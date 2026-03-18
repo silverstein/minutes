@@ -157,10 +157,24 @@ impl Default for WatchConfig {
 impl Config {
     /// Standard config file location.
     pub fn config_path() -> PathBuf {
-        dirs::config_dir()
+        // Prefer ~/.config/minutes/ (Unix convention, documented in README)
+        let unix_path = home_dir()
+            .join(".config")
+            .join("minutes")
+            .join("config.toml");
+        if unix_path.exists() {
+            return unix_path;
+        }
+        // Fall back to platform-native (~/Library/Application Support/ on macOS)
+        let native_path = dirs::config_dir()
             .unwrap_or_else(|| home_dir().join(".config"))
             .join("minutes")
-            .join("config.toml")
+            .join("config.toml");
+        if native_path.exists() {
+            return native_path;
+        }
+        // Default to Unix-standard path
+        unix_path
     }
 
     /// Load config from file, falling back to defaults.

@@ -1,6 +1,7 @@
 use crate::config::Config;
 use crate::error::MinutesError;
 use crate::markdown::{self, ContentType, Frontmatter, OutputStatus, WriteResult};
+use crate::transcribe;
 use chrono::Local;
 use std::path::Path;
 
@@ -13,14 +14,12 @@ use std::path::Path;
 //                     config.diarization  config.summarization
 //                     .engine != "none"   .engine != "none"
 //
-// Phase 1a: only Transcribe + Write are active.
+// Transcription uses whisper-rs (whisper.cpp) with symphonia for
+// format conversion (m4a/mp3/ogg → 16kHz mono PCM).
 // Phase 1b adds Diarize + Summarize with if-guards.
 // ──────────────────────────────────────────────────────────────
 
 /// Process an audio file through the full pipeline.
-///
-/// For Phase 1a, this is: read audio → transcribe → write markdown.
-/// Diarization and summarization are skipped (config engines = "none").
 pub fn process(
     audio_path: &Path,
     content_type: ContentType,
@@ -34,9 +33,15 @@ pub fn process(
         "starting pipeline"
     );
 
+    // Verify file exists and is not empty
+    let metadata = std::fs::metadata(audio_path)?;
+    if metadata.len() == 0 {
+        return Err(crate::error::TranscribeError::EmptyAudio.into());
+    }
+
     // Step 1: Transcribe (always)
     tracing::info!(step = "transcribe", file = %audio_path.display(), "transcribing audio");
-    let transcript = transcribe_audio(audio_path)?;
+    let transcript = transcribe::transcribe(audio_path, config)?;
 
     let word_count = transcript.split_whitespace().count();
     tracing::info!(
@@ -106,31 +111,6 @@ pub fn process(
     Ok(result)
 }
 
-/// Transcribe audio to text.
-/// Phase 1a: placeholder that reads WAV and returns placeholder text.
-/// Will be replaced with whisper-rs integration.
-fn transcribe_audio(audio_path: &Path) -> Result<String, MinutesError> {
-    // Verify file exists and is not empty
-    let metadata = std::fs::metadata(audio_path)?;
-    if metadata.len() == 0 {
-        return Err(crate::error::TranscribeError::EmptyAudio.into());
-    }
-
-    // TODO(P1a.4): Replace with whisper-rs integration
-    // For now, return a placeholder indicating the file was found
-    // This lets us test the full pipeline end-to-end
-    let size_mb = metadata.len() as f64 / 1_048_576.0;
-    Ok(format!(
-        "[Transcription placeholder — whisper-rs not yet integrated]\n\
-         Audio file: {}\n\
-         Size: {:.1} MB\n\
-         \n\
-         Once whisper-rs is integrated, this will contain the actual transcript.",
-        audio_path.display(),
-        size_mb,
-    ))
-}
-
 /// Estimate audio duration from file size (rough approximation).
 /// 16kHz mono 16-bit WAV ≈ 32KB/sec.
 fn estimate_duration(audio_path: &Path) -> String {
@@ -181,7 +161,8 @@ mod tests {
 
     #[test]
     fn generate_title_skips_speaker_labels() {
-        let transcript = "[SPEAKER 0:00] We need to discuss pricing";
+        let transcript = "[0:00] We need to discuss pricing";
+        // Lines starting with [ are skipped for title generation
         let title = generate_title(transcript);
         assert_eq!(title, "Untitled Recording");
     }

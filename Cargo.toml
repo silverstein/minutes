@@ -22,7 +22,7 @@ cpal = "0.15"
 hound = "3.5"
 
 # Transcription
-# whisper-rs = "0.12"  # Uncomment when ready — requires whisper.cpp system lib
+whisper-rs = "0.16"
 
 # File watching
 notify = "7"
@@ -49,4 +49,4 @@ tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
 ctrlc = { version = "3", features = ["termination"] }
 
 # Audio format conversion
-# symphonia = { version = "0.5", features = ["mp3", "aac", "ogg", "wav"] }  # Uncomment when ready
+symphonia = { version = "0.5", features = ["mp3", "aac", "ogg", "wav", "isomp4"] }

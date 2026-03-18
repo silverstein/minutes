@@ -6,6 +6,10 @@ license.workspace = true
 authors.workspace = true
 description = "Core library for minutes — audio capture, transcription, and meeting memory"
 
+[features]
+default = ["whisper"]
+whisper = ["dep:whisper-rs"]
+
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -18,6 +22,8 @@ walkdir = { workspace = true }
 tracing = { workspace = true }
 hound = { workspace = true }
 notify = { workspace = true }
+whisper-rs = { workspace = true, optional = true }
+symphonia = { workspace = true }
 libc = "0.2"
 
 [dev-dependencies]

@@ -5,6 +5,7 @@ pub mod markdown;
 pub mod pid;
 pub mod pipeline;
 pub mod search;
+pub mod transcribe;
 pub mod watch;
 
 // Re-export commonly used types

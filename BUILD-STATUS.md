@@ -8,16 +8,16 @@
 ### 10/10 Sprint Beads
 | Bead | Category | Task | Status |
 |------|----------|------|--------|
-| Q.1 | Security | Replace curl with reqwest for HTTP (no process args) | NOT STARTED |
-| Q.2 | Code Quality | Deduplicate frontmatter parsing → shared `parse_frontmatter()` in markdown.rs | NOT STARTED |
-| Q.3 | Code Quality | Make `cmd_list` delegate to `search("")` instead of reimplementing | NOT STARTED |
-| Q.4 | Code Quality | Add `///` doc comments to all pub functions in minutes-core | NOT STARTED |
-| Q.5 | Tests | Add concurrent PID race test (two `pid::create()` calls) | NOT STARTED |
-| Q.6 | Tests | Fix logging tests to actually test I/O (use temp dir) | NOT STARTED |
-| Q.7 | Production | Call `rotate_logs()` at startup | NOT STARTED |
-| Q.8 | Production | Make Ollama URL configurable | NOT STARTED |
-| Q.9 | UX | Consistent `-t` flag naming across all commands | NOT STARTED |
-| Q.10 | UX | `minutes devices` output to stdout (not just stderr) | NOT STARTED |
+| Q.1 | Security | Replace curl with reqwest for HTTP | DEFERRED (body via stdin is sufficient for now) |
+| Q.2 | Code Quality | Deduplicate frontmatter parsing → shared functions in markdown.rs | DONE |
+| Q.3 | Code Quality | Make `cmd_list` delegate to `search("")` | DONE |
+| Q.4 | Code Quality | Add `///` doc comments to all pub functions | DEFERRED (nice-to-have) |
+| Q.5 | Tests | Concurrent PID race test | DEFERRED (needs flock, tracked in PLAN.md) |
+| Q.6 | Tests | Fix logging tests to actually test I/O | DONE |
+| Q.7 | Production | Call `rotate_logs()` at startup | DONE |
+| Q.8 | Production | Make Ollama URL + model configurable | DONE |
+| Q.9 | UX | Consistent `-t` flag naming | Already consistent |
+| Q.10 | UX | `minutes devices` output to stdout | DONE |
 
 ## Phase 1a: Recording Pipeline — COMPLETE
 | Bead | Score | Summary |

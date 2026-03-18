@@ -119,6 +119,13 @@ enum Commands {
     /// List available audio input devices
     Devices,
 
+    /// Install or uninstall the folder watcher as a login service
+    Service {
+        /// Action: install or uninstall
+        #[arg(value_parser = ["install", "uninstall", "status"])]
+        action: String,
+    },
+
     /// Show recent logs
     Logs {
         /// Show only errors
@@ -148,7 +155,7 @@ fn main() -> Result<()> {
 
     match cli.command {
         Commands::Record { title, context } => cmd_record(title, context, &config),
-        Commands::Note { text, meeting } => cmd_note(&text, meeting.as_deref()),
+        Commands::Note { text, meeting } => cmd_note(&text, meeting.as_deref(), &config),
         Commands::Stop => cmd_stop(&config),
         Commands::Status => cmd_status(),
         Commands::Search {
@@ -181,13 +188,16 @@ fn main() -> Result<()> {
         Commands::Watch { dir } => cmd_watch(dir.as_deref(), &config),
         Commands::Devices => cmd_devices(),
         Commands::Setup { model, list } => cmd_setup(&model, list),
+        Commands::Service { action } => cmd_service(&action),
         Commands::Logs { errors, lines } => cmd_logs(errors, lines),
     }
 }
 
-fn cmd_note(text: &str, meeting: Option<&Path>) -> Result<()> {
+fn cmd_note(text: &str, meeting: Option<&Path>, config: &Config) -> Result<()> {
     if let Some(meeting_path) = meeting {
         // Post-meeting annotation
+        minutes_core::notes::validate_meeting_path(meeting_path, &config.output_dir)
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
         minutes_core::notes::annotate_meeting(meeting_path, text)
             .map_err(|e| anyhow::anyhow!("{}", e))?;
         eprintln!("Note added to {}", meeting_path.display());
@@ -517,6 +527,119 @@ fn cmd_setup(model: &str, list: bool) -> Result<()> {
         }
     }
 
+    Ok(())
+}
+
+fn cmd_service(action: &str) -> Result<()> {
+    let plist_name = "dev.getminutes.watcher";
+    let plist_dest = dirs::home_dir()
+        .unwrap_or_default()
+        .join("Library/LaunchAgents")
+        .join(format!("{}.plist", plist_name));
+
+    match action {
+        "install" => {
+            let minutes_bin = std::env::current_exe()
+                .unwrap_or_else(|_| PathBuf::from("minutes"));
+            let home = dirs::home_dir().unwrap_or_default();
+            let log_dir = Config::minutes_dir().join("logs");
+            std::fs::create_dir_all(&log_dir)?;
+            std::fs::create_dir_all(home.join("Library/LaunchAgents"))?;
+
+            let plist = format!(
+r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>{label}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>{bin}</string>
+        <string>watch</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>{home}</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>{home}</string>
+        <key>PATH</key>
+        <string>{home}/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>{log}</string>
+    <key>StandardErrorPath</key>
+    <string>{log}</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+    <key>Nice</key>
+    <integer>5</integer>
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+</dict>
+</plist>"#,
+                label = plist_name,
+                bin = minutes_bin.display(),
+                home = home.display(),
+                log = log_dir.join("watcher.log").display(),
+            );
+
+            std::fs::write(&plist_dest, &plist)?;
+
+            let status = std::process::Command::new("launchctl")
+                .args(["load", "-w", &plist_dest.to_string_lossy()])
+                .status()?;
+
+            if status.success() {
+                eprintln!("Watcher service installed and started.");
+                eprintln!("  Plist: {}", plist_dest.display());
+                eprintln!("  Logs:  {}", log_dir.join("watcher.log").display());
+                eprintln!("  It will auto-start on login and process audio in ~/.minutes/inbox/");
+            } else {
+                anyhow::bail!("launchctl load failed");
+            }
+        }
+        "uninstall" => {
+            if plist_dest.exists() {
+                let _ = std::process::Command::new("launchctl")
+                    .args(["unload", &plist_dest.to_string_lossy()])
+                    .status();
+                std::fs::remove_file(&plist_dest)?;
+                eprintln!("Watcher service uninstalled.");
+            } else {
+                eprintln!("Service not installed.");
+            }
+        }
+        "status" => {
+            let output = std::process::Command::new("launchctl")
+                .args(["list", plist_name])
+                .output()?;
+            if output.status.success() {
+                eprintln!("Watcher service is running.");
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                for line in stdout.lines() {
+                    if line.contains("PID") || line.contains("LastExitStatus") {
+                        eprintln!("  {}", line.trim());
+                    }
+                }
+            } else {
+                eprintln!("Watcher service is not running.");
+                if plist_dest.exists() {
+                    eprintln!("  Plist exists at: {}", plist_dest.display());
+                    eprintln!("  Try: minutes service install");
+                } else {
+                    eprintln!("  Not installed. Run: minutes service install");
+                }
+            }
+        }
+        _ => anyhow::bail!("Unknown action: {}. Use install, uninstall, or status.", action),
+    }
     Ok(())
 }
 

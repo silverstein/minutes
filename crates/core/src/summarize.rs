@@ -365,7 +365,7 @@ DECISIONS:
 
 ACTION ITEMS:
 - @user: Send pricing doc by Friday
-- @logan: Review competitor grid";
+- @case: Review competitor grid";
 
         let summary = parse_summary_response(response);
         assert_eq!(summary.key_points.len(), 2);

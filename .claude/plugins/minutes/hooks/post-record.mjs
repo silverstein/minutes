@@ -8,7 +8,7 @@
  * the current git repo name as a `project:` tag in the meeting's frontmatter.
  *
  * This connects meetings to the codebase the user was working on when they
- * recorded — enabling queries like "what meetings relate to the x1-wealth project?"
+ * recorded — enabling queries like "what meetings relate to my-project?"
  *
  * Hook event: PostToolUse
  * Tool: Bash

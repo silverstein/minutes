@@ -13,7 +13,7 @@ Add a timestamped note during a recording, or annotate a past meeting.
 ```bash
 # Add a note to the active recording (auto-timestamped)
 minutes note "Alex wants monthly billing not annual billing"
-minutes note "Logan agreed — compromise at monthly billing for experiment"
+minutes note "Case agreed — compromise at monthly billing for experiment"
 ```
 
 Each note gets a timestamp matching the recording position (e.g., `[4:23]`). Notes feed into the LLM summarizer as high-priority context — the AI knows what you thought was important and weights those parts of the transcript more heavily in the summary.

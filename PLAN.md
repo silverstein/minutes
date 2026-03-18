@@ -90,24 +90,24 @@ The pipeline is the product, not the meeting. The same transcribe → summarize 
 │  │ │ title: Q2 Planning Discussion                          │  │ │
 │  │ │ date: 2026-03-17T14:00:00                                  │  │ │
 │  │ │ duration: 42m                                               │  │ │
-│  │ │ attendees: [Logan G., User]                               │  │ │
-│  │ │ calendar_event: X1 Weekly Sync                              │  │ │
-│  │ │ tags: [pricing, advisor, x1]                                │  │ │
-│  │ │ people: [[logan-gunderson], [[mat]]]                        │  │ │
+│  │ │ attendees: [Jordan M., User]                               │  │ │
+│  │ │ calendar_event: Team Weekly Sync                              │  │ │
+│  │ │ tags: [pricing, advisor]                                │  │ │
+│  │ │ people: [[jordan-m], [[mat]]]                        │  │ │
 │  │ │ ---                                                         │  │ │
 │  │ │                                                             │  │ │
 │  │ │ ## Summary                                                  │  │ │
 │  │ │ - Agreed to price advisor platform at annual billing/mo minimum       │  │ │
 │  │ │                                                             │  │ │
 │  │ │ ## Decisions                                                │  │ │
-│  │ │ - [x] Advisor pricing must pass Garrett fairness test       │  │ │
+│  │ │ - [x] Advisor pricing must pass Molly fairness test       │  │ │
 │  │ │                                                             │  │ │
 │  │ │ ## Action Items                                             │  │ │
 │  │ │ - [ ] @user: Send pricing doc to Alex by Friday             │  │ │
-│  │ │ - [ ] @logan: Review competitor pricing grid                │  │ │
+│  │ │ - [ ] @case: Review competitor pricing grid                │  │ │
 │  │ │                                                             │  │ │
 │  │ │ ## Transcript                                               │  │ │
-│  │ │ [LOGAN 0:00] So I think the pricing for advisors should...  │  │ │
+│  │ │ [CASE 0:00] So I think the pricing for advisors should...  │  │ │
 │  │ │ [MAT 0:45] Right, but the fairness test says...             │  │ │
 │  │ └────────────────────────────────────────────────────────────┘  │ │
 │  │                                                                 │ │
@@ -224,7 +224,7 @@ Meetings and memos become first-class PARA entities:
 ~/Documents/life/           (or configurable path)
 ├── areas/
 │   └── meetings/                              # QMD collection
-│       ├── 2026-03-17-x1-weekly-standup.md
+│       ├── 2026-03-17-weekly-standup.md
 │       ├── 2026-03-17-advisor-demo-call.md
 │       ├── memos/                             # Voice memos subfolder
 │       │   ├── 2026-03-17-onboarding-idea.md
@@ -232,7 +232,7 @@ Meetings and memos become first-class PARA entities:
 │       │   └── ...
 │       └── ...
 ├── areas/people/
-│   └── logan-gunderson/
+│   └── jordan-m/
 │       └── summary.md    # Auto-linked from meeting attendees
 └── memory/
     └── 2026-03-17.md     # Daily note gets backlinks:
@@ -512,7 +512,7 @@ settle_delay_ms = 2000       # Wait for file size to stabilize before processing
 - Skills call the same Rust CLI binary (`minutes record`, `minutes search`) — no duplication
 - The MCP server in `.mcp.json` is identical to the MCPB — one MCP server, two distribution formats
 - `SessionStart` hook reads `~/meetings/` and injects a "Today's meetings" summary if any exist
-- `PostToolUse` hook fires when `minutes stop` completes — reads the current git repo and adds `project: x1-wealth` (or whatever) to the meeting's YAML frontmatter
+- `PostToolUse` hook fires when `minutes stop` completes — reads the current git repo and adds `project: my-project` (or whatever) to the meeting's YAML frontmatter
 - The `meeting-analyst` agent has access to all meeting files and can answer cross-meeting questions autonomously
 
 **Exit criteria**: `claude plugin add minutes` → `/minutes record` works → meeting context appears in Claude Code sessions → `/minutes search "pricing"` returns results.
@@ -538,7 +538,7 @@ DURING RECORDING:
        ▼
   ~/.minutes/current-notes.md:
        [4:23] Alex wants monthly billing not annual billing
-       [12:10] Logan agreed with Alex
+       [12:10] Case agreed with Alex
 
 ON STOP:
 
@@ -552,7 +552,7 @@ ON STOP:
     "The user marked these moments as important during the meeting.
      Weight them heavily in the summary:
      [4:23] Alex wants monthly billing not annual billing
-     [12:10] Logan agreed with Alex"
+     [12:10] Case agreed with Alex"
        │
        ▼
   Better summary. Notes appear in ## Notes section of output.
@@ -561,8 +561,8 @@ ON STOP:
 #### Pre-meeting context
 
 ```bash
-minutes record --title "1:1 with Logan" \
-  --context "Discuss Q2 pricing. Follow up on annual billing decision. Logan was hesitant last time."
+minutes record --title "1:1 with Case" \
+  --context "Discuss Q2 pricing. Follow up on annual billing decision. Case was hesitant last time."
 ```
 
 The `--context` flag stores text in `~/.minutes/current-context.txt`. The pipeline passes it to the LLM: "Before the meeting, the user noted this context: [text]". This produces summaries that understand *why* the meeting happened.
@@ -611,12 +611,12 @@ context: "Discuss Q2 pricing, follow up on annual billing minimum decision"
 
 ## Summary
 - Alex proposed lowering API launch timeline from annual billing to monthly billing/mo
-- Logan supported the lower price point
+- Case supported the lower price point
 - Compromise: run a pricing experiment with 10 advisors at monthly billing
 
 ## Notes
 - [4:23] Alex wants monthly billing not annual billing
-- [12:10] Logan agreed with Alex
+- [12:10] Case agreed with Alex
 - [28:00] Compromise: experiment at monthly billing
 - [Mar 18, post-meeting] Alex confirmed via email she's on board
 
@@ -659,7 +659,7 @@ context: "Discuss Q2 pricing, follow up on annual billing minimum decision"
 | P4a.1 | Cross-meeting search ("what did we decide about X across all meetings?") | TBD |
 | P4a.2 | People profiles — build attendee context over time (decisions, commitments, topics they care about) | TBD |
 | P4a.3 | **Structured intent extraction** — LLM summarization emits a machine-readable `intents:` block in YAML frontmatter alongside the human-readable summary. Decisions, action items, open questions, and commitments as typed entries with `who`, `what`, `status`, and `by_date` fields. The markdown stays readable; the frontmatter becomes agent-queryable. MCP `search_meetings` gains a `--intents-only` filter that returns structured data, not prose. | TBD |
-| P4a.4 | **Decision consistency tracking** — the `meeting-analyst` agent compares new meeting intents against the existing intent index. Flags contradictions ("March 5: launch date April 1. March 12: launch date pushed to May.") and stale commitments ("Logan committed to send spec by March 8 — no follow-up in 3 meetings since"). Outputs a `consistency_report` via MCP tool, not just a wall of text. | TBD |
+| P4a.4 | **Decision consistency tracking** — the `meeting-analyst` agent compares new meeting intents against the existing intent index. Flags contradictions ("March 5: launch date April 1. March 12: launch date pushed to May.") and stale commitments ("Case committed to send spec by March 8 — no follow-up in 3 meetings since"). Outputs a `consistency_report` via MCP tool, not just a wall of text. | TBD |
 | P4a.5 | PARA entity auto-linking (meetings → people → projects) | TBD |
 | P4a.6 | QMD collection auto-registration (`qmd collection add minutes ~/meetings`) | TBD |
 | P4a.7 | Daily note backlinks (append meeting summaries to daily notes) | TBD |
@@ -943,7 +943,7 @@ Issues identified and mitigations:
 | 10 | Maintenance sustainability | Medium | Keep core tiny: ~1000 lines Rust + ~300 lines Node.js | Active |
 | 11 | **Falcon licensing blocks MIT distribution** | **High** | **RESOLVED: Falcon is NOT viable. Use pyannote via subprocess (AGPL-safe) or sherpa-onnx (Apache 2.0).** See Diarization Decision in Phase 1b. | **RESOLVED** |
 | 12 | Phase 1 timeline too aggressive (was 1 week) | Medium | **RESOLVED: Split into Phase 1a (pipeline, week 1) + Phase 1b (intelligence, week 2)** | **RESOLVED** |
-| 13 | X1 synergy content in public repo kills trust | Medium | **RESOLVED: Moved to `.claude/x1-strategy.md` (gitignored). Public plan is pure open-source story.** | **RESOLVED** |
+| 13 | Business-specific content in public repo kills trust | Medium | **RESOLVED: Moved to gitignored `.claude/` directory. Public plan is pure open-source story.** | **RESOLVED** |
 | 14 | macOS TCC blocks Voice Memos iCloud path without Full Disk Access | **High** | **RESOLVED: Default to unprotected `~/.minutes/inbox/`. Ship Apple Shortcut for iPhone → iCloud Drive → inbox pipeline. FDA path documented as power-user option only.** | **RESOLVED** |
 | 15 | MCPB ↔ Rust IPC undefined — how does Node.js start/stop recordings? | **High** | **RESOLVED: PID file (`~/.minutes/recording.pid`) + signals. `minutes status` for state queries. Stale PID recovery on crash.** | **RESOLVED** |
 | 16 | Folder watcher reprocesses files / race with iCloud sync | **High** | **RESOLVED: Move to `processed/` after success, `failed/` on error. 2-second settle delay for size stability. Lock file prevents concurrent watchers.** | **RESOLVED** |

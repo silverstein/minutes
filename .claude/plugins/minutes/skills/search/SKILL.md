@@ -57,6 +57,6 @@ qmd_collection = "meetings"
 ## Tips for good searches
 
 - Search for **what people said**, not document titles: `"we should postpone the launch"` not `"launch delay meeting"`
-- Search for **names** to find everything someone discussed: `"Alex"` or `"Logan"`
+- Search for **names** to find everything someone discussed: `"Alex"` or `"Case"`
 - Search for **decisions**: `"decided"`, `"agreed"`, `"committed to"`
 - Combine with `Read` to load the full context after finding a match

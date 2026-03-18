@@ -123,4 +123,4 @@ This project has a unique strategic position in the Claude ecosystem:
 - Agent: `meeting-analyst` for cross-meeting intelligence queries
 
 ### Private Strategy Notes
-- See `.claude/x1-strategy.md` for business-specific strategy (gitignored, not in public repo)
+- Business-specific strategy lives in gitignored `.claude/` directory

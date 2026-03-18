@@ -1,39 +1,62 @@
 ---
 name: minutes-record
-description: Start or stop recording a meeting or voice memo. Captures audio from the default input device, transcribes with whisper.cpp, and saves as searchable markdown.
+description: Start or stop recording a meeting, call, or voice memo. Use this whenever the user says "record", "start recording", "capture this meeting", "stop recording", "I'm in a meeting", "take notes on this call", or wants to transcribe live audio. Also use when they ask about recording status or want to know if something is being recorded.
 user_invocable: true
 ---
 
 # /minutes record
 
-Start or stop recording audio.
+Record audio from the microphone, transcribe it locally with whisper.cpp, and save as searchable markdown.
 
-## Usage
+## How it works
 
-To **start** recording:
+Recording is a two-step process — start and stop. Between those two commands, audio is captured continuously from the default input device.
+
+**Start recording:**
 ```bash
 minutes record
+# Or with a title:
+minutes record --title "Weekly standup with Alex"
 ```
-This captures audio from the default input device (built-in mic or BlackHole for system audio).
-The recording runs until you press Ctrl-C or run `minutes stop` in another terminal.
 
-To **stop** recording from Claude Code:
+The process runs in the foreground. It captures audio from whatever input device is active — the built-in MacBook mic for in-person conversations, or a BlackHole virtual audio device for system audio (Zoom, Meet, Teams calls).
+
+**Stop recording:**
 ```bash
 minutes stop
 ```
-This stops the capture, transcribes the audio with whisper.cpp, and saves the result as markdown.
+This sends a signal to the recording process, which then:
+1. Stops audio capture
+2. Transcribes the audio locally via whisper.cpp (no cloud, no data leaves the machine)
+3. Saves the transcript as a markdown file in `~/meetings/`
+4. Prints the output path and word count as JSON
 
-To **check status**:
+**Check status:**
 ```bash
 minutes status
 ```
+Returns JSON: `{"recording": true, "pid": 12345}` or `{"recording": false}`
 
-## Output
+## What you get
 
-After stopping, the transcript is saved to `~/meetings/` as a markdown file with YAML frontmatter containing the title, date, duration, and full transcript.
+A markdown file at `~/meetings/YYYY-MM-DD-title.md` with:
+- YAML frontmatter (title, date, duration, type)
+- Timestamped transcript
+- Summary, decisions, and action items (if LLM summarization is configured)
 
-## Prerequisites
+File permissions are set to 0600 (owner-only) because transcripts contain sensitive content.
 
-- Whisper model downloaded: `minutes setup --model small`
-- For system audio (Zoom/Meet): BlackHole virtual audio device installed
-- For mic audio: works out of the box
+## First-time setup
+
+If the user hasn't set up minutes before, they need to download a whisper model first:
+```bash
+minutes setup --model small
+```
+This downloads a ~466MB model. For faster but lower quality: `--model tiny` (75MB). For best quality: `--model large-v3` (3.1GB).
+
+## When things go wrong
+
+- **"model not found"** → Run `minutes setup --model small`
+- **"already recording"** → Run `minutes stop` first, or `minutes status` to check
+- **No audio captured** → Check that the right input device is selected in System Settings > Sound
+- **For Zoom/Meet audio** → Install BlackHole (`brew install blackhole-2ch`) and set up a Multi-Output Device in Audio MIDI Setup

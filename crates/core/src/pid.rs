@@ -41,10 +41,7 @@ pub fn check_recording() -> Result<Option<u32>, PidError> {
     }
 
     let pid_str = fs::read_to_string(&path)?;
-    let pid: u32 = pid_str
-        .trim()
-        .parse()
-        .map_err(|_| PidError::StalePid(0))?;
+    let pid: u32 = pid_str.trim().parse().map_err(|_| PidError::StalePid(0))?;
 
     if is_process_alive(pid) {
         Ok(Some(pid))

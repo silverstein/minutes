@@ -72,9 +72,8 @@ pub fn write(
     };
 
     // Ensure output directory exists
-    fs::create_dir_all(&output_dir).map_err(|e| {
-        MarkdownError::OutputDirError(format!("{}: {}", output_dir.display(), e))
-    })?;
+    fs::create_dir_all(&output_dir)
+        .map_err(|e| MarkdownError::OutputDirError(format!("{}: {}", output_dir.display(), e)))?;
 
     // Generate filename slug
     let slug = generate_slug(&frontmatter.title, frontmatter.date);

@@ -106,8 +106,8 @@ fn wait_for_settle(path: &Path, delay_ms: u64) -> bool {
         std::thread::sleep(delay);
         match fs::metadata(path) {
             Ok(m) if m.len() == 0 => return false, // Still empty
-            Ok(_) => {}                             // Now has content, continue
-            Err(_) => return false,                 // Disappeared
+            Ok(_) => {}                            // Now has content, continue
+            Err(_) => return false,                // Disappeared
         }
     }
 
@@ -135,9 +135,8 @@ fn wait_for_settle(path: &Path, delay_ms: u64) -> bool {
 fn move_to(file: &Path, subdir: &str) -> Result<PathBuf, WatchError> {
     let parent = file.parent().unwrap_or(Path::new("."));
     let dest_dir = parent.join(subdir);
-    fs::create_dir_all(&dest_dir).map_err(|e| {
-        WatchError::MoveError(dest_dir.display().to_string(), e)
-    })?;
+    fs::create_dir_all(&dest_dir)
+        .map_err(|e| WatchError::MoveError(dest_dir.display().to_string(), e))?;
 
     let filename = file.file_name().unwrap_or_default();
     let dest = dest_dir.join(filename);
@@ -145,16 +144,17 @@ fn move_to(file: &Path, subdir: &str) -> Result<PathBuf, WatchError> {
     // Handle collision in destination
     let dest = if dest.exists() {
         let stem = dest.file_stem().unwrap_or_default().to_string_lossy();
-        let ext = dest.extension().map(|e| e.to_string_lossy().to_string()).unwrap_or_default();
+        let ext = dest
+            .extension()
+            .map(|e| e.to_string_lossy().to_string())
+            .unwrap_or_default();
         let ts = chrono::Local::now().timestamp();
         dest_dir.join(format!("{}-{}.{}", stem, ts, ext))
     } else {
         dest
     };
 
-    fs::rename(file, &dest).map_err(|e| {
-        WatchError::MoveError(dest.display().to_string(), e)
-    })?;
+    fs::rename(file, &dest).map_err(|e| WatchError::MoveError(dest.display().to_string(), e))?;
 
     tracing::debug!(from = %file.display(), to = %dest.display(), "moved file");
     Ok(dest)
@@ -186,9 +186,10 @@ fn process_file(path: &Path, config: &Config) -> Result<(), WatchError> {
                 "pipeline failed — moving to failed/"
             );
             move_to(path, "failed")?;
-            Err(WatchError::Io(std::io::Error::other(
-                format!("pipeline error: {}", e),
-            )))
+            Err(WatchError::Io(std::io::Error::other(format!(
+                "pipeline error: {}",
+                e
+            ))))
         }
     }
 }
@@ -255,10 +256,7 @@ pub fn run(watch_dir: Option<&Path>, config: &Config) -> Result<(), WatchError> 
     loop {
         match rx.recv_timeout(Duration::from_secs(5)) {
             Ok(event) => {
-                if matches!(
-                    event.kind,
-                    EventKind::Create(_) | EventKind::Modify(_)
-                ) {
+                if matches!(event.kind, EventKind::Create(_) | EventKind::Modify(_)) {
                     for path in event.paths {
                         handle_file_event(&path, settle_delay, config);
                     }
@@ -461,7 +459,12 @@ mod tests {
 
         // handle_file_event should skip files in processed/
         // We can verify by checking the parent directory name logic
-        let parent_name = file.parent().unwrap().file_name().unwrap().to_string_lossy();
+        let parent_name = file
+            .parent()
+            .unwrap()
+            .file_name()
+            .unwrap()
+            .to_string_lossy();
         assert_eq!(parent_name, "processed");
     }
 }

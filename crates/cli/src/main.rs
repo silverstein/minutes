@@ -145,9 +145,7 @@ fn cmd_record(title: Option<String>, config: &Config) -> Result<()> {
     config.ensure_dirs()?;
 
     // Check if already recording
-    minutes_core::pid::create().map_err(|e| {
-        anyhow::anyhow!("{}", e)
-    })?;
+    minutes_core::pid::create().map_err(|e| anyhow::anyhow!("{}", e))?;
 
     eprintln!("Recording... (press Ctrl-C or run `minutes stop` to finish)");
 
@@ -169,12 +167,7 @@ fn cmd_record(title: Option<String>, config: &Config) -> Result<()> {
 
     // Run pipeline on the captured audio
     let content_type = ContentType::Meeting;
-    let result = minutes_core::process(
-        &wav_path,
-        content_type,
-        title.as_deref(),
-        config,
-    )?;
+    let result = minutes_core::process(&wav_path, content_type, title.as_deref(), config)?;
 
     // Write result file for `minutes stop` to read
     let result_json = serde_json::to_string_pretty(&serde_json::json!({
@@ -309,7 +302,8 @@ fn cmd_list(limit: usize, content_type: Option<String>, config: &Config) -> Resu
     {
         let path = entry.path();
         let content = std::fs::read_to_string(path)?;
-        let title = extract_title(&content).unwrap_or_else(|| path.file_stem().unwrap().to_string_lossy().to_string());
+        let title = extract_title(&content)
+            .unwrap_or_else(|| path.file_stem().unwrap().to_string_lossy().to_string());
         let date = extract_date(&content).unwrap_or_default();
         let ct = extract_type(&content).unwrap_or_else(|| "meeting".into());
 
@@ -390,9 +384,8 @@ fn cmd_watch(dir: Option<&Path>, config: &Config) -> Result<()> {
     // Run watcher in a separate thread so we can catch Ctrl-C
     let config_clone = config.clone();
     let dir_clone = dir.map(|d| d.to_path_buf());
-    let watcher_thread = std::thread::spawn(move || {
-        minutes_core::watch::run(dir_clone.as_deref(), &config_clone)
-    });
+    let watcher_thread =
+        std::thread::spawn(move || minutes_core::watch::run(dir_clone.as_deref(), &config_clone));
 
     // Wait for Ctrl-C
     rx.recv().ok();
@@ -495,7 +488,13 @@ fn extract_frontmatter_field(content: &str, key: &str) -> Option<String> {
     for line in content.lines() {
         let trimmed = line.trim();
         if let Some(value) = trimmed.strip_prefix(&prefix) {
-            return Some(value.trim().trim_matches('"').trim_matches('\'').to_string());
+            return Some(
+                value
+                    .trim()
+                    .trim_matches('"')
+                    .trim_matches('\'')
+                    .to_string(),
+            );
         }
     }
     None

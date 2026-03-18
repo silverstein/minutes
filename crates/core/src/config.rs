@@ -128,10 +128,7 @@ impl Default for SearchConfig {
 impl Default for SecurityConfig {
     fn default() -> Self {
         Self {
-            allowed_audio_dirs: vec![
-                minutes_dir().join("inbox"),
-                home_dir().join("meetings"),
-            ],
+            allowed_audio_dirs: vec![minutes_dir().join("inbox"), home_dir().join("meetings")],
         }
     }
 }

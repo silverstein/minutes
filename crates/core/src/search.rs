@@ -46,11 +46,7 @@ pub fn search(
     for entry in WalkDir::new(dir)
         .into_iter()
         .filter_map(|e| e.ok())
-        .filter(|e| {
-            e.path()
-                .extension()
-                .is_some_and(|ext| ext == "md")
-        })
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "md"))
     {
         let path = entry.path();
         match process_file(path, &query_lower, filters) {
@@ -154,10 +150,7 @@ fn extract_field(frontmatter: &str, key: &str) -> Option<String> {
 fn extract_snippet(body: &str, query: &str) -> String {
     let lower = body.to_lowercase();
     if let Some(pos) = lower.find(query) {
-        let start = body[..pos]
-            .rfind('\n')
-            .map(|i| i + 1)
-            .unwrap_or(0);
+        let start = body[..pos].rfind('\n').map(|i| i + 1).unwrap_or(0);
         let end = body[pos..]
             .find('\n')
             .map(|i| pos + i)

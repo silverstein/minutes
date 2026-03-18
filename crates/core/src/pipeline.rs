@@ -39,7 +39,11 @@ pub fn process(
     let transcript = transcribe_audio(audio_path)?;
 
     let word_count = transcript.split_whitespace().count();
-    tracing::info!(step = "transcribe", words = word_count, "transcription complete");
+    tracing::info!(
+        step = "transcribe",
+        words = word_count,
+        "transcription complete"
+    );
 
     // Check minimum word threshold
     let status = if word_count < config.transcription.min_words {
@@ -89,12 +93,7 @@ pub fn process(
     };
 
     tracing::info!(step = "write", "writing markdown");
-    let result = markdown::write(
-        &frontmatter,
-        &transcript,
-        summary.as_deref(),
-        config,
-    )?;
+    let result = markdown::write(&frontmatter, &transcript, summary.as_deref(), config)?;
 
     let elapsed = start.elapsed();
     tracing::info!(
@@ -135,16 +134,10 @@ fn transcribe_audio(audio_path: &Path) -> Result<String, MinutesError> {
 /// Estimate audio duration from file size (rough approximation).
 /// 16kHz mono 16-bit WAV ≈ 32KB/sec.
 fn estimate_duration(audio_path: &Path) -> String {
-    let bytes = std::fs::metadata(audio_path)
-        .map(|m| m.len())
-        .unwrap_or(0);
+    let bytes = std::fs::metadata(audio_path).map(|m| m.len()).unwrap_or(0);
 
     // WAV header is 44 bytes, then raw PCM at 32000 bytes/sec (16kHz 16-bit mono)
-    let secs = if bytes > 44 {
-        (bytes - 44) / 32_000
-    } else {
-        0
-    };
+    let secs = if bytes > 44 { (bytes - 44) / 32_000 } else { 0 };
 
     let mins = secs / 60;
     let remaining_secs = secs % 60;

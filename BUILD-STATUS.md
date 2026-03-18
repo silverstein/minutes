@@ -3,7 +3,7 @@
 > This file tracks implementation progress. Read this after compaction to know exactly where you left off.
 > Update this file after completing each bead. Never leave it stale.
 
-## Current Phase: 1b — Intelligence Layer (diarization + summarization)
+## Current Phase: 2/2b — MCP Server + Claude Code Plugin
 
 ## Build Chunks
 
@@ -77,6 +77,31 @@
 | P1b.5 | NOT STARTED | - | Calendar integration (ical file parsing) |
 | P1b.6 | DONE | 10/10 | Already built in Phase 1a (search + list commands) |
 | P1b.7 | NOT STARTED | - | End-to-end test with real meeting audio |
+
+### Phase 2: MCP Server
+| Bead | Status | Score | Notes |
+|------|--------|-------|-------|
+| P2.1 | DONE | 10/10 | MCP scaffold: package.json, tsconfig, TypeScript MCP server |
+| P2.2 | DONE | 10/10 | start_recording tool (spawns detached minutes record process) |
+| P2.3 | DONE | 10/10 | stop_recording tool (calls minutes stop, 3 min timeout) |
+| P2.4 | DONE | 10/10 | list_meetings tool |
+| P2.5 | DONE | 10/10 | search_meetings tool |
+| P2.6 | DONE | 10/10 | get_meeting tool (reads full markdown file) |
+| P2.7 | NOT STARTED | - | Package as .mcpb — needs MCPB spec research (P1a.0) |
+| P2.8 | PARTIAL | 7/10 | Claude Desktop config template included. Full README pending. |
+
+### Phase 2b: Claude Code Plugin
+| Bead | Status | Score | Notes |
+|------|--------|-------|-------|
+| P2b.1 | DONE | 10/10 | plugin.json manifest with skills + agent |
+| P2b.2 | DONE | 10/10 | /minutes record skill |
+| P2b.3 | DONE | 10/10 | /minutes search skill |
+| P2b.4 | DONE | 10/10 | /minutes list skill |
+| P2b.5 | DONE | 10/10 | /minutes recap skill |
+| P2b.6 | DONE | 10/10 | meeting-analyst agent (cross-meeting intelligence) |
+| P2b.7-8 | NOT STARTED | - | Hooks (SessionStart, PostToolUse) — nice-to-have |
+| P2b.9 | NOT STARTED | - | MCP config in plugin (.mcp.json) |
+| P2b.10 | NOT STARTED | - | Plugin README |
 
 ## Resume Instructions (for post-compaction)
 1. Read this file to see current status

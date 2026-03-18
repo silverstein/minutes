@@ -1,0 +1,21 @@
+# Private strategy docs (not for open-source repo)
+.claude/x1-strategy.md
+
+# Build artifacts
+target/
+node_modules/
+
+# Environment
+.env
+.env.*
+
+# OS
+.DS_Store
+
+# Audio temp files
+*.wav
+*.mp3
+*.m4a
+
+# Whisper models (large, downloaded locally)
+models/

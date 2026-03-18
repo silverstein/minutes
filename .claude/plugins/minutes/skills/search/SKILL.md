@@ -60,3 +60,12 @@ qmd_collection = "meetings"
 - Search for **names** to find everything someone discussed: `"Alex"` or `"Case"`
 - Search for **decisions**: `"decided"`, `"agreed"`, `"committed to"`
 - Combine with `Read` to load the full context after finding a match
+
+## Gotchas
+
+- **Search is substring, not fuzzy** — `"price"` matches `"pricing"` and `"price"`, but `"prcing"` (typo) matches nothing. Try multiple terms if you're not sure of the exact wording.
+- **`--since` requires ISO date format** — Use `2026-03-01`, not `"last week"` or `"March 1st"`. For relative dates, compute the ISO date first: `date -v-7d +%Y-%m-%d`.
+- **Large result sets flood stdout** — Always use `--limit` when searching broad terms. The default limit is 10, but common words can match hundreds of files.
+- **QMD semantic search requires separate setup** — If `config.toml` sets `engine = "qmd"` but the QMD collection isn't indexed, search will fail silently. Run `qmd update && qmd embed` first.
+- **Voice memos vs meetings** — Both are searched by default. Use `-t memo` or `-t meeting` to narrow results. Voice memos live in `~/meetings/memos/`, meetings in `~/meetings/`.
+- **Empty results don't mean it wasn't discussed** — If the meeting wasn't transcribed (e.g., recording was stopped before processing), it won't appear in search. Check `minutes list` to see what's been processed.

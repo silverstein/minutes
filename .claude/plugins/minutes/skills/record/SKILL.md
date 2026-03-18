@@ -54,9 +54,13 @@ minutes setup --model small
 ```
 This downloads a ~466MB model. For faster but lower quality: `--model tiny` (75MB). For best quality: `--model large-v3` (3.1GB).
 
-## When things go wrong
+## Gotchas
 
-- **"model not found"** → Run `minutes setup --model small`
-- **"already recording"** → Run `minutes stop` first, or `minutes status` to check
-- **No audio captured** → Check that the right input device is selected in System Settings > Sound
-- **For Zoom/Meet audio** → Install BlackHole (`brew install blackhole-2ch`) and set up a Multi-Output Device in Audio MIDI Setup
+- **"model not found"** → Run `minutes setup --model small`. This is the most common first-run error.
+- **"already recording"** → Run `minutes stop` first, or `minutes status` to check. If the PID file is stale (process crashed), `minutes stop` will clean it up.
+- **No audio captured / empty transcript** → Check that the right input device is selected in System Settings > Sound. On MacBooks, the default mic works for in-person conversations but won't capture system audio.
+- **For Zoom/Meet/Teams audio** → You need BlackHole to capture system audio. See `references/audio-devices.md` in this skill folder for the full setup guide.
+- **Recording runs but transcription is garbage** → The `tiny` model is fast but low quality. Upgrade to `small` or `medium` for real meetings: `minutes setup --model small`.
+- **"permission denied" on output file** → Output files are `0600` (owner-only). This is intentional — transcripts contain sensitive content. Don't chmod them to be world-readable.
+- **Long meetings (>2 hours)** → Transcription time scales with duration. A 2-hour meeting with the `small` model takes ~3-5 minutes on Apple Silicon. The `tiny` model is ~4x faster but much less accurate.
+- **Recording process disappeared** → If you close the terminal tab where `minutes record` is running, the recording stops but may not process. Always use `minutes stop` from another terminal.

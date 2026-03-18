@@ -7,7 +7,10 @@
     { "name": "search", "path": "skills/search/SKILL.md" },
     { "name": "list", "path": "skills/list/SKILL.md" },
     { "name": "recap", "path": "skills/recap/SKILL.md" },
-    { "name": "note", "path": "skills/note/SKILL.md" }
+    { "name": "note", "path": "skills/note/SKILL.md" },
+    { "name": "verify", "path": "skills/verify/SKILL.md" },
+    { "name": "setup", "path": "skills/setup/SKILL.md" },
+    { "name": "cleanup", "path": "skills/cleanup/SKILL.md" }
   ],
   "agents": [
     { "name": "meeting-analyst", "path": "agents/meeting-analyst.md" }

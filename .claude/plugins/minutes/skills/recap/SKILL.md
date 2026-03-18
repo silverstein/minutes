@@ -10,33 +10,14 @@ Synthesize all of today's meetings and voice memos into a single daily brief.
 
 ## How to generate the recap
 
-1. **Get today's recordings:**
+1. **Find today's recordings** using the `/minutes search` skill:
    ```bash
    minutes search "$(date +%Y-%m-%d)" --limit 50
    ```
 
 2. **Read each meeting file** using `Read` on the paths returned
 
-3. **Synthesize into a daily brief** with this structure:
-
-```markdown
-## Daily Recap — [date]
-
-**[N] meetings, [M] voice memos**
-
-### Key Decisions
-- [Decision from meeting title]: [what was decided]
-
-### Action Items
-- [ ] @person: [task] (from: [meeting title])
-
-### Topics Discussed
-- [Topic 1] — discussed in [meeting 1], [meeting 2]
-- [Topic 2] — raised in [voice memo title]
-
-### Ideas Captured
-- [Any voice memo insights worth surfacing]
-```
+3. **Synthesize into a daily brief** — use the template in `templates/daily-recap.md` as a starting point, adapting sections based on what actually exists in the day's recordings.
 
 4. Present the recap directly in the conversation — don't save it to a file unless asked.
 
@@ -47,3 +28,10 @@ Synthesize all of today's meetings and voice memos into a single daily brief.
 - **Prioritize action items**: these are the things the user needs to act on
 - **Include voice memos**: ideas captured on the go are easy to forget — surface them
 - If there are no meetings or memos today, say so clearly rather than making something up
+
+## Gotchas
+
+- **No recordings today ≠ an error** — If there are no meetings or memos for today, say "No recordings found for today" and offer to search a different date range. Don't hallucinate a recap.
+- **Voice memos are easy to miss** — They live in `~/meetings/memos/`, not the main `~/meetings/` directory. The search command includes both, but double-check if the user says "I recorded a voice memo today" and you don't see it.
+- **Meetings without LLM summarization have less structure** — If a meeting file only has a raw transcript (no Summary, Decisions, or Action Items sections), you'll need to extract insights yourself from the transcript text. Check the YAML frontmatter for `action_items:` and `decisions:` fields.
+- **Cross-day meetings** — A meeting that started at 11 PM and ended at 1 AM will be dated by its start time. If the user asks "what happened today" and is missing a late-night meeting, check yesterday's date too.

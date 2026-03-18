@@ -39,6 +39,8 @@ pub struct DiarizationConfig {
 pub struct SummarizationConfig {
     pub engine: String,
     pub chunk_max_tokens: usize,
+    pub ollama_url: String,
+    pub ollama_model: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -48,7 +50,7 @@ pub struct SearchConfig {
     pub qmd_collection: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SecurityConfig {
     pub allowed_audio_dirs: Vec<PathBuf>,
@@ -112,6 +114,8 @@ impl Default for SummarizationConfig {
         Self {
             engine: "none".into(),
             chunk_max_tokens: 4000,
+            ollama_url: "http://localhost:11434".into(),
+            ollama_model: "llama3.2".into(),
         }
     }
 }
@@ -125,16 +129,10 @@ impl Default for SearchConfig {
     }
 }
 
-impl Default for SecurityConfig {
-    fn default() -> Self {
-        Self {
-            // Empty = allow all paths (permissive default for local CLI use).
-            // Set explicitly in config.toml for MCP/networked use:
-            //   allowed_audio_dirs = ["~/.minutes/inbox", "~/meetings"]
-            allowed_audio_dirs: vec![],
-        }
-    }
-}
+// SecurityConfig::default() derives empty vec for allowed_audio_dirs.
+// Empty = allow all paths (permissive default for local CLI use).
+// Set explicitly in config.toml for MCP/networked use:
+//   allowed_audio_dirs = ["~/.minutes/inbox", "~/meetings"]
 
 impl Default for WatchConfig {
     fn default() -> Self {

@@ -188,6 +188,47 @@ fn set_permissions_0600(path: &Path) -> Result<(), MarkdownError> {
     Ok(())
 }
 
+// ── Frontmatter parsing utilities (shared across modules) ────
+
+/// Split markdown content into frontmatter string and body string.
+/// Returns `("", content)` if no frontmatter is found.
+pub fn split_frontmatter(content: &str) -> (&str, &str) {
+    if !content.starts_with("---") {
+        return ("", content);
+    }
+
+    if let Some(end) = content[3..].find("\n---") {
+        let fm_end = end + 3;
+        let body_start = fm_end + 4; // skip \n---
+        let body_start = content[body_start..]
+            .find('\n')
+            .map(|i| body_start + i + 1)
+            .unwrap_or(body_start);
+        (&content[3..fm_end], &content[body_start..])
+    } else {
+        ("", content)
+    }
+}
+
+/// Extract a simple `key: value` field from YAML frontmatter text.
+/// Handles quoted values. Returns None if key not found.
+pub fn extract_field(frontmatter: &str, key: &str) -> Option<String> {
+    let prefix = format!("{}:", key);
+    for line in frontmatter.lines() {
+        let trimmed = line.trim();
+        if let Some(value) = trimmed.strip_prefix(&prefix) {
+            return Some(
+                value
+                    .trim()
+                    .trim_matches('"')
+                    .trim_matches('\'')
+                    .to_string(),
+            );
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

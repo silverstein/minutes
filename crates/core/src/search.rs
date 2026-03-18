@@ -1,5 +1,6 @@
 use crate::config::Config;
 use crate::error::SearchError;
+use crate::markdown::{extract_field, split_frontmatter};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
@@ -112,39 +113,7 @@ fn process_file(
     }
 }
 
-/// Split content into frontmatter and body.
-fn split_frontmatter(content: &str) -> (&str, &str) {
-    if !content.starts_with("---") {
-        return ("", content);
-    }
-
-    if let Some(end) = content[3..].find("\n---") {
-        let fm_end = end + 3;
-        let body_start = fm_end + 4; // skip \n---
-        let body_start = content[body_start..]
-            .find('\n')
-            .map(|i| body_start + i + 1)
-            .unwrap_or(body_start);
-        (&content[3..fm_end], &content[body_start..])
-    } else {
-        ("", content)
-    }
-}
-
-/// Extract a simple key: value field from YAML frontmatter.
-fn extract_field(frontmatter: &str, key: &str) -> Option<String> {
-    let prefix = format!("{}:", key);
-    for line in frontmatter.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with(&prefix) {
-            let value = trimmed[prefix.len()..].trim();
-            // Strip quotes
-            let value = value.trim_matches('"').trim_matches('\'');
-            return Some(value.to_string());
-        }
-    }
-    None
-}
+// split_frontmatter and extract_field are in markdown.rs (shared)
 
 /// Extract a snippet around the first match of the query.
 fn extract_snippet(body: &str, query: &str) -> String {

@@ -310,16 +310,13 @@ fn summarize_with_ollama(
 
     for chunk in &chunks {
         let body = serde_json::json!({
-            "model": "llama3.2",
+            "model": &config.summarization.ollama_model,
             "prompt": format!("{}\n\nSummarize this transcript:\n\n{}", SYSTEM_PROMPT, chunk),
             "stream": false,
         });
 
-        let response = http_post(
-            "http://localhost:11434/api/generate",
-            &body,
-            &[("Content-Type", "application/json")],
-        )?;
+        let url = format!("{}/api/generate", config.summarization.ollama_url);
+        let response = http_post(&url, &body, &[("Content-Type", "application/json")])?;
 
         let text = response["response"].as_str().unwrap_or("").to_string();
         all_text.push_str(&text);

@@ -118,11 +118,13 @@ pub fn log_error(step: &str, file: &str, error: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::TempDir;
 
     #[test]
-    fn append_log_creates_file() {
-        // This test writes to the real log path — just verify format
+    fn append_log_writes_json_line_to_file() {
+        // Use a temp dir to avoid contaminating real logs
+        let dir = tempfile::TempDir::new().unwrap();
+        let log_file = dir.path().join("test.log");
+
         let entry = serde_json::json!({
             "ts": "2026-03-17T08:00:00",
             "level": "info",
@@ -130,13 +132,22 @@ mod tests {
             "message": "unit test entry"
         });
 
-        let json_str = serde_json::to_string(&entry).unwrap();
-        assert!(json_str.contains("\"step\":\"test\""));
+        // Write directly to temp file
+        let line = serde_json::to_string(&entry).unwrap() + "\n";
+        std::fs::write(&log_file, &line).unwrap();
+
+        // Verify it was written
+        let content = std::fs::read_to_string(&log_file).unwrap();
+        assert!(content.contains("\"step\":\"test\""));
+        assert!(content.ends_with('\n'));
+
+        // Verify it's valid JSON
+        let parsed: serde_json::Value = serde_json::from_str(content.trim()).unwrap();
+        assert_eq!(parsed["step"], "test");
     }
 
     #[test]
     fn log_step_formats_correctly() {
-        // Verify the JSON structure
         let entry = serde_json::json!({
             "ts": chrono::Local::now().to_rfc3339(),
             "level": "info",

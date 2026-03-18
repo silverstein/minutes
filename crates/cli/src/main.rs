@@ -136,6 +136,9 @@ fn main() -> Result<()> {
 
     let config = Config::load();
 
+    // Rotate old log files at startup
+    minutes_core::logging::rotate_logs().ok();
+
     match cli.command {
         Commands::Record { title, context } => cmd_record(title, context, &config),
         Commands::Note { text, meeting } => cmd_note(&text, meeting.as_deref()),
@@ -343,66 +346,8 @@ fn cmd_search(
 }
 
 fn cmd_list(limit: usize, content_type: Option<String>, config: &Config) -> Result<()> {
-    // List is just search with an empty query — returns all files
-    let filters = minutes_core::search::SearchFilters {
-        content_type,
-        since: None,
-        attendee: None,
-    };
-
-    // Walk directory and collect all markdown files with frontmatter
-    let dir = &config.output_dir;
-    if !dir.exists() {
-        eprintln!("No meetings directory found at {}", dir.display());
-        return Ok(());
-    }
-
-    let mut entries: Vec<minutes_core::search::SearchResult> = Vec::new();
-    for entry in walkdir::WalkDir::new(dir)
-        .into_iter()
-        .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().is_some_and(|ext| ext == "md"))
-    {
-        let path = entry.path();
-        let content = std::fs::read_to_string(path)?;
-        let title = extract_title(&content)
-            .unwrap_or_else(|| path.file_stem().unwrap().to_string_lossy().to_string());
-        let date = extract_date(&content).unwrap_or_default();
-        let ct = extract_type(&content).unwrap_or_else(|| "meeting".into());
-
-        if let Some(ref type_filter) = filters.content_type {
-            if ct != *type_filter {
-                continue;
-            }
-        }
-
-        entries.push(minutes_core::search::SearchResult {
-            path: path.to_path_buf(),
-            title,
-            date,
-            content_type: ct,
-            snippet: String::new(),
-        });
-    }
-
-    entries.sort_by(|a, b| b.date.cmp(&a.date));
-    let limited: Vec<_> = entries.into_iter().take(limit).collect();
-
-    if limited.is_empty() {
-        eprintln!("No meetings or memos found.");
-        return Ok(());
-    }
-
-    for entry in &limited {
-        eprintln!(
-            "  {} — {} [{}]",
-            entry.date, entry.title, entry.content_type
-        );
-    }
-
-    let json = serde_json::to_string_pretty(&limited)?;
-    println!("{}", json);
-    Ok(())
+    // List delegates to search with an empty query — DRY, no duplicated file walking
+    cmd_search("", content_type, None, limit, config)
 }
 
 fn cmd_process(
@@ -456,10 +401,13 @@ fn cmd_devices() -> Result<()> {
     if devices.is_empty() {
         eprintln!("No audio input devices found.");
     } else {
+        // Human-readable to stderr, JSON to stdout (consistent with other commands)
         eprintln!("Audio input devices:");
         for d in &devices {
             eprintln!("  {}", d);
         }
+        let json = serde_json::to_string_pretty(&devices)?;
+        println!("{}", json);
     }
     Ok(())
 }
@@ -575,32 +523,4 @@ fn cmd_logs(errors: bool, lines: usize) -> Result<()> {
     Ok(())
 }
 
-// Simple frontmatter extractors for the list command
-fn extract_frontmatter_field(content: &str, key: &str) -> Option<String> {
-    let prefix = format!("{}:", key);
-    for line in content.lines() {
-        let trimmed = line.trim();
-        if let Some(value) = trimmed.strip_prefix(&prefix) {
-            return Some(
-                value
-                    .trim()
-                    .trim_matches('"')
-                    .trim_matches('\'')
-                    .to_string(),
-            );
-        }
-    }
-    None
-}
-
-fn extract_title(content: &str) -> Option<String> {
-    extract_frontmatter_field(content, "title")
-}
-
-fn extract_date(content: &str) -> Option<String> {
-    extract_frontmatter_field(content, "date")
-}
-
-fn extract_type(content: &str) -> Option<String> {
-    extract_frontmatter_field(content, "type")
-}
+// Frontmatter parsing is in minutes_core::markdown::{split_frontmatter, extract_field}

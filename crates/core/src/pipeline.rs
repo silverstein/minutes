@@ -1,6 +1,7 @@
 use crate::config::Config;
 use crate::diarize;
 use crate::error::MinutesError;
+use crate::logging;
 use crate::markdown::{self, ContentType, Frontmatter, OutputStatus, WriteResult};
 use crate::summarize;
 use crate::transcribe;
@@ -43,13 +44,21 @@ pub fn process(
 
     // Step 1: Transcribe (always)
     tracing::info!(step = "transcribe", file = %audio_path.display(), "transcribing audio");
+    let step_start = std::time::Instant::now();
     let transcript = transcribe::transcribe(audio_path, config)?;
+    let transcribe_ms = step_start.elapsed().as_millis() as u64;
 
     let word_count = transcript.split_whitespace().count();
     tracing::info!(
         step = "transcribe",
         words = word_count,
         "transcription complete"
+    );
+    logging::log_step(
+        "transcribe",
+        &audio_path.display().to_string(),
+        transcribe_ms,
+        serde_json::json!({"words": word_count}),
     );
 
     // Check minimum word threshold
@@ -109,9 +118,23 @@ pub fn process(
     };
 
     tracing::info!(step = "write", "writing markdown");
+    let step_start = std::time::Instant::now();
     let result = markdown::write(&frontmatter, &transcript, summary.as_deref(), config)?;
+    let write_ms = step_start.elapsed().as_millis() as u64;
+    logging::log_step(
+        "write",
+        &audio_path.display().to_string(),
+        write_ms,
+        serde_json::json!({"output": result.path.display().to_string(), "words": result.word_count}),
+    );
 
     let elapsed = start.elapsed();
+    logging::log_step(
+        "pipeline_complete",
+        &audio_path.display().to_string(),
+        elapsed.as_millis() as u64,
+        serde_json::json!({"output": result.path.display().to_string(), "words": result.word_count, "content_type": format!("{:?}", content_type)}),
+    );
     tracing::info!(
         file = %result.path.display(),
         words = result.word_count,

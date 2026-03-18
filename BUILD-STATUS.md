@@ -3,7 +3,7 @@
 > This file tracks implementation progress. Read this after compaction to know exactly where you left off.
 > Update this file after completing each bead. Never leave it stale.
 
-## Current Phase: COMPLETE through Phase 2b. Ready for Phase 3 (Tauri).
+## Current Phase: Phase 3 (Tauri menu bar app) scaffolded. All phases 1-3 built.
 
 ## Build Chunks
 
@@ -103,6 +103,18 @@
 | P2b.7-8 | NOT STARTED | - | Hooks (SessionStart, PostToolUse) — nice-to-have |
 | P2b.9 | NOT STARTED | - | MCP config in plugin (.mcp.json) |
 | P2b.10 | NOT STARTED | - | Plugin README |
+
+### Phase 3: Tauri Menu Bar App
+| Bead | Status | Score | Notes |
+|------|--------|-------|-------|
+| P3.1 | DONE | 9/10 | Tauri v2 scaffold: Cargo.toml, tauri.conf.json, system tray with menu. Tauri CLI 2.10.1 installed. |
+| P3.2 | NOT STARTED | - | Calendar polling (macOS EventKit) |
+| P3.3 | NOT STARTED | - | Meeting suggestion notification (2 min before) |
+| P3.4 | DONE | 8/10 | Recording indicator via tray menu + status badge in web UI |
+| P3.5 | DONE | 8/10 | Minimal web UI: dark-mode meeting list, search box, status indicator. Safe DOM rendering. |
+| P3.6 | NOT STARTED | - | Auto-start on login (launchd) |
+| P3.7 | NOT STARTED | - | First-run onboarding |
+| P3.8 | NOT STARTED | - | Homebrew cask formula |
 
 ## Resume Instructions (for post-compaction)
 1. Read this file to see current status

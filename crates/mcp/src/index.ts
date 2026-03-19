@@ -465,6 +465,96 @@ server.tool(
   }
 );
 
+// ── Tool: research_topic ────────────────────────────────────
+
+server.tool(
+  "research_topic",
+  "Research a topic across meetings, decisions, and open follow-ups.",
+  {
+    query: z.string().describe("Topic or question to investigate across meetings"),
+    type: z.enum(["meeting", "memo"]).optional().describe("Filter by type"),
+    since: z.string().optional().describe("Only results after this date (ISO)"),
+    attendee: z.string().optional().describe("Filter by attendee / person"),
+  },
+  async ({ query, type: contentType, since, attendee }) => {
+    const args = ["research", query];
+    if (contentType) args.push("-t", contentType);
+    if (since) args.push("--since", since);
+    if (attendee) args.push("--attendee", attendee);
+
+    const { stdout, stderr } = await runMinutes(args);
+    const report = parseJsonOutput(stdout);
+
+    if (!report || typeof report !== "object") {
+      return { content: [{ type: "text" as const, text: stderr || stdout }] };
+    }
+
+    const decisions = Array.isArray(report.related_decisions) ? report.related_decisions : [];
+    const openIntents = Array.isArray(report.related_open_intents)
+      ? report.related_open_intents
+      : [];
+    const recentMeetings = Array.isArray(report.recent_meetings)
+      ? report.recent_meetings
+      : [];
+    const topics = Array.isArray(report.related_topics) ? report.related_topics : [];
+
+    if (decisions.length === 0 && openIntents.length === 0 && recentMeetings.length === 0) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `No cross-meeting results found for ${query}.`,
+          },
+        ],
+      };
+    }
+
+    const sections = [];
+    if (topics.length > 0) {
+      sections.push(
+        "Related topics:\n" +
+          topics.map((topic: any) => `- ${topic.topic} (${topic.count})`).join("\n")
+      );
+    }
+    if (decisions.length > 0) {
+      sections.push(
+        "Recent decisions:\n" +
+          decisions
+            .map((decision: any) => `- ${decision.date} — ${decision.what} (${decision.title})`)
+            .join("\n")
+      );
+    }
+    if (openIntents.length > 0) {
+      sections.push(
+        "Open follow-ups:\n" +
+          openIntents
+            .map(
+              (intent: any) =>
+                `- ${intent.kind}: ${intent.what}${intent.who ? ` (@${intent.who})` : ""}${intent.by_date ? ` by ${intent.by_date}` : ""}`
+            )
+            .join("\n")
+      );
+    }
+    if (recentMeetings.length > 0) {
+      sections.push(
+        "Matching meetings:\n" +
+          recentMeetings
+            .map((meeting: any) => `- ${meeting.date} — ${meeting.title}`)
+            .join("\n")
+      );
+    }
+
+    return {
+      content: [
+        {
+          type: "text" as const,
+          text: `Cross-meeting research for ${query}:\n\n${sections.join("\n\n")}`,
+        },
+      ],
+    };
+  }
+);
+
 // ── Tool: get_meeting ───────────────────────────────────────
 
 server.tool(

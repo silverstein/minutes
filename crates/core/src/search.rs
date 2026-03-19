@@ -94,12 +94,195 @@ pub struct PersonProfile {
     pub top_topics: Vec<TopicSummary>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct CrossMeetingResearch {
+    pub query: String,
+    pub related_decisions: Vec<ReportEntry>,
+    pub related_open_intents: Vec<IntentResult>,
+    pub recent_meetings: Vec<MeetingReference>,
+    pub related_topics: Vec<TopicSummary>,
+}
+
 pub struct SearchFilters {
     pub content_type: Option<String>,
     pub since: Option<String>,
     pub attendee: Option<String>,
     pub intent_kind: Option<IntentKind>,
     pub owner: Option<String>,
+}
+
+pub fn cross_meeting_research(
+    query: &str,
+    config: &Config,
+    filters: &SearchFilters,
+) -> Result<CrossMeetingResearch, SearchError> {
+    let dir = &config.output_dir;
+    if !dir.exists() {
+        return Err(SearchError::DirNotFound(dir.display().to_string()));
+    }
+
+    let query_lower = query.to_lowercase();
+    let mut related_decisions = Vec::new();
+    let mut related_open_intents = Vec::new();
+    let mut recent_meetings = Vec::new();
+    let mut topic_counts: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+
+    for entry in WalkDir::new(dir)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "md"))
+    {
+        let path = entry.path();
+        let content = match std::fs::read_to_string(path) {
+            Ok(content) => content,
+            Err(e) => {
+                tracing::warn!(path = %path.display(), error = %e, "skipping file in cross-meeting research");
+                continue;
+            }
+        };
+
+        let (frontmatter_str, _) = split_frontmatter(&content);
+        if frontmatter_str.is_empty() {
+            continue;
+        }
+
+        let frontmatter: Frontmatter = match serde_yaml::from_str(frontmatter_str) {
+            Ok(frontmatter) => frontmatter,
+            Err(e) => {
+                tracing::warn!(path = %path.display(), error = %e, "skipping malformed frontmatter in cross-meeting research");
+                continue;
+            }
+        };
+
+        let content_type = match frontmatter.r#type {
+            crate::markdown::ContentType::Meeting => "meeting".to_string(),
+            crate::markdown::ContentType::Memo => "memo".to_string(),
+        };
+        if let Some(ref type_filter) = filters.content_type {
+            if content_type != *type_filter {
+                continue;
+            }
+        }
+
+        let date = frontmatter.date.to_rfc3339();
+        if let Some(ref since) = filters.since {
+            if date < *since {
+                continue;
+            }
+        }
+        if let Some(ref attendee) = filters.attendee {
+            let attendee_lower = attendee.to_lowercase();
+            let attendee_match = frontmatter
+                .attendees
+                .iter()
+                .any(|name| name.to_lowercase().contains(&attendee_lower))
+                || frontmatter
+                    .people
+                    .iter()
+                    .any(|person| person.to_lowercase().contains(&attendee_lower));
+            if !attendee_match {
+                continue;
+            }
+        }
+
+        let meeting_matches = frontmatter.title.to_lowercase().contains(&query_lower)
+            || frontmatter
+                .context
+                .as_ref()
+                .map(|context| context.to_lowercase().contains(&query_lower))
+                .unwrap_or(false);
+
+        let mut matched_this_meeting = meeting_matches;
+
+        for decision in &frontmatter.decisions {
+            let topic = decision
+                .topic
+                .clone()
+                .unwrap_or_else(|| normalize_topic(&decision.text));
+            let haystack = format!("{} {}", topic, decision.text).to_lowercase();
+            if haystack.contains(&query_lower) {
+                matched_this_meeting = true;
+                if !topic.is_empty() {
+                    *topic_counts.entry(topic).or_insert(0) += 1;
+                }
+                related_decisions.push(ReportEntry {
+                    path: path.to_path_buf(),
+                    title: frontmatter.title.clone(),
+                    date: date.clone(),
+                    what: decision.text.clone(),
+                    who: None,
+                    by_date: None,
+                });
+            }
+        }
+
+        for intent in &frontmatter.intents {
+            let haystack = format!(
+                "{} {} {} {}",
+                intent.what,
+                intent.who.clone().unwrap_or_default(),
+                intent.status,
+                intent.by_date.clone().unwrap_or_default()
+            )
+            .to_lowercase();
+            if !haystack.contains(&query_lower) {
+                continue;
+            }
+
+            matched_this_meeting = true;
+            let topic = normalize_topic(&intent.what);
+            if !topic.is_empty() {
+                *topic_counts.entry(topic).or_insert(0) += 1;
+            }
+
+            if intent.status == "open" {
+                related_open_intents.push(IntentResult {
+                    path: path.to_path_buf(),
+                    title: frontmatter.title.clone(),
+                    date: date.clone(),
+                    content_type: content_type.clone(),
+                    kind: intent.kind,
+                    what: intent.what.clone(),
+                    who: intent.who.clone(),
+                    status: intent.status.clone(),
+                    by_date: intent.by_date.clone(),
+                });
+            }
+        }
+
+        if matched_this_meeting {
+            recent_meetings.push(MeetingReference {
+                path: path.to_path_buf(),
+                title: frontmatter.title.clone(),
+                date,
+                content_type,
+            });
+        }
+    }
+
+    related_decisions.sort_by(|a, b| b.date.cmp(&a.date));
+    related_open_intents.sort_by(|a, b| b.date.cmp(&a.date));
+    recent_meetings.sort_by(|a, b| b.date.cmp(&a.date));
+
+    let mut related_topics: Vec<TopicSummary> = topic_counts
+        .into_iter()
+        .map(|(topic, count)| TopicSummary { topic, count })
+        .collect();
+    related_topics.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.topic.cmp(&b.topic)));
+
+    related_decisions.truncate(10);
+    related_open_intents.truncate(10);
+    recent_meetings.truncate(10);
+    related_topics.truncate(5);
+
+    Ok(CrossMeetingResearch {
+        query: query.to_string(),
+        related_decisions,
+        related_open_intents,
+        recent_meetings,
+        related_topics,
+    })
 }
 
 /// Search all markdown files in the meetings directory.
@@ -1100,5 +1283,43 @@ mod tests {
         let profile = person_profile(&config, "sarah").unwrap();
         assert_eq!(profile.recent_meetings.len(), 1);
         assert_eq!(profile.recent_meetings[0].title, "Pricing Review");
+    }
+
+    #[test]
+    fn cross_meeting_research_collects_decisions_intents_and_meetings() {
+        let dir = TempDir::new().unwrap();
+        create_test_file(
+            dir.path(),
+            "2026-03-17-a.md",
+            "---\ntitle: Pricing Review\ntype: meeting\ndate: 2026-03-17T12:00:00-07:00\nduration: 42m\nstatus: complete\ntags: []\nattendees: [Alex]\npeople: [Alex]\nentities:\n  people:\n    - slug: sarah\n      label: Alex\n      aliases: []\n  projects:\n    - slug: pricing\n      label: Pricing\n      aliases: []\ncontext: pricing review\naction_items: []\ndecisions:\n  - text: Launch pricing at monthly billing per month\n    topic: pricing\nintents:\n  - kind: commitment\n    what: Share revised pricing model\n    who: Alex\n    status: open\n    by_date: Tuesday\n---\n\n## Transcript\n\nWe discussed pricing.\n",
+        );
+        create_test_file(
+            dir.path(),
+            "2026-03-20-b.md",
+            "---\ntitle: Onboarding Follow-up\ntype: meeting\ndate: 2026-03-20T12:00:00-07:00\nduration: 30m\nstatus: complete\ntags: []\nattendees: []\npeople: []\naction_items: []\ndecisions: []\nintents: []\n---\n\n## Transcript\n\nWe discussed onboarding.\n",
+        );
+
+        let config = Config {
+            output_dir: dir.path().to_path_buf(),
+            ..Config::default()
+        };
+
+        let filters = SearchFilters {
+            content_type: None,
+            since: None,
+            attendee: None,
+            intent_kind: None,
+            owner: None,
+        };
+        let report = cross_meeting_research("pricing", &config, &filters).unwrap();
+
+        assert_eq!(report.related_decisions.len(), 1);
+        assert_eq!(report.related_open_intents.len(), 1);
+        assert_eq!(report.recent_meetings.len(), 1);
+        assert_eq!(report.recent_meetings[0].title, "Pricing Review");
+        assert!(report
+            .related_topics
+            .iter()
+            .any(|topic| topic.topic == "pricing"));
     }
 }

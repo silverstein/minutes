@@ -104,6 +104,24 @@ enum Commands {
         name: String,
     },
 
+    /// Research a topic across meetings, decisions, and open follow-ups
+    Research {
+        /// Topic or question to investigate across meetings
+        query: String,
+
+        /// Filter by type: meeting or memo
+        #[arg(short = 't', long)]
+        content_type: Option<String>,
+
+        /// Filter by date (ISO format, e.g., 2026-03-17)
+        #[arg(short, long)]
+        since: Option<String>,
+
+        /// Filter by attendee / person
+        #[arg(short, long)]
+        attendee: Option<String>,
+    },
+
     /// List recent meetings and voice memos
     List {
         /// Maximum number of results
@@ -231,6 +249,12 @@ fn main() -> Result<()> {
             stale_after_days,
         } => cmd_consistency(owner.as_deref(), stale_after_days, &config),
         Commands::Person { name } => cmd_person(&name, &config),
+        Commands::Research {
+            query,
+            content_type,
+            since,
+            attendee,
+        } => cmd_research(&query, content_type, since, attendee, &config),
         Commands::List {
             limit,
             content_type,
@@ -658,6 +682,73 @@ fn cmd_person(name: &str, config: &Config) -> Result<()> {
     }
 
     println!("{}", serde_json::to_string_pretty(&profile)?);
+    Ok(())
+}
+
+fn cmd_research(
+    query: &str,
+    content_type: Option<String>,
+    since: Option<String>,
+    attendee: Option<String>,
+    config: &Config,
+) -> Result<()> {
+    let filters = minutes_core::search::SearchFilters {
+        content_type,
+        since,
+        attendee,
+        intent_kind: None,
+        owner: None,
+    };
+
+    let report = minutes_core::search::cross_meeting_research(query, config, &filters)
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+    if report.related_decisions.is_empty()
+        && report.related_open_intents.is_empty()
+        && report.recent_meetings.is_empty()
+    {
+        eprintln!("No cross-meeting results found for {}.", query);
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+
+    eprintln!("Cross-meeting research for {}:", query);
+    if !report.related_topics.is_empty() {
+        eprintln!(
+            "  Related topics: {}",
+            report
+                .related_topics
+                .iter()
+                .map(|topic| format!("{} ({})", topic.topic, topic.count))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    if !report.related_decisions.is_empty() {
+        eprintln!("  Recent decisions:");
+        for decision in &report.related_decisions {
+            eprintln!("    {} — {}", decision.date, decision.what);
+        }
+    }
+    if !report.related_open_intents.is_empty() {
+        eprintln!("  Open follow-ups:");
+        for intent in &report.related_open_intents {
+            let owner = intent.who.as_deref().unwrap_or("unassigned");
+            let due = intent.by_date.as_deref().unwrap_or("no due date");
+            eprintln!(
+                "    {:?}: {} (@{}, {})",
+                intent.kind, intent.what, owner, due
+            );
+        }
+    }
+    if !report.recent_meetings.is_empty() {
+        eprintln!("  Matching meetings:");
+        for meeting in &report.recent_meetings {
+            eprintln!("    {} — {}", meeting.date, meeting.title);
+        }
+    }
+
+    println!("{}", serde_json::to_string_pretty(&report)?);
     Ok(())
 }
 

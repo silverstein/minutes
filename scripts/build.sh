@@ -20,8 +20,21 @@ if [ -d "$CELLAR" ]; then
 fi
 
 echo ""
+
+# Install to /Applications if --install flag is passed
+if [[ "$*" == *"--install"* ]]; then
+    echo "=== Installing app to /Applications ==="
+    cp -r target/release/bundle/macos/Minutes.app /Applications/
+    echo "  Installed to /Applications/Minutes.app"
+fi
+
 echo "=== Done ==="
 echo "  CLI:  $(which minutes) — $(minutes --version 2>&1)"
 echo "  App:  target/release/bundle/macos/Minutes.app"
 echo ""
-echo "  Launch: open target/release/bundle/macos/Minutes.app"
+if [ -d "/Applications/Minutes.app" ]; then
+    echo "  Relaunch: open /Applications/Minutes.app"
+else
+    echo "  Launch: open target/release/bundle/macos/Minutes.app"
+    echo "  Install: ./scripts/build.sh --install"
+fi

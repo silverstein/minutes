@@ -1521,44 +1521,49 @@ pub fn cmd_needs_setup() -> serde_json::Value {
 }
 
 #[tauri::command]
-pub fn cmd_download_model(model: String) -> Result<String, String> {
-    let config = Config::load();
-    let model_dir = &config.transcription.model_path;
-    let model_file = model_dir.join(format!("ggml-{}.bin", model));
+pub async fn cmd_download_model(model: String) -> Result<String, String> {
+    // Run in a blocking thread so the UI stays responsive during download
+    tauri::async_runtime::spawn_blocking(move || {
+        let config = Config::load();
+        let model_dir = &config.transcription.model_path;
+        let model_file = model_dir.join(format!("ggml-{}.bin", model));
 
-    if model_file.exists() {
-        return Ok(format!("Model '{}' already downloaded", model));
-    }
+        if model_file.exists() {
+            return Ok(format!("Model '{}' already downloaded", model));
+        }
 
-    std::fs::create_dir_all(model_dir).map_err(|e| e.to_string())?;
+        std::fs::create_dir_all(model_dir).map_err(|e| e.to_string())?;
 
-    let url = format!(
-        "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-{}.bin",
-        model
-    );
+        let url = format!(
+            "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-{}.bin",
+            model
+        );
 
-    eprintln!("[minutes] Downloading model: {} from {}", model, url);
+        eprintln!("[minutes] Downloading model: {} from {}", model, url);
 
-    let status = std::process::Command::new("curl")
-        .args([
-            "-L",
-            "-o",
-            &model_file.to_string_lossy(),
-            &url,
-            "--progress-bar",
-        ])
-        .status()
-        .map_err(|e| format!("curl failed: {}", e))?;
+        let status = std::process::Command::new("curl")
+            .args([
+                "-L",
+                "-o",
+                &model_file.to_string_lossy(),
+                &url,
+                "--progress-bar",
+            ])
+            .status()
+            .map_err(|e| format!("curl failed: {}", e))?;
 
-    if !status.success() {
-        return Err("Download failed".into());
-    }
+        if !status.success() {
+            return Err("Download failed".into());
+        }
 
-    let size = std::fs::metadata(&model_file)
-        .map(|m| m.len() / (1024 * 1024))
-        .unwrap_or(0);
+        let size = std::fs::metadata(&model_file)
+            .map(|m| m.len() / (1024 * 1024))
+            .unwrap_or(0);
 
-    Ok(format!("Downloaded '{}' model ({} MB)", model, size))
+        Ok(format!("Downloaded '{}' model ({} MB)", model, size))
+    })
+    .await
+    .map_err(|e| format!("Download task failed: {}", e))?
 }
 
 // ── Terminal / AI Assistant commands ──────────────────────────
@@ -1885,6 +1890,12 @@ pub fn cmd_get_settings() -> serde_json::Value {
             "agent": config.assistant.agent,
             "agent_args": config.assistant.agent_args,
         },
+        "call_detection": {
+            "enabled": config.call_detection.enabled,
+            "poll_interval_secs": config.call_detection.poll_interval_secs,
+            "cooldown_minutes": config.call_detection.cooldown_minutes,
+            "apps": config.call_detection.apps,
+        },
     })
 }
 
@@ -1920,6 +1931,11 @@ pub fn cmd_set_setting(section: String, key: String, value: String) -> Result<St
 
         // Assistant
         ("assistant", "agent") => config.assistant.agent = value.clone(),
+
+        // Call detection
+        ("call_detection", "enabled") => {
+            config.call_detection.enabled = value == "true";
+        }
 
         _ => return Err(format!("Unknown setting: {}.{}", section, key)),
     }

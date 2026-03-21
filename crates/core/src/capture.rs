@@ -251,11 +251,17 @@ pub fn record_to_wav(
                 Arc::clone(&stop_flag),
             ) {
                 Ok(handle) => {
-                    eprintln!("[minutes] Screen context capture enabled (every {}s)", config.screen_context.interval_secs);
+                    eprintln!(
+                        "[minutes] Screen context capture enabled (every {}s)",
+                        config.screen_context.interval_secs
+                    );
                     Some(handle)
                 }
                 Err(e) => {
-                    tracing::warn!("screen capture init failed: {} — continuing without screen context", e);
+                    tracing::warn!(
+                        "screen capture init failed: {} — continuing without screen context",
+                        e
+                    );
                     None
                 }
             }

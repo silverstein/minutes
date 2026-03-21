@@ -172,9 +172,7 @@ fn refresh_calendar_items(
     // Insert at position 2 (after "Open Minutes" + first separator)
     for (i, event) in events.iter().enumerate() {
         let label = format_calendar_label(event);
-        if let Ok(item) =
-            MenuItem::with_id(app, format!("cal-{}", i), &label, true, None::<&str>)
-        {
+        if let Ok(item) = MenuItem::with_id(app, format!("cal-{}", i), &label, true, None::<&str>) {
             if menu.insert(&item, 2 + i).is_ok() {
                 state.items.push(item);
             }
@@ -183,8 +181,7 @@ fn refresh_calendar_items(
 
     // Separator after calendar items
     if !state.items.is_empty() {
-        if let Ok(sep) =
-            MenuItem::with_id(app, "cal-sep", "──────────", false, None::<&str>)
+        if let Ok(sep) = MenuItem::with_id(app, "cal-sep", "──────────", false, None::<&str>)
         {
             if menu.insert(&sep, 2 + state.items.len()).is_ok() {
                 state.separator = Some(sep);
@@ -295,8 +292,7 @@ fn main() {
                 true,
                 None::<&str>,
             )?;
-            let assistant_item =
-                MenuItem::with_id(app, "assistant", "Recall", true, None::<&str>)?;
+            let assistant_item = MenuItem::with_id(app, "assistant", "Recall", true, None::<&str>)?;
             let screen_share_item = MenuItem::with_id(
                 app,
                 "screen-share-toggle",
@@ -513,9 +509,13 @@ fn main() {
 
                             // Update menu label
                             if new_state {
-                                screen_share_item_ref.set_text("Hide from Screen Share ✓").ok();
+                                screen_share_item_ref
+                                    .set_text("Hide from Screen Share ✓")
+                                    .ok();
                             } else {
-                                screen_share_item_ref.set_text("Hide from Screen Share").ok();
+                                screen_share_item_ref
+                                    .set_text("Hide from Screen Share")
+                                    .ok();
                             }
 
                             // Apply to all existing windows
@@ -607,11 +607,9 @@ fn main() {
                 let app_cal = app.handle().clone();
                 let menu_cal = menu.clone();
                 let cal_timer = cal_state.clone();
-                std::thread::spawn(move || {
-                    loop {
-                        refresh_calendar_items(&app_cal, &menu_cal, &cal_timer);
-                        std::thread::sleep(std::time::Duration::from_secs(CALENDAR_REFRESH_SECS));
-                    }
+                std::thread::spawn(move || loop {
+                    refresh_calendar_items(&app_cal, &menu_cal, &cal_timer);
+                    std::thread::sleep(std::time::Duration::from_secs(CALENDAR_REFRESH_SECS));
                 });
             }
 

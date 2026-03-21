@@ -93,7 +93,10 @@ pub fn start_capture(
         let first_sleep_end = std::time::Instant::now() + interval;
         while std::time::Instant::now() < first_sleep_end {
             if thread_stop.load(Ordering::Relaxed) {
-                tracing::info!(captures = 0, "screen capture stopped (before first capture)");
+                tracing::info!(
+                    captures = 0,
+                    "screen capture stopped (before first capture)"
+                );
                 return;
             }
             std::thread::sleep(Duration::from_millis(250));
@@ -163,7 +166,13 @@ fn capture_screenshot(path: &Path) -> std::io::Result<()> {
 
         // Downscale to reduce file size (Retina screenshots are 3-8 MB)
         let _ = std::process::Command::new("sips")
-            .args(["--resampleWidth", &TARGET_WIDTH.to_string(), "-s", "format", "png"])
+            .args([
+                "--resampleWidth",
+                &TARGET_WIDTH.to_string(),
+                "-s",
+                "format",
+                "png",
+            ])
             .arg(path)
             .output(); // Best-effort — if sips fails, keep the full-res image
     }
@@ -171,9 +180,7 @@ fn capture_screenshot(path: &Path) -> std::io::Result<()> {
     // Linux: try scrot, fall back to gnome-screenshot
     #[cfg(target_os = "linux")]
     {
-        let result = std::process::Command::new("scrot")
-            .arg(path)
-            .output();
+        let result = std::process::Command::new("scrot").arg(path).output();
 
         match result {
             Ok(output) if output.status.success() => {}

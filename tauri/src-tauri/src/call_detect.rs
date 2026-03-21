@@ -70,7 +70,10 @@ impl CallDetector {
 
                 if let Some((display_name, process_name)) = self.detect_active_call() {
                     if !self.in_cooldown(&process_name) {
-                        eprintln!("[call-detect] detected: {} ({})", display_name, process_name);
+                        eprintln!(
+                            "[call-detect] detected: {} ({})",
+                            display_name, process_name
+                        );
                         self.set_cooldown(&process_name);
 
                         // Notify via macOS notification
@@ -107,10 +110,9 @@ impl CallDetector {
             let config_lower = config_app.to_lowercase();
             // Substring match: "zoom.us" matches process "zoom.us",
             // "Microsoft Teams" matches "Microsoft Teams Helper", etc.
-            if running
-                .iter()
-                .any(|p| p.to_lowercase().contains(&config_lower) || config_lower.contains(&p.to_lowercase()))
-            {
+            if running.iter().any(|p| {
+                p.to_lowercase().contains(&config_lower) || config_lower.contains(&p.to_lowercase())
+            }) {
                 let display = display_name_for(config_app);
                 return Some((display, config_app.clone()));
             }
@@ -169,13 +171,7 @@ fn running_process_names() -> Vec<String> {
                     if trimmed.is_empty() {
                         return None;
                     }
-                    Some(
-                        trimmed
-                            .rsplit('/')
-                            .next()
-                            .unwrap_or(trimmed)
-                            .to_string(),
-                    )
+                    Some(trimmed.rsplit('/').next().unwrap_or(trimmed).to_string())
                 })
                 .collect()
         }
@@ -222,9 +218,7 @@ print(r > 0 ? "1" : "0")
         .output();
 
     match output {
-        Ok(out) if out.status.success() => {
-            String::from_utf8_lossy(&out.stdout).trim() == "1"
-        }
+        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout).trim() == "1",
         _ => false,
     }
 }

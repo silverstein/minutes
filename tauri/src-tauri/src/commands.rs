@@ -1270,8 +1270,7 @@ pub fn cmd_list_meetings(limit: Option<usize>) -> serde_json::Value {
             let enriched: Vec<serde_json::Value> = limited
                 .iter()
                 .map(|r| {
-                    let mut val =
-                        serde_json::to_value(r).unwrap_or(serde_json::json!({}));
+                    let mut val = serde_json::to_value(r).unwrap_or(serde_json::json!({}));
                     // Read frontmatter to check for lifecycle badges
                     let badges = compute_lifecycle_badges(&r.path, &prep_slugs);
                     val["badges"] = serde_json::json!(badges);
@@ -1308,9 +1307,7 @@ fn compute_lifecycle_badges(
             badges.push("recorded".into());
         }
         // "debriefed" badge: has decisions or resolved intents (added by debrief)
-        if !fm.decisions.is_empty()
-            || fm.intents.iter().any(|i| i.status != "open")
-        {
+        if !fm.decisions.is_empty() || fm.intents.iter().any(|i| i.status != "open") {
             badges.push("debriefed".into());
         }
     }

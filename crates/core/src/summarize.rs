@@ -276,10 +276,7 @@ fn resolve_agent_path(cmd: &str) -> String {
     }
 
     // Check if it's findable in the current PATH
-    if let Ok(output) = std::process::Command::new("which")
-        .arg(cmd)
-        .output()
-    {
+    if let Ok(output) = std::process::Command::new("which").arg(cmd).output() {
         if output.status.success() {
             let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
             if !path.is_empty() {
@@ -348,14 +345,14 @@ fn summarize_with_agent(
     // All agents use stdin/pipe to avoid OS ARG_MAX limits.
     // A 100K transcript as a CLI argument works on most systems but is fragile.
     // Piping is universally safe and works with all agents.
-    let (cmd, args): (&str, Vec<&str>) =
-        if agent_cmd == "claude" || agent_cmd.ends_with("/claude") {
-            (&agent_cmd, vec!["-p", "-", "--no-input"])
-        } else if agent_cmd == "codex" || agent_cmd.ends_with("/codex") {
-            (&agent_cmd, vec!["exec", "-", "-s", "read-only"])
-        } else {
-            (&agent_cmd, vec![])
-        };
+    let (cmd, args): (&str, Vec<&str>) = if agent_cmd == "claude" || agent_cmd.ends_with("/claude")
+    {
+        (&agent_cmd, vec!["-p", "-", "--no-input"])
+    } else if agent_cmd == "codex" || agent_cmd.ends_with("/codex") {
+        (&agent_cmd, vec!["exec", "-", "-s", "read-only"])
+    } else {
+        (&agent_cmd, vec![])
+    };
 
     let mut child = std::process::Command::new(cmd)
         .args(&args)
@@ -387,16 +384,15 @@ fn summarize_with_agent(
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
-                let output = child.wait_with_output().map_err(|e| {
-                    format!("Failed to read agent output: {}", e)
-                })?;
+                let output = child
+                    .wait_with_output()
+                    .map_err(|e| format!("Failed to read agent output: {}", e))?;
 
                 if !status.success() {
                     let stderr = String::from_utf8_lossy(&output.stderr);
-                    return Err(format!(
-                        "Agent '{}' exited with error: {}",
-                        agent_cmd, stderr
-                    ).into());
+                    return Err(
+                        format!("Agent '{}' exited with error: {}", agent_cmd, stderr).into(),
+                    );
                 }
 
                 let response = String::from_utf8_lossy(&output.stdout).to_string();
@@ -418,8 +414,10 @@ fn summarize_with_agent(
                     child.kill().ok();
                     return Err(format!(
                         "Agent '{}' timed out after {}s",
-                        agent_cmd, timeout.as_secs()
-                    ).into());
+                        agent_cmd,
+                        timeout.as_secs()
+                    )
+                    .into());
                 }
                 std::thread::sleep(std::time::Duration::from_millis(500));
             }
@@ -456,7 +454,10 @@ fn summarize_with_claude(
 
         // Include screen context images in the first chunk
         if i == 0 && !screen_content.is_empty() {
-            tracing::info!(images = screen_content.len(), "sending screen context to Claude");
+            tracing::info!(
+                images = screen_content.len(),
+                "sending screen context to Claude"
+            );
             content_blocks.extend(screen_content.clone());
             content_blocks.push(serde_json::json!({
                 "type": "text",
@@ -552,7 +553,10 @@ fn summarize_with_openai(
         let mut content_parts: Vec<serde_json::Value> = Vec::new();
 
         if i == 0 && !screen_content.is_empty() {
-            tracing::info!(images = screen_content.len(), "sending screen context to OpenAI");
+            tracing::info!(
+                images = screen_content.len(),
+                "sending screen context to OpenAI"
+            );
             content_parts.extend(screen_content.clone());
             content_parts.push(serde_json::json!({
                 "type": "text",
@@ -566,7 +570,11 @@ fn summarize_with_openai(
         }));
 
         // Use gpt-4o (vision-capable) when we have images, gpt-4o-mini otherwise
-        let model = if i == 0 && !screen_content.is_empty() { "gpt-4o" } else { "gpt-4o-mini" };
+        let model = if i == 0 && !screen_content.is_empty() {
+            "gpt-4o"
+        } else {
+            "gpt-4o-mini"
+        };
 
         let body = serde_json::json!({
             "model": model,
@@ -653,10 +661,8 @@ fn http_post(
 
 const MAX_SCREEN_IMAGES: usize = 8;
 
-fn read_and_encode_images(
-    screen_files: &[std::path::PathBuf],
-) -> Vec<(String, String)> {
-    use base64::{Engine, engine::general_purpose::STANDARD};
+fn read_and_encode_images(screen_files: &[std::path::PathBuf]) -> Vec<(String, String)> {
+    use base64::{engine::general_purpose::STANDARD, Engine};
 
     screen_files
         .iter()
@@ -664,7 +670,8 @@ fn read_and_encode_images(
         .filter_map(|path| {
             std::fs::read(path).ok().map(|bytes| {
                 let b64 = STANDARD.encode(&bytes);
-                let name = path.file_name()
+                let name = path
+                    .file_name()
                     .and_then(|n| n.to_str())
                     .unwrap_or("screenshot.png")
                     .to_string();
@@ -675,9 +682,7 @@ fn read_and_encode_images(
 }
 
 /// Encode screenshots as Claude API image content blocks.
-fn encode_screens_for_claude(
-    screen_files: &[std::path::PathBuf],
-) -> Vec<serde_json::Value> {
+fn encode_screens_for_claude(screen_files: &[std::path::PathBuf]) -> Vec<serde_json::Value> {
     read_and_encode_images(screen_files)
         .into_iter()
         .map(|(_name, b64)| {
@@ -694,9 +699,7 @@ fn encode_screens_for_claude(
 }
 
 /// Encode screenshots as OpenAI API image_url content blocks.
-fn encode_screens_for_openai(
-    screen_files: &[std::path::PathBuf],
-) -> Vec<serde_json::Value> {
+fn encode_screens_for_openai(screen_files: &[std::path::PathBuf]) -> Vec<serde_json::Value> {
     read_and_encode_images(screen_files)
         .into_iter()
         .map(|(_name, b64)| {

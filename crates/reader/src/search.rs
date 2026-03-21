@@ -91,7 +91,12 @@ mod tests {
     #[test]
     fn search_meetings_filters_by_query() {
         let dir = TempDir::new().unwrap();
-        write_meeting(dir.path(), "a.md", "Pricing Discussion", "Talked about pricing");
+        write_meeting(
+            dir.path(),
+            "a.md",
+            "Pricing Discussion",
+            "Talked about pricing",
+        );
         write_meeting(dir.path(), "b.md", "Onboarding", "New hire onboarding");
 
         let results = search_meetings(dir.path(), "pricing", 10);

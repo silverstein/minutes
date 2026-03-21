@@ -2439,6 +2439,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "cpal",
+ "crossbeam-channel",
  "dirs",
  "fs2",
  "hound",

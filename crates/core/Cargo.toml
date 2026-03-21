@@ -12,6 +12,7 @@ categories = ["multimedia::audio", "command-line-utilities"]
 [features]
 default = ["whisper"]
 whisper = ["dep:whisper-rs"]
+streaming = ["dep:crossbeam-channel"]
 
 [dependencies]
 serde = { workspace = true }
@@ -31,6 +32,7 @@ symphonia = { workspace = true }
 ureq = { workspace = true }
 fs2 = { workspace = true }
 schemars = { workspace = true }
+crossbeam-channel = { workspace = true, optional = true }
 base64 = "0.22"
 
 [target.'cfg(unix)'.dependencies]

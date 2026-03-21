@@ -235,6 +235,32 @@ enum Commands {
         #[arg(long)]
         dry_run: bool,
     },
+
+    /// Connect your Obsidian/Logseq vault to Minutes
+    Vault {
+        #[command(subcommand)]
+        action: VaultAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum VaultAction {
+    /// Detect vaults and set up sync
+    Setup {
+        /// Vault root path (skip auto-detection)
+        #[arg(short, long)]
+        path: Option<PathBuf>,
+
+        /// Force a specific strategy: symlink, copy, or direct
+        #[arg(short, long, value_parser = ["symlink", "copy", "direct"])]
+        strategy: Option<String>,
+    },
+    /// Check vault sync health
+    Status,
+    /// Remove vault configuration
+    Unlink,
+    /// Copy all existing meetings to vault (catch-up for copy strategy)
+    Sync,
 }
 
 fn main() -> Result<()> {
@@ -336,6 +362,12 @@ fn main() -> Result<()> {
         Commands::Import { from, dir, dry_run } => {
             cmd_import(&from, dir.as_deref(), dry_run, &config)
         }
+        Commands::Vault { action } => match action {
+            VaultAction::Setup { path, strategy } => cmd_vault_setup(path, strategy, config),
+            VaultAction::Status => cmd_vault_status(&config),
+            VaultAction::Unlink => cmd_vault_unlink(config),
+            VaultAction::Sync => cmd_vault_sync(&config),
+        },
     }
 }
 
@@ -1601,4 +1633,249 @@ fn extract_section(content: &str, heading: &str) -> Option<String> {
     } else {
         Some(trimmed)
     }
+}
+
+// ── Vault commands ───────────────────────────────────────────
+
+fn cmd_vault_setup(
+    path: Option<PathBuf>,
+    strategy_override: Option<String>,
+    mut config: Config,
+) -> Result<()> {
+    use minutes_core::vault;
+
+    let vault_path = if let Some(p) = path {
+        // Expand ~ to home directory
+        let expanded = if p.starts_with("~") {
+            dirs::home_dir()
+                .unwrap_or_default()
+                .join(p.strip_prefix("~").unwrap_or(&p))
+        } else {
+            p
+        };
+        if !expanded.exists() {
+            anyhow::bail!("path does not exist: {}", expanded.display());
+        }
+        expanded
+    } else {
+        // Auto-detect vaults
+        eprintln!("Scanning for markdown vaults...\n");
+        let vaults = vault::detect_vaults();
+
+        if vaults.is_empty() {
+            eprintln!("No Obsidian/Logseq vaults detected.");
+            eprintln!("Run with --path to specify your vault location:");
+            eprintln!("  minutes vault setup --path ~/Documents/life");
+            return Ok(());
+        }
+
+        eprintln!("Found {} vault(s):\n", vaults.len());
+        for (i, v) in vaults.iter().enumerate() {
+            let cloud_note = match &v.cloud {
+                Some(provider) => format!(" ({})", provider),
+                None => String::new(),
+            };
+            let tcc_note = if v.tcc_protected {
+                " [TCC-protected]"
+            } else {
+                ""
+            };
+            eprintln!(
+                "  {}. {} — {}{}{}",
+                i + 1,
+                v.path.display(),
+                v.kind,
+                cloud_note,
+                tcc_note
+            );
+        }
+
+        if vaults.len() == 1 {
+            eprintln!("\nUsing the only vault found.");
+            vaults[0].path.clone()
+        } else {
+            eprintln!("\nRe-run with --path to select a vault:");
+            eprintln!("  minutes vault setup --path {}", vaults[0].path.display());
+            return Ok(());
+        }
+    };
+
+    // Analyze the vault path
+    let tcc = vault::is_tcc_protected(&vault_path);
+    let cloud = vault::is_cloud_synced(&vault_path);
+    let recommended = strategy_override
+        .as_ref()
+        .map(|s| match s.as_str() {
+            "symlink" => vault::VaultStrategy::Symlink,
+            "copy" => vault::VaultStrategy::Copy,
+            "direct" => vault::VaultStrategy::Direct,
+            _ => vault::recommend_strategy(&vault_path),
+        })
+        .unwrap_or_else(|| vault::recommend_strategy(&vault_path));
+
+    eprintln!("\nVault: {}", vault_path.display());
+    if let Some(ref provider) = cloud {
+        eprintln!("Cloud sync: {} detected", provider);
+    }
+    if tcc {
+        eprintln!("TCC: ~/Documents/ is macOS-protected (terminal needs Full Disk Access)");
+    }
+    eprintln!("Strategy: {}", recommended);
+
+    // Show explanation
+    match recommended {
+        vault::VaultStrategy::Symlink => {
+            let meetings_link = vault_path.join(&config.vault.meetings_subdir);
+            eprintln!(
+                "\nCreating symlink: {} → {}",
+                meetings_link.display(),
+                config.output_dir.display()
+            );
+
+            match vault::create_symlink(&meetings_link, &config.output_dir) {
+                Ok(()) => {
+                    eprintln!("Symlink created successfully.");
+                }
+                Err(minutes_core::error::VaultError::PermissionDenied(path)) => {
+                    eprintln!("\nPermission denied: {}", path);
+                    eprintln!("\nmacOS blocks terminal access to this directory.");
+                    eprintln!("Options:");
+                    eprintln!("  1. Use Minutes.app (Settings > Vault) — no FDA needed");
+                    eprintln!("  2. Create the symlink manually:");
+                    eprintln!(
+                        "     ln -s {} {}",
+                        config.output_dir.display(),
+                        meetings_link.display()
+                    );
+                    eprintln!("  3. Grant Full Disk Access to your terminal:");
+                    eprintln!("     System Settings > Privacy & Security > Full Disk Access");
+                    return Ok(());
+                }
+                Err(minutes_core::error::VaultError::ExistingDirectory(path)) => {
+                    eprintln!("\nDirectory already exists: {}", path);
+                    eprintln!("Move or merge it first, then re-run this command.");
+                    eprintln!(
+                        "  mv {} {}/vault-backup-meetings",
+                        path,
+                        vault_path.display()
+                    );
+                    return Ok(());
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
+        vault::VaultStrategy::Copy => {
+            let dest = vault::vault_meetings_dir(&config);
+            if cloud.is_some() {
+                eprintln!("\nCloud-synced vault detected — using copy strategy.");
+                eprintln!("Meetings will be copied to: {}", dest.display());
+                eprintln!("This works with iCloud, Obsidian Sync, Dropbox, etc.");
+            } else if tcc {
+                eprintln!("\nTCC-protected path — using copy strategy.");
+                eprintln!("Note: copy requires write access to the vault directory.");
+                eprintln!("If this fails at runtime, use Minutes.app or grant FDA.");
+            }
+        }
+        vault::VaultStrategy::Direct => {
+            eprintln!("\nDirect mode: setting output_dir to vault meetings path.");
+            eprintln!("All meetings will be written directly to the vault.");
+            config.output_dir = vault_path.join(&config.vault.meetings_subdir);
+        }
+    }
+
+    // Save config
+    config.vault.enabled = true;
+    config.vault.path = vault_path;
+    config.vault.strategy = recommended.to_string();
+
+    config
+        .save()
+        .map_err(|e| anyhow::anyhow!("failed to save config: {}", e))?;
+    eprintln!(
+        "\nVault configuration saved to: {}",
+        Config::config_path().display()
+    );
+    eprintln!("Run `minutes vault status` to check health.");
+
+    Ok(())
+}
+
+fn cmd_vault_status(config: &Config) -> Result<()> {
+    use minutes_core::vault;
+
+    let status = vault::check_health(config);
+    match status {
+        vault::VaultStatus::NotConfigured => {
+            eprintln!("Vault: not configured");
+            eprintln!("Run `minutes vault setup` to connect a vault.");
+        }
+        vault::VaultStatus::Healthy { strategy, path } => {
+            eprintln!("Vault: healthy");
+            eprintln!("  Strategy: {}", strategy);
+            eprintln!("  Path: {}", path.display());
+        }
+        vault::VaultStatus::BrokenSymlink { link_path, target } => {
+            eprintln!("Vault: BROKEN SYMLINK");
+            eprintln!("  Link: {}", link_path.display());
+            eprintln!("  Target: {} (does not exist)", target.display());
+            eprintln!("Run `minutes vault setup` to fix.");
+        }
+        vault::VaultStatus::PermissionDenied { path } => {
+            eprintln!("Vault: PERMISSION DENIED");
+            eprintln!("  Path: {}", path.display());
+            eprintln!("Grant Full Disk Access or use Minutes.app.");
+        }
+        vault::VaultStatus::MissingVaultDir { path } => {
+            eprintln!("Vault: MISSING DIRECTORY");
+            eprintln!("  Expected: {}", path.display());
+            eprintln!("Run `minutes vault setup` to reconfigure.");
+        }
+    }
+    Ok(())
+}
+
+fn cmd_vault_unlink(mut config: Config) -> Result<()> {
+    if !config.vault.enabled {
+        eprintln!("Vault is not configured.");
+        return Ok(());
+    }
+
+    let old_path = config.vault.path.display().to_string();
+    config.vault.enabled = false;
+    config.vault.path = PathBuf::new();
+    config.vault.strategy = "auto".into();
+
+    config
+        .save()
+        .map_err(|e| anyhow::anyhow!("failed to save config: {}", e))?;
+    eprintln!("Vault unlinked (was: {})", old_path);
+    eprintln!("Note: any symlinks or copied files remain on disk.");
+    Ok(())
+}
+
+fn cmd_vault_sync(config: &Config) -> Result<()> {
+    use minutes_core::vault;
+
+    if !config.vault.enabled {
+        eprintln!("Vault is not configured. Run `minutes vault setup` first.");
+        return Ok(());
+    }
+
+    eprintln!("Syncing meetings to vault...");
+    match vault::sync_all(config) {
+        Ok(synced) => {
+            if synced.is_empty() {
+                eprintln!("No files to sync (strategy may not require copying).");
+            } else {
+                eprintln!("Synced {} file(s) to vault.", synced.len());
+                for path in &synced {
+                    eprintln!("  {}", path.display());
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("Sync failed: {}", e);
+        }
+    }
+    Ok(())
 }

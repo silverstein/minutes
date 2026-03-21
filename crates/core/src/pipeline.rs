@@ -303,6 +303,21 @@ where
         serde_json::json!({"output": result.path.display().to_string(), "words": result.word_count}),
     );
 
+    // Vault sync (non-fatal — pipeline succeeds regardless)
+    match crate::vault::sync_file(&result.path, config) {
+        Ok(Some(vault_path)) => {
+            crate::events::append_event(crate::events::MinutesEvent::VaultSynced {
+                source_path: result.path.display().to_string(),
+                vault_path: vault_path.display().to_string(),
+                strategy: config.vault.strategy.clone(),
+            });
+        }
+        Ok(None) => {} // vault not enabled or no-op strategy
+        Err(e) => {
+            tracing::warn!(error = %e, output = %result.path.display(), "vault sync failed");
+        }
+    }
+
     // Emit event for agents/watchers
     crate::events::append_event(crate::events::audio_processed_event(
         &result,

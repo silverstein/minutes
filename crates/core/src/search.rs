@@ -125,11 +125,16 @@ pub fn resolve_slug(slug: &str, config: &Config) -> Option<PathBuf> {
     }
 
     for entry in WalkDir::new(dir)
+        .follow_links(true)
         .into_iter()
         .filter_map(|e| e.ok())
         .filter(|e| e.path().extension().is_some_and(|ext| ext == "md"))
     {
-        let filename = entry.path().file_stem().unwrap_or_default().to_string_lossy();
+        let filename = entry
+            .path()
+            .file_stem()
+            .unwrap_or_default()
+            .to_string_lossy();
         if filename.to_lowercase().contains(&slug.to_lowercase()) {
             return Some(entry.path().to_path_buf());
         }
@@ -156,6 +161,7 @@ pub fn cross_meeting_research(
         std::collections::HashMap::new();
 
     for entry in WalkDir::new(dir)
+        .follow_links(true)
         .into_iter()
         .filter_map(|e| e.ok())
         .filter(|e| e.path().extension().is_some_and(|ext| ext == "md"))
@@ -327,6 +333,7 @@ pub fn search(
     let mut results = Vec::new();
 
     for entry in WalkDir::new(dir)
+        .follow_links(true)
         .into_iter()
         .filter_map(|e| e.ok())
         .filter(|e| e.path().extension().is_some_and(|ext| ext == "md"))
@@ -361,6 +368,7 @@ pub fn search_intents(
     let mut results = Vec::new();
 
     for entry in WalkDir::new(dir)
+        .follow_links(true)
         .into_iter()
         .filter_map(|e| e.ok())
         .filter(|e| e.path().extension().is_some_and(|ext| ext == "md"))
@@ -390,6 +398,7 @@ pub fn consistency_report(
 
     let mut parsed_frontmatters = Vec::new();
     for entry in WalkDir::new(dir)
+        .follow_links(true)
         .into_iter()
         .filter_map(|e| e.ok())
         .filter(|e| e.path().extension().is_some_and(|ext| ext == "md"))
@@ -560,6 +569,7 @@ pub fn person_profile(config: &Config, person: &str) -> Result<PersonProfile, Se
     let person_lower = person.to_lowercase();
     let mut parsed_frontmatters = Vec::new();
     for entry in WalkDir::new(dir)
+        .follow_links(true)
         .into_iter()
         .filter_map(|e| e.ok())
         .filter(|e| e.path().extension().is_some_and(|ext| ext == "md"))
@@ -862,6 +872,7 @@ pub fn find_open_actions(
     let mut results = Vec::new();
 
     for entry in WalkDir::new(dir)
+        .follow_links(true)
         .into_iter()
         .filter_map(|e| e.ok())
         .filter(|e| e.path().extension().is_some_and(|ext| ext == "md"))

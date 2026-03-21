@@ -121,7 +121,16 @@ pub enum VaultError {
     #[error("vault path not found: {0}")]
     VaultPathNotFound(String),
 
+    #[cfg(target_os = "macos")]
     #[error("permission denied: {0} — macOS requires Full Disk Access for ~/Documents/")]
+    PermissionDenied(String),
+
+    #[cfg(target_os = "windows")]
+    #[error("permission denied: {0} — Windows requires Developer Mode or admin for symlinks")]
+    PermissionDenied(String),
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    #[error("permission denied: {0}")]
     PermissionDenied(String),
 
     #[error("cannot create symlink — directory already exists: {0}")]

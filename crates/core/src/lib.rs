@@ -14,6 +14,7 @@ pub mod screen;
 pub mod search;
 pub mod summarize;
 pub mod transcribe;
+pub mod vault;
 pub mod watch;
 
 // Re-export commonly used types

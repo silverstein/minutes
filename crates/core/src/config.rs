@@ -23,6 +23,7 @@ pub struct Config {
     pub screen_context: ScreenContextConfig,
     pub call_detection: CallDetectionConfig,
     pub identity: IdentityConfig,
+    pub vault: VaultConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -112,6 +113,29 @@ pub struct IdentityConfig {
     pub email: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct VaultConfig {
+    pub enabled: bool,
+    /// Root path of the markdown vault (e.g., ~/Documents/life)
+    pub path: PathBuf,
+    /// Subdirectory inside vault where meetings are placed (e.g., "areas/meetings")
+    pub meetings_subdir: String,
+    /// Sync strategy: "auto", "symlink", "copy", or "direct"
+    pub strategy: String,
+}
+
+impl Default for VaultConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            path: PathBuf::new(),
+            meetings_subdir: "areas/meetings".into(),
+            strategy: "auto".into(),
+        }
+    }
+}
+
 impl Default for ScreenContextConfig {
     fn default() -> Self {
         Self {
@@ -173,6 +197,7 @@ impl Default for Config {
             screen_context: ScreenContextConfig::default(),
             call_detection: CallDetectionConfig::default(),
             identity: IdentityConfig::default(),
+            vault: VaultConfig::default(),
         }
     }
 }

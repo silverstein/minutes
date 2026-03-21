@@ -53,6 +53,11 @@ pub enum MinutesEvent {
         meeting_path: String,
         text: String,
     },
+    VaultSynced {
+        source_path: String,
+        vault_path: String,
+        strategy: String,
+    },
 }
 
 fn events_path() -> PathBuf {

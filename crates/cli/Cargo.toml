@@ -22,7 +22,8 @@ serde_json = { workspace = true }
 chrono = { workspace = true }
 hound = { workspace = true }
 dirs = { workspace = true }
+schemars = { workspace = true, features = ["derive"] }
+ureq = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
-schemars = { workspace = true, features = ["derive"] }

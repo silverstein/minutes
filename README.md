@@ -46,21 +46,44 @@ Everything runs locally. Your audio never leaves your machine (unless you opt in
 
 ## Install
 
+### macOS
+
 ```bash
-# Homebrew (macOS)
+# Homebrew
 brew tap silverstein/tap
 brew install minutes
 
-# From source (requires Rust + cmake)
-# macOS 15+ / Xcode 26+: set C++ include path for whisper.cpp
+# Or from source (requires Rust + cmake)
 export CXXFLAGS="-I$(xcrun --show-sdk-path)/usr/include/c++/v1"
 cargo install --path crates/cli
+```
 
+### Windows
+
+```powershell
+# Download pre-built binary from GitHub releases, or build from source:
+# Requires: Rust, cmake, MSVC build tools
+cargo install --path crates/cli
+```
+
+### Linux
+
+```bash
+# Requires: Rust, cmake, ALSA dev headers
+sudo apt-get install -y libasound2-dev  # Debian/Ubuntu
+cargo install --path crates/cli
+```
+
+### Setup (all platforms)
+
+```bash
 # Download whisper model
 minutes setup --model tiny    # Quick start (75MB, fast, less accurate)
 minutes setup --model small   # Recommended (466MB, good accuracy)
 minutes setup --model base    # Middle ground (141MB)
 ```
+
+> **Platform notes:** Calendar integration (auto-detecting meeting attendees) requires macOS. Screen context capture works on macOS and Linux. All other features — recording, transcription, search, action items, person profiles — work on all platforms.
 
 ### Desktop app (optional)
 

@@ -898,6 +898,15 @@ fn cmd_devices() -> Result<()> {
         let json = serde_json::to_string_pretty(&devices)?;
         println!("{}", json);
     }
+
+    // Platform-specific virtual audio hints
+    #[cfg(target_os = "macos")]
+    eprintln!("\nTip: Install BlackHole for system audio capture: brew install blackhole-2ch");
+    #[cfg(target_os = "windows")]
+    eprintln!("\nTip: Install VB-CABLE for system audio capture: https://vb-audio.com/Cable/");
+    #[cfg(target_os = "linux")]
+    eprintln!("\nTip: Use a PulseAudio monitor source for system audio capture");
+
     Ok(())
 }
 
@@ -945,16 +954,54 @@ fn cmd_setup(model: &str, list: bool) -> Result<()> {
     eprintln!("  From: {}", url);
     eprintln!("  To:   {}", dest.display());
 
-    // Use curl for the download (available on all macOS systems)
-    let status = std::process::Command::new("curl")
-        .args(["-L", "-o", dest.to_str().unwrap(), &url, "--progress-bar"])
-        .status()?;
+    // Download using ureq (cross-platform, no curl dependency)
+    let response = ureq::get(&url)
+        .call()
+        .map_err(|e| anyhow::anyhow!("download failed: {}. Check your internet connection.", e))?;
 
-    if !status.success() {
-        // Clean up partial download
-        std::fs::remove_file(&dest).ok();
-        anyhow::bail!("download failed. Check your internet connection and try again.");
+    let content_length = response
+        .headers()
+        .get("content-length")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<u64>().ok());
+
+    let mut reader = response.into_body().into_reader();
+    let tmp_dest = dest.with_extension("bin.partial");
+    let mut file = std::fs::File::create(&tmp_dest)?;
+    let mut downloaded: u64 = 0;
+    let mut buf = vec![0u8; 64 * 1024];
+    let mut last_report = std::time::Instant::now();
+
+    loop {
+        let n = std::io::Read::read(&mut reader, &mut buf)?;
+        if n == 0 {
+            break;
+        }
+        std::io::Write::write_all(&mut file, &buf[..n])?;
+        downloaded += n as u64;
+
+        if last_report.elapsed().as_millis() > 500 {
+            if let Some(total) = content_length {
+                eprint!(
+                    "\r  {:.0} / {:.0} MB ({:.0}%)",
+                    downloaded as f64 / 1_048_576.0,
+                    total as f64 / 1_048_576.0,
+                    downloaded as f64 / total as f64 * 100.0
+                );
+            } else {
+                eprint!("\r  {:.0} MB downloaded", downloaded as f64 / 1_048_576.0);
+            }
+            last_report = std::time::Instant::now();
+        }
     }
+    eprintln!();
+    drop(file);
+
+    // Rename from partial to final (atomic on most filesystems)
+    std::fs::rename(&tmp_dest, &dest).map_err(|e| {
+        std::fs::remove_file(&tmp_dest).ok();
+        anyhow::anyhow!("failed to save model: {}", e)
+    })?;
 
     let size = std::fs::metadata(&dest)?.len();
     eprintln!(

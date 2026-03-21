@@ -49,7 +49,10 @@ Everything runs locally. Your audio never leaves your machine (unless you opt in
 ### macOS
 
 ```bash
-# Homebrew
+# Desktop app (menu bar, recording UI, AI assistant)
+brew install --cask silverstein/tap/minutes
+
+# CLI only (terminal recording, search, vault sync)
 brew tap silverstein/tap
 brew install minutes
 
@@ -85,9 +88,13 @@ minutes setup --model base    # Middle ground (141MB)
 
 > **Platform notes:** Calendar integration (auto-detecting meeting attendees) requires macOS. Screen context capture works on macOS and Linux. All other features — recording, transcription, search, action items, person profiles — work on all platforms.
 
-### Desktop app (optional)
+### Desktop app
 
 ```bash
+# Homebrew cask (recommended)
+brew install --cask silverstein/tap/minutes
+
+# Or build from source
 export CXXFLAGS="-I$(xcrun --show-sdk-path)/usr/include/c++/v1"
 export MACOSX_DEPLOYMENT_TARGET=11.0
 cargo tauri build --bundles app
@@ -218,6 +225,23 @@ decisions:
 ```
 
 Works with [Obsidian](https://obsidian.md), grep, or any markdown tool. Action items and decisions are queryable via the CLI and MCP tools.
+
+### Vault sync (Obsidian / Logseq)
+
+Connect your vault so meetings appear alongside your notes:
+
+```bash
+minutes vault setup              # Auto-detect vaults, configure sync
+minutes vault status             # Check health
+minutes vault sync               # Copy existing meetings to vault
+```
+
+Three strategies based on your setup:
+- **symlink** — zero-copy, for local vaults not in `~/Documents/`
+- **copy** — works with iCloud, Obsidian Sync, Dropbox
+- **direct** — write straight to vault (requires Full Disk Access for `~/Documents/`)
+
+`minutes vault setup` detects your vault, checks for cloud sync and macOS permissions, and recommends the right strategy automatically.
 
 ## Claude integration
 

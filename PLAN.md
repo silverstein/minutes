@@ -1321,7 +1321,7 @@ context: "Discuss Q2 roadmap, follow up on API launch timeline"
 | P3.6 | macOS mic permission: Info.plist + entitlements.plist + .app bundle | **DONE** |
 | P3.7 | .app bundle build: `cargo tauri build --bundles app` → Minutes.app | **DONE** |
 | P3.8 | Calendar polling (macOS EventKit or ical) | **DONE** (calendar-events helper + tray menu) |
-| P3.9 | Meeting suggestion notification (2 min before) | TBD |
+| P3.9 | Meeting suggestion notification (2 min before) | **DONE** (macOS notification via calendar poll) |
 | P3.10 | Auto-start on login (launchd integration) | **DONE** (`minutes service install`) |
 | P3.11 | First-run onboarding (permissions, model download, LLM config) | **DONE** (onboarding flow + readiness center) |
 | P3.12 | Homebrew cask formula | **DONE** (`brew install --cask silverstein/tap/minutes`) |

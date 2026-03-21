@@ -107,10 +107,13 @@ pub fn update_tray_state(app: &tauri::AppHandle, is_recording: bool) {
 const MAX_CALENDAR_ITEMS: usize = 3;
 const CALENDAR_REFRESH_SECS: u64 = 60;
 const CALENDAR_LOOKAHEAD_MINUTES: u32 = 240; // 4 hours
+const MEETING_NOTIFY_MINUTES: i64 = 2; // Notify this many minutes before
 
 struct CalendarMenuState {
     items: Vec<MenuItem<tauri::Wry>>,
     separator: Option<MenuItem<tauri::Wry>>,
+    /// Event titles we've already sent a notification for (prevents repeat alerts)
+    notified: std::collections::HashSet<String>,
 }
 
 fn format_calendar_label(event: &minutes_core::calendar::CalendarEvent) -> String {
@@ -159,6 +162,33 @@ fn refresh_calendar_items(
     for e in &all_events {
         eprintln!("[calendar]   {} — in {} min", e.title, e.minutes_until);
     }
+    // Notify for meetings starting in ≤ MEETING_NOTIFY_MINUTES (once per event)
+    for e in &all_events {
+        if e.minutes_until >= 0
+            && e.minutes_until <= MEETING_NOTIFY_MINUTES
+            && !state.notified.contains(&e.title)
+        {
+            let body = if e.minutes_until == 0 {
+                format!("{} is starting now. Click to record.", e.title)
+            } else if e.minutes_until == 1 {
+                format!("{} starts in 1 minute. Click to record.", e.title)
+            } else {
+                format!(
+                    "{} starts in {} minutes. Click to record.",
+                    e.title, e.minutes_until
+                )
+            };
+            crate::commands::show_user_notification("Upcoming Meeting", &body);
+            state.notified.insert(e.title.clone());
+            eprintln!("[calendar] notified: {} (in {} min)", e.title, e.minutes_until);
+        }
+    }
+
+    // Clean up old notifications (events that have passed)
+    state
+        .notified
+        .retain(|title| all_events.iter().any(|e| &e.title == title && e.minutes_until >= -5));
+
     let events: Vec<_> = all_events
         .into_iter()
         .filter(|e| e.minutes_until >= 0)
@@ -245,6 +275,7 @@ fn main() {
             let cal_state = Arc::new(std::sync::Mutex::new(CalendarMenuState {
                 items: Vec::new(),
                 separator: None,
+                notified: std::collections::HashSet::new(),
             }));
 
             // Tray menu

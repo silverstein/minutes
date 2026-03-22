@@ -683,6 +683,153 @@ fn output_dir_status(config: &Config) -> ReadinessItem {
     }
 }
 
+fn vault_status(config: &Config) -> ReadinessItem {
+    use minutes_core::vault;
+    match vault::check_health(config) {
+        vault::VaultStatus::NotConfigured => ReadinessItem {
+            label: "Vault sync (Obsidian / Logseq)".into(),
+            state: "attention".into(),
+            detail: "Not configured. Use Settings > Set Up Vault to connect your vault.".into(),
+            optional: true,
+        },
+        vault::VaultStatus::Healthy { strategy, path } => ReadinessItem {
+            label: "Vault sync (Obsidian / Logseq)".into(),
+            state: "ready".into(),
+            detail: format!("Strategy: {}. Path: {}.", strategy, path.display()),
+            optional: true,
+        },
+        vault::VaultStatus::BrokenSymlink { link_path, target } => ReadinessItem {
+            label: "Vault sync (Obsidian / Logseq)".into(),
+            state: "attention".into(),
+            detail: format!(
+                "Broken symlink at {} → {}. Re-run vault setup.",
+                link_path.display(),
+                target.display()
+            ),
+            optional: true,
+        },
+        vault::VaultStatus::PermissionDenied { path } => ReadinessItem {
+            label: "Vault sync (Obsidian / Logseq)".into(),
+            state: "attention".into(),
+            detail: format!("Permission denied: {}. Try Set Up Vault from the app.", path.display()),
+            optional: true,
+        },
+        vault::VaultStatus::MissingVaultDir { path } => ReadinessItem {
+            label: "Vault sync (Obsidian / Logseq)".into(),
+            state: "attention".into(),
+            detail: format!("Vault directory missing: {}.", path.display()),
+            optional: true,
+        },
+    }
+}
+
+// ── Vault Tauri commands ─────────────────────────────────────
+
+#[tauri::command]
+pub fn cmd_vault_status() -> serde_json::Value {
+    let config = Config::load();
+    let health = minutes_core::vault::check_health(&config);
+    let (status, strategy, path, detail) = match health {
+        minutes_core::vault::VaultStatus::NotConfigured => {
+            ("not_configured", "".into(), "".into(), "Not configured".into())
+        }
+        minutes_core::vault::VaultStatus::Healthy { strategy, path } => {
+            let p = path.display().to_string();
+            ("healthy", strategy, p.clone(), format!("Vault active at {}", p))
+        }
+        minutes_core::vault::VaultStatus::BrokenSymlink {
+            link_path,
+            target,
+        } => (
+            "broken",
+            "symlink".into(),
+            link_path.display().to_string(),
+            format!("Broken symlink → {}", target.display()),
+        ),
+        minutes_core::vault::VaultStatus::PermissionDenied { path } => (
+            "permission_denied",
+            "".into(),
+            path.display().to_string(),
+            "Permission denied".into(),
+        ),
+        minutes_core::vault::VaultStatus::MissingVaultDir { path } => (
+            "missing",
+            "".into(),
+            path.display().to_string(),
+            "Vault directory missing".into(),
+        ),
+    };
+    serde_json::json!({
+        "status": status,
+        "strategy": strategy,
+        "path": path,
+        "detail": detail,
+        "enabled": config.vault.enabled,
+    })
+}
+
+#[tauri::command]
+pub fn cmd_vault_setup(path: String) -> Result<serde_json::Value, String> {
+    let vault_path = std::path::PathBuf::from(&path);
+    if !vault_path.exists() {
+        return Err(format!("Path does not exist: {}", path));
+    }
+
+    let mut config = Config::load();
+    let strategy = minutes_core::vault::recommend_strategy(&vault_path);
+
+    // For symlink strategy, try to create the symlink
+    if strategy == minutes_core::vault::VaultStrategy::Symlink {
+        let link_path = vault_path.join(&config.vault.meetings_subdir);
+        if let Err(e) = minutes_core::vault::create_symlink(&link_path, &config.output_dir) {
+            // Fall back to copy if symlink fails
+            eprintln!("[vault] symlink failed ({}), falling back to copy", e);
+            config.vault.strategy = "copy".into();
+        } else {
+            config.vault.strategy = "symlink".into();
+        }
+    } else {
+        config.vault.strategy = strategy.to_string();
+    }
+
+    config.vault.enabled = true;
+    config.vault.path = vault_path;
+
+    config
+        .save()
+        .map_err(|e| format!("Failed to save config: {}", e))?;
+
+    let health = minutes_core::vault::check_health(&config);
+    let status = match health {
+        minutes_core::vault::VaultStatus::Healthy { strategy, path } => {
+            format!("Vault configured ({}): {}", strategy, path.display())
+        }
+        _ => "Vault configured but health check shows issues. Check Readiness Center.".into(),
+    };
+
+    Ok(serde_json::json!({
+        "status": "ok",
+        "strategy": config.vault.strategy,
+        "detail": status,
+    }))
+}
+
+#[tauri::command]
+pub fn cmd_vault_unlink() -> Result<String, String> {
+    let mut config = Config::load();
+    if !config.vault.enabled {
+        return Ok("Vault is not configured.".into());
+    }
+    let old = config.vault.path.display().to_string();
+    config.vault.enabled = false;
+    config.vault.path = std::path::PathBuf::new();
+    config.vault.strategy = "auto".into();
+    config
+        .save()
+        .map_err(|e| format!("Failed to save config: {}", e))?;
+    Ok(format!("Vault unlinked (was: {})", old))
+}
+
 fn recovery_title(path: &std::path::Path, fallback: &str) -> String {
     path.file_stem()
         .and_then(|stem| stem.to_str())
@@ -1408,6 +1555,7 @@ pub fn cmd_permission_center() -> serde_json::Value {
         calendar_status(),
         watcher_status(&config),
         output_dir_status(&config),
+        vault_status(&config),
     ];
     serde_json::to_value(items).unwrap_or(serde_json::json!([]))
 }

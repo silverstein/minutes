@@ -1745,6 +1745,22 @@
         </div>
       </div>
 
+      <!-- Vault Sync -->
+      <div style="margin-bottom: 16px;">
+        <div class="about-item-title">VAULT SYNC</div>
+        <div class="about-controls">
+          <div class="about-controls-group" style="flex: 1;">
+            <div class="about-controls-copy">Connect an Obsidian or Logseq vault</div>
+            <div class="about-controls-meta" id="vault-status-detail">Checking...</div>
+          </div>
+          <button class="btn btn-primary btn-sm" id="btn-vault-setup" style="white-space: nowrap;">Set Up Vault</button>
+        </div>
+        <div class="about-controls" id="vault-unlink-row" style="display: none;">
+          <div class="about-controls-copy" id="vault-active-path" style="font-family: var(--font-mono); font-size: 11px; opacity: 0.7;"></div>
+          <button class="btn btn-secondary btn-sm" id="btn-vault-unlink">Unlink</button>
+        </div>
+      </div>
+
       <!-- Recall Agent -->
       <div style="margin-bottom: 16px;">
         <div class="about-item-title">RECALL AGENT</div>
@@ -2941,8 +2957,75 @@
         sel.value = s.assistant.agent;
         document.getElementById('settings-agent-status').textContent = agents.length + ' agent(s) installed';
         loadStorageStats();
+        loadVaultStatus();
       } catch (e) { console.error('loadSettings:', e); }
     }
+
+    async function loadVaultStatus() {
+      try {
+        const v = await invoke('cmd_vault_status');
+        const detail = document.getElementById('vault-status-detail');
+        const setupBtn = document.getElementById('btn-vault-setup');
+        const unlinkRow = document.getElementById('vault-unlink-row');
+        const activePath = document.getElementById('vault-active-path');
+
+        if (v.enabled && v.status === 'healthy') {
+          detail.textContent = v.detail;
+          detail.style.color = 'var(--green)';
+          setupBtn.textContent = 'Reconfigure';
+          setupBtn.classList.remove('btn-primary');
+          setupBtn.classList.add('btn-secondary');
+          unlinkRow.style.display = '';
+          activePath.textContent = v.strategy + ': ' + v.path;
+        } else if (v.enabled) {
+          detail.textContent = v.detail;
+          detail.style.color = 'var(--yellow, #e8b339)';
+          setupBtn.textContent = 'Fix';
+          unlinkRow.style.display = '';
+          activePath.textContent = v.path;
+        } else {
+          detail.textContent = 'Not configured. Meetings stay in ~/meetings/ — connect a vault to see them in Obsidian.';
+          detail.style.color = '';
+          setupBtn.textContent = 'Set Up Vault';
+          setupBtn.classList.add('btn-primary');
+          setupBtn.classList.remove('btn-secondary');
+          unlinkRow.style.display = 'none';
+        }
+      } catch (e) { console.error('loadVaultStatus:', e); }
+    }
+
+    document.getElementById('btn-vault-setup').addEventListener('click', async () => {
+      try {
+        const { open } = window.__TAURI__.dialog || await import('@tauri-apps/plugin-dialog');
+        const selected = await open({ directory: true, title: 'Select your vault folder' });
+        if (!selected) return;
+
+        const btn = document.getElementById('btn-vault-setup');
+        btn.disabled = true;
+        btn.textContent = 'Configuring...';
+
+        const result = await invoke('cmd_vault_setup', { path: selected });
+        document.getElementById('vault-status-detail').textContent = result.detail;
+        document.getElementById('vault-status-detail').style.color = 'var(--green)';
+        loadVaultStatus();
+      } catch (e) {
+        document.getElementById('vault-status-detail').textContent = 'Error: ' + e;
+        document.getElementById('vault-status-detail').style.color = 'var(--red)';
+      } finally {
+        const btn = document.getElementById('btn-vault-setup');
+        btn.disabled = false;
+      }
+    });
+
+    document.getElementById('btn-vault-unlink').addEventListener('click', async () => {
+      try {
+        await invoke('cmd_vault_unlink');
+        loadVaultStatus();
+      } catch (e) {
+        console.error('vault unlink:', e);
+      }
+    });
+
     function setSettingsToggle(id, on) { const b = document.getElementById(id); b.textContent = on ? 'On' : 'Off'; b.style.opacity = on ? '1' : '0.5'; }
     function updateSumStatus(s) {
       const el = document.getElementById('settings-summarization-status');

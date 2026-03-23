@@ -309,7 +309,7 @@ Minutes exposes a standard MCP server. Point any MCP-compatible client at it:
 }
 ```
 
-**12 tools:** `start_recording`, `stop_recording`, `get_status`, `list_meetings`, `search_meetings`, `get_meeting`, `process_audio`, `add_note`, `consistency_report`, `get_person_profile`, `research_topic`, `qmd_collection_status`
+**13 tools:** `start_recording`, `stop_recording`, `get_status`, `list_meetings`, `search_meetings`, `get_meeting`, `process_audio`, `add_note`, `consistency_report`, `get_person_profile`, `research_topic`, `qmd_collection_status`, `register_qmd_collection`
 
 **6 resources:** `minutes://meetings/recent`, `minutes://status`, `minutes://actions/open`, `minutes://events/recent`, `minutes://meetings/{slug}`, `ui://minutes/dashboard`
 
@@ -440,7 +440,7 @@ minutes/
 ├── crates/core/    17 Rust modules — the engine (shared by all interfaces)
 ├── crates/cli/     CLI binary — 15 commands
 ├── crates/reader/  Lightweight read-only meeting parser (no audio deps)
-├── crates/mcp/     MCP server — 12 tools + 6 resources + interactive dashboard
+├── crates/mcp/     MCP server — 13 tools + 6 resources + interactive dashboard
 │   └── ui/         MCP App dashboard (vanilla TS → single-file HTML)
 ├── tauri/          Menu bar app — system tray, recording UI, singleton AI Assistant
 └── .claude/plugins/minutes/   Claude Code plugin — 11 skills + 1 agent + 2 hooks

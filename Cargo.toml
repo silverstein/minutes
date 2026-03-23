@@ -59,3 +59,6 @@ schemars = { version = "1", features = ["derive", "chrono04"] }
 
 # Audio format conversion
 symphonia = { version = "0.5", features = ["mp3", "aac", "ogg", "wav", "isomp4"] }
+
+# Channels (for streaming audio)
+crossbeam-channel = "0.5"

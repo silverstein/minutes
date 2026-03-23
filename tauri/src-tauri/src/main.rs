@@ -699,13 +699,18 @@ fn main() {
             }
 
             // Calendar items in tray menu — refresh every minute
+            // Delay first refresh so the app window is interactive before
+            // osascript Calendar queries block the main-thread menu updates.
             {
                 let app_cal = app.handle().clone();
                 let menu_cal = menu.clone();
                 let cal_timer = cal_state.clone();
-                std::thread::spawn(move || loop {
-                    refresh_calendar_items(&app_cal, &menu_cal, &cal_timer);
-                    std::thread::sleep(std::time::Duration::from_secs(CALENDAR_REFRESH_SECS));
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_secs(3));
+                    loop {
+                        refresh_calendar_items(&app_cal, &menu_cal, &cal_timer);
+                        std::thread::sleep(std::time::Duration::from_secs(CALENDAR_REFRESH_SECS));
+                    }
                 });
             }
 

@@ -117,8 +117,8 @@ impl AudioStream {
                                 }
                             }
 
-                            let consumed = resample_pos as usize;
-                            if consumed > 0 && consumed <= resample_buf.len() {
+                            let consumed = (resample_pos as usize).min(resample_buf.len());
+                            if consumed > 0 {
                                 resample_buf.drain(..consumed);
                                 resample_pos -= consumed as f64;
                             }
@@ -163,14 +163,14 @@ impl AudioStream {
                                 if chunk_buf.len() >= chunk_size {
                                     let samples: Vec<f32> = chunk_buf.drain(..chunk_size).collect();
                                     let rms = compute_rms(&samples);
-                                    let level = (rms * 300.0).min(100.0) as u32;
+                                    let level = (rms * 2000.0).min(100.0) as u32;
                                     STREAM_AUDIO_LEVEL.store(level, Ordering::Relaxed);
                                     let _ = tx.try_send(AudioChunk { samples, rms });
                                 }
                             }
 
-                            let consumed = resample_pos as usize;
-                            if consumed > 0 && consumed <= resample_buf.len() {
+                            let consumed = (resample_pos as usize).min(resample_buf.len());
+                            if consumed > 0 {
                                 resample_buf.drain(..consumed);
                                 resample_pos -= consumed as f64;
                             }

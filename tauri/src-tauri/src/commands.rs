@@ -1652,9 +1652,13 @@ pub fn cmd_get_meeting_detail(path: String) -> Result<MeetingDetail, String> {
 }
 
 #[tauri::command]
-pub fn cmd_upcoming_meetings() -> serde_json::Value {
-    let events = minutes_core::calendar::upcoming_events(120); // 2 hour lookahead
-    serde_json::to_value(&events).unwrap_or(serde_json::json!([]))
+pub async fn cmd_upcoming_meetings() -> serde_json::Value {
+    tauri::async_runtime::spawn_blocking(|| {
+        let events = minutes_core::calendar::upcoming_events(120); // 2 hour lookahead
+        serde_json::to_value(&events).unwrap_or(serde_json::json!([]))
+    })
+    .await
+    .unwrap_or(serde_json::json!([]))
 }
 
 #[tauri::command]

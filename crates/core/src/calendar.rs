@@ -1,4 +1,5 @@
 use std::process::Command;
+use std::time::Duration;
 
 // ──────────────────────────────────────────────────────────────
 // Calendar integration — upcoming meetings from macOS Calendar.
@@ -9,6 +10,38 @@ use std::process::Command;
 //
 // Also tries a compiled EventKit helper if available.
 // ──────────────────────────────────────────────────────────────
+
+/// Maximum time to wait for a calendar subprocess before giving up.
+const SUBPROCESS_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Run a Command with a timeout. Returns None if the process hangs or fails to start.
+fn output_with_timeout(mut cmd: Command, timeout: Duration) -> Option<std::process::Output> {
+    let child = cmd.spawn().ok()?;
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    let child_id = child.id();
+    let handle = std::thread::spawn(move || {
+        let result = child.wait_with_output();
+        let _ = tx.send(result);
+    });
+
+    match rx.recv_timeout(timeout) {
+        Ok(result) => {
+            let _ = handle.join();
+            result.ok()
+        }
+        Err(_) => {
+            // Timed out — kill the subprocess
+            eprintln!("[calendar] subprocess {} timed out after {:?}, killing", child_id, timeout);
+            #[cfg(unix)]
+            {
+                unsafe { libc::kill(child_id as i32, libc::SIGKILL); }
+            }
+            let _ = handle.join();
+            None
+        }
+    }
+}
 
 /// A calendar event with title, start time, attendees, and optional meeting URL.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -156,10 +189,10 @@ tell application "Calendar"
 end tell
 return output"#;
 
-    let output = Command::new("osascript").arg("-e").arg(script).output();
-
-    let output = match output {
-        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
+    let mut cmd = Command::new("osascript");
+    cmd.arg("-e").arg(script);
+    let output = match output_with_timeout(cmd, SUBPROCESS_TIMEOUT) {
+        Some(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
         _ => return Vec::new(),
     };
 
@@ -203,10 +236,9 @@ return output"#;
 fn query_via_eventkit(lookahead_minutes: u32) -> Option<Vec<CalendarEvent>> {
     let helper = find_calendar_helper()?;
 
-    let output = Command::new(&helper)
-        .arg(lookahead_minutes.to_string())
-        .output()
-        .ok()?;
+    let mut cmd = Command::new(&helper);
+    cmd.arg(lookahead_minutes.to_string());
+    let output = output_with_timeout(cmd, SUBPROCESS_TIMEOUT)?;
 
     if !output.status.success() {
         return None;
@@ -283,17 +315,17 @@ return output"#,
         minutes = lookahead_minutes
     );
 
-    let output = Command::new("osascript").arg("-e").arg(&script).output();
-
-    let output = match output {
-        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
-        Ok(o) => {
+    let mut cmd = Command::new("osascript");
+    cmd.arg("-e").arg(&script);
+    let output = match output_with_timeout(cmd, SUBPROCESS_TIMEOUT) {
+        Some(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
+        Some(o) => {
             let stderr = String::from_utf8_lossy(&o.stderr);
             eprintln!("[calendar] applescript failed: {}", stderr.trim());
             return Vec::new();
         }
-        Err(e) => {
-            eprintln!("[calendar] osascript error: {}", e);
+        None => {
+            eprintln!("[calendar] osascript timed out or failed to start");
             return Vec::new();
         }
     };

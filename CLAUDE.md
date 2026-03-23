@@ -43,6 +43,24 @@ open target/release/bundle/macos/Minutes.app   # Launch app
 - All Rust + app: `./scripts/build.sh` (add `--install` to copy .app to /Applications)
 - **Don't forget the MCP server** — it's TypeScript, not Rust. `./scripts/build.sh` does NOT rebuild it. Always run `cd crates/mcp && npm run build` after touching `crates/mcp/src/index.ts` or `crates/mcp/ui/`.
 
+## Release Process
+
+When shipping a new version:
+1. Bump version in: `Cargo.toml` (workspace), `tauri/src-tauri/tauri.conf.json`, `crates/mcp/package.json`, `crates/sdk/package.json`
+2. Verify all 4 match: `grep version Cargo.toml tauri/src-tauri/tauri.conf.json crates/mcp/package.json crates/sdk/package.json`
+3. Rebuild MCP: `cd crates/mcp && npm run build`
+4. Commit, tag, push: `git tag vX.Y.Z && git push origin main --tags`
+5. Create GitHub release: `gh release create vX.Y.Z -t "title" -F notes.md` (triggers signed DMG + CLI binary CI)
+6. **Publish npm packages** (required for `npx minutes-mcp` users):
+   ```bash
+   cd crates/sdk && npm publish --access public --registry https://registry.npmjs.org
+   cd crates/mcp && npm publish --access public --registry https://registry.npmjs.org
+   ```
+   If 2FA blocks publish, use a granular access token with "Bypass 2FA" enabled.
+   **IMPORTANT**: `crates/mcp/package.json` must depend on `"minutes-sdk": "^X.Y.Z"` (npm version), NOT `"file:../sdk"` (local path). Check before publishing.
+7. Redeploy landing page: `cd site && vercel deploy --yes --prod --scope evil-genius-laboratory`
+8. Update Homebrew tap formula if CLI changed
+
 ## Project Structure
 
 ```

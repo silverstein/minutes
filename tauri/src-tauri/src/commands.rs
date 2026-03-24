@@ -273,10 +273,21 @@ pub fn request_stop(
                 recording.store(true, Ordering::Relaxed);
                 Ok(())
             } else {
-                let rc = unsafe { libc::kill(pid as i32, libc::SIGTERM) };
-                if rc != 0 {
-                    return Err(std::io::Error::last_os_error().to_string());
+                minutes_core::pid::write_stop_sentinel().map_err(|e| e.to_string())?;
+
+                #[cfg(unix)]
+                {
+                    let rc = unsafe { libc::kill(pid as i32, libc::SIGTERM) };
+                    if rc != 0 {
+                        let err = std::io::Error::last_os_error();
+                        eprintln!(
+                            "SIGTERM failed (PID {}): {} — sentinel file will stop recording",
+                            pid,
+                            err
+                        );
+                    }
                 }
+
                 Ok(())
             }
         }

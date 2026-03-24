@@ -1,7 +1,8 @@
 use crate::config::Config;
 use crate::error::PidError;
 use std::fs;
-use std::path::PathBuf;
+use std::io::{Read, Seek, SeekFrom, Write};
+use std::path::{Path, PathBuf};
 
 // ──────────────────────────────────────────────────────────────
 // PID file state machine:
@@ -167,6 +168,98 @@ pub fn read_processing_status() -> ProcessingStatus {
         })
 }
 
+/// Check if a process holds the given PID file.
+/// Returns Ok(Some(pid)) if active, Ok(None) if not.
+/// Cleans up stale PID files automatically.
+pub fn check_pid_file(path: &Path) -> Result<Option<u32>, PidError> {
+    if !path.exists() {
+        return Ok(None);
+    }
+
+    let pid_str = fs::read_to_string(path)?;
+    let pid: u32 = pid_str.trim().parse().map_err(|_| PidError::StalePid(0))?;
+
+    if is_process_alive(pid) {
+        Ok(Some(pid))
+    } else {
+        tracing::warn!(
+            "stale PID file found at {} (PID {pid} is dead). Cleaning up.",
+            path.display()
+        );
+        fs::remove_file(path).ok();
+        Ok(None)
+    }
+}
+
+fn read_locked_pid(file: &mut fs::File) -> Result<Option<u32>, PidError> {
+    file.seek(SeekFrom::Start(0))?;
+
+    let mut pid_str = String::new();
+    file.read_to_string(&mut pid_str)?;
+    let trimmed = pid_str.trim();
+
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+
+    let pid = trimmed.parse().map_err(|_| PidError::StalePid(0))?;
+    Ok(Some(pid))
+}
+
+fn write_locked_pid(file: &mut fs::File, pid: u32) -> Result<(), PidError> {
+    file.seek(SeekFrom::Start(0))?;
+    file.set_len(0)?;
+    write!(file, "{}", pid)?;
+    file.flush()?;
+    Ok(())
+}
+
+/// Create a PID file at the given path with exclusive flock.
+pub fn create_pid_file(path: &Path) -> Result<(), PidError> {
+    use fs2::FileExt;
+
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(path)?;
+
+    if file.try_lock_exclusive().is_err() {
+        let existing_pid = fs::read_to_string(path)
+            .ok()
+            .and_then(|s| s.trim().parse::<u32>().ok())
+            .unwrap_or(0);
+        return Err(PidError::AlreadyRecording(existing_pid));
+    }
+
+    if let Some(old_pid) = read_locked_pid(&mut file)? {
+        if old_pid != 0 && is_process_alive(old_pid) {
+            file.unlock().ok();
+            return Err(PidError::AlreadyRecording(old_pid));
+        }
+    }
+
+    let pid = std::process::id();
+    write_locked_pid(&mut file, pid)?;
+
+    tracing::debug!("PID file created: {} (PID {})", path.display(), pid);
+    Ok(())
+}
+
+/// Remove a PID file at the given path.
+pub fn remove_pid_file(path: &Path) -> Result<(), PidError> {
+    if path.exists() {
+        fs::remove_file(path)?;
+        tracing::debug!("PID file removed: {}", path.display());
+    }
+    Ok(())
+}
+
 /// Check if a recording is currently in progress.
 /// Returns Ok(Some(pid)) if recording, Ok(None) if not.
 /// Cleans up stale PID files automatically.
@@ -194,7 +287,6 @@ pub fn check_recording() -> Result<Option<u32>, PidError> {
 /// when two `minutes record` invocations start simultaneously.
 pub fn create() -> Result<(), PidError> {
     use fs2::FileExt;
-    use std::io::Write;
 
     // Clean up stale sentinel from a previous crashed recording
     check_and_clear_sentinel();
@@ -206,8 +298,9 @@ pub fn create() -> Result<(), PidError> {
 
     // Open/create the PID file and acquire an exclusive lock.
     // This is atomic: if another process holds the lock, we block briefly then check.
-    let file = fs::OpenOptions::new()
+    let mut file = fs::OpenOptions::new()
         .create(true)
+        .read(true)
         .write(true)
         .truncate(false)
         .open(&path)?;
@@ -223,8 +316,7 @@ pub fn create() -> Result<(), PidError> {
     }
 
     // We hold the lock. Check if there's a stale PID from a crashed process.
-    let existing = fs::read_to_string(&path).unwrap_or_default();
-    if let Ok(old_pid) = existing.trim().parse::<u32>() {
+    if let Some(old_pid) = read_locked_pid(&mut file)? {
         if old_pid != 0 && is_process_alive(old_pid) {
             file.unlock().ok();
             return Err(PidError::AlreadyRecording(old_pid));
@@ -233,12 +325,7 @@ pub fn create() -> Result<(), PidError> {
 
     // Write our PID (we still hold the lock)
     let pid = std::process::id();
-    // Truncate and write
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .truncate(true)
-        .open(&path)?;
-    write!(file, "{}", pid)?;
+    write_locked_pid(&mut file, pid)?;
 
     tracing::debug!("PID file created: {} (PID {})", path.display(), pid);
     Ok(())
@@ -393,19 +480,30 @@ pub fn status() -> RecordingStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fs2::FileExt;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    fn test_guard() -> MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+    }
+
     #[test]
     fn is_process_alive_detects_current_process() {
+        let _guard = test_guard();
         assert!(is_process_alive(std::process::id()));
     }
 
     #[test]
     fn is_process_alive_returns_false_for_dead_pid() {
+        let _guard = test_guard();
         // PID 99999999 almost certainly doesn't exist
         assert!(!is_process_alive(99_999_999));
     }
 
     #[test]
     fn processing_status_round_trip() {
+        let _guard = test_guard();
         set_processing_status(Some("Transcribing audio"), Some(CaptureMode::QuickThought)).unwrap();
         let status = read_processing_status();
         assert!(status.processing);
@@ -417,6 +515,7 @@ mod tests {
 
     #[test]
     fn recording_metadata_round_trip() {
+        let _guard = test_guard();
         write_recording_metadata(CaptureMode::QuickThought).unwrap();
         let metadata = read_recording_metadata().unwrap();
         assert_eq!(metadata.mode, CaptureMode::QuickThought);
@@ -425,6 +524,7 @@ mod tests {
 
     #[test]
     fn sentinel_lifecycle() {
+        let _guard = test_guard();
         // Ensure clean state
         let _ = std::fs::remove_file(stop_sentinel_path());
         assert!(!stop_sentinel_path().exists());
@@ -443,6 +543,7 @@ mod tests {
 
     #[test]
     fn sentinel_write_and_clear() {
+        let _guard = test_guard();
         // Write a sentinel and verify check_and_clear removes it
         write_stop_sentinel().unwrap();
         assert!(stop_sentinel_path().exists());
@@ -454,8 +555,33 @@ mod tests {
 
     #[test]
     fn check_and_clear_sentinel_returns_false_when_absent() {
+        let _guard = test_guard();
         // Ensure no sentinel exists
         let _ = std::fs::remove_file(stop_sentinel_path());
         assert!(!check_and_clear_sentinel());
+    }
+
+    #[test]
+    fn create_pid_file_writes_using_locked_handle_without_reopen() {
+        let _guard = test_guard();
+        let tempdir = tempfile::tempdir().unwrap();
+        let pid_path = tempdir.path().join("recording.pid");
+
+        create_pid_file(&pid_path).unwrap();
+
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&pid_path)
+            .unwrap();
+
+        assert!(
+            file.try_lock_exclusive().is_ok(),
+            "PID creation should not leave a live lock behind"
+        );
+
+        let pid_text = fs::read_to_string(&pid_path).unwrap();
+        let pid = pid_text.trim().parse::<u32>().unwrap();
+        assert_eq!(pid, std::process::id());
     }
 }

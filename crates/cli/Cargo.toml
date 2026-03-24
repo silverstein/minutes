@@ -13,6 +13,11 @@ categories = ["multimedia::audio", "command-line-utilities"]
 name = "minutes"
 path = "src/main.rs"
 
+[features]
+cuda = ["minutes-core/cuda"]
+metal = ["minutes-core/metal"]
+coreml = ["minutes-core/coreml"]
+
 [dependencies]
 minutes-core = { path = "../core", version = "0.7.0", features = ["streaming"] }
 clap = { workspace = true }

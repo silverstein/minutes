@@ -1,1 +1,0 @@
-/Users/silverbook/Sites/minutes/target/release/bundle/macos/Minutes.app/Applications/Minutes.app

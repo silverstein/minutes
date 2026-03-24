@@ -1,6 +1,6 @@
 {
   "name": "minutes",
-  "version": "0.1.0",
+  "version": "0.7.0",
   "description": "Conversation memory for AI assistants — record, transcribe, search meetings and voice memos",
   "skills": [
     { "name": "minutes-record", "path": "skills/minutes-record/SKILL.md" },

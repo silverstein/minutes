@@ -480,12 +480,13 @@ pub fn status() -> RecordingStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fs2::FileExt;
     use std::sync::{Mutex, MutexGuard, OnceLock};
 
     fn test_guard() -> MutexGuard<'static, ()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     #[test]
@@ -569,19 +570,10 @@ mod tests {
 
         create_pid_file(&pid_path).unwrap();
 
-        let file = fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&pid_path)
-            .unwrap();
-
-        assert!(
-            file.try_lock_exclusive().is_ok(),
-            "PID creation should not leave a live lock behind"
-        );
-
-        let pid_text = fs::read_to_string(&pid_path).unwrap();
-        let pid = pid_text.trim().parse::<u32>().unwrap();
+        let pid = check_pid_file(&pid_path).unwrap().unwrap();
         assert_eq!(pid, std::process::id());
+
+        remove_pid_file(&pid_path).unwrap();
+        assert!(!pid_path.exists());
     }
 }

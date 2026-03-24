@@ -4,17 +4,29 @@ import { GeistMono } from "geist/font/mono";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "minutes — your AI remembers every conversation",
+  title: "minutes — open-source conversation memory",
   description:
-    "Open-source, privacy-first conversation memory for AI assistants. Record meetings, capture voice memos, search everything. Local transcription, structured markdown, Claude-native.",
+    "Record meetings, capture voice memos, search everything. Local transcription with whisper.cpp, structured markdown, Claude-native. Free forever.",
   metadataBase: new URL("https://useminutes.app"),
   alternates: { canonical: "/" },
+  icons: {
+    icon: [
+      { url: "/favicon.svg", type: "image/svg+xml" },
+    ],
+  },
   openGraph: {
-    title: "minutes — your AI remembers every conversation",
+    title: "minutes — open-source conversation memory",
     description:
-      "Open-source conversation memory. Local transcription, structured markdown, AI-native.",
+      "Record meetings, capture voice memos, ask your AI what was decided. Local transcription, structured markdown, free forever.",
     type: "website",
     url: "https://useminutes.app",
+    siteName: "minutes",
+  },
+  twitter: {
+    card: "summary",
+    title: "minutes — open-source conversation memory",
+    description:
+      "Record meetings, capture voice memos, ask your AI what was decided. Local, free, MIT licensed.",
   },
   other: {
     "theme-color": "#000000",

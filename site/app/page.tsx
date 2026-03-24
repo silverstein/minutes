@@ -4,8 +4,8 @@ import { CopyButton } from "@/components/copy-button";
 export default function Home() {
   return (
     <div className="max-w-[800px] mx-auto px-6">
-      {/* Nav */}
-      <nav className="flex items-center justify-between py-5 border-b border-white/[0.06]">
+      {/* Nav — sticky with backdrop blur */}
+      <nav className="sticky top-0 z-50 flex items-center justify-between py-4 border-b border-white/[0.06] bg-black/80 backdrop-blur-lg">
         <div className="font-mono text-[15px] font-medium text-[#ededed]">
           minutes
         </div>
@@ -61,6 +61,22 @@ export default function Home() {
         <p className="text-[13px] text-[#666]">
           macOS, Windows, Linux. <code className="font-mono text-[12px] text-[#a1a1a1]">npx</code> works everywhere — Claude Desktop, Cursor, Windsurf, any MCP client.
         </p>
+
+        {/* Works with */}
+        <div className="mt-10 pt-8 border-t border-white/[0.04]">
+          <p className="text-xs text-[#444] uppercase tracking-widest mb-4">Works with any MCP client</p>
+          <div className="flex items-center justify-center gap-8 text-[#555] text-sm max-sm:gap-4 max-sm:text-xs flex-wrap">
+            <span className="font-medium">Claude Desktop</span>
+            <span className="text-[#333]">/</span>
+            <span className="font-medium">Claude Code</span>
+            <span className="text-[#333]">/</span>
+            <span className="font-medium">Cursor</span>
+            <span className="text-[#333]">/</span>
+            <span className="font-medium">Windsurf</span>
+            <span className="text-[#333]">/</span>
+            <span className="font-medium">Cowork</span>
+          </div>
+        </div>
       </section>
 
       {/* How it works */}

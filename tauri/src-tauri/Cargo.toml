@@ -4,6 +4,11 @@ version = "0.1.0"
 edition = "2021"
 description = "Minutes — menu bar app for conversation memory"
 
+[features]
+cuda = ["minutes-core/cuda"]
+metal = ["minutes-core/metal"]
+coreml = ["minutes-core/coreml"]
+
 [dependencies]
 tauri = { version = "2", features = ["tray-icon", "image-png", "devtools"] }
 tauri-plugin-shell = "2"

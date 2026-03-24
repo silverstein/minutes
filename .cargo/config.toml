@@ -2,4 +2,4 @@
 # whisper.cpp's ggml uses std::filesystem which requires macOS 10.15+.
 # The cc crate defaults to 10.13 for some targets, causing build failures.
 # Setting this ensures the correct -mmacosx-version-min flag. (See #14)
-MACOSX_DEPLOYMENT_TARGET = { value = "11.0", force = false }
+MACOSX_DEPLOYMENT_TARGET = { value = "11.0", force = true }

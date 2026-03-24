@@ -107,7 +107,7 @@ Expected semantics:
 Per surface:
 
 - Tauri:
-  - shows output notice with open / show-in-finder actions
+  - shows output notice with open / reveal-in-folder actions
 - CLI:
   - prints structured JSON to `stdout`
 - MCP:
@@ -176,4 +176,3 @@ Residual parity work still worth doing:
 
 - plugin-specific verification against this checklist
 - a lightweight scripted smoke pass that exercises these transitions automatically
-

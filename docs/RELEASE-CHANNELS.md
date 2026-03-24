@@ -20,6 +20,7 @@ Use stable for releases intended for broad usage.
   - `v1.0.3`
 - Expectations:
   - signed + notarized macOS desktop artifact
+  - Windows desktop artifact may also be attached; if it is unsigned or otherwise experimental, say so explicitly in the release notes
   - no known data-loss or install-blocking issues
   - release notes written for humans, not just commit history
 
@@ -34,6 +35,7 @@ Use preview for early access and validation.
   - `v0.2.0-rc.1`
 - Expectations:
   - signed + notarized macOS desktop artifact still required
+  - Windows desktop artifact may be attached for validation even before installer/signing polish is complete
   - may contain rough edges or incomplete distribution polish
   - release notes must clearly say what is experimental
 
@@ -64,6 +66,7 @@ The release note does not need to be long, but it must be explicit.
 Examples of acceptable cross-surface phrasing:
 
 - `Desktop: adds signed Minutes.app with notarized dmg`
+- `Desktop (Windows): adds experimental tray binary as minutes-desktop-windows-x64.exe`
 - `CLI: no command changes in this release`
 - `MCP: new quick-thought mode available through start_recording(mode=...)`
 

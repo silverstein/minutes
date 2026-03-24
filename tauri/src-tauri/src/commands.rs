@@ -6,6 +6,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime};
 use tauri::{Emitter, Manager};
+use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
+use tauri_plugin_shell::ShellExt;
 
 pub struct AppState {
     pub recording: Arc<AtomicBool>,
@@ -83,6 +85,17 @@ pub struct HotkeySettings {
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopCapabilities {
+    pub platform: String,
+    pub folder_reveal_label: String,
+    pub supports_calendar_integration: bool,
+    pub supports_call_detection: bool,
+    pub supports_tray_artifact_copy: bool,
+    pub supports_dictation_hotkey: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct TerminalInfo {
     pub title: String,
 }
@@ -109,6 +122,44 @@ const HOTKEY_CHOICES: [(&str, &str); 3] = [
 ];
 const HOTKEY_HOLD_THRESHOLD_MS: u64 = 300;
 const HOTKEY_MIN_DURATION_MS: u64 = 400;
+
+pub fn current_platform() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "macos"
+    } else if cfg!(target_os = "windows") {
+        "windows"
+    } else if cfg!(target_os = "linux") {
+        "linux"
+    } else {
+        "other"
+    }
+}
+
+pub fn supports_calendar_integration() -> bool {
+    cfg!(target_os = "macos")
+}
+
+pub fn supports_call_detection() -> bool {
+    cfg!(target_os = "macos")
+}
+
+pub fn supports_tray_artifact_copy() -> bool {
+    cfg!(target_os = "macos")
+}
+
+pub fn supports_dictation_hotkey() -> bool {
+    cfg!(target_os = "macos")
+}
+
+pub fn folder_reveal_label() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "Show in Finder"
+    } else if cfg!(target_os = "windows") {
+        "Show in Explorer"
+    } else {
+        "Show in Folder"
+    }
+}
 
 pub fn default_hotkey_shortcut() -> &'static str {
     HOTKEY_CHOICES[0].0
@@ -327,10 +378,24 @@ fn display_path(path: &str) -> String {
     path.to_string()
 }
 
+#[cfg(target_os = "macos")]
 fn escape_applescript_literal(text: &str) -> String {
     text.replace('\\', "\\\\")
         .replace('"', "\\\"")
         .replace('\n', " ")
+}
+
+#[cfg(not(target_os = "macos"))]
+fn escape_applescript_literal(text: &str) -> String {
+    text.to_string()
+}
+
+pub fn open_target(app_handle: &tauri::AppHandle, target: &str) -> Result<(), String> {
+    #[allow(deprecated)]
+    app_handle
+        .shell()
+        .open(target.to_string(), None)
+        .map_err(|e| e.to_string())
 }
 
 fn maybe_show_completion_notification(
@@ -356,46 +421,59 @@ fn maybe_show_completion_notification(
     }
 
     let body = format!("{} {}", notice.detail, display_path(&notice.path));
-    let script = format!(
-        "display notification \"{}\" with title \"Minutes\" subtitle \"{}\"",
-        escape_applescript_literal(&body),
-        escape_applescript_literal(&notice.title)
-    );
-
-    let _ = std::process::Command::new("osascript")
-        .arg("-e")
-        .arg(script)
-        .spawn();
+    show_user_notification(app_handle, &notice.title, &body);
 }
 
-pub fn show_user_notification(title: &str, body: &str) {
-    let script = format!(
-        "display notification \"{}\" with title \"Minutes\" subtitle \"{}\"",
-        escape_applescript_literal(body),
-        escape_applescript_literal(title)
-    );
+pub fn show_user_notification(app_handle: &tauri::AppHandle, title: &str, body: &str) {
+    #[cfg(target_os = "macos")]
+    {
+        let script = format!(
+            "display notification \"{}\" with title \"Minutes\" subtitle \"{}\"",
+            escape_applescript_literal(body),
+            escape_applescript_literal(title)
+        );
 
-    let _ = std::process::Command::new("osascript")
-        .arg("-e")
-        .arg(script)
-        .spawn();
+        if std::process::Command::new("osascript")
+            .arg("-e")
+            .arg(script)
+            .spawn()
+            .is_ok()
+        {
+            return;
+        }
+    }
+
+    app_handle
+        .dialog()
+        .message(body.to_string())
+        .title(title.to_string())
+        .kind(MessageDialogKind::Info)
+        .show(|_| {});
 }
 
 pub fn frontmost_application_name() -> Option<String> {
-    let script = r#"tell application "System Events" to get name of first application process whose frontmost is true"#;
-    let output = std::process::Command::new("osascript")
-        .arg("-e")
-        .arg(script)
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
+    #[cfg(target_os = "macos")]
+    {
+        let script = r#"tell application "System Events" to get name of first application process whose frontmost is true"#;
+        let output = std::process::Command::new("osascript")
+            .arg("-e")
+            .arg(script)
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let name = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if name.is_empty() || name == "Minutes" {
+            None
+        } else {
+            Some(name)
+        }
     }
-    let name = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if name.is_empty() || name == "Minutes" {
+
+    #[cfg(not(target_os = "macos"))]
+    {
         None
-    } else {
-        Some(name)
     }
 }
 
@@ -453,55 +531,73 @@ fn extract_paste_text(content: &str, kind: &str) -> Result<String, String> {
 }
 
 fn copy_to_clipboard(text: &str) -> Result<(), String> {
-    use std::io::Write;
+    #[cfg(target_os = "macos")]
+    {
+        use std::io::Write;
 
-    let mut child = std::process::Command::new("pbcopy")
-        .stdin(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("Could not start pbcopy: {}", e))?;
+        let mut child = std::process::Command::new("pbcopy")
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("Could not start pbcopy: {}", e))?;
 
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin
-            .write_all(text.as_bytes())
-            .map_err(|e| format!("Could not write to clipboard: {}", e))?;
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin
+                .write_all(text.as_bytes())
+                .map_err(|e| format!("Could not write to clipboard: {}", e))?;
+        }
+
+        let status = child
+            .wait()
+            .map_err(|e| format!("Could not finish clipboard write: {}", e))?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err("pbcopy failed to update the clipboard.".into())
+        }
     }
 
-    let status = child
-        .wait()
-        .map_err(|e| format!("Could not finish clipboard write: {}", e))?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err("pbcopy failed to update the clipboard.".into())
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = text;
+        Err("Tray copy/paste automation is currently available on macOS only.".into())
     }
 }
 
 fn paste_into_application(app_name: &str) -> Result<(), String> {
-    let script = format!(
-        r#"tell application "{}" to activate
+    #[cfg(target_os = "macos")]
+    {
+        let script = format!(
+            r#"tell application "{}" to activate
 delay 0.15
 tell application "System Events" to keystroke "v" using command down"#,
-        escape_applescript_literal(app_name)
-    );
+            escape_applescript_literal(app_name)
+        );
 
-    let output = std::process::Command::new("osascript")
-        .arg("-e")
-        .arg(script)
-        .output()
-        .map_err(|e| format!("Could not run paste automation: {}", e))?;
+        let output = std::process::Command::new("osascript")
+            .arg("-e")
+            .arg(script)
+            .output()
+            .map_err(|e| format!("Could not run paste automation: {}", e))?;
 
-    if output.status.success() {
-        Ok(())
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        Err(format!(
-            "Paste automation failed{}. Minutes already copied the text to your clipboard.",
-            if stderr.trim().is_empty() {
-                ".".to_string()
-            } else {
-                format!(" ({})", stderr.trim())
-            }
-        ))
+        if output.status.success() {
+            Ok(())
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            Err(format!(
+                "Paste automation failed{}. Minutes already copied the text to your clipboard.",
+                if stderr.trim().is_empty() {
+                    ".".to_string()
+                } else {
+                    format!(" ({})", stderr.trim())
+                }
+            ))
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = app_name;
+        Err("Tray paste automation is currently available on macOS only.".into())
     }
 }
 
@@ -592,18 +688,28 @@ fn microphone_status() -> ReadinessItem {
         state: if has_devices { "ready" } else { "attention" }.into(),
         detail: if has_devices {
             format!(
-                "{} audio input device{} detected. macOS may still prompt the first time you record.",
+                "{} audio input device{} detected. Minutes may still prompt for microphone access the first time you record.",
                 devices.len(),
                 if devices.len() == 1 { "" } else { "s" }
             )
         } else {
-            "No audio input devices detected. Check hardware, macOS input settings, and permissions.".into()
+            "No audio input devices detected. Check hardware and system audio settings.".into()
         },
         optional: false,
     }
 }
 
 fn calendar_status() -> ReadinessItem {
+    #[cfg(not(target_os = "macos"))]
+    {
+        return ReadinessItem {
+            label: "Calendar suggestions".into(),
+            state: "unsupported".into(),
+            detail: "Calendar suggestions are currently available on macOS only.".into(),
+            optional: true,
+        };
+    }
+
     let output = std::process::Command::new("osascript")
         .arg("-e")
         .arg(r#"tell application "Calendar" to get name of every calendar"#)
@@ -961,7 +1067,11 @@ pub fn start_recording(
 
     if let Err(e) = minutes_core::pid::create() {
         eprintln!("Failed to create PID: {}", e);
-        show_user_notification("Recording", &format!("Could not start recording: {}", e));
+        show_user_notification(
+            &app_handle,
+            "Recording",
+            &format!("Could not start recording: {}", e),
+        );
         starting.store(false, Ordering::Relaxed);
         recording.store(false, Ordering::Relaxed);
         reset_hotkey_capture_state(
@@ -1182,6 +1292,7 @@ pub fn handle_global_hotkey_event(
         tauri_plugin_global_shortcut::ShortcutState::Pressed => {
             if minutes_core::pid::status().processing || state.processing.load(Ordering::Relaxed) {
                 show_user_notification(
+                    app,
                     "Quick thought",
                     "Minutes is still processing the previous capture. Finish that first.",
                 );
@@ -1259,6 +1370,7 @@ pub fn handle_global_hotkey_event(
                 }
                 if let Err(err) = request_stop(&state.recording, &state.stop_flag) {
                     show_user_notification(
+                        app,
                         "Quick thought",
                         &format!("Could not stop recording: {}", err),
                     );
@@ -1273,6 +1385,7 @@ pub fn handle_global_hotkey_event(
             if recording_active(&state.recording) {
                 if let Err(err) = request_stop(&state.recording, &state.stop_flag) {
                     show_user_notification(
+                        app,
                         "Quick thought",
                         &format!("Could not stop recording: {}", err),
                     );
@@ -1282,6 +1395,7 @@ pub fn handle_global_hotkey_event(
 
             if minutes_core::pid::status().processing || state.processing.load(Ordering::Relaxed) {
                 show_user_notification(
+                    app,
                     "Quick thought",
                     "Minutes is still processing the previous capture. Finish that first.",
                 );
@@ -1513,12 +1627,8 @@ pub fn cmd_search(query: String) -> serde_json::Value {
 }
 
 #[tauri::command]
-pub fn cmd_open_file(path: String) -> Result<(), String> {
-    std::process::Command::new("open")
-        .arg(&path)
-        .spawn()
-        .map_err(|e| e.to_string())?;
-    Ok(())
+pub fn cmd_open_file(app: tauri::AppHandle, path: String) -> Result<(), String> {
+    open_target(&app, &path)
 }
 
 #[tauri::command]
@@ -1591,6 +1701,18 @@ pub fn cmd_permission_center() -> serde_json::Value {
         vault_status(&config),
     ];
     serde_json::to_value(items).unwrap_or(serde_json::json!([]))
+}
+
+#[tauri::command]
+pub fn cmd_desktop_capabilities() -> DesktopCapabilities {
+    DesktopCapabilities {
+        platform: current_platform().into(),
+        folder_reveal_label: folder_reveal_label().into(),
+        supports_calendar_integration: supports_calendar_integration(),
+        supports_call_detection: supports_call_detection(),
+        supports_tray_artifact_copy: supports_tray_artifact_copy(),
+        supports_dictation_hotkey: supports_dictation_hotkey(),
+    }
 }
 
 #[tauri::command]
@@ -2199,12 +2321,8 @@ pub fn cmd_get_storage_stats() -> serde_json::Value {
 }
 
 #[tauri::command]
-pub fn cmd_open_meeting_url(url: String) -> Result<(), String> {
-    std::process::Command::new("open")
-        .arg(&url)
-        .spawn()
-        .map_err(|e| format!("Failed to open URL: {}", e))?;
-    Ok(())
+pub fn cmd_open_meeting_url(app: tauri::AppHandle, url: String) -> Result<(), String> {
+    open_target(&app, &url)
 }
 
 #[cfg(test)]
@@ -2293,6 +2411,24 @@ mod tests {
         let current = latest_output.lock().unwrap().clone().unwrap();
         assert_eq!(current.title, "Demo");
         assert_eq!(current.path, "/tmp/demo.md");
+    }
+
+    #[test]
+    fn desktop_capabilities_align_with_helper_flags() {
+        let caps = cmd_desktop_capabilities();
+
+        assert_eq!(caps.platform, current_platform());
+        assert_eq!(caps.folder_reveal_label, folder_reveal_label());
+        assert_eq!(
+            caps.supports_calendar_integration,
+            supports_calendar_integration()
+        );
+        assert_eq!(caps.supports_call_detection, supports_call_detection());
+        assert_eq!(
+            caps.supports_tray_artifact_copy,
+            supports_tray_artifact_copy()
+        );
+        assert_eq!(caps.supports_dictation_hotkey, supports_dictation_hotkey());
     }
 
     #[test]
@@ -2587,7 +2723,9 @@ fn dictation_hotkey_status_for_other_platform() -> DictationHotkeyStatus {
         enabled: false,
         pending: false,
         keycode: 57,
-        message: "Native dictation hotkey is only available on macOS.".into(),
+        message:
+            "Native dictation hotkey is currently available on macOS only. Use the CLI or MCP dictation flow on this platform for now."
+                .into(),
     }
 }
 
@@ -2793,7 +2931,7 @@ pub fn start_dictation_hotkey_with_keycode(
                     if let Err(error) =
                         start_dictation_session(&app_for_hold, Some(HotkeyCaptureStyle::Hold))
                     {
-                        show_user_notification("Dictation", &error);
+                        show_user_notification(&app_for_hold, "Dictation", &error);
                     }
                 });
             }
@@ -2832,7 +2970,7 @@ pub fn start_dictation_hotkey_with_keycode(
                 if let Err(error) =
                     start_dictation_session(&app_for_events, Some(HotkeyCaptureStyle::Locked))
                 {
-                    show_user_notification("Dictation", &error);
+                    show_user_notification(&app_for_events, "Dictation", &error);
                 }
             }
         },
@@ -2973,7 +3111,11 @@ pub fn cmd_check_accessibility() -> serde_json::Value {
     }
     #[cfg(not(target_os = "macos"))]
     {
-        serde_json::json!({ "trusted": true, "platform": "other", "note": "native hotkey not available" })
+        serde_json::json!({
+            "trusted": true,
+            "platform": current_platform(),
+            "note": "Accessibility checks are only relevant to the macOS dictation hotkey."
+        })
     }
 }
 
@@ -2986,6 +3128,6 @@ pub fn cmd_request_accessibility() -> String {
     }
     #[cfg(not(target_os = "macos"))]
     {
-        "Native hotkey not available on this platform".into()
+        "Accessibility settings are only used for the macOS dictation hotkey.".into()
     }
 }

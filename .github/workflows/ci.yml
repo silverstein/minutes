@@ -100,6 +100,31 @@ jobs:
       - name: Verify minutes --version
         run: minutes --version
 
+  desktop_windows:
+    name: Desktop App (windows-latest)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-desktop-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --version "2.10.1" --locked
+
+      - name: Build Windows desktop app (no bundle)
+        working-directory: tauri/src-tauri
+        run: cargo tauri build --ci --no-bundle
+
   mcp:
     name: MCP Server
     runs-on: ubuntu-latest

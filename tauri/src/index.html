@@ -15,12 +15,12 @@
       --text: #f5f5f7;
       --text-secondary: #86868b;
       --text-tertiary: #636366;
-      --accent: #0a84ff;
-      --accent-hover: #409cff;
-      --red: #ff453a;
-      --red-bg: rgba(255, 69, 58, 0.12);
-      --green: #30d158;
-      --purple: #bf5af2;
+      --accent: #5b8fd9;
+      --accent-hover: #7ba6e3;
+      --red: #d9655f;
+      --red-bg: rgba(217, 101, 95, 0.12);
+      --green: #5cb88a;
+      --purple: #a78bca;
       --radius: 10px;
       --font-sans: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Helvetica Neue', sans-serif;
       --font-display: ui-serif, 'Iowan Old Style', 'Palatino Linotype', 'Book Antiqua', Georgia, serif;
@@ -39,6 +39,19 @@
       user-select: none;
     }
 
+    /* Subtle grain overlay for depth — barely perceptible, adds warmth to flat surfaces */
+    body::after {
+      content: '';
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      z-index: 9999;
+      opacity: 0.020;
+      background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+      background-repeat: repeat;
+      background-size: 256px;
+    }
+
     /* ── Split layout ── */
     .app-left {
       flex: 1;
@@ -55,7 +68,7 @@
       overflow: hidden;
       display: flex;
       flex-direction: column;
-      border-left: 1px solid var(--border);
+      border-left: 1px solid rgba(255,255,255,0.04);
       background: var(--bg);
       opacity: 0;
       transition: opacity 100ms ease-out;
@@ -72,7 +85,7 @@
       align-items: center;
       justify-content: space-between;
       padding: 10px 16px;
-      border-bottom: 1px solid var(--border);
+      border-bottom: 1px solid rgba(255,255,255,0.04);
       flex-shrink: 0;
       -webkit-app-region: drag;
     }
@@ -95,7 +108,7 @@
     .recall-phase-dot.prep { background: var(--accent); }
     .recall-phase-dot.listening {
       background: var(--red);
-      animation: blink 1s step-end infinite;
+      animation: recording-glow 1.8s ease-in-out infinite;
     }
     .recall-phase-dot.debrief { background: var(--green); }
 
@@ -182,7 +195,7 @@
 
     .recall-note-row input:focus {
       border-color: var(--accent);
-      box-shadow: 0 0 0 3px rgba(10, 132, 255, 0.12);
+      box-shadow: 0 0 0 3px rgba(91, 143, 217, 0.12);
     }
 
     .recall-note-row input::placeholder { color: var(--text-tertiary); }
@@ -226,14 +239,15 @@
 
     .lifecycle-badge {
       font-size: 9px;
-      font-weight: 600;
+      font-weight: 500;
       padding: 1px 6px;
       border-radius: 999px;
-      letter-spacing: 0.2px;
+      letter-spacing: 0;
+      text-transform: lowercase;
     }
 
     .lifecycle-badge.prepped {
-      background: rgba(10, 132, 255, 0.12);
+      background: rgba(91, 143, 217, 0.12);
       color: var(--accent);
     }
 
@@ -243,7 +257,7 @@
     }
 
     .lifecycle-badge.debriefed {
-      background: rgba(48, 209, 88, 0.12);
+      background: rgba(92, 184, 138, 0.12);
       color: var(--green);
     }
 
@@ -269,14 +283,27 @@
       display: flex;
       align-items: center;
       justify-content: space-between;
-      padding: 16px 20px 12px;
+      padding: 10px 16px;
       -webkit-app-region: drag;
+      position: relative;
+      z-index: 10;
+    }
+
+    .header::after {
+      content: '';
+      position: absolute;
+      bottom: -6px;
+      left: 0;
+      right: 0;
+      height: 6px;
+      background: linear-gradient(rgba(28, 28, 30, 0.6), transparent);
+      pointer-events: none;
     }
 
     .brand {
       display: flex;
       align-items: center;
-      gap: 12px;
+      gap: 10px;
       min-width: 0;
     }
 
@@ -315,22 +342,16 @@
     }
 
     .brand-label {
-      font-size: 20px;
+      font-size: 18px;
       font-family: var(--font-display);
       font-weight: 700;
-      letter-spacing: -0.4px;
+      letter-spacing: -0.3px;
       color: var(--text);
       line-height: 1;
     }
 
     .brand-sub {
-      margin-top: 4px;
-      font-size: 11px;
-      letter-spacing: 0.2px;
-      color: var(--text-tertiary);
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
+      display: none;
     }
 
     .header-actions {
@@ -343,58 +364,73 @@
     .header-chip {
       display: none;
       align-items: center;
-      gap: 6px;
-      padding: 5px 10px;
+      gap: 4px;
+      padding: 3px 8px;
       border-radius: 999px;
-      background: rgba(255, 159, 10, 0.12);
+      background: rgba(255, 159, 10, 0.08);
       color: #ff9f0a;
-      font-size: 11px;
+      font-size: 10px;
       font-weight: 600;
       letter-spacing: 0.2px;
+      cursor: pointer;
     }
 
     .header-chip.active { display: inline-flex; }
 
     .header-chip.readiness {
-      display: inline-flex;
-      background: rgba(10, 132, 255, 0.12);
-      color: var(--accent);
+      display: none;
     }
 
     .status-pill {
-      font-size: 11px;
+      font-size: 0;
       font-weight: 600;
-      padding: 3px 10px;
-      border-radius: 12px;
-      background: var(--bg-elevated);
-      color: var(--text-tertiary);
+      padding: 0;
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: var(--text-tertiary);
+      opacity: 0.3;
       -webkit-app-region: no-drag;
+      transition: all 0.2s ease;
     }
 
     .status-pill.recording {
+      font-size: 11px;
+      padding: 3px 10px;
+      width: auto;
+      height: auto;
+      border-radius: 12px;
+      opacity: 1;
       background: var(--red-bg);
       color: var(--red);
     }
 
     .status-pill.processing {
-      background: rgba(10, 132, 255, 0.12);
+      font-size: 11px;
+      padding: 3px 10px;
+      width: auto;
+      height: auto;
+      border-radius: 12px;
+      opacity: 1;
+      background: rgba(91, 143, 217, 0.12);
       color: var(--accent);
     }
 
     /* ── Recording bar ── */
     .recording-bar {
       display: none;
-      padding: 12px 20px;
+      padding: 12px 16px;
       background: var(--red-bg);
-      border-bottom: 1px solid rgba(255, 69, 58, 0.2);
-      animation: recording-pulse 2s ease-in-out infinite;
+      border-bottom: 1px solid rgba(217, 101, 95, 0.12);
+      animation: recording-pulse 2.5s ease-in-out infinite;
+      box-shadow: inset 0 -1px 0 rgba(217, 101, 95, 0.08), 0 4px 20px rgba(217, 101, 95, 0.04);
     }
 
     .recording-bar.active { display: block; }
 
     @keyframes recording-pulse {
       0%, 100% { background: var(--red-bg); }
-      50% { background: rgba(255, 69, 58, 0.18); }
+      50% { background: rgba(217, 101, 95, 0.15); }
     }
 
     .recording-bar .top-row {
@@ -408,9 +444,11 @@
       display: flex;
       align-items: center;
       gap: 8px;
-      font-size: 13px;
+      font-size: 12px;
       font-weight: 600;
       color: var(--red);
+      letter-spacing: 0.3px;
+      text-transform: uppercase;
     }
 
     .recording-dot {
@@ -418,16 +456,24 @@
       height: 8px;
       border-radius: 50%;
       background: var(--red);
-      animation: blink 1s step-end infinite;
+      animation: recording-glow 1.8s ease-in-out infinite;
+      box-shadow: 0 0 0 0 rgba(217, 101, 95, 0.4);
     }
 
     @keyframes blink { 50% { opacity: 0; } }
 
+    @keyframes recording-glow {
+      0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(217, 101, 95, 0.4); }
+      50% { opacity: 0.4; box-shadow: 0 0 8px 2px rgba(217, 101, 95, 0.15); }
+    }
+
     .recording-time {
-      font-size: 13px;
+      font-size: 20px;
       font-variant-numeric: tabular-nums;
-      color: var(--text-secondary);
+      color: var(--text);
       font-family: var(--font-mono);
+      font-weight: 500;
+      letter-spacing: 0.5px;
     }
 
     /* ── Audio visualizer ── */
@@ -435,18 +481,20 @@
       display: flex;
       align-items: center;
       justify-content: center;
-      gap: 2px;
-      height: 28px;
-      margin: 6px 0 8px;
+      gap: 1.5px;
+      height: 32px;
+      margin: 8px 0 10px;
+      -webkit-mask-image: linear-gradient(to right, transparent, black 10%, black 90%, transparent);
+      mask-image: linear-gradient(to right, transparent, black 10%, black 90%, transparent);
     }
 
     .audio-viz .bar {
-      width: 3px;
-      border-radius: 2px;
+      width: 2px;
+      border-radius: 999px;
       background: var(--red);
-      opacity: 0.6;
-      min-height: 3px;
-      transition: height 0.08s ease-out;
+      opacity: 0.5;
+      min-height: 2px;
+      transition: height 0.12s cubic-bezier(0.4, 0, 0.2, 1);
     }
 
     .recording-actions {
@@ -461,9 +509,9 @@
     /* ── Processing bar ── */
     .processing-bar {
       display: none;
-      padding: 12px 20px;
-      background: rgba(10, 132, 255, 0.08);
-      border-bottom: 1px solid rgba(10, 132, 255, 0.18);
+      padding: 12px 16px;
+      background: rgba(91, 143, 217, 0.08);
+      border-bottom: 1px solid rgba(91, 143, 217, 0.12);
     }
 
     .processing-bar.active { display: block; }
@@ -477,7 +525,7 @@
     .processing-spinner {
       width: 14px;
       height: 14px;
-      border: 2px solid rgba(10, 132, 255, 0.18);
+      border: 2px solid rgba(91, 143, 217, 0.18);
       border-top-color: var(--accent);
       border-radius: 50%;
       animation: processing-spin 0.8s linear infinite;
@@ -509,9 +557,9 @@
     /* ── Output notice ── */
     .output-notice {
       display: none;
-      padding: 12px 20px;
-      background: rgba(48, 209, 88, 0.08);
-      border-bottom: 1px solid rgba(48, 209, 88, 0.16);
+      padding: 12px 16px;
+      background: rgba(92, 184, 138, 0.08);
+      border-bottom: 1px solid rgba(92, 184, 138, 0.12);
     }
 
     .output-notice.active { display: block; }
@@ -536,7 +584,7 @@
       justify-content: center;
       font-size: 14px;
       flex-shrink: 0;
-      background: rgba(48, 209, 88, 0.16);
+      background: rgba(92, 184, 138, 0.16);
       color: var(--green);
     }
 
@@ -581,7 +629,7 @@
     /* ── Quick note inline ── */
     .quick-note {
       display: none;
-      padding: 0 20px 12px;
+      padding: 0 16px 12px;
     }
 
     .quick-note.active { display: block; }
@@ -607,22 +655,22 @@
 
     .quick-note-row input:focus {
       border-color: var(--accent);
-      box-shadow: 0 0 0 3px rgba(10, 132, 255, 0.12);
+      box-shadow: 0 0 0 3px rgba(91, 143, 217, 0.12);
     }
 
     .quick-note-row input::placeholder { color: var(--text-tertiary); }
 
     /* ── Search ── */
     .search-wrap {
-      padding: 0 20px 12px;
+      padding: 0 16px 12px;
     }
 
     .search-box {
       width: 100%;
       padding: 9px 12px 9px 34px;
-      border: 1px solid var(--border);
+      border: 1px solid rgba(255,255,255,0.06);
       border-radius: var(--radius);
-      background: var(--bg-elevated);
+      background: rgba(255,255,255,0.03);
       color: var(--text);
       font-family: inherit;
       font-size: 13px;
@@ -633,7 +681,7 @@
 
     .search-box:focus {
       border-color: var(--accent);
-      box-shadow: 0 0 0 3px rgba(10, 132, 255, 0.12);
+      box-shadow: 0 0 0 3px rgba(91, 143, 217, 0.12);
     }
 
     .search-box::placeholder { color: var(--text-tertiary); }
@@ -645,7 +693,7 @@
     .search-icon::before {
       content: "⌕";
       position: absolute;
-      left: 32px;
+      left: 28px;
       top: 9px;
       font-size: 16px;
       color: var(--text-tertiary);
@@ -657,44 +705,73 @@
     .meetings-scroll {
       flex: 1;
       overflow-y: auto;
-      padding: 0 20px;
+      padding: 0 16px;
     }
 
-    .meetings-scroll::-webkit-scrollbar { width: 6px; }
+    .meetings-scroll::-webkit-scrollbar { width: 5px; }
     .meetings-scroll::-webkit-scrollbar-track { background: transparent; }
     .meetings-scroll::-webkit-scrollbar-thumb {
-      background: var(--bg-hover);
-      border-radius: 3px;
+      background: rgba(255,255,255,0.08);
+      border-radius: 999px;
+    }
+    .meetings-scroll::-webkit-scrollbar-thumb:hover {
+      background: rgba(255,255,255,0.14);
     }
 
     .date-group {
-      font-size: 11px;
+      font-size: 13px;
+      font-family: var(--font-display);
       font-weight: 600;
-      text-transform: uppercase;
-      letter-spacing: 0.5px;
-      color: var(--text-tertiary);
-      padding: 12px 0 6px;
+      text-transform: none;
+      letter-spacing: -0.1px;
+      color: var(--text-secondary);
+      padding: 20px 4px 8px;
+      border-bottom: 1px solid rgba(255,255,255,0.04);
+      margin-bottom: 4px;
     }
 
-    .date-group:first-child { padding-top: 4px; }
+    .date-group:first-child { padding-top: 8px; }
+
+    /* ── Staggered entrance ── */
+    @keyframes list-enter {
+      from { opacity: 0; transform: translateY(6px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    .meeting-item, .date-group {
+      animation: list-enter 0.25s ease-out both;
+    }
+
+    .meetings-scroll > :nth-child(1) { animation-delay: 0ms; }
+    .meetings-scroll > :nth-child(2) { animation-delay: 30ms; }
+    .meetings-scroll > :nth-child(3) { animation-delay: 55ms; }
+    .meetings-scroll > :nth-child(4) { animation-delay: 75ms; }
+    .meetings-scroll > :nth-child(5) { animation-delay: 95ms; }
+    .meetings-scroll > :nth-child(6) { animation-delay: 110ms; }
+    .meetings-scroll > :nth-child(7) { animation-delay: 125ms; }
+    .meetings-scroll > :nth-child(8) { animation-delay: 140ms; }
+    .meetings-scroll > :nth-child(9) { animation-delay: 155ms; }
+    .meetings-scroll > :nth-child(10) { animation-delay: 170ms; }
+    .meetings-scroll > :nth-child(n+11) { animation-delay: 185ms; }
 
     .meeting-item {
       display: flex;
       align-items: center;
       justify-content: space-between;
-      padding: 10px 12px;
-      border-radius: 8px;
+      position: relative;
+      padding: 10px 12px 10px 16px;
+      border-radius: 10px;
       cursor: pointer;
-      transition: background 0.12s;
+      transition: background 0.15s ease;
     }
 
     .meeting-item:hover { background: var(--bg-hover); }
-    .meeting-item:active { background: #48484a; }
+    .meeting-item:active { background: rgba(255,255,255,0.08); }
 
     .meeting-info { flex: 1; min-width: 0; }
 
     .meeting-title {
-      font-size: 13px;
+      font-size: 14px;
       font-weight: 600;
       color: var(--text);
       white-space: nowrap;
@@ -704,8 +781,10 @@
 
     .meeting-meta {
       font-size: 11px;
-      color: var(--text-secondary);
-      margin-top: 2px;
+      font-family: var(--font-mono);
+      color: var(--text-tertiary);
+      margin-top: 3px;
+      letter-spacing: 0.2px;
     }
 
     .meeting-snippet {
@@ -720,19 +799,31 @@
     }
 
     .meeting-badge {
-      font-size: 10px;
-      font-weight: 600;
-      padding: 2px 8px;
-      border-radius: 10px;
-      background: var(--bg-elevated);
-      color: var(--text-secondary);
-      flex-shrink: 0;
-      margin-left: 8px;
+      position: absolute;
+      left: 4px;
+      top: 10px;
+      bottom: 10px;
+      width: 3px;
+      height: auto;
+      border-radius: 999px;
+      padding: 0;
+      font-size: 0;
+      overflow: hidden;
+      margin: 0;
+      background: rgba(255,255,255,0.08);
+      transition: background 0.15s ease;
+    }
+
+    .meeting-item:hover .meeting-badge {
+      background: rgba(255,255,255,0.14);
     }
 
     .meeting-badge.memo {
-      background: rgba(191, 90, 242, 0.12);
-      color: var(--purple);
+      background: rgba(167, 139, 202, 0.4);
+    }
+
+    .meeting-item:hover .meeting-badge.memo {
+      background: rgba(167, 139, 202, 0.6);
     }
 
     /* ── Meeting detail view ── */
@@ -890,9 +981,9 @@
       color: var(--text-tertiary);
     }
 
-    .empty-state .icon { font-size: 32px; margin-bottom: 8px; opacity: 0.5; }
-    .empty-state .title { font-size: 14px; font-weight: 500; color: var(--text-secondary); }
-    .empty-state .sub { font-size: 12px; margin-top: 4px; }
+    .empty-state .icon { font-size: 40px; margin-bottom: 12px; opacity: 0.35; filter: grayscale(0.3); }
+    .empty-state .title { font-size: 15px; font-family: var(--font-display); font-weight: 600; color: var(--text-secondary); }
+    .empty-state .sub { font-size: 12px; margin-top: 6px; line-height: 1.5; }
 
     /* ── About view ── */
     .about-overlay {
@@ -1140,13 +1231,18 @@
     }
 
     .readiness-state.ready {
-      background: rgba(48, 209, 88, 0.12);
+      background: rgba(92, 184, 138, 0.12);
       color: var(--green);
     }
 
     .readiness-state.attention {
       background: rgba(255, 159, 10, 0.12);
       color: #ff9f0a;
+    }
+
+    .readiness-state.unsupported {
+      background: rgba(255,255,255,0.06);
+      color: var(--text-secondary);
     }
 
     .readiness-optional {
@@ -1281,70 +1377,91 @@
 
     /* ── Footer ── */
     .footer {
-      padding: 12px 20px 16px;
-      border-top: 1px solid var(--border);
+      padding: 8px 12px 12px;
+      border-top: none;
     }
 
     .footer-actions {
       display: grid;
       grid-template-columns: 1.35fr 1fr 1fr;
-      gap: 10px;
+      gap: 6px;
+      background: var(--bg-elevated);
+      border: 1px solid rgba(255,255,255,0.06);
+      border-radius: 14px;
+      padding: 6px;
+      box-shadow: 0 2px 12px rgba(0,0,0,0.12), 0 0 0 1px rgba(255,255,255,0.02);
     }
 
     .footer-actions .btn {
       width: 100%;
+      border-radius: 10px;
     }
 
     /* ── Buttons ── */
     .btn {
-      padding: 7px 16px;
+      padding: 7px 14px;
       border-radius: 8px;
       border: none;
       font-family: inherit;
       font-size: 13px;
       font-weight: 500;
       cursor: pointer;
-      transition: all 0.12s;
+      transition: all 0.15s ease;
       -webkit-app-region: no-drag;
     }
 
     .btn-primary {
       background: var(--accent);
       color: #fff;
+      box-shadow: 0 1px 2px rgba(0,0,0,0.15);
     }
 
     .footer-actions .btn-primary {
       width: 100%;
     }
 
-    .btn-primary:hover { background: var(--accent-hover); }
-    .btn-primary:active { transform: scale(0.98); }
+    .btn-primary:hover { background: var(--accent-hover); box-shadow: 0 2px 4px rgba(0,0,0,0.2); }
+    .btn-primary:active { transform: scale(0.98); box-shadow: none; }
 
     .btn-danger {
-      background: var(--red);
-      color: #fff;
+      background: transparent;
+      color: var(--red);
+      border: 1px solid var(--red);
+      box-shadow: none;
     }
 
-    .btn-danger:hover { background: #ff6961; }
+    .btn-danger:hover { background: rgba(217, 101, 95, 0.12); }
+    .btn-danger:active { transform: scale(0.98); }
 
     .btn-secondary {
-      background: var(--bg-elevated);
+      background: rgba(255,255,255,0.06);
       color: var(--text);
-      border: 1px solid var(--border);
+      border: 1px solid rgba(255,255,255,0.08);
     }
 
-    .btn-secondary:hover { background: var(--bg-hover); }
+    .btn-secondary:hover { background: rgba(255,255,255,0.1); }
 
     .btn-sm { padding: 5px 12px; font-size: 12px; }
+
+    .btn-icon {
+      padding: 4px 7px;
+      font-size: 15px;
+      line-height: 1;
+      border: none !important;
+      background: transparent !important;
+      color: var(--text-tertiary);
+      border-radius: 6px;
+    }
+    .btn-icon:hover { background: var(--bg-hover) !important; color: var(--text-secondary); }
 
     /* ── Upcoming meeting ── */
     .upcoming {
       display: flex;
       align-items: center;
       gap: 10px;
-      padding: 10px 20px;
-      background: rgba(10, 132, 255, 0.08);
-      border-bottom: 1px solid rgba(10, 132, 255, 0.15);
+      padding: 10px 16px;
+      background: rgba(91, 143, 217, 0.06);
+      border-bottom: 1px solid rgba(91, 143, 217, 0.1);
     }
 
     .upcoming-icon { font-size: 16px; flex-shrink: 0; }
@@ -1373,9 +1490,9 @@
       display: none;
       align-items: center;
       gap: 10px;
-      padding: 10px 20px;
-      background: rgba(48, 209, 88, 0.08);
-      border-bottom: 1px solid rgba(48, 209, 88, 0.15);
+      padding: 10px 16px;
+      background: rgba(92, 184, 138, 0.06);
+      border-bottom: 1px solid rgba(92, 184, 138, 0.1);
     }
     .call-detected.active { display: flex; }
     .call-detected-icon { font-size: 16px; flex-shrink: 0; }
@@ -1396,7 +1513,7 @@
       </div>
     </div>
     <div class="header-actions">
-      <button class="btn btn-secondary btn-sm" id="btn-settings">Settings</button>
+      <button class="btn btn-icon" id="btn-settings" title="Settings (⌘,)">⚙</button>
       <button class="header-chip readiness" id="btn-readiness">Readiness</button>
       <button class="header-chip" id="btn-recovery">Recovery <span id="recovery-count">0</span></button>
       <span class="status-pill" id="status-pill">idle</span>
@@ -1440,7 +1557,7 @@
         <div class="output-notice-path" id="output-notice-path"></div>
         <div class="output-notice-actions">
           <button class="btn btn-secondary btn-sm" id="btn-open-output">Open</button>
-          <button class="btn btn-secondary btn-sm" id="btn-open-output-folder">Show in Finder</button>
+          <button class="btn btn-secondary btn-sm" id="btn-open-output-folder">Show in Folder</button>
           <button class="btn btn-secondary btn-sm" id="btn-dismiss-output">Dismiss</button>
         </div>
       </div>
@@ -1569,7 +1686,7 @@
       <div class="recovery-header">
         <div>
           <div class="recovery-title" id="recovery-title">Recovery Center</div>
-          <div class="recovery-sub">Retry preserved captures and watched files that failed to process, or open them directly in Finder.</div>
+          <div class="recovery-sub" id="recovery-subtitle">Retry preserved captures and watched files that failed to process, or open them directly in a folder.</div>
         </div>
         <button class="btn btn-secondary btn-sm" id="btn-recovery-close">Close</button>
       </div>
@@ -1610,7 +1727,7 @@
           <div class="about-item-body">Built to work well with Claude Desktop, Claude Code, Cowork, Codex, and other tool-calling assistants.</div>
         </div>
       </div>
-      <div class="about-footer">
+      <div class="about-footer" id="about-tray-copy">
         Minutes is open source, markdown-backed, and designed so the artifact remains valuable even outside this app. Power-user tray actions copy the latest summary or transcript and try to paste it into your previous app when macOS automation allows it.
       </div>
       <div class="about-controls">
@@ -1670,11 +1787,15 @@
       <!-- Dictation -->
       <div style="margin-bottom: 16px;">
         <div class="about-item-title">DICTATION</div>
-        <div class="about-controls" style="opacity: 0.5;">
+        <div class="about-controls">
           <div class="about-controls-group">
-            <div class="about-controls-copy">Dictation hotkey — coming soon</div>
-            <div class="about-controls-meta">Native hotkey (Caps Lock) requires a signed build. Use <code style="font-family: var(--font-mono); font-size: 11px; background: rgba(255,255,255,0.06); padding: 1px 5px; border-radius: 4px;">minutes dictate</code> in the terminal or MCP tools for now.</div>
+            <div class="about-controls-copy">Dictation hotkey</div>
+            <div style="display: flex; align-items: center; gap: 8px; margin-top: 6px;">
+              <button id="settings-dictation-hotkey-record" class="btn btn-secondary btn-sm" style="min-width: 100px; font-family: var(--font-mono); font-size: 12px;">Caps Lock</button>
+            </div>
+            <div class="about-controls-meta" id="settings-dictation-hotkey-status">Hold the selected key to dictate, or tap to lock and tap again to stop. Requires Input Monitoring permission.</div>
           </div>
+          <button class="btn btn-secondary btn-sm toggle-btn" id="settings-dictation-hotkey">Off</button>
         </div>
         <div class="about-controls">
           <div class="about-controls-group">
@@ -1817,6 +1938,19 @@
         <div class="about-item-title">STORAGE</div>
         <div id="settings-storage-info" style="font-size: 13px; color: var(--text-secondary); line-height: 1.8; padding: 0 4px;">
           Loading...
+        </div>
+      </div>
+
+      <!-- Diagnostics (Readiness + Recovery moved from header) -->
+      <div style="margin-bottom: 16px;">
+        <div class="about-item-title">DIAGNOSTICS</div>
+        <div class="about-controls">
+          <div class="about-controls-copy">System readiness and audio permission checks</div>
+          <button class="btn btn-secondary btn-sm" onclick="document.getElementById('settings-overlay').classList.remove('active');document.getElementById('btn-readiness').click();">Readiness</button>
+        </div>
+        <div class="about-controls">
+          <div class="about-controls-copy">Retry failed captures and unprocessed audio files</div>
+          <button class="btn btn-secondary btn-sm" onclick="document.getElementById('settings-overlay').classList.remove('active');document.getElementById('btn-recovery').click();">Recovery</button>
         </div>
       </div>
 
@@ -1964,7 +2098,10 @@
     const recoveryButton = document.getElementById('btn-recovery');
     const recoveryCount = document.getElementById('recovery-count');
     const recoveryScroll = document.getElementById('recovery-scroll');
+    const recoverySubtitle = document.getElementById('recovery-subtitle');
     const quickThoughtButton = document.getElementById('btn-quick-thought');
+    const openOutputFolderButton = document.getElementById('btn-open-output-folder');
+    const aboutTrayCopy = document.getElementById('about-tray-copy');
 
     let isRecording = false;
     let isProcessing = false;
@@ -1981,6 +2118,14 @@
     let hotkeyShortcut = 'CmdOrCtrl+Shift+M';
     let lastOutputKey = null;
     let pollInterval = null;
+    let desktopCapabilities = {
+      platform: 'other',
+      folderRevealLabel: 'Show in Folder',
+      supportsCalendarIntegration: false,
+      supportsCallDetection: false,
+      supportsTrayArtifactCopy: false,
+      supportsDictationHotkey: false,
+    };
     const NUM_BARS = 32;
     const audioViz = document.getElementById('audio-viz');
     const cues = {
@@ -2000,6 +2145,43 @@
 
     // History for smooth animation
     const barHeights = new Array(NUM_BARS).fill(3);
+
+    function parentPath(path) {
+      if (!path) return path;
+      const normalized = path.replace(/[\\/]+$/, '');
+      const lastSlash = Math.max(normalized.lastIndexOf('/'), normalized.lastIndexOf('\\'));
+      return lastSlash === -1 ? normalized : normalized.slice(0, lastSlash);
+    }
+
+    function applyDesktopCapabilities(caps) {
+      if (!caps) return;
+      desktopCapabilities = {
+        ...desktopCapabilities,
+        ...caps,
+      };
+
+      openOutputFolderButton.textContent = desktopCapabilities.folderRevealLabel || 'Show in Folder';
+
+      if (recoverySubtitle) {
+        recoverySubtitle.textContent =
+          `Retry preserved captures and watched files that failed to process, or open them directly in ${desktopCapabilities.folderRevealLabel === 'Show in Finder' ? 'Finder' : desktopCapabilities.folderRevealLabel === 'Show in Explorer' ? 'Explorer' : 'a folder'}.`;
+      }
+
+      if (aboutTrayCopy) {
+        aboutTrayCopy.textContent = desktopCapabilities.supportsTrayArtifactCopy
+          ? 'Minutes is open source, markdown-backed, and designed so the artifact remains valuable even outside this app. Power-user tray actions copy the latest summary or transcript and try to paste it into your previous app when macOS automation allows it.'
+          : 'Minutes is open source, markdown-backed, and designed so the artifact remains valuable even outside this app. This desktop build focuses on recording, transcription, search, and Recall today; tray copy/paste automation remains macOS-only for now.';
+      }
+    }
+
+    async function loadDesktopCapabilities() {
+      try {
+        const caps = await invoke('cmd_desktop_capabilities');
+        applyDesktopCapabilities(caps);
+      } catch (e) {
+        console.error('Desktop capabilities:', e);
+      }
+    }
 
     function updateViz(level) {
       const bars = audioViz.children;
@@ -2350,10 +2532,10 @@
 
         const folder = document.createElement('button');
         folder.className = 'btn btn-secondary btn-sm';
-        folder.textContent = 'Show in Finder';
+        folder.textContent = desktopCapabilities.folderRevealLabel || 'Show in Folder';
         folder.addEventListener('click', async () => {
           try {
-            const parent = item.path.slice(0, item.path.lastIndexOf('/'));
+            const parent = parentPath(item.path);
             await invoke('cmd_open_file', { path: parent });
           } catch (e) {
             console.error('Open recovery folder:', e);
@@ -2411,7 +2593,7 @@
     document.getElementById('btn-open-output-folder').addEventListener('click', async () => {
       if (!latestOutput?.path) return;
       try {
-        const folder = latestOutput.path.slice(0, latestOutput.path.lastIndexOf('/'));
+        const folder = parentPath(latestOutput.path);
         await invoke('cmd_open_file', { path: folder });
       } catch (e) {
         console.error('Open folder:', e);
@@ -2898,6 +3080,10 @@
 
     // ── Upcoming meetings ──
     async function checkUpcoming() {
+      if (!desktopCapabilities.supportsCalendarIntegration) {
+        document.getElementById('upcoming').style.display = 'none';
+        return;
+      }
       if (isRecording) return;
       try {
         const events = await invoke('cmd_upcoming_meetings');
@@ -3004,7 +3190,9 @@
           const savedKeycode = s.dictation.hotkey_keycode || 57;
           dictationKeycode = savedKeycode;
           const keyName = dictationHotkeyLabel(savedKeycode);
-          document.getElementById('settings-dictation-hotkey-record').textContent = keyName;
+          if (hotkeyRecordBtn) {
+            hotkeyRecordBtn.textContent = keyName;
+          }
         }
         const nativeDictationHotkey = await invoke('cmd_dictation_hotkey_status').catch(() => null);
         if (nativeDictationHotkey) {
@@ -3257,12 +3445,18 @@
       const toggleBtn = document.getElementById('settings-dictation-hotkey');
       const statusEl = document.getElementById('settings-dictation-hotkey-status');
 
-      hotkeyRecordBtn.textContent = dictationHotkeyLabel(dictationKeycode);
-      hotkeyRecordBtn.style.borderColor = '';
-      hotkeyRecordBtn.style.color = '';
+      if (hotkeyRecordBtn) {
+        hotkeyRecordBtn.textContent = dictationHotkeyLabel(dictationKeycode);
+        hotkeyRecordBtn.style.borderColor = '';
+        hotkeyRecordBtn.style.color = '';
+      }
 
-      toggleBtn.disabled = false;
       if (dictationHotkeyPending) {
+        toggleBtn.disabled = false;
+        if (hotkeyRecordBtn) {
+          hotkeyRecordBtn.disabled = false;
+          hotkeyRecordBtn.style.opacity = '';
+        }
         toggleBtn.textContent = 'Starting...';
         toggleBtn.style.opacity = '0.85';
         statusEl.style.color = '';
@@ -3271,24 +3465,47 @@
         return;
       }
 
+      toggleBtn.style.opacity = '';
       setSettingsToggle('settings-dictation-hotkey', dictationHotkeyEnabled);
 
       if (status.state === 'failed') {
+        toggleBtn.disabled = false;
+        if (hotkeyRecordBtn) {
+          hotkeyRecordBtn.disabled = false;
+          hotkeyRecordBtn.style.opacity = '';
+        }
         statusEl.style.color = 'var(--red)';
         statusEl.textContent = status.message || 'Could not start the native dictation hotkey.';
       } else if (status.state === 'active') {
+        toggleBtn.disabled = false;
+        if (hotkeyRecordBtn) {
+          hotkeyRecordBtn.disabled = false;
+          hotkeyRecordBtn.style.opacity = '';
+        }
         statusEl.style.color = '';
-        statusEl.textContent = `Active - tap ${dictationHotkeyLabel(dictationKeycode)} to start/stop dictation`;
+        statusEl.textContent = `Active - hold ${dictationHotkeyLabel(dictationKeycode)} to dictate, or tap it to lock and tap again to stop`;
       } else if (status.state === 'unsupported') {
-        statusEl.style.color = 'var(--red)';
-        statusEl.textContent = status.message || 'Native dictation hotkey is only available on macOS.';
+        toggleBtn.disabled = true;
+        toggleBtn.textContent = 'N/A';
+        toggleBtn.style.opacity = '0.5';
+        if (hotkeyRecordBtn) {
+          hotkeyRecordBtn.disabled = true;
+          hotkeyRecordBtn.style.opacity = '0.5';
+        }
+        statusEl.style.color = 'var(--text-secondary)';
+        statusEl.textContent = status.message || 'Native dictation hotkey is currently available on macOS only.';
       } else {
+        toggleBtn.disabled = false;
+        if (hotkeyRecordBtn) {
+          hotkeyRecordBtn.disabled = false;
+          hotkeyRecordBtn.style.opacity = '';
+        }
         statusEl.style.color = '';
-        statusEl.textContent = 'Tap to start dictation, tap again to stop. Requires Input Monitoring permission.';
+        statusEl.textContent = 'Hold the selected key to dictate, or tap to lock and tap again to stop. Requires Input Monitoring permission.';
       }
     }
 
-    hotkeyRecordBtn.addEventListener('click', () => {
+    if (hotkeyRecordBtn) hotkeyRecordBtn.addEventListener('click', () => {
       if (isRecordingHotkey) return;
       isRecordingHotkey = true;
       hotkeyRecordBtn.textContent = 'Press any key...';
@@ -3811,6 +4028,7 @@
     invoke('cmd_set_completion_notifications', { enabled: notifyOnCompletion }).catch((e) => {
       console.error('Init notifications:', e);
     });
+    loadDesktopCapabilities();
     loadHotkeySettings();
     checkSetup();
     checkStatus();

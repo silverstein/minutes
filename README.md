@@ -449,19 +449,28 @@ minutes setup --model base    # Middle ground (141MB)
 ### Desktop app
 
 ```bash
-# Homebrew cask (recommended)
+# macOS — Homebrew cask (recommended)
 brew install --cask silverstein/tap/minutes
 
-# Or build from source
+# macOS — build from source
 export CXXFLAGS="-I$(xcrun --show-sdk-path)/usr/include/c++/v1"
 export MACOSX_DEPLOYMENT_TARGET=11.0
 cargo tauri build --bundles app
 
-# For local desktop development with stable macOS permissions
+# macOS — local desktop development with stable permissions
 ./scripts/install-dev-app.sh
 ```
 
-The desktop app adds a system tray icon, recording controls, audio visualizer, and a meeting list window. macOS will prompt for microphone permission on first recording.
+```powershell
+# Windows — build desktop binary from source
+cargo install tauri-cli --version 2.10.1 --locked
+cd tauri/src-tauri
+cargo tauri build --ci --no-bundle
+```
+
+Tagged GitHub releases can also include a Windows desktop binary as `minutes-desktop-windows-x64.exe`.
+
+The desktop app adds a system tray icon, recording controls, audio visualizer, Recall, and a meeting list window. The current Windows desktop build covers recording, transcription, search, settings, and Recall. Calendar suggestions, call detection, tray copy/paste automation, and the native dictation hotkey remain macOS-only for now.
 
 For macOS development, use a dedicated signed dev app identity:
 

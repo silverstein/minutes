@@ -460,25 +460,22 @@ fn main() {
             let sep2 = MenuItem::with_id(app, "sep2", "──────────", false, None::<&str>)?;
             let quit_item = MenuItem::with_id(app, "quit", "Quit Minutes", true, None::<&str>)?;
 
-            let menu = Menu::with_items(
-                app,
-                &[
-                    &open_item,
-                    &sep0,
-                    &record_item,
-                    &quick_thought_item,
-                    &stop_item,
-                    &sep,
-                    &note_item,
-                    &assistant_item,
-                    &list_item,
-                    &paste_summary_item,
-                    &paste_transcript_item,
-                    &sep2,
-                    &screen_share_item,
-                    &quit_item,
-                ],
-            )?;
+            let menu = Menu::new(app)?;
+            menu.append_items(&[
+                &open_item,
+                &sep0,
+                &record_item,
+                &quick_thought_item,
+                &stop_item,
+                &sep,
+                &note_item,
+                &assistant_item,
+                &list_item,
+            ])?;
+            if commands::supports_tray_artifact_copy() {
+                menu.append_items(&[&paste_summary_item, &paste_transcript_item])?;
+            }
+            menu.append_items(&[&sep2, &screen_share_item, &quit_item])?;
 
             let icon = tauri::image::Image::from_bytes(include_bytes!("../icons/icon.png"))
                 .expect("load tray icon");
@@ -623,14 +620,21 @@ fn main() {
                                     None,
                                     None,
                                 ) {
-                                    commands::show_user_notification("AI Assistant", &err);
+                                    commands::show_user_notification(
+                                        &app_handle,
+                                        "AI Assistant",
+                                        &err,
+                                    );
                                 }
                             });
                         }
                         "list" => {
-                            let meetings_dir =
-                                dirs::home_dir().unwrap_or_default().join("meetings");
-                            let _ = std::process::Command::new("open").arg(meetings_dir).spawn();
+                            let meetings_dir = minutes_core::config::Config::load().output_dir;
+                            if let Err(err) =
+                                commands::open_target(app, &meetings_dir.display().to_string())
+                            {
+                                commands::show_user_notification(app, "Meetings", &err);
+                            }
                         }
                         "paste-summary" | "paste-transcript" => {
                             let target_app = commands::frontmost_application_name();
@@ -646,12 +650,14 @@ fn main() {
                             ) {
                                 Ok(message) => {
                                     commands::show_user_notification(
+                                        app,
                                         &format!("Latest {}", kind),
                                         &message,
                                     );
                                 }
                                 Err(err) => {
                                     commands::show_user_notification(
+                                        app,
                                         &format!("Latest {}", kind),
                                         &err,
                                     );
@@ -748,7 +754,7 @@ fn main() {
             update_tray_state(app.handle(), initial_recording);
 
             // Start call detection background loop
-            {
+            if commands::supports_call_detection() {
                 let config = minutes_core::config::Config::load();
                 let detector = Arc::new(call_detect::CallDetector::new(config.call_detection));
                 detector.start(
@@ -761,7 +767,7 @@ fn main() {
             // Calendar items in tray menu — refresh every minute
             // Delay first refresh so the app window is interactive before
             // osascript Calendar queries block the main-thread menu updates.
-            {
+            if commands::supports_calendar_integration() {
                 let app_cal = app.handle().clone();
                 let menu_cal = menu.clone();
                 let cal_timer = cal_state.clone();
@@ -798,6 +804,7 @@ fn main() {
             commands::cmd_set_completion_notifications,
             commands::cmd_global_hotkey_settings,
             commands::cmd_set_global_hotkey,
+            commands::cmd_desktop_capabilities,
             commands::cmd_permission_center,
             commands::cmd_recovery_items,
             commands::cmd_retry_recovery,

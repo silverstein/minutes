@@ -1,0 +1,11 @@
+{
+  "bundle": {
+    "externalBin": [
+      "bin/mic_check"
+    ],
+    "macOS": {
+      "entitlements": "entitlements.plist",
+      "infoPlist": "Info.plist"
+    }
+  }
+}

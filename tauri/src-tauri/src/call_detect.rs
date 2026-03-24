@@ -78,6 +78,7 @@ impl CallDetector {
 
                         // Notify via macOS notification
                         crate::commands::show_user_notification(
+                            &app,
                             &format!("{} call detected", display_name),
                             "Open Minutes to start recording",
                         );

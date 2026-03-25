@@ -33,6 +33,7 @@ chrono = { workspace = true }
 hound = { workspace = true }
 dirs = { workspace = true }
 schemars = { workspace = true, features = ["derive"] }
+serde_yaml = { workspace = true }
 ureq = { workspace = true }
 csv = "1"
 

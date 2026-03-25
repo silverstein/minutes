@@ -175,6 +175,45 @@ pub fn match_embedding(embedding: &[f32], profiles: &[VoiceProfileWithEmbedding]
     best_name
 }
 
+/// Save per-speaker embeddings as a sidecar file next to the meeting markdown.
+/// Path: ~/meetings/.2026-03-25-standup.embeddings (hidden file, same dir)
+pub fn save_meeting_embeddings(
+    meeting_path: &std::path::Path,
+    embeddings: &std::collections::HashMap<String, Vec<f32>>,
+) {
+    if embeddings.is_empty() {
+        return;
+    }
+    let sidecar = sidecar_path(meeting_path);
+    let data = serde_json::to_vec(embeddings).unwrap_or_default();
+    if let Err(e) = std::fs::write(&sidecar, &data) {
+        tracing::warn!(path = %sidecar.display(), error = %e, "failed to write meeting embeddings");
+    } else {
+        // Set 0600 permissions (embeddings are biometric-adjacent data)
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&sidecar, std::fs::Permissions::from_mode(0o600)).ok();
+        }
+        tracing::debug!(path = %sidecar.display(), speakers = embeddings.len(), "meeting embeddings saved");
+    }
+}
+
+/// Load per-speaker embeddings from a meeting's sidecar file.
+pub fn load_meeting_embeddings(
+    meeting_path: &std::path::Path,
+) -> Option<std::collections::HashMap<String, Vec<f32>>> {
+    let sidecar = sidecar_path(meeting_path);
+    let data = std::fs::read(&sidecar).ok()?;
+    serde_json::from_slice(&data).ok()
+}
+
+fn sidecar_path(meeting_path: &std::path::Path) -> std::path::PathBuf {
+    let dir = meeting_path.parent().unwrap_or(std::path::Path::new("."));
+    let stem = meeting_path.file_name().unwrap_or_default().to_string_lossy();
+    dir.join(format!(".{}.embeddings", stem.trim_end_matches(".md")))
+}
+
 pub fn load_self_profile(config: &Config) -> Option<VoiceProfileWithEmbedding> {
     if !config.voice.enabled { return None; }
     let name = config.identity.name.as_ref()?;
@@ -272,5 +311,36 @@ mod tests {
     #[test]
     fn slugify_basic() {
         assert_eq!(slugify("Mat Silverstein"), "mat-silverstein");
+    }
+
+    #[test]
+    fn meeting_embeddings_roundtrip() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let meeting = dir.path().join("2026-03-25-standup.md");
+        std::fs::write(&meeting, "---\ntitle: test\n---\ntranscript").unwrap();
+
+        let mut embeddings = std::collections::HashMap::new();
+        embeddings.insert("SPEAKER_1".to_string(), vec![0.1f32, 0.2, 0.3]);
+        embeddings.insert("SPEAKER_2".to_string(), vec![0.4f32, 0.5, 0.6]);
+
+        save_meeting_embeddings(&meeting, &embeddings);
+
+        let loaded = load_meeting_embeddings(&meeting).unwrap();
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(loaded["SPEAKER_1"], vec![0.1f32, 0.2, 0.3]);
+        assert_eq!(loaded["SPEAKER_2"], vec![0.4f32, 0.5, 0.6]);
+    }
+
+    #[test]
+    fn meeting_embeddings_missing_returns_none() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let meeting = dir.path().join("nonexistent.md");
+        assert!(load_meeting_embeddings(&meeting).is_none());
+    }
+
+    #[test]
+    fn sidecar_path_is_hidden_file() {
+        let p = sidecar_path(std::path::Path::new("/tmp/meetings/2026-03-25-standup.md"));
+        assert_eq!(p.file_name().unwrap().to_str().unwrap(), ".2026-03-25-standup.embeddings");
     }
 }

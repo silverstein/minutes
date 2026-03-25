@@ -327,6 +327,25 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+
+    /// Confirm or correct speaker attributions for a meeting
+    Confirm {
+        /// Path to the meeting markdown file
+        #[arg(long)]
+        meeting: PathBuf,
+
+        /// Non-interactive: specify speaker label to confirm (e.g., SPEAKER_1)
+        #[arg(long)]
+        speaker: Option<String>,
+
+        /// Non-interactive: name to assign to the speaker
+        #[arg(long)]
+        name: Option<String>,
+
+        /// Save confirmed speaker's voice profile for future meetings
+        #[arg(long)]
+        save_voice: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -475,6 +494,12 @@ fn main() -> Result<()> {
         },
         Commands::Enroll { file, duration } => cmd_enroll(file.as_deref(), duration, &config),
         Commands::Voices { delete, json } => cmd_voices(delete, json),
+        Commands::Confirm {
+            meeting,
+            speaker,
+            name,
+            save_voice,
+        } => cmd_confirm(&meeting, speaker.as_deref(), name.as_deref(), save_voice, &config),
     }
 }
 
@@ -2694,5 +2719,164 @@ fn cmd_voices(delete: bool, json: bool) -> Result<()> {
         eprintln!("  {} — {} samples, {} ({})", p.name, p.sample_count, p.source, p.model_version);
         eprintln!("    enrolled: {}, updated: {}", p.enrolled_at.get(..10).unwrap_or(&p.enrolled_at), p.updated_at.get(..10).unwrap_or(&p.updated_at));
     }
+    Ok(())
+}
+
+fn cmd_confirm(
+    meeting_path: &Path,
+    speaker: Option<&str>,
+    name: Option<&str>,
+    save_voice: bool,
+    _config: &Config,
+) -> Result<()> {
+    use minutes_core::diarize::{AttributionSource, Confidence};
+    use minutes_core::voice;
+
+    if !meeting_path.exists() {
+        return Err(anyhow::anyhow!("Meeting not found: {}", meeting_path.display()));
+    }
+
+    // Read the meeting file
+    let content = std::fs::read_to_string(meeting_path)?;
+    let (yaml_str, body) = minutes_core::markdown::split_frontmatter(&content);
+
+    if yaml_str.is_empty() {
+        return Err(anyhow::anyhow!("Meeting has no YAML frontmatter"));
+    }
+
+    // Parse existing frontmatter
+    let mut frontmatter: minutes_core::markdown::Frontmatter =
+        serde_yaml::from_str(yaml_str).map_err(|e| anyhow::anyhow!("Failed to parse frontmatter: {}", e))?;
+
+    if frontmatter.speaker_map.is_empty() {
+        eprintln!("No speaker attributions found in this meeting.");
+        eprintln!("Process the meeting with diarization enabled first.");
+        return Ok(());
+    }
+
+    // Load meeting embeddings (for optional voice save)
+    let meeting_embeddings = voice::load_meeting_embeddings(meeting_path);
+
+    // Non-interactive mode: confirm a specific speaker
+    if let (Some(speaker_label), Some(new_name)) = (speaker, name) {
+        let found = frontmatter
+            .speaker_map
+            .iter_mut()
+            .find(|a| a.speaker_label == speaker_label);
+
+        if let Some(attr) = found {
+            let old_confidence = attr.confidence;
+            attr.name = new_name.to_string();
+            attr.confidence = Confidence::High;
+            attr.source = AttributionSource::Manual;
+            eprintln!(
+                "Confirmed: {} = {} (was {:?} → High)",
+                speaker_label, new_name, old_confidence
+            );
+
+            // Optionally save voice profile
+            if save_voice {
+                if let Some(ref embeddings) = meeting_embeddings {
+                    if let Some(embedding) = embeddings.get(speaker_label) {
+                        let conn = voice::open_db().map_err(|e| anyhow::anyhow!("{}", e))?;
+                        let slug: String = new_name.to_lowercase().chars()
+                            .map(|c: char| if c.is_alphanumeric() { c } else { '-' })
+                            .collect::<String>().trim_matches('-').to_string();
+                        voice::save_profile_blended(&conn, &slug, new_name, embedding, "confirmed")
+                            .map_err(|e| anyhow::anyhow!("{}", e))?;
+                        eprintln!("Voice profile saved for {} (from confirmed meeting)", new_name);
+                    } else {
+                        eprintln!("Warning: no embedding found for {} in meeting sidecar", speaker_label);
+                    }
+                } else {
+                    eprintln!("Warning: no meeting embeddings sidecar found (meeting was processed before Level 3)");
+                }
+            }
+        } else {
+            return Err(anyhow::anyhow!(
+                "Speaker '{}' not found in speaker_map. Available: {}",
+                speaker_label,
+                frontmatter.speaker_map.iter().map(|a| a.speaker_label.as_str()).collect::<Vec<_>>().join(", ")
+            ));
+        }
+    } else {
+        // Interactive mode: walk through all attributions
+        eprintln!("Speaker attributions for: {}", frontmatter.title);
+        eprintln!();
+
+        for attr in &mut frontmatter.speaker_map {
+            if attr.confidence == Confidence::High {
+                eprintln!(
+                    "  {} = {} (high, {:?}) ✓",
+                    attr.speaker_label, attr.name, attr.source
+                );
+                continue;
+            }
+
+            eprint!(
+                "  {} = {} ({:?}, {:?}) — confirm? [Y/n/name]: ",
+                attr.speaker_label, attr.name, attr.confidence, attr.source
+            );
+
+            let mut input = String::new();
+            std::io::stdin().read_line(&mut input)?;
+            let input = input.trim();
+
+            if input.is_empty() || input.eq_ignore_ascii_case("y") || input.eq_ignore_ascii_case("yes") {
+                attr.confidence = Confidence::High;
+                attr.source = AttributionSource::Manual;
+                eprintln!("    → Confirmed: {} = {}", attr.speaker_label, attr.name);
+            } else if input.eq_ignore_ascii_case("n") || input.eq_ignore_ascii_case("no") {
+                eprintln!("    → Skipped");
+            } else {
+                // User typed a different name
+                attr.name = input.to_string();
+                attr.confidence = Confidence::High;
+                attr.source = AttributionSource::Manual;
+                eprintln!("    → Updated: {} = {}", attr.speaker_label, attr.name);
+            }
+        }
+
+        // Ask about saving voice profiles for confirmed speakers
+        if save_voice {
+            if let Some(ref embeddings) = meeting_embeddings {
+                let conn = voice::open_db().map_err(|e| anyhow::anyhow!("{}", e))?;
+                for attr in &frontmatter.speaker_map {
+                    if attr.confidence == Confidence::High && attr.source == AttributionSource::Manual {
+                        if let Some(embedding) = embeddings.get(&attr.speaker_label) {
+                            let slug: String = attr.name.to_lowercase().chars()
+                                .map(|c: char| if c.is_alphanumeric() { c } else { '-' })
+                                .collect::<String>().trim_matches('-').to_string();
+                            voice::save_profile_blended(&conn, &slug, &attr.name, embedding, "confirmed")
+                                .map_err(|e| anyhow::anyhow!("{}", e))?;
+                            eprintln!("  Voice profile saved for {}", attr.name);
+                        }
+                    }
+                }
+            } else {
+                eprintln!("No meeting embeddings sidecar — voice profiles not saved");
+            }
+        }
+    }
+
+    // Rewrite the meeting file with updated speaker_map
+    // Also apply High-confidence names to transcript body
+    let new_body = minutes_core::diarize::apply_confirmed_names(body, &frontmatter.speaker_map);
+    let new_yaml = serde_yaml::to_string(&frontmatter)
+        .map_err(|e| anyhow::anyhow!("Failed to serialize frontmatter: {}", e))?;
+    let new_content = format!("---\n{}---\n{}", new_yaml, new_body);
+    std::fs::write(meeting_path, new_content)?;
+
+    let confirmed_count = frontmatter
+        .speaker_map
+        .iter()
+        .filter(|a| a.confidence == Confidence::High)
+        .count();
+    eprintln!(
+        "\nMeeting updated: {}/{} speakers confirmed.",
+        confirmed_count,
+        frontmatter.speaker_map.len()
+    );
+
     Ok(())
 }

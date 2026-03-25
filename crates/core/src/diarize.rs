@@ -28,6 +28,9 @@ pub struct SpeakerSegment {
 pub struct DiarizationResult {
     pub segments: Vec<SpeakerSegment>,
     pub num_speakers: usize,
+    /// Per-speaker averaged embeddings (for Level 3 confirmed learning).
+    /// Empty when using the Python subprocess engine.
+    pub speaker_embeddings: std::collections::HashMap<String, Vec<f32>>,
 }
 
 // ── Speaker attribution ──────────────────────────────────────
@@ -278,17 +281,31 @@ fn diarize_with_pyannote_rs(
     let threshold = config.diarization.threshold;
 
     let mut segments = Vec::new();
+    let mut embedding_accum: std::collections::HashMap<String, (Vec<f32>, usize)> =
+        std::collections::HashMap::new();
+
     for segment_result in segments_iter {
         let segment = segment_result?;
         let embedding: Vec<f32> = extractor.compute(&segment.samples)?.collect();
 
         let speaker_id = manager
-            .search_speaker(embedding, threshold)
+            .search_speaker(embedding.clone(), threshold)
             .map(|id| id.to_string())
             .unwrap_or_else(|| "0".to_string());
 
+        let label = format!("SPEAKER_{}", speaker_id);
+
+        // Accumulate embeddings per speaker for averaging
+        let entry = embedding_accum
+            .entry(label.clone())
+            .or_insert_with(|| (vec![0.0f32; embedding.len()], 0));
+        for (i, val) in embedding.iter().enumerate() {
+            entry.0[i] += val;
+        }
+        entry.1 += 1;
+
         segments.push(SpeakerSegment {
-            speaker: format!("SPEAKER_{}", speaker_id),
+            speaker: label,
             start: segment.start,
             end: segment.end,
         });
@@ -300,9 +317,19 @@ fn diarize_with_pyannote_rs(
         .collect::<std::collections::HashSet<_>>()
         .len();
 
+    // Average embeddings per speaker
+    let speaker_embeddings: std::collections::HashMap<String, Vec<f32>> = embedding_accum
+        .into_iter()
+        .map(|(label, (sum, count))| {
+            let avg = sum.into_iter().map(|v| v / count as f32).collect();
+            (label, avg)
+        })
+        .collect();
+
     Ok(DiarizationResult {
         segments,
         num_speakers,
+        speaker_embeddings,
     })
 }
 
@@ -440,6 +467,7 @@ except Exception as e:
     Ok(DiarizationResult {
         segments,
         num_speakers,
+        speaker_embeddings: std::collections::HashMap::new(), // Python path can't extract embeddings
     })
 }
 
@@ -517,6 +545,7 @@ mod tests {
                 },
             ],
             num_speakers: 2,
+            speaker_embeddings: std::collections::HashMap::new(),
         };
 
         let labeled = apply_speakers(transcript, &result);

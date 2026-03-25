@@ -169,12 +169,15 @@ where
 
     // Step 2: Diarize (optional — depends on config.diarization.engine)
     let mut diarization_num_speakers: usize = 0;
+    let mut diarization_embeddings: std::collections::HashMap<String, Vec<f32>> =
+        std::collections::HashMap::new();
     let transcript = if config.diarization.engine != "none" && content_type == ContentType::Meeting
     {
         on_progress(PipelineStage::Diarizing);
         tracing::info!(step = "diarize", "running speaker diarization");
         if let Some(result) = diarize::diarize(audio_path, config) {
             diarization_num_speakers = result.num_speakers;
+            diarization_embeddings = result.speaker_embeddings.clone();
             diarize::apply_speakers(&transcript, &result)
         } else {
             transcript
@@ -452,6 +455,11 @@ where
         user_notes.as_deref(),
         config,
     )?;
+    // Save per-speaker embeddings as sidecar (for Level 3 confirmed learning)
+    if !diarization_embeddings.is_empty() {
+        crate::voice::save_meeting_embeddings(&result.path, &diarization_embeddings);
+    }
+
     if let Err(error) =
         crate::daily_notes::append_backlink(&result, frontmatter.date, summary.as_deref(), config)
     {

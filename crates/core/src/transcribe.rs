@@ -818,10 +818,15 @@ fn resolve_vad_model_path(config: &Config) -> Option<PathBuf> {
     }
 
     let model_dir = &config.transcription.model_path;
-    let candidates = [
+    let mut candidates = vec![
         model_dir.join(format!("ggml-{}.bin", vad_model)),
         model_dir.join(format!("{}.bin", vad_model)),
     ];
+    // Fallback: accept old "ggml-silero-vad.bin" name for backward compatibility,
+    // but only when the config is using a silero-variant name (the default).
+    if vad_model.starts_with("silero") {
+        candidates.push(model_dir.join("ggml-silero-vad.bin"));
+    }
 
     for candidate in &candidates {
         if candidate.exists() {

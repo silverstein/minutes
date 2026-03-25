@@ -1376,11 +1376,11 @@ fn cmd_setup(model: &str, list: bool, diarization: bool) -> Result<()> {
     }
 
     // Auto-download Silero VAD model (prevents transcription loops on non-English audio)
-    let vad_dest = model_dir.join("ggml-silero-vad.bin");
+    let vad_dest = model_dir.join("ggml-silero-v6.2.0.bin");
     if !vad_dest.exists() {
         let vad_url =
-            "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-silero-vad.bin";
-        eprintln!("Downloading Silero VAD model (~2 MB) ...");
+            "https://huggingface.co/ggml-org/whisper-vad/resolve/main/ggml-silero-v6.2.0.bin";
+        eprintln!("Downloading Silero VAD model (~885 KB) ...");
         if let Err(e) = download_file(vad_url, &vad_dest) {
             eprintln!(
                 "Warning: VAD model download failed ({}). Transcription will still work \

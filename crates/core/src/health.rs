@@ -77,17 +77,19 @@ pub fn vad_model_status(config: &Config) -> HealthItem {
         };
     }
 
-    let vad_file = config
-        .transcription
-        .model_path
-        .join(format!("ggml-{}.bin", vad_model));
-    let exists = vad_file.exists();
+    let model_dir = &config.transcription.model_path;
+    let mut candidates = vec![model_dir.join(format!("ggml-{}.bin", vad_model))];
+    // Accept old filename for backward compatibility (only for silero variants)
+    if vad_model.starts_with("silero") {
+        candidates.push(model_dir.join("ggml-silero-vad.bin"));
+    }
+    let found = candidates.iter().find(|p| p.exists());
 
     HealthItem {
         label: "VAD model".into(),
-        state: if exists { "ready" } else { "attention" }.into(),
-        detail: if exists {
-            format!("Silero VAD installed at {}.", vad_file.display())
+        state: if found.is_some() { "ready" } else { "attention" }.into(),
+        detail: if let Some(path) = found {
+            format!("Silero VAD installed at {}.", path.display())
         } else {
             "Silero VAD not installed. Run `minutes setup` to download it. \
              Without it, non-English audio may produce transcription loops."

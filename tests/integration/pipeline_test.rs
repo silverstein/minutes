@@ -16,7 +16,7 @@ fn test_config(output_dir: PathBuf) -> Config {
                 .join("models"),
             min_words: 10,
             language: Some("en".into()),
-            vad_model: "silero-vad".into(),
+            vad_model: "silero-v6.2.0".into(),
         },
         ..Config::default()
     }

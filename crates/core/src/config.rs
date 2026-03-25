@@ -34,7 +34,7 @@ pub struct TranscriptionConfig {
     pub model_path: PathBuf,
     pub min_words: usize,
     pub language: Option<String>,
-    /// Silero VAD model name (resolved under model_path, e.g. "silero-vad" → ggml-silero-vad.bin).
+    /// Silero VAD model name (resolved under model_path, e.g. "silero-v6.2.0" → ggml-silero-v6.2.0.bin).
     /// Set to empty string to disable VAD (falls back to energy-based silence stripping).
     pub vad_model: String,
 }
@@ -261,7 +261,7 @@ impl Default for TranscriptionConfig {
             model_path: minutes_dir().join("models"),
             min_words: 3,
             language: None,
-            vad_model: "silero-vad".into(),
+            vad_model: "silero-v6.2.0".into(),
         }
     }
 }

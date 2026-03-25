@@ -2567,17 +2567,73 @@ fn cmd_dictate(stdout: bool, note_only: bool, config: &Config) -> Result<()> {
 fn cmd_enroll(file: Option<&Path>, duration: u64, config: &Config) -> Result<()> {
     use minutes_core::voice;
 
-    let my_name = config.identity.name.as_ref().ok_or_else(|| anyhow::anyhow!(
-        "identity.name not set. Add to ~/.config/minutes/config.toml:\n\n[identity]\nname = \"Your Name\""
-    ))?;
-    eprintln!("Enrolling voice for: {}", my_name);
+    // Step 1: Check name — offer to set it if missing
+    let my_name = match config.identity.name.as_ref() {
+        Some(name) if !name.is_empty() => name.clone(),
+        _ => {
+            eprintln!("Your name isn't set yet. This is needed so Minutes knows which speaker is you.");
+            eprint!("What's your name? ");
+            let mut input = String::new();
+            std::io::stdin().read_line(&mut input)?;
+            let name = input.trim().to_string();
+            if name.is_empty() {
+                return Err(anyhow::anyhow!("Name is required for voice enrollment."));
+            }
+            // Save to config file
+            let config_path = dirs::config_dir()
+                .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".config"))
+                .join("minutes/config.toml");
+            if config_path.exists() {
+                let mut content = std::fs::read_to_string(&config_path)?;
+                if content.contains("[identity]") {
+                    // Add name under existing [identity] section
+                    content = content.replace("[identity]", &format!("[identity]\nname = \"{}\"", name));
+                } else {
+                    content.push_str(&format!("\n[identity]\nname = \"{}\"\n", name));
+                }
+                std::fs::write(&config_path, content)?;
+                eprintln!("Saved to {}", config_path.display());
+            }
+            name
+        }
+    };
+
+    // Step 2: Check diarization models
+    if !minutes_core::diarize::models_installed(config) {
+        eprintln!("Speaker diarization models aren't installed yet.");
+        eprintln!("Run this first:  minutes setup --diarization");
+        eprintln!("Then try:        minutes enroll");
+        return Err(anyhow::anyhow!("Diarization models required for voice enrollment."));
+    }
+
+    // Step 3: Record or load audio
+    eprintln!();
+    eprintln!("  \x1b[1;36m◉ Voice Enrollment\x1b[0m  \x1b[2mfor\x1b[0m \x1b[1m{}\x1b[0m", my_name);
+    eprintln!();
 
     let audio_path = if let Some(path) = file {
-        if !path.exists() { return Err(anyhow::anyhow!("File not found: {}", path.display())); }
-        eprintln!("Using audio file: {}", path.display());
+        if !path.exists() {
+            return Err(anyhow::anyhow!("File not found: {}", path.display()));
+        }
+        eprintln!("  Using audio file: {}", path.display());
         path.to_path_buf()
     } else {
-        eprintln!("Recording {}s of your voice... speak naturally.", duration);
+        eprintln!("  This creates a voice profile so Minutes can identify you");
+        eprintln!("  in future meetings. Just talk normally for {} seconds.", duration);
+        eprintln!();
+        eprintln!("  Tips:");
+        eprintln!("  - Use the same mic you use for meetings");
+        eprintln!("  - Talk at your normal volume and pace");
+        eprintln!("  - Say anything — read something aloud, describe your day");
+        eprintln!();
+        eprint!("  Ready? Press Enter to start recording...");
+        let mut buf = String::new();
+        std::io::stdin().read_line(&mut buf)?;
+
+        eprintln!();
+        eprintln!("  \x1b[1;32m● REC\x1b[0m  \x1b[1mSpeak now!\x1b[0m  ({}s)", duration);
+        eprintln!();
+
         let tmp_dir = std::env::temp_dir().join("minutes-enroll");
         std::fs::create_dir_all(&tmp_dir)?;
         let tmp_path = tmp_dir.join("enroll-sample.wav");
@@ -2588,42 +2644,79 @@ fn cmd_enroll(file: Option<&Path>, duration: u64, config: &Config) -> Result<()>
             flag_clone.store(true, std::sync::atomic::Ordering::Relaxed);
         });
         minutes_core::capture::record_to_wav(&tmp_path, stop_flag, config)?;
-        eprintln!("Recording saved.");
+        eprintln!("  \x1b[1;32m✓\x1b[0m Recording captured.");
         tmp_path
     };
 
-    if !minutes_core::diarize::models_installed(config) {
-        return Err(anyhow::anyhow!("Diarization models not installed. Run: minutes setup --diarization"));
+    // Step 4: Extract voice embedding
+    eprintln!("  \x1b[2mAnalyzing your voice...\x1b[0m");
+    let result = minutes_core::diarize::diarize(&audio_path, config)
+        .ok_or_else(|| anyhow::anyhow!(
+            "Could not analyze the recording. Make sure you spoke clearly and your mic is working.\n\
+             Check with: minutes devices"
+        ))?;
+
+    if result.segments.is_empty() {
+        return Err(anyhow::anyhow!(
+            "No speech detected in the recording.\n\n\
+             Try again:\n\
+             - Make sure your mic is not muted\n\
+             - Speak at normal volume\n\
+             - Reduce background noise\n\
+             - Check your mic: minutes devices"
+        ));
     }
 
-    eprintln!("Extracting voice embedding...");
-    let result = minutes_core::diarize::diarize(&audio_path, config)
-        .ok_or_else(|| anyhow::anyhow!("Diarization failed"))?;
-    if result.segments.is_empty() {
-        return Err(anyhow::anyhow!("No speech detected. Try again in a quiet environment."));
-    }
     if result.num_speakers > 1 {
-        eprintln!("Warning: detected {} speakers. Using dominant speaker.", result.num_speakers);
+        eprintln!("  Note: detected {} voices — using the primary speaker.", result.num_speakers);
+        eprintln!("  For best results, enroll in a quiet room with just you speaking.");
     }
 
     // Find dominant speaker
     let mut counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
-    for seg in &result.segments { *counts.entry(&seg.speaker).or_insert(0) += 1; }
-    let dominant = counts.into_iter().max_by_key(|(_, c)| *c).map(|(s, _)| s).unwrap_or("SPEAKER_1");
+    for seg in &result.segments {
+        *counts.entry(&seg.speaker).or_insert(0) += 1;
+    }
+    let dominant = counts
+        .into_iter()
+        .max_by_key(|(_, c)| *c)
+        .map(|(s, _)| s)
+        .unwrap_or("SPEAKER_1");
 
-    eprintln!("Computing voice profile...");
+    eprintln!("  \x1b[2mComputing voice profile...\x1b[0m");
     let embedding = extract_dominant_embedding(&audio_path, dominant, config)?;
 
+    // Step 5: Save
     let conn = voice::open_db().map_err(|e| anyhow::anyhow!("{}", e))?;
-    let slug: String = my_name.to_lowercase().chars().map(|c| if c.is_alphanumeric() { c } else { '-' }).collect::<String>().trim_matches('-').to_string();
-    voice::save_profile_blended(&conn, &slug, my_name, &embedding, "self-enrollment").map_err(|e| anyhow::anyhow!("{}", e))?;
+    let slug: String = my_name
+        .to_lowercase()
+        .chars()
+        .map(|c: char| if c.is_alphanumeric() { c } else { '-' })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_string();
+    voice::save_profile_blended(&conn, &slug, &my_name, &embedding, "self-enrollment")
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
 
     let profiles = voice::list_profiles(&conn).map_err(|e| anyhow::anyhow!("{}", e))?;
     if let Some(p) = profiles.iter().find(|p| p.person_slug == slug) {
-        eprintln!("\nVoice profile saved for {}. (samples: {}, model: {})", p.name, p.sample_count, p.model_version);
-        eprintln!("You'll be auto-identified in future diarized meetings.");
+        eprintln!();
+        eprintln!("  \x1b[1;32m✓ Voice profile saved!\x1b[0m");
+        eprintln!("  \x1b[2m───────────────────────\x1b[0m");
+        eprintln!("  \x1b[2mName:\x1b[0m     \x1b[1m{}\x1b[0m", p.name);
+        eprintln!("  \x1b[2mSamples:\x1b[0m  {}", p.sample_count);
+        eprintln!("  \x1b[2mModel:\x1b[0m    {}", p.model_version);
+        eprintln!();
+        eprintln!("  \x1b[36mWhat happens next:\x1b[0m");
+        eprintln!("  \x1b[2m›\x1b[0m Your voice will be auto-identified in future meetings");
+        eprintln!("  \x1b[2m›\x1b[0m Your lines show as \x1b[1m[{}]\x1b[0m instead of [SPEAKER_X]", p.name);
+        eprintln!("  \x1b[2m›\x1b[0m Run \x1b[33mminutes enroll\x1b[0m again to improve accuracy");
+        eprintln!("  \x1b[2m›\x1b[0m Run \x1b[33mminutes voices\x1b[0m to see your profile");
     }
-    if file.is_none() { std::fs::remove_file(&audio_path).ok(); }
+
+    if file.is_none() {
+        std::fs::remove_file(&audio_path).ok();
+    }
     Ok(())
 }
 

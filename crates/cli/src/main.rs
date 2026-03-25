@@ -124,6 +124,17 @@ enum Commands {
         limit: usize,
     },
 
+    /// List open and stale commitments from the conversation graph
+    Commitments {
+        /// Filter by person name or slug
+        #[arg(short, long)]
+        person: Option<String>,
+
+        /// Output raw JSON
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Research a topic across meetings, decisions, and open follow-ups
     Research {
         /// Topic or question to investigate across meetings
@@ -373,6 +384,7 @@ fn main() -> Result<()> {
             json,
             limit,
         } => cmd_people(rebuild, json, limit, &config),
+        Commands::Commitments { person, json } => cmd_commitments(person.as_deref(), json, &config),
         Commands::Research {
             query,
             content_type,
@@ -1073,6 +1085,34 @@ fn cmd_people(rebuild: bool, json: bool, limit: usize, config: &Config) -> Resul
 
     // Print JSON to stdout for programmatic consumption
     println!("{}", serde_json::to_string_pretty(&people)?);
+    Ok(())
+}
+
+fn cmd_commitments(person: Option<&str>, json: bool, config: &Config) -> Result<()> {
+    use minutes_core::graph;
+    let commitments =
+        graph::query_commitments(config, person).map_err(|e| anyhow::anyhow!("{}", e))?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&commitments)?);
+        return Ok(());
+    }
+
+    if commitments.is_empty() {
+        eprintln!("No commitments found.");
+        return Ok(());
+    }
+
+    for c in &commitments {
+        let who = c.person_name.as_deref().unwrap_or("unknown");
+        let status_icon = match c.status.as_str() {
+            "stale" => "\x1b[33m⚠\x1b[0m",
+            "done" => "\x1b[32m✓\x1b[0m",
+            _ => "·",
+        };
+        eprintln!("{} {} — {} ({})", status_icon, who, c.text, c.status);
+    }
+
     Ok(())
 }
 

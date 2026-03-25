@@ -160,17 +160,16 @@ pub fn rebuild_index_at(config: &Config, path: &Path) -> Result<GraphStats, Grap
     }
 
     // If existing db is corrupted, delete and recreate
-    if path.exists() {
-        if Connection::open(&path)
+    if path.exists()
+        && Connection::open(path)
             .and_then(|c| c.execute_batch("SELECT 1 FROM people LIMIT 1"))
             .is_err()
-        {
-            tracing::warn!("Corrupted graph.db detected, rebuilding from scratch");
-            std::fs::remove_file(&path).ok();
-        }
+    {
+        tracing::warn!("Corrupted graph.db detected, rebuilding from scratch");
+        std::fs::remove_file(path).ok();
     }
 
-    let conn = open_db(&path)?;
+    let conn = open_db(path)?;
 
     // Clear existing data for full rebuild
     conn.execute_batch(
@@ -721,7 +720,7 @@ fn fix_frontmatter(fm_str: &str) -> String {
             if trimmed.starts_with("people:") && trimmed.contains('[') {
                 let colon_pos = line.find(':').unwrap_or(0);
                 let key = &line[..=colon_pos];
-                let value = line[colon_pos + 1..].replace('[', "").replace(']', "");
+                let value = line[colon_pos + 1..].replace(['[', ']'], "");
                 let items: Vec<String> = value
                     .split(',')
                     .map(|s| s.trim().to_string())
@@ -734,7 +733,11 @@ fn fix_frontmatter(fm_str: &str) -> String {
                 let value = trimmed[4..].trim();
                 if !value.is_empty()
                     && !value.starts_with('"')
-                    && !value.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false)
+                    && !value
+                        .chars()
+                        .next()
+                        .map(|c| c.is_ascii_digit())
+                        .unwrap_or(false)
                 {
                     let indent = line.len() - line.trim_start().len();
                     return format!("{}due: \"{}\"", " ".repeat(indent), value);
@@ -854,9 +857,9 @@ fn extract_commitments_from_transcript(body: &str) -> Vec<(String, String)> {
                 // Clean up the line — remove speaker labels and timestamps
                 let clean = line
                     .trim()
-                    .trim_start_matches(|c: char| c == '[')
+                    .trim_start_matches('[')
                     .split(']')
-                    .last()
+                    .next_back()
                     .unwrap_or(line.trim())
                     .trim();
                 if clean.len() > 10 {
@@ -1177,11 +1180,13 @@ Skip the wizard. Drop users into a pre-populated demo workspace.
         rebuild_index_at(&config, &db).unwrap();
 
         let conn = open_db(&db).unwrap();
-        let result = conn.query_row(
-            "SELECT COUNT(*) FROM people WHERE slug = ?1",
-            params!["nonexistent-person"],
-            |row| row.get::<_, i64>(0),
-        ).unwrap();
+        let result = conn
+            .query_row(
+                "SELECT COUNT(*) FROM people WHERE slug = ?1",
+                params!["nonexistent-person"],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap();
         assert_eq!(result, 0);
     }
 
@@ -1198,20 +1203,24 @@ Skip the wizard. Drop users into a pre-populated demo workspace.
         rebuild_index_at(&config, &db).unwrap();
 
         let conn = open_db(&db).unwrap();
-        let (name, count): (String, i64) = conn.query_row(
-            "SELECT name, meeting_count FROM people WHERE slug = 'sarah-chen'",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        ).unwrap();
+        let (name, count): (String, i64) = conn
+            .query_row(
+                "SELECT name, meeting_count FROM people WHERE slug = 'sarah-chen'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
         assert_eq!(name, "Sarah Chen");
         assert_eq!(count, 2);
 
         // Check open commitments
-        let person_id: i64 = conn.query_row(
-            "SELECT id FROM people WHERE slug = 'sarah-chen'",
-            [],
-            |row| row.get(0),
-        ).unwrap();
+        let person_id: i64 = conn
+            .query_row(
+                "SELECT id FROM people WHERE slug = 'sarah-chen'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
         let open: i64 = conn.query_row(
             "SELECT COUNT(*) FROM commitments WHERE person_id = ?1 AND status IN ('open', 'stale')",
             params![person_id],
@@ -1232,11 +1241,13 @@ Skip the wizard. Drop users into a pre-populated demo workspace.
         rebuild_index_at(&config, &db).unwrap();
 
         let conn = open_db(&db).unwrap();
-        let total: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM commitments WHERE status IN ('open', 'stale')",
-            [],
-            |row| row.get(0),
-        ).unwrap();
+        let total: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM commitments WHERE status IN ('open', 'stale')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert!(total > 0, "Should have at least 1 open commitment");
     }
 
@@ -1255,11 +1266,13 @@ Skip the wizard. Drop users into a pre-populated demo workspace.
 
         let conn = open_db(&db).unwrap();
         // Sarah appears in 2 meetings, should have highest meeting count
-        let top: (String, i64) = conn.query_row(
-            "SELECT name, meeting_count FROM people ORDER BY meeting_count DESC LIMIT 1",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        ).unwrap();
+        let top: (String, i64) = conn
+            .query_row(
+                "SELECT name, meeting_count FROM people ORDER BY meeting_count DESC LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
         assert_eq!(top.0, "Sarah Chen");
         assert_eq!(top.1, 2);
     }

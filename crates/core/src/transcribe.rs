@@ -205,10 +205,21 @@ fn load_audio_samples(path: &Path) -> Result<Vec<f32>, TranscribeError> {
             match decode_with_ffmpeg(path) {
                 Ok(samples) => Ok(samples),
                 Err(e) => {
-                    tracing::debug!(
-                        error = %e,
-                        "ffmpeg decode failed — falling back to symphonia"
-                    );
+                    let is_not_found = e.to_string().contains("not available")
+                        || e.to_string().contains("not found");
+                    if is_not_found {
+                        tracing::warn!(
+                            "ffmpeg not found — falling back to symphonia for {} decoding. \
+                             Non-English audio may produce poor results. \
+                             Install ffmpeg: brew install ffmpeg (macOS) / apt install ffmpeg (Linux)",
+                            ext
+                        );
+                    } else {
+                        tracing::warn!(
+                            error = %e,
+                            "ffmpeg decode failed — falling back to symphonia"
+                        );
+                    }
                     decode_with_symphonia(path)
                 }
             }
@@ -542,6 +553,7 @@ fn normalize_audio(mut samples: Vec<f32>) -> Vec<f32> {
 /// Whisper's decoder can get stuck repeating the same text across consecutive segments,
 /// especially on non-English audio. This function detects runs of 3+ consecutive segments
 /// with >80% text overlap and collapses them to the first occurrence.
+#[allow(dead_code)] // Only used with whisper feature
 fn dedup_segments(lines: Vec<String>) -> Vec<String> {
     if lines.len() < 3 {
         return lines;

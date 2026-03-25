@@ -14,12 +14,14 @@ name = "minutes"
 path = "src/main.rs"
 
 [features]
+default = ["diarize"]
+diarize = ["minutes-core/diarize"]
 cuda = ["minutes-core/cuda"]
 metal = ["minutes-core/metal"]
 coreml = ["minutes-core/coreml"]
 
 [dependencies]
-minutes-core = { path = "../core", version = "0.7.3", features = ["streaming", "diarize"] }
+minutes-core = { path = "../core", version = "0.7.3", features = ["streaming"] }
 clap = { workspace = true }
 ctrlc = { workspace = true }
 anyhow = { workspace = true }

@@ -383,8 +383,28 @@ fn main() -> Result<()> {
             rebuild,
             json,
             limit,
-        } => cmd_people(rebuild, json, limit, &config),
-        Commands::Commitments { person, json } => cmd_commitments(person.as_deref(), json, &config),
+        } => {
+            #[cfg(feature = "diarize")]
+            {
+                cmd_people(rebuild, json, limit, &config)
+            }
+            #[cfg(not(feature = "diarize"))]
+            {
+                let _ = (rebuild, json, limit);
+                anyhow::bail!("The `people` command requires the diarize feature. Rebuild with: cargo install --path crates/cli")
+            }
+        }
+        Commands::Commitments { person, json } => {
+            #[cfg(feature = "diarize")]
+            {
+                cmd_commitments(person.as_deref(), json, &config)
+            }
+            #[cfg(not(feature = "diarize"))]
+            {
+                let _ = (person, json);
+                anyhow::bail!("The `commitments` command requires the diarize feature. Rebuild with: cargo install --path crates/cli")
+            }
+        }
         Commands::Research {
             query,
             content_type,
@@ -672,6 +692,7 @@ fn cmd_stop(_config: &Config) -> Result<()> {
                 std::fs::remove_file(&result_path).ok();
 
                 // Update relationship graph index
+                #[cfg(feature = "diarize")]
                 if let Err(e) = minutes_core::graph::rebuild_index(_config) {
                     tracing::warn!(error = %e, "graph index rebuild failed (non-fatal)");
                 }
@@ -981,6 +1002,7 @@ fn cmd_person(name: &str, config: &Config) -> Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "diarize")]
 fn cmd_people(rebuild: bool, json: bool, limit: usize, config: &Config) -> Result<()> {
     use minutes_core::graph;
 
@@ -1088,8 +1110,16 @@ fn cmd_people(rebuild: bool, json: bool, limit: usize, config: &Config) -> Resul
     Ok(())
 }
 
+#[cfg(feature = "diarize")]
 fn cmd_commitments(person: Option<&str>, json: bool, config: &Config) -> Result<()> {
     use minutes_core::graph;
+
+    // Auto-rebuild if index doesn't exist
+    if !graph::db_path().exists() {
+        eprintln!("Building relationship index...");
+        graph::rebuild_index(config).map_err(|e| anyhow::anyhow!("{}", e))?;
+    }
+
     let commitments =
         graph::query_commitments(config, person).map_err(|e| anyhow::anyhow!("{}", e))?;
 
@@ -1099,18 +1129,41 @@ fn cmd_commitments(person: Option<&str>, json: bool, config: &Config) -> Result<
     }
 
     if commitments.is_empty() {
-        eprintln!("No commitments found.");
+        let scope = person.map(|p| format!(" for {}", p)).unwrap_or_default();
+        eprintln!("No open commitments found{}.", scope);
         return Ok(());
     }
 
-    for c in &commitments {
-        let who = c.person_name.as_deref().unwrap_or("unknown");
-        let status_icon = match c.status.as_str() {
-            "stale" => "\x1b[33m⚠\x1b[0m",
-            "done" => "\x1b[32m✓\x1b[0m",
-            _ => "·",
-        };
-        eprintln!("{} {} — {} ({})", status_icon, who, c.text, c.status);
+    // Group by status for clear output
+    let stale: Vec<_> = commitments.iter().filter(|c| c.status == "stale").collect();
+    let open: Vec<_> = commitments.iter().filter(|c| c.status == "open").collect();
+
+    if !stale.is_empty() {
+        eprintln!("STALE ({} overdue)", stale.len());
+        for c in &stale {
+            let who = c.person_name.as_deref().unwrap_or("unassigned");
+            eprintln!(
+                "  \x1b[33m⚠\x1b[0m {} \x1b[2m({}; due: {}; from: {})\x1b[0m",
+                c.text,
+                who,
+                c.due_date.as_deref().unwrap_or("no date"),
+                c.meeting_title,
+            );
+        }
+    }
+
+    if !open.is_empty() {
+        if !stale.is_empty() {
+            eprintln!();
+        }
+        eprintln!("OPEN ({})", open.len());
+        for c in &open {
+            let who = c.person_name.as_deref().unwrap_or("unassigned");
+            eprintln!(
+                "  · {} \x1b[2m({}; from: {})\x1b[0m",
+                c.text, who, c.meeting_title
+            );
+        }
     }
 
     Ok(())

@@ -455,18 +455,18 @@
           label.textContent = 'Dictating';
           waveform.style.display = 'flex';
           timer.style.display = '';
-          showExpanded(true);
-          if (!partialText) setTextContent('...', true);
+          // Stay compact during dictation — text appears only on success
+          showExpanded(false);
           startTimer();
           break;
 
         case 'processing':
           // Seamless transition: keep "Dictating" label, swap dot for spinner
           setIndicator('spinner');
-          // label stays as "Dictating" — don't change it
           waveform.style.display = 'none';
           // timer stays frozen (don't hide it)
-          showExpanded(true);
+          // Stay compact — will expand when success shows final text
+          showExpanded(false);
           break;
 
         case 'partial':

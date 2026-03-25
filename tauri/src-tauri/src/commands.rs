@@ -3080,7 +3080,7 @@ fn start_dictation_session(
                     })).ok();
                 }
 
-                if matches!(&event, DictationEvent::Accumulating) {
+                if matches!(&event, DictationEvent::Accumulating | DictationEvent::PartialText(_)) {
                     let level = minutes_core::streaming::stream_audio_level();
                     app_for_events.emit("dictation:level", level).ok();
                 }
@@ -3097,9 +3097,16 @@ fn start_dictation_session(
             clear_dictation_hotkey_capture_state(&mut runtime);
         }
 
-        if let Err(e) = result {
-            eprintln!("[dictation] error: {}", e);
-            app_clone.emit("dictation:state", "error").ok();
+        match result {
+            Ok(()) => {
+                // Session ended normally (silence timeout or yield).
+                // Dismiss overlay if it wasn't already dismissed by a terminal event.
+                app_clone.emit("dictation:state", "cancelled").ok();
+            }
+            Err(e) => {
+                eprintln!("[dictation] error: {}", e);
+                app_clone.emit("dictation:state", "error").ok();
+            }
         }
     });
 

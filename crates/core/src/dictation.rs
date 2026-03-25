@@ -92,10 +92,7 @@ fn take_cached_model(model_name: &str) -> Option<whisper_rs::WhisperContext> {
 #[cfg(feature = "whisper")]
 fn return_model_to_cache(ctx: whisper_rs::WhisperContext, model_name: String) {
     if let Ok(mut cache) = MODEL_CACHE.lock() {
-        *cache = Some(CachedModel {
-            ctx,
-            model_name,
-        });
+        *cache = Some(CachedModel { ctx, model_name });
     }
 }
 
@@ -152,7 +149,10 @@ pub enum DictationEvent {
     /// Partial transcription (streaming mode) — text updates progressively.
     PartialText(String),
     /// Silence countdown: total timeout ms, remaining ms.
-    SilenceCountdown { total_ms: u64, remaining_ms: u64 },
+    SilenceCountdown {
+        total_ms: u64,
+        remaining_ms: u64,
+    },
     Success,
     Error,
     Cancelled,
@@ -346,7 +346,10 @@ where
                 }
 
                 total_silence_ms += 100;
-                if has_spoken && !was_speaking && total_silence_ms < config.dictation.silence_timeout_ms {
+                if has_spoken
+                    && !was_speaking
+                    && total_silence_ms < config.dictation.silence_timeout_ms
+                {
                     let remaining = config.dictation.silence_timeout_ms - total_silence_ms;
                     on_event(DictationEvent::SilenceCountdown {
                         total_ms: config.dictation.silence_timeout_ms,

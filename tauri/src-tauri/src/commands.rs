@@ -3090,14 +3090,26 @@ fn start_dictation_session(
                     app_for_events.emit("dictation:partial", text.as_str()).ok();
                 }
 
-                if let DictationEvent::SilenceCountdown { total_ms, remaining_ms } = &event {
-                    app_for_events.emit("dictation:silence", serde_json::json!({
-                        "total_ms": total_ms,
-                        "remaining_ms": remaining_ms,
-                    })).ok();
+                if let DictationEvent::SilenceCountdown {
+                    total_ms,
+                    remaining_ms,
+                } = &event
+                {
+                    app_for_events
+                        .emit(
+                            "dictation:silence",
+                            serde_json::json!({
+                                "total_ms": total_ms,
+                                "remaining_ms": remaining_ms,
+                            }),
+                        )
+                        .ok();
                 }
 
-                if matches!(&event, DictationEvent::Accumulating | DictationEvent::PartialText(_)) {
+                if matches!(
+                    &event,
+                    DictationEvent::Accumulating | DictationEvent::PartialText(_)
+                ) {
                     let level = minutes_core::streaming::stream_audio_level();
                     app_for_events.emit("dictation:level", level).ok();
                 }

@@ -443,7 +443,8 @@ fn main() {
             // Preload whisper model for dictation in background thread.
             // Only if dictation shortcuts are enabled — avoids 150MB RAM for
             // users who never use dictation.
-            if startup_config.dictation.shortcut_enabled || startup_config.dictation.hotkey_enabled {
+            if startup_config.dictation.shortcut_enabled || startup_config.dictation.hotkey_enabled
+            {
                 let preload_config = startup_config.clone();
                 std::thread::spawn(move || {
                     if let Err(e) = minutes_core::dictation::preload_model(&preload_config) {

@@ -12,6 +12,7 @@ categories = ["multimedia::audio", "command-line-utilities"]
 [features]
 default = ["whisper"]
 whisper = ["dep:whisper-rs"]
+parakeet = []  # subprocess-based, no native deps
 diarize = ["dep:pyannote-rs"]
 cuda = ["whisper-rs/cuda"]
 metal = ["whisper-rs/metal"]

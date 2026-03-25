@@ -60,6 +60,15 @@ pub enum TranscribeError {
     #[error("transcription failed: {0}")]
     TranscriptionFailed(String),
 
+    #[error("engine '{0}' not compiled in — rebuild with: cargo build --features {0}")]
+    EngineNotAvailable(String),
+
+    #[error("parakeet binary not found. Install parakeet.cpp and ensure `parakeet` is in PATH.")]
+    ParakeetNotFound,
+
+    #[error("parakeet transcription failed: {0}")]
+    ParakeetFailed(String),
+
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 }

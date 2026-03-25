@@ -74,8 +74,8 @@ The pipeline is the product, not the meeting. The same transcribe → summarize 
 │  ┌──────────┐  ├─▶│Transcribe │──▶│ Diarize   │──▶│ Summarize    │ │
 │  │ Watch     │  │  │           │   │ (optional)│   │              │ │
 │  │ Folder    │──┘  │whisper.cpp│   │ pyannote /│   │ Claude /     │ │
-│  │           │     │(local,    │   │ sherpa-   │   │ Ollama /     │ │
-│  │ Voice     │     │ Apple Si  │   │ onnx      │   │ OpenAI /     │ │
+│  │           │     │/ parakeet │   │ sherpa-   │   │ Ollama /     │ │
+│  │ Voice     │     │(local,    │   │ onnx      │   │ OpenAI /     │ │
 │  │ Memos,    │     │ optimized)│   │ (skip for │   │ any LLM      │ │
 │  │ any .m4a/ │     │           │   │  memos)   │   │ (pluggable)  │ │
 │  │ .wav file │     │           │   │           │   │              │ │
@@ -162,7 +162,7 @@ The pipeline is the product, not the meeting. The same transcribe → summarize 
 | Component | Technology | Rationale |
 |-----------|-----------|-----------|
 | **Audio engine** | Rust | Cross-platform, fast, memory-safe. Single binary. |
-| **Transcription** | whisper.cpp (via Rust bindings) | Local, Apple Silicon optimized, best open-source STT |
+| **Transcription** | whisper.cpp (default) or parakeet.cpp (opt-in) | Local, Apple Silicon optimized. Parakeet: lower WER, multilingual. |
 | **Diarization** | pyannote (subprocess) or sherpa-onnx (native) | Pluggable: pyannote for best quality, sherpa-onnx for no-Python mode |
 | **Menu bar app** | Tauri v2 | Rust backend + web frontend, ~10MB vs Electron's 150MB |
 | **CLI** | Rust (clap) | Same binary as engine, zero extra deps |

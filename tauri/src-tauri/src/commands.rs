@@ -2756,6 +2756,7 @@ mod tests {
                 min_words: 3,
                 language: Some("en".into()),
                 vad_model: "silero-v6.2.0".into(),
+                ..minutes_core::config::TranscriptionConfig::default()
             },
             ..Config::default()
         };

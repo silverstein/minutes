@@ -55,7 +55,7 @@ minutes stop                  # Stop and transcribe
 Audio → Transcribe → Diarize → Summarize → Structured Markdown → Relationship Graph
          (local)     (local)     (LLM)       (decisions,            (people, commitments,
         whisper.cpp  pyannote   Claude/       action items,          topics, scores)
-                                Ollama/       people, entities)      SQLite index
+        /parakeet               Ollama/       people, entities)      SQLite index
                                 OpenAI
 ```
 
@@ -465,6 +465,11 @@ brew install ffmpeg           # macOS
 # Enable speaker diarization (optional, ~34MB ONNX models)
 minutes setup --diarization
 
+# Alternative: use Parakeet engine (opt-in, lower WER than Whisper)
+# Requires parakeet.cpp installed: https://github.com/Frikallo/parakeet.cpp
+minutes setup --parakeet                          # English model (tdt-ctc-110m, ~220MB)
+minutes setup --parakeet --parakeet-model tdt-600m  # Multilingual (25 EU languages, ~1.2GB)
+
 # Enroll your voice for automatic speaker identification
 minutes enroll              # Records 10s of your voice
 minutes voices              # View enrolled profiles
@@ -586,7 +591,10 @@ Optional — minutes works out of the box.
 # ~/.config/minutes/config.toml
 
 [transcription]
-model = "small"           # tiny (75MB), base, small (466MB), medium, large-v3 (3.1GB)
+engine = "whisper"        # "whisper" (default) or "parakeet" (opt-in, lower WER)
+model = "small"           # whisper: tiny (75MB), base, small (466MB), medium, large-v3 (3.1GB)
+# parakeet_model = "tdt-ctc-110m"  # parakeet: tdt-ctc-110m (English), tdt-600m (multilingual)
+# parakeet_binary = "parakeet"     # Path to parakeet.cpp binary (or name in PATH)
 
 [summarization]
 engine = "none"           # Default: Claude summarizes conversationally via MCP

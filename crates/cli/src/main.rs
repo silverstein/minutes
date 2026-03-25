@@ -212,6 +212,14 @@ enum Commands {
         /// Download speaker diarization models (~34 MB)
         #[arg(long)]
         diarization: bool,
+
+        /// Download parakeet.cpp model for alternative transcription engine
+        #[arg(long)]
+        parakeet: bool,
+
+        /// Parakeet model to download: tdt-ctc-110m, tdt-600m
+        #[arg(long, default_value = "tdt-ctc-110m")]
+        parakeet_model: String,
     },
 
     /// Inspect or register the meetings directory as a QMD collection
@@ -461,7 +469,15 @@ fn main() -> Result<()> {
             model,
             list,
             diarization,
-        } => cmd_setup(&model, list, diarization),
+            parakeet,
+            parakeet_model,
+        } => {
+            if parakeet {
+                cmd_setup_parakeet(&parakeet_model)
+            } else {
+                cmd_setup(&model, list, diarization)
+            }
+        }
         Commands::Qmd { action, collection } => cmd_qmd(&action, &collection, &config),
         Commands::Service { action } => {
             #[cfg(target_os = "macos")]
@@ -1359,6 +1375,10 @@ fn cmd_setup(model: &str, list: bool, diarization: bool) -> Result<()> {
         eprintln!();
         eprintln!("Speaker diarization:");
         eprintln!("  --diarization   34 MB   (pyannote-rs: segmentation + speaker embedding)");
+        eprintln!();
+        eprintln!("Parakeet models (alternative engine, --parakeet):");
+        eprintln!("  tdt-ctc-110m  ~220 MB   (English, fast, default)");
+        eprintln!("  tdt-600m      ~1.2 GB   (multilingual, 25 EU languages, best quality)");
         return Ok(());
     }
 
@@ -1475,6 +1495,88 @@ fn cmd_setup_diarization() -> Result<()> {
     eprintln!("\nTo enable speaker diarization, add to ~/.config/minutes/config.toml:");
     eprintln!("  [diarization]");
     eprintln!("  engine = \"pyannote-rs\"");
+
+    Ok(())
+}
+
+/// Download and set up a parakeet.cpp model for alternative transcription.
+fn cmd_setup_parakeet(model: &str) -> Result<()> {
+    let valid_models = ["tdt-ctc-110m", "tdt-600m"];
+    if !valid_models.contains(&model) {
+        anyhow::bail!(
+            "unknown parakeet model: {}. Available: {}",
+            model,
+            valid_models.join(", ")
+        );
+    }
+
+    let config = Config::default();
+    let model_dir = config.transcription.model_path.join("parakeet");
+    std::fs::create_dir_all(&model_dir)?;
+
+    let dest = model_dir.join(format!("{}.safetensors", model));
+    if dest.exists() {
+        let size = std::fs::metadata(&dest)?.len();
+        eprintln!(
+            "Model already downloaded: {} ({:.0} MB)",
+            dest.display(),
+            size as f64 / 1_048_576.0
+        );
+    } else {
+        // Map model name to HuggingFace repo
+        let hf_repo = match model {
+            "tdt-ctc-110m" => "nvidia/parakeet-tdt_ctc-110m",
+            "tdt-600m" => "nvidia/parakeet-tdt-0.6b-v3",
+            _ => unreachable!(),
+        };
+        let url = format!(
+            "https://huggingface.co/{}/resolve/main/model.safetensors",
+            hf_repo
+        );
+
+        eprintln!("Downloading parakeet model: {} ...", model);
+        eprintln!(
+            "Note: If a pre-converted safetensors is not available at this URL,"
+        );
+        eprintln!("you may need to download the .nemo file and convert it:");
+        eprintln!("  huggingface-cli download {} --include '*.nemo'", hf_repo);
+        eprintln!("  python scripts/convert_nemo.py <file>.nemo -o {}", dest.display());
+        eprintln!();
+
+        if let Err(e) = download_file(&url, &dest) {
+            eprintln!("Download failed: {}", e);
+            eprintln!("\nThe pre-converted safetensors may not be hosted yet.");
+            eprintln!("To convert manually, install parakeet.cpp and run:");
+            eprintln!("  python convert_nemo.py <model>.nemo -o {}", dest.display());
+            return Err(e);
+        }
+    }
+
+    // Verify parakeet binary is available
+    match std::process::Command::new("parakeet")
+        .arg("--help")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+    {
+        Ok(status) if status.success() => {
+            eprintln!("\nparakeet binary found in PATH.");
+        }
+        _ => {
+            eprintln!("\nWarning: `parakeet` binary not found in PATH.");
+            eprintln!("Install parakeet.cpp: https://github.com/Frikallo/parakeet.cpp");
+            eprintln!("Build from source:");
+            eprintln!("  git clone https://github.com/Frikallo/parakeet.cpp");
+            eprintln!("  cd parakeet.cpp && mkdir build && cd build");
+            eprintln!("  cmake .. && make -j");
+            eprintln!("  cp parakeet /usr/local/bin/");
+        }
+    }
+
+    eprintln!("\nTo use parakeet as your transcription engine, add to ~/.config/minutes/config.toml:");
+    eprintln!("  [transcription]");
+    eprintln!("  engine = \"parakeet\"");
+    eprintln!("  parakeet_model = \"{}\"", model);
 
     Ok(())
 }

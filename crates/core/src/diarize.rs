@@ -30,6 +30,75 @@ pub struct DiarizationResult {
     pub num_speakers: usize,
 }
 
+// ── Speaker attribution ──────────────────────────────────────
+
+/// How confident we are that a speaker label maps to a real person.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum Confidence {
+    High,
+    Medium,
+    Low,
+}
+
+/// How the attribution was determined.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum AttributionSource {
+    Deterministic,
+    Llm,
+    Enrollment,
+    Manual,
+}
+
+/// A mapping from an anonymous speaker label to a real person.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct SpeakerAttribution {
+    pub speaker_label: String,
+    pub name: String,
+    pub confidence: Confidence,
+    pub source: AttributionSource,
+}
+
+/// Rewrite speaker labels in a transcript for high-confidence attributions only.
+pub fn apply_confirmed_names(
+    transcript: &str,
+    attributions: &[SpeakerAttribution],
+) -> String {
+    let high_map: std::collections::HashMap<&str, &str> = attributions
+        .iter()
+        .filter(|a| a.confidence == Confidence::High)
+        .map(|a| (a.speaker_label.as_str(), a.name.as_str()))
+        .collect();
+
+    if high_map.is_empty() {
+        return transcript.to_string();
+    }
+
+    let mut output = String::new();
+    for line in transcript.lines() {
+        let mut replaced = false;
+        if let Some(rest) = line.strip_prefix('[') {
+            if let Some(bracket_end) = rest.find(']') {
+                let inside = &rest[..bracket_end];
+                if let Some(space_pos) = inside.find(' ') {
+                    let label = &inside[..space_pos];
+                    if let Some(name) = high_map.get(label) {
+                        let after = &rest[bracket_end..];
+                        output.push_str(&format!("[{} {}{}\n", name, &inside[space_pos + 1..], after));
+                        replaced = true;
+                    }
+                }
+            }
+        }
+        if !replaced {
+            output.push_str(line);
+            output.push('\n');
+        }
+    }
+    output
+}
+
 /// Model filenames expected by pyannote-rs.
 pub const SEGMENTATION_MODEL: &str = "segmentation-3.0.onnx";
 pub const EMBEDDING_MODEL: &str = "wespeaker_en_voxceleb_CAM++.onnx";
@@ -460,6 +529,54 @@ mod tests {
         let config = Config::default(); // engine = "none"
         let result = diarize(Path::new("/fake.wav"), &config);
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn apply_confirmed_names_rewrites_high_confidence() {
+        let transcript = "[SPEAKER_1 0:00] Hello\n[SPEAKER_2 0:05] Hi there\n";
+        let attributions = vec![
+            SpeakerAttribution {
+                speaker_label: "SPEAKER_1".into(),
+                name: "Mat".into(),
+                confidence: Confidence::High,
+                source: AttributionSource::Manual,
+            },
+            SpeakerAttribution {
+                speaker_label: "SPEAKER_2".into(),
+                name: "Alex".into(),
+                confidence: Confidence::Medium,
+                source: AttributionSource::Deterministic,
+            },
+        ];
+        let result = apply_confirmed_names(transcript, &attributions);
+        assert!(result.contains("[Mat 0:00]"));
+        assert!(result.contains("[SPEAKER_2 0:05]"));
+    }
+
+    #[test]
+    fn apply_confirmed_names_no_high_is_noop() {
+        let transcript = "[SPEAKER_1 0:00] Hello\n";
+        let result = apply_confirmed_names(transcript, &[SpeakerAttribution {
+            speaker_label: "SPEAKER_1".into(),
+            name: "Mat".into(),
+            confidence: Confidence::Medium,
+            source: AttributionSource::Deterministic,
+        }]);
+        assert_eq!(result, transcript);
+    }
+
+    #[test]
+    fn speaker_attribution_roundtrips_yaml() {
+        let attr = SpeakerAttribution {
+            speaker_label: "SPEAKER_2".into(),
+            name: "Sarah".into(),
+            confidence: Confidence::High,
+            source: AttributionSource::Manual,
+        };
+        let yaml = serde_yaml::to_string(&attr).unwrap();
+        let parsed: SpeakerAttribution = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(parsed.confidence, Confidence::High);
+        assert_eq!(parsed.source, AttributionSource::Manual);
     }
 
     #[test]

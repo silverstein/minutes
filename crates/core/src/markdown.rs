@@ -69,6 +69,8 @@ pub struct Frontmatter {
     pub recorded_by: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub visibility: Option<Visibility>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub speaker_map: Vec<crate::diarize::SpeakerAttribution>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
@@ -374,6 +376,7 @@ mod tests {
             intents: vec![],
             recorded_by: None,
             visibility: None,
+            speaker_map: vec![],
         }
     }
 
@@ -442,6 +445,41 @@ mod tests {
         assert!(json.contains("Frontmatter"));
         assert!(json.contains("recorded_by"));
         assert!(json.contains("visibility"));
+    }
+
+    #[test]
+    fn frontmatter_with_speaker_map_roundtrips() {
+        let dir = TempDir::new().unwrap();
+        let config = Config {
+            output_dir: dir.path().to_path_buf(),
+            ..Config::default()
+        };
+        let mut fm = test_frontmatter();
+        fm.speaker_map = vec![crate::diarize::SpeakerAttribution {
+            speaker_label: "SPEAKER_1".into(),
+            name: "Mat".into(),
+            confidence: crate::diarize::Confidence::Medium,
+            source: crate::diarize::AttributionSource::Deterministic,
+        }];
+        let result = write(&fm, "transcript", None, None, &config).unwrap();
+        let content = std::fs::read_to_string(&result.path).unwrap();
+        assert!(content.contains("speaker_map:"), "speaker_map should appear in YAML");
+        assert!(content.contains("SPEAKER_1"), "speaker label should appear");
+        assert!(content.contains("medium"), "confidence should be lowercase");
+        assert!(content.contains("deterministic"), "source should be lowercase");
+    }
+
+    #[test]
+    fn frontmatter_without_speaker_map_omits_field() {
+        let dir = TempDir::new().unwrap();
+        let config = Config {
+            output_dir: dir.path().to_path_buf(),
+            ..Config::default()
+        };
+        let fm = test_frontmatter(); // speaker_map: vec![]
+        let result = write(&fm, "transcript", None, None, &config).unwrap();
+        let content = std::fs::read_to_string(&result.path).unwrap();
+        assert!(!content.contains("speaker_map"), "empty speaker_map should be omitted");
     }
 
     #[test]

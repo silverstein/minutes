@@ -714,6 +714,197 @@ fn encode_screens_for_openai(screen_files: &[std::path::PathBuf]) -> Vec<serde_j
         .collect()
 }
 
+// ── Speaker mapping (Level 1) ────────────────────────────────
+
+const SPEAKER_MAPPING_PROMPT: &str = r#"Given this meeting transcript with anonymous speaker labels (SPEAKER_1, SPEAKER_2, etc.) and a list of known attendees, determine which speaker is which person based on conversational context clues.
+
+Look for: direct address, role mentions, self-references, topic ownership.
+
+ATTENDEES:
+{attendees}
+
+TRANSCRIPT (first 3000 chars):
+{transcript}
+
+For each speaker, respond in this exact format (one per line):
+SPEAKER_1 = Name
+SPEAKER_2 = Name
+
+If you cannot determine a speaker's identity, respond:
+SPEAKER_X = UNKNOWN
+
+Only output the mappings, nothing else."#;
+
+/// Map anonymous speaker labels to real names using an LLM.
+/// Returns Medium-confidence attributions.
+pub fn map_speakers(
+    transcript: &str,
+    attendees: &[String],
+    config: &Config,
+) -> Vec<crate::diarize::SpeakerAttribution> {
+    if attendees.is_empty() || !transcript.contains("SPEAKER_") {
+        return Vec::new();
+    }
+
+    let speakers = extract_speaker_labels(transcript);
+    if speakers.is_empty() {
+        return Vec::new();
+    }
+
+    tracing::info!(speakers = speakers.len(), attendees = attendees.len(), "Level 1: LLM speaker mapping");
+
+    let max_chars = 3000;
+    let truncated = if transcript.len() > max_chars {
+        let mut end = max_chars;
+        while end > 0 && !transcript.is_char_boundary(end) {
+            end -= 1;
+        }
+        &transcript[..end]
+    } else {
+        transcript
+    };
+
+    let prompt = SPEAKER_MAPPING_PROMPT
+        .replace("{attendees}", &attendees.join(", "))
+        .replace("{transcript}", truncated);
+
+    let response = if config.summarization.engine != "none" {
+        run_speaker_mapping_prompt(&prompt, config)
+    } else {
+        run_speaker_mapping_via_agent(&prompt, config)
+    };
+
+    match response {
+        Ok(text) => {
+            let mappings = parse_speaker_mapping(&text, &speakers, attendees);
+            if !mappings.is_empty() {
+                tracing::info!(mapped = mappings.len(), "Level 1: speaker mapping complete");
+            }
+            mappings
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "Level 1: speaker mapping failed");
+            Vec::new()
+        }
+    }
+}
+
+/// Extract unique SPEAKER_X labels from a transcript. Public for pipeline use.
+pub fn extract_speaker_labels_pub(transcript: &str) -> Vec<String> {
+    extract_speaker_labels(transcript)
+}
+
+fn extract_speaker_labels(transcript: &str) -> Vec<String> {
+    let mut labels = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for line in transcript.lines() {
+        if let Some(rest) = line.strip_prefix('[') {
+            if let Some(bracket_end) = rest.find(']') {
+                let inside = &rest[..bracket_end];
+                if let Some(space_pos) = inside.find(' ') {
+                    let label = &inside[..space_pos];
+                    if label.starts_with("SPEAKER_") && seen.insert(label.to_string()) {
+                        labels.push(label.to_string());
+                    }
+                }
+            }
+        }
+    }
+    labels
+}
+
+fn run_speaker_mapping_prompt(prompt: &str, config: &Config) -> Result<String, Box<dyn std::error::Error>> {
+    match config.summarization.engine.as_str() {
+        "agent" => run_speaker_mapping_via_agent(prompt, config),
+        "claude" => {
+            let api_key = std::env::var("ANTHROPIC_API_KEY").map_err(|_| "ANTHROPIC_API_KEY not set")?;
+            let body = serde_json::json!({"model":"claude-sonnet-4-20250514","max_tokens":256,"messages":[{"role":"user","content":prompt}]});
+            let resp: serde_json::Value = ureq::post("https://api.anthropic.com/v1/messages")
+                .header("x-api-key", &api_key).header("anthropic-version", "2023-06-01").header("content-type", "application/json")
+                .send_json(&body)?.body_mut().read_json()?;
+            resp["content"][0]["text"].as_str().map(|s| s.to_string()).ok_or_else(|| "No text in response".into())
+        }
+        "openai" => {
+            let api_key = std::env::var("OPENAI_API_KEY").map_err(|_| "OPENAI_API_KEY not set")?;
+            let body = serde_json::json!({"model":"gpt-4o-mini","max_tokens":256,"messages":[{"role":"user","content":prompt}]});
+            let resp: serde_json::Value = ureq::post("https://api.openai.com/v1/chat/completions")
+                .header("Authorization", &format!("Bearer {}", api_key)).header("content-type", "application/json")
+                .send_json(&body)?.body_mut().read_json()?;
+            resp["choices"][0]["message"]["content"].as_str().map(|s| s.to_string()).ok_or_else(|| "No text in response".into())
+        }
+        "ollama" => {
+            let url = format!("{}/api/generate", config.summarization.ollama_url);
+            let body = serde_json::json!({"model": config.summarization.ollama_model, "prompt": prompt, "stream": false});
+            let resp: serde_json::Value = ureq::post(&url).header("content-type", "application/json").send_json(&body)?.body_mut().read_json()?;
+            resp["response"].as_str().map(|s| s.to_string()).ok_or_else(|| "No text in response".into())
+        }
+        other => Err(format!("Unknown engine: {}", other).into()),
+    }
+}
+
+fn run_speaker_mapping_via_agent(prompt: &str, config: &Config) -> Result<String, Box<dyn std::error::Error>> {
+    use std::io::Write;
+    let agent_cmd = if config.summarization.agent_command.is_empty() { "claude".to_string() } else { config.summarization.agent_command.clone() };
+    let agent_cmd = resolve_agent_path(&agent_cmd);
+    let (cmd, args): (&str, Vec<&str>) = if agent_cmd == "claude" || agent_cmd.ends_with("/claude") {
+        (&agent_cmd, vec!["-p", "-", "--no-input"])
+    } else if agent_cmd == "codex" || agent_cmd.ends_with("/codex") {
+        (&agent_cmd, vec!["exec", "-", "-s", "read-only"])
+    } else {
+        (&agent_cmd, vec![])
+    };
+    let mut child = std::process::Command::new(cmd).args(&args)
+        .stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped())
+        .spawn().map_err(|e| format!("Agent '{}' not found: {}", agent_cmd, e))?;
+    if let Some(mut stdin) = child.stdin.take() {
+        let bytes = prompt.as_bytes().to_vec();
+        std::thread::spawn(move || { stdin.write_all(&bytes).ok(); });
+    }
+    let timeout = std::time::Duration::from_secs(120);
+    let start = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let output = child.wait_with_output()?;
+                if !status.success() { return Err(format!("Agent failed: {}", String::from_utf8_lossy(&output.stderr)).into()); }
+                return Ok(String::from_utf8_lossy(&output.stdout).to_string());
+            }
+            Ok(None) => {
+                if start.elapsed() > timeout { child.kill().ok(); return Err("Agent timed out".into()); }
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+            Err(e) => return Err(format!("Error: {}", e).into()),
+        }
+    }
+}
+
+fn parse_speaker_mapping(response: &str, valid_speakers: &[String], valid_attendees: &[String]) -> Vec<crate::diarize::SpeakerAttribution> {
+    let valid_set: std::collections::HashSet<&str> = valid_speakers.iter().map(|s| s.as_str()).collect();
+    let attendee_lower: std::collections::HashSet<String> = valid_attendees.iter().map(|a| a.to_lowercase()).collect();
+    let mut results = Vec::new();
+    for line in response.lines() {
+        let trimmed = line.trim();
+        if let Some(eq_pos) = trimmed.find('=') {
+            let label = trimmed[..eq_pos].trim();
+            let name = trimmed[eq_pos + 1..].trim();
+            if valid_set.contains(label) && !name.is_empty() && !name.eq_ignore_ascii_case("UNKNOWN") {
+                let name_lower = name.to_lowercase();
+                let matches_attendee = attendee_lower.iter().any(|a| {
+                    a.contains(&name_lower) || name_lower.contains(a.as_str())
+                        || a.split_whitespace().any(|part| part.len() > 2 && name_lower.contains(part))
+                });
+                if matches_attendee {
+                    results.push(crate::diarize::SpeakerAttribution {
+                        speaker_label: label.to_string(), name: name.to_string(),
+                        confidence: crate::diarize::Confidence::Medium, source: crate::diarize::AttributionSource::Llm,
+                    });
+                }
+            }
+        }
+    }
+    results
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -821,5 +1012,52 @@ PARTICIPANTS:
         let config = Config::default(); // engine = "none"
         let result = summarize("some transcript", &config);
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn extract_speaker_labels_finds_unique() {
+        let t = "[SPEAKER_1 0:00] Hi\n[SPEAKER_2 0:05] Hey\n[SPEAKER_1 0:10] Ok\n";
+        assert_eq!(extract_speaker_labels(t), vec!["SPEAKER_1", "SPEAKER_2"]);
+    }
+
+    #[test]
+    fn extract_speaker_labels_ignores_named() {
+        assert_eq!(extract_speaker_labels("[Mat 0:00] Hi\n[SPEAKER_1 0:05] Hey\n"), vec!["SPEAKER_1"]);
+    }
+
+    #[test]
+    fn parse_speaker_mapping_valid() {
+        let r = "SPEAKER_1 = Alex Chen\nSPEAKER_2 = Sarah Kim\n";
+        let s = vec!["SPEAKER_1".into(), "SPEAKER_2".into()];
+        let a = vec!["Alex Chen".into(), "Sarah Kim".into()];
+        let result = parse_speaker_mapping(r, &s, &a);
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].name, "Alex Chen");
+        assert_eq!(result[0].confidence, crate::diarize::Confidence::Medium);
+    }
+
+    #[test]
+    fn parse_speaker_mapping_skips_unknown() {
+        let r = "SPEAKER_1 = Alex\nSPEAKER_2 = UNKNOWN\n";
+        let result = parse_speaker_mapping(r, &["SPEAKER_1".into(), "SPEAKER_2".into()], &["Alex Chen".into()]);
+        assert_eq!(result.len(), 1);
+    }
+
+    #[test]
+    fn parse_speaker_mapping_rejects_hallucinated() {
+        let result = parse_speaker_mapping("SPEAKER_1 = Bob\n", &["SPEAKER_1".into()], &["Alex".into()]);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn map_speakers_empty_when_no_speakers() {
+        let config = Config::default();
+        assert!(map_speakers("[0:00] no labels", &["Alex".into()], &config).is_empty());
+    }
+
+    #[test]
+    fn map_speakers_empty_when_no_attendees() {
+        let config = Config::default();
+        assert!(map_speakers("[SPEAKER_1 0:00] hi", &[], &config).is_empty());
     }
 }

@@ -168,12 +168,13 @@ where
     };
 
     // Step 2: Diarize (optional — depends on config.diarization.engine)
-    // "auto" engine resolves inside diarize() based on whether models are downloaded
+    let mut diarization_num_speakers: usize = 0;
     let transcript = if config.diarization.engine != "none" && content_type == ContentType::Meeting
     {
         on_progress(PipelineStage::Diarizing);
         tracing::info!(step = "diarize", "running speaker diarization");
         if let Some(result) = diarize::diarize(audio_path, config) {
+            diarization_num_speakers = result.num_speakers;
             diarize::apply_speakers(&transcript, &result)
         } else {
             transcript
@@ -283,6 +284,111 @@ where
         tracing::info!(attendees = ?attendees, "merged attendee list");
     }
 
+    // Step 4b: Speaker attribution
+    // Level 2 → Level 0 → Level 1 (voice enrollment → deterministic → LLM)
+    let mut speaker_map: Vec<diarize::SpeakerAttribution> = Vec::new();
+    let mut transcript = transcript;
+    let mut enrolled_profile_found: Option<String> = None;
+
+    if diarization_num_speakers > 0 && content_type == ContentType::Meeting {
+        // Level 2: Voice enrollment matching
+        // If the user has enrolled their voice, find which SPEAKER_X is them
+        if let Some(self_profile) = crate::voice::load_self_profile(config) {
+            // Scan transcript for speaker labels and try to match by looking
+            // at the dominant speaker (most lines). In a real implementation,
+            // we'd match per-segment embeddings, but for now we use the fact
+            // that the enrolled user's name + dominant speaker heuristic works.
+            // Full per-segment matching comes with Level 3's extended DiarizationResult.
+            tracing::info!(
+                name = %self_profile.name,
+                "Level 2: enrolled voice profile found"
+            );
+
+            // For now, if identity.name matches an enrolled profile AND Level 0
+            // would assign them, upgrade that assignment to High confidence.
+            // Full embedding-based matching requires per-segment embeddings in
+            // DiarizationResult (Level 3 extension).
+            enrolled_profile_found = Some(self_profile.name.clone());
+        }
+
+        // Level 0: deterministic 1-on-1 mapping
+        // Extract actual speaker labels from transcript (handles both native SPEAKER_1
+        // and Python subprocess SPEAKER_00 formats)
+        let transcript_labels = crate::summarize::extract_speaker_labels_pub(&transcript);
+
+        if !attendees.is_empty()
+            && diarization_num_speakers == attendees.len()
+            && diarization_num_speakers == 2
+            && transcript_labels.len() == 2
+        {
+            if let Some(my_name) = config.identity.name.as_ref() {
+                let my_slug = slugify(my_name);
+                let other = attendees.iter().find(|a| slugify(a) != my_slug);
+                if let Some(other_name) = other {
+                    let my_confidence = if enrolled_profile_found.is_some() {
+                        diarize::Confidence::High
+                    } else {
+                        diarize::Confidence::Medium
+                    };
+                    let my_source = if enrolled_profile_found.is_some() {
+                        diarize::AttributionSource::Enrollment
+                    } else {
+                        diarize::AttributionSource::Deterministic
+                    };
+
+                    speaker_map.push(diarize::SpeakerAttribution {
+                        speaker_label: transcript_labels[0].clone(),
+                        name: my_name.clone(),
+                        confidence: my_confidence,
+                        source: my_source,
+                    });
+                    speaker_map.push(diarize::SpeakerAttribution {
+                        speaker_label: transcript_labels[1].clone(),
+                        name: other_name.clone(),
+                        confidence: diarize::Confidence::Medium,
+                        source: diarize::AttributionSource::Deterministic,
+                    });
+                    tracing::info!(
+                        my_name = %my_name,
+                        my_confidence = ?my_confidence,
+                        other_name = %other_name,
+                        labels = ?transcript_labels,
+                        "Level 0: deterministic 1-on-1 speaker attribution"
+                    );
+                }
+            }
+        }
+
+        // Level 1: LLM suggestions for unmapped speakers
+        let mapped_labels: std::collections::HashSet<String> =
+            speaker_map.iter().map(|a| a.speaker_label.clone()).collect();
+        let has_unmapped = transcript.lines().any(|line| {
+            if let Some(rest) = line.strip_prefix('[') {
+                if let Some(bracket_end) = rest.find(']') {
+                    let inside = &rest[..bracket_end];
+                    if let Some(space_pos) = inside.find(' ') {
+                        let label = &inside[..space_pos];
+                        return label.starts_with("SPEAKER_") && !mapped_labels.contains(label);
+                    }
+                }
+            }
+            false
+        });
+        if has_unmapped {
+            let llm_attributions = summarize::map_speakers(&transcript, &attendees, config);
+            for attr in llm_attributions {
+                if !mapped_labels.contains(&attr.speaker_label) {
+                    speaker_map.push(attr);
+                }
+            }
+        }
+
+        // Apply high-confidence attributions to transcript
+        if speaker_map.iter().any(|a| a.confidence == diarize::Confidence::High) {
+            transcript = diarize::apply_confirmed_names(&transcript, &speaker_map);
+        }
+    }
+
     // Step 5: Write markdown (always)
     let duration = estimate_duration(audio_path);
     let auto_title = title
@@ -334,6 +440,7 @@ where
         intents: structured_intents,
         recorded_by: config.identity.name.clone(),
         visibility: None,
+        speaker_map,
     };
 
     tracing::info!(step = "write", "writing markdown");

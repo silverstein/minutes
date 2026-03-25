@@ -307,6 +307,26 @@ enum Commands {
         #[command(subcommand)]
         action: VaultAction,
     },
+
+    /// Enroll your voice for automatic speaker identification
+    Enroll {
+        /// Enroll from an existing audio file instead of recording
+        #[arg(long)]
+        file: Option<PathBuf>,
+        /// Recording duration in seconds (default: 10)
+        #[arg(long, default_value = "10")]
+        duration: u64,
+    },
+
+    /// List and manage enrolled voice profiles
+    Voices {
+        /// Delete your voice profile
+        #[arg(long)]
+        delete: bool,
+        /// Output raw JSON
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -453,6 +473,8 @@ fn main() -> Result<()> {
             VaultAction::Unlink => cmd_vault_unlink(config),
             VaultAction::Sync => cmd_vault_sync(&config),
         },
+        Commands::Enroll { file, duration } => cmd_enroll(file.as_deref(), duration, &config),
+        Commands::Voices { delete, json } => cmd_voices(delete, json),
     }
 }
 
@@ -2514,5 +2536,163 @@ fn cmd_dictate(stdout: bool, note_only: bool, config: &Config) -> Result<()> {
         },
     )?;
 
+    Ok(())
+}
+
+fn cmd_enroll(file: Option<&Path>, duration: u64, config: &Config) -> Result<()> {
+    use minutes_core::voice;
+
+    let my_name = config.identity.name.as_ref().ok_or_else(|| anyhow::anyhow!(
+        "identity.name not set. Add to ~/.config/minutes/config.toml:\n\n[identity]\nname = \"Your Name\""
+    ))?;
+    eprintln!("Enrolling voice for: {}", my_name);
+
+    let audio_path = if let Some(path) = file {
+        if !path.exists() { return Err(anyhow::anyhow!("File not found: {}", path.display())); }
+        eprintln!("Using audio file: {}", path.display());
+        path.to_path_buf()
+    } else {
+        eprintln!("Recording {}s of your voice... speak naturally.", duration);
+        let tmp_dir = std::env::temp_dir().join("minutes-enroll");
+        std::fs::create_dir_all(&tmp_dir)?;
+        let tmp_path = tmp_dir.join("enroll-sample.wav");
+        let stop_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag_clone = stop_flag.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(duration * 1000));
+            flag_clone.store(true, std::sync::atomic::Ordering::Relaxed);
+        });
+        minutes_core::capture::record_to_wav(&tmp_path, stop_flag, config)?;
+        eprintln!("Recording saved.");
+        tmp_path
+    };
+
+    if !minutes_core::diarize::models_installed(config) {
+        return Err(anyhow::anyhow!("Diarization models not installed. Run: minutes setup --diarization"));
+    }
+
+    eprintln!("Extracting voice embedding...");
+    let result = minutes_core::diarize::diarize(&audio_path, config)
+        .ok_or_else(|| anyhow::anyhow!("Diarization failed"))?;
+    if result.segments.is_empty() {
+        return Err(anyhow::anyhow!("No speech detected. Try again in a quiet environment."));
+    }
+    if result.num_speakers > 1 {
+        eprintln!("Warning: detected {} speakers. Using dominant speaker.", result.num_speakers);
+    }
+
+    // Find dominant speaker
+    let mut counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for seg in &result.segments { *counts.entry(&seg.speaker).or_insert(0) += 1; }
+    let dominant = counts.into_iter().max_by_key(|(_, c)| *c).map(|(s, _)| s).unwrap_or("SPEAKER_1");
+
+    eprintln!("Computing voice profile...");
+    let embedding = extract_dominant_embedding(&audio_path, dominant, config)?;
+
+    let conn = voice::open_db().map_err(|e| anyhow::anyhow!("{}", e))?;
+    let slug: String = my_name.to_lowercase().chars().map(|c| if c.is_alphanumeric() { c } else { '-' }).collect::<String>().trim_matches('-').to_string();
+    voice::save_profile_blended(&conn, &slug, my_name, &embedding, "self-enrollment").map_err(|e| anyhow::anyhow!("{}", e))?;
+
+    let profiles = voice::list_profiles(&conn).map_err(|e| anyhow::anyhow!("{}", e))?;
+    if let Some(p) = profiles.iter().find(|p| p.person_slug == slug) {
+        eprintln!("\nVoice profile saved for {}. (samples: {}, model: {})", p.name, p.sample_count, p.model_version);
+        eprintln!("You'll be auto-identified in future diarized meetings.");
+    }
+    if file.is_none() { std::fs::remove_file(&audio_path).ok(); }
+    Ok(())
+}
+
+#[cfg(feature = "diarize")]
+fn extract_dominant_embedding(audio_path: &Path, dominant_speaker: &str, config: &Config) -> Result<Vec<f32>> {
+    use pyannote_rs::{EmbeddingExtractor, EmbeddingManager};
+    use symphonia::core::audio::SampleBuffer;
+    use symphonia::core::codecs::DecoderOptions;
+    use symphonia::core::formats::FormatOptions;
+    use symphonia::core::io::MediaSourceStream;
+    use symphonia::core::meta::MetadataOptions;
+    use symphonia::core::probe::Hint;
+
+    let model_dir = &config.diarization.model_path;
+    let seg_model = model_dir.join(minutes_core::diarize::SEGMENTATION_MODEL);
+    let emb_model = model_dir.join(minutes_core::diarize::EMBEDDING_MODEL);
+
+    let file = std::fs::File::open(audio_path)?;
+    let mss = MediaSourceStream::new(Box::new(file), Default::default());
+    let mut hint = Hint::new();
+    if let Some(ext) = audio_path.extension().and_then(|e| e.to_str()) { hint.with_extension(ext); }
+    let probed = symphonia::default::get_probe().format(&hint, mss, &FormatOptions::default(), &MetadataOptions::default())?;
+    let mut format = probed.format;
+    let track = format.default_track().ok_or_else(|| anyhow::anyhow!("no audio track"))?;
+    let track_id = track.id;
+    let sample_rate = track.codec_params.sample_rate.ok_or_else(|| anyhow::anyhow!("no sample rate"))?;
+    let channels = track.codec_params.channels.map(|c| c.count()).unwrap_or(1);
+    let mut decoder = symphonia::default::get_codecs().make(&track.codec_params, &DecoderOptions::default())?;
+
+    let mut all_samples: Vec<f32> = Vec::new();
+    loop {
+        let packet = match format.next_packet() {
+            Ok(p) => p,
+            Err(symphonia::core::errors::Error::IoError(ref e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+            Err(e) => return Err(e.into()),
+        };
+        if packet.track_id() != track_id { continue; }
+        let decoded = decoder.decode(&packet)?;
+        let spec = *decoded.spec();
+        let mut sample_buf = SampleBuffer::<f32>::new(decoded.capacity() as u64, spec);
+        sample_buf.copy_interleaved_ref(decoded);
+        for i in 0..sample_buf.samples().len() / channels {
+            let mut sum = 0.0f32;
+            for c in 0..channels { sum += sample_buf.samples()[i * channels + c]; }
+            all_samples.push(sum / channels as f32);
+        }
+    }
+    let samples_i16: Vec<i16> = all_samples.iter().map(|&s| (s.clamp(-1.0, 1.0) * 32767.0) as i16).collect();
+
+    let segments_iter = pyannote_rs::get_segments(&samples_i16, sample_rate, &seg_model).map_err(|e| anyhow::anyhow!("{}", e))?;
+    let mut extractor = EmbeddingExtractor::new(&emb_model).map_err(|e| anyhow::anyhow!("{}", e))?;
+    let mut manager = EmbeddingManager::new(usize::MAX);
+    let threshold = config.diarization.threshold;
+    let mut dominant_embeddings: Vec<Vec<f32>> = Vec::new();
+
+    for segment_result in segments_iter {
+        let segment = segment_result.map_err(|e| anyhow::anyhow!("{}", e))?;
+        let embedding: Vec<f32> = extractor.compute(&segment.samples).map_err(|e| anyhow::anyhow!("{}", e))?.collect();
+        let speaker_id = manager.search_speaker(embedding.clone(), threshold).map(|id| id.to_string()).unwrap_or_else(|| "0".to_string());
+        if format!("SPEAKER_{}", speaker_id) == dominant_speaker { dominant_embeddings.push(embedding); }
+    }
+
+    if dominant_embeddings.is_empty() { return Err(anyhow::anyhow!("No embeddings for dominant speaker")); }
+    let dim = dominant_embeddings[0].len();
+    let count = dominant_embeddings.len() as f32;
+    let mut avg = vec![0.0f32; dim];
+    for emb in &dominant_embeddings { for (i, val) in emb.iter().enumerate() { avg[i] += val / count; } }
+    Ok(avg)
+}
+
+#[cfg(not(feature = "diarize"))]
+fn extract_dominant_embedding(_: &Path, _: &str, _: &Config) -> Result<Vec<f32>> {
+    Err(anyhow::anyhow!("Voice enrollment requires the 'diarize' feature. Rebuild with: cargo build --features diarize"))
+}
+
+fn cmd_voices(delete: bool, json: bool) -> Result<()> {
+    use minutes_core::voice;
+    let conn = voice::open_db().map_err(|e| anyhow::anyhow!("{}", e))?;
+    if delete {
+        let profiles = voice::list_profiles(&conn).map_err(|e| anyhow::anyhow!("{}", e))?;
+        if profiles.is_empty() { eprintln!("No voice profiles enrolled."); return Ok(()); }
+        for p in &profiles {
+            voice::delete_profile(&conn, &p.person_slug).map_err(|e| anyhow::anyhow!("{}", e))?;
+            eprintln!("Deleted voice profile: {}", p.name);
+        }
+        return Ok(());
+    }
+    let profiles = voice::list_profiles(&conn).map_err(|e| anyhow::anyhow!("{}", e))?;
+    if json { println!("{}", serde_json::to_string_pretty(&profiles)?); return Ok(()); }
+    if profiles.is_empty() { eprintln!("No voice profiles enrolled.\nRun: minutes enroll"); return Ok(()); }
+    eprintln!("Voice profiles:");
+    for p in &profiles {
+        eprintln!("  {} — {} samples, {} ({})", p.name, p.sample_count, p.source, p.model_version);
+        eprintln!("    enrolled: {}, updated: {}", p.enrolled_at.get(..10).unwrap_or(&p.enrolled_at), p.updated_at.get(..10).unwrap_or(&p.updated_at));
+    }
     Ok(())
 }

@@ -25,6 +25,23 @@ pub struct Config {
     pub identity: IdentityConfig,
     pub vault: VaultConfig,
     pub dictation: DictationConfig,
+    pub voice: VoiceConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct VoiceConfig {
+    pub enabled: bool,
+    pub match_threshold: f32,
+}
+
+impl Default for VoiceConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            match_threshold: 0.65,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -250,6 +267,7 @@ impl Default for Config {
             identity: IdentityConfig::default(),
             vault: VaultConfig::default(),
             dictation: DictationConfig::default(),
+            voice: VoiceConfig::default(),
         }
     }
 }

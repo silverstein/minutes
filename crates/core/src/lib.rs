@@ -17,6 +17,7 @@ pub mod search;
 pub mod summarize;
 pub mod transcribe;
 pub mod vault;
+pub mod voice;
 pub mod watch;
 
 // Streaming audio API (for Prompter and other real-time consumers)

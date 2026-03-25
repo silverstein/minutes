@@ -551,6 +551,7 @@ fn write_dictation_file(text: &str, duration_secs: f64, config: &Config) -> Opti
         intents: vec![],
         recorded_by: config.identity.name.clone(),
         visibility: None,
+        speaker_map: vec![],
     };
 
     match crate::markdown::write(&frontmatter, text, None, None, config) {

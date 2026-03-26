@@ -32,6 +32,7 @@ import {
   registerAppTool,
   registerAppResource,
   RESOURCE_MIME_TYPE,
+  EXTENSION_ID,
 } from "@modelcontextprotocol/ext-apps/server";
 import { z } from "zod";
 import { execFile, spawn } from "child_process";
@@ -303,6 +304,13 @@ const server = new McpServer({
   name: "minutes",
   version: "0.8.0",
 });
+
+// Declare MCP Apps extension support so hosts classify this server as interactive.
+// The `extensions` field is part of the draft MCP spec (SEP-1724) — not yet in the
+// stable SDK types, so we cast through `any`.
+(server.server as any).registerCapabilities({
+  extensions: { [EXTENSION_ID]: {} },
+} as any);
 
 // Configurable directories — override via env vars in Claude Desktop extension settings
 const MEETINGS_DIR = process.env.MEETINGS_DIR || join(homedir(), "meetings");

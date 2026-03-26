@@ -377,7 +377,10 @@ fn get_macos_default_input_name() -> Option<String> {
                     .unwrap_or(false);
 
                 if is_default_input {
-                    return sub.get("_name").and_then(|v| v.as_str()).map(|s| s.to_string());
+                    return sub
+                        .get("_name")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
                 }
             }
         }

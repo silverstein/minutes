@@ -4,7 +4,7 @@
   "display_name": "Minutes \u2014 Meeting Memory for AI",
   "description": "Record, transcribe, search, and remember every meeting and voice memo. Privacy-first, local-only transcription with whisper.cpp.",
   "long_description": "Minutes is a conversation memory layer for AI assistants. It captures any audio (meetings, voice memos, brain dumps), transcribes locally with whisper.cpp, diarizes speakers, and outputs searchable markdown with structured action items and decisions.\n\n**Record & Transcribe:**\n\u2022 Start/stop live meeting recordings\n\u2022 Process audio files (WAV, M4A, MP3, OGG)\n\u2022 Local transcription \u2014 nothing leaves your machine\n\n**Search & Query:**\n\u2022 Full-text search across all meetings\n\u2022 Find open action items by assignee\n\u2022 Track decisions and commitments\n\u2022 Person profiles across meetings\n\u2022 Cross-meeting topic research\n\n**Agent-Friendly:**\n\u2022 MCP resources for stable context (recent meetings, action items, events)\n\u2022 JSON Schema for meeting format validation\n\u2022 Event log for reactive agent workflows\n\u2022 Structured YAML frontmatter on all output",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "author": {
     "name": "Mat Silverstein",
     "url": "https://github.com/silverstein"
@@ -26,7 +26,12 @@
     "memory",
     "search",
     "action-items",
-    "decisions"
+    "decisions",
+    "mcp-apps",
+    "interactive"
+  ],
+  "screenshots": [
+    "docs/assets/dashboard-screenshot.png"
   ],
   "tools": [
     {

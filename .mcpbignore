@@ -6,6 +6,9 @@ Minutes.app
 # Tauri app source (not needed for MCP extension)
 tauri/
 
+# Landing page site (not needed for MCP extension)
+site/
+
 # Rust source (MCP server is Node.js only)
 crates/core/
 crates/cli/

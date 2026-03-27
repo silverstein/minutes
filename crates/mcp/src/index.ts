@@ -172,7 +172,81 @@ function findMinutesBinary(): string {
   return "minutes";
 }
 
-const MINUTES_BIN = findMinutesBinary();
+let MINUTES_BIN = findMinutesBinary();
+
+// ── Expected CLI version (must match this MCP server release) ──
+const EXPECTED_CLI_VERSION = "0.8.0";
+
+// ── CLI auto-install ────────────────────────────────────────
+// When installed via MCPB or `npx minutes-mcp`, the Rust CLI binary
+// may not be present. We attempt to install it automatically so
+// non-technical users don't hit a "binary not found" dead end.
+
+let installAttempted = false;
+
+async function tryAutoInstall(): Promise<boolean> {
+  if (installAttempted) return false;
+  installAttempted = true;
+
+  const platform = process.platform;
+  console.error("[Minutes] CLI not found — attempting automatic install...");
+
+  if (platform === "darwin") {
+    // macOS: try Homebrew first (most common)
+    try {
+      console.error("[Minutes] Trying: brew tap silverstein/tap && brew install minutes");
+      await execFileAsync("brew", ["tap", "silverstein/tap"], { timeout: 120000 });
+      await execFileAsync("brew", ["install", "minutes"], { timeout: 300000 });
+      console.error("[Minutes] ✓ Installed via Homebrew");
+      // Re-resolve the binary path after install
+      MINUTES_BIN = findMinutesBinary();
+      return true;
+    } catch (e: any) {
+      console.error(`[Minutes] Homebrew install failed: ${e.message || e}`);
+    }
+  }
+
+  // All platforms: try cargo install as fallback
+  try {
+    console.error("[Minutes] Trying: cargo install minutes-cli");
+    await execFileAsync("cargo", ["install", "minutes-cli"], { timeout: 600000 });
+    console.error("[Minutes] ✓ Installed via cargo");
+    MINUTES_BIN = findMinutesBinary();
+    return true;
+  } catch (e: any) {
+    console.error(`[Minutes] cargo install failed: ${e.message || e}`);
+  }
+
+  console.error(
+    "[Minutes] Auto-install failed. Install manually:\n" +
+    "  macOS:   brew tap silverstein/tap && brew install minutes\n" +
+    "  Any:     cargo install minutes-cli"
+  );
+  return false;
+}
+
+// ── CLI version check ───────────────────────────────────────
+
+async function checkCliVersion(): Promise<void> {
+  try {
+    const { stdout } = await execFileAsync(MINUTES_BIN, ["--version"], { timeout: 5000 });
+    // Output is like "minutes 0.8.0" or just "0.8.0"
+    const match = stdout.trim().match(/(\d+\.\d+\.\d+)/);
+    if (match) {
+      const installedVersion = match[1];
+      if (installedVersion !== EXPECTED_CLI_VERSION) {
+        console.error(
+          `[Minutes] ⚠ CLI version mismatch: installed ${installedVersion}, server expects ${EXPECTED_CLI_VERSION}. ` +
+          `Update with: brew upgrade minutes (or cargo install minutes-cli)`
+        );
+      } else {
+        console.error(`[Minutes] CLI v${installedVersion} — up to date`);
+      }
+    }
+  } catch {
+    // Version check is best-effort — don't block on failure
+  }
+}
 
 // ── CLI availability detection ──────────────────────────────
 // When installed via `npx minutes-mcp`, the Rust CLI may not be present.
@@ -193,11 +267,29 @@ async function isCliAvailable(): Promise<boolean> {
     cliAvailable = true;
     cliCheckedAt = Date.now();
     console.error("[Minutes] CLI found — full mode (all tools enabled)");
+    // Check version in background (non-blocking)
+    checkCliVersion();
   } catch {
+    // CLI not found — try to install it automatically
+    if (!installAttempted) {
+      const installed = await tryAutoInstall();
+      if (installed) {
+        try {
+          await execFileAsync(MINUTES_BIN, ["--version"], { timeout: 5000 });
+          cliAvailable = true;
+          cliCheckedAt = Date.now();
+          console.error("[Minutes] CLI now available after auto-install — full mode");
+          checkCliVersion();
+          return true;
+        } catch {
+          // Install succeeded but binary still not found — path issue
+        }
+      }
+    }
     cliAvailable = false;
     cliCheckedAt = Date.now();
     console.error(
-      "[Minutes] CLI not found — read-only mode. Install for recording: brew install minutes"
+      "[Minutes] CLI not available — read-only mode (search and browse only)"
     );
   }
   return cliAvailable;

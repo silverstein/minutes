@@ -111,6 +111,9 @@ fn transcribe_with_whisper(
     let mut params = default_whisper_params(vad_path_str);
     params.set_n_threads(num_cpus());
     params.set_language(config.transcription.language.as_deref());
+    if let Some(ref prompt) = config.transcription.initial_prompt {
+        params.set_initial_prompt(prompt);
+    }
     params.set_token_timestamps(true);
 
     state
@@ -1277,6 +1280,7 @@ mod tests {
                 min_words: 10,
                 language: Some("en".into()),
                 vad_model: String::new(),
+                initial_prompt: None,
             },
             ..Config::default()
         };

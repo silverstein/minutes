@@ -17,6 +17,7 @@ fn test_config(output_dir: PathBuf) -> Config {
             min_words: 10,
             language: Some("en".into()),
             vad_model: "silero-v6.2.0".into(),
+            initial_prompt: None,
         },
         ..Config::default()
     }

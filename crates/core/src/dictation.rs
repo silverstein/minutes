@@ -240,7 +240,10 @@ where
         tracing::info!(device = %stream.device_name, "dictation audio stream started");
 
         let mut vad = Vad::new();
-        let mut streaming = StreamingWhisper::new(config.transcription.language.clone());
+        let mut streaming = StreamingWhisper::new(
+            config.transcription.language.clone(),
+            config.transcription.initial_prompt.clone(),
+        );
         let mut was_speaking = false;
         let mut has_spoken = false;
         let mut total_silence_ms: u64 = 0;

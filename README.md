@@ -600,6 +600,9 @@ ollama_model = "llama3.2"
 [transcription]
 # vad_model = "silero-v6.2.0" # Silero VAD model (auto-downloaded by setup). Empty = disable.
                               # Prevents whisper hallucination loops on non-English/noisy audio.
+# initial_prompt = "Acme Corp, JIRA, OKRs, GraphQL, S3"  # Bias Whisper toward domain vocabulary.
+                              # Add company names, project acronyms, industry jargon, or proper nouns
+                              # that Whisper tends to misspell. Comma-separated list works well.
 
 [diarization]
 engine = "auto"           # "auto" (default — uses pyannote-rs if models downloaded, otherwise skips),

@@ -68,19 +68,22 @@ pub struct StreamingWhisper {
     n_threads: i32,
     /// Language hint (None = auto-detect).
     language: Option<String>,
+    /// Optional prompt to bias Whisper toward domain-specific vocabulary.
+    initial_prompt: Option<String>,
     /// Whether we've created a state before (suppress init noise on subsequent calls).
     has_created_state: bool,
 }
 
 impl StreamingWhisper {
     /// Create a new streaming transcriber.
-    pub fn new(language: Option<String>) -> Self {
+    pub fn new(language: Option<String>, initial_prompt: Option<String>) -> Self {
         Self {
             audio_buffer: Vec::with_capacity(16000 * 30), // pre-alloc 30s
             samples_since_partial: 0,
             last_partial: String::new(),
             n_threads: num_cpus(),
             language,
+            initial_prompt,
             has_created_state: false,
         }
     }
@@ -139,6 +142,9 @@ impl StreamingWhisper {
         let mut params = streaming_whisper_params();
         params.set_n_threads(self.n_threads);
         params.set_language(self.language.as_deref());
+        if let Some(ref prompt) = self.initial_prompt {
+            params.set_initial_prompt(prompt);
+        }
 
         let start = std::time::Instant::now();
 
@@ -231,14 +237,14 @@ mod tests {
 
     #[test]
     fn new_streaming_whisper_has_empty_buffer() {
-        let sw = StreamingWhisper::new(None);
+        let sw = StreamingWhisper::new(None, None);
         assert_eq!(sw.duration_secs(), 0.0);
         assert!(sw.audio_buffer.is_empty());
     }
 
     #[test]
     fn feed_below_interval_returns_none() {
-        let mut sw = StreamingWhisper::new(None);
+        let mut sw = StreamingWhisper::new(None, None);
         // Feed 1 second of silence (below 2s interval)
         let silence = vec![0.0f32; 16000];
         // We can't test with a real WhisperContext without a model,
@@ -251,7 +257,7 @@ mod tests {
 
     #[test]
     fn reset_clears_state() {
-        let mut sw = StreamingWhisper::new(Some("en".into()));
+        let mut sw = StreamingWhisper::new(Some("en".into()), None);
         sw.audio_buffer.extend_from_slice(&[0.0; 16000]);
         sw.samples_since_partial = 16000;
         sw.last_partial = "hello".into();

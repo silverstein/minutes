@@ -54,6 +54,9 @@ pub struct TranscriptionConfig {
     /// Silero VAD model name (resolved under model_path, e.g. "silero-v6.2.0" → ggml-silero-v6.2.0.bin).
     /// Set to empty string to disable VAD (falls back to energy-based silence stripping).
     pub vad_model: String,
+    /// Optional prompt to bias Whisper toward domain-specific vocabulary.
+    /// Useful for proper nouns, acronyms, and jargon that Whisper would otherwise misspell.
+    pub initial_prompt: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -280,6 +283,7 @@ impl Default for TranscriptionConfig {
             min_words: 3,
             language: None,
             vad_model: "silero-v6.2.0".into(),
+            initial_prompt: None,
         }
     }
 }
@@ -543,6 +547,32 @@ model = "tiny"
 
         let config = Config::load_from(&config_path);
         assert_eq!(config.transcription.language, None);
+    }
+
+    #[test]
+    fn default_initial_prompt_is_none() {
+        let config = Config::default();
+        assert_eq!(config.transcription.initial_prompt, None);
+    }
+
+    #[test]
+    fn initial_prompt_round_trips_through_toml() {
+        let dir = TempDir::new().unwrap();
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(
+            &config_path,
+            r#"
+[transcription]
+initial_prompt = "Acme Corp, JIRA, OKRs, GraphQL"
+"#,
+        )
+        .unwrap();
+
+        let config = Config::load_from(&config_path);
+        assert_eq!(
+            config.transcription.initial_prompt,
+            Some("Acme Corp, JIRA, OKRs, GraphQL".into())
+        );
     }
 
     #[test]

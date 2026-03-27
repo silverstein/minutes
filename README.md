@@ -17,10 +17,10 @@ Record a meeting. Capture a voice memo on a walk. Ask Claude *"what did I promis
 ### Works with
 
 <p align="center">
-  <a href="#any-mcp-client-claude-desktop-cursor-windsurf-your-own-agent">Claude Desktop</a> &bull;
   <a href="#claude-code-plugin">Claude Code</a> &bull;
-  <a href="#any-mcp-client-claude-desktop-cursor-windsurf-your-own-agent">Cursor</a> &bull;
-  <a href="#any-mcp-client-claude-desktop-cursor-windsurf-your-own-agent">Windsurf</a> &bull;
+  <a href="#any-mcp-client-claude-code-codex-gemini-cli-claude-desktop-or-your-own-agent">Codex</a> &bull;
+  <a href="#any-mcp-client-claude-code-codex-gemini-cli-claude-desktop-or-your-own-agent">Gemini CLI</a> &bull;
+  <a href="#any-mcp-client-claude-code-codex-gemini-cli-claude-desktop-or-your-own-agent">Claude Desktop</a> &bull;
   <a href="#vault-sync-obsidian--logseq">Obsidian</a> &bull;
   <a href="#vault-sync-obsidian--logseq">Logseq</a> &bull;
   <a href="#phone--desktop-voice-memo-pipeline">Phone Voice Memos</a> &bull;
@@ -39,7 +39,7 @@ brew tap silverstein/tap && brew install minutes
 # Any platform — from source (requires Rust + cmake)
 cargo install minutes-cli
 
-# MCP server only — no Rust needed (Claude Desktop, Cursor, etc.)
+# MCP server only — no Rust needed (Claude Code, Codex, Gemini CLI, Claude Desktop, etc.)
 npx minutes-mcp
 ```
 
@@ -317,7 +317,7 @@ You: "Any open action items for me?"
 Claude: [calls list_meetings] → scans frontmatter → reports open items
 ```
 
-### Any MCP client (Claude Desktop, Cursor, Windsurf, your own agent)
+### Any MCP client (Claude Code, Codex, Gemini CLI, Claude Desktop, or your own agent)
 
 Minutes exposes a standard MCP server. Point any MCP-compatible client at it:
 

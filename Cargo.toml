@@ -9,6 +9,7 @@ license = "MIT"
 authors = ["Mat Silverstein"]
 description = "Conversation memory for AI assistants"
 repository = "https://github.com/silverstein/minutes"
+homepage = "https://useminutes.app"
 
 [workspace.dependencies]
 # Serialization

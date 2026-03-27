@@ -5,9 +5,11 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
+homepage.workspace = true
 description = "CLI for minutes — record, transcribe, and search conversation memory"
 keywords = ["meeting", "transcription", "whisper", "ai", "memory"]
 categories = ["multimedia::audio", "command-line-utilities"]
+readme = "README.md"
 
 [[bin]]
 name = "minutes"

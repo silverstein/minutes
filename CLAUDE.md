@@ -117,6 +117,8 @@ certificate or local notarization credentials.
 | **SDK rebuild** | Any change to `crates/sdk/src/` | `cd crates/sdk && npm run build` |
 | **Mutual exclusion** | Any change to recording/dictation/live transcript start paths | Verify all three modes check each other's PID/state: `live_transcript::run` checks recording+dictation PIDs, `cmd_record`/`capture::record_to_wav` checks live PID, `dictation::run` checks live PID, Tauri `cmd_start_*` checks `live_transcript_active`+`recording`+`dictation_active` |
 | **Tauri command duplication** | Changes to live transcript start/stop logic | Both `cmd_start_live_transcript` and `handle_live_shortcut_event` must use the shared `try_acquire_live` + `run_live_session` functions. Do NOT duplicate logic. |
+| **README accuracy** | New/removed tools, features, crates, or CLI commands | Tool/resource counts, crate list in Architecture, feature sections, and CLI examples in README.md must reflect the current state. Check: tool count matches `manifest.json`, crate list matches `ls crates/*/`, module count matches `ls crates/core/src/*.rs` |
+| **npm dep versions** | Version bumps | `crates/mcp/package.json` `minutes-sdk` dep must reference a version that's actually published on npm. Check with `npm view minutes-sdk versions --json` |
 
 ## Release Checklist
 
@@ -303,4 +305,4 @@ node test/mcp_tools_test.mjs                        # 8 MCP integration tests
 - **Auto-tagging + alerts**: PostToolUse hook tags meetings with git repo, checks for decision conflicts, surfaces overdue action items
 - **Proactive reminders**: SessionStart hook checks calendar for upcoming meetings and nudges `/minutes prep`
 - **Desktop assistant**: Tauri AI Assistant is a singleton session that can switch focus into a selected meeting without spawning parallel assistant workspaces
-- **Live coaching**: Tauri Live Mode toggle starts real-time transcription; CLAUDE.md in assistant workspace auto-updates to tell any agent (Claude, Codex, Gemini) about the live JSONL file. Agent-agnostic design: MCP tools for Claude, file reads for everything else.
+- **Live coaching**: Tauri Live Mode toggle starts real-time transcription; the assistant workspace `CLAUDE.md` auto-updates so the connected Recall session, Claude Desktop/Code, or any other agent can read the live JSONL file and coach mid-meeting. There is no dedicated transcript/coaching panel in Tauri v1; the coaching happens through the assistant chat surface.

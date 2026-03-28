@@ -738,25 +738,52 @@ fn summarize_with_ollama(
 
 // ── HTTP helper (ureq — pure Rust, no subprocess, no secrets in process args) ──
 
+/// Global HTTP timeout for LLM API calls (2 minutes).
+/// Prevents infinite hangs on TCP-level stalls or unresponsive endpoints.
+const HTTP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
+fn http_agent() -> ureq::Agent {
+    ureq::Agent::new_with_config(
+        ureq::config::Config::builder()
+            .timeout_global(Some(HTTP_TIMEOUT))
+            .http_status_as_error(false)
+            .build(),
+    )
+}
+
 fn http_post(
     url: &str,
     body: &serde_json::Value,
     headers: &[(&str, &str)],
 ) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
-    let mut request = ureq::post(url);
+    let agent = http_agent();
+    let mut request = agent.post(url);
 
     for (key, value) in headers {
         request = request.header(*key, *value);
     }
 
-    let response: serde_json::Value = request.send_json(body)?.body_mut().read_json()?;
+    let mut response = request.send_json(body)?;
+    let status = response.status().as_u16();
 
-    // Check for API errors
-    if let Some(error) = response.get("error") {
+    // Read the body regardless of status code so we can extract API error messages
+    let body: serde_json::Value = response.body_mut().read_json()?;
+
+    // Check for HTTP-level errors (4xx/5xx) — extract the API's error message if available
+    if status >= 400 {
+        let api_msg = body
+            .get("error")
+            .and_then(|e| e.get("message").or(Some(e)))
+            .unwrap_or(&body);
+        return Err(format!("HTTP {}: {}", status, api_msg).into());
+    }
+
+    // Check for API-level errors in 2xx responses (e.g., OpenAI error objects)
+    if let Some(error) = body.get("error") {
         return Err(format!("API error: {}", error).into());
     }
 
-    Ok(response)
+    Ok(body)
 }
 
 // ── Screen context image encoding ────────────────────────────
@@ -939,13 +966,15 @@ fn run_speaker_mapping_prompt(
     prompt: &str,
     config: &Config,
 ) -> Result<String, Box<dyn std::error::Error>> {
+    let agent = http_agent();
     match config.summarization.engine.as_str() {
         "agent" => run_speaker_mapping_via_agent(prompt, config),
         "claude" => {
             let api_key =
                 std::env::var("ANTHROPIC_API_KEY").map_err(|_| "ANTHROPIC_API_KEY not set")?;
             let body = serde_json::json!({"model":"claude-sonnet-4-20250514","max_tokens":256,"messages":[{"role":"user","content":prompt}]});
-            let resp: serde_json::Value = ureq::post("https://api.anthropic.com/v1/messages")
+            let resp: serde_json::Value = agent
+                .post("https://api.anthropic.com/v1/messages")
                 .header("x-api-key", &api_key)
                 .header("anthropic-version", "2023-06-01")
                 .header("content-type", "application/json")
@@ -960,7 +989,8 @@ fn run_speaker_mapping_prompt(
         "openai" => {
             let api_key = std::env::var("OPENAI_API_KEY").map_err(|_| "OPENAI_API_KEY not set")?;
             let body = serde_json::json!({"model":"gpt-4o-mini","max_tokens":256,"messages":[{"role":"user","content":prompt}]});
-            let resp: serde_json::Value = ureq::post("https://api.openai.com/v1/chat/completions")
+            let resp: serde_json::Value = agent
+                .post("https://api.openai.com/v1/chat/completions")
                 .header("Authorization", &format!("Bearer {}", api_key))
                 .header("content-type", "application/json")
                 .send_json(&body)?
@@ -975,7 +1005,8 @@ fn run_speaker_mapping_prompt(
             let api_key =
                 std::env::var("MISTRAL_API_KEY").map_err(|_| "MISTRAL_API_KEY not set")?;
             let body = serde_json::json!({"model": &config.summarization.mistral_model, "max_tokens": 256, "messages":[{"role":"user","content":prompt}]});
-            let resp: serde_json::Value = ureq::post("https://api.mistral.ai/v1/chat/completions")
+            let resp: serde_json::Value = agent
+                .post("https://api.mistral.ai/v1/chat/completions")
                 .header("Authorization", &format!("Bearer {}", api_key))
                 .header("content-type", "application/json")
                 .send_json(&body)?
@@ -989,7 +1020,8 @@ fn run_speaker_mapping_prompt(
         "ollama" => {
             let url = format!("{}/api/generate", config.summarization.ollama_url);
             let body = serde_json::json!({"model": config.summarization.ollama_model, "prompt": prompt, "stream": false});
-            let resp: serde_json::Value = ureq::post(&url)
+            let resp: serde_json::Value = agent
+                .post(&url)
                 .header("content-type", "application/json")
                 .send_json(&body)?
                 .body_mut()

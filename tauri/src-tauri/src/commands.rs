@@ -1946,12 +1946,11 @@ pub fn cmd_retry_recovery(
     state: tauri::State<AppState>,
     path: String,
     content_type: String,
-) -> Result<OutputNotice, String> {
+) -> Result<(), String> {
     if recording_active(&state.recording) || state.processing.load(Ordering::Relaxed) {
         return Err("Finish the current recording before retrying recovery items.".into());
     }
 
-    let config = Config::load();
     let audio_path = PathBuf::from(&path);
     if !audio_path.exists() {
         return Err(format!("Recovery item not found: {}", path));
@@ -1963,18 +1962,62 @@ pub fn cmd_retry_recovery(
         other => return Err(format!("Unsupported recovery type: {}", other)),
     };
 
-    let result =
-        minutes_core::pipeline::process_with_progress(&audio_path, ct, None, &config, |_| {})
-            .map_err(|e| e.to_string())?;
+    // Run pipeline on a background thread so the UI stays responsive
+    let processing = state.processing.clone();
+    let processing_stage = state.processing_stage.clone();
+    let latest_output = state.latest_output.clone();
 
-    let notice = OutputNotice {
-        kind: "saved".into(),
-        title: result.title.clone(),
-        path: result.path.display().to_string(),
-        detail: "Recovery item was processed successfully.".into(),
-    };
-    set_latest_output(&state.latest_output, Some(notice.clone()));
-    Ok(notice)
+    processing.store(true, Ordering::Relaxed);
+    set_processing_stage(&processing_stage, Some("Preparing transcript..."));
+
+    std::thread::spawn(move || {
+        let config = Config::load();
+        match minutes_core::pipeline::process_with_progress(
+            &audio_path,
+            ct,
+            None,
+            &config,
+            |stage| {
+                let label = match stage {
+                    minutes_core::pipeline::PipelineStage::Transcribing => "Transcribing...",
+                    minutes_core::pipeline::PipelineStage::Diarizing => "Identifying speakers...",
+                    minutes_core::pipeline::PipelineStage::Summarizing => "Generating summary...",
+                    minutes_core::pipeline::PipelineStage::Saving => "Saving...",
+                };
+                set_processing_stage(&processing_stage, Some(label));
+                let _ = minutes_core::pid::set_processing_status(
+                    Some(label),
+                    Some(minutes_core::pid::CaptureMode::Meeting),
+                );
+            },
+        ) {
+            Ok(result) => {
+                let notice = OutputNotice {
+                    kind: "saved".into(),
+                    title: result.title.clone(),
+                    path: result.path.display().to_string(),
+                    detail: "Recovery item was processed successfully.".into(),
+                };
+                set_latest_output(&latest_output, Some(notice));
+                eprintln!("Recovery retry succeeded: {}", result.path.display());
+            }
+            Err(e) => {
+                let notice = OutputNotice {
+                    kind: "error".into(),
+                    title: "Retry failed".into(),
+                    path: audio_path.display().to_string(),
+                    detail: format!("Recovery retry failed: {}", e),
+                };
+                set_latest_output(&latest_output, Some(notice));
+                eprintln!("Recovery retry failed: {}", e);
+            }
+        }
+        processing.store(false, Ordering::Relaxed);
+        set_processing_stage(&processing_stage, None);
+        minutes_core::pid::clear_processing_status().ok();
+    });
+
+    Ok(())
 }
 
 #[tauri::command]

@@ -168,9 +168,36 @@ fn transcribe_with_whisper(
     params.set_language(config.transcription.language.as_deref());
     params.set_token_timestamps(true);
 
+    // Abort callback: prevents infinite hangs on large models with problematic audio.
+    // Timeout scales with audio duration: base 5 min + 10x audio length (e.g. 35s audio → 5:35 max).
+    let audio_duration_secs = samples.len() as f64 / 16000.0;
+    let timeout_secs = 300.0 + (audio_duration_secs * 10.0);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs_f64(timeout_secs);
+    params.set_abort_callback_safe(move || {
+        let exceeded = std::time::Instant::now() > deadline;
+        if exceeded {
+            tracing::warn!(
+                timeout_secs = format!("{:.0}", timeout_secs),
+                "whisper transcription timed out — aborting"
+            );
+        }
+        exceeded
+    });
+
     state
         .full(params, samples)
-        .map_err(|e| TranscribeError::TranscriptionFailed(format!("{}", e)))?;
+        .map_err(|e| {
+            let msg = format!("{}", e);
+            if msg.contains("abort") {
+                TranscribeError::TranscriptionFailed(format!(
+                    "transcription timed out after {:.0}s (audio was {:.0}s). \
+                     Try a smaller model or ensure Silero VAD is installed: minutes setup",
+                    timeout_secs, audio_duration_secs
+                ))
+            } else {
+                TranscribeError::TranscriptionFailed(msg)
+            }
+        })?;
 
     let num_segments = state.full_n_segments();
 

@@ -648,6 +648,12 @@
       color: var(--text-secondary);
       margin-top: 2px;
     }
+    .processing-elapsed {
+      font-size: 11px;
+      color: var(--text-tertiary, #888);
+      margin-top: 1px;
+      font-variant-numeric: tabular-nums;
+    }
 
     /* ── Output notice ── */
     .output-notice {
@@ -1741,6 +1747,7 @@
       <div class="processing-copy">
         <div class="processing-title" id="processing-title">Processing recording</div>
         <div class="processing-stage" id="processing-stage">Preparing transcript...</div>
+        <div class="processing-elapsed" id="processing-elapsed"></div>
       </div>
     </div>
   </div>
@@ -2294,6 +2301,7 @@
     const processingTitle = document.getElementById('processing-title');
     const recordingTime = document.getElementById('recording-time');
     const processingStage = document.getElementById('processing-stage');
+    const processingElapsed = document.getElementById('processing-elapsed');
     const outputNotice = document.getElementById('output-notice');
     const outputNoticeIcon = document.getElementById('output-notice-icon');
     const outputNoticeTitle = document.getElementById('output-notice-title');
@@ -2348,6 +2356,8 @@
     let dictationShortcutLabel = 'Dictate';
     let lastOutputKey = null;
     let pollInterval = null;
+    let processingStartTime = null;
+    let processingTimerInterval = null;
     let desktopCapabilities = {
       platform: 'other',
       folderRevealLabel: 'Show in Folder',
@@ -2496,6 +2506,21 @@
           footer.style.display = 'none';
           processingStage.textContent = status.processingStage || 'Preparing transcript...';
 
+          // Start elapsed timer when processing begins
+          if (!wasProcessing) {
+            processingStartTime = Date.now();
+            if (processingTimerInterval) clearInterval(processingTimerInterval);
+            processingTimerInterval = setInterval(() => {
+              if (!processingStartTime) return;
+              const secs = Math.floor((Date.now() - processingStartTime) / 1000);
+              const m = Math.floor(secs / 60);
+              const s = secs % 60;
+              processingElapsed.textContent = m > 0
+                ? `${m}:${String(s).padStart(2, '0')} elapsed`
+                : `${s}s elapsed`;
+            }, 1000);
+          }
+
           if (!wasRecording && !wasProcessing) {
             startFastPoll();
           }
@@ -2539,10 +2564,20 @@
           quickNote.classList.remove('active');
           footer.style.display = '';
 
+          // Clear processing elapsed timer
+          if (processingTimerInterval) { clearInterval(processingTimerInterval); processingTimerInterval = null; }
+          processingStartTime = null;
+          processingElapsed.textContent = '';
+
           // Slow down polling when recording/processing/live stops (T5)
           if (wasRecording || wasProcessing || wasLive) {
             stopFastPoll();
             loadMeetings(); // Refresh list
+
+            // Auto-open the result when processing completes successfully
+            if (wasProcessing && latestOutput && latestOutput.kind === 'saved') {
+              openMeetingDetail(latestOutput.path);
+            }
           }
           } // end if (!isLiveTranscript)
         }
@@ -2778,14 +2813,14 @@
         retry.textContent = item.retry_type === 'memo' ? 'Retry as Memo' : 'Retry as Meeting';
         retry.addEventListener('click', async () => {
           try {
-            const notice = await invoke('cmd_retry_recovery', {
+            await invoke('cmd_retry_recovery', {
               path: item.path,
               contentType: item.retry_type
             });
-            updateOutputNotice(notice);
+            // Processing now runs in background — close recovery panel
+            // and let status polling pick up the processing state + result
             closeRecovery();
-            loadMeetings();
-            loadRecoveryItems();
+            startFastPoll();
           } catch (e) {
             console.error('Retry recovery:', e);
           }
@@ -2906,7 +2941,7 @@
     document.getElementById('btn-open-output').addEventListener('click', async () => {
       if (!latestOutput?.path) return;
       try {
-        await invoke('cmd_open_file', { path: latestOutput.path });
+        await openMeetingDetail(latestOutput.path);
       } catch (e) {
         console.error('Open output:', e);
       }

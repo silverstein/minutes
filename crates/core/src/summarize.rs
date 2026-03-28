@@ -535,6 +535,19 @@ fn extract_claude_text(response: &serde_json::Value) -> Result<String, Box<dyn s
         .ok_or_else(|| format!("unexpected Claude API response: {}", response).into())
 }
 
+/// Extract text from an OpenAI-compatible chat completion response.
+/// Used by OpenAI and Mistral engines (both use the same response shape).
+fn extract_chat_completion_text(
+    response: &serde_json::Value,
+    engine: &str,
+) -> Result<String, Box<dyn std::error::Error>> {
+    response["choices"]
+        .get(0)
+        .and_then(|choice| choice["message"]["content"].as_str())
+        .map(|s| s.to_string())
+        .ok_or_else(|| format!("unexpected {} API response: {}", engine, response).into())
+}
+
 // ── OpenAI API ───────────────────────────────────────────────
 
 fn summarize_with_openai(
@@ -596,10 +609,7 @@ fn summarize_with_openai(
             ],
         )?;
 
-        let text = response["choices"][0]["message"]["content"]
-            .as_str()
-            .unwrap_or("")
-            .to_string();
+        let text = extract_chat_completion_text(&response, "OpenAI")?;
         all_text.push_str(&text);
         all_text.push('\n');
     }
@@ -665,10 +675,7 @@ fn summarize_with_mistral(
             ],
         )?;
 
-        let text = response["choices"][0]["message"]["content"]
-            .as_str()
-            .unwrap_or("")
-            .to_string();
+        let text = extract_chat_completion_text(&response, "Mistral")?;
         all_summaries.push(text);
     }
 
@@ -692,10 +699,7 @@ fn summarize_with_mistral(
                 ("Content-Type", "application/json"),
             ],
         )?;
-        response["choices"][0]["message"]["content"]
-            .as_str()
-            .unwrap_or("")
-            .to_string()
+        extract_chat_completion_text(&response, "Mistral")?
     } else {
         all_summaries.into_iter().next().unwrap_or_default()
     };
@@ -722,8 +726,10 @@ fn summarize_with_ollama(
         let url = format!("{}/api/generate", config.summarization.ollama_url);
         let response = http_post(&url, &body, &[("Content-Type", "application/json")])?;
 
-        let text = response["response"].as_str().unwrap_or("").to_string();
-        all_text.push_str(&text);
+        let text = response["response"]
+            .as_str()
+            .ok_or_else(|| format!("unexpected Ollama API response: {}", response))?;
+        all_text.push_str(text);
         all_text.push('\n');
     }
 

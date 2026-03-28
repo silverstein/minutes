@@ -297,6 +297,13 @@ pub fn record_to_wav(
             .map_err(|e| CaptureError::Io(std::io::Error::other(format!("WAV finalize: {}", e))))?;
     }
 
+    // Set restrictive permissions on the recording (contains sensitive audio)
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(output_path, std::fs::Permissions::from_mode(0o600)).ok();
+    }
+
     eprintln!(
         "[minutes] Captured {} samples ({:.1}s), peak audio level during recording: {}",
         total_samples,

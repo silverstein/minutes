@@ -383,6 +383,17 @@ fn decode_with_ffmpeg(path: &Path) -> Result<Vec<f32>, TranscribeError> {
     let tmp_dir = std::env::temp_dir();
     let tmp_wav = tmp_dir.join(format!("minutes-ffmpeg-{}.wav", std::process::id()));
 
+    // Pre-create temp file with restrictive permissions (contains raw audio)
+    #[cfg(unix)]
+    {
+        // Touch the file so we can set permissions before ffmpeg writes to it
+        if let Ok(f) = std::fs::File::create(&tmp_wav) {
+            drop(f);
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&tmp_wav, std::fs::Permissions::from_mode(0o600)).ok();
+        }
+    }
+
     let output = Command::new("ffmpeg")
         .args([
             "-i",

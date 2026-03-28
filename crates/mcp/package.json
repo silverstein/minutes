@@ -40,7 +40,7 @@
   "dependencies": {
     "@modelcontextprotocol/ext-apps": "^1.2.2",
     "@modelcontextprotocol/sdk": "^1.27.1",
-    "minutes-sdk": "^0.8.1",
+    "minutes-sdk": "^0.8.0",
     "yaml": "^2.8.3"
   },
   "devDependencies": {

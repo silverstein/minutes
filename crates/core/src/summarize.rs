@@ -617,12 +617,17 @@ fn summarize_with_mistral(
     let api_key = std::env::var("MISTRAL_API_KEY")
         .map_err(|_| "MISTRAL_API_KEY not set. Export it or switch to engine = \"ollama\"")?;
 
+    let model = &config.summarization.mistral_model;
     let chunks = build_prompt(transcript, config.summarization.chunk_max_tokens);
-    let mut all_text = String::new();
+    let mut all_summaries = Vec::new();
 
     let screen_content = encode_screens_for_openai(screen_files);
 
     for (i, chunk) in chunks.iter().enumerate() {
+        if chunks.len() > 1 {
+            tracing::info!(chunk = i + 1, total = chunks.len(), "summarizing chunk");
+        }
+
         let mut content_parts: Vec<serde_json::Value> = Vec::new();
 
         if i == 0 && !screen_content.is_empty() {
@@ -641,8 +646,6 @@ fn summarize_with_mistral(
             "type": "text",
             "text": format!("Summarize this transcript:\n\n{}", chunk)
         }));
-
-        let model = &config.summarization.mistral_model;
 
         let body = serde_json::json!({
             "model": model,
@@ -666,11 +669,38 @@ fn summarize_with_mistral(
             .as_str()
             .unwrap_or("")
             .to_string();
-        all_text.push_str(&text);
-        all_text.push('\n');
+        all_summaries.push(text);
     }
 
-    Ok(parse_summary_response(&all_text))
+    // If multiple chunks, do a final synthesis
+    let final_text = if all_summaries.len() > 1 {
+        let combined = all_summaries.join("\n\n---\n\n");
+        let synth_body = serde_json::json!({
+            "model": model,
+            "messages": [
+                { "role": "system", "content": "Combine these partial meeting summaries into a single cohesive summary. Use the same KEY POINTS / DECISIONS / ACTION ITEMS format." },
+                { "role": "user", "content": format!("Combine these summaries:\n\n{}", combined) }
+            ],
+            "max_tokens": 1024,
+        });
+
+        let response = http_post(
+            "https://api.mistral.ai/v1/chat/completions",
+            &synth_body,
+            &[
+                ("Authorization", &format!("Bearer {}", api_key)),
+                ("Content-Type", "application/json"),
+            ],
+        )?;
+        response["choices"][0]["message"]["content"]
+            .as_str()
+            .unwrap_or("")
+            .to_string()
+    } else {
+        all_summaries.into_iter().next().unwrap_or_default()
+    };
+
+    Ok(parse_summary_response(&final_text))
 }
 
 // ── Ollama (local) ───────────────────────────────────────────

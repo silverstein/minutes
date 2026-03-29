@@ -3,6 +3,8 @@ use chrono::TimeZone;
 use clap::{Parser, Subcommand};
 use minutes_core::{CaptureMode, Config, ContentType};
 use serde::Serialize;
+
+mod dashboard;
 use std::path::{Path, PathBuf};
 
 /// minutes — conversation memory for AI assistants.
@@ -371,6 +373,17 @@ enum Commands {
         format: String,
     },
 
+    /// Open the Meeting Intelligence Dashboard in your browser
+    Dashboard {
+        /// Port to serve on (default: 3141)
+        #[arg(short, long, default_value = "3141")]
+        port: u16,
+
+        /// Don't open the browser automatically
+        #[arg(long)]
+        no_open: bool,
+    },
+
     /// Confirm or correct speaker attributions for a meeting
     Confirm {
         /// Path to the meeting markdown file
@@ -565,6 +578,7 @@ fn main() -> Result<()> {
             status,
             format,
         } => cmd_transcript(since.as_deref(), status, &format),
+        Commands::Dashboard { port, no_open } => dashboard::serve(&config, port, !no_open),
     }
 }
 

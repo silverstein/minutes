@@ -114,6 +114,10 @@
     {
       "name": "read_live_transcript",
       "description": "Read utterances from the active live transcript with optional cursor or time window"
+    },
+    {
+      "name": "open_dashboard",
+      "description": "Open the Meeting Intelligence Dashboard in the browser — visual overview of conversation memory"
     }
   ],
   "prompts": [

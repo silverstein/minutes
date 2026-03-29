@@ -1,0 +1,417 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Minutes — Meeting Intelligence</title>
+<style>
+  :root {
+    --bg: #1c1c1e;
+    --bg-elevated: #2c2c2e;
+    --bg-hover: #38383a;
+    --border: #38383a;
+    --divider: rgba(255,255,255,0.06);
+    --text: #f5f5f7;
+    --text-secondary: #86868b;
+    --text-tertiary: #636366;
+    --accent: #0a84ff;
+    --red: #ff453a;
+    --green: #30d158;
+    --green-bg: rgba(48, 209, 88, 0.12);
+    --purple: #bf5af2;
+    --purple-bg: rgba(191, 90, 242, 0.12);
+    --accent-bg: rgba(10, 132, 255, 0.04);
+    --warning-bg: rgba(255, 214, 10, 0.08);
+    --font-sans: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Helvetica Neue', sans-serif;
+    --font-display: ui-serif, 'Iowan Old Style', 'Palatino Linotype', 'Book Antiqua', Georgia, serif;
+    --font-mono: 'SF Mono', Menlo, monospace;
+    --radius-card: 12px;
+    --radius-btn: 8px;
+    --radius-pill: 999px;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    background: var(--bg); color: var(--text);
+    font-family: var(--font-sans); font-size: 13px; line-height: 1.5;
+    min-height: 100vh;
+  }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  .app { display: grid; grid-template-columns: 220px 1fr; min-height: 100vh; }
+
+  /* Sidebar */
+  .sidebar {
+    background: var(--bg); border-right: 1px solid var(--border);
+    padding: 20px 0; display: flex; flex-direction: column;
+    position: sticky; top: 0; height: 100vh; overflow-y: auto;
+  }
+  .sidebar-header { padding: 0 16px 16px; border-bottom: 1px solid var(--divider); }
+  .sidebar-header h1 { font-family: var(--font-display); font-size: 18px; font-weight: 500; letter-spacing: -0.01em; }
+  .sidebar-header .subtitle { color: var(--text-secondary); font-size: 11px; margin-top: 2px; }
+  .sidebar-nav { padding: 12px 8px; flex: 1; }
+  .nav-item {
+    display: flex; align-items: center; gap: 8px; padding: 6px 8px;
+    border-radius: 6px; color: var(--text-secondary); font-size: 13px;
+    cursor: pointer; text-decoration: none; transition: background 0.15s ease, color 0.15s ease;
+  }
+  .nav-item:hover { background: var(--bg-elevated); color: var(--text); }
+  .nav-item.active { background: var(--bg-elevated); color: var(--text); }
+  .nav-item .icon { width: 16px; text-align: center; font-size: 14px; }
+  .sidebar-stats { padding: 16px; border-top: 1px solid var(--divider); }
+  .stat-row { display: flex; justify-content: space-between; padding: 4px 0; font-size: 12px; }
+  .stat-label { color: var(--text-secondary); }
+  .stat-value { color: var(--text); font-variant-numeric: tabular-nums; }
+
+  /* Main */
+  .main { padding: 24px 32px; overflow-y: auto; max-width: 1200px; }
+  .warning-banner {
+    padding: 8px 12px; background: var(--warning-bg); border-radius: var(--radius-btn);
+    font-size: 12px; color: var(--text); margin-bottom: 16px; display: none;
+  }
+  .main-header { margin-bottom: 20px; }
+  .main-header h2 { font-family: var(--font-display); font-size: 20px; font-weight: 400; letter-spacing: -0.02em; }
+  .main-header .period { color: var(--text-secondary); font-size: 12px; margin-top: 4px; }
+
+  /* Metrics */
+  .metrics {
+    display: grid; grid-template-columns: repeat(4, 1fr); gap: 1px;
+    background: var(--border); border-radius: var(--radius-card); overflow: hidden; margin-bottom: 24px;
+  }
+  .metric { background: var(--bg-elevated); padding: 16px; transition: background 0.15s ease; }
+  .metric:hover { background: var(--bg-hover); }
+  .metric-value { font-size: 28px; font-weight: 600; font-variant-numeric: tabular-nums; letter-spacing: -0.02em; }
+  .metric-value.overdue { color: var(--red); }
+  .metric-label { color: var(--text-secondary); font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; margin-top: 4px; }
+  .metric-context { color: var(--text-tertiary); font-size: 11px; margin-top: 2px; }
+
+  /* Content grid */
+  .content-grid { display: grid; grid-template-columns: 1fr 300px; gap: 24px; }
+  @media (max-width: 1100px) { .content-grid { grid-template-columns: 1fr; } }
+
+  .section-title {
+    font-family: var(--font-display); font-size: 16px; font-weight: 400;
+    margin-bottom: 12px; padding-bottom: 8px; border-bottom: 1px solid var(--divider);
+    display: flex; justify-content: space-between; align-items: baseline;
+  }
+  .section-count { font-family: var(--font-sans); font-size: 11px; color: var(--text-tertiary); font-weight: 400; }
+
+  /* Date group headers */
+  .date-group {
+    color: var(--text-tertiary); font-size: 10px; font-weight: 600; text-transform: uppercase;
+    letter-spacing: 0.08em; padding: 20px 12px 6px; border-top: 1px solid var(--divider); margin-top: 4px;
+  }
+  .date-group:first-child { padding-top: 4px; border-top: none; margin-top: 0; }
+
+  /* Show more */
+  .show-more {
+    padding: 10px 16px; text-align: center; color: var(--accent); font-size: 12px;
+    cursor: pointer; border-radius: 6px; transition: all 0.15s ease;
+    border: 1px solid rgba(10, 132, 255, 0.15); margin-top: 8px;
+  }
+  .show-more:hover { background: rgba(10, 132, 255, 0.06); border-color: rgba(10, 132, 255, 0.3); }
+
+  /* Meetings */
+  .meeting-list { display: flex; flex-direction: column; gap: 2px; }
+  .meeting-item {
+    display: grid; grid-template-columns: 56px 1fr auto; gap: 12px;
+    padding: 10px 12px; border-radius: 6px; align-items: start; transition: background 0.15s ease;
+    cursor: default;
+  }
+  .meeting-item:hover { background: var(--bg-elevated); }
+  .meeting-date { font-family: var(--font-mono); font-size: 11px; color: var(--text-secondary); padding-top: 2px; line-height: 1.4; }
+  .meeting-info h4 { font-size: 14px; font-weight: 600; margin-bottom: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 400px; }
+  .meeting-meta { font-size: 12px; color: var(--text-secondary); display: flex; gap: 12px; }
+  .meeting-tags { display: flex; gap: 4px; align-items: start; padding-top: 2px; flex-wrap: wrap; }
+
+  /* Staggered entrance animation */
+  @keyframes fadeSlideIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+  .animate-in { animation: fadeSlideIn 0.3s ease forwards; opacity: 0; }
+  .metrics.animate-in { animation-delay: 0.05s; }
+  .content-grid.animate-in { animation-delay: 0.15s; }
+  .tag { font-size: 10px; padding: 2px 8px; border-radius: var(--radius-pill); background: rgba(255,255,255,0.06); color: var(--text-secondary); }
+  .tag.decision { color: var(--accent); background: rgba(10, 132, 255, 0.12); }
+  .tag.action { color: var(--green); background: var(--green-bg); }
+  .tag.memo { color: var(--purple); background: var(--purple-bg); }
+  .memo-item .meeting-info h4 { color: var(--purple); }
+  .memos-wrapper { background: rgba(191, 90, 242, 0.02); border-radius: var(--radius-card); padding: 16px; border: 1px solid rgba(191, 90, 242, 0.06); }
+
+  /* Right column */
+  .right-column { display: flex; flex-direction: column; gap: 28px; }
+
+  /* Decisions — blue tint, the "what was decided" section */
+  .decision-list { display: flex; flex-direction: column; gap: 6px; }
+  .decision-item { padding: 10px 12px; background: var(--accent-bg); border-radius: var(--radius-btn); transition: background 0.15s ease; }
+  .decision-item:hover { background: rgba(10, 132, 255, 0.08); }
+  .decision-text { font-size: 13px; }
+  .decision-source { font-size: 11px; color: var(--text-secondary); font-family: var(--font-mono); margin-top: 4px; }
+
+  /* Topics — purple bars, the "what keeps coming up" section */
+  .topic-list { display: flex; flex-direction: column; gap: 4px; }
+  .topic-item {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 6px 12px; border-radius: 6px; transition: background 0.15s ease;
+  }
+  .topic-item:hover { background: var(--bg-elevated); }
+  .topic-name { font-size: 13px; }
+  .topic-bar-wrap { display: flex; align-items: center; gap: 8px; }
+  .topic-bar { height: 3px; background: var(--purple); border-radius: 2px; opacity: 0.6; min-width: 12px; transition: opacity 0.15s ease; }
+  .topic-item:hover .topic-bar { opacity: 1; }
+  .topic-count { font-size: 11px; color: var(--text-secondary); font-variant-numeric: tabular-nums; min-width: 20px; text-align: right; }
+
+  /* Actions — checkbox pattern, the "what to do" section */
+  .action-list { display: flex; flex-direction: column; gap: 6px; }
+  .action-item {
+    display: flex; gap: 8px; padding: 8px 12px; background: var(--bg-elevated);
+    border-radius: 6px; align-items: start; transition: background 0.15s ease;
+  }
+  .action-item:hover { background: var(--bg-hover); }
+  .action-item.action-overdue { background: var(--red-bg); }
+  .action-item.action-overdue:hover { background: rgba(255, 69, 58, 0.18); }
+  .action-check { width: 14px; height: 14px; border: 1.5px solid var(--text-tertiary); border-radius: 3px; flex-shrink: 0; margin-top: 1px; }
+  .action-check.done { background: var(--green); border-color: var(--green); }
+  .action-check.check-overdue { border-color: var(--red); }
+  .action-text { font-size: 13px; }
+  .action-text.done { color: var(--text-secondary); text-decoration: line-through; }
+  .action-due { font-size: 11px; color: var(--text-secondary); margin-top: 2px; }
+  .action-due.due-overdue { color: var(--red); }
+
+  /* Empty state */
+  .empty-state { display: none; flex-direction: column; align-items: center; justify-content: center; text-align: center; padding: 80px 32px; min-height: 60vh; }
+  .empty-state h2 { font-family: var(--font-display); font-size: 20px; font-weight: 400; margin-bottom: 12px; }
+  .empty-state p { color: var(--text-secondary); font-size: 13px; max-width: 360px; margin-bottom: 20px; line-height: 1.6; }
+  .empty-state .code-block { background: var(--bg-elevated); border-radius: var(--radius-btn); padding: 12px 20px; font-family: var(--font-mono); font-size: 12px; color: var(--text-secondary); text-align: left; line-height: 1.8; }
+  .empty-state .code-block .cmd { color: var(--accent); }
+  .empty-state .tagline { color: var(--text-tertiary); font-size: 12px; margin-top: 24px; }
+
+  /* Loading shimmer */
+  .shimmer { background: var(--bg-elevated); border-radius: 6px; animation: shimmer 1.5s ease-in-out infinite; }
+  @keyframes shimmer { 0%, 100% { opacity: 0.5; } 50% { opacity: 0.8; } }
+  .shimmer-row { height: 48px; margin-bottom: 4px; }
+  .shimmer-metric { height: 72px; }
+  .populated { display: none; }
+  .muted { padding: 8px 0; color: var(--text-tertiary); font-size: 12px; }
+</style>
+</head>
+<body>
+<div class="app">
+  <nav class="sidebar">
+    <div class="sidebar-header">
+      <h1>Minutes</h1>
+      <div class="subtitle">Conversation Memory</div>
+    </div>
+    <div class="sidebar-nav" id="sidebar-nav">
+      <a href="#top" class="nav-item active"><span class="icon">&#9673;</span> Intelligence</a>
+      <a href="#meetings-section" class="nav-item"><span class="icon">&#9636;</span> Meetings</a>
+      <a href="#decisions-section" class="nav-item"><span class="icon">&#9671;</span> Decisions</a>
+      <a href="#actions-section" class="nav-item"><span class="icon">&#9744;</span> Action Items</a>
+      <a href="#memos-section" class="nav-item"><span class="icon">&#9830;</span> Voice Memos</a>
+    </div>
+    <div class="sidebar-stats">
+      <div class="stat-row"><span class="stat-label">Meetings</span><span class="stat-value" id="s-mtg">&#8212;</span></div>
+      <div class="stat-row"><span class="stat-label">Voice memos</span><span class="stat-value" id="s-memo">&#8212;</span></div>
+      <div class="stat-row"><span class="stat-label">Hours captured</span><span class="stat-value" id="s-hrs">&#8212;</span></div>
+      <div class="stat-row"><span class="stat-label">People</span><span class="stat-value" id="s-ppl">&#8212;</span></div>
+    </div>
+  </nav>
+
+  <main class="main" id="top">
+    <div class="warning-banner" id="warn"></div>
+    <div class="empty-state" id="empty">
+      <h2>Your conversation memory starts here.</h2>
+      <p>Record a meeting, dictate a thought, or drop a voice memo into your meetings folder.</p>
+      <div class="code-block"><span class="cmd">$ minutes record</span><br><span class="cmd">$ minutes dictate</span><br><span class="cmd">$ minutes watch</span></div>
+      <div class="tagline">Minutes will remember everything.</div>
+    </div>
+    <div id="loading">
+      <div class="metrics" style="margin-bottom:24px"><div class="shimmer shimmer-metric"></div><div class="shimmer shimmer-metric"></div><div class="shimmer shimmer-metric"></div><div class="shimmer shimmer-metric"></div></div>
+      <div class="shimmer shimmer-row"></div><div class="shimmer shimmer-row"></div><div class="shimmer shimmer-row"></div><div class="shimmer shimmer-row"></div>
+    </div>
+    <div class="populated" id="pop">
+      <div class="main-header"><h2>Meeting Intelligence</h2><div class="period" id="period"></div></div>
+      <div class="metrics animate-in" id="metrics">
+        <div class="metric"><div class="metric-value" id="mv-dec">0</div><div class="metric-label">Decisions</div><div class="metric-context" id="mc-dec"></div></div>
+        <div class="metric"><div class="metric-value" id="mv-act">0</div><div class="metric-label">Open Actions</div><div class="metric-context" id="mc-act"></div></div>
+        <div class="metric"><div class="metric-value" id="mv-ppl">0</div><div class="metric-label">People</div><div class="metric-context" id="mc-ppl"></div></div>
+        <div class="metric"><div class="metric-value" id="mv-ovr">0</div><div class="metric-label">Overdue</div><div class="metric-context" id="mc-ovr"></div></div>
+      </div>
+      <div class="content-grid animate-in">
+        <div>
+          <div id="meetings-section"><div class="section-title">Recent Meetings <span class="section-count" id="sc-mtg"></span></div><div id="ml"></div></div>
+          <div id="memos-section" style="margin-top:28px"><div class="section-title">Voice Memos <span class="section-count" id="sc-memo"></span></div><div class="memos-wrapper"><div class="meeting-list" id="meml"></div></div></div>
+        </div>
+        <div class="right-column">
+          <div id="decisions-section"><div class="section-title">Recent Decisions <span class="section-count" id="sc-dec"></span></div><div class="decision-list" id="dl"></div></div>
+          <div id="topics-section"><div class="section-title">Recurring Topics <span class="section-count" id="sc-top"></span></div><div class="topic-list" id="tl"></div></div>
+          <div id="actions-section"><div class="section-title">Open Actions <span class="section-count" id="sc-act"></span></div><div class="action-list" id="al"></div></div>
+        </div>
+      </div>
+    </div>
+  </main>
+</div>
+<script>
+(function(){
+  var E=function(s){var e=document.createElement('span');e.textContent=s||'';return e.innerHTML};
+  var D=function(s){if(!s)return'';var d=new Date(s);if(isNaN(d))return E(s);return d.toLocaleString('en',{month:'short'})+' '+d.getDate()+'<br>'+d.getHours()+':'+String(d.getMinutes()).padStart(2,'0')};
+  var SD=function(s){if(!s)return'';var d=new Date(s);if(isNaN(d))return E(s);return d.toLocaleString('en',{month:'short'})+' '+d.getDate()};
+
+  // Date grouping helper
+  function dateGroup(dateStr) {
+    if (!dateStr) return 'Other';
+    var d = new Date(dateStr);
+    if (isNaN(d)) return 'Other';
+    var now = new Date(), today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    var diff = Math.floor((today - new Date(d.getFullYear(), d.getMonth(), d.getDate())) / 86400000);
+    if (diff === 0) return 'Today';
+    if (diff === 1) return 'Yesterday';
+    if (diff < 7) return 'This Week';
+    if (diff < 14) return 'Last Week';
+    return d.toLocaleString('en', { month: 'long', year: 'numeric' });
+  }
+
+  // Sidebar click nav
+  document.getElementById('sidebar-nav').addEventListener('click',function(e){
+    var l=e.target.closest('.nav-item');if(!l)return;
+    document.querySelectorAll('.nav-item').forEach(function(n){n.classList.remove('active')});
+    l.classList.add('active');
+  });
+
+  // Scroll-linked nav highlighting
+  var navSections=['top','meetings-section','decisions-section','actions-section','memos-section'];
+  var navLinks=document.querySelectorAll('.nav-item');
+  var mainEl=document.querySelector('.main');
+  function updateActiveNav(){
+    var scrollY=mainEl.scrollTop||window.scrollY,best=0;
+    for(var i=navSections.length-1;i>=0;i--){
+      var el=document.getElementById(navSections[i]);
+      if(el&&el.offsetTop-100<=scrollY){best=i;break}
+    }
+    navLinks.forEach(function(n,idx){n.classList.toggle('active',idx===best)});
+  }
+  mainEl.addEventListener('scroll',updateActiveNav);
+  window.addEventListener('scroll',updateActiveNav);
+
+  function renderMeetingItem(m, isMemo) {
+    var dc=(m.decisions||[]).length,ac=(m.action_items||[]).length,tags='';
+    if (!isMemo) {
+      if(dc)tags+='<span class="tag decision">'+dc+' decision'+(dc>1?'s':'')+'</span>';
+      if(ac)tags+='<span class="tag action">'+ac+' action'+(ac>1?'s':'')+'</span>';
+    } else {
+      tags='<span class="tag memo">memo</span>';
+    }
+    var sn=m.snippet?E(m.snippet):'',ta=sn?' title="'+sn.replace(/"/g,'&quot;')+'"':'';
+    var sp=!isMemo&&m.speaker_count?m.speaker_count+' speaker'+(m.speaker_count>1?'s':''):'';
+    var cls=isMemo?'meeting-item memo-item':'meeting-item';
+    return '<div class="'+cls+'" tabindex="0"'+ta+'><div class="meeting-date">'+D(m.date)+'</div><div class="meeting-info"><h4>'+E(m.title||'Untitled')+'</h4><div class="meeting-meta">'+(m.duration?'<span>'+E(m.duration)+'</span>':'')+(sp?'<span>'+sp+'</span>':'')+'</div></div><div class="meeting-tags">'+tags+'</div></div>';
+  }
+
+  fetch('/api/data').then(function(r){if(!r.ok)throw new Error('HTTP '+r.status);return r.json()}).then(function(data){
+    document.getElementById('loading').style.display='none';
+    var mtgs=data.meetings||[],stats=data.stats||{},topics=data.topics||[],warns=data.warnings||[];
+    if(warns.length){var w=document.getElementById('warn');w.textContent='\u26A0 '+warns.join(' ');w.style.display='block'}
+    if(!mtgs.length){document.getElementById('empty').style.display='flex';return}
+    document.getElementById('pop').style.display='block';
+
+    var meetings=mtgs.filter(function(m){return m.content_type!=='memo'}),
+        memos=mtgs.filter(function(m){return m.content_type==='memo'}),
+        allDec=[],allAct=[],openAct=[];
+
+    mtgs.forEach(function(m){
+      (m.decisions||[]).forEach(function(d){allDec.push({text:typeof d==='string'?d:(d.text||''),source:m.title,date:m.date})});
+      (m.action_items||[]).forEach(function(a){
+        var done=/^(done|complete)/i.test(a.status||'');
+        allAct.push({task:a.task,assignee:a.assignee,due:a.due,done:done,source:m.title,date:m.date});
+        if(!done)openAct.push(a);
+      });
+    });
+
+    var now=new Date(),overdue=openAct.filter(function(a){if(!a.due)return false;var d=new Date(a.due);return !isNaN(d)&&d<now}).length;
+
+    // Sidebar stats
+    document.getElementById('s-mtg').textContent=meetings.length;
+    document.getElementById('s-memo').textContent=memos.length;
+    document.getElementById('s-hrs').textContent=stats.hours_captured||'0';
+    document.getElementById('s-ppl').textContent=stats.people_count||0;
+    document.getElementById('period').textContent=stats.total_meetings+' recordings \u00B7 '+stats.hours_captured+' hours captured';
+
+    // Section counts
+    var sc=function(id,n){var el=document.getElementById(id);if(el&&n)el.textContent=n};
+
+    // Metrics with context
+    document.getElementById('mv-dec').textContent=allDec.length;
+    document.getElementById('mc-dec').textContent=allDec.length?'across '+meetings.length+' meetings':'';
+    document.getElementById('mv-act').textContent=openAct.length;
+    document.getElementById('mc-act').textContent=openAct.length?overdue+' overdue':'all clear';
+    document.getElementById('mv-ppl').textContent=stats.people_count||0;
+    document.getElementById('mc-ppl').textContent=stats.people_count?'in conversation':'';
+    var ov=document.getElementById('mv-ovr');ov.textContent=overdue;
+    if(overdue>0){ov.classList.add('overdue');document.getElementById('mc-ovr').textContent='needs attention'}
+
+    // Meetings with date groups and limit
+    var INITIAL_LIMIT = 10;
+    var allMeetingItems = meetings;
+
+    function renderMeetingList(items) {
+      var html='',lastGroup='';
+      items.forEach(function(m){
+        var group=dateGroup(m.date);
+        if(group!==lastGroup){html+='<div class="date-group">'+E(group)+'</div>';lastGroup=group}
+        html+=renderMeetingItem(m,false);
+      });
+      return html;
+    }
+
+    var ml=document.getElementById('ml');
+    if(!meetings.length){ml.innerHTML='<div class="muted">No meetings yet.</div>'}
+    else {
+      var visible=meetings.slice(0,INITIAL_LIMIT);
+      var html=renderMeetingList(visible);
+      if(meetings.length>INITIAL_LIMIT){
+        html+='<div class="show-more" id="show-more" tabindex="0">'+(meetings.length-INITIAL_LIMIT)+' more meetings</div>';
+      }
+      ml.innerHTML=html;
+      if(meetings.length>INITIAL_LIMIT){
+        document.getElementById('show-more').addEventListener('click',function(){
+          ml.innerHTML=renderMeetingList(meetings);
+        });
+      }
+    }
+
+    sc('sc-mtg',meetings.length);
+    sc('sc-memo',memos.length||'');
+
+    // Memos
+    document.getElementById('meml').innerHTML=memos.length?memos.slice(0,10).map(function(m){
+      return renderMeetingItem(m,true);
+    }).join(''):'<div class="muted">No voice memos yet.</div>';
+
+    // Decisions
+    sc('sc-dec',allDec.length||'');
+    document.getElementById('dl').innerHTML=allDec.length?allDec.slice(0,8).map(function(d){
+      return '<div class="decision-item"><div class="decision-text">'+E(d.text)+'</div><div class="decision-source">'+SD(d.date)+' \u00B7 '+E(d.source)+'</div></div>'
+    }).join(''):'<div class="muted">No decisions extracted yet.</div>';
+
+    // Topics
+    sc('sc-top',topics.length||'');
+    if(!topics.length){document.getElementById('tl').innerHTML='<div class="muted">Topics appear as you tag meetings.</div>'}
+    else{var mx=topics[0].count||1;document.getElementById('tl').innerHTML=topics.slice(0,8).map(function(t){
+      return '<div class="topic-item"><span class="topic-name">'+E(t.tag)+'</span><div class="topic-bar-wrap"><div class="topic-bar" style="width:'+Math.max(12,Math.round(t.count/mx*80))+'px"></div><span class="topic-count">'+t.count+'</span></div></div>'
+    }).join('')}
+
+    // Actions with overdue highlighting
+    sc('sc-act',openAct.length||'');
+    var da=allAct.filter(function(a){return!a.done}).slice(0,8).concat(allAct.filter(function(a){return a.done}).slice(0,2));
+    document.getElementById('al').innerHTML=da.length?da.map(function(a){
+      var isOverdue=!a.done&&a.due&&!isNaN(new Date(a.due))&&new Date(a.due)<now;
+      return '<div class="action-item'+(isOverdue?' action-overdue':'')+'"><div class="action-check'+(a.done?' done':'')+(isOverdue?' check-overdue':'')+'"></div><div><div class="action-text'+(a.done?' done':'')+'">'+E(a.task)+'</div><div class="action-due'+(isOverdue?' due-overdue':'')+'">'+SD(a.date)+' \u00B7 '+E(a.source)+(isOverdue?' \u00B7 overdue':'')+'</div></div></div>'
+    }).join(''):'<div class="muted">No open action items.</div>';
+
+  }).catch(function(err){
+    document.getElementById('loading').style.display='none';
+    var w=document.getElementById('warn');w.textContent='\u26A0 Failed to load: '+err.message;w.style.display='block';
+    document.getElementById('empty').style.display='flex';
+  });
+})();
+</script>
+</body>
+</html>

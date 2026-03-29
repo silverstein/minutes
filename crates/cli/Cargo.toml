@@ -38,6 +38,7 @@ schemars = { workspace = true, features = ["derive"] }
 serde_yaml = { workspace = true }
 ureq = { workspace = true }
 csv = "1"
+walkdir = { workspace = true }
 pyannote-rs = { workspace = true, optional = true }
 # Pin ort to rc.10 — rc.12 switched to ndarray 0.17 which conflicts with pyannote-rs's ndarray 0.16.
 # This constraint is respected even by `cargo install minutes-cli` from crates.io.

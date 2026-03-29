@@ -1853,6 +1853,73 @@ server.tool(
   }
 );
 
+// ── Dashboard ───────────────────────────────────────────────
+
+server.tool(
+  "open_dashboard",
+  "Open the Meeting Intelligence Dashboard in the browser. Shows a visual overview of your conversation memory: metrics, meeting timeline, decisions, recurring topics, action items, and voice memos. Runs a local HTTP server — data never leaves your machine.",
+  {},
+  { title: "Open Dashboard", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  async () => {
+    if (!(await isCliAvailable())) {
+      return { content: [{ type: "text" as const, text: CLI_INSTALL_MSG }] };
+    }
+
+    // Check if dashboard is already running via PID file
+    const pidPath = join(homedir(), ".minutes", "dashboard.pid");
+    try {
+      const pidStr = await readFile(pidPath, "utf-8");
+      const pid = parseInt(pidStr.trim(), 10);
+      if (pid > 0) {
+        // Check if process is alive
+        try {
+          process.kill(pid, 0);
+          return {
+            content: [{
+              type: "text" as const,
+              text: `Dashboard already running (PID ${pid}). Open http://localhost:3141 in your browser.`,
+            }],
+          };
+        } catch {
+          // Process not alive, stale PID — proceed to launch
+        }
+      }
+    } catch {
+      // No PID file — proceed to launch
+    }
+
+    // Spawn dashboard as detached subprocess
+    const { spawn } = await import("child_process");
+    const child = spawn(MINUTES_BIN, ["dashboard"], {
+      detached: true,
+      stdio: "ignore",
+    });
+    child.unref();
+
+    // Give it a moment to start
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+
+    // Count meetings for the response
+    try {
+      const { stdout } = await runMinutes(["list", "--format", "json", "--limit", "999"]);
+      const lines = stdout.trim().split("\n").filter(Boolean);
+      return {
+        content: [{
+          type: "text" as const,
+          text: `Dashboard opened at http://localhost:3141 (${lines.length} meetings loaded).`,
+        }],
+      };
+    } catch {
+      return {
+        content: [{
+          type: "text" as const,
+          text: "Dashboard opened at http://localhost:3141.",
+        }],
+      };
+    }
+  }
+);
+
 // ── Start server ────────────────────────────────────────────
 
 async function main() {

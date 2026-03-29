@@ -119,6 +119,7 @@ certificate or local notarization credentials.
 | **Tauri command duplication** | Changes to live transcript start/stop logic | Both `cmd_start_live_transcript` and `handle_live_shortcut_event` must use the shared `try_acquire_live` + `run_live_session` functions. Do NOT duplicate logic. |
 | **README accuracy** | New/removed tools, features, crates, or CLI commands | Tool/resource counts, crate list in Architecture, feature sections, and CLI examples in README.md must reflect the current state. Check: tool count matches `manifest.json`, crate list matches `ls crates/*/`, module count matches `ls crates/core/src/*.rs` |
 | **npm dep versions** | Version bumps | `crates/mcp/package.json` `minutes-sdk` dep must reference a version that's actually published on npm. Check with `npm view minutes-sdk versions --json` |
+| **Release notes drafted** | Version bumps / releases | Every release is a visibility moment in followers' GitHub feeds. Draft compelling release notes BEFORE creating the release. No empty releases — ever. See Release Checklist step 5. |
 
 ## Release Checklist
 
@@ -149,15 +150,19 @@ cargo fmt --all -- --check           # Rust formatting
 cargo clippy --all --no-default-features -- -D warnings  # Rust lints
 ```
 
-### 5. Commit, tag, push
-```bash
-git tag vX.Y.Z && git push origin main --tags
-```
+### 5. Write release notes
+Every release shows up in followers' GitHub feeds — this is free awareness. Write notes BEFORE creating the release. No release should ever ship with an empty body.
+- Summarize what shipped and why it matters (not commit messages — outcomes)
+- Include install instructions (cargo install, DMG, npx)
+- Match the voice of past releases (see v0.8.0, v0.8.1 for examples)
+- Save to a temp file: `notes.md`
 
-### 6. GitHub release
+### 6. Commit, push, create release
 ```bash
-gh release create vX.Y.Z -t "title" -F notes.md  # Triggers signed DMG + CLI binary CI
+git push origin main                                          # Push commits first
+gh release create vX.Y.Z -t "vX.Y.Z: Short Title" -F notes.md --target main  # Creates tag + release with notes, triggers CI
 ```
+**IMPORTANT**: `gh release create` creates the tag on the remote and triggers CI. Do NOT `git tag` locally — that causes a race where CI creates the release before notes exist. The release must exist with notes BEFORE CI workflows run.
 
 ### 7. Build and upload .mcpb
 ```bash
@@ -216,10 +221,10 @@ minutes/
 │   │   ├── vad.rs             # Voice activity detection
 │   │   └── vault.rs           # Obsidian/Logseq vault sync
 │   ├── whisper-guard/          # Standalone anti-hallucination toolkit (segment dedup, silence strip, whisper params)
-│   ├── cli/                   # CLI binary — 31 commands
+│   ├── cli/                   # CLI binary — 32 commands
 │   ├── reader/                # Lightweight read-only meeting parser (no audio deps)
 │   ├── assets/                # Bundled assets (demo.wav)
-│   └── mcp/                   # MCP server — 12 tools + 6 resources + MCP App dashboard
+│   └── mcp/                   # MCP server — 22 tools + 6 resources + MCP App dashboard
 │       └── ui/                # Interactive dashboard (vanilla TS, builds to single-file HTML)
 ├── site/                      # Landing page (Next.js + Remotion demo player)
 ├── tauri/                     # Tauri v2 menu bar app + singleton AI Assistant

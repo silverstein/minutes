@@ -13,7 +13,7 @@ categories = ["multimedia::audio", "command-line-utilities"]
 default = ["whisper"]
 whisper = ["dep:whisper-rs", "whisper-guard/whisper"]
 parakeet = ["dep:tempfile"]  # subprocess-based, uses tempfile for concurrent safety
-diarize = ["dep:pyannote-rs"]
+diarize = ["dep:pyannote-rs", "dep:ort"]
 cuda = ["whisper-rs/cuda"]
 metal = ["whisper-rs/metal"]
 coreml = ["whisper-rs/coreml"]
@@ -40,6 +40,7 @@ fs2 = { workspace = true }
 schemars = { workspace = true }
 crossbeam-channel = { workspace = true, optional = true }
 pyannote-rs = { workspace = true, optional = true }
+ort = { workspace = true, optional = true }
 whisper-guard = { path = "../whisper-guard" }
 nnnoiseless = { workspace = true, optional = true }
 base64 = "0.22"

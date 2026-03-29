@@ -70,5 +70,9 @@ crossbeam-channel = "0.5"
 # Speaker diarization (native, no Python)
 pyannote-rs = "0.3"
 
+# ONNX Runtime — pin to rc.10 to avoid Send/Sync breakage in rc.11+
+# (ort::Error<SessionBuilder> is not Send+Sync, breaks pyannote-rs ? operator)
+ort = "=2.0.0-rc.10"
+
 # SQLite (relationship graph index)
 rusqlite = { version = "0.33", features = ["bundled"] }

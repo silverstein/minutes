@@ -1,15 +1,47 @@
 use crate::config::Config;
-use crate::error::{LiveTranscriptError, MinutesError, TranscribeError};
+#[cfg(any(
+    feature = "whisper",
+    all(feature = "parakeet-coreml", target_os = "macos")
+))]
+use crate::error::LiveTranscriptError;
+use crate::error::MinutesError;
 use crate::pid;
+#[cfg(any(
+    feature = "whisper",
+    all(feature = "parakeet-coreml", target_os = "macos")
+))]
 use crate::streaming::AudioStream;
-use crate::streaming_whisper::StreamingWhisper;
+#[cfg(any(
+    feature = "whisper",
+    all(feature = "parakeet-coreml", target_os = "macos")
+))]
+use crate::streaming_engine::StreamingEngine;
+#[cfg(any(
+    feature = "whisper",
+    all(feature = "parakeet-coreml", target_os = "macos")
+))]
 use crate::vad::Vad;
 use chrono::{DateTime, Local};
 use serde::{Deserialize, Serialize};
-use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, BufWriter, Write};
+use std::fs::File;
+#[cfg(any(
+    feature = "whisper",
+    all(feature = "parakeet-coreml", target_os = "macos")
+))]
+use std::fs::OpenOptions;
+use std::io::{BufRead, BufReader};
+#[cfg(any(
+    feature = "whisper",
+    all(feature = "parakeet-coreml", target_os = "macos")
+))]
+use std::io::{BufWriter, Write};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
+#[cfg(any(
+    feature = "whisper",
+    all(feature = "parakeet-coreml", target_os = "macos")
+))]
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 // ──────────────────────────────────────────────────────────────
@@ -68,6 +100,10 @@ pub struct SessionStatus {
 }
 
 /// Manages writing the JSONL and optional WAV file during a live session.
+#[cfg(any(
+    feature = "whisper",
+    all(feature = "parakeet-coreml", target_os = "macos")
+))]
 struct LiveTranscriptWriter {
     jsonl_writer: BufWriter<File>,
     wav_writer: Option<hound::WavWriter<BufWriter<File>>>,
@@ -89,6 +125,10 @@ pub struct LiveStatus {
     pub last_duration_ms: u64,
 }
 
+#[cfg(any(
+    feature = "whisper",
+    all(feature = "parakeet-coreml", target_os = "macos")
+))]
 impl LiveTranscriptWriter {
     fn new(config: &Config) -> Result<Self, MinutesError> {
         let jsonl_path = pid::live_transcript_jsonl_path();
@@ -236,7 +276,10 @@ impl LiveTranscriptWriter {
 ///
 /// Unlike dictation, there is NO silence timeout — the session runs
 /// until explicitly stopped via `minutes stop` or the stop_flag.
-#[cfg(feature = "whisper")]
+#[cfg(any(
+    feature = "whisper",
+    all(feature = "parakeet-coreml", target_os = "macos")
+))]
 pub fn run(
     stop_flag: Arc<AtomicBool>,
     config: &Config,
@@ -268,27 +311,15 @@ pub fn run(
     run_inner(stop_flag, config)
 }
 
-#[cfg(feature = "whisper")]
+#[cfg(any(
+    feature = "whisper",
+    all(feature = "parakeet-coreml", target_os = "macos")
+))]
 fn run_inner(
     stop_flag: Arc<AtomicBool>,
     config: &Config,
 ) -> Result<(usize, f64, PathBuf), MinutesError> {
-    // Load whisper model: use live_transcript.model if set, otherwise dictation.model
-    let whisper_ctx = {
-        let model_path = if config.live_transcript.model.is_empty() {
-            crate::transcribe::resolve_model_path_for_dictation(config)?
-        } else {
-            crate::transcribe::resolve_model_path_by_name(&config.live_transcript.model, config)?
-        };
-        tracing::info!(model = %model_path.display(), "loading whisper model for live transcript");
-        whisper_rs::WhisperContext::new_with_params(
-            model_path
-                .to_str()
-                .ok_or_else(|| TranscribeError::ModelLoadError("invalid path".into()))?,
-            whisper_rs::WhisperContextParameters::default(),
-        )
-        .map_err(|e| TranscribeError::ModelLoadError(format!("{}", e)))?
-    };
+    let mut engine = StreamingEngine::new_for_live(config)?;
 
     // Start audio stream FIRST — validate mic access before truncating any files
     let stream = AudioStream::start()?;
@@ -298,7 +329,6 @@ fn run_inner(
     let mut writer = LiveTranscriptWriter::new(config)?;
 
     let mut vad = Vad::new();
-    let mut streaming = StreamingWhisper::new(config.transcription.language.clone());
     let mut was_speaking = false;
     let mut utterance_samples: usize = 0;
     let max_utterance_secs = config.live_transcript.max_utterance_secs.max(5);
@@ -311,7 +341,7 @@ fn run_inner(
         if stop_flag.load(Ordering::Relaxed) {
             // Finalize any in-progress utterance
             if utterance_samples > 0 {
-                if let Some(sr) = streaming.finalize(&whisper_ctx) {
+                if let Some(sr) = engine.finalize() {
                     writer.write_utterance(&sr.text, sr.duration_secs);
                 }
             }
@@ -321,7 +351,7 @@ fn run_inner(
         // Check for stop sentinel (from `minutes stop`)
         if pid::check_and_clear_sentinel() {
             if utterance_samples > 0 {
-                if let Some(sr) = streaming.finalize(&whisper_ctx) {
+                if let Some(sr) = engine.finalize() {
                     writer.write_utterance(&sr.text, sr.duration_secs);
                 }
             }
@@ -338,7 +368,7 @@ fn run_inner(
             Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
                 tracing::warn!("audio stream disconnected");
                 if utterance_samples > 0 {
-                    if let Some(sr) = streaming.finalize(&whisper_ctx) {
+                    if let Some(sr) = engine.finalize() {
                         writer.write_utterance(&sr.text, sr.duration_secs);
                     }
                 }
@@ -355,15 +385,15 @@ fn run_inner(
             was_speaking = true;
             utterance_samples += chunk.samples.len();
 
-            // Feed to streaming whisper
-            if let Some(_sr) = streaming.feed(&chunk.samples, &whisper_ctx) {
+            // Feed to the streaming engine
+            if let Some(_sr) = engine.feed(&chunk.samples) {
                 // Partial result available — could emit event, but for now just continue
             }
 
             // Force-finalize if max utterance reached
             if utterance_samples >= max_utterance_samples {
                 tracing::info!("max utterance duration reached, force-finalizing");
-                if let Some(sr) = streaming.finalize(&whisper_ctx) {
+                if let Some(sr) = engine.finalize() {
                     if !writer.write_utterance(&sr.text, sr.duration_secs) {
                         tracing::error!(
                             "JSONL write failed — stopping session to prevent data loss"
@@ -371,19 +401,19 @@ fn run_inner(
                         break;
                     }
                 }
-                streaming.reset();
+                engine.reset();
                 utterance_samples = 0;
                 was_speaking = false;
             }
         } else if was_speaking && utterance_samples > 0 {
             // Speech just ended — finalize the utterance
-            if let Some(sr) = streaming.finalize(&whisper_ctx) {
+            if let Some(sr) = engine.finalize() {
                 if !writer.write_utterance(&sr.text, sr.duration_secs) {
                     tracing::error!("JSONL write failed — stopping session to prevent data loss");
                     break;
                 }
             }
-            streaming.reset();
+            engine.reset();
             utterance_samples = 0;
             was_speaking = false;
             // No silence timeout — keep running until stop
@@ -401,15 +431,18 @@ fn run_inner(
 }
 
 /// Stub when whisper feature is disabled.
-#[cfg(not(feature = "whisper"))]
+#[cfg(not(any(
+    feature = "whisper",
+    all(feature = "parakeet-coreml", target_os = "macos")
+)))]
 pub fn run(
     _stop_flag: Arc<AtomicBool>,
     _config: &Config,
 ) -> Result<(usize, f64, PathBuf), MinutesError> {
-    Err(
-        TranscribeError::ModelLoadError("live transcript requires the whisper feature".into())
-            .into(),
+    Err(crate::error::TranscribeError::ModelLoadError(
+        "live transcript requires whisper or parakeet-coreml on macOS".into(),
     )
+    .into())
 }
 
 // ── Delta reader ────────────────────────────────────────────────
@@ -519,6 +552,10 @@ pub fn session_status() -> SessionStatus {
     }
 }
 
+#[cfg(any(
+    feature = "whisper",
+    all(feature = "parakeet-coreml", target_os = "macos")
+))]
 fn set_permissions_0600(path: &std::path::Path) {
     #[cfg(unix)]
     {

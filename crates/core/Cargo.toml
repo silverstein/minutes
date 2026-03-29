@@ -13,6 +13,7 @@ categories = ["multimedia::audio", "command-line-utilities"]
 default = ["whisper"]
 whisper = ["dep:whisper-rs", "whisper-guard/whisper"]
 parakeet = ["dep:tempfile"]  # subprocess-based, uses tempfile for concurrent safety
+parakeet-coreml = ["dep:tempfile"]
 diarize = ["dep:pyannote-rs"]
 cuda = ["whisper-rs/cuda"]
 metal = ["whisper-rs/metal"]

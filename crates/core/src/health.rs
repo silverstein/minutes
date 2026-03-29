@@ -146,14 +146,10 @@ pub fn diarization_status(config: &Config) -> HealthItem {
         let installed = crate::diarize::models_installed(config);
         return HealthItem {
             label: "Speaker diarization".into(),
-            state: if installed {
+            state: if installed || is_auto {
                 "ready"
             } else {
-                if is_auto {
-                    "ready"
-                } else {
-                    "attention"
-                }
+                "attention"
             }
             .into(),
             detail: if installed {

@@ -3,7 +3,7 @@ use crate::error::{DictationError, MinutesError, TranscribeError};
 use crate::markdown::{ContentType, Frontmatter, OutputStatus};
 use crate::pid;
 use crate::streaming::AudioStream;
-use crate::streaming_whisper::StreamingWhisper;
+use crate::streaming_engine::StreamingEngine;
 use crate::vad::Vad;
 use chrono::Local;
 use std::path::PathBuf;
@@ -213,173 +213,186 @@ where
     F: FnMut(DictationEvent),
     G: FnMut(DictationResult),
 {
-    // Try to use preloaded model, fall back to loading on demand
     #[cfg(feature = "whisper")]
-    let model_name = config.dictation.model.clone();
-    #[cfg(feature = "whisper")]
-    let whisper_ctx = if let Some(ctx) = take_cached_model(&model_name) {
-        tracing::info!(model = %model_name, "using preloaded whisper model");
-        ctx
+    let mut model_name = None;
+
+    let mut engine = if config.transcription.engine == "parakeet-coreml" {
+        StreamingEngine::new_for_dictation(config)?
     } else {
-        let model_path = crate::transcribe::resolve_model_path_for_dictation(config)?;
-        tracing::info!(model = %model_path.display(), "loading whisper model on demand");
-        let ctx = whisper_rs::WhisperContext::new_with_params(
-            model_path
-                .to_str()
-                .ok_or_else(|| TranscribeError::ModelLoadError("invalid path".into()))?,
-            whisper_rs::WhisperContextParameters::default(),
-        )
-        .map_err(|e| TranscribeError::ModelLoadError(format!("{}", e)))?;
-        tracing::info!("whisper model loaded for dictation session");
-        ctx
-    };
+        #[cfg(feature = "whisper")]
+        {
+            let whisper_model_name = config.dictation.model.clone();
+            model_name = Some(whisper_model_name.clone());
 
-    #[cfg(not(feature = "whisper"))]
-    return Err(
-        TranscribeError::ModelLoadError("dictation requires the whisper feature".into()).into(),
-    );
-
-    // Start audio stream
-    #[cfg(feature = "whisper")]
-    {
-        let stream = AudioStream::start()?;
-        tracing::info!(device = %stream.device_name, "dictation audio stream started");
-
-        let mut vad = Vad::new();
-        let mut streaming = StreamingWhisper::new(config.transcription.language.clone());
-        let mut was_speaking = false;
-        let mut has_spoken = false;
-        let mut total_silence_ms: u64 = 0;
-        let mut utterance_samples: usize = 0;
-        let max_utterance_samples = config.dictation.max_utterance_secs as usize * 16000;
-
-        on_event(DictationEvent::Listening);
-
-        loop {
-            // Check stop flag (Esc / Ctrl-C / MCP stop)
-            if stop_flag.load(Ordering::Relaxed) {
-                // Finalize any in-progress transcription before exiting
-                if utterance_samples > 0 {
-                    on_event(DictationEvent::Processing);
-                    if let Some(sr) = streaming.finalize(&whisper_ctx) {
-                        let result = finish_utterance(&sr.text, sr.duration_secs, config);
-                        if let Some(result) = result {
-                            on_event(DictationEvent::Success);
-                            on_result(result);
-                        }
-                    }
-                }
-                on_event(DictationEvent::Cancelled);
-                break;
-            }
-
-            // Check if recording started (yield to recording)
-            if let Ok(Some(_)) = pid::check_recording() {
-                tracing::info!("recording started — yielding dictation");
-                if utterance_samples > 0 {
-                    on_event(DictationEvent::Processing);
-                    if let Some(sr) = streaming.finalize(&whisper_ctx) {
-                        let result = finish_utterance(&sr.text, sr.duration_secs, config);
-                        if let Some(result) = result {
-                            on_event(DictationEvent::Success);
-                            on_result(result);
-                        }
-                    }
-                }
-                on_event(DictationEvent::Yielded);
-                break;
-            }
-
-            // Receive audio chunk (100ms timeout to allow stop checks)
-            let chunk = match stream
-                .receiver
-                .recv_timeout(std::time::Duration::from_millis(100))
-            {
-                Ok(chunk) => chunk,
-                Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
-                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
+            let ctx = if let Some(ctx) = take_cached_model(&whisper_model_name) {
+                tracing::info!(model = %whisper_model_name, "using preloaded whisper model");
+                ctx
+            } else {
+                let model_path = crate::transcribe::resolve_model_path_for_dictation(config)?;
+                tracing::info!(model = %model_path.display(), "loading whisper model on demand");
+                let ctx = whisper_rs::WhisperContext::new_with_params(
+                    model_path
+                        .to_str()
+                        .ok_or_else(|| TranscribeError::ModelLoadError("invalid path".into()))?,
+                    whisper_rs::WhisperContextParameters::default(),
+                )
+                .map_err(|e| TranscribeError::ModelLoadError(format!("{}", e)))?;
+                tracing::info!("whisper model loaded for dictation session");
+                ctx
             };
 
-            let vad_result = vad.process(chunk.rms);
-
-            if vad_result.speaking {
-                if !was_speaking {
-                    on_event(DictationEvent::Accumulating);
-                    total_silence_ms = 0;
-                }
-                was_speaking = true;
-                has_spoken = true;
-                utterance_samples += chunk.samples.len();
-
-                // Feed to streaming whisper — may emit a partial result
-                if let Some(sr) = streaming.feed(&chunk.samples, &whisper_ctx) {
-                    on_event(DictationEvent::PartialText(sr.text));
-                }
-
-                // Force-finalize if max utterance reached
-                if utterance_samples >= max_utterance_samples {
-                    tracing::info!("max utterance duration reached, force-processing");
-                    on_event(DictationEvent::Processing);
-                    if let Some(sr) = streaming.finalize(&whisper_ctx) {
-                        let result = finish_utterance(&sr.text, sr.duration_secs, config);
-                        if let Some(result) = result {
-                            on_event(DictationEvent::Success);
-                            on_result(result);
-                        }
-                    }
-                    streaming.reset();
-                    utterance_samples = 0;
-                    was_speaking = false;
-                    on_event(DictationEvent::Listening);
-                }
-            } else {
-                // Silence
-                if was_speaking && utterance_samples > 0 {
-                    // Speech just ended — finalize the streaming transcription
-                    on_event(DictationEvent::Processing);
-                    if let Some(sr) = streaming.finalize(&whisper_ctx) {
-                        let result = finish_utterance(&sr.text, sr.duration_secs, config);
-                        if let Some(result) = result {
-                            on_event(DictationEvent::Success);
-                            on_result(result);
-                        }
-                    }
-                    streaming.reset();
-                    utterance_samples = 0;
-                    was_speaking = false;
-                    total_silence_ms = 0;
-                    on_event(DictationEvent::Listening);
-                }
-
-                total_silence_ms += 100;
-                if has_spoken
-                    && !was_speaking
-                    && total_silence_ms < config.dictation.silence_timeout_ms
-                {
-                    let remaining = config.dictation.silence_timeout_ms - total_silence_ms;
-                    on_event(DictationEvent::SilenceCountdown {
-                        total_ms: config.dictation.silence_timeout_ms,
-                        remaining_ms: remaining,
-                    });
-                }
-                if has_spoken
-                    && !was_speaking
-                    && total_silence_ms >= config.dictation.silence_timeout_ms
-                {
-                    tracing::info!(
-                        silence_ms = total_silence_ms,
-                        "silence timeout — ending dictation"
-                    );
-                    break;
-                }
+            StreamingEngine::Whisper {
+                ctx,
+                streamer: crate::streaming_whisper::StreamingWhisper::new(
+                    config.transcription.language.clone(),
+                ),
             }
         }
 
-        // Return model to cache for next session
-        return_model_to_cache(whisper_ctx, model_name);
+        #[cfg(not(feature = "whisper"))]
+        {
+            return Err(TranscribeError::EngineNotAvailable("whisper".into()).into());
+        }
+    };
 
-        Ok(())
+    let stream = AudioStream::start()?;
+    tracing::info!(device = %stream.device_name, "dictation audio stream started");
+
+    let mut vad = Vad::new();
+    let mut was_speaking = false;
+    let mut has_spoken = false;
+    let mut total_silence_ms: u64 = 0;
+    let mut utterance_samples: usize = 0;
+    let max_utterance_samples = config.dictation.max_utterance_secs as usize * 16000;
+
+    on_event(DictationEvent::Listening);
+
+    loop {
+        // Check stop flag (Esc / Ctrl-C / MCP stop)
+        if stop_flag.load(Ordering::Relaxed) {
+            // Finalize any in-progress transcription before exiting
+            if utterance_samples > 0 {
+                on_event(DictationEvent::Processing);
+                if let Some(sr) = engine.finalize() {
+                    let result = finish_utterance(&sr.text, sr.duration_secs, config);
+                    if let Some(result) = result {
+                        on_event(DictationEvent::Success);
+                        on_result(result);
+                    }
+                }
+            }
+            on_event(DictationEvent::Cancelled);
+            break;
+        }
+
+        // Check if recording started (yield to recording)
+        if let Ok(Some(_)) = pid::check_recording() {
+            tracing::info!("recording started — yielding dictation");
+            if utterance_samples > 0 {
+                on_event(DictationEvent::Processing);
+                if let Some(sr) = engine.finalize() {
+                    let result = finish_utterance(&sr.text, sr.duration_secs, config);
+                    if let Some(result) = result {
+                        on_event(DictationEvent::Success);
+                        on_result(result);
+                    }
+                }
+            }
+            on_event(DictationEvent::Yielded);
+            break;
+        }
+
+        // Receive audio chunk (100ms timeout to allow stop checks)
+        let chunk = match stream
+            .receiver
+            .recv_timeout(std::time::Duration::from_millis(100))
+        {
+            Ok(chunk) => chunk,
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
+        };
+
+        let vad_result = vad.process(chunk.rms);
+
+        if vad_result.speaking {
+            if !was_speaking {
+                on_event(DictationEvent::Accumulating);
+                total_silence_ms = 0;
+            }
+            was_speaking = true;
+            has_spoken = true;
+            utterance_samples += chunk.samples.len();
+
+            // Feed to the streaming engine — may emit a partial result
+            if let Some(sr) = engine.feed(&chunk.samples) {
+                on_event(DictationEvent::PartialText(sr.text));
+            }
+
+            // Force-finalize if max utterance reached
+            if utterance_samples >= max_utterance_samples {
+                tracing::info!("max utterance duration reached, force-processing");
+                on_event(DictationEvent::Processing);
+                if let Some(sr) = engine.finalize() {
+                    let result = finish_utterance(&sr.text, sr.duration_secs, config);
+                    if let Some(result) = result {
+                        on_event(DictationEvent::Success);
+                        on_result(result);
+                    }
+                }
+                engine.reset();
+                utterance_samples = 0;
+                was_speaking = false;
+                on_event(DictationEvent::Listening);
+            }
+        } else {
+            // Silence
+            if was_speaking && utterance_samples > 0 {
+                // Speech just ended — finalize the streaming transcription
+                on_event(DictationEvent::Processing);
+                if let Some(sr) = engine.finalize() {
+                    let result = finish_utterance(&sr.text, sr.duration_secs, config);
+                    if let Some(result) = result {
+                        on_event(DictationEvent::Success);
+                        on_result(result);
+                    }
+                }
+                engine.reset();
+                utterance_samples = 0;
+                was_speaking = false;
+                total_silence_ms = 0;
+                on_event(DictationEvent::Listening);
+            }
+
+            total_silence_ms += 100;
+            if has_spoken && !was_speaking && total_silence_ms < config.dictation.silence_timeout_ms
+            {
+                let remaining = config.dictation.silence_timeout_ms - total_silence_ms;
+                on_event(DictationEvent::SilenceCountdown {
+                    total_ms: config.dictation.silence_timeout_ms,
+                    remaining_ms: remaining,
+                });
+            }
+            if has_spoken
+                && !was_speaking
+                && total_silence_ms >= config.dictation.silence_timeout_ms
+            {
+                tracing::info!(
+                    silence_ms = total_silence_ms,
+                    "silence timeout — ending dictation"
+                );
+                break;
+            }
+        }
     }
+
+    #[cfg(feature = "whisper")]
+    if let Some(model_name) = model_name {
+        if let Some(ctx) = engine.take_whisper_ctx() {
+            return_model_to_cache(ctx, model_name);
+        }
+    }
+
+    Ok(())
 }
 
 /// Finish a transcribed utterance: write to clipboard, file, daily note.
@@ -609,6 +622,7 @@ fn append_dictation_to_daily_note(text: &str, config: &Config) {
 }
 
 /// Save failed audio to disk for recovery.
+#[cfg(feature = "whisper")]
 fn save_failed_audio(samples: &[f32]) {
     let failed_dir = crate::config::Config::minutes_dir().join("dictation-failed");
     if std::fs::create_dir_all(&failed_dir).is_err() {
@@ -643,6 +657,7 @@ fn first_words(text: &str, n: usize) -> String {
     }
 }
 
+#[cfg(feature = "whisper")]
 fn num_cpus() -> i32 {
     whisper_guard::params::num_cpus()
 }

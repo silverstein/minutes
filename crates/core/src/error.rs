@@ -69,6 +69,15 @@ pub enum TranscribeError {
     #[error("parakeet transcription failed: {0}")]
     ParakeetFailed(String),
 
+    #[error("parakeet-coreml helper not found. Run: minutes setup --parakeet-coreml")]
+    ParakeetCoremlNotFound,
+
+    #[error("parakeet-coreml requires macOS 14+ (Sonoma)")]
+    ParakeetCoremlUnsupported,
+
+    #[error("parakeet-coreml transcription failed: {0}")]
+    ParakeetCoremlFailed(String),
+
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 }

@@ -23,8 +23,10 @@ pub use whisper_guard::segments::{clean_transcript, CleanStats};
 // Engines:
 //   - whisper (default): whisper.cpp via whisper-rs, Apple Accelerate on M-series
 //   - parakeet (opt-in): parakeet.cpp via subprocess, Metal on Apple Silicon
+//   - parakeet-coreml (opt-in, macOS-only): Swift helper subprocess via CoreML
 //
-// Engine is selected via config.transcription.engine ("whisper" or "parakeet").
+// Engine is selected via config.transcription.engine
+// ("whisper", "parakeet", or "parakeet-coreml").
 // Model must be downloaded first via `minutes setup`.
 // ──────────────────────────────────────────────────────────────
 
@@ -33,6 +35,7 @@ pub use whisper_guard::segments::{clean_transcript, CleanStats};
 /// Dispatches to the engine configured in `config.transcription.engine`:
 /// - `"whisper"` (default): whisper.cpp via whisper-rs
 /// - `"parakeet"`: parakeet.cpp via subprocess
+/// - `"parakeet-coreml"`: Swift helper subprocess on macOS
 ///
 /// Handles format conversion (m4a/mp3/ogg → PCM) automatically via symphonia.
 /// Both engines produce identical output format: `[M:SS] text` lines.
@@ -40,6 +43,7 @@ pub fn transcribe(audio_path: &Path, config: &Config) -> Result<String, Transcri
     match config.transcription.engine.as_str() {
         "whisper" => transcribe_whisper_dispatch(audio_path, config),
         "parakeet" => transcribe_parakeet_dispatch(audio_path, config),
+        "parakeet-coreml" => transcribe_parakeet_coreml_dispatch(audio_path, config),
         other => {
             tracing::warn!(
                 engine = other,
@@ -128,6 +132,28 @@ fn transcribe_parakeet_dispatch(
     {
         let _ = (audio_path, config);
         Err(TranscribeError::EngineNotAvailable("parakeet".into()))
+    }
+}
+
+/// Parakeet CoreML transcription path (macOS-only, Swift helper subprocess).
+fn transcribe_parakeet_coreml_dispatch(
+    audio_path: &Path,
+    config: &Config,
+) -> Result<String, TranscribeError> {
+    #[cfg(all(feature = "parakeet-coreml", target_os = "macos"))]
+    {
+        transcribe_with_parakeet_coreml(audio_path, config)
+    }
+
+    #[cfg(not(all(feature = "parakeet-coreml", target_os = "macos")))]
+    {
+        let _ = (audio_path, config);
+        #[cfg(not(target_os = "macos"))]
+        return Err(TranscribeError::ParakeetCoremlUnsupported);
+        #[cfg(target_os = "macos")]
+        return Err(TranscribeError::EngineNotAvailable(
+            "parakeet-coreml".into(),
+        ));
     }
 }
 
@@ -546,15 +572,39 @@ fn decode_with_symphonia(path: &Path) -> Result<Vec<f32>, TranscribeError> {
 // They are re-exported as pub use at the top of this file for API compatibility.
 // The private wrappers below delegate to whisper-guard so internal callers
 // (transcribe_with_whisper) continue working without path changes.
+#[cfg(any(
+    test,
+    feature = "whisper",
+    feature = "parakeet",
+    all(feature = "parakeet-coreml", target_os = "macos")
+))]
 use whisper_guard::segments as wg_segments;
 
 // Thin delegates to whisper-guard (used by whisper, parakeet, and tests)
+#[cfg(any(
+    test,
+    feature = "whisper",
+    feature = "parakeet",
+    all(feature = "parakeet-coreml", target_os = "macos")
+))]
 fn dedup_segments(lines: Vec<String>) -> Vec<String> {
     wg_segments::dedup_segments(&lines)
 }
+#[cfg(any(
+    test,
+    feature = "whisper",
+    feature = "parakeet",
+    all(feature = "parakeet-coreml", target_os = "macos")
+))]
 fn dedup_interleaved(lines: Vec<String>) -> Vec<String> {
     wg_segments::dedup_interleaved(&lines)
 }
+#[cfg(any(
+    test,
+    feature = "whisper",
+    feature = "parakeet",
+    all(feature = "parakeet-coreml", target_os = "macos")
+))]
 fn trim_trailing_noise(lines: Vec<String>) -> Vec<String> {
     wg_segments::trim_trailing_noise(&lines)
 }
@@ -980,8 +1030,192 @@ fn parse_parakeet_output(raw_output: &str, config: &Config) -> Result<String, Tr
     Ok(format!("{}\n", transcript))
 }
 
+#[cfg(all(feature = "parakeet-coreml", target_os = "macos"))]
+fn transcribe_with_parakeet_coreml(
+    audio_path: &Path,
+    config: &Config,
+) -> Result<String, TranscribeError> {
+    use std::process::Command;
+
+    let samples = load_audio_samples(audio_path)?;
+    if samples.is_empty() {
+        return Err(TranscribeError::EmptyAudio);
+    }
+
+    let samples = strip_silence(&samples, 16000);
+    if samples.is_empty() {
+        return Err(TranscribeError::EmptyAudio);
+    }
+
+    let tmp_wav = tempfile::Builder::new()
+        .prefix("minutes-parakeet-coreml-")
+        .suffix(".wav")
+        .tempfile()
+        .map_err(TranscribeError::Io)?;
+    write_wav_16k_mono(tmp_wav.path(), &samples)?;
+
+    let binary = resolve_parakeet_coreml_binary(config)?;
+    let model_dir = &config.transcription.parakeet_coreml_model_dir;
+
+    tracing::info!(
+        binary = %binary.display(),
+        model_dir = %model_dir.display(),
+        audio = %audio_path.display(),
+        "starting parakeet-coreml transcription"
+    );
+
+    let wav_str = tmp_wav.path().to_str().ok_or_else(|| {
+        TranscribeError::ParakeetCoremlFailed("temp WAV path is not valid UTF-8".into())
+    })?;
+    let model_dir_str = model_dir.to_str().ok_or_else(|| {
+        TranscribeError::ParakeetCoremlFailed("model dir path is not valid UTF-8".into())
+    })?;
+
+    let mut cmd = Command::new(&binary);
+    cmd.arg("--batch")
+        .arg(wav_str)
+        .arg("--model-dir")
+        .arg(model_dir_str);
+    if let Some(ref lang) = config.transcription.language {
+        cmd.arg("--language").arg(lang);
+    }
+    cmd.stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+
+    let output = cmd.output().map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            TranscribeError::ParakeetCoremlNotFound
+        } else {
+            TranscribeError::ParakeetCoremlFailed(format!("spawn error: {}", e))
+        }
+    })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(TranscribeError::ParakeetCoremlFailed(format!(
+            "exit code {}: {}",
+            output.status.code().unwrap_or(-1),
+            stderr.trim()
+        )));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let transcript = parse_parakeet_coreml_output(&stdout, config)?;
+
+    let word_count = transcript.split_whitespace().count();
+    tracing::info!(words = word_count, "parakeet-coreml transcription complete");
+
+    Ok(transcript)
+}
+
+#[cfg(all(feature = "parakeet-coreml", target_os = "macos"))]
+fn parse_parakeet_coreml_output(raw: &str, config: &Config) -> Result<String, TranscribeError> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Err(TranscribeError::EmptyTranscript(
+            config.transcription.min_words,
+        ));
+    }
+
+    let mut lines: Vec<String> = Vec::new();
+    let mut has_timestamps = false;
+
+    for raw_line in raw.lines() {
+        let raw_line = raw_line.trim();
+        if raw_line.is_empty() {
+            continue;
+        }
+        if let Some(rest) = raw_line.strip_prefix('[') {
+            if let Some(bracket_end) = rest.find(']') {
+                let timestamp_part = &rest[..bracket_end];
+                let text = rest[bracket_end + 1..].trim();
+                if text.is_empty() {
+                    continue;
+                }
+                if let Some(dash_pos) = timestamp_part.find('-') {
+                    let start_str = timestamp_part[..dash_pos].trim();
+                    if let Ok(start_secs) = start_str.parse::<f64>() {
+                        let total_secs = start_secs as u64;
+                        let mins = total_secs / 60;
+                        let secs = total_secs % 60;
+                        has_timestamps = true;
+                        lines.push(format!("[{}:{:02}] {}", mins, secs, text));
+                        continue;
+                    }
+                }
+            }
+        }
+        tracing::debug!(line = raw_line, "skipping unparseable parakeet-coreml line");
+    }
+
+    if lines.is_empty() {
+        if !has_timestamps {
+            let preview: String = raw.chars().take(200).collect();
+            return Err(TranscribeError::ParakeetCoremlFailed(format!(
+                "could not parse parakeet-coreml output (no [start - end] timestamps found). \
+                 First 200 chars: {}",
+                preview
+            )));
+        }
+        return Err(TranscribeError::EmptyTranscript(
+            config.transcription.min_words,
+        ));
+    }
+
+    let lines = dedup_segments(lines);
+    let lines = dedup_interleaved(lines);
+    let lines = trim_trailing_noise(lines);
+
+    let transcript = lines.join("\n");
+    if transcript.is_empty() {
+        return Err(TranscribeError::EmptyTranscript(
+            config.transcription.min_words,
+        ));
+    }
+    Ok(format!("{}\n", transcript))
+}
+
+#[cfg(all(feature = "parakeet-coreml", target_os = "macos"))]
+pub(crate) fn resolve_parakeet_coreml_binary(
+    config: &Config,
+) -> Result<std::path::PathBuf, TranscribeError> {
+    let binary_name = &config.transcription.parakeet_coreml_binary;
+    let path = std::path::PathBuf::from(binary_name);
+    if path.is_absolute() {
+        if path.exists() {
+            return Ok(path);
+        }
+        return Err(TranscribeError::ParakeetCoremlNotFound);
+    }
+    let candidates = [
+        dirs::home_dir().map(|h| h.join(".local").join("bin").join(binary_name)),
+        Some(std::path::PathBuf::from("/opt/homebrew/bin").join(binary_name)),
+        Some(std::path::PathBuf::from("/usr/local/bin").join(binary_name)),
+    ];
+    for candidate in candidates.iter().flatten() {
+        if candidate.exists() {
+            return Ok(candidate.clone());
+        }
+    }
+    if let Ok(output) = std::process::Command::new("which")
+        .arg(binary_name)
+        .output()
+    {
+        if output.status.success() {
+            let p = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !p.is_empty() {
+                return Ok(std::path::PathBuf::from(p));
+            }
+        }
+    }
+    Err(TranscribeError::ParakeetCoremlNotFound)
+}
+
 /// Write f32 samples as a 16kHz mono 16-bit WAV file.
-#[cfg(feature = "parakeet")]
+#[cfg(any(
+    feature = "parakeet",
+    all(feature = "parakeet-coreml", target_os = "macos")
+))]
 fn write_wav_16k_mono(path: &Path, samples: &[f32]) -> Result<(), TranscribeError> {
     let spec = hound::WavSpec {
         channels: 1,
@@ -1456,6 +1690,47 @@ mod tests {
             "should reject invalid model: {}",
             err
         );
+    }
+
+    #[cfg(all(feature = "parakeet-coreml", target_os = "macos"))]
+    #[test]
+    fn parse_parakeet_coreml_basic() {
+        let config = Config::default();
+        let output = "[0.00 - 2.45] Hello world\n[2.50 - 5.10] How are you\n";
+        let result = parse_parakeet_coreml_output(output, &config).unwrap();
+        assert!(result.contains("[0:00] Hello world"));
+        assert!(result.contains("[0:02] How are you"));
+    }
+
+    #[cfg(all(feature = "parakeet-coreml", target_os = "macos"))]
+    #[test]
+    fn parse_parakeet_coreml_empty() {
+        let config = Config::default();
+        let result = parse_parakeet_coreml_output("", &config);
+        assert!(result.is_err());
+    }
+
+    #[cfg(all(feature = "parakeet-coreml", target_os = "macos"))]
+    #[test]
+    fn parse_parakeet_coreml_plain_text_rejected() {
+        let config = Config::default();
+        let result = parse_parakeet_coreml_output("plain text without timestamps", &config);
+        assert!(result.is_err(), "plain text without timestamps should fail");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("no [start - end] timestamps"),
+            "error should explain the issue: {}",
+            err
+        );
+    }
+
+    #[cfg(all(feature = "parakeet-coreml", target_os = "macos"))]
+    #[test]
+    fn parse_parakeet_coreml_over_minute() {
+        let config = Config::default();
+        let output = "[65.00 - 70.00] After a minute\n";
+        let result = parse_parakeet_coreml_output(output, &config).unwrap();
+        assert!(result.contains("[1:05] After a minute"));
     }
 
     #[test]

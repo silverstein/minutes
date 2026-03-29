@@ -544,6 +544,12 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    fn temp_minutes_dir() -> (TempDir, crate::config::TestMinutesDirGuard) {
+        let dir = TempDir::new().unwrap();
+        let guard = crate::config::override_test_minutes_dir(dir.path().join(".minutes"));
+        (dir, guard)
+    }
+
     #[test]
     fn has_valid_extension_matches_configured_types() {
         let config = Config::default();
@@ -637,6 +643,7 @@ mod tests {
 
     #[test]
     fn lock_acquire_and_release() {
+        let (_tmp, _minutes_dir) = temp_minutes_dir();
         // Clean up any existing lock
         release_lock();
 

@@ -269,7 +269,7 @@ pub fn create_pid_file(path: &Path) -> Result<(), PidError> {
 
     if let Some(old_pid) = read_locked_pid(&mut file)? {
         if old_pid != 0 && is_process_alive(old_pid) {
-            file.unlock().ok();
+            fs2::FileExt::unlock(&file).ok();
             return Err(PidError::AlreadyRecording(old_pid));
         }
     }
@@ -334,7 +334,7 @@ pub fn create_pid_guard(path: &Path) -> Result<PidGuard, PidError> {
 
     if let Some(old_pid) = read_locked_pid(&mut file)? {
         if old_pid != 0 && is_process_alive(old_pid) {
-            file.unlock().ok();
+            fs2::FileExt::unlock(&file).ok();
             return Err(PidError::AlreadyRecording(old_pid));
         }
     }
@@ -416,7 +416,7 @@ pub fn create() -> Result<(), PidError> {
     // We hold the lock. Check if there's a stale PID from a crashed process.
     if let Some(old_pid) = read_locked_pid(&mut file)? {
         if old_pid != 0 && is_process_alive(old_pid) {
-            file.unlock().ok();
+            fs2::FileExt::unlock(&file).ok();
             return Err(PidError::AlreadyRecording(old_pid));
         }
     }
@@ -580,12 +580,19 @@ mod tests {
     use super::*;
     use fs2::FileExt;
     use std::sync::{Mutex, MutexGuard, OnceLock};
+    use tempfile::TempDir;
 
     fn test_guard() -> MutexGuard<'static, ()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn temp_minutes_dir() -> (TempDir, crate::config::TestMinutesDirGuard) {
+        let dir = TempDir::new().unwrap();
+        let guard = crate::config::override_test_minutes_dir(dir.path().join(".minutes"));
+        (dir, guard)
     }
 
     #[test]
@@ -604,6 +611,7 @@ mod tests {
     #[test]
     fn processing_status_round_trip() {
         let _guard = test_guard();
+        let (_tmp, _minutes_dir) = temp_minutes_dir();
         set_processing_status(Some("Transcribing audio"), Some(CaptureMode::QuickThought)).unwrap();
         let status = read_processing_status();
         assert!(status.processing);
@@ -616,6 +624,7 @@ mod tests {
     #[test]
     fn recording_metadata_round_trip() {
         let _guard = test_guard();
+        let (_tmp, _minutes_dir) = temp_minutes_dir();
         write_recording_metadata(CaptureMode::QuickThought).unwrap();
         let metadata = read_recording_metadata().unwrap();
         assert_eq!(metadata.mode, CaptureMode::QuickThought);
@@ -625,6 +634,7 @@ mod tests {
     #[test]
     fn sentinel_lifecycle() {
         let _guard = test_guard();
+        let (_tmp, _minutes_dir) = temp_minutes_dir();
         // Ensure clean state
         let _ = std::fs::remove_file(stop_sentinel_path());
         assert!(!stop_sentinel_path().exists());
@@ -644,6 +654,7 @@ mod tests {
     #[test]
     fn sentinel_write_and_clear() {
         let _guard = test_guard();
+        let (_tmp, _minutes_dir) = temp_minutes_dir();
         // Write a sentinel and verify check_and_clear removes it
         write_stop_sentinel().unwrap();
         assert!(stop_sentinel_path().exists());
@@ -656,6 +667,7 @@ mod tests {
     #[test]
     fn check_and_clear_sentinel_returns_false_when_absent() {
         let _guard = test_guard();
+        let (_tmp, _minutes_dir) = temp_minutes_dir();
         // Ensure no sentinel exists
         let _ = std::fs::remove_file(stop_sentinel_path());
         assert!(!check_and_clear_sentinel());

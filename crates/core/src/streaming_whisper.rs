@@ -1,4 +1,6 @@
+#[cfg(feature = "whisper")]
 use crate::transcribe::streaming_whisper_params;
+#[cfg(feature = "whisper")]
 use whisper_rs::WhisperContext;
 
 // ──────────────────────────────────────────────────────────────
@@ -39,9 +41,11 @@ use whisper_rs::WhisperContext;
 // ──────────────────────────────────────────────────────────────
 
 /// How often to run partial transcription (in audio samples at 16kHz).
+#[cfg(feature = "whisper")]
 const PARTIAL_INTERVAL_SAMPLES: usize = 16000 * 2; // Every 2 seconds
 
 /// Minimum audio length to attempt transcription (avoid noise-only runs).
+#[cfg(feature = "whisper")]
 const MIN_TRANSCRIBE_SAMPLES: usize = 16000; // 1 second
 
 /// Result from a streaming transcription pass.
@@ -57,6 +61,7 @@ pub struct StreamingResult {
 
 /// Streaming whisper transcriber. Holds the accumulated audio buffer
 /// and runs partial transcriptions at intervals.
+#[cfg(feature = "whisper")]
 pub struct StreamingWhisper {
     /// All audio samples accumulated so far (16kHz mono f32).
     audio_buffer: Vec<f32>,
@@ -72,6 +77,7 @@ pub struct StreamingWhisper {
     has_created_state: bool,
 }
 
+#[cfg(feature = "whisper")]
 impl StreamingWhisper {
     /// Create a new streaming transcriber.
     pub fn new(language: Option<String>) -> Self {
@@ -196,6 +202,7 @@ impl StreamingWhisper {
 }
 
 /// Temporarily suppress stderr (whisper C code prints noisy init logs).
+#[cfg(feature = "whisper")]
 fn suppress_stderr<T>(f: impl FnOnce() -> T) -> T {
     #[cfg(unix)]
     {
@@ -219,11 +226,12 @@ fn suppress_stderr<T>(f: impl FnOnce() -> T) -> T {
     f()
 }
 
+#[cfg(feature = "whisper")]
 fn num_cpus() -> i32 {
     whisper_guard::params::num_cpus()
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "whisper"))]
 mod tests {
     use super::*;
 

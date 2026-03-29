@@ -48,7 +48,7 @@ impl Default for VoiceConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TranscriptionConfig {
-    /// Transcription engine: "whisper" (default) or "parakeet".
+    /// Transcription engine: "whisper" (default), "parakeet", or "parakeet-coreml".
     pub engine: String,
     pub model: String,
     pub model_path: PathBuf,
@@ -66,6 +66,12 @@ pub struct TranscriptionConfig {
     pub parakeet_model: String,
     /// SentencePiece vocab filename (resolved under model_path/parakeet/, e.g. "vocab.txt").
     pub parakeet_vocab: String,
+    /// Path or name of the parakeet-coreml Swift helper binary.
+    /// Resolved via PATH if not absolute. Default: "parakeet-coreml"
+    pub parakeet_coreml_binary: String,
+    /// Directory containing the CoreML model (.mlmodelc).
+    /// Default: ~/.minutes/models/parakeet-coreml/
+    pub parakeet_coreml_model_dir: PathBuf,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -287,8 +293,39 @@ fn home_dir() -> PathBuf {
     dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp"))
 }
 
+#[cfg(test)]
+std::thread_local! {
+    static TEST_MINUTES_DIR: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+}
+
 fn minutes_dir() -> PathBuf {
+    #[cfg(test)]
+    if let Some(path) = TEST_MINUTES_DIR.with(|slot| slot.borrow().clone()) {
+        return path;
+    }
+
     home_dir().join(".minutes")
+}
+
+#[cfg(test)]
+pub(crate) struct TestMinutesDirGuard {
+    previous: Option<PathBuf>,
+}
+
+#[cfg(test)]
+impl Drop for TestMinutesDirGuard {
+    fn drop(&mut self) {
+        TEST_MINUTES_DIR.with(|slot| {
+            slot.replace(self.previous.take());
+        });
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn override_test_minutes_dir(path: PathBuf) -> TestMinutesDirGuard {
+    std::fs::create_dir_all(&path).unwrap();
+    let previous = TEST_MINUTES_DIR.with(|slot| slot.replace(Some(path)));
+    TestMinutesDirGuard { previous }
 }
 
 impl Default for Config {
@@ -327,6 +364,8 @@ impl Default for TranscriptionConfig {
             parakeet_binary: "parakeet".into(),
             parakeet_model: "tdt-ctc-110m".into(),
             parakeet_vocab: "vocab.txt".into(),
+            parakeet_coreml_binary: "parakeet-coreml".into(),
+            parakeet_coreml_model_dir: minutes_dir().join("models").join("parakeet-coreml"),
         }
     }
 }

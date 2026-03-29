@@ -30,6 +30,18 @@ pub mod vad;
 #[cfg(feature = "streaming")]
 pub mod streaming_whisper;
 
+// Streaming parakeet-coreml (CoreML subprocess for real-time transcription)
+#[cfg(all(
+    feature = "streaming",
+    feature = "parakeet-coreml",
+    target_os = "macos"
+))]
+pub mod streaming_parakeet;
+
+// Unified streaming engine (wraps whisper or parakeet-coreml)
+#[cfg(feature = "streaming")]
+pub mod streaming_engine;
+
 // Dictation mode (requires streaming + whisper)
 #[cfg(feature = "streaming")]
 pub mod dictation;

@@ -686,13 +686,23 @@ fn cmd_record(
         }
     }
 
-    // Set up stop flag for signal handler
+    // Set up stop flag for signal handler (double Ctrl+C to force quit)
     let stop_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let stop_clone = std::sync::Arc::clone(&stop_flag);
     ctrlc::set_handler(move || {
-        eprintln!("\nStopping recording...");
+        if stop_clone.load(std::sync::atomic::Ordering::Relaxed) {
+            eprintln!("\nForce quit.");
+            std::process::exit(1);
+        }
+        eprintln!("\nStopping recording... (Ctrl+C again to force quit)");
         stop_clone.store(true, std::sync::atomic::Ordering::Relaxed);
     })?;
+
+    // Ignore SIGTERM — `minutes stop` uses sentinel file for graceful shutdown
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(libc::SIGTERM, libc::SIG_IGN);
+    }
 
     // Record audio from default input device
     let wav_path = minutes_core::pid::current_wav_path();
@@ -2952,11 +2962,21 @@ fn cmd_dictate(stdout: bool, note_only: bool, config: &Config) -> Result<()> {
     let stop_flag = Arc::new(AtomicBool::new(false));
     let stop_clone = Arc::clone(&stop_flag);
 
-    // Handle Ctrl-C
+    // Handle Ctrl-C (double press to force quit)
     ctrlc::set_handler(move || {
-        eprintln!("\nStopping dictation...");
+        if stop_clone.load(Ordering::Relaxed) {
+            eprintln!("\nForce quit.");
+            std::process::exit(1);
+        }
+        eprintln!("\nStopping dictation... (Ctrl+C again to force quit)");
         stop_clone.store(true, Ordering::Relaxed);
     })?;
+
+    // Ignore SIGTERM — `minutes stop` uses sentinel file for graceful shutdown
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(libc::SIGTERM, libc::SIG_IGN);
+    }
 
     let mut config = config.clone();
     if stdout {
@@ -3538,11 +3558,22 @@ fn cmd_live(config: &Config) -> Result<()> {
     let stop = Arc::new(AtomicBool::new(false));
     let stop_clone = Arc::clone(&stop);
 
-    // Handle Ctrl-C
+    // Handle Ctrl-C (double press to force quit)
     ctrlc::set_handler(move || {
+        if stop_clone.load(Ordering::Relaxed) {
+            eprintln!("\nForce quit.");
+            std::process::exit(1);
+        }
+        eprintln!("\nStopping gracefully... (Ctrl+C again to force quit)");
         stop_clone.store(true, Ordering::Relaxed);
     })
     .ok();
+
+    // Ignore SIGTERM — `minutes stop` uses sentinel file for graceful shutdown
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(libc::SIGTERM, libc::SIG_IGN);
+    }
 
     // No sentinel watcher needed — run_inner already polls check_and_clear_sentinel
     // directly in its main loop, avoiding the thread-join and double-consume race.

@@ -47,7 +47,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
 
 # Signal handling
-ctrlc = { version = "3", features = ["termination"] }
+ctrlc = "3"
 
 # HTTP client (for LLM API calls — no secrets in process args)
 ureq = { version = "3", features = ["json"] }

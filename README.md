@@ -37,8 +37,9 @@ brew install --cask silverstein/tap/minutes
 # macOS — CLI only
 brew tap silverstein/tap && brew install minutes
 
-# Any platform — from source (requires Rust + cmake)
-cargo install minutes-cli
+# Any platform — from source (requires Rust + cmake; Windows also needs LLVM)
+cargo install minutes-cli                          # macOS/Linux
+cargo install minutes-cli --no-default-features    # Windows (see install notes below)
 
 # MCP server only — no Rust needed (Claude Code, Codex, Gemini CLI, Claude Desktop, etc.)
 npx minutes-mcp
@@ -439,15 +440,29 @@ cargo install --path crates/cli
 
 ```powershell
 # Download pre-built binary from GitHub releases, or build from source:
-# Requires: Rust, cmake, MSVC build tools
+# Requires: Rust, cmake, MSVC build tools, LLVM (for libclang)
+
+# Install LLVM (needed by whisper-rs bindgen):
+winget install LLVM.LLVM
+[Environment]::SetEnvironmentVariable("LIBCLANG_PATH", "C:\Program Files\LLVM\bin", "User")
+# Restart your terminal after setting LIBCLANG_PATH
+
+# Full build (includes speaker diarization):
 cargo install --path crates/cli
+
+# Without speaker diarization:
+cargo install --path crates/cli --no-default-features
 ```
+
+> **Note:** If diarization fails to compile on Windows, use `--no-default-features`.
+> This is a [known upstream issue](https://github.com/silverstein/minutes/issues/27)
+> with `pyannote-rs`'s ONNX Runtime dependency. Everything except speaker labels works without it.
 
 ### Linux
 
 ```bash
-# Requires: Rust, cmake, ALSA dev headers
-sudo apt-get install -y libasound2-dev  # Debian/Ubuntu
+# Requires: Rust, cmake, ALSA dev headers, libclang (for bindgen)
+sudo apt-get install -y libasound2-dev libclang-dev  # Debian/Ubuntu
 cargo install --path crates/cli
 ```
 

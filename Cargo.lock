@@ -2781,6 +2781,7 @@ dependencies = [
  "hound",
  "libc",
  "minutes-core",
+ "ort",
  "pyannote-rs",
  "schemars 1.2.1",
  "serde",

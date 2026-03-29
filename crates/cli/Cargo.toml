@@ -17,7 +17,7 @@ path = "src/main.rs"
 
 [features]
 default = ["diarize"]
-diarize = ["minutes-core/diarize", "dep:pyannote-rs", "dep:symphonia"]
+diarize = ["minutes-core/diarize", "dep:pyannote-rs", "dep:ort", "dep:symphonia"]
 cuda = ["minutes-core/cuda"]
 metal = ["minutes-core/metal"]
 coreml = ["minutes-core/coreml"]
@@ -39,6 +39,10 @@ serde_yaml = { workspace = true }
 ureq = { workspace = true }
 csv = "1"
 pyannote-rs = { workspace = true, optional = true }
+# Pin ort to rc.10 — rc.12 switched to ndarray 0.17 which conflicts with pyannote-rs's ndarray 0.16.
+# This constraint is respected even by `cargo install minutes-cli` from crates.io.
+# Remove once pyannote-rs ships a fix (tracked: thewh1teagle/pyannote-rs#27).
+ort = { version = "=2.0.0-rc.10", optional = true }
 symphonia = { workspace = true, optional = true }
 
 [target.'cfg(unix)'.dependencies]

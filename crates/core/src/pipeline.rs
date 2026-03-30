@@ -403,7 +403,12 @@ where
         if status == Some(OutputStatus::NoSpeech) {
             "Untitled Recording".into()
         } else {
-            generate_title(&transcript, pre_context.as_deref())
+            // Prefer calendar event title over transcript-derived title
+            calendar_event_title
+                .as_deref()
+                .and_then(title_from_context)
+                .map(finalize_title)
+                .unwrap_or_else(|| generate_title(&transcript, pre_context.as_deref()))
         }
     });
     let entities = build_entity_links(

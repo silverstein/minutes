@@ -2645,7 +2645,14 @@ fn cmd_vault_setup(
 
     // Apply custom subdir before any strategy logic uses it
     if let Some(ref sub) = subdir {
-        config.vault.meetings_subdir = sub.clone();
+        let trimmed = sub.trim_matches('/');
+        if trimmed.is_empty() {
+            anyhow::bail!("--subdir cannot be empty");
+        }
+        if Path::new(sub).is_absolute() || sub.contains("..") {
+            anyhow::bail!("--subdir must be a relative path without '..' components");
+        }
+        config.vault.meetings_subdir = trimmed.to_string();
     }
 
     let vault_path = if let Some(p) = path {

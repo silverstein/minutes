@@ -335,10 +335,7 @@ fn percent_decode(s: &str) -> String {
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let Ok(b) = u8::from_str_radix(
-                &s[i + 1..i + 3],
-                16,
-            ) {
+            if let Ok(b) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
                 out.push(b);
                 i += 3;
                 continue;
@@ -403,10 +400,7 @@ fn handle_request(stream: &mut std::net::TcpStream, config: &Config) {
         "/api/open" => {
             // Open a meeting file in the user's default app
             let file_path = query
-                .and_then(|q| {
-                    q.split('&')
-                        .find_map(|param| param.strip_prefix("path="))
-                })
+                .and_then(|q| q.split('&').find_map(|param| param.strip_prefix("path=")))
                 .map(percent_decode);
 
             let meetings_dir = config.output_dir.canonicalize().ok();
@@ -424,7 +418,10 @@ fn handle_request(stream: &mut std::net::TcpStream, config: &Config) {
                         ("403 Forbidden", "{\"error\":\"path outside meetings dir\"}")
                     }
                 }
-                _ => ("400 Bad Request", "{\"error\":\"missing path or meetings dir\"}"),
+                _ => (
+                    "400 Bad Request",
+                    "{\"error\":\"missing path or meetings dir\"}",
+                ),
             };
             let response = format!(
                 "HTTP/1.1 {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",

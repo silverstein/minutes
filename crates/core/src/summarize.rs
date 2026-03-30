@@ -285,16 +285,15 @@ fn detect_agent_cli() -> Option<String> {
     for cmd in &["claude", "codex", "gemini"] {
         let resolved = resolve_agent_path(cmd);
         // resolve_agent_path returns the bare name if not found — check if we got a real path
-        if resolved != *cmd || std::path::Path::new(&resolved).exists() {
-            if std::process::Command::new(&resolved)
+        if (resolved != *cmd || std::path::Path::new(&resolved).exists())
+            && std::process::Command::new(&resolved)
                 .arg("--version")
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
                 .status()
                 .is_ok()
-            {
-                return Some(resolved);
-            }
+        {
+            return Some(resolved);
         }
     }
     None

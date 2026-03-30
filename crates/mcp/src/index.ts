@@ -590,6 +590,19 @@ server.tool(
       const { stdout, stderr } = await runMinutes(["stop"], 180000);
       const result = parseJsonOutput(stdout);
 
+      if (result.status === "queued") {
+        const title = result.title ? ` for ${result.title}` : "";
+        const jobLine = result.job_id ? ` Job: ${result.job_id}.` : "";
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `Recording stopped. Processing queued${title}.${jobLine}`,
+            },
+          ],
+        };
+      }
+
       if (!result.file) {
         return { content: [{ type: "text" as const, text: stderr || "Recording stopped." }] };
       }
@@ -659,7 +672,7 @@ server.tool(
     const text = status.recording
       ? `${modeLabel} in progress (PID: ${status.pid})`
       : status.processing
-        ? `${processingLabel}${status.processing_stage ? `: ${status.processing_stage}` : "."}`
+        ? `${processingLabel}${status.processing_title ? ` for ${status.processing_title}` : ""}${status.processing_stage ? `: ${status.processing_stage}` : "."}${status.processing_job_count > 1 ? ` (${status.processing_job_count} jobs queued)` : ""}`
         : "No recording in progress.";
     return { content: [{ type: "text" as const, text }] };
   }

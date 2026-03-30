@@ -386,6 +386,7 @@ fn parse_capture_mode(mode: Option<&str>) -> Result<CaptureMode, String> {
     }
 }
 
+#[cfg(test)]
 fn stage_label(stage: minutes_core::pipeline::PipelineStage, mode: CaptureMode) -> &'static str {
     match (stage, mode) {
         (minutes_core::pipeline::PipelineStage::Transcribing, CaptureMode::Meeting) => {
@@ -431,6 +432,85 @@ fn set_latest_output(
     if let Ok(mut current) = latest_output.lock() {
         *current = notice;
     }
+}
+
+fn sync_processing_indicator(
+    processing: &Arc<AtomicBool>,
+    processing_stage: &Arc<Mutex<Option<String>>>,
+) {
+    let summary = minutes_core::jobs::processing_summary();
+    processing.store(summary.is_some(), Ordering::Relaxed);
+    set_processing_stage(
+        processing_stage,
+        summary
+            .as_ref()
+            .and_then(|job| job.stage.as_deref()),
+    );
+}
+
+fn output_notice_from_job(job: &minutes_core::jobs::ProcessingJob) -> Option<OutputNotice> {
+    match job.state {
+        minutes_core::jobs::JobState::Complete => job.output_path.as_ref().map(|path| OutputNotice {
+            kind: "saved".into(),
+            title: job
+                .title
+                .clone()
+                .unwrap_or_else(|| "Processed recording".into()),
+            path: path.clone(),
+            detail: "Saved meeting markdown".into(),
+        }),
+        minutes_core::jobs::JobState::Failed => {
+            let path = job
+                .output_path
+                .clone()
+                .unwrap_or_else(|| job.audio_path.clone());
+            Some(OutputNotice {
+                kind: "preserved-capture".into(),
+                title: job
+                    .title
+                    .clone()
+                    .unwrap_or_else(|| "Processing failed".into()),
+                path,
+                detail: job
+                    .error
+                    .clone()
+                    .unwrap_or_else(|| "Processing failed, recoverable capture preserved.".into()),
+            })
+        }
+        _ => None,
+    }
+}
+
+pub fn spawn_processing_worker(
+    app_handle: tauri::AppHandle,
+    processing: Arc<AtomicBool>,
+    processing_stage: Arc<Mutex<Option<String>>>,
+    latest_output: Arc<Mutex<Option<OutputNotice>>>,
+    completion_notifications_enabled: Arc<AtomicBool>,
+) {
+    std::thread::spawn(move || {
+        let config = Config::load();
+        let result = minutes_core::jobs::process_pending_jobs(&config, |job| {
+            sync_processing_indicator(&processing, &processing_stage);
+
+            if let Some(notice) = output_notice_from_job(job) {
+                set_latest_output(&latest_output, Some(notice.clone()));
+                maybe_show_completion_notification(
+                    &app_handle,
+                    &completion_notifications_enabled,
+                    &notice,
+                );
+            }
+        });
+
+        if let Err(error) = result {
+            if !matches!(error, minutes_core::MinutesError::Pid(minutes_core::error::PidError::AlreadyRecording(_))) {
+                eprintln!("[minutes] processing worker failed: {}", error);
+            }
+        }
+
+        sync_processing_indicator(&processing, &processing_stage);
+    });
 }
 
 fn display_path(path: &str) -> String {
@@ -1129,6 +1209,7 @@ pub fn start_recording(
 ) {
     let config = Config::load();
     let wav_path = minutes_core::pid::current_wav_path();
+    let recording_started_at = chrono::Local::now();
 
     if let Err(e) = minutes_core::pid::create() {
         eprintln!("Failed to create PID: {}", e);
@@ -1148,17 +1229,15 @@ pub fn start_recording(
     starting.store(false, Ordering::Relaxed);
     recording.store(true, Ordering::Relaxed);
     stop_flag.store(false, Ordering::Relaxed);
-    processing.store(false, Ordering::Relaxed);
-    set_processing_stage(&processing_stage, None);
+    sync_processing_indicator(&processing, &processing_stage);
     set_latest_output(&latest_output, None);
-    minutes_core::pid::clear_processing_status().ok();
     minutes_core::pid::write_recording_metadata(mode).ok();
     crate::update_tray_state(&app_handle, true);
 
     minutes_core::notes::save_recording_start().ok();
     eprintln!("{} started...", mode.noun());
 
-    let mut remove_current_wav = false;
+    let mut clear_processing_on_exit = true;
     match minutes_core::capture::record_to_wav(&wav_path, stop_flag, &config) {
         Ok(()) => {
             recording.store(false, Ordering::Relaxed);
@@ -1167,71 +1246,65 @@ pub fn start_recording(
                 .map(|flag| flag.swap(false, Ordering::Relaxed))
                 .unwrap_or(false);
             if should_discard {
-                remove_current_wav = true;
+                if wav_path.exists() {
+                    std::fs::remove_file(&wav_path).ok();
+                }
                 eprintln!("Discarded short {} capture.", mode.noun());
             } else {
-                processing.store(true, Ordering::Relaxed);
-            }
-            if !should_discard {
-                match minutes_core::pipeline::process_with_progress(
-                    &wav_path,
-                    mode.content_type(),
+                let recording_finished_at = chrono::Local::now();
+                let user_notes = minutes_core::notes::read_notes();
+                let pre_context = minutes_core::notes::read_context();
+                let calendar_event = if mode.content_type() == ContentType::Meeting {
+                    minutes_core::calendar::events_overlapping_now()
+                        .into_iter()
+                        .next()
+                } else {
+                    None
+                };
+
+                match minutes_core::jobs::queue_live_capture(
+                    mode,
                     None,
-                    &config,
-                    |stage| {
-                        let label = stage_label(stage, mode);
-                        set_processing_stage(&processing_stage, Some(label));
-                        let _ = minutes_core::pid::set_processing_status(Some(label), Some(mode));
-                    },
+                    &wav_path,
+                    user_notes,
+                    pre_context,
+                    Some(recording_started_at),
+                    Some(recording_finished_at),
+                    calendar_event,
                 ) {
-                    Ok(result) => {
-                        remove_current_wav = true;
-                        let detail = match mode {
-                            CaptureMode::Meeting => "Saved meeting markdown",
-                            CaptureMode::QuickThought => "Saved quick thought memo",
-                            CaptureMode::Dictation => "Saved dictation",
-                            CaptureMode::LiveTranscript => "Saved live transcript",
-                        };
-                        let notice = OutputNotice {
-                            kind: "saved".into(),
-                            title: result.title.clone(),
-                            path: result.path.display().to_string(),
-                            detail: detail.into(),
-                        };
-                        set_latest_output(&latest_output, Some(notice.clone()));
-                        maybe_show_completion_notification(
-                            &app_handle,
-                            &completion_notifications_enabled,
-                            &notice,
-                        );
-                        eprintln!(
-                            "Saved {}: {} ({} words)",
-                            mode.noun(),
-                            result.path.display(),
-                            result.word_count
+                    Ok(job) => {
+                        processing.store(true, Ordering::Relaxed);
+                        set_processing_stage(&processing_stage, job.stage.as_deref());
+                        minutes_core::pid::set_processing_status(
+                            job.stage.as_deref(),
+                            Some(mode),
+                            job.title.as_deref(),
+                            Some(&job.id),
+                            minutes_core::jobs::active_job_count(),
+                        )
+                        .ok();
+                        minutes_core::pid::remove().ok();
+                        minutes_core::pid::clear_recording_metadata().ok();
+                        minutes_core::notes::cleanup();
+                        clear_processing_on_exit = false;
+                        spawn_processing_worker(
+                            app_handle.clone(),
+                            processing.clone(),
+                            processing_stage.clone(),
+                            latest_output.clone(),
+                            completion_notifications_enabled.clone(),
                         );
                     }
                     Err(e) => {
                         if let Some(saved) = preserve_failed_capture(&wav_path, &config) {
-                            let detail = match mode {
-                                CaptureMode::Meeting => {
-                                    "Processing failed, but the raw meeting capture was preserved."
-                                }
-                                CaptureMode::QuickThought => {
-                                    "Processing failed, but the raw quick thought capture was preserved."
-                                }
-                                CaptureMode::Dictation => {
-                                    "Processing failed, but the raw dictation capture was preserved."
-                                }
-                                CaptureMode::LiveTranscript => {
-                                    "Processing failed, but the raw live transcript capture was preserved."
-                                }
-                            };
                             let notice = OutputNotice {
                                 kind: "preserved-capture".into(),
                                 title: "Raw capture preserved".into(),
                                 path: saved.display().to_string(),
-                                detail: detail.into(),
+                                detail: format!(
+                                    "Failed to queue background processing. Raw {} capture preserved.",
+                                    mode.noun()
+                                ),
                             };
                             set_latest_output(&latest_output, Some(notice.clone()));
                             maybe_show_completion_notification(
@@ -1240,16 +1313,12 @@ pub fn start_recording(
                                 &notice,
                             );
                             eprintln!(
-                                "Pipeline error: {}. Raw audio preserved at {}",
+                                "Queue error: {}. Raw audio preserved at {}",
                                 e,
                                 saved.display()
                             );
                         } else {
-                            eprintln!(
-                                "Pipeline error: {}. Raw audio left at {}",
-                                e,
-                                wav_path.display()
-                            );
+                            eprintln!("Queue error: {}", e);
                         }
                     }
                 }
@@ -1295,15 +1364,16 @@ pub fn start_recording(
         }
     }
 
-    minutes_core::notes::cleanup();
-    minutes_core::pid::remove().ok();
-    if remove_current_wav && wav_path.exists() {
-        std::fs::remove_file(&wav_path).ok();
+    if clear_processing_on_exit {
+        minutes_core::notes::cleanup();
+        minutes_core::pid::remove().ok();
+        processing.store(false, Ordering::Relaxed);
+        set_processing_stage(&processing_stage, None);
+        minutes_core::pid::clear_processing_status().ok();
+        minutes_core::pid::clear_recording_metadata().ok();
+    } else {
+        sync_processing_indicator(&processing, &processing_stage);
     }
-    processing.store(false, Ordering::Relaxed);
-    set_processing_stage(&processing_stage, None);
-    minutes_core::pid::clear_processing_status().ok();
-    minutes_core::pid::clear_recording_metadata().ok();
     starting.store(false, Ordering::Relaxed);
     recording.store(false, Ordering::Relaxed);
     reset_hotkey_capture_state(
@@ -1362,15 +1432,6 @@ pub fn handle_global_hotkey_event(
 
     match shortcut_state {
         tauri_plugin_global_shortcut::ShortcutState::Pressed => {
-            if minutes_core::pid::status().processing || state.processing.load(Ordering::Relaxed) {
-                show_user_notification(
-                    app,
-                    "Quick thought",
-                    "Minutes is still processing the previous capture. Finish that first.",
-                );
-                return;
-            }
-
             let generation = {
                 let mut runtime = match state.hotkey_runtime.lock() {
                     Ok(runtime) => runtime,
@@ -1462,15 +1523,6 @@ pub fn handle_global_hotkey_event(
                         &format!("Could not stop recording: {}", err),
                     );
                 }
-                return;
-            }
-
-            if minutes_core::pid::status().processing || state.processing.load(Ordering::Relaxed) {
-                show_user_notification(
-                    app,
-                    "Quick thought",
-                    "Minutes is still processing the previous capture. Finish that first.",
-                );
                 return;
             }
 
@@ -1660,6 +1712,9 @@ pub fn cmd_status(state: tauri::State<AppState>) -> serde_json::Value {
         "processing": processing,
         "recordingMode": status.recording_mode,
         "processingStage": processing_stage,
+        "processingTitle": status.processing_title,
+        "processingJobId": status.processing_job_id,
+        "processingJobCount": status.processing_job_count,
         "latestOutput": latest_output,
         "pid": status.pid,
         "elapsed": elapsed,
@@ -1988,6 +2043,9 @@ pub fn cmd_retry_recovery(
                 let _ = minutes_core::pid::set_processing_status(
                     Some(label),
                     Some(minutes_core::pid::CaptureMode::Meeting),
+                    None,
+                    None,
+                    0,
                 );
             },
         ) {
@@ -3480,10 +3538,6 @@ fn start_dictation_session(
 
     if state.recording.load(Ordering::Relaxed) {
         return Err("Recording in progress — stop recording before dictating".into());
-    }
-
-    if state.processing.load(Ordering::Relaxed) || minutes_core::pid::status().processing {
-        return Err("Minutes is still processing the previous capture. Finish that first.".into());
     }
 
     if state.dictation_active.load(Ordering::Relaxed) || dictation_pid_active() {

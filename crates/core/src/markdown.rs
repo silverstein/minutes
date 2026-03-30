@@ -151,6 +151,50 @@ pub struct WriteResult {
     pub content_type: ContentType,
 }
 
+fn render_markdown(
+    frontmatter: &Frontmatter,
+    transcript: &str,
+    summary: Option<&str>,
+    user_notes: Option<&str>,
+    path_for_no_speech_hint: &Path,
+) -> Result<String, MarkdownError> {
+    let yaml = serde_yaml::to_string(frontmatter)
+        .map_err(|e| MarkdownError::SerializationError(e.to_string()))?;
+
+    let mut content = format!("---\n{}---\n\n", yaml);
+
+    if let Some(summary_text) = summary {
+        content.push_str("## Summary\n\n");
+        content.push_str(summary_text);
+        content.push_str("\n\n");
+    }
+
+    if frontmatter.status == Some(OutputStatus::NoSpeech) {
+        content.push_str("*No speech detected in this recording.*\n\n");
+        content.push_str(&format!(
+            "To retry with a different model:\n`minutes process {} --model large-v3`\n\n",
+            path_for_no_speech_hint.display()
+        ));
+    }
+
+    if let Some(notes) = user_notes {
+        content.push_str("## Notes\n\n");
+        for line in notes.lines() {
+            let trimmed = line.trim();
+            if !trimmed.is_empty() {
+                content.push_str(&format!("- {}\n", trimmed));
+            }
+        }
+        content.push('\n');
+    }
+
+    content.push_str("## Transcript\n\n");
+    content.push_str(transcript);
+    content.push('\n');
+
+    Ok(content)
+}
+
 /// Write a meeting/memo to markdown with YAML frontmatter.
 pub fn write(
     frontmatter: &Frontmatter,
@@ -176,41 +220,7 @@ pub fn write(
         frontmatter.recorded_by.as_deref(),
     );
     let path = resolve_collision(&output_dir, &slug);
-
-    // Build markdown content
-    let yaml = serde_yaml::to_string(frontmatter)
-        .map_err(|e| MarkdownError::SerializationError(e.to_string()))?;
-
-    let mut content = format!("---\n{}---\n\n", yaml);
-
-    if let Some(summary_text) = summary {
-        content.push_str("## Summary\n\n");
-        content.push_str(summary_text);
-        content.push_str("\n\n");
-    }
-
-    if frontmatter.status == Some(OutputStatus::NoSpeech) {
-        content.push_str("*No speech detected in this recording.*\n\n");
-        content.push_str(&format!(
-            "To retry with a different model:\n`minutes process {} --model large-v3`\n\n",
-            path.display()
-        ));
-    }
-
-    if let Some(notes) = user_notes {
-        content.push_str("## Notes\n\n");
-        for line in notes.lines() {
-            let trimmed = line.trim();
-            if !trimmed.is_empty() {
-                content.push_str(&format!("- {}\n", trimmed));
-            }
-        }
-        content.push('\n');
-    }
-
-    content.push_str("## Transcript\n\n");
-    content.push_str(transcript);
-    content.push('\n');
+    let content = render_markdown(frontmatter, transcript, summary, user_notes, &path)?;
 
     // Write file with appropriate permissions
     fs::write(&path, &content)?;
@@ -230,6 +240,32 @@ pub fn write(
 
     Ok(WriteResult {
         path,
+        title: frontmatter.title.clone(),
+        word_count,
+        content_type: frontmatter.r#type,
+    })
+}
+
+pub fn rewrite(
+    path: &Path,
+    frontmatter: &Frontmatter,
+    transcript: &str,
+    summary: Option<&str>,
+    user_notes: Option<&str>,
+) -> Result<WriteResult, MarkdownError> {
+    let content = render_markdown(frontmatter, transcript, summary, user_notes, path)?;
+    let tmp = path.with_extension("md.tmp");
+    fs::write(&tmp, content)?;
+    let mode = match frontmatter.visibility {
+        Some(Visibility::Team) => 0o640,
+        _ => 0o600,
+    };
+    set_permissions(&tmp, mode)?;
+    fs::rename(&tmp, path)?;
+
+    let word_count = transcript.split_whitespace().count();
+    Ok(WriteResult {
+        path: path.to_path_buf(),
         title: frontmatter.title.clone(),
         word_count,
         content_type: frontmatter.r#type,

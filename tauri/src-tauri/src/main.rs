@@ -221,7 +221,7 @@ fn format_calendar_label(event: &minutes_core::calendar::CalendarEvent) -> Strin
 fn show_meeting_prompt(app: &tauri::AppHandle, event: &minutes_core::calendar::CalendarEvent) {
     // Don't show if already recording
     if let Some(state) = app.try_state::<commands::AppState>() {
-        if state.recording.load(Ordering::Relaxed) || state.processing.load(Ordering::Relaxed) {
+        if state.recording.load(Ordering::Relaxed) {
             return;
         }
     }
@@ -494,6 +494,16 @@ fn main() {
 
             // Create main window on launch
             show_main_window(app.handle());
+
+            if minutes_core::jobs::active_job_count() > 0 {
+                commands::spawn_processing_worker(
+                    app.handle().clone(),
+                    processing.clone(),
+                    processing_stage.clone(),
+                    latest_output.clone(),
+                    completion_notifications_enabled.clone(),
+                );
+            }
 
             #[cfg(target_os = "macos")]
             if startup_config.dictation.hotkey_enabled {

@@ -42,7 +42,7 @@ impl CallDetector {
         self: Arc<Self>,
         app: tauri::AppHandle,
         recording: Arc<AtomicBool>,
-        processing: Arc<AtomicBool>,
+        _processing: Arc<AtomicBool>,
     ) {
         if !self.config.enabled {
             eprintln!("[call-detect] disabled in config");
@@ -63,8 +63,8 @@ impl CallDetector {
             loop {
                 std::thread::sleep(interval);
 
-                // Skip if already recording or processing
-                if recording.load(Ordering::Relaxed) || processing.load(Ordering::Relaxed) {
+                // Skip only while the mic is already in use.
+                if recording.load(Ordering::Relaxed) {
                     continue;
                 }
 

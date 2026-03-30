@@ -7,6 +7,7 @@ pub mod error;
 pub mod events;
 pub mod graph;
 pub mod health;
+pub mod jobs;
 pub mod logging;
 pub mod markdown;
 pub mod notes;

@@ -1,5 +1,5 @@
 use anyhow::Result;
-use chrono::TimeZone;
+use chrono::{Local, TimeZone};
 use clap::{Parser, Subcommand};
 use minutes_core::{CaptureMode, Config, ContentType};
 use serde::Serialize;
@@ -49,6 +49,10 @@ enum Commands {
 
     /// Stop recording and process the audio
     Stop,
+
+    /// Hidden worker that processes queued jobs.
+    #[command(hide = true)]
+    ProcessQueue,
 
     /// Check if a recording is in progress
     Status,
@@ -451,6 +455,7 @@ fn main() -> Result<()> {
         } => cmd_record(title, context, &mode, &config),
         Commands::Note { text, meeting } => cmd_note(&text, meeting.as_deref(), &config),
         Commands::Stop => cmd_stop(&config),
+        Commands::ProcessQueue => cmd_process_queue(&config),
         Commands::Status => cmd_status(),
         Commands::Paths { json } => cmd_paths(json, &config),
         Commands::Search {
@@ -619,49 +624,6 @@ fn capture_mode_from_str(mode: &str) -> Result<CaptureMode> {
     }
 }
 
-fn live_stage_label(
-    stage: minutes_core::pipeline::PipelineStage,
-    mode: CaptureMode,
-) -> &'static str {
-    match (stage, mode) {
-        (minutes_core::pipeline::PipelineStage::Transcribing, CaptureMode::Meeting) => {
-            "Transcribing meeting"
-        }
-        (minutes_core::pipeline::PipelineStage::Transcribing, CaptureMode::QuickThought) => {
-            "Transcribing quick thought"
-        }
-        (minutes_core::pipeline::PipelineStage::Diarizing, _) => "Separating speakers",
-        (minutes_core::pipeline::PipelineStage::Summarizing, CaptureMode::Meeting) => {
-            "Generating meeting summary"
-        }
-        (minutes_core::pipeline::PipelineStage::Summarizing, CaptureMode::QuickThought) => {
-            "Generating memo summary"
-        }
-        (minutes_core::pipeline::PipelineStage::Saving, CaptureMode::Meeting) => "Saving meeting",
-        (minutes_core::pipeline::PipelineStage::Saving, CaptureMode::QuickThought) => {
-            "Saving quick thought"
-        }
-        (minutes_core::pipeline::PipelineStage::Transcribing, CaptureMode::Dictation) => {
-            "Transcribing dictation"
-        }
-        (minutes_core::pipeline::PipelineStage::Summarizing, CaptureMode::Dictation) => {
-            "Generating dictation summary"
-        }
-        (minutes_core::pipeline::PipelineStage::Saving, CaptureMode::Dictation) => {
-            "Saving dictation"
-        }
-        (minutes_core::pipeline::PipelineStage::Transcribing, CaptureMode::LiveTranscript) => {
-            "Transcribing live session"
-        }
-        (minutes_core::pipeline::PipelineStage::Summarizing, CaptureMode::LiveTranscript) => {
-            "Generating live session summary"
-        }
-        (minutes_core::pipeline::PipelineStage::Saving, CaptureMode::LiveTranscript) => {
-            "Saving live transcript"
-        }
-    }
-}
-
 fn cmd_record(
     title: Option<String>,
     context: Option<String>,
@@ -681,6 +643,7 @@ fn cmd_record(
     // Check if already recording
     minutes_core::pid::create().map_err(|e| anyhow::anyhow!("{}", e))?;
     minutes_core::pid::write_recording_metadata(capture_mode).ok();
+    let recording_started_at = Local::now();
 
     // Save recording start time (for timestamping notes)
     minutes_core::notes::save_recording_start()?;
@@ -730,57 +693,78 @@ fn cmd_record(
     let wav_path = minutes_core::pid::current_wav_path();
     minutes_core::capture::record_to_wav(&wav_path, stop_flag, config)
         .map_err(|e| anyhow::anyhow!("{}", e))?;
-
-    // Run pipeline on the captured audio
-    let content_type = capture_mode.content_type();
-    let result = minutes_core::pipeline::process_with_progress(
+    let recording_finished_at = Local::now();
+    let user_notes = minutes_core::notes::read_notes();
+    let pre_context = minutes_core::notes::read_context();
+    let calendar_event = if capture_mode.content_type() == ContentType::Meeting {
+        minutes_core::calendar::events_overlapping_now()
+            .into_iter()
+            .next()
+    } else {
+        None
+    };
+    let job = minutes_core::jobs::queue_live_capture(
+        capture_mode,
+        title.clone(),
         &wav_path,
-        content_type,
-        title.as_deref(),
-        config,
-        |stage| {
-            let label = live_stage_label(stage, capture_mode);
-            let _ = minutes_core::pid::set_processing_status(Some(label), Some(capture_mode));
-        },
-    );
+        user_notes,
+        pre_context,
+        Some(recording_started_at),
+        Some(recording_finished_at),
+        calendar_event,
+    )?;
 
-    if let Err(err) = result {
-        minutes_core::pid::remove().ok();
-        minutes_core::pid::clear_processing_status().ok();
-        minutes_core::pid::clear_recording_metadata().ok();
-        minutes_core::notes::cleanup();
-        return Err(err.into());
-    }
-
-    let result = result?;
-
-    // Emit RecordingCompleted event (AudioProcessed already emitted by pipeline)
-    minutes_core::events::append_event(minutes_core::events::recording_completed_event(
-        &result, "live",
-    ));
-
-    // Write result file for `minutes stop` to read
-    let result_json = serde_json::to_string_pretty(&serde_json::json!({
-        "status": "done",
-        "file": result.path.display().to_string(),
-        "title": result.title,
-        "words": result.word_count,
+    let queued_result = serde_json::to_string_pretty(&serde_json::json!({
+        "status": "queued",
+        "job_id": job.id,
+        "title": job.title,
+        "mode": mode,
     }))?;
-    std::fs::write(minutes_core::pid::last_result_path(), &result_json)?;
+    std::fs::write(minutes_core::pid::last_result_path(), &queued_result)?;
 
-    // Clean up
+    minutes_core::pid::set_processing_status(
+        job.stage.as_deref(),
+        Some(capture_mode),
+        job.title.as_deref(),
+        Some(&job.id),
+        minutes_core::jobs::active_job_count(),
+    )
+    .ok();
+
+    // Clean up live-capture state before the worker starts so a new meeting can begin.
     minutes_core::pid::remove().ok();
-    minutes_core::pid::clear_processing_status().ok();
     minutes_core::pid::clear_recording_metadata().ok();
-    minutes_core::notes::cleanup(); // Remove notes + context + recording-start files
-    if wav_path.exists() {
-        std::fs::remove_file(&wav_path).ok();
+    minutes_core::notes::cleanup();
+
+    spawn_queue_worker()?;
+
+    eprintln!(
+        "Queued {} processing{}.",
+        capture_mode.noun(),
+        job.title
+            .as_ref()
+            .map(|title| format!(" for {}", title))
+            .unwrap_or_default()
+    );
+    println!("{}", queued_result);
+
+    Ok(())
+}
+
+fn spawn_queue_worker() -> Result<()> {
+    if minutes_core::jobs::current_worker_pid().is_some() {
+        return Ok(());
     }
 
-    eprintln!("Saved: {}", result.path.display());
-    // Print JSON to stdout for programmatic consumption (MCPB)
-    println!("{}", result_json);
-
+    let exe = std::env::current_exe()?;
+    let child = std::process::Command::new(exe)
+        .arg("process-queue")
+        .env("RUST_LOG", std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into()))
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()?;
+    let _ = child.id();
     Ok(())
 }
 
@@ -839,7 +823,20 @@ fn cmd_stop(_config: &Config) -> Result<()> {
                     tracing::warn!(error = %e, "graph index rebuild failed (non-fatal)");
                 }
             } else {
-                eprintln!("Recording stopped but no result file found.");
+                let active_jobs = minutes_core::jobs::active_jobs();
+                if let Some(job) = active_jobs.first() {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&serde_json::json!({
+                            "status": "queued",
+                            "job_id": job.id,
+                            "title": job.title,
+                            "mode": job.mode,
+                        }))?
+                    );
+                } else {
+                    eprintln!("Recording stopped but no result file found.");
+                }
             }
 
             Ok(())
@@ -883,6 +880,11 @@ fn cmd_stop(_config: &Config) -> Result<()> {
         }
         Err(e) => Err(anyhow::anyhow!("{}", e)),
     }
+}
+
+fn cmd_process_queue(config: &Config) -> Result<()> {
+    minutes_core::jobs::process_pending_jobs(config, |_| {})?;
+    Ok(())
 }
 
 fn cmd_status() -> Result<()> {

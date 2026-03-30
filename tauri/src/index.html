@@ -2498,7 +2498,9 @@
         } else if (isProcessing) {
           statusPill.className = 'status-pill processing';
           statusPill.textContent = 'processing';
-          processingTitle.textContent = currentProcessingTitle(mode);
+          processingTitle.textContent = status.processingTitle
+            ? `Processing ${status.processingTitle}`
+            : currentProcessingTitle(mode);
           recordingBar.classList.remove('active');
           processingBar.classList.add('active');
           liveBar.classList.remove('active'); // T4

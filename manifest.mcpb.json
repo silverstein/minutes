@@ -3,19 +3,19 @@
   "name": "minutes",
   "display_name": "Minutes \u2014 Meeting Memory for AI",
   "description": "Record, transcribe, search, and remember every meeting and voice memo. Privacy-first, local-only transcription with whisper.cpp.",
-  "long_description": "Minutes is a conversation memory layer for AI assistants. It captures any audio (meetings, voice memos, brain dumps), transcribes locally with whisper.cpp, diarizes speakers, and outputs searchable markdown with structured action items and decisions.\n\n**Record & Transcribe:**\n\u2022 Start/stop live meeting recordings\n\u2022 Process audio files (WAV, M4A, MP3, OGG)\n\u2022 Local transcription \u2014 nothing leaves your machine\n\n**Search & Query:**\n\u2022 Full-text search across all meetings\n\u2022 Find open action items by assignee\n\u2022 Track decisions and commitments\n\u2022 Person profiles across meetings\n\u2022 Cross-meeting topic research\n\n**Agent-Friendly:**\n\u2022 MCP resources for stable context (recent meetings, action items, events)\n\u2022 JSON Schema for meeting format validation\n\u2022 Event log for reactive agent workflows\n\u2022 Cross-device voice memo pipeline (phone \u2192 desktop \u2192 searchable memory)\n\u2022 Recent ideas resource for proactive memo surfacing\n\u2022 Structured YAML frontmatter on all output",
-  "version": "0.7.0",
+  "long_description": "Minutes is a conversation memory layer for AI assistants. It captures any audio (meetings, voice memos, brain dumps), transcribes locally with whisper.cpp, diarizes speakers, and outputs searchable markdown with structured action items and decisions.\n\n**Setup:** The extension auto-installs the minutes CLI binary on first run (downloads a pre-built binary for your platform). For recording, you also need to run `minutes setup --model tiny` once to download the speech model (75MB). Search and browsing work immediately with no setup.\n\n**Record & Transcribe:**\n\u2022 Start/stop live meeting recordings\n\u2022 Process audio files (WAV, M4A, MP3, OGG)\n\u2022 Local transcription \u2014 nothing leaves your machine\n\u2022 Dictation mode \u2014 speak to clipboard and daily notes\n\u2022 Live transcript \u2014 real-time meeting transcription with delta reads for AI coaching\n\n**Search & Query:**\n\u2022 Full-text search across all meetings\n\u2022 Find open action items by assignee\n\u2022 Track decisions and commitments\n\u2022 Cross-meeting topic research\n\n**Relationship Intelligence:**\n\u2022 Person profiles across all meetings\n\u2022 Relationship map with losing-touch alerts\n\u2022 Commitment tracking by person\n\u2022 Consistency reports flagging conflicting decisions\n\n**Speaker Identification:**\n\u2022 Voice enrollment and speaker profiles\n\u2022 Confirm or correct speaker attribution in transcripts\n\n**Interactive Dashboard (MCP App):**\n\u2022 Visual meeting browser, detail viewer, and people dashboard\n\u2022 Renders inline in Claude conversations\n\n**Agent-Friendly:**\n\u2022 MCP resources for stable context (recent meetings, action items, events)\n\u2022 Event log for reactive agent workflows\n\u2022 Structured YAML frontmatter on all output",
+  "version": "0.8.4",
   "author": {
     "name": "Mat Silverstein",
-    "url": "https://github.com/matsilverstein"
+    "url": "https://github.com/silverstein"
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/matsilverstein/minutes"
+    "url": "https://github.com/silverstein/minutes"
   },
-  "homepage": "https://github.com/matsilverstein/minutes",
-  "documentation": "https://github.com/matsilverstein/minutes/blob/main/README.md",
-  "support": "https://github.com/matsilverstein/minutes/issues",
+  "homepage": "https://useminutes.app",
+  "documentation": "https://github.com/silverstein/minutes/blob/main/README.md",
+  "support": "https://github.com/silverstein/minutes/issues",
   "license": "MIT",
   "icon": "icon.png",
   "keywords": [
@@ -26,7 +26,9 @@
     "memory",
     "search",
     "action-items",
-    "decisions"
+    "decisions",
+    "mcp-apps",
+    "interactive"
   ],
   "tools": [
     {
@@ -72,6 +74,50 @@
     {
       "name": "research_topic",
       "description": "Research a topic across meetings, decisions, and follow-ups"
+    },
+    {
+      "name": "qmd_collection_status",
+      "description": "Check if the Minutes output directory is registered as a QMD collection"
+    },
+    {
+      "name": "register_qmd_collection",
+      "description": "Register the Minutes output directory as a QMD collection"
+    },
+    {
+      "name": "start_dictation",
+      "description": "Start dictation mode — speech to clipboard and daily notes"
+    },
+    {
+      "name": "stop_dictation",
+      "description": "Stop dictation mode"
+    },
+    {
+      "name": "track_commitments",
+      "description": "List open and stale commitments, optionally filtered by person"
+    },
+    {
+      "name": "relationship_map",
+      "description": "All contacts with relationship scores and losing-touch alerts"
+    },
+    {
+      "name": "list_voices",
+      "description": "List enrolled voice profiles for speaker identification"
+    },
+    {
+      "name": "confirm_speaker",
+      "description": "Confirm or correct speaker attribution in a meeting transcript"
+    },
+    {
+      "name": "start_live_transcript",
+      "description": "Start a live transcript session for real-time meeting transcription"
+    },
+    {
+      "name": "read_live_transcript",
+      "description": "Read utterances from the active live transcript with optional cursor or time window"
+    },
+    {
+      "name": "open_dashboard",
+      "description": "Open the Meeting Intelligence Dashboard in the browser — visual overview of conversation memory"
     }
   ],
   "prompts": [
@@ -161,5 +207,7 @@
       "node": ">=18.0.0"
     }
   },
-  "privacy_policies": []
+  "privacy_policies": [
+    "https://useminutes.app/privacy"
+  ]
 }

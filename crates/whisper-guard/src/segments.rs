@@ -16,10 +16,12 @@ fn text_part(line: &str) -> &str {
 
 /// Statistics from transcript cleaning.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub struct CleanStats {
     pub original_lines: usize,
     pub after_consecutive_dedup: usize,
     pub after_interleaved_dedup: usize,
+    pub after_script_filter: usize,
     pub after_trailing_trim: usize,
     pub lines_removed: usize,
 }
@@ -40,6 +42,9 @@ pub fn clean_transcript(transcript: &str) -> (String, CleanStats) {
     let lines = dedup_interleaved(&lines);
     let after_interleaved = lines.len();
 
+    let lines = strip_foreign_script(&lines);
+    let after_script = lines.len();
+
     let lines = trim_trailing_noise(&lines);
     let after_trim = lines.len();
 
@@ -47,6 +52,7 @@ pub fn clean_transcript(transcript: &str) -> (String, CleanStats) {
         original_lines: original_count,
         after_consecutive_dedup: after_consecutive,
         after_interleaved_dedup: after_interleaved,
+        after_script_filter: after_script,
         after_trailing_trim: after_trim,
         lines_removed: original_count.saturating_sub(after_trim),
     };
@@ -303,6 +309,139 @@ pub fn dedup_interleaved(lines: &[String]) -> Vec<String> {
         result
     } else {
         lines.to_vec()
+    }
+}
+
+/// Detect and remove lines with hallucinated foreign script.
+///
+/// When whisper processes silence or very low-signal audio, it often hallucinates
+/// text in scripts unrelated to the actual audio — most commonly CJK characters
+/// (Japanese/Chinese/Korean), Arabic, or Cyrillic in an otherwise Latin transcript.
+///
+/// This function determines the dominant script of the transcript and removes lines
+/// that are primarily in a different script. It is conservative: it only acts when
+/// there is a clear majority script (≥70% of lines) and only removes lines where
+/// ≥50% of alphabetic characters are in a foreign script.
+///
+/// This is language-agnostic: a Japanese transcript with a few hallucinated Latin
+/// lines would have the Latin lines removed, and vice versa. Also handles
+/// Cyrillic, Arabic, and other scripts via the `Script::Other` bucket.
+pub fn strip_foreign_script(lines: &[String]) -> Vec<String> {
+    if lines.len() < 2 {
+        return lines.to_vec();
+    }
+
+    // Classify each line's dominant script
+    let classifications: Vec<Script> = lines
+        .iter()
+        .map(|l| classify_script(text_part(l)))
+        .collect();
+
+    // Count lines per script (ignoring Unknown/empty)
+    let mut latin_count = 0usize;
+    let mut cjk_count = 0usize;
+    let mut other_count = 0usize;
+    for s in &classifications {
+        match s {
+            Script::Latin => latin_count += 1,
+            Script::Cjk => cjk_count += 1,
+            Script::Other => other_count += 1,
+            Script::Unknown => {}
+        }
+    }
+
+    let meaningful = latin_count + cjk_count + other_count;
+    if meaningful < 2 {
+        return lines.to_vec();
+    }
+
+    // Determine majority script (must be ≥70% of meaningful lines)
+    let majority = if latin_count as f64 / meaningful as f64 >= 0.7 {
+        Script::Latin
+    } else if cjk_count as f64 / meaningful as f64 >= 0.7 {
+        Script::Cjk
+    } else if other_count as f64 / meaningful as f64 >= 0.7 {
+        Script::Other
+    } else {
+        return lines.to_vec(); // No clear majority — don't filter
+    };
+
+    let mut result = Vec::with_capacity(lines.len());
+    let mut removed = 0usize;
+
+    for (i, line) in lines.iter().enumerate() {
+        let dominated_by_foreign = match (&classifications[i], &majority) {
+            (Script::Unknown, _) => false, // Keep empty/punctuation-only lines
+            (s, m) if s == m => false,     // Same script as majority
+            _ => true,                     // Foreign script
+        };
+
+        if dominated_by_foreign {
+            removed += 1;
+        } else {
+            result.push(line.clone());
+        }
+    }
+
+    if removed > 0 {
+        tracing::info!(
+            removed = removed,
+            majority = ?majority,
+            "removed foreign-script hallucination lines"
+        );
+    }
+
+    result
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Script {
+    Latin,
+    Cjk,
+    Other,
+    Unknown,
+}
+
+/// Classify the dominant script of a text string.
+/// Returns the script that comprises the majority of alphabetic characters.
+fn classify_script(text: &str) -> Script {
+    let mut latin = 0u32;
+    let mut cjk = 0u32;
+    let mut other_script = 0u32;
+
+    for ch in text.chars() {
+        if !ch.is_alphabetic() {
+            continue;
+        }
+        if ch.is_ascii_alphabetic()
+            || ('\u{00C0}'..='\u{024F}').contains(&ch) // Latin Extended
+            || ('\u{1E00}'..='\u{1EFF}').contains(&ch)
+        {
+            latin += 1;
+        } else if ('\u{4E00}'..='\u{9FFF}').contains(&ch)   // CJK Unified
+            || ('\u{3400}'..='\u{4DBF}').contains(&ch)       // CJK Extension A
+            || ('\u{3040}'..='\u{309F}').contains(&ch)       // Hiragana
+            || ('\u{30A0}'..='\u{30FF}').contains(&ch)       // Katakana
+            || ('\u{AC00}'..='\u{D7AF}').contains(&ch)
+        // Hangul
+        {
+            cjk += 1;
+        } else {
+            other_script += 1;
+        }
+    }
+
+    let total = latin + cjk + other_script;
+    if total == 0 {
+        return Script::Unknown;
+    }
+
+    if latin as f64 / total as f64 >= 0.5 {
+        Script::Latin
+    } else if cjk as f64 / total as f64 >= 0.5 {
+        Script::Cjk
+    } else {
+        Script::Other
     }
 }
 
@@ -571,5 +710,121 @@ mod tests {
         let result = trim_trailing_noise(&lines);
         assert_eq!(result.len(), 1);
         assert!(result[0].contains("trailing noise removed"));
+    }
+
+    // ── foreign script detection ──
+
+    #[test]
+    fn script_removes_cjk_from_latin_transcript() {
+        let lines = vec![
+            "[0:00] Hello and welcome".into(),
+            "[0:05] Let's discuss the project".into(),
+            "[0:10] スパイシー".into(),
+            "[0:15] We should wrap up now".into(),
+        ];
+        let result = strip_foreign_script(&lines);
+        assert_eq!(result.len(), 3);
+        assert!(!result.iter().any(|l| l.contains("スパイシー")));
+    }
+
+    #[test]
+    fn script_preserves_pure_latin_transcript() {
+        let lines = vec![
+            "[0:00] Hello world".into(),
+            "[0:05] How are you".into(),
+            "[0:10] I'm doing fine".into(),
+        ];
+        let result = strip_foreign_script(&lines);
+        assert_eq!(result, lines);
+    }
+
+    #[test]
+    fn script_preserves_pure_cjk_transcript() {
+        let lines = vec![
+            "[0:00] こんにちは".into(),
+            "[0:05] お元気ですか".into(),
+            "[0:10] 元気です".into(),
+        ];
+        let result = strip_foreign_script(&lines);
+        assert_eq!(result, lines);
+    }
+
+    #[test]
+    fn script_no_action_on_mixed_transcript() {
+        // No clear majority (50/50 split) — don't filter anything
+        let lines = vec![
+            "[0:00] Hello world".into(),
+            "[0:05] こんにちは".into(),
+            "[0:10] Good morning".into(),
+            "[0:15] お元気ですか".into(),
+        ];
+        let result = strip_foreign_script(&lines);
+        assert_eq!(result, lines);
+    }
+
+    #[test]
+    fn script_handles_single_line() {
+        let lines = vec!["[0:00] スパイシー".into()];
+        let result = strip_foreign_script(&lines);
+        assert_eq!(result, lines); // Single line — no majority to compare against
+    }
+
+    #[test]
+    fn script_all_hallucinated_in_latin_majority() {
+        // Mostly Latin with a couple CJK hallucination lines (>70% Latin)
+        let lines = vec![
+            "[0:00] Today we need to discuss".into(),
+            "[0:05] The quarterly results".into(),
+            "[0:10] Are looking good".into(),
+            "[0:15] Revenue is up".into(),
+            "[0:20] Margins improved significantly".into(),
+            "[0:25] 東京タワー".into(),
+            "[0:30] 大阪城".into(),
+        ];
+        let result = strip_foreign_script(&lines);
+        assert_eq!(result.len(), 5);
+        assert!(result
+            .iter()
+            .all(|l| !l.contains('東') && !l.contains('大')));
+    }
+
+    #[test]
+    fn script_two_cjk_lines_preserved() {
+        // Exactly 2 CJK lines: majority is CJK, so both are kept (not hallucination).
+        let lines = vec!["[0:00] スパイシー".into(), "[0:05] 東京タワー".into()];
+        let result = strip_foreign_script(&lines);
+        assert_eq!(result, lines);
+    }
+
+    #[test]
+    fn script_cyrillic_majority_strips_latin() {
+        // Cyrillic majority with a Latin hallucination line.
+        let lines = vec![
+            "[0:00] Привет мир".into(),
+            "[0:05] Как дела".into(),
+            "[0:10] Всё хорошо".into(),
+            "[0:15] Hello world".into(), // Hallucinated Latin
+        ];
+        let result = strip_foreign_script(&lines);
+        assert_eq!(result.len(), 3);
+        assert!(!result.iter().any(|l| l.contains("Hello")));
+    }
+
+    #[test]
+    fn script_classify_basic() {
+        assert_eq!(classify_script("Hello world"), Script::Latin);
+        assert_eq!(classify_script("スパイシー"), Script::Cjk);
+        assert_eq!(classify_script("Привет"), Script::Other);
+        assert_eq!(classify_script(""), Script::Unknown);
+        assert_eq!(classify_script("123 !@#"), Script::Unknown);
+    }
+
+    #[test]
+    fn clean_transcript_includes_script_filter() {
+        let input =
+            "[0:00] Hello world\n[0:05] Testing one two\n[0:10] スパイシー\n[0:15] All done\n";
+        let (cleaned, stats) = clean_transcript(input);
+        assert!(!cleaned.contains("スパイシー"));
+        assert!(stats.after_script_filter < stats.after_interleaved_dedup);
     }
 }

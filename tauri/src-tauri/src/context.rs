@@ -231,6 +231,9 @@ pub fn generate_assistant_context(config: &Config) -> Result<String, String> {
     md.push_str("- `minutes person \"name\"` — build a profile across meetings\n");
     md.push_str("- `minutes list` — list recent meetings and memos\n");
     md.push_str("- `minutes record` / `minutes stop` — start/stop recording\n");
+    md.push_str("- `minutes live` / `minutes stop` — start/stop live transcript (real-time)\n");
+    md.push_str("- `minutes transcript --since 5m` — read last 5 minutes of live transcript\n");
+    md.push_str("- `minutes transcript --status` — check if a live session is active\n");
     md.push_str("- `minutes note \"text\"` — add a timestamped note to current recording\n");
     md.push_str("- `minutes process <file>` — process an audio file\n");
     md.push_str("- `minutes qmd status` — check QMD collection status\n");
@@ -277,8 +280,43 @@ pub fn generate_assistant_context(config: &Config) -> Result<String, String> {
 }
 
 pub fn write_assistant_context(workspace: &Path, config: &Config) -> Result<(), String> {
+    let claude_md_path = workspace.join("CLAUDE.md");
     let assistant_md = generate_assistant_context(config)?;
-    std::fs::write(workspace.join("CLAUDE.md"), assistant_md)
+
+    // Preserve live transcript markers only if a session is actually active (V3).
+    // Don't trust stale markers in the file — verify via PID.
+    let lt_pid = minutes_core::pid::live_transcript_pid_path();
+    let live_actually_active = minutes_core::pid::check_pid_file(&lt_pid)
+        .ok()
+        .flatten()
+        .is_some();
+
+    let content = if live_actually_active {
+        let marker_start = "<!-- LIVE_TRANSCRIPT_START -->";
+        let marker_end = "<!-- LIVE_TRANSCRIPT_END -->";
+        let existing = std::fs::read_to_string(&claude_md_path).unwrap_or_default();
+        let live_section = if let (Some(start), Some(end)) =
+            (existing.find(marker_start), existing.find(marker_end))
+        {
+            if start < end {
+                Some(existing[start..end + marker_end.len()].to_string())
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        if let Some(section) = live_section {
+            format!("{}\n{}\n", assistant_md.trim_end(), section)
+        } else {
+            assistant_md.clone()
+        }
+    } else {
+        assistant_md
+    };
+
+    std::fs::write(&claude_md_path, content)
         .map_err(|e| format!("Failed to write assistant context: {}", e))
 }
 

@@ -190,18 +190,33 @@ pub fn diarize(audio_path: &Path, config: &Config) -> Option<DiarizationResult> 
     // This matches how transcribe.rs preprocesses audio for whisper.
     let (effective_path, _temp_file) = preprocess_audio(audio_path);
 
-    let result = match resolved_engine {
-        #[cfg(feature = "diarize")]
-        "pyannote-rs" => diarize_with_pyannote_rs(&effective_path, config),
-        #[cfg(not(feature = "diarize"))]
-        "pyannote-rs" => {
-            tracing::error!("pyannote-rs engine requires the 'diarize' feature. Rebuild with: cargo build --features diarize");
-            return None;
-        }
-        "pyannote" => diarize_with_pyannote(&effective_path),
-        other => {
-            tracing::warn!(engine = %other, "unknown diarization engine, skipping");
-            return None;
+    // Run diarization in a separate thread so we can detect panics and
+    // keep the main pipeline from getting stuck on ONNX inference issues.
+    let effective_path_owned = effective_path.clone();
+    #[allow(unused_variables)] // config_clone is used only when the diarize feature is enabled
+    let config_clone = config.clone();
+    let engine_owned = resolved_engine.to_string();
+    let handle = std::thread::spawn(move || -> Result<DiarizationResult, String> {
+        let result = match engine_owned.as_str() {
+            #[cfg(feature = "diarize")]
+            "pyannote-rs" => diarize_with_pyannote_rs(&effective_path_owned, &config_clone),
+            #[cfg(not(feature = "diarize"))]
+            "pyannote-rs" => {
+                Err("pyannote-rs engine requires the 'diarize' feature. Rebuild with: cargo build --features diarize".into())
+            }
+            "pyannote" => diarize_with_pyannote(&effective_path_owned),
+            other => {
+                Err(format!("unknown diarization engine: {}", other).into())
+            }
+        };
+        result.map_err(|e| e.to_string())
+    });
+
+    let result = match handle.join() {
+        Ok(r) => Some(r),
+        Err(_) => {
+            tracing::error!("diarization thread panicked");
+            None
         }
     };
 
@@ -211,7 +226,7 @@ pub fn diarize(audio_path: &Path, config: &Config) -> Option<DiarizationResult> 
     }
 
     match result {
-        Ok(result) => {
+        Some(Ok(result)) => {
             tracing::info!(
                 speakers = result.num_speakers,
                 segments = result.segments.len(),
@@ -219,10 +234,11 @@ pub fn diarize(audio_path: &Path, config: &Config) -> Option<DiarizationResult> 
             );
             Some(result)
         }
-        Err(e) => {
+        Some(Err(e)) => {
             tracing::error!(error = %e, "diarization failed, continuing without speaker labels");
             None
         }
+        None => None,
     }
 }
 

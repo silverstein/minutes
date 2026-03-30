@@ -371,7 +371,7 @@ export function ConversationTopology() {
         }}
         dpr={quality === 'high' ? [1, 2] : [1, 1.5]}
         performance={{ min: 0.5 }}
-        style={{ background: 'transparent' }}
+        style={{ background: 'transparent', pointerEvents: 'none' }}
       >
         <SceneCamera />
         <TopologyScene scrollFade={scrollFade} quality={quality} />

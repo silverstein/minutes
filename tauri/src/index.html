@@ -20,11 +20,17 @@
       --red: #d9655f;
       --red-bg: rgba(217, 101, 95, 0.12);
       --green: #5cb88a;
+      --live: #34c759;
       --purple: #a78bca;
       --radius: 10px;
       --font-sans: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Helvetica Neue', sans-serif;
       --font-display: ui-serif, 'Iowan Old Style', 'Palatino Linotype', 'Book Antiqua', Georgia, serif;
       --font-mono: 'SF Mono', 'Menlo', monospace;
+    }
+
+    :focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
     }
 
     body {
@@ -421,6 +427,90 @@
       color: var(--accent);
     }
 
+    .status-pill.live {
+      font-size: 11px;
+      padding: 3px 10px;
+      width: auto;
+      height: auto;
+      border-radius: 12px;
+      opacity: 1;
+      background: rgba(52, 199, 89, 0.15);
+      color: var(--live);
+    }
+
+    /* ── Live transcript bar ── */
+    .live-bar {
+      display: none;
+      padding: 12px 16px;
+      background: rgba(52, 199, 89, 0.06);
+      border-bottom: 1px solid rgba(52, 199, 89, 0.12);
+    }
+    .live-bar.active { display: block; }
+    @media (prefers-reduced-motion: reduce) {
+      .live-dot { animation: none; }
+    }
+    .live-bar .top-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+    .live-indicator {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--live);
+      letter-spacing: 0.3px;
+      text-transform: uppercase;
+    }
+    .live-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 2px;
+      background: var(--live);
+      animation: live-pulse 2s ease-in-out infinite;
+      /* Rounded square shape distinguishes from recording's circle for colorblind users */
+    }
+    @keyframes live-pulse {
+      0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(52, 199, 89, 0.4); }
+      50% { opacity: 0.7; box-shadow: 0 0 6px 2px rgba(52, 199, 89, 0.3); }
+    }
+    .live-time {
+      font-size: 20px;
+      font-variant-numeric: tabular-nums;
+      color: var(--text);
+      font-family: var(--font-mono);
+      font-weight: 500;
+      letter-spacing: 0.5px;
+    }
+    .live-utterances {
+      font-size: 11px;
+      color: var(--text-secondary);
+      margin-top: 2px;
+    }
+    .live-level {
+      height: 3px;
+      margin: 6px 0 8px;
+      background: rgba(255,255,255,0.06);
+      border-radius: 2px;
+      overflow: hidden;
+    }
+    .live-level-fill {
+      height: 100%;
+      background: var(--live);
+      opacity: 0.6;
+      border-radius: 2px;
+      transition: width 0.15s ease-out;
+      width: 0%;
+    }
+    .live-actions {
+      margin-top: 8px;
+      display: flex;
+      gap: 8px;
+    }
+
     /* ── Recording bar ── */
     .recording-bar {
       display: none;
@@ -557,6 +647,12 @@
       font-size: 12px;
       color: var(--text-secondary);
       margin-top: 2px;
+    }
+    .processing-elapsed {
+      font-size: 11px;
+      color: var(--text-tertiary, #888);
+      margin-top: 1px;
+      font-variant-numeric: tabular-nums;
     }
 
     /* ── Output notice ── */
@@ -991,7 +1087,7 @@
 
     .speaker-badge.high {
       background: rgba(52, 199, 89, 0.15);
-      color: #34c759;
+      color: var(--live);
     }
 
     .speaker-badge.medium {
@@ -1628,6 +1724,22 @@
     </div>
   </div>
 
+  <!-- Live transcript bar (hidden when not in live mode) -->
+  <div class="live-bar" id="live-bar" role="status" aria-live="polite">
+    <div class="top-row">
+      <div class="live-indicator">
+        <span class="live-dot" aria-hidden="true"></span>
+        <span>Live Transcript</span>
+      </div>
+      <span class="live-time" id="live-time">0:00</span>
+    </div>
+    <div class="live-level"><div class="live-level-fill" id="live-level-fill"></div></div>
+    <div class="live-utterances" id="live-utterances">0 utterances</div>
+    <div class="live-actions">
+      <button class="btn btn-secondary btn-sm" id="btn-stop-live">Stop Live</button>
+    </div>
+  </div>
+
   <!-- Processing bar (hidden when not processing) -->
   <div class="processing-bar" id="processing-bar">
     <div class="processing-row">
@@ -1635,6 +1747,7 @@
       <div class="processing-copy">
         <div class="processing-title" id="processing-title">Processing recording</div>
         <div class="processing-stage" id="processing-stage">Preparing transcript...</div>
+        <div class="processing-elapsed" id="processing-elapsed"></div>
       </div>
     </div>
   </div>
@@ -1702,6 +1815,7 @@
   <div class="footer" id="footer">
     <div class="footer-actions">
       <button class="btn btn-primary" id="btn-record">Start Recording</button>
+      <button class="btn btn-secondary" id="btn-live" title="Start live transcription — ask your agent in Recall for coaching" aria-label="Start live transcription">Live</button>
       <button class="btn btn-secondary" id="btn-quick-thought">Quick Thought</button>
       <button class="btn btn-secondary" id="btn-assistant" aria-expanded="false">Recall <span class="recall-nudge" id="recall-nudge" aria-label="Recall has new content"></span></button>
     </div>
@@ -1923,6 +2037,23 @@
               <option value="5000">5 seconds</option>
             </select>
           </div>
+        </div>
+      </div>
+
+      <!-- Live Transcript -->
+      <div style="margin-bottom: 16px;">
+        <div class="about-item-title">LIVE TRANSCRIPT</div>
+        <div class="about-controls">
+          <div class="about-controls-group">
+            <div class="about-controls-copy">Keyboard shortcut</div>
+            <select class="shortcut-select" id="settings-live-shortcut-select" style="margin-top: 6px;">
+              <option value="CmdOrCtrl+Shift+L">Cmd+Shift+L</option>
+              <option value="CmdOrCtrl+Alt+L">Cmd+Option+L</option>
+              <option value="CmdOrCtrl+Shift+T">Cmd+Shift+T</option>
+            </select>
+            <div class="about-controls-meta">Toggle live transcript on/off from any app.</div>
+          </div>
+          <button class="btn btn-secondary btn-sm toggle-btn" id="settings-live-shortcut">Off</button>
         </div>
       </div>
 
@@ -2170,6 +2301,7 @@
     const processingTitle = document.getElementById('processing-title');
     const recordingTime = document.getElementById('recording-time');
     const processingStage = document.getElementById('processing-stage');
+    const processingElapsed = document.getElementById('processing-elapsed');
     const outputNotice = document.getElementById('output-notice');
     const outputNoticeIcon = document.getElementById('output-notice-icon');
     const outputNoticeTitle = document.getElementById('output-notice-title');
@@ -2206,7 +2338,10 @@
 
     let isRecording = false;
     let isProcessing = false;
+    let isLiveTranscript = false;
     let currentMeetingPath = null;
+    const liveBar = document.getElementById('live-bar');
+    // Live bar elements are accessed by ID inline (live-time, live-utterances)
     let currentMeetingDetail = null;
     let activeSearchQuery = '';
     let currentSetup = null;
@@ -2221,6 +2356,8 @@
     let dictationShortcutLabel = 'Dictate';
     let lastOutputKey = null;
     let pollInterval = null;
+    let processingStartTime = null;
+    let processingTimerInterval = null;
     let desktopCapabilities = {
       platform: 'other',
       folderRevealLabel: 'Show in Folder',
@@ -2347,6 +2484,8 @@
           recordingLabel.textContent = currentModeLabel(mode);
           recordingBar.classList.add('active');
           processingBar.classList.remove('active');
+          liveBar.classList.remove('active'); // T4: clear live bar if recording starts externally
+          isLiveTranscript = false;
           footer.style.display = 'none';
           if (status.elapsed) recordingTime.textContent = status.elapsed;
           updateViz(status.audioLevel || 0);
@@ -2362,8 +2501,25 @@
           processingTitle.textContent = currentProcessingTitle(mode);
           recordingBar.classList.remove('active');
           processingBar.classList.add('active');
+          liveBar.classList.remove('active'); // T4
+          isLiveTranscript = false;
           footer.style.display = 'none';
           processingStage.textContent = status.processingStage || 'Preparing transcript...';
+
+          // Start elapsed timer when processing begins
+          if (!wasProcessing) {
+            processingStartTime = Date.now();
+            if (processingTimerInterval) clearInterval(processingTimerInterval);
+            processingTimerInterval = setInterval(() => {
+              if (!processingStartTime) return;
+              const secs = Math.floor((Date.now() - processingStartTime) / 1000);
+              const m = Math.floor(secs / 60);
+              const s = secs % 60;
+              processingElapsed.textContent = m > 0
+                ? `${m}:${String(s).padStart(2, '0')} elapsed`
+                : `${s}s elapsed`;
+            }, 1000);
+          }
 
           if (!wasRecording && !wasProcessing) {
             startFastPoll();
@@ -2372,6 +2528,33 @@
             playCue('stop');
           }
         } else {
+          // Check live transcript status
+          let wasLive = isLiveTranscript;
+          try {
+            const liveStatus = await invoke('cmd_live_transcript_status');
+            isLiveTranscript = !!liveStatus.active;
+            if (isLiveTranscript) {
+              statusPill.className = 'status-pill live';
+              statusPill.textContent = 'live';
+              recordingBar.classList.remove('active');
+              processingBar.classList.remove('active');
+              liveBar.classList.add('active');
+              footer.style.display = 'none';
+              const n = liveStatus.line_count || 0;
+              const d = Math.round(liveStatus.duration_secs || 0);
+              const min = Math.floor(d / 60);
+              const sec = d % 60;
+              document.getElementById('live-time').textContent = `${min}:${String(sec).padStart(2, '0')}`;
+              document.getElementById('live-utterances').textContent = `${n} utterance${n !== 1 ? 's' : ''}`;
+              const lvl = Math.min(100, liveStatus.audioLevel || 0);
+              document.getElementById('live-level-fill').style.width = lvl + '%';
+              if (!wasLive) startFastPoll();
+            } else {
+              liveBar.classList.remove('active');
+            }
+          } catch { isLiveTranscript = false; liveBar.classList.remove('active'); }
+
+          if (!isLiveTranscript) {
           statusPill.className = 'status-pill';
           statusPill.textContent = 'idle';
           recordingLabel.textContent = 'Recording';
@@ -2381,11 +2564,22 @@
           quickNote.classList.remove('active');
           footer.style.display = '';
 
-          // Slow down polling when recording/processing stops
-          if (wasRecording || wasProcessing) {
+          // Clear processing elapsed timer
+          if (processingTimerInterval) { clearInterval(processingTimerInterval); processingTimerInterval = null; }
+          processingStartTime = null;
+          processingElapsed.textContent = '';
+
+          // Slow down polling when recording/processing/live stops (T5)
+          if (wasRecording || wasProcessing || wasLive) {
             stopFastPoll();
             loadMeetings(); // Refresh list
+
+            // Auto-open the result when processing completes successfully
+            if (wasProcessing && latestOutput && latestOutput.kind === 'saved') {
+              openMeetingDetail(latestOutput.path);
+            }
           }
+          } // end if (!isLiveTranscript)
         }
       } catch (e) {
         console.error('Status:', e);
@@ -2619,14 +2813,14 @@
         retry.textContent = item.retry_type === 'memo' ? 'Retry as Memo' : 'Retry as Meeting';
         retry.addEventListener('click', async () => {
           try {
-            const notice = await invoke('cmd_retry_recovery', {
+            await invoke('cmd_retry_recovery', {
               path: item.path,
               contentType: item.retry_type
             });
-            updateOutputNotice(notice);
+            // Processing now runs in background — close recovery panel
+            // and let status polling pick up the processing state + result
             closeRecovery();
-            loadMeetings();
-            loadRecoveryItems();
+            startFastPoll();
           } catch (e) {
             console.error('Retry recovery:', e);
           }
@@ -2694,10 +2888,60 @@
       }
     });
 
+    // ── Live transcript controls ──
+    document.getElementById('btn-live').addEventListener('click', async () => {
+      const btn = document.getElementById('btn-live');
+
+      // First-use explainer (shown once, stored in localStorage)
+      if (!localStorage.getItem('minutes_live_intro_seen')) {
+        localStorage.setItem('minutes_live_intro_seen', '1');
+        const noticeTitle = document.getElementById('output-notice-title');
+        const noticeDetail = document.getElementById('output-notice-detail');
+        const noticeIcon = document.getElementById('output-notice-icon');
+        const notice = document.getElementById('output-notice');
+        if (noticeIcon) noticeIcon.textContent = '\u{1F399}';
+        if (noticeTitle) noticeTitle.textContent = 'Live Transcript';
+        if (noticeDetail) noticeDetail.textContent = 'Transcribes your meeting in real time. Ask your agent in Recall for coaching during the call.';
+        if (notice) notice.classList.add('active');
+        // Auto-dismiss after 4 seconds, then proceed with start
+        await new Promise(r => setTimeout(r, 3000));
+        if (notice) notice.classList.remove('active');
+      }
+
+      const origText = btn.textContent;
+      btn.disabled = true;
+      btn.textContent = 'Starting...';
+      try {
+        await invoke('cmd_start_live_transcript');
+      } catch (e) {
+        console.error('Live:', e);
+        // Show visible error using the output-notice pattern
+        const noticeIcon = document.getElementById('output-notice-icon');
+        const noticeTitle = document.getElementById('output-notice-title');
+        const noticeDetail = document.getElementById('output-notice-detail');
+        const notice = document.getElementById('output-notice');
+        if (noticeIcon) noticeIcon.textContent = '✕';
+        if (noticeTitle) noticeTitle.textContent = 'Live transcript failed';
+        if (noticeDetail) noticeDetail.textContent = String(e);
+        if (notice) notice.classList.add('active');
+      } finally {
+        btn.disabled = false;
+        btn.textContent = origText;
+      }
+    });
+
+    document.getElementById('btn-stop-live').addEventListener('click', async () => {
+      try {
+        await invoke('cmd_stop_live_transcript');
+      } catch (e) {
+        console.error('Stop live:', e);
+      }
+    });
+
     document.getElementById('btn-open-output').addEventListener('click', async () => {
       if (!latestOutput?.path) return;
       try {
-        await invoke('cmd_open_file', { path: latestOutput.path });
+        await openMeetingDetail(latestOutput.path);
       } catch (e) {
         console.error('Open output:', e);
       }
@@ -3633,6 +3877,40 @@
       await invoke('cmd_set_setting', {section:'dictation',key:'daily_note_log',value:String(next)});
       setSettingsToggle('settings-dictation-daily-note', next);
     });
+
+    // ── Live transcript shortcut settings ──
+    document.getElementById('settings-live-shortcut').addEventListener('click', async () => {
+      const select = document.getElementById('settings-live-shortcut-select');
+      const currentEnabled = document.getElementById('settings-live-shortcut').textContent === 'On';
+      try {
+        const settings = await invoke('cmd_set_live_shortcut', {
+          enabled: !currentEnabled,
+          shortcut: select.value,
+        });
+        setSettingsToggle('settings-live-shortcut', settings.enabled);
+      } catch (e) {
+        console.error('Live shortcut:', e);
+      }
+    });
+    document.getElementById('settings-live-shortcut-select').addEventListener('change', async (e) => {
+      const enabled = document.getElementById('settings-live-shortcut').textContent === 'On';
+      if (!enabled) return;
+      try {
+        const settings = await invoke('cmd_set_live_shortcut', {
+          enabled: true,
+          shortcut: e.target.value,
+        });
+        setSettingsToggle('settings-live-shortcut', settings.enabled);
+      } catch (e2) {
+        console.error('Live shortcut change:', e2);
+      }
+    });
+    // Load initial live shortcut state
+    invoke('cmd_live_shortcut_settings').then(settings => {
+      setSettingsToggle('settings-live-shortcut', settings.enabled);
+      const select = document.getElementById('settings-live-shortcut-select');
+      if (select) select.value = settings.shortcut;
+    }).catch(() => {});
     // Dictation hotkey — "press to record" key capture
     const KEYCODE_NAMES = {
       0: 'A', 1: 'S', 2: 'D', 3: 'F', 4: 'H', 5: 'G', 6: 'Z', 7: 'X', 8: 'C', 9: 'V',
@@ -4231,6 +4509,48 @@
 
     currentWindow.listen('dictation-hotkey:status', (event) => {
       applyDictationHotkeyStatus(event.payload);
+    });
+
+    // ── Listen for live transcript events (T6: immediate UI feedback) ──
+    currentWindow.listen('live-transcript:started', () => {
+      isLiveTranscript = true;
+      liveBar.classList.add('active');
+      footer.style.display = 'none';
+      statusPill.className = 'status-pill live';
+      statusPill.textContent = 'live';
+      startFastPoll();
+      playCue('start');
+    });
+
+    currentWindow.listen('live-transcript:stopped', (event) => {
+      isLiveTranscript = false;
+      liveBar.classList.remove('active');
+      footer.style.display = '';
+      statusPill.className = 'status-pill';
+      statusPill.textContent = 'idle';
+      stopFastPoll();
+      loadMeetings();
+      playCue('stop');
+    });
+
+    currentWindow.listen('live-transcript:error', (event) => {
+      isLiveTranscript = false;
+      liveBar.classList.remove('active');
+      footer.style.display = '';
+      statusPill.className = 'status-pill';
+      statusPill.textContent = 'idle';
+      stopFastPoll();
+      const errMsg = event.payload?.error || 'Unknown error';
+      console.error('[live-transcript] error:', errMsg);
+      // Show visible error to user
+      const noticeIcon = document.getElementById('output-notice-icon');
+      const noticeTitle = document.getElementById('output-notice-title');
+      const noticeDetail = document.getElementById('output-notice-detail');
+      const notice = document.getElementById('output-notice');
+      if (noticeIcon) noticeIcon.textContent = '✕';
+      if (noticeTitle) noticeTitle.textContent = 'Live transcript stopped unexpectedly';
+      if (noticeDetail) noticeDetail.textContent = errMsg;
+      if (notice) notice.classList.add('active');
     });
 
     // ── Listen for recall:expand events from Rust backend ──

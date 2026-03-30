@@ -26,6 +26,7 @@ pub struct Config {
     pub vault: VaultConfig,
     pub dictation: DictationConfig,
     pub voice: VoiceConfig,
+    pub live_transcript: LiveTranscriptConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -85,6 +86,7 @@ pub struct SummarizationConfig {
     pub chunk_max_tokens: usize,
     pub ollama_url: String,
     pub ollama_model: String,
+    pub mistral_model: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -156,6 +158,7 @@ pub struct IdentityConfig {
 #[serde(default)]
 pub struct DictationConfig {
     pub destination: String,
+    pub accumulate: bool,
     pub daily_note_log: bool,
     pub cleanup_engine: String,
     pub auto_paste: bool,
@@ -187,6 +190,7 @@ impl Default for DictationConfig {
     fn default() -> Self {
         Self {
             destination: "clipboard".into(),
+            accumulate: true,
             daily_note_log: true,
             cleanup_engine: String::new(),
             auto_paste: false,
@@ -211,6 +215,34 @@ impl Default for VaultConfig {
             path: PathBuf::new(),
             meetings_subdir: "areas/meetings".into(),
             strategy: "auto".into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LiveTranscriptConfig {
+    /// Whisper model to use for live transcription.
+    /// Empty string means "use the dictation model".
+    pub model: String,
+    /// Maximum utterance length in seconds before force-finalizing.
+    pub max_utterance_secs: u64,
+    /// Whether to save raw WAV alongside JSONL for post-meeting reprocessing.
+    pub save_wav: bool,
+    /// Whether the keyboard shortcut is enabled.
+    pub shortcut_enabled: bool,
+    /// The keyboard shortcut string (e.g., "CmdOrCtrl+Shift+L").
+    pub shortcut: String,
+}
+
+impl Default for LiveTranscriptConfig {
+    fn default() -> Self {
+        Self {
+            model: String::new(), // empty = use dictation model
+            max_utterance_secs: 30,
+            save_wav: true,
+            shortcut_enabled: false,
+            shortcut: "CmdOrCtrl+Shift+L".into(),
         }
     }
 }
@@ -279,6 +311,7 @@ impl Default for Config {
             vault: VaultConfig::default(),
             dictation: DictationConfig::default(),
             voice: VoiceConfig::default(),
+            live_transcript: LiveTranscriptConfig::default(),
         }
     }
 }
@@ -313,11 +346,12 @@ impl Default for DiarizationConfig {
 impl Default for SummarizationConfig {
     fn default() -> Self {
         Self {
-            engine: "none".into(),
+            engine: "auto".into(),
             agent_command: "claude".into(),
             chunk_max_tokens: 4000,
             ollama_url: "http://localhost:11434".into(),
             ollama_model: "llama3.2".into(),
+            mistral_model: "mistral-large-latest".into(),
         }
     }
 }
@@ -491,9 +525,10 @@ mod tests {
         assert_eq!(config.transcription.parakeet_model, "tdt-ctc-110m");
         assert_eq!(config.transcription.parakeet_vocab, "vocab.txt");
         assert_eq!(config.diarization.engine, "auto");
-        assert_eq!(config.summarization.engine, "none");
+        assert_eq!(config.summarization.engine, "auto");
         assert_eq!(config.search.engine, "builtin");
         assert!(!config.daily_notes.enabled);
+        assert!(config.dictation.accumulate);
         assert_eq!(config.watch.settle_delay_ms, 2000);
         assert!(!config.watch.extensions.is_empty());
     }
@@ -523,6 +558,7 @@ model = "large-v3"
         assert_eq!(config.transcription.min_words, 3);
         assert_eq!(config.diarization.engine, "auto");
         assert!(!config.daily_notes.enabled);
+        assert!(config.dictation.accumulate);
     }
 
     #[test]
@@ -573,6 +609,7 @@ model = "tiny"
 
         let config = Config::load_from(&config_path);
         assert_eq!(config.transcription.model, "small");
+        assert!(config.dictation.accumulate);
     }
 
     #[test]
@@ -618,5 +655,22 @@ model = "tiny"
         let config = Config::load_from(&config_path);
         assert_eq!(config.transcription.engine, "whisper");
         assert_eq!(config.transcription.parakeet_binary, "parakeet");
+    }
+
+    #[test]
+    fn dictation_accumulate_can_be_disabled_from_toml() {
+        let dir = TempDir::new().unwrap();
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(
+            &config_path,
+            r#"
+[dictation]
+accumulate = false
+"#,
+        )
+        .unwrap();
+
+        let config = Config::load_from(&config_path);
+        assert!(!config.dictation.accumulate);
     }
 }

@@ -14,6 +14,7 @@
 //! **Post-transcription segment cleaning** (`segments` module):
 //! - Consecutive repetition detection (3+ similar segments collapsed)
 //! - Interleaved A/B/A/B hallucination pattern detection
+//! - Foreign script hallucination detection (e.g., CJK in a Latin transcript)
 //! - Trailing noise trimming (`[music]`, `[BLANK_AUDIO]`, filler)
 //!
 //! **Whisper parameter presets** (`params` module, requires `whisper` feature):

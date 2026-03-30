@@ -26,6 +26,10 @@ pub struct AppState {
     pub dictation_stop_flag: Arc<AtomicBool>,
     pub dictation_shortcut_enabled: Arc<AtomicBool>,
     pub dictation_shortcut: Arc<Mutex<String>>,
+    pub live_transcript_active: Arc<AtomicBool>,
+    pub live_transcript_stop_flag: Arc<AtomicBool>,
+    pub live_shortcut_enabled: Arc<AtomicBool>,
+    pub live_shortcut: Arc<Mutex<String>>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -410,6 +414,7 @@ fn stage_label(stage: minutes_core::pipeline::PipelineStage, mode: CaptureMode) 
         (minutes_core::pipeline::PipelineStage::Saving, CaptureMode::Dictation) => {
             "Saving dictation"
         }
+        (_, CaptureMode::LiveTranscript) => "Processing live transcript",
     }
 }
 
@@ -1185,6 +1190,7 @@ pub fn start_recording(
                             CaptureMode::Meeting => "Saved meeting markdown",
                             CaptureMode::QuickThought => "Saved quick thought memo",
                             CaptureMode::Dictation => "Saved dictation",
+                            CaptureMode::LiveTranscript => "Saved live transcript",
                         };
                         let notice = OutputNotice {
                             kind: "saved".into(),
@@ -1216,6 +1222,9 @@ pub fn start_recording(
                                 }
                                 CaptureMode::Dictation => {
                                     "Processing failed, but the raw dictation capture was preserved."
+                                }
+                                CaptureMode::LiveTranscript => {
+                                    "Processing failed, but the raw live transcript capture was preserved."
                                 }
                             };
                             let notice = OutputNotice {
@@ -1258,6 +1267,9 @@ pub fn start_recording(
                     }
                     CaptureMode::Dictation => {
                         "Dictation failed, but the audio was preserved."
+                    }
+                    CaptureMode::LiveTranscript => {
+                        "Live transcript failed, but the audio was preserved."
                     }
                 };
                 let notice = OutputNotice {
@@ -1551,6 +1563,9 @@ pub fn cmd_start_recording(
 ) -> Result<(), String> {
     if recording_active(&state.recording) || state.starting.load(Ordering::Relaxed) {
         return Err("Already recording".into());
+    }
+    if state.live_transcript_active.load(Ordering::Relaxed) {
+        return Err("Live transcript in progress — stop it first".into());
     }
     let capture_mode = parse_capture_mode(mode.as_deref())?;
     state.starting.store(true, Ordering::Relaxed);
@@ -1931,12 +1946,11 @@ pub fn cmd_retry_recovery(
     state: tauri::State<AppState>,
     path: String,
     content_type: String,
-) -> Result<OutputNotice, String> {
+) -> Result<(), String> {
     if recording_active(&state.recording) || state.processing.load(Ordering::Relaxed) {
         return Err("Finish the current recording before retrying recovery items.".into());
     }
 
-    let config = Config::load();
     let audio_path = PathBuf::from(&path);
     if !audio_path.exists() {
         return Err(format!("Recovery item not found: {}", path));
@@ -1948,18 +1962,62 @@ pub fn cmd_retry_recovery(
         other => return Err(format!("Unsupported recovery type: {}", other)),
     };
 
-    let result =
-        minutes_core::pipeline::process_with_progress(&audio_path, ct, None, &config, |_| {})
-            .map_err(|e| e.to_string())?;
+    // Run pipeline on a background thread so the UI stays responsive
+    let processing = state.processing.clone();
+    let processing_stage = state.processing_stage.clone();
+    let latest_output = state.latest_output.clone();
 
-    let notice = OutputNotice {
-        kind: "saved".into(),
-        title: result.title.clone(),
-        path: result.path.display().to_string(),
-        detail: "Recovery item was processed successfully.".into(),
-    };
-    set_latest_output(&state.latest_output, Some(notice.clone()));
-    Ok(notice)
+    processing.store(true, Ordering::Relaxed);
+    set_processing_stage(&processing_stage, Some("Preparing transcript..."));
+
+    std::thread::spawn(move || {
+        let config = Config::load();
+        match minutes_core::pipeline::process_with_progress(
+            &audio_path,
+            ct,
+            None,
+            &config,
+            |stage| {
+                let label = match stage {
+                    minutes_core::pipeline::PipelineStage::Transcribing => "Transcribing...",
+                    minutes_core::pipeline::PipelineStage::Diarizing => "Identifying speakers...",
+                    minutes_core::pipeline::PipelineStage::Summarizing => "Generating summary...",
+                    minutes_core::pipeline::PipelineStage::Saving => "Saving...",
+                };
+                set_processing_stage(&processing_stage, Some(label));
+                let _ = minutes_core::pid::set_processing_status(
+                    Some(label),
+                    Some(minutes_core::pid::CaptureMode::Meeting),
+                );
+            },
+        ) {
+            Ok(result) => {
+                let notice = OutputNotice {
+                    kind: "saved".into(),
+                    title: result.title.clone(),
+                    path: result.path.display().to_string(),
+                    detail: "Recovery item was processed successfully.".into(),
+                };
+                set_latest_output(&latest_output, Some(notice));
+                eprintln!("Recovery retry succeeded: {}", result.path.display());
+            }
+            Err(e) => {
+                let notice = OutputNotice {
+                    kind: "error".into(),
+                    title: "Retry failed".into(),
+                    path: audio_path.display().to_string(),
+                    detail: format!("Recovery retry failed: {}", e),
+                };
+                set_latest_output(&latest_output, Some(notice));
+                eprintln!("Recovery retry failed: {}", e);
+            }
+        }
+        processing.store(false, Ordering::Relaxed);
+        set_processing_stage(&processing_stage, None);
+        minutes_core::pid::clear_processing_status().ok();
+    });
+
+    Ok(())
 }
 
 #[tauri::command]
@@ -2171,6 +2229,7 @@ fn sync_workspace_for_mode(
     mode: &str,
     meeting_path: Option<&str>,
 ) -> Result<(), String> {
+    // write_assistant_context preserves live transcript markers if present (U2/T3)
     crate::context::write_assistant_context(workspace, config)?;
 
     match mode {
@@ -2474,6 +2533,7 @@ pub fn cmd_get_settings() -> serde_json::Value {
         "dictation": {
             "model": config.dictation.model,
             "destination": config.dictation.destination,
+            "accumulate": config.dictation.accumulate,
             "daily_note_log": config.dictation.daily_note_log,
             "cleanup_engine": config.dictation.cleanup_engine,
             "auto_paste": config.dictation.auto_paste,
@@ -2539,6 +2599,9 @@ pub fn cmd_set_setting(section: String, key: String, value: String) -> Result<St
         ("dictation", "daily_note_log") => {
             config.dictation.daily_note_log = value == "true";
         }
+        ("dictation", "accumulate") => {
+            config.dictation.accumulate = value == "true";
+        }
         ("dictation", "silence_timeout_ms") => {
             config.dictation.silence_timeout_ms = value
                 .parse()
@@ -2560,6 +2623,14 @@ pub fn cmd_set_setting(section: String, key: String, value: String) -> Result<St
             config.dictation.hotkey_keycode = value
                 .parse()
                 .map_err(|_| "hotkey_keycode must be a number")?;
+        }
+
+        // Live transcript
+        ("live_transcript", "shortcut_enabled") => {
+            config.live_transcript.shortcut_enabled = value == "true";
+        }
+        ("live_transcript", "shortcut") => {
+            config.live_transcript.shortcut = value.clone();
         }
 
         _ => return Err(format!("Unknown setting: {}.{}", section, key)),
@@ -2963,6 +3034,305 @@ fn show_dictation_overlay(app: &tauri::AppHandle) {
     {
         Ok(_) => eprintln!("[dictation] overlay shown"),
         Err(e) => eprintln!("[dictation] overlay failed: {}", e),
+    }
+}
+
+// ── Live transcript commands ─────────────────────────────────
+
+/// RAII guard that resets the live_transcript_active flag on drop (even on panic).
+struct LiveActiveGuard(Arc<AtomicBool>);
+impl Drop for LiveActiveGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
+
+/// Shared live transcript session runner. Spawned on a background thread by both
+/// cmd_start_live_transcript and handle_live_shortcut_event.
+fn run_live_session(app: tauri::AppHandle, active: Arc<AtomicBool>, stop_flag: Arc<AtomicBool>) {
+    let _guard = LiveActiveGuard(active);
+
+    let config = Config::load();
+
+    if let Ok(workspace) = crate::context::create_workspace(&config) {
+        update_assistant_live_context(&workspace, true);
+    }
+
+    crate::update_tray_state_with_mode(&app, true, true);
+
+    let result = minutes_core::live_transcript::run(stop_flag.clone(), &config);
+
+    stop_flag.store(false, Ordering::Relaxed);
+
+    if let Ok(workspace) = crate::context::create_workspace(&config) {
+        update_assistant_live_context(&workspace, false);
+    }
+
+    match result {
+        Ok((lines, duration, _path)) => {
+            eprintln!(
+                "[live-transcript] ended: {} lines in {:.0}s",
+                lines, duration
+            );
+            if let Some(win) = app.get_webview_window("main") {
+                win.emit(
+                    "live-transcript:stopped",
+                    serde_json::json!({ "lines": lines, "duration_secs": duration }),
+                )
+                .ok();
+            }
+        }
+        Err(e) => {
+            eprintln!("[live-transcript] error: {}", e);
+            if let Some(win) = app.get_webview_window("main") {
+                win.emit(
+                    "live-transcript:error",
+                    serde_json::json!({ "error": e.to_string() }),
+                )
+                .ok();
+            }
+        }
+    }
+
+    crate::update_tray_state(&app, false);
+}
+
+/// Try to acquire the live transcript state. Returns Err with a message on conflict.
+fn try_acquire_live(state: &AppState) -> Result<(), String> {
+    if state
+        .live_transcript_active
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return Err("Live transcript already active".into());
+    }
+    if recording_active(&state.recording) {
+        state.live_transcript_active.store(false, Ordering::SeqCst);
+        return Err("Recording in progress — stop recording first".into());
+    }
+    if state.dictation_active.load(Ordering::Relaxed) {
+        state.live_transcript_active.store(false, Ordering::SeqCst);
+        return Err("Dictation in progress — stop dictation first".into());
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn cmd_start_live_transcript(
+    app: tauri::AppHandle,
+    state: tauri::State<AppState>,
+) -> Result<(), String> {
+    try_acquire_live(&state)?;
+
+    let active = state.live_transcript_active.clone();
+    let stop_flag = state.live_transcript_stop_flag.clone();
+    stop_flag.store(false, Ordering::Relaxed);
+
+    let app_clone = app.clone();
+    std::thread::spawn(move || run_live_session(app_clone, active, stop_flag));
+
+    if let Some(win) = app.get_webview_window("main") {
+        win.emit("live-transcript:started", ()).ok();
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+pub fn cmd_stop_live_transcript(state: tauri::State<AppState>) -> Result<(), String> {
+    if state.live_transcript_active.load(Ordering::Relaxed) {
+        state
+            .live_transcript_stop_flag
+            .store(true, Ordering::Relaxed);
+        return Ok(());
+    }
+    // Check for external live transcript (started from CLI)
+    let lt_pid = minutes_core::pid::live_transcript_pid_path();
+    if let Ok(Some(pid)) = minutes_core::pid::check_pid_file(&lt_pid) {
+        minutes_core::pid::write_stop_sentinel()
+            .map_err(|e| format!("failed to write stop sentinel: {}", e))?;
+        #[cfg(unix)]
+        unsafe {
+            libc::kill(pid as i32, libc::SIGTERM);
+        }
+        return Ok(());
+    }
+    Err("No live transcript session active".into())
+}
+
+#[tauri::command]
+pub fn cmd_live_transcript_status(state: tauri::State<AppState>) -> serde_json::Value {
+    let in_app_active = state.live_transcript_active.load(Ordering::Relaxed);
+    let status = minutes_core::live_transcript::session_status();
+    let audio_level = if in_app_active {
+        minutes_core::streaming::stream_audio_level()
+    } else {
+        0
+    };
+    serde_json::json!({
+        "active": in_app_active || status.active,
+        "line_count": status.line_count,
+        "duration_secs": status.duration_secs,
+        "audioLevel": audio_level,
+    })
+}
+
+/// Update the CLAUDE.md in the assistant workspace to mention (or un-mention)
+/// the live transcript. This makes any agent (Claude, Codex, Gemini) aware
+/// of the live JSONL file without requiring MCP.
+pub fn handle_live_shortcut_event(
+    app: &tauri::AppHandle,
+    shortcut_state: tauri_plugin_global_shortcut::ShortcutState,
+) {
+    let state = app.state::<AppState>();
+    if !state.live_shortcut_enabled.load(Ordering::Relaxed) {
+        return;
+    }
+    if shortcut_state != tauri_plugin_global_shortcut::ShortcutState::Pressed {
+        return;
+    }
+
+    // Toggle: if active, stop. If idle, start.
+    if state.live_transcript_active.load(Ordering::Relaxed) {
+        state
+            .live_transcript_stop_flag
+            .store(true, Ordering::Relaxed);
+    } else if try_acquire_live(&state).is_ok() {
+        let active = state.live_transcript_active.clone();
+        let stop_flag = state.live_transcript_stop_flag.clone();
+        stop_flag.store(false, Ordering::Relaxed);
+        let app_clone = app.clone();
+        std::thread::spawn(move || run_live_session(app_clone, active, stop_flag));
+        if let Some(win) = app.get_webview_window("main") {
+            win.emit("live-transcript:started", ()).ok();
+        }
+    }
+    // else: conflicting mode, silently ignore (shortcut is best-effort)
+}
+
+#[tauri::command]
+pub fn cmd_live_shortcut_settings(state: tauri::State<AppState>) -> HotkeySettings {
+    let enabled = state.live_shortcut_enabled.load(Ordering::Relaxed);
+    let shortcut = state
+        .live_shortcut
+        .lock()
+        .map(|s| s.clone())
+        .unwrap_or_else(|_| "CmdOrCtrl+Shift+L".into());
+    HotkeySettings {
+        enabled,
+        shortcut,
+        choices: vec![],
+    }
+}
+
+#[tauri::command]
+pub fn cmd_set_live_shortcut(
+    app: tauri::AppHandle,
+    state: tauri::State<AppState>,
+    enabled: bool,
+    shortcut: String,
+) -> Result<HotkeySettings, String> {
+    use tauri_plugin_global_shortcut::GlobalShortcutExt;
+
+    let next_shortcut = validate_hotkey_shortcut(&shortcut)?;
+    let previous = cmd_live_shortcut_settings(state.clone());
+    let manager = app.global_shortcut();
+
+    if previous.enabled {
+        manager
+            .unregister(previous.shortcut.as_str())
+            .map_err(|e| format!("Could not unregister {}: {}", previous.shortcut, e))?;
+    }
+
+    if enabled {
+        if let Err(e) = manager.register(next_shortcut.as_str()) {
+            if previous.enabled {
+                let _ = manager.register(previous.shortcut.as_str());
+            }
+            return Err(format!(
+                "Could not register {}. Another app may already be using it. ({})",
+                next_shortcut, e
+            ));
+        }
+    }
+
+    state
+        .live_shortcut_enabled
+        .store(enabled, Ordering::Relaxed);
+    if let Ok(mut current) = state.live_shortcut.lock() {
+        *current = next_shortcut.clone();
+    }
+
+    // Persist to config.toml
+    cmd_set_setting(
+        "live_transcript".into(),
+        "shortcut_enabled".into(),
+        enabled.to_string(),
+    )
+    .ok();
+    cmd_set_setting("live_transcript".into(), "shortcut".into(), next_shortcut).ok();
+
+    Ok(cmd_live_shortcut_settings(state))
+}
+
+fn update_assistant_live_context(workspace: &std::path::Path, live_active: bool) {
+    let claude_md = workspace.join("CLAUDE.md");
+    let existing = std::fs::read_to_string(&claude_md).unwrap_or_default();
+
+    let marker_start = "<!-- LIVE_TRANSCRIPT_START -->";
+    let marker_end = "<!-- LIVE_TRANSCRIPT_END -->";
+
+    // Remove any existing live transcript section (T4: validate marker order)
+    let cleaned = if let (Some(start), Some(end)) =
+        (existing.find(marker_start), existing.find(marker_end))
+    {
+        if start < end {
+            let end_pos = end + marker_end.len();
+            format!("{}{}", &existing[..start], &existing[end_pos..])
+        } else {
+            // Markers out of order (corrupt file). Remove both markers individually.
+            existing.replace(marker_start, "").replace(marker_end, "")
+        }
+    } else {
+        // Remove any orphaned single marker
+        existing.replace(marker_start, "").replace(marker_end, "")
+    };
+
+    let updated = if live_active {
+        let jsonl_path = minutes_core::pid::live_transcript_jsonl_path();
+        let section = format!(
+            "\n{marker_start}\n\
+            ## Live Transcript Active\n\
+            \n\
+            A live meeting transcript is being recorded right now.\n\
+            \n\
+            **JSONL file:** `{path}`\n\
+            \n\
+            Each line is a JSON object with: `line` (sequence number), `ts` (wall clock), \
+            `offset_ms` (ms since session start), `duration_ms`, `text`, `speaker` (null for now).\n\
+            \n\
+            To read the latest utterances:\n\
+            - **File:** `cat {path} | tail -5` (last 5 utterances)\n\
+            - **CLI:** `minutes transcript --since 5m` (last 5 minutes)\n\
+            - **MCP:** Use `read_live_transcript` tool with `since: \"5m\"`\n\
+            \n\
+            The user may ask for coaching during the meeting. Read the recent transcript \
+            to understand what's being discussed, then provide tactical advice.\n\
+            {marker_end}\n",
+            marker_start = marker_start,
+            marker_end = marker_end,
+            path = jsonl_path.display(),
+        );
+        format!("{}{}", cleaned.trim_end(), section)
+    } else {
+        cleaned
+    };
+
+    // Atomic write: write to temp file then rename (T7)
+    let content = updated.trim_end().to_string() + "\n";
+    let tmp = claude_md.with_extension("md.tmp");
+    if std::fs::write(&tmp, &content).is_ok() {
+        std::fs::rename(&tmp, &claude_md).ok();
     }
 }
 

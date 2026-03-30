@@ -180,6 +180,9 @@ pub enum DictationError {
     #[error("recording in progress — stop recording before dictating")]
     RecordingActive,
 
+    #[error("live transcript in progress — stop it before dictating")]
+    LiveTranscriptActive,
+
     #[error("dictation already active (PID: {0})")]
     AlreadyActive(u32),
 
@@ -194,6 +197,21 @@ pub enum DictationError {
 
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
+}
+
+#[derive(Debug, Error)]
+pub enum LiveTranscriptError {
+    #[error("recording in progress — stop recording before starting live transcript")]
+    RecordingActive,
+
+    #[error("dictation in progress — stop dictation before starting live transcript")]
+    DictationActive,
+
+    #[error("live transcript already active (PID: {0})")]
+    AlreadyActive(u32),
+
+    #[error("no live transcript session active")]
+    NoActiveSession,
 }
 
 /// Unified error type for the minutes-core crate.
@@ -226,6 +244,9 @@ pub enum MinutesError {
 
     #[error(transparent)]
     Dictation(#[from] DictationError),
+
+    #[error(transparent)]
+    LiveTranscript(#[from] LiveTranscriptError),
 
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),

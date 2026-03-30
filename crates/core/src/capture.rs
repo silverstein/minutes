@@ -28,7 +28,8 @@ pub fn audio_level() -> u32 {
 // ──────────────────────────────────────────────────────────────
 
 /// Start recording audio from the default input device.
-/// Blocks until `stop_flag` is set to true (via signal handler).
+/// Blocks until `stop_flag` is set to true (via signal handler) or a stop
+/// sentinel file is detected (from `minutes stop`).
 /// Writes raw PCM to a WAV file at the given path.
 /// If screen context is enabled, also captures periodic screenshots.
 pub fn record_to_wav(
@@ -37,6 +38,9 @@ pub fn record_to_wav(
     config: &Config,
 ) -> Result<(), CaptureError> {
     use cpal::traits::{DeviceTrait, StreamTrait};
+
+    // Clear any stale stop sentinel from a previous session
+    crate::pid::check_and_clear_sentinel();
 
     // Get the input device — prefer the macOS system default over cpal's default,
     // which can pick virtual devices (Descript Loopback, Zoom, etc.) over the real mic.
@@ -269,12 +273,17 @@ pub fn record_to_wav(
         None
     };
 
-    // Wait for stop signal
+    // Wait for stop signal (Ctrl+C sets stop_flag, `minutes stop` writes sentinel)
     while !stop_flag.load(Ordering::Relaxed) {
         std::thread::sleep(std::time::Duration::from_millis(100));
 
         if err_flag.load(Ordering::Relaxed) {
             tracing::error!("audio stream encountered an error, stopping");
+            break;
+        }
+
+        if crate::pid::check_and_clear_sentinel() {
+            tracing::info!("stop sentinel detected — stopping recording");
             break;
         }
     }
@@ -295,6 +304,13 @@ pub fn record_to_wav(
     if let Some(w) = guard.take() {
         w.finalize()
             .map_err(|e| CaptureError::Io(std::io::Error::other(format!("WAV finalize: {}", e))))?;
+    }
+
+    // Set restrictive permissions on the recording (contains sensitive audio)
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(output_path, std::fs::Permissions::from_mode(0o600)).ok();
     }
 
     eprintln!(

@@ -21,6 +21,7 @@ Record a meeting. Capture a voice memo on a walk. Ask Claude *"what did I promis
   <a href="#any-mcp-client-claude-code-codex-gemini-cli-claude-desktop-or-your-own-agent">Codex</a> &bull;
   <a href="#any-mcp-client-claude-code-codex-gemini-cli-claude-desktop-or-your-own-agent">Gemini CLI</a> &bull;
   <a href="#any-mcp-client-claude-code-codex-gemini-cli-claude-desktop-or-your-own-agent">Claude Desktop</a> &bull;
+  <a href="#mistral-vibe">Mistral Vibe</a> &bull;
   <a href="#vault-sync-obsidian--logseq">Obsidian</a> &bull;
   <a href="#vault-sync-obsidian--logseq">Logseq</a> &bull;
   <a href="#phone--desktop-voice-memo-pipeline">Phone Voice Memos</a> &bull;
@@ -36,8 +37,9 @@ brew install --cask silverstein/tap/minutes
 # macOS — CLI only
 brew tap silverstein/tap && brew install minutes
 
-# Any platform — from source (requires Rust + cmake)
-cargo install minutes-cli
+# Any platform — from source (requires Rust + cmake; Windows also needs LLVM)
+cargo install minutes-cli                          # macOS/Linux
+cargo install minutes-cli --no-default-features    # Windows (see install notes below)
 
 # MCP server only — no Rust needed (Claude Code, Codex, Gemini CLI, Claude Desktop, etc.)
 npx minutes-mcp
@@ -54,9 +56,9 @@ minutes stop                  # Stop and transcribe
 ```
 Audio → Transcribe → Diarize → Summarize → Structured Markdown → Relationship Graph
          (local)     (local)     (LLM)       (decisions,            (people, commitments,
-        whisper.cpp  pyannote   Claude/       action items,          topics, scores)
-        /parakeet               Ollama/       people, entities)      SQLite index
-                                OpenAI
+        whisper.cpp  pyannote-rs Claude/       action items,          topics, scores)
+        /parakeet    (native)    Ollama/       people, entities)      SQLite index
+                                Mistral/OpenAI
 ```
 
 Everything runs locally. Your audio never leaves your machine (unless you opt into cloud LLM summarization). Speakers are identified via native diarization. The relationship graph indexes people, commitments, and topics across all meetings for instant queries.
@@ -111,12 +113,19 @@ minutes person "Alex"                              # Build a profile from meetin
 minutes consistency                                # Flag contradicting decisions + stale commitments
 ```
 
+### Live transcript (real-time coaching)
+```bash
+minutes live                                     # Start real-time transcription
+minutes stop                                     # Stop live session
+```
+Streams whisper transcription to a JSONL file in real time — any AI agent can read it mid-meeting for live coaching. The MCP `read_live_transcript` tool provides delta reads (by line cursor or wall-clock duration). Works with Claude Code, Codex, Gemini CLI, or any agent that reads files. The Tauri desktop app has a Live Mode toggle that starts this with one click.
+
 ### Dictation mode
 ```bash
 minutes dictate                                  # Speak → text appears as you talk
 minutes dictate --stdout                         # Output to stdout instead of clipboard
 ```
-Text streams progressively as you speak (partial results every 2 seconds). Goes to clipboard + daily note. Local whisper, no cloud.
+Text streams progressively as you speak (partial results every 2 seconds). By default it accumulates across pauses and writes the combined text to clipboard + daily note when dictation ends. Set `[dictation] accumulate = false` to keep the older per-pause behavior. Local whisper, no cloud.
 
 ### System diagnostics
 ```bash
@@ -332,11 +341,25 @@ Minutes exposes a standard MCP server. Point any MCP-compatible client at it:
 }
 ```
 
-**15 tools:** `start_recording`, `stop_recording`, `get_status`, `search_meetings`, `list_meetings`, `get_meeting`, `get_person_profile`, `track_commitments`, `relationship_map`, `research_topic`, `process_audio`, `add_note`, `consistency_report`, `qmd_collection_status`, `register_qmd_collection`
+**22 tools:** `start_recording`, `stop_recording`, `get_status`, `list_meetings`, `search_meetings`, `get_meeting`, `process_audio`, `add_note`, `consistency_report`, `get_person_profile`, `research_topic`, `qmd_collection_status`, `register_qmd_collection`, `start_dictation`, `stop_dictation`, `track_commitments`, `relationship_map`, `list_voices`, `confirm_speaker`, `start_live_transcript`, `read_live_transcript`, `open_dashboard`
 
 **7 resources:** `minutes://meetings/recent`, `minutes://status`, `minutes://actions/open`, `minutes://events/recent`, `minutes://meetings/{slug}`, `minutes://ideas/recent`, `ui://minutes/dashboard`
 
 **Interactive dashboard (Claude Desktop):** Tools render an inline interactive UI via [MCP Apps](https://modelcontextprotocol.io/specification/2025-03-26/server/utilities/apps) — meeting list with filter/search, detail view with fullscreen + "Send to Claude" context injection, **People tab** with relationship cards and click-through profiles, consistency reports. Text-only clients see the same data as plain text.
+
+### Mistral Vibe
+
+Add Minutes to your `~/.vibe/config.toml`:
+
+```toml
+[[mcp_servers]]
+name = "minutes"
+transport = "stdio"
+command = "npx"
+args = ["minutes-mcp"]
+```
+
+All 22 tools are available in Vibe as `minutes_*` (e.g. `minutes_start_recording`, `minutes_search_meetings`).
 
 ### Claude Code (Plugin)
 
@@ -385,6 +408,11 @@ MCP tools are automatically available in Cowork. From your phone via Dispatch: *
 engine = "agent"
 agent_command = "claude"  # or "codex" for OpenAI Codex users
 
+# Or use Mistral API (requires MISTRAL_API_KEY)
+[summarization]
+engine = "mistral"
+mistral_model = "mistral-large-latest"
+
 # Or use a free local LLM
 [summarization]
 engine = "ollama"
@@ -412,15 +440,29 @@ cargo install --path crates/cli
 
 ```powershell
 # Download pre-built binary from GitHub releases, or build from source:
-# Requires: Rust, cmake, MSVC build tools
+# Requires: Rust, cmake, MSVC build tools, LLVM (for libclang)
+
+# Install LLVM (needed by whisper-rs bindgen):
+winget install LLVM.LLVM
+[Environment]::SetEnvironmentVariable("LIBCLANG_PATH", "C:\Program Files\LLVM\bin", "User")
+# Restart your terminal after setting LIBCLANG_PATH
+
+# Full build (includes speaker diarization):
 cargo install --path crates/cli
+
+# Without speaker diarization:
+cargo install --path crates/cli --no-default-features
 ```
+
+> **Note:** If diarization fails to compile on Windows, use `--no-default-features`.
+> This is a [known upstream issue](https://github.com/silverstein/minutes/issues/27)
+> with `pyannote-rs`'s ONNX Runtime dependency. Everything except speaker labels works without it.
 
 ### Linux
 
 ```bash
-# Requires: Rust, cmake, ALSA dev headers
-sudo apt-get install -y libasound2-dev  # Debian/Ubuntu
+# Requires: Rust, cmake, ALSA dev headers, libclang (for bindgen)
+sudo apt-get install -y libasound2-dev libclang-dev  # Debian/Ubuntu
 cargo install --path crates/cli
 ```
 
@@ -595,6 +637,8 @@ engine = "whisper"        # "whisper" (default) or "parakeet" (opt-in, lower WER
 model = "small"           # whisper: tiny (75MB), base, small (466MB), medium, large-v3 (3.1GB)
 # parakeet_model = "tdt-ctc-110m"  # parakeet: tdt-ctc-110m (English), tdt-600m (multilingual)
 # parakeet_binary = "parakeet"     # Path to parakeet.cpp binary (or name in PATH)
+# vad_model = "silero-v6.2.0"     # Silero VAD model (auto-downloaded by setup). Empty = disable.
+                                   # Prevents whisper hallucination loops on non-English/noisy audio.
 
 [summarization]
 engine = "none"           # Default: Claude summarizes conversationally via MCP
@@ -604,10 +648,6 @@ engine = "none"           # Default: Claude summarizes conversationally via MCP
 agent_command = "claude"  # Which CLI to use when engine = "agent" (claude, codex, etc.)
 ollama_url = "http://localhost:11434"
 ollama_model = "llama3.2"
-
-[transcription]
-# vad_model = "silero-v6.2.0" # Silero VAD model (auto-downloaded by setup). Empty = disable.
-                              # Prevents whisper hallucination loops on non-English/noisy audio.
 
 [diarization]
 engine = "auto"           # "auto" (default — uses pyannote-rs if models downloaded, otherwise skips),
@@ -644,12 +684,14 @@ agent_args = []           # Optional extra args, e.g. ["--dangerously-skip-permi
 
 ```
 minutes/
-├── crates/core/    17 Rust modules — the engine (shared by all interfaces)
-├── crates/cli/     CLI binary — 15 commands
-├── crates/reader/  Lightweight read-only meeting parser (no audio deps)
-├── crates/mcp/     MCP server — 15 tools + 7 resources + interactive dashboard
-│   └── ui/         MCP App dashboard (vanilla TS → single-file HTML)
-├── tauri/          Menu bar app — system tray, recording UI, singleton AI Assistant
+├── crates/core/          26 Rust modules — the engine (shared by all interfaces)
+├── crates/cli/           CLI binary — recording, search, health, and workflow commands
+├── crates/whisper-guard/ Anti-hallucination toolkit (VAD gating, dedup, noise trimming)
+├── crates/reader/        Lightweight read-only meeting parser (no audio deps)
+├── crates/sdk/           TypeScript SDK — `npm install minutes-sdk` (query meetings programmatically)
+├── crates/mcp/           MCP server — 22 tools + 7 resources + interactive dashboard
+│   └── ui/               MCP App dashboard (vanilla TS → single-file HTML)
+├── tauri/                Menu bar app — system tray, recording UI, singleton AI Assistant
 └── .claude/plugins/minutes/   Claude Code plugin — 12 skills + 1 agent + 2 hooks
 ```
 
@@ -663,9 +705,24 @@ Minutes is designed as infrastructure for AI agents. The MCP server is the prima
 - **Track people**: `get_person_profile` builds cross-meeting profiles with topics, open commitments
 - **Monitor consistency**: `consistency_report` flags conflicting decisions and stale commitments
 - **Record + process**: `start_recording`, `stop_recording`, `process_audio` for pipeline control
+- **Live coaching**: `start_live_transcript`, `read_live_transcript` for real-time mid-meeting access
+- **Voice profiles**: `list_voices`, `confirm_speaker` for speaker identification workflows
 - **Resources**: Stable URIs (`minutes://meetings/recent`, `minutes://actions/open`) for agent context injection
 
 Any agent framework that speaks MCP can use Minutes as its conversation memory layer — the agent handles the intelligence, Minutes handles the recall.
+
+**TypeScript SDK** — for direct programmatic access without MCP:
+
+```bash
+npm install minutes-sdk
+```
+
+```typescript
+import { listMeetings, searchMeetings, parseFrontmatter } from "minutes-sdk";
+
+const meetings = await listMeetings("~/meetings", 20);
+const results = await searchMeetings("~/meetings", "pricing");
+```
 
 **Built with:** Rust, [whisper.cpp](https://github.com/ggerganov/whisper.cpp) (transcription), [pyannote-rs](https://github.com/pyannote/pyannote-rs) (speaker diarization), [Silero VAD](https://github.com/snakers4/silero-vad) (voice activity detection), [symphonia](https://github.com/pdeljanov/Symphonia) (audio decoding), [cpal](https://github.com/RustAudio/cpal) (audio capture), [Tauri v2](https://v2.tauri.app/) (desktop app), [ureq](https://github.com/algesten/ureq) (HTTP). Optional: [ffmpeg](https://ffmpeg.org/) (recommended for non-English audio decoding).
 

@@ -15,7 +15,8 @@ You are a meeting intelligence analyst with access to the user's complete meetin
 
 - **Meetings**: `~/meetings/*.md` — multi-speaker transcripts from calls, standups, 1:1s
 - **Voice memos**: `~/meetings/memos/*.md` — single-speaker brain dumps, ideas, notes
-- All files are markdown with YAML frontmatter (title, date, duration, type, attendees, tags)
+- **Live transcript**: `~/.minutes/live-transcript.jsonl` — real-time utterances from an active live session (if one is running). Each line is JSON with `line`, `ts`, `offset_ms`, `duration_ms`, `text`, `speaker`. Use `minutes transcript --since 5m` to read the last 5 minutes.
+- All markdown files have YAML frontmatter (title, date, duration, type, attendees, tags)
 
 ## How to work
 

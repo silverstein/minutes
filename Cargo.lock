@@ -2770,7 +2770,7 @@ dependencies = [
 
 [[package]]
 name = "minutes-cli"
-version = "0.8.0"
+version = "0.8.4"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2781,6 +2781,7 @@ dependencies = [
  "hound",
  "libc",
  "minutes-core",
+ "ort",
  "pyannote-rs",
  "schemars 1.2.1",
  "serde",
@@ -2790,11 +2791,12 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "ureq",
+ "walkdir",
 ]
 
 [[package]]
 name = "minutes-core"
-version = "0.8.0"
+version = "0.8.4"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -2826,7 +2828,7 @@ dependencies = [
 
 [[package]]
 name = "minutes-reader"
-version = "0.8.0"
+version = "0.8.4"
 dependencies = [
  "chrono",
  "schemars 1.2.1",

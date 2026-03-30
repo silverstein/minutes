@@ -431,9 +431,28 @@ fn process_existing_files(dir: &Path, config: &Config) {
 
     for entry in entries {
         let path = entry.path();
+        // Reject symlinks — prevents traversal attacks
+        if path
+            .symlink_metadata()
+            .is_ok_and(|m| m.file_type().is_symlink())
+        {
+            tracing::warn!(path = %path.display(), "skipping symlink in existing files");
+            continue;
+        }
         if path.is_file() && has_valid_extension(&path, config) {
             tracing::info!(path = %path.display(), "processing existing file");
             if wait_for_settle(&path, config.watch.settle_delay_ms) {
+                // Validate file is actual audio (same check as handle_file_event)
+                if audio_duration(&path).is_none() {
+                    let is_wav = path
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .is_some_and(|e| e.eq_ignore_ascii_case("wav"));
+                    if !is_wav {
+                        tracing::warn!(path = %path.display(), "file failed audio probe — skipping");
+                        continue;
+                    }
+                }
                 if let Err(e) = process_file(&path, config) {
                     tracing::error!(path = %path.display(), error = %e, "failed to process existing file");
                 }
@@ -457,6 +476,15 @@ fn handle_file_event(path: &Path, settle_delay: u64, config: &Config) {
         }
     }
 
+    // Reject symlinks — prevents traversal attacks via crafted links
+    if path
+        .symlink_metadata()
+        .is_ok_and(|m| m.file_type().is_symlink())
+    {
+        tracing::warn!(path = %path.display(), "skipping symlink — only regular files are processed");
+        return;
+    }
+
     // Skip iCloud eviction stubs (.NAME.icloud placeholder files)
     if is_icloud_stub(path) {
         tracing::debug!(path = %path.display(), "skipping iCloud stub");
@@ -478,6 +506,21 @@ fn handle_file_event(path: &Path, settle_delay: u64, config: &Config) {
     if !wait_for_settle(path, settle_delay) {
         tracing::debug!(path = %path.display(), "file not stable yet");
         return;
+    }
+
+    // Validate file is actual audio by probing with symphonia (magic bytes / container check).
+    // Files that merely have the right extension but aren't valid audio are rejected early.
+    if audio_duration(path).is_none() {
+        // WAV files produced by cpal may not have duration metadata in the header,
+        // so only reject non-WAV files that fail the probe.
+        let is_wav = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("wav"));
+        if !is_wav {
+            tracing::warn!(path = %path.display(), "file failed audio probe — not a valid audio container, skipping");
+            return;
+        }
     }
 
     tracing::info!(path = %path.display(), "new file detected, processing");

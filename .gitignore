@@ -34,3 +34,4 @@ models/
 *.db
 Minutes.app
 minutes.mcpb
+.gstack/

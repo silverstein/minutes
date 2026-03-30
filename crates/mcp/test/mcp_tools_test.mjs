@@ -111,6 +111,15 @@ test("minutes devices returns JSON array", () => {
   }
 });
 
+// ── Test 5b: minutes paths exposes effective directories ──
+test("minutes paths --json returns output_dir", () => {
+  const output = minutesCli(["paths", "--json"]);
+  const paths = JSON.parse(output);
+  assert(typeof paths.output_dir === "string", "output_dir should be a string");
+  assert(typeof paths.minutes_dir === "string", "minutes_dir should be a string");
+  assert(typeof paths.config_path === "string", "config_path should be a string");
+});
+
 // ── Test 6: minutes note without recording fails gracefully ──
 test("minutes note fails gracefully without recording", () => {
   try {

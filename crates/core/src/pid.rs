@@ -30,6 +30,26 @@ pub fn dictation_pid_path() -> PathBuf {
     Config::minutes_dir().join("dictation.pid")
 }
 
+/// Path to the live transcript PID file (`~/.minutes/live-transcript.pid`).
+pub fn live_transcript_pid_path() -> PathBuf {
+    Config::minutes_dir().join("live-transcript.pid")
+}
+
+/// Path to the live transcript JSONL file (`~/.minutes/live-transcript.jsonl`).
+pub fn live_transcript_jsonl_path() -> PathBuf {
+    Config::minutes_dir().join("live-transcript.jsonl")
+}
+
+/// Path to the live transcript WAV file (`~/.minutes/live-transcript.wav`).
+pub fn live_transcript_wav_path() -> PathBuf {
+    Config::minutes_dir().join("live-transcript.wav")
+}
+
+/// Path to the live transcript status sidecar (`~/.minutes/live-transcript-status.json`).
+pub fn live_transcript_status_path() -> PathBuf {
+    Config::minutes_dir().join("live-transcript-status.json")
+}
+
 /// Path to the recording metadata JSON (`~/.minutes/recording-meta.json`).
 pub fn recording_meta_path() -> PathBuf {
     Config::minutes_dir().join("recording-meta.json")
@@ -56,12 +76,13 @@ pub enum CaptureMode {
     Meeting,
     QuickThought,
     Dictation,
+    LiveTranscript,
 }
 
 impl CaptureMode {
     pub fn content_type(self) -> crate::markdown::ContentType {
         match self {
-            Self::Meeting => crate::markdown::ContentType::Meeting,
+            Self::Meeting | Self::LiveTranscript => crate::markdown::ContentType::Meeting,
             Self::QuickThought => crate::markdown::ContentType::Memo,
             Self::Dictation => crate::markdown::ContentType::Dictation,
         }
@@ -72,6 +93,7 @@ impl CaptureMode {
             Self::Meeting => "meeting",
             Self::QuickThought => "quick thought",
             Self::Dictation => "dictation",
+            Self::LiveTranscript => "live transcript",
         }
     }
 }
@@ -257,6 +279,74 @@ pub fn create_pid_file(path: &Path) -> Result<(), PidError> {
 
     tracing::debug!("PID file created: {} (PID {})", path.display(), pid);
     Ok(())
+}
+
+/// A guard that holds an exclusive flock on a PID file for the lifetime of a session.
+/// The PID file is removed and the lock released when the guard is dropped.
+pub struct PidGuard {
+    file: Option<fs::File>,
+    path: PathBuf,
+}
+
+impl Drop for PidGuard {
+    fn drop(&mut self) {
+        // On Unix: unlink first (flock persists on the unlinked inode until fd is closed).
+        // This prevents the race where another process acquires the lock between
+        // our fd close and our unlink.
+        // On Windows: must close the fd before deleting (can't delete an open file).
+        #[cfg(unix)]
+        {
+            fs::remove_file(&self.path).ok();
+            self.file.take(); // releases flock on the now-unlinked inode
+        }
+        #[cfg(not(unix))]
+        {
+            self.file.take(); // release handle so Windows can delete
+            fs::remove_file(&self.path).ok();
+        }
+        tracing::debug!("PID guard dropped: {}", self.path.display());
+    }
+}
+
+/// Create a PID file with an exclusive flock held for the lifetime of the returned guard.
+/// The flock is NOT released until the guard is dropped, preventing concurrent starts.
+pub fn create_pid_guard(path: &Path) -> Result<PidGuard, PidError> {
+    use fs2::FileExt;
+
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(path)?;
+
+    if file.try_lock_exclusive().is_err() {
+        let existing_pid = fs::read_to_string(path)
+            .ok()
+            .and_then(|s| s.trim().parse::<u32>().ok())
+            .unwrap_or(0);
+        return Err(PidError::AlreadyRecording(existing_pid));
+    }
+
+    if let Some(old_pid) = read_locked_pid(&mut file)? {
+        if old_pid != 0 && is_process_alive(old_pid) {
+            file.unlock().ok();
+            return Err(PidError::AlreadyRecording(old_pid));
+        }
+    }
+
+    let pid = std::process::id();
+    write_locked_pid(&mut file, pid)?;
+
+    tracing::debug!("PID guard created: {} (PID {})", path.display(), pid);
+    Ok(PidGuard {
+        file: Some(file),
+        path: path.to_path_buf(),
+    })
 }
 
 /// Remove a PID file at the given path.

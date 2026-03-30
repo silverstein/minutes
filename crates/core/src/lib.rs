@@ -34,6 +34,10 @@ pub mod streaming_whisper;
 #[cfg(feature = "streaming")]
 pub mod dictation;
 
+// Live transcript mode (requires streaming + whisper)
+#[cfg(feature = "streaming")]
+pub mod live_transcript;
+
 // Native macOS hotkey monitoring via CGEventTap
 #[cfg(target_os = "macos")]
 pub mod hotkey_macos;

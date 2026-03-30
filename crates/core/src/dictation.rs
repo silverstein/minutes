@@ -179,6 +179,12 @@ where
         return Err(DictationError::RecordingActive.into());
     }
 
+    // Check for conflicts: live transcript must not be active
+    let lt_pid = pid::live_transcript_pid_path();
+    if let Ok(Some(_)) = pid::check_pid_file(&lt_pid) {
+        return Err(DictationError::LiveTranscriptActive.into());
+    }
+
     // Check for conflicts: another dictation must not be active
     let dict_pid = pid::dictation_pid_path();
     if let Ok(Some(existing)) = pid::check_pid_file(&dict_pid) {
@@ -241,6 +247,7 @@ where
 
         let mut vad = Vad::new();
         let mut streaming = StreamingWhisper::new(config.transcription.language.clone());
+        let mut accumulated_results: Vec<DictationResult> = Vec::new();
         let mut was_speaking = false;
         let mut has_spoken = false;
         let mut total_silence_ms: u64 = 0;
@@ -256,13 +263,17 @@ where
                 if utterance_samples > 0 {
                     on_event(DictationEvent::Processing);
                     if let Some(sr) = streaming.finalize(&whisper_ctx) {
-                        let result = finish_utterance(&sr.text, sr.duration_secs, config);
-                        if let Some(result) = result {
-                            on_event(DictationEvent::Success);
-                            on_result(result);
-                        }
+                        handle_utterance(
+                            &sr.text,
+                            sr.duration_secs,
+                            config,
+                            &mut accumulated_results,
+                            on_result,
+                        );
+                        on_event(DictationEvent::Success);
                     }
                 }
+                flush_accumulated_results(config, &mut accumulated_results, on_event, on_result);
                 on_event(DictationEvent::Cancelled);
                 break;
             }
@@ -273,13 +284,17 @@ where
                 if utterance_samples > 0 {
                     on_event(DictationEvent::Processing);
                     if let Some(sr) = streaming.finalize(&whisper_ctx) {
-                        let result = finish_utterance(&sr.text, sr.duration_secs, config);
-                        if let Some(result) = result {
-                            on_event(DictationEvent::Success);
-                            on_result(result);
-                        }
+                        handle_utterance(
+                            &sr.text,
+                            sr.duration_secs,
+                            config,
+                            &mut accumulated_results,
+                            on_result,
+                        );
+                        on_event(DictationEvent::Success);
                     }
                 }
+                flush_accumulated_results(config, &mut accumulated_results, on_event, on_result);
                 on_event(DictationEvent::Yielded);
                 break;
             }
@@ -315,11 +330,14 @@ where
                     tracing::info!("max utterance duration reached, force-processing");
                     on_event(DictationEvent::Processing);
                     if let Some(sr) = streaming.finalize(&whisper_ctx) {
-                        let result = finish_utterance(&sr.text, sr.duration_secs, config);
-                        if let Some(result) = result {
-                            on_event(DictationEvent::Success);
-                            on_result(result);
-                        }
+                        handle_utterance(
+                            &sr.text,
+                            sr.duration_secs,
+                            config,
+                            &mut accumulated_results,
+                            on_result,
+                        );
+                        on_event(DictationEvent::Success);
                     }
                     streaming.reset();
                     utterance_samples = 0;
@@ -332,11 +350,14 @@ where
                     // Speech just ended — finalize the streaming transcription
                     on_event(DictationEvent::Processing);
                     if let Some(sr) = streaming.finalize(&whisper_ctx) {
-                        let result = finish_utterance(&sr.text, sr.duration_secs, config);
-                        if let Some(result) = result {
-                            on_event(DictationEvent::Success);
-                            on_result(result);
-                        }
+                        handle_utterance(
+                            &sr.text,
+                            sr.duration_secs,
+                            config,
+                            &mut accumulated_results,
+                            on_result,
+                        );
+                        on_event(DictationEvent::Success);
                     }
                     streaming.reset();
                     utterance_samples = 0;
@@ -364,6 +385,12 @@ where
                         silence_ms = total_silence_ms,
                         "silence timeout — ending dictation"
                     );
+                    flush_accumulated_results(
+                        config,
+                        &mut accumulated_results,
+                        on_event,
+                        on_result,
+                    );
                     break;
                 }
             }
@@ -376,9 +403,60 @@ where
     }
 }
 
+fn handle_utterance<G>(
+    text: &str,
+    duration_secs: f64,
+    config: &Config,
+    accumulated_results: &mut Vec<DictationResult>,
+    on_result: &mut G,
+) where
+    G: FnMut(DictationResult),
+{
+    let Some(result) = prepare_result(text, duration_secs, config) else {
+        return;
+    };
+
+    if config.dictation.accumulate {
+        accumulated_results.push(result.clone());
+        on_result(result);
+        return;
+    }
+
+    if let Some(result) = write_result_outputs(result, config) {
+        on_result(result);
+    }
+}
+
+fn flush_accumulated_results<F, G>(
+    config: &Config,
+    accumulated_results: &mut Vec<DictationResult>,
+    on_event: &mut F,
+    on_result: &mut G,
+) where
+    F: FnMut(DictationEvent),
+    G: FnMut(DictationResult),
+{
+    if !config.dictation.accumulate || accumulated_results.is_empty() {
+        return;
+    }
+
+    if let Some(result) = finish_session(accumulated_results.as_slice(), config) {
+        on_event(DictationEvent::Success);
+        if config.dictation.destination != "stdout" {
+            on_result(result);
+        }
+    }
+    accumulated_results.clear();
+}
+
 /// Finish a transcribed utterance: write to clipboard, file, daily note.
 /// Called after StreamingWhisper produces a final result.
 fn finish_utterance(text: &str, duration_secs: f64, config: &Config) -> Option<DictationResult> {
+    let result = prepare_result(text, duration_secs, config)?;
+    write_result_outputs(result, config)
+}
+
+fn prepare_result(text: &str, duration_secs: f64, config: &Config) -> Option<DictationResult> {
     let text = text.trim().to_string();
     if text.is_empty() {
         return None;
@@ -390,31 +468,71 @@ fn finish_utterance(text: &str, duration_secs: f64, config: &Config) -> Option<D
         "dictation utterance finalized"
     );
 
-    // Write to clipboard
-    let destination = config.dictation.destination.as_str();
+    Some(DictationResult {
+        text,
+        duration_secs,
+        destination: config.dictation.destination.clone(),
+        file_path: None,
+    })
+}
+
+fn write_result_outputs(mut result: DictationResult, config: &Config) -> Option<DictationResult> {
+    let destination = result.destination.as_str();
     if destination == "clipboard" || destination.is_empty() {
-        if let Err(e) = write_to_clipboard(&text) {
+        if let Err(e) = write_to_clipboard(&result.text) {
             tracing::error!("clipboard write failed: {}", e);
         }
     }
 
-    // Write dictation file
-    let file_path = if destination != "daily_note" {
-        write_dictation_file(&text, duration_secs, config)
+    result.file_path = if destination != "daily_note" {
+        write_dictation_file(&result.text, result.duration_secs, config)
     } else {
         None
     };
 
-    // Append to daily note
     if config.dictation.daily_note_log {
-        append_dictation_to_daily_note(&text, config);
+        append_dictation_to_daily_note(&result.text, config);
+    }
+
+    Some(result)
+}
+
+fn finish_session(results: &[DictationResult], config: &Config) -> Option<DictationResult> {
+    let mut combined = combine_results(results, config)?;
+    combined.file_path = if combined.destination != "daily_note" {
+        write_dictation_file(&combined.text, combined.duration_secs, config)
+    } else {
+        None
+    };
+
+    if combined.destination == "clipboard" || combined.destination.is_empty() {
+        if let Err(e) = write_to_clipboard(&combined.text) {
+            tracing::error!("clipboard write failed: {}", e);
+        }
+    }
+
+    if config.dictation.daily_note_log {
+        append_dictation_to_daily_note(&combined.text, config);
+    }
+
+    Some(combined)
+}
+
+fn combine_results(results: &[DictationResult], config: &Config) -> Option<DictationResult> {
+    let parts: Vec<&str> = results
+        .iter()
+        .map(|result| result.text.trim())
+        .filter(|text| !text.is_empty())
+        .collect();
+    if parts.is_empty() {
+        return None;
     }
 
     Some(DictationResult {
-        text,
-        duration_secs,
-        destination: destination.to_string(),
-        file_path,
+        text: parts.join(" "),
+        duration_secs: results.iter().map(|result| result.duration_secs).sum(),
+        destination: config.dictation.destination.clone(),
+        file_path: None,
     })
 }
 
@@ -639,4 +757,77 @@ fn first_words(text: &str, n: usize) -> String {
 
 fn num_cpus() -> i32 {
     whisper_guard::params::num_cpus()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn test_config(root: &std::path::Path) -> Config {
+        let mut config = Config::default();
+        config.output_dir = root.join("meetings");
+        config.daily_notes.enabled = true;
+        config.daily_notes.path = root.join("daily");
+        config.dictation.destination = "daily_note".into();
+        config.dictation.accumulate = true;
+        config
+    }
+
+    #[test]
+    fn combine_results_joins_text_and_duration() {
+        let config = Config::default();
+        let results = vec![
+            DictationResult {
+                text: "first sentence.".into(),
+                duration_secs: 1.25,
+                destination: "clipboard".into(),
+                file_path: None,
+            },
+            DictationResult {
+                text: "second sentence.".into(),
+                duration_secs: 2.75,
+                destination: "clipboard".into(),
+                file_path: None,
+            },
+        ];
+
+        let combined = combine_results(&results, &config).unwrap();
+        assert_eq!(combined.text, "first sentence. second sentence.");
+        assert!((combined.duration_secs - 4.0).abs() < f64::EPSILON);
+        assert_eq!(combined.destination, "clipboard");
+        assert!(combined.file_path.is_none());
+    }
+
+    #[test]
+    fn finish_session_writes_one_daily_note_entry_for_combined_text() {
+        let dir = TempDir::new().unwrap();
+        let config = test_config(dir.path());
+        let results = vec![
+            DictationResult {
+                text: "first sentence.".into(),
+                duration_secs: 1.0,
+                destination: "daily_note".into(),
+                file_path: None,
+            },
+            DictationResult {
+                text: "second sentence.".into(),
+                duration_secs: 2.0,
+                destination: "daily_note".into(),
+                file_path: None,
+            },
+        ];
+
+        let final_result = finish_session(&results, &config).unwrap();
+        assert_eq!(final_result.text, "first sentence. second sentence.");
+        assert!(final_result.file_path.is_none());
+
+        let note_name = format!("{}.md", Local::now().format("%Y-%m-%d"));
+        let note_path = config.daily_notes.path.join(note_name);
+        let note = std::fs::read_to_string(note_path).unwrap();
+
+        assert!(note.contains("- first sentence. second sentence."));
+        assert!(!note.contains("- first sentence.\n"));
+        assert!(!note.contains("- second sentence.\n"));
+    }
 }

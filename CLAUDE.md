@@ -6,8 +6,9 @@
 
 **Minutes** — open-source, privacy-first conversation memory layer for AI assistants. Captures any audio (meetings, voice memos, brain dumps), transcribes locally with whisper.cpp, diarizes speakers, and outputs searchable markdown with structured action items and decisions. Built with Rust + Tauri v2 + Node.js (MCP).
 
-**Three input modes, one pipeline:**
+**Four input modes, one pipeline:**
 - **Live recording**: `minutes record` / `minutes stop` — for meetings, calls, conversations
+- **Live transcript**: `minutes live` / `minutes stop` — real-time transcription with delta reads for AI coaching mid-meeting
 - **Notetaking**: `minutes note "important point"` — timestamped annotations during recording
 - **Folder watcher**: `minutes watch` — auto-processes voice memos from iPhone/iCloud
 
@@ -114,6 +115,12 @@ certificate or local notarization credentials.
 | **cargo fmt** | Any Rust change | `cargo fmt --all -- --check` |
 | **cargo clippy** | Any Rust change | `cargo clippy --all --no-default-features -- -D warnings` |
 | **SDK rebuild** | Any change to `crates/sdk/src/` | `cd crates/sdk && npm run build` |
+| **Mutual exclusion** | Any change to recording/dictation/live transcript start paths | Verify all three modes check each other's PID/state: `live_transcript::run` checks recording+dictation PIDs, `cmd_record`/`capture::record_to_wav` checks live PID, `dictation::run` checks live PID, Tauri `cmd_start_*` checks `live_transcript_active`+`recording`+`dictation_active` |
+| **Tauri command duplication** | Changes to live transcript start/stop logic | Both `cmd_start_live_transcript` and `handle_live_shortcut_event` must use the shared `try_acquire_live` + `run_live_session` functions. Do NOT duplicate logic. |
+| **README accuracy** | New/removed tools, features, crates, or CLI commands | Tool/resource counts, crate list in Architecture, feature sections, and CLI examples in README.md must reflect the current state. Check: tool count matches `manifest.json`, crate list matches `ls crates/*/`, module count matches `ls crates/core/src/*.rs` |
+| **npm dep versions** | Version bumps | `crates/mcp/package.json` `minutes-sdk` dep must reference a version that's actually published on npm. Check with `npm view minutes-sdk versions --json` |
+| **Release notes drafted** | Version bumps / releases | Every release is a visibility moment in followers' GitHub feeds. Draft compelling release notes BEFORE creating the release. No empty releases — ever. See Release Checklist step 5. |
+| **Release warranted?** | New/removed MCP tools, new CLI commands, user-facing features | Manifest changes (new tools, updated description) don't reach Claude Desktop users until a release is cut and `.mcpb` is uploaded. If the change is user-visible, plan a release. |
 
 ## Release Checklist
 
@@ -144,15 +151,19 @@ cargo fmt --all -- --check           # Rust formatting
 cargo clippy --all --no-default-features -- -D warnings  # Rust lints
 ```
 
-### 5. Commit, tag, push
-```bash
-git tag vX.Y.Z && git push origin main --tags
-```
+### 5. Write release notes
+Every release shows up in followers' GitHub feeds — this is free awareness. Write notes BEFORE creating the release. No release should ever ship with an empty body.
+- Summarize what shipped and why it matters (not commit messages — outcomes)
+- Include install instructions (cargo install, DMG, npx)
+- Match the voice of past releases (see v0.8.0, v0.8.1 for examples)
+- Save to a temp file: `notes.md`
 
-### 6. GitHub release
+### 6. Commit, push, create release
 ```bash
-gh release create vX.Y.Z -t "title" -F notes.md  # Triggers signed DMG + CLI binary CI
+git push origin main                                          # Push commits first
+gh release create vX.Y.Z -t "vX.Y.Z: Short Title" -F notes.md --target main  # Creates tag + release with notes, triggers CI
 ```
+**IMPORTANT**: `gh release create` creates the tag on the remote and triggers CI. Do NOT `git tag` locally — that causes a race where CI creates the release before notes exist. The release must exist with notes BEFORE CI workflows run.
 
 ### 7. Build and upload .mcpb
 ```bash
@@ -204,16 +215,17 @@ minutes/
 │   │   ├── calendar.rs        # Calendar integration (upcoming meetings)
 │   │   ├── daily_notes.rs     # Daily note append for dictation/memos
 │   │   ├── dictation.rs       # Dictation mode (speak → clipboard + daily note)
+│   │   ├── live_transcript.rs # Live transcript mode (real-time JSONL + WAV, delta reads, AI coaching)
 │   │   ├── health.rs          # System health checks (model, mic, disk, watcher)
 │   │   ├── hotkey_macos.rs    # macOS global hotkey registration
 │   │   ├── screen.rs          # Screen context capture (screenshots)
 │   │   ├── vad.rs             # Voice activity detection
 │   │   └── vault.rs           # Obsidian/Logseq vault sync
 │   ├── whisper-guard/          # Standalone anti-hallucination toolkit (segment dedup, silence strip, whisper params)
-│   ├── cli/                   # CLI binary — 29 commands
+│   ├── cli/                   # CLI binary — 32 commands
 │   ├── reader/                # Lightweight read-only meeting parser (no audio deps)
 │   ├── assets/                # Bundled assets (demo.wav)
-│   └── mcp/                   # MCP server — 10 tools + 6 resources + MCP App dashboard
+│   └── mcp/                   # MCP server — 22 tools + 6 resources + MCP App dashboard
 │       └── ui/                # Interactive dashboard (vanilla TS, builds to single-file HTML)
 ├── site/                      # Landing page (Next.js + Remotion demo player)
 ├── tauri/                     # Tauri v2 menu bar app + singleton AI Assistant
@@ -260,12 +272,13 @@ node test/mcp_tools_test.mjs                        # 8 MCP integration tests
 - **Markdown + YAML frontmatter** for storage — universal, works with everything
 - **Structured extraction** — action items + decisions in frontmatter as queryable YAML
 - **No API keys needed** — Claude summarizes conversationally via MCP tools
+- **Live transcript** — per-utterance whisper → JSONL append with PidGuard flock for session exclusivity. Delta reads via line cursor or wall-clock duration. Optional WAV preservation for post-meeting reprocessing. Agent-agnostic: JSONL readable by any agent, MCP tools for Claude, CLAUDE.md context injection for Codex/Gemini.
 
 ## Key Patterns
 
 - All audio processing is local (whisper.cpp + pyannote-rs + Silero VAD). ffmpeg recommended but optional.
 - Claude summarizes via MCP when the user asks (no API key needed)
-- Optional automated summarization via Ollama (local) or cloud LLMs
+- Optional automated summarization via Ollama (local), Mistral, or cloud LLMs
 - Config at `~/.config/minutes/config.toml` (optional, compiled defaults work)
 - Tauri assistant uses a singleton workspace at `~/.minutes/assistant/`
 - `CLAUDE.md` holds general assistant instructions; `CURRENT_MEETING.md` is the active meeting focus for "Discuss with AI"
@@ -278,9 +291,9 @@ node test/mcp_tools_test.mjs                        # 8 MCP integration tests
 
 ## Test Coverage
 
-~250 tests total:
+~255 tests total:
 - 27 whisper-guard unit tests (resample, normalize, strip_silence, dedup_segments, dedup_interleaved, trim_trailing_noise, clean_transcript + 1 doctest)
-- 120 core unit tests (all modules including screen, calendar, config, watch, streaming whisper, vault, dictation, health, vad, hotkey)
+- 124 core unit tests (all modules including screen, calendar, config, watch, streaming whisper, vault, dictation, live_transcript, health, vad, hotkey)
 - 10 integration tests (pipeline, permissions, collisions, search filters)
 - 23 Tauri unit tests (commands, call detection)
 - 2 CLI tests
@@ -291,10 +304,11 @@ node test/mcp_tools_test.mjs                        # 8 MCP integration tests
 
 ## Claude Ecosystem Integration
 
-- **MCP Server**: 10 tools + 6 resources for Claude Desktop / Cowork / Dispatch (`npx minutes-mcp` for zero-install)
+- **MCP Server**: 12 tools + 6 resources for Claude Desktop / Cowork / Dispatch (`npx minutes-mcp` for zero-install)
 - **Claude Code Plugin**: 12 skills (8 core + 3 interactive lifecycle + 1 ghost context) + meeting-analyst agent + PostToolUse hook
 - **Interactive meeting lifecycle**: `/minutes prep` → record → `/minutes debrief` → `/minutes weekly` with skill chaining via `.prep.md` files
 - **Conversational summarization**: Claude reads transcripts via MCP, no API key needed
 - **Auto-tagging + alerts**: PostToolUse hook tags meetings with git repo, checks for decision conflicts, surfaces overdue action items
 - **Proactive reminders**: SessionStart hook checks calendar for upcoming meetings and nudges `/minutes prep`
 - **Desktop assistant**: Tauri AI Assistant is a singleton session that can switch focus into a selected meeting without spawning parallel assistant workspaces
+- **Live coaching**: Tauri Live Mode toggle starts real-time transcription; the assistant workspace `CLAUDE.md` auto-updates so the connected Recall session, Claude Desktop/Code, or any other agent can read the live JSONL file and coach mid-meeting. There is no dedicated transcript/coaching panel in Tauri v1; the coaching happens through the assistant chat surface.

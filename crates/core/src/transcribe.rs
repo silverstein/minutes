@@ -168,9 +168,34 @@ fn transcribe_with_whisper(
     params.set_language(config.transcription.language.as_deref());
     params.set_token_timestamps(true);
 
-    state
-        .full(params, samples)
-        .map_err(|e| TranscribeError::TranscriptionFailed(format!("{}", e)))?;
+    // Abort callback: prevents infinite hangs on large models with problematic audio.
+    // Timeout scales with audio duration: base 5 min + 10x audio length (e.g. 35s audio → 5:35 max).
+    let audio_duration_secs = samples.len() as f64 / 16000.0;
+    let timeout_secs = 300.0 + (audio_duration_secs * 10.0);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs_f64(timeout_secs);
+    params.set_abort_callback_safe(move || {
+        let exceeded = std::time::Instant::now() > deadline;
+        if exceeded {
+            tracing::warn!(
+                timeout_secs = format!("{:.0}", timeout_secs),
+                "whisper transcription timed out — aborting"
+            );
+        }
+        exceeded
+    });
+
+    state.full(params, samples).map_err(|e| {
+        let msg = format!("{}", e);
+        if msg.contains("abort") {
+            TranscribeError::TranscriptionFailed(format!(
+                "transcription timed out after {:.0}s (audio was {:.0}s). \
+                     Try a smaller model or ensure Silero VAD is installed: minutes setup",
+                timeout_secs, audio_duration_secs
+            ))
+        } else {
+            TranscribeError::TranscriptionFailed(msg)
+        }
+    })?;
 
     let num_segments = state.full_n_segments();
 
@@ -223,7 +248,10 @@ fn transcribe_with_whisper(
     // Layer 4: Remove interleaved repetition (A/B/A/B patterns, filler-separated loops)
     let lines = dedup_interleaved(lines);
 
-    // Layer 5: Trim trailing noise ([music], [BLANK_AUDIO]) from the end
+    // Layer 5: Remove foreign-script hallucination (e.g., CJK in a Latin transcript)
+    let lines = strip_foreign_script(lines);
+
+    // Layer 6: Trim trailing noise ([music], [BLANK_AUDIO]) from the end
     let lines = trim_trailing_noise(lines);
 
     let transcript = lines.join("\n");
@@ -357,6 +385,17 @@ fn decode_with_ffmpeg(path: &Path) -> Result<Vec<f32>, TranscribeError> {
 
     let tmp_dir = std::env::temp_dir();
     let tmp_wav = tmp_dir.join(format!("minutes-ffmpeg-{}.wav", std::process::id()));
+
+    // Pre-create temp file with restrictive permissions (contains raw audio)
+    #[cfg(unix)]
+    {
+        // Touch the file so we can set permissions before ffmpeg writes to it
+        if let Ok(f) = std::fs::File::create(&tmp_wav) {
+            drop(f);
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&tmp_wav, std::fs::Permissions::from_mode(0o600)).ok();
+        }
+    }
 
     let output = Command::new("ffmpeg")
         .args([
@@ -522,6 +561,9 @@ fn dedup_interleaved(lines: Vec<String>) -> Vec<String> {
 fn trim_trailing_noise(lines: Vec<String>) -> Vec<String> {
     wg_segments::trim_trailing_noise(&lines)
 }
+fn strip_foreign_script(lines: Vec<String>) -> Vec<String> {
+    wg_segments::strip_foreign_script(&lines)
+}
 
 // ── Noise reduction ──────────────────────────────────────────
 
@@ -628,6 +670,49 @@ pub fn resolve_model_path_for_dictation(config: &Config) -> Result<PathBuf, Tran
         model_name,
         model_dir.display(),
     )))
+}
+
+/// Resolve a whisper model file path by explicit model name.
+/// Falls back to the dictation model if the given name doesn't resolve.
+#[cfg(feature = "whisper")]
+pub fn resolve_model_path_by_name(
+    model_name: &str,
+    config: &Config,
+) -> Result<PathBuf, TranscribeError> {
+    let model_dir = &config.transcription.model_path;
+
+    let candidates = [
+        model_dir.join(format!("ggml-{}.bin", model_name)),
+        model_dir.join(format!("whisper-{}.bin", model_name)),
+        model_dir.join(format!("{}.bin", model_name)),
+    ];
+
+    for candidate in &candidates {
+        if candidate.exists() {
+            return Ok(candidate.clone());
+        }
+    }
+
+    let direct = PathBuf::from(model_name);
+    if direct.exists() {
+        return Ok(direct);
+    }
+
+    // Fall back to dictation model with a warning
+    let model_dir_display = model_dir.display().to_string();
+    let requested = model_name.to_string();
+    let dictation_model = &config.dictation.model;
+    tracing::warn!(
+        requested = %requested,
+        fallback = %dictation_model,
+        "live transcript model not found, falling back to dictation model"
+    );
+    resolve_model_path_for_dictation(config).map_err(|_| {
+        TranscribeError::ModelNotFound(format!(
+            "Expected model file \"ggml-{}.bin\" in {}",
+            requested, model_dir_display,
+        ))
+    })
 }
 
 /// Resolve the whisper model file path.
@@ -890,6 +975,7 @@ fn parse_parakeet_output(raw_output: &str, config: &Config) -> Result<String, Tr
     // Full anti-hallucination pipeline (same as whisper path)
     let lines = dedup_segments(lines);
     let lines = dedup_interleaved(lines);
+    let lines = strip_foreign_script(lines);
     let lines = trim_trailing_noise(lines);
 
     let transcript = lines.join("\n");

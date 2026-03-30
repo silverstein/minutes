@@ -23,6 +23,7 @@ crates/mcp/ui/
 crates/mcp/test/
 crates/mcp/tsconfig.json
 crates/mcp/vite.config.mjs
+crates/mcp/vitest.config.ts
 
 # Dev dependencies not needed in MCPB bundle
 crates/mcp/node_modules/vite/
@@ -44,15 +45,26 @@ crates/mcp/test/
 # Claude Code plugin (separate from MCP extension)
 .claude/
 .agents/
+plugin/hooks/test/
+
+# Rust helper sources not needed by the packaged Node extension
+crates/whisper-guard/
 
 # Docs and dev files
 docs/
 scripts/
 CLAUDE.md
 PLAN.md
+PLAN.md*
 BUILD-STATUS.md
 *.md
 !README.md
+
+# SDK source/config is not needed at runtime
+crates/sdk/src/
+crates/sdk/test/
+crates/sdk/tsconfig.json
+crates/sdk/vitest.config.ts
 
 # Issue tracker database
 .beads/

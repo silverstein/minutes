@@ -27,6 +27,9 @@ jobs:
           fetch-depth: 0
           fetch-tags: true
 
+      - name: Set C++ include path for whisper.cpp
+        run: echo "CXXFLAGS=-I$(xcrun --show-sdk-path)/usr/include/c++/v1" >> $GITHUB_ENV
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
@@ -81,18 +84,6 @@ jobs:
           chmod 600 "$key_path"
           echo "APPLE_API_KEY_PATH=$key_path" >> "$GITHUB_ENV"
 
-      - name: Generate release-note draft
-        if: startsWith(github.ref, 'refs/tags/v')
-        run: |
-          if [[ "${GITHUB_REF_NAME}" == *-* ]]; then
-            channel="preview"
-          else
-            channel="stable"
-          fi
-
-          chmod +x scripts/release_notes.sh
-          scripts/release_notes.sh "${GITHUB_SHA}" "$channel" > "$RUNNER_TEMP/release-notes.md"
-
       - name: Build signed + notarized bundle
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -121,7 +112,6 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          body_path: ${{ runner.temp }}/release-notes.md
           prerelease: ${{ contains(github.ref_name, '-') }}
           files: |
             target/release/bundle/dmg/*.dmg

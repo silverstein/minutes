@@ -157,22 +157,30 @@ pub fn show_terminal_window(app: &tauri::AppHandle, session_id: &str, title: &st
 
 /// Update tray to reflect recording state
 pub fn update_tray_state(app: &tauri::AppHandle, is_recording: bool) {
+    update_tray_state_with_mode(app, is_recording, false);
+}
+
+pub fn update_tray_state_with_mode(app: &tauri::AppHandle, is_active: bool, is_live: bool) {
     if let Some(tray) = app.tray_by_id("minutes-tray") {
-        let icon_bytes: &[u8] = if is_recording {
+        let icon_bytes: &[u8] = if is_live {
+            include_bytes!("../icons/icon-live.png")
+        } else if is_active {
             include_bytes!("../icons/icon-recording.png")
         } else {
             include_bytes!("../icons/icon.png")
         };
         if let Ok(icon) = tauri::image::Image::from_bytes(icon_bytes) {
             tray.set_icon(Some(icon)).ok();
-            tray.set_icon_as_template(!is_recording).ok();
+            tray.set_icon_as_template(!is_active).ok();
         }
-        tray.set_tooltip(Some(if is_recording {
+        let tooltip = if is_live {
+            "Minutes — Live Transcribing..."
+        } else if is_active {
             "Minutes — Recording..."
         } else {
             "Minutes"
-        }))
-        .ok();
+        };
+        tray.set_tooltip(Some(tooltip)).ok();
     }
 }
 
@@ -405,8 +413,24 @@ fn main() {
                         )
                         .ok()
                         .map(|shortcut| shortcut.id());
+                    // Also check live transcript shortcut
+                    let live_shortcut_value = state
+                        .live_shortcut
+                        .lock()
+                        .ok()
+                        .map(|value| value.clone())
+                        .unwrap_or_else(|| "CmdOrCtrl+Shift+L".to_string());
+                    let live_shortcut_id =
+                        <tauri_plugin_global_shortcut::Shortcut as std::str::FromStr>::from_str(
+                            live_shortcut_value.as_str(),
+                        )
+                        .ok()
+                        .map(|shortcut| shortcut.id());
+
                     if Some(shortcut_id) == dictation_shortcut_id {
                         commands::handle_dictation_shortcut_event(app, event.state());
+                    } else if Some(shortcut_id) == live_shortcut_id {
+                        commands::handle_live_shortcut_event(app, event.state());
                     } else {
                         commands::handle_global_hotkey_event(app, event.state());
                     }
@@ -432,6 +456,21 @@ fn main() {
             pty_manager: Arc::new(Mutex::new(pty::PtyManager::default())),
             dictation_active: Arc::new(AtomicBool::new(false)),
             dictation_stop_flag: Arc::new(AtomicBool::new(false)),
+            live_transcript_active: Arc::new(AtomicBool::new(false)),
+            live_transcript_stop_flag: Arc::new(AtomicBool::new(false)),
+            live_shortcut_enabled: {
+                let cfg = minutes_core::config::Config::load();
+                Arc::new(AtomicBool::new(cfg.live_transcript.shortcut_enabled))
+            },
+            live_shortcut: {
+                let cfg = minutes_core::config::Config::load();
+                let s = if cfg.live_transcript.shortcut.is_empty() {
+                    "CmdOrCtrl+Shift+L".to_string()
+                } else {
+                    cfg.live_transcript.shortcut.clone()
+                };
+                Arc::new(Mutex::new(s))
+            },
         })
         .setup(move |app| {
             let initial_recording = minutes_core::pid::status().recording;
@@ -522,6 +561,25 @@ fn main() {
                     if let Ok(mut current) = dictation_shortcut.lock() {
                         *current = shortcut;
                     }
+                }
+            }
+
+            // Restore live transcript shortcut from config
+            if startup_config.live_transcript.shortcut_enabled {
+                use tauri_plugin_global_shortcut::GlobalShortcutExt;
+                let shortcut = if startup_config.live_transcript.shortcut.is_empty() {
+                    "CmdOrCtrl+Shift+L".to_string()
+                } else {
+                    startup_config.live_transcript.shortcut.clone()
+                };
+                if let Err(e) = app.global_shortcut().register(shortcut.as_str()) {
+                    eprintln!("[live-shortcut] startup restore failed: {}", e);
+                } else {
+                    let state = app.state::<commands::AppState>();
+                    state.live_shortcut_enabled.store(true, Ordering::Relaxed);
+                    if let Ok(mut current) = state.live_shortcut.lock() {
+                        *current = shortcut;
+                    };
                 }
             }
 
@@ -964,6 +1022,11 @@ fn main() {
             commands::cmd_dictation_hotkey_status,
             commands::cmd_check_accessibility,
             commands::cmd_request_accessibility,
+            commands::cmd_start_live_transcript,
+            commands::cmd_stop_live_transcript,
+            commands::cmd_live_transcript_status,
+            commands::cmd_live_shortcut_settings,
+            commands::cmd_set_live_shortcut,
         ])
         .run(tauri::generate_context!())
         .expect("error while running minutes app");

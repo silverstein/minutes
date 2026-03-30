@@ -399,9 +399,13 @@ where
 
     // Step 5: Write markdown (always)
     let duration = estimate_duration(audio_path);
-    let auto_title = title
-        .map(String::from)
-        .unwrap_or_else(|| generate_title(&transcript, pre_context.as_deref()));
+    let auto_title = title.map(String::from).unwrap_or_else(|| {
+        if status == Some(OutputStatus::NoSpeech) {
+            "Untitled Recording".into()
+        } else {
+            generate_title(&transcript, pre_context.as_deref())
+        }
+    });
     let entities = build_entity_links(
         &auto_title,
         pre_context.as_deref(),
@@ -579,10 +583,36 @@ fn title_from_transcript(transcript: &str) -> Option<String> {
     let candidate = normalize_space(&stripped);
 
     if candidate.is_empty() {
-        None
-    } else {
-        Some(to_display_title(&candidate))
+        return None;
     }
+
+    // Reject titles that are primarily non-Latin — a strong hallucination signal.
+    // Whisper frequently hallucinates CJK/Arabic/Cyrillic text on low-signal audio.
+    // We count Latin-script characters (including accented: é, ñ, ł, ü, etc.)
+    // rather than raw ASCII to avoid rejecting valid European language titles.
+    let alpha_chars: Vec<char> = candidate.chars().filter(|c| c.is_alphabetic()).collect();
+    if !alpha_chars.is_empty() {
+        let latin_count = alpha_chars
+            .iter()
+            .filter(|c| {
+                c.is_ascii_alphabetic()
+                    || ('\u{00C0}'..='\u{024F}').contains(c) // Latin Extended-A/B
+                    || ('\u{1E00}'..='\u{1EFF}').contains(c) // Latin Extended Additional
+                    || ('\u{0100}'..='\u{017F}').contains(c) // Latin Extended-A (ł, etc.)
+            })
+            .count();
+        let latin_ratio = latin_count as f64 / alpha_chars.len() as f64;
+        if latin_ratio < 0.5 {
+            tracing::debug!(
+                candidate = %candidate,
+                latin_ratio = latin_ratio,
+                "rejecting non-Latin title as likely hallucination"
+            );
+            return None;
+        }
+    }
+
+    Some(to_display_title(&candidate))
 }
 
 fn clean_transcript_line(line: &str) -> Option<String> {
@@ -1161,6 +1191,56 @@ mod tests {
         assert_eq!(intents[3].kind, markdown::IntentKind::Commitment);
         assert_eq!(intents[3].who.as_deref(), Some("sarah"));
         assert_eq!(intents[3].by_date.as_deref(), Some("Tuesday"));
+    }
+
+    #[test]
+    fn generate_title_rejects_hallucinated_cjk() {
+        // Whisper hallucinates CJK text on silence — title_from_transcript
+        // rejects non-ASCII-dominant candidates, so generate_title falls back
+        // to "Untitled Recording".
+        let transcript = "スパイシー";
+        let title = generate_title(transcript, None);
+        assert_eq!(title, "Untitled Recording");
+    }
+
+    #[test]
+    fn generate_title_rejects_mixed_hallucination() {
+        // Even with a timestamp prefix, the CJK content is rejected.
+        let transcript = "[0:00] スパイシー\n[0:05] 東京タワー";
+        let title = generate_title(transcript, None);
+        assert_eq!(title, "Untitled Recording");
+    }
+
+    #[test]
+    fn generate_title_allows_latin_with_accents() {
+        // Accented Latin characters (French, Spanish, etc.) should be fine.
+        let transcript = "café résumé naïve";
+        let title = generate_title(transcript, None);
+        assert_ne!(title, "Untitled Recording");
+    }
+
+    #[test]
+    fn generate_title_allows_polish_with_extended_latin() {
+        // Polish city name: Łódź has mostly non-ASCII but all Latin-extended chars.
+        let transcript = "Meeting in Łódź about the project";
+        let title = generate_title(transcript, None);
+        assert_ne!(title, "Untitled Recording");
+    }
+
+    #[test]
+    fn generate_title_rejects_cyrillic() {
+        let transcript = "Привет мир";
+        let title = generate_title(transcript, None);
+        assert_eq!(title, "Untitled Recording");
+    }
+
+    #[test]
+    fn generate_title_below_threshold_seam() {
+        // 60% Latin (below 70% strip_foreign_script threshold) but first line is CJK.
+        // title_from_transcript must catch it via Latin-ratio check.
+        let transcript = "[0:00] スパイシー\n[0:05] Hello world\n[0:10] Good morning\n[0:15] 東京\n[0:20] Testing";
+        let title = generate_title(transcript, None);
+        assert_eq!(title, "Untitled Recording");
     }
 
     #[test]

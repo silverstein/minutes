@@ -17,6 +17,11 @@
 | 2026-03-24 | self | Trusted `Contents/MacOS/minutes-app --diagnose-hotkey` as a faithful TCC check, but the same probe only reflected granted permissions when the app was launched through LaunchServices | For macOS permission debugging, test the installed app through `open -a` or the repo helper instead of directly executing the bundle binary from the shell |
 | 2026-03-24 | self | Read a Windows cross-target `can't find crate for core` failure as if it were a repo portability bug before checking which local Rust toolchain actually owned the installed target | When testing cross-platform builds on this machine, verify `which cargo`, `which rustc`, and `rustup target list --toolchain ... --installed` before trusting the failure as a code issue |
 | 2026-03-24 | self | Reached for stale mental-model paths like `tauri/src/app.js` and `crates/mcp/src/reader.ts` before checking the live tree, even though the repo has moved those surfaces to `tauri/src/index.html` and `crates/sdk/src/reader.ts` | When reviewing fast-moving product repos, verify the current file layout with `rg --files` before quoting architecture docs or assuming entry points |
+| 2026-03-28 | self | Took "made updates" as likely code changes before checking the worktree; the actual changes were new untracked planning docs | For review requests, start with `git status --short` and inspect untracked docs too, not just tracked diffs |
+| 2026-03-28 | self | Almost trusted the shell to demonstrate literal `${HOME}` path handling, but zsh expanded it before Node saw the string | When validating env-var expansion bugs in JS/TS code, use a single-quoted heredoc or equivalent so the runtime receives the literal `${HOME}` / `$HOME` string |
+| 2026-03-28 | self | v0.8.2 and v0.7.2 GitHub releases shipped with empty bodies because CI (softprops/action-gh-release) created the release before `gh release create` ran with notes | Create the release with notes FIRST via `gh release create --target main`, which also creates the tag. CI then uploads assets to the existing release. Never `git tag` + `git push --tags` before the release exists. |
+| 2026-03-29 | self | Passed two positional test filters to `cargo test`, which Rust interprets as an invalid command rather than "run both sets" | For Rust verification, use one filter per `cargo test` invocation or run the broader target once instead of stacking multiple test names |
+| 2026-03-29 | self | Tried to run new dictation unit tests without enabling the `streaming` feature, so the `dictation` module wasn't present in the test binary and the tests silently appeared missing | When verifying dictation/live-transcript behavior in `minutes-core`, use `cargo test -p minutes-core --features streaming ...` or inspect `cargo test -- --list` first if tests don't appear |
 
 ## User Preferences
 - For coding/debugging/testing/review tasks, prioritize technical implementation detail and concrete verification.
@@ -26,6 +31,7 @@
 - Start by checking repo instructions plus `bd` workflow, then inspect both the Rust crates and the MCP/Tauri surfaces before making claims about app behavior.
 - On macOS 26+, Rust tests that compile `whisper-rs` need `CXXFLAGS="-I$(xcrun --show-sdk-path)/usr/include/c++/v1"`; core tests pass once that is set.
 - For native macOS hotkeys in Tauri, keep startup non-blocking and report lifecycle changes back to the webview with explicit `starting/active/failed` status events.
+- For releases: create the GitHub release with notes BEFORE pushing the tag (use `gh release create` which creates both). CI workflows only upload assets to an existing release. Never let CI create the release — it produces empty bodies that show up blank in followers' feeds.
 
 ## Patterns That Don't Work
 - Assuming this repo is only a CLI tool misses the Tauri desktop app and MCP integration surfaces that need review too.
@@ -36,3 +42,4 @@
 - `minutes` is a local-first meeting capture app with Rust core/CLI, a Tauri desktop app, and a TypeScript MCP server.
 - The worktree may already contain user changes; review around them carefully and do not revert unrelated edits.
 - The desktop app mixes in-memory recording state with PID-file-based status, so app restarts and cross-surface recording flows are easy places for desync bugs.
+- Live coaching is intentionally split across surfaces: the Tauri UI is the on/off control plus lightweight live status, while the actual coaching/advice is meant to happen in Claude Desktop/Code or another agent reading the live transcript context.

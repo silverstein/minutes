@@ -756,6 +756,52 @@ fn cmd_note(text: &str, meeting: Option<&Path>, config: &Config) -> Result<()> {
     Ok(())
 }
 
+/// If the configured summarization engine requires an API key that isn't
+/// available (env var or config file), prompt the user interactively and
+/// persist it to the config file for future runs.
+fn ensure_api_key(config: &Config) -> Result<()> {
+    let env_var = match config.required_api_key_env() {
+        Some(v) => v,
+        None => return Ok(()),
+    };
+
+    if config.resolve_api_key(env_var).is_some() {
+        return Ok(());
+    }
+
+    eprintln!(
+        "\nThe '{}' summarization engine requires {}.",
+        config.summarization.engine, env_var
+    );
+    eprint!("Enter your API key: ");
+
+    // Flush stderr so the prompt appears before we block on stdin
+    use std::io::Write;
+    std::io::stderr().flush().ok();
+
+    let mut key = String::new();
+    std::io::stdin().read_line(&mut key)?;
+    let key = key.trim().to_string();
+
+    if key.is_empty() {
+        anyhow::bail!(
+            "No API key provided. Re-run to try again or change [summarization] engine in ~/.config/minutes/config.toml."
+        );
+    }
+
+    // Persist to config file
+    let mut cfg = Config::load();
+    cfg.set_api_key(env_var, key.clone());
+    cfg.save()
+        .map_err(|e| anyhow::anyhow!("Failed to save config: {}", e))?;
+
+    // Make the key available to the current process immediately
+    std::env::set_var(env_var, &key);
+    eprintln!("API key saved to {}.", Config::config_path().display());
+
+    Ok(())
+}
+
 fn capture_mode_from_str(mode: &str) -> Result<CaptureMode> {
     match mode {
         "meeting" => Ok(CaptureMode::Meeting),
@@ -906,6 +952,10 @@ fn cmd_record(
     let wav_path = minutes_core::pid::current_wav_path();
     minutes_core::capture::record_to_wav(&wav_path, stop_flag, config)
         .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+    // Prompt for missing API key after recording, before processing
+    ensure_api_key(config)?;
+
     let recording_finished_at = Local::now();
     let user_notes = minutes_core::notes::read_notes();
     let pre_context = minutes_core::notes::read_context();
@@ -1928,6 +1978,7 @@ fn cmd_process(
         other => anyhow::bail!("unknown content type: {}. Use 'meeting' or 'memo'.", other),
     };
 
+    ensure_api_key(config)?;
     config.ensure_dirs()?;
     let result = minutes_core::process(path, ct, title, config)?;
     eprintln!("Saved: {}", result.path.display());
@@ -1943,6 +1994,7 @@ fn cmd_process(
 }
 
 fn cmd_watch(dir: Option<&Path>, config: &Config) -> Result<()> {
+    ensure_api_key(config)?;
     config.ensure_dirs()?;
 
     // Set up Ctrl-C to release the lock and exit cleanly

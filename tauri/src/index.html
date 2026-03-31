@@ -2246,6 +2246,7 @@
               <option value="ollama">Ollama — local, free, runs on your machine</option>
               <option value="claude">Claude API — direct API key (legacy)</option>
               <option value="openai">OpenAI API — direct API key (legacy)</option>
+              <option value="mistral">Mistral API — direct API key</option>
             </select>
             <div class="about-controls-meta" id="settings-summarization-status"></div>
           </div>
@@ -2338,6 +2339,31 @@
 
       <div class="about-footer" style="font-size: 11px;">
         Config file: <span id="settings-config-path" style="font-family: var(--font-mono); opacity: 0.7;"></span>
+      </div>
+    </div>
+  </div>
+
+  <!-- API Key Modal -->
+  <div class="about-overlay" id="apikey-overlay">
+    <div class="about-card" role="dialog" aria-modal="true" aria-labelledby="apikey-title" style="width: min(440px, 100%);">
+      <div class="about-top">
+        <h2 id="apikey-title" style="font-size: 18px; font-family: var(--font-display);">API Key Required</h2>
+        <button class="btn btn-secondary btn-sm" id="btn-apikey-cancel">Cancel</button>
+      </div>
+      <div style="padding: 0 4px;">
+        <p id="apikey-description" style="font-size: 13px; color: var(--text-secondary); margin-bottom: 16px;">
+          The selected summarization engine requires an API key.
+        </p>
+        <label for="apikey-input" style="font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-secondary); display: block; margin-bottom: 6px;">
+          <span id="apikey-label">API Key</span>
+        </label>
+        <input type="password" id="apikey-input" autocomplete="off" spellcheck="false"
+          style="width: 100%; padding: 8px 10px; border-radius: 8px; background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.15); color: var(--text); font-size: 14px; font-family: var(--font-mono); box-sizing: border-box;"
+          placeholder="Paste your API key here" />
+        <div id="apikey-error" style="font-size: 12px; color: #f87171; margin-top: 6px; display: none;"></div>
+      </div>
+      <div style="display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px;">
+        <button class="btn btn-secondary btn-sm" id="btn-apikey-save">Save Key</button>
       </div>
     </div>
   </div>
@@ -3058,6 +3084,15 @@
       if (!notice) {
         outputNotice.classList.remove('active', 'capture');
         lastOutputKey = null;
+        return;
+      }
+
+      // Missing API key — open the modal so the user can enter it
+      if (notice.kind === 'missing-api-key') {
+        const envVar = notice.title.replace(' required', '');
+        const engineMatch = notice.detail.match(/The '(\w+)' summarization/);
+        const engine = engineMatch ? engineMatch[1] : '';
+        openApiKeyModal(envVar, engine);
         return;
       }
 
@@ -4072,6 +4107,59 @@
     // ⌘, keyboard shortcut
     document.addEventListener('keydown', (e) => { if (e.metaKey && e.key === ',') { e.preventDefault(); openSettings(); } });
 
+    // API Key modal
+    const apikeyOverlay = document.getElementById('apikey-overlay');
+    let apikeyEnvVar = '';
+    let apikeyEngine = '';
+
+    function openApiKeyModal(envVar, engine) {
+      apikeyEnvVar = envVar;
+      apikeyEngine = engine;
+      const labels = {
+        'ANTHROPIC_API_KEY': 'Anthropic API Key',
+        'OPENAI_API_KEY': 'OpenAI API Key',
+        'MISTRAL_API_KEY': 'Mistral API Key',
+      };
+      document.getElementById('apikey-label').textContent = labels[envVar] || envVar;
+      document.getElementById('apikey-description').textContent =
+        'The "' + engine + '" summarization engine requires ' + envVar + '. Enter it below and it will be saved to your config file.';
+      document.getElementById('apikey-input').value = '';
+      document.getElementById('apikey-error').style.display = 'none';
+      apikeyOverlay.classList.add('active');
+      setTimeout(() => document.getElementById('apikey-input').focus(), 100);
+    }
+
+    function closeApiKeyModal() {
+      apikeyOverlay.classList.remove('active');
+    }
+
+    document.getElementById('btn-apikey-cancel').addEventListener('click', closeApiKeyModal);
+    apikeyOverlay.addEventListener('click', (e) => { if (e.target === apikeyOverlay) closeApiKeyModal(); });
+
+    document.getElementById('btn-apikey-save').addEventListener('click', async () => {
+      const value = document.getElementById('apikey-input').value.trim();
+      const errorEl = document.getElementById('apikey-error');
+      if (!value) {
+        errorEl.textContent = 'Please enter an API key.';
+        errorEl.style.display = '';
+        return;
+      }
+      try {
+        await invoke('cmd_set_api_key', { envVar: apikeyEnvVar, value });
+        closeApiKeyModal();
+        const s = await invoke('cmd_get_settings');
+        updateSumStatus(s);
+      } catch (e) {
+        errorEl.textContent = 'Failed to save: ' + e;
+        errorEl.style.display = '';
+      }
+    });
+
+    document.getElementById('apikey-input').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') document.getElementById('btn-apikey-save').click();
+      if (e.key === 'Escape') closeApiKeyModal();
+    });
+
     async function loadSettings() {
       try {
         const s = await invoke('cmd_get_settings');
@@ -4266,8 +4354,21 @@
       if (s.summarization.engine === 'none') el.textContent = '';
       else if (s.summarization.engine === 'agent') el.textContent = 'Using: ' + (s.summarization.agent_command || 'claude') + ' — no API key needed, uses your existing subscription';
       else if (s.summarization.engine === 'ollama') el.textContent = s.summarization.ollama_reachable ? 'Ollama reachable (' + s.summarization.ollama_model + ')' : 'Ollama not reachable at ' + s.summarization.ollama_url;
-      else if (s.summarization.engine === 'claude') el.textContent = s.summarization.anthropic_key_set ? 'API key set' : 'ANTHROPIC_API_KEY not found in environment';
-      else if (s.summarization.engine === 'openai') el.textContent = s.summarization.openai_key_set ? 'API key set' : 'OPENAI_API_KEY not found in environment';
+      else if (s.summarization.engine === 'claude') el.textContent = s.summarization.anthropic_key_set ? 'API key set' : 'ANTHROPIC_API_KEY not set — click to configure';
+      else if (s.summarization.engine === 'openai') el.textContent = s.summarization.openai_key_set ? 'API key set' : 'OPENAI_API_KEY not set — click to configure';
+      else if (s.summarization.engine === 'mistral') el.textContent = s.summarization.mistral_key_set ? 'API key set' : 'MISTRAL_API_KEY not set — click to configure';
+
+      // Make the status clickable to open the API key modal when the key is missing
+      const engine = s.summarization.engine;
+      const keyMissing = (engine === 'claude' && !s.summarization.anthropic_key_set)
+        || (engine === 'openai' && !s.summarization.openai_key_set)
+        || (engine === 'mistral' && !s.summarization.mistral_key_set);
+      el.style.cursor = keyMissing ? 'pointer' : '';
+      el.style.textDecoration = keyMissing ? 'underline' : '';
+      el.onclick = keyMissing ? () => {
+        const envMap = { claude: 'ANTHROPIC_API_KEY', openai: 'OPENAI_API_KEY', mistral: 'MISTRAL_API_KEY' };
+        openApiKeyModal(envMap[engine], engine);
+      } : null;
     }
     async function loadStorageStats() {
       try {
@@ -4340,8 +4441,16 @@
       setSettingsToggle('settings-diarization', next!=='none');
     });
     document.getElementById('settings-summarization-engine').addEventListener('change', async (e) => {
-      await invoke('cmd_set_setting', {section:'summarization',key:'engine',value:e.target.value});
-      document.getElementById('settings-agent-command-row').style.display = e.target.value === 'agent' ? '' : 'none';
+      const engine = e.target.value;
+      await invoke('cmd_set_setting', {section:'summarization',key:'engine',value:engine});
+      document.getElementById('settings-agent-command-row').style.display = engine === 'agent' ? '' : 'none';
+
+      // Check if the selected engine needs an API key
+      const check = await invoke('cmd_check_api_key', { engine });
+      if (check.needed && !check.available) {
+        openApiKeyModal(check.env_var, engine);
+      }
+
       const s = await invoke('cmd_get_settings'); updateSumStatus(s);
     });
     document.getElementById('settings-agent-command').addEventListener('change', async (e) => {

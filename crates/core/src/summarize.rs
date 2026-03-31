@@ -485,8 +485,9 @@ fn summarize_with_claude(
     screen_files: &[std::path::PathBuf],
     config: &Config,
 ) -> Result<Summary, Box<dyn std::error::Error>> {
-    let api_key = std::env::var("ANTHROPIC_API_KEY")
-        .map_err(|_| "ANTHROPIC_API_KEY not set. Export it or switch to engine = \"ollama\"")?;
+    let api_key = config
+        .resolve_api_key("ANTHROPIC_API_KEY")
+        .ok_or("ANTHROPIC_API_KEY not set. Set it via `minutes setup` or switch to engine = \"ollama\"")?;
 
     let chunks = build_prompt(transcript, config.summarization.chunk_max_tokens);
     let mut all_summaries = Vec::new();
@@ -603,8 +604,9 @@ fn summarize_with_openai(
     screen_files: &[std::path::PathBuf],
     config: &Config,
 ) -> Result<Summary, Box<dyn std::error::Error>> {
-    let api_key = std::env::var("OPENAI_API_KEY")
-        .map_err(|_| "OPENAI_API_KEY not set. Export it or switch to engine = \"ollama\"")?;
+    let api_key = config
+        .resolve_api_key("OPENAI_API_KEY")
+        .ok_or("OPENAI_API_KEY not set. Set it via `minutes setup` or switch to engine = \"ollama\"")?;
 
     let chunks = build_prompt(transcript, config.summarization.chunk_max_tokens);
     let mut all_text = String::new();
@@ -672,8 +674,9 @@ fn summarize_with_mistral(
     screen_files: &[std::path::PathBuf],
     config: &Config,
 ) -> Result<Summary, Box<dyn std::error::Error>> {
-    let api_key = std::env::var("MISTRAL_API_KEY")
-        .map_err(|_| "MISTRAL_API_KEY not set. Export it or switch to engine = \"ollama\"")?;
+    let api_key = config
+        .resolve_api_key("MISTRAL_API_KEY")
+        .ok_or("MISTRAL_API_KEY not set. Set it via `minutes setup` or switch to engine = \"ollama\"")?;
 
     let model = &config.summarization.mistral_model;
     let chunks = build_prompt(transcript, config.summarization.chunk_max_tokens);
@@ -1018,8 +1021,9 @@ fn run_speaker_mapping_prompt(
     match config.summarization.engine.as_str() {
         "agent" => run_speaker_mapping_via_agent(prompt, config),
         "claude" => {
-            let api_key =
-                std::env::var("ANTHROPIC_API_KEY").map_err(|_| "ANTHROPIC_API_KEY not set")?;
+            let api_key = config
+                .resolve_api_key("ANTHROPIC_API_KEY")
+                .ok_or("ANTHROPIC_API_KEY not set")?;
             let body = serde_json::json!({"model":"claude-sonnet-4-20250514","max_tokens":256,"messages":[{"role":"user","content":prompt}]});
             let resp: serde_json::Value = agent
                 .post("https://api.anthropic.com/v1/messages")
@@ -1035,7 +1039,9 @@ fn run_speaker_mapping_prompt(
                 .ok_or_else(|| "No text in response".into())
         }
         "openai" => {
-            let api_key = std::env::var("OPENAI_API_KEY").map_err(|_| "OPENAI_API_KEY not set")?;
+            let api_key = config
+                .resolve_api_key("OPENAI_API_KEY")
+                .ok_or("OPENAI_API_KEY not set")?;
             let body = serde_json::json!({"model":"gpt-4o-mini","max_tokens":256,"messages":[{"role":"user","content":prompt}]});
             let resp: serde_json::Value = agent
                 .post("https://api.openai.com/v1/chat/completions")
@@ -1050,8 +1056,9 @@ fn run_speaker_mapping_prompt(
                 .ok_or_else(|| "No text in response".into())
         }
         "mistral" => {
-            let api_key =
-                std::env::var("MISTRAL_API_KEY").map_err(|_| "MISTRAL_API_KEY not set")?;
+            let api_key = config
+                .resolve_api_key("MISTRAL_API_KEY")
+                .ok_or("MISTRAL_API_KEY not set")?;
             let body = serde_json::json!({"model": &config.summarization.mistral_model, "max_tokens": 256, "messages":[{"role":"user","content":prompt}]});
             let resp: serde_json::Value = agent
                 .post("https://api.mistral.ai/v1/chat/completions")

@@ -29,6 +29,18 @@ pub struct Config {
     pub voice: VoiceConfig,
     pub live_transcript: LiveTranscriptConfig,
     pub recording: RecordingConfig,
+    pub api_keys: ApiKeysConfig,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ApiKeysConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub anthropic: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub openai: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mistral: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -369,6 +381,7 @@ impl Default for Config {
             voice: VoiceConfig::default(),
             live_transcript: LiveTranscriptConfig::default(),
             recording: RecordingConfig::default(),
+            api_keys: ApiKeysConfig::default(),
         }
     }
 }
@@ -564,6 +577,43 @@ impl Config {
     /// Path to the minutes state directory (~/.minutes/).
     pub fn minutes_dir() -> PathBuf {
         minutes_dir()
+    }
+
+    /// Resolve an API key by env var name: env var takes precedence, then config file.
+    pub fn resolve_api_key(&self, env_var: &str) -> Option<String> {
+        if let Ok(val) = std::env::var(env_var) {
+            if !val.is_empty() {
+                return Some(val);
+            }
+        }
+        match env_var {
+            "ANTHROPIC_API_KEY" => self.api_keys.anthropic.clone(),
+            "OPENAI_API_KEY" => self.api_keys.openai.clone(),
+            "MISTRAL_API_KEY" => self.api_keys.mistral.clone(),
+            _ => None,
+        }
+        .filter(|v| !v.is_empty())
+    }
+
+    /// Returns the required env var name for the configured summarization engine,
+    /// or None if the engine doesn't need an API key.
+    pub fn required_api_key_env(&self) -> Option<&'static str> {
+        match self.summarization.engine.as_str() {
+            "claude" => Some("ANTHROPIC_API_KEY"),
+            "openai" => Some("OPENAI_API_KEY"),
+            "mistral" => Some("MISTRAL_API_KEY"),
+            _ => None,
+        }
+    }
+
+    /// Store an API key in the config (by env var name).
+    pub fn set_api_key(&mut self, env_var: &str, value: String) {
+        match env_var {
+            "ANTHROPIC_API_KEY" => self.api_keys.anthropic = Some(value),
+            "OPENAI_API_KEY" => self.api_keys.openai = Some(value),
+            "MISTRAL_API_KEY" => self.api_keys.mistral = Some(value),
+            _ => {}
+        }
     }
 }
 

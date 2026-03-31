@@ -1034,6 +1034,8 @@ fn main() {
             commands::cmd_set_setting,
             commands::cmd_get_autostart,
             commands::cmd_set_autostart,
+            commands::cmd_set_api_key,
+            commands::cmd_check_api_key,
             commands::cmd_get_storage_stats,
             commands::cmd_vault_status,
             commands::cmd_vault_setup,

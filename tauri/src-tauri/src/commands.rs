@@ -1756,6 +1756,22 @@ pub fn start_recording(
                     None
                 };
 
+                // Surface missing API key to the user before queuing the job
+                if let Some(env_var) = config.required_api_key_env() {
+                    if config.resolve_api_key(env_var).is_none() {
+                        let notice = OutputNotice {
+                            kind: "missing-api-key".into(),
+                            title: format!("{} required", env_var),
+                            path: wav_path.display().to_string(),
+                            detail: format!(
+                                "The '{}' summarization engine requires {}. Open Settings to configure it.",
+                                config.summarization.engine, env_var
+                            ),
+                        };
+                        set_latest_output(&latest_output, Some(notice));
+                    }
+                }
+
                 match minutes_core::jobs::queue_live_capture(
                     mode,
                     requested_title.clone(),
@@ -3184,9 +3200,10 @@ pub fn cmd_get_settings() -> serde_json::Value {
     let config = Config::load();
     let path = Config::config_path();
 
-    // Check env vars for API key status
-    let anthropic_key_set = std::env::var("ANTHROPIC_API_KEY").is_ok();
-    let openai_key_set = std::env::var("OPENAI_API_KEY").is_ok();
+    // Check API key availability (env var → config file)
+    let anthropic_key_set = config.resolve_api_key("ANTHROPIC_API_KEY").is_some();
+    let openai_key_set = config.resolve_api_key("OPENAI_API_KEY").is_some();
+    let mistral_key_set = config.resolve_api_key("MISTRAL_API_KEY").is_some();
 
     // Check Ollama reachability
     let ollama_reachable = ureq::Agent::new_with_config(
@@ -3235,6 +3252,7 @@ pub fn cmd_get_settings() -> serde_json::Value {
             "ollama_url": config.summarization.ollama_url,
             "anthropic_key_set": anthropic_key_set,
             "openai_key_set": openai_key_set,
+            "mistral_key_set": mistral_key_set,
             "ollama_reachable": ollama_reachable,
         },
         "screen_context": {
@@ -3380,6 +3398,43 @@ pub fn cmd_set_autostart(app: tauri::AppHandle, enabled: bool) -> Result<(), Str
     } else {
         manager.disable().map_err(|e| e.to_string())
     }
+}
+
+#[tauri::command]
+pub fn cmd_set_api_key(env_var: String, value: String) -> Result<String, String> {
+    let mut config = Config::load();
+    config.set_api_key(&env_var, value.clone());
+    config
+        .save()
+        .map_err(|e| format!("Failed to save config: {}", e))?;
+
+    // Make key available to the current process immediately
+    std::env::set_var(&env_var, &value);
+
+    Ok(format!("{} saved", env_var))
+}
+
+#[tauri::command]
+pub fn cmd_check_api_key(engine: String) -> serde_json::Value {
+    let config = Config::load();
+    let env_var = match engine.as_str() {
+        "claude" => "ANTHROPIC_API_KEY",
+        "openai" => "OPENAI_API_KEY",
+        "mistral" => "MISTRAL_API_KEY",
+        _ => {
+            return serde_json::json!({
+                "needed": false,
+            });
+        }
+    };
+
+    let available = config.resolve_api_key(env_var).is_some();
+    serde_json::json!({
+        "needed": true,
+        "available": available,
+        "env_var": env_var,
+        "engine": engine,
+    })
 }
 
 #[tauri::command]

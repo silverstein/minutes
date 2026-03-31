@@ -307,6 +307,16 @@ impl Default for CallDetectionConfig {
 // ── Defaults ─────────────────────────────────────────────────
 
 fn home_dir() -> PathBuf {
+    // Check env vars directly first — dirs::home_dir() on Windows uses
+    // SHGetKnownFolderPath which ignores runtime env var changes, breaking
+    // test isolation via with_temp_home().
+    if let Some(home) = std::env::var_os("HOME") {
+        return PathBuf::from(home);
+    }
+    #[cfg(windows)]
+    if let Some(up) = std::env::var_os("USERPROFILE") {
+        return PathBuf::from(up);
+    }
     dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp"))
 }
 

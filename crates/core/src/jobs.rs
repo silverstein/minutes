@@ -85,6 +85,7 @@ fn next_job_id() -> String {
     format!("job-{}-{}-{}", ts, pid, counter)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn queue_live_capture(
     mode: CaptureMode,
     title: Option<String>,
@@ -181,6 +182,7 @@ pub fn move_capture_into_job(job_id: &str, current_wav: &Path) -> std::io::Resul
     Ok(dest)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn enqueue_capture_job(
     mode: CaptureMode,
     title: Option<String>,
@@ -381,7 +383,7 @@ pub fn remove_capture_artifacts(job: &ProcessingJob) {
 
 fn sync_processing_status() {
     if let Some(job) = processing_summary() {
-        let title = job.title.as_deref().or_else(|| job.output_path.as_deref());
+        let title = job.title.as_deref().or(job.output_path.as_deref());
         let _ = pid::set_processing_status(
             job.stage.as_deref(),
             Some(job.mode),

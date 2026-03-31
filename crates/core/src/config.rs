@@ -320,11 +320,7 @@ impl Default for CallDetectionConfig {
             enabled: true,
             poll_interval_secs: 1,
             cooldown_minutes: 5,
-            apps: vec![
-                "zoom.us".into(),
-                "Microsoft Teams".into(),
-                "Webex".into(),
-            ],
+            apps: vec!["zoom.us".into(), "Microsoft Teams".into(), "Webex".into()],
         }
     }
 }

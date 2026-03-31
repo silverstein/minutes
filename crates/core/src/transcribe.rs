@@ -1791,7 +1791,11 @@ mod tests {
             "should not show filter when rescue happened: {}",
             d
         );
-        assert!(d.contains("final: 5 words"), "should show final words: {}", d);
+        assert!(
+            d.contains("final: 5 words"),
+            "should show final words: {}",
+            d
+        );
     }
 
     #[test]
@@ -1816,11 +1820,7 @@ mod tests {
             "should show normal filter: {}",
             d
         );
-        assert!(
-            !d.contains("rescue"),
-            "should not mention rescue: {}",
-            d
-        );
+        assert!(!d.contains("rescue"), "should not mention rescue: {}", d);
     }
 
     #[test]

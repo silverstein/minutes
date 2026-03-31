@@ -449,7 +449,7 @@ function parseJsonOutput(stdout: string): any {
 
 const server = new McpServer({
   name: "minutes",
-  version: "0.9.0",
+  version: "0.9.1",
 });
 
 // Declare MCP Apps extension support so hosts classify this server as interactive.

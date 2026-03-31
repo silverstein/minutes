@@ -136,6 +136,11 @@ pub enum MinutesEvent {
         source_path: String,
         device: Option<String>,
     },
+    /// Audio input device changed mid-recording (e.g., Bluetooth headset connected).
+    DeviceChanged {
+        old_device: String,
+        new_device: String,
+    },
     /// Structured insight extracted from a meeting (decision, commitment, etc.).
     /// Subscribable by external systems via MCP notifications.
     MeetingInsightExtracted {

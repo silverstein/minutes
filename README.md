@@ -70,6 +70,7 @@ Everything runs locally. Your audio never leaves your machine (unless you opt in
 minutes record                                    # Record from mic
 minutes record --title "Standup" --context "Sprint 4 blockers"  # With context
 minutes record --language ur                      # Force Urdu (ISO 639-1 code)
+minutes record --device "AirPods Pro"             # Use specific audio device
 minutes stop                                      # Stop from another terminal
 ```
 
@@ -687,7 +688,7 @@ agent_args = []           # Optional extra args, e.g. ["--dangerously-skip-permi
 
 ```
 minutes/
-├── crates/core/          26 Rust modules — the engine (shared by all interfaces)
+├── crates/core/          27 Rust modules — the engine (shared by all interfaces)
 ├── crates/cli/           CLI binary — recording, search, health, and workflow commands
 ├── crates/whisper-guard/ Anti-hallucination toolkit (VAD gating, dedup, noise trimming)
 ├── crates/reader/        Lightweight read-only meeting parser (no audio deps)

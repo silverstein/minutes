@@ -27,37 +27,29 @@ pub fn audio_level() -> u32 {
 //   stop capture → flush WAV → run pipeline → clean up → exit
 // ──────────────────────────────────────────────────────────────
 
-/// Start recording audio from the default input device.
-/// Blocks until `stop_flag` is set to true (via signal handler) or a stop
-/// sentinel file is detected (from `minutes stop`).
-/// Writes raw PCM to a WAV file at the given path.
-/// If screen context is enabled, also captures periodic screenshots.
-pub fn record_to_wav(
-    output_path: &Path,
-    stop_flag: Arc<AtomicBool>,
-    config: &Config,
-) -> Result<(), CaptureError> {
+/// Seconds of silence before checking if the audio device changed.
+/// Shorter than silence_reminder_secs to enable fast reconnection.
+const DEVICE_CHECK_SILENCE_SECS: u64 = 5;
+
+/// Build a cpal input stream that writes resampled 16kHz mono into the shared WAV writer.
+/// Returns the stream handle and the device name string.
+fn build_capture_stream(
+    device: &cpal::Device,
+    writer: &Arc<std::sync::Mutex<Option<hound::WavWriter<std::io::BufWriter<std::fs::File>>>>>,
+    stop_flag: &Arc<AtomicBool>,
+    sample_count: &Arc<std::sync::atomic::AtomicU64>,
+    err_flag: &Arc<AtomicBool>,
+) -> Result<cpal::Stream, CaptureError> {
     use cpal::traits::{DeviceTrait, StreamTrait};
 
-    // Clear any stale stop sentinel from a previous session
-    crate::pid::check_and_clear_sentinel();
-
-    // Get the input device — prefer the macOS system default over cpal's default,
-    // which can pick virtual devices (Descript Loopback, Zoom, etc.) over the real mic.
-    let host = cpal::default_host();
-    let device = select_input_device(&host)?;
-
-    let device_name = device.name().unwrap_or_else(|_| "unknown".into());
-    eprintln!("[minutes] Using input device: {}", device_name);
-    tracing::info!(device = %device_name, "using audio input device");
-
-    // Get the default input config
     let supported_config = device
         .default_input_config()
         .map_err(|e| CaptureError::Io(std::io::Error::other(format!("input config: {}", e))))?;
 
     let sample_rate = supported_config.sample_rate().0;
     let channels = supported_config.channels();
+    let ratio = sample_rate as f64 / 16000.0;
+
     tracing::info!(
         sample_rate,
         channels,
@@ -65,36 +57,10 @@ pub fn record_to_wav(
         "audio capture config"
     );
 
-    // Create WAV writer — always write as 16kHz mono 16-bit for whisper
-    // We'll downsample in real-time during capture
-    if let Some(parent) = output_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-
-    let wav_spec = hound::WavSpec {
-        channels: 1,
-        sample_rate: 16000,
-        bits_per_sample: 16,
-        sample_format: hound::SampleFormat::Int,
-    };
-
-    let writer = hound::WavWriter::create(output_path, wav_spec)
-        .map_err(|e| CaptureError::Io(std::io::Error::other(format!("WAV create: {}", e))))?;
-    let writer = Arc::new(std::sync::Mutex::new(Some(writer)));
-
-    // Set up the resampler state
-    let ratio = sample_rate as f64 / 16000.0;
-    let writer_clone = Arc::clone(&writer);
-    let stop_clone = Arc::clone(&stop_flag);
-    let sample_count = Arc::new(std::sync::atomic::AtomicU64::new(0));
-    let sample_count_clone = Arc::clone(&sample_count);
-
-    // Build the input stream
-    let err_flag = Arc::new(AtomicBool::new(false));
-    let err_flag_clone = Arc::clone(&err_flag);
-
-    // Reset audio level
-    AUDIO_LEVEL.store(0, Ordering::Relaxed);
+    let writer_clone = Arc::clone(writer);
+    let stop_clone = Arc::clone(stop_flag);
+    let sample_count_clone = Arc::clone(sample_count);
+    let err_flag_clone = Arc::clone(err_flag);
 
     let stream = match supported_config.sample_format() {
         cpal::SampleFormat::F32 => {
@@ -103,7 +69,7 @@ pub fn record_to_wav(
             let mut input_samples: Vec<f32> = Vec::new();
             let mut level_accum: f64 = 0.0;
             let mut level_count: u32 = 0;
-            let level_interval = (sample_rate / 10) as u32; // ~10 updates/sec
+            let level_interval = sample_rate / 10; // ~10 updates/sec
 
             device
                 .build_input_stream(
@@ -169,7 +135,7 @@ pub fn record_to_wav(
             let mut input_samples: Vec<f32> = Vec::new();
             let mut level_accum: f64 = 0.0;
             let mut level_count: u32 = 0;
-            let level_interval = (sample_rate / 10) as u32;
+            let level_interval = sample_rate / 10;
 
             device
                 .build_input_stream(
@@ -234,12 +200,109 @@ pub fn record_to_wav(
         }
     };
 
-    // Start the stream
     stream
         .play()
         .map_err(|e| CaptureError::Io(std::io::Error::other(format!("stream play: {}", e))))?;
 
+    Ok(stream)
+}
+
+/// Try to reconnect to the current default audio device.
+/// Returns the new stream and device name on success.
+fn try_reconnect(
+    host: &cpal::Host,
+    device_override: Option<&str>,
+    writer: &Arc<std::sync::Mutex<Option<hound::WavWriter<std::io::BufWriter<std::fs::File>>>>>,
+    stop_flag: &Arc<AtomicBool>,
+    sample_count: &Arc<std::sync::atomic::AtomicU64>,
+    err_flag: &Arc<AtomicBool>,
+) -> Option<(cpal::Stream, String)> {
+    use cpal::traits::DeviceTrait;
+
+    // Reset error flag for the new stream
+    err_flag.store(false, Ordering::Relaxed);
+
+    let device = match select_input_device(host, device_override) {
+        Ok(d) => d,
+        Err(e) => {
+            tracing::warn!("reconnect: device selection failed: {}", e);
+            return None;
+        }
+    };
+
+    let name = device.name().unwrap_or_else(|_| "unknown".into());
+
+    match build_capture_stream(&device, writer, stop_flag, sample_count, err_flag) {
+        Ok(stream) => {
+            tracing::info!(device = %name, "audio stream reconnected");
+            Some((stream, name))
+        }
+        Err(e) => {
+            tracing::warn!(device = %name, "reconnect: build stream failed: {}", e);
+            None
+        }
+    }
+}
+
+/// Start recording audio from the default input device.
+/// Blocks until `stop_flag` is set to true (via signal handler) or a stop
+/// sentinel file is detected (from `minutes stop`).
+/// Writes raw PCM to a WAV file at the given path.
+/// If screen context is enabled, also captures periodic screenshots.
+/// Automatically reconnects if the audio device changes mid-recording.
+pub fn record_to_wav(
+    output_path: &Path,
+    stop_flag: Arc<AtomicBool>,
+    config: &Config,
+) -> Result<(), CaptureError> {
+    use cpal::traits::DeviceTrait;
+
+    // Clear any stale stop sentinel from a previous session
+    crate::pid::check_and_clear_sentinel();
+
+    let host = cpal::default_host();
+    let device_override = config.recording.device.as_deref();
+    let device = select_input_device(&host, device_override)?;
+
+    let device_name = device.name().unwrap_or_else(|_| "unknown".into());
+    eprintln!("[minutes] Using input device: {}", device_name);
+    tracing::info!(device = %device_name, "using audio input device");
+
+    // Create WAV writer — always write as 16kHz mono 16-bit for whisper
+    if let Some(parent) = output_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let wav_spec = hound::WavSpec {
+        channels: 1,
+        sample_rate: 16000,
+        bits_per_sample: 16,
+        sample_format: hound::SampleFormat::Int,
+    };
+
+    let writer = hound::WavWriter::create(output_path, wav_spec)
+        .map_err(|e| CaptureError::Io(std::io::Error::other(format!("WAV create: {}", e))))?;
+    let writer = Arc::new(std::sync::Mutex::new(Some(writer)));
+
+    let sample_count = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let err_flag = Arc::new(AtomicBool::new(false));
+
+    // Reset audio level
+    AUDIO_LEVEL.store(0, Ordering::Relaxed);
+
+    // Build initial stream (wrapped in Option for reconnection)
+    let mut stream = Some(build_capture_stream(
+        &device,
+        &writer,
+        &stop_flag,
+        &sample_count,
+        &err_flag,
+    )?);
     tracing::info!("audio capture started");
+
+    // Device change monitor
+    let mut device_monitor = crate::device_monitor::DeviceMonitor::new(&device_name);
+    let mut current_device_name = device_name;
 
     // Start screen context capture if enabled (with permission check)
     let _screen_handle = if config.screen_context.enabled {
@@ -283,29 +346,42 @@ pub fn record_to_wav(
     while !stop_flag.load(Ordering::Relaxed) {
         std::thread::sleep(std::time::Duration::from_millis(100));
 
-        if err_flag.load(Ordering::Relaxed) {
-            tracing::error!("audio stream encountered an error, stopping");
-            break;
-        }
-
         if crate::pid::check_and_clear_sentinel() {
             tracing::info!("stop sentinel detected — stopping recording");
             break;
         }
 
-        // Silence reminder: notify if audio has been below threshold for too long
-        if silence_reminder_secs > 0 {
+        // Check for stream error or device change → attempt reconnection
+        let should_reconnect = if err_flag.load(Ordering::Relaxed) {
+            tracing::warn!("audio stream error detected — checking for device change");
+            true
+        } else if device_monitor.has_device_changed() {
+            tracing::info!("default audio device changed — will reconnect");
+            true
+        } else {
+            false
+        };
+
+        // Also check for silence-triggered device change (device went silent because it changed)
+        let silence_triggered_reconnect = if !should_reconnect && silence_reminder_secs > 0 {
             let level = audio_level();
             if level <= silence_threshold {
                 let start = silence_start.get_or_insert_with(std::time::Instant::now);
                 let silent_secs = start.elapsed().as_secs();
-                if silent_secs >= silence_reminder_secs && !silence_notified {
+
+                // Check device change after a few seconds of silence (faster than silence reminder)
+                if silent_secs >= DEVICE_CHECK_SILENCE_SECS && device_monitor.has_device_changed() {
+                    true
+                } else if silent_secs >= silence_reminder_secs && !silence_notified {
                     silence_notified = true;
                     tracing::info!(
                         silent_secs,
                         "silence detected — sending reminder notification"
                     );
                     send_silence_notification(silent_secs);
+                    false
+                } else {
+                    false
                 }
             } else {
                 // Audio resumed — reset silence tracking
@@ -314,12 +390,69 @@ pub fn record_to_wav(
                 }
                 silence_start = None;
                 silence_notified = false;
+                false
+            }
+        } else {
+            false
+        };
+
+        if should_reconnect || silence_triggered_reconnect {
+            // Drop old stream before building a new one
+            stream.take();
+
+            // Try reconnecting (with one retry after 1s)
+            let reconnected = try_reconnect(
+                &host,
+                device_override,
+                &writer,
+                &stop_flag,
+                &sample_count,
+                &err_flag,
+            )
+            .or_else(|| {
+                tracing::info!("reconnect failed, retrying in 1s...");
+                std::thread::sleep(std::time::Duration::from_secs(1));
+                try_reconnect(
+                    &host,
+                    device_override,
+                    &writer,
+                    &stop_flag,
+                    &sample_count,
+                    &err_flag,
+                )
+            });
+
+            match reconnected {
+                Some((new_stream, new_name)) => {
+                    let old_name = current_device_name.clone();
+                    current_device_name = new_name;
+                    device_monitor.update_device(&current_device_name);
+                    stream = Some(new_stream);
+                    silence_start = None;
+                    silence_notified = false;
+
+                    eprintln!(
+                        "[minutes] Audio device switched: {} → {}",
+                        old_name, current_device_name
+                    );
+                    send_device_change_notification(&old_name, &current_device_name);
+
+                    // Log event for agent reactivity
+                    crate::events::append_event(crate::events::MinutesEvent::DeviceChanged {
+                        old_device: old_name,
+                        new_device: current_device_name.clone(),
+                    });
+                }
+                None => {
+                    tracing::error!("could not reconnect to any audio device — stopping recording");
+                    break;
+                }
             }
         }
     }
 
     // Stop and finalize
-    drop(stream); // Stop the audio stream
+    drop(stream);
 
     let total_samples = sample_count.load(Ordering::Relaxed);
     let duration_secs = total_samples as f64 / 16000.0;
@@ -359,13 +492,51 @@ pub fn record_to_wav(
 
 /// Select the best input device.
 ///
+/// If `device_name` is provided, matches by name against available devices.
+/// Otherwise, queries the macOS system default (via `system_profiler`),
+/// then falls back to cpal's `default_input_device()`.
+///
 /// cpal's `default_input_device()` picks the first device in enumeration order,
 /// which on macOS is often a virtual device (Descript Loopback, Zoom Audio, etc.)
-/// rather than the actual system default. This function queries the macOS system
-/// default via `SoundSource` AppleScript and matches by name, falling back to
-/// cpal's default if the query fails.
-fn select_input_device(host: &cpal::Host) -> Result<cpal::Device, CaptureError> {
+/// rather than the actual system default.
+pub fn select_input_device(
+    host: &cpal::Host,
+    device_name: Option<&str>,
+) -> Result<cpal::Device, CaptureError> {
     use cpal::traits::{DeviceTrait, HostTrait};
+
+    // If a specific device was requested, find it by name
+    if let Some(requested) = device_name {
+        if let Ok(devices) = host.input_devices() {
+            for device in devices {
+                if let Ok(name) = device.name() {
+                    if name == requested {
+                        tracing::info!(device = %name, "using requested input device");
+                        return Ok(device);
+                    }
+                }
+            }
+        }
+        // Collect available device names for a helpful error message
+        let available: Vec<String> = host
+            .input_devices()
+            .map(|devs| devs.filter_map(|d| d.name().ok()).collect())
+            .unwrap_or_default();
+        tracing::error!(
+            requested = %requested,
+            available = ?available,
+            "requested audio device not found"
+        );
+        return Err(CaptureError::Io(std::io::Error::other(format!(
+            "audio device '{}' not found. Available devices: {}",
+            requested,
+            if available.is_empty() {
+                "(none)".to_string()
+            } else {
+                available.join(", ")
+            }
+        ))));
+    }
 
     // Try to get the macOS system default input device name
     #[cfg(target_os = "macos")]
@@ -398,7 +569,7 @@ fn select_input_device(host: &cpal::Host) -> Result<cpal::Device, CaptureError> 
 /// Query macOS for the actual system default input device name.
 /// Uses `system_profiler` which is more reliable than AppleScript for audio devices.
 #[cfg(target_os = "macos")]
-fn get_macos_default_input_name() -> Option<String> {
+pub fn get_macos_default_input_name() -> Option<String> {
     // Try AppleScript to get the system-level default input device
     let output = std::process::Command::new("system_profiler")
         .args(["SPAudioDataType", "-json"])
@@ -461,6 +632,34 @@ fn send_silence_notification(silent_secs: u64) {
             .output()
         {
             Ok(_) => tracing::debug!("silence notification sent"),
+            Err(e) => tracing::warn!("failed to send notification: {}", e),
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        eprintln!("[minutes] {}", body);
+    }
+}
+
+/// Send a macOS notification when the audio input device changes mid-recording.
+fn send_device_change_notification(old_device: &str, new_device: &str) {
+    let body = format!(
+        "Audio input switched from \"{}\" to \"{}\".",
+        old_device, new_device
+    );
+
+    #[cfg(target_os = "macos")]
+    {
+        let script = format!(
+            "display notification \"{}\" with title \"Minutes\" sound name \"Blow\"",
+            body.replace('\\', "\\\\").replace('"', "\\\"")
+        );
+        match std::process::Command::new("osascript")
+            .args(["-e", &script])
+            .output()
+        {
+            Ok(_) => tracing::debug!("device change notification sent"),
             Err(e) => tracing::warn!("failed to send notification: {}", e),
         }
     }

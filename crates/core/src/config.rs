@@ -229,6 +229,9 @@ pub struct RecordingConfig {
     /// Audio level (0–100) below which audio is considered silence.
     /// The level comes from RMS energy of the mic input. Default: 3.
     pub silence_threshold: u32,
+    /// Audio input device name override. When set, Minutes uses this device
+    /// instead of the system default. Use `minutes devices` to list available names.
+    pub device: Option<String>,
 }
 
 impl Default for RecordingConfig {
@@ -236,6 +239,7 @@ impl Default for RecordingConfig {
         Self {
             silence_reminder_secs: 300,
             silence_threshold: 3,
+            device: None,
         }
     }
 }

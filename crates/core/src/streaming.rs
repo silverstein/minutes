@@ -1,5 +1,5 @@
 use crate::error::CaptureError;
-use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use cpal::traits::{DeviceTrait, StreamTrait};
 use crossbeam_channel::{bounded, Receiver, Sender};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
@@ -45,6 +45,7 @@ pub fn stream_audio_level() -> u32 {
 pub struct AudioStream {
     _stream: cpal::Stream,
     stop: Arc<AtomicBool>,
+    err_flag: Arc<AtomicBool>,
     /// Receive audio chunks from this channel.
     pub receiver: Receiver<AudioChunk>,
     /// The sample rate of output chunks (always 16000).
@@ -54,14 +55,12 @@ pub struct AudioStream {
 }
 
 impl AudioStream {
-    /// Start capturing from the default input device.
+    /// Start capturing from the specified (or default) input device.
     /// Returns a stream handle with a channel receiver for audio chunks.
     /// Chunks arrive at ~10Hz (100ms each at 16kHz = 1600 samples).
-    pub fn start() -> Result<Self, CaptureError> {
+    pub fn start(device_override: Option<&str>) -> Result<Self, CaptureError> {
         let host = cpal::default_host();
-        let device = host
-            .default_input_device()
-            .ok_or(CaptureError::DeviceNotFound)?;
+        let device = crate::capture::select_input_device(&host, device_override)?;
 
         let device_name = device.name().unwrap_or_else(|_| "unknown".into());
         let config = device
@@ -76,7 +75,7 @@ impl AudioStream {
         let (tx, rx): (Sender<AudioChunk>, Receiver<AudioChunk>) = bounded(64);
 
         let stop = Arc::new(AtomicBool::new(false));
-        let stop_clone = Arc::clone(&stop);
+        let err_flag = Arc::new(AtomicBool::new(false));
         let chunk_size: usize = 1600; // 100ms at 16kHz
 
         let stream = match config.sample_format() {
@@ -85,6 +84,8 @@ impl AudioStream {
                 let mut resample_pos: f64 = 0.0;
                 let mut chunk_buf: Vec<f32> = Vec::with_capacity(chunk_size);
                 let tx = tx.clone();
+                let stop_clone = Arc::clone(&stop);
+                let err_flag_clone = Arc::clone(&err_flag);
 
                 device
                     .build_input_stream(
@@ -125,6 +126,7 @@ impl AudioStream {
                         },
                         move |err| {
                             tracing::error!("streaming audio error: {}", err);
+                            err_flag_clone.store(true, Ordering::Relaxed);
                         },
                         None,
                     )
@@ -137,6 +139,8 @@ impl AudioStream {
                 let mut resample_pos: f64 = 0.0;
                 let mut chunk_buf: Vec<f32> = Vec::with_capacity(chunk_size);
                 let tx = tx.clone();
+                let stop_clone = Arc::clone(&stop);
+                let err_flag_clone = Arc::clone(&err_flag);
 
                 device
                     .build_input_stream(
@@ -177,6 +181,7 @@ impl AudioStream {
                         },
                         move |err| {
                             tracing::error!("streaming audio error: {}", err);
+                            err_flag_clone.store(true, Ordering::Relaxed);
                         },
                         None,
                     )
@@ -201,10 +206,16 @@ impl AudioStream {
         Ok(AudioStream {
             _stream: stream,
             stop,
+            err_flag,
             receiver: rx,
             sample_rate: 16000,
             device_name,
         })
+    }
+
+    /// Returns true if the audio stream has encountered an error.
+    pub fn has_error(&self) -> bool {
+        self.err_flag.load(Ordering::Relaxed)
     }
 
     /// Stop the audio stream.

@@ -291,8 +291,12 @@ fn run_inner(
     };
 
     // Start audio stream FIRST — validate mic access before truncating any files
-    let stream = AudioStream::start()?;
+    let device_override = config.recording.device.as_deref();
+    let mut stream = AudioStream::start(device_override)?;
     tracing::info!(device = %stream.device_name, "live transcript audio stream started");
+
+    // Device change monitor for auto-reconnection
+    let mut device_monitor = crate::device_monitor::DeviceMonitor::new(&stream.device_name);
 
     // Only now create the writer (which truncates the JSONL and WAV files)
     let mut writer = LiveTranscriptWriter::new(config)?;
@@ -328,6 +332,33 @@ fn run_inner(
             break;
         }
 
+        // Check for stream error or device change — attempt reconnection
+        if stream.has_error() || device_monitor.has_device_changed() {
+            let old_name = stream.device_name.clone();
+            tracing::info!(device = %old_name, "audio stream error or device change — reconnecting");
+            drop(stream);
+            match AudioStream::start(device_override) {
+                Ok(new_stream) => {
+                    tracing::info!(
+                        old = %old_name, new = %new_stream.device_name,
+                        "live transcript audio stream reconnected"
+                    );
+                    device_monitor.update_device(&new_stream.device_name);
+                    stream = new_stream;
+                    continue;
+                }
+                Err(e) => {
+                    tracing::error!("live transcript reconnect failed: {}", e);
+                    if utterance_samples > 0 {
+                        if let Some(sr) = streaming.finalize(&whisper_ctx) {
+                            writer.write_utterance(&sr.text, sr.duration_secs);
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+
         // Receive audio chunk (100ms timeout for stop checks)
         let chunk = match stream
             .receiver
@@ -336,13 +367,29 @@ fn run_inner(
             Ok(chunk) => chunk,
             Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
             Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
-                tracing::warn!("audio stream disconnected");
-                if utterance_samples > 0 {
-                    if let Some(sr) = streaming.finalize(&whisper_ctx) {
-                        writer.write_utterance(&sr.text, sr.duration_secs);
+                // Stream died — try to reconnect (device may have changed)
+                let old_name = stream.device_name.clone();
+                tracing::warn!("audio stream disconnected — attempting reconnect");
+                match AudioStream::start(device_override) {
+                    Ok(new_stream) => {
+                        tracing::info!(
+                            old = %old_name, new = %new_stream.device_name,
+                            "live transcript audio stream reconnected after disconnect"
+                        );
+                        device_monitor.update_device(&new_stream.device_name);
+                        stream = new_stream;
+                        continue;
+                    }
+                    Err(e) => {
+                        tracing::error!("reconnect after disconnect failed: {}", e);
+                        if utterance_samples > 0 {
+                            if let Some(sr) = streaming.finalize(&whisper_ctx) {
+                                writer.write_utterance(&sr.text, sr.duration_secs);
+                            }
+                        }
+                        break;
                     }
                 }
-                break;
             }
         };
 

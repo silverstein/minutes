@@ -2,6 +2,7 @@ pub mod calendar;
 pub mod capture;
 pub mod config;
 pub mod daily_notes;
+pub mod device_monitor;
 pub mod diarize;
 pub mod error;
 pub mod events;

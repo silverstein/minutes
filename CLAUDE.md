@@ -194,7 +194,7 @@ minutes/
 ├── BUILD-STATUS.md            # Build progress tracker
 ├── Cargo.toml                 # Workspace root
 ├── crates/
-│   ├── core/src/              # 26 Rust modules — the engine
+│   ├── core/src/              # 27 Rust modules — the engine
 │   │   ├── capture.rs         # Audio capture (cpal)
 │   │   ├── transcribe.rs      # Whisper.cpp transcription (delegates to whisper-guard for anti-hallucination, optional nnnoiseless denoise)
 │   │   ├── diarize.rs         # Speaker diarization + attribution types (pyannote-rs native or pyannote subprocess)
@@ -208,6 +208,7 @@ minutes/
 │   │   ├── config.rs          # TOML config with compiled defaults
 │   │   ├── pid.rs             # PID file lifecycle (flock atomic)
 │   │   ├── events.rs          # Append-only JSONL event log for agent reactivity
+│   │   ├── device_monitor.rs  # Audio device change detection (CoreAudio listener + auto-reconnect)
 │   │   ├── streaming_whisper.rs # Progressive transcription (partial results every 2s)
 │   │   ├── streaming.rs       # Streaming state machine for live transcription
 │   │   ├── logging.rs         # Structured JSON logging

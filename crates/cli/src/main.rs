@@ -39,6 +39,11 @@ enum Commands {
         /// Transcription language (e.g. "en", "ur", "es"). Overrides config.toml setting.
         #[arg(short, long)]
         language: Option<String>,
+
+        /// Audio input device name. Use `minutes devices` to list available devices.
+        /// Overrides the [recording] device setting in config.toml.
+        #[arg(short = 'D', long)]
+        device: Option<String>,
     },
 
     /// Add a note to the current recording
@@ -515,9 +520,13 @@ fn main() -> Result<()> {
             context,
             mode,
             language,
+            device,
         } => {
             if let Some(lang) = language {
                 config.transcription.language = Some(lang);
+            }
+            if let Some(dev) = device {
+                config.recording.device = Some(dev);
             }
             cmd_record(title, context, &mode, &config)
         }

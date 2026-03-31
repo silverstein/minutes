@@ -242,8 +242,12 @@ where
     // Start audio stream
     #[cfg(feature = "whisper")]
     {
-        let stream = AudioStream::start()?;
+        let device_override = config.recording.device.as_deref();
+        let mut stream = AudioStream::start(device_override)?;
         tracing::info!(device = %stream.device_name, "dictation audio stream started");
+
+        // Device change monitor for auto-reconnection
+        let mut device_monitor = crate::device_monitor::DeviceMonitor::new(&stream.device_name);
 
         let mut vad = Vad::new();
         let mut streaming = StreamingWhisper::new(config.transcription.language.clone());
@@ -299,6 +303,28 @@ where
                 break;
             }
 
+            // Check for stream error or device change — attempt reconnection
+            if stream.has_error() || device_monitor.has_device_changed() {
+                let old_name = stream.device_name.clone();
+                tracing::info!(device = %old_name, "dictation stream error or device change — reconnecting");
+                drop(stream);
+                match AudioStream::start(device_override) {
+                    Ok(new_stream) => {
+                        tracing::info!(
+                            old = %old_name, new = %new_stream.device_name,
+                            "dictation audio stream reconnected"
+                        );
+                        device_monitor.update_device(&new_stream.device_name);
+                        stream = new_stream;
+                        continue;
+                    }
+                    Err(e) => {
+                        tracing::error!("dictation reconnect failed: {}", e);
+                        break;
+                    }
+                }
+            }
+
             // Receive audio chunk (100ms timeout to allow stop checks)
             let chunk = match stream
                 .receiver
@@ -306,7 +332,23 @@ where
             {
                 Ok(chunk) => chunk,
                 Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
-                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
+                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
+                    // Stream died — try to reconnect
+                    let old_name = stream.device_name.clone();
+                    tracing::warn!("dictation audio stream disconnected — attempting reconnect");
+                    match AudioStream::start(device_override) {
+                        Ok(new_stream) => {
+                            tracing::info!(
+                                old = %old_name, new = %new_stream.device_name,
+                                "dictation audio stream reconnected after disconnect"
+                            );
+                            device_monitor.update_device(&new_stream.device_name);
+                            stream = new_stream;
+                            continue;
+                        }
+                        Err(_) => break,
+                    }
+                }
             };
 
             let vad_result = vad.process(chunk.rms);
@@ -670,6 +712,7 @@ fn write_dictation_file(text: &str, duration_secs: f64, config: &Config) -> Opti
         recorded_by: config.identity.name.clone(),
         visibility: None,
         speaker_map: vec![],
+        filter_diagnosis: None,
     };
 
     match crate::markdown::write(&frontmatter, text, None, None, config) {

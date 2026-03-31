@@ -338,7 +338,8 @@ pub fn requeue_job(job_id: &str) -> std::io::Result<Option<ProcessingJob>> {
         job.finished_at = None;
         job.error = None;
         job.owner_pid = None;
-    })? else {
+    })?
+    else {
         return Ok(None);
     };
     sync_processing_status();
@@ -380,10 +381,7 @@ pub fn remove_capture_artifacts(job: &ProcessingJob) {
 
 fn sync_processing_status() {
     if let Some(job) = processing_summary() {
-        let title = job
-            .title
-            .as_deref()
-            .or_else(|| job.output_path.as_deref());
+        let title = job.title.as_deref().or_else(|| job.output_path.as_deref());
         let _ = pid::set_processing_status(
             job.stage.as_deref(),
             Some(job.mode),
@@ -459,7 +457,8 @@ where
             job.owner_pid = Some(owner_pid);
             job.started_at.get_or_insert_with(Local::now);
             job.error = None;
-        })? else {
+        })?
+        else {
             continue;
         };
         sync_processing_status();
@@ -484,7 +483,8 @@ where
                     job.finished_at = Some(Local::now());
                     job.error = Some(error.to_string());
                     job.owner_pid = None;
-                })? else {
+                })?
+                else {
                     sync_processing_status();
                     continue;
                 };
@@ -500,7 +500,8 @@ where
             job.output_path = Some(artifact.write_result.path.display().to_string());
             job.title = Some(artifact.write_result.title.clone());
             job.word_count = Some(artifact.write_result.word_count);
-        })? else {
+        })?
+        else {
             sync_processing_status();
             continue;
         };
@@ -535,7 +536,8 @@ where
                     job.word_count = Some(result.word_count);
                     job.finished_at = Some(Local::now());
                     job.owner_pid = None;
-                })? else {
+                })?
+                else {
                     sync_processing_status();
                     continue;
                 };
@@ -562,7 +564,8 @@ where
                     job.finished_at = Some(Local::now());
                     job.error = Some(error.to_string());
                     job.owner_pid = None;
-                })? else {
+                })?
+                else {
                     sync_processing_status();
                     continue;
                 };
@@ -591,13 +594,21 @@ mod tests {
     fn with_temp_home<T>(f: impl FnOnce(&tempfile::TempDir) -> T) -> T {
         let _guard = test_guard();
         let dir = tempfile::tempdir().unwrap();
+        // Set HOME (Unix) and USERPROFILE (Windows) so dirs::home_dir() resolves to temp
         let original_home = std::env::var_os("HOME");
+        let original_userprofile = std::env::var_os("USERPROFILE");
         std::env::set_var("HOME", dir.path());
+        std::env::set_var("USERPROFILE", dir.path());
         let result = f(&dir);
         if let Some(home) = original_home {
             std::env::set_var("HOME", home);
         } else {
             std::env::remove_var("HOME");
+        }
+        if let Some(up) = original_userprofile {
+            std::env::set_var("USERPROFILE", up);
+        } else {
+            std::env::remove_var("USERPROFILE");
         }
         result
     }
@@ -669,9 +680,9 @@ mod tests {
 
     #[test]
     fn requeue_job_preserves_existing_output_path() {
-        with_temp_home(|_| {
-            let audio_path = PathBuf::from("/tmp/fake.wav");
-            let output_path = "/tmp/existing.md".to_string();
+        with_temp_home(|dir| {
+            let audio_path = dir.path().join("fake.wav");
+            let output_path = dir.path().join("existing.md").display().to_string();
             let job = ProcessingJob {
                 id: "job-failed".into(),
                 mode: CaptureMode::Meeting,

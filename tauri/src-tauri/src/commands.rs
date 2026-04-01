@@ -3306,6 +3306,16 @@ pub fn cmd_set_setting(section: String, key: String, value: String) -> Result<St
         ("call_detection", "enabled") => {
             config.call_detection.enabled = value == "true";
         }
+        ("call_detection", "poll_interval_secs") => {
+            config.call_detection.poll_interval_secs = value
+                .parse()
+                .map_err(|_| "poll_interval_secs must be a number")?;
+        }
+        ("call_detection", "cooldown_minutes") => {
+            config.call_detection.cooldown_minutes = value
+                .parse()
+                .map_err(|_| "cooldown_minutes must be a number")?;
+        }
 
         // Dictation
         ("dictation", "model") => {

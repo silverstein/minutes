@@ -119,6 +119,45 @@ This gives us reliable detection with explicit user intent. The `auto_call_inten
 
 Default detection apps: Zoom, Teams, Webex. Slack and FaceTime were removed from defaults because they run as background processes on every Mac, producing constant false positives.
 
+### Browser-based call detection policy
+
+Browser-hosted calls are a separate trust and signal-quality problem from native desktop call apps.
+
+Examples:
+
+- Google Meet in Chrome/Safari
+- browser-based Teams or Webex sessions
+- any future tab-based calling surface
+
+Current product stance:
+
+- **native desktop call apps may be default-on detection candidates**
+- **browser-based integrations should be opt-in until proven trustworthy in dogfood**
+
+Why:
+
+1. Browser signals are usually weaker.
+   A tab existing is not the same thing as an active call. Scheduled meeting tabs, landing pages, and stale tabs can all stay open in the background and create false positives.
+
+2. Browser inspection often crosses a stronger privacy boundary.
+   On macOS, querying tabs via Apple Events / AppleScript requires automation consent and can fail noisily if we probe too aggressively.
+
+3. The product already learned this lesson the hard way.
+   We removed Slack and FaceTime from default detection because "process exists" was too weak a signal. Browser integrations should start from an even more conservative posture, not a more aggressive one.
+
+Implementation policy for browser detection:
+
+- browser integrations must not be added to the default `CallDetectionConfig.apps` list until they are proven reliable in real dogfood
+- browser integrations should use the strongest available call-specific signal, not just hostname presence
+- on macOS, Apple Events / AppleScript based detection must include permission-aware failure handling and backoff so denied automation paths are not retried every poll forever
+- browser detections should be treated as lower-confidence signals than native app detections when deciding whether to surface a call banner
+
+Practical implication:
+
+- `Zoom`, `Teams`, and `Webex` remain good default detection candidates
+- `Google Meet` detection is worth supporting, but should begin as an opt-in browser integration rather than a default-enabled detector
+- cross-platform browser call detection is a future design problem, not something the macOS AppleScript path should define for the whole product
+
 ## Architectural Decision
 
 ### 1. Split intent from backend
@@ -282,8 +321,10 @@ struct StartRecordingRequest {
 
 Flow:
 
-1. infer default intent if omitted
-   - if a known call app is active, default to `call`
+1. determine intent from the initiating surface
+   - call detection banner → `call`
+   - normal "Start Recording" button → `room` or `memo`
+   - optional `auto_call_intent` config may override this for users who explicitly opt in
 2. run preflight
 3. if intent is `call` and dual capture is unavailable:
    - show blocking setup/fallback UI

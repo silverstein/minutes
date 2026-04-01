@@ -2377,6 +2377,29 @@
         </div>
       </div>
 
+      <!-- Call Detection -->
+      <div style="margin-bottom: 16px;">
+        <div class="about-item-title">CALL DETECTION</div>
+        <div class="about-controls">
+          <div class="about-controls-copy">Detect calls automatically</div>
+          <button class="btn btn-secondary btn-sm toggle-btn" id="settings-call-detection">On</button>
+        </div>
+        <div class="about-controls">
+          <div class="about-controls-group">
+            <div class="about-controls-copy">Polling interval</div>
+            <div class="about-controls-meta">How often to check for active calls (seconds).</div>
+            <input type="number" id="settings-call-detection-polling-interval" min="1" style="margin-top: 6px; width: 100%; padding: 6px 8px; border-radius: 8px; background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.1); color: var(--text); font-size: 13px;">
+          </div>
+        </div>
+        <div class="about-controls">
+          <div class="about-controls-group">
+            <div class="about-controls-copy">Cooldown</div>
+            <div class="about-controls-meta">Minutes to wait before re-triggering call detection.</div>
+            <input type="number" id="settings-call-detection-cooldown" min="0" style="margin-top: 6px; width: 100%; padding: 6px 8px; border-radius: 8px; background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.1); color: var(--text); font-size: 13px;">
+          </div>
+        </div>
+      </div>
+
       <!-- Privacy -->
       <div style="margin-bottom: 16px;">
         <div class="about-item-title">PRIVACY</div>
@@ -4271,6 +4294,12 @@
         for (const a of agents) { const o = document.createElement('option'); o.value = a.name; o.textContent = a.name; sel.appendChild(o); }
         sel.value = s.assistant.agent;
         document.getElementById('settings-agent-status').textContent = agents.length + ' agent(s) installed';
+        // Call detection settings
+        if (s.call_detection) {
+          setSettingsToggle('settings-call-detection', s.call_detection.enabled);
+          document.getElementById('settings-call-detection-polling-interval').value = String(s.call_detection.poll_interval_secs ?? 1);
+          document.getElementById('settings-call-detection-cooldown').value = String(s.call_detection.cooldown_minutes ?? 5);
+        }
         // Dictation settings
         if (s.dictation) {
           document.getElementById('settings-dictation-model').value = s.dictation.model || 'base';
@@ -4503,6 +4532,16 @@
     });
     document.getElementById('settings-screen-interval').addEventListener('change', (e) => invoke('cmd_set_setting', {section:'screen_context',key:'interval_secs',value:e.target.value}));
     document.getElementById('settings-agent').addEventListener('change', (e) => invoke('cmd_set_setting', {section:'assistant',key:'agent',value:e.target.value}));
+
+    // Call detection settings handlers
+    document.getElementById('settings-call-detection').addEventListener('click', async () => {
+      const s = await invoke('cmd_get_settings');
+      const next = !s.call_detection.enabled;
+      await invoke('cmd_set_setting', {section:'call_detection',key:'enabled',value:String(next)});
+      setSettingsToggle('settings-call-detection', next);
+    });
+    document.getElementById('settings-call-detection-polling-interval').addEventListener('change', (e) => invoke('cmd_set_setting', {section:'call_detection',key:'poll_interval_secs',value:e.target.value}));
+    document.getElementById('settings-call-detection-cooldown').addEventListener('change', (e) => invoke('cmd_set_setting', {section:'call_detection',key:'cooldown_minutes',value:e.target.value}));
 
     // Dictation settings handlers
     document.getElementById('settings-dictation-shortcut').addEventListener('click', async () => {

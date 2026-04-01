@@ -727,6 +727,17 @@ fn parse_optional_string_setting(value: &str) -> Option<String> {
     }
 }
 
+fn call_detection_has_sentinel(config: &Config, sentinel: &str) -> bool {
+    config.call_detection.apps.iter().any(|app| app == sentinel)
+}
+
+fn set_call_detection_sentinel(config: &mut Config, sentinel: &str, enabled: bool) {
+    config.call_detection.apps.retain(|app| app != sentinel);
+    if enabled {
+        config.call_detection.apps.push(sentinel.to_string());
+    }
+}
+
 #[cfg(test)]
 fn stage_label(stage: minutes_core::pipeline::PipelineStage, mode: CaptureMode) -> &'static str {
     match (stage, mode) {
@@ -3261,6 +3272,7 @@ pub fn cmd_get_settings() -> serde_json::Value {
             "poll_interval_secs": config.call_detection.poll_interval_secs,
             "cooldown_minutes": config.call_detection.cooldown_minutes,
             "apps": config.call_detection.apps,
+            "google_meet_enabled": call_detection_has_sentinel(&config, "google-meet"),
         },
         "dictation": {
             "model": config.dictation.model,
@@ -3328,6 +3340,9 @@ pub fn cmd_set_setting(section: String, key: String, value: String) -> Result<St
             config.call_detection.cooldown_minutes = value
                 .parse()
                 .map_err(|_| "cooldown_minutes must be a number")?;
+        }
+        ("call_detection", "google_meet_enabled") => {
+            set_call_detection_sentinel(&mut config, "google-meet", value == "true");
         }
 
         // Dictation
@@ -3524,6 +3539,29 @@ mod tests {
             parse_optional_string_setting(" es "),
             Some("es".to_string())
         );
+    }
+
+    #[test]
+    fn call_detection_sentinel_toggle_is_idempotent() {
+        let mut config = Config::default();
+        assert!(!call_detection_has_sentinel(&config, "google-meet"));
+
+        set_call_detection_sentinel(&mut config, "google-meet", true);
+        assert!(call_detection_has_sentinel(&config, "google-meet"));
+
+        set_call_detection_sentinel(&mut config, "google-meet", true);
+        assert_eq!(
+            config
+                .call_detection
+                .apps
+                .iter()
+                .filter(|app| app.as_str() == "google-meet")
+                .count(),
+            1
+        );
+
+        set_call_detection_sentinel(&mut config, "google-meet", false);
+        assert!(!call_detection_has_sentinel(&config, "google-meet"));
     }
 
     #[test]

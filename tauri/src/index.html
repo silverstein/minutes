@@ -2507,6 +2507,13 @@
             <input type="number" id="settings-call-detection-cooldown" min="0" style="margin-top: 6px; width: 100%; padding: 6px 8px; border-radius: 8px; background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.1); color: var(--text); font-size: 13px;">
           </div>
         </div>
+        <div class="about-controls">
+          <div class="about-controls-group">
+            <div class="about-controls-copy">Google Meet detection (experimental)</div>
+            <div class="about-controls-meta">Opt-in browser integration for Meet in Chrome/Safari. Uses stronger meeting-URL matching, may require macOS browser automation permission, and backs off after failures instead of probing every second.</div>
+          </div>
+          <button class="btn btn-secondary btn-sm toggle-btn" id="settings-call-detection-google-meet">Off</button>
+        </div>
       </div>
 
       <!-- Privacy -->
@@ -4409,6 +4416,7 @@
           setSettingsToggle('settings-call-detection', s.call_detection.enabled);
           document.getElementById('settings-call-detection-polling-interval').value = String(s.call_detection.poll_interval_secs ?? 1);
           document.getElementById('settings-call-detection-cooldown').value = String(s.call_detection.cooldown_minutes ?? 5);
+          setSettingsToggle('settings-call-detection-google-meet', Boolean(s.call_detection.google_meet_enabled));
         }
         // Dictation settings
         if (s.dictation) {
@@ -4655,6 +4663,12 @@
     });
     document.getElementById('settings-call-detection-polling-interval').addEventListener('change', (e) => invoke('cmd_set_setting', {section:'call_detection',key:'poll_interval_secs',value:e.target.value}));
     document.getElementById('settings-call-detection-cooldown').addEventListener('change', (e) => invoke('cmd_set_setting', {section:'call_detection',key:'cooldown_minutes',value:e.target.value}));
+    document.getElementById('settings-call-detection-google-meet').addEventListener('click', async () => {
+      const s = await invoke('cmd_get_settings');
+      const next = !Boolean(s.call_detection.google_meet_enabled);
+      await invoke('cmd_set_setting', {section:'call_detection',key:'google_meet_enabled',value:String(next)});
+      setSettingsToggle('settings-call-detection-google-meet', next);
+    });
 
     // Dictation settings handlers
     document.getElementById('settings-dictation-shortcut').addEventListener('click', async () => {

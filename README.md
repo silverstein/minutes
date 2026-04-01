@@ -627,6 +627,32 @@ The native hotkey uses macOS Input Monitoring, which is separate from Screen Rec
 
 Use `./scripts/install-dev-app.sh` first so you are testing the stable development app identity rather than a raw `target/` build. The helper intentionally launches the app through LaunchServices; direct shell execution of `Contents/MacOS/minutes-app --diagnose-hotkey` can misreport TCC status.
 
+### Updating
+
+```bash
+# macOS desktop app (Homebrew cask)
+brew upgrade --cask silverstein/tap/minutes
+
+# macOS CLI (Homebrew)
+brew upgrade silverstein/tap/minutes
+
+# From source (CLI)
+git pull && cargo install --path crates/cli
+
+# From source (desktop app)
+git pull
+export CXXFLAGS="-I$(xcrun --show-sdk-path)/usr/include/c++/v1"
+cargo tauri build --bundles app
+# Then replace /Applications/Minutes.app with the new build from
+# target/release/bundle/macos/Minutes.app
+
+# GitHub release (desktop app)
+# Download the latest .dmg from https://github.com/silverstein/minutes/releases
+# and drag Minutes.app to /Applications, replacing the old version
+```
+
+Check your current version with `minutes --version` (CLI) or the Settings gear in the desktop app.
+
 ## Configuration
 
 Optional — minutes works out of the box.
@@ -678,6 +704,17 @@ dictation_threshold_secs = 120      # Files shorter than this → memo (skip dia
 enabled = false           # Opt-in: capture screenshots during recording for LLM context
 interval_secs = 30        # How often to capture (seconds)
 keep_after_summary = false # Delete screenshots after summarization (default: clean up)
+
+[call_detection]
+enabled = true            # macOS-only today
+poll_interval_secs = 1
+cooldown_minutes = 5
+# Default apps stay conservative:
+# apps = ["zoom.us", "Microsoft Teams", "Webex"]
+#
+# Browser-based integrations such as Google Meet are opt-in on purpose.
+# If you want to dogfood browser detection, add the sentinel explicitly:
+# apps = ["zoom.us", "Microsoft Teams", "Webex", "google-meet"]
 
 [assistant]
 agent = "claude"          # CLI launched by the Tauri AI Assistant

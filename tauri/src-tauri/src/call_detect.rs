@@ -8,6 +8,7 @@
 //! `is_mic_in_use`) use CoreAudio and `ps`. Windows/Linux would need
 //! alternative implementations behind `cfg(target_os)` gates.
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -44,6 +45,13 @@ pub struct CallDetector {
     /// but we also re-notify the same active app after a short interval so
     /// back-to-back meetings and sticky Zoom states don't go silent forever.
     active_call: Mutex<Option<ActiveCallState>>,
+    /// Browser tab probing is slower and lower-confidence than native app
+    /// detection, so keep it on its own cadence instead of every call-detect
+    /// poll when the mic is hot.
+    browser_probe_next_allowed_at: Mutex<Option<Instant>>,
+    /// Back off individual browsers after Apple Events / automation failures so
+    /// one denied path does not get retried every poll or suppress other browsers.
+    browser_probe_backoff_until: Mutex<HashMap<String, Instant>>,
 }
 
 /// Payload emitted to the frontend when a call is detected.
@@ -66,12 +74,16 @@ enum DetectionTransition {
 }
 
 const SAME_APP_REMINDER_SECS: u64 = 20;
+const BROWSER_PROBE_INTERVAL_SECS: u64 = 15;
+const BROWSER_PROBE_BACKOFF_SECS: u64 = 300;
 
 impl CallDetector {
     pub fn new(config: CallDetectionConfig) -> Self {
         Self {
             config,
             active_call: Mutex::new(None),
+            browser_probe_next_allowed_at: Mutex::new(None),
+            browser_probe_backoff_until: Mutex::new(HashMap::new()),
         }
     }
 
@@ -190,9 +202,16 @@ impl CallDetector {
             return None;
         }
 
+        let has_google_meet = self.config.apps.iter().any(|app| app == "google-meet");
+        let native_apps: Vec<&String> = self
+            .config
+            .apps
+            .iter()
+            .filter(|app| app.as_str() != "google-meet")
+            .collect();
         let running = running_process_names();
 
-        for config_app in &self.config.apps {
+        for config_app in native_apps {
             let config_lower = config_app.to_lowercase();
             // Substring match: "zoom.us" matches process "zoom.us",
             // "Microsoft Teams" matches "Microsoft Teams Helper", etc.
@@ -201,6 +220,13 @@ impl CallDetector {
             }) {
                 let display = display_name_for(config_app);
                 return Some((display, config_app.clone()));
+            }
+        }
+
+        if has_google_meet && self.browser_probe_due() {
+            self.schedule_next_browser_probe();
+            if self.detect_google_meet_in_browsers(&running) {
+                return Some(("Google Meet".into(), "google-meet".into()));
             }
         }
         None
@@ -241,9 +267,97 @@ impl CallDetector {
         let mut active = self.active_call.lock().unwrap();
         active.take().map(|state| state.process_name)
     }
+
+    fn browser_probe_due(&self) -> bool {
+        let mut next_probe = self.browser_probe_next_allowed_at.lock().unwrap();
+        match *next_probe {
+            Some(until) if Instant::now() < until => false,
+            Some(_) => {
+                *next_probe = None;
+                true
+            }
+            None => true,
+        }
+    }
+
+    fn schedule_next_browser_probe(&self) {
+        let mut next_probe = self.browser_probe_next_allowed_at.lock().unwrap();
+        *next_probe = Some(Instant::now() + Duration::from_secs(BROWSER_PROBE_INTERVAL_SECS));
+    }
+
+    fn browser_probe_allowed_for(&self, browser_app: &str) -> bool {
+        let mut backoff = self.browser_probe_backoff_until.lock().unwrap();
+        match backoff.get(browser_app).copied() {
+            Some(until) if Instant::now() < until => false,
+            Some(_) => {
+                backoff.remove(browser_app);
+                true
+            }
+            None => true,
+        }
+    }
+
+    fn defer_browser_probe_for(&self, browser_app: &str, reason: &str) {
+        let mut backoff = self.browser_probe_backoff_until.lock().unwrap();
+        backoff.insert(
+            browser_app.to_string(),
+            Instant::now() + Duration::from_secs(BROWSER_PROBE_BACKOFF_SECS),
+        );
+        log_call_detect_event(
+            "warn",
+            "browser_probe_backoff",
+            Some("Google Meet"),
+            Some(browser_app),
+            serde_json::json!({
+                "reason": reason,
+                "backoff_secs": BROWSER_PROBE_BACKOFF_SECS,
+            }),
+        );
+    }
+
+    fn detect_google_meet_in_browsers(&self, running: &[String]) -> bool {
+        let running_lower: Vec<String> = running.iter().map(|s| s.to_lowercase()).collect();
+
+        for (proc_fragment, app_name, kind) in &[
+            ("google chrome", "Google Chrome", BrowserKind::ChromeLike),
+            (
+                "chrome canary",
+                "Google Chrome Canary",
+                BrowserKind::ChromeLike,
+            ),
+            ("chromium", "Chromium", BrowserKind::ChromeLike),
+            ("safari", "Safari", BrowserKind::Safari),
+        ] {
+            if !running_lower.iter().any(|p| p.contains(proc_fragment)) {
+                continue;
+            }
+            if !self.browser_probe_allowed_for(app_name) {
+                continue;
+            }
+
+            match query_browser_urls(app_name, *kind) {
+                AppleScriptProbe::Urls(urls) => {
+                    if urls
+                        .iter()
+                        .any(|url| looks_like_google_meet_meeting_url(url))
+                    {
+                        return true;
+                    }
+                }
+                AppleScriptProbe::PermissionDenied => {
+                    self.defer_browser_probe_for(app_name, "apple_events_permission_denied");
+                }
+                AppleScriptProbe::Error => {
+                    self.defer_browser_probe_for(app_name, "browser_probe_error");
+                }
+            }
+        }
+
+        false
+    }
 }
 
-/// Friendly display name for a process name.
+/// Friendly display name for a process name or browser sentinel.
 fn display_name_for(process: &str) -> String {
     match process {
         "zoom.us" => "Zoom".into(),
@@ -251,8 +365,115 @@ fn display_name_for(process: &str) -> String {
         "FaceTime" => "FaceTime".into(),
         "Webex" => "Webex".into(),
         "Slack" => "Slack".into(),
+        "google-meet" => "Google Meet".into(),
         other => other.into(),
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum BrowserKind {
+    ChromeLike,
+    Safari,
+}
+
+enum AppleScriptProbe {
+    Urls(Vec<String>),
+    PermissionDenied,
+    Error,
+}
+
+fn query_browser_urls(app_name: &str, kind: BrowserKind) -> AppleScriptProbe {
+    let script = match kind {
+        BrowserKind::ChromeLike => format!(
+            r#"tell application "{app_name}"
+set output to ""
+repeat with w in windows
+  repeat with t in tabs of w
+    set output to output & (URL of t as text) & linefeed
+  end repeat
+end repeat
+return output
+end tell"#
+        ),
+        BrowserKind::Safari => format!(
+            r#"tell application "{app_name}"
+set output to ""
+repeat with w in windows
+  repeat with t in tabs of w
+    set output to output & (URL of t as text) & linefeed
+  end repeat
+end repeat
+return output
+end tell"#
+        ),
+    };
+    run_applescript_urls(&script)
+}
+
+fn run_applescript_urls(script: &str) -> AppleScriptProbe {
+    let output = match std::process::Command::new("osascript")
+        .arg("-e")
+        .arg(script)
+        .output()
+    {
+        Ok(output) => output,
+        Err(_) => return AppleScriptProbe::Error,
+    };
+
+    if output.status.success() {
+        let urls = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(ToOwned::to_owned)
+            .collect();
+        return AppleScriptProbe::Urls(urls);
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr).to_lowercase();
+    if stderr.contains("not authorized")
+        || stderr.contains("not permitted")
+        || stderr.contains("(-1743)")
+    {
+        AppleScriptProbe::PermissionDenied
+    } else {
+        AppleScriptProbe::Error
+    }
+}
+
+fn looks_like_google_meet_meeting_url(url: &str) -> bool {
+    let lower = url.trim().to_lowercase();
+    let without_scheme = lower
+        .strip_prefix("https://")
+        .or_else(|| lower.strip_prefix("http://"))
+        .unwrap_or(&lower);
+
+    let Some(rest) = without_scheme.strip_prefix("meet.google.com/") else {
+        return false;
+    };
+
+    let first_segment = rest
+        .split(['?', '#', '/'])
+        .next()
+        .unwrap_or_default()
+        .trim();
+
+    looks_like_google_meet_meeting_code(first_segment)
+}
+
+fn looks_like_google_meet_meeting_code(segment: &str) -> bool {
+    let parts: Vec<&str> = segment.split('-').collect();
+    if parts.len() != 3 {
+        return false;
+    }
+
+    let expected_lengths = [3, 4, 3];
+    parts
+        .iter()
+        .zip(expected_lengths)
+        .all(|(part, expected_len)| {
+            part.len() == expected_len && part.chars().all(|ch| ch.is_ascii_lowercase())
+        })
 }
 
 // ── macOS-specific detection ──────────────────────────────────
@@ -384,7 +605,106 @@ mod tests {
         assert_eq!(display_name_for("zoom.us"), "Zoom");
         assert_eq!(display_name_for("Microsoft Teams"), "Teams");
         assert_eq!(display_name_for("FaceTime"), "FaceTime");
+        assert_eq!(display_name_for("google-meet"), "Google Meet");
         assert_eq!(display_name_for("SomeOtherApp"), "SomeOtherApp");
+    }
+
+    #[test]
+    fn google_meet_detection_is_opt_in_via_sentinel() {
+        let detector = CallDetector::new(CallDetectionConfig {
+            enabled: true,
+            poll_interval_secs: 1,
+            cooldown_minutes: 5,
+            apps: vec!["zoom.us".into(), "google-meet".into()],
+        });
+
+        assert!(detector.config.apps.iter().any(|app| app == "google-meet"));
+    }
+
+    #[test]
+    fn browser_probe_is_skipped_when_no_browser_processes_exist() {
+        let detector = CallDetector::new(CallDetectionConfig {
+            enabled: true,
+            poll_interval_secs: 1,
+            cooldown_minutes: 5,
+            apps: vec!["google-meet".into()],
+        });
+        let running: Vec<String> = vec!["Finder".into(), "launchd".into()];
+        assert!(!detector.detect_google_meet_in_browsers(&running));
+    }
+
+    #[test]
+    fn meet_url_requires_real_meeting_code() {
+        assert!(looks_like_google_meet_meeting_url(
+            "https://meet.google.com/abc-defg-hij"
+        ));
+        assert!(looks_like_google_meet_meeting_url(
+            "https://meet.google.com/abc-defg-hij?authuser=1"
+        ));
+        assert!(!looks_like_google_meet_meeting_url(
+            "https://meet.google.com/"
+        ));
+        assert!(!looks_like_google_meet_meeting_url(
+            "https://meet.google.com/new"
+        ));
+        assert!(!looks_like_google_meet_meeting_url(
+            "https://meet.google.com/landing"
+        ));
+        assert!(!looks_like_google_meet_meeting_url(
+            "https://example.com/abc-defg-hij"
+        ));
+    }
+
+    #[test]
+    fn malformed_applescript_fails_gracefully() {
+        assert!(matches!(
+            run_applescript_urls("this is not valid applescript @@@@"),
+            AppleScriptProbe::Error
+        ));
+    }
+
+    #[test]
+    fn browser_probe_backoff_resets_after_expiry() {
+        let detector = CallDetector::new(CallDetectionConfig {
+            enabled: true,
+            poll_interval_secs: 1,
+            cooldown_minutes: 5,
+            apps: vec!["google-meet".into()],
+        });
+
+        detector.defer_browser_probe_for("Google Chrome", "test");
+        assert!(!detector.browser_probe_allowed_for("Google Chrome"));
+        assert!(detector.browser_probe_allowed_for("Safari"));
+
+        {
+            let mut backoff = detector.browser_probe_backoff_until.lock().unwrap();
+            backoff.insert(
+                "Google Chrome".into(),
+                Instant::now() - Duration::from_secs(1),
+            );
+        }
+
+        assert!(detector.browser_probe_allowed_for("Google Chrome"));
+    }
+
+    #[test]
+    fn browser_probe_global_interval_resets_after_expiry() {
+        let detector = CallDetector::new(CallDetectionConfig {
+            enabled: true,
+            poll_interval_secs: 1,
+            cooldown_minutes: 5,
+            apps: vec!["google-meet".into()],
+        });
+
+        detector.schedule_next_browser_probe();
+        assert!(!detector.browser_probe_due());
+
+        {
+            let mut next_probe = detector.browser_probe_next_allowed_at.lock().unwrap();
+            *next_probe = Some(Instant::now() - Duration::from_secs(1));
+        }
+
+        assert!(detector.browser_probe_due());
     }
 
     #[test]

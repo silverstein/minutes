@@ -1124,6 +1124,44 @@ mod tests {
     }
 
     #[test]
+    fn search_filters_by_recorded_by() {
+        let dir = TempDir::new().unwrap();
+        create_test_file(
+            dir.path(),
+            "test.md",
+            "---\ntitle: Test\ndate: 2026-03-17\nrecorded_by: Mat Silver\ntype: meeting\n---\n\nPricing discussion",
+        );
+
+        let config = Config {
+            output_dir: dir.path().to_path_buf(),
+            ..Config::default()
+        };
+
+        let matching_filters = SearchFilters {
+            content_type: None,
+            since: None,
+            attendee: None,
+            intent_kind: None,
+            owner: None,
+            recorded_by: Some("mat".into()),
+        };
+        let non_matching_filters = SearchFilters {
+            content_type: None,
+            since: None,
+            attendee: None,
+            intent_kind: None,
+            owner: None,
+            recorded_by: Some("sarah".into()),
+        };
+
+        let matching_results = search("pricing", &config, &matching_filters).unwrap();
+        let non_matching_results = search("pricing", &config, &non_matching_filters).unwrap();
+
+        assert_eq!(matching_results.len(), 1);
+        assert!(non_matching_results.is_empty());
+    }
+
+    #[test]
     fn search_empty_directory() {
         let dir = TempDir::new().unwrap();
         let config = Config {
@@ -1168,10 +1206,6 @@ mod tests {
             "---\ntitle: Pricing Review\ntype: meeting\ndate: 2026-03-17T12:00:00-07:00\nduration: 42m\nstatus: complete\ntags: []\nattendees: []\npeople: []\naction_items: []\ndecisions: []\nintents:\n  - kind: action-item\n    what: Send pricing doc\n    who: mat\n    status: open\n    by_date: Friday\n  - kind: commitment\n    what: Share revised pricing model\n    who: sarah\n    status: open\n    by_date: Tuesday\n---\n\n## Transcript\n\nWe discussed pricing.\n",
         );
 
-        let config = Config {
-            output_dir: dir.path().to_path_buf(),
-            ..Config::default()
-        };
         let filters = SearchFilters {
             content_type: None,
             since: None,
@@ -1217,6 +1251,43 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].kind, IntentKind::Commitment);
         assert_eq!(results[0].who.as_deref(), Some("sarah"));
+    }
+
+    #[test]
+    fn search_intents_filter_by_recorded_by() {
+        let dir = TempDir::new().unwrap();
+        create_test_file(
+            dir.path(),
+            "2026-03-17-test.md",
+            "---\ntitle: Pricing Review\ntype: meeting\ndate: 2026-03-17T12:00:00-07:00\nduration: 42m\nstatus: complete\ntags: []\nattendees: []\npeople: []\nrecorded_by: Mat Silver\naction_items: []\ndecisions: []\nintents:\n  - kind: action-item\n    what: Send pricing doc\n    who: mat\n    status: open\n    by_date: Friday\n---\n\n## Transcript\n\nWe discussed pricing.\n",
+        );
+
+        let matching_filters = SearchFilters {
+            content_type: None,
+            since: None,
+            attendee: None,
+            intent_kind: None,
+            owner: None,
+            recorded_by: Some("mat".into()),
+        };
+        let non_matching_filters = SearchFilters {
+            content_type: None,
+            since: None,
+            attendee: None,
+            intent_kind: None,
+            owner: None,
+            recorded_by: Some("sarah".into()),
+        };
+
+        let matching_results =
+            process_intent_file(&dir.path().join("2026-03-17-test.md"), "", &matching_filters)
+                .unwrap();
+        let non_matching_results =
+            process_intent_file(&dir.path().join("2026-03-17-test.md"), "", &non_matching_filters)
+                .unwrap();
+
+        assert_eq!(matching_results.len(), 1);
+        assert!(non_matching_results.is_empty());
     }
 
     #[test]

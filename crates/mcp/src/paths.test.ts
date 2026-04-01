@@ -48,4 +48,18 @@ describe("isWithinDirectory", () => {
     expect(isWithinDirectory("/home/user/meetings/file.md", "/home/user/meetings")).toBe(true);
     expect(isWithinDirectory("/home/user/meetings/sub/file.md", "/home/user/meetings")).toBe(true);
   });
+
+  it("uses native Windows separators when running on Windows", () => {
+    if (process.platform !== "win32") {
+      return;
+    }
+
+    expect(isWithinDirectory("C:\\Users\\alice\\meetings", "C:\\Users\\alice\\meetings")).toBe(true);
+    expect(
+      isWithinDirectory("C:\\Users\\alice\\meetings\\daily\\note.md", "C:\\Users\\alice\\meetings")
+    ).toBe(true);
+    expect(
+      isWithinDirectory("C:\\Users\\alice\\meetings-evil\\note.md", "C:\\Users\\alice\\meetings")
+    ).toBe(false);
+  });
 });

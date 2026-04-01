@@ -3224,6 +3224,7 @@ pub fn cmd_get_settings() -> serde_json::Value {
         "transcription": {
             "model": config.transcription.model,
             "downloaded_models": downloaded_models,
+            "language":config.transcription.language,
         },
         "diarization": {
             "engine": config.diarization.engine,
@@ -3276,6 +3277,7 @@ pub fn cmd_set_setting(section: String, key: String, value: String) -> Result<St
     match (section.as_str(), key.as_str()) {
         // Transcription
         ("transcription", "model") => config.transcription.model = value.clone(),
+        ("transcription", "language") => config.transcription.language = Some(value.clone()),
 
         // Diarization
         ("diarization", "engine") => config.diarization.engine = value.clone(),

@@ -718,6 +718,15 @@ fn parse_recording_intent(intent: Option<&str>) -> Result<Option<RecordingIntent
     }
 }
 
+fn parse_optional_string_setting(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
 #[cfg(test)]
 fn stage_label(stage: minutes_core::pipeline::PipelineStage, mode: CaptureMode) -> &'static str {
     match (stage, mode) {
@@ -3224,6 +3233,7 @@ pub fn cmd_get_settings() -> serde_json::Value {
         "transcription": {
             "model": config.transcription.model,
             "downloaded_models": downloaded_models,
+            "language": config.transcription.language,
         },
         "diarization": {
             "engine": config.diarization.engine,
@@ -3276,6 +3286,9 @@ pub fn cmd_set_setting(section: String, key: String, value: String) -> Result<St
     match (section.as_str(), key.as_str()) {
         // Transcription
         ("transcription", "model") => config.transcription.model = value.clone(),
+        ("transcription", "language") => {
+            config.transcription.language = parse_optional_string_setting(&value);
+        }
 
         // Diarization
         ("diarization", "engine") => config.diarization.engine = value.clone(),
@@ -3489,6 +3502,17 @@ mod tests {
                 CaptureMode::Meeting
             ),
             "Saving meeting"
+        );
+    }
+
+    #[test]
+    fn parse_optional_string_setting_preserves_auto_detect_state() {
+        assert_eq!(parse_optional_string_setting(""), None);
+        assert_eq!(parse_optional_string_setting("   "), None);
+        assert_eq!(parse_optional_string_setting("en"), Some("en".to_string()));
+        assert_eq!(
+            parse_optional_string_setting(" es "),
+            Some("es".to_string())
         );
     }
 

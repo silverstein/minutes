@@ -316,7 +316,26 @@ pub fn available_disk_space_mb(path: &Path) -> Option<u64> {
         None
     }
 
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        let wide: Vec<u16> = check_path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+        let mut free_bytes: u64 = 0;
+        let ok = unsafe {
+            windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW(
+                wide.as_ptr(),
+                &mut free_bytes as *mut u64,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        if ok != 0 {
+            return Some(free_bytes / (1024 * 1024));
+        }
+        None
+    }
+
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = check_path;
         None
@@ -1359,7 +1378,7 @@ mod tests {
 
     #[test]
     fn available_disk_space_returns_some_for_valid_path() {
-        let result = available_disk_space_mb(Path::new("/tmp"));
+        let result = available_disk_space_mb(&std::env::temp_dir());
         assert!(result.is_some());
         assert!(result.unwrap() > 0);
     }

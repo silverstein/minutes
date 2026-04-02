@@ -5206,26 +5206,30 @@
       userExplicitlyCollapsed = false;
       recallNudge.classList.remove('active');
 
-      try {
-        // outerPosition() returns physical pixels; convert to logical
-        // so setPosition(LogicalPosition) doesn't shift on Retina displays.
-        const scaleFactor = await currentWindow.scaleFactor();
-        const pos = await currentWindow.outerPosition();
-        const logicalX = pos.x / scaleFactor;
-        const logicalY = pos.y / scaleFactor;
-        const screenWidth = window.screen.availWidth;
-        const newRight = logicalX + EXPANDED_WIDTH;
-        if (newRight > screenWidth) {
-          const shiftX = Math.max(0, logicalX - (newRight - screenWidth));
-          await currentWindow.setPosition(new window.__TAURI__.window.LogicalPosition(shiftX, logicalY));
-        }
-      } catch (e) {
-        console.error('Screen edge check:', e);
-      }
+      const isFullscreen = await currentWindow.isFullscreen().catch(() => false);
 
-      await currentWindow.setSize(
-        new window.__TAURI__.window.LogicalSize(EXPANDED_WIDTH, 640)
-      );
+      if (!isFullscreen) {
+        try {
+          // outerPosition() returns physical pixels; convert to logical
+          // so setPosition(LogicalPosition) doesn't shift on Retina displays.
+          const scaleFactor = await currentWindow.scaleFactor();
+          const pos = await currentWindow.outerPosition();
+          const logicalX = pos.x / scaleFactor;
+          const logicalY = pos.y / scaleFactor;
+          const screenWidth = window.screen.availWidth;
+          const newRight = logicalX + EXPANDED_WIDTH;
+          if (newRight > screenWidth) {
+            const shiftX = Math.max(0, logicalX - (newRight - screenWidth));
+            await currentWindow.setPosition(new window.__TAURI__.window.LogicalPosition(shiftX, logicalY));
+          }
+        } catch (e) {
+          console.error('Screen edge check:', e);
+        }
+
+        await currentWindow.setSize(
+          new window.__TAURI__.window.LogicalSize(EXPANDED_WIDTH, 640)
+        );
+      }
 
       recallPanel.classList.add('expanded');
       assistantBtn.setAttribute('aria-expanded', 'true');
@@ -5250,10 +5254,14 @@
       recallPanel.classList.remove('expanded');
       assistantBtn.setAttribute('aria-expanded', 'false');
 
+      const isFullscreen = await currentWindow.isFullscreen().catch(() => false);
+
       setTimeout(async () => {
-        await currentWindow.setSize(
-          new window.__TAURI__.window.LogicalSize(COLLAPSED_WIDTH, 640)
-        );
+        if (!isFullscreen) {
+          await currentWindow.setSize(
+            new window.__TAURI__.window.LogicalSize(COLLAPSED_WIDTH, 640)
+          );
+        }
         recallExpanded = false;
         expandAnimating = false;
         localStorage.setItem('minutes.recallExpanded', 'false');

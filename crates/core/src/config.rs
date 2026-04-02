@@ -29,6 +29,7 @@ pub struct Config {
     pub voice: VoiceConfig,
     pub live_transcript: LiveTranscriptConfig,
     pub recording: RecordingConfig,
+    pub hooks: HooksConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -294,6 +295,23 @@ impl Default for RecordingConfig {
     }
 }
 
+/// Hooks configuration — shell commands triggered by pipeline events.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HooksConfig {
+    /// Shell command to run after a recording is processed.
+    /// The transcript file path is appended as the last argument.
+    /// Example: "/path/to/script.sh" → executed as: /path/to/script.sh /path/to/meeting.md
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post_record: Option<String>,
+}
+
+impl Default for HooksConfig {
+    fn default() -> Self {
+        Self { post_record: None }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LiveTranscriptConfig {
@@ -393,6 +411,7 @@ impl Default for Config {
             voice: VoiceConfig::default(),
             live_transcript: LiveTranscriptConfig::default(),
             recording: RecordingConfig::default(),
+            hooks: HooksConfig::default(),
         }
     }
 }

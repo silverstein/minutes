@@ -1769,4 +1769,91 @@ mod tests {
             .iter()
             .any(|entity| entity.slug == "advisor-platform"));
     }
+
+    #[test]
+    fn run_post_record_hook_executes_and_receives_path() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let marker = dir.path().join("hook-ran.txt");
+        let transcript = dir.path().join("test-meeting.md");
+        std::fs::write(&transcript, "test content").unwrap();
+
+        // The hook is invoked as: sh -c '{cmd} "$1"' -- /path/to/transcript.md
+        // So the user's command receives the transcript path as $1.
+        // Use a simple script that copies $1 to the marker location.
+        let script = dir.path().join("hook.sh");
+        std::fs::write(
+            &script,
+            format!("#!/bin/sh\ncp \"$1\" '{}'\n", marker.display()),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let config = Config {
+            hooks: crate::config::HooksConfig {
+                post_record: Some(script.display().to_string()),
+            },
+            ..Config::default()
+        };
+
+        // Replicate the exact invocation from run_post_record_hook
+        let cmd = config.hooks.post_record.as_ref().unwrap();
+        let output = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!("{} \"$1\"", cmd))
+            .arg("--")
+            .arg(transcript.display().to_string())
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success(),
+            "hook failed (stderr={})",
+            stderr
+        );
+        assert!(marker.exists(), "hook should have created the marker file");
+        let contents = std::fs::read_to_string(&marker).unwrap();
+        assert_eq!(contents, "test content");
+    }
+}
+
+/// Execute the post_record hook if configured.
+/// Runs the command asynchronously in the background with the transcript path as argument.
+pub fn run_post_record_hook(config: &Config, transcript_path: &Path) {
+    if let Some(ref command) = config.hooks.post_record {
+        let cmd = command.clone();
+        let path = transcript_path.display().to_string();
+        std::thread::spawn(move || {
+            tracing::info!(command = %cmd, path = %path, "running post_record hook");
+            match std::process::Command::new("sh")
+                .arg("-c")
+                .arg(format!("{} \"$1\"", cmd))
+                .arg("--")
+                .arg(&path)
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .output()
+            {
+                Ok(output) => {
+                    if !output.status.success() {
+                        let stderr = String::from_utf8_lossy(&output.stderr);
+                        tracing::warn!(
+                            command = %cmd,
+                            exit_code = output.status.code(),
+                            stderr = %stderr,
+                            "post_record hook failed"
+                        );
+                    } else {
+                        tracing::info!(command = %cmd, "post_record hook completed");
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(command = %cmd, error = %error, "post_record hook spawn failed");
+                }
+            }
+        });
+    }
 }

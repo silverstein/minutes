@@ -617,6 +617,8 @@ where
                     tracing::warn!(error = %error, "graph index rebuild failed after queued job");
                 }
                 refresh_qmd_collection(config);
+                // Run post_record hook (async, non-blocking)
+                pipeline::run_post_record_hook(config, &result.path);
                 if !should_preserve_capture(completed_job.state) {
                     remove_capture_artifacts(&completed_job);
                 }

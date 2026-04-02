@@ -496,6 +496,20 @@ enum Commands {
         no_open: bool,
     },
 
+    /// Delete a meeting or voice memo (moves to archive by default, or permanently with --force)
+    Delete {
+        /// Filename slug or path of the meeting to delete (e.g., "2026-03-17-standup")
+        meeting: String,
+
+        /// Also delete the original .wav audio file
+        #[arg(long)]
+        with_audio: bool,
+
+        /// Permanently delete instead of archiving
+        #[arg(long)]
+        force: bool,
+    },
+
     /// Confirm or correct speaker attributions for a meeting
     Confirm {
         /// Path to the meeting markdown file
@@ -786,6 +800,11 @@ fn main() -> Result<()> {
         },
         Commands::Enroll { file, duration } => cmd_enroll(file.as_deref(), duration, &config),
         Commands::Voices { delete, json } => cmd_voices(delete, json),
+        Commands::Delete {
+            meeting,
+            with_audio,
+            force,
+        } => cmd_delete(&meeting, with_audio, force, &config),
         Commands::Confirm {
             meeting,
             speaker,
@@ -2892,9 +2911,114 @@ life (qmd://life/)
             assert!(minutes_core::notes::read_notes().is_none());
         });
     }
+
+    #[test]
+    fn cmd_delete_archives_meeting_to_archive_dir() {
+        with_temp_home(|dir| {
+            let meetings = dir.join("meetings");
+            std::fs::create_dir_all(&meetings).unwrap();
+            let md = meetings.join("2026-04-01-test.md");
+            std::fs::write(&md, "---\ntitle: Test\n---\nContent").unwrap();
+            let wav = meetings.join("2026-04-01-test.wav");
+            std::fs::write(&wav, b"fake audio").unwrap();
+
+            let config = Config {
+                output_dir: meetings.clone(),
+                ..Config::default()
+            };
+
+            // Archive (soft delete)
+            cmd_delete("2026-04-01-test", false, false, &config).unwrap();
+            assert!(!md.exists(), "md should be moved");
+            assert!(
+                meetings.join("archive/2026-04-01-test.md").exists(),
+                "md should be in archive"
+            );
+            assert!(wav.exists(), "wav should remain without --with-audio");
+        });
+    }
+
+    #[test]
+    fn cmd_delete_force_permanently_removes() {
+        with_temp_home(|dir| {
+            let meetings = dir.join("meetings");
+            std::fs::create_dir_all(&meetings).unwrap();
+            let md = meetings.join("2026-04-01-force.md");
+            std::fs::write(&md, "---\ntitle: Force\n---\nContent").unwrap();
+            let wav = meetings.join("2026-04-01-force.wav");
+            std::fs::write(&wav, b"fake audio").unwrap();
+
+            let config = Config {
+                output_dir: meetings.clone(),
+                ..Config::default()
+            };
+
+            cmd_delete("2026-04-01-force", true, true, &config).unwrap();
+            assert!(!md.exists(), "md should be gone");
+            assert!(!wav.exists(), "wav should be gone with --with-audio --force");
+            assert!(
+                !meetings.join("archive/2026-04-01-force.md").exists(),
+                "nothing in archive for force delete"
+            );
+        });
+    }
 }
 
 // Frontmatter parsing is in minutes_core::markdown::{split_frontmatter, extract_field}
+
+fn cmd_delete(meeting: &str, with_audio: bool, force: bool, config: &Config) -> Result<()> {
+    // Resolve the slug to a file path
+    let md_path = if Path::new(meeting).exists() {
+        PathBuf::from(meeting)
+    } else {
+        minutes_core::search::resolve_slug(meeting, config)
+            .ok_or_else(|| anyhow::anyhow!("no meeting found matching: {}", meeting))?
+    };
+
+    let title = md_path
+        .file_stem()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
+
+    // Find associated audio file (.wav with same stem in same directory)
+    let audio_path = md_path.with_extension("wav");
+    let has_audio = audio_path.exists();
+
+    if force {
+        // Permanent delete
+        std::fs::remove_file(&md_path)?;
+        eprintln!("Deleted: {}", md_path.display());
+
+        if with_audio && has_audio {
+            std::fs::remove_file(&audio_path)?;
+            eprintln!("Deleted audio: {}", audio_path.display());
+        }
+    } else {
+        // Soft delete: move to archive directory
+        let archive_dir = config.output_dir.join("archive");
+        std::fs::create_dir_all(&archive_dir)?;
+
+        let dest_md = archive_dir.join(md_path.file_name().unwrap());
+        std::fs::rename(&md_path, &dest_md)?;
+        eprintln!("Archived: {} → {}", title, dest_md.display());
+
+        if with_audio && has_audio {
+            let dest_audio = archive_dir.join(audio_path.file_name().unwrap());
+            std::fs::rename(&audio_path, &dest_audio)?;
+            eprintln!("Archived audio: {}", dest_audio.display());
+        }
+    }
+
+    if has_audio && !with_audio {
+        eprintln!(
+            "Note: audio file still exists at {}. Use --with-audio to remove it.",
+            audio_path.display()
+        );
+    }
+
+    Ok(())
+}
 
 fn cmd_schema() -> Result<()> {
     let schema = schemars::schema_for!(minutes_core::markdown::Frontmatter);

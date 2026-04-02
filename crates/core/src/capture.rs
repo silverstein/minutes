@@ -1363,4 +1363,11 @@ mod tests {
         assert!(result.is_some());
         assert!(result.unwrap() > 0);
     }
+
+    #[test]
+    fn list_input_devices_returns_vec_of_strings() {
+        let devices = list_input_devices();
+        // Should return a Vec<String> (may be empty in CI, but must not panic)
+        assert!(devices.iter().all(|d| !d.is_empty()));
+    }
 }

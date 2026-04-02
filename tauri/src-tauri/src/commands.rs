@@ -2506,6 +2506,55 @@ pub fn cmd_search(query: String) -> serde_json::Value {
 }
 
 #[tauri::command]
+pub fn cmd_list_devices() -> serde_json::Value {
+    let config = Config::load();
+    let configured_device = config.recording.device.clone();
+    let devices = minutes_core::capture::list_input_devices();
+    serde_json::json!({
+        "devices": devices,
+        "configured_device": configured_device,
+    })
+}
+
+#[tauri::command]
+pub fn cmd_delete_meeting(path: String, with_audio: bool, force: bool) -> Result<String, String> {
+    let md_path = std::path::PathBuf::from(&path);
+    if !md_path.exists() {
+        return Err(format!("File not found: {}", path));
+    }
+
+    let title = md_path
+        .file_stem()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
+
+    let audio_path = md_path.with_extension("wav");
+    let has_audio = audio_path.exists();
+
+    if force {
+        std::fs::remove_file(&md_path).map_err(|e| e.to_string())?;
+        if with_audio && has_audio {
+            std::fs::remove_file(&audio_path).map_err(|e| e.to_string())?;
+        }
+        Ok(format!("Deleted: {}", title))
+    } else {
+        let config = Config::load();
+        let archive_dir = config.output_dir.join("archive");
+        std::fs::create_dir_all(&archive_dir).map_err(|e| e.to_string())?;
+
+        let dest_md = archive_dir.join(md_path.file_name().unwrap());
+        std::fs::rename(&md_path, &dest_md).map_err(|e| e.to_string())?;
+
+        if with_audio && has_audio {
+            let dest_audio = archive_dir.join(audio_path.file_name().unwrap());
+            std::fs::rename(&audio_path, &dest_audio).map_err(|e| e.to_string())?;
+        }
+        Ok(format!("Archived: {}", title))
+    }
+}
+
+#[tauri::command]
 pub fn cmd_open_file(app: tauri::AppHandle, path: String) -> Result<(), String> {
     open_target(&app, &path)
 }
@@ -3253,6 +3302,9 @@ pub fn cmd_get_settings() -> serde_json::Value {
 
     serde_json::json!({
         "config_path": path.display().to_string(),
+        "recording": {
+            "device": config.recording.device,
+        },
         "transcription": {
             "model": config.transcription.model,
             "downloaded_models": downloaded_models,
@@ -3278,6 +3330,9 @@ pub fn cmd_get_settings() -> serde_json::Value {
         "assistant": {
             "agent": config.assistant.agent,
             "agent_args": config.assistant.agent_args,
+        },
+        "hooks": {
+            "post_record": config.hooks.post_record,
         },
         "call_detection": {
             "enabled": config.call_detection.enabled,
@@ -3312,6 +3367,11 @@ pub fn cmd_set_setting(section: String, key: String, value: String) -> Result<St
         ("transcription", "model") => config.transcription.model = value.clone(),
         ("transcription", "language") => {
             config.transcription.language = parse_optional_string_setting(&value);
+        }
+
+        // Recording
+        ("recording", "device") => {
+            config.recording.device = parse_optional_string_setting(&value);
         }
 
         // Diarization
@@ -3403,6 +3463,11 @@ pub fn cmd_set_setting(section: String, key: String, value: String) -> Result<St
         }
         ("live_transcript", "shortcut") => {
             config.live_transcript.shortcut = value.clone();
+        }
+
+        // Hooks
+        ("hooks", "post_record") => {
+            config.hooks.post_record = parse_optional_string_setting(&value);
         }
 
         _ => return Err(format!("Unknown setting: {}.{}", section, key)),

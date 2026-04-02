@@ -1059,6 +1059,8 @@ fn main() {
             commands::cmd_recovery_items,
             commands::cmd_retry_recovery,
             commands::cmd_retry_processing_job,
+            commands::cmd_list_devices,
+            commands::cmd_delete_meeting,
             commands::cmd_get_meeting_detail,
             commands::cmd_list_voices,
             commands::cmd_confirm_speaker,

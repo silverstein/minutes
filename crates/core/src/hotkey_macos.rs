@@ -86,6 +86,7 @@ mod ffi {
         ) -> CFMachPortRef;
 
         pub fn CGEventTapEnable(tap: CFMachPortRef, enable: bool);
+        pub fn CGEventTapIsEnabled(tap: CFMachPortRef) -> bool;
 
         pub fn CFMachPortCreateRunLoopSource(
             allocator: CFAllocatorRef,
@@ -110,23 +111,42 @@ mod ffi {
 
         pub fn CFRelease(cf: *const c_void);
 
+        // Input Monitoring permission (correct API for CGEventTap)
+        pub fn CGPreflightListenEventAccess() -> bool;
+        pub fn CGRequestListenEventAccess() -> bool;
+
+        // Accessibility permission (for reference, NOT what CGEventTap needs)
         pub fn AXIsProcessTrustedWithOptions(options: CFDictionaryRef) -> bool;
     }
 }
 
-/// Check if the app has Accessibility / Input Monitoring permission.
-pub fn is_accessibility_trusted() -> bool {
-    // Check without prompting — pass NULL options (no prompt)
-    unsafe { ffi::AXIsProcessTrustedWithOptions(std::ptr::null()) }
+/// Check if Input Monitoring permission is granted (what CGEventTap actually needs).
+pub fn is_input_monitoring_granted() -> bool {
+    unsafe { ffi::CGPreflightListenEventAccess() }
 }
 
-/// Prompt the user for Accessibility permission.
-/// Opens Input Monitoring in System Settings (CGEventTap needs this, not just Accessibility).
-pub fn prompt_accessibility_permission() {
-    // Open Input Monitoring pane — CGEventTap requires this permission
+/// Request Input Monitoring permission. Shows the system prompt if not yet decided.
+pub fn request_input_monitoring() -> bool {
+    unsafe { ffi::CGRequestListenEventAccess() }
+}
+
+/// Open System Settings to the Input Monitoring pane.
+pub fn open_input_monitoring_settings() {
     let _ = std::process::Command::new("open")
         .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent")
         .spawn();
+}
+
+/// Check if Accessibility permission is granted (NOT needed for CGEventTap,
+/// but kept for other uses like AppleScript automation).
+pub fn is_accessibility_trusted() -> bool {
+    unsafe { ffi::AXIsProcessTrustedWithOptions(std::ptr::null()) }
+}
+
+/// Prompt the user for Accessibility permission (legacy, prefer open_input_monitoring_settings
+/// for hotkey-related flows).
+pub fn prompt_accessibility_permission() {
+    open_input_monitoring_settings();
 }
 
 /// Events emitted by the native hotkey monitor.
@@ -210,7 +230,7 @@ impl Drop for HotkeyMonitor {
 /// Attempt to start the native macOS hotkey monitor and report whether the
 /// current process identity can create the CGEventTap successfully.
 pub fn probe_hotkey_monitor(keycode: i64, timeout: Duration) -> HotkeyProbeResult {
-    let accessibility_trusted = is_accessibility_trusted();
+    let accessibility_trusted = is_input_monitoring_granted();
     let started_at = Instant::now();
     let (tx, rx) = std::sync::mpsc::channel::<HotkeyMonitorStatus>();
 
@@ -379,8 +399,18 @@ fn run_event_tap(
         ffi::CGEventTapEnable(tap, true);
         status_callback(HotkeyMonitorStatus::Active);
 
-        // Run in 0.5s intervals so we can check the stop flag
+        // Run in 0.5s intervals so we can check the stop flag and tap health
         while !stop.load(Ordering::Relaxed) {
+            // Health check: macOS can silently disable the tap after code re-signing
+            // or secure input activation. Re-enable if needed.
+            if !ffi::CGEventTapIsEnabled(tap) {
+                tracing::warn!(
+                    keycode = target_keycode,
+                    "CGEventTap was silently disabled, re-enabling"
+                );
+                ffi::CGEventTapEnable(tap, true);
+            }
+
             let result = ffi::CFRunLoopRunInMode(ffi::kCFRunLoopDefaultMode, 0.5, false);
             if result == ffi::kCFRunLoopRunFinished {
                 break;
@@ -450,6 +480,11 @@ unsafe extern "C" fn event_tap_callback(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn input_monitoring_check_returns_bool() {
+        let _ = is_input_monitoring_granted();
+    }
 
     #[test]
     fn accessibility_check_returns_bool() {

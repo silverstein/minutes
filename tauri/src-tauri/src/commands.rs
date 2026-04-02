@@ -4325,6 +4325,14 @@ fn clear_dictation_hotkey_capture_state(runtime: &mut DictationHotkeyRuntime) {
     runtime.active_capture = None;
 }
 
+/// Public entry point for the shortcut manager to start a dictation session.
+pub fn start_dictation_session_public(
+    app: &tauri::AppHandle,
+    capture_style: Option<HotkeyCaptureStyle>,
+) -> Result<(), String> {
+    start_dictation_session(app, capture_style).map(|_| ())
+}
+
 fn start_dictation_session(
     app: &tauri::AppHandle,
     capture_style: Option<HotkeyCaptureStyle>,
@@ -4848,4 +4856,166 @@ pub fn cmd_request_accessibility() -> String {
     {
         "Accessibility settings are only used for the macOS dictation hotkey.".into()
     }
+}
+
+// ── Unified Shortcut Commands ────────────────────────────────
+
+#[tauri::command]
+pub fn cmd_set_shortcut(
+    app: tauri::AppHandle,
+    slot: String,
+    enabled: bool,
+    shortcut: String,
+    keycode: i64,
+) -> Result<crate::shortcut_manager::ShortcutStatus, String> {
+    use crate::shortcut_manager::{ShortcutManager, ShortcutSlot};
+
+    let slot = ShortcutSlot::from_str(&slot)?;
+
+    // Validate shortcut string
+    if shortcut.len() > 50 {
+        return Err("Shortcut string too long (max 50 characters)".into());
+    }
+    if !shortcut.is_empty()
+        && !shortcut
+            .chars()
+            .all(|c| c.is_alphanumeric() || "+_ ".contains(c))
+    {
+        return Err(format!("Invalid characters in shortcut: {}", shortcut));
+    }
+
+    // Validate keycode range
+    if !(-1..=255).contains(&keycode) {
+        return Err(format!("Invalid keycode: {}", keycode));
+    }
+
+    // Acquire lock, perform registration/unregistration, then DROP before file I/O.
+    let status = {
+        let mgr_state = app.state::<std::sync::Arc<std::sync::Mutex<ShortcutManager>>>();
+        let mut mgr = mgr_state
+            .lock()
+            .map_err(|_| "Shortcut manager lock poisoned".to_string())?;
+
+        if enabled {
+            mgr.register(slot, shortcut.clone(), keycode, &app)?
+        } else {
+            mgr.unregister(slot, &app)?;
+            let mut s = mgr.build_status(slot);
+            // Preserve the shortcut choice in status even when disabling
+            if !shortcut.is_empty() {
+                s.shortcut = shortcut.clone();
+                s.keycode = keycode;
+            }
+            s
+        }
+    }; // lock dropped here
+
+    if enabled {
+        // Persist to config (no lock held)
+        let mut config = Config::load();
+        match slot {
+            ShortcutSlot::Dictation => {
+                config.dictation.shortcut_enabled = true;
+                config.dictation.shortcut = status.shortcut.clone();
+                let backend = crate::shortcut_manager::classify_shortcut(keycode);
+                if backend == crate::shortcut_manager::ShortcutBackend::Native {
+                    config.dictation.hotkey_enabled = true;
+                    config.dictation.hotkey_keycode = keycode;
+                } else {
+                    config.dictation.hotkey_enabled = false;
+                }
+            }
+            ShortcutSlot::QuickThought => {}
+        }
+        config
+            .save()
+            .map_err(|e| format!("Failed to save config: {}", e))?;
+
+        // Preload model when dictation is first enabled
+        if matches!(slot, ShortcutSlot::Dictation) {
+            let config = Config::load();
+            std::thread::spawn(move || {
+                minutes_core::dictation::preload_model(&config).ok();
+            });
+        }
+
+        Ok(status)
+    } else {
+        // Persist disabled state but keep the shortcut/keycode for later re-enable
+        let mut config = Config::load();
+        match slot {
+            ShortcutSlot::Dictation => {
+                config.dictation.shortcut_enabled = false;
+                config.dictation.hotkey_enabled = false;
+                if !shortcut.is_empty() {
+                    let backend = crate::shortcut_manager::classify_shortcut(keycode);
+                    if backend == crate::shortcut_manager::ShortcutBackend::Native {
+                        config.dictation.hotkey_keycode = keycode;
+                    } else {
+                        config.dictation.shortcut = shortcut;
+                    }
+                }
+            }
+            ShortcutSlot::QuickThought => {}
+        }
+        config
+            .save()
+            .map_err(|e| format!("Failed to save config: {}", e))?;
+
+        Ok(status)
+    }
+}
+
+#[tauri::command]
+pub fn cmd_shortcut_status(
+    app: tauri::AppHandle,
+    slot: String,
+) -> Result<crate::shortcut_manager::ShortcutStatus, String> {
+    use crate::shortcut_manager::{ShortcutManager, ShortcutSlot};
+
+    let slot = ShortcutSlot::from_str(&slot)?;
+    let mgr_state = app.state::<std::sync::Arc<std::sync::Mutex<ShortcutManager>>>();
+    let mgr = mgr_state
+        .lock()
+        .map_err(|_| "Shortcut manager lock poisoned".to_string())?;
+    Ok(mgr.build_status(slot))
+}
+
+#[tauri::command]
+pub fn cmd_suspend_shortcut(app: tauri::AppHandle, slot: String) -> Result<(), String> {
+    use crate::shortcut_manager::{ShortcutManager, ShortcutSlot};
+    let slot = ShortcutSlot::from_str(&slot)?;
+    let mgr_state = app.state::<std::sync::Arc<std::sync::Mutex<ShortcutManager>>>();
+    let mut mgr = mgr_state
+        .lock()
+        .map_err(|_| "Shortcut manager lock poisoned".to_string())?;
+    mgr.unregister(slot, &app)?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn cmd_probe_shortcut(keycode: i64) -> serde_json::Value {
+    let backend = crate::shortcut_manager::classify_shortcut(keycode);
+    let needs_native = backend == crate::shortcut_manager::ShortcutBackend::Native;
+
+    let permission_granted = if needs_native {
+        #[cfg(target_os = "macos")]
+        {
+            minutes_core::hotkey_macos::is_input_monitoring_granted()
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            false
+        }
+    } else {
+        true // Standard backend needs no permission
+    };
+
+    serde_json::json!({
+        "keycode": keycode,
+        "backend": if needs_native { "native" } else { "standard" },
+        "needs_permission": needs_native && !permission_granted,
+        "permission_granted": permission_granted,
+        "supported": !needs_native || cfg!(target_os = "macos"),
+    })
 }

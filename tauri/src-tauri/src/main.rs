@@ -13,6 +13,7 @@ mod call_detect;
 mod commands;
 mod context;
 mod pty;
+mod shortcut_manager;
 
 #[cfg(target_os = "macos")]
 fn maybe_run_hotkey_diagnostic() -> Option<i32> {
@@ -400,7 +401,60 @@ fn main() {
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, shortcut, event| {
+                    use tauri::Manager;
                     let shortcut_id = shortcut.id();
+
+                    // Try the new unified shortcut manager first.
+                    // IMPORTANT: Extract the action under the lock, then execute
+                    // AFTER dropping it to avoid deadlock.
+                    type UnifiedResult = Option<(
+                        shortcut_manager::ShortcutSlot,
+                        Option<shortcut_manager::StateMachineAction>,
+                        Option<(shortcut_manager::ShortcutSlot, u64)>,
+                    )>;
+                    let unified_result: UnifiedResult = {
+                        if let Some(mgr_state) =
+                            app.try_state::<Arc<Mutex<shortcut_manager::ShortcutManager>>>()
+                        {
+                            if let Ok(mut mgr) = mgr_state.lock() {
+                                if let Some(slot) = mgr.find_slot_for_shortcut_id(shortcut_id) {
+                                    match event.state() {
+                                        tauri_plugin_global_shortcut::ShortcutState::Pressed => {
+                                            let hold_info = mgr.handle_press(slot);
+                                            Some((slot, None, hold_info))
+                                        }
+                                        tauri_plugin_global_shortcut::ShortcutState::Released => {
+                                            let session_active =
+                                                shortcut_manager::is_slot_session_active_fast(
+                                                    app, slot,
+                                                );
+                                            let (_s, action) =
+                                                mgr.handle_release(slot, session_active);
+                                            Some((slot, Some(action), None))
+                                        }
+                                    }
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    }; // lock dropped here
+
+                    if let Some((slot, action, hold_info)) = unified_result {
+                        if let Some(action) = action {
+                            shortcut_manager::execute_action(app, slot, action);
+                        }
+                        if let Some((slot, generation)) = hold_info {
+                            shortcut_manager::schedule_hold_check(app, slot, generation);
+                        }
+                        return;
+                    }
+
+                    // Fall through to legacy handlers for shortcuts registered by old code
                     let state = app.state::<commands::AppState>();
                     let dictation_shortcut_value = state
                         .dictation_shortcut
@@ -414,7 +468,6 @@ fn main() {
                         )
                         .ok()
                         .map(|shortcut| shortcut.id());
-                    // Also check live transcript shortcut
                     let live_shortcut_value = state
                         .live_shortcut
                         .lock()
@@ -479,6 +532,9 @@ fn main() {
                 Arc::new(Mutex::new(s))
             },
         })
+        .manage(Arc::new(Mutex::new(
+            shortcut_manager::ShortcutManager::new(),
+        )))
         .setup(move |app| {
             let initial_recording = minutes_core::pid::status().recording;
             let startup_config = minutes_core::config::Config::load();
@@ -512,71 +568,52 @@ fn main() {
                 );
             }
 
-            #[cfg(target_os = "macos")]
-            if startup_config.dictation.hotkey_enabled {
+            // Restore dictation shortcut via the unified ShortcutManager.
+            // This replaces the old dual-path (legacy hotkey + legacy standard shortcut).
+            {
+                let cfg = &startup_config;
                 let app_handle = app.handle().clone();
-                let keycode = startup_config.dictation.hotkey_keycode;
-                minutes_core::logging::append_log(&serde_json::json!({
-                    "ts": chrono::Local::now().to_rfc3339(),
-                    "level": "info",
-                    "step": "dictation_hotkey_startup_restore",
-                    "file": "",
-                    "extra": {
-                        "enabled": true,
-                        "keycode": keycode,
-                    }
-                }))
-                .ok();
-                std::thread::spawn(move || {
-                    if let Err(error) =
-                        commands::start_dictation_hotkey_with_keycode(app_handle, keycode)
-                    {
-                        eprintln!("[dictation-hotkey] startup restore failed: {}", error);
-                        minutes_core::logging::append_log(&serde_json::json!({
-                            "ts": chrono::Local::now().to_rfc3339(),
-                            "level": "error",
-                            "step": "dictation_hotkey_startup_restore",
-                            "file": "",
-                            "error": error,
-                        }))
-                        .ok();
-                    }
-                });
-            }
-
-            if startup_config.dictation.shortcut_enabled {
-                use tauri_plugin_global_shortcut::GlobalShortcutExt;
-
-                let shortcut = startup_config.dictation.shortcut.clone();
-                if let Err(error) = app.global_shortcut().register(shortcut.as_str()) {
-                    eprintln!("[dictation-shortcut] startup restore failed: {}", error);
-                    minutes_core::logging::append_log(&serde_json::json!({
-                        "ts": chrono::Local::now().to_rfc3339(),
-                        "level": "error",
-                        "step": "dictation_shortcut_startup_restore",
-                        "file": "",
-                        "error": error.to_string(),
-                        "extra": {
-                            "enabled": true,
-                            "shortcut": shortcut,
+                if cfg.dictation.hotkey_enabled || cfg.dictation.shortcut_enabled {
+                    let (shortcut, keycode) = if cfg.dictation.hotkey_enabled {
+                        let kc = cfg.dictation.hotkey_keycode;
+                        let label = if kc == 57 {
+                            "CapsLock"
+                        } else if kc == 63 {
+                            "fn"
+                        } else {
+                            "CapsLock"
+                        };
+                        (label.to_string(), kc)
+                    } else {
+                        (cfg.dictation.shortcut.clone(), -1i64)
+                    };
+                    let register_result = {
+                        let mgr_state =
+                            app_handle.state::<Arc<Mutex<shortcut_manager::ShortcutManager>>>();
+                        let mut mgr = match mgr_state.lock() {
+                            Ok(mgr) => mgr,
+                            Err(_) => {
+                                eprintln!("[shortcut_manager] mutex poisoned at startup");
+                                return Ok(());
+                            }
+                        };
+                        mgr.register(
+                            shortcut_manager::ShortcutSlot::Dictation,
+                            shortcut.clone(),
+                            keycode,
+                            &app_handle,
+                        )
+                    };
+                    match register_result {
+                        Ok(_) => {
+                            dictation_shortcut_enabled.store(true, Ordering::Relaxed);
+                            if let Ok(mut current) = dictation_shortcut.lock() {
+                                *current = shortcut;
+                            }
                         }
-                    }))
-                    .ok();
-                } else {
-                    minutes_core::logging::append_log(&serde_json::json!({
-                        "ts": chrono::Local::now().to_rfc3339(),
-                        "level": "info",
-                        "step": "dictation_shortcut_startup_restore",
-                        "file": "",
-                        "extra": {
-                            "enabled": true,
-                            "shortcut": shortcut.clone(),
+                        Err(e) => {
+                            eprintln!("[shortcut_manager] startup restore dictation failed: {}", e);
                         }
-                    }))
-                    .ok();
-                    dictation_shortcut_enabled.store(true, Ordering::Relaxed);
-                    if let Ok(mut current) = dictation_shortcut.lock() {
-                        *current = shortcut;
                     }
                 }
             }
@@ -1049,6 +1086,10 @@ fn main() {
             commands::cmd_dictation_hotkey_status,
             commands::cmd_check_accessibility,
             commands::cmd_request_accessibility,
+            commands::cmd_set_shortcut,
+            commands::cmd_shortcut_status,
+            commands::cmd_suspend_shortcut,
+            commands::cmd_probe_shortcut,
             commands::cmd_start_live_transcript,
             commands::cmd_stop_live_transcript,
             commands::cmd_live_transcript_status,

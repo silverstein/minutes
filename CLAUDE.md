@@ -245,7 +245,7 @@ minutes/
 ├── BUILD-STATUS.md            # Build progress tracker
 ├── Cargo.toml                 # Workspace root
 ├── crates/
-│   ├── core/src/              # 28 Rust modules — the engine
+│   ├── core/src/              # 31 Rust modules — the engine
 │   │   ├── capture.rs         # Audio capture (cpal), device categorization, loopback detection
 │   │   ├── resample.rs        # Shared mono-downmix + 16kHz decimation resampler (used by capture + streaming)
 │   │   ├── transcribe.rs      # Whisper.cpp transcription (delegates to whisper-guard for anti-hallucination, optional nnnoiseless denoise)

@@ -183,7 +183,7 @@ function findMinutesBinary(): string {
 let MINUTES_BIN = findMinutesBinary();
 
 // ── Expected CLI version (must match this MCP server release) ──
-const MCP_SERVER_VERSION = "0.9.3";
+const MCP_SERVER_VERSION = "0.9.4";
 const EXPECTED_CLI_VERSION = MCP_SERVER_VERSION;
 const RELEASE_TAG = `v${EXPECTED_CLI_VERSION}`;
 
@@ -708,8 +708,12 @@ server.tool(
       };
     }
 
-    // Spawn detached — recording is a foreground process that blocks,
-    // so we spawn it and let it run independently
+    // Spawn recording as a child process (not detached).
+    // detached: true calls setsid() which creates a new macOS audit session,
+    // severing the TCC microphone grant inherited from the host app (Claude Desktop).
+    // CoreAudio then delivers all-zero samples — silent recordings.
+    // The MCP server is long-lived, and the recording process ignores SIGTERM,
+    // so child.unref() alone is sufficient.
     const args = ["record", "--mode", mode];
     if (title) args.push("--title", title);
     if (intent) args.push("--intent", intent);
@@ -717,7 +721,6 @@ server.tool(
     if (language) args.push("--language", language);
 
     const child = spawn(MINUTES_BIN, args, {
-      detached: true,
       stdio: "ignore",
       env: { ...process.env, RUST_LOG: "info" },
     });
@@ -1912,11 +1915,10 @@ server.tool(
       };
     }
 
-    // Spawn detached dictation process
+    // Spawn dictation as child (not detached — preserves macOS TCC mic grant)
     const dictArgs = ["dictate"];
     if (language) dictArgs.push("--language", language);
     const child = spawn(MINUTES_BIN, dictArgs, {
-      detached: true,
       stdio: "ignore",
       env: { ...process.env, RUST_LOG: "info" },
     });
@@ -2127,11 +2129,10 @@ server.tool(
       }
     } catch { /* no active session, proceed */ }
 
-    // Spawn detached live transcript process
+    // Spawn live transcript as child (not detached — preserves macOS TCC mic grant)
     const liveArgs = ["live"];
     if (language) liveArgs.push("--language", language);
     const child = spawn(MINUTES_BIN, liveArgs, {
-      detached: true,
       stdio: "ignore",
       env: { ...process.env, RUST_LOG: "info" },
     });

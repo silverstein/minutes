@@ -35,6 +35,7 @@
 | 2026-04-01 | self | The desktop transcription-language fix looked straightforward until I checked the underlying config type and saw `transcription.language` is `Option<String>`, so a plain select would have silently removed the existing auto-detect state | When mirroring CLI/config settings into the Tauri UI, re-open the config field type first and preserve nullable/`None` semantics explicitly in the control and save path |
 | 2026-04-01 | self | Browser-based call detection looked like a narrow Google Meet feature until I checked it against the recent product stance and macOS Automation rules; default-on browser polling would have reopened the same false-positive trust problem we just removed | For call detection in Minutes, treat browser integrations as lower-confidence and opt-in until proven in dogfood, especially when they rely on Apple Events / browser tab inspection |
 | 2026-04-01 | self | While backfilling regression tests for community PRs, I repeated the exact Rust CLI mistake the napkin already warned about and passed two positional filters to `cargo test` | For targeted Rust verification in this repo, use one filter per `cargo test` invocation or a single broader substring filter instead of stacking multiple test names |
+| 2026-04-02 | self | Trusted `$CODEX_HOME` from the automation prompt and tried to write automation memory before confirming the shell exported it; in this app session it was empty and resolved to `/automations` | For automation-memory writes, verify the env var first and fall back to the concrete `~/.codex` path when `CODEX_HOME` is unset |
 
 ## User Preferences
 - For coding/debugging/testing/review tasks, prioritize technical implementation detail and concrete verification.
@@ -45,6 +46,7 @@
 - On macOS 26+, Rust tests that compile `whisper-rs` need `CXXFLAGS="-I$(xcrun --show-sdk-path)/usr/include/c++/v1"`; core tests pass once that is set.
 - For native macOS hotkeys in Tauri, keep startup non-blocking and report lifecycle changes back to the webview with explicit `starting/active/failed` status events.
 - For releases: create the GitHub release with notes BEFORE pushing the tag (use `gh release create` which creates both). CI workflows only upload assets to an existing release. Never let CI create the release — it produces empty bodies that show up blank in followers' feeds.
+- For time-window adversarial reviews here, anchor the window with `git rev-list --before='24 hours ago'` and inspect `BASE..HEAD`; raw `git diff --since` stats can make the review surface look much larger than the actual code delta.
 
 ## Patterns That Don't Work
 - Assuming this repo is only a CLI tool misses the Tauri desktop app and MCP integration surfaces that need review too.

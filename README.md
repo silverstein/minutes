@@ -725,7 +725,7 @@ agent_args = []           # Optional extra args, e.g. ["--dangerously-skip-permi
 
 ```
 minutes/
-├── crates/core/          28 Rust modules — the engine (shared by all interfaces)
+├── crates/core/          31 Rust modules — the engine (shared by all interfaces)
 ├── crates/cli/           CLI binary — recording, search, health, and workflow commands
 ├── crates/whisper-guard/ Anti-hallucination toolkit (VAD gating, dedup, noise trimming)
 ├── crates/reader/        Lightweight read-only meeting parser (no audio deps)

@@ -296,7 +296,7 @@ impl Default for RecordingConfig {
 }
 
 /// Hooks configuration — shell commands triggered by pipeline events.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct HooksConfig {
     /// Shell command to run after a recording is processed.
@@ -304,12 +304,6 @@ pub struct HooksConfig {
     /// Example: "/path/to/script.sh" → executed as: /path/to/script.sh /path/to/meeting.md
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub post_record: Option<String>,
-}
-
-impl Default for HooksConfig {
-    fn default() -> Self {
-        Self { post_record: None }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

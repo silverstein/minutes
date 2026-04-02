@@ -1495,6 +1495,14 @@
       padding: 8px 10px;
     }
 
+    .shortcut-recorder-btn {
+      cursor: pointer;
+      transition: border-color 0.15s, color 0.15s;
+    }
+    .shortcut-recorder-btn:hover {
+      border-color: var(--accent);
+    }
+
     .about-controls-group {
       flex: 1;
     }
@@ -2248,36 +2256,34 @@
           <div class="about-controls-copy">Open Minutes at login</div>
           <button class="btn btn-secondary btn-sm toggle-btn" id="settings-autostart">Off</button>
         </div>
+        <!-- Quick Thought shortcut (unified recorder) -->
         <div class="about-controls">
           <div class="about-controls-group">
-            <div class="about-controls-copy">Global hotkey for quick-thought capture</div>
-            <select class="shortcut-select" id="settings-hotkey-shortcut" style="margin-top: 6px;"></select>
-            <div class="about-controls-meta" id="settings-hotkey-status"></div>
+            <div class="about-controls-copy">Quick Thought shortcut</div>
+            <div style="display: flex; align-items: center; gap: 8px; margin-top: 6px;">
+              <button id="shortcut-recorder-quick_thought" class="btn btn-secondary btn-sm shortcut-recorder-btn" style="min-width: 140px; font-family: var(--font-mono); font-size: 12px;" data-slot="quick_thought">&#8984; Shift M</button>
+              <span class="special-key-link" style="font-size: 11px; color: var(--text-tertiary); cursor: pointer;" data-slot="quick_thought">or <u>Caps Lock</u> / <u>fn</u></span>
+            </div>
+            <div class="about-controls-meta" id="shortcut-status-quick_thought">Hold to record a quick thought, or tap to lock and tap again to stop.</div>
           </div>
-          <button class="btn btn-secondary btn-sm toggle-btn" id="settings-hotkey">Off</button>
+          <button class="btn btn-secondary btn-sm toggle-btn" id="shortcut-toggle-quick_thought">Off</button>
         </div>
       </div>
 
       <!-- Dictation -->
       <div style="margin-bottom: 16px;">
         <div class="about-item-title">DICTATION</div>
+        <!-- Dictation shortcut (unified recorder) -->
         <div class="about-controls">
           <div class="about-controls-group">
-            <div class="about-controls-copy">Standard shortcut (recommended)</div>
-            <select class="shortcut-select" id="settings-dictation-shortcut-select" style="margin-top: 6px;"></select>
-            <div class="about-controls-meta" id="settings-dictation-shortcut-status">Uses the standard global shortcut system. Recommended for most users.</div>
-          </div>
-          <button class="btn btn-secondary btn-sm toggle-btn" id="settings-dictation-shortcut">Off</button>
-        </div>
-        <div class="about-controls">
-          <div class="about-controls-group">
-            <div class="about-controls-copy">Raw key hotkey (advanced)</div>
+            <div class="about-controls-copy">Dictation shortcut</div>
             <div style="display: flex; align-items: center; gap: 8px; margin-top: 6px;">
-              <button id="settings-dictation-hotkey-record" class="btn btn-secondary btn-sm" style="min-width: 100px; font-family: var(--font-mono); font-size: 12px;">Caps Lock</button>
+              <button id="shortcut-recorder-dictation" class="btn btn-secondary btn-sm shortcut-recorder-btn" style="min-width: 140px; font-family: var(--font-mono); font-size: 12px;" data-slot="dictation">&#8984; Shift Space</button>
+              <span class="special-key-link" style="font-size: 11px; color: var(--text-tertiary); cursor: pointer;" data-slot="dictation">or <u>Caps Lock</u> / <u>fn</u></span>
             </div>
-            <div class="about-controls-meta" id="settings-dictation-hotkey-status">Advanced mode. Hold the selected key to dictate, or tap to lock and tap again to stop. Requires Input Monitoring permission.</div>
+            <div class="about-controls-meta" id="shortcut-status-dictation">Hold to dictate, or tap to lock and tap again to stop.</div>
           </div>
-          <button class="btn btn-secondary btn-sm toggle-btn" id="settings-dictation-hotkey">Off</button>
+          <button class="btn btn-secondary btn-sm toggle-btn" id="shortcut-toggle-dictation">Off</button>
         </div>
         <div class="about-controls">
           <div class="about-controls-group">
@@ -3399,6 +3405,8 @@
     }
 
     async function loadHotkeySettings() {
+      // Skip entirely if the unified shortcut system is active
+      if (typeof unifiedShortcutsActive !== 'undefined' && unifiedShortcutsActive) return;
       try {
         const settings = await invoke('cmd_global_hotkey_settings');
         hotkeyShortcut =
@@ -4365,18 +4373,23 @@
         setSettingsToggle('settings-cues', playCaptureCues);
         // Autostart
         try { const autoOn = await invoke('cmd_get_autostart'); setSettingsToggle('settings-autostart', autoOn); } catch(e) { console.error('autostart check:', e); }
-        setSettingsToggle('settings-hotkey', hotkeyEnabled);
-        // Populate hotkey shortcut dropdown from existing choices
-        const hkSettings = await invoke('cmd_global_hotkey_settings').catch(() => null);
-        const settingsHkSelect = document.getElementById('settings-hotkey-shortcut');
-        settingsHkSelect.replaceChildren();
-        if (hkSettings && hkSettings.choices) {
-          for (const choice of hkSettings.choices) {
-            const o = document.createElement('option'); o.value = choice.value; o.textContent = choice.label; settingsHkSelect.appendChild(o);
+        // Legacy hotkey settings -- guarded for removed HTML elements
+        if (document.getElementById('settings-hotkey')) {
+          setSettingsToggle('settings-hotkey', hotkeyEnabled);
+          const hkSettings = await invoke('cmd_global_hotkey_settings').catch(() => null);
+          const settingsHkSelect = document.getElementById('settings-hotkey-shortcut');
+          if (settingsHkSelect) {
+            settingsHkSelect.replaceChildren();
+            if (hkSettings && hkSettings.choices) {
+              for (const choice of hkSettings.choices) {
+                const o = document.createElement('option'); o.value = choice.value; o.textContent = choice.label; settingsHkSelect.appendChild(o);
+              }
+              settingsHkSelect.value = hotkeyShortcut || hkSettings.shortcut || '';
+            }
           }
-          settingsHkSelect.value = hotkeyShortcut || hkSettings.shortcut || '';
+          const hkStatus = document.getElementById('settings-hotkey-status');
+          if (hkStatus) hkStatus.textContent = hotkeyEnabled ? 'Active' : 'Off';
         }
-        document.getElementById('settings-hotkey-status').textContent = hotkeyEnabled ? 'Active' : 'Off';
         document.getElementById('settings-whisper-model').value = s.transcription.model;
         const dl = s.transcription.downloaded_models || [];
         const selectedModel = s.transcription.model;
@@ -4433,8 +4446,8 @@
         }
         const dictationShortcutSettings = await invoke('cmd_dictation_shortcut_settings').catch(() => null);
         const dictationShortcutSelect = document.getElementById('settings-dictation-shortcut-select');
-        dictationShortcutSelect.replaceChildren();
-        if (dictationShortcutSettings && dictationShortcutSettings.choices) {
+        if (dictationShortcutSelect) dictationShortcutSelect.replaceChildren();
+        if (dictationShortcutSettings && dictationShortcutSettings.choices && dictationShortcutSelect) {
           for (const choice of dictationShortcutSettings.choices) {
             const o = document.createElement('option');
             o.value = choice.value;
@@ -4448,7 +4461,8 @@
             ? `Dictate ${dictationShortcutSettings.shortcut}`
             : 'Dictate';
           renderDictationShortcutChip();
-          document.getElementById('settings-dictation-shortcut-status').textContent =
+          const dsStatus = document.getElementById('settings-dictation-shortcut-status');
+          if (dsStatus) dsStatus.textContent =
             dictationShortcutSettings.enabled
               ? `Active - ${dictationShortcutSettings.shortcut}`
               : 'Uses the standard global shortcut system. Recommended for most users.';
@@ -4583,18 +4597,25 @@
       const next = !isOn;
       try { await invoke('cmd_set_autostart', { enabled: next }); setSettingsToggle('settings-autostart', next); } catch(e) { console.error('autostart toggle:', e); }
     });
-    document.getElementById('settings-hotkey').addEventListener('click', async () => {
-      const shortcut = document.getElementById('settings-hotkey-shortcut').value || hotkeyShortcut;
-      await syncHotkey(!hotkeyEnabled, shortcut);
-      setSettingsToggle('settings-hotkey', hotkeyEnabled);
-      document.getElementById('settings-hotkey-status').textContent = hotkeyEnabled ? 'Active' : 'Off';
-    });
-    document.getElementById('settings-hotkey-shortcut').addEventListener('change', async () => {
-      const shortcut = document.getElementById('settings-hotkey-shortcut').value;
-      await syncHotkey(hotkeyEnabled, shortcut);
-      setSettingsToggle('settings-hotkey', hotkeyEnabled);
-      document.getElementById('settings-hotkey-status').textContent = hotkeyEnabled ? 'Active' : 'Off';
-    });
+    // Legacy hotkey settings — guarded for removed HTML elements
+    if (document.getElementById('settings-hotkey')) {
+      document.getElementById('settings-hotkey').addEventListener('click', async () => {
+        const shortcut = document.getElementById('settings-hotkey-shortcut').value || hotkeyShortcut;
+        await syncHotkey(!hotkeyEnabled, shortcut);
+        setSettingsToggle('settings-hotkey', hotkeyEnabled);
+        const el = document.getElementById('settings-hotkey-status');
+        if (el) el.textContent = hotkeyEnabled ? 'Active' : 'Off';
+      });
+    }
+    if (document.getElementById('settings-hotkey-shortcut')) {
+      document.getElementById('settings-hotkey-shortcut').addEventListener('change', async () => {
+        const shortcut = document.getElementById('settings-hotkey-shortcut').value;
+        await syncHotkey(hotkeyEnabled, shortcut);
+        setSettingsToggle('settings-hotkey', hotkeyEnabled);
+        const el = document.getElementById('settings-hotkey-status');
+        if (el) el.textContent = hotkeyEnabled ? 'Active' : 'Off';
+      });
+    }
 
     // Settings change handlers
     document.getElementById('settings-whisper-model').addEventListener('change', async (e) => {
@@ -4670,8 +4691,8 @@
       setSettingsToggle('settings-call-detection-google-meet', next);
     });
 
-    // Dictation settings handlers
-    document.getElementById('settings-dictation-shortcut').addEventListener('click', async () => {
+    // Dictation settings handlers — guarded for removed HTML elements
+    if (document.getElementById('settings-dictation-shortcut')) document.getElementById('settings-dictation-shortcut').addEventListener('click', async () => {
       const select = document.getElementById('settings-dictation-shortcut-select');
       const currentEnabled = document.getElementById('settings-dictation-shortcut').textContent === 'On';
       try {
@@ -4691,7 +4712,7 @@
         document.getElementById('settings-dictation-shortcut-status').textContent = String(e);
       }
     });
-    document.getElementById('settings-dictation-shortcut-select').addEventListener('change', async (e) => {
+    if (document.getElementById('settings-dictation-shortcut-select')) document.getElementById('settings-dictation-shortcut-select').addEventListener('change', async (e) => {
       const button = document.getElementById('settings-dictation-shortcut');
       const enabled = button.textContent === 'On';
       if (!enabled) {
@@ -4755,7 +4776,377 @@
       const select = document.getElementById('settings-live-shortcut-select');
       if (select) select.value = settings.shortcut;
     }).catch(() => {});
-    // Dictation hotkey — "press to record" key capture
+
+    // ── Unified Shortcut Recorder ──────────────────────────────
+    // Replaces the old 3-system approach (dropdown, dropdown, raw-key capture)
+    // with a single "click to record" button per slot.
+
+    const UNIFIED_SLOTS = ['quick_thought', 'dictation'];
+    const SLOT_DEFAULTS = {
+      quick_thought: { shortcut: 'CmdOrCtrl+Shift+M', keycode: -1 },
+      dictation: { shortcut: 'CmdOrCtrl+Shift+Space', keycode: -1 },
+    };
+    const unifiedSlotState = {};
+
+    function shortcutDisplayLabel(shortcut, keycode) {
+      if (keycode === 57) return 'Caps Lock';
+      if (keycode === 63) return 'fn';
+      // Format "CmdOrCtrl+Shift+Space" as "⌘ Shift Space"
+      return shortcut
+        .replace(/CmdOrCtrl/g, '\u2318')
+        .replace(/Shift/g, 'Shift')
+        .replace(/Alt/g, 'Option')
+        .replace(/\+/g, ' ');
+    }
+
+    function updateSlotUI(slot, status) {
+      unifiedSlotState[slot] = status;
+
+      // Sync QuickThought state to localStorage for persistence and legacy compat
+      if (slot === 'quick_thought') {
+        localStorage.setItem('minutes.globalHotkeyEnabled', status.enabled ? 'true' : 'false');
+        if (status.shortcut) localStorage.setItem('minutes.globalHotkeyShortcut', status.shortcut);
+      }
+
+      const recorder = document.getElementById('shortcut-recorder-' + slot);
+      const statusEl = document.getElementById('shortcut-status-' + slot);
+      const toggle = document.getElementById('shortcut-toggle-' + slot);
+      if (!recorder || !statusEl || !toggle) return;
+
+      recorder.textContent = shortcutDisplayLabel(status.shortcut, status.keycode);
+      recorder.style.borderColor = '';
+      recorder.style.color = '';
+
+      const isOn = status.enabled;
+      toggle.textContent = isOn ? 'On' : 'Off';
+      toggle.classList.toggle('btn-primary', isOn);
+      toggle.classList.toggle('btn-secondary', !isOn);
+
+      if (status.pending) {
+        statusEl.textContent = 'Starting ' + shortcutDisplayLabel(status.shortcut, status.keycode) + '...';
+        statusEl.classList.remove('error');
+      } else if (status.needsPermission) {
+        statusEl.textContent = 'Requires Input Monitoring permission. Open System Settings to grant it.';
+        statusEl.classList.add('error');
+      } else if (isOn) {
+        statusEl.textContent = status.message;
+        statusEl.classList.remove('error');
+      } else {
+        const defaultMsg = slot === 'dictation'
+          ? 'Hold to dictate, or tap to lock and tap again to stop.'
+          : 'Hold to record a quick thought, or tap to lock and tap again to stop.';
+        statusEl.textContent = status.message === 'Off.' ? defaultMsg : status.message;
+        statusEl.classList.toggle('error', status.message !== 'Off.' && !status.enabled);
+      }
+    }
+
+    async function loadSlotStatus(slot) {
+      try {
+        const status = await invoke('cmd_shortcut_status', { slot });
+        updateSlotUI(slot, status);
+      } catch (e) {
+        console.error('Load shortcut status for ' + slot + ':', e);
+      }
+    }
+
+    async function toggleSlot(slot) {
+      const current = unifiedSlotState[slot];
+      const wasEnabled = current && current.enabled;
+      const shortcut = (current && current.shortcut) || SLOT_DEFAULTS[slot].shortcut;
+      const keycode = (current && current.keycode) || SLOT_DEFAULTS[slot].keycode;
+      try {
+        const status = await invoke('cmd_set_shortcut', {
+          slot,
+          enabled: !wasEnabled,
+          shortcut,
+          keycode,
+        });
+        updateSlotUI(slot, status);
+      } catch (e) {
+        const statusEl = document.getElementById('shortcut-status-' + slot);
+        if (statusEl) {
+          statusEl.textContent = String(e);
+          statusEl.classList.add('error');
+        }
+      }
+    }
+
+    // Build shortcut string from keyboard event
+    function buildShortcutString(e) {
+      const parts = [];
+      if (e.metaKey || e.ctrlKey) parts.push('CmdOrCtrl');
+      if (e.shiftKey) parts.push('Shift');
+      if (e.altKey) parts.push('Alt');
+
+      // Get the base key using event.code -> macOS keycode mapping
+      const macKeycode = BROWSER_CODE_TO_MAC[e.code]
+        ?? BROWSER_KEY_TO_MAC[e.key]
+        ?? LEGACY_KEYCODE_TO_MAC[e.keyCode]
+        ?? -1;
+
+      // Special keys that are standalone (no modifiers needed)
+      if (e.code === 'CapsLock' || macKeycode === 57) {
+        return { shortcut: 'CapsLock', keycode: 57 };
+      }
+      if (e.key === 'Fn' || e.key === 'fn' || macKeycode === 63) {
+        return { shortcut: 'fn', keycode: 63 };
+      }
+
+      // Skip if only modifier keys were pressed (no base key)
+      const modifierCodes = ['MetaLeft', 'MetaRight', 'ControlLeft', 'ControlRight',
+        'ShiftLeft', 'ShiftRight', 'AltLeft', 'AltRight'];
+      if (modifierCodes.includes(e.code)) {
+        return null; // Modifier-only, wait for base key
+      }
+
+      // Need at least one modifier for a standard combo
+      if (parts.length === 0) {
+        return null; // Bare key without modifier, not valid
+      }
+
+      // Get key name for the shortcut string
+      const keyName = KEYCODE_NAMES[macKeycode] || e.key;
+      parts.push(keyName);
+
+      return { shortcut: parts.join('+'), keycode: macKeycode };
+    }
+
+    // Shortcut recorder: click button to start recording, press keys to capture
+    function initRecorder(slot) {
+      const btn = document.getElementById('shortcut-recorder-' + slot);
+      if (!btn) return;
+      let recording = false;
+      let handler = null;
+
+      btn.addEventListener('click', async () => {
+        if (recording) return;
+        recording = true;
+        btn.textContent = 'Press your shortcut...';
+        btn.style.borderColor = 'var(--accent)';
+
+        // Temporarily unregister the slot's shortcut so key events reach the webview
+        try { await invoke('cmd_suspend_shortcut', { slot }); } catch (e) { /* ok if not registered */ }
+        btn.style.color = 'var(--accent)';
+
+        async function restoreButton() {
+          recording = false;
+          const current = unifiedSlotState[slot];
+          btn.textContent = shortcutDisplayLabel(
+            (current && current.shortcut) || SLOT_DEFAULTS[slot].shortcut,
+            (current && current.keycode) || SLOT_DEFAULTS[slot].keycode
+          );
+          btn.style.borderColor = '';
+          btn.style.color = '';
+          // Re-register the previous shortcut if it was enabled
+          if (current && current.enabled) {
+            try {
+              await invoke('cmd_set_shortcut', {
+                slot,
+                enabled: true,
+                shortcut: current.shortcut,
+                keycode: current.keycode,
+              });
+            } catch (e) { console.error('Re-register shortcut after cancel:', e); }
+          }
+        }
+
+        handler = async (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+
+          // Escape cancels recording
+          if (e.key === 'Escape' || e.code === 'Escape') {
+            document.removeEventListener('keydown', handler, true);
+            restoreButton();
+            return;
+          }
+
+          const result = buildShortcutString(e);
+          if (!result) return; // Modifier-only press, keep waiting
+
+          document.removeEventListener('keydown', handler, true);
+          recording = false;
+
+          const current = unifiedSlotState[slot];
+          const wasEnabled = current && current.enabled;
+
+          try {
+            const probe = await invoke('cmd_probe_shortcut', { keycode: result.keycode });
+            let effectiveEnabled = wasEnabled;
+            if (probe.needs_permission) {
+              const statusEl = document.getElementById('shortcut-status-' + slot);
+              if (statusEl) {
+                statusEl.textContent = shortcutDisplayLabel(result.shortcut, result.keycode) + ' requires Input Monitoring permission.';
+                statusEl.classList.add('error');
+              }
+              // Save choice but don't try to enable until permission is granted
+              effectiveEnabled = false;
+            }
+            if (!probe.supported) {
+              const statusEl = document.getElementById('shortcut-status-' + slot);
+              if (statusEl) {
+                statusEl.textContent = shortcutDisplayLabel(result.shortcut, result.keycode) + ' is not available on this platform.';
+                statusEl.classList.add('error');
+              }
+              btn.textContent = shortcutDisplayLabel(result.shortcut, result.keycode);
+              btn.style.borderColor = '';
+              btn.style.color = '';
+              return;
+            }
+
+            // Register the shortcut (save even if disabled)
+            const status = await invoke('cmd_set_shortcut', {
+              slot,
+              enabled: effectiveEnabled,
+              shortcut: result.shortcut,
+              keycode: result.keycode,
+            });
+            updateSlotUI(slot, status);
+          } catch (e2) {
+            btn.textContent = shortcutDisplayLabel(result.shortcut, result.keycode);
+            btn.style.borderColor = '';
+            btn.style.color = '';
+            const statusEl = document.getElementById('shortcut-status-' + slot);
+            if (statusEl) {
+              statusEl.textContent = String(e2);
+              statusEl.classList.add('error');
+            }
+          }
+        };
+
+        document.addEventListener('keydown', handler, true);
+      });
+    }
+
+    // Special key picker: Caps Lock / fn (can't be captured via keydown in a webview)
+    function initSpecialKeyPicker(slot) {
+      const links = document.querySelectorAll(`.special-key-link[data-slot="${slot}"]`);
+      links.forEach(link => {
+        link.querySelectorAll('u').forEach(u => {
+          u.style.cursor = 'pointer';
+          u.addEventListener('click', async (e) => {
+            e.stopPropagation();
+            const keyName = u.textContent.trim();
+            let shortcut, keycode;
+            if (keyName === 'Caps Lock') {
+              shortcut = 'CapsLock'; keycode = 57;
+            } else if (keyName === 'fn') {
+              shortcut = 'fn'; keycode = 63;
+            } else return;
+
+            const current = unifiedSlotState[slot];
+            const wasEnabled = current && current.enabled;
+
+            // Probe permission first
+            try {
+              const probe = await invoke('cmd_probe_shortcut', { keycode });
+              let effectiveEnabled = wasEnabled;
+              if (probe.needs_permission) {
+                effectiveEnabled = false;
+              }
+              if (!probe.supported) {
+                const statusEl = document.getElementById('shortcut-status-' + slot);
+                if (statusEl) {
+                  statusEl.textContent = keyName + ' is not available on this platform.';
+                  statusEl.classList.add('error');
+                }
+                return;
+              }
+              const status = await invoke('cmd_set_shortcut', {
+                slot, enabled: effectiveEnabled, shortcut, keycode,
+              });
+              updateSlotUI(slot, status);
+              if (probe.needs_permission) {
+                const statusEl = document.getElementById('shortcut-status-' + slot);
+                if (statusEl) {
+                  statusEl.textContent = keyName + ' requires Input Monitoring permission. Toggle On after granting it in System Settings.';
+                  statusEl.classList.add('error');
+                }
+              }
+            } catch (err) {
+              const statusEl = document.getElementById('shortcut-status-' + slot);
+              if (statusEl) { statusEl.textContent = String(err); statusEl.classList.add('error'); }
+            }
+          });
+        });
+      });
+    }
+
+    // Wire toggle buttons
+    for (const slot of UNIFIED_SLOTS) {
+      const toggle = document.getElementById('shortcut-toggle-' + slot);
+      if (toggle) {
+        toggle.addEventListener('click', () => toggleSlot(slot));
+      }
+      initRecorder(slot);
+      initSpecialKeyPicker(slot);
+    }
+
+    // Listen for status updates from the backend (native monitor lifecycle)
+    window.__TAURI__.event.listen('shortcut:status', (event) => {
+      const status = event.payload;
+      if (status && status.slot) {
+        updateSlotUI(status.slot, status);
+      }
+    });
+
+    // Flag: set synchronously so loadHotkeySettings() knows to skip
+    let unifiedShortcutsActive = true;
+
+    // Load initial state for all slots
+    // Also restore from saved config
+    (async () => {
+      const settings = await invoke('cmd_get_settings').catch(() => null);
+      for (const slot of UNIFIED_SLOTS) {
+        await loadSlotStatus(slot);
+
+        // If config says enabled but backend says disabled, restore
+        if (settings) {
+          const current = unifiedSlotState[slot];
+          let shouldRestore = false;
+          let shortcut = SLOT_DEFAULTS[slot].shortcut;
+          let keycode = SLOT_DEFAULTS[slot].keycode;
+
+          // Skip restore if backend already shows enabled (Rust setup handles it)
+          if (current && current.enabled) continue;
+
+          if (slot === 'dictation') {
+            if (settings.dictation?.hotkey_enabled) {
+              shouldRestore = true;
+              keycode = settings.dictation.hotkey_keycode || 57;
+              shortcut = keycode === 57 ? 'CapsLock' : keycode === 63 ? 'fn' : settings.dictation.shortcut;
+            } else if (settings.dictation?.shortcut_enabled) {
+              shouldRestore = true;
+              shortcut = settings.dictation.shortcut || shortcut;
+              keycode = -1;
+            }
+          }
+
+          if (slot === 'quick_thought') {
+            const storedEnabled = localStorage.getItem('minutes.globalHotkeyEnabled');
+            const storedShortcut = localStorage.getItem('minutes.globalHotkeyShortcut');
+            if (storedEnabled === 'true') {
+              shouldRestore = true;
+              shortcut = storedShortcut || shortcut;
+              keycode = -1;
+            }
+          }
+
+          if (shouldRestore) {
+            try {
+              const status = await invoke('cmd_set_shortcut', { slot, enabled: true, shortcut, keycode });
+              updateSlotUI(slot, status);
+            } catch (e) {
+              console.error('Restore shortcut for ' + slot + ':', e);
+            }
+          }
+        }
+      }
+    })();
+
+    // ── End Unified Shortcut Recorder ──────────────────────────
+
+    // Dictation hotkey — "press to record" key capture (legacy, kept for old UI paths)
     const KEYCODE_NAMES = {
       0: 'A', 1: 'S', 2: 'D', 3: 'F', 4: 'H', 5: 'G', 6: 'Z', 7: 'X', 8: 'C', 9: 'V',
       11: 'B', 12: 'Q', 13: 'W', 14: 'E', 15: 'R', 16: 'Y', 17: 'T',
@@ -5000,7 +5391,7 @@
       document.addEventListener('keyup', captureKey, true);
     });
 
-    document.getElementById('settings-dictation-hotkey').addEventListener('click', async () => {
+    if (document.getElementById('settings-dictation-hotkey')) document.getElementById('settings-dictation-hotkey').addEventListener('click', async () => {
       const next = !(dictationHotkeyEnabled || dictationHotkeyPending);
       try {
         const status = await invoke('cmd_enable_dictation_hotkey', { enabled: next, keycode: dictationKeycode });

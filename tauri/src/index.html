@@ -5915,6 +5915,19 @@
       recallEndBtn.style.display = '';
     });
 
+    // ── Restore window size when exiting fullscreen with recall panel open ──
+    currentWindow.onResized(async () => {
+      if (!recallExpanded) return;
+      const fs = await currentWindow.isFullscreen().catch(() => false);
+      if (!fs) {
+        // Just left fullscreen — snap the window to the expected expanded size.
+        await currentWindow.setSize(
+          new window.__TAURI__.window.LogicalSize(EXPANDED_WIDTH, 640)
+        ).catch(() => {});
+        if (recallFitAddon) recallFitAddon.fit();
+      }
+    });
+
     // ── Button handlers ──
     assistantBtn.addEventListener('click', () => toggleRecallPanel());
 

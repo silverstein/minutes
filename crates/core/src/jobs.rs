@@ -399,10 +399,6 @@ fn terminal_state_for_artifact(artifact: &pipeline::TranscriptArtifact) -> JobSt
     }
 }
 
-fn should_preserve_capture(state: JobState) -> bool {
-    matches!(state, JobState::NeedsReview | JobState::Failed)
-}
-
 /// Move the captured WAV alongside the output markdown so users can reprocess later.
 /// e.g. ~/meetings/2026-04-02-standup.md → ~/meetings/2026-04-02-standup.wav
 fn preserve_audio_alongside_output(job: &ProcessingJob) {
@@ -796,11 +792,6 @@ mod tests {
             JobState::NeedsReview
         );
         assert!(JobState::NeedsReview.is_terminal());
-        assert!(should_preserve_capture(JobState::NeedsReview));
-        // Complete jobs now preserve audio alongside the output markdown
-        // rather than deleting it, so should_preserve_capture is only
-        // used for NeedsReview/Failed (kept in jobs dir for inspection).
-        assert!(!should_preserve_capture(JobState::Complete));
     }
 
     #[test]

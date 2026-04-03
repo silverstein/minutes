@@ -1019,8 +1019,33 @@ fn main() {
                 let cal_timer = cal_state.clone();
                 std::thread::spawn(move || {
                     std::thread::sleep(std::time::Duration::from_secs(3));
+                    let mut consecutive_timeouts: u32 = 0;
                     loop {
+                        // Circuit breaker: back off after repeated calendar failures.
+                        // Calendar.app can hang on CalDAV sync or TCC prompts, spawning
+                        // orphaned osascript processes each attempt. After 3 failures,
+                        // wait 5 minutes before trying again.
+                        if consecutive_timeouts >= 3 {
+                            eprintln!(
+                                "[calendar] {} consecutive timeouts, backing off 5 min",
+                                consecutive_timeouts
+                            );
+                            std::thread::sleep(std::time::Duration::from_secs(300));
+                            consecutive_timeouts = 0; // reset and retry
+                        }
+
+                        let start = std::time::Instant::now();
                         refresh_calendar_items(&app_cal, &menu_cal, &cal_timer);
+                        let elapsed = start.elapsed();
+
+                        // If the query took close to the subprocess timeout (10s),
+                        // it almost certainly timed out waiting on Calendar.app.
+                        if elapsed >= std::time::Duration::from_secs(8) {
+                            consecutive_timeouts += 1;
+                        } else {
+                            consecutive_timeouts = 0;
+                        }
+
                         std::thread::sleep(std::time::Duration::from_secs(CALENDAR_REFRESH_SECS));
                     }
                 });

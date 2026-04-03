@@ -15,10 +15,26 @@ use std::time::Duration;
 const SUBPROCESS_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Run a Command with a timeout. Returns None if the process hangs or fails to start.
+///
+/// On Unix, the child is placed in its own process group so that the entire
+/// group (including any grandchild processes) can be killed on timeout.
 pub(crate) fn output_with_timeout(
     mut cmd: Command,
     timeout: Duration,
 ) -> Option<std::process::Output> {
+    // Put the child in its own process group so we can kill the whole group.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // SAFETY: setpgid is async-signal-safe and called between fork/exec.
+        unsafe {
+            cmd.pre_exec(|| {
+                libc::setpgid(0, 0);
+                Ok(())
+            });
+        }
+    }
+
     let child = cmd.spawn().ok()?;
 
     let (tx, rx) = std::sync::mpsc::channel();
@@ -34,7 +50,7 @@ pub(crate) fn output_with_timeout(
             result.ok()
         }
         Err(_) => {
-            // Timed out — kill the subprocess
+            // Timed out — kill the entire process group
             eprintln!(
                 "[calendar] subprocess {} timed out after {:?}, killing",
                 child_id, timeout
@@ -42,7 +58,8 @@ pub(crate) fn output_with_timeout(
             #[cfg(unix)]
             {
                 unsafe {
-                    libc::kill(child_id as i32, libc::SIGKILL);
+                    // Kill the process group (negative PID) to catch any children
+                    libc::kill(-(child_id as i32), libc::SIGKILL);
                 }
             }
             drop(handle); // detach — thread exits on its own after kill

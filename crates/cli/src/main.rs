@@ -1013,14 +1013,9 @@ fn cmd_record(
     let recording_finished_at = Local::now();
     let user_notes = minutes_core::notes::read_notes();
     let pre_context = minutes_core::notes::read_context();
-    let calendar_event =
-        if capture_mode.content_type() == ContentType::Meeting && config.calendar.enabled {
-            minutes_core::calendar::events_overlapping_now()
-                .into_iter()
-                .next()
-        } else {
-            None
-        };
+    // Don't block the stop path with a calendar query (can take 10s if Calendar.app hangs).
+    // The pipeline already falls back to events_overlapping_now() during background processing.
+    let calendar_event = None;
     let queued = (|| -> Result<(minutes_core::jobs::ProcessingJob, String)> {
         let job = minutes_core::jobs::queue_live_capture(
             capture_mode,

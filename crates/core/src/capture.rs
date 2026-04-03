@@ -10,6 +10,9 @@ use std::time::Instant;
 /// Updated ~10x per second from the cpal callback.
 static AUDIO_LEVEL: AtomicU32 = AtomicU32::new(0);
 
+/// Count of audio chunks dropped by the live sidecar channel (buffer full).
+static SIDECAR_DROPS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// Get the current audio input level (0–100).
 pub fn audio_level() -> u32 {
     AUDIO_LEVEL.load(Ordering::Relaxed)
@@ -421,9 +424,11 @@ fn build_capture_stream(
     stop_flag: &Arc<AtomicBool>,
     sample_count: &Arc<std::sync::atomic::AtomicU64>,
     err_flag: &Arc<AtomicBool>,
+    live_tx: &Option<std::sync::mpsc::SyncSender<Vec<f32>>>,
 ) -> Result<cpal::Stream, CaptureError> {
     let writer_clone = Arc::clone(writer);
     let sample_count_clone = Arc::clone(sample_count);
+    let live_tx_clone = live_tx.clone();
 
     // Level meter state — updated from the resampled samples (~10x/sec)
     let mut level_accum: f64 = 0.0;
@@ -464,6 +469,13 @@ fn build_capture_stream(
                     sample_count_clone.fetch_add(1, Ordering::Relaxed);
                 }
             }
+
+            // Fork samples to live transcript sidecar (non-blocking, drops if full)
+            if let Some(ref tx) = live_tx_clone {
+                if tx.try_send(resampled.to_vec()).is_err() {
+                    SIDECAR_DROPS.fetch_add(1, Ordering::Relaxed);
+                }
+            }
         },
     )?;
 
@@ -479,6 +491,7 @@ fn try_reconnect(
     stop_flag: &Arc<AtomicBool>,
     sample_count: &Arc<std::sync::atomic::AtomicU64>,
     err_flag: &Arc<AtomicBool>,
+    live_tx: &Option<std::sync::mpsc::SyncSender<Vec<f32>>>,
 ) -> Option<(cpal::Stream, String)> {
     use cpal::traits::DeviceTrait;
 
@@ -497,7 +510,7 @@ fn try_reconnect(
         .description()
         .map_or_else(|_| "unknown".to_string(), |d| d.name().to_string());
 
-    match build_capture_stream(&device, writer, stop_flag, sample_count, err_flag) {
+    match build_capture_stream(&device, writer, stop_flag, sample_count, err_flag, live_tx) {
         Ok(stream) => {
             tracing::info!(device = %name, "audio stream reconnected");
             Some((stream, name))
@@ -557,6 +570,10 @@ pub fn record_to_wav(
     // Reset audio level
     AUDIO_LEVEL.store(0, Ordering::Relaxed);
 
+    // Start live transcript sidecar — streams real-time transcription to JSONL
+    // so agents can see what's being discussed during the recording.
+    let (live_tx, sidecar_handle) = start_live_sidecar(config, &stop_flag);
+
     // Build initial stream (wrapped in Option for reconnection)
     let mut stream = Some(build_capture_stream(
         &device,
@@ -564,6 +581,7 @@ pub fn record_to_wav(
         &stop_flag,
         &sample_count,
         &err_flag,
+        &live_tx,
     )?);
     tracing::info!("audio capture started");
 
@@ -683,6 +701,7 @@ pub fn record_to_wav(
                 &stop_flag,
                 &sample_count,
                 &err_flag,
+                &live_tx,
             )
             .or_else(|| {
                 tracing::info!("reconnect failed, retrying in 1s...");
@@ -694,6 +713,7 @@ pub fn record_to_wav(
                     &stop_flag,
                     &sample_count,
                     &err_flag,
+                    &live_tx,
                 )
             });
 
@@ -727,6 +747,19 @@ pub fn record_to_wav(
 
     // Stop and finalize
     drop(stream);
+
+    // Disconnect the live sidecar channel and wait for it to finish
+    drop(live_tx);
+    if let Some(handle) = sidecar_handle {
+        handle.join().ok();
+    }
+    let sidecar_drops = SIDECAR_DROPS.swap(0, Ordering::Relaxed);
+    if sidecar_drops > 0 {
+        tracing::warn!(
+            dropped_chunks = sidecar_drops,
+            "live sidecar: audio chunks dropped (transcript may have gaps)"
+        );
+    }
 
     let total_samples = sample_count.load(Ordering::Relaxed);
     let duration_secs = total_samples as f64 / 16000.0;
@@ -762,6 +795,44 @@ pub fn record_to_wav(
     }
 
     Ok(())
+}
+
+/// Spawn a live transcript sidecar thread that receives audio samples and
+/// produces a JSONL transcript in real-time. Returns (sender, join_handle).
+/// When the whisper+streaming features are not available, returns (None, None).
+#[cfg(all(feature = "whisper", feature = "streaming"))]
+fn start_live_sidecar(
+    config: &Config,
+    stop_flag: &Arc<AtomicBool>,
+) -> (
+    Option<std::sync::mpsc::SyncSender<Vec<f32>>>,
+    Option<std::thread::JoinHandle<()>>,
+) {
+    let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<f32>>(200);
+    let sidecar_config = config.clone();
+    let sidecar_stop = stop_flag.clone();
+    match std::thread::Builder::new()
+        .name("live-sidecar".into())
+        .spawn(move || {
+            crate::live_transcript::run_sidecar_mpsc(rx, sidecar_stop, &sidecar_config);
+        }) {
+        Ok(handle) => (Some(tx), Some(handle)),
+        Err(e) => {
+            tracing::warn!("failed to spawn live sidecar thread: {}", e);
+            (None, None)
+        }
+    }
+}
+
+#[cfg(not(all(feature = "whisper", feature = "streaming")))]
+fn start_live_sidecar(
+    _config: &Config,
+    _stop_flag: &Arc<AtomicBool>,
+) -> (
+    Option<std::sync::mpsc::SyncSender<Vec<f32>>>,
+    Option<std::thread::JoinHandle<()>>,
+) {
+    (None, None)
 }
 
 /// Select the best input device.

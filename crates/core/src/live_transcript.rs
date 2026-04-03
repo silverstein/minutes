@@ -459,6 +459,157 @@ pub fn run(
     )
 }
 
+// ── Recording sidecar ──────────────────────────────────────────
+//
+// ── Recording sidecar ──────────────────────────────────────────
+//
+// Runs alongside record_to_wav to produce a live JSONL transcript
+// while recording. Receives audio samples via a stdlib mpsc channel
+// from the capture callback and runs the same VAD + StreamingWhisper
+// loop that standalone live mode uses. The sidecar does NOT write
+// its own WAV (the recording WAV is the canonical audio).
+
+/// Run a live transcript sidecar that consumes audio samples from a channel.
+/// Blocks until the channel disconnects (recording stopped) or stop_flag is set.
+/// Loads its own whisper model (tiny/base) for real-time streaming.
+#[cfg(feature = "whisper")]
+pub fn run_sidecar_mpsc(
+    rx: std::sync::mpsc::Receiver<Vec<f32>>,
+    stop_flag: Arc<AtomicBool>,
+    config: &Config,
+) {
+    if let Err(e) = run_sidecar_inner_mpsc(rx, stop_flag, config) {
+        eprintln!(
+            "[minutes] Live sidecar unavailable: {} — recording continues without real-time transcript",
+            e
+        );
+        tracing::warn!("live sidecar stopped: {}", e);
+    }
+}
+
+/// mpsc sidecar implementation.
+/// Used by record_to_wav which doesn't depend on the streaming feature.
+#[cfg(feature = "whisper")]
+fn run_sidecar_inner_mpsc(
+    rx: std::sync::mpsc::Receiver<Vec<f32>>,
+    stop_flag: Arc<AtomicBool>,
+    config: &Config,
+) -> Result<(), MinutesError> {
+    // Guard: don't clobber a standalone live transcript session's JSONL
+    let lt_pid = pid::live_transcript_pid_path();
+    if let Ok(Some(_)) = pid::check_pid_file(&lt_pid) {
+        tracing::info!("standalone live transcript active — skipping recording sidecar");
+        return Ok(());
+    }
+
+    let whisper_ctx = {
+        let model_path = if config.live_transcript.model.is_empty() {
+            crate::transcribe::resolve_model_path_for_dictation(config)?
+        } else {
+            crate::transcribe::resolve_model_path_by_name(&config.live_transcript.model, config)?
+        };
+        tracing::info!(model = %model_path.display(), "loading whisper model for recording sidecar");
+        whisper_rs::WhisperContext::new_with_params(
+            model_path
+                .to_str()
+                .ok_or_else(|| TranscribeError::ModelLoadError("invalid path".into()))?,
+            whisper_rs::WhisperContextParameters::default(),
+        )
+        .map_err(|e| TranscribeError::ModelLoadError(format!("{}", e)))?
+    };
+
+    let mut sidecar_config = config.clone();
+    sidecar_config.live_transcript.save_wav = false;
+    let mut writer = LiveTranscriptWriter::new(&sidecar_config)?;
+
+    let mut vad = Vad::new();
+    let mut streaming = StreamingWhisper::new(config.transcription.language.clone());
+    let mut was_speaking = false;
+    let mut utterance_samples: usize = 0;
+    let max_utterance_secs = config.live_transcript.max_utterance_secs.max(5);
+    let max_utterance_samples = (max_utterance_secs as usize).saturating_mul(16000);
+
+    tracing::info!("live sidecar started (recording mode)");
+
+    loop {
+        if stop_flag.load(Ordering::Relaxed) {
+            if utterance_samples > 0 {
+                if let Some(sr) = streaming.finalize(&whisper_ctx) {
+                    writer.write_utterance(&sr.text, sr.duration_secs);
+                }
+            }
+            break;
+        }
+
+        let samples = match rx.recv_timeout(std::time::Duration::from_millis(100)) {
+            Ok(s) => s,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                if utterance_samples > 0 {
+                    if let Some(sr) = streaming.finalize(&whisper_ctx) {
+                        writer.write_utterance(&sr.text, sr.duration_secs);
+                    }
+                }
+                break;
+            }
+        };
+
+        let rms = if samples.is_empty() {
+            0.0
+        } else {
+            let sum_sq: f32 = samples.iter().map(|s| s * s).sum();
+            (sum_sq / samples.len() as f32).sqrt()
+        };
+
+        let vad_result = vad.process(rms);
+
+        if vad_result.speaking {
+            was_speaking = true;
+            utterance_samples += samples.len();
+
+            if let Some(_sr) = streaming.feed(&samples, &whisper_ctx) {
+                // Partial result — could emit event in future
+            }
+
+            if utterance_samples >= max_utterance_samples {
+                tracing::info!("sidecar: max utterance duration, force-finalizing");
+                if let Some(sr) = streaming.finalize(&whisper_ctx) {
+                    writer.write_utterance(&sr.text, sr.duration_secs);
+                }
+                streaming.reset();
+                utterance_samples = 0;
+                was_speaking = false;
+            }
+        } else if was_speaking && utterance_samples > 0 {
+            if let Some(sr) = streaming.finalize(&whisper_ctx) {
+                writer.write_utterance(&sr.text, sr.duration_secs);
+            }
+            streaming.reset();
+            utterance_samples = 0;
+            was_speaking = false;
+        }
+    }
+
+    let (lines, duration, _path) = writer.finalize();
+    tracing::info!(
+        lines = lines,
+        duration_secs = format!("{:.1}", duration),
+        "live sidecar ended (recording mode)"
+    );
+
+    Ok(())
+}
+
+/// Stub when whisper feature is disabled.
+#[cfg(not(feature = "whisper"))]
+pub fn run_sidecar_mpsc(
+    _rx: std::sync::mpsc::Receiver<Vec<f32>>,
+    _stop_flag: Arc<AtomicBool>,
+    _config: &Config,
+) {
+    tracing::warn!("live sidecar requires the whisper feature");
+}
+
 // ── Delta reader ────────────────────────────────────────────────
 
 /// Read transcript lines from the JSONL file since a given line number.

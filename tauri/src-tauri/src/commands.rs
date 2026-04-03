@@ -1754,6 +1754,12 @@ pub fn start_recording(
     minutes_core::notes::save_recording_start().ok();
     eprintln!("{} started...", mode.noun());
 
+    // Inject live transcript context into the assistant workspace so the Recall
+    // panel (and any connected agent) can read the live JSONL during recording.
+    if let Ok(workspace) = crate::context::create_workspace(&config) {
+        update_assistant_live_context(&workspace, true);
+    }
+
     let mut clear_processing_on_exit = true;
     match minutes_core::capture::record_to_wav(&wav_path, stop_flag, &config) {
         Ok(()) => {
@@ -1771,13 +1777,9 @@ pub fn start_recording(
                 let recording_finished_at = chrono::Local::now();
                 let user_notes = minutes_core::notes::read_notes();
                 let pre_context = minutes_core::notes::read_context();
-                let calendar_event = if mode.content_type() == ContentType::Meeting {
-                    minutes_core::calendar::events_overlapping_now()
-                        .into_iter()
-                        .next()
-                } else {
-                    None
-                };
+                // Don't block the stop path with a calendar query (can take 10s if Calendar.app hangs).
+                // The pipeline already falls back to events_overlapping_now() during background processing.
+                let calendar_event = None;
 
                 match minutes_core::jobs::queue_live_capture(
                     mode,
@@ -1879,6 +1881,11 @@ pub fn start_recording(
                 eprintln!("Capture error: {}", e);
             }
         }
+    }
+
+    // Remove live transcript context from assistant workspace
+    if let Ok(workspace) = crate::context::create_workspace(&config) {
+        update_assistant_live_context(&workspace, false);
     }
 
     if clear_processing_on_exit {

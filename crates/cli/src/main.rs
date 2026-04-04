@@ -3884,7 +3884,9 @@ fn cmd_enroll(file: Option<&Path>, duration: u64, config: &Config) -> Result<()>
         eprintln!("  For best results, enroll in a quiet room with just you speaking.");
     }
 
-    // Find dominant speaker
+    // Find dominant speaker and use its embedding from the diarization result
+    // directly — avoids a second segmentation pass which can produce mismatched
+    // speaker IDs and fail on non-16kHz audio.
     let mut counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
     for seg in &result.segments {
         *counts.entry(&seg.speaker).or_insert(0) += 1;
@@ -3893,10 +3895,21 @@ fn cmd_enroll(file: Option<&Path>, duration: u64, config: &Config) -> Result<()>
         .into_iter()
         .max_by_key(|(_, c)| *c)
         .map(|(s, _)| s)
-        .unwrap_or("SPEAKER_1");
+        .unwrap_or("SPEAKER_0");
 
     eprintln!("  \x1b[2mComputing voice profile...\x1b[0m");
-    let embedding = extract_dominant_embedding(&audio_path, dominant, config)?;
+    let embedding = result
+        .speaker_embeddings
+        .get(dominant)
+        .cloned()
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "No embedding found for dominant speaker {}. \
+                 Available speakers: {:?}",
+                dominant,
+                result.speaker_embeddings.keys().collect::<Vec<_>>()
+            )
+        })?;
 
     // Step 5: Save
     let conn = voice::open_db().map_err(|e| anyhow::anyhow!("{}", e))?;
@@ -3933,122 +3946,6 @@ fn cmd_enroll(file: Option<&Path>, duration: u64, config: &Config) -> Result<()>
         std::fs::remove_file(&audio_path).ok();
     }
     Ok(())
-}
-
-#[cfg(feature = "diarize")]
-fn extract_dominant_embedding(
-    audio_path: &Path,
-    dominant_speaker: &str,
-    config: &Config,
-) -> Result<Vec<f32>> {
-    use pyannote_rs::{EmbeddingExtractor, EmbeddingManager};
-    use symphonia::core::audio::SampleBuffer;
-    use symphonia::core::codecs::DecoderOptions;
-    use symphonia::core::formats::FormatOptions;
-    use symphonia::core::io::MediaSourceStream;
-    use symphonia::core::meta::MetadataOptions;
-    use symphonia::core::probe::Hint;
-
-    let model_dir = &config.diarization.model_path;
-    let seg_model = model_dir.join(minutes_core::diarize::SEGMENTATION_MODEL);
-    let emb_model = model_dir.join(minutes_core::diarize::EMBEDDING_MODEL);
-
-    let file = std::fs::File::open(audio_path)?;
-    let mss = MediaSourceStream::new(Box::new(file), Default::default());
-    let mut hint = Hint::new();
-    if let Some(ext) = audio_path.extension().and_then(|e| e.to_str()) {
-        hint.with_extension(ext);
-    }
-    let probed = symphonia::default::get_probe().format(
-        &hint,
-        mss,
-        &FormatOptions::default(),
-        &MetadataOptions::default(),
-    )?;
-    let mut format = probed.format;
-    let track = format
-        .default_track()
-        .ok_or_else(|| anyhow::anyhow!("no audio track"))?;
-    let track_id = track.id;
-    let sample_rate = track
-        .codec_params
-        .sample_rate
-        .ok_or_else(|| anyhow::anyhow!("no sample rate"))?;
-    let channels = track.codec_params.channels.map(|c| c.count()).unwrap_or(1);
-    let mut decoder =
-        symphonia::default::get_codecs().make(&track.codec_params, &DecoderOptions::default())?;
-
-    let mut all_samples: Vec<f32> = Vec::new();
-    loop {
-        let packet = match format.next_packet() {
-            Ok(p) => p,
-            Err(symphonia::core::errors::Error::IoError(ref e))
-                if e.kind() == std::io::ErrorKind::UnexpectedEof =>
-            {
-                break
-            }
-            Err(e) => return Err(e.into()),
-        };
-        if packet.track_id() != track_id {
-            continue;
-        }
-        let decoded = decoder.decode(&packet)?;
-        let spec = *decoded.spec();
-        let mut sample_buf = SampleBuffer::<f32>::new(decoded.capacity() as u64, spec);
-        sample_buf.copy_interleaved_ref(decoded);
-        for i in 0..sample_buf.samples().len() / channels {
-            let mut sum = 0.0f32;
-            for c in 0..channels {
-                sum += sample_buf.samples()[i * channels + c];
-            }
-            all_samples.push(sum / channels as f32);
-        }
-    }
-    let samples_i16: Vec<i16> = all_samples
-        .iter()
-        .map(|&s| (s.clamp(-1.0, 1.0) * 32767.0) as i16)
-        .collect();
-
-    let segments_iter = pyannote_rs::get_segments(&samples_i16, sample_rate, &seg_model)
-        .map_err(|e| anyhow::anyhow!("{}", e))?;
-    let mut extractor =
-        EmbeddingExtractor::new(&emb_model).map_err(|e| anyhow::anyhow!("{}", e))?;
-    let mut manager = EmbeddingManager::new(usize::MAX);
-    let threshold = config.diarization.threshold;
-    let mut dominant_embeddings: Vec<Vec<f32>> = Vec::new();
-
-    for segment_result in segments_iter {
-        let segment = segment_result.map_err(|e| anyhow::anyhow!("{}", e))?;
-        let embedding: Vec<f32> = extractor
-            .compute(&segment.samples)
-            .map_err(|e| anyhow::anyhow!("{}", e))?
-            .collect();
-        let speaker_id = manager
-            .search_speaker(embedding.clone(), threshold)
-            .map(|id| id.to_string())
-            .unwrap_or_else(|| "0".to_string());
-        if format!("SPEAKER_{}", speaker_id) == dominant_speaker {
-            dominant_embeddings.push(embedding);
-        }
-    }
-
-    if dominant_embeddings.is_empty() {
-        return Err(anyhow::anyhow!("No embeddings for dominant speaker"));
-    }
-    let dim = dominant_embeddings[0].len();
-    let count = dominant_embeddings.len() as f32;
-    let mut avg = vec![0.0f32; dim];
-    for emb in &dominant_embeddings {
-        for (i, val) in emb.iter().enumerate() {
-            avg[i] += val / count;
-        }
-    }
-    Ok(avg)
-}
-
-#[cfg(not(feature = "diarize"))]
-fn extract_dominant_embedding(_: &Path, _: &str, _: &Config) -> Result<Vec<f32>> {
-    Err(anyhow::anyhow!("Voice enrollment requires the 'diarize' feature. Rebuild with: cargo build --features diarize"))
 }
 
 fn cmd_voices(delete: bool, json: bool) -> Result<()> {

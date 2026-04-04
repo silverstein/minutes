@@ -861,11 +861,11 @@ fn load_audio(audio_path: &Path) -> Result<(Vec<f32>, Vec<i16>, u32), Box<dyn st
         "diarization audio f32 peak before normalization"
     );
 
-    const TARGET_PEAK: f32 = 0.5;
+    const QUIET_THRESHOLD: f32 = 0.01;
     const NOISE_FLOOR: f32 = 0.0001;
 
-    if peak > NOISE_FLOOR && peak < TARGET_PEAK {
-        let gain = TARGET_PEAK / peak;
+    if peak > NOISE_FLOOR && peak < QUIET_THRESHOLD {
+        let gain = QUIET_THRESHOLD / peak;
         tracing::info!(
             peak = format!("{:.6}", peak),
             gain = format!("{:.1}x", gain),

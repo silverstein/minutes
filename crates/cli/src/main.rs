@@ -3877,39 +3877,28 @@ fn cmd_enroll(file: Option<&Path>, duration: u64, config: &Config) -> Result<()>
     }
 
     if result.num_speakers > 1 {
+        tracing::warn!(
+            speakers = result.num_speakers,
+            "multiple speakers detected during enrollment — picking an arbitrary one"
+        );
         eprintln!(
-            "  Note: detected {} voices — using the primary speaker.",
+            "  ⚠ Detected {} voices — the enrolled profile may not be yours.",
             result.num_speakers
         );
-        eprintln!("  For best results, enroll in a quiet room with just you speaking.");
+        eprintln!("  For best results, re-run in a quiet room with just you speaking.");
     }
-
-    // Find dominant speaker and use its embedding from the diarization result
-    // directly — avoids a second segmentation pass which can produce mismatched
-    // speaker IDs and fail on non-16kHz audio.
-    let mut counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
-    for seg in &result.segments {
-        *counts.entry(&seg.speaker).or_insert(0) += 1;
-    }
-    let dominant = counts
-        .into_iter()
-        .max_by_key(|(_, c)| *c)
-        .map(|(s, _)| s)
-        .unwrap_or("SPEAKER_0");
 
     eprintln!("  \x1b[2mComputing voice profile...\x1b[0m");
-    let embedding = result
+
+    // Enrollment expects a single speaker, so just grab the first available
+    // embedding. When multiple speakers are detected the choice is arbitrary
+    // (HashMap order), but the user is warned above to re-record solo.
+    let (_, embedding) = result
         .speaker_embeddings
-        .get(dominant)
-        .cloned()
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "No embedding found for dominant speaker {}. \
-                 Available speakers: {:?}",
-                dominant,
-                result.speaker_embeddings.keys().collect::<Vec<_>>()
-            )
-        })?;
+        .iter()
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("Diarization produced no speaker embeddings."))?;
+    let embedding = embedding.clone();
 
     // Step 5: Save
     let conn = voice::open_db().map_err(|e| anyhow::anyhow!("{}", e))?;

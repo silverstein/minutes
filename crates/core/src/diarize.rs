@@ -556,7 +556,7 @@ fn diarize_with_pyannote_rs(
     audio_path: &Path,
     config: &Config,
 ) -> Result<DiarizationResult, Box<dyn std::error::Error>> {
-    use pyannote_rs::{EmbeddingExtractor, EmbeddingManager};
+    use pyannote_rs::EmbeddingExtractor;
 
     let model_dir = &config.diarization.model_path;
     let seg_model = model_dir.join(SEGMENTATION_MODEL);
@@ -623,54 +623,203 @@ fn diarize_with_pyannote_rs(
         "speech segmentation complete"
     );
 
-    // Step 2: Extract speaker embeddings and cluster using EmbeddingManager.
+    // Step 2: Extract speaker embeddings and cluster.
+    //
+    // We replace pyannote-rs's EmbeddingManager with our own clustering
+    // that maintains running-average speaker templates. EmbeddingManager
+    // only stores the first segment's embedding per speaker, which causes
+    // over-segmentation (one person → multiple speakers) as the reference
+    // embedding becomes unrepresentative over time.
     let mut extractor = EmbeddingExtractor::new(&emb_model)?;
-    let mut manager = EmbeddingManager::new(usize::MAX);
     let threshold = config.diarization.threshold;
 
-    let mut segments = Vec::new();
-    let mut embedding_accum: std::collections::HashMap<String, (Vec<f32>, usize)> =
-        std::collections::HashMap::new();
+    // Merge adjacent speech segments that are separated by short gaps.
+    // The segmentation model often splits continuous speech into many
+    // tiny fragments; merging them produces longer, more stable segments
+    // for embedding extraction.
+    let speech_segments = merge_short_segments(speech_segments, sample_rate);
+
+    tracing::info!(
+        segments = speech_segments.len(),
+        "speech segments after merge"
+    );
+
+    // speaker_templates[i] = (running average embedding, segment count)
+    let mut speaker_templates: Vec<(Vec<f32>, usize)> = Vec::new();
+    // Per-segment: which speaker index was assigned
+    let mut seg_speaker_ids: Vec<usize> = Vec::new();
+
+    // Minimum samples for reliable embedding extraction (~1.5s at 16kHz).
+    // Shorter segments produce unstable embeddings that corrupt clustering.
+    let min_embed_samples = (sample_rate as f64 * 1.5) as usize;
 
     for seg in &speech_segments {
         let seg_i16 = &i16_samples[seg.start_sample..seg.end_sample];
-        let embedding: Vec<f32> = extractor.compute(seg_i16)?.collect();
 
-        let speaker_id = manager
-            .search_speaker(embedding.clone(), threshold)
-            .map(|id| id.to_string())
-            .unwrap_or_else(|| "0".to_string());
-
-        let label = format!("SPEAKER_{}", speaker_id);
-
-        let entry = embedding_accum
-            .entry(label.clone())
-            .or_insert_with(|| (vec![0.0f32; embedding.len()], 0));
-        for (i, val) in embedding.iter().enumerate() {
-            entry.0[i] += val;
+        // Skip too-short segments for clustering; they still appear in the
+        // transcript but inherit the nearest speaker label.
+        if seg_i16.len() < min_embed_samples {
+            seg_speaker_ids.push(usize::MAX); // sentinel: inherit later
+            continue;
         }
-        entry.1 += 1;
 
+        let raw_embedding: Vec<f32> = extractor.compute(seg_i16)?.collect();
+
+        // L2-normalize so every segment contributes equally to the
+        // average direction, regardless of the model's output magnitude.
+        let embedding = l2_normalize(&raw_embedding);
+
+        // Find best matching speaker by cosine similarity
+        let mut best_id = None;
+        let mut best_sim = threshold;
+        for (id, (template, _)) in speaker_templates.iter().enumerate() {
+            let sim = crate::voice::cosine_similarity(&embedding, template);
+            if sim > best_sim {
+                best_sim = sim;
+                best_id = Some(id);
+            }
+        }
+
+        let speaker_id = match best_id {
+            Some(id) => {
+                let (ref mut template, ref mut count) = speaker_templates[id];
+                let old_count = *count as f32;
+                let new_count = old_count + 1.0;
+                for (i, val) in embedding.iter().enumerate() {
+                    template[i] = (template[i] * old_count + val) / new_count;
+                }
+                *count += 1;
+                id
+            }
+            None => {
+                let id = speaker_templates.len();
+                speaker_templates.push((embedding, 1));
+                id
+            }
+        };
+
+        seg_speaker_ids.push(speaker_id);
+    }
+
+    // Merge pass: if two speaker templates are similar enough, merge them.
+    // This catches cases where early segments created separate speakers
+    // that converged as more data came in.
+    let merge_threshold = (threshold * 0.85).max(0.2);
+    let num_templates = speaker_templates.len();
+    let mut merge_map: Vec<usize> = (0..num_templates).collect();
+
+    for i in 0..num_templates {
+        for j in (i + 1)..num_templates {
+            if merge_map[j] != j {
+                continue; // already merged
+            }
+            let ri = merge_map[i]; // canonical id for i
+            let sim =
+                crate::voice::cosine_similarity(&speaker_templates[ri].0, &speaker_templates[j].0);
+            if sim > merge_threshold {
+                tracing::info!(
+                    from = j,
+                    into = ri,
+                    similarity = format!("{:.4}", sim),
+                    "merging speaker clusters"
+                );
+                merge_map[j] = ri;
+            }
+        }
+    }
+
+    // Resolve transitive merges and build canonical label mapping
+    for i in 0..num_templates {
+        let mut root = merge_map[i];
+        while merge_map[root] != root {
+            root = merge_map[root];
+        }
+        merge_map[i] = root;
+    }
+
+    // Assign compact labels (SPEAKER_1, SPEAKER_2, ...) to canonical IDs
+    let mut canonical_to_label: std::collections::HashMap<usize, String> =
+        std::collections::HashMap::new();
+    let mut next_label = 1usize;
+    for &canonical in &merge_map {
+        canonical_to_label.entry(canonical).or_insert_with(|| {
+            let label = format!("SPEAKER_{}", next_label);
+            next_label += 1;
+            label
+        });
+    }
+
+    // Build segments with merged labels.
+    // Segments that were too short for embedding extraction (sentinel usize::MAX)
+    // inherit the label of the nearest non-skipped segment.
+    let mut segments = Vec::new();
+
+    // First pass: resolve labels for non-skipped segments
+    let resolved_labels: Vec<Option<String>> = seg_speaker_ids
+        .iter()
+        .map(|&raw_id| {
+            if raw_id == usize::MAX {
+                None
+            } else {
+                let canonical_id = merge_map[raw_id];
+                Some(canonical_to_label[&canonical_id].clone())
+            }
+        })
+        .collect();
+
+    // Forward pass: fill skipped segments by inheriting from last known neighbor
+    let mut last_known_label: Option<String> = None;
+    let mut final_labels: Vec<String> = Vec::with_capacity(resolved_labels.len());
+    for label in &resolved_labels {
+        if let Some(l) = label {
+            last_known_label = Some(l.clone());
+        }
+        final_labels.push(last_known_label.clone().unwrap_or_else(|| "UNKNOWN".into()));
+    }
+    // Backward pass: fix leading skipped segments (before any known label)
+    if let Some(first_known) = resolved_labels.iter().find_map(|l| l.as_ref()) {
+        for label in &mut final_labels {
+            if label == "UNKNOWN" {
+                *label = first_known.clone();
+            } else {
+                break;
+            }
+        }
+    }
+
+    for (idx, seg) in speech_segments.iter().enumerate() {
         segments.push(SpeakerSegment {
-            speaker: label,
+            speaker: final_labels[idx].clone(),
             start: seg.start,
             end: seg.end,
         });
     }
 
-    let num_speakers = segments
-        .iter()
-        .map(|s| s.speaker.as_str())
-        .collect::<std::collections::HashSet<_>>()
-        .len();
+    // Deduplicate accumulation (templates may be counted multiple times when
+    // multiple segments share the same raw_id). Rebuild from templates directly.
+    let mut speaker_embeddings: std::collections::HashMap<String, Vec<f32>> =
+        std::collections::HashMap::new();
+    for (raw_id, (template, _count)) in speaker_templates.iter().enumerate() {
+        let canonical_id = merge_map[raw_id];
+        let label = canonical_to_label[&canonical_id].clone();
+        let entry = speaker_embeddings
+            .entry(label)
+            .or_insert_with(|| vec![0.0f32; template.len()]);
+        let merge_count = merge_map.iter().filter(|&&c| c == canonical_id).count() as f32;
+        for (i, val) in template.iter().enumerate() {
+            entry[i] += val / merge_count;
+        }
+    }
 
-    let speaker_embeddings: std::collections::HashMap<String, Vec<f32>> = embedding_accum
-        .into_iter()
-        .map(|(label, (sum, count))| {
-            let avg = sum.into_iter().map(|v| v / count as f32).collect();
-            (label, avg)
-        })
-        .collect();
+    let num_speakers = speaker_embeddings.len();
+
+    tracing::info!(
+        raw_clusters = num_templates,
+        merged_speakers = num_speakers,
+        threshold = threshold,
+        merge_threshold = format!("{:.3}", merge_threshold),
+        "speaker clustering complete"
+    );
 
     Ok(DiarizationResult {
         segments,
@@ -687,6 +836,57 @@ struct SpeechSegment {
     end: f64,
     start_sample: usize,
     end_sample: usize,
+}
+
+/// L2-normalize a vector to unit length. Returns the zero vector if the input
+/// has zero norm (avoids NaN propagation).
+#[cfg(feature = "diarize")]
+fn l2_normalize(v: &[f32]) -> Vec<f32> {
+    let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if norm == 0.0 {
+        return v.to_vec();
+    }
+    v.iter().map(|x| x / norm).collect()
+}
+
+/// Merge speech segments that are separated by gaps shorter than `max_gap`
+/// and ensure all resulting segments are at least `min_dur` long by absorbing
+/// tiny neighbours. This reduces over-fragmentation from the frame-level
+/// segmentation model, producing longer segments with more stable embeddings.
+#[cfg(feature = "diarize")]
+fn merge_short_segments(segments: Vec<SpeechSegment>, sample_rate: u32) -> Vec<SpeechSegment> {
+    if segments.is_empty() {
+        return segments;
+    }
+
+    let max_gap_samples = (sample_rate as f64 * 0.3) as usize; // 300ms gap tolerance
+    let min_dur_samples = (sample_rate as f64 * 0.5) as usize; // 0.5s minimum
+
+    let mut merged: Vec<SpeechSegment> = Vec::new();
+    let mut current = segments[0].clone();
+
+    for seg in segments.iter().skip(1) {
+        let gap = seg.start_sample.saturating_sub(current.end_sample);
+        let current_dur = current.end_sample.saturating_sub(current.start_sample);
+
+        if gap <= max_gap_samples || current_dur < min_dur_samples {
+            // Absorb: extend current segment to cover this one
+            current.end = seg.end;
+            current.end_sample = seg.end_sample;
+        } else {
+            merged.push(current);
+            current = seg.clone();
+        }
+    }
+    merged.push(current);
+
+    tracing::debug!(
+        before = segments.len(),
+        after = merged.len(),
+        "merged adjacent speech segments"
+    );
+
+    merged
 }
 
 /// Run the segmentation ONNX model directly with properly normalised f32 audio.

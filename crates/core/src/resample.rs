@@ -37,7 +37,7 @@ where
         .default_input_config()
         .map_err(|e| CaptureError::Io(std::io::Error::other(format!("input config: {}", e))))?;
 
-    let sample_rate = supported_config.sample_rate().0;
+    let sample_rate = supported_config.sample_rate();
     let channels = supported_config.channels();
     let ratio = sample_rate as f64 / 16000.0;
 
@@ -69,7 +69,7 @@ where
 
             device
                 .build_input_stream(
-                    &supported_config.into(),
+                    supported_config.into(),
                     move |data: &[f32], _: &cpal::InputCallbackInfo| {
                         if stop_clone.load(Ordering::Relaxed) {
                             return;
@@ -122,7 +122,7 @@ where
 
             device
                 .build_input_stream(
-                    &supported_config.into(),
+                    supported_config.into(),
                     move |data: &[i16], _: &cpal::InputCallbackInfo| {
                         if stop_clone.load(Ordering::Relaxed) {
                             return;

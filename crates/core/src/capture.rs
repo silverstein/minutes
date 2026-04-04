@@ -1111,7 +1111,7 @@ pub fn list_input_devices() -> Vec<String> {
                     format!(
                         "{} ({}Hz, {} ch)",
                         name,
-                        config.sample_rate().0,
+                        config.sample_rate(),
                         config.channels()
                     )
                 } else {
@@ -1160,7 +1160,7 @@ pub fn list_devices_categorized() -> Vec<CategorizedDevice> {
             let Ok(name) = device.name() else { continue };
             let (sample_rate, channels) = device
                 .default_input_config()
-                .map(|c| (c.sample_rate().0, c.channels()))
+                .map(|c| (c.sample_rate(), c.channels()))
                 .unwrap_or((0, 0));
 
             let category = if is_system_audio_device_name(&name) {

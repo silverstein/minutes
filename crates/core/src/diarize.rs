@@ -597,7 +597,7 @@ fn diarize_with_pyannote_rs(
     // and retry — this avoids hardcoding a sensitivity threshold.
     if speech_segments.is_empty() {
         let peak = f32_samples.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
-        const TARGET_PEAK: f32 = 0.3;
+        const TARGET_PEAK: f32 = 0.5;
 
         if peak > 0.0 && peak < TARGET_PEAK {
             let gain = TARGET_PEAK / peak;

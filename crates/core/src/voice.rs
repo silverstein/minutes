@@ -215,14 +215,33 @@ pub fn match_embedding(
     threshold: f32,
 ) -> Option<String> {
     let mut best_name = None;
-    let mut best_sim = threshold;
+    let mut best_sim = f32::MIN;
+
     for p in profiles {
         let sim = cosine_similarity(embedding, &p.embedding);
+        tracing::debug!(
+            profile = %p.name,
+            similarity = format!("{:.4}", sim),
+            "voice embedding comparison"
+        );
         if sim > best_sim {
             best_sim = sim;
-            best_name = Some(p.name.clone());
+            if sim > threshold {
+                best_name = Some(p.name.clone());
+            }
         }
     }
+
+    if let Some(ref name) = best_name {
+        tracing::info!(matched = %name, similarity = format!("{:.4}", best_sim), "voice profile matched");
+    } else if !profiles.is_empty() {
+        tracing::info!(
+            best_similarity = format!("{:.4}", best_sim),
+            threshold = format!("{:.4}", threshold),
+            "no voice profile matched"
+        );
+    }
+
     best_name
 }
 

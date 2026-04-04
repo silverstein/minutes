@@ -43,7 +43,7 @@ impl Default for VoiceConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            match_threshold: 0.65,
+            match_threshold: 0.5,
         }
     }
 }

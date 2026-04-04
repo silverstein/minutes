@@ -378,15 +378,47 @@ where
     let mut speaker_map: Vec<diarize::SpeakerAttribution> = Vec::new();
     let mut enrolled_profile_found: Option<String> = None;
     if diarization_num_speakers > 0 && artifact.frontmatter.r#type == ContentType::Meeting {
-        if let Some(self_profile) = crate::voice::load_self_profile(config) {
-            enrolled_profile_found = Some(self_profile.name.clone());
+        // Level 2: Voice enrollment matching via embedding cosine similarity.
+        if config.voice.enabled && !diarization_embeddings.is_empty() {
+            let profiles = crate::voice::open_db()
+                .ok()
+                .and_then(|conn| crate::voice::load_all_with_embeddings(&conn).ok())
+                .unwrap_or_default();
+
+            if !profiles.is_empty() {
+                let threshold = config.voice.match_threshold;
+                for (label, emb) in &diarization_embeddings {
+                    if let Some(name) = crate::voice::match_embedding(emb, &profiles, threshold) {
+                        tracing::info!(
+                            speaker = %label,
+                            name = %name,
+                            threshold = threshold,
+                            "Level 2: voice enrollment match"
+                        );
+                        speaker_map.push(diarize::SpeakerAttribution {
+                            speaker_label: label.clone(),
+                            name: name.clone(),
+                            confidence: diarize::Confidence::High,
+                            source: diarize::AttributionSource::Enrollment,
+                        });
+                    }
+                }
+                enrolled_profile_found = profiles.first().map(|p| p.name.clone());
+            }
         }
 
+        // Level 0: deterministic 1-on-1 mapping (skip labels already matched by Level 2)
         let transcript_labels = crate::summarize::extract_speaker_labels_pub(&transcript);
+        let l2_labels: std::collections::HashSet<String> = speaker_map
+            .iter()
+            .map(|a| a.speaker_label.clone())
+            .collect();
+
         if !attendees.is_empty()
             && diarization_num_speakers == attendees.len()
             && diarization_num_speakers == 2
             && transcript_labels.len() == 2
+            && l2_labels.is_empty()
         {
             if let Some(my_name) = config.identity.name.as_ref() {
                 let my_slug = slugify(my_name);
@@ -743,35 +775,52 @@ where
     let mut enrolled_profile_found: Option<String> = None;
 
     if diarization_num_speakers > 0 && content_type == ContentType::Meeting {
-        // Level 2: Voice enrollment matching
-        // If the user has enrolled their voice, find which SPEAKER_X is them
-        if let Some(self_profile) = crate::voice::load_self_profile(config) {
-            // Scan transcript for speaker labels and try to match by looking
-            // at the dominant speaker (most lines). In a real implementation,
-            // we'd match per-segment embeddings, but for now we use the fact
-            // that the enrolled user's name + dominant speaker heuristic works.
-            // Full per-segment matching comes with Level 3's extended DiarizationResult.
-            tracing::info!(
-                name = %self_profile.name,
-                "Level 2: enrolled voice profile found"
-            );
+        // Level 2: Voice enrollment matching via embedding cosine similarity.
+        // Compare each diarized speaker's averaged embedding against all
+        // enrolled voice profiles. High-confidence matches are added to
+        // speaker_map directly, so Level 0/1 can skip those labels.
+        if config.voice.enabled && !diarization_embeddings.is_empty() {
+            let profiles = crate::voice::open_db()
+                .ok()
+                .and_then(|conn| crate::voice::load_all_with_embeddings(&conn).ok())
+                .unwrap_or_default();
 
-            // For now, if identity.name matches an enrolled profile AND Level 0
-            // would assign them, upgrade that assignment to High confidence.
-            // Full embedding-based matching requires per-segment embeddings in
-            // DiarizationResult (Level 3 extension).
-            enrolled_profile_found = Some(self_profile.name.clone());
+            if !profiles.is_empty() {
+                let threshold = config.voice.match_threshold;
+                for (label, emb) in &diarization_embeddings {
+                    if let Some(name) = crate::voice::match_embedding(emb, &profiles, threshold) {
+                        tracing::info!(
+                            speaker = %label,
+                            name = %name,
+                            threshold = threshold,
+                            "Level 2: voice enrollment match"
+                        );
+                        speaker_map.push(diarize::SpeakerAttribution {
+                            speaker_label: label.clone(),
+                            name: name.clone(),
+                            confidence: diarize::Confidence::High,
+                            source: diarize::AttributionSource::Enrollment,
+                        });
+                    }
+                }
+                enrolled_profile_found = profiles.first().map(|p| p.name.clone());
+            }
         }
 
-        // Level 0: deterministic 1-on-1 mapping
+        // Level 0: deterministic 1-on-1 mapping (skip labels already matched by Level 2)
         // Extract actual speaker labels from transcript (handles both native SPEAKER_1
         // and Python subprocess SPEAKER_00 formats)
         let transcript_labels = crate::summarize::extract_speaker_labels_pub(&transcript);
+        let l2_labels: std::collections::HashSet<String> = speaker_map
+            .iter()
+            .map(|a| a.speaker_label.clone())
+            .collect();
 
         if !attendees.is_empty()
             && diarization_num_speakers == attendees.len()
             && diarization_num_speakers == 2
             && transcript_labels.len() == 2
+            && l2_labels.is_empty()
         {
             if let Some(my_name) = config.identity.name.as_ref() {
                 let my_slug = slugify(my_name);

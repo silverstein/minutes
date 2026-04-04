@@ -577,7 +577,7 @@ fn diarize_with_pyannote_rs(
         .into());
     }
 
-    let (f32_samples, i16_samples, sample_rate) = load_audio(audio_path)?;
+    let (mut f32_samples, mut i16_samples, sample_rate) = load_audio(audio_path)?;
 
     tracing::info!(
         f32_samples = f32_samples.len(),
@@ -590,7 +590,34 @@ fn diarize_with_pyannote_rs(
     // normalized f32 input. We bypass pyannote_rs::get_segments because it
     // casts i16 to f32 without dividing by 32768, feeding the model values
     // in [-32768, 32767] when it expects [-1.0, 1.0].
-    let speech_segments = segment_speech(&f32_samples, sample_rate, &seg_model)?;
+    let mut speech_segments = segment_speech(&f32_samples, sample_rate, &seg_model)?;
+
+    // If the model found no speech, the audio may be too quiet (e.g. MacBook
+    // built-in mic with peaks as low as 0.0004). Normalize to a usable level
+    // and retry — this avoids hardcoding a sensitivity threshold.
+    if speech_segments.is_empty() {
+        let peak = f32_samples.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
+        const NOISE_FLOOR: f32 = 0.0001;
+        const TARGET_PEAK: f32 = 0.3;
+
+        if peak > NOISE_FLOOR && peak < TARGET_PEAK {
+            let gain = TARGET_PEAK / peak;
+            tracing::info!(
+                peak = format!("{:.6}", peak),
+                gain = format!("{:.1}x", gain),
+                "no speech detected — retrying with normalized audio"
+            );
+            for s in &mut f32_samples {
+                *s = (*s * gain).clamp(-1.0, 1.0);
+            }
+            i16_samples = f32_samples
+                .iter()
+                .map(|&s| (s.clamp(-1.0, 1.0) * 32767.0) as i16)
+                .collect();
+
+            speech_segments = segment_speech(&f32_samples, sample_rate, &seg_model)?;
+        }
+    }
 
     tracing::info!(
         segments = speech_segments.len(),
@@ -848,32 +875,6 @@ fn load_audio(audio_path: &Path) -> Result<(Vec<f32>, Vec<i16>, u32), Box<dyn st
             }
         } else {
             all_samples.extend_from_slice(samples);
-        }
-    }
-
-    // Normalize quiet audio. MacBook mics often produce peaks as low as
-    // 14/32768 (~0.0004) — far too quiet for reliable segmentation.
-    let peak = all_samples.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
-
-    tracing::info!(
-        peak = format!("{:.6}", peak),
-        num_samples = all_samples.len(),
-        "diarization audio f32 peak before normalization"
-    );
-
-    const QUIET_THRESHOLD: f32 = 0.05;
-    const TARGET_PEAK: f32 = 0.3;
-    const NOISE_FLOOR: f32 = 0.0001;
-
-    if peak > NOISE_FLOOR && peak < QUIET_THRESHOLD {
-        let gain = TARGET_PEAK / peak;
-        tracing::info!(
-            peak = format!("{:.6}", peak),
-            gain = format!("{:.1}x", gain),
-            "normalizing quiet audio for diarization"
-        );
-        for s in &mut all_samples {
-            *s = (*s * gain).clamp(-1.0, 1.0);
         }
     }
 

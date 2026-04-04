@@ -493,7 +493,9 @@ fn try_reconnect(
         }
     };
 
-    let name = device.name().unwrap_or_else(|_| "unknown".into());
+    let name = device
+        .description()
+        .map_or_else(|_| "unknown".to_string(), |d| d.name().to_string());
 
     match build_capture_stream(&device, writer, stop_flag, sample_count, err_flag) {
         Ok(stream) => {
@@ -527,7 +529,9 @@ pub fn record_to_wav(
     let device_override = config.recording.device.as_deref();
     let device = select_input_device(&host, device_override)?;
 
-    let device_name = device.name().unwrap_or_else(|_| "unknown".into());
+    let device_name = device
+        .description()
+        .map_or_else(|_| "unknown".to_string(), |d| d.name().to_string());
     eprintln!("[minutes] Using input device: {}", device_name);
     tracing::info!(device = %device_name, "using audio input device");
 
@@ -781,7 +785,8 @@ pub fn select_input_device(
     if let Some(requested) = device_name {
         if let Ok(devices) = host.input_devices() {
             for device in devices {
-                if let Ok(name) = device.name() {
+                if let Ok(desc) = device.description() {
+                    let name = desc.name().to_string();
                     if name == requested {
                         tracing::info!(device = %name, "using requested input device");
                         return Ok(device);
@@ -792,7 +797,10 @@ pub fn select_input_device(
         // Collect available device names for a helpful error message
         let available: Vec<String> = host
             .input_devices()
-            .map(|devs| devs.filter_map(|d| d.name().ok()).collect())
+            .map(|devs| {
+                devs.filter_map(|d| d.description().ok().map(|desc| desc.name().to_string()))
+                    .collect()
+            })
             .unwrap_or_default();
         tracing::error!(
             requested = %requested,
@@ -816,7 +824,8 @@ pub fn select_input_device(
         // Search cpal's device list for a matching name
         if let Ok(devices) = host.input_devices() {
             for device in devices {
-                if let Ok(name) = device.name() {
+                if let Ok(desc) = device.description() {
+                    let name = desc.name().to_string();
                     if name == system_default_name {
                         tracing::info!(
                             device = %name,
@@ -946,7 +955,8 @@ pub fn selected_input_device_name(config: &Config) -> Result<String, CaptureErro
     let host = cpal::default_host();
     let device = select_input_device(&host, config.recording.device.as_deref())?;
     device
-        .name()
+        .description()
+        .map(|d| d.name().to_string())
         .map_err(|error| CaptureError::Io(std::io::Error::other(error.to_string())))
 }
 
@@ -1106,7 +1116,8 @@ pub fn list_input_devices() -> Vec<String> {
 
     if let Ok(input_devices) = host.input_devices() {
         for device in input_devices {
-            if let Ok(name) = device.name() {
+            if let Ok(desc) = device.description() {
+                let name = desc.name().to_string();
                 let info = if let Ok(config) = device.default_input_config() {
                     format!(
                         "{} ({}Hz, {} ch)",
@@ -1150,14 +1161,15 @@ pub fn list_devices_categorized() -> Vec<CategorizedDevice> {
     tracing::info!(host_id = ?host.id(), "cpal host for categorized device listing");
     let default_name = host
         .default_input_device()
-        .and_then(|d| d.name().ok())
+        .and_then(|d| d.description().ok().map(|desc| desc.name().to_string()))
         .unwrap_or_default();
 
     let mut devices = Vec::new();
 
     if let Ok(input_devices) = host.input_devices() {
         for device in input_devices {
-            let Ok(name) = device.name() else { continue };
+            let Ok(desc) = device.description() else { continue };
+            let name = desc.name().to_string();
             let (sample_rate, channels) = device
                 .default_input_config()
                 .map(|c| (c.sample_rate(), c.channels()))

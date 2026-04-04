@@ -93,7 +93,7 @@ impl DeviceMonitor {
             use cpal::traits::{DeviceTrait, HostTrait};
             cpal::default_host()
                 .default_input_device()
-                .and_then(|d| d.name().ok())
+                .and_then(|d| d.description().ok().map(|desc| desc.name().to_string()))
         }
     }
 

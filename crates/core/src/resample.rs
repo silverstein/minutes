@@ -31,7 +31,9 @@ pub fn build_resampled_input_stream<F>(
 where
     F: FnMut(&[f32]) + Send + 'static,
 {
-    let device_name = device.name().unwrap_or_else(|_| "unknown".into());
+    let device_name = device
+        .description()
+        .map_or_else(|_| "unknown".to_string(), |d| d.name().to_string());
 
     let supported_config = device
         .default_input_config()

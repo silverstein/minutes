@@ -3,6 +3,11 @@ use std::fs;
 use std::path::PathBuf;
 use tempfile::TempDir;
 
+const ENROLL_WAV: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../tests/data/13s_enroll.wav"
+);
+
 /// Create a test config that works with or without the whisper feature.
 /// Uses the tiny model (smallest/fastest) when whisper is enabled.
 fn test_config(output_dir: PathBuf) -> Config {
@@ -266,5 +271,127 @@ fn whisper_no_speech_detection() {
     assert!(
         content.contains("status: no-speech") || content.contains("No speech detected"),
         "near-silent audio should trigger no-speech detection"
+    );
+}
+
+/// Test the full voice enrollment → meeting pipeline flow:
+///   1. Diarize a real speech WAV to get segments + embeddings
+///   2. Enroll the dominant speaker as "Grégoire"
+///   3. Verify enrolled embedding matches back via cosine similarity
+///
+/// Requires: diarize + whisper features, tiny model, diarization ONNX models.
+#[test]
+#[cfg(all(feature = "whisper", feature = "diarize"))]
+fn voice_enrollment_identifies_speaker_in_meeting() {
+    use minutes_core::{diarize, voice};
+
+    let wav = std::path::Path::new(ENROLL_WAV);
+    if !wav.exists() {
+        eprintln!("SKIPPED: tests/data/13s_enroll.wav not found");
+        return;
+    }
+    if !dirs::home_dir()
+        .unwrap()
+        .join(".minutes/models/ggml-tiny.bin")
+        .exists()
+    {
+        eprintln!("SKIPPED: tiny whisper model not found");
+        return;
+    }
+
+    let dir = TempDir::new().unwrap();
+    let voices_db = dir.path().join("voices.db");
+
+    let mut config = test_config(dir.path().join("output"));
+    config.diarization.engine = "auto".into();
+    config.transcription.language = Some("fr".into());
+    config.identity.name = Some("Grégoire".into());
+    config.voice.enabled = true;
+    config.voice.match_threshold = 0.3;
+
+    if !diarize::models_installed(&config) {
+        eprintln!("SKIPPED: diarization models not installed");
+        return;
+    }
+
+    // Step 1: Diarize to get segments + embeddings
+    let result = diarize::diarize(wav, &config).expect("diarization should succeed on speech WAV");
+    assert!(
+        !result.segments.is_empty(),
+        "should find speech segments (got {} segments, {} speakers)",
+        result.segments.len(),
+        result.num_speakers,
+    );
+    assert!(
+        !result.speaker_embeddings.is_empty(),
+        "should produce speaker embeddings"
+    );
+
+    // Step 2: Enroll dominant speaker as "Grégoire"
+    let mut counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for seg in &result.segments {
+        *counts.entry(&seg.speaker).or_insert(0) += 1;
+    }
+    let dominant = counts
+        .into_iter()
+        .max_by_key(|(_, c)| *c)
+        .map(|(s, _)| s.to_string())
+        .unwrap();
+
+    let embedding = result.speaker_embeddings.get(&dominant).unwrap();
+    let conn = voice::open_db_at(&voices_db).unwrap();
+    voice::save_profile(&conn, "gr-goire", "Grégoire", embedding, "test-enrollment").unwrap();
+
+    let profiles = voice::list_profiles(&conn).unwrap();
+    assert_eq!(profiles.len(), 1);
+    assert_eq!(profiles[0].name, "Grégoire");
+
+    // Step 3: Verify enrolled embedding matches back
+    let all = voice::load_all_with_embeddings(&conn).unwrap();
+    let matched = voice::match_embedding(embedding, &all, 0.3);
+    assert_eq!(
+        matched,
+        Some("Grégoire".into()),
+        "enrolled embedding should match itself"
+    );
+
+    // Dominant speaker's diarization embedding should match enrolled profile
+    let threshold = config.voice.match_threshold;
+    let dominant_emb = result.speaker_embeddings.get(&dominant).unwrap();
+    let matched = voice::match_embedding(dominant_emb, &all, threshold);
+    assert_eq!(
+        matched,
+        Some("Grégoire".into()),
+        "dominant speaker embedding should match enrolled profile"
+    );
+}
+
+/// Verify pyannote-rs segmentation works on the test enrollment WAV.
+#[test]
+#[cfg(feature = "diarize")]
+fn pyannote_segments_on_enroll_wav() {
+    let wav = std::path::Path::new(ENROLL_WAV);
+    if !wav.exists() {
+        eprintln!("SKIPPED: 13s_enroll.wav not found");
+        return;
+    }
+    let model_dir = dirs::home_dir()
+        .unwrap()
+        .join(".minutes/models/diarization");
+    let seg_model = model_dir.join("segmentation-3.0.onnx");
+    if !seg_model.exists() {
+        eprintln!("SKIPPED: segmentation model not found");
+        return;
+    }
+
+    let (samples, sr) = pyannote_rs::read_wav(wav.to_str().unwrap()).unwrap();
+    let segments: Vec<_> = pyannote_rs::get_segments(&samples, sr, &seg_model)
+        .unwrap()
+        .filter_map(|s| s.ok())
+        .collect();
+
+    assert!(
+        !segments.is_empty(),
+        "pyannote should detect speech in enrollment WAV"
     );
 }

@@ -704,7 +704,11 @@ fn diarize_with_pyannote_rs(
     // Merge pass: if two speaker templates are similar enough, merge them.
     // This catches cases where early segments created separate speakers
     // that converged as more data came in.
-    let merge_threshold = (threshold * 0.85).max(0.2);
+    //
+    // The merge threshold is set to max(threshold - 0.05, 0.3) to avoid
+    // merging genuinely different speakers. The 0.3 floor prevents overly
+    // aggressive merging when the user sets a low diarization threshold.
+    let merge_threshold = (threshold - 0.05).max(0.3);
     let num_templates = speaker_templates.len();
     let mut merge_map: Vec<usize> = (0..num_templates).collect();
 
@@ -728,11 +732,14 @@ fn diarize_with_pyannote_rs(
         }
     }
 
-    // Resolve transitive merges and build canonical label mapping
+    // Resolve transitive merges (e.g. 3→2→1 becomes 3→1, 2→1).
+    // Loop bound prevents infinite loops if merge_map is ever inconsistent.
     for i in 0..num_templates {
         let mut root = merge_map[i];
-        while merge_map[root] != root {
+        let mut steps = 0;
+        while merge_map[root] != root && steps < num_templates {
             root = merge_map[root];
+            steps += 1;
         }
         merge_map[i] = root;
     }
@@ -767,7 +774,12 @@ fn diarize_with_pyannote_rs(
         })
         .collect();
 
-    // Forward pass: fill skipped segments by inheriting from last known neighbor
+    // Forward pass: fill skipped segments by inheriting from the nearest
+    // *temporal* neighbor (not acoustic). A short segment between two different
+    // speakers gets the label of whichever speaker was most recent, not
+    // whichever it sounds like. This is an acceptable tradeoff: extracting
+    // embeddings from <1.5s segments produces unreliable results, and temporal
+    // proximity is a reasonable heuristic for meeting-style audio.
     let mut last_known_label: Option<String> = None;
     let mut final_labels: Vec<String> = Vec::with_capacity(resolved_labels.len());
     for label in &resolved_labels {

@@ -70,5 +70,10 @@ crossbeam-channel = "0.5"
 # Speaker diarization (native, no Python)
 pyannote-rs = "0.3"
 
+# ONNX Runtime + ndarray (used directly for segmentation model — pyannote-rs
+# has a normalisation bug so we bypass get_segments for the segmentation step)
+ort = { version = "2.0.0-rc.10", features = ["ndarray"] }
+ndarray = "0.16"
+
 # SQLite (relationship graph index)
 rusqlite = { version = "0.33", features = ["bundled"] }

@@ -577,20 +577,27 @@ fn diarize_with_pyannote_rs(
         .into());
     }
 
-    // Load audio — pyannote-rs needs mono 16-bit PCM.
-    // Use symphonia to decode any format, then convert to i16 samples.
-    let (samples, sample_rate) = load_audio_as_i16(audio_path)?;
+    let (f32_samples, i16_samples, sample_rate) = load_audio(audio_path)?;
 
     tracing::info!(
-        samples = samples.len(),
+        f32_samples = f32_samples.len(),
+        i16_samples = i16_samples.len(),
         sample_rate = sample_rate,
         "audio loaded for diarization"
     );
 
-    // Step 1: Segment speech regions
-    let segments_iter = pyannote_rs::get_segments(&samples, sample_rate, &seg_model)?;
+    // Step 1: Segment speech using the ONNX model directly with properly
+    // normalized f32 input. We bypass pyannote_rs::get_segments because it
+    // casts i16 to f32 without dividing by 32768, feeding the model values
+    // in [-32768, 32767] when it expects [-1.0, 1.0].
+    let speech_segments = segment_speech(&f32_samples, sample_rate, &seg_model)?;
 
-    // Step 2: Extract speaker embeddings and cluster
+    tracing::info!(
+        segments = speech_segments.len(),
+        "speech segmentation complete"
+    );
+
+    // Step 2: Extract speaker embeddings and cluster using EmbeddingManager.
     let mut extractor = EmbeddingExtractor::new(&emb_model)?;
     let mut manager = EmbeddingManager::new(usize::MAX);
     let threshold = config.diarization.threshold;
@@ -599,9 +606,9 @@ fn diarize_with_pyannote_rs(
     let mut embedding_accum: std::collections::HashMap<String, (Vec<f32>, usize)> =
         std::collections::HashMap::new();
 
-    for segment_result in segments_iter {
-        let segment = segment_result?;
-        let embedding: Vec<f32> = extractor.compute(&segment.samples)?.collect();
+    for seg in &speech_segments {
+        let seg_i16 = &i16_samples[seg.start_sample..seg.end_sample];
+        let embedding: Vec<f32> = extractor.compute(seg_i16)?.collect();
 
         let speaker_id = manager
             .search_speaker(embedding.clone(), threshold)
@@ -610,7 +617,6 @@ fn diarize_with_pyannote_rs(
 
         let label = format!("SPEAKER_{}", speaker_id);
 
-        // Accumulate embeddings per speaker for averaging
         let entry = embedding_accum
             .entry(label.clone())
             .or_insert_with(|| (vec![0.0f32; embedding.len()], 0));
@@ -621,8 +627,8 @@ fn diarize_with_pyannote_rs(
 
         segments.push(SpeakerSegment {
             speaker: label,
-            start: segment.start,
-            end: segment.end,
+            start: seg.start,
+            end: seg.end,
         });
     }
 
@@ -632,7 +638,6 @@ fn diarize_with_pyannote_rs(
         .collect::<std::collections::HashSet<_>>()
         .len();
 
-    // Average embeddings per speaker
     let speaker_embeddings: std::collections::HashMap<String, Vec<f32>> = embedding_accum
         .into_iter()
         .map(|(label, (sum, count))| {
@@ -648,10 +653,136 @@ fn diarize_with_pyannote_rs(
     })
 }
 
-/// Load audio file as mono 16-bit PCM samples using symphonia.
-/// Handles WAV, M4A, MP3, OGG, and other formats symphonia supports.
+/// A detected speech region with sample-level boundaries for embedding extraction.
 #[cfg(feature = "diarize")]
-fn load_audio_as_i16(audio_path: &Path) -> Result<(Vec<i16>, u32), Box<dyn std::error::Error>> {
+#[derive(Clone)]
+struct SpeechSegment {
+    start: f64,
+    end: f64,
+    start_sample: usize,
+    end_sample: usize,
+}
+
+/// Run the segmentation ONNX model directly with properly normalised f32 audio.
+///
+/// pyannote-rs's `get_segments` has a bug: it casts raw i16 samples to f32
+/// (`x as f32`) without dividing by 32768, so the model receives values in
+/// [-32768, 32767] instead of the [-1.0, 1.0] it was trained on. This causes
+/// the model to classify all frames as non-speech for typical microphone input.
+///
+/// This function mirrors the same sliding-window logic but feeds the model
+/// correctly normalised f32 waveform data.
+#[cfg(feature = "diarize")]
+fn segment_speech(
+    samples: &[f32],
+    sample_rate: u32,
+    model_path: &Path,
+) -> Result<Vec<SpeechSegment>, Box<dyn std::error::Error>> {
+    use ndarray::{Array1, ArrayViewD, Axis, IxDyn};
+    use ort::session::builder::GraphOptimizationLevel;
+    use ort::session::Session;
+
+    let mut session = Session::builder()?
+        .with_optimization_level(GraphOptimizationLevel::Level3)?
+        .with_intra_threads(1)?
+        .with_inter_threads(1)?
+        .commit_from_file(model_path)?;
+
+    let frame_size: usize = 270;
+    let frame_start: usize = 721;
+    let window_size = (sample_rate as usize) * 10;
+
+    // Pad to fill the last window
+    let mut padded = samples.to_vec();
+    let remainder = padded.len() % window_size;
+    if remainder != 0 {
+        padded.extend(vec![0.0f32; window_size - remainder]);
+    }
+
+    let mut result = Vec::new();
+    let mut is_speeching = false;
+    let mut offset = frame_start;
+    let mut start_offset = 0usize;
+
+    for window_start in (0..padded.len()).step_by(window_size) {
+        let window_end = (window_start + window_size).min(padded.len());
+        let window = &padded[window_start..window_end];
+
+        let array = Array1::from_iter(window.iter().copied());
+        let array = array.view().insert_axis(Axis(0)).insert_axis(Axis(1));
+
+        let inputs = ort::inputs![ort::value::TensorRef::from_array_view(array.into_dyn())
+            .map_err(|e| format!("tensor prep: {e:?}"))?];
+
+        let ort_outs = session.run(inputs)?;
+        let ort_out = ort_outs
+            .get("output")
+            .ok_or("segmentation model missing 'output' tensor")?;
+        let ort_out = ort_out
+            .try_extract_tensor::<f32>()
+            .map_err(|e| format!("tensor extract: {e:?}"))?;
+
+        let (shape, data) = ort_out;
+        let shape_slice: Vec<usize> = (0..shape.len()).map(|i| shape[i] as usize).collect();
+        let view = ArrayViewD::<f32>::from_shape(IxDyn(&shape_slice), data)
+            .map_err(|e| format!("ndarray shape: {e}"))?;
+
+        for row in view.outer_iter() {
+            for sub_row in row.axis_iter(Axis(0)) {
+                let max_index = sub_row
+                    .iter()
+                    .enumerate()
+                    .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
+                    .map(|(i, _)| i)
+                    .unwrap_or(0);
+
+                if max_index != 0 {
+                    if !is_speeching {
+                        start_offset = offset;
+                        is_speeching = true;
+                    }
+                } else if is_speeching {
+                    let start_secs = start_offset as f64 / sample_rate as f64;
+                    let end_secs = offset as f64 / sample_rate as f64;
+                    let si = start_offset.min(samples.len().saturating_sub(1));
+                    let ei = offset.min(samples.len());
+                    result.push(SpeechSegment {
+                        start: start_secs,
+                        end: end_secs,
+                        start_sample: si,
+                        end_sample: ei,
+                    });
+                    is_speeching = false;
+                }
+                offset += frame_size;
+            }
+        }
+    }
+
+    // Flush trailing speech (unlike pyannote-rs, we don't drop it)
+    if is_speeching {
+        let start_secs = start_offset as f64 / sample_rate as f64;
+        let end_secs = offset as f64 / sample_rate as f64;
+        let si = start_offset.min(samples.len().saturating_sub(1));
+        let ei = samples.len();
+        result.push(SpeechSegment {
+            start: start_secs,
+            end: end_secs,
+            start_sample: si,
+            end_sample: ei,
+        });
+    }
+
+    Ok(result)
+}
+
+/// Load audio file as both f32 (for segmentation) and i16 (for embedding extraction).
+///
+/// Returns `(f32_samples, i16_samples, sample_rate)` where f32 is normalised
+/// to [-1.0, 1.0] and i16 mirrors the same waveform in PCM scale.
+#[cfg(feature = "diarize")]
+#[allow(clippy::type_complexity)]
+fn load_audio(audio_path: &Path) -> Result<(Vec<f32>, Vec<i16>, u32), Box<dyn std::error::Error>> {
     use symphonia::core::audio::SampleBuffer;
     use symphonia::core::codecs::DecoderOptions;
     use symphonia::core::formats::FormatOptions;
@@ -710,7 +841,6 @@ fn load_audio_as_i16(audio_path: &Path) -> Result<(Vec<i16>, u32), Box<dyn std::
 
         let samples = sample_buf.samples();
 
-        // Mix to mono if multi-channel
         if channels > 1 {
             for chunk in samples.chunks(channels) {
                 let mono: f32 = chunk.iter().sum::<f32>() / channels as f32;
@@ -721,16 +851,37 @@ fn load_audio_as_i16(audio_path: &Path) -> Result<(Vec<i16>, u32), Box<dyn std::
         }
     }
 
-    // Convert f32 [-1.0, 1.0] to i16
+    // Normalize quiet audio. MacBook mics often produce peaks as low as
+    // 14/32768 (~0.0004) — far too quiet for reliable segmentation.
+    let peak = all_samples.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
+
+    tracing::info!(
+        peak = format!("{:.6}", peak),
+        num_samples = all_samples.len(),
+        "diarization audio f32 peak before normalization"
+    );
+
+    const TARGET_PEAK: f32 = 0.5;
+    const NOISE_FLOOR: f32 = 0.0001;
+
+    if peak > NOISE_FLOOR && peak < TARGET_PEAK {
+        let gain = TARGET_PEAK / peak;
+        tracing::info!(
+            peak = format!("{:.6}", peak),
+            gain = format!("{:.1}x", gain),
+            "normalizing quiet audio for diarization"
+        );
+        for s in &mut all_samples {
+            *s = (*s * gain).clamp(-1.0, 1.0);
+        }
+    }
+
     let i16_samples: Vec<i16> = all_samples
         .iter()
-        .map(|&s| {
-            let clamped = s.clamp(-1.0, 1.0);
-            (clamped * 32767.0) as i16
-        })
+        .map(|&s| (s.clamp(-1.0, 1.0) * 32767.0) as i16)
         .collect();
 
-    Ok((i16_samples, sample_rate))
+    Ok((all_samples, i16_samples, sample_rate))
 }
 
 // ── Legacy Python subprocess diarization ────────────────────

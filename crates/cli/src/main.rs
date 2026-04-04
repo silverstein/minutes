@@ -63,6 +63,11 @@ enum Commands {
         /// Shorthand for --intent call with auto-detected system audio device.
         #[arg(long)]
         call: bool,
+
+        /// Skip live recording — use an existing WAV file as mock recording
+        /// output and process it with full diagnostic logging.
+        #[arg(long, value_name = "WAV_FILE")]
+        diagnose: Option<PathBuf>,
     },
 
     /// Add a note to the current recording
@@ -463,21 +468,6 @@ enum Commands {
         json: bool,
     },
 
-    /// Process an audio file as a meeting and print detailed diarization diagnostics
-    TestRecording {
-        /// Path to audio file (.wav, .m4a, .mp3)
-        #[arg(long)]
-        file: PathBuf,
-
-        /// Optional title for the meeting
-        #[arg(short, long)]
-        title: Option<String>,
-
-        /// Transcription language (e.g. "en", "ur", "es")
-        #[arg(short, long)]
-        language: Option<String>,
-    },
-
     /// Start a live transcript session (real-time meeting transcription)
     Live {
         /// Transcription language (e.g. "en", "ur", "es"). Overrides config.toml setting.
@@ -595,6 +585,7 @@ fn main() -> Result<()> {
             device,
             source,
             call,
+            diagnose,
         } => {
             if let Some(lang) = language {
                 config.transcription.language = Some(lang);
@@ -636,6 +627,10 @@ fn main() -> Result<()> {
                 }
             } else if let Some(dev) = device {
                 config.recording.device = Some(dev);
+            }
+
+            if let Some(wav_path) = diagnose {
+                return cmd_diagnose(&wav_path, title.as_deref(), &config);
             }
 
             let effective_intent = if call && intent == "auto" {
@@ -815,16 +810,6 @@ fn main() -> Result<()> {
         },
         Commands::Enroll { file, duration } => cmd_enroll(file.as_deref(), duration, &config),
         Commands::Voices { delete, json } => cmd_voices(delete, json),
-        Commands::TestRecording {
-            file,
-            title,
-            language,
-        } => {
-            if let Some(lang) = language {
-                config.transcription.language = Some(lang);
-            }
-            cmd_test_recording(&file, title.as_deref(), &config)
-        }
         Commands::Delete {
             meeting,
             with_audio,
@@ -2061,51 +2046,43 @@ fn cmd_process(
     Ok(())
 }
 
-fn cmd_test_recording(path: &Path, title: Option<&str>, config: &Config) -> Result<()> {
+/// Process an existing WAV file as a mock recording with full diagnostic output.
+/// Bypasses live mic capture — runs diarization, voice matching, and the full
+/// pipeline on the provided file so results can be reproduced deterministically.
+fn cmd_diagnose(path: &Path, title: Option<&str>, config: &Config) -> Result<()> {
     if !path.exists() {
         anyhow::bail!("file not found: {}", path.display());
     }
-
     config.ensure_dirs()?;
 
-    eprintln!("=== Minutes Test Recording ===");
-    eprintln!("File: {}", path.display());
+    eprintln!("=== Diagnose: {} ===", path.display());
     eprintln!();
 
-    // Step 1: Diarize
-    eprintln!("--- Step 1: Diarization ---");
+    // Step 1: Diarization
+    eprintln!("--- Diarization ---");
     let diarize_result = minutes_core::diarize::diarize(path, config);
-    let (diarization_num_speakers, diarization_embeddings) = match &diarize_result {
+    let diarization_embeddings = match &diarize_result {
         Some(result) => {
-            eprintln!("  Speakers detected: {}", result.num_speakers);
+            eprintln!("  Speakers: {}", result.num_speakers);
             for seg in &result.segments {
-                eprintln!("  [{} {:.1}s-{:.1}s]", seg.speaker, seg.start, seg.end);
+                eprintln!("  [{} {:.1}s–{:.1}s]", seg.speaker, seg.start, seg.end);
             }
-            eprintln!(
-                "  Embeddings: {}",
-                result
-                    .speaker_embeddings
-                    .keys()
-                    .cloned()
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            );
             for (label, emb) in &result.speaker_embeddings {
                 let rms = (emb.iter().map(|v| v * v).sum::<f32>() / emb.len() as f32).sqrt();
                 eprintln!("    {}: {} dims, rms={:.2}", label, emb.len(), rms);
             }
-            (result.num_speakers, result.speaker_embeddings.clone())
+            result.speaker_embeddings.clone()
         }
         None => {
             eprintln!("  No diarization result (disabled or failed).");
-            (0, std::collections::HashMap::new())
+            std::collections::HashMap::new()
         }
     };
 
     // Step 2: Voice matching
     eprintln!();
-    eprintln!("--- Step 2: Voice Matching ---");
-    if diarization_num_speakers > 0 && config.voice.enabled && !diarization_embeddings.is_empty() {
+    eprintln!("--- Voice Matching ---");
+    if config.voice.enabled && !diarization_embeddings.is_empty() {
         let profiles = minutes_core::voice::open_db()
             .ok()
             .and_then(|conn| minutes_core::voice::load_all_with_embeddings(&conn).ok())
@@ -2116,53 +2093,37 @@ fn cmd_test_recording(path: &Path, title: Option<&str>, config: &Config) -> Resu
         } else {
             eprintln!("  Enrolled profiles: {}", profiles.len());
             for p in &profiles {
-                let rms = (p.embedding.iter().map(|v| v * v).sum::<f32>()
-                    / p.embedding.len() as f32)
-                    .sqrt();
-                eprintln!(
-                    "    {} ({}): {} dims, rms={:.2}",
-                    p.name,
-                    p.person_slug,
-                    p.embedding.len(),
-                    rms
-                );
+                eprintln!("    {} ({})", p.name, p.person_slug);
             }
-            eprintln!();
 
             let threshold = config.voice.match_threshold;
-            eprintln!("  Match threshold: {:.2}", threshold);
+            eprintln!("  Threshold: {:.2}", threshold);
             eprintln!();
 
             for (label, emb) in &diarization_embeddings {
                 eprintln!("  {} vs enrolled profiles:", label);
                 for p in &profiles {
                     let sim = minutes_core::voice::cosine_similarity(emb, &p.embedding);
-                    let matched = if sim > threshold {
-                        " *** MATCH ***"
-                    } else {
-                        ""
-                    };
-                    eprintln!("    → {} : sim={:.4}{}", p.name, sim, matched);
+                    let marker = if sim > threshold { " ✓ MATCH" } else { "" };
+                    eprintln!("    → {} : sim={:.4}{}", p.name, sim, marker);
                 }
             }
         }
     } else if !config.voice.enabled {
-        eprintln!("  Voice matching is disabled in config.");
+        eprintln!("  Voice matching disabled.");
     } else {
         eprintln!("  No speaker embeddings to match against.");
     }
 
-    // Step 3: Full pipeline (transcribe + diarize + write)
+    // Step 3: Full pipeline
     eprintln!();
-    eprintln!("--- Step 3: Full Pipeline ---");
+    eprintln!("--- Pipeline ---");
     let result = minutes_core::process(path, ContentType::Meeting, title, config)?;
     eprintln!("  Output: {}", result.path.display());
     eprintln!("  Title:  {}", result.title);
     eprintln!("  Words:  {}", result.word_count);
     eprintln!();
 
-    // Step 4: Show the generated markdown
-    eprintln!("--- Result ---");
     let content = std::fs::read_to_string(&result.path)?;
     println!("{}", content);
 

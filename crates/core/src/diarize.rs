@@ -861,7 +861,7 @@ fn load_audio(audio_path: &Path) -> Result<(Vec<f32>, Vec<i16>, u32), Box<dyn st
         "diarization audio f32 peak before normalization"
     );
 
-    const QUIET_THRESHOLD: f32 = 0.01;
+    const QUIET_THRESHOLD: f32 = 0.05;
     const TARGET_PEAK: f32 = 0.3;
     const NOISE_FLOOR: f32 = 0.0001;
 

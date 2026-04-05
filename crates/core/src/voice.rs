@@ -11,7 +11,11 @@ use thiserror::Error;
 // (which is a rebuildable cache that wipes on rebuild).
 // ──────────────────────────────────────────────────────────────
 
-const MODEL_VERSION: &str = "wespeaker_en_voxceleb_CAM++_v0.3";
+/// Resolve the model version tag for the currently configured embedding model.
+/// Falls back to the cam++-lm version string if the config value is unrecognized.
+pub fn model_version(config: &Config) -> &'static str {
+    crate::diarize::embedding_model_for_config(config).version
+}
 
 #[derive(Debug, Error)]
 pub enum VoiceError {
@@ -109,6 +113,7 @@ pub fn save_profile(
     name: &str,
     embedding: &[f32],
     source: &str,
+    model_version: &str,
 ) -> Result<(), VoiceError> {
     let now = chrono::Local::now().to_rfc3339();
     let blob = embedding_to_bytes(embedding);
@@ -118,7 +123,7 @@ pub fn save_profile(
          ON CONFLICT(person_slug) DO UPDATE SET
             name = excluded.name, embedding = excluded.embedding, updated_at = excluded.updated_at,
             sample_count = sample_count + 1, source = excluded.source, model_version = excluded.model_version",
-        params![slug, name, blob, now, now, source, MODEL_VERSION],
+        params![slug, name, blob, now, now, source, model_version],
     )?;
     Ok(())
 }
@@ -129,6 +134,7 @@ pub fn save_profile_blended(
     name: &str,
     new_embedding: &[f32],
     source: &str,
+    model_version: &str,
 ) -> Result<(), VoiceError> {
     if let Some(existing) = load_profile_with_embedding(conn, slug)? {
         let total = existing.sample_count as f32 + 1.0;
@@ -139,9 +145,9 @@ pub fn save_profile_blended(
             .zip(new_embedding.iter())
             .map(|(old, new)| (old * old_weight + new) / total)
             .collect();
-        save_profile(conn, slug, name, &blended, source)
+        save_profile(conn, slug, name, &blended, source, model_version)
     } else {
-        save_profile(conn, slug, name, new_embedding, source)
+        save_profile(conn, slug, name, new_embedding, source, model_version)
     }
 }
 
@@ -330,10 +336,12 @@ mod tests {
         assert_eq!(bytes_to_embedding(&embedding_to_bytes(&orig)), orig);
     }
 
+    const TEST_MODEL_VERSION: &str = "test_model_v1";
+
     #[test]
     fn save_and_list() {
         let (conn, _tmp) = test_db();
-        save_profile(&conn, "mat", "Mat", &vec![0.1f32; 512], "self-enrollment").unwrap();
+        save_profile(&conn, "mat", "Mat", &vec![0.1f32; 512], "self-enrollment", TEST_MODEL_VERSION).unwrap();
         let profiles = list_profiles(&conn).unwrap();
         assert_eq!(profiles.len(), 1);
         assert_eq!(profiles[0].person_slug, "mat");
@@ -343,16 +351,16 @@ mod tests {
     #[test]
     fn upsert_increments_count() {
         let (conn, _tmp) = test_db();
-        save_profile(&conn, "mat", "Mat", &vec![0.1f32; 4], "self-enrollment").unwrap();
-        save_profile(&conn, "mat", "Mat", &vec![0.2f32; 4], "self-enrollment").unwrap();
+        save_profile(&conn, "mat", "Mat", &vec![0.1f32; 4], "self-enrollment", TEST_MODEL_VERSION).unwrap();
+        save_profile(&conn, "mat", "Mat", &vec![0.2f32; 4], "self-enrollment", TEST_MODEL_VERSION).unwrap();
         assert_eq!(list_profiles(&conn).unwrap()[0].sample_count, 2);
     }
 
     #[test]
     fn blended_averages() {
         let (conn, _tmp) = test_db();
-        save_profile(&conn, "mat", "Mat", &[1.0f32; 4], "self-enrollment").unwrap();
-        save_profile_blended(&conn, "mat", "Mat", &[3.0f32; 4], "self-enrollment").unwrap();
+        save_profile(&conn, "mat", "Mat", &[1.0f32; 4], "self-enrollment", TEST_MODEL_VERSION).unwrap();
+        save_profile_blended(&conn, "mat", "Mat", &[3.0f32; 4], "self-enrollment", TEST_MODEL_VERSION).unwrap();
         let p = load_profile_with_embedding(&conn, "mat").unwrap().unwrap();
         assert!((p.embedding[0] - 2.0).abs() < 1e-6);
     }
@@ -360,7 +368,7 @@ mod tests {
     #[test]
     fn delete_works() {
         let (conn, _tmp) = test_db();
-        save_profile(&conn, "mat", "Mat", &vec![0.1f32; 4], "self-enrollment").unwrap();
+        save_profile(&conn, "mat", "Mat", &vec![0.1f32; 4], "self-enrollment", TEST_MODEL_VERSION).unwrap();
         assert!(delete_profile(&conn, "mat").unwrap());
         assert!(list_profiles(&conn).unwrap().is_empty());
     }

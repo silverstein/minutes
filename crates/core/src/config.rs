@@ -79,6 +79,11 @@ pub struct DiarizationConfig {
     /// Cosine similarity threshold for speaker matching (0.0–1.0).
     /// Lower values merge more aggressively; higher values create more speakers.
     pub threshold: f32,
+    /// Speaker embedding model: "cam++" (default) or "cam++-lm".
+    /// CAM++_LM has ~12% lower EER on benchmarks but produces lower cosine
+    /// similarities, so `voice.match_threshold` must be lowered (~0.1–0.2)
+    /// for voice enrollment matching to work reliably.
+    pub embedding_model: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -433,6 +438,7 @@ impl Default for DiarizationConfig {
             engine: "auto".into(),
             model_path: minutes_dir().join("models").join("diarization"),
             threshold: 0.5,
+            embedding_model: "cam++".into(),
         }
     }
 }

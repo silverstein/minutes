@@ -19,7 +19,7 @@ https://huggingface.co/pyannote/segmentation-3.0
 
 ---
 
-WeSpeaker VoxCeleb ResNet34-LM (ONNX)
+WeSpeaker VoxCeleb CAM++ and CAM++_LM (ONNX)
 Developed by the WeSpeaker team
 Licensed under the Apache License, Version 2.0
 https://github.com/wenet-e2e/wespeaker

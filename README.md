@@ -684,11 +684,15 @@ engine = "auto"           # "auto" (default — uses pyannote-rs if models downl
                           # "pyannote-rs" (always on — native Rust, no Python),
                           # "pyannote" (legacy — requires pip install pyannote.audio),
                           # "none" (explicitly disabled)
+# embedding_model = "cam++"  # "cam++" (default) or "cam++-lm" (~12% lower EER on benchmarks).
+                          # Note: cam++-lm produces lower cosine similarities, so if you switch
+                          # to it you should also lower voice.match_threshold to ~0.1–0.2.
 # threshold = 0.5         # Speaker similarity threshold (0.0–1.0). Lower = fewer speakers.
 
 [voice]
 # enabled = true          # Voice profile matching during diarization (default: true if enrolled)
-# match_threshold = 0.65  # Cosine similarity threshold for voice matching (higher = stricter)
+# match_threshold = 0.65  # Cosine similarity threshold for voice matching (higher = stricter).
+                          # If using embedding_model = "cam++-lm", lower this to ~0.1–0.2.
 
 [search]
 engine = "builtin"        # builtin (regex) or qmd (semantic)

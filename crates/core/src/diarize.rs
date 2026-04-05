@@ -12,7 +12,7 @@ use std::path::Path;
 //
 // The pyannote-rs engine uses ONNX models (~34 MB total):
 //   - segmentation-3.0.onnx (speech segmentation)
-//   - wespeaker_en_voxceleb_CAM++.onnx (speaker embeddings)
+//   - voxceleb_CAM++_LM.onnx (speaker embeddings, large-margin fine-tuned)
 //
 // Download with: minutes setup --diarization
 // ──────────────────────────────────────────────────────────────
@@ -106,18 +106,52 @@ pub fn apply_confirmed_names(transcript: &str, attributions: &[SpeakerAttributio
 
 /// Model filenames expected by pyannote-rs.
 pub const SEGMENTATION_MODEL: &str = "segmentation-3.0.onnx";
-pub const EMBEDDING_MODEL: &str = "wespeaker_en_voxceleb_CAM++.onnx";
 
-/// Download URLs for diarization models (hosted on pyannote-rs GitHub releases).
 pub const SEGMENTATION_MODEL_URL: &str =
     "https://github.com/thewh1teagle/pyannote-rs/releases/download/v0.1.0/segmentation-3.0.onnx";
-pub const EMBEDDING_MODEL_URL: &str =
-    "https://github.com/thewh1teagle/pyannote-rs/releases/download/v0.1.0/wespeaker_en_voxceleb_CAM++.onnx";
+
+/// Descriptor for a speaker embedding ONNX model.
+pub struct EmbeddingModelInfo {
+    pub filename: &'static str,
+    pub url: &'static str,
+    pub version: &'static str,
+}
+
+/// Resolve the configured embedding model name to its ONNX file, download URL,
+/// and version tag stored alongside voice profiles.
+pub fn embedding_model_info(name: &str) -> Option<&'static EmbeddingModelInfo> {
+    static CAM_PP: EmbeddingModelInfo = EmbeddingModelInfo {
+        filename: "wespeaker_en_voxceleb_CAM++.onnx",
+        url: "https://github.com/thewh1teagle/pyannote-rs/releases/download/v0.1.0/wespeaker_en_voxceleb_CAM++.onnx",
+        version: "wespeaker_en_voxceleb_CAM++_v0.3",
+    };
+    static CAM_PP_LM: EmbeddingModelInfo = EmbeddingModelInfo {
+        filename: "voxceleb_CAM++_LM.onnx",
+        url: "https://huggingface.co/Wespeaker/wespeaker-voxceleb-campplus-LM/resolve/main/voxceleb_CAM%2B%2B_LM.onnx",
+        version: "wespeaker_voxceleb_CAM++_LM_v0.3",
+    };
+
+    match name {
+        "cam++" => Some(&CAM_PP),
+        "cam++-lm" => Some(&CAM_PP_LM),
+        _ => None,
+    }
+}
+
+/// All recognized embedding model names (for help / error messages).
+pub const EMBEDDING_MODEL_NAMES: &[&str] = &["cam++", "cam++-lm"];
+
+/// Resolve from config, falling back to the default (cam++).
+pub fn embedding_model_for_config(config: &Config) -> &'static EmbeddingModelInfo {
+    embedding_model_info(&config.diarization.embedding_model)
+        .unwrap_or_else(|| embedding_model_info("cam++").unwrap())
+}
 
 /// Check if diarization models are installed.
 pub fn models_installed(config: &Config) -> bool {
     let dir = &config.diarization.model_path;
-    dir.join(SEGMENTATION_MODEL).exists() && dir.join(EMBEDDING_MODEL).exists()
+    let emb = embedding_model_for_config(config);
+    dir.join(SEGMENTATION_MODEL).exists() && dir.join(emb.filename).exists()
 }
 
 /// Pre-process audio to 16kHz mono WAV via ffmpeg (if available).
@@ -560,7 +594,8 @@ fn diarize_with_pyannote_rs(
 
     let model_dir = &config.diarization.model_path;
     let seg_model = model_dir.join(SEGMENTATION_MODEL);
-    let emb_model = model_dir.join(EMBEDDING_MODEL);
+    let emb_info = embedding_model_for_config(config);
+    let emb_model = model_dir.join(emb_info.filename);
 
     if !seg_model.exists() {
         return Err(format!(

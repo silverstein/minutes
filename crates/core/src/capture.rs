@@ -1168,7 +1168,9 @@ pub fn list_devices_categorized() -> Vec<CategorizedDevice> {
 
     if let Ok(input_devices) = host.input_devices() {
         for device in input_devices {
-            let Ok(desc) = device.description() else { continue };
+            let Ok(desc) = device.description() else {
+                continue;
+            };
             let name = desc.name().to_string();
             let (sample_rate, channels) = device
                 .default_input_config()

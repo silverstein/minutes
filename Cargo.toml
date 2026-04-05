@@ -67,8 +67,9 @@ nnnoiseless = "0.5"
 # Channels (for streaming audio)
 crossbeam-channel = "0.5"
 
-# Speaker diarization (native, no Python)
-pyannote-rs = "0.3"
+# Speaker diarization (native, no Python) — patched fork fixes i16→f32
+# normalization bug and trailing speech flush in get_segments
+pyannote-rs = { git = "https://github.com/gregoire22enpc/pyannote-rs", rev = "ae9fbc1" }
 
 # SQLite (relationship graph index)
 rusqlite = { version = "0.33", features = ["bundled"] }

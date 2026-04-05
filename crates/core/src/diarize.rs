@@ -807,19 +807,28 @@ fn diarize_with_pyannote_rs(
         });
     }
 
-    // Deduplicate accumulation (templates may be counted multiple times when
-    // multiple segments share the same raw_id). Rebuild from templates directly.
+    // Rebuild final speaker embeddings by weighted-averaging merged templates.
+    // Each template is weighted by its segment count so a template built from
+    // 50 segments contributes proportionally more than one from 2 segments.
     let mut speaker_embeddings: std::collections::HashMap<String, Vec<f32>> =
         std::collections::HashMap::new();
-    for (raw_id, (template, _count)) in speaker_templates.iter().enumerate() {
+    let mut speaker_total_counts: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    for (raw_id, (template, count)) in speaker_templates.iter().enumerate() {
         let canonical_id = merge_map[raw_id];
         let label = canonical_to_label[&canonical_id].clone();
         let entry = speaker_embeddings
-            .entry(label)
+            .entry(label.clone())
             .or_insert_with(|| vec![0.0f32; template.len()]);
-        let merge_count = merge_map.iter().filter(|&&c| c == canonical_id).count() as f32;
         for (i, val) in template.iter().enumerate() {
-            entry[i] += val / merge_count;
+            entry[i] += val * (*count as f32);
+        }
+        *speaker_total_counts.entry(label).or_insert(0) += count;
+    }
+    for (label, embedding) in speaker_embeddings.iter_mut() {
+        let total = *speaker_total_counts.get(label).unwrap_or(&1) as f32;
+        for val in embedding.iter_mut() {
+            *val /= total;
         }
     }
 
@@ -874,6 +883,9 @@ fn merge_short_segments(segments: Vec<SpeechSegment>, sample_rate: u32) -> Vec<S
     let max_gap_samples = (sample_rate as f64 * 0.3) as usize; // 300ms gap tolerance
     let min_dur_samples = (sample_rate as f64 * 0.5) as usize; // 0.5s minimum
 
+    // Cap gap tolerance for short segments so they don't absorb across long pauses.
+    let max_short_gap_samples = (sample_rate as f64 * 1.0) as usize; // 1s ceiling
+
     let mut merged: Vec<SpeechSegment> = Vec::new();
     let mut current = segments[0].clone();
 
@@ -881,8 +893,10 @@ fn merge_short_segments(segments: Vec<SpeechSegment>, sample_rate: u32) -> Vec<S
         let gap = seg.start_sample.saturating_sub(current.end_sample);
         let current_dur = current.end_sample.saturating_sub(current.start_sample);
 
-        if gap <= max_gap_samples || current_dur < min_dur_samples {
-            // Absorb: extend current segment to cover this one
+        let should_merge = gap <= max_gap_samples
+            || (current_dur < min_dur_samples && gap <= max_short_gap_samples);
+
+        if should_merge {
             current.end = seg.end;
             current.end_sample = seg.end_sample;
         } else {
@@ -926,6 +940,13 @@ fn segment_speech(
         .with_inter_threads(1)?
         .commit_from_file(model_path)?;
 
+    // These constants come from the pyannote segmentation-3.0 model architecture:
+    // - frame_size (270 samples @ 16kHz = 16.875ms) is the hop between output frames,
+    //   derived from the model's sincnet + temporal pooling stride.
+    // - frame_start (721 samples @ 16kHz = 45ms) is the receptive-field offset, i.e.
+    //   how many input samples precede the center of the first output frame.
+    // - window_size (10s @ sample_rate) matches the model's fixed-length input window.
+    // See pyannote-rs source and pyannote-audio's SlidingWindowFeature for derivation.
     let frame_size: usize = 270;
     let frame_start: usize = 721;
     let window_size = (sample_rate as usize) * 10;
@@ -1361,5 +1382,147 @@ mod tests {
         config.diarization.engine = "pyannote-rs".into();
         assert_eq!(config.diarization.engine, "pyannote-rs");
         assert_eq!(config.diarization.threshold, 0.5);
+    }
+
+    // ── l2_normalize tests ──────────────────────────────────────
+
+    #[cfg(feature = "diarize")]
+    #[test]
+    fn l2_normalize_unit_vector() {
+        let v = vec![3.0f32, 4.0];
+        let n = l2_normalize(&v);
+        let norm: f32 = n.iter().map(|x| x * x).sum::<f32>().sqrt();
+        assert!(
+            (norm - 1.0).abs() < 1e-6,
+            "expected unit length, got {}",
+            norm
+        );
+        assert!((n[0] - 0.6).abs() < 1e-6);
+        assert!((n[1] - 0.8).abs() < 1e-6);
+    }
+
+    #[cfg(feature = "diarize")]
+    #[test]
+    fn l2_normalize_zero_vector() {
+        let v = vec![0.0f32; 5];
+        let n = l2_normalize(&v);
+        assert_eq!(n, v, "zero vector should be returned as-is");
+    }
+
+    #[cfg(feature = "diarize")]
+    #[test]
+    fn l2_normalize_single_element() {
+        let v = vec![7.0f32];
+        let n = l2_normalize(&v);
+        assert!((n[0] - 1.0).abs() < 1e-6);
+    }
+
+    #[cfg(feature = "diarize")]
+    #[test]
+    fn l2_normalize_negative_values() {
+        let v = vec![-3.0f32, 4.0];
+        let n = l2_normalize(&v);
+        let norm: f32 = n.iter().map(|x| x * x).sum::<f32>().sqrt();
+        assert!((norm - 1.0).abs() < 1e-6);
+        assert!(n[0] < 0.0, "sign should be preserved");
+    }
+
+    // ── merge_short_segments tests ──────────────────────────────
+
+    #[cfg(feature = "diarize")]
+    fn make_seg(start_s: f64, end_s: f64, sr: u32) -> SpeechSegment {
+        SpeechSegment {
+            start: start_s,
+            end: end_s,
+            start_sample: (start_s * sr as f64) as usize,
+            end_sample: (end_s * sr as f64) as usize,
+        }
+    }
+
+    #[cfg(feature = "diarize")]
+    #[test]
+    fn merge_short_segments_empty_input() {
+        let result = merge_short_segments(vec![], 16000);
+        assert!(result.is_empty());
+    }
+
+    #[cfg(feature = "diarize")]
+    #[test]
+    fn merge_short_segments_single_segment() {
+        let segs = vec![make_seg(0.0, 2.0, 16000)];
+        let result = merge_short_segments(segs, 16000);
+        assert_eq!(result.len(), 1);
+        assert!((result[0].start - 0.0).abs() < 1e-6);
+        assert!((result[0].end - 2.0).abs() < 1e-6);
+    }
+
+    #[cfg(feature = "diarize")]
+    #[test]
+    fn merge_short_segments_merges_small_gaps() {
+        // Two segments 200ms apart → should merge (300ms tolerance)
+        let segs = vec![make_seg(0.0, 1.0, 16000), make_seg(1.2, 2.0, 16000)];
+        let result = merge_short_segments(segs, 16000);
+        assert_eq!(result.len(), 1);
+        assert!((result[0].end - 2.0).abs() < 1e-6);
+    }
+
+    #[cfg(feature = "diarize")]
+    #[test]
+    fn merge_short_segments_preserves_large_gaps() {
+        // Two segments 2s apart → should NOT merge
+        let segs = vec![make_seg(0.0, 1.0, 16000), make_seg(3.0, 4.0, 16000)];
+        let result = merge_short_segments(segs, 16000);
+        assert_eq!(result.len(), 2);
+    }
+
+    #[cfg(feature = "diarize")]
+    #[test]
+    fn merge_short_segments_short_segment_respects_gap_ceiling() {
+        // A short segment (0.3s) followed by another 1.5s away.
+        // Even though the first is <0.5s (min_dur), the gap exceeds the 1s
+        // ceiling so they should NOT merge.
+        let segs = vec![make_seg(0.0, 0.3, 16000), make_seg(1.8, 3.0, 16000)];
+        let result = merge_short_segments(segs, 16000);
+        assert_eq!(
+            result.len(),
+            2,
+            "short segment should not absorb across >1s gap"
+        );
+    }
+
+    #[cfg(feature = "diarize")]
+    #[test]
+    fn merge_short_segments_short_segment_merges_within_ceiling() {
+        // A short segment (0.3s) followed by another 0.8s away.
+        // First is <0.5s and gap is <1s ceiling → should merge.
+        let segs = vec![make_seg(0.0, 0.3, 16000), make_seg(1.1, 2.0, 16000)];
+        let result = merge_short_segments(segs, 16000);
+        assert_eq!(
+            result.len(),
+            1,
+            "short segment should absorb within 1s ceiling"
+        );
+    }
+
+    #[cfg(feature = "diarize")]
+    #[test]
+    fn merge_short_segments_all_below_min_duration() {
+        // All segments are very short. They should chain-merge until they
+        // hit the gap ceiling.
+        let segs = vec![
+            make_seg(0.0, 0.1, 16000),
+            make_seg(0.2, 0.3, 16000),
+            make_seg(0.4, 0.5, 16000),
+            // 3s gap — exceeds ceiling
+            make_seg(3.5, 3.6, 16000),
+        ];
+        let result = merge_short_segments(segs, 16000);
+        assert_eq!(
+            result.len(),
+            2,
+            "chain of short segments should merge, but not across 3s gap"
+        );
+        assert!((result[0].end - 0.5).abs() < 1e-6);
+        assert!((result[1].start - 3.5).abs() < 1e-6);
     }
 }

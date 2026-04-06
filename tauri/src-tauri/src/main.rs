@@ -95,14 +95,22 @@ fn show_main_window(app: &tauri::AppHandle) {
         win.set_focus().ok();
         return;
     }
-    let _win = WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
+    if let Ok(win) = WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
         .title("Minutes")
         .inner_size(480.0, 640.0)
         .min_inner_size(380.0, 480.0)
+        .transparent(true)
         .content_protected(true)
         .center()
         .focused(true)
-        .build();
+        .build()
+    {
+        #[cfg(target_os = "macos")]
+        {
+            use window_vibrancy::{apply_vibrancy, NSVisualEffectMaterial};
+            apply_vibrancy(&win, NSVisualEffectMaterial::Sidebar, None, None).ok();
+        }
+    }
 }
 
 fn show_note_window(app: &tauri::AppHandle) {

@@ -30,6 +30,7 @@ tauri-plugin-autostart = "2"
 tauri-plugin-updater = "2"
 walkdir = { workspace = true }
 ureq = { workspace = true }
+window-vibrancy = "0.7"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

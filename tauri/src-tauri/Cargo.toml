@@ -27,6 +27,7 @@ portable-pty = "0.9"
 base64 = "0.22"
 tauri-plugin-pty = "0.1"
 tauri-plugin-autostart = "2"
+tauri-plugin-updater = "2"
 walkdir = { workspace = true }
 ureq = { workspace = true }
 

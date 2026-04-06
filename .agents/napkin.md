@@ -3,6 +3,7 @@
 ## Corrections
 | Date | Source | What Went Wrong | What To Do Instead |
 |------|--------|----------------|-------------------|
+| 2026-04-05 | self | While reviewing the Tauri auto-updater wiring, I almost treated a darwin-only `latest.json` as harmless even though the plugin is now enabled globally | For updater changes, inspect the manifest targets against every enabled desktop platform; `tauri-plugin-updater` errors with `TargetsNotFound` when the current OS/arch is missing |
 | 2026-03-18 | self | Updated `start_recording` signature for processing-state wiring but missed the tray menu call site in `tauri/src-tauri/src/main.rs` | After widening Tauri command/helper signatures, run `rg` for all call sites before testing so the state plumbing stays consistent |
 | 2026-03-19 | self | The Tauri live-recording path was still injecting timestamp titles, which quietly bypassed the smart-title pipeline we had already shipped | When adding UX polish around recording labels, verify we are not overriding downstream title generation or artifact heuristics by accident |
 | 2026-03-19 | self | Tried a direct `cargo run -p minutes-cli` sanity check without the repo's usual macOS `CXXFLAGS`, which failed in `whisper-rs-sys` even though the targeted tests had already passed | On this machine, use the `CXXFLAGS=\"-I$(xcrun --show-sdk-path)/usr/include/c++/v1\"` prefix for any Rust command that may build `whisper-rs`, not just tests |

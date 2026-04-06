@@ -1924,6 +1924,22 @@
     .call-detected-subtitle { font-size: 11px; color: var(--green); font-weight: 600; margin-top: 2px; }
     .call-detected-detail { font-size: 11px; color: var(--text-secondary); margin-top: 6px; line-height: 1.35; }
     .call-detected-health { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+
+    /* ── Update available banner ── */
+    .update-banner {
+      display: none;
+      align-items: center;
+      gap: 12px;
+      padding: 10px 16px;
+      background: rgba(77, 168, 217, 0.08);
+      border-bottom: 1px solid rgba(77, 168, 217, 0.12);
+    }
+    .update-banner.active { display: flex; animation: processing-enter 0.3s ease-out; }
+    .update-banner-info { flex: 1; min-width: 0; }
+    .update-banner-title { font-size: 12px; font-weight: 600; color: var(--text); }
+    .update-banner-sub { font-size: 11px; color: var(--text-secondary); margin-top: 2px; }
+    .update-banner-actions { display: flex; gap: 6px; flex-shrink: 0; }
+    .update-banner-actions .btn { font-size: 11px; }
     .call-health-chip {
       font-size: 11px;
       border-radius: 999px;
@@ -2072,6 +2088,18 @@
     <div class="call-detected-actions">
       <button class="btn btn-primary btn-sm" id="btn-record-call">Record</button>
       <button class="btn btn-secondary btn-sm" id="btn-dismiss-call">Dismiss</button>
+    </div>
+  </div>
+
+  <!-- Update available banner -->
+  <div class="update-banner" id="update-banner">
+    <div class="update-banner-info">
+      <div class="update-banner-title" id="update-banner-title">Update available</div>
+      <div class="update-banner-sub" id="update-banner-sub">A new version is ready to install</div>
+    </div>
+    <div class="update-banner-actions">
+      <button class="btn btn-primary btn-sm" id="btn-restart-update">Restart Now</button>
+      <button class="btn btn-secondary btn-sm" id="btn-dismiss-update">Later</button>
     </div>
   </div>
 
@@ -5858,6 +5886,57 @@
 
     currentWindow.listen('dictation-hotkey:status', (event) => {
       applyDictationHotkeyStatus(event.payload);
+    });
+
+    // ── Auto-update banner ──
+    const updateBanner = document.getElementById('update-banner');
+    function showUpdateBanner(version, body) {
+      if (!updateBanner) return;
+      const titleEl = document.getElementById('update-banner-title');
+      const subEl = document.getElementById('update-banner-sub');
+      if (titleEl) titleEl.textContent = 'Update available (v' + version + ')';
+      if (subEl) subEl.textContent =
+        body ? body.split('\n')[0].slice(0, 80) : 'A new version is ready to install';
+      updateBanner.classList.add('active');
+    }
+    // Restore banner from localStorage if a pending update was stored,
+    // but only if the stored version is newer than the current app version
+    // (clears stale entries from a successfully applied update)
+    try {
+      const stored = localStorage.getItem('minutes-pending-update');
+      if (stored) {
+        const { version, body } = JSON.parse(stored);
+        window.__TAURI__.app.getVersion().then(currentVersion => {
+          if (version && version !== currentVersion) {
+            showUpdateBanner(version, body);
+          } else {
+            localStorage.removeItem('minutes-pending-update');
+          }
+        }).catch(() => {});
+      }
+    } catch (_) {}
+    currentWindow.listen('update-ready', (event) => {
+      const { version, body } = event.payload;
+      try { localStorage.setItem('minutes-pending-update', JSON.stringify({ version, body })); } catch (_) {}
+      showUpdateBanner(version, body);
+    });
+    document.getElementById('btn-restart-update').addEventListener('click', async () => {
+      const btn = document.getElementById('btn-restart-update');
+      btn.textContent = 'Updating...';
+      btn.disabled = true;
+      try {
+        await window.__TAURI__.core.invoke('cmd_install_update');
+      } catch (e) {
+        console.error('[updater] update failed:', e);
+        btn.textContent = 'Restart Now';
+        btn.disabled = false;
+        const subEl = document.getElementById('update-banner-sub');
+        if (subEl) subEl.textContent = String(e);
+      }
+    });
+    document.getElementById('btn-dismiss-update').addEventListener('click', () => {
+      if (updateBanner) updateBanner.classList.remove('active');
+      try { localStorage.removeItem('minutes-pending-update'); } catch (_) {}
     });
 
     // ── Listen for live transcript events (T6: immediate UI feedback) ──

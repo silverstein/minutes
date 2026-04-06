@@ -53,6 +53,7 @@ jobs:
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
           APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
           APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
         run: |
           missing=()
           for name in \
@@ -61,7 +62,8 @@ jobs:
             APPLE_SIGNING_IDENTITY \
             APPLE_API_ISSUER \
             APPLE_API_KEY \
-            APPLE_API_PRIVATE_KEY
+            APPLE_API_PRIVATE_KEY \
+            TAURI_SIGNING_PRIVATE_KEY
           do
             if [ -z "${!name}" ]; then
               missing+=("$name")
@@ -84,7 +86,7 @@ jobs:
           chmod 600 "$key_path"
           echo "APPLE_API_KEY_PATH=$key_path" >> "$GITHUB_ENV"
 
-      - name: Build signed + notarized bundle
+      - name: Build signed + notarized bundle (with updater artifacts)
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
@@ -92,6 +94,8 @@ jobs:
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
           APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
         run: cargo tauri build --bundles app,dmg
 
       - name: Upload signed app bundle
@@ -115,9 +119,48 @@ jobs:
         run: |
           gh release view "${GITHUB_REF_NAME}" >/dev/null
 
+      - name: Generate latest.json for auto-updater
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          SIG=$(cat target/release/bundle/macos/Minutes.app.tar.gz.sig)
+          if [ -z "$SIG" ]; then
+            echo "ERROR: .sig file empty or missing" >&2
+            exit 1
+          fi
+          URL="https://github.com/silverstein/minutes/releases/download/${GITHUB_REF_NAME}/Minutes.app.tar.gz"
+          NOTES=$(gh release view "${GITHUB_REF_NAME}" --json body -q .body 2>/dev/null || echo "")
+          export UPDATE_VERSION="$VERSION"
+          export UPDATE_SIG="$SIG"
+          export UPDATE_URL="$URL"
+          export UPDATE_NOTES="$NOTES"
+          python3 << 'PYEOF'
+          import json, os, datetime
+          data = {
+              "version": os.environ["UPDATE_VERSION"],
+              "notes": os.environ["UPDATE_NOTES"],
+              "pub_date": datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+              "platforms": {
+                  "darwin-aarch64": {
+                      "signature": os.environ["UPDATE_SIG"].strip(),
+                      "url": os.environ["UPDATE_URL"]
+                  }
+              }
+          }
+          with open("target/release/bundle/macos/latest.json", "w") as f:
+              json.dump(data, f, indent=2)
+          PYEOF
+
       - name: Upload release assets to existing tag release
         if: startsWith(github.ref, 'refs/tags/v')
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release upload "${GITHUB_REF_NAME}" target/release/bundle/dmg/*.dmg --clobber
+          gh release upload "${GITHUB_REF_NAME}" \
+            target/release/bundle/dmg/*.dmg \
+            target/release/bundle/macos/Minutes.app.tar.gz \
+            target/release/bundle/macos/Minutes.app.tar.gz.sig \
+            target/release/bundle/macos/latest.json \
+            --clobber

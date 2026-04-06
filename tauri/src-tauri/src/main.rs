@@ -186,6 +186,71 @@ pub fn update_tray_state_with_mode(app: &tauri::AppHandle, is_active: bool, is_l
     }
 }
 
+// ── Auto-updater ────────────────────────────────────────────
+
+async fn check_for_update(app: &tauri::AppHandle) {
+    use tauri_plugin_updater::UpdaterExt;
+
+    let updater = match app.updater() {
+        Ok(u) => u,
+        Err(e) => {
+            eprintln!("[updater] init failed (non-fatal): {}", e);
+            return;
+        }
+    };
+
+    let update = match updater.check().await {
+        Ok(Some(u)) => u,
+        Ok(None) => return,
+        Err(e) => {
+            eprintln!("[updater] check failed (non-fatal): {}", e);
+            return;
+        }
+    };
+
+    let version = update.version.clone();
+    let body = update.body.clone().unwrap_or_default();
+    eprintln!(
+        "[updater] v{} available (check only, no download yet)",
+        version
+    );
+
+    // Store pending update info in AppState
+    if let Some(state) = app.try_state::<commands::AppState>() {
+        if let Ok(mut pending) = state.pending_update.lock() {
+            *pending = Some(commands::PendingUpdate {
+                version: version.clone(),
+                body: body.clone(),
+            });
+        }
+
+        // Defer notification if any session activity is in progress.
+        // The pending_update is stored either way, so it will be surfaced
+        // by the 30s deferred poll once the session ends.
+        if state.recording.load(Ordering::Relaxed)
+            || state.starting.load(Ordering::Relaxed)
+            || state.processing.load(Ordering::Relaxed)
+            || state.live_transcript_active.load(Ordering::Relaxed)
+            || state.dictation_active.load(Ordering::Relaxed)
+        {
+            eprintln!("[updater] deferring notification (session active)");
+            return;
+        }
+    }
+
+    notify_update_available(app, &version, &body);
+}
+
+fn notify_update_available(app: &tauri::AppHandle, version: &str, body: &str) {
+    let _ = app.emit(
+        "update-ready",
+        serde_json::json!({
+            "version": version,
+            "body": body,
+        }),
+    );
+}
+
 // ── Calendar items in tray menu ──────────────────────────────
 
 const MAX_CALENDAR_ITEMS: usize = 3;
@@ -498,6 +563,7 @@ fn main() {
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None,
         ))
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(commands::AppState {
             recording: recording.clone(),
             starting: starting.clone(),
@@ -531,6 +597,7 @@ fn main() {
                 };
                 Arc::new(Mutex::new(s))
             },
+            pending_update: Arc::new(Mutex::new(None)),
         })
         .manage(Arc::new(Mutex::new(
             shortcut_manager::ShortcutManager::new(),
@@ -541,6 +608,26 @@ fn main() {
 
             // Clean up stale terminal workspaces from previous sessions
             context::cleanup_stale_workspaces();
+
+            // Auto-update: check on launch, then every 6 hours.
+            // Check-only (no download). Download happens when user clicks "Restart Now".
+            // Defers notification if recording/live/dictation is active.
+            // Between checks, polls every 30s to surface deferred updates once sessions end.
+            let update_handle = app.handle().clone();
+            std::thread::spawn(move || {
+                const CHECK_INTERVAL_SECS: u64 = 6 * 60 * 60;
+                const DEFERRED_POLL_SECS: u64 = 30;
+
+                loop {
+                    tauri::async_runtime::block_on(check_for_update(&update_handle));
+
+                    let polls = CHECK_INTERVAL_SECS / DEFERRED_POLL_SECS;
+                    for _ in 0..polls {
+                        std::thread::sleep(std::time::Duration::from_secs(DEFERRED_POLL_SECS));
+                        commands::surface_deferred_update(&update_handle);
+                    }
+                }
+            });
 
             // Preload whisper model for dictation in background thread.
             // Only if dictation shortcuts are enabled — avoids 150MB RAM for
@@ -698,6 +785,13 @@ fn main() {
                 None::<&str>,
             )?;
             let screen_share_item_ref = screen_share_item.clone();
+            let check_update_item = MenuItem::with_id(
+                app,
+                "check-for-updates",
+                "Check for Updates",
+                true,
+                None::<&str>,
+            )?;
             let sep2 = MenuItem::with_id(app, "sep2", "──────────", false, None::<&str>)?;
             let quit_item = MenuItem::with_id(app, "quit", "Quit Minutes", true, None::<&str>)?;
 
@@ -716,7 +810,7 @@ fn main() {
             if commands::supports_tray_artifact_copy() {
                 menu.append_items(&[&paste_summary_item, &paste_transcript_item])?;
             }
-            menu.append_items(&[&sep2, &screen_share_item, &quit_item])?;
+            menu.append_items(&[&sep2, &screen_share_item, &check_update_item, &quit_item])?;
 
             let icon = tauri::image::Image::from_bytes(include_bytes!("../icons/icon.png"))
                 .expect("load tray icon");
@@ -909,6 +1003,12 @@ fn main() {
                             for (_, win) in app.webview_windows() {
                                 win.set_content_protected(new_state).ok();
                             }
+                        }
+                        "check-for-updates" => {
+                            let handle = app.clone();
+                            tauri::async_runtime::spawn(async move {
+                                check_for_update(&handle).await;
+                            });
                         }
                         "quit" => {
                             // Kill all PTY sessions before exiting
@@ -1125,6 +1225,7 @@ fn main() {
             commands::cmd_live_transcript_status,
             commands::cmd_live_shortcut_settings,
             commands::cmd_set_live_shortcut,
+            commands::cmd_install_update,
         ])
         .run(tauri::generate_context!())
         .expect("error while running minutes app");

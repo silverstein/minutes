@@ -15,6 +15,7 @@
     }
   },
   "bundle": {
+    "createUpdaterArtifacts": true,
     "icon": [
       "icons/icon.icns",
       "icons/icon.ico",
@@ -24,6 +25,12 @@
   "plugins": {
     "shell": {
       "open": true
+    },
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEUyMjA0OUE4OTg1RjhCNDYKUldSR2kxK1lxRWtnNHRKQ2ZxenRqN1V6cFhCSUFDT0tZVTBHUk1LdGJuOFJzdTVkd2xsNjZFQTUK",
+      "endpoints": [
+        "https://github.com/silverstein/minutes/releases/latest/download/latest.json"
+      ]
     }
   }
 }

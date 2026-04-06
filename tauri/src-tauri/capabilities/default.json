@@ -23,6 +23,7 @@
     "dialog:default",
     "dialog:allow-open",
     "autostart:default",
-    "notification:default"
+    "notification:default",
+    "updater:default"
   ]
 }

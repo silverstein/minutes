@@ -398,6 +398,7 @@ same local meeting artifacts. It runs as a singleton assistant session:
 
 - `AI Assistant` opens or focuses the persistent assistant window
 - `Discuss with AI` reuses that same assistant and switches its active meeting focus
+- Auto-updates from GitHub Releases with signed artifacts, never interrupting a recording
 
 ### Cowork / Dispatch
 MCP tools are automatically available in Cowork. From your phone via Dispatch: *"Start recording"* → Mac captures → Claude processes → summary on your phone.

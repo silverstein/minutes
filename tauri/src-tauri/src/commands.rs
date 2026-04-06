@@ -34,6 +34,43 @@ pub struct AppState {
     pub live_transcript_stop_flag: Arc<AtomicBool>,
     pub live_shortcut_enabled: Arc<AtomicBool>,
     pub live_shortcut: Arc<Mutex<String>>,
+    pub pending_update: Arc<Mutex<Option<PendingUpdate>>>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PendingUpdate {
+    pub version: String,
+    pub body: String,
+}
+
+/// Surface a deferred update notification if one is pending and no session is active.
+/// Call this after recording/live/dictation stops.
+pub fn surface_deferred_update(app: &tauri::AppHandle) {
+    let state = match app.try_state::<AppState>() {
+        Some(s) => s,
+        None => return,
+    };
+    if state.recording.load(Ordering::Relaxed)
+        || state.starting.load(Ordering::Relaxed)
+        || state.processing.load(Ordering::Relaxed)
+        || state.live_transcript_active.load(Ordering::Relaxed)
+        || state.dictation_active.load(Ordering::Relaxed)
+    {
+        return;
+    }
+    let pending = match state.pending_update.lock() {
+        Ok(mut guard) => guard.take(),
+        Err(_) => return,
+    };
+    if let Some(update) = pending {
+        let _ = app.emit(
+            "update-ready",
+            serde_json::json!({
+                "version": update.version,
+                "body": update.body,
+            }),
+        );
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -5086,4 +5123,52 @@ pub fn cmd_probe_shortcut(keycode: i64) -> serde_json::Value {
         "permission_granted": permission_granted,
         "supported": !needs_native || cfg!(target_os = "macos"),
     })
+}
+
+#[tauri::command]
+pub async fn cmd_install_update(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
+    use tauri_plugin_updater::UpdaterExt;
+
+    // Block restart if any recording/processing activity is in progress
+    let state = app.state::<AppState>();
+    if state.recording.load(Ordering::Relaxed) {
+        return Err("Cannot update while recording. Stop the recording first.".into());
+    }
+    if state.starting.load(Ordering::Relaxed) {
+        return Err("Recording is starting. Wait a moment and try again.".into());
+    }
+    if state.processing.load(Ordering::Relaxed) {
+        return Err("Processing a recording. Wait until it finishes.".into());
+    }
+    if state.live_transcript_active.load(Ordering::Relaxed) {
+        return Err("Cannot update during live transcription. Stop it first.".into());
+    }
+    if state.dictation_active.load(Ordering::Relaxed) {
+        return Err("Cannot update during dictation. Stop it first.".into());
+    }
+
+    // Download and install (the background checker only checked, not downloaded)
+    let updater = app.updater().map_err(|e| e.to_string())?;
+    let update = updater
+        .check()
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "No update available.".to_string())?;
+
+    let version = update.version.clone();
+    update
+        .download_and_install(|_, _| {}, || {})
+        .await
+        .map_err(|e| format!("Update failed: {}", e))?;
+
+    // Clear pending update state
+    if let Ok(mut pending) = state.pending_update.lock() {
+        *pending = None;
+    }
+
+    eprintln!("[updater] v{} installed, restarting", version);
+    app.restart();
+
+    #[allow(unreachable_code)]
+    Ok(serde_json::json!({"restarting": true}))
 }

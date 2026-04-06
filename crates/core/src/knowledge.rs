@@ -29,7 +29,7 @@ pub enum Confidence {
 }
 
 impl Confidence {
-    pub fn from_str(s: &str) -> Self {
+    pub fn parse(s: &str) -> Self {
         match s {
             "explicit" => Confidence::Explicit,
             "strong" => Confidence::Strong,
@@ -116,7 +116,7 @@ pub fn update_from_meeting(
     }
 
     let kc = &config.knowledge;
-    let min_confidence = Confidence::from_str(&kc.min_confidence);
+    let min_confidence = Confidence::parse(&kc.min_confidence);
 
     // Phase 1: Extract facts from structured frontmatter (zero hallucination risk)
     let person_facts = crate::knowledge_extract::extract_from_frontmatter(

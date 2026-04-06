@@ -137,7 +137,7 @@ minutes demo                                     # Run a demo recording (no mic 
 
 ## Switching from Granola?
 
-Import your meeting history in one command:
+Import your meeting history into Minutes' conversation memory. Once imported, your meetings become searchable context for AI agents, feed the relationship graph for meeting prep, and surface action items and decision patterns across months of conversations.
 
 ```bash
 minutes import granola --dry-run    # Preview what will be imported

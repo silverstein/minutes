@@ -323,6 +323,11 @@ fn process_file(path: &Path, config: &Config) -> Result<(), WatchError> {
                 });
             }
 
+            // Update relationship graph index
+            if let Err(e) = crate::graph::rebuild_index(config) {
+                tracing::warn!(error = %e, "graph index rebuild failed (non-fatal)");
+            }
+
             move_to(path, "processed")?;
             Ok(())
         }

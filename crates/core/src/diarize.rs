@@ -530,7 +530,9 @@ pub fn apply_speakers(transcript: &str, result: &DiarizationResult) -> String {
     // labeled UNKNOWN. Since the opening words almost certainly belong to
     // whoever is about to speak, we inherit the speaker from the next
     // attributed segment rather than leaving it unresolved.
-    let first_attr = lines.iter().position(|l| matches!(l, OutputLine::Attributed { .. }));
+    let first_attr = lines
+        .iter()
+        .position(|l| matches!(l, OutputLine::Attributed { .. }));
     if let Some(first_idx) = first_attr {
         let is_unknown = matches!(&lines[first_idx], OutputLine::Attributed { speaker, .. } if speaker == "UNKNOWN");
         if is_unknown {

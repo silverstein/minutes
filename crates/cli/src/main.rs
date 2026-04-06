@@ -1088,7 +1088,7 @@ fn spawn_queue_worker() -> Result<()> {
     Ok(())
 }
 
-fn cmd_stop(_config: &Config) -> Result<()> {
+fn cmd_stop(config: &Config) -> Result<()> {
     match minutes_core::pid::check_recording() {
         Ok(Some(pid)) => {
             let capture_mode = minutes_core::pid::read_recording_metadata()
@@ -1138,8 +1138,7 @@ fn cmd_stop(_config: &Config) -> Result<()> {
                 std::fs::remove_file(&result_path).ok();
 
                 // Update relationship graph index
-                #[cfg(feature = "diarize")]
-                if let Err(e) = minutes_core::graph::rebuild_index(_config) {
+                if let Err(e) = minutes_core::graph::rebuild_index(config) {
                     tracing::warn!(error = %e, "graph index rebuild failed (non-fatal)");
                 }
             } else {
@@ -2030,6 +2029,11 @@ fn cmd_process(
     config.ensure_dirs()?;
     let result = minutes_core::process(path, ct, title, config)?;
     eprintln!("Saved: {}", result.path.display());
+
+    // Update relationship graph index
+    if let Err(e) = minutes_core::graph::rebuild_index(config) {
+        tracing::warn!(error = %e, "graph index rebuild failed (non-fatal)");
+    }
 
     let json = serde_json::to_string_pretty(&serde_json::json!({
         "status": "done",
@@ -3369,6 +3373,13 @@ fn import_granola(dir: Option<&Path>, dry_run: bool, config: &Config) -> Result<
         }
 
         imported += 1;
+    }
+
+    // Update relationship graph index after batch import
+    if !dry_run && imported > 0 {
+        if let Err(e) = minutes_core::graph::rebuild_index(config) {
+            tracing::warn!(error = %e, "graph index rebuild failed (non-fatal)");
+        }
     }
 
     let action = if dry_run { "Would import" } else { "Imported" };

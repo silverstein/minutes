@@ -237,6 +237,14 @@ gh api repos/silverstein/minutes/discussions --jq '.[].title'   # List recent
 gh issue list --label question                                    # Find issues that should be discussions
 ```
 
+## Contributor PRs
+
+**Always merge contributor PRs through GitHub's merge flow.** Use `gh pr merge <number>` or the GitHub merge button. Never cherry-pick/rebase to main manually and then close the PR via API. That makes GitHub display the PR as "Closed" (red) instead of "Merged" (purple), which looks like a rejection to the contributor.
+
+If there are merge conflicts, resolve them on the PR branch and merge through GitHub. If you need to rebase, push to the PR branch first, then merge.
+
+**Never rewrite a contributor's PR without communicating first.** If their approach needs changes, iterate via review comments on their PR. Don't ship a competing implementation silently.
+
 ## Project Structure
 
 ```

@@ -146,6 +146,24 @@ minutes import granola              # Import all meetings to ~/meetings/
 
 Reads from `~/.granola-archivist/output/`. Meetings are converted to Minutes' markdown format with YAML frontmatter. Duplicates are skipped automatically. All your data stays local — no cloud, no $18/mo.
 
+### Want transcripts and AI summaries?
+
+[granola-to-minutes](https://github.com/calvindotsg/granola-to-minutes) exports via the Granola API with richer data:
+
+| | `minutes import granola` | `granola-to-minutes` |
+|---|---|---|
+| **Data source** | Local export (`~/.granola-archivist/output/`) | Granola API via [granola-cli](https://github.com/magarcia/granola-cli) |
+| **Notes & transcript** | ✓ | ✓ |
+| **AI-enhanced summaries** | — | ✓ |
+| **Action items & decisions** | — | ✓ (extracted via Claude) |
+| **Speaker attribution** | — | ✓ (`speaker_map` in frontmatter) |
+| **Setup** | Export from Granola desktop app | `npm install -g granola-to-minutes` |
+| **Works on free tier** | ✓ | ✓ |
+
+```bash
+npx granola-to-minutes export    # Export to ~/meetings/
+```
+
 ## Output format
 
 Meetings save as markdown with structured YAML frontmatter:

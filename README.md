@@ -148,17 +148,18 @@ Reads from `~/.granola-archivist/output/`. Meetings are converted to Minutes' ma
 
 ### Want transcripts and AI summaries?
 
-[granola-to-minutes](https://github.com/calvindotsg/granola-to-minutes) exports via the Granola API with richer data:
+[granola-to-minutes](https://github.com/calvindotsg/granola-to-minutes) exports richer data using [granola-cli](https://github.com/magarcia/granola-cli), a community-built CLI tool (not affiliated with Granola Labs) that accesses Granola's internal API:
 
 | | `minutes import granola` | `granola-to-minutes` |
 |---|---|---|
-| **Data source** | Local export (`~/.granola-archivist/output/`) | Granola API via [granola-cli](https://github.com/magarcia/granola-cli) |
+| **Data source** | Local export (`~/.granola-archivist/output/`) | Granola internal API via [granola-cli](https://github.com/magarcia/granola-cli) |
 | **Notes & transcript** | ✓ | ✓ |
 | **AI-enhanced summaries** | — | ✓ |
 | **Action items & decisions** | — | ✓ (extracted via Claude) |
 | **Speaker attribution** | — | ✓ (`speaker_map` in frontmatter) |
 | **Setup** | Export from Granola desktop app | `npm install -g granola-to-minutes` |
 | **Works on free tier** | ✓ | ✓ |
+| **API stability** | N/A (local files) | Internal API — may change without notice |
 
 ```bash
 npx granola-to-minutes export    # Export to ~/meetings/

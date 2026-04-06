@@ -66,7 +66,7 @@ export default function Home() {
         {/* Download */}
         <div id="install" className="flex gap-3 justify-center flex-wrap mb-4 max-sm:flex-col max-sm:items-center">
           <a
-            href="https://github.com/silverstein/minutes/releases/latest/download/Minutes_0.10.0_aarch64.dmg"
+            href="https://github.com/silverstein/minutes/releases/latest/download/Minutes_0.10.1_aarch64.dmg"
             className="inline-flex items-center gap-2 px-5 py-2 bg-[#111] border border-white/[0.1] text-sm text-[#ededed] rounded-[3px] hover:bg-[#1a1a1a] hover:border-white/[0.18] transition-colors"
           >
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>

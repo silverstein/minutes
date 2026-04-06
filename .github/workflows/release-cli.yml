@@ -41,9 +41,9 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - name: Install ALSA dev headers (Linux)
+      - name: Install Linux audio dev headers
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libpipewire-0.3-dev libspa-0.2-dev
 
       - name: Set CXXFLAGS for whisper.cpp (macOS)
         if: runner.os == 'macOS'

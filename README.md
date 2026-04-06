@@ -362,7 +362,7 @@ Minutes exposes a standard MCP server. Point any MCP-compatible client at it:
 }
 ```
 
-**24 tools:** `start_recording`, `stop_recording`, `get_status`, `list_processing_jobs`, `list_meetings`, `search_meetings`, `get_meeting`, `process_audio`, `add_note`, `consistency_report`, `get_person_profile`, `research_topic`, `qmd_collection_status`, `register_qmd_collection`, `start_dictation`, `stop_dictation`, `track_commitments`, `relationship_map`, `list_voices`, `confirm_speaker`, `get_meeting_insights`, `start_live_transcript`, `read_live_transcript`, `open_dashboard`
+**26 tools:** `start_recording`, `stop_recording`, `get_status`, `list_processing_jobs`, `list_meetings`, `search_meetings`, `get_meeting`, `process_audio`, `add_note`, `consistency_report`, `get_person_profile`, `research_topic`, `qmd_collection_status`, `register_qmd_collection`, `start_dictation`, `stop_dictation`, `track_commitments`, `relationship_map`, `list_voices`, `confirm_speaker`, `get_meeting_insights`, `start_live_transcript`, `read_live_transcript`, `open_dashboard`, `ingest_meeting`, `knowledge_status`
 
 **7 resources:** `minutes://meetings/recent`, `minutes://status`, `minutes://actions/open`, `minutes://events/recent`, `minutes://meetings/{slug}`, `minutes://ideas/recent`, `ui://minutes/dashboard`
 
@@ -380,7 +380,7 @@ command = "npx"
 args = ["minutes-mcp"]
 ```
 
-All 24 tools are available in Vibe as `minutes_*` (e.g. `minutes_start_recording`, `minutes_search_meetings`).
+All 26 tools are available in Vibe as `minutes_*` (e.g. `minutes_start_recording`, `minutes_search_meetings`).
 
 ### Claude Code (Plugin)
 
@@ -390,10 +390,11 @@ claude plugin marketplace add silverstein/minutes
 claude plugin install minutes
 ```
 
-12 skills, 1 agent, 2 hooks:
+14 skills, 1 agent, 2 hooks:
 ```
 ├── Core: /minutes record, search, list, note, ideas, verify, setup, cleanup
 ├── Interactive: /minutes prep, debrief, recap, weekly
+├── Knowledge: /minutes ingest, lint
 ├── Agent: meeting-analyst (cross-meeting intelligence)
 └── Hooks: post-recording alerts + proactive meeting/voice memo reminders
 ```
@@ -440,6 +441,34 @@ mistral_model = "mistral-large-latest"
 engine = "ollama"
 ollama_model = "llama3.2"
 ```
+
+### Optional: knowledge base integration
+
+Maintain a living knowledge base from your conversations — person profiles, decision history, and a chronological log that compounds over time. Inspired by [Karpathy's LLM Wiki pattern](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f).
+
+```toml
+[knowledge]
+enabled = true
+path = "~/wiki"        # or your Obsidian vault, PARA system, etc.
+adapter = "wiki"       # "wiki" (flat markdown), "para" (atomic facts), "obsidian" (wiki + [[links]])
+engine = "none"        # "none" = structured YAML only (safest), "agent" = LLM extraction
+min_confidence = "strong"
+```
+
+After each meeting, structured facts (decisions, action items, commitments) flow into person profiles automatically. Every fact carries provenance back to its source meeting.
+
+```bash
+minutes ingest --dry-run --all   # Preview what would be extracted
+minutes ingest --all              # Backfill existing meetings
+minutes ingest ~/meetings/call.md # Process a single meeting
+```
+
+Three output formats:
+- **Wiki** — `people/{slug}.md` with facts grouped by category
+- **PARA** — `areas/people/{slug}/items.json` with atomic facts (id, status, supersededBy)
+- **Obsidian** — Wiki format with `[[wikilinks]]` for cross-references
+
+Safety: default `engine = "none"` extracts only from parsed YAML frontmatter. No LLM call, zero hallucination risk. Confidence thresholds filter speculative facts. Corrupt data is backed up, never silently destroyed.
 
 ## Install
 
@@ -754,7 +783,7 @@ minutes/
 ├── crates/whisper-guard/ Anti-hallucination toolkit (VAD gating, dedup, noise trimming)
 ├── crates/reader/        Lightweight read-only meeting parser (no audio deps)
 ├── crates/sdk/           TypeScript SDK — `npm install minutes-sdk` (query meetings programmatically)
-├── crates/mcp/           MCP server — 24 tools + 7 resources + interactive dashboard
+├── crates/mcp/           MCP server — 26 tools + 7 resources + interactive dashboard
 │   └── ui/               MCP App dashboard (vanilla TS → single-file HTML)
 ├── tauri/                Menu bar app — system tray, recording UI, singleton AI Assistant
 └── .claude/plugins/minutes/   Claude Code plugin — 12 skills + 1 agent + 2 hooks

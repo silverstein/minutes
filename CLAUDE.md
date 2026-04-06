@@ -254,7 +254,7 @@ minutes/
 ├── BUILD-STATUS.md            # Build progress tracker
 ├── Cargo.toml                 # Workspace root
 ├── crates/
-│   ├── core/src/              # 31 Rust modules — the engine
+│   ├── core/src/              # 33 Rust modules — the engine
 │   │   ├── capture.rs         # Audio capture (cpal), device categorization, loopback detection
 │   │   ├── resample.rs        # Shared mono-downmix + 16kHz decimation resampler (used by capture + streaming)
 │   │   ├── transcribe.rs      # Whisper.cpp transcription (delegates to whisper-guard for anti-hallucination, optional nnnoiseless denoise)
@@ -282,16 +282,18 @@ minutes/
 │   │   ├── hotkey_macos.rs    # macOS global hotkey registration
 │   │   ├── screen.rs          # Screen context capture (screenshots)
 │   │   ├── vad.rs             # Voice activity detection
-│   │   └── vault.rs           # Obsidian/Logseq vault sync
+│   │   ├── vault.rs           # Obsidian/Logseq vault sync
+│   │   ├── knowledge.rs       # Knowledge base adapters (wiki/PARA/Obsidian) + fact writing
+│   │   └── knowledge_extract.rs # Structured fact extraction from meeting frontmatter
 │   ├── whisper-guard/          # Standalone anti-hallucination toolkit (segment dedup, silence strip, whisper params)
 │   ├── cli/                   # CLI binary — 33 commands
 │   ├── reader/                # Lightweight read-only meeting parser (no audio deps)
 │   ├── assets/                # Bundled assets (demo.wav)
-│   └── mcp/                   # MCP server — 23 tools + 6 resources + MCP App dashboard
+│   └── mcp/                   # MCP server — 26 tools + 7 resources + MCP App dashboard
 │       └── ui/                # Interactive dashboard (vanilla TS, builds to single-file HTML)
 ├── site/                      # Landing page (Next.js + Remotion demo player)
 ├── tauri/                     # Tauri v2 menu bar app + singleton AI Assistant
-├── .claude/plugins/minutes/   # Claude Code plugin — 12 skills + 1 agent + 2 hooks
+├── .claude/plugins/minutes/   # Claude Code plugin — 14 skills + 1 agent + 2 hooks
 └── tests/integration/         # Integration tests (including real whisper tests)
 ```
 
@@ -366,8 +368,8 @@ node test/mcp_tools_test.mjs                        # 8 MCP integration tests
 
 ## Claude Ecosystem Integration
 
-- **MCP Server**: 12 tools + 6 resources for Claude Desktop / Cowork / Dispatch (`npx minutes-mcp` for zero-install)
-- **Claude Code Plugin**: 12 skills (8 core + 3 interactive lifecycle + 1 ghost context) + meeting-analyst agent + PostToolUse hook
+- **MCP Server**: 26 tools + 7 resources for Claude Desktop / Cowork / Dispatch (`npx minutes-mcp` for zero-install)
+- **Claude Code Plugin**: 14 skills (8 core + 4 interactive lifecycle + 2 knowledge) + meeting-analyst agent + PostToolUse hook
 - **Interactive meeting lifecycle**: `/minutes prep` → record → `/minutes debrief` → `/minutes weekly` with skill chaining via `.prep.md` files
 - **Conversational summarization**: Claude reads transcripts via MCP, no API key needed
 - **Auto-tagging + alerts**: PostToolUse hook tags meetings with git repo, checks for decision conflicts, surfaces overdue action items

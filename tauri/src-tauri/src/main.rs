@@ -207,6 +207,23 @@ pub fn update_tray_state_with_mode(app: &tauri::AppHandle, is_active: bool, is_l
         };
         tray.set_tooltip(Some(tooltip)).ok();
     }
+
+    // Notify the palette overlay that recording / live state changed
+    // so it can re-fetch its visible command list. Every recording or
+    // live transcript transition flows through `update_tray_state*`,
+    // which makes this the natural single funnel for the palette
+    // re-fetch signal. Dictation transitions emit `palette:refresh`
+    // separately from `commands.rs` because they don't touch the tray.
+    //
+    // The payload is a tagged source string so the palette can ignore
+    // refreshes that aren't relevant if it ever needs to.
+    let _ = app.emit(
+        "palette:refresh",
+        serde_json::json!({
+            "source": if is_live { "live-transcript" } else { "recording" },
+            "active": is_active,
+        }),
+    );
 }
 
 // ── Auto-updater ────────────────────────────────────────────

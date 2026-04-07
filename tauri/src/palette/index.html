@@ -625,15 +625,21 @@
     }
 
     /**
-     * Run a command against the backend. The recents store gets a fresh
-     * state-aware fetch right before execute so we can refuse to run
-     * commands that left the visible set since the user picked them.
+     * Run a fully-built ActionId JSON against the backend, with the
+     * promised pre-execute re-fetch. Both `executeAction` (typed
+     * payload) and `executeRecent` (replay from recents) funnel through
+     * here so neither path can bypass the visibility check.
      */
-    async function executeAction(commandId, payload) {
+    async function executeWithFreshVisibility(actionJson) {
+      const commandId = actionJson?.id;
+      if (!commandId) {
+        console.error("[palette] executeWithFreshVisibility: missing id");
+        return;
+      }
       try {
         // Re-fetch authoritative visibility just before execute. If the
-        // command is no longer visible, refuse and stay open so the user
-        // sees what changed.
+        // command is no longer visible, refuse and stay open so the
+        // user sees what changed.
         const currentMeeting = await invoke("palette_current_meeting").catch(() => null);
         const ui = currentMeeting ? { currentMeeting } : {};
         const fresh = await invoke("palette_list", { ui });
@@ -649,18 +655,25 @@
           return;
         }
 
-        const action = buildActionId(commandId, payload);
-        await invoke("palette_execute", { ui, action });
+        await invoke("palette_execute", { ui, action: actionJson });
         // Successful execution: close the palette. The Tauri-side
         // record_recent already persisted the recent.
         await closePalette();
       } catch (e) {
         console.error("[palette] palette_execute failed:", e);
-        // Surface the error briefly in the hint slot. Stay open so the
-        // user can read it and try something else.
         const message = (typeof e === "string" ? e : (e?.message ?? "execute failed"));
         hintEl.textContent = message.slice(0, 80);
       }
+    }
+
+    /**
+     * Build the ActionId from (commandId, payload) and run it with
+     * the pre-execute visibility guard. Used for both bare commands
+     * and locked-mode payload submissions.
+     */
+    async function executeAction(commandId, payload) {
+      const action = buildActionId(commandId, payload);
+      await executeWithFreshVisibility(action);
     }
 
     /**
@@ -698,15 +711,11 @@
     }
 
     async function executeRecent(action) {
-      try {
-        const currentMeeting = await invoke("palette_current_meeting").catch(() => null);
-        const ui = currentMeeting ? { currentMeeting } : {};
-        await invoke("palette_execute", { ui, action });
-        await closePalette();
-      } catch (e) {
-        console.error("[palette] recent execute failed:", e);
-        hintEl.textContent = (typeof e === "string" ? e : (e?.message ?? "execute failed")).slice(0, 80);
-      }
+      // Recents go through the same fresh-visibility guard as bare
+      // command activations so a stale recent (e.g. start-recording
+      // while a session started elsewhere) cannot execute into a
+      // conflicting state. See codex pass 2 P1 #2.
+      await executeWithFreshVisibility(action);
     }
 
     function enterLockedMode(cmd) {
@@ -797,22 +806,17 @@
     // ─────────────────────────────────────────────────────────────
     // State-change re-fetch (D2). The visible list must follow
     // backend truth so users never see stale rows mid-session.
+    //
+    // The backend emits `palette:refresh` from `update_tray_state*`
+    // (the universal funnel for every recording / live transcript
+    // transition) and also continues to emit `dictation:state` from
+    // the dictation pipeline. The palette listens to both. Anything
+    // that changes session state in the backend goes through one of
+    // those two channels.
     // ─────────────────────────────────────────────────────────────
 
-    listen("recording:start", () => fetchCommands()).catch((e) =>
-      console.warn("[palette] listen recording:start failed:", e)
-    );
-    listen("recording:stop", () => fetchCommands()).catch((e) =>
-      console.warn("[palette] listen recording:stop failed:", e)
-    );
-    listen("recording:state", () => fetchCommands()).catch((e) =>
-      console.warn("[palette] listen recording:state failed:", e)
-    );
-    listen("live-transcript:state", () => fetchCommands()).catch((e) =>
-      console.warn("[palette] listen live-transcript:state failed:", e)
-    );
-    listen("live-transcript:started", () => fetchCommands()).catch((e) =>
-      console.warn("[palette] listen live-transcript:started failed:", e)
+    listen("palette:refresh", () => fetchCommands()).catch((e) =>
+      console.warn("[palette] listen palette:refresh failed:", e)
     );
     listen("dictation:state", () => fetchCommands()).catch((e) =>
       console.warn("[palette] listen dictation:state failed:", e)
@@ -852,8 +856,17 @@
         { query: "find", expectedFirst: "search-transcripts" },
         // keyword fallback: 'grep' is a keyword on search-transcripts only
         { query: "grep", expectedFirst: "search-transcripts" },
-        // word-boundary prefix: 'rec' should still hit start-recording first
-        { query: "rec", expectedFirst: "start-recording" },
+        // For "rec", both "Start recording" and "Stop recording" hit
+        // bucket 2 (word-boundary prefix) on the "recording" word.
+        // The comparator breaks ties by position-within-target, so
+        // "Stop recording" (position 5) wins over "Start recording"
+        // (position 6). In production this tie never matters because
+        // the two commands are never visible at the same time
+        // (start-recording requires idle, stop-recording requires
+        // recording). The test pins the deterministic order for the
+        // contrived sample so future scoring changes have to update
+        // it on purpose.
+        { query: "rec", expectedFirst: "stop-recording" },
       ];
 
       let failures = 0;

@@ -5376,6 +5376,26 @@ pub fn palette_close(app: tauri::AppHandle) {
 }
 
 fn create_or_show_palette_window(app: &tauri::AppHandle) {
+    // Wrap the entire create-or-show path in `catch_unwind` so a panic
+    // inside `WebviewWindowBuilder::build()` (or any of the helper
+    // calls below) cannot leave `palette_lifecycle` stuck in `Opening`
+    // forever. This was codex pass 2 P2 #5: the only reset path used
+    // to be the explicit `Err` arm after `.build()`, so an unwinding
+    // panic would skip the reset and the user could never reopen the
+    // palette without restarting the app.
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        create_or_show_palette_window_inner(app)
+    }));
+    if let Err(panic) = result {
+        eprintln!("[palette] window creation panicked: {:?}", panic);
+        let state = app.state::<AppState>();
+        if let Ok(mut lifecycle) = state.palette_lifecycle.lock() {
+            *lifecycle = PaletteLifecycle::Closed;
+        };
+    }
+}
+
+fn create_or_show_palette_window_inner(app: &tauri::AppHandle) {
     use tauri::WebviewUrl;
 
     // Singleton: a stale window from a previous toggle should be reused,
@@ -5461,11 +5481,21 @@ fn finalize_palette_open(app: &tauri::AppHandle) {
 /// The palette webview calls this right before `palette_list` and
 /// `palette_execute` so `PaletteUiContext.current_meeting` can be
 /// populated for meeting-scoped commands (copy markdown, rename, etc.).
+///
+/// **Side-effect-free**: this command intentionally does NOT call
+/// `crate::context::create_workspace` because that function does
+/// `create_dir_all`, creates a `meetings` symlink, and runs `git init`.
+/// Just opening the palette must not mutate `~/.minutes/assistant`.
+/// Instead we use `workspace_dir()` (a pure path computation) and only
+/// read the marker file if the workspace already exists. See codex
+/// pass 2 P2 #3.
 #[tauri::command]
 pub fn palette_current_meeting() -> Option<PathBuf> {
-    let config = Config::load();
-    let workspace_root = crate::context::create_workspace(&config).ok()?;
-    let marker = workspace_root.join("CURRENT_MEETING.md");
+    let workspace_root = crate::context::workspace_dir();
+    if !workspace_root.exists() {
+        return None;
+    }
+    let marker = workspace_root.join(crate::context::ACTIVE_MEETING_FILE);
     let contents = std::fs::read_to_string(&marker).ok()?;
 
     // CURRENT_MEETING.md stores a link or raw path to the current meeting

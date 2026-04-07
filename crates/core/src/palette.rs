@@ -1062,8 +1062,33 @@ pub mod recents {
             }
 
             let reloaded = RecentsStore::load(&path);
-            assert!(reloaded.file.entries.len() <= STORAGE_CAP);
-            assert_eq!(reloaded.visible().len(), VISIBLE_CAP);
+            // Tighter assertions per codex pass 2 P3 #7. The previous
+            // `<=` form passed even if unknown entries were dropped
+            // aggressively. Spell out the exact mix:
+            //   - exactly 5 visible (known) entries
+            //   - exactly 5 preserved unknown entries (10 - 5)
+            //   - 10 total = STORAGE_CAP
+            assert_eq!(
+                reloaded.file.entries.len(),
+                STORAGE_CAP,
+                "exactly STORAGE_CAP entries should remain after trim"
+            );
+            assert_eq!(
+                reloaded.visible().len(),
+                VISIBLE_CAP,
+                "exactly VISIBLE_CAP visible entries should remain after trim"
+            );
+            let unknown_count = reloaded
+                .file
+                .entries
+                .iter()
+                .filter(|e| serde_json::from_value::<ActionId>((*e).clone()).is_err())
+                .count();
+            assert_eq!(
+                unknown_count,
+                STORAGE_CAP - VISIBLE_CAP,
+                "trim should preserve exactly STORAGE_CAP - VISIBLE_CAP unknowns"
+            );
         }
     }
 }

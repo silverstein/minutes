@@ -550,13 +550,13 @@ fn start_native_call_recording(
 
     while !stop_flag.load(Ordering::Relaxed) {
         std::thread::sleep(Duration::from_millis(100));
+        if let Ok(mut health) = call_capture_health.lock() {
+            *health = Some(session.source_health());
+        }
         if minutes_core::pid::check_and_clear_sentinel() {
             break;
         }
         if let Some(status) = session.try_wait()? {
-            if let Ok(mut health) = call_capture_health.lock() {
-                *health = Some(session.source_health());
-            }
             if !status.success() {
                 let preserved = preserve_failed_capture_path(&output_path, config);
                 minutes_core::pid::remove().ok();

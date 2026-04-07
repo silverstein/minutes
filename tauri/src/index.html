@@ -3379,6 +3379,7 @@
 
     // History for smooth animation
     const barHeights = new Array(NUM_BARS).fill(3);
+    let recordingVizTick = 0;
 
     function parentPath(path) {
       if (!path) return path;
@@ -3431,6 +3432,27 @@
         bars[i].style.height = barHeights[i] + 'px';
         bars[i].style.opacity = barHeights[i] > 4 ? '0.7' : '0.3';
       }
+    }
+
+    function recordingVizLevel(status) {
+      const rawLevel = Number(status.audioLevel || 0);
+      if (rawLevel > 0) return rawLevel;
+
+      const callHealth = status.callCaptureHealth;
+      if (!callHealth) return 0;
+
+      const micLive = !!callHealth.mic_live;
+      const callLive = !!callHealth.call_audio_live;
+      if (!micLive && !callLive) return 0;
+
+      // Native call capture currently exposes liveness but not levels.
+      // Keep the waveform visibly alive with a gentle deterministic pulse
+      // so the UI matches the "Mic live / Call audio live" chips.
+      recordingVizTick += 1;
+      const base = micLive && callLive ? 34 : 24;
+      const swing = micLive && callLive ? 18 : 12;
+      const phase = recordingVizTick / 2.5;
+      return Math.max(8, Math.min(70, base + Math.sin(phase) * swing));
     }
 
     function playCue(name) {
@@ -3776,7 +3798,7 @@
           syncMeetingRecordButtons();
           footer.style.display = 'none';
           if (status.elapsed) recordingTime.textContent = status.elapsed;
-          updateViz(status.audioLevel || 0);
+          updateViz(recordingVizLevel(status));
 
           // Speed up polling when recording starts
           if (!wasRecording && !wasProcessing) {
@@ -6605,12 +6627,6 @@
       setCallHealthChip(callHealthAudio, 'Call audio waiting', false);
       callBanner.classList.add('active');
       syncMeetingRecordButtons();
-
-      // Only steal focus on first detection, not periodic reminders
-      if (!is_reminder) {
-        currentWindow.show();
-        currentWindow.setFocus();
-      }
     });
 
     document.getElementById('btn-record-call').addEventListener('click', async () => {

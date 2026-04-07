@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use minutes_core::config::CallDetectionConfig;
+use minutes_core::config::{CallDetectionConfig, Config};
 use tauri::Emitter;
 
 fn log_call_detect_event(
@@ -40,7 +40,7 @@ fn log_call_detect_event(
 
 /// State for the call detection background loop.
 pub struct CallDetector {
-    config: CallDetectionConfig,
+    config: Mutex<CallDetectionConfig>,
     /// Last observed active call session. We still re-arm on call end/start,
     /// but we also re-notify the same active app after a short interval so
     /// back-to-back meetings and sticky Zoom states don't go silent forever.
@@ -52,6 +52,8 @@ pub struct CallDetector {
     /// Back off individual browsers after Apple Events / automation failures so
     /// one denied path does not get retried every poll or suppress other browsers.
     browser_probe_backoff_until: Mutex<HashMap<String, Instant>>,
+    /// Log mic-gate transitions once instead of spamming every poll.
+    last_mic_live: Mutex<Option<bool>>,
 }
 
 /// Payload emitted to the frontend when a call is detected.
@@ -76,6 +78,20 @@ enum DetectionTransition {
     Noop,
 }
 
+enum DetectActiveCallResult {
+    Detected { display_name: String, process_name: String },
+    PermissionWarning { browser_app: String },
+    None,
+}
+
+enum BrowserMeetProbe {
+    Detected,
+    PermissionDenied { browser_app: String },
+    Error,
+    NoBrowserProcesses,
+    NoMatch,
+}
+
 const SAME_APP_REMINDER_SECS: u64 = 20;
 const BROWSER_PROBE_INTERVAL_SECS: u64 = 15;
 const BROWSER_PROBE_BACKOFF_SECS: u64 = 300;
@@ -83,11 +99,23 @@ const BROWSER_PROBE_BACKOFF_SECS: u64 = 300;
 impl CallDetector {
     pub fn new(config: CallDetectionConfig) -> Self {
         Self {
-            config,
+            config: Mutex::new(config),
             active_call: Mutex::new(None),
             browser_probe_next_allowed_at: Mutex::new(None),
             browser_probe_backoff_until: Mutex::new(HashMap::new()),
+            last_mic_live: Mutex::new(None),
         }
+    }
+
+    fn current_config(&self) -> CallDetectionConfig {
+        self.config.lock().unwrap().clone()
+    }
+
+    fn reload_config(&self) -> CallDetectionConfig {
+        let latest = Config::load().call_detection;
+        let mut guard = self.config.lock().unwrap();
+        *guard = latest.clone();
+        latest
     }
 
     /// Start the background detection loop. Runs in its own thread.
@@ -97,26 +125,12 @@ impl CallDetector {
         recording: Arc<AtomicBool>,
         _processing: Arc<AtomicBool>,
     ) {
-        if !self.config.enabled {
-            eprintln!("[call-detect] disabled in config");
-            log_call_detect_event(
-                "info",
-                "disabled",
-                None,
-                None,
-                serde_json::json!({
-                    "poll_interval_secs": self.config.poll_interval_secs,
-                    "apps": self.config.apps,
-                }),
-            );
-            return;
-        }
-
-        let interval = Duration::from_secs(self.config.poll_interval_secs.max(1));
+        let startup_config = self.current_config();
+        let interval = Duration::from_secs(startup_config.poll_interval_secs.max(1));
         eprintln!(
             "[call-detect] started — polling every {}s for {:?}",
             interval.as_secs(),
-            self.config.apps
+            startup_config.apps
         );
         log_call_detect_event(
             "info",
@@ -125,7 +139,7 @@ impl CallDetector {
             None,
             serde_json::json!({
                 "poll_interval_secs": interval.as_secs(),
-                "apps": self.config.apps,
+                "apps": startup_config.apps,
             }),
         );
 
@@ -134,6 +148,24 @@ impl CallDetector {
             std::thread::sleep(Duration::from_secs(5));
 
             loop {
+                let config = self.reload_config();
+                if !config.enabled {
+                    if let Some(previous) = self.clear_active_call() {
+                        log_call_detect_event(
+                            "info",
+                            "cleared",
+                            None,
+                            Some(&previous),
+                            serde_json::json!({
+                                "reason": "call detection disabled"
+                            }),
+                        );
+                    }
+                    std::thread::sleep(Duration::from_secs(1));
+                    continue;
+                }
+
+                let interval = Duration::from_secs(config.poll_interval_secs.max(1));
                 std::thread::sleep(interval);
 
                 // Skip only while the mic is already in use.
@@ -141,7 +173,11 @@ impl CallDetector {
                     continue;
                 }
 
-                if let Some((display_name, process_name)) = self.detect_active_call() {
+                match self.detect_active_call(&config) {
+                    DetectActiveCallResult::Detected {
+                        display_name,
+                        process_name,
+                    } => {
                     match self.note_active_call(&process_name) {
                         DetectionTransition::Noop => {}
                         transition => {
@@ -183,38 +219,99 @@ impl CallDetector {
                             .ok();
                         }
                     }
-                } else {
-                    if let Some(previous) = self.clear_active_call() {
-                        log_call_detect_event(
-                            "info",
-                            "cleared",
-                            None,
-                            Some(&previous),
-                            serde_json::json!({
-                                "reason": "no active call detected on current poll"
-                            }),
+                    }
+                    DetectActiveCallResult::PermissionWarning { browser_app } => {
+                        if let Some(previous) = self.clear_active_call() {
+                            log_call_detect_event(
+                                "info",
+                                "cleared",
+                                None,
+                                Some(&previous),
+                                serde_json::json!({
+                                    "reason": "browser automation permission required"
+                                }),
+                            );
+                        }
+                        crate::commands::show_user_notification(
+                            &app,
+                            "Google Meet detection needs browser access",
+                            &format!(
+                                "Allow Minutes to control {} in System Settings > Privacy & Security > Automation so Meet detection can see browser tabs.",
+                                browser_app
+                            ),
                         );
+                    }
+                    DetectActiveCallResult::None => {
+                        if let Some(previous) = self.clear_active_call() {
+                            log_call_detect_event(
+                                "info",
+                                "cleared",
+                                None,
+                                Some(&previous),
+                                serde_json::json!({
+                                    "reason": "no active call detected on current poll"
+                                }),
+                            );
+                        }
                     }
                 }
             }
         });
     }
 
-    /// Check if any configured call app is running AND the mic is active.
-    fn detect_active_call(&self) -> Option<(String, String)> {
-        // Check mic first — it's the cheaper signal to short-circuit on
-        if !is_mic_in_use() {
-            return None;
+    fn note_mic_state(&self, mic_live: bool) {
+        let mut last = self.last_mic_live.lock().unwrap();
+        if last.is_some() && *last == Some(mic_live) {
+            return;
         }
+        *last = Some(mic_live);
+        log_call_detect_event(
+            "info",
+            if mic_live {
+                "mic_gate_active"
+            } else {
+                "mic_gate_inactive"
+            },
+            None,
+            None,
+            serde_json::json!({ "mic_live": mic_live }),
+        );
+    }
 
-        let has_google_meet = self.config.apps.iter().any(|app| app == "google-meet");
-        let native_apps: Vec<&String> = self
-            .config
+    /// Check if any configured call app is active.
+    fn detect_active_call(&self, config: &CallDetectionConfig) -> DetectActiveCallResult {
+        let mic_live = is_mic_in_use();
+        self.note_mic_state(mic_live);
+
+        let has_google_meet = config.apps.iter().any(|app| app == "google-meet");
+        let native_apps: Vec<&String> = config
             .apps
             .iter()
             .filter(|app| app.as_str() != "google-meet")
             .collect();
         let running = running_process_names();
+
+        if has_google_meet && self.browser_probe_due() {
+            self.schedule_next_browser_probe();
+            match self.detect_google_meet_in_browsers(&running) {
+                BrowserMeetProbe::Detected => {
+                    return DetectActiveCallResult::Detected {
+                        display_name: "Google Meet".into(),
+                        process_name: "google-meet".into(),
+                    };
+                }
+                BrowserMeetProbe::PermissionDenied { browser_app } => {
+                    return DetectActiveCallResult::PermissionWarning { browser_app };
+                }
+                BrowserMeetProbe::Error
+                | BrowserMeetProbe::NoBrowserProcesses
+                | BrowserMeetProbe::NoMatch => {}
+            }
+        }
+
+        if !mic_live {
+            return DetectActiveCallResult::None;
+        }
 
         for config_app in native_apps {
             let config_lower = config_app.to_lowercase();
@@ -232,17 +329,14 @@ impl CallDetector {
                     || p_lower.starts_with(&format!("{} ", config_lower))
             }) {
                 let display = display_name_for(config_app);
-                return Some((display, config_app.clone()));
+                return DetectActiveCallResult::Detected {
+                    display_name: display,
+                    process_name: config_app.clone(),
+                };
             }
         }
 
-        if has_google_meet && self.browser_probe_due() {
-            self.schedule_next_browser_probe();
-            if self.detect_google_meet_in_browsers(&running) {
-                return Some(("Google Meet".into(), "google-meet".into()));
-            }
-        }
-        None
+        DetectActiveCallResult::None
     }
 
     fn note_active_call(&self, process_name: &str) -> DetectionTransition {
@@ -328,8 +422,9 @@ impl CallDetector {
         );
     }
 
-    fn detect_google_meet_in_browsers(&self, running: &[String]) -> bool {
+    fn detect_google_meet_in_browsers(&self, running: &[String]) -> BrowserMeetProbe {
         let running_lower: Vec<String> = running.iter().map(|s| s.to_lowercase()).collect();
+        let mut saw_browser = false;
 
         for (proc_fragment, app_name, kind) in &[
             ("google chrome", "Google Chrome", BrowserKind::ChromeLike),
@@ -344,6 +439,7 @@ impl CallDetector {
             if !running_lower.iter().any(|p| p.contains(proc_fragment)) {
                 continue;
             }
+            saw_browser = true;
             if !self.browser_probe_allowed_for(app_name) {
                 continue;
             }
@@ -354,19 +450,27 @@ impl CallDetector {
                         .iter()
                         .any(|url| looks_like_google_meet_meeting_url(url))
                     {
-                        return true;
+                        return BrowserMeetProbe::Detected;
                     }
                 }
                 AppleScriptProbe::PermissionDenied => {
                     self.defer_browser_probe_for(app_name, "apple_events_permission_denied");
+                    return BrowserMeetProbe::PermissionDenied {
+                        browser_app: (*app_name).to_string(),
+                    };
                 }
                 AppleScriptProbe::Error => {
                     self.defer_browser_probe_for(app_name, "browser_probe_error");
+                    return BrowserMeetProbe::Error;
                 }
             }
         }
 
-        false
+        if saw_browser {
+            BrowserMeetProbe::NoMatch
+        } else {
+            BrowserMeetProbe::NoBrowserProcesses
+        }
     }
 }
 
@@ -631,7 +735,13 @@ mod tests {
             apps: vec!["zoom.us".into(), "google-meet".into()],
         });
 
-        assert!(detector.config.apps.iter().any(|app| app == "google-meet"));
+        assert!(
+            detector
+                .current_config()
+                .apps
+                .iter()
+                .any(|app| app == "google-meet")
+        );
     }
 
     #[test]
@@ -643,7 +753,10 @@ mod tests {
             apps: vec!["google-meet".into()],
         });
         let running: Vec<String> = vec!["Finder".into(), "launchd".into()];
-        assert!(!detector.detect_google_meet_in_browsers(&running));
+        assert!(matches!(
+            detector.detect_google_meet_in_browsers(&running),
+            BrowserMeetProbe::NoBrowserProcesses
+        ));
     }
 
     #[test]

@@ -1182,7 +1182,7 @@ pub fn list_input_devices() -> Vec<String> {
     use cpal::traits::{DeviceTrait, HostTrait};
 
     let host = cpal::default_host();
-    tracing::info!(host_id = ?host.id(), "cpal host for input device listing");
+    tracing::debug!(host_id = ?host.id(), "cpal host for input device listing");
     let mut devices = Vec::new();
 
     if let Ok(input_devices) = host.input_devices() {
@@ -1229,7 +1229,7 @@ pub fn list_devices_categorized() -> Vec<CategorizedDevice> {
     use cpal::traits::{DeviceTrait, HostTrait};
 
     let host = cpal::default_host();
-    tracing::info!(host_id = ?host.id(), "cpal host for categorized device listing");
+    tracing::debug!(host_id = ?host.id(), "cpal host for categorized device listing");
     let default_name = host
         .default_input_device()
         .and_then(|d| d.description().ok().map(|desc| desc.name().to_string()))

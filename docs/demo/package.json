@@ -11,11 +11,11 @@
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
-    "@remotion/cli": "^4.0.438",
-    "@remotion/renderer": "^4.0.438",
+    "@remotion/cli": "^4.0.446",
+    "@remotion/renderer": "^4.0.446",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
-    "remotion": "^4.0.438"
+    "remotion": "^4.0.446"
   },
   "devDependencies": {
     "@types/react": "^19.2.14",

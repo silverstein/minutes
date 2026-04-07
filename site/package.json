@@ -10,14 +10,14 @@
   "dependencies": {
     "@react-three/drei": "^10.7.7",
     "@react-three/fiber": "^9.5.0",
-    "@remotion/player": "^4.0.438",
+    "@remotion/player": "^4.0.446",
     "@types/three": "^0.183.1",
     "@vercel/analytics": "^2.0.1",
     "geist": "^1.4.1",
     "next": "^15.4.0",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
-    "remotion": "^4.0.438",
+    "remotion": "^4.0.446",
     "three": "^0.183.2"
   },
   "devDependencies": {

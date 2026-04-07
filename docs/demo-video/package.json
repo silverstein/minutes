@@ -10,13 +10,13 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "@remotion/cli": "^4.0.438",
-    "@remotion/player": "^4.0.438",
+    "@remotion/cli": "^4.0.446",
+    "@remotion/player": "^4.0.446",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
-    "remotion": "^4.0.438",
+    "remotion": "^4.0.446",
     "typescript": "^6.0.2"
   }
 }

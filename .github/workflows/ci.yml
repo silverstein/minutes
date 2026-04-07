@@ -112,6 +112,11 @@ jobs:
     # release-cli.yml workflow at tag push. Builds the CLI with default features
     # (whisper + diarize) so any libclang / cmake / pipewire-sys / whisper-rs
     # breakage on Linux surfaces here.
+    #
+    # Uses a debug build (not --release) because optimization-only failures in
+    # whisper.cpp / ort / pyannote-rs are vanishingly rare and the time savings
+    # (~5 min vs ~15 min cold) compound across every PR. release-cli.yml still
+    # does the release build at tag time as the final gate.
     name: Build CLI (ubuntu-latest, default features)
     runs-on: ubuntu-latest
     steps:
@@ -137,13 +142,13 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cli-fullbuild-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cli-fullbuild-debug-${{ hashFiles('**/Cargo.lock') }}
 
-      - name: Build CLI release (whisper + diarize)
-        run: cargo build --release -p minutes-cli
+      - name: Build CLI debug (whisper + diarize)
+        run: cargo build -p minutes-cli
 
       - name: Verify binary runs
-        run: ./target/release/minutes --version
+        run: ./target/debug/minutes --version
 
   desktop_windows:
     name: Desktop App Installer (windows-latest)

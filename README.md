@@ -540,7 +540,10 @@ cargo install --path crates/cli
 - `libpipewire-0.3-dev`, `libspa-0.2-dev` — cpal's PipeWire backend (compiled unconditionally on Linux)
 - `ffmpeg` — preferred audio decoder for `.m4a`/`.mp3`/`.ogg` (falls back to pure-Rust symphonia if absent)
 
-For Fedora/RHEL: `sudo dnf install -y gcc-c++ cmake pkgconf clang clang-devel alsa-lib-devel pipewire-devel ffmpeg`. For Arch: `sudo pacman -S --needed base-devel cmake clang alsa-lib pipewire ffmpeg`.
+**Other distros** (best-effort — Debian/Ubuntu is the validated path; please [open an issue](https://github.com/silverstein/minutes/issues) if any package name is wrong on your distro):
+
+- **Fedora/RHEL**: `sudo dnf install -y gcc-c++ cmake pkgconf-pkg-config clang clang-devel alsa-lib-devel pipewire-devel ffmpeg-free`
+- **Arch**: `sudo pacman -S --needed base-devel cmake clang alsa-lib pipewire ffmpeg`
 
 ### GPU acceleration (optional)
 

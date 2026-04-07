@@ -45,6 +45,10 @@ run "list audio devices (cpal enumeration on ALSA/PipeWire)" \
 run "list audio sources (capture vs loopback categorization)" \
   minutes sources
 
+# demo.wav is a synthetic 3-second silence-plus-beep file (see crates/cli/src/main.rs:3940).
+# A successful run will produce words=0 in the JSON output — that's correct, not a bug.
+# What we're verifying here is that the full pipeline (decode → VAD → whisper → diarize →
+# markdown write) executes end-to-end without panicking, not that it produces a transcript.
 run "process bundled demo.wav as a meeting (whisper end-to-end)" \
   minutes process crates/assets/demo.wav -t meeting --title "Linux smoke test"
 

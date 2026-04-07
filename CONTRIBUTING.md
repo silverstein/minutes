@@ -50,6 +50,21 @@ Some areas where help is especially welcome:
 - **CLI commands** — new query/reporting commands in `crates/cli/src/main.rs`
 - **Docs** — README, inline code comments, examples
 
+### Testing on Linux without a Linux machine
+
+This repo ships a GitHub Codespaces config so anyone can spin up a Linux dev
+environment in one click — no Linux box required:
+
+```bash
+gh codespace create --repo silverstein/minutes
+gh codespace ssh
+.devcontainer/test-linux.sh   # full sanity suite
+```
+
+See [`.devcontainer/README.md`](.devcontainer/README.md) for what works in a
+Codespace (whisper, diarize, MCP, all the file-processing paths) and what
+doesn't (live recording — no audio hardware in the container).
+
 ## Adding a Feature
 
 ### Rust (core/CLI)

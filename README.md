@@ -129,10 +129,19 @@ minutes dictate --stdout                         # Output to stdout instead of c
 ```
 Text streams progressively as you speak (partial results every 2 seconds). By default it accumulates across pauses and writes the combined text to clipboard + daily note when dictation ends. Set `[dictation] accumulate = false` to keep the older per-pause behavior. Local whisper, no cloud.
 
+### Try it without a mic
+```bash
+minutes demo --full                              # Seed 5 sample meetings (Snow Crash theme)
+minutes demo --query                             # Cross-meeting intelligence demo
+minutes demo --clean                             # Remove sample meetings
+```
+
+The interactive demo seeds interconnected meetings, then lets you pick a thread to explore. Two storylines, five meetings, zero setup.
+
 ### System diagnostics
 ```bash
 minutes health                                   # Check model, mic, calendar, disk
-minutes demo                                     # Run a demo recording (no mic needed)
+minutes demo                                     # Run a pipeline test (bundled audio, no mic)
 ```
 
 ## Switching from Granola?

@@ -1005,9 +1005,34 @@ pub fn detect_active_call_app(config: &Config) -> Option<String> {
     detect_call_app_from_processes(&running_process_names(), &config.call_detection)
 }
 
+/// True if the device name matches a known system audio capture driver.
+///
+/// Three groups of patterns, all substring-matched against the lowercased name:
+///
+/// 1. Generic loopback/aggregate drivers: `blackhole`, `loopback`, `soundflower`,
+///    `vb-cable`, `stereo mix`, `multi-output`, `aggregate`. These are the
+///    drivers most users install for system audio capture on macOS / Windows.
+///
+/// 2. App-installed virtual drivers on macOS: `mmaudio`, `loomaudio`,
+///    `zoomaudio`, `teams audio`. These are installed by Loom, Zoom, Microsoft
+///    Teams, and similar apps for screen-recording / call-capture and
+///    consistently report `supports_input == true && supports_output == true`
+///    on CoreAudio. Empirically verified on Mat's machine 2026-04-06.
+///    Substrings are chosen specifically enough to avoid false positives on
+///    real microphones (e.g., "Camo Microphone" is a real mic via a 2-way
+///    iPhone bridge that also reports as Duplex).
+///
+/// 3. PulseAudio monitor sources: anything containing `.monitor`. PulseAudio
+///    exposes monitor sources as `Device::Source` entries with names ending in
+///    `<sink_name>.monitor` (cpal/host/pulseaudio/mod.rs:107), so they pass
+///    through `host.input_devices()` like regular sources and would otherwise
+///    be lumped under Microphone. The PipeWire backend uses a different model
+///    (Sinks-as-Duplex, see `categorize_device` for the host-gated check),
+///    so this pattern only kicks in on PulseAudio.
 pub fn is_system_audio_device_name(name: &str) -> bool {
     let lower = name.to_lowercase();
     [
+        // Generic loopback / aggregate
         "blackhole",
         "loopback",
         "soundflower",
@@ -1015,6 +1040,13 @@ pub fn is_system_audio_device_name(name: &str) -> bool {
         "stereo mix",
         "multi-output",
         "aggregate",
+        // macOS app-installed virtual drivers (verified 2026-04-06)
+        "mmaudio",
+        "loomaudio",
+        "zoomaudio",
+        "teams audio",
+        // PulseAudio monitor source pattern
+        ".monitor",
     ]
     .iter()
     .any(|hint| lower.contains(hint))
@@ -1414,6 +1446,75 @@ mod tests {
         // but the name heuristic catches it.
         let category = categorize_device("BlackHole 2ch", true, false, false);
         assert_eq!(category, DeviceCategory::SystemAudio);
+    }
+
+    #[test]
+    fn categorize_mmaudio_returns_system_audio() {
+        // MMAudio is a virtual loopback driver on macOS. Both the main device
+        // and the "(UI Sounds)" variant should be SystemAudio.
+        assert_eq!(
+            categorize_device("MMAudio Device", true, true, false),
+            DeviceCategory::SystemAudio
+        );
+        assert_eq!(
+            categorize_device("MMAudio Device (UI Sounds)", true, true, false),
+            DeviceCategory::SystemAudio
+        );
+    }
+
+    #[test]
+    fn categorize_loom_audio_device_returns_system_audio() {
+        // Loom installs LoomAudioDevice for screen-recording audio capture.
+        let category = categorize_device("LoomAudioDevice", true, true, false);
+        assert_eq!(category, DeviceCategory::SystemAudio);
+    }
+
+    #[test]
+    fn categorize_zoom_audio_device_returns_system_audio() {
+        // Zoom installs ZoomAudioDevice for screen-share audio capture.
+        let category = categorize_device("ZoomAudioDevice", true, true, false);
+        assert_eq!(category, DeviceCategory::SystemAudio);
+    }
+
+    #[test]
+    fn categorize_teams_audio_returns_system_audio() {
+        // Microsoft Teams installs "Microsoft Teams Audio" for call audio routing.
+        let category = categorize_device("Microsoft Teams Audio", true, true, false);
+        assert_eq!(category, DeviceCategory::SystemAudio);
+    }
+
+    #[test]
+    fn categorize_pulseaudio_monitor_source_returns_system_audio() {
+        // PulseAudio exposes monitor sources as separate Source devices with
+        // names ending in `.monitor`. They appear in input_devices() like real
+        // mics and were previously lumped into Microphone.
+        let category = categorize_device(
+            "alsa_output.pci-0000_00_1f.3.analog-stereo.monitor",
+            true,
+            false, // PulseAudio Source has direction = Input, not Duplex
+            false, // not pipewire
+        );
+        assert_eq!(category, DeviceCategory::SystemAudio);
+    }
+
+    #[test]
+    fn categorize_camo_microphone_is_not_false_positive() {
+        // Critical regression test: Camo Microphone is a REAL microphone
+        // (via a 2-way iPhone bridge) that also reports as Duplex on macOS.
+        // None of the new hints should accidentally match it. If this test
+        // ever fails, someone added a hint that's too broad.
+        let category = categorize_device("Camo Microphone", true, true, false);
+        assert_eq!(category, DeviceCategory::Microphone);
+    }
+
+    #[test]
+    fn categorize_real_mic_named_with_monitor_substring_does_not_false_positive() {
+        // Edge case: a microphone named "Studio Monitor Microphone" or similar
+        // contains "monitor" but should NOT be SystemAudio. The PulseAudio
+        // pattern uses ".monitor" specifically (with the leading dot), so this
+        // should fall through to Microphone.
+        let category = categorize_device("Studio Monitor Microphone", true, false, false);
+        assert_eq!(category, DeviceCategory::Microphone);
     }
 
     #[test]

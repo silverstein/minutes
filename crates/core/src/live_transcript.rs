@@ -8,7 +8,7 @@ use chrono::{DateTime, Local};
 use serde::{Deserialize, Serialize};
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -693,31 +693,34 @@ pub fn session_status() -> SessionStatus {
     let lt_pid = pid::live_transcript_pid_path();
     let lt_process_pid = pid::check_pid_file(&lt_pid).ok().flatten();
 
-    // A recording sidecar runs whenever recording is active (whisper+streaming builds only).
-    // The status file may not exist yet during whisper model loading, but is removed when
-    // the sidecar exits — so recording_pid alone is sufficient to detect activity.
     let recording_pid = pid::check_recording().ok().flatten();
     let status_path = pid::live_transcript_status_path();
+    let jsonl_path = pid::live_transcript_jsonl_path();
+
+    derive_session_status(lt_process_pid, recording_pid, &status_path, &jsonl_path)
+}
+
+fn derive_session_status(
+    lt_process_pid: Option<u32>,
+    recording_pid: Option<u32>,
+    status_path: &Path,
+    jsonl_path: &Path,
+) -> SessionStatus {
+    let live_status = read_live_status(status_path);
     #[cfg(all(feature = "whisper", feature = "streaming"))]
-    let sidecar_active = recording_pid.is_some();
+    let sidecar_active = recording_pid.is_some() && live_status.is_some();
     #[cfg(not(all(feature = "whisper", feature = "streaming")))]
     let sidecar_active = false;
 
     let active = lt_process_pid.is_some() || sidecar_active;
-    let pid = lt_process_pid.or(recording_pid);
-
-    let jsonl_path = pid::live_transcript_jsonl_path();
+    let pid = lt_process_pid.or(if sidecar_active { recording_pid } else { None });
 
     // Read stats from status file or JSONL. Only report non-zero values when
     // a session is active — otherwise stale files would leak old data.
     let (line_count, duration_secs) = if active {
-        if let Ok(content) = std::fs::read_to_string(&status_path) {
-            if let Ok(status) = serde_json::from_str::<LiveStatus>(&content) {
-                let elapsed = (Local::now() - status.start_time).num_seconds().max(0) as f64;
-                (status.line_count, elapsed)
-            } else {
-                (0, 0.0)
-            }
+        if let Some(status) = live_status {
+            let elapsed = (Local::now() - status.start_time).num_seconds().max(0) as f64;
+            (status.line_count, elapsed)
         } else {
             // Fallback: no status file, parse JSONL
             let lines = if jsonl_path.exists() {
@@ -760,6 +763,12 @@ pub fn session_status() -> SessionStatus {
     }
 }
 
+fn read_live_status(path: &Path) -> Option<LiveStatus> {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|content| serde_json::from_str::<LiveStatus>(&content).ok())
+}
+
 fn set_permissions_0600(path: &std::path::Path) {
     #[cfg(unix)]
     {
@@ -779,7 +788,7 @@ fn remove_status_file() {
 mod tests {
     use super::*;
     use std::io::Write;
-    use tempfile::NamedTempFile;
+    use tempfile::{tempdir, NamedTempFile};
 
     #[test]
     fn test_transcript_line_roundtrip() {
@@ -853,5 +862,47 @@ mod tests {
         };
         // The writer checks text.trim().is_empty() before writing
         assert!(line.text.trim().is_empty());
+    }
+
+    #[cfg(all(feature = "whisper", feature = "streaming"))]
+    #[test]
+    fn sidecar_requires_live_status_file_to_report_active() {
+        let dir = tempdir().unwrap();
+        let status = derive_session_status(
+            None,
+            Some(std::process::id()),
+            &dir.path().join("live-status.json"),
+            &dir.path().join("live.jsonl"),
+        );
+
+        assert!(!status.active);
+        assert_eq!(status.source, None);
+        assert_eq!(status.pid, None);
+    }
+
+    #[cfg(all(feature = "whisper", feature = "streaming"))]
+    #[test]
+    fn sidecar_reports_active_when_recording_pid_and_status_file_exist() {
+        let dir = tempdir().unwrap();
+        let status_path = dir.path().join("live-status.json");
+        let status = LiveStatus {
+            start_time: Local::now(),
+            line_count: 3,
+            last_offset_ms: 1200,
+            last_duration_ms: 400,
+        };
+        std::fs::write(&status_path, serde_json::to_string(&status).unwrap()).unwrap();
+
+        let status = derive_session_status(
+            None,
+            Some(std::process::id()),
+            &status_path,
+            &dir.path().join("live.jsonl"),
+        );
+
+        assert!(status.active);
+        assert_eq!(status.source, Some(TranscriptSource::RecordingSidecar));
+        assert_eq!(status.pid, Some(std::process::id()));
+        assert_eq!(status.line_count, 3);
     }
 }

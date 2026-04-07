@@ -54,6 +54,12 @@ import {
 
 const UI_RESOURCE_URI = "ui://minutes/dashboard";
 export const MEETING_INSIGHT_KINDS = ["decision", "commitment", "question"] as const;
+export type KnowledgeConfigStatus = {
+  enabled: boolean;
+  path?: string;
+  adapter: string;
+  engine: string;
+};
 
 const execFileAsync = promisify(execFile);
 
@@ -218,6 +224,26 @@ let MINUTES_BIN = findMinutesBinary();
 // ── Expected CLI version (must match this MCP server release) ──
 const MCP_SERVER_VERSION = "0.10.3";
 const EXPECTED_CLI_VERSION = MCP_SERVER_VERSION;
+
+export function parseKnowledgeConfig(configContent: string): KnowledgeConfigStatus | null {
+  const knowledgeMatch = configContent.match(/\[knowledge\][\s\S]*?(?=\n\[|$)/);
+  if (!knowledgeMatch) {
+    return null;
+  }
+
+  const section = knowledgeMatch[0];
+  const enabled = /^\s*enabled\s*=\s*true(?:\s*#.*)?$/m.test(section);
+  const pathMatch = section.match(/^\s*path\s*=\s*"([^"]+)"/m);
+  const adapterMatch = section.match(/^\s*adapter\s*=\s*"([^"]+)"/m);
+  const engineMatch = section.match(/^\s*engine\s*=\s*"([^"]+)"/m);
+
+  return {
+    enabled,
+    path: pathMatch?.[1],
+    adapter: adapterMatch?.[1] || "wiki",
+    engine: engineMatch?.[1] || "none",
+  };
+}
 const RELEASE_TAG = `v${EXPECTED_CLI_VERSION}`;
 
 // ── CLI auto-install ────────────────────────────────────────
@@ -2421,18 +2447,14 @@ server.tool(
         }
       }
 
-      const knowledgeMatch = configContent.match(/\[knowledge\][\s\S]*?(?=\n\[|$)/);
-      if (!knowledgeMatch || !configContent.includes("enabled = true")) {
+      const knowledge = parseKnowledgeConfig(configContent);
+      if (!knowledge || !knowledge.enabled) {
         return { content: [{ type: "text" as const, text: "Knowledge base: not configured or disabled.\n\nAdd [knowledge] section to ~/.config/minutes/config.toml with enabled = true and a path." }] };
       }
 
-      const pathMatch = configContent.match(/\[knowledge\][\s\S]*?path\s*=\s*"([^"]+)"/);
-      const adapterMatch = configContent.match(/\[knowledge\][\s\S]*?adapter\s*=\s*"([^"]+)"/);
-      const engineMatch = configContent.match(/\[knowledge\][\s\S]*?engine\s*=\s*"([^"]+)"/);
-      const rawKbPath = pathMatch?.[1] || "unknown";
+      const rawKbPath = knowledge.path || "unknown";
       const kbPath = rawKbPath.startsWith("~") ? join(homedir(), rawKbPath.slice(1)) : rawKbPath;
-      const adapter = adapterMatch?.[1] || "wiki";
-      const engine = engineMatch?.[1] || "none";
+      const { adapter, engine } = knowledge;
 
       // Count people and log entries
       const { readdir, stat: statAsync } = await import("fs/promises");

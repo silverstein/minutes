@@ -7,7 +7,14 @@
 //!    Conservative prompt: "only extract explicitly stated facts, never infer."
 
 use crate::knowledge::{slugify, Confidence, Fact, PersonFacts};
-use crate::markdown::Frontmatter;
+use crate::markdown::{EntityRef, Frontmatter};
+use std::collections::{HashMap, HashSet};
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PersonIdentity {
+    slug: String,
+    name: String,
+}
 
 /// Extract facts from structured frontmatter only (phase 1 — zero hallucination risk).
 /// This is the default mode when `[knowledge] engine = "none"`.
@@ -20,23 +27,22 @@ pub fn extract_from_frontmatter(fm: &Frontmatter, meeting_path: &str) -> Vec<Per
         .trim_end_matches(".md")
         .to_string();
 
-    let mut person_map: std::collections::HashMap<String, PersonFacts> =
-        std::collections::HashMap::new();
+    let canonical_people = build_canonical_person_index(&fm.entities.people);
+    let mut person_map: HashMap<String, PersonFacts> = HashMap::new();
 
     // Extract from action_items (high-value: explicit assignee + task)
     for item in &fm.action_items {
         if item.status == "done" {
             continue;
         }
-        let slug = slugify(&item.assignee);
-        if slug.is_empty() {
+        let Some(identity) = resolve_person_identity(&item.assignee, &canonical_people) else {
             continue;
-        }
+        };
         let entry = person_map
-            .entry(slug.clone())
+            .entry(identity.slug.clone())
             .or_insert_with(|| PersonFacts {
-                slug: slug.clone(),
-                name: item.assignee.clone(),
+                slug: identity.slug.clone(),
+                name: identity.name.clone(),
                 facts: vec![],
             });
         entry.facts.push(Fact {
@@ -57,15 +63,14 @@ pub fn extract_from_frontmatter(fm: &Frontmatter, meeting_path: &str) -> Vec<Per
         // Decisions are attributed to the meeting, not a specific person.
         // We file them under each attendee present.
         for attendee in &fm.attendees {
-            let slug = slugify(attendee);
-            if slug.is_empty() {
+            let Some(identity) = resolve_person_identity(attendee, &canonical_people) else {
                 continue;
-            }
+            };
             let entry = person_map
-                .entry(slug.clone())
+                .entry(identity.slug.clone())
                 .or_insert_with(|| PersonFacts {
-                    slug: slug.clone(),
-                    name: attendee.clone(),
+                    slug: identity.slug.clone(),
+                    name: identity.name.clone(),
                     facts: vec![],
                 });
             let topic_str = decision
@@ -85,18 +90,17 @@ pub fn extract_from_frontmatter(fm: &Frontmatter, meeting_path: &str) -> Vec<Per
 
     // Extract from entities.people (presence facts — they were in this meeting)
     for entity in &fm.entities.people {
-        let slug = slugify(&entity.slug);
-        if slug.is_empty() {
+        let Some(identity) = resolve_entity_identity(entity) else {
             continue;
-        }
+        };
         // Only create the entry if they don't already have facts from above.
         // Avoids cluttering with "was in meeting" for people we already have richer data on.
-        if !person_map.contains_key(&slug) {
+        if !person_map.contains_key(&identity.slug) {
             person_map.insert(
-                slug.clone(),
+                identity.slug.clone(),
                 PersonFacts {
-                    slug: slug.clone(),
-                    name: entity.label.clone(),
+                    slug: identity.slug.clone(),
+                    name: identity.name.clone(),
                     facts: vec![Fact {
                         text: format!("Attended meeting: {}", fm.title),
                         category: "context".into(),
@@ -112,15 +116,14 @@ pub fn extract_from_frontmatter(fm: &Frontmatter, meeting_path: &str) -> Vec<Per
     // Extract from intents
     for intent in &fm.intents {
         if let Some(ref who) = intent.who {
-            let slug = slugify(who);
-            if slug.is_empty() {
+            let Some(identity) = resolve_person_identity(who, &canonical_people) else {
                 continue;
-            }
+            };
             let entry = person_map
-                .entry(slug.clone())
+                .entry(identity.slug.clone())
                 .or_insert_with(|| PersonFacts {
-                    slug: slug.clone(),
-                    name: who.clone(),
+                    slug: identity.slug.clone(),
+                    name: identity.name.clone(),
                     facts: vec![],
                 });
             let kind_label = format!("{:?}", intent.kind)
@@ -142,6 +145,119 @@ pub fn extract_from_frontmatter(fm: &Frontmatter, meeting_path: &str) -> Vec<Per
     }
 
     person_map.into_values().collect()
+}
+
+fn build_canonical_person_index(entities: &[EntityRef]) -> HashMap<String, PersonIdentity> {
+    let mut direct_candidates: HashMap<String, Vec<PersonIdentity>> = HashMap::new();
+    let mut first_name_candidates: HashMap<String, Vec<PersonIdentity>> = HashMap::new();
+
+    for entity in entities {
+        let Some(identity) = resolve_entity_identity(entity) else {
+            continue;
+        };
+
+        let mut candidates = HashSet::new();
+        candidates.insert(identity.slug.clone());
+
+        let label_slug = slugify(&entity.label);
+        if !label_slug.is_empty() {
+            candidates.insert(label_slug);
+        }
+
+        for alias in &entity.aliases {
+            let alias_slug = slugify(alias);
+            if !alias_slug.is_empty() {
+                candidates.insert(alias_slug);
+            }
+        }
+
+        for candidate in candidates {
+            direct_candidates
+                .entry(candidate)
+                .or_default()
+                .push(identity.clone());
+        }
+
+        let first_name_slug = entity
+            .label
+            .split_whitespace()
+            .next()
+            .map(slugify)
+            .unwrap_or_default();
+        if !first_name_slug.is_empty() {
+            first_name_candidates
+                .entry(first_name_slug)
+                .or_default()
+                .push(identity.clone());
+        }
+    }
+
+    let mut resolved = HashMap::new();
+    for (candidate, identities) in direct_candidates {
+        if let Some(identity) = unique_identity(&identities) {
+            resolved.insert(candidate, identity);
+        }
+    }
+
+    for (candidate, identities) in first_name_candidates {
+        if resolved.contains_key(&candidate) {
+            continue;
+        }
+        if let Some(identity) = unique_identity(&identities) {
+            resolved.insert(candidate, identity);
+        }
+    }
+
+    resolved
+}
+
+fn unique_identity(identities: &[PersonIdentity]) -> Option<PersonIdentity> {
+    let unique_slugs: HashSet<&str> = identities
+        .iter()
+        .map(|identity| identity.slug.as_str())
+        .collect();
+    if unique_slugs.len() == 1 {
+        identities.first().cloned()
+    } else {
+        None
+    }
+}
+
+fn resolve_entity_identity(entity: &EntityRef) -> Option<PersonIdentity> {
+    let slug = slugify(&entity.slug);
+    if slug.is_empty() {
+        return None;
+    }
+
+    let name = if entity.label.trim().is_empty() {
+        entity.slug.trim().to_string()
+    } else {
+        entity.label.trim().to_string()
+    };
+
+    Some(PersonIdentity { slug, name })
+}
+
+fn resolve_person_identity(
+    raw: &str,
+    canonical_people: &HashMap<String, PersonIdentity>,
+) -> Option<PersonIdentity> {
+    let trimmed = raw.trim().trim_start_matches('@').trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let slug = slugify(trimmed);
+    if slug.is_empty() {
+        return None;
+    }
+
+    canonical_people.get(&slug).cloned().or_else(|| {
+        Some(PersonIdentity {
+            slug,
+            name: trimmed.to_string(),
+        })
+    })
 }
 
 fn capitalize_first(s: &str) -> String {
@@ -240,7 +356,7 @@ mod tests {
         let results = extract_from_frontmatter(&fm, "2026-04-03-strategy.md");
 
         // Both Mat and Dan should get the pricing decision
-        for name in &["mat", "dan"] {
+        for name in &["mat", "dan-benamoz"] {
             let pf: Vec<&PersonFacts> = results.iter().filter(|pf| pf.slug == *name).collect();
             assert!(!pf.is_empty(), "{} should have facts", name);
             let has_decision = pf[0].facts.iter().any(|f| f.category == "decision");
@@ -281,5 +397,42 @@ mod tests {
         assert_eq!(jex.len(), 1);
         assert_eq!(jex[0].facts.len(), 1);
         assert!(jex[0].facts[0].text.contains("Attended meeting"));
+    }
+
+    #[test]
+    fn merges_short_names_into_unique_entity_slug() {
+        let fm = test_frontmatter();
+        let results = extract_from_frontmatter(&fm, "2026-04-03-strategy.md");
+
+        assert!(results.iter().all(|pf| pf.slug != "dan"));
+
+        let dan = results
+            .iter()
+            .find(|pf| pf.slug == "dan-benamoz")
+            .expect("canonical Dan profile should exist");
+        assert_eq!(dan.name, "Dan Benamoz");
+        assert!(dan.facts.iter().any(|fact| fact.category == "commitment"));
+        assert!(dan.facts.iter().any(|fact| fact.category == "decision"));
+    }
+
+    #[test]
+    fn first_name_matching_stays_disabled_when_entities_are_ambiguous() {
+        let identities = build_canonical_person_index(&[
+            EntityRef {
+                slug: "dan-benamoz".into(),
+                label: "Dan Benamoz".into(),
+                aliases: vec![],
+            },
+            EntityRef {
+                slug: "dan-smith".into(),
+                label: "Dan Smith".into(),
+                aliases: vec![],
+            },
+        ]);
+
+        assert!(!identities.contains_key("dan"));
+        let fallback = resolve_person_identity("Dan", &identities).expect("fallback identity");
+        assert_eq!(fallback.slug, "dan");
+        assert_eq!(fallback.name, "Dan");
     }
 }

@@ -1020,6 +1020,56 @@ pub fn is_system_audio_device_name(name: &str) -> bool {
     .any(|hint| lower.contains(hint))
 }
 
+/// Categorize a device into Microphone / SystemAudio / Virtual.
+///
+/// On PipeWire, `Audio/Sink` nodes (your speakers, headphones) are exposed
+/// with `direction = Duplex` so they appear in `host.input_devices()`. Recording
+/// from one transparently uses the sink's monitor port via `STREAM_CAPTURE_SINK`
+/// at stream creation. We surface that to users by categorizing them as
+/// `SystemAudio` rather than `Microphone`. The PipeWire-only gate is necessary
+/// because (a) ALSA backend Duplex devices are typically USB headsets where the
+/// user wants the mic, not the speaker monitor, and (b) on macOS, virtual
+/// drivers like Camo Microphone, Loom, Zoom, and Teams all report
+/// `supports_output() == true` and would be wrongly bucketed.
+///
+/// Test fixture for unit tests — pure function, no cpal dependency.
+fn categorize_device(
+    name: &str,
+    supports_input: bool,
+    supports_output: bool,
+    is_pipewire: bool,
+) -> DeviceCategory {
+    if is_pipewire && supports_input && supports_output {
+        // PipeWire sink with monitor port — see doc comment above.
+        return DeviceCategory::SystemAudio;
+    }
+    if is_system_audio_device_name(name) {
+        return DeviceCategory::SystemAudio;
+    }
+    let lower = name.to_lowercase();
+    if lower.contains("virtual") || lower.contains("pipewire") || lower.contains("pulse") {
+        return DeviceCategory::Virtual;
+    }
+    DeviceCategory::Microphone
+}
+
+/// True when the cpal default host is the PipeWire backend.
+///
+/// Compiles to a const `false` on platforms where cpal doesn't expose a
+/// `HostId::PipeWire` variant (macOS, Windows, etc.), so callers don't need
+/// their own cfg guards.
+fn is_pipewire_host(host_id: cpal::HostId) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        matches!(host_id, cpal::HostId::PipeWire)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = host_id;
+        false
+    }
+}
+
 pub fn selected_input_device_name(config: &Config) -> Result<String, CaptureError> {
     use cpal::traits::DeviceTrait;
 
@@ -1229,7 +1279,9 @@ pub fn list_devices_categorized() -> Vec<CategorizedDevice> {
     use cpal::traits::{DeviceTrait, HostTrait};
 
     let host = cpal::default_host();
-    tracing::debug!(host_id = ?host.id(), "cpal host for categorized device listing");
+    let host_id = host.id();
+    tracing::debug!(host_id = ?host_id, "cpal host for categorized device listing");
+    let is_pipewire = is_pipewire_host(host_id);
     let default_name = host
         .default_input_device()
         .and_then(|d| d.description().ok().map(|desc| desc.name().to_string()))
@@ -1248,16 +1300,10 @@ pub fn list_devices_categorized() -> Vec<CategorizedDevice> {
                 .map(|c| (c.sample_rate(), c.channels()))
                 .unwrap_or((0, 0));
 
-            let category = if is_system_audio_device_name(&name) {
-                DeviceCategory::SystemAudio
-            } else if name.to_lowercase().contains("virtual")
-                || name.to_lowercase().contains("pipewire")
-                || name.to_lowercase().contains("pulse")
-            {
-                DeviceCategory::Virtual
-            } else {
-                DeviceCategory::Microphone
-            };
+            // host.input_devices() already filters by supports_input, but we re-check
+            // supports_output here to detect Duplex devices (PipeWire sinks-as-inputs).
+            let supports_output = device.supports_output();
+            let category = categorize_device(&name, true, supports_output, is_pipewire);
 
             devices.push(CategorizedDevice {
                 is_default: name == default_name,
@@ -1285,6 +1331,80 @@ pub fn detect_loopback_device() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn categorize_pipewire_sink_returns_system_audio() {
+        // PipeWire host: a sink (output device) appears in input_devices() with
+        // supports_output() == true. This is a "monitor source" and should be
+        // categorized as SystemAudio so users know they can record system audio
+        // from it.
+        let category = categorize_device(
+            "Built-in Audio Analog Stereo",
+            true, // supports_input (cpal already filtered)
+            true, // supports_output (the Duplex signal)
+            true, // is_pipewire
+        );
+        assert_eq!(category, DeviceCategory::SystemAudio);
+    }
+
+    #[test]
+    fn categorize_pipewire_real_microphone_returns_microphone() {
+        // PipeWire host: a real microphone (Audio/Source) only supports input.
+        let category = categorize_device(
+            "Built-in Audio Analog Mono",
+            true,
+            false, // input-only
+            true,
+        );
+        assert_eq!(category, DeviceCategory::Microphone);
+    }
+
+    #[test]
+    fn categorize_alsa_duplex_does_not_become_system_audio() {
+        // ALSA host: a USB headset that genuinely supports both directions on
+        // the same node. Without the host gate, this would be wrongly categorized
+        // as SystemAudio. This test pins the gate behavior — if it ever fails,
+        // someone removed the is_pipewire check and broke ALSA users.
+        let category = categorize_device(
+            "USB Headset Mono",
+            true,
+            true,
+            false, // NOT pipewire — this is the ALSA path
+        );
+        assert_eq!(category, DeviceCategory::Microphone);
+    }
+
+    #[test]
+    fn categorize_macos_camo_microphone_does_not_become_system_audio() {
+        // macOS-style false positive: Camo Microphone is a real mic that bridges
+        // to an iPhone, but CoreAudio reports it as Duplex (verified empirically
+        // on Mat's machine, see PLAN.md.cpal-pipewire-fix P2 results). The
+        // PipeWire-only gate prevents this false positive.
+        let category = categorize_device("Camo Microphone", true, true, false);
+        assert_eq!(category, DeviceCategory::Microphone);
+    }
+
+    #[test]
+    fn categorize_loopback_device_by_name_still_works() {
+        // Existing name-based heuristic still applies as a fallback.
+        let category = categorize_device("Descript Loopback Recorder", true, true, false);
+        assert_eq!(category, DeviceCategory::SystemAudio);
+    }
+
+    #[test]
+    fn categorize_virtual_device_by_name_still_works() {
+        let category = categorize_device("VirtualMicSomething", true, false, false);
+        assert_eq!(category, DeviceCategory::Virtual);
+    }
+
+    #[test]
+    fn categorize_blackhole_still_works() {
+        // BlackHole is an output-only loopback driver on macOS — supports_output
+        // is false from the input_devices() perspective in our existing setup,
+        // but the name heuristic catches it.
+        let category = categorize_device("BlackHole 2ch", true, false, false);
+        assert_eq!(category, DeviceCategory::SystemAudio);
+    }
 
     #[test]
     fn detect_call_app_matches_configured_processes() {

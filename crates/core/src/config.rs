@@ -31,6 +31,36 @@ pub struct Config {
     pub recording: RecordingConfig,
     pub hooks: HooksConfig,
     pub knowledge: KnowledgeConfig,
+    pub palette: PaletteConfig,
+}
+
+/// Command palette configuration.
+///
+/// The palette is the keyboard-first command surface introduced in v0.11.
+/// Upgrades from earlier versions default `shortcut_enabled` to `false`
+/// so that users who mapped `⌘⇧K` to something else (VS Code Delete Line,
+/// JetBrains Push, etc.) are not surprised by a new global shortcut.
+/// Fresh installs default to `true` via `Default::default` — see
+/// [`Config::load_with_migrations`] for the detection.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PaletteConfig {
+    /// Whether the global palette shortcut is enabled.
+    pub shortcut_enabled: bool,
+    /// The palette shortcut string (e.g., "CmdOrCtrl+Shift+K").
+    pub shortcut: String,
+}
+
+impl Default for PaletteConfig {
+    fn default() -> Self {
+        // Fresh-install default. The upgrade path in
+        // `Config::load_with_migrations` rewrites this to `false` for users
+        // who already have a config file without a `[palette]` section.
+        Self {
+            shortcut_enabled: true,
+            shortcut: "CmdOrCtrl+Shift+K".into(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -454,6 +484,7 @@ impl Default for Config {
             recording: RecordingConfig::default(),
             hooks: HooksConfig::default(),
             knowledge: KnowledgeConfig::default(),
+            palette: PaletteConfig::default(),
         }
     }
 }
@@ -575,7 +606,74 @@ impl Config {
         Self::load_from(&path)
     }
 
-    /// Load config from a specific path. Used for testing.
+    /// Load the config file with first-run and upgrade migrations applied.
+    ///
+    /// This is the entry point the Tauri desktop app uses at startup. The
+    /// CLI and non-app consumers can continue to use [`Self::load`] if they
+    /// do not need migration side effects.
+    ///
+    /// Currently runs:
+    /// - **Palette upgrade migration**: if the config file exists but has
+    ///   no `[palette]` section, the user is upgrading from a version that
+    ///   had no palette. Force `palette.shortcut_enabled = false` and
+    ///   persist the change so the next load is a no-op. This prevents a
+    ///   silent global-shortcut hijack on upgrade — VS Code, JetBrains, and
+    ///   Firefox all bind `⌘⇧K` to app-level commands.
+    ///
+    /// Fresh installs (file does not exist) skip every migration and take
+    /// the compiled defaults verbatim.
+    pub fn load_with_migrations() -> Self {
+        let path = Self::config_path();
+        Self::load_with_migrations_from(&path)
+    }
+
+    /// Testable form of [`Self::load_with_migrations`]. Reads from `path`,
+    /// runs migrations, and writes the migrated config back if it changed.
+    pub fn load_with_migrations_from(path: &Path) -> Self {
+        let file_existed = path.exists();
+        let raw_toml = if file_existed {
+            std::fs::read_to_string(path).ok()
+        } else {
+            None
+        };
+
+        let mut config = Self::load_from(path);
+        let mut changed = false;
+
+        // Palette upgrade: detect the absence of a `[palette]` section in a
+        // pre-existing config. `toml::from_str` silently fills missing
+        // sections with `Default`, so the parsed struct alone does not tell
+        // us whether the user explicitly chose their setting or inherited
+        // the default. A text check on the raw TOML is the only way to
+        // distinguish "new field, never seen" from "user set it to true".
+        if file_existed {
+            if let Some(raw) = raw_toml.as_deref() {
+                if !raw_toml_has_section(raw, "palette") {
+                    config.palette.shortcut_enabled = false;
+                    changed = true;
+                    tracing::info!(
+                        "palette upgrade migration: disabled shortcut for existing config at {}",
+                        path.display()
+                    );
+                }
+            }
+        }
+
+        if changed {
+            if let Err(e) = config.save_to(path) {
+                tracing::warn!(
+                    "failed to persist config migration to {}: {}",
+                    path.display(),
+                    e
+                );
+            }
+        }
+
+        config
+    }
+
+    /// Load config from a specific path. Used for testing and by
+    /// [`Self::load_with_migrations_from`].
     pub fn load_from(path: &Path) -> Self {
         if !path.exists() {
             return Self::default();
@@ -651,6 +749,33 @@ impl Config {
     pub fn minutes_dir() -> PathBuf {
         minutes_dir()
     }
+}
+
+/// Return `true` iff the raw TOML text contains a top-level `[section]`
+/// header. This is a deliberately primitive text check — we cannot use
+/// `toml::from_str` to answer this question because serde's `#[serde(default)]`
+/// silently fills missing sections with their default values, so a parsed
+/// struct never tells you whether a key was present in the file.
+///
+/// The check:
+/// - Ignores leading whitespace
+/// - Skips lines that start with `#` (comments)
+/// - Does not try to understand inline tables, dotted keys, or array tables
+///   like `[[section]]` — those are not how Minutes writes its config, and
+///   `toml::to_string_pretty` always emits bare `[section]` headers for the
+///   sections we own
+fn raw_toml_has_section(raw: &str, section: &str) -> bool {
+    let target = format!("[{}]", section);
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('#') {
+            continue;
+        }
+        if trimmed == target {
+            return true;
+        }
+    }
+    false
 }
 
 #[cfg(test)]
@@ -818,5 +943,136 @@ accumulate = false
 
         let config = Config::load_from(&config_path);
         assert!(!config.dictation.accumulate);
+    }
+
+    // ── Palette config + upgrade migration ────────────────────
+
+    #[test]
+    fn palette_default_is_enabled() {
+        let config = Config::default();
+        assert!(config.palette.shortcut_enabled);
+        assert_eq!(config.palette.shortcut, "CmdOrCtrl+Shift+K");
+    }
+
+    #[test]
+    fn raw_toml_has_section_matches_top_level_headers() {
+        assert!(raw_toml_has_section("[palette]\nx = 1\n", "palette"));
+        assert!(raw_toml_has_section("# header\n[palette]", "palette"));
+        assert!(raw_toml_has_section(
+            "[other]\nx=1\n\n[palette]\ny=2\n",
+            "palette"
+        ));
+    }
+
+    #[test]
+    fn raw_toml_has_section_ignores_commented_headers() {
+        assert!(!raw_toml_has_section("# [palette]\n", "palette"));
+        assert!(!raw_toml_has_section("  # [palette]\n", "palette"));
+    }
+
+    #[test]
+    fn raw_toml_has_section_rejects_non_matching_sections() {
+        assert!(!raw_toml_has_section("[dictation]\n", "palette"));
+        assert!(!raw_toml_has_section("[palette.inner]\n", "palette"));
+    }
+
+    #[test]
+    fn fresh_install_keeps_palette_enabled() {
+        let dir = TempDir::new().unwrap();
+        let config_path = dir.path().join("config.toml");
+        // No file exists — fresh install path.
+        let config = Config::load_with_migrations_from(&config_path);
+        assert!(
+            config.palette.shortcut_enabled,
+            "fresh install should default palette shortcut to ENABLED"
+        );
+        // And the migration should NOT have created a file out of thin air.
+        // Fresh installs leave config creation to a later save() call.
+        assert!(
+            !config_path.exists(),
+            "migration should not materialize a config file on fresh install"
+        );
+    }
+
+    #[test]
+    fn upgrade_disables_palette_when_section_missing() {
+        let dir = TempDir::new().unwrap();
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(
+            &config_path,
+            r#"
+[transcription]
+model = "small"
+"#,
+        )
+        .unwrap();
+
+        let config = Config::load_with_migrations_from(&config_path);
+        assert!(
+            !config.palette.shortcut_enabled,
+            "upgrade path should default palette shortcut to DISABLED"
+        );
+
+        // The migration should have persisted its decision so the next
+        // load is a no-op instead of running the same migration twice.
+        let reloaded = std::fs::read_to_string(&config_path).unwrap();
+        assert!(
+            raw_toml_has_section(&reloaded, "palette"),
+            "migration should persist a [palette] section to disk"
+        );
+        assert!(
+            reloaded.contains("shortcut_enabled = false"),
+            "persisted migration must encode shortcut_enabled = false, got:\n{}",
+            reloaded
+        );
+
+        // Second load must be a stable fixpoint.
+        let second = Config::load_with_migrations_from(&config_path);
+        assert!(!second.palette.shortcut_enabled);
+    }
+
+    #[test]
+    fn upgrade_respects_explicit_palette_section() {
+        let dir = TempDir::new().unwrap();
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(
+            &config_path,
+            r#"
+[transcription]
+model = "small"
+
+[palette]
+shortcut_enabled = true
+shortcut = "CmdOrCtrl+Shift+K"
+"#,
+        )
+        .unwrap();
+
+        let config = Config::load_with_migrations_from(&config_path);
+        assert!(
+            config.palette.shortcut_enabled,
+            "explicit [palette] section must not be overridden by migration"
+        );
+
+        // And the on-disk file should be unchanged (no write storm).
+        let reloaded = std::fs::read_to_string(&config_path).unwrap();
+        assert!(reloaded.contains("shortcut_enabled = true"));
+    }
+
+    #[test]
+    fn upgrade_respects_user_disabled_palette_section() {
+        let dir = TempDir::new().unwrap();
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(
+            &config_path,
+            r#"
+[palette]
+shortcut_enabled = false
+"#,
+        )
+        .unwrap();
+
+        let config = Config::load_with_migrations_from(&config_path);
+        assert!(!config.palette.shortcut_enabled);
     }
 }

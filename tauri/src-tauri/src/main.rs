@@ -462,7 +462,13 @@ fn main() {
         std::process::exit(code);
     }
 
-    let startup_config_snapshot = minutes_core::config::Config::load();
+    // Load with first-run and upgrade migrations. This is the only place
+    // the desktop app reads config at startup; the CLI and non-app code
+    // continue to use `Config::load()` without migrations. See
+    // `Config::load_with_migrations` for the palette upgrade path that
+    // disables `⌘⇧K` by default for existing users so the global shortcut
+    // does not silently hijack their existing bindings.
+    let startup_config_snapshot = minutes_core::config::Config::load_with_migrations();
     let recording = Arc::new(AtomicBool::new(false));
     let starting = Arc::new(AtomicBool::new(false));
     let stop_flag = Arc::new(AtomicBool::new(false));
@@ -480,6 +486,10 @@ fn main() {
     let hotkey_runtime = Arc::new(Mutex::new(commands::HotkeyRuntime::default()));
     let discard_short_hotkey_capture = Arc::new(AtomicBool::new(false));
     let screen_share_hidden = Arc::new(AtomicBool::new(true));
+    let palette_shortcut_enabled = Arc::new(AtomicBool::new(false));
+    let palette_shortcut = Arc::new(Mutex::new(startup_config_snapshot.palette.shortcut.clone()));
+    let palette_lifecycle = Arc::new(Mutex::new(commands::PaletteLifecycle::default()));
+    let palette_reopen_pending = Arc::new(AtomicBool::new(false));
     let recording_clone = recording.clone();
     let recording_for_detector = recording.clone();
     let processing_clone = processing.clone();
@@ -568,11 +578,25 @@ fn main() {
                         )
                         .ok()
                         .map(|shortcut| shortcut.id());
+                    let palette_shortcut_value = state
+                        .palette_shortcut
+                        .lock()
+                        .ok()
+                        .map(|value| value.clone())
+                        .unwrap_or_else(|| "CmdOrCtrl+Shift+K".to_string());
+                    let palette_shortcut_id =
+                        <tauri_plugin_global_shortcut::Shortcut as std::str::FromStr>::from_str(
+                            palette_shortcut_value.as_str(),
+                        )
+                        .ok()
+                        .map(|shortcut| shortcut.id());
 
                     if Some(shortcut_id) == dictation_shortcut_id {
                         commands::handle_dictation_shortcut_event(app, event.state());
                     } else if Some(shortcut_id) == live_shortcut_id {
                         commands::handle_live_shortcut_event(app, event.state());
+                    } else if Some(shortcut_id) == palette_shortcut_id {
+                        commands::handle_palette_shortcut_event(app, event.state());
                     } else {
                         commands::handle_global_hotkey_event(app, event.state());
                     }
@@ -621,6 +645,10 @@ fn main() {
                 Arc::new(Mutex::new(s))
             },
             pending_update: Arc::new(Mutex::new(None)),
+            palette_shortcut_enabled: palette_shortcut_enabled.clone(),
+            palette_shortcut: palette_shortcut.clone(),
+            palette_lifecycle: palette_lifecycle.clone(),
+            palette_reopen_pending: palette_reopen_pending.clone(),
         })
         .manage(Arc::new(Mutex::new(
             shortcut_manager::ShortcutManager::new(),
@@ -742,6 +770,33 @@ fn main() {
                     let state = app.state::<commands::AppState>();
                     state.live_shortcut_enabled.store(true, Ordering::Relaxed);
                     if let Ok(mut current) = state.live_shortcut.lock() {
+                        *current = shortcut;
+                    };
+                }
+            }
+
+            // Register the palette shortcut if the config opts into it.
+            // Fresh installs default to enabled via `Default::default` on
+            // `PaletteConfig`; upgrades default to disabled through the
+            // migration path in `Config::load_with_migrations`.
+            if startup_config.palette.shortcut_enabled {
+                use tauri_plugin_global_shortcut::GlobalShortcutExt;
+                let shortcut = if startup_config.palette.shortcut.is_empty() {
+                    "CmdOrCtrl+Shift+K".to_string()
+                } else {
+                    startup_config.palette.shortcut.clone()
+                };
+                if let Err(e) = app.global_shortcut().register(shortcut.as_str()) {
+                    eprintln!(
+                        "[palette-shortcut] startup register failed ({}): {}",
+                        shortcut, e
+                    );
+                } else {
+                    let state = app.state::<commands::AppState>();
+                    state
+                        .palette_shortcut_enabled
+                        .store(true, Ordering::Relaxed);
+                    if let Ok(mut current) = state.palette_shortcut.lock() {
                         *current = shortcut;
                     };
                 }
@@ -1180,13 +1235,25 @@ fn main() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                if window.label() == "main" {
-                    // Hide main window on close instead of quitting (app stays in tray)
-                    // PTY session persists — user can reopen and resume where they left off
-                    api.prevent_close();
-                    window.hide().ok();
+            match event {
+                tauri::WindowEvent::CloseRequested { api, .. } => {
+                    if window.label() == "main" {
+                        // Hide main window on close instead of quitting (app stays in tray)
+                        // PTY session persists — user can reopen and resume where they left off
+                        api.prevent_close();
+                        window.hide().ok();
+                    }
                 }
+                tauri::WindowEvent::Focused(false) => {
+                    // Palette overlay auto-closes on focus loss. Funnel
+                    // through the lifecycle-aware close path so the toggle
+                    // hotkey can reopen cleanly. Other windows are
+                    // unaffected.
+                    if window.label() == "palette" {
+                        commands::close_palette_window(&window.app_handle().clone());
+                    }
+                }
+                _ => {}
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -1249,6 +1316,8 @@ fn main() {
             commands::cmd_live_shortcut_settings,
             commands::cmd_set_live_shortcut,
             commands::cmd_install_update,
+            commands::palette_close,
+            commands::palette_current_meeting,
             palette_dispatch::palette_list,
             palette_dispatch::palette_execute,
         ])

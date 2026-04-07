@@ -35,6 +35,37 @@ pub struct AppState {
     pub live_shortcut_enabled: Arc<AtomicBool>,
     pub live_shortcut: Arc<Mutex<String>>,
     pub pending_update: Arc<Mutex<Option<PendingUpdate>>>,
+    /// Whether the palette global shortcut is currently registered.
+    pub palette_shortcut_enabled: Arc<AtomicBool>,
+    /// The shortcut string registered for the palette (e.g. "CmdOrCtrl+Shift+K").
+    pub palette_shortcut: Arc<Mutex<String>>,
+    /// Explicit lifecycle state for the palette overlay window. Tracked as a
+    /// four-state machine (Closed/Opening/Open/Closing) rather than a boolean
+    /// so fast `⌘⇧K` mashing during the close path doesn't eat keypresses.
+    /// See PLAN.md.command-palette-slice-2 D3.
+    pub palette_lifecycle: Arc<Mutex<PaletteLifecycle>>,
+    /// Set when a hotkey press lands in the `Closing` state. The close path
+    /// drains this flag on completion and re-opens the palette if it was set.
+    pub palette_reopen_pending: Arc<AtomicBool>,
+}
+
+/// Lifecycle state for the palette overlay window.
+///
+/// Transitions:
+/// ```text
+///     Closed ──hotkey──▶ Opening ──build_window──▶ Open
+///     Open   ──hotkey──▶ Closing ──close──▶ Closed
+///     Open   ──focus-lost──▶ Closing ──close──▶ Closed
+///     Opening + hotkey  ==> ignored (mid-open race)
+///     Closing + hotkey  ==> queue reopen; Closed triggers Opening again
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PaletteLifecycle {
+    #[default]
+    Closed,
+    Opening,
+    Open,
+    Closing,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -5223,4 +5254,304 @@ pub async fn cmd_install_update(app: tauri::AppHandle) -> Result<serde_json::Val
 
     #[allow(unreachable_code)]
     Ok(serde_json::json!({"restarting": true}))
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Command palette window management
+// ─────────────────────────────────────────────────────────────────────
+
+/// Global-shortcut handler for the palette toggle (`⌘⇧K` by default).
+///
+/// Reacts to `Pressed` only. The palette is a toggle on press, not a
+/// hold-to-talk, so `Released` is ignored. Routes through the
+/// lifecycle-aware `toggle_palette_window` helper to survive fast
+/// double-press races.
+pub fn handle_palette_shortcut_event(
+    app: &tauri::AppHandle,
+    shortcut_state: tauri_plugin_global_shortcut::ShortcutState,
+) {
+    if shortcut_state != tauri_plugin_global_shortcut::ShortcutState::Pressed {
+        return;
+    }
+    let state = app.state::<AppState>();
+    if !state.palette_shortcut_enabled.load(Ordering::Relaxed) {
+        return;
+    }
+    toggle_palette_window(app);
+}
+
+/// Toggle the palette overlay window based on the current lifecycle state.
+///
+/// The state machine:
+/// - `Closed`  → `Opening` → build window → `Open`
+/// - `Open`    → `Closing` → close window → `Closed`
+/// - `Opening` → ignore (duplicate press mid-create)
+/// - `Closing` → queue a reopen; when close completes, transition
+///   `Closed → Opening` immediately
+///
+/// All transitions happen under a `Mutex`, so two concurrent hotkey
+/// handlers (e.g., plugin dispatch on a worker thread) cannot race each
+/// other. The window itself is created on the main thread via
+/// `app.run_on_main_thread`.
+pub fn toggle_palette_window(app: &tauri::AppHandle) {
+    let state = app.state::<AppState>();
+
+    let transition: Option<PaletteTransition> = {
+        let mut lifecycle = match state.palette_lifecycle.lock() {
+            Ok(guard) => guard,
+            Err(_) => {
+                eprintln!("[palette] palette_lifecycle mutex poisoned; dropping hotkey");
+                return;
+            }
+        };
+        match *lifecycle {
+            PaletteLifecycle::Closed => {
+                *lifecycle = PaletteLifecycle::Opening;
+                Some(PaletteTransition::Open)
+            }
+            PaletteLifecycle::Open => {
+                *lifecycle = PaletteLifecycle::Closing;
+                Some(PaletteTransition::Close)
+            }
+            PaletteLifecycle::Opening => None,
+            PaletteLifecycle::Closing => {
+                state.palette_reopen_pending.store(true, Ordering::Relaxed);
+                None
+            }
+        }
+    };
+
+    match transition {
+        Some(PaletteTransition::Open) => create_or_show_palette_window(app),
+        Some(PaletteTransition::Close) => close_palette_window(app),
+        None => {}
+    }
+}
+
+#[derive(Debug)]
+enum PaletteTransition {
+    Open,
+    Close,
+}
+
+/// Close the palette window and drain any queued reopen request. Both
+/// `palette_close` (invoked from the webview's Esc key and focus-lost
+/// handlers) and the shortcut-toggle path funnel through here.
+pub fn close_palette_window(app: &tauri::AppHandle) {
+    if let Some(win) = app.get_webview_window("palette") {
+        if let Err(e) = win.close() {
+            eprintln!("[palette] failed to close palette window: {}", e);
+        }
+    }
+
+    let state = app.state::<AppState>();
+    let reopen = {
+        let mut lifecycle = match state.palette_lifecycle.lock() {
+            Ok(guard) => guard,
+            Err(_) => return,
+        };
+        *lifecycle = PaletteLifecycle::Closed;
+        state.palette_reopen_pending.swap(false, Ordering::Relaxed)
+    };
+
+    if reopen {
+        let mut lifecycle = match state.palette_lifecycle.lock() {
+            Ok(guard) => guard,
+            Err(_) => return,
+        };
+        if *lifecycle == PaletteLifecycle::Closed {
+            *lifecycle = PaletteLifecycle::Opening;
+            drop(lifecycle);
+            create_or_show_palette_window(app);
+        }
+    }
+}
+
+/// Public Tauri command wrapping [`close_palette_window`]. Called from
+/// the palette frontend's Esc and focus-lost handlers so the state
+/// machine stays consistent no matter which event triggered the close.
+#[tauri::command]
+pub fn palette_close(app: tauri::AppHandle) {
+    close_palette_window(&app);
+}
+
+fn create_or_show_palette_window(app: &tauri::AppHandle) {
+    use tauri::WebviewUrl;
+
+    // Singleton: a stale window from a previous toggle should be reused,
+    // not duplicated. `get_webview_window` is cheap.
+    if let Some(win) = app.get_webview_window("palette") {
+        // The lifecycle says we are opening, but a window already exists.
+        // Show + focus it instead of spawning a duplicate.
+        if let Err(e) = win.show() {
+            eprintln!("[palette] show failed: {}", e);
+        }
+        if let Err(e) = win.set_focus() {
+            eprintln!("[palette] focus failed: {}", e);
+        }
+        finalize_palette_open(app);
+        return;
+    }
+
+    // Position: center of the primary monitor. Tauri's `center()` builder
+    // option handles multi-monitor setups correctly.
+    let width = 640.0_f64;
+    let height = 420.0_f64;
+
+    let build_result = tauri::WebviewWindowBuilder::new(
+        app,
+        "palette",
+        WebviewUrl::App("palette/index.html".into()),
+    )
+    .title("Minutes Palette")
+    .inner_size(width, height)
+    .resizable(false)
+    .decorations(false)
+    .transparent(true)
+    .shadow(true)
+    .always_on_top(true)
+    .center()
+    .focused(true)
+    .skip_taskbar(true)
+    .content_protected(true)
+    .build();
+
+    match build_result {
+        Ok(_) => finalize_palette_open(app),
+        Err(e) => {
+            eprintln!("[palette] failed to build palette window: {}", e);
+            let state = app.state::<AppState>();
+            if let Ok(mut lifecycle) = state.palette_lifecycle.lock() {
+                *lifecycle = PaletteLifecycle::Closed;
+            };
+        }
+    }
+}
+
+fn finalize_palette_open(app: &tauri::AppHandle) {
+    let state = app.state::<AppState>();
+    if let Ok(mut lifecycle) = state.palette_lifecycle.lock() {
+        *lifecycle = PaletteLifecycle::Open;
+    }
+
+    // Capability smoke test (D4 of PLAN.md.command-palette-slice-2).
+    //
+    // Fire a `palette:ping` event to the palette window on a short
+    // delay so the webview's `listen()` subscription has time to mount.
+    // The palette HTML shows a green "events ok" indicator when it
+    // receives this. If the indicator never turns green in dev-app
+    // testing, capabilities/default.json needs an explicit `palette`
+    // entry per the D4 fallback.
+    let app_clone = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(120));
+        if let Err(e) =
+            app_clone.emit_to("palette", "palette:ping", serde_json::json!({ "ok": true }))
+        {
+            eprintln!("[palette] palette:ping emit failed: {}", e);
+        }
+    });
+}
+
+/// Read the assistant workspace's `CURRENT_MEETING.md` breadcrumb and
+/// return the absolute path of the meeting the user is currently
+/// discussing. Returns `None` if the file is missing, unreadable, or
+/// does not reference a resolvable meeting path.
+///
+/// The palette webview calls this right before `palette_list` and
+/// `palette_execute` so `PaletteUiContext.current_meeting` can be
+/// populated for meeting-scoped commands (copy markdown, rename, etc.).
+#[tauri::command]
+pub fn palette_current_meeting() -> Option<PathBuf> {
+    let config = Config::load();
+    let workspace_root = crate::context::create_workspace(&config).ok()?;
+    let marker = workspace_root.join("CURRENT_MEETING.md");
+    let contents = std::fs::read_to_string(&marker).ok()?;
+
+    // CURRENT_MEETING.md stores a link or raw path to the current meeting
+    // markdown. Accepted forms (pick the first matching line):
+    //   1. Markdown link: `[title](/abs/path.md)`
+    //   2. Bare path line: `/abs/path.md`
+    //   3. `path: /abs/path.md` frontmatter-ish line
+    // Anything else → `None`.
+    for line in contents.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        if let Some(path) = extract_current_meeting_path(trimmed) {
+            let candidate = PathBuf::from(path);
+            if candidate.exists() && candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+/// Parse a single line of `CURRENT_MEETING.md` looking for a path. Kept
+/// private and tested directly so the accepted forms are documented.
+fn extract_current_meeting_path(line: &str) -> Option<&str> {
+    // Markdown link form: `[label](path)`
+    if let Some(start) = line.find("](") {
+        let rest = &line[start + 2..];
+        if let Some(end) = rest.find(')') {
+            let path = &rest[..end];
+            if path.ends_with(".md") {
+                return Some(path);
+            }
+        }
+    }
+    // `path: /abs/path.md` form
+    if let Some(rest) = line.strip_prefix("path:") {
+        let trimmed = rest.trim().trim_matches('"').trim_matches('\'');
+        if trimmed.ends_with(".md") {
+            return Some(trimmed);
+        }
+    }
+    // Bare path form
+    if line.ends_with(".md") && line.starts_with('/') {
+        return Some(line);
+    }
+    None
+}
+
+#[cfg(test)]
+mod palette_window_tests {
+    use super::*;
+
+    #[test]
+    fn extracts_markdown_link_path() {
+        assert_eq!(
+            extract_current_meeting_path("[Team Sync](/Users/x/meetings/2026-04-07-team-sync.md)"),
+            Some("/Users/x/meetings/2026-04-07-team-sync.md")
+        );
+    }
+
+    #[test]
+    fn extracts_path_prefix_form() {
+        assert_eq!(
+            extract_current_meeting_path("path: /Users/x/meetings/call.md"),
+            Some("/Users/x/meetings/call.md")
+        );
+        assert_eq!(
+            extract_current_meeting_path(r#"path: "/Users/x/meetings/call.md""#),
+            Some("/Users/x/meetings/call.md")
+        );
+    }
+
+    #[test]
+    fn extracts_bare_absolute_path() {
+        assert_eq!(
+            extract_current_meeting_path("/Users/x/meetings/call.md"),
+            Some("/Users/x/meetings/call.md")
+        );
+    }
+
+    #[test]
+    fn rejects_non_md_and_relative_paths() {
+        assert_eq!(extract_current_meeting_path("relative/path.md"), None);
+        assert_eq!(extract_current_meeting_path("/abs/path.txt"), None);
+        assert_eq!(extract_current_meeting_path("just a sentence"), None);
+    }
 }

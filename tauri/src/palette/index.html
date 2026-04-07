@@ -1,0 +1,461 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Minutes Palette</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    :root {
+      --panel: rgba(28, 28, 34, 0.98);
+      --panel-edge: rgba(255, 255, 255, 0.06);
+      --text: #f5f5f7;
+      --text-secondary: #98989d;
+      --text-tertiary: #636366;
+      --accent: #4da8d9;
+      --accent-soft: rgba(77, 168, 217, 0.18);
+      --row-hover: rgba(255, 255, 255, 0.04);
+      --row-focus: rgba(77, 168, 217, 0.16);
+      --section-label: #6e6e73;
+      --shadow:
+        0 24px 48px rgba(0, 0, 0, 0.32),
+        0 6px 14px rgba(0, 0, 0, 0.24),
+        inset 0 1px 0 rgba(255, 255, 255, 0.08);
+    }
+
+    html, body {
+      width: 100%;
+      height: 100%;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
+      background: transparent;
+      overflow: hidden;
+      -webkit-user-select: none;
+      user-select: none;
+      color: var(--text);
+    }
+
+    .palette {
+      width: 100%;
+      height: 100%;
+      background: var(--panel);
+      border: 1px solid var(--panel-edge);
+      border-radius: 14px;
+      box-shadow: var(--shadow);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      animation: appear 140ms ease-out;
+    }
+
+    @keyframes appear {
+      from { opacity: 0; transform: translateY(8px) scale(0.992); }
+      to   { opacity: 1; transform: translateY(0) scale(1); }
+    }
+
+    .input-row {
+      padding: 14px 18px 12px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .prefix {
+      color: var(--accent);
+      font-size: 14px;
+      font-weight: 600;
+      letter-spacing: -0.01em;
+    }
+
+    .query {
+      flex: 1;
+      background: transparent;
+      border: none;
+      outline: none;
+      color: var(--text);
+      font-size: 17px;
+      font-weight: 500;
+      letter-spacing: -0.01em;
+      caret-color: var(--accent);
+    }
+
+    .query::placeholder {
+      color: var(--text-tertiary);
+    }
+
+    .hint {
+      font-size: 11px;
+      color: var(--text-tertiary);
+      font-variant-numeric: tabular-nums;
+    }
+
+    .list {
+      flex: 1;
+      overflow-y: auto;
+      padding: 6px 0 8px;
+    }
+
+    .list::-webkit-scrollbar {
+      width: 6px;
+    }
+    .list::-webkit-scrollbar-thumb {
+      background: rgba(255, 255, 255, 0.08);
+      border-radius: 3px;
+    }
+
+    .row {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 10px 18px;
+      cursor: default;
+      transition: background-color 60ms ease;
+    }
+
+    .row:hover {
+      background: var(--row-hover);
+    }
+
+    .row.focused {
+      background: var(--row-focus);
+    }
+
+    .row .icon {
+      width: 22px;
+      height: 22px;
+      border-radius: 5px;
+      background: rgba(255, 255, 255, 0.06);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 13px;
+      flex-shrink: 0;
+    }
+
+    .row .text {
+      flex: 1;
+      min-width: 0;
+    }
+
+    .row .title {
+      font-size: 14px;
+      font-weight: 500;
+      letter-spacing: -0.01em;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .row .description {
+      font-size: 12px;
+      color: var(--text-secondary);
+      margin-top: 1px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .row .badge {
+      font-size: 10px;
+      font-weight: 600;
+      color: var(--text-tertiary);
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      flex-shrink: 0;
+      padding: 2px 6px;
+      border-radius: 4px;
+      background: rgba(255, 255, 255, 0.04);
+    }
+
+    .empty {
+      padding: 28px 18px;
+      text-align: center;
+      color: var(--text-tertiary);
+      font-size: 13px;
+    }
+
+    .footer {
+      border-top: 1px solid rgba(255, 255, 255, 0.06);
+      padding: 8px 18px;
+      display: flex;
+      gap: 16px;
+      font-size: 11px;
+      color: var(--text-tertiary);
+    }
+
+    .footer kbd {
+      background: rgba(255, 255, 255, 0.06);
+      border-radius: 3px;
+      padding: 1px 5px;
+      font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+      font-size: 10px;
+      color: var(--text-secondary);
+      margin-right: 4px;
+    }
+
+    .smoke-indicator {
+      position: absolute;
+      bottom: 6px;
+      right: 10px;
+      font-size: 9px;
+      color: var(--text-tertiary);
+      opacity: 0;
+      transition: opacity 140ms ease;
+    }
+    .smoke-indicator.ok { opacity: 1; color: #46c072; }
+  </style>
+</head>
+<body>
+  <div class="palette" id="palette">
+    <div class="input-row">
+      <span class="prefix">&gt;</span>
+      <input
+        class="query"
+        id="query"
+        type="text"
+        placeholder="Search Minutes commands..."
+        autofocus
+        spellcheck="false"
+        autocomplete="off"
+      />
+      <span class="hint" id="hint"></span>
+    </div>
+    <div class="list" id="list" role="listbox" aria-label="Commands"></div>
+    <div class="footer">
+      <span><kbd>↑↓</kbd>navigate</span>
+      <span><kbd>⏎</kbd>run</span>
+      <span><kbd>esc</kbd>close</span>
+      <span style="margin-left:auto" id="count"></span>
+    </div>
+    <span class="smoke-indicator" id="smoke">events ok</span>
+  </div>
+
+  <script type="module">
+    // ─────────────────────────────────────────────────────────────
+    // Slice 2a scope:
+    //   - Capability smoke test: assert window-targeted listen() works
+    //     for the EXACT pairing the production palette will use
+    //     (`app.emit_to("palette", ...)` + `currentWindow.listen(...)`).
+    //   - Render the visible command list returned by `palette_list`.
+    //   - Esc closes via the lifecycle-aware `palette_close` command.
+    //   - Focus lost is handled by the Tauri main.rs WindowEvent
+    //     listener, which also funnels through `palette_close`.
+    //
+    //   Slice 2b will add: fuzzy scoring, palette_execute, recent list
+    //   floating to the top, the BROWSING/LOCKED reducer for parameter
+    //   capture, and re-fetch on state change events.
+    //
+    //   Do not let this script grow without first checking that scope.
+    // ─────────────────────────────────────────────────────────────
+
+    const { invoke } = window.__TAURI__.core;
+    const { listen } = window.__TAURI__.event;
+
+    const queryEl = document.getElementById("query");
+    const listEl = document.getElementById("list");
+    const countEl = document.getElementById("count");
+    const hintEl = document.getElementById("hint");
+    const smokeEl = document.getElementById("smoke");
+
+    /** @type {Array<any>} */
+    let commands = [];
+    let focusedIndex = 0;
+
+    const SECTION_LABELS = {
+      recording: "Recording",
+      dictation: "Dictation",
+      navigation: "Navigation",
+      search: "Search",
+    };
+
+    const SECTION_ICONS = {
+      recording: "●",
+      dictation: "◉",
+      navigation: "→",
+      search: "⌕",
+    };
+
+    function clearChildren(node) {
+      while (node.firstChild) {
+        node.removeChild(node.firstChild);
+      }
+    }
+
+    function render() {
+      clearChildren(listEl);
+      countEl.textContent = "";
+
+      const filtered = commands; // slice 2b adds the fuzzy filter
+
+      if (filtered.length === 0) {
+        const empty = document.createElement("div");
+        empty.className = "empty";
+        empty.textContent = "No commands available right now.";
+        listEl.appendChild(empty);
+        return;
+      }
+
+      countEl.textContent = `${filtered.length} command${filtered.length === 1 ? "" : "s"}`;
+
+      filtered.forEach((cmd, index) => {
+        const row = document.createElement("div");
+        row.className = "row" + (index === focusedIndex ? " focused" : "");
+        row.setAttribute("role", "option");
+        row.setAttribute("aria-selected", index === focusedIndex ? "true" : "false");
+        row.dataset.index = String(index);
+
+        const icon = document.createElement("div");
+        icon.className = "icon";
+        icon.textContent = SECTION_ICONS[cmd.section] ?? "·";
+
+        const text = document.createElement("div");
+        text.className = "text";
+
+        const title = document.createElement("div");
+        title.className = "title";
+        title.textContent = cmd.title;
+
+        const description = document.createElement("div");
+        description.className = "description";
+        description.textContent = cmd.description;
+
+        text.appendChild(title);
+        text.appendChild(description);
+
+        const badge = document.createElement("span");
+        badge.className = "badge";
+        badge.textContent = SECTION_LABELS[cmd.section] ?? cmd.section;
+
+        row.appendChild(icon);
+        row.appendChild(text);
+        row.appendChild(badge);
+
+        row.addEventListener("mouseenter", () => {
+          focusedIndex = index;
+          updateFocusClasses();
+        });
+
+        listEl.appendChild(row);
+      });
+
+      hintEl.textContent = focusedRowInputHint();
+    }
+
+    function updateFocusClasses() {
+      const rows = listEl.querySelectorAll(".row");
+      rows.forEach((row, index) => {
+        row.classList.toggle("focused", index === focusedIndex);
+        row.setAttribute("aria-selected", index === focusedIndex ? "true" : "false");
+      });
+      const focused = listEl.children[focusedIndex];
+      if (focused && typeof focused.scrollIntoView === "function") {
+        focused.scrollIntoView({ block: "nearest" });
+      }
+      hintEl.textContent = focusedRowInputHint();
+    }
+
+    function focusedRowInputHint() {
+      const cmd = commands[focusedIndex];
+      if (!cmd) return "";
+      switch (cmd.input) {
+        case "inline-query":
+          return "needs query";
+        case "prompt-text":
+          return "opens input";
+        default:
+          return "";
+      }
+    }
+
+    async function fetchCommands() {
+      try {
+        const currentMeeting = await invoke("palette_current_meeting").catch(() => null);
+        const ui = currentMeeting ? { currentMeeting } : {};
+        const result = await invoke("palette_list", { ui });
+        commands = Array.isArray(result) ? result : [];
+        if (focusedIndex >= commands.length) {
+          focusedIndex = 0;
+        }
+        render();
+      } catch (e) {
+        console.error("[palette] palette_list failed:", e);
+        commands = [];
+        render();
+      }
+    }
+
+    async function closePalette() {
+      try {
+        await invoke("palette_close");
+      } catch (e) {
+        // The Tauri-side state machine treats palette_close as
+        // idempotent, so an error here usually means the window is
+        // already gone. Don't surface it.
+        console.warn("[palette] palette_close error:", e);
+      }
+    }
+
+    queryEl.addEventListener("keydown", async (event) => {
+      switch (event.key) {
+        case "Escape":
+          event.preventDefault();
+          await closePalette();
+          return;
+        case "ArrowDown":
+          event.preventDefault();
+          if (commands.length === 0) return;
+          focusedIndex = (focusedIndex + 1) % commands.length;
+          updateFocusClasses();
+          return;
+        case "ArrowUp":
+          event.preventDefault();
+          if (commands.length === 0) return;
+          focusedIndex = (focusedIndex - 1 + commands.length) % commands.length;
+          updateFocusClasses();
+          return;
+        case "Enter": {
+          event.preventDefault();
+          // Slice 2b will wire palette_execute here. For now, log the
+          // selection and close so we can manually verify the round trip.
+          const cmd = commands[focusedIndex];
+          console.log("[palette] selected:", cmd?.id, cmd);
+          await closePalette();
+          return;
+        }
+      }
+    });
+
+    // Capability smoke test (D4 of PLAN.md.command-palette-slice-2).
+    //
+    // The Tauri v2 capabilities gotcha that bit Minutes before is that
+    // window-targeted events can silently fail to deliver if the
+    // permissions list omits `core:event:allow-listen`. The current
+    // capabilities/default.json uses `"windows": ["*"]` so the palette
+    // window inherits the permissions, but the only way to be sure is
+    // to test the EXACT pairing production uses. The Tauri side emits a
+    // "palette:ping" event right after the window is built; the listener
+    // below confirms it arrived. Visible via the green indicator at the
+    // bottom-right of the palette.
+    listen("palette:ping", () => {
+      smokeEl.classList.add("ok");
+      console.log("[palette] capability smoke test passed");
+    }).catch((e) => {
+      console.warn("[palette] failed to subscribe to palette:ping:", e);
+    });
+
+    // Slice 2b will add real listeners on:
+    //   - "recording:start" / "recording:stop"
+    //   - "live-transcript:state"
+    //   - "dictation:state"
+    // Each one re-runs `fetchCommands` so the visible list never goes
+    // stale while the palette is open.
+
+    // Initial load.
+    fetchCommands();
+  </script>
+</body>
+</html>

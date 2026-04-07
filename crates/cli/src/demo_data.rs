@@ -234,26 +234,32 @@ pub fn present_demo(meeting_count: usize, people_count: usize, _output_dir: &Pat
             "q" | "quit" | "n" | "no" => {
                 writeln!(w).ok();
                 present_explore_commands(&mut w);
+                writeln!(
+                    w,
+                    "  {DIM}Missed the threads? Run {RESET}{CYAN}minutes demo --clean --full{RESET}{DIM} to replay.{RESET}"
+                )
+                .ok();
+                writeln!(w).ok();
             }
             "2" => {
                 present_territory_thread(&mut w, width);
-                // Offer the other thread
-                if prompt_continue(&mut w, "See the Da5id thread?") {
-                    present_query_inner(&mut w, width);
+                let saw_both = prompt_continue(&mut w, "See the Da5id thread?");
+                if saw_both {
+                    present_query_inner_short(&mut w, width);
                     present_connection_punchline(&mut w, width);
                 }
                 writeln!(w).ok();
-                present_end_card(&mut w, width);
+                present_end_card(&mut w, width, saw_both);
             }
             _ => {
                 present_query_inner(&mut w, width);
-                // Offer the other thread
-                if prompt_continue(&mut w, "See the territory collision?") {
-                    present_territory_thread(&mut w, width);
+                let saw_both = prompt_continue(&mut w, "See the territory collision?");
+                if saw_both {
+                    present_territory_thread_short(&mut w, width);
                     present_connection_punchline(&mut w, width);
                 }
                 writeln!(w).ok();
-                present_end_card(&mut w, width);
+                present_end_card(&mut w, width, saw_both);
             }
         }
     } else {
@@ -368,7 +374,7 @@ fn present_query_inner(w: &mut impl Write, width: usize) {
     typewriter(
         w,
         &format!("{BOLD}{WHITE}What did Da5id promise and did he deliver?{RESET}"),
-        if is_tty { 16 } else { 0 },
+        if is_tty { 8 } else { 0 },
     );
     writeln!(w).ok();
     writeln!(w).ok();
@@ -477,7 +483,7 @@ fn present_territory_thread(w: &mut impl Write, width: usize) {
     typewriter(
         w,
         &format!("{BOLD}{WHITE}Is anything about to disrupt Y.T.'s delivery routes?{RESET}"),
-        if is_tty { 16 } else { 0 },
+        if is_tty { 8 } else { 0 },
     );
     writeln!(w).ok();
     writeln!(w).ok();
@@ -577,18 +583,241 @@ fn present_territory_thread(w: &mut impl Write, width: usize) {
     writeln!(w).ok();
 }
 
+// ── Short variants (skip scanning, used for the second thread) ──
+
+fn present_query_inner_short(w: &mut impl Write, width: usize) {
+    let is_tty = tty();
+    let rw = width.min(72);
+
+    writeln!(w).ok();
+    if is_tty {
+        rule(w, '\u{2500}', rw);
+    }
+    writeln!(w).ok();
+
+    writeln!(
+        w,
+        "  {DIM}>{RESET} {BOLD}{WHITE}What did Da5id promise and did he deliver?{RESET}"
+    )
+    .ok();
+    writeln!(w).ok();
+
+    pause(150);
+    writeln!(
+        w,
+        "  {GREEN}{BOLD}COMMIT{RESET}   {DIM}Metaverse Infrastructure Standup, 14 days ago{RESET}"
+    )
+    .ok();
+    writeln!(
+        w,
+        "    {ITALIC}Da5id: \"I think I can fix it by Friday if I swap out{RESET}"
+    )
+    .ok();
+    writeln!(w, "    {ITALIC}the spatial index.\"{RESET}").ok();
+    writeln!(w).ok();
+
+    pause(300);
+
+    writeln!(
+        w,
+        "  {YELLOW}{BOLD}SIGNAL{RESET}   {DIM}Avatar Expression System, 7 days ago{RESET}"
+    )
+    .ok();
+    writeln!(
+        w,
+        "    {ITALIC}Juanita: \"Last I heard he was spending time down at the Raft.\"{RESET}"
+    )
+    .ok();
+    writeln!(w).ok();
+
+    pause(300);
+
+    writeln!(
+        w,
+        "  {YELLOW}{BOLD}SIGNAL{RESET}   {DIM}Intel Debrief, yesterday{RESET}"
+    )
+    .ok();
+    writeln!(
+        w,
+        "    {ITALIC}Y.T.: \"Uncle Enzo said he saw him at the Raft three times{RESET}"
+    )
+    .ok();
+    writeln!(w, "    {ITALIC}in the last two weeks.\"{RESET}").ok();
+    writeln!(w).ok();
+
+    pause(600);
+
+    if is_tty {
+        rule(w, '\u{2500}', rw);
+    }
+    writeln!(w).ok();
+
+    typewriter(
+        w,
+        &format!(
+            "{BOLD}{WHITE}  Da5id committed to the rendering pipeline fix 14 days ago.{RESET}"
+        ),
+        if is_tty { 10 } else { 0 },
+    );
+    writeln!(w).ok();
+    pause(300);
+    typewriter(
+        w,
+        &format!("{BOLD}{WHITE}  He didn't deliver.{RESET}"),
+        if is_tty { 12 } else { 0 },
+    );
+    writeln!(w).ok();
+    writeln!(w).ok();
+    pause(200);
+
+    writeln!(
+        w,
+        "{DIM}  Minutes connected a casual aside from Juanita, delivery intel"
+    )
+    .ok();
+    writeln!(
+        w,
+        "  from Y.T., and a 14-day-old commitment from a standup. Three"
+    )
+    .ok();
+    writeln!(
+        w,
+        "  separate conversations, one thread. No human would have caught it.{RESET}"
+    )
+    .ok();
+    writeln!(w).ok();
+}
+
+fn present_territory_thread_short(w: &mut impl Write, width: usize) {
+    let is_tty = tty();
+    let rw = width.min(72);
+
+    writeln!(w).ok();
+    if is_tty {
+        rule(w, '\u{2500}', rw);
+    }
+    writeln!(w).ok();
+
+    writeln!(
+        w,
+        "  {DIM}>{RESET} {BOLD}{WHITE}Is anything about to disrupt Y.T.'s delivery routes?{RESET}"
+    )
+    .ok();
+    writeln!(w).ok();
+
+    pause(150);
+    writeln!(
+        w,
+        "  {GREEN}{BOLD}COMMIT{RESET}   {DIM}CosaNostra Delivery Logistics, 11 days ago{RESET}"
+    )
+    .ok();
+    writeln!(
+        w,
+        "    {ITALIC}Enzo: \"90-day trial. You keep the times under 30, the territory{RESET}"
+    )
+    .ok();
+    writeln!(w, "    {ITALIC}is yours.\"{RESET}").ok();
+    writeln!(w).ok();
+
+    pause(300);
+
+    writeln!(
+        w,
+        "  {YELLOW}{BOLD}SIGNAL{RESET}   {DIM}Rat Things Perimeter Security, 4 days ago{RESET}"
+    )
+    .ok();
+    writeln!(
+        w,
+        "    {ITALIC}Ng: \"Anything running through that corridor, deliveries, supply{RESET}"
+    )
+    .ok();
+    writeln!(
+        w,
+        "    {ITALIC}trucks, whatever, is going to hit the new checkpoints.\"{RESET}"
+    )
+    .ok();
+    writeln!(w).ok();
+
+    pause(300);
+
+    writeln!(
+        w,
+        "  {YELLOW}{BOLD}SIGNAL{RESET}   {DIM}Intel Debrief, yesterday{RESET}"
+    )
+    .ok();
+    writeln!(
+        w,
+        "    {ITALIC}Y.T.: \"If anyone's doing perimeter changes on the east side,{RESET}"
+    )
+    .ok();
+    writeln!(w, "    {ITALIC}that's going to wreck my routes.\"{RESET}").ok();
+    writeln!(w).ok();
+
+    pause(600);
+
+    if is_tty {
+        rule(w, '\u{2500}', rw);
+    }
+    writeln!(w).ok();
+
+    typewriter(
+        w,
+        &format!(
+            "{BOLD}{WHITE}  Y.T. signed an exclusive Valley delivery territory 11 days ago.{RESET}"
+        ),
+        if is_tty { 10 } else { 0 },
+    );
+    writeln!(w).ok();
+    pause(300);
+    typewriter(
+        w,
+        &format!(
+            "{BOLD}{WHITE}  Ng's east-side security expansion is about to reroute her corridor.{RESET}"
+        ),
+        if is_tty { 10 } else { 0 },
+    );
+    writeln!(w).ok();
+    writeln!(w).ok();
+    pause(200);
+
+    writeln!(
+        w,
+        "{DIM}  A delivery franchise, a security perimeter, and a passing warning."
+    )
+    .ok();
+    writeln!(
+        w,
+        "  Three meetings, two teams, zero overlap in the room. Hiro was in"
+    )
+    .ok();
+    writeln!(
+        w,
+        "  both conversations but never connected the dots.{RESET}"
+    )
+    .ok();
+    writeln!(w).ok();
+}
+
 // ── End card ────────────────────────────────────────────────────
 
-fn present_end_card(w: &mut impl Write, width: usize) {
+fn present_end_card(w: &mut impl Write, width: usize, saw_both: bool) {
     if tty() {
         rule(w, '\u{2500}', width.min(72));
     }
     writeln!(w).ok();
-    writeln!(
-        w,
-        "  {DIM}Two threads. Five meetings. Zero manual work.{RESET}"
-    )
-    .ok();
+    if saw_both {
+        writeln!(
+            w,
+            "  {DIM}Two threads. Five meetings. Zero manual work.{RESET}"
+        )
+        .ok();
+    } else {
+        writeln!(
+            w,
+            "  {DIM}One thread. Five meetings. Zero manual work.{RESET}"
+        )
+        .ok();
+    }
     writeln!(
         w,
         "  {DIM}This is what your AI sees when it reads your conversations.{RESET}"
@@ -668,7 +897,7 @@ pub fn query_demo(output_dir: &Path) -> anyhow::Result<()> {
 
     present_query_inner(&mut w, width);
     writeln!(w).ok();
-    present_end_card(&mut w, width);
+    present_end_card(&mut w, width, false);
 
     if tty() {
         write!(w, "{SHOW_CURSOR}").ok();

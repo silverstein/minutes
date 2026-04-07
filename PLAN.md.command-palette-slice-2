@@ -1,0 +1,1239 @@
+# PLAN: Command Palette — Slice 2 (UI + hotkey + dogfood)
+
+> **Single source of truth** for slice 2 of the command palette work.
+> Sibling to `PLAN.md.command-palette` (slice 1, merged as `fdbcbf9`).
+> Update this file at every step. If conversation context is lost, this
+> file is enough to resume.
+
+**Started**: 2026-04-07
+**Status**: 🟡 drafting
+**Branch**: `feat/command-palette-slice-2` (not yet created)
+**Goal**: Make the command palette visible to users. Slice 1 locked in the
+registry and dispatcher; slice 2 ships the overlay window, fuzzy matcher,
+⌘⇧K hotkey, recent-list persistence, synchronous preflight on
+`StartRecording`, a typed `ActionResponse` enum, and two of the three deferred
+commands.
+
+---
+
+## Vision (what ships at the end of slice 2)
+
+The first Minutes user who installs this release sees a new release note,
+hits ⌘⇧K, types `rec`, presses Enter. They are recording. They open the
+palette again with ⌘⇧K, type `search pricing`, press Enter. They see
+matching meetings. The palette is their new muscle memory.
+
+For slice 2 to earn that moment:
+
+1. The overlay window must open in under 50 ms from an empty state.
+2. Fuzzy matching must feel responsive on every keystroke.
+3. The hotkey must survive a full day without conflicting with Finder,
+   Raycast, Spotlight, or the user's IDE.
+4. Recent commands must persist across restarts with their payloads intact
+   (a recent "search transcripts for 'pricing'" must not collapse to
+   "search transcripts").
+5. `StartRecording` must fail loud when the mic is missing, not report
+   success and die silently in a background thread.
+
+Anything that blocks those five properties is in scope. Everything else is
+a follow-up.
+
+## Scope cut (non-goals for slice 2)
+
+- ❌ Raycast-style system-wide launcher (separate project, parked)
+- ❌ Plugin commands from third parties (v2 of the registry pattern)
+- ❌ Refactoring CLI or MCP to consume the registry (slice 3+)
+- ❌ `ReprocessCurrentMeeting` — **cut from slice 2**. Not blocked on
+  plumbing (`pipeline::process` exists); blocked on a product decision
+  about output semantics (overwrite vs create a `-v2` vs reprocess in
+  place with frontmatter history). The wrong decision here ships data
+  loss risk, so this waits for a design conversation.
+- ❌ Natural-language command parsing ("record a meeting about X")
+- ❌ i18n of titles / keywords
+- ❌ A visible keybind editor UI (config.toml editing only, for now)
+- ❌ Pinned commands (v1.1)
+
+## Correction to the slice 2 task brief
+
+The task brief says "⌘⇧K global hotkey via `crates/core/src/hotkey_macos.rs`."
+This is wrong for ⌘⇧K. `hotkey_macos.rs` is a CGEventTap path for keys
+Carbon cannot intercept (Caps Lock, fn). ⌘⇧K is a normal combo that
+Carbon's `RegisterEventHotKey` handles, and `tauri-plugin-global-shortcut`
+already wraps that path — the same path `live_shortcut` (⌘⇧L) and
+`dictation_shortcut` (non-native variants) use.
+
+**Decision**: register the palette shortcut through
+`tauri_plugin_global_shortcut`, matching the `live_shortcut` pattern in
+`tauri/src-tauri/src/main.rs`. Do **not** touch `hotkey_macos.rs` in slice
+2. This avoids an unnecessary Input Monitoring permission prompt for users
+who already have zero TCC obligations on the standard-backend path.
+
+The palette is still TCC-sensitive in another sense: a new window may hit
+the Tauri v2 capability-permissions gotcha. That risk is handled by R2
+below, not by reaching for `hotkey_macos.rs`.
+
+## Hotkey: ⌘⇧K, default-on, configurable
+
+Default: `CmdOrCtrl+Shift+K`.
+
+Conflict audit (2026-04-07):
+- **macOS Finder**: ⌘⇧K is bound to "Connect to Server" (low-frequency
+  legacy feature; most users never reach for it).
+- **Spotlight**: ⌘Space (no conflict).
+- **Raycast** (default): ⌥Space (no conflict).
+- **Alfred** (default): ⌥Space (no conflict).
+- **VS Code / JetBrains**: ⌘⇧P for command palette (intentional — users
+  will recognize the pattern, not the binding, so ⌘⇧K is actually a
+  nice rhyme).
+- **1Password**: ⌘\ / ⌥⌘\ (no conflict).
+- **Browsers**: ⌘⇧K is usually "Web Console" in Firefox dev tools, no
+  conflict in Chrome/Safari at the system level.
+
+Verdict: ⌘⇧K is acceptable as default. The only genuine conflict is
+Finder's Connect to Server, which users rebind or don't use. The binding
+is configurable from day one via `config.palette.shortcut` in
+`config.toml` (see "Config" section below).
+
+## Design decisions
+
+### D1. Vanilla TS + single-file HTML, matching `dictation-overlay.html`
+
+Files:
+- `tauri/src/palette/index.html` — markup + inline styles + inline script
+- `tauri/src/palette/palette.ts` — optional module if the inline script
+  grows past ~300 lines; otherwise everything inline like
+  `dictation-overlay.html` does today
+- `tauri/src/palette/palette.css` — cut if styles stay reasonable; bundle
+  inline in `<style>` to match the rest of the repo
+
+No bundler, no React, no Vue. Access Tauri via `window.__TAURI__.core.invoke`
+and `window.__TAURI__.event.listen`, exactly like
+`dictation-overlay.html:277`. The repo convention is self-contained HTML
+files in `tauri/src/`, and slice 2 will not break that.
+
+### D2. Fuzzy matcher in TS, backend stays authoritative over visibility
+
+Options considered:
+
+- **A. In-core `palette::fuzzy_match` behind a `palette` Cargo feature**,
+  exposed as a Tauri command. Pros: deterministic, unit-testable in Rust.
+  Cons: adds a dep (`fuzzy-matcher`), adds a feature flag, round-trips
+  every keystroke through Tauri IPC.
+- **B. Vanilla TS fzf-style scoring in `palette.ts`**. Pros: zero IPC
+  latency per keystroke, no new deps. Cons: scoring is in JS so it's not
+  reachable from Rust tests.
+
+**Decision: B for scoring, but backend remains authoritative over
+visibility**. Codex P1 caught a bug in the original phrasing: the palette
+was going to load the visible list once on open and filter a stale
+snapshot until close. If recording/live/dictation state changes while the
+palette is open (e.g., call detection autostarts a recording, or the
+user stops dictation from the tray), the cached list is wrong and the
+user either sees rows that error on execute or misses rows that should
+have appeared.
+
+**Concrete rules**:
+
+1. `palette_list` is called on every palette open.
+2. `palette_list` is called again on every **Tauri event** the backend
+   already emits for state changes: `recording:start`, `recording:stop`,
+   `live-transcript:state`, `dictation:state`. The palette window listens
+   via `currentWindow.listen(...)` for these and re-fetches. This is the
+   authoritative source of truth for what's visible.
+3. Just before `palette_execute` runs, `palette_list` is called one more
+   time, and if the focused command is no longer in the returned set,
+   execute aborts with `"command no longer available"`.
+4. Between re-fetches, TS fuzzy scoring filters the most recently returned
+   list. The TS layer never invents visibility decisions.
+
+**Scoring rules (integer tuple comparator, NOT floats)**:
+
+Every command is scored against the query into a fixed-shape tuple
+`[bucket, position, tieBreaker]` where:
+
+- `bucket` is an integer in `0..=5`:
+  - `0` — exact title match
+  - `1` — title prefix match
+  - `2` — word-boundary prefix match in title
+  - `3` — contiguous substring match in title
+  - `4` — subsequence match in title
+  - `5` — any match in keywords (never bucket 0-4)
+- `position` is the zero-based index of the first match character (lower
+  is better, secondary sort)
+- `tieBreaker` is the command's original registry index
+
+Commands are sorted by `(bucket, position, tieBreaker)` ascending.
+Non-matches are filtered out. Integer tuple sort avoids JS float math
+entirely. Empty query short-circuits: return recents first, then the
+entire authoritative list in registry order.
+
+Deterministic. Unit-tested in `palette.ts` with ≥10 hand-written cases
+including ties, empty queries, and keyword-only matches. Tests run via a
+tiny `node --test` harness or an inline assertion script checked in with
+the module.
+
+### D3. Palette window lifecycle — explicit state machine
+
+Codex P1 caught that a simple "AtomicBool operation in flight" guard
+eats hotkey presses during the close animation. The fix is an explicit
+four-state machine, not a boolean.
+
+**States**: `Closed | Opening | Open | Closing`
+
+Transitions (all happen on the main thread, guarded by a `Mutex`):
+
+- `Closed` + hotkey → `Opening` → (window created + shown) → `Open`
+- `Open` + hotkey → `Closing` → (window.close()) → `Closed`
+- `Open` + focus-lost → `Closing` → `Closed`
+- `Opening` + hotkey → **ignored** (duplicate press during race)
+- `Closing` + hotkey → **queued**: set `reopen_pending = true`. When
+  close completes, if `reopen_pending`, transition `Closed → Opening`
+  immediately
+
+No animated close in slice 2. The window is destroyed synchronously on
+close: `window.close()` blocks until the webview is torn down. This
+removes the race surface entirely for users who hold-and-release the
+hotkey fast.
+
+**Window config**:
+- Label: `"palette"`
+- Size: 640 × 420, centered on the active monitor
+- `undecorated`, `transparent`, `always_on_top`, `skip_taskbar`,
+  `resizable(false)`, `focused(true)`
+- Esc key in the webview: `window.__TAURI__.core.invoke("palette_close")`
+  (a new Tauri command that runs the state machine cleanly, not
+  `window.close()` directly — otherwise focus-lost and Esc can race)
+- Focus-lost handler calls `palette_close` (idempotent in `Open` state)
+- On first-open (empty Closed state), preload takes <50 ms on M-series;
+  subsequent opens reuse the window if the close was unsuccessful for any
+  reason — singleton guaranteed via `app.get_webview_window("palette")`
+
+### D4. Capabilities: no changes expected, but test the exact pairing
+
+`tauri/src-tauri/capabilities/default.json` already uses
+`"windows": ["*"]` with `core:event:allow-listen`, `core:event:allow-emit`,
+and `core:window:default`. The palette window label `"palette"` matches
+the `*` glob, so in theory no new permissions are required.
+
+**But**: codex P2 caught that the earlier plan's smoke test
+(`app.emit` + global `event.listen`) is not the same code path the
+production palette will use. The palette listens for state events via
+`currentWindow.listen("live-transcript:state", ...)` and for targeted
+messages via `app.emit_to("palette", ...)`. Those are different
+permission paths in Tauri v2.
+
+**Verification step** (mandatory before merging 2a):
+
+1. In Rust, call `app.emit_to("palette", "palette:ping", serde_json::json!({"ok": true}))`
+2. In `palette/index.html` inline script, call
+   `window.__TAURI__.event.getCurrentWebviewWindow().listen("palette:ping", ...)`
+   (or the v2 equivalent `getCurrentWindow().listen(...)`)
+3. Confirm the listener fires in the palette webview, not the main
+   window
+4. Repeat with `currentWindow.listen("live-transcript:state", ...)` for
+   a real event the palette depends on for re-fetch (see D2 rule 2)
+5. Only ship 2a once both pairings work
+
+If either fails, add an explicit palette-scoped entry to
+`capabilities/default.json` per `feedback_tauri_capabilities.md`:
+
+```json
+{
+  "identifier": "palette",
+  "description": "Palette overlay window permissions",
+  "windows": ["palette"],
+  "permissions": [
+    "core:default",
+    "core:event:allow-listen",
+    "core:event:allow-emit",
+    "core:window:default",
+    "core:window:allow-close",
+    "core:window:allow-set-focus",
+    "core:webview:default"
+  ]
+}
+```
+
+Do not skip this test. The memory entry is explicit: do not debug this
+in hour 4.
+
+### D5. Recents: `~/.minutes/palette.json`, forward-compatible, ActionId-shaped
+
+File format:
+
+```json
+{
+  "version": 1,
+  "entries": [
+    { "id": "search-transcripts", "query": "pricing" },
+    { "id": "start-recording" },
+    { "id": "add-note", "text": "TODO: ping Justin" }
+  ]
+}
+```
+
+**Forward compatibility**: entries are stored and parsed as raw
+`serde_json::Value`, NOT as strongly-typed `ActionId`, until the moment
+of use. This lets a downgraded older client preserve unknown-variant
+entries that a newer client wrote. Codex P2 caught the original design
+as a silent-data-loss sink: parse-as-ActionId on an unknown variant →
+"empty recents" → next successful execute overwrites the file → user
+loses recents from the newer build.
+
+**Parsing rules (codex-informed)**:
+
+1. File missing → empty recents, never fatal
+2. File exists but not valid JSON → empty recents + log warning + move
+   the corrupt file to `~/.minutes/palette.json.broken` so the user can
+   inspect. Do NOT overwrite in place until next successful write
+3. Top-level `{version, entries}` mismatch or wrong type → same as (2)
+4. `version` higher than what this client understands → preserve the
+   file read-only, display no recents UI-side, and refuse to write back
+   until the user upgrades (prevents the downgrade data loss)
+5. `version` equal: parse `entries` as `Vec<serde_json::Value>`. Each
+   entry is validated lazily: at display time, attempt `serde_json::from_value::<ActionId>`
+   on each entry. Entries that fail are **hidden** from the UI but
+   preserved in the on-disk representation and round-tripped unchanged
+   on write
+
+**Behavior**:
+
+- Cap: 5 recognizable entries visible in UI, but on-disk cap is 10
+  (room for preserved unknowns)
+- Newest first
+- Duplicate entries (by full JSON equality) collapse to the most recent
+  position
+- Atomic write via `tmp` + rename, permissions `0600`
+- Written from the backend (Tauri dispatcher) after every successful
+  `palette_execute`, so it stays consistent across processes
+
+**Unit tests**:
+
+- Missing file → empty recents
+- `{"version": 1, "entries": []}` → empty
+- `{"version": 1, "entries": [{"id": "start-recording"}]}` → one entry
+- `{"version": 1, "entries": [{"id": "unknown-future-command"}]}`
+  → empty UI, entry preserved on write-back
+- `garbage` → empty UI + `.broken` file written
+- `{"version": 999}` → empty UI + file preserved read-only
+- Write-then-read round-trip preserves unknown entries byte-for-byte
+
+### D6. Synchronous preflight on `StartRecording` — scoped honestly
+
+**What preflight actually covers** (codex read `capture.rs:1155` and
+caught that my original framing was overblown):
+
+`minutes_core::capture::preflight_recording` does three things:
+1. Process inspection via `ps` — detects conflicting recording processes
+2. Input device lookup — categorizes the selected mic
+3. Call-capture routing evaluation — decides if the current intent
+   needs the native call path
+
+It does **NOT** check:
+- Microphone permission (TCC prompt still happens later, inside the
+  recording thread's capture call)
+- Disk space (runtime check happens inside `record_to_wav`'s safety
+  guards)
+- PID file creation (happens later in `start_recording`)
+- Whisper model presence (not a preflight concern at all)
+
+**What D6 actually solves**: returning a typed error in the palette when
+preflight rejects a recording (e.g., mic is on an unsupported device
+category or another process is already recording). It does NOT solve
+every "silent success" failure mode — some failures still surface via
+the existing notification path.
+
+This is still worth doing: the most common "why didn't my palette
+recording start" errors are preflight rejections, and making them
+immediately visible in the palette UI is a real improvement. But I am
+not claiming slice 2 solves all silent failures, and the release notes
+should not overpromise.
+
+**Implementation**:
+
+```rust
+ActionId::StartRecording => {
+    let config = Config::load();
+    match minutes_core::capture::preflight_recording(
+        minutes_core::CaptureMode::Meeting,
+        None,
+        false,
+        &config,
+    ) {
+        Ok(preflight) => {
+            if let Some(reason) = preflight.blocking_reason {
+                // Native call capture is the one exception: if call
+                // intent is blocked but native capture is available,
+                // start_recording handles the override. Match that
+                // logic here too, or we block recordings the tray
+                // would allow.
+                let native_call_capture_available =
+                    preflight.intent == minutes_core::RecordingIntent::Call
+                    && matches!(
+                        crate::call_capture::availability(),
+                        crate::call_capture::CallCaptureAvailability::Available { .. }
+                    );
+                if !native_call_capture_available {
+                    return Err(format!("recording blocked: {}", reason));
+                }
+            }
+        }
+        Err(e) => return Err(format!("preflight failed: {}", e)),
+    }
+    cmd_start_recording(app, state, None, None, None, None, None)?;
+    Ok(ActionResponse::Ok)
+}
+```
+
+**Double-preflight**: `launch_recording → start_recording` **will** run
+`preflight_recording` again on the background thread. This is fine —
+preflight is read-only, has no side effects (verified in `capture.rs`),
+and is fast. The palette runs its own first only so it can return an
+error synchronously to the UI. This is documented in the commit message.
+
+**Followup** (NOT slice 2 scope): a real `validate_recording_start` that
+covers mic permission, disk space, PID creation, model availability.
+That's a multi-file refactor touching every recording entry point,
+filed as an issue before slice 2 merges.
+
+### D7. Tagged `ActionResponse` envelope replaces `serde_json::Value`
+
+Slice 1 deferred this (P2 #6). Slice 2 lands it, but **honestly**: this
+is a **tagged envelope**, not a fully-typed response surface. Codex P2
+was right — half the payloads are still `serde_json::Value` inside, so
+calling this "typed" would oversell it.
+
+```rust
+// tauri/src-tauri/src/palette_dispatch.rs
+
+/// Tagged envelope for palette_execute return values. Discriminates on
+/// `kind` so the UI never has to guess which command it was looking at,
+/// but many inner payloads are still untyped JSON passthroughs to existing
+/// Tauri command shapes (cmd_search, cmd_upcoming_meetings, etc). Typing
+/// those inner DTOs is a slice 3 refactor.
+#[derive(Debug, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum ActionResponse {
+    /// Fire-and-forget actions (started, stopped, opened, etc.).
+    Ok,
+    /// AddNote — the returned string is the rendered note line.
+    NoteAdded { line: String },
+    /// StopDictation — the rendered confirmation.
+    DictationStopped { detail: String },
+    /// ReadLiveTranscript — passthrough JSON array of TranscriptLine.
+    LiveLines { lines: serde_json::Value },
+    /// SearchTranscripts — passthrough cmd_search shape.
+    SearchResults { results: serde_json::Value },
+    /// ResearchTopic — passthrough cross_meeting_research shape.
+    Research { report: serde_json::Value },
+    /// FindOpenActionItems — passthrough.
+    Actions { actions: serde_json::Value },
+    /// FindRecentDecisions — passthrough.
+    Decisions { decisions: serde_json::Value },
+    /// ShowUpcomingMeetings — passthrough cmd_upcoming_meetings shape.
+    Upcoming { events: serde_json::Value },
+    /// OpenTodayMeetings — metadata about which meeting opened.
+    MeetingOpened { path: String, title: String },
+    /// RenameCurrentMeeting — old + new path so UI can update current_meeting.
+    MeetingRenamed { old_path: String, new_path: String, new_title: String },
+}
+```
+
+**What the envelope catches**:
+- Frontend can no longer confuse `AddNote` and `StopDictation` just
+  because both return `{detail: ...}` shapes — the `kind` discriminant
+  forces a branch
+- Adding a new variant forces a test to update (exhaustive-match in
+  tests + `#[deny(dead_code)]` on any unused variant)
+- Refactoring a dispatch arm to return a different shape forces the arm
+  to update the variant
+
+**What it does NOT catch**:
+- Drift inside `SearchResults.results` (still freeform JSON)
+- Schema changes in `cmd_upcoming_meetings` that slip through without
+  updating the palette
+- Inner-payload field renames
+
+Typing the inner DTOs is a slice 3 refactor. Out of scope here.
+
+Tests assert every variant serializes with a `"kind"` tag and a known
+outer shape. One test per variant.
+
+### D8. Deferred commands in slice 2
+
+Rename `OpenTodayMeetings` → `OpenLatestMeetingFromToday` to match the
+actual behavior (codex P2). No picker in slice 2; "open the latest one"
+is a complete feature, not a half-picker.
+
+- **`OpenLatestMeetingFromToday`** — ~15-line change. Uses existing
+  `search::search("", &config, &filters)` with
+  `filters.since = Some(today_start_rfc3339)` where `today_start_rfc3339`
+  is `Local::now().date_naive().and_hms_opt(0,0,0).unwrap().and_local_timezone(Local).unwrap().to_rfc3339()`.
+  `filters.since` is already a lexicographic RFC3339 comparison
+  (`search.rs:203`). `search::search` returns results sorted newest-first,
+  so `.into_iter().next()` is the latest. If empty → return
+  `Err("no meetings yet today")`. Opens via `cmd_open_meeting_url`.
+  Registry title: "Open latest meeting from today".
+
+- **`RenameCurrentMeeting`** — fail-closed approach per codex P1. Do NOT
+  do a naive string-replace on the title line. The edge cases codex
+  named (folded scalars `title: >`, anchors `title: &x "..."` + aliases
+  `summary_title: *x`) can corrupt user files permanently by making
+  frontmatter YAML invalid, which then gets skipped by
+  search/graph features.
+
+  **New core helper**: `minutes_core::markdown::rename_meeting(path: &Path, new_title: &str) -> Result<PathBuf, MarkdownError>`.
+
+  Algorithm (fail-closed, small blast radius):
+  1. Read the file
+  2. Call `split_frontmatter` to get `(fm_str, body)`
+  3. Parse `fm_str` via `serde_yaml::from_str::<Frontmatter>` — **if
+     this fails, return an error and do nothing**. Do not attempt
+     recovery on malformed frontmatter
+  4. Re-parse `fm_str` as `serde_yaml::Value` to detect if the `title`
+     field is a **plain string scalar** (not a mapping, not a sequence,
+     not a tagged value, not a folded/literal block). If not, return
+     `Err("title is not a plain scalar — rename via text editor")`.
+     This intentionally refuses YAML anchors, aliases, folded blocks,
+     multi-line literals, and tagged values
+  5. Find the EXACT line in `fm_str` that starts with `title:` followed
+     by optional space and the original title value (matched literally
+     against the parsed plain scalar). If the parsed title is "Pricing
+     Review", match `^title:\s*"?Pricing Review"?\s*$`. If more than one
+     line matches, error out (means the user has a duplicate `title`
+     field, which is weird; refuse)
+  6. Replace that exact line with `title: "<new_title escaped>"` where
+     escape handles quotes, backslashes, and YAML-special characters
+  7. Write the new content to `path.with_extension("md.tmp")`, then
+     rename atomically over the original path
+  8. **Re-parse the written file via `serde_yaml`** to confirm the
+     write produced valid YAML. If parse fails, restore the backup
+     (the tmp file) and return an error
+  9. Generate the new slug via `markdown::generate_slug(new_title, date,
+     recorded_by)`. If it differs from the current file name, rename
+     the file to the new slug, using `resolve_collision` to handle the
+     case where another file already claims that name
+  10. Return the final path
+
+  **Unit tests** (expanded per codex P3):
+  - Plain single-line title → success
+  - Quoted title with colons / special chars → success
+  - Folded scalar title (`title: >\n  Multi\n  line`) → error, file unchanged
+  - Literal scalar title (`title: |\n  Multi\n  line`) → error
+  - YAML anchor on title → error
+  - Title containing only whitespace → error ("empty title")
+  - Parse-after-write fails (simulated via a bad escape) → restored + error
+  - Collision with existing sibling file → suffix added
+  - CRLF line endings → handled (split_frontmatter already tolerates)
+  - File not a meeting (no frontmatter) → error
+  - New title is identical to old → no-op, success
+
+  Input is `InputKind::PromptText`. Slice 2 does NOT prefill the current
+  title; user types the new title from scratch. Prefill is a v2.1 polish.
+
+Both land with executors FIRST, registry entries SECOND, one commit per
+command. Per `feedback_registry_dispatcher_invariant.md`.
+
+**On `ReprocessCurrentMeeting`**: codex P2 pushed back on my "needs a
+design conversation" framing and proposed a narrow version — "reprocess
+to a new sibling file, never overwrite". That IS shippable without a
+product discussion. **Decision for slice 2**: still cut. The reason is
+prioritization, not plumbing: slice 2 is already carrying the UI state
+machine, rename safety work, fuzzy scoring, recents forward-compat, and
+the preflight fix. Adding a new WAV-sidecar lookup path + a
+jobs-queue-reroute for reprocess pushes slice 2 past a sane review
+surface. File a follow-up issue: "Palette: ReprocessCurrentMeeting as
+sibling artifact" with codex's suggested contract. Ship slice 2 without
+it.
+
+### D9. InputKind UI state machine
+
+Codex P1 caught that my original phrasing was under-specified to the
+point of being wrong: "serialize the focused row's id into an ActionId
+JSON" can't carry a `query` or `text` payload. Also, I never said where
+`current_meeting` comes from for meeting-scoped commands.
+
+**UI state machine** (one reducer in `palette.ts`):
+
+```
+states:
+  BROWSING   { query: string, focusedIndex: int }
+  LOCKED     { command: Command, payload: string, focusedIndex: 0 }
+```
+
+- **Start**: `BROWSING { query: "", focusedIndex: 0 }`. List = recents
+  first, then all visible commands
+- **Typing in BROWSING**: update `query`, re-score the authoritative
+  list, reset `focusedIndex` to 0
+- **Up/Down/Tab in BROWSING**: move `focusedIndex`
+- **Enter in BROWSING** on a row with `InputKind::None`: execute
+  immediately with the focused command's bare `ActionId` (no payload)
+- **Enter in BROWSING** on a row with `InputKind::InlineQuery`:
+  transition to `LOCKED { command, payload: "", focusedIndex: 0 }`.
+  The input bar now shows `> {command.title}: ` as a prefix and the
+  user's subsequent typing builds `payload`
+- **Enter in BROWSING** on a row with `InputKind::PromptText`: same
+  transition to `LOCKED`, but the UI renders a multi-line textarea
+  instead of a single-line input
+- **Enter in LOCKED**: build the full `ActionId` JSON with the payload
+  injected into the correct field (`query` for SearchTranscripts /
+  ResearchTopic, `text` for AddNote, `new_title` for
+  RenameCurrentMeeting) and invoke `palette_execute`
+- **Esc in LOCKED**: return to `BROWSING { query: "", focusedIndex: 0 }`.
+  Query clears on return — trying to preserve it is a footgun for
+  state-carrying commands
+- **Esc in BROWSING**: close the palette window
+
+**Payload injection table** (one function, `buildActionIdJson(command, payload)`):
+
+| Command                 | Injection                          |
+|-------------------------|------------------------------------|
+| `SearchTranscripts`     | `{ id, query: payload }`           |
+| `ResearchTopic`         | `{ id, query: payload }`           |
+| `AddNote`               | `{ id, text: payload }`            |
+| `RenameCurrentMeeting`  | `{ id, new_title: payload }`       |
+| all others              | `{ id }`                           |
+
+Empty payload on a LOCKED command: the UI refuses to submit and shows
+a hint. No silent Enter-with-empty on payload-bearing commands.
+
+**Shortcut form "> search pricing"**: codex also called out that typing
+`> search pricing` in BROWSING should resolve to the same final
+`ActionId` JSON as selecting Search then typing `pricing`. Slice 2
+punt: **only the select-then-type form ships**. The inline
+`> command + args` form is a polish feature, not worth the parsing
+ambiguity in slice 2. This is documented in the release notes as a
+"known limitation, coming soon".
+
+**Reducer tests**: ≥8 deterministic cases asserting the state machine's
+(state, action) → state transitions:
+
+- BROWSING, type → BROWSING with filtered list
+- BROWSING, Enter on InputKind::None → execute called with bare ActionId
+- BROWSING, Enter on InputKind::InlineQuery → LOCKED
+- LOCKED, Esc → BROWSING with empty query
+- LOCKED, Enter with empty payload → refused (no execute call)
+- LOCKED, Enter with payload → execute called with correct payload
+- Any state, focus-lost → close
+- Any state, state-change event (recording started elsewhere) → re-fetch
+
+**`current_meeting` source** (codex P1): the assistant workspace writes
+the currently-focused meeting to
+`~/.minutes/assistant/CURRENT_MEETING.md`. The palette needs a Tauri
+command `palette_current_meeting() -> Option<PathBuf>` that reads this
+file if it exists and returns the parsed path. This command is called
+by the palette frontend right before `palette_list` / `palette_execute`
+and its result is passed in as `PaletteUiContext.current_meeting`.
+
+Add this as part of 2a, not 2b, because without it
+`RenameCurrentMeeting` and `CopyMeetingMarkdown` cannot even be *visible*
+in the right contexts, let alone executed.
+
+### D10. Config surface — opt-in, not default-on
+
+Codex P1 caught that my earlier "default-on" was hostile to existing
+users. ⌘⇧K is VS Code's `Delete Line` and JetBrains' `Push...`. A
+silent upgrade that registers a system-wide shortcut while those apps
+are focused would steal muscle memory without consent. Unacceptable.
+
+**Revised policy**:
+
+- **Fresh installs** (first run on a machine with no existing
+  `~/.config/minutes/config.toml`): palette shortcut defaults to `true`
+  AND the user sees a first-run notification "Minutes added a command
+  palette — press ⌘⇧K to open it. Disable in Settings if needed."
+- **Upgrades** (existing config.toml without a `[palette]` section):
+  palette shortcut defaults to `false`. The next settings UI visit
+  shows a pill "New: command palette — enable?" and the user opts in
+  explicitly
+
+**Implementation note**: `PaletteConfig::default()` returns
+`shortcut_enabled: true` — this is what a fresh install loads. For
+upgrades, detect by checking whether `config.toml` existed before
+this load. Config loading already has this affordance (the load path
+writes a default config if missing). The check is:
+
+1. `config_path.exists()` before load → upgrade path
+2. Otherwise → fresh install path
+
+For the upgrade path, after loading, rewrite the config to include
+`[palette] shortcut_enabled = false` explicitly, so the user's next
+edit sees the option visibly.
+
+**Alternative considered**: always default off. Rejected because fresh
+installs deserve to see the feature without hunting in settings.
+
+```rust
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PaletteConfig {
+    /// Whether the global palette shortcut is enabled.
+    pub shortcut_enabled: bool,
+    /// The palette shortcut string (e.g., "CmdOrCtrl+Shift+K").
+    pub shortcut: String,
+}
+
+impl Default for PaletteConfig {
+    fn default() -> Self {
+        Self {
+            shortcut_enabled: true,  // fresh install only
+            shortcut: "CmdOrCtrl+Shift+K".into(),
+        }
+    }
+}
+```
+
+Added as `palette: PaletteConfig` on `Config`. Upgrade path overrides
+`shortcut_enabled` to `false` before save.
+
+**Dogfood**: per codex P1, I must dogfood the hotkey with Finder, VS
+Code, JetBrains, and Firefox focused before calling the default
+"acceptable". The dev-app tests via `install-dev-app.sh` are the test
+surface. Any real conflict observed during dogfood → rebind the default
+to something cleaner like `CmdOrCtrl+Shift+O` or `CmdOrCtrl+Shift+Space`
+before merge.
+
+Registration: in `main.rs::setup()`, after `live_shortcut` registration,
+following the same pattern — read config, register via
+`app.global_shortcut().register(...)`, stash the shortcut string on
+`AppState`. Handler branch: add `palette_shortcut_id` alongside
+`live_shortcut_id` in the plugin handler at `main.rs:558` and route to
+`commands::handle_palette_shortcut_event(app, event.state())`.
+
+`handle_palette_shortcut_event` only reacts to `ShortcutState::Pressed`
+(not Released) — the palette is a toggle on press, not a hold-to-talk.
+
+## Risk table (adversarial, post-codex-pass-1)
+
+| # | Risk | Mitigation |
+|---|---|---|
+| R1 | ⌘⇧K conflicts with VS Code `Delete Line`, JetBrains `Push...`, Firefox `Web Console`, Finder `Connect to Server` | Upgrade path defaults the shortcut to **off** (D10). Fresh install defaults to on but shows a first-run notice. Dogfood with all four apps focused before calling the default acceptable. If real conflicts, rebind to `CmdOrCtrl+Shift+O` |
+| R2 | Palette window hits the Tauri v2 capability permission gotcha | Smoke test uses the EXACT production pairing: `app.emit_to("palette", ...)` + `currentWindow.listen(...)`. Ship only after both pairings demonstrated working. See D4 |
+| R3 | TS fuzzy matcher is non-deterministic (float math) or drifts from user expectation | **Integer tuple comparator**, no floats (D2). ≥10 deterministic unit tests. Backend re-fetches on state events so visibility never drifts from truth |
+| R4 | Visible list stale during recording / live / dictation state changes while palette is open | `currentWindow.listen` on `recording:start`, `recording:stop`, `live-transcript:state`, `dictation:state`, re-fetch via `palette_list` on each. Re-fetch again just before `palette_execute` and abort if the focused command left the visible set (D2 rule 3) |
+| R5 | Recents file corruption bricks the palette | Parse failure → treat as empty + move corrupt file to `.broken` + log warning. Never fatal. Full unit test list in D5 |
+| R6 | Recents silently eat data on downgrade (newer variant unknown to older client) | Parse entries as raw `serde_json::Value`, not `ActionId`. Unknown entries are hidden from UI but preserved byte-for-byte on write. Version-mismatch files are read-only (D5) |
+| R7 | Preflight double-call has subtle races | Preflight is pure/read-only (verified in `capture.rs`). The double call is intentional; palette runs its own first to return a synchronous error, existing background path still runs its own. Documented in D6 |
+| R8 | D6 over-claims what preflight covers | Honest framing in D6: preflight catches process + device + call routing only. Disk, mic permission, and PID failure still happen later. Release notes do not promise "all silent failures fixed" |
+| R9 | Window lifecycle race on fast ⌘⇧K mashing | Explicit `Closed/Opening/Open/Closing` state machine with queued reopen (D3), NOT an AtomicBool guard |
+| R10 | Focus-lost close races with hotkey toggle | Both paths funnel through the same `palette_close` Tauri command, which is idempotent in `Open` state and a no-op in `Closing` or `Closed` (D3) |
+| R11 | `RenameCurrentMeeting` corrupts user files with folded scalars, anchors, aliases, literal blocks | **Fail-closed** per codex P1: parse via serde_yaml, require title is a plain-string scalar. Any non-trivial YAML → error, file unchanged. Parse-after-write validation restores backup on failure. See D8 test list |
+| R12 | Rename collision: new title produces an existing slug | Reuse `markdown::resolve_collision`. The renamed file gets the next free suffix. Document in the confirmation toast |
+| R13 | `ActionResponse` outer-typed but inner-untyped — overselling | Honest naming: "tagged envelope", not "typed". D7 lists exactly what it does and does not catch. Inner DTO typing is explicit follow-up |
+| R14 | InputKind UI state machine is under-specified | Explicit reducer with (state, action) → state transitions in D9. ≥8 reducer tests. No "shortcut syntax" (`> search foo`) in slice 2 — select-then-type only |
+| R15 | `current_meeting` source not defined for the overlay window | New Tauri command `palette_current_meeting` reads `CURRENT_MEETING.md` from the assistant workspace. Called by frontend before `palette_list` / `palette_execute`. Landed in 2a, not deferred |
+| R16 | Dev-app TCC prompts block testing | Per CLAUDE.md, always use `./scripts/install-dev-app.sh` and test `~/Applications/Minutes Dev.app`. Export `MINUTES_DEV_SIGNING_IDENTITY` first for stable TCC. No testing against `/Applications/Minutes.app` |
+| R17 | `ReprocessCurrentMeeting` deferred looks like scope cowardice | Codex pushed back legitimately. Reframe: cut for prioritization (slice 2 is already large), not hard blockage. Narrow version ("reprocess to sibling file") is a real option. Follow-up issue filed before slice 2 merges |
+| R18 | PromptText modal state leaks into the command-list query on Esc | Reducer-level test in D9: LOCKED + Esc → BROWSING with **empty** query. Deterministic, not manual |
+| R19 | The palette open latency target (<50 ms) is blown by Rust-side work on `palette_list` | `palette_list` iterates an 18-entry vector → nanoseconds. Any latency comes from window creation. If creation >50 ms, pre-create at app startup, hidden, and show on hotkey (v2.1 polish, not slice 2) |
+
+## Phased sub-slices
+
+### 2a — capability + window + hotkey + list (NO execute, NO fuzzy, NO recents)
+
+**Goal**: ⌘⇧K opens a palette window that shows all visible commands
+for the current context. Clicking a command does nothing (yet). This is
+the smallest shippable unit that proves the capability + window + event
++ state-machine paths are sound.
+
+**Config + shortcut**:
+- [ ] Add `PaletteConfig` to `crates/core/src/config.rs` with defaults
+  from D10 (shortcut_enabled: true in `Default`, upgrade path overrides
+  to false before save)
+- [ ] Implement the upgrade-path detection: `Config::load()` (or a new
+  `load_with_upgrade_info`) records whether the config file existed
+  before this load; if it did and had no `[palette]` section, rewrite
+  `shortcut_enabled = false` and persist
+- [ ] Add `palette_shortcut_enabled: Arc<AtomicBool>` and
+  `palette_shortcut: Arc<Mutex<String>>` to `AppState` in `commands.rs`
+- [ ] Register palette shortcut in `main.rs::setup()` following the
+  `live_shortcut` pattern (lines 717-734)
+- [ ] Add `palette_shortcut_id` match arm in the plugin handler at
+  `main.rs:558`, routing to `commands::handle_palette_shortcut_event`
+- [ ] Implement `commands::handle_palette_shortcut_event` — on Pressed
+  only (never Released), calls `toggle_palette_window(app)`
+
+**Window state machine (D3)**:
+- [ ] Define `enum PaletteLifecycle { Closed, Opening, Open, Closing }`
+  on `AppState` (behind a Mutex, not atomic — richer state than bool)
+- [ ] Define `palette_reopen_pending: AtomicBool`
+- [ ] Implement `toggle_palette_window(app)` — reads state under lock,
+  dispatches open/close, never spawns a second window
+- [ ] Implement `palette_close` Tauri command (idempotent, drains
+  `reopen_pending`, schedules reopen if set)
+- [ ] Synchronous `.close()` on the webview window (no animated close)
+
+**Frontend scaffold**:
+- [ ] Create `tauri/src/palette/index.html` with inline styles + inline
+  script, matching `dictation-overlay.html` convention
+- [ ] Script registers `currentWindow.listen("recording:start", ...)`,
+  `"recording:stop"`, `"live-transcript:state"`, `"dictation:state"`,
+  and `"palette:ping"` (the smoke-test event)
+- [ ] On load, script invokes `palette_current_meeting()` → then
+  `palette_list({ ui: { currentMeeting } })` → renders rows
+- [ ] Esc key: invoke `palette_close`
+- [ ] Focus-lost handler: invoke `palette_close`
+
+**New Tauri command**:
+- [ ] `palette_current_meeting()` — reads
+  `~/.minutes/assistant/CURRENT_MEETING.md` if it exists, parses out the
+  file path, returns `Option<PathBuf>`. If the file doesn't exist or is
+  malformed, returns `None` (never errors)
+- [ ] Register in `main.rs::invoke_handler!` list
+
+**Capability verification (D4)**:
+- [ ] Emit a `"palette:ping"` event via `app.emit_to("palette", ...)`
+  from Rust the first time the palette opens (or via a debug command)
+- [ ] Assert the palette webview received it via a console.log or a
+  visible indicator
+- [ ] Also test `currentWindow.listen("live-transcript:state", ...)`
+  with a synthesized emit — do not move on until both work
+- [ ] If either fails, add the explicit `palette` entry to
+  `capabilities/default.json` per D4 fallback
+
+**Smoke tests**:
+- [ ] Manual: ⌘⇧K opens window, shows 18 rows (idle state), Esc closes
+- [ ] Manual: ⌘⇧K while open → close; ⌘⇧K again → reopens
+- [ ] Manual: ⌘⇧K while closing (if possible to reproduce) → queued reopen
+- [ ] Manual: click outside the window → closes
+
+**Checklist**:
+- [ ] Build via `./scripts/install-dev-app.sh` and test
+  `~/Applications/Minutes Dev.app`
+- [ ] Export `MINUTES_DEV_SIGNING_IDENTITY` first
+- [ ] `cargo fmt --all -- --check`
+- [ ] `cargo clippy --all --no-default-features -- -D warnings`
+- [ ] `cargo test -p minutes-core --no-default-features palette::`
+- [ ] `cargo test -p minutes-app palette_dispatch::`
+- [ ] Commit: "feat(palette): slice 2a window + hotkey + list (no execute)"
+
+### 2b — reducer + fuzzy + execute + recents (with re-fetch discipline)
+
+**Goal**: clicking or pressing Enter on a row runs the action. Typing
+in the input box filters the list with the integer-tuple comparator
+from D2. Recent actions float to the top when the query is empty. The
+authoritative command list re-fetches on every state-change event and
+before every execute.
+
+**Reducer + state machine (D9)**:
+- [ ] Implement the `BROWSING | LOCKED` reducer in `palette.ts`
+- [ ] Implement `buildActionIdJson(command, payload)` per the injection
+  table in D9
+- [ ] Enter in BROWSING on `InputKind::None` → `palette_execute(bareAction)`
+- [ ] Enter in BROWSING on `InputKind::InlineQuery` or `PromptText`
+  → LOCKED
+- [ ] Enter in LOCKED with empty payload → refused (show hint, no IPC)
+- [ ] Enter in LOCKED with payload → `palette_execute(fullAction)`
+- [ ] Esc in LOCKED → BROWSING with empty query
+- [ ] Esc in BROWSING → close palette
+
+**Fuzzy matcher (D2)**:
+- [ ] Implement `scoreCommand(query, cmd, registryIndex): [bucket, position, tieBreaker]`
+- [ ] Sort by tuple ascending, filter non-matches
+- [ ] ≥10 inline unit tests (run via `node --test` harness or a
+  `palette.test.ts` sibling)
+- [ ] Benchmark on 18 commands: assert median <1 ms on M-series
+
+**Re-fetch discipline (D2)**:
+- [ ] On each of `recording:start`, `recording:stop`,
+  `live-transcript:state`, `dictation:state` events → call
+  `palette_list` again, preserve the user's query, re-score
+- [ ] Just before `palette_execute`: call `palette_list` once more, if
+  the focused command is no longer in the returned set → show
+  "command no longer available" + return to BROWSING, do NOT execute
+
+**Recents (D5)**:
+- [ ] Add `recents` submodule under `crates/core/src/palette.rs`
+  (private module is fine; not part of the `palette` Cargo feature)
+- [ ] `load_recents()` — returns `Vec<serde_json::Value>` with the
+  forward-compat parsing rules from D5
+- [ ] `push_recent(action: serde_json::Value)` — atomic write, dedupe,
+  cap enforcement, preserves unknown entries
+- [ ] `palette_dispatch::palette_execute` calls `push_recent` on
+  successful execution (at the very end of the success path)
+- [ ] `palette_dispatch::palette_list` reads recents and prepends them
+  to the returned list when the query is empty — BUT only entries the
+  current version can parse back into `ActionId`
+- [ ] Unit tests per D5 list (≥7 cases)
+
+**PromptText modal UI**:
+- [ ] When LOCKED with `InputKind::PromptText`, the input bar becomes
+  a single-line text field with the command title as a prefix label.
+  No multi-line textarea in slice 2 — keep it simple
+- [ ] Reducer tests for the state transitions
+
+**Manual tests**:
+- [ ] ⌘⇧K → type `rec` → Enter → recording starts (and fails with a
+  visible preflight error if the mic is detached)
+- [ ] ⌘⇧K → type `note` → Enter → enters LOCKED → type "test" → Enter
+  → note added, palette closes
+- [ ] ⌘⇧K → type `note` → Enter → LOCKED → Esc → back to BROWSING with
+  cleared query
+- [ ] While palette is open, start a recording from the tray → observe
+  the palette list re-fetch (stop-recording row appears, start-recording
+  row disappears)
+
+**Checklist**:
+- [ ] `cargo fmt --all -- --check`
+- [ ] `cargo clippy --all --no-default-features -- -D warnings`
+- [ ] `cargo test -p minutes-core --no-default-features palette::`
+- [ ] `cargo test -p minutes-app palette_dispatch::`
+- [ ] Commit: "feat(palette): slice 2b reducer, fuzzy, execute, recents"
+
+### 2c — preflight, ActionResponse, deferred commands, docs
+
+**Goal**: land the slice 1 deferrals and the two in-scope deferred
+commands, with the fail-closed rename safety from D8.
+
+**Preflight (D6)**:
+- [ ] In `palette_execute` arm for `ActionId::StartRecording`, call
+  `minutes_core::capture::preflight_recording` synchronously before
+  invoking `cmd_start_recording`
+- [ ] Handle `blocking_reason` with the native-call-capture override
+  logic from D6
+- [ ] Return `Err(String)` with the rejection reason or `Ok(ActionResponse::Ok)`
+- [ ] File follow-up issue: "palette: synchronous validate_recording_start
+  covering mic permission, disk, model availability"
+
+**ActionResponse (D7)**:
+- [ ] Define the enum in `palette_dispatch.rs`
+- [ ] Convert every `palette_execute` arm to return an `ActionResponse`
+  variant
+- [ ] Change the function signature to `Result<ActionResponse, String>`
+- [ ] Add one unit test per variant asserting the `kind` tag and
+  outer shape
+
+**`rename_meeting` core helper (D8)**:
+- [ ] Implement `minutes_core::markdown::rename_meeting(path, new_title)
+  -> Result<PathBuf, MarkdownError>` following the fail-closed algorithm
+  in D8
+- [ ] `MarkdownError` gets a new variant `RenameRefused(String)` for
+  the non-trivial-YAML case
+- [ ] Unit tests from D8's expanded list (≥11 cases including the
+  folded scalar, anchor/alias, literal block, collision, and
+  parse-after-write-fails cases)
+- [ ] Uses `tempfile::TempDir` for isolation
+
+**`OpenLatestMeetingFromToday` (D8, renamed from `OpenTodayMeetings`)**:
+- [ ] Implement the dispatch arm using `search::search("", &config, &filters)`
+  with `filters.since = Some(today_start_rfc3339)`
+- [ ] Handle empty result → `Err("no meetings yet today")`
+- [ ] On success, `cmd_open_meeting_url` and return
+  `ActionResponse::MeetingOpened { path, title }`
+
+**`RenameCurrentMeeting` dispatch arm**:
+- [ ] Requires `ui.current_meeting.is_some()`; error otherwise
+- [ ] Calls `rename_meeting`, returns `ActionResponse::MeetingRenamed`
+- [ ] Registry entry is gated by `Visibility { requires: MEETING_OPEN }`
+
+**Registry updates (executors first, entries second — same commits)**:
+- [ ] Commit 1: `rename_meeting` core helper + tests
+- [ ] Commit 2: `RenameCurrentMeeting` dispatch arm + registry entry +
+  updated `registry_has_seed_commands` count (18 → 19)
+- [ ] Commit 3: `OpenLatestMeetingFromToday` dispatch arm + registry
+  entry + count (19 → 20)
+
+**Docs**:
+- [ ] Update `README.md` Features section to mention the palette
+  (count reflects 20 commands, not 21 or 18)
+- [ ] Update the crate tests count in README if it references "~290
+  tests" — it should now include the new palette tests
+- [ ] Draft release notes file `notes.md` at the repo root covering
+  slice 1 + slice 2, written in the voice of v0.8.0 / v0.8.1 examples
+  per CLAUDE.md
+
+**Checklist**:
+- [ ] `cargo fmt --all -- --check`
+- [ ] `cargo clippy --all --no-default-features -- -D warnings`
+- [ ] `cargo test -p minutes-core --no-default-features`
+- [ ] `cargo test -p minutes-app`
+- [ ] Commit: "feat(palette): slice 2c preflight, ActionResponse, rename, today"
+
+### 2d — ship (pre-merge)
+
+- [ ] Run `codex` challenge mode on the full slice 2 diff (pass 2 of the
+  budgeted 2 — pass 1 ran on the plan)
+- [ ] Fix must-fixes, defer nice-to-haves as follow-up issues
+- [ ] Pre-commit checklist from `CLAUDE.md`:
+  - [ ] cargo fmt
+  - [ ] cargo clippy --all --no-default-features -- -D warnings
+  - [ ] cargo test -p minutes-core --no-default-features
+  - [ ] cargo test -p minutes-app
+  - [ ] Manifest tools still in sync (no MCP changes this slice)
+  - [ ] README reflects the new palette
+- [ ] Push branch, open PR with this plan linked
+- [ ] Merge via `gh pr merge` (not manual cherry-pick, per
+  `feedback_gh_pr_merge_local_ff.md` if applicable)
+- [ ] Bundled release cut: slice 1 + slice 2 + any drift fixes. Version
+  bump per the Release Checklist in CLAUDE.md
+
+## Acceptance criteria (10/10)
+
+**Correctness**:
+- [ ] Fresh install: palette shortcut enabled by default, first-run
+  notice shown
+- [ ] Upgrade install: palette shortcut DISABLED by default, settings
+  UI offers enable
+- [ ] ⌘⇧K opens the palette window in under 50 ms on an idle M-series Mac
+- [ ] Fuzzy scoring uses integer tuple comparator, no float math
+- [ ] ≥10 deterministic fuzzy-scoring tests
+- [ ] ≥8 reducer state machine tests for BROWSING/LOCKED transitions
+- [ ] Recent list survives app restart with payloads intact
+- [ ] Corrupted recents file → palette still opens, recents empty,
+  broken file preserved as `.broken`
+- [ ] Unknown-variant recents are preserved byte-for-byte across
+  read/write cycles
+- [ ] Version-mismatch recents files are read-only, never overwritten
+
+**Authoritative visibility**:
+- [ ] Palette re-fetches `palette_list` on `recording:start`,
+  `recording:stop`, `live-transcript:state`, `dictation:state` while
+  open
+- [ ] Pre-execute re-fetch aborts if the focused command is no longer
+  visible
+- [ ] `current_meeting` is sourced from `CURRENT_MEETING.md` via
+  `palette_current_meeting` Tauri command
+
+**Recording preflight**:
+- [ ] `StartRecording` preflight failures surface synchronously in the
+  palette as a typed error
+- [ ] Plan and release notes do NOT claim "all silent failures fixed"
+  (honest framing per D6)
+- [ ] Follow-up issue filed for `validate_recording_start`
+
+**Rename safety**:
+- [ ] `rename_meeting` refuses to modify files with non-trivial YAML
+  (folded scalars, anchors, aliases, literal blocks)
+- [ ] Parse-after-write validation; restore on failure
+- [ ] ≥11 rename unit tests including the codex-flagged edge cases
+
+**Typed responses**:
+- [ ] `palette_execute` returns `Result<ActionResponse, String>`, not
+  `Result<serde_json::Value, String>`
+- [ ] Every `ActionResponse` variant has a unit test asserting its
+  `kind` tag and shape
+- [ ] Plan documents D7 as "tagged envelope", not "fully typed"
+
+**Lifecycle**:
+- [ ] Explicit `Closed/Opening/Open/Closing` state machine, not an
+  AtomicBool
+- [ ] Fast ⌘⇧K mashing does not lose keypresses or spawn duplicates
+- [ ] Focus-lost close and Esc close both funnel through the
+  idempotent `palette_close` Tauri command
+
+**Capabilities**:
+- [ ] Smoke test with `app.emit_to("palette", ...)` + `currentWindow.listen`
+  passes before merging 2a
+- [ ] Also test `currentWindow.listen` on a real state event before
+  merging 2a
+
+**Windows under test**:
+- [ ] Dev app tested via `./scripts/install-dev-app.sh`, NOT a
+  `/Applications/Minutes.app` copy (CLAUDE.md identity rules)
+- [ ] Hotkey dogfooded with Finder, VS Code, JetBrains, and Firefox
+  focused before calling the default acceptable
+
+**Deferred commands**:
+- [ ] `OpenLatestMeetingFromToday` filters by today's date and opens
+  the latest (or returns a friendly error if none)
+- [ ] `RenameCurrentMeeting` renames both the title line AND the file
+- [ ] `ReprocessCurrentMeeting` explicitly cut, follow-up issue filed
+  with codex's "reprocess to sibling file" contract
+- [ ] Registry entry count in `registry_has_seed_commands` updated to 20
+
+**Docs**:
+- [ ] README Features section mentions the palette
+- [ ] Release notes file drafted and committed (covers slice 1 + slice 2)
+- [ ] Follow-up issues filed: `validate_recording_start`,
+  `ReprocessCurrentMeeting`, inline-query shortcut form
+
+**Process**:
+- [ ] Codex adversarial pass on the plan completed before writing any
+  Rust or TS (see findings log below)
+- [ ] Codex adversarial pass on the slice 2 diff completed before
+  opening the PR
+- [ ] No em dashes in commit messages, PR body, release notes, or
+  README
+- [ ] PR merged via `gh pr merge`, not manual cherry-pick
+
+## Phases
+
+### P0. Codex adversarial review of this PLAN — PENDING
+
+Run codex consult challenge mode on this file before writing any code.
+Focus areas to name in the prompt:
+- Is the fuzzy matcher location decision (D2) actually correct, or will
+  the TS scorer diverge from what users expect?
+- Does the D6 double-preflight design have a subtle race?
+- Is the `ActionResponse` enum shape (D7) actually typed, or is it a
+  `serde_json::Value` wrapper in disguise?
+- Is the rename design in D8 safe for real user meetings, or does it
+  silently corrupt quoted/multi-line titles?
+- Is the scope cut of `ReprocessCurrentMeeting` honest, or lazy?
+- Is the window lifecycle (D3) racy under fast ⌘⇧K mashing?
+- Are there hotkey conflicts in the audit I missed?
+- Is the capabilities `"*"` glob really sufficient, or should the palette
+  get an explicit entry?
+
+Record findings in the "Findings log" section.
+
+### P1. Slice 2a implementation — PENDING
+
+See the 2a checklist above.
+
+### P2. Slice 2b implementation — PENDING
+
+See the 2b checklist above.
+
+### P3. Slice 2c implementation — PENDING
+
+See the 2c checklist above.
+
+### P4. Codex adversarial review of the full diff — PENDING
+
+Pass 2 of 2. Focus on:
+- Is the new code's error handling defensive enough for
+  users who hit preflight failures?
+- Does the rename helper have edge cases the unit tests miss?
+- Does the window lifecycle behave correctly under stress?
+
+Record findings. Address must-fixes. Defer the rest.
+
+### P5. Pre-commit checklist + PR + release notes — PENDING
+
+See 2d checklist above.
+
+---
+
+## Findings log (append-only)
+
+### 2026-04-07 — Audit before writing the plan
+
+- `minutes_core::capture::preflight_recording` already exists as a
+  standalone function (`commands.rs:1683`). The slice 1 P2 #3 fix needs
+  no core extraction, just a synchronous call from the palette arm
+  before `cmd_start_recording`.
+- `tauri/src-tauri/capabilities/default.json` already grants the right
+  permissions for `"windows": ["*"]`. The palette window (label
+  `"palette"`) inherits. No capability file change needed, but a smoke
+  test on first build is still mandatory.
+- `hotkey_macos.rs` is a CGEventTap path for Caps Lock / fn only. ⌘⇧K
+  goes through `tauri_plugin_global_shortcut` (Carbon
+  `RegisterEventHotKey`), matching the `live_shortcut` (⌘⇧L) pattern in
+  `main.rs:717-734`. The task brief's pointer to `hotkey_macos.rs` is a
+  miscue.
+- `markdown::rewrite` exists but would lose user-added sections on rename
+  because it re-renders from the frontmatter + transcript + summary +
+  notes trio. A line-level title edit preserves arbitrary body content.
+- `search::SearchFilters::since` is a lexicographic RFC3339 comparison
+  (`search.rs:203`), so `OpenTodayMeetings` is a trivial wrapper.
+- `ReprocessCurrentMeeting` is NOT a plumbing issue — `pipeline::process`
+  already works on any WAV. It IS a product decision: where does the
+  regenerated markdown live? Overwrite? New file? Versioned? Cutting
+  from slice 2 and filing a follow-up.
+
+### 2026-04-07 — Codex adversarial review P0 of the slice 2 plan
+
+Codex ran in read-only sandbox with high reasoning effort, reviewed the
+initial plan plus slice 1 code (`crates/core/src/palette.rs`,
+`tauri/src-tauri/src/palette_dispatch.rs`). ~198k tokens. Six P1, five
+P2, three P3 findings. All legitimate — no rubber-stamping this pass.
+
+**P1 critical findings (all addressed above):**
+
+1. **D2 staleness**: the original plan loaded `visible_commands` once on
+   open and filtered a stale JS snapshot forever. State changes while
+   the palette was open would produce wrong visibility. **Fix applied**:
+   backend is authoritative; re-fetch on state-change events
+   (`recording:start`, `recording:stop`, `live-transcript:state`,
+   `dictation:state`) and before every `palette_execute`. TS scorer
+   only filters the most recent authoritative list.
+
+2. **D6 over-claim**: I wrote "mic/permissions/disk checks" but
+   `preflight_recording` only does process inspection, device lookup,
+   and call-capture routing. Mic permission, disk space, and PID
+   creation still fail later. **Fix applied**: D6 now honestly scoped;
+   "all silent failures fixed" removed; follow-up issue planned for
+   `validate_recording_start`.
+
+3. **D8 rename corruption**: naive "replace line starting with `title:`"
+   corrupts folded scalars (`title: >`), literal blocks (`title: |`),
+   anchored titles (`title: &x "..."`) and their aliases, silently
+   invalidating frontmatter so downstream parsers skip the file.
+   **Fix applied**: fail-closed design in D8. Parse via serde_yaml, require
+   title is a plain-string scalar, reject anything else. Parse-after-write
+   validation. Unit test list expanded to 11 cases.
+
+4. **D3 window race**: the AtomicBool guard eats keypresses during the
+   close animation. **Fix applied**: explicit `Closed/Opening/Open/Closing`
+   state machine with queued reopen. Synchronous close. Focus-lost and
+   Esc both funnel through the idempotent `palette_close` Tauri command.
+
+5. **Hotkey audit wrong + migration hostile**: ⌘⇧K is VS Code
+   `Delete Line`, JetBrains `Push...`, Firefox `Web Console`, not just
+   Finder. Default-on for existing users would silently steal muscle
+   memory. **Fix applied**: upgrade path defaults to OFF, fresh install
+   defaults to ON with first-run notice. Dogfood requirement added for
+   the four apps before merge.
+
+6. **D9 UI state machine under-specified**: "serialize the focused row's
+   id" can't carry `query`, `text`, or `new_title` payloads. Also no
+   source defined for `current_meeting` in the overlay window.
+   **Fix applied**: explicit `BROWSING / LOCKED` reducer with
+   (state, action) → state transitions. `buildActionIdJson` payload
+   injection table. New `palette_current_meeting` Tauri command reads
+   `CURRENT_MEETING.md`. Inline `> search foo` syntax cut from slice 2 to
+   avoid parsing ambiguity.
+
+**P2 important findings (all addressed above):**
+
+7. **D7 lipstick**: "typed ActionResponse" but half the payloads are
+   still `serde_json::Value`. **Fix applied**: honest reframe as a
+   "tagged envelope". D7 now explicitly lists what the envelope catches
+   and what it does not. Inner DTO typing is an explicit slice 3 followup.
+
+8. **Capability smoke test too vague**: `app.emit` + global
+   `event.listen` won't catch window-targeted event failures. **Fix
+   applied**: D4 now specifies the exact production pairing
+   (`app.emit_to("palette", ...)` + `currentWindow.listen`) and makes
+   the smoke test cover a real state event, not a synthetic one.
+
+9. **D5 downgrade data loss**: parse-as-ActionId on an unknown variant
+   would eat recents on downgrade. **Fix applied**: entries parsed as
+   raw `serde_json::Value`, unknown entries hidden from UI but preserved
+   on disk, version-mismatch files are read-only.
+
+10. **ReprocessCurrentMeeting cut framing**: "needs design conversation"
+    is true for overwrite semantics, but not the only option. A narrow
+    "reprocess to sibling file" contract is shippable without a product
+    debate. **Fix applied**: cut reason reframed as prioritization, not
+    hard blockage. Followup issue will propose codex's sibling-file
+    contract.
+
+11. **OpenTodayMeetings naming**: plural name, singular behavior. **Fix
+    applied**: renamed to `OpenLatestMeetingFromToday` with registry
+    title "Open latest meeting from today". Multi-match picker is a
+    follow-up.
+
+**P3 nits (all addressed above):**
+
+12. **Integer tuple comparator** (not floats) for fuzzy scoring.
+    **Fix applied**: D2 now uses `[bucket, position, tieBreaker]` with
+    integer buckets and integer tiebreaker. No JS float math.
+
+13. **Rename test list too narrow**: folded scalars, anchors/aliases,
+    inline comments, CRLF, parse-after-write validation. **Fix applied**:
+    D8 test list expanded to 11 cases.
+
+14. **PromptText modal test is "manual"**: not sufficient for a
+    stateful modal. **Fix applied**: D9 now requires deterministic
+    reducer-level tests for LOCKED↔BROWSING transitions. Esc in LOCKED
+    returns to BROWSING with empty query, tested at the reducer level.
+
+**Verdict**: no second codex pass on the plan. Per
+`feedback_codex_iteration_loop.md`, two passes is the right dose.
+Pass 1 was the plan (above). Pass 2 will run on the slice 2 diff just
+before opening the PR. Any third confirmation pass is wasted wall
+clock.
+
+**Token budget used**: ~198k on pass 1. Pass 2 should stay under ~3M on
+the diff.

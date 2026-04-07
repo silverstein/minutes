@@ -2349,7 +2349,10 @@ fn cmd_devices() -> Result<()> {
     #[cfg(target_os = "windows")]
     eprintln!("\nTip: Install VB-CABLE for system audio capture: https://vb-audio.com/Cable/");
     #[cfg(target_os = "linux")]
-    eprintln!("\nTip: Use a PulseAudio monitor source for system audio capture");
+    eprintln!(
+        "\nTip: System audio capture works automatically when PipeWire or PulseAudio is running. \
+         Run `minutes sources` for the categorized view."
+    );
 
     Ok(())
 }
@@ -2396,7 +2399,11 @@ fn cmd_sources() -> Result<()> {
         #[cfg(target_os = "macos")]
         eprintln!("    Install a loopback driver: brew install blackhole-2ch");
         #[cfg(target_os = "linux")]
-        eprintln!("    PipeWire monitor sources should appear here automatically");
+        eprintln!(
+            "    On PipeWire, your speakers/headphones are the system-audio sources.\n    \
+             On PulseAudio, look for source names ending in `.monitor`.\n    \
+             If neither shows up here, check `wpctl status` or `pactl list sinks`."
+        );
         eprintln!("    Or use the Minutes desktop app for native call capture (no driver needed).");
     }
 

@@ -228,19 +228,34 @@ The `--call` CLI flag is equivalent to setting `call = "auto"`.
 
 ### Auto-detection of loopback devices
 
-`call = "auto"` scans for known loopback device names:
+`call = "auto"` scans `host.input_devices()` for the first device the
+categorizer flags as `SystemAudio`:
 
-- macOS: "BlackHole", "Loopback", "Soundflower"
-- Linux: PipeWire monitor sources (`*.monitor`)
+- **macOS**: virtual loopback drivers — BlackHole, Loopback, Soundflower, MMAudio,
+  LoomAudioDevice, ZoomAudioDevice, Microsoft Teams Audio (see
+  `crates/core/src/capture.rs::is_system_audio_device_name` for the full list)
+- **Linux / PipeWire**: cpal exposes `Audio/Sink` nodes (your speakers and
+  headphones) with `direction = Duplex`, so they appear in `host.input_devices()`
+  automatically. The categorizer flags any device where
+  `supports_input() && supports_output()` and the host is PipeWire as
+  `SystemAudio`. Recording from one transparently uses the sink's monitor port
+  via the `STREAM_CAPTURE_SINK` PipeWire stream property at stream creation
+  (cpal handles this internally — see `cpal/src/host/pipewire/device.rs:133-135`).
+- **Linux / PulseAudio**: monitor sources are exposed as separate `Source`
+  devices with names ending in `.monitor`, caught by the name heuristic.
+- **Linux / ALSA-only**: no system audio capture available without installing a
+  loopback module.
 
-If no loopback device is found:
+If no system audio device is found:
 
 ```
 No system audio device detected.
 
-To capture call audio, install a loopback driver:
-  macOS: brew install blackhole-2ch
-  Linux: PipeWire monitor sources are usually available by default
+To capture call audio:
+  macOS:           brew install blackhole-2ch
+  Linux PipeWire:  your speakers should appear automatically — check `wpctl status`
+  Linux PulseAudio: monitor sources should appear automatically — check `pactl list sources`
+  Linux ALSA-only: install pipewire or pulseaudio for monitor capture
 
 Or use the Minutes desktop app for native call capture (no driver needed).
 ```

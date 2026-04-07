@@ -236,20 +236,20 @@
 
   <script type="module">
     // ─────────────────────────────────────────────────────────────
-    // Slice 2a scope:
-    //   - Capability smoke test: assert window-targeted listen() works
-    //     for the EXACT pairing the production palette will use
-    //     (`app.emit_to("palette", ...)` + `currentWindow.listen(...)`).
-    //   - Render the visible command list returned by `palette_list`.
-    //   - Esc closes via the lifecycle-aware `palette_close` command.
-    //   - Focus lost is handled by the Tauri main.rs WindowEvent
-    //     listener, which also funnels through `palette_close`.
+    // Slice 2b scope (built on slice 2a):
+    //   - Integer-tuple fuzzy scorer (no JS float math)
+    //   - BROWSING / LOCKED reducer for InputKind capture
+    //   - palette_execute wiring
+    //   - Recents float to the top when query is empty
+    //   - Re-fetch palette_list on every state-change event so the
+    //     visible list stays authoritative while the palette is open
+    //   - Pre-execute re-fetch aborts if the focused command left the
+    //     visible set
     //
-    //   Slice 2b will add: fuzzy scoring, palette_execute, recent list
-    //   floating to the top, the BROWSING/LOCKED reducer for parameter
-    //   capture, and re-fetch on state change events.
-    //
-    //   Do not let this script grow without first checking that scope.
+    // Test cases for the scorer live in the SCORER_TESTS array at the
+    // bottom; they run once on script load and console.error if any
+    // fail. They are NOT a substitute for proper unit tests but they
+    // do catch the easy regressions during dogfood.
     // ─────────────────────────────────────────────────────────────
 
     const { invoke } = window.__TAURI__.core;
@@ -260,9 +260,18 @@
     const countEl = document.getElementById("count");
     const hintEl = document.getElementById("hint");
     const smokeEl = document.getElementById("smoke");
+    const prefixEl = document.querySelector(".prefix");
 
-    /** @type {Array<any>} */
-    let commands = [];
+    /** Authoritative command list as last returned by palette_list. */
+    let allCommands = [];
+    /** Recent ActionId JSON values, parsed by the backend. */
+    let recents = [];
+    /**
+     * Reducer state. Either:
+     *   { kind: "browsing" }
+     *   { kind: "locked",  command: CommandDto, payload: string }
+     */
+    let mode = { kind: "browsing" };
     let focusedIndex = 0;
 
     const SECTION_LABELS = {
@@ -279,6 +288,148 @@
       search: "⌕",
     };
 
+    // ─────────────────────────────────────────────────────────────
+    // Fuzzy scorer (integer tuple comparator, no float math)
+    // ─────────────────────────────────────────────────────────────
+
+    /**
+     * Score a command against a query. Returns null if no match,
+     * otherwise an integer tuple [bucket, position, registryIndex] used
+     * as a sort key (lower wins).
+     *
+     * Buckets (lower is better):
+     *   0  exact title match
+     *   1  title prefix match
+     *   2  word-boundary prefix match in title
+     *   3  contiguous substring match in title
+     *   4  subsequence match in title
+     *   5  any match in keywords
+     */
+    function scoreCommand(query, cmd, registryIndex) {
+      const q = query.trim().toLowerCase();
+      if (q.length === 0) {
+        return [99, 0, registryIndex];
+      }
+      const title = cmd.title.toLowerCase();
+
+      if (title === q) {
+        return [0, 0, registryIndex];
+      }
+      if (title.startsWith(q)) {
+        return [1, 0, registryIndex];
+      }
+
+      // Word-boundary prefix: any word in the title starts with the query.
+      const words = title.split(/\s+/);
+      let cursor = 0;
+      for (const word of words) {
+        if (word.startsWith(q)) {
+          return [2, cursor, registryIndex];
+        }
+        cursor += word.length + 1;
+      }
+
+      const subIndex = title.indexOf(q);
+      if (subIndex >= 0) {
+        return [3, subIndex, registryIndex];
+      }
+
+      // Subsequence match (e.g. "srh" matches "search transcripts")
+      const subseq = subsequencePosition(title, q);
+      if (subseq !== -1) {
+        return [4, subseq, registryIndex];
+      }
+
+      // Keyword fallback. Any keyword that contains the query → bucket 5.
+      const keywords = Array.isArray(cmd.keywords) ? cmd.keywords : [];
+      for (let i = 0; i < keywords.length; i++) {
+        const k = (keywords[i] || "").toLowerCase();
+        if (k.includes(q)) {
+          return [5, i, registryIndex];
+        }
+      }
+
+      return null;
+    }
+
+    /**
+     * Returns the index of the first character of the query in the
+     * target if every character of the query appears in order in the
+     * target, or -1 otherwise. Used for the bucket-4 subsequence match.
+     */
+    function subsequencePosition(target, query) {
+      let qi = 0;
+      let firstHit = -1;
+      for (let ti = 0; ti < target.length && qi < query.length; ti++) {
+        if (target[ti] === query[qi]) {
+          if (firstHit === -1) firstHit = ti;
+          qi++;
+        }
+      }
+      return qi === query.length ? firstHit : -1;
+    }
+
+    /**
+     * Compare two scoring tuples lexicographically. Lower wins.
+     * Both tuples must have the same length.
+     */
+    function compareTuples(a, b) {
+      for (let i = 0; i < a.length; i++) {
+        if (a[i] !== b[i]) return a[i] - b[i];
+      }
+      return 0;
+    }
+
+    function filterAndSortCommands(query) {
+      const scored = [];
+      for (let i = 0; i < allCommands.length; i++) {
+        const cmd = allCommands[i];
+        const score = scoreCommand(query, cmd, i);
+        if (score !== null) {
+          scored.push({ cmd, score });
+        }
+      }
+      scored.sort((a, b) => compareTuples(a.score, b.score));
+      return scored.map((s) => s.cmd);
+    }
+
+    /**
+     * Resolve recents into actual CommandDto objects by matching the
+     * recent action's `id` against the current visible set. Recents
+     * whose action id is no longer visible (e.g. start-recording while
+     * a session is active) are dropped — they cannot be safely
+     * re-executed in the current state.
+     */
+    function visibleRecentRows() {
+      const out = [];
+      const seen = new Set();
+      for (const recent of recents) {
+        const id = recent && recent.id;
+        if (!id || seen.has(id)) continue;
+        const cmd = allCommands.find((c) => c.id === id);
+        if (cmd) {
+          out.push({ cmd, recentAction: recent, isRecent: true });
+          seen.add(id);
+        }
+      }
+      return out;
+    }
+
+    function rowsForCurrentQuery() {
+      if (mode.kind !== "browsing") return [];
+      const q = queryEl.value;
+      if (q.trim().length === 0) {
+        const recentRows = visibleRecentRows();
+        const recentIds = new Set(recentRows.map((r) => r.cmd.id));
+        const rest = allCommands
+          .filter((c) => !recentIds.has(c.id))
+          .map((cmd) => ({ cmd, isRecent: false }));
+        return [...recentRows, ...rest];
+      }
+      const filtered = filterAndSortCommands(q);
+      return filtered.map((cmd) => ({ cmd, isRecent: false }));
+    }
+
     function clearChildren(node) {
       while (node.firstChild) {
         node.removeChild(node.firstChild);
@@ -289,19 +440,29 @@
       clearChildren(listEl);
       countEl.textContent = "";
 
-      const filtered = commands; // slice 2b adds the fuzzy filter
+      if (mode.kind === "locked") {
+        renderLockedView();
+        return;
+      }
 
-      if (filtered.length === 0) {
+      const rows = rowsForCurrentQuery();
+      if (rows.length === 0) {
         const empty = document.createElement("div");
         empty.className = "empty";
-        empty.textContent = "No commands available right now.";
+        empty.textContent = queryEl.value.trim().length > 0
+          ? "No commands match."
+          : "No commands available right now.";
         listEl.appendChild(empty);
         return;
       }
 
-      countEl.textContent = `${filtered.length} command${filtered.length === 1 ? "" : "s"}`;
+      countEl.textContent =
+        `${rows.length} command${rows.length === 1 ? "" : "s"}`;
 
-      filtered.forEach((cmd, index) => {
+      if (focusedIndex >= rows.length) focusedIndex = 0;
+
+      rows.forEach((entry, index) => {
+        const cmd = entry.cmd;
         const row = document.createElement("div");
         row.className = "row" + (index === focusedIndex ? " focused" : "");
         row.setAttribute("role", "option");
@@ -310,7 +471,7 @@
 
         const icon = document.createElement("div");
         icon.className = "icon";
-        icon.textContent = SECTION_ICONS[cmd.section] ?? "·";
+        icon.textContent = entry.isRecent ? "↺" : (SECTION_ICONS[cmd.section] ?? "·");
 
         const text = document.createElement("div");
         text.className = "text";
@@ -328,7 +489,9 @@
 
         const badge = document.createElement("span");
         badge.className = "badge";
-        badge.textContent = SECTION_LABELS[cmd.section] ?? cmd.section;
+        badge.textContent = entry.isRecent
+          ? "Recent"
+          : (SECTION_LABELS[cmd.section] ?? cmd.section);
 
         row.appendChild(icon);
         row.appendChild(text);
@@ -338,6 +501,11 @@
           focusedIndex = index;
           updateFocusClasses();
         });
+        row.addEventListener("mousedown", async (event) => {
+          event.preventDefault();
+          focusedIndex = index;
+          await activateFocused();
+        });
 
         listEl.appendChild(row);
       });
@@ -345,7 +513,33 @@
       hintEl.textContent = focusedRowInputHint();
     }
 
+    function renderLockedView() {
+      const cmd = mode.command;
+      const empty = document.createElement("div");
+      empty.className = "empty";
+      empty.style.textAlign = "left";
+      empty.style.padding = "16px 18px 24px";
+      empty.style.color = "var(--text-secondary)";
+      const title = document.createElement("div");
+      title.style.color = "var(--text)";
+      title.style.fontSize = "14px";
+      title.style.fontWeight = "500";
+      title.style.marginBottom = "6px";
+      title.textContent = cmd.title;
+      const desc = document.createElement("div");
+      desc.style.fontSize = "12px";
+      desc.style.lineHeight = "1.4";
+      desc.textContent = cmd.input === "inline-query"
+        ? "Type your query, then press Enter to run. Escape to cancel."
+        : "Type your text, then press Enter to run. Escape to cancel.";
+      empty.appendChild(title);
+      empty.appendChild(desc);
+      listEl.appendChild(empty);
+      countEl.textContent = "input required";
+    }
+
     function updateFocusClasses() {
+      if (mode.kind !== "browsing") return;
       const rows = listEl.querySelectorAll(".row");
       rows.forEach((row, index) => {
         row.classList.toggle("focused", index === focusedIndex);
@@ -359,9 +553,11 @@
     }
 
     function focusedRowInputHint() {
-      const cmd = commands[focusedIndex];
-      if (!cmd) return "";
-      switch (cmd.input) {
+      if (mode.kind !== "browsing") return "";
+      const rows = rowsForCurrentQuery();
+      const entry = rows[focusedIndex];
+      if (!entry) return "";
+      switch (entry.cmd.input) {
         case "inline-query":
           return "needs query";
         case "prompt-text":
@@ -375,15 +571,22 @@
       try {
         const currentMeeting = await invoke("palette_current_meeting").catch(() => null);
         const ui = currentMeeting ? { currentMeeting } : {};
-        const result = await invoke("palette_list", { ui });
-        commands = Array.isArray(result) ? result : [];
-        if (focusedIndex >= commands.length) {
+        const response = await invoke("palette_list", { ui });
+        if (response && Array.isArray(response.commands)) {
+          allCommands = response.commands;
+          recents = Array.isArray(response.recents) ? response.recents : [];
+        } else {
+          allCommands = [];
+          recents = [];
+        }
+        if (focusedIndex >= allCommands.length) {
           focusedIndex = 0;
         }
         render();
       } catch (e) {
         console.error("[palette] palette_list failed:", e);
-        commands = [];
+        allCommands = [];
+        recents = [];
         render();
       }
     }
@@ -392,54 +595,230 @@
       try {
         await invoke("palette_close");
       } catch (e) {
-        // The Tauri-side state machine treats palette_close as
-        // idempotent, so an error here usually means the window is
-        // already gone. Don't surface it.
         console.warn("[palette] palette_close error:", e);
       }
     }
+
+    /**
+     * Build the full hydrated ActionId JSON for an action by injecting
+     * the user's payload into the right field. The payload-bearing
+     * commands are listed explicitly so an unknown id falls through to
+     * a bare `{id}` request, matching the dispatcher's expectation for
+     * parameterless commands.
+     */
+    function buildActionId(commandId, payload) {
+      const trimmed = (payload ?? "").trim();
+      switch (commandId) {
+        case "search-transcripts":
+          return trimmed.length > 0
+            ? { id: "search-transcripts", query: trimmed }
+            : { id: "search-transcripts" };
+        case "research-topic":
+          return { id: "research-topic", query: trimmed };
+        case "add-note":
+          return { id: "add-note", text: trimmed };
+        case "rename-current-meeting":
+          return { id: "rename-current-meeting", new_title: trimmed };
+        default:
+          return { id: commandId };
+      }
+    }
+
+    /**
+     * Run a command against the backend. The recents store gets a fresh
+     * state-aware fetch right before execute so we can refuse to run
+     * commands that left the visible set since the user picked them.
+     */
+    async function executeAction(commandId, payload) {
+      try {
+        // Re-fetch authoritative visibility just before execute. If the
+        // command is no longer visible, refuse and stay open so the user
+        // sees what changed.
+        const currentMeeting = await invoke("palette_current_meeting").catch(() => null);
+        const ui = currentMeeting ? { currentMeeting } : {};
+        const fresh = await invoke("palette_list", { ui });
+        const visible = (fresh && Array.isArray(fresh.commands)) ? fresh.commands : [];
+        if (!visible.find((c) => c.id === commandId)) {
+          allCommands = visible;
+          recents = (fresh && Array.isArray(fresh.recents)) ? fresh.recents : [];
+          mode = { kind: "browsing" };
+          queryEl.value = "";
+          focusedIndex = 0;
+          render();
+          hintEl.textContent = "no longer available";
+          return;
+        }
+
+        const action = buildActionId(commandId, payload);
+        await invoke("palette_execute", { ui, action });
+        // Successful execution: close the palette. The Tauri-side
+        // record_recent already persisted the recent.
+        await closePalette();
+      } catch (e) {
+        console.error("[palette] palette_execute failed:", e);
+        // Surface the error briefly in the hint slot. Stay open so the
+        // user can read it and try something else.
+        const message = (typeof e === "string" ? e : (e?.message ?? "execute failed"));
+        hintEl.textContent = message.slice(0, 80);
+      }
+    }
+
+    /**
+     * Activate the focused row. Bare commands execute immediately.
+     * Commands with InputKind != none transition to LOCKED so the user
+     * can type the payload.
+     */
+    async function activateFocused() {
+      if (mode.kind !== "browsing") return;
+      const rows = rowsForCurrentQuery();
+      const entry = rows[focusedIndex];
+      if (!entry) return;
+      const cmd = entry.cmd;
+
+      if (cmd.input === "none") {
+        // Recents may carry a hydrated payload (e.g. a previous
+        // SearchTranscripts query). Use it directly when present so
+        // running a recent action repeats the original payload.
+        if (entry.isRecent && entry.recentAction) {
+          await executeRecent(entry.recentAction);
+        } else {
+          await executeAction(cmd.id, "");
+        }
+        return;
+      }
+
+      // Recents for payload-bearing commands re-execute with the saved
+      // payload (no need to retype "pricing" every time).
+      if (entry.isRecent && entry.recentAction) {
+        await executeRecent(entry.recentAction);
+        return;
+      }
+
+      enterLockedMode(cmd);
+    }
+
+    async function executeRecent(action) {
+      try {
+        const currentMeeting = await invoke("palette_current_meeting").catch(() => null);
+        const ui = currentMeeting ? { currentMeeting } : {};
+        await invoke("palette_execute", { ui, action });
+        await closePalette();
+      } catch (e) {
+        console.error("[palette] recent execute failed:", e);
+        hintEl.textContent = (typeof e === "string" ? e : (e?.message ?? "execute failed")).slice(0, 80);
+      }
+    }
+
+    function enterLockedMode(cmd) {
+      mode = { kind: "locked", command: cmd, payload: "" };
+      queryEl.value = "";
+      queryEl.placeholder = lockedPlaceholder(cmd);
+      prefixEl.textContent = ">";
+      hintEl.textContent = "press Enter to run";
+      focusedIndex = 0;
+      render();
+    }
+
+    function lockedPlaceholder(cmd) {
+      switch (cmd.input) {
+        case "inline-query":
+          return `${cmd.title}: search query...`;
+        case "prompt-text":
+          return `${cmd.title}: text...`;
+        default:
+          return cmd.title;
+      }
+    }
+
+    function exitLockedMode() {
+      mode = { kind: "browsing" };
+      queryEl.value = "";
+      queryEl.placeholder = "Search Minutes commands...";
+      prefixEl.textContent = ">";
+      focusedIndex = 0;
+      hintEl.textContent = "";
+      render();
+    }
+
+    queryEl.addEventListener("input", () => {
+      if (mode.kind === "locked") {
+        mode.payload = queryEl.value;
+        return;
+      }
+      focusedIndex = 0;
+      render();
+    });
 
     queryEl.addEventListener("keydown", async (event) => {
       switch (event.key) {
         case "Escape":
           event.preventDefault();
+          if (mode.kind === "locked") {
+            exitLockedMode();
+            return;
+          }
           await closePalette();
           return;
-        case "ArrowDown":
+        case "ArrowDown": {
+          if (mode.kind !== "browsing") return;
           event.preventDefault();
-          if (commands.length === 0) return;
-          focusedIndex = (focusedIndex + 1) % commands.length;
+          const rows = rowsForCurrentQuery();
+          if (rows.length === 0) return;
+          focusedIndex = (focusedIndex + 1) % rows.length;
           updateFocusClasses();
           return;
-        case "ArrowUp":
+        }
+        case "ArrowUp": {
+          if (mode.kind !== "browsing") return;
           event.preventDefault();
-          if (commands.length === 0) return;
-          focusedIndex = (focusedIndex - 1 + commands.length) % commands.length;
+          const rows = rowsForCurrentQuery();
+          if (rows.length === 0) return;
+          focusedIndex = (focusedIndex - 1 + rows.length) % rows.length;
           updateFocusClasses();
           return;
+        }
         case "Enter": {
           event.preventDefault();
-          // Slice 2b will wire palette_execute here. For now, log the
-          // selection and close so we can manually verify the round trip.
-          const cmd = commands[focusedIndex];
-          console.log("[palette] selected:", cmd?.id, cmd);
-          await closePalette();
+          if (mode.kind === "locked") {
+            const payload = (mode.payload ?? "").trim();
+            if (payload.length === 0) {
+              hintEl.textContent = "input required";
+              return;
+            }
+            await executeAction(mode.command.id, payload);
+            return;
+          }
+          await activateFocused();
           return;
         }
       }
     });
 
-    // Capability smoke test (D4 of PLAN.md.command-palette-slice-2).
-    //
-    // The Tauri v2 capabilities gotcha that bit Minutes before is that
-    // window-targeted events can silently fail to deliver if the
-    // permissions list omits `core:event:allow-listen`. The current
-    // capabilities/default.json uses `"windows": ["*"]` so the palette
-    // window inherits the permissions, but the only way to be sure is
-    // to test the EXACT pairing production uses. The Tauri side emits a
-    // "palette:ping" event right after the window is built; the listener
-    // below confirms it arrived. Visible via the green indicator at the
-    // bottom-right of the palette.
+    // ─────────────────────────────────────────────────────────────
+    // State-change re-fetch (D2). The visible list must follow
+    // backend truth so users never see stale rows mid-session.
+    // ─────────────────────────────────────────────────────────────
+
+    listen("recording:start", () => fetchCommands()).catch((e) =>
+      console.warn("[palette] listen recording:start failed:", e)
+    );
+    listen("recording:stop", () => fetchCommands()).catch((e) =>
+      console.warn("[palette] listen recording:stop failed:", e)
+    );
+    listen("recording:state", () => fetchCommands()).catch((e) =>
+      console.warn("[palette] listen recording:state failed:", e)
+    );
+    listen("live-transcript:state", () => fetchCommands()).catch((e) =>
+      console.warn("[palette] listen live-transcript:state failed:", e)
+    );
+    listen("live-transcript:started", () => fetchCommands()).catch((e) =>
+      console.warn("[palette] listen live-transcript:started failed:", e)
+    );
+    listen("dictation:state", () => fetchCommands()).catch((e) =>
+      console.warn("[palette] listen dictation:state failed:", e)
+    );
+
+    // Capability smoke test (D4).
     listen("palette:ping", () => {
       smokeEl.classList.add("ok");
       console.log("[palette] capability smoke test passed");
@@ -447,12 +826,77 @@
       console.warn("[palette] failed to subscribe to palette:ping:", e);
     });
 
-    // Slice 2b will add real listeners on:
-    //   - "recording:start" / "recording:stop"
-    //   - "live-transcript:state"
-    //   - "dictation:state"
-    // Each one re-runs `fetchCommands` so the visible list never goes
-    // stale while the palette is open.
+    // ─────────────────────────────────────────────────────────────
+    // Inline scorer self-test. Runs on every load. If any of these
+    // fail, the change broke fuzzy ordering — fix the scorer or
+    // intentionally update the expected output.
+    // ─────────────────────────────────────────────────────────────
+
+    function runScorerSelfTest() {
+      const sampleCommands = [
+        { id: "start-recording", title: "Start recording", description: "", keywords: ["record", "capture"] },
+        { id: "stop-recording", title: "Stop recording", description: "", keywords: ["stop"] },
+        { id: "search-transcripts", title: "Search transcripts...", description: "", keywords: ["find", "grep"] },
+        { id: "research-topic", title: "Research topic...", description: "", keywords: ["cross"] },
+        { id: "open-latest-meeting", title: "Open latest meeting", description: "", keywords: ["last"] },
+      ];
+
+      const cases = [
+        { query: "start", expectedFirst: "start-recording" },
+        { query: "stop", expectedFirst: "stop-recording" },
+        { query: "search", expectedFirst: "search-transcripts" },
+        { query: "open", expectedFirst: "open-latest-meeting" },
+        // subsequence: 'srh' subseq of 'search...'
+        { query: "srh", expectedFirst: "search-transcripts" },
+        // keyword fallback: 'find' is a keyword on search-transcripts only
+        { query: "find", expectedFirst: "search-transcripts" },
+        // keyword fallback: 'grep' is a keyword on search-transcripts only
+        { query: "grep", expectedFirst: "search-transcripts" },
+        // word-boundary prefix: 'rec' should still hit start-recording first
+        { query: "rec", expectedFirst: "start-recording" },
+      ];
+
+      let failures = 0;
+      for (const { query, expectedFirst } of cases) {
+        const scored = [];
+        for (let i = 0; i < sampleCommands.length; i++) {
+          const score = scoreCommand(query, sampleCommands[i], i);
+          if (score) scored.push({ cmd: sampleCommands[i], score });
+        }
+        scored.sort((a, b) => compareTuples(a.score, b.score));
+        const first = scored[0]?.cmd.id;
+        if (first !== expectedFirst) {
+          console.error(
+            `[palette] scorer self-test FAILED for query "${query}":`,
+            `expected ${expectedFirst}, got ${first}`,
+            scored
+          );
+          failures++;
+        }
+      }
+
+      // Edge cases for subsequencePosition.
+      const subseqCases = [
+        { target: "abcdef", query: "abc", expected: 0 },
+        { target: "abcdef", query: "ace", expected: 0 },
+        { target: "abcdef", query: "ax", expected: -1 },
+        { target: "abcdef", query: "", expected: -1 }, // empty handled at scorer level
+      ];
+      for (const { target, query, expected } of subseqCases) {
+        // Empty queries never reach subsequencePosition because
+        // scoreCommand short-circuits earlier; reflect that here.
+        const got = query.length === 0 ? -1 : subsequencePosition(target, query);
+        if (got !== expected) {
+          console.error(`[palette] subsequencePosition("${target}","${query}") expected ${expected}, got ${got}`);
+          failures++;
+        }
+      }
+
+      if (failures === 0) {
+        console.log("[palette] scorer self-test passed");
+      }
+    }
+    runScorerSelfTest();
 
     // Initial load.
     fetchCommands();

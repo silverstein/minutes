@@ -523,6 +523,522 @@ pub fn is_visible(v: Visibility, flags: StateFlags) -> bool {
 }
 
 // ──────────────────────────────────────────────────────────────
+// Recents (forward-compatible store at ~/.minutes/palette.json)
+// ──────────────────────────────────────────────────────────────
+
+pub mod recents {
+    //! Persistent recent-actions list for the command palette.
+    //!
+    //! Lives at `~/.minutes/palette.json`. The on-disk format is
+    //! intentionally schema-versioned **and** the entry list is parsed as
+    //! raw `serde_json::Value` rather than as strongly-typed `ActionId` so
+    //! a downgraded older client never silently eats entries written by a
+    //! newer client. See D5 of `PLAN.md.command-palette-slice-2`.
+    //!
+    //! # Format
+    //!
+    //! ```json
+    //! {
+    //!   "version": 1,
+    //!   "entries": [
+    //!     { "id": "search-transcripts", "query": "pricing" },
+    //!     { "id": "start-recording" }
+    //!   ]
+    //! }
+    //! ```
+    //!
+    //! - The `version` field is the writer's schema version. Files with a
+    //!   version **higher** than this client understands are kept
+    //!   read-only: the file is loaded but never overwritten until the
+    //!   client is upgraded.
+    //! - `entries` is parsed as `Vec<serde_json::Value>`. Each entry is
+    //!   validated **lazily** when the caller asks for visible recents:
+    //!   entries that don't deserialize into `ActionId` for this version
+    //!   are *hidden* from the UI but *preserved* in memory and on disk.
+    //! - Visible entries are capped at `VISIBLE_CAP`. The on-disk total
+    //!   (visible + preserved-unknown) is capped at `STORAGE_CAP`.
+    //! - Duplicates (full JSON equality) collapse to the most recent
+    //!   position.
+    //! - Atomic write via tmp + rename. Permissions `0600`.
+    //!
+    //! # Failure handling
+    //!
+    //! Parse failures are NEVER fatal. The store always returns a
+    //! best-effort `RecentsStore` so the palette can keep opening even if
+    //! the file is garbage. A corrupt file is renamed to
+    //! `palette.json.broken` so the user can inspect it; the active
+    //! recents file is not overwritten until the next successful
+    //! `push_and_save` writes a fresh one.
+    //!
+    //! # Why a separate module
+    //!
+    //! Keeping recents inside `palette.rs` (not its own crate file) keeps
+    //! the registry, the FFI types, and the persistence layer in one
+    //! place. Future versions might split this out if recents grow
+    //! beyond ~5 entries with metadata.
+
+    use super::ActionId;
+    use serde::{Deserialize, Serialize};
+    use serde_json::Value;
+    use std::path::{Path, PathBuf};
+
+    /// Latest schema version this client knows how to write.
+    pub const CURRENT_VERSION: u32 = 1;
+
+    /// Maximum number of UI-visible (parseable) recents.
+    pub const VISIBLE_CAP: usize = 5;
+
+    /// Maximum number of entries stored on disk total. Larger than
+    /// `VISIBLE_CAP` so unknown future-variant entries can ride along
+    /// without being evicted by the visible cap.
+    pub const STORAGE_CAP: usize = 10;
+
+    /// Suffix appended to corrupt files for forensic recovery.
+    pub const BROKEN_SUFFIX: &str = ".broken";
+
+    /// On-disk shape. Public so tests can construct it; callers should
+    /// use [`RecentsStore::load`] / [`RecentsStore::push_and_save`].
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct RecentsFile {
+        pub version: u32,
+        #[serde(default)]
+        pub entries: Vec<Value>,
+    }
+
+    impl Default for RecentsFile {
+        fn default() -> Self {
+            Self {
+                version: CURRENT_VERSION,
+                entries: Vec::new(),
+            }
+        }
+    }
+
+    /// In-memory wrapper around the recents file.
+    ///
+    /// `entries` is the raw on-disk list (preserves unknown variants).
+    /// `read_only` is true when the loaded file's `version` is higher
+    /// than [`CURRENT_VERSION`] — the store still serves visible recents
+    /// from whatever it can parse, but [`Self::push_and_save`] is a
+    /// no-op so the newer file is never overwritten.
+    #[derive(Debug, Clone, Default)]
+    pub struct RecentsStore {
+        pub file: RecentsFile,
+        pub read_only: bool,
+    }
+
+    impl RecentsStore {
+        /// Default location: `~/.minutes/palette.json`.
+        pub fn default_path() -> PathBuf {
+            crate::config::Config::minutes_dir().join("palette.json")
+        }
+
+        /// Load recents from `path`. Always returns a best-effort store
+        /// even on parse failure (the file is renamed to
+        /// `<path>.broken` for forensics and the returned store is empty).
+        pub fn load(path: &Path) -> Self {
+            if !path.exists() {
+                return Self::default();
+            }
+            let raw = match std::fs::read_to_string(path) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!("[palette/recents] could not read {}: {}", path.display(), e);
+                    return Self::default();
+                }
+            };
+            match serde_json::from_str::<RecentsFile>(&raw) {
+                Ok(file) => {
+                    let read_only = file.version > CURRENT_VERSION;
+                    if read_only {
+                        tracing::info!(
+                            "[palette/recents] {} has version {} > current {}; treating as read-only",
+                            path.display(),
+                            file.version,
+                            CURRENT_VERSION
+                        );
+                    }
+                    Self { file, read_only }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "[palette/recents] failed to parse {}: {}; quarantining",
+                        path.display(),
+                        e
+                    );
+                    quarantine_corrupt_file(path);
+                    Self::default()
+                }
+            }
+        }
+
+        /// Visible recents are entries that deserialize into the current
+        /// `ActionId` schema. Capped at [`VISIBLE_CAP`]. Unknown-variant
+        /// entries are skipped here (still preserved in `self.file`).
+        pub fn visible(&self) -> Vec<ActionId> {
+            self.file
+                .entries
+                .iter()
+                .filter_map(|v| serde_json::from_value::<ActionId>(v.clone()).ok())
+                .take(VISIBLE_CAP)
+                .collect()
+        }
+
+        /// Push a new action to the front of the list, dedupe by full
+        /// JSON equality, enforce caps, and atomically persist to `path`.
+        ///
+        /// Returns the serialized entry that was prepended (useful for
+        /// telemetry / tests). Returns `None` if the store is read-only
+        /// (newer version on disk) or serialization fails.
+        pub fn push_and_save(
+            &mut self,
+            action: &ActionId,
+            path: &Path,
+        ) -> Result<Option<Value>, std::io::Error> {
+            if self.read_only {
+                return Ok(None);
+            }
+
+            let entry = match serde_json::to_value(action) {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::warn!("[palette/recents] failed to serialize action: {}", e);
+                    return Ok(None);
+                }
+            };
+
+            // Dedupe (collapse to most-recent position).
+            self.file.entries.retain(|existing| existing != &entry);
+            self.file.entries.insert(0, entry.clone());
+
+            // Trim while preserving unknown entries — visible (parseable
+            // for current version) entries up to VISIBLE_CAP, plus any
+            // unknown entries until we hit STORAGE_CAP. Unknown entries
+            // are kept in their original relative order.
+            self.file.entries = trim_entries(&self.file.entries);
+
+            // Update version on every successful write so older files
+            // get migrated forward without needing a separate migration
+            // step.
+            self.file.version = CURRENT_VERSION;
+
+            atomic_write_json(path, &self.file)?;
+            Ok(Some(entry))
+        }
+    }
+
+    fn trim_entries(entries: &[Value]) -> Vec<Value> {
+        let mut visible_count = 0usize;
+        let mut out = Vec::with_capacity(entries.len().min(STORAGE_CAP));
+        for entry in entries {
+            if out.len() >= STORAGE_CAP {
+                break;
+            }
+            let parses = serde_json::from_value::<ActionId>(entry.clone()).is_ok();
+            if parses {
+                if visible_count >= VISIBLE_CAP {
+                    continue;
+                }
+                visible_count += 1;
+                out.push(entry.clone());
+            } else {
+                out.push(entry.clone());
+            }
+        }
+        out
+    }
+
+    fn quarantine_corrupt_file(path: &Path) {
+        let broken = path.with_extension({
+            // path.with_extension replaces the extension; preserve the
+            // original by appending instead.
+            let original = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or_default()
+                .to_string();
+            if original.is_empty() {
+                BROKEN_SUFFIX.trim_start_matches('.').to_string()
+            } else {
+                format!("{}{}", original, BROKEN_SUFFIX)
+            }
+        });
+        if let Err(e) = std::fs::rename(path, &broken) {
+            tracing::warn!(
+                "[palette/recents] could not quarantine {} to {}: {}",
+                path.display(),
+                broken.display(),
+                e
+            );
+        }
+    }
+
+    fn atomic_write_json(path: &Path, file: &RecentsFile) -> std::io::Result<()> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let json = serde_json::to_string_pretty(file)
+            .map_err(|e| std::io::Error::other(format!("serialize palette recents: {}", e)))?;
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, json)?;
+        set_recents_permissions(&tmp)?;
+        std::fs::rename(&tmp, path)?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    fn set_recents_permissions(path: &Path) -> std::io::Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+    }
+
+    #[cfg(not(unix))]
+    fn set_recents_permissions(_path: &Path) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use serde_json::json;
+        use tempfile::TempDir;
+
+        #[test]
+        fn missing_file_loads_empty() {
+            let dir = TempDir::new().unwrap();
+            let path = dir.path().join("palette.json");
+            let store = RecentsStore::load(&path);
+            assert!(store.file.entries.is_empty());
+            assert!(!store.read_only);
+            assert!(store.visible().is_empty());
+        }
+
+        #[test]
+        fn round_trips_known_action() {
+            let dir = TempDir::new().unwrap();
+            let path = dir.path().join("palette.json");
+            let mut store = RecentsStore::load(&path);
+            store
+                .push_and_save(&ActionId::StartRecording, &path)
+                .unwrap();
+
+            let reloaded = RecentsStore::load(&path);
+            let visible = reloaded.visible();
+            assert_eq!(visible.len(), 1);
+            assert_eq!(visible[0], ActionId::StartRecording);
+        }
+
+        #[test]
+        fn dedupes_to_most_recent_position() {
+            let dir = TempDir::new().unwrap();
+            let path = dir.path().join("palette.json");
+            let mut store = RecentsStore::load(&path);
+            store
+                .push_and_save(&ActionId::StartRecording, &path)
+                .unwrap();
+            store
+                .push_and_save(&ActionId::OpenLatestMeeting, &path)
+                .unwrap();
+            store
+                .push_and_save(&ActionId::StartRecording, &path)
+                .unwrap();
+
+            let reloaded = RecentsStore::load(&path);
+            let visible = reloaded.visible();
+            // start-recording should be at the front, no duplicate.
+            assert_eq!(
+                visible,
+                vec![ActionId::StartRecording, ActionId::OpenLatestMeeting]
+            );
+        }
+
+        #[test]
+        fn parameterized_actions_preserve_payload() {
+            let dir = TempDir::new().unwrap();
+            let path = dir.path().join("palette.json");
+            let mut store = RecentsStore::load(&path);
+            store
+                .push_and_save(
+                    &ActionId::SearchTranscripts {
+                        query: Some("pricing".into()),
+                    },
+                    &path,
+                )
+                .unwrap();
+
+            let reloaded = RecentsStore::load(&path);
+            assert_eq!(
+                reloaded.visible(),
+                vec![ActionId::SearchTranscripts {
+                    query: Some("pricing".into()),
+                }]
+            );
+        }
+
+        #[test]
+        fn corrupt_file_quarantines_and_returns_empty_store() {
+            let dir = TempDir::new().unwrap();
+            let path = dir.path().join("palette.json");
+            std::fs::write(&path, "this is not json").unwrap();
+
+            let store = RecentsStore::load(&path);
+            assert!(store.file.entries.is_empty());
+            assert!(!store.read_only);
+
+            // Corrupt file should be moved to .broken so the user can
+            // inspect it. The original path should no longer exist.
+            assert!(!path.exists(), "corrupt file should be quarantined");
+            let broken = dir.path().join("palette.json.broken");
+            assert!(
+                broken.exists(),
+                "expected quarantine at {}",
+                broken.display()
+            );
+            assert_eq!(
+                std::fs::read_to_string(&broken).unwrap(),
+                "this is not json"
+            );
+        }
+
+        #[test]
+        fn unknown_variants_are_hidden_but_preserved() {
+            let dir = TempDir::new().unwrap();
+            let path = dir.path().join("palette.json");
+            std::fs::write(
+                &path,
+                r#"{
+                    "version": 1,
+                    "entries": [
+                        { "id": "future-command", "weird": true },
+                        { "id": "start-recording" }
+                    ]
+                }"#,
+            )
+            .unwrap();
+
+            let store = RecentsStore::load(&path);
+            // The visible list only includes start-recording.
+            assert_eq!(store.visible(), vec![ActionId::StartRecording]);
+            // But the on-disk shape preserves the unknown entry.
+            assert_eq!(store.file.entries.len(), 2);
+            let unknown = &store.file.entries[0];
+            assert_eq!(
+                unknown.get("id").and_then(|v| v.as_str()),
+                Some("future-command")
+            );
+        }
+
+        #[test]
+        fn unknown_variants_round_trip_through_push() {
+            let dir = TempDir::new().unwrap();
+            let path = dir.path().join("palette.json");
+            std::fs::write(
+                &path,
+                r#"{
+                    "version": 1,
+                    "entries": [
+                        { "id": "future-command", "payload": "still here" }
+                    ]
+                }"#,
+            )
+            .unwrap();
+
+            let mut store = RecentsStore::load(&path);
+            store
+                .push_and_save(&ActionId::StopRecording, &path)
+                .unwrap();
+
+            let reloaded = RecentsStore::load(&path);
+            // The unknown entry MUST still be on disk after the write.
+            assert_eq!(reloaded.file.entries.len(), 2);
+            let mut found_unknown = false;
+            for entry in &reloaded.file.entries {
+                if entry.get("id").and_then(|v| v.as_str()) == Some("future-command") {
+                    assert_eq!(
+                        entry.get("payload").and_then(|v| v.as_str()),
+                        Some("still here")
+                    );
+                    found_unknown = true;
+                }
+            }
+            assert!(found_unknown, "unknown entry must round-trip unchanged");
+            // Visible recents only show the known entry.
+            assert_eq!(reloaded.visible(), vec![ActionId::StopRecording]);
+        }
+
+        #[test]
+        fn newer_version_files_are_read_only() {
+            let dir = TempDir::new().unwrap();
+            let path = dir.path().join("palette.json");
+            std::fs::write(
+                &path,
+                r#"{
+                    "version": 9999,
+                    "entries": [
+                        { "id": "start-recording" }
+                    ]
+                }"#,
+            )
+            .unwrap();
+
+            let mut store = RecentsStore::load(&path);
+            assert!(store.read_only);
+            // Visible recents are still served from what we can parse.
+            assert_eq!(store.visible(), vec![ActionId::StartRecording]);
+
+            // push_and_save is a no-op on read-only stores.
+            let original = std::fs::read_to_string(&path).unwrap();
+            let pushed = store
+                .push_and_save(&ActionId::StopRecording, &path)
+                .unwrap();
+            assert!(pushed.is_none());
+            let after = std::fs::read_to_string(&path).unwrap();
+            assert_eq!(after, original, "read-only file must not be overwritten");
+        }
+
+        #[test]
+        fn cap_enforces_visible_and_storage_limits() {
+            let dir = TempDir::new().unwrap();
+            let path = dir.path().join("palette.json");
+            // Seed the file with 7 unknown entries — they should all be
+            // preserved up to STORAGE_CAP=10.
+            let mut entries = Vec::new();
+            for i in 0..7 {
+                entries.push(json!({ "id": format!("future-cmd-{}", i) }));
+            }
+            std::fs::write(
+                &path,
+                serde_json::to_string(&RecentsFile {
+                    version: 1,
+                    entries,
+                })
+                .unwrap(),
+            )
+            .unwrap();
+
+            let mut store = RecentsStore::load(&path);
+            // Push 6 known commands. The visible cap is 5; the storage
+            // cap is 10. Expect: 5 known + (10 - 5 = 5) unknown after
+            // trim — 7 unknowns truncated to 5.
+            for action in [
+                ActionId::StartRecording,
+                ActionId::StopRecording,
+                ActionId::OpenLatestMeeting,
+                ActionId::ShowUpcomingMeetings,
+                ActionId::OpenMeetingsFolder,
+                ActionId::OpenMemosFolder,
+            ] {
+                store.push_and_save(&action, &path).unwrap();
+            }
+
+            let reloaded = RecentsStore::load(&path);
+            assert!(reloaded.file.entries.len() <= STORAGE_CAP);
+            assert_eq!(reloaded.visible().len(), VISIBLE_CAP);
+        }
+    }
+}
+
+// ──────────────────────────────────────────────────────────────
 // Tests
 // ──────────────────────────────────────────────────────────────
 

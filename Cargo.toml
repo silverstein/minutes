@@ -45,6 +45,7 @@ anyhow = "1"
 # Filesystem
 dirs = "6"
 walkdir = "2"
+which = "4"
 
 # Logging
 tracing = "0.1"

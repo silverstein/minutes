@@ -301,28 +301,26 @@ pub(crate) fn detect_agent_cli() -> Option<String> {
 
 /// Resolve a command name to a full path, searching common install locations.
 /// GUI apps (like Tauri) run with a minimal PATH that doesn't include
-/// ~/.cargo/bin, ~/.local/bin, or /opt/homebrew/bin.
+/// ~/.cargo/bin, ~/.local/bin, or /opt/homebrew/bin. On Windows, npm-global
+/// CLIs install to %APPDATA%\npm which is also frequently missing from PATH
+/// for GUI processes.
 pub(crate) fn resolve_agent_path(cmd: &str) -> String {
     use std::path::PathBuf;
 
-    // Already an absolute path
-    if cmd.starts_with('/') {
+    // Already an absolute path (any platform)
+    let as_path = PathBuf::from(cmd);
+    if as_path.is_absolute() {
         return cmd.to_string();
     }
 
-    // Check if it's findable in the current PATH
-    if let Ok(output) = std::process::Command::new("which").arg(cmd).output() {
-        if output.status.success() {
-            let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !path.is_empty() {
-                return path;
-            }
-        }
+    // PATH lookup via the `which` crate. Cross-platform and respects PATHEXT
+    // on Windows, so `claude` resolves to `claude.cmd` correctly.
+    if let Ok(path) = which::which(cmd) {
+        return path.to_string_lossy().to_string();
     }
 
-    // Search common install directories
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp"));
-    let search_dirs = [
+    let mut search_dirs: Vec<PathBuf> = vec![
         home.join(".cargo/bin"),
         home.join(".local/bin"),
         home.join(".npm-global/bin"),
@@ -330,11 +328,30 @@ pub(crate) fn resolve_agent_path(cmd: &str) -> String {
         PathBuf::from("/usr/local/bin"),
         PathBuf::from("/usr/bin"),
     ];
+    if cfg!(windows) {
+        if let Some(appdata) = dirs::data_dir() {
+            search_dirs.push(appdata.join("npm"));
+        }
+        if let Some(local) = dirs::data_local_dir() {
+            search_dirs.push(local.join("npm"));
+            search_dirs.push(local.join("Programs"));
+        }
+    }
 
+    let exts: &[&str] = if cfg!(windows) {
+        &["", "cmd", "exe", "bat"]
+    } else {
+        &[""]
+    };
     for dir in &search_dirs {
-        let candidate = dir.join(cmd);
-        if candidate.exists() {
-            return candidate.to_string_lossy().to_string();
+        for ext in exts {
+            let mut candidate = dir.join(cmd);
+            if !ext.is_empty() {
+                candidate.set_extension(ext);
+            }
+            if candidate.exists() {
+                return candidate.to_string_lossy().to_string();
+            }
         }
     }
 

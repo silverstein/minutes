@@ -3119,7 +3119,9 @@ fn context_switch_prompt(command: &str, mode: &str, title: &str) -> String {
 /// Resolve an agent name or path to an executable.
 ///
 /// Accepts either:
-/// - A bare command name ("claude", "codex", "bash") — searched in common PATH dirs
+/// - A bare command name ("claude", "codex", "bash") — looked up via PATH
+///   (with PATHEXT on Windows, so `claude.cmd` resolves from `claude`), then
+///   searched in well-known install dirs as a fallback
 /// - An absolute path ("/usr/local/bin/my-agent") — used directly if it exists
 ///
 /// This is intentionally open: users can set `assistant.agent` to any binary
@@ -3131,8 +3133,16 @@ pub fn find_agent_binary(name: &str) -> Option<PathBuf> {
         return Some(as_path);
     }
 
+    // PATH lookup (cross-platform). On Windows this respects PATHEXT and
+    // resolves `claude` → `claude.cmd` / `claude.exe` correctly. GUI apps
+    // launched from Finder/Explorer often have a minimal PATH, so the
+    // fallback below catches common install dirs that aren't on PATH.
+    if let Ok(path) = which::which(name) {
+        return Some(path);
+    }
+
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp"));
-    let search_dirs = [
+    let mut search_dirs: Vec<PathBuf> = vec![
         home.join(".cargo/bin"),
         home.join(".local/bin"),
         home.join(".npm-global/bin"),
@@ -3141,13 +3151,41 @@ pub fn find_agent_binary(name: &str) -> Option<PathBuf> {
         PathBuf::from("/usr/bin"),
         PathBuf::from("/bin"),
     ];
+    if cfg!(windows) {
+        // npm-global on Windows lands in %APPDATA%\npm by default, which
+        // isn't always on PATH for GUI processes. LOCALAPPDATA covers a few
+        // installer conventions (e.g., scoop, native installers).
+        if let Some(appdata) = dirs::data_dir() {
+            search_dirs.push(appdata.join("npm"));
+        }
+        if let Some(local) = dirs::data_local_dir() {
+            search_dirs.push(local.join("npm"));
+            search_dirs.push(local.join("Programs"));
+        }
+    }
+
+    let exts: &[&str] = if cfg!(windows) {
+        &["", "cmd", "exe", "bat"]
+    } else {
+        &[""]
+    };
     for dir in &search_dirs {
-        let candidate = dir.join(name);
-        if candidate.exists() {
-            return Some(candidate);
+        for ext in exts {
+            let mut candidate = dir.join(name);
+            if !ext.is_empty() {
+                candidate.set_extension(ext);
+            }
+            if candidate.exists() {
+                return Some(candidate);
+            }
         }
     }
     None
+}
+
+/// Platform-correct path to the user's config file, used in error messages.
+fn user_config_path_for_display() -> String {
+    Config::config_path().display().to_string()
 }
 
 /// Shared spawn logic used by both cmd_spawn_terminal and the tray menu handler.
@@ -3179,13 +3217,20 @@ pub fn spawn_terminal(
         }
     } else {
         let agent_name = agent_override.unwrap_or(&config.assistant.agent);
-        let agent_bin = find_agent_binary(agent_name)
-            .ok_or_else(|| {
-                format!(
-                    "'{}' not found. Install it or set a different agent in ~/.config/minutes/config.toml under [assistant].",
-                    agent_name
-                )
-            })?;
+        let agent_bin = find_agent_binary(agent_name).ok_or_else(|| {
+            let install_hint = if agent_name == "claude" {
+                " Install Claude Code with `npm i -g @anthropic-ai/claude-code`."
+            } else {
+                ""
+            };
+            format!(
+                "'{}' not found on PATH or in common install dirs.{} \
+                 Then set the agent in {} under [assistant].",
+                agent_name,
+                install_hint,
+                user_config_path_for_display(),
+            )
+        })?;
 
         manager.spawn(
             crate::pty::SpawnConfig {

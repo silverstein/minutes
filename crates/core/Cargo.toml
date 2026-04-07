@@ -29,6 +29,7 @@ chrono = { workspace = true }
 thiserror = { workspace = true }
 dirs = { workspace = true }
 walkdir = { workspace = true }
+which = { workspace = true }
 tracing = { workspace = true }
 cpal = { workspace = true }
 hound = { workspace = true }

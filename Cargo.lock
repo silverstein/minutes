@@ -3117,6 +3117,7 @@ dependencies = [
  "tempfile",
  "ureq",
  "walkdir",
+ "which",
  "window-vibrancy 0.7.1",
 ]
 
@@ -3175,6 +3176,7 @@ dependencies = [
  "tracing",
  "ureq",
  "walkdir",
+ "which",
  "whisper-guard",
  "whisper-rs",
  "windows-sys 0.59.0",

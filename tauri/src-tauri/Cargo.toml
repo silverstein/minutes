@@ -23,6 +23,7 @@ minutes-core = { path = "../../crates/core", features = ["streaming", "diarize"]
 chrono = { version = "0.4", features = ["serde"] }
 dirs = "6"
 libc = "0.2"
+which = { workspace = true }
 portable-pty = "0.9"
 base64 = "0.22"
 tauri-plugin-pty = "0.1"

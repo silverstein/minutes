@@ -62,9 +62,7 @@ final class NativeCallRecorder: NSObject, SCRecordingOutputDelegate, SCStreamOut
 
         let stream = SCStream(filter: filter, configuration: configuration, delegate: nil)
         try stream.addStreamOutput(self, type: .audio, sampleHandlerQueue: sampleQueue)
-        if #available(macOS 15.0, *) {
-            try stream.addStreamOutput(self, type: .microphone, sampleHandlerQueue: sampleQueue)
-        }
+        try stream.addStreamOutput(self, type: .microphone, sampleHandlerQueue: sampleQueue)
         let recordingConfiguration = SCRecordingOutputConfiguration()
         recordingConfiguration.outputURL = outputURL
         recordingConfiguration.outputFileType = .mov
@@ -309,6 +307,10 @@ final class NativeCallRecorder: NSObject, SCRecordingOutputDelegate, SCStreamOut
 
 @main
 struct NativeCallRecordMain {
+    // Keep the signal source alive after `run()` returns so the SIGTERM handler
+    // remains installed for the lifetime of the helper.
+    nonisolated(unsafe) static var retainedStopSource: DispatchSourceSignal?
+
     static func main() {
         Task {
             await run()
@@ -338,6 +340,7 @@ struct NativeCallRecordMain {
             }
         }
         stopSource.resume()
+        NativeCallRecordMain.retainedStopSource = stopSource
 
         do {
             try await recorder.start()

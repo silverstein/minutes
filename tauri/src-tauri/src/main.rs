@@ -12,6 +12,7 @@ mod call_capture;
 mod call_detect;
 mod commands;
 mod context;
+mod palette_dispatch;
 mod pty;
 mod shortcut_manager;
 
@@ -1234,6 +1235,8 @@ fn main() {
             commands::cmd_live_shortcut_settings,
             commands::cmd_set_live_shortcut,
             commands::cmd_install_update,
+            palette_dispatch::palette_list,
+            palette_dispatch::palette_execute,
         ])
         .run(tauri::generate_context!())
         .expect("error while running minutes app");

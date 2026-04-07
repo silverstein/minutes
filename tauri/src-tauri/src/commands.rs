@@ -1100,7 +1100,7 @@ fn extract_paste_text(content: &str, kind: &str) -> Result<String, String> {
         .ok_or_else(|| format!("The latest artifact does not contain a {} section.", kind))
 }
 
-fn copy_to_clipboard(text: &str) -> Result<(), String> {
+pub(crate) fn copy_to_clipboard(text: &str) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
         use std::io::Write;
@@ -4468,7 +4468,7 @@ fn emit_dictation_hotkey_status(app: &tauri::AppHandle) {
     app.emit("dictation-hotkey:status", &status).ok();
 }
 
-fn dictation_pid_active() -> bool {
+pub(crate) fn dictation_pid_active() -> bool {
     minutes_core::pid::check_pid_file(&minutes_core::pid::dictation_pid_path())
         .ok()
         .flatten()

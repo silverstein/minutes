@@ -44,6 +44,7 @@ use std::sync::atomic::Ordering;
 use serde::Deserialize;
 use tauri::{AppHandle, State};
 
+use minutes_core::palette::recents::RecentsStore;
 use minutes_core::palette::{visible_commands, ActionId, Command, Context, InputKind, StateFlags};
 use minutes_core::Config;
 
@@ -83,6 +84,24 @@ pub struct CommandDto {
     pub keywords: Vec<&'static str>,
     pub section: &'static str,
     pub input: &'static str,
+}
+
+/// Response shape returned by `palette_list`. Carries the visible
+/// command set AND the user's recent actions in one round-trip so the
+/// UI can render recents at the top when the query is empty without a
+/// second IPC hop.
+///
+/// Recent entries are full hydrated `ActionId` JSON values (not bare
+/// kebab strings) so parameterized variants like
+/// `SearchTranscripts { query: "pricing" }` round-trip with their
+/// payload intact. Entries that don't deserialize into the current
+/// `ActionId` schema are hidden here but preserved on disk — see the
+/// recents module for details.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PaletteListResponse {
+    pub commands: Vec<CommandDto>,
+    pub recents: Vec<serde_json::Value>,
 }
 
 impl From<&Command> for CommandDto {
@@ -167,25 +186,60 @@ fn merge_context(state: &AppState, ui: PaletteUiContext) -> Context {
 // Commands
 // ─────────────────────────────────────────────────────────────────────
 
-/// Return the list of commands visible for the current merged context.
+/// Return the list of commands visible for the current merged context
+/// plus the user's recent action history.
 ///
 /// Takes `PaletteUiContext` inline because only the frontend knows which
 /// meeting is currently open in the assistant webview and whether text is
 /// selected. Backend state is resolved via `backend_flags`.
+///
+/// Recents are loaded fresh on every call (cheap — `~/.minutes/palette.json`
+/// is small) so multiple processes writing to the file stay consistent.
+/// Unknown-variant entries from a future client are filtered out of the
+/// returned list but preserved on disk.
 #[tauri::command]
-pub fn palette_list(state: State<'_, AppState>, ui: Option<PaletteUiContext>) -> Vec<CommandDto> {
+pub fn palette_list(
+    state: State<'_, AppState>,
+    ui: Option<PaletteUiContext>,
+) -> PaletteListResponse {
     let ctx = merge_context(&state, ui.unwrap_or_default());
-    visible_commands(&ctx)
+    let commands = visible_commands(&ctx)
         .iter()
         .map(CommandDto::from)
-        .collect()
+        .collect();
+
+    let recents_path = RecentsStore::default_path();
+    let recents_store = RecentsStore::load(&recents_path);
+    let recents: Vec<serde_json::Value> = recents_store
+        .visible()
+        .into_iter()
+        .filter_map(|action| serde_json::to_value(&action).ok())
+        .collect();
+
+    PaletteListResponse { commands, recents }
+}
+
+/// Push a successfully executed action to the recents store. Logged but
+/// non-fatal — a recents write failure must never break command
+/// execution.
+fn record_recent(action: &ActionId) {
+    let path = RecentsStore::default_path();
+    let mut store = RecentsStore::load(&path);
+    if let Err(e) = store.push_and_save(action, &path) {
+        eprintln!("[palette] could not persist recents: {}", e);
+    }
 }
 
 /// Execute an `ActionId` against the live app state. Exhaustive match
 /// directly on the core enum — adding a new variant in core forces a new
 /// arm here or this crate will not compile. Returns a `serde_json::Value`
-/// for now; a typed `ActionResponse` enum is planned for slice 2 to remove
-/// the only remaining untyped boundary.
+/// for now; a typed `ActionResponse` enum lands in slice 2c.
+///
+/// On a successful execution the action is pushed to the recents store
+/// **with its full hydrated payload** (`SearchTranscripts { query:
+/// "pricing" }`, not the bare `id`), so a re-run from the recents list
+/// retains the user's original input. Recents persistence failures are
+/// logged but never returned — they must not break command execution.
 #[tauri::command]
 pub fn palette_execute(
     app: AppHandle,
@@ -194,7 +248,21 @@ pub fn palette_execute(
     action: ActionId,
 ) -> Result<serde_json::Value, String> {
     let ui = ui.unwrap_or_default();
+    let action_for_recents = action.clone();
 
+    let result = dispatch_action(app, state, ui, action);
+    if result.is_ok() {
+        record_recent(&action_for_recents);
+    }
+    result
+}
+
+fn dispatch_action(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    ui: PaletteUiContext,
+    action: ActionId,
+) -> Result<serde_json::Value, String> {
     match action {
         // ── Recording ────────────────────────────────────────────
         ActionId::StartRecording => {

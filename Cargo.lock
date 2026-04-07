@@ -3131,7 +3131,7 @@ dependencies = [
 
 [[package]]
 name = "minutes-cli"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3157,7 +3157,7 @@ dependencies = [
 
 [[package]]
 name = "minutes-core"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -3191,7 +3191,7 @@ dependencies = [
 
 [[package]]
 name = "minutes-reader"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "chrono",
  "schemars 1.2.1",

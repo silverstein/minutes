@@ -1,9 +1,12 @@
 import { DemoPlayer } from "@/components/demo-player";
 import { CopyButton } from "@/components/copy-button";
 import { TopologyLoader } from "@/components/topology-loader";
-import manifest from "../../manifest.json";
 
-const APPLE_SILICON_DMG = `https://github.com/silverstein/minutes/releases/latest/download/Minutes_${manifest.version}_aarch64.dmg`;
+// Bump this in lockstep with manifest.json on every release.
+// Can't import manifest.json directly: Vercel's project root is site/, so
+// parent files aren't in the build context. See PRE-RELEASE-CHECKLIST.md §9.
+const APPLE_SILICON_DMG =
+  "https://github.com/silverstein/minutes/releases/latest/download/Minutes_0.10.4_aarch64.dmg";
 
 function SectionLabel({ n, label }: { n: string; label: string }) {
   return (

@@ -128,6 +128,11 @@ minutes dictate --stdout                         # Output to stdout instead of c
 ```
 Text streams progressively as you speak (partial results every 2 seconds). By default it accumulates across pauses and writes the combined text to clipboard + daily note when dictation ends. Set `[dictation] accumulate = false` to keep the older per-pause behavior. Local whisper, no cloud.
 
+### Command palette (desktop app)
+Press `⌘⇧K` from anywhere on macOS to open a keyboard-first palette of every Minutes command. Start a recording, drop a note into the active session, jump to the latest meeting, search transcripts, or rename the meeting open in your assistant — all without leaving the keyboard. Backed by a single typed command registry in `minutes-core`, so visibility follows real backend state: stop-recording only appears while you're recording, mid-recording dictation rows are hidden, and the list re-fetches automatically when state changes.
+
+Recents float to the top with their original payload intact (re-running a `Search transcripts: pricing` from history skips the retype). The hotkey is configurable in `~/.config/minutes/config.toml` under `[palette]`. Existing users upgrading from a previous version need to opt into the shortcut explicitly so it doesn't override existing IDE bindings; fresh installs get it on by default.
+
 ### Try it without a mic
 ```bash
 minutes demo --full                              # Seed 5 sample meetings (Snow Crash theme)

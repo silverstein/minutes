@@ -95,6 +95,7 @@ pub enum ActionId {
 
     // Navigation
     OpenLatestMeeting,
+    OpenLatestMeetingFromToday,
     OpenMeetingsFolder,
     OpenMemosFolder,
     OpenAssistantWorkspace,
@@ -115,6 +116,12 @@ pub enum ActionId {
 
     // Meeting-context actions (only visible with current_meeting)
     CopyMeetingMarkdown,
+    /// Rename the meeting that the assistant workspace currently points
+    /// at. The new title comes from the palette's PromptText input.
+    RenameCurrentMeeting {
+        #[serde(default, alias = "new_title", alias = "newTitle")]
+        new_title: Option<String>,
+    },
 }
 
 impl ActionId {
@@ -133,6 +140,7 @@ impl ActionId {
             ActionId::StartDictation => "start-dictation",
             ActionId::StopDictation => "stop-dictation",
             ActionId::OpenLatestMeeting => "open-latest-meeting",
+            ActionId::OpenLatestMeetingFromToday => "open-latest-meeting-from-today",
             ActionId::OpenMeetingsFolder => "open-meetings-folder",
             ActionId::OpenMemosFolder => "open-memos-folder",
             ActionId::OpenAssistantWorkspace => "open-assistant-workspace",
@@ -142,6 +150,7 @@ impl ActionId {
             ActionId::FindOpenActionItems => "find-open-action-items",
             ActionId::FindRecentDecisions => "find-recent-decisions",
             ActionId::CopyMeetingMarkdown => "copy-meeting-markdown",
+            ActionId::RenameCurrentMeeting { .. } => "rename-current-meeting",
         }
     }
 }
@@ -415,6 +424,15 @@ pub fn commands() -> Vec<Command> {
             input: InputKind::None,
         },
         Command {
+            id: ActionId::OpenLatestMeetingFromToday,
+            title: "Open latest meeting from today",
+            description: "Jump to the most recent meeting recorded today",
+            keywords: &["today", "latest", "today's"],
+            section: Section::Navigation,
+            visibility: Visibility::always(),
+            input: InputKind::None,
+        },
+        Command {
             id: ActionId::ShowUpcomingMeetings,
             title: "Show upcoming meetings",
             description: "Calendar-aware preview of what's next",
@@ -502,6 +520,18 @@ pub fn commands() -> Vec<Command> {
                 forbids: StateFlags::empty(),
             },
             input: InputKind::None,
+        },
+        Command {
+            id: ActionId::RenameCurrentMeeting { new_title: None },
+            title: "Rename current meeting",
+            description: "Type a new title for the open meeting",
+            keywords: &["rename", "title", "edit"],
+            section: Section::Search,
+            visibility: Visibility {
+                requires: StateFlags::MEETING_OPEN,
+                forbids: StateFlags::empty(),
+            },
+            input: InputKind::PromptText,
         },
     ]
 }
@@ -1085,13 +1115,13 @@ mod tests {
     #[test]
     fn registry_has_seed_commands() {
         let all = commands();
-        // Slice 1 ships the 18 commands with concrete dispatch arms in
-        // tauri/src-tauri/src/palette_dispatch.rs. New commands MUST land
-        // with a backing executor — no scaffolding entries.
+        // Slice 2 grows the registry to 20 commands. The two new
+        // entries since slice 1 are OpenLatestMeetingFromToday and
+        // RenameCurrentMeeting; both ship with backing dispatchers.
         assert_eq!(
             all.len(),
-            18,
-            "slice 1 should have exactly 18 commands with backing dispatchers"
+            20,
+            "slice 2 should have exactly 20 commands with backing dispatchers"
         );
     }
 
@@ -1153,6 +1183,7 @@ mod tests {
                 ActionId::SearchTranscripts { .. }
                     | ActionId::ResearchTopic { .. }
                     | ActionId::AddNote { .. }
+                    | ActionId::RenameCurrentMeeting { .. }
             );
             if parameterized {
                 assert_ne!(

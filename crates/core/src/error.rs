@@ -120,6 +120,9 @@ pub enum MarkdownError {
     #[error("failed to serialize frontmatter: {0}")]
     SerializationError(String),
 
+    #[error("rename refused: {0}")]
+    RenameRefused(String),
+
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 }

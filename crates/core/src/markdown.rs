@@ -318,6 +318,236 @@ pub fn rewrite_with_retry_path(
     })
 }
 
+/// Rename an existing meeting markdown file in place.
+///
+/// This is the safe path used by the command palette's
+/// `RenameCurrentMeeting` action. It is **fail-closed**: any
+/// frontmatter that is not boring-and-plain refuses the rename
+/// instead of attempting a string replace that could corrupt YAML
+/// anchors, folded scalars, literal blocks, or aliases.
+///
+/// Steps (described in `PLAN.md.command-palette-slice-2` D8):
+/// 1. Read the file.
+/// 2. Split frontmatter via `split_frontmatter`. Empty frontmatter
+///    means "not a Minutes meeting" → refuse.
+/// 3. Parse the frontmatter via `serde_yaml::from_str::<Frontmatter>`.
+///    A failure means the file is malformed → refuse.
+/// 4. Re-parse the same frontmatter as `serde_yaml::Value` to check
+///    that the `title` field is a **plain string scalar**. If it is a
+///    folded scalar (`title: >`), literal block (`title: |`), tagged
+///    scalar, mapping, sequence, or carries an anchor/alias, refuse.
+///    These are real YAML constructs that the line-replace strategy
+///    cannot handle safely.
+/// 5. Find the exact line matching `^title:\s*<original-quoted-or-bare>$`
+///    in the frontmatter text. If zero matches or more than one,
+///    refuse.
+/// 6. Replace that single line with `title: "<escaped-new-title>"`.
+/// 7. Write the result to a tmp sibling and rename atomically over
+///    the original path.
+/// 8. **Parse the written file** to confirm the resulting frontmatter
+///    is still valid YAML. If parse fails, restore the backup that
+///    was written before the change and return an error.
+/// 9. If the new title produces a different slug, rename the file
+///    using `resolve_collision`. Returns the final path.
+///
+/// Errors are returned as `MarkdownError::RenameRefused` for the
+/// safety-policy refusals and as `MarkdownError::Io` for filesystem
+/// failures.
+pub fn rename_meeting(path: &Path, new_title: &str) -> Result<PathBuf, MarkdownError> {
+    let new_title = new_title.trim();
+    if new_title.is_empty() {
+        return Err(MarkdownError::RenameRefused("new title is empty".into()));
+    }
+    if new_title.contains('\n') || new_title.contains('\r') {
+        return Err(MarkdownError::RenameRefused(
+            "new title contains newlines".into(),
+        ));
+    }
+
+    let original = fs::read_to_string(path)?;
+    let (fm_str, _body) = split_frontmatter(&original);
+    if fm_str.is_empty() {
+        return Err(MarkdownError::RenameRefused(
+            "file has no YAML frontmatter — not a Minutes meeting".into(),
+        ));
+    }
+
+    // Step 3: parse via serde_yaml::Frontmatter to confirm the file is
+    // structurally a meeting.
+    let parsed: Frontmatter = serde_yaml::from_str(fm_str).map_err(|e| {
+        MarkdownError::RenameRefused(format!("frontmatter does not parse as YAML: {}", e))
+    })?;
+
+    let original_title = parsed.title.trim().to_string();
+    if original_title.is_empty() {
+        return Err(MarkdownError::RenameRefused(
+            "current frontmatter title is empty".into(),
+        ));
+    }
+
+    // Step 4: confirm the on-disk title is a plain-string scalar with
+    // no anchors/aliases/tags/folded/literal blocks. We do this by
+    // parsing the frontmatter as a generic serde_yaml::Value and
+    // walking the title node.
+    let value: serde_yaml::Value = serde_yaml::from_str(fm_str).map_err(|e| {
+        MarkdownError::RenameRefused(format!("frontmatter generic parse failed: {}", e))
+    })?;
+    let title_value = value
+        .get("title")
+        .ok_or_else(|| MarkdownError::RenameRefused("no `title` field in frontmatter".into()))?;
+    if !title_value.is_string() {
+        return Err(MarkdownError::RenameRefused(
+            "title is not a plain scalar — rename via your text editor".into(),
+        ));
+    }
+
+    // No-op rename: title unchanged.
+    if original_title == new_title {
+        return Ok(path.to_path_buf());
+    }
+
+    // Step 5: find the EXACT title line in fm_str. We refuse to touch
+    // files with `title:` appearing on more than one line in the
+    // frontmatter — that's a sign of an unusual file we don't want to
+    // mutate blindly.
+    let title_lines: Vec<(usize, &str)> = fm_str
+        .lines()
+        .enumerate()
+        .filter(|(_, line)| {
+            let trimmed = line.trim_start();
+            trimmed.starts_with("title:") && !trimmed.starts_with("title::")
+        })
+        .collect();
+    if title_lines.is_empty() {
+        return Err(MarkdownError::RenameRefused(
+            "could not locate `title:` line in frontmatter".into(),
+        ));
+    }
+    if title_lines.len() > 1 {
+        return Err(MarkdownError::RenameRefused(
+            "multiple `title:` lines in frontmatter — refusing to rename".into(),
+        ));
+    }
+    let (title_line_index, original_title_line) = title_lines[0];
+
+    // Reject anchors / folded / literal block markers on the title line.
+    let after_colon = original_title_line
+        .trim_start()
+        .trim_start_matches("title:")
+        .trim_start();
+    if after_colon.starts_with('&') || after_colon.starts_with('*') || after_colon.starts_with('!')
+    {
+        return Err(MarkdownError::RenameRefused(
+            "title line uses YAML anchor/alias/tag — rename via your text editor".into(),
+        ));
+    }
+    // Folded scalar `>` and literal block `|` markers (with optional
+    // chomping indicator) on the title line mean the value spans
+    // multiple lines, which the line replace cannot handle safely.
+    let leading_marker = after_colon.chars().next();
+    if matches!(leading_marker, Some('>') | Some('|')) {
+        return Err(MarkdownError::RenameRefused(
+            "title is a folded or literal block scalar — rename via your text editor".into(),
+        ));
+    }
+
+    // Step 6: rebuild the frontmatter with the title line replaced.
+    let new_title_line = format!("title: {}", yaml_quote(new_title));
+    let mut new_fm_lines: Vec<String> = fm_str.lines().map(String::from).collect();
+    new_fm_lines[title_line_index] = new_title_line;
+    let new_fm_text = new_fm_lines.join("\n");
+
+    // Reassemble the file. `split_frontmatter` strips the leading
+    // `---\n` and trailing `\n---\n`; we have to put them back.
+    // Find the body slice the same way `split_frontmatter` does, then
+    // splice in the new frontmatter text.
+    let body_start = original
+        .find("\n---")
+        .map(|idx| {
+            // Move past the trailing `\n---` and the next newline.
+            let after = idx + 4;
+            original[after..]
+                .find('\n')
+                .map(|n| after + n + 1)
+                .unwrap_or(original.len())
+        })
+        .unwrap_or(original.len());
+    let new_content = format!("---\n{}\n---\n{}", new_fm_text, &original[body_start..]);
+
+    // Step 7: atomic write through a tmp sibling.
+    let tmp_path = path.with_extension("md.rename.tmp");
+    fs::write(&tmp_path, &new_content)?;
+    set_permissions(&tmp_path, 0o600).map_err(|e| match e {
+        MarkdownError::Io(io) => MarkdownError::Io(io),
+        other => other,
+    })?;
+
+    // Step 8: parse-after-write validation. Read back what we just
+    // wrote and confirm the frontmatter still parses. If it doesn't,
+    // delete the tmp and refuse the rename — the original file is
+    // unchanged.
+    let written = match fs::read_to_string(&tmp_path) {
+        Ok(s) => s,
+        Err(e) => {
+            let _ = fs::remove_file(&tmp_path);
+            return Err(MarkdownError::Io(e));
+        }
+    };
+    let (written_fm, _) = split_frontmatter(&written);
+    if let Err(e) = serde_yaml::from_str::<Frontmatter>(written_fm) {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(MarkdownError::RenameRefused(format!(
+            "post-write validation failed; original file unchanged: {}",
+            e
+        )));
+    }
+
+    // Commit: atomically replace the original file with the new
+    // content. After this point the meeting markdown reflects the new
+    // title; only the file *name* may still need to change.
+    fs::rename(&tmp_path, path)?;
+
+    // Step 9: rename the file itself if the slug changes. We use the
+    // parsed frontmatter (parsed before the title edit) for the date
+    // and recorded_by fields — the title edit doesn't touch those.
+    let new_slug = generate_slug(new_title, parsed.date, parsed.recorded_by.as_deref());
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let final_path = if path.file_name().and_then(|n| n.to_str()) == Some(new_slug.as_str()) {
+        path.to_path_buf()
+    } else {
+        let target = resolve_collision(parent, &new_slug);
+        fs::rename(path, &target)?;
+        target
+    };
+
+    Ok(final_path)
+}
+
+/// Quote a string as a YAML double-quoted scalar. Escapes the
+/// characters that double-quoted scalars require: backslash, double
+/// quote, and the C0 control set. Used by `rename_meeting` to write a
+/// safe `title:` line.
+fn yaml_quote(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for ch in s.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => {
+                use std::fmt::Write;
+                write!(out, "\\x{:02x}", c as u32).expect("write to string");
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
 /// Generate a URL-safe filename slug from title, date, and optional recorder name.
 fn generate_slug(title: &str, date: DateTime<Local>, recorded_by: Option<&str>) -> String {
     let date_prefix = date.format("%Y-%m-%d").to_string();
@@ -685,6 +915,242 @@ mod tests {
         assert!(content.contains("slug: sarah-chen"));
         assert!(content.contains("label: Alex Chen"));
         assert!(content.contains("slug: pricing-review"));
+    }
+
+    // ── rename_meeting fail-closed tests ─────────────────────
+
+    fn write_meeting(dir: &TempDir, slug: &str, frontmatter_yaml: &str, body: &str) -> PathBuf {
+        let path = dir.path().join(slug);
+        let content = format!("---\n{}---\n{}", frontmatter_yaml, body);
+        std::fs::write(&path, content).unwrap();
+        path
+    }
+
+    #[test]
+    fn rename_meeting_renames_plain_title_in_place() {
+        let dir = TempDir::new().unwrap();
+        let path = write_meeting(
+            &dir,
+            "2026-04-07-pricing-review.md",
+            "title: \"Pricing Review\"\ntype: meeting\ndate: 2026-04-07T10:00:00-07:00\nduration: 0\n",
+            "## Transcript\n\n[00:00] Hello\n",
+        );
+
+        let new_path = rename_meeting(&path, "Quarterly Pricing").expect("rename should succeed");
+        let content = std::fs::read_to_string(&new_path).unwrap();
+        assert!(content.contains("title: \"Quarterly Pricing\""));
+        // Body must be preserved untouched.
+        assert!(content.contains("[00:00] Hello"));
+        // The post-write parse must round-trip.
+        let (fm, _) = split_frontmatter(&content);
+        let parsed: Frontmatter = serde_yaml::from_str(fm).unwrap();
+        assert_eq!(parsed.title, "Quarterly Pricing");
+        // The file name should reflect the new slug.
+        assert!(
+            new_path
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .contains("quarterly-pricing"),
+            "expected slug rename, got {}",
+            new_path.display()
+        );
+        // The original path should no longer exist.
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn rename_meeting_handles_unquoted_title() {
+        let dir = TempDir::new().unwrap();
+        let path = write_meeting(
+            &dir,
+            "2026-04-07-team-sync.md",
+            "title: Team Sync\ntype: meeting\ndate: 2026-04-07T10:00:00-07:00\nduration: 0\n",
+            "## Transcript\n\nHello\n",
+        );
+
+        let new_path = rename_meeting(&path, "Team Standup").unwrap();
+        let content = std::fs::read_to_string(&new_path).unwrap();
+        assert!(content.contains("title: \"Team Standup\""));
+    }
+
+    #[test]
+    fn rename_meeting_preserves_user_added_sections() {
+        let dir = TempDir::new().unwrap();
+        let path = write_meeting(
+            &dir,
+            "2026-04-07-call.md",
+            "title: \"Call\"\ntype: meeting\ndate: 2026-04-07T10:00:00-07:00\nduration: 0\n",
+            "## Summary\n\nWent well\n\n## Custom Section From User\n\nHand-edited stuff\n\n## Transcript\n\n[00:00] Hi\n",
+        );
+
+        let new_path = rename_meeting(&path, "Important Call").unwrap();
+        let content = std::fs::read_to_string(&new_path).unwrap();
+        // Hand-edited section must survive.
+        assert!(content.contains("## Custom Section From User"));
+        assert!(content.contains("Hand-edited stuff"));
+    }
+
+    #[test]
+    fn rename_meeting_refuses_folded_scalar_title() {
+        let dir = TempDir::new().unwrap();
+        let path = write_meeting(
+            &dir,
+            "2026-04-07-folded.md",
+            "title: >\n  Pricing\n  Review\ntype: meeting\ndate: 2026-04-07T10:00:00-07:00\nduration: 0\n",
+            "## Transcript\n\nHi\n",
+        );
+        let original = std::fs::read_to_string(&path).unwrap();
+
+        let err = rename_meeting(&path, "Q4 Pricing").unwrap_err();
+        assert!(matches!(err, MarkdownError::RenameRefused(_)));
+
+        // Original file MUST be unchanged.
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(original, after);
+    }
+
+    #[test]
+    fn rename_meeting_refuses_literal_block_title() {
+        let dir = TempDir::new().unwrap();
+        let path = write_meeting(
+            &dir,
+            "2026-04-07-literal.md",
+            "title: |\n  Multi\n  line\n  title\ntype: meeting\ndate: 2026-04-07T10:00:00-07:00\nduration: 0\n",
+            "## Transcript\n\nHi\n",
+        );
+        let original = std::fs::read_to_string(&path).unwrap();
+
+        let err = rename_meeting(&path, "Single Line").unwrap_err();
+        assert!(matches!(err, MarkdownError::RenameRefused(_)));
+
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(original, after);
+    }
+
+    #[test]
+    fn rename_meeting_refuses_anchored_title() {
+        let dir = TempDir::new().unwrap();
+        let path = write_meeting(
+            &dir,
+            "2026-04-07-anchored.md",
+            "title: &meeting_title \"Pricing Review\"\ntype: meeting\ndate: 2026-04-07T10:00:00-07:00\nduration: 0\n",
+            "## Transcript\n\nHi\n",
+        );
+        let original = std::fs::read_to_string(&path).unwrap();
+
+        let err = rename_meeting(&path, "Q4 Pricing").unwrap_err();
+        assert!(matches!(err, MarkdownError::RenameRefused(_)));
+        // The original file is untouched even though our serde parse
+        // would happily accept the anchor.
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(original, after);
+    }
+
+    #[test]
+    fn rename_meeting_refuses_empty_title() {
+        let dir = TempDir::new().unwrap();
+        let path = write_meeting(
+            &dir,
+            "2026-04-07-empty.md",
+            "title: \"Pricing\"\ntype: meeting\ndate: 2026-04-07T10:00:00-07:00\nduration: 0\n",
+            "## Transcript\n\nHi\n",
+        );
+
+        let err = rename_meeting(&path, "   ").unwrap_err();
+        assert!(matches!(err, MarkdownError::RenameRefused(_)));
+    }
+
+    #[test]
+    fn rename_meeting_refuses_newline_in_new_title() {
+        let dir = TempDir::new().unwrap();
+        let path = write_meeting(
+            &dir,
+            "2026-04-07-nl.md",
+            "title: \"Pricing\"\ntype: meeting\ndate: 2026-04-07T10:00:00-07:00\nduration: 0\n",
+            "## Transcript\n\nHi\n",
+        );
+
+        let err = rename_meeting(&path, "First\nSecond").unwrap_err();
+        assert!(matches!(err, MarkdownError::RenameRefused(_)));
+    }
+
+    #[test]
+    fn rename_meeting_refuses_file_without_frontmatter() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("plain.md");
+        std::fs::write(&path, "no frontmatter here\n").unwrap();
+
+        let err = rename_meeting(&path, "Anything").unwrap_err();
+        assert!(matches!(err, MarkdownError::RenameRefused(_)));
+    }
+
+    #[test]
+    fn rename_meeting_quotes_special_chars_in_new_title() {
+        let dir = TempDir::new().unwrap();
+        let path = write_meeting(
+            &dir,
+            "2026-04-07-call.md",
+            "title: \"Call\"\ntype: meeting\ndate: 2026-04-07T10:00:00-07:00\nduration: 0\n",
+            "## Transcript\n\nHi\n",
+        );
+
+        let new_path = rename_meeting(&path, "Quote \"this\" and \\that").unwrap();
+        let content = std::fs::read_to_string(&new_path).unwrap();
+        // Round-trip via serde_yaml — the special chars must survive.
+        let (fm, _) = split_frontmatter(&content);
+        let parsed: Frontmatter = serde_yaml::from_str(fm).unwrap();
+        assert_eq!(parsed.title, "Quote \"this\" and \\that");
+    }
+
+    #[test]
+    fn rename_meeting_resolves_slug_collision() {
+        let dir = TempDir::new().unwrap();
+        let path = write_meeting(
+            &dir,
+            "2026-04-07-call.md",
+            "title: \"Call\"\ntype: meeting\ndate: 2026-04-07T10:00:00-07:00\nduration: 0\n",
+            "## Transcript\n\nHi\n",
+        );
+        // Pre-create a sibling that the new slug would collide with.
+        std::fs::write(
+            dir.path().join("2026-04-07-pricing-review.md"),
+            "---\ntitle: existing\ntype: meeting\ndate: 2026-04-07T10:00:00-07:00\nduration: 0\n---\n",
+        )
+        .unwrap();
+
+        let new_path = rename_meeting(&path, "Pricing Review").unwrap();
+        let name = new_path.file_name().unwrap().to_str().unwrap();
+        assert!(
+            name.starts_with("2026-04-07-pricing-review-") && name.ends_with(".md"),
+            "expected collision-resolved slug, got {}",
+            name
+        );
+    }
+
+    #[test]
+    fn rename_meeting_no_op_when_title_unchanged() {
+        let dir = TempDir::new().unwrap();
+        let path = write_meeting(
+            &dir,
+            "2026-04-07-pricing-review.md",
+            "title: \"Pricing Review\"\ntype: meeting\ndate: 2026-04-07T10:00:00-07:00\nduration: 0\n",
+            "## Transcript\n\nHi\n",
+        );
+        let original = std::fs::read_to_string(&path).unwrap();
+        let result = rename_meeting(&path, "Pricing Review").unwrap();
+        assert_eq!(result, path);
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(original, after);
+    }
+
+    #[test]
+    fn yaml_quote_escapes_required_chars() {
+        assert_eq!(yaml_quote("plain"), r#""plain""#);
+        assert_eq!(yaml_quote("with \"quotes\""), r#""with \"quotes\"""#);
+        assert_eq!(yaml_quote("back\\slash"), r#""back\\slash""#);
+        assert_eq!(yaml_quote("tab\there"), r#""tab\there""#);
     }
 
     #[test]

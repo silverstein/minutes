@@ -1,6 +1,7 @@
 # Agent Instructions
 
 This project uses **bd** (beads) for issue tracking. Run `bd onboard` to get started.
+In this repo, beads is **local-only**: use it for structured issue tracking on your machine, but do not expect a shared Dolt remote.
 
 ## Quick Reference
 
@@ -9,7 +10,6 @@ bd ready              # Find available work
 bd show <id>          # View issue details
 bd update <id> --claim  # Claim work atomically
 bd close <id>         # Complete work
-bd dolt push          # Push beads data to remote
 ```
 
 ## GitHub Discussions
@@ -79,7 +79,7 @@ Why:
 ### Why bd?
 
 - Dependency-aware: Track blockers and relationships between issues
-- Git-friendly: Dolt-powered version control with native sync
+- Git-friendly: Dolt-backed local history for issue state
 - Agent-optimized: JSON output, ready work detection, discovered-from links
 - Prevents duplicate tracking systems and confusion
 
@@ -136,13 +136,13 @@ bd close bd-42 --reason "Completed" --json
    - `bd create "Found bug" --description="Details about what was found" -p 1 --deps discovered-from:<parent-id>`
 5. **Complete**: `bd close <id> --reason "Done"`
 
-### Auto-Sync
+### Local-Only Storage
 
-bd automatically syncs via Dolt:
+bd writes issue state into the local beads/Dolt store for this repo.
 
-- Each write auto-commits to Dolt history
-- Use `bd dolt push`/`bd dolt pull` for remote sync
-- No manual export/import needed!
+- Each write auto-commits to local Dolt history
+- This repo does **not** use a configured Dolt remote
+- Do not require `bd dolt push`/`bd dolt pull` in landing workflows unless the repo is explicitly reconfigured later
 
 ### Important Rules
 
@@ -168,7 +168,6 @@ For more details, see README.md and docs/QUICKSTART.md.
 4. **PUSH TO REMOTE** - This is MANDATORY:
    ```bash
    git pull --rebase
-   bd dolt push
    git push
    git status  # MUST show "up to date with origin"
    ```

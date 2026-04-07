@@ -1057,17 +1057,27 @@ fn categorize_device(
 ///
 /// Compiles to a const `false` on platforms where cpal doesn't expose a
 /// `HostId::PipeWire` variant (macOS, Windows, etc.), so callers don't need
-/// their own cfg guards.
+/// their own cfg guards. The `#[cfg]` set matches cpal's own pipewire feature
+/// gate (`linux | dragonfly | freebsd | netbsd`) so BSD-with-PipeWire users
+/// get the fix too.
+#[cfg(any(
+    target_os = "linux",
+    target_os = "dragonfly",
+    target_os = "freebsd",
+    target_os = "netbsd"
+))]
 fn is_pipewire_host(host_id: cpal::HostId) -> bool {
-    #[cfg(target_os = "linux")]
-    {
-        matches!(host_id, cpal::HostId::PipeWire)
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = host_id;
-        false
-    }
+    matches!(host_id, cpal::HostId::PipeWire)
+}
+
+#[cfg(not(any(
+    target_os = "linux",
+    target_os = "dragonfly",
+    target_os = "freebsd",
+    target_os = "netbsd"
+)))]
+fn is_pipewire_host(_: cpal::HostId) -> bool {
+    false
 }
 
 pub fn selected_input_device_name(config: &Config) -> Result<String, CaptureError> {

@@ -19,6 +19,8 @@ pub struct CallSourceHealth {
     pub backend: String,
     pub mic_live: bool,
     pub call_audio_live: bool,
+    pub mic_level: u32,
+    pub call_audio_level: u32,
     pub last_update: String,
 }
 
@@ -80,6 +82,8 @@ impl NativeCallCaptureSession {
                 backend: "screencapturekit-helper".into(),
                 mic_live: false,
                 call_audio_live: false,
+                mic_level: 0,
+                call_audio_level: 0,
                 last_update: chrono::Local::now().to_rfc3339(),
             })
     }
@@ -183,6 +187,8 @@ pub fn start_native_call_capture() -> Result<NativeCallCaptureSession, String> {
         backend: "screencapturekit-helper".into(),
         mic_live: false,
         call_audio_live: false,
+        mic_level: 0,
+        call_audio_level: 0,
         last_update: chrono::Local::now().to_rfc3339(),
     }));
     let mut child = Command::new(helper)
@@ -253,6 +259,16 @@ pub fn start_native_call_capture() -> Result<NativeCallCaptureSession, String> {
                                 .get("call_audio_live")
                                 .and_then(|v| v.as_bool())
                                 .unwrap_or(false);
+                            current.mic_level = value
+                                .get("mic_level")
+                                .and_then(|v| v.as_u64())
+                                .map(|v| v as u32)
+                                .unwrap_or(0);
+                            current.call_audio_level = value
+                                .get("call_audio_level")
+                                .and_then(|v| v.as_u64())
+                                .map(|v| v as u32)
+                                .unwrap_or(0);
                             current.last_update = chrono::Local::now().to_rfc3339();
                         }
                     }

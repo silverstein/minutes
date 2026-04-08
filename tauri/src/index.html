@@ -3379,8 +3379,6 @@
 
     // History for smooth animation
     const barHeights = new Array(NUM_BARS).fill(3);
-    let recordingVizTick = 0;
-
     function parentPath(path) {
       if (!path) return path;
       const normalized = path.replace(/[\\/]+$/, '');
@@ -3424,9 +3422,9 @@
       for (let i = 0; i < NUM_BARS - 1; i++) {
         barHeights[i] = barHeights[i + 1];
       }
-      // Map 0-100 to 3-28px with some randomness for natural feel
-      const jitter = level > 5 ? (Math.random() - 0.5) * level * 0.3 : 0;
-      barHeights[NUM_BARS - 1] = Math.max(3, Math.min(28, (level / 100) * 28 + jitter));
+      // Map 0-100 to 3-28px without synthetic jitter so the waveform tracks
+      // actual audio levels instead of feeling theatrical.
+      barHeights[NUM_BARS - 1] = Math.max(3, Math.min(28, (level / 100) * 28));
 
       for (let i = 0; i < NUM_BARS; i++) {
         bars[i].style.height = barHeights[i] + 'px';
@@ -3441,18 +3439,13 @@
       const callHealth = status.callCaptureHealth;
       if (!callHealth) return 0;
 
-      const micLive = !!callHealth.mic_live;
-      const callLive = !!callHealth.call_audio_live;
-      if (!micLive && !callLive) return 0;
+      const micLevel = Number(callHealth.mic_level || 0);
+      const callLevel = Number(callHealth.call_audio_level || 0);
+      if (micLevel > 0 || callLevel > 0) {
+        return Math.max(micLevel, callLevel);
+      }
 
-      // Native call capture currently exposes liveness but not levels.
-      // Keep the waveform visibly alive with a gentle deterministic pulse
-      // so the UI matches the "Mic live / Call audio live" chips.
-      recordingVizTick += 1;
-      const base = micLive && callLive ? 34 : 24;
-      const swing = micLive && callLive ? 18 : 12;
-      const phase = recordingVizTick / 2.5;
-      return Math.max(8, Math.min(70, base + Math.sin(phase) * swing));
+      return 0;
     }
 
     function playCue(name) {

@@ -10,12 +10,13 @@ final class NativeCallRecorder: NSObject, SCRecordingOutputDelegate, SCStreamOut
     private var recordingOutput: SCRecordingOutput?
     private let outputURL: URL
     private let sampleQueue = DispatchQueue(label: "minutes.system-audio.samples")
-    private let monitorQueue = DispatchQueue(label: "minutes.system-audio.monitor")
     private var monitorTimer: DispatchSourceTimer?
     private var lastSystemAudioSampleAt: Date?
     private var lastMicSampleAt: Date?
     private var lastReportedSystemLive = false
     private var lastReportedMicLive = false
+    private var latestSystemLevel: UInt32 = 0
+    private var latestMicLevel: UInt32 = 0
 
     // Per-source stem writers
     private var voiceStemFile: AVAudioFile?
@@ -111,26 +112,36 @@ final class NativeCallRecorder: NSObject, SCRecordingOutputDelegate, SCStreamOut
     }
 
     private func startMonitoring() {
-        let timer = DispatchSource.makeTimerSource(queue: monitorQueue)
-        timer.schedule(deadline: .now(), repeating: .milliseconds(500))
+        let timer = DispatchSource.makeTimerSource(queue: sampleQueue)
+        timer.schedule(deadline: .now(), repeating: .milliseconds(150))
         timer.setEventHandler { [weak self] in
             guard let self else { return }
             let now = Date()
             let systemLive = self.lastSystemAudioSampleAt.map { now.timeIntervalSince($0) < 1.5 } ?? false
             let micLive = self.lastMicSampleAt.map { now.timeIntervalSince($0) < 1.5 } ?? false
-            if systemLive != self.lastReportedSystemLive || micLive != self.lastReportedMicLive {
-                self.lastReportedSystemLive = systemLive
-                self.lastReportedMicLive = micLive
-                let payload: [String: Any] = [
-                    "event": "health",
-                    "call_audio_live": systemLive,
-                    "mic_live": micLive
-                ]
-                if let data = try? JSONSerialization.data(withJSONObject: payload),
-                   let json = String(data: data, encoding: .utf8) {
-                    print(json)
-                    fflush(stdout)
-                }
+            if !systemLive {
+                self.latestSystemLevel = 0
+            }
+            if !micLive {
+                self.latestMicLevel = 0
+            }
+
+            let shouldEmit = systemLive || micLive || systemLive != self.lastReportedSystemLive || micLive != self.lastReportedMicLive
+            guard shouldEmit else { return }
+
+            self.lastReportedSystemLive = systemLive
+            self.lastReportedMicLive = micLive
+            let payload: [String: Any] = [
+                "event": "health",
+                "call_audio_live": systemLive,
+                "mic_live": micLive,
+                "call_audio_level": self.latestSystemLevel,
+                "mic_level": self.latestMicLevel
+            ]
+            if let data = try? JSONSerialization.data(withJSONObject: payload),
+               let json = String(data: data, encoding: .utf8) {
+                print(json)
+                fflush(stdout)
             }
         }
         timer.resume()
@@ -266,6 +277,22 @@ final class NativeCallRecorder: NSObject, SCRecordingOutputDelegate, SCStreamOut
                 }
                 monoPtr[frame] = sum / Float(channelCount)
             }
+        }
+
+        var sumSquares: Float = 0
+        for frame in 0..<Int(frameCount) {
+            let sample = monoPtr[frame]
+            sumSquares += sample * sample
+        }
+        let rms = sqrt(sumSquares / max(Float(frameCount), 1))
+        let level = UInt32(min(100.0, max(0.0, Double(rms) * 2000.0)))
+        switch source {
+        case .microphone:
+            latestMicLevel = level
+        case .audio:
+            latestSystemLevel = level
+        default:
+            break
         }
 
         do {

@@ -5161,6 +5161,7 @@
         agentCmdSel.value = currentCmd;
         document.getElementById('settings-agent-command-status').textContent = sumAgents.find(a => a.name === currentCmd) ? 'Installed' : 'Custom command';
         } catch(e) { console.error('agent command picker:', e); }
+        setSettingsToggle('settings-screen-share', Boolean(s.privacy?.hide_from_screen_share));
         setSettingsToggle('settings-screen-context', s.screen_context.enabled);
         document.getElementById('settings-screen-interval-row').style.display = s.screen_context.enabled ? '' : 'none';
         document.getElementById('settings-screen-interval').value = String(s.screen_context.interval_secs);
@@ -6275,9 +6276,15 @@
       }
     });
 
-    document.getElementById('settings-screen-share').addEventListener('click', () => {
-      const b = document.getElementById('settings-screen-share');
-      setSettingsToggle('settings-screen-share', b.textContent!=='On');
+    document.getElementById('settings-screen-share').addEventListener('click', async () => {
+      try {
+        const s = await invoke('cmd_get_settings');
+        const next = !Boolean(s.privacy?.hide_from_screen_share);
+        await invoke('cmd_set_screen_share_hidden', { hidden: next });
+        setSettingsToggle('settings-screen-share', next);
+      } catch (e) {
+        console.error('Set screen share privacy:', e);
+      }
     });
     notificationToggle.addEventListener('click', async () => {
       const next = !notifyOnCompletion;

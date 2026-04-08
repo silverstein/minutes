@@ -20,6 +20,7 @@ pub struct Config {
     pub security: SecurityConfig,
     pub watch: WatchConfig,
     pub assistant: AssistantConfig,
+    pub privacy: PrivacyConfig,
     pub screen_context: ScreenContextConfig,
     pub calendar: CalendarConfig,
     pub call_detection: CallDetectionConfig,
@@ -185,6 +186,12 @@ pub struct ScreenContextConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
+pub struct PrivacyConfig {
+    pub hide_from_screen_share: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct AssistantConfig {
     pub agent: String,
     pub agent_args: Vec<String>,
@@ -199,6 +206,14 @@ pub struct CalendarConfig {
 impl Default for CalendarConfig {
     fn default() -> Self {
         Self { enabled: true }
+    }
+}
+
+impl Default for PrivacyConfig {
+    fn default() -> Self {
+        Self {
+            hide_from_screen_share: true,
+        }
     }
 }
 
@@ -486,6 +501,7 @@ impl Default for Config {
             security: SecurityConfig::default(),
             watch: WatchConfig::default(),
             assistant: AssistantConfig::default(),
+            privacy: PrivacyConfig::default(),
             screen_context: ScreenContextConfig::default(),
             calendar: CalendarConfig::default(),
             call_detection: CallDetectionConfig::default(),

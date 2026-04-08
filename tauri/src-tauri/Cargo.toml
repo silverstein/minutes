@@ -5,9 +5,11 @@ edition = "2021"
 description = "Minutes — menu bar app for conversation memory"
 
 [features]
-cuda = ["minutes-core/cuda"]
-metal = ["minutes-core/metal"]
 coreml = ["minutes-core/coreml"]
+cuda = ["minutes-core/cuda"]
+hipblas = ["minutes-core/hipblas"]
+metal = ["minutes-core/metal"]
+vulkan = ["minutes-core/vulkan"]
 
 [dependencies]
 tauri = { version = "2", features = ["tray-icon", "image-png", "devtools", "macos-private-api"] }

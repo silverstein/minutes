@@ -18,9 +18,11 @@ path = "src/main.rs"
 [features]
 default = ["diarize"]
 diarize = ["minutes-core/diarize", "dep:pyannote-rs", "dep:ort", "dep:symphonia"]
-cuda = ["minutes-core/cuda"]
-metal = ["minutes-core/metal"]
 coreml = ["minutes-core/coreml"]
+cuda = ["minutes-core/cuda"]
+hipblas = ["minutes-core/hipblas"]
+metal = ["minutes-core/metal"]
+vulkan = ["minutes-core/vulkan"]
 
 [dependencies]
 minutes-core = { path = "../core", version = "0.11.0", features = ["streaming"] }

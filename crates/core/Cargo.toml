@@ -14,9 +14,11 @@ default = ["whisper"]
 whisper = ["dep:whisper-rs", "whisper-guard/whisper"]
 parakeet = ["dep:tempfile"]  # subprocess-based, uses tempfile for concurrent safety
 diarize = ["dep:pyannote-rs", "dep:ort", "dep:ndarray"]
-cuda = ["whisper-rs/cuda"]
-metal = ["whisper-rs/metal"]
 coreml = ["whisper-rs/coreml"]
+cuda = ["whisper-rs/cuda"]
+hipblas = ["whisper-rs/hipblas"]
+metal = ["whisper-rs/metal"]
+vulkan = ["whisper-rs/vulkan"]
 streaming = ["dep:crossbeam-channel"]
 denoise = ["dep:nnnoiseless"]
 

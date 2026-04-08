@@ -98,18 +98,32 @@ fn show_main_window(app: &tauri::AppHandle) {
     }
     if let Ok(win) = WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
         .title("Minutes")
-        .inner_size(480.0, 640.0)
-        .min_inner_size(380.0, 480.0)
+        .inner_size(520.0, 640.0)
+        .min_inner_size(460.0, 480.0)
         .transparent(true)
         .content_protected(true)
+        .theme(Some(tauri::Theme::Dark))
         .center()
         .focused(true)
         .build()
     {
         #[cfg(target_os = "macos")]
         {
-            use window_vibrancy::{apply_vibrancy, NSVisualEffectMaterial};
-            apply_vibrancy(&win, NSVisualEffectMaterial::Sidebar, None, None).ok();
+            use window_vibrancy::{apply_vibrancy, NSVisualEffectMaterial, NSVisualEffectState};
+            // HudWindow is the macOS-blessed material for floating panels that
+            // must stay readable regardless of what content sits behind them.
+            // Sidebar (the previous choice) is adaptive — it samples background
+            // luminance and washes out over bright content, which made white text
+            // hard to read when Minutes was in front of light apps like Slack.
+            // Active state pins the effect on so it doesn't desaturate when the
+            // window loses focus.
+            apply_vibrancy(
+                &win,
+                NSVisualEffectMaterial::HudWindow,
+                Some(NSVisualEffectState::Active),
+                None,
+            )
+            .ok();
         }
     }
 }

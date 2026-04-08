@@ -2,7 +2,7 @@
   "$schema": "https://raw.githubusercontent.com/nicedoc/tauri/dev/crates/tauri-cli/schema.json",
   "productName": "Minutes",
   "identifier": "com.useminutes.desktop",
-  "version": "0.10.4",
+  "version": "0.11.0",
   "build": {
     "frontendDist": "../src"
   },

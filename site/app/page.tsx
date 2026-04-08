@@ -6,7 +6,7 @@ import { TopologyLoader } from "@/components/topology-loader";
 // Can't import manifest.json directly: Vercel's project root is site/, so
 // parent files aren't in the build context. See PRE-RELEASE-CHECKLIST.md §9.
 const APPLE_SILICON_DMG =
-  "https://github.com/silverstein/minutes/releases/latest/download/Minutes_0.10.4_aarch64.dmg";
+  "https://github.com/silverstein/minutes/releases/latest/download/Minutes_0.11.0_aarch64.dmg";
 
 function SectionLabel({ n, label }: { n: string; label: string }) {
   return (

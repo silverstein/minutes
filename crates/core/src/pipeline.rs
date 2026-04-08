@@ -90,12 +90,11 @@ fn single_stem_speaker_self_attribution(
     config: &Config,
     voice_result: &VoiceMatchResult,
     diarization_from_stems: bool,
-    diarization_num_speakers: usize,
     transcript: &str,
     transcript_labels: &[String],
     l2_labels: &std::collections::HashSet<String>,
 ) -> Option<diarize::SpeakerAttribution> {
-    if !diarization_from_stems || diarization_num_speakers != 1 || !l2_labels.is_empty() {
+    if !diarization_from_stems || !l2_labels.is_empty() {
         return None;
     }
 
@@ -571,7 +570,6 @@ where
             config,
             &voice_result,
             diarization_from_stems,
-            diarization_num_speakers,
             &transcript,
             &transcript_labels,
             &l2_labels,
@@ -995,7 +993,6 @@ where
             config,
             &voice_result,
             diarization_from_stems,
-            diarization_num_speakers,
             &transcript,
             &transcript_labels,
             &l2_labels,
@@ -1855,7 +1852,6 @@ mod tests {
             &config,
             &voice_result,
             true,
-            1,
             "[SPEAKER_0 0:00] hello\n",
             &labels,
             &l2_labels,
@@ -1884,7 +1880,6 @@ mod tests {
             &config,
             &voice_result,
             true,
-            1,
             "[SPEAKER_2 0:00] hello\n",
             &labels,
             &l2_labels,
@@ -1895,7 +1890,6 @@ mod tests {
             &config,
             &voice_result,
             false,
-            1,
             "[SPEAKER_0 0:00] hello\n",
             &["SPEAKER_0".to_string()],
             &std::collections::HashSet::new(),
@@ -1908,7 +1902,6 @@ mod tests {
             &config,
             &voice_result,
             true,
-            1,
             "[SPEAKER_0 0:00] hello\n",
             &["SPEAKER_0".to_string()],
             &mapped,
@@ -1930,7 +1923,6 @@ mod tests {
             &config,
             &voice_result,
             true,
-            1,
             "[UNKNOWN 0:00] Hello there\n",
             &[],
             &std::collections::HashSet::new(),

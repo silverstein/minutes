@@ -84,6 +84,43 @@ fn match_speakers_by_voice(
     }
 }
 
+fn single_stem_speaker_self_attribution(
+    config: &Config,
+    voice_result: &VoiceMatchResult,
+    diarization_from_stems: bool,
+    diarization_num_speakers: usize,
+    transcript_labels: &[String],
+    l2_labels: &std::collections::HashSet<String>,
+) -> Option<diarize::SpeakerAttribution> {
+    if !diarization_from_stems
+        || diarization_num_speakers != 1
+        || transcript_labels.len() != 1
+        || transcript_labels[0] != "SPEAKER_0"
+        || !l2_labels.is_empty()
+    {
+        return None;
+    }
+
+    let my_name = config.identity.name.as_ref()?;
+    let my_confidence = if voice_result.self_profile_exists {
+        diarize::Confidence::High
+    } else {
+        diarize::Confidence::Medium
+    };
+    let my_source = if voice_result.self_profile_exists {
+        diarize::AttributionSource::Enrollment
+    } else {
+        diarize::AttributionSource::Deterministic
+    };
+
+    Some(diarize::SpeakerAttribution {
+        speaker_label: transcript_labels[0].clone(),
+        name: my_name.clone(),
+        confidence: my_confidence,
+        source: my_source,
+    })
+}
+
 // ──────────────────────────────────────────────────────────────
 // Pipeline orchestration:
 //
@@ -362,6 +399,7 @@ where
 
     let mut transcript = artifact.transcript.clone();
     let mut diarization_num_speakers = 0usize;
+    let mut diarization_from_stems = false;
     let mut diarization_embeddings: std::collections::HashMap<String, Vec<f32>> =
         std::collections::HashMap::new();
     if config.diarization.engine != "none" && artifact.frontmatter.r#type == ContentType::Meeting {
@@ -370,6 +408,7 @@ where
         if let Some(result) = diarize::diarize(audio_path, config) {
             let diarize_ms = diarize_start.elapsed().as_millis() as u64;
             diarization_num_speakers = result.num_speakers;
+            diarization_from_stems = result.from_stems;
             diarization_embeddings = result.speaker_embeddings.clone();
             logging::log_step(
                 "diarize",
@@ -453,7 +492,7 @@ where
     if diarization_num_speakers > 0 && artifact.frontmatter.r#type == ContentType::Meeting {
         // Level 2: Voice enrollment matching via embedding cosine similarity.
         let voice_result = match_speakers_by_voice(config, &diarization_embeddings);
-        speaker_map.extend(voice_result.attributions);
+        speaker_map.extend(voice_result.attributions.clone());
 
         // Level 0: deterministic 1-on-1 mapping (skip if Level 2 already matched)
         let transcript_labels = crate::summarize::extract_speaker_labels_pub(&transcript);
@@ -498,6 +537,17 @@ where
                     });
                 }
             }
+        }
+
+        if let Some(attr) = single_stem_speaker_self_attribution(
+            config,
+            &voice_result,
+            diarization_from_stems,
+            diarization_num_speakers,
+            &transcript_labels,
+            &l2_labels,
+        ) {
+            speaker_map.push(attr);
         }
 
         let mapped_labels: std::collections::HashSet<String> = speaker_map
@@ -727,6 +777,7 @@ where
 
     // Step 2: Diarize (optional — depends on config.diarization.engine)
     let mut diarization_num_speakers: usize = 0;
+    let mut diarization_from_stems = false;
     let mut diarization_embeddings: std::collections::HashMap<String, Vec<f32>> =
         std::collections::HashMap::new();
     let transcript = if config.diarization.engine != "none" && content_type == ContentType::Meeting
@@ -735,6 +786,7 @@ where
         tracing::info!(step = "diarize", "running speaker diarization");
         if let Some(result) = diarize::diarize(audio_path, config) {
             diarization_num_speakers = result.num_speakers;
+            diarization_from_stems = result.from_stems;
             diarization_embeddings = result.speaker_embeddings.clone();
             diarize::apply_speakers(&transcript, &result)
         } else {
@@ -856,7 +908,7 @@ where
     if diarization_num_speakers > 0 && content_type == ContentType::Meeting {
         // Level 2: Voice enrollment matching via embedding cosine similarity.
         let voice_result = match_speakers_by_voice(config, &diarization_embeddings);
-        speaker_map.extend(voice_result.attributions);
+        speaker_map.extend(voice_result.attributions.clone());
 
         // Level 0: deterministic 1-on-1 mapping (skip if Level 2 already matched)
         let transcript_labels = crate::summarize::extract_speaker_labels_pub(&transcript);
@@ -907,6 +959,17 @@ where
                     );
                 }
             }
+        }
+
+        if let Some(attr) = single_stem_speaker_self_attribution(
+            config,
+            &voice_result,
+            diarization_from_stems,
+            diarization_num_speakers,
+            &transcript_labels,
+            &l2_labels,
+        ) {
+            speaker_map.push(attr);
         }
 
         // Level 1: LLM suggestions for unmapped speakers
@@ -1742,6 +1805,69 @@ mod tests {
             Some("March 21".into())
         );
         assert_eq!(extract_due_date("Just do this thing"), None);
+    }
+
+    #[test]
+    fn single_stem_speaker_self_attribution_maps_to_identity() {
+        let mut config = Config::default();
+        config.identity.name = Some("Mat".into());
+
+        let voice_result = VoiceMatchResult {
+            attributions: vec![],
+            self_profile_exists: true,
+        };
+        let labels = vec!["SPEAKER_0".to_string()];
+        let l2_labels = std::collections::HashSet::new();
+
+        let attr = single_stem_speaker_self_attribution(
+            &config,
+            &voice_result,
+            true,
+            1,
+            &labels,
+            &l2_labels,
+        )
+        .expect("single stem speaker should map to self");
+
+        assert_eq!(attr.name, "Mat");
+        assert_eq!(attr.speaker_label, "SPEAKER_0");
+        assert_eq!(attr.confidence, diarize::Confidence::High);
+        assert_eq!(attr.source, diarize::AttributionSource::Enrollment);
+    }
+
+    #[test]
+    fn single_stem_speaker_self_attribution_respects_guards() {
+        let mut config = Config::default();
+        config.identity.name = Some("Mat".into());
+        let voice_result = VoiceMatchResult {
+            attributions: vec![],
+            self_profile_exists: false,
+        };
+        let labels = vec!["SPEAKER_1".to_string()];
+        let l2_labels = std::collections::HashSet::new();
+
+        assert!(
+            single_stem_speaker_self_attribution(
+                &config,
+                &voice_result,
+                true,
+                1,
+                &labels,
+                &l2_labels,
+            )
+            .is_none()
+        );
+        assert!(
+            single_stem_speaker_self_attribution(
+                &config,
+                &voice_result,
+                false,
+                1,
+                &["SPEAKER_0".to_string()],
+                &std::collections::HashSet::new(),
+            )
+            .is_none()
+        );
     }
 
     #[test]

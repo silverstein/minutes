@@ -28,6 +28,7 @@ pub struct SpeakerSegment {
 pub struct DiarizationResult {
     pub segments: Vec<SpeakerSegment>,
     pub num_speakers: usize,
+    pub from_stems: bool,
     /// Per-speaker averaged embeddings (for Level 3 confirmed learning).
     /// Empty when using the Python subprocess engine.
     pub speaker_embeddings: std::collections::HashMap<String, Vec<f32>>,
@@ -398,6 +399,7 @@ fn diarization_from_energy_windows(
         return Some(DiarizationResult {
             segments,
             num_speakers: 1,
+            from_stems: true,
             speaker_embeddings: std::collections::HashMap::new(),
         });
     }
@@ -441,6 +443,7 @@ fn diarization_from_energy_windows(
         Some(DiarizationResult {
             segments,
             num_speakers,
+            from_stems: true,
             speaker_embeddings: std::collections::HashMap::new(),
         })
     }
@@ -1049,6 +1052,7 @@ fn diarize_with_pyannote_rs(
     Ok(DiarizationResult {
         segments,
         num_speakers,
+        from_stems: false,
         speaker_embeddings,
     })
 }
@@ -1371,6 +1375,7 @@ except Exception as e:
     Ok(DiarizationResult {
         segments,
         num_speakers,
+        from_stems: false,
         speaker_embeddings: std::collections::HashMap::new(), // Python path can't extract embeddings
     })
 }
@@ -1498,6 +1503,7 @@ mod tests {
                 },
             ],
             num_speakers: 2,
+            from_stems: false,
             speaker_embeddings: std::collections::HashMap::new(),
         };
 
@@ -1525,6 +1531,7 @@ mod tests {
                 },
             ],
             num_speakers: 2,
+            from_stems: false,
             speaker_embeddings: std::collections::HashMap::new(),
         };
 

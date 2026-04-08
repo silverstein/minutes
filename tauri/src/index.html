@@ -15,8 +15,8 @@
       --text: #f5f5f7;
       --text-secondary: #98989d;
       --text-tertiary: #636366;
-      --accent: #4da8d9;
-      --accent-hover: #6bbce3;
+      --accent: #6391b3;
+      --accent-hover: #7ba3c0;
       --red: #e5534b;
       --red-bg: rgba(229, 83, 75, 0.12);
       --green: #46c072;
@@ -28,6 +28,20 @@
       --font-sans: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Helvetica Neue', sans-serif;
       --font-display: ui-serif, 'Iowan Old Style', 'Palatino Linotype', 'Book Antiqua', Georgia, serif;
       --font-mono: 'SF Mono', 'Menlo', monospace;
+
+      /* Spacing scale — use these in lieu of magic numbers */
+      --s-1: 4px;
+      --s-2: 8px;
+      --s-3: 12px;
+      --s-4: 16px;
+      --s-5: 20px;
+      --s-6: 24px;
+
+      /* Standard easing */
+      --ease-out-quart: cubic-bezier(0.32, 0.72, 0, 1);
+      --duration-fast: 140ms;
+      --duration-base: 220ms;
+      --duration-slow: 320ms;
     }
 
     :focus-visible {
@@ -37,9 +51,16 @@
 
     html { background: transparent; }
 
+    /* The body sits on top of the macOS vibrancy material applied by Tauri.
+       Without a CSS layer here the entire left panel would be pure vibrancy,
+       which is "dark frosted glass" against dark wallpapers but washes out to
+       light gray over bright apps (Slack, Notion in light mode, etc.).
+       A 78% opaque dark layer guarantees white text contrast regardless of
+       what's behind the window, while still letting ~22% vibrancy bleed
+       through so the surface keeps that "alive" frosted-glass feel. */
     body {
       font-family: var(--font-sans);
-      background: transparent;
+      background: rgba(22, 22, 24, 0.78);
       color: var(--text);
       height: 100vh;
       display: flex;
@@ -49,14 +70,17 @@
       user-select: none;
     }
 
-    /* Subtle grain overlay for depth — barely perceptible, adds warmth to flat surfaces */
+    /* Subtle grain overlay for depth — barely perceptible, adds warmth to flat surfaces.
+       Was 0.020 when body was transparent and the grain rode on vibrancy; now that
+       body is 78% opaque dark the grain has more contrast against it, so the same
+       perceived intensity comes from a smaller alpha. */
     body::after {
       content: '';
       position: fixed;
       inset: 0;
       pointer-events: none;
       z-index: 9999;
-      opacity: 0.020;
+      opacity: 0.014;
       background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
       background-repeat: repeat;
       background-size: 256px;
@@ -79,26 +103,44 @@
       overflow: hidden;
       display: flex;
       flex-direction: column;
-      border-left: 1px solid rgba(255,255,255,0.04);
-      background: var(--bg);
+      border-left: 1px solid rgba(255,255,255,0.06);
+      /* Body already provides the base dark layer (~78% opaque). The
+         recall pane adds a small extra darkening (~12%) so it reads as
+         a subtly distinct surface from the left meeting list — the
+         "content area" vs the "chrome". Was 0.18 — softened for less
+         harsh contrast between the two panes. */
+      background: rgba(0, 0, 0, 0.12);
       opacity: 0;
-      transition: opacity 100ms ease-out;
+      transition: opacity 140ms cubic-bezier(0.32, 0.72, 0, 1);
     }
 
     .recall-panel.expanded {
       width: 50%;
       opacity: 1;
-      transition: opacity 100ms ease-out 150ms;
+      transition: opacity 220ms cubic-bezier(0.32, 0.72, 0, 1) 120ms;
     }
 
     .recall-header {
       display: flex;
       align-items: center;
       justify-content: space-between;
-      padding: 10px 16px;
-      border-bottom: 1px solid rgba(255,255,255,0.04);
+      padding: 14px 16px 14px;
       flex-shrink: 0;
       -webkit-app-region: drag;
+      position: relative;
+      z-index: 2;
+    }
+
+    .recall-header::after {
+      content: '';
+      position: absolute;
+      bottom: -10px;
+      left: 0;
+      right: 0;
+      height: 10px;
+      background: linear-gradient(rgba(0, 0, 0, 0.35), transparent);
+      pointer-events: none;
+      z-index: 1;
     }
 
     .recall-header-info {
@@ -150,23 +192,39 @@
     }
 
     .recall-close {
-      padding: 2px 8px;
+      width: 24px;
+      height: 24px;
       border-radius: 6px;
       border: none;
       background: transparent;
       color: var(--text-tertiary);
-      font-size: 14px;
       cursor: pointer;
-      line-height: 1;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      transition: background 0.15s ease, color 0.15s ease;
     }
 
-    .recall-close:hover { color: var(--text-secondary); background: var(--bg-hover); }
+    .recall-close svg { display: block; }
+    .recall-close:hover { color: var(--text); background: var(--bg-hover); }
 
     .recall-terminal {
       flex: 1;
       overflow: hidden;
-      padding: 4px;
-      background: #1c1c1e;
+      padding: 20px 8px 8px;
+      background: rgba(14, 15, 17, 0.45);
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
+    }
+
+    /* xterm.js viewport bg must be transparent so the terminal canvas
+       (now using allowTransparency:true + transparent theme bg) shows
+       the recall-terminal's translucent material through. Same for the
+       screen layer. */
+    .recall-terminal .xterm-viewport {
+      background: transparent !important;
+    }
+    .recall-terminal .xterm-screen {
+      background: transparent;
     }
 
 
@@ -206,7 +264,7 @@
 
     .recall-note-row input:focus {
       border-color: var(--accent);
-      box-shadow: 0 0 0 3px rgba(77, 168, 217, 0.12);
+      box-shadow: 0 0 0 3px rgba(99, 145, 179, 0.12);
     }
 
     .recall-note-row input::placeholder { color: var(--text-tertiary); }
@@ -258,7 +316,7 @@
     }
 
     .lifecycle-badge.prepped {
-      background: rgba(77, 168, 217, 0.12);
+      background: rgba(99, 145, 179, 0.12);
       color: var(--accent);
     }
 
@@ -331,6 +389,47 @@
         0 8px 20px rgba(0,0,0,0.18);
       position: relative;
       flex-shrink: 0;
+      animation: brand-breathe 6s ease-in-out infinite;
+    }
+
+    @keyframes brand-breathe {
+      0%, 100% {
+        box-shadow:
+          inset 0 1px 0 rgba(255,255,255,0.16),
+          0 8px 20px rgba(0,0,0,0.18),
+          0 0 0 0 rgba(56, 189, 248, 0);
+      }
+      50% {
+        box-shadow:
+          inset 0 1px 0 rgba(255,255,255,0.20),
+          0 8px 22px rgba(0,0,0,0.22),
+          0 0 14px 0 rgba(56, 189, 248, 0.08);
+      }
+    }
+
+    /* Faster, warmer pulse during recording */
+    body.is-recording .brand-mark {
+      animation: brand-pulse-recording 2.4s ease-in-out infinite;
+    }
+
+    @keyframes brand-pulse-recording {
+      0%, 100% {
+        box-shadow:
+          inset 0 1px 0 rgba(255,255,255,0.16),
+          0 8px 20px rgba(0,0,0,0.18),
+          0 0 0 0 rgba(229, 83, 75, 0);
+      }
+      50% {
+        box-shadow:
+          inset 0 1px 0 rgba(255,255,255,0.22),
+          0 8px 24px rgba(0,0,0,0.22),
+          0 0 18px 2px rgba(229, 83, 75, 0.18);
+      }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .brand-mark,
+      .first-record-mark { animation: none !important; }
     }
 
     .brand-mark::before,
@@ -393,7 +492,7 @@
     }
 
     .header-chip.dictation-shortcut {
-      background: rgba(77, 168, 217, 0.10);
+      background: rgba(99, 145, 179, 0.10);
       color: var(--accent);
     }
 
@@ -430,7 +529,7 @@
       height: auto;
       border-radius: 12px;
       opacity: 1;
-      background: rgba(77, 168, 217, 0.12);
+      background: rgba(99, 145, 179, 0.12);
       color: var(--accent);
     }
 
@@ -449,8 +548,8 @@
     .live-bar {
       display: none;
       padding: 12px 16px;
-      background: rgba(52, 199, 89, 0.06);
-      border-bottom: 1px solid rgba(52, 199, 89, 0.12);
+      background: rgba(52, 199, 89, 0.10);
+      border-bottom: 1px solid rgba(52, 199, 89, 0.18);
     }
     .live-bar.active { display: block; }
     @media (prefers-reduced-motion: reduce) {
@@ -521,26 +620,34 @@
     /* ── Recording bar ── */
     .recording-bar {
       display: none;
+      opacity: 0;
+      transform: translateY(-6px);
       padding: 16px;
-      background: rgba(229, 83, 75, 0.06);
-      border-bottom: 1px solid rgba(229, 83, 75, 0.10);
-      animation: recording-breathe 3s ease-in-out infinite;
-      box-shadow: inset 0 0 24px rgba(229, 83, 75, 0.04);
+      background: rgba(229, 83, 75, 0.10);
+      border-bottom: 1px solid rgba(229, 83, 75, 0.16);
+      box-shadow: inset 0 0 28px rgba(229, 83, 75, 0.06);
+      transition: opacity 280ms cubic-bezier(0.32, 0.72, 0, 1),
+                  transform 280ms cubic-bezier(0.32, 0.72, 0, 1),
+                  display 280ms allow-discrete;
     }
 
     .recording-bar.active {
       display: block;
-      animation: recording-enter 0.3s ease-out, recording-breathe 3s ease-in-out 0.3s infinite;
+      opacity: 1;
+      transform: translateY(0);
+      animation: recording-breathe 3s ease-in-out infinite;
     }
 
-    @keyframes recording-enter {
-      from { opacity: 0; transform: translateY(-4px); }
-      to { opacity: 1; transform: translateY(0); }
+    @starting-style {
+      .recording-bar.active {
+        opacity: 0;
+        transform: translateY(-6px);
+      }
     }
 
     @keyframes recording-breathe {
-      0%, 100% { background: rgba(229, 83, 75, 0.06); }
-      50% { background: rgba(229, 83, 75, 0.10); }
+      0%, 100% { background: rgba(229, 83, 75, 0.10); }
+      50% { background: rgba(229, 83, 75, 0.15); }
     }
 
     .recording-bar .top-row {
@@ -554,10 +661,10 @@
       display: flex;
       align-items: center;
       gap: 8px;
-      font-size: 11px;
+      font-size: 10px;
       font-weight: 600;
       color: var(--red);
-      letter-spacing: 0.3px;
+      letter-spacing: 0.8px;
       text-transform: uppercase;
     }
 
@@ -625,19 +732,36 @@
     /* ── Processing bar ── */
     .processing-bar {
       display: none;
-      padding: 16px;
-      background: rgba(77, 168, 217, 0.05);
-      border-bottom: 1px solid rgba(77, 168, 217, 0.08);
+      opacity: 0;
+      transform: translateY(-6px);
+      padding: 14px 16px;
+      background: rgba(99, 145, 179, 0.10);
+      border-bottom: 1px solid rgba(99, 145, 179, 0.16);
+      transition: opacity 240ms cubic-bezier(0.32, 0.72, 0, 1) 80ms,
+                  transform 240ms cubic-bezier(0.32, 0.72, 0, 1) 80ms,
+                  display 240ms allow-discrete 80ms;
+    }
+
+    /* When exactly one job is processing, the per-job card already
+       shows title/stage/elapsed — hide the redundant top summary row. */
+    .processing-bar.single-job .processing-row {
+      display: none;
+    }
+    .processing-bar.single-job .processing-jobs {
+      margin-top: 0;
     }
 
     .processing-bar.active {
       display: block;
-      animation: processing-enter 0.3s ease-out;
+      opacity: 1;
+      transform: translateY(0);
     }
 
-    @keyframes processing-enter {
-      from { opacity: 0; }
-      to { opacity: 1; }
+    @starting-style {
+      .processing-bar.active {
+        opacity: 0;
+        transform: translateY(-6px);
+      }
     }
 
     .processing-row {
@@ -649,7 +773,7 @@
     .processing-spinner {
       width: 16px;
       height: 16px;
-      border: 2px solid rgba(77, 168, 217, 0.15);
+      border: 2px solid rgba(99, 145, 179, 0.15);
       border-top-color: var(--accent);
       border-radius: 50%;
       animation: processing-spin 0.9s linear infinite;
@@ -681,7 +805,7 @@
       border-radius: var(--radius);
       padding: 10px 12px;
       background: var(--bg-elevated);
-      border: 1px solid rgba(77, 168, 217, 0.08);
+      border: 1px solid rgba(99, 145, 179, 0.08);
     }
 
     .processing-job-top {
@@ -751,19 +875,27 @@
     /* ── Output notice ── */
     .output-notice {
       display: none;
-      padding: 16px;
-      background: rgba(70, 192, 114, 0.06);
-      border-bottom: 1px solid rgba(70, 192, 114, 0.10);
+      opacity: 0;
+      transform: translateY(-6px);
+      padding: 10px 14px;
+      background: rgba(70, 192, 114, 0.10);
+      border-bottom: 1px solid rgba(70, 192, 114, 0.16);
+      transition: opacity 320ms cubic-bezier(0.32, 0.72, 0, 1) 120ms,
+                  transform 320ms cubic-bezier(0.32, 0.72, 0, 1) 120ms,
+                  display 320ms allow-discrete 120ms;
     }
 
     .output-notice.active {
       display: block;
-      animation: notice-enter 0.3s ease-out;
+      opacity: 1;
+      transform: translateY(0);
     }
 
-    @keyframes notice-enter {
-      from { opacity: 0; transform: translateY(-4px); }
-      to { opacity: 1; transform: translateY(0); }
+    @starting-style {
+      .output-notice.active {
+        opacity: 0;
+        transform: translateY(-6px);
+      }
     }
 
     .output-notice.capture {
@@ -773,18 +905,18 @@
 
     .output-notice-row {
       display: flex;
-      align-items: flex-start;
-      gap: 12px;
+      align-items: center;
+      gap: 10px;
     }
 
     .output-notice-icon {
-      width: 28px;
-      height: 28px;
+      width: 22px;
+      height: 22px;
       border-radius: 999px;
       display: flex;
       align-items: center;
       justify-content: center;
-      font-size: 14px;
+      font-size: 12px;
       flex-shrink: 0;
       background: rgba(70, 192, 114, 0.16);
       color: var(--green);
@@ -798,34 +930,37 @@
     .output-notice-copy {
       min-width: 0;
       flex: 1;
+      display: flex;
+      flex-direction: column;
     }
 
     .output-notice-title {
-      font-size: 13px;
+      font-size: 12px;
       font-weight: 600;
       color: var(--text);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
 
     .output-notice-detail {
-      font-size: 12px;
+      font-size: 11px;
       color: var(--text-secondary);
-      margin-top: 3px;
-      line-height: 1.45;
+      margin-top: 1px;
+      line-height: 1.35;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
 
     .output-notice-path {
-      font-size: 11px;
-      color: var(--text-tertiary);
-      margin-top: 6px;
-      font-family: var(--font-mono);
-      word-break: break-all;
+      display: none;
     }
 
     .output-notice-actions {
       display: flex;
-      gap: 8px;
-      flex-wrap: wrap;
-      margin-top: 10px;
+      gap: 6px;
+      flex-shrink: 0;
     }
 
     /* ── Quick note inline ── */
@@ -857,7 +992,7 @@
 
     .quick-note-row input:focus {
       border-color: var(--accent);
-      box-shadow: 0 0 0 3px rgba(77, 168, 217, 0.12);
+      box-shadow: 0 0 0 3px rgba(99, 145, 179, 0.12);
     }
 
     .quick-note-row input::placeholder { color: var(--text-tertiary); }
@@ -879,27 +1014,57 @@
       outline: none;
       -webkit-user-select: text;
       user-select: text;
+      transition: border-color 200ms cubic-bezier(0.32, 0.72, 0, 1),
+                  box-shadow 200ms cubic-bezier(0.32, 0.72, 0, 1),
+                  background 200ms cubic-bezier(0.32, 0.72, 0, 1);
     }
 
     .search-box:focus {
-      border-color: rgba(77, 168, 217, 0.4);
-      box-shadow: 0 0 0 3px rgba(77, 168, 217, 0.08);
+      border-color: rgba(99, 145, 179, 0.5);
+      box-shadow: 0 0 0 4px rgba(99, 145, 179, 0.10);
       background: rgba(255,255,255,0.05);
     }
 
     .search-box::placeholder { color: var(--text-tertiary); }
+
+    .search-kbd {
+      position: absolute;
+      right: 28px;
+      top: 50%;
+      transform: translateY(calc(-50% - 1px));
+      display: inline-flex;
+      align-items: center;
+      gap: 2px;
+      padding: 2px 6px;
+      border-radius: 4px;
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      color: var(--text-tertiary);
+      font-size: 10px;
+      font-weight: 500;
+      letter-spacing: 0.2px;
+      pointer-events: none;
+      transition: opacity 200ms ease;
+    }
+
+    .search-box:focus ~ .search-kbd,
+    .search-box:not(:placeholder-shown) ~ .search-kbd {
+      opacity: 0;
+    }
 
     .search-icon {
       position: relative;
     }
 
     .search-icon::before {
-      content: "⌕";
+      content: "";
       position: absolute;
       left: 28px;
-      top: 9px;
-      font-size: 16px;
-      color: var(--text-tertiary);
+      top: 50%;
+      width: 14px;
+      height: 14px;
+      transform: translateY(calc(-50% - 1px));
+      background: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none" stroke="%237b7b80" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="7" cy="7" r="5"/><path d="m14 14-3.05-3.05"/></svg>') center/contain no-repeat;
       pointer-events: none;
       z-index: 1;
     }
@@ -924,18 +1089,36 @@
     }
 
     .date-group {
-      font-size: 12px;
-      font-family: var(--font-display);
-      font-weight: 500;
-      text-transform: none;
-      letter-spacing: -0.1px;
+      font-size: 10px;
+      font-family: inherit;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.8px;
       color: var(--orange);
-      padding: 24px 4px 8px;
-      border-bottom: 1px solid rgba(212, 160, 60, 0.06);
+      padding: 22px 16px 8px 28px;
       margin-bottom: 2px;
+      position: relative;
     }
 
-    .date-group:first-child { padding-top: 4px; }
+    .date-group::before {
+      content: '';
+      position: absolute;
+      top: 0;
+      left: 28px;
+      right: 16px;
+      height: 1px;
+      background: linear-gradient(to right,
+        rgba(255, 255, 255, 0.06),
+        rgba(255, 255, 255, 0.02) 60%,
+        transparent);
+    }
+
+    .date-group:first-child {
+      padding-top: 4px;
+    }
+    .date-group:first-child::before {
+      display: none;
+    }
 
     /* ── Staggered entrance ── */
     @keyframes list-enter {
@@ -975,6 +1158,24 @@
       background: var(--bg-hover);
       box-shadow: 0 1px 4px rgba(0,0,0,0.1);
     }
+    .meeting-item::after {
+      content: '';
+      position: absolute;
+      left: 18px;
+      top: 50%;
+      transform: translateY(-50%) scaleY(0);
+      width: 2px;
+      height: 24px;
+      border-radius: 2px;
+      background: var(--accent);
+      opacity: 0;
+      transition: transform 220ms cubic-bezier(0.32, 0.72, 0, 1),
+                  opacity 220ms ease;
+    }
+    .meeting-item:hover::after {
+      transform: translateY(-50%) scaleY(1);
+      opacity: 0.7;
+    }
     .meeting-item:active { background: rgba(255,255,255,0.08); box-shadow: none; }
 
     .meeting-info { flex: 1; min-width: 0; }
@@ -990,10 +1191,11 @@
 
     .meeting-meta {
       font-size: 11px;
-      font-family: var(--font-mono);
+      font-family: inherit;
       color: var(--text-tertiary);
       margin-top: 3px;
-      letter-spacing: 0.2px;
+      font-variant-numeric: tabular-nums;
+      font-feature-settings: "tnum" 1, "ss01" 1;
     }
 
     .meeting-snippet {
@@ -1036,11 +1238,11 @@
     }
 
     .meeting-badge.dictation {
-      background: rgba(77, 168, 217, 0.7);
+      background: rgba(99, 145, 179, 0.7);
     }
 
     .meeting-item:hover .meeting-badge.dictation {
-      background: rgba(77, 168, 217, 0.85);
+      background: rgba(99, 145, 179, 0.85);
     }
 
     /* ── Meeting detail view ── */
@@ -1062,13 +1264,17 @@
     .detail-card {
       width: min(760px, 100%);
       max-height: calc(100vh - 40px);
-      background: var(--bg);
-      border: 1px solid var(--border);
+      background: rgba(28, 28, 30, 0.92);
+      border: 1px solid rgba(255, 255, 255, 0.08);
       border-radius: 18px;
       overflow: hidden;
       display: flex;
       flex-direction: column;
-      box-shadow: 0 24px 60px rgba(0, 0, 0, 0.4);
+      box-shadow: 0 32px 80px rgba(0, 0, 0, 0.5),
+                  0 0 0 1px rgba(255, 255, 255, 0.02),
+                  inset 0 1px 0 rgba(255, 255, 255, 0.04);
+      backdrop-filter: blur(24px);
+      -webkit-backdrop-filter: blur(24px);
     }
 
     .detail-header {
@@ -1095,7 +1301,6 @@
       border: none;
       background: transparent;
       color: var(--text-tertiary);
-      font-size: 16px;
       cursor: pointer;
       display: flex;
       align-items: center;
@@ -1104,7 +1309,8 @@
       -webkit-app-region: no-drag;
       z-index: 1;
     }
-    .detail-close-x:hover { background: var(--bg-hover); color: var(--text-secondary); }
+    .detail-close-x svg { display: block; }
+    .detail-close-x:hover { background: var(--bg-hover); color: var(--text); }
 
     .detail-title {
       font-size: 18px;
@@ -1121,16 +1327,20 @@
     .detail-meta {
       display: flex;
       flex-wrap: wrap;
-      gap: 8px;
-      font-size: 12px;
-      color: var(--text-secondary);
+      align-items: center;
+      gap: 6px;
+      font-size: 11px;
+      color: var(--text-tertiary);
+      font-variant-numeric: tabular-nums;
     }
 
     .detail-meta-chip {
-      padding: 3px 8px;
+      padding: 2px 8px;
       border-radius: 999px;
-      background: var(--bg-elevated);
+      background: rgba(255, 255, 255, 0.04);
+      border: 1px solid rgba(255, 255, 255, 0.06);
       color: var(--text-secondary);
+      font-weight: 500;
     }
 
     .detail-actions {
@@ -1149,8 +1359,8 @@
       margin-top: 20px;
       padding: 14px 16px;
       border-radius: 12px;
-      background: rgba(77, 168, 217, 0.06);
-      border: 1px solid rgba(77, 168, 217, 0.15);
+      background: rgba(99, 145, 179, 0.06);
+      border: 1px solid rgba(99, 145, 179, 0.15);
       display: flex;
       align-items: center;
       justify-content: space-between;
@@ -1186,7 +1396,7 @@
       transition: opacity 0.15s ease, background 0.15s ease, color 0.15s ease;
     }
     .meeting-item:hover .meeting-chat-btn { opacity: 1; }
-    .meeting-chat-btn:hover { background: rgba(77, 168, 217, 0.15); color: var(--accent); }
+    .meeting-chat-btn:hover { background: rgba(99, 145, 179, 0.15); color: var(--accent); }
 
     .detail-context {
       margin-top: 16px;
@@ -1268,7 +1478,7 @@
     }
 
     .speaker-name {
-      color: var(--text-primary);
+      color: var(--text);
       font-weight: 500;
     }
 
@@ -1297,21 +1507,24 @@
     }
 
     .speaker-confirm-btn {
-      font-size: 11px;
-      padding: 2px 8px;
-      border-radius: 4px;
-      border: 1px solid var(--border);
-      background: transparent;
-      color: var(--text-secondary);
+      font-size: 10px;
+      font-weight: 600;
+      padding: 3px 10px;
+      border-radius: 6px;
+      border: 1px solid rgba(99, 145, 179, 0.25);
+      background: rgba(99, 145, 179, 0.08);
+      color: var(--accent);
       cursor: pointer;
-      transition: all 0.15s;
+      transition: background 180ms cubic-bezier(0.32, 0.72, 0, 1),
+                  border-color 180ms cubic-bezier(0.32, 0.72, 0, 1),
+                  transform 120ms cubic-bezier(0.32, 0.72, 0, 1);
     }
 
     .speaker-confirm-btn:hover {
-      background: var(--accent);
-      color: white;
-      border-color: var(--accent);
+      background: rgba(99, 145, 179, 0.16);
+      border-color: rgba(99, 145, 179, 0.4);
     }
+    .speaker-confirm-btn:active { transform: scale(0.96); }
 
     .detail-section {
       padding-top: 18px;
@@ -1326,12 +1539,12 @@
     }
 
     .detail-section-title {
-      font-size: 12px;
-      font-weight: 700;
-      letter-spacing: 0.5px;
+      font-size: 10px;
+      font-weight: 600;
+      letter-spacing: 0.8px;
       text-transform: uppercase;
       color: var(--text-tertiary);
-      margin-bottom: 10px;
+      margin-bottom: 12px;
     }
 
     .detail-section-body {
@@ -1367,6 +1580,170 @@
     .empty-state .icon { font-size: 40px; margin-bottom: 12px; opacity: 0.35; filter: grayscale(0.3); }
     .empty-state .title { font-size: 15px; font-family: var(--font-display); font-weight: 600; color: var(--text-secondary); }
     .empty-state .sub { font-size: 12px; margin-top: 6px; line-height: 1.5; }
+
+    /* First-record card — shown when model is installed but no recordings.
+       Quiet, single CTA, no multi-step flow. Vanishes the moment the user
+       records anything. */
+    .empty-state.first-record {
+      padding: 64px 24px 32px;
+    }
+
+    .first-record-card {
+      max-width: 360px;
+      margin: 0 auto;
+      text-align: center;
+      animation: first-record-enter 480ms cubic-bezier(0.32, 0.72, 0, 1);
+    }
+
+    @keyframes first-record-enter {
+      from { opacity: 0; transform: translateY(8px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    .first-record-mark {
+      width: 48px;
+      height: 48px;
+      margin: 0 auto 18px;
+      border-radius: 14px;
+      background:
+        radial-gradient(circle at 28% 25%, rgba(56, 189, 248, 0.55), transparent 45%),
+        radial-gradient(circle at 74% 76%, rgba(251, 191, 36, 0.4), transparent 40%),
+        linear-gradient(155deg, #173b5c 0%, #1d2c4a 100%);
+      box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.16),
+        0 12px 32px rgba(0, 0, 0, 0.22);
+      position: relative;
+      animation: brand-breathe 5s ease-in-out infinite;
+    }
+
+    .first-record-mark::before,
+    .first-record-mark::after {
+      content: "";
+      position: absolute;
+      top: 11px;
+      width: 11px;
+      height: 26px;
+      border-radius: 4px;
+      background: rgba(248, 250, 252, 0.92);
+      box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.08);
+    }
+    .first-record-mark::before { left: 11px; }
+    .first-record-mark::after { right: 11px; }
+
+    .first-record-title {
+      font-size: 20px;
+      font-family: var(--font-display);
+      font-weight: 700;
+      letter-spacing: -0.3px;
+      color: var(--text);
+      margin-bottom: 10px;
+    }
+
+    .first-record-sub {
+      font-size: 13px;
+      color: var(--text-secondary);
+      line-height: 1.55;
+      margin-bottom: 22px;
+    }
+
+    .first-record-sub kbd {
+      display: inline-block;
+      padding: 1px 6px;
+      margin: 0 1px;
+      border-radius: 4px;
+      background: rgba(255, 255, 255, 0.06);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      color: var(--text);
+      font-family: inherit;
+      font-size: 11px;
+      font-weight: 500;
+      vertical-align: 1px;
+    }
+
+    .first-record-tips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      justify-content: center;
+    }
+
+    .first-record-tip {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      padding: 5px 9px;
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.025);
+      border: 1px solid rgba(255, 255, 255, 0.05);
+      color: var(--text-tertiary);
+      font-size: 11px;
+      font-weight: 500;
+    }
+
+    .first-record-tip kbd {
+      display: inline-block;
+      padding: 1px 5px;
+      border-radius: 3px;
+      background: rgba(255, 255, 255, 0.06);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      color: var(--text-secondary);
+      font-family: inherit;
+      font-size: 10px;
+      font-weight: 600;
+    }
+
+    /* ── List skeleton (initial load) ── */
+    .list-skeleton {
+      padding: 22px 16px 8px 28px;
+      display: flex;
+      flex-direction: column;
+      gap: 22px;
+    }
+
+    .skeleton-section {
+      display: flex;
+      flex-direction: column;
+      gap: 18px;
+    }
+
+    .skeleton-label {
+      width: 56px;
+      height: 9px;
+      border-radius: 3px;
+      background: linear-gradient(90deg,
+        rgba(212, 160, 60, 0.10) 0%,
+        rgba(212, 160, 60, 0.20) 50%,
+        rgba(212, 160, 60, 0.10) 100%);
+      background-size: 200% 100%;
+      animation: shimmer 1.6s ease-in-out infinite;
+    }
+
+    .skeleton-row {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .skeleton-bar {
+      height: 10px;
+      border-radius: 4px;
+      background: linear-gradient(90deg,
+        rgba(255, 255, 255, 0.04) 0%,
+        rgba(255, 255, 255, 0.10) 50%,
+        rgba(255, 255, 255, 0.04) 100%);
+      background-size: 200% 100%;
+      animation: shimmer 1.6s ease-in-out infinite;
+    }
+
+    .skeleton-bar.title { width: 78%; height: 12px; }
+    .skeleton-bar.title.short { width: 54%; }
+    .skeleton-bar.title.medium { width: 66%; }
+    .skeleton-bar.meta { width: 42px; height: 8px; }
+
+    @keyframes shimmer {
+      0% { background-position: 200% 0; }
+      100% { background-position: -200% 0; }
+    }
 
     /* ── About view ── */
     .about-overlay {
@@ -1507,6 +1884,41 @@
 
     .about-controls-group {
       flex: 1;
+    }
+
+    /* Shared select/input control inside settings sections.
+       Replaces the inline-style soup that was repeated ~10 times. */
+    .settings-input {
+      margin-top: 6px;
+      width: 100%;
+      padding: 6px 8px;
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.06);
+      border: 1px solid rgba(255, 255, 255, 0.10);
+      color: var(--text);
+      font-size: 13px;
+      font-family: inherit;
+      box-sizing: border-box;
+      outline: none;
+      transition: border-color var(--duration-base) var(--ease-out-quart),
+                  background var(--duration-base) var(--ease-out-quart);
+    }
+    .settings-input:focus {
+      border-color: rgba(99, 145, 179, 0.45);
+      background: rgba(255, 255, 255, 0.08);
+    }
+
+    /* Shared section wrapper inside Settings panel. */
+    .settings-section {
+      margin-bottom: 16px;
+    }
+
+    /* Shared inline row for shortcut recorder + caps lock link. */
+    .settings-shortcut-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-top: 6px;
     }
 
     .about-controls-meta {
@@ -1785,8 +2197,8 @@
     }
 
     .footer-actions {
-      display: grid;
-      grid-template-columns: 1.3fr 0.55fr 1fr 0.7fr;
+      display: flex;
+      align-items: stretch;
       gap: 5px;
       background: var(--bg-elevated);
       border: 1px solid rgba(255,255,255,0.06);
@@ -1795,8 +2207,28 @@
       box-shadow: 0 2px 12px rgba(0,0,0,0.12), 0 0 0 1px rgba(255,255,255,0.02);
     }
 
+    .footer-record-group {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      flex: 1 1 auto;
+      min-width: 0;
+    }
+
+    .footer-record-group .btn-primary {
+      flex: 0 0 auto;
+    }
+
+    .footer-record-group .device-picker {
+      flex: 1 1 90px;
+      min-width: 70px;
+    }
+
+    .footer-actions > .btn {
+      flex: 0 0 auto;
+    }
+
     .footer-actions .btn {
-      width: 100%;
       border-radius: var(--radius);
       font-size: 12px;
       white-space: nowrap;
@@ -1811,25 +2243,32 @@
       font-size: 13px;
       font-weight: 500;
       cursor: pointer;
-      transition: all 0.15s ease;
+      transition: background 180ms cubic-bezier(0.32, 0.72, 0, 1),
+                  box-shadow 180ms cubic-bezier(0.32, 0.72, 0, 1),
+                  transform 120ms cubic-bezier(0.32, 0.72, 0, 1),
+                  color 180ms ease;
       -webkit-app-region: no-drag;
     }
 
     .btn-primary {
-      background: linear-gradient(135deg, var(--accent) 0%, #3d94c2 100%);
+      background: linear-gradient(135deg, var(--accent) 0%, #4d7a99 100%);
       color: #fff;
-      box-shadow: 0 1px 3px rgba(0,0,0,0.2), 0 0 12px rgba(77, 168, 217, 0.15);
-    }
-
-    .footer-actions .btn-primary {
-      width: 100%;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.22),
+                  0 0 12px rgba(99, 145, 179, 0.18),
+                  inset 0 1px 0 rgba(255, 255, 255, 0.18);
     }
 
     .btn-primary:hover {
-      background: linear-gradient(135deg, var(--accent-hover) 0%, #4da8d9 100%);
-      box-shadow: 0 2px 6px rgba(0,0,0,0.25), 0 0 18px rgba(77, 168, 217, 0.2);
+      background: linear-gradient(135deg, var(--accent-hover) 0%, var(--accent) 100%);
+      box-shadow: 0 2px 8px rgba(0,0,0,0.28),
+                  0 0 22px rgba(99, 145, 179, 0.28),
+                  inset 0 1px 0 rgba(255, 255, 255, 0.22);
     }
-    .btn-primary:active { transform: scale(0.98); box-shadow: 0 0 8px rgba(77, 168, 217, 0.1); }
+    .btn-primary:active {
+      transform: scale(0.97);
+      box-shadow: 0 0 8px rgba(99, 145, 179, 0.12),
+                  inset 0 1px 0 rgba(255, 255, 255, 0.12);
+    }
 
     .btn-danger {
       background: rgba(229, 83, 75, 0.12);
@@ -1848,7 +2287,12 @@
       border: 1px solid rgba(255,255,255,0.06);
     }
 
-    .btn-secondary:hover { background: rgba(255,255,255,0.09); color: var(--text); }
+    .btn-secondary:hover {
+      background: rgba(255,255,255,0.09);
+      color: var(--text);
+      border-color: rgba(255,255,255,0.10);
+    }
+    .btn-secondary:active { transform: scale(0.97); background: rgba(255,255,255,0.12); }
 
     .btn-sm { padding: 5px 12px; font-size: 12px; }
 
@@ -1857,10 +2301,11 @@
       color: var(--text-secondary);
       border: 1px solid var(--border);
       border-radius: var(--radius);
-      padding: 6px 8px;
+      padding: 5px 7px;
       font-size: 11px;
       font-family: inherit;
-      max-width: 140px;
+      max-width: 110px;
+      text-overflow: ellipsis;
       cursor: pointer;
       -webkit-appearance: none;
       outline: none;
@@ -1869,15 +2314,19 @@
     .device-picker:focus { border-color: var(--blue); }
 
     .btn-icon {
-      padding: 4px 7px;
-      font-size: 15px;
-      line-height: 1;
+      padding: 6px;
+      line-height: 0;
       border: none !important;
       background: transparent !important;
       color: var(--text-tertiary);
       border-radius: 6px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      transition: background 0.15s ease, color 0.15s ease;
     }
-    .btn-icon:hover { background: var(--bg-hover) !important; color: var(--text-secondary); }
+    .btn-icon svg { display: block; }
+    .btn-icon:hover { background: var(--bg-hover) !important; color: var(--text); }
 
     /* ── Upcoming meeting ── */
     .upcoming {
@@ -1885,11 +2334,20 @@
       align-items: center;
       gap: 10px;
       padding: 10px 16px;
-      background: rgba(77, 168, 217, 0.06);
-      border-bottom: 1px solid rgba(77, 168, 217, 0.1);
+      background: rgba(99, 145, 179, 0.10);
+      border-bottom: 1px solid rgba(99, 145, 179, 0.18);
     }
 
-    .upcoming-icon { font-size: 16px; flex-shrink: 0; }
+    .upcoming-icon {
+      flex-shrink: 0;
+      width: 18px;
+      height: 18px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--accent);
+    }
+    .upcoming-icon svg { display: block; }
 
     .upcoming-info { flex: 1; min-width: 0; }
 
@@ -1920,7 +2378,17 @@
       border-bottom: 1px solid rgba(70, 192, 114, 0.12);
     }
     .call-detected.active { display: flex; }
-    .call-detected-icon { font-size: 16px; flex-shrink: 0; }
+    .call-detected-icon {
+      flex-shrink: 0;
+      width: 18px;
+      height: 18px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--green);
+      margin-top: 1px;
+    }
+    .call-detected-icon svg { display: block; }
     .call-detected-info { flex: 1; min-width: 0; }
     .call-detected-title { font-size: 13px; font-weight: 600; color: var(--text); }
     .call-detected-subtitle { font-size: 11px; color: var(--green); font-weight: 600; margin-top: 2px; }
@@ -1933,8 +2401,8 @@
       align-items: center;
       gap: 12px;
       padding: 10px 16px;
-      background: rgba(77, 168, 217, 0.08);
-      border-bottom: 1px solid rgba(77, 168, 217, 0.12);
+      background: rgba(99, 145, 179, 0.08);
+      border-bottom: 1px solid rgba(99, 145, 179, 0.12);
     }
     .update-banner.active { display: flex; animation: processing-enter 0.3s ease-out; }
     .update-banner-info { flex: 1; min-width: 0; }
@@ -1976,7 +2444,7 @@
       </div>
     </div>
     <div class="header-actions">
-      <button class="btn btn-icon" id="btn-settings" title="Settings (⌘,)">⚙</button>
+      <button class="btn btn-icon" id="btn-settings" title="Settings (⌘,)" aria-label="Settings"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></button>
       <button class="header-chip dictation-shortcut" id="dictation-shortcut-chip">Dictate</button>
       <button class="header-chip readiness" id="btn-readiness">Readiness</button>
       <button class="header-chip" id="btn-jobs">Jobs <span id="jobs-count">0</span></button>
@@ -2043,11 +2511,11 @@
         <div class="output-notice-title" id="output-notice-title">Saved meeting</div>
         <div class="output-notice-detail" id="output-notice-detail"></div>
         <div class="output-notice-path" id="output-notice-path"></div>
-        <div class="output-notice-actions">
-          <button class="btn btn-secondary btn-sm" id="btn-open-output">Open</button>
-          <button class="btn btn-secondary btn-sm" id="btn-open-output-folder">Show in Folder</button>
-          <button class="btn btn-secondary btn-sm" id="btn-dismiss-output">Dismiss</button>
-        </div>
+      </div>
+      <div class="output-notice-actions">
+        <button class="btn btn-secondary btn-sm" id="btn-open-output">Open</button>
+        <button class="btn btn-secondary btn-sm" id="btn-open-output-folder">Reveal</button>
+        <button class="btn btn-secondary btn-sm" id="btn-dismiss-output" aria-label="Dismiss">×</button>
       </div>
     </div>
   </div>
@@ -2063,11 +2531,12 @@
   <!-- Search -->
   <div class="search-wrap search-icon">
     <input class="search-box" type="text" placeholder="Search meetings, memos, and dictations..." id="search-input" />
+    <span class="search-kbd" aria-hidden="true">⌘K</span>
   </div>
 
   <!-- Upcoming meeting suggestion -->
   <div class="upcoming" id="upcoming" style="display: none;">
-    <div class="upcoming-icon">📅</div>
+    <div class="upcoming-icon" aria-hidden="true"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg></div>
     <div class="upcoming-info">
       <div class="upcoming-title" id="upcoming-title"></div>
       <div class="upcoming-time" id="upcoming-time"></div>
@@ -2077,7 +2546,7 @@
 
   <!-- Call detected banner -->
   <div class="call-detected" id="call-detected-banner">
-    <div class="call-detected-icon">📞</div>
+    <div class="call-detected-icon" aria-hidden="true"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"/></svg></div>
     <div class="call-detected-info">
       <div class="call-detected-title" id="call-detected-title">Call detected</div>
       <div class="call-detected-subtitle" id="call-detected-subtitle">Ready to record this call</div>
@@ -2107,16 +2576,25 @@
 
   <!-- Meeting list -->
   <div class="meetings-scroll" id="meetings-scroll">
-    <div class="empty-state">
-      <div class="icon">⏳</div>
-      <div class="title">Loading...</div>
+    <div class="list-skeleton" aria-hidden="true">
+      <div class="skeleton-section">
+        <div class="skeleton-label"></div>
+        <div class="skeleton-row"><div class="skeleton-bar title"></div><div class="skeleton-bar meta"></div></div>
+        <div class="skeleton-row"><div class="skeleton-bar title medium"></div><div class="skeleton-bar meta"></div></div>
+        <div class="skeleton-row"><div class="skeleton-bar title short"></div><div class="skeleton-bar meta"></div></div>
+      </div>
+      <div class="skeleton-section">
+        <div class="skeleton-label"></div>
+        <div class="skeleton-row"><div class="skeleton-bar title medium"></div><div class="skeleton-bar meta"></div></div>
+        <div class="skeleton-row"><div class="skeleton-bar title"></div><div class="skeleton-bar meta"></div></div>
+      </div>
     </div>
   </div>
 
   <!-- Footer -->
   <div class="footer" id="footer">
     <div class="footer-actions">
-      <div style="display: flex; gap: 4px; align-items: center;">
+      <div class="footer-record-group">
         <button class="btn btn-primary" id="btn-record">Start Recording</button>
         <select id="device-picker" class="device-picker" title="Select microphone">
           <option value="">System Default</option>
@@ -2139,7 +2617,7 @@
       </div>
       <div class="recall-header-actions">
         <button class="btn btn-secondary btn-sm" id="btn-recall-end" style="display:none;">End Session</button>
-        <button class="recall-close" id="btn-recall-close" title="Close panel">&times;</button>
+        <button class="recall-close" id="btn-recall-close" title="Close panel" aria-label="Close panel"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
       </div>
     </div>
     <div class="recall-note" id="recall-note">
@@ -2150,7 +2628,7 @@
     </div>
     <div class="recall-status" id="recall-loading" style="display:none;">
       <div class="processing-spinner" aria-hidden="true"></div>
-      <span>Starting Recall...</span>
+      <span>Spinning up your agent...</span>
     </div>
     <div class="recall-terminal" id="recall-terminal-container"></div>
     <div class="recall-exit-banner" id="recall-exit-banner">
@@ -2162,7 +2640,7 @@
   <!-- In-app meeting detail view -->
   <div class="detail-overlay" id="detail-overlay">
     <div class="detail-card" role="dialog" aria-modal="true" aria-labelledby="detail-title" style="position:relative;">
-      <button class="detail-close-x" id="btn-detail-close" aria-label="Close">&times;</button>
+      <button class="detail-close-x" id="btn-detail-close" aria-label="Close"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
       <div class="detail-header">
         <div class="detail-header-copy">
           <div class="detail-title" id="detail-title">Meeting</div>
@@ -2294,7 +2772,7 @@
       </div>
 
       <!-- General -->
-      <div style="margin-bottom: 16px;">
+      <div class="settings-section">
         <div class="about-item-title">GENERAL</div>
         <div class="about-controls">
           <div class="about-controls-copy">Show completion alerts</div>
@@ -2312,7 +2790,7 @@
         <div class="about-controls">
           <div class="about-controls-group">
             <div class="about-controls-copy">Quick Thought shortcut</div>
-            <div style="display: flex; align-items: center; gap: 8px; margin-top: 6px;">
+            <div class="settings-shortcut-row">
               <button id="shortcut-recorder-quick_thought" class="btn btn-secondary btn-sm shortcut-recorder-btn" style="min-width: 140px; font-family: var(--font-mono); font-size: 12px;" data-slot="quick_thought">&#8984; Shift M</button>
               <span class="special-key-link" style="font-size: 11px; color: var(--text-tertiary); cursor: pointer;" data-slot="quick_thought">or <u>Caps Lock</u> / <u>fn</u></span>
             </div>
@@ -2323,13 +2801,13 @@
       </div>
 
       <!-- Dictation -->
-      <div style="margin-bottom: 16px;">
+      <div class="settings-section">
         <div class="about-item-title">DICTATION</div>
         <!-- Dictation shortcut (unified recorder) -->
         <div class="about-controls">
           <div class="about-controls-group">
             <div class="about-controls-copy">Dictation shortcut</div>
-            <div style="display: flex; align-items: center; gap: 8px; margin-top: 6px;">
+            <div class="settings-shortcut-row">
               <button id="shortcut-recorder-dictation" class="btn btn-secondary btn-sm shortcut-recorder-btn" style="min-width: 140px; font-family: var(--font-mono); font-size: 12px;" data-slot="dictation">&#8984; Shift Space</button>
               <span class="special-key-link" style="font-size: 11px; color: var(--text-tertiary); cursor: pointer;" data-slot="dictation">or <u>Caps Lock</u> / <u>fn</u></span>
             </div>
@@ -2340,7 +2818,7 @@
         <div class="about-controls">
           <div class="about-controls-group">
             <div class="about-controls-copy">Dictation whisper model</div>
-            <select id="settings-dictation-model" style="margin-top: 6px; width: 100%; padding: 6px 8px; border-radius: 8px; background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.1); color: var(--text); font-size: 13px;">
+            <select id="settings-dictation-model" class="settings-input">
               <option value="tiny">tiny — fastest, lower quality</option>
               <option value="base">base — fast, decent quality (default)</option>
               <option value="small">small — good quality, slower</option>
@@ -2356,7 +2834,7 @@
           <div class="about-controls-group">
             <div class="about-controls-copy">Silence timeout</div>
             <div class="about-controls-meta">End dictation session after this much silence (after first speech).</div>
-            <select id="settings-dictation-silence" style="margin-top: 6px; width: 100%; padding: 6px 8px; border-radius: 8px; background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.1); color: var(--text); font-size: 13px;">
+            <select id="settings-dictation-silence" class="settings-input">
               <option value="1000">1 second</option>
               <option value="2000">2 seconds (default)</option>
               <option value="3000">3 seconds</option>
@@ -2367,7 +2845,7 @@
       </div>
 
       <!-- Live Transcript -->
-      <div style="margin-bottom: 16px;">
+      <div class="settings-section">
         <div class="about-item-title">LIVE TRANSCRIPT</div>
         <div class="about-controls">
           <div class="about-controls-group">
@@ -2384,12 +2862,12 @@
       </div>
 
       <!-- Transcription -->
-      <div style="margin-bottom: 16px;">
+      <div class="settings-section">
         <div class="about-item-title">TRANSCRIPTION</div>
         <div class="about-controls">
           <div class="about-controls-group">
             <div class="about-controls-copy">Whisper model</div>
-            <select id="settings-whisper-model" style="margin-top: 6px; width: 100%; padding: 6px 8px; border-radius: 8px; background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.1); color: var(--text); font-size: 13px;">
+            <select id="settings-whisper-model" class="settings-input">
               <option value="tiny">tiny — 75 MB, fastest, lower quality</option>
               <option value="base">base — 148 MB, fast, decent quality</option>
               <option value="small">small — 466 MB, good quality (recommended)</option>
@@ -2406,7 +2884,7 @@
           <div class="about-controls-group">
             <div class="about-controls-copy">Transcription language</div>
             <div class="about-controls-meta">Leave this on Auto-detect for mixed or unknown audio. Pick a language only when Whisper is consistently guessing wrong.</div>
-            <select id="settings-whisper-language" style="margin-top: 6px; width: 100%; padding: 6px 8px; border-radius: 8px; background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.1); color: var(--text); font-size: 13px;">
+            <select id="settings-whisper-language" class="settings-input">
               <option value="">Auto-detect</option>
               <option value="af">Afrikaans</option>
               <option value="am">Amharic</option>
@@ -2518,7 +2996,7 @@
       </div>
 
       <!-- Summarization -->
-      <div style="margin-bottom: 16px;">
+      <div class="settings-section">
         <div class="about-item-title">AUTO-SUMMARIZATION</div>
         <div class="about-controls">
           <div class="about-controls-group">
@@ -2537,7 +3015,7 @@
         <div class="about-controls" id="settings-agent-command-row" style="display: none;">
           <div class="about-controls-group">
             <div class="about-controls-copy">Agent command</div>
-            <select id="settings-agent-command" style="margin-top: 6px; width: 100%; padding: 6px 8px; border-radius: 8px; background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.1); color: var(--text); font-size: 13px;">
+            <select id="settings-agent-command" class="settings-input">
             </select>
             <div class="about-controls-meta" id="settings-agent-command-status"></div>
           </div>
@@ -2545,7 +3023,7 @@
       </div>
 
       <!-- Call Detection -->
-      <div style="margin-bottom: 16px;">
+      <div class="settings-section">
         <div class="about-item-title">CALL DETECTION</div>
         <div class="about-controls">
           <div class="about-controls-copy">Detect calls automatically</div>
@@ -2555,14 +3033,14 @@
           <div class="about-controls-group">
             <div class="about-controls-copy">Polling interval</div>
             <div class="about-controls-meta">How often to check for active calls (seconds).</div>
-            <input type="number" id="settings-call-detection-polling-interval" min="1" style="margin-top: 6px; width: 100%; padding: 6px 8px; border-radius: 8px; background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.1); color: var(--text); font-size: 13px;">
+            <input type="number" id="settings-call-detection-polling-interval" min="1" class="settings-input">
           </div>
         </div>
         <div class="about-controls">
           <div class="about-controls-group">
             <div class="about-controls-copy">Cooldown</div>
             <div class="about-controls-meta">Minutes to wait before re-triggering call detection.</div>
-            <input type="number" id="settings-call-detection-cooldown" min="0" style="margin-top: 6px; width: 100%; padding: 6px 8px; border-radius: 8px; background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.1); color: var(--text); font-size: 13px;">
+            <input type="number" id="settings-call-detection-cooldown" min="0" class="settings-input">
           </div>
         </div>
         <div class="about-controls">
@@ -2575,7 +3053,7 @@
       </div>
 
       <!-- Privacy -->
-      <div style="margin-bottom: 16px;">
+      <div class="settings-section">
         <div class="about-item-title">PRIVACY</div>
         <div class="about-controls">
           <div class="about-controls-copy">Hide windows from screen sharing</div>
@@ -2591,7 +3069,7 @@
         <div class="about-controls" id="settings-screen-interval-row" style="display: none;">
           <div class="about-controls-group">
             <div class="about-controls-copy">Screenshot interval</div>
-            <select id="settings-screen-interval" style="margin-top: 6px; width: 100%; padding: 6px 8px; border-radius: 8px; background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.1); color: var(--text); font-size: 13px;">
+            <select id="settings-screen-interval" class="settings-input">
               <option value="15">Every 15 seconds</option>
               <option value="30">Every 30 seconds</option>
               <option value="60">Every 60 seconds</option>
@@ -2601,7 +3079,7 @@
       </div>
 
       <!-- Vault Sync -->
-      <div style="margin-bottom: 16px;">
+      <div class="settings-section">
         <div class="about-item-title">VAULT SYNC</div>
         <div class="about-controls">
           <div class="about-controls-group" style="flex: 1;">
@@ -2617,12 +3095,12 @@
       </div>
 
       <!-- Recall Agent -->
-      <div style="margin-bottom: 16px;">
+      <div class="settings-section">
         <div class="about-item-title">RECALL AGENT</div>
         <div class="about-controls">
           <div class="about-controls-group">
             <div class="about-controls-copy">AI agent for the Recall panel</div>
-            <select id="settings-agent" style="margin-top: 6px; width: 100%; padding: 6px 8px; border-radius: 8px; background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.1); color: var(--text); font-size: 13px;">
+            <select id="settings-agent" class="settings-input">
             </select>
             <div class="about-controls-meta" id="settings-agent-status"></div>
           </div>
@@ -2636,7 +3114,7 @@
           <div class="about-controls-group">
             <div class="about-controls-copy">Extra launch flags</div>
             <div class="about-controls-meta">Additional CLI arguments passed when starting the agent</div>
-            <input type="text" id="settings-agent-args" placeholder="e.g. --model sonnet" style="margin-top: 6px; width: 100%; padding: 6px 8px; border-radius: 8px; background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.1); color: var(--text); font-size: 13px; box-sizing: border-box;">
+            <input type="text" id="settings-agent-args" placeholder="e.g. --model sonnet" class="settings-input">
             <div class="about-controls-meta" id="settings-agent-args-status" style="margin-top: 4px;"></div>
           </div>
         </div>
@@ -2651,7 +3129,7 @@
       </div>
 
       <!-- Diagnostics (Readiness + Recovery moved from header) -->
-      <div style="margin-bottom: 16px;">
+      <div class="settings-section">
         <div class="about-item-title">DIAGNOSTICS</div>
         <div class="about-controls">
           <div class="about-controls-copy">System readiness and audio permission checks</div>
@@ -2985,15 +3463,24 @@
       processingJobs = Array.isArray(jobs) ? jobs : [];
       processingJobsEl.replaceChildren();
 
-      if (!processingJobs.length) {
+      const count = processingJobs.length;
+      processingBar.classList.toggle('single-job', count === 1);
+
+      if (!count) {
         processingSummary.textContent = '';
         return;
       }
 
+      // For count === 1 the .single-job class hides the entire top row
+      // (.processing-row), so the per-job card is the only visible artifact.
+      // For count > 1 the top row stays visible — but checkStatus()
+      // unconditionally rewrites processingTitle/Stage/Elapsed each poll,
+      // so we only set processingSummary here. Don't write the other three:
+      // they'd be overwritten on the next tick anyway.
       processingSummary.textContent =
-        processingJobs.length > 1
-          ? `${processingJobs.length} recordings are cooking in the background.`
-          : 'You can keep recording while this finishes.';
+        count > 1
+          ? `${count} recordings are cooking in the background.`
+          : '';
 
       for (const job of processingJobs) {
         const card = document.createElement('div');
@@ -3031,7 +3518,15 @@
         card.appendChild(detail);
         card.appendChild(meta);
 
-        if (job.outputPath) {
+        // Only show the Open button when there's something actually openable.
+        // While the job is queued/transcribing/summarizing/saving, the markdown
+        // file may exist on disk but its contents aren't readable yet — clicking
+        // would silently fail and the button flickers because the card re-renders
+        // every poll. Once state reaches transcript-only or complete, the file
+        // has stable content and the button appears.
+        const isOpenable = job.outputPath
+          && (job.state === 'transcript-only' || job.state === 'complete');
+        if (isOpenable) {
           const actions = document.createElement('div');
           actions.className = 'processing-job-actions';
 
@@ -3227,6 +3722,7 @@
         const mode = status.recordingMode || 'meeting';
         isRecording = status.recording;
         isProcessing = !!status.processing;
+        document.body.classList.toggle('is-recording', !!isRecording);
         updateJobsChip(status.processingJobCount || 0);
         renderProcessingJobs(status.processingJobs || []);
         updateOutputNotice(status.latestOutput);
@@ -4273,7 +4769,21 @@
           chatBtn.className = 'meeting-chat-btn';
           chatBtn.setAttribute('aria-label', 'Discuss with Agent');
           chatBtn.setAttribute('title', 'Discuss with Agent');
-          chatBtn.textContent = '\u279C';
+          const SVG_NS = 'http://www.w3.org/2000/svg';
+          const chatSvg = document.createElementNS(SVG_NS, 'svg');
+          chatSvg.setAttribute('width', '14');
+          chatSvg.setAttribute('height', '14');
+          chatSvg.setAttribute('viewBox', '0 0 24 24');
+          chatSvg.setAttribute('fill', 'none');
+          chatSvg.setAttribute('stroke', 'currentColor');
+          chatSvg.setAttribute('stroke-width', '2');
+          chatSvg.setAttribute('stroke-linecap', 'round');
+          chatSvg.setAttribute('stroke-linejoin', 'round');
+          chatSvg.setAttribute('aria-hidden', 'true');
+          const chatPath = document.createElementNS(SVG_NS, 'path');
+          chatPath.setAttribute('d', 'M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z');
+          chatSvg.appendChild(chatPath);
+          chatBtn.appendChild(chatSvg);
           chatBtn.addEventListener('click', async (e) => {
             e.stopPropagation();
             await openRecall('meeting', m.path);
@@ -4394,54 +4904,66 @@
     function renderSetupEmptyState() {
       const empty = document.createElement('div');
       empty.className = 'empty-state';
-      empty.innerHTML = `
-        <div class="onboarding-content">
-          <div class="onboarding-icon">🎙</div>
-          <h2>Welcome to Minutes</h2>
-          <p class="onboarding-sub">Download the model once, then create one short recording. The moment it saves, this becomes your real meeting list.</p>
-          <div class="onboarding-steps">
-            <div class="onboarding-step" id="step-model">
-              <div class="step-header">
-                <span class="step-num">1</span>
-                <span class="step-title">Download speech model</span>
-                <span class="step-status" id="step-model-status"></span>
-              </div>
-              <div class="step-body" id="step-model-body">
-                <p>Choose a model size:</p>
-                <div class="model-options">
-                  <button class="btn btn-secondary btn-sm model-btn" data-model="tiny">Tiny (75 MB, fast)</button>
-                  <button class="btn btn-primary btn-sm model-btn" data-model="base">Base (141 MB, recommended)</button>
-                  <button class="btn btn-secondary btn-sm model-btn" data-model="small">Small (466 MB, best accuracy)</button>
+      const hasModel = !!currentSetup?.hasModel;
+
+      if (!hasModel) {
+        // Real gate: model has to be downloaded before anything works.
+        empty.innerHTML = `
+          <div class="onboarding-content">
+            <div class="onboarding-icon">🎙</div>
+            <h2>Welcome to Minutes</h2>
+            <p class="onboarding-sub">Download the speech model once. Everything else stays local.</p>
+            <div class="onboarding-steps">
+              <div class="onboarding-step" id="step-model">
+                <div class="step-header">
+                  <span class="step-num">1</span>
+                  <span class="step-title">Download speech model</span>
+                  <span class="step-status" id="step-model-status"></span>
                 </div>
-                <div class="download-progress" style="display: none;">
-                  <div class="progress-bar"><div class="progress-fill"></div></div>
-                  <span class="progress-text">Downloading...</span>
+                <div class="step-body" id="step-model-body">
+                  <p>Choose a model size:</p>
+                  <div class="model-options">
+                    <button class="btn btn-secondary btn-sm model-btn" data-model="tiny">Tiny (75 MB, fast)</button>
+                    <button class="btn btn-primary btn-sm model-btn" data-model="base">Base (141 MB, recommended)</button>
+                    <button class="btn btn-secondary btn-sm model-btn" data-model="small">Small (466 MB, best accuracy)</button>
+                  </div>
+                  <div class="download-progress" style="display: none;">
+                    <div class="progress-bar"><div class="progress-fill"></div></div>
+                    <span class="progress-text">Downloading...</span>
+                  </div>
+                </div>
+              </div>
+              <div class="onboarding-step disabled" id="step-first-artifact">
+                <div class="step-header">
+                  <span class="step-num">2</span>
+                  <span class="step-title">Capture your first conversation</span>
+                </div>
+                <div class="step-body">
+                  <p>Once the model is ready, hit Start Recording. Anything you capture lives only on this Mac.</p>
                 </div>
               </div>
             </div>
-            <div class="onboarding-step disabled" id="step-first-artifact">
-              <div class="step-header">
-                <span class="step-num">2</span>
-                <span class="step-title">Create your first artifact</span>
-              </div>
-              <div class="step-body">
-                <p>Make a quick 10-second test recording. Say one sentence, stop, and let Minutes save its first markdown artifact.</p>
-                <button class="btn btn-primary" id="btn-start-first-recording">Record a 10-second test</button>
-              </div>
+          </div>`;
+      } else {
+        // Model is installed, just no recordings yet. One quiet card,
+        // one CTA, no multi-step gauntlet. Disappears the moment they
+        // record anything.
+        empty.classList.add('first-record');
+        empty.innerHTML = `
+          <div class="first-record-card">
+            <div class="first-record-mark" aria-hidden="true"></div>
+            <div class="first-record-title">Ready when you are.</div>
+            <div class="first-record-sub">Hit <kbd>Start Recording</kbd> below — or press <kbd>⌘R</kbd> — to capture your first conversation. Everything stays on this Mac.</div>
+            <div class="first-record-tips">
+              <span class="first-record-tip"><kbd>⌘K</kbd> Search</span>
+              <span class="first-record-tip"><kbd>⌘⇧M</kbd> Quick thought</span>
+              <span class="first-record-tip"><kbd>⌘⇧L</kbd> Live transcript</span>
             </div>
-            <div class="onboarding-step disabled">
-              <div class="step-header">
-                <span class="step-num">3</span>
-                <span class="step-title">Watch it appear here</span>
-              </div>
-              <div class="step-body">
-                <p>As soon as the test recording finishes processing, this setup card disappears and your first saved artifact takes its place.</p>
-              </div>
-            </div>
-          </div>
-        </div>`;
+          </div>`;
+      }
+
       meetingsScroll.appendChild(empty);
-      setupOnboarding(empty);
+      if (!hasModel) setupOnboarding(empty);
     }
 
     // ── Upcoming meetings ──
@@ -4494,6 +5016,37 @@
 
     // ⌘, keyboard shortcut
     document.addEventListener('keydown', (e) => { if (e.metaKey && e.key === ',') { e.preventDefault(); openSettings(); } });
+
+    // ⌘K focuses the search input. Skip when an editable field is focused
+    // so it doesn't steal in-progress text from the recall quick-note,
+    // settings inputs, or any other text entry — the only exception is
+    // the search input itself, where ⌘K becomes a "select all" repeat.
+    document.addEventListener('keydown', (e) => {
+      if (!e.metaKey || e.shiftKey || e.altKey || e.ctrlKey) return;
+      if (e.key !== 'k' && e.key !== 'K') return;
+      const active = document.activeElement;
+      const tag = (active?.tagName || '').toLowerCase();
+      const isEditable = (tag === 'input' || tag === 'textarea' || tag === 'select')
+        && active !== searchInput;
+      if (isEditable) return;
+      e.preventDefault();
+      searchInput.focus();
+      searchInput.select();
+    });
+
+    // ⌘R toggles recording (the first-record card teaches this shortcut,
+    // so wire it to whatever the primary record button is currently doing).
+    // No-op when an input is focused so it doesn't steal text-field reload
+    // intent (text fields don't reload in this app, but the principle holds).
+    document.addEventListener('keydown', (e) => {
+      if (!e.metaKey || e.shiftKey || e.altKey || e.ctrlKey) return;
+      if (e.key !== 'r' && e.key !== 'R') return;
+      const tag = (document.activeElement?.tagName || '').toLowerCase();
+      if (tag === 'input' || tag === 'textarea' || tag === 'select') return;
+      e.preventDefault();
+      const recordBtn = document.getElementById('btn-record');
+      if (recordBtn && !recordBtn.disabled) recordBtn.click();
+    });
 
     async function loadSettings() {
       try {
@@ -5665,8 +6218,8 @@
     const recallEndBtn = document.getElementById('btn-recall-end');
     const assistantBtn = document.getElementById('btn-assistant');
 
-    const COLLAPSED_WIDTH = 480;
-    const EXPANDED_WIDTH = 960;
+    const COLLAPSED_WIDTH = 520;
+    const EXPANDED_WIDTH = 1040;
     const SESSION_ID = 'assistant';
 
     let recallExpanded = false;
@@ -5711,6 +6264,7 @@
         cursorStyle: 'bar',
         scrollback: 10000,
         allowProposedApi: true,
+        allowTransparency: true,
       });
 
       recallFitAddon = new FitAddon.FitAddon();

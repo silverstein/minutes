@@ -84,6 +84,7 @@ fn match_speakers_by_voice(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn single_stem_speaker_self_attribution(
     audio_path: &Path,
     config: &Config,
@@ -100,10 +101,10 @@ fn single_stem_speaker_self_attribution(
 
     let speaker_label = if transcript_labels.len() == 1 && transcript_labels[0] == "SPEAKER_0" {
         "SPEAKER_0".to_string()
+    } else if transcript_labels.len() == 1 && transcript_labels[0] == "SPEAKER_1" {
+        "SPEAKER_1".to_string()
     } else if transcript.contains("[UNKNOWN ") {
         "UNKNOWN".to_string()
-    } else if transcript_labels.len() == 1 {
-        transcript_labels[0].clone()
     } else {
         return None;
     };
@@ -1875,7 +1876,7 @@ mod tests {
             attributions: vec![],
             self_profile_exists: false,
         };
-        let labels = vec!["SPEAKER_1".to_string()];
+        let labels = vec!["SPEAKER_2".to_string()];
         let l2_labels = std::collections::HashSet::new();
 
         assert!(single_stem_speaker_self_attribution(
@@ -1884,7 +1885,7 @@ mod tests {
             &voice_result,
             true,
             1,
-            "[SPEAKER_1 0:00] hello\n",
+            "[SPEAKER_2 0:00] hello\n",
             &labels,
             &l2_labels,
         )
@@ -1898,6 +1899,19 @@ mod tests {
             "[SPEAKER_0 0:00] hello\n",
             &["SPEAKER_0".to_string()],
             &std::collections::HashSet::new(),
+        )
+        .is_none());
+        let mut mapped = std::collections::HashSet::new();
+        mapped.insert("SPEAKER_0".to_string());
+        assert!(single_stem_speaker_self_attribution(
+            Path::new("/fake.wav"),
+            &config,
+            &voice_result,
+            true,
+            1,
+            "[SPEAKER_0 0:00] hello\n",
+            &["SPEAKER_0".to_string()],
+            &mapped,
         )
         .is_none());
     }

@@ -672,6 +672,8 @@ pub fn apply_speakers(transcript: &str, result: &DiarizationResult) -> String {
         lines.push(OutputLine::Raw(line.to_string()));
     }
 
+    let dominant_speaker = dominant_speaker_label(&sorted_segments);
+
     // Hypothesis: Whisper often starts transcribing at t=0 while diarization
     // detects voice activity slightly later (VAD onset latency, mic warmup, or
     // leading silence). The first transcript segment therefore lands before the
@@ -696,6 +698,30 @@ pub fn apply_speakers(transcript: &str, result: &DiarizationResult) -> String {
                     *speaker = resolved;
                     unknown_count = unknown_count.saturating_sub(1);
                     matched_count += 1;
+                }
+            }
+        }
+    }
+
+    // If every attributed line is still UNKNOWN but the diarization result has
+    // one clearly dominant speaker, prefer that speaker over leaving the whole
+    // clip unresolved. This is especially useful for short native-call clips
+    // where the first transcript line starts before the first diarization
+    // segment, but one speaker still dominates the clip overall.
+    let all_unknown = !lines.is_empty()
+        && lines.iter().all(|line| match line {
+            OutputLine::Attributed { speaker, .. } => speaker == "UNKNOWN",
+            OutputLine::Raw(_) => true,
+        });
+    if all_unknown {
+        if let Some(dominant) = dominant_speaker {
+            for line in &mut lines {
+                if let OutputLine::Attributed { speaker, .. } = line {
+                    if speaker == "UNKNOWN" {
+                        *speaker = dominant.clone();
+                        unknown_count = unknown_count.saturating_sub(1);
+                        matched_count += 1;
+                    }
                 }
             }
         }
@@ -727,6 +753,31 @@ pub fn apply_speakers(transcript: &str, result: &DiarizationResult) -> String {
     }
 
     output
+}
+
+fn dominant_speaker_label(segments: &[SpeakerSegment]) -> Option<String> {
+    let mut durations: std::collections::HashMap<&str, f64> = std::collections::HashMap::new();
+    for seg in segments {
+        let dur = (seg.end - seg.start).max(0.0);
+        *durations.entry(seg.speaker.as_str()).or_insert(0.0) += dur;
+    }
+
+    let total: f64 = durations.values().sum();
+    if total <= f64::EPSILON {
+        return None;
+    }
+
+    let (label, duration) = durations
+        .into_iter()
+        .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))?;
+
+    // Require a strong majority before overriding UNKNOWN lines. This avoids
+    // inventing certainty when the clip is genuinely mixed.
+    if duration / total >= 0.6 {
+        Some(label.to_string())
+    } else {
+        None
+    }
 }
 
 /// Find which speaker is talking at a given timestamp.
@@ -1577,6 +1628,48 @@ mod tests {
         );
         assert!(labeled.contains("[SPEAKER_0 0:03]"));
         assert!(labeled.contains("[SPEAKER_1 0:07]"));
+    }
+
+    #[test]
+    fn apply_speakers_all_unknown_prefers_dominant_speaker() {
+        let transcript = "[0:00] Short intro line\n";
+        let result = DiarizationResult {
+            segments: vec![
+                SpeakerSegment {
+                    speaker: "SPEAKER_1".into(),
+                    start: 1.0,
+                    end: 9.0,
+                },
+                SpeakerSegment {
+                    speaker: "SPEAKER_0".into(),
+                    start: 9.0,
+                    end: 10.0,
+                },
+            ],
+            num_speakers: 2,
+            from_stems: true,
+            speaker_embeddings: std::collections::HashMap::new(),
+        };
+
+        let labeled = apply_speakers(transcript, &result);
+        assert!(labeled.contains("[SPEAKER_1 0:00]"));
+    }
+
+    #[test]
+    fn dominant_speaker_requires_clear_majority() {
+        let segments = vec![
+            SpeakerSegment {
+                speaker: "SPEAKER_0".into(),
+                start: 0.0,
+                end: 5.0,
+            },
+            SpeakerSegment {
+                speaker: "SPEAKER_1".into(),
+                start: 5.0,
+                end: 9.0,
+            },
+        ];
+        assert_eq!(dominant_speaker_label(&segments), None);
     }
 
     #[test]

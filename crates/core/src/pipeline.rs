@@ -89,17 +89,21 @@ fn single_stem_speaker_self_attribution(
     voice_result: &VoiceMatchResult,
     diarization_from_stems: bool,
     diarization_num_speakers: usize,
+    transcript: &str,
     transcript_labels: &[String],
     l2_labels: &std::collections::HashSet<String>,
 ) -> Option<diarize::SpeakerAttribution> {
-    if !diarization_from_stems
-        || diarization_num_speakers != 1
-        || transcript_labels.len() != 1
-        || transcript_labels[0] != "SPEAKER_0"
-        || !l2_labels.is_empty()
-    {
+    if !diarization_from_stems || diarization_num_speakers != 1 || !l2_labels.is_empty() {
         return None;
     }
+
+    let speaker_label = if transcript_labels.len() == 1 && transcript_labels[0] == "SPEAKER_0" {
+        "SPEAKER_0".to_string()
+    } else if transcript.contains("[UNKNOWN ") {
+        "UNKNOWN".to_string()
+    } else {
+        return None;
+    };
 
     let my_name = config.identity.name.as_ref()?;
     let my_confidence = if voice_result.self_profile_exists {
@@ -114,7 +118,7 @@ fn single_stem_speaker_self_attribution(
     };
 
     Some(diarize::SpeakerAttribution {
-        speaker_label: transcript_labels[0].clone(),
+        speaker_label,
         name: my_name.clone(),
         confidence: my_confidence,
         source: my_source,
@@ -544,6 +548,7 @@ where
             &voice_result,
             diarization_from_stems,
             diarization_num_speakers,
+            &transcript,
             &transcript_labels,
             &l2_labels,
         ) {
@@ -966,6 +971,7 @@ where
             &voice_result,
             diarization_from_stems,
             diarization_num_speakers,
+            &transcript,
             &transcript_labels,
             &l2_labels,
         ) {
@@ -1824,6 +1830,7 @@ mod tests {
             &voice_result,
             true,
             1,
+            "[SPEAKER_0 0:00] hello\n",
             &labels,
             &l2_labels,
         )
@@ -1851,6 +1858,7 @@ mod tests {
             &voice_result,
             true,
             1,
+            "[SPEAKER_1 0:00] hello\n",
             &labels,
             &l2_labels,
         )
@@ -1860,10 +1868,36 @@ mod tests {
             &voice_result,
             false,
             1,
+            "[SPEAKER_0 0:00] hello\n",
             &["SPEAKER_0".to_string()],
             &std::collections::HashSet::new(),
         )
         .is_none());
+    }
+
+    #[test]
+    fn single_stem_speaker_self_attribution_handles_unknown_label() {
+        let mut config = Config::default();
+        config.identity.name = Some("Mat".into());
+        let voice_result = VoiceMatchResult {
+            attributions: vec![],
+            self_profile_exists: true,
+        };
+
+        let attr = single_stem_speaker_self_attribution(
+            &config,
+            &voice_result,
+            true,
+            1,
+            "[UNKNOWN 0:00] Hello there\n",
+            &[],
+            &std::collections::HashSet::new(),
+        )
+        .expect("single unknown label should still map to self");
+
+        assert_eq!(attr.speaker_label, "UNKNOWN");
+        assert_eq!(attr.name, "Mat");
+        assert_eq!(attr.confidence, diarize::Confidence::High);
     }
 
     #[test]

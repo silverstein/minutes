@@ -277,6 +277,12 @@ const DICTATION_SHORTCUT_CHOICES: [(&str, &str); 3] = [
     ("CmdOrCtrl+Alt+Space", "Cmd/Ctrl + Option/Alt + Space"),
     ("CmdOrCtrl+Shift+D", "Cmd/Ctrl + Shift + D"),
 ];
+const PALETTE_SHORTCUT_CHOICES: [(&str, &str); 4] = [
+    ("CmdOrCtrl+Shift+K", "Cmd/Ctrl + Shift + K"),
+    ("CmdOrCtrl+Shift+P", "Cmd/Ctrl + Shift + P"),
+    ("CmdOrCtrl+Shift+O", "Cmd/Ctrl + Shift + O"),
+    ("CmdOrCtrl+Alt+Space", "Cmd/Ctrl + Option/Alt + Space"),
+];
 const HOTKEY_HOLD_THRESHOLD_MS: u64 = 300;
 const HOTKEY_MIN_DURATION_MS: u64 = 400;
 
@@ -326,6 +332,10 @@ pub fn default_dictation_shortcut() -> &'static str {
     DICTATION_SHORTCUT_CHOICES[0].0
 }
 
+pub fn default_palette_shortcut() -> &'static str {
+    PALETTE_SHORTCUT_CHOICES[0].0
+}
+
 fn shortcut_choices(choices: &[(&str, &str)]) -> Vec<HotkeyChoice> {
     choices
         .iter()
@@ -342,6 +352,10 @@ fn hotkey_choices() -> Vec<HotkeyChoice> {
 
 fn dictation_shortcut_choices() -> Vec<HotkeyChoice> {
     shortcut_choices(&DICTATION_SHORTCUT_CHOICES)
+}
+
+fn palette_shortcut_choices() -> Vec<HotkeyChoice> {
+    shortcut_choices(&PALETTE_SHORTCUT_CHOICES)
 }
 
 fn validate_shortcut(shortcut: &str, choices: &[(&str, &str)]) -> Result<String, String> {
@@ -367,6 +381,10 @@ fn validate_hotkey_shortcut(shortcut: &str) -> Result<String, String> {
 
 fn validate_dictation_shortcut(shortcut: &str) -> Result<String, String> {
     validate_shortcut(shortcut, &DICTATION_SHORTCUT_CHOICES)
+}
+
+fn validate_palette_shortcut(shortcut: &str) -> Result<String, String> {
+    validate_shortcut(shortcut, &PALETTE_SHORTCUT_CHOICES)
 }
 
 fn current_hotkey_settings(state: &AppState) -> HotkeySettings {
@@ -3915,6 +3933,44 @@ mod tests {
     }
 
     #[test]
+    fn validate_palette_shortcut_accepts_default_choices() {
+        assert_eq!(
+            validate_palette_shortcut("CmdOrCtrl+Shift+K").unwrap(),
+            "CmdOrCtrl+Shift+K"
+        );
+        assert_eq!(
+            validate_palette_shortcut("CmdOrCtrl+Shift+P").unwrap(),
+            "CmdOrCtrl+Shift+P"
+        );
+        assert_eq!(
+            validate_palette_shortcut("CmdOrCtrl+Shift+O").unwrap(),
+            "CmdOrCtrl+Shift+O"
+        );
+        assert_eq!(
+            validate_palette_shortcut("CmdOrCtrl+Alt+Space").unwrap(),
+            "CmdOrCtrl+Alt+Space"
+        );
+    }
+
+    #[test]
+    fn validate_palette_shortcut_rejects_unknown() {
+        assert!(validate_palette_shortcut("CmdOrCtrl+Shift+Z").is_err());
+        assert!(validate_palette_shortcut("nonsense").is_err());
+    }
+
+    #[test]
+    fn humanize_shortcut_renders_modifiers_as_glyphs() {
+        assert_eq!(humanize_shortcut("CmdOrCtrl+Shift+K"), "⌘⇧K");
+        assert_eq!(humanize_shortcut("CmdOrCtrl+Alt+Space"), "⌘⌥Space");
+        assert_eq!(humanize_shortcut("CmdOrCtrl+Shift+O"), "⌘⇧O");
+        // Unknown pieces fall through verbatim.
+        assert_eq!(
+            humanize_shortcut("CmdOrCtrl+Shift+Backspace"),
+            "⌘⇧Backspace"
+        );
+    }
+
+    #[test]
     fn short_hotkey_capture_is_discarded() {
         let started = Instant::now() - std::time::Duration::from_millis(200);
         assert!(should_discard_hotkey_capture(Some(started), Instant::now()));
@@ -4314,6 +4370,170 @@ pub fn cmd_set_live_shortcut(
     cmd_set_setting("live_transcript".into(), "shortcut".into(), next_shortcut).ok();
 
     Ok(cmd_live_shortcut_settings(state))
+}
+
+#[tauri::command]
+pub fn cmd_palette_settings(state: tauri::State<AppState>) -> HotkeySettings {
+    let enabled = state.palette_shortcut_enabled.load(Ordering::Relaxed);
+    let shortcut = state
+        .palette_shortcut
+        .lock()
+        .map(|s| s.clone())
+        .unwrap_or_else(|_| default_palette_shortcut().to_string());
+    HotkeySettings {
+        enabled,
+        shortcut,
+        choices: palette_shortcut_choices(),
+    }
+}
+
+#[tauri::command]
+pub fn cmd_set_palette_shortcut(
+    app: tauri::AppHandle,
+    state: tauri::State<AppState>,
+    enabled: bool,
+    shortcut: String,
+) -> Result<HotkeySettings, String> {
+    use tauri_plugin_global_shortcut::GlobalShortcutExt;
+
+    let next_shortcut = validate_palette_shortcut(&shortcut)?;
+    let previous = cmd_palette_settings(state.clone());
+    let manager = app.global_shortcut();
+
+    if previous.enabled {
+        if let Err(e) = manager.unregister(previous.shortcut.as_str()) {
+            // Best-effort: don't block re-registration just because the
+            // unregister failed (the previous shortcut may already be
+            // gone if the user is rotating bindings rapidly).
+            eprintln!(
+                "[palette-shortcut] could not unregister {}: {}",
+                previous.shortcut, e
+            );
+        }
+    }
+
+    if enabled {
+        if let Err(e) = manager.register(next_shortcut.as_str()) {
+            // If the new shortcut won't register, try to restore the
+            // previous one so we don't leave the user without a
+            // working palette toggle.
+            if previous.enabled {
+                let _ = manager.register(previous.shortcut.as_str());
+            }
+            return Err(format!(
+                "Could not register {}. Another app may already be using it. ({})",
+                next_shortcut, e
+            ));
+        }
+    }
+
+    state
+        .palette_shortcut_enabled
+        .store(enabled, Ordering::Relaxed);
+    if let Ok(mut current) = state.palette_shortcut.lock() {
+        *current = next_shortcut.clone();
+    }
+
+    // Persist to config.toml so the next launch picks up the user's
+    // choice without re-running the migration.
+    cmd_set_setting(
+        "palette".into(),
+        "shortcut_enabled".into(),
+        enabled.to_string(),
+    )
+    .ok();
+    cmd_set_setting("palette".into(), "shortcut".into(), next_shortcut).ok();
+
+    Ok(cmd_palette_settings(state))
+}
+
+/// Marker file used to track whether the palette first-run notice has
+/// been shown to the user. Stored as a sibling to `palette.json` in
+/// `~/.minutes/` so it survives config rewrites and works across
+/// processes (CLI vs desktop) without a config schema dance.
+fn palette_first_run_marker() -> PathBuf {
+    Config::minutes_dir().join("palette_first_run_shown")
+}
+
+/// Fire a one-shot system notification announcing the new command
+/// palette. Called from `main.rs::setup` after the palette shortcut
+/// is registered. The marker file ensures this only happens once per
+/// machine, even across reinstalls — the only way to re-trigger it is
+/// to delete the marker file manually.
+///
+/// **Why this exists**: the upgrade migration used to default the
+/// shortcut to OFF specifically to avoid hijacking VS Code's
+/// `Delete Line` and JetBrains' `Push...` chords without consent.
+/// That made the feature undiscoverable. The current design defaults
+/// ON for both fresh installs and upgrades, but fires this
+/// notification on the first launch so users with a real conflict
+/// hear about it immediately and can disable from the settings UI in
+/// one click. See PLAN.md.command-palette-slice-2 D10 (post-fix).
+pub fn maybe_show_palette_first_run_notice(app: &tauri::AppHandle) {
+    let marker = palette_first_run_marker();
+    if marker.exists() {
+        return;
+    }
+
+    let state = app.state::<AppState>();
+    if !state.palette_shortcut_enabled.load(Ordering::Relaxed) {
+        // The user (or some other process) already opted out before
+        // the notice ran. Don't show it.
+        return;
+    }
+    let shortcut = state
+        .palette_shortcut
+        .lock()
+        .map(|s| s.clone())
+        .unwrap_or_else(|_| default_palette_shortcut().to_string());
+
+    // Persist the marker FIRST so a notification dispatch failure
+    // doesn't cause us to nag the user repeatedly. Best-effort: log
+    // and continue if the write fails.
+    if let Some(parent) = marker.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Err(e) = std::fs::write(&marker, "shown\n") {
+        eprintln!(
+            "[palette] could not write first-run marker {}: {}",
+            marker.display(),
+            e
+        );
+    }
+
+    let body = format!(
+        "Press {} to open the new command palette. \
+         Disable in Settings if it conflicts with your other apps.",
+        humanize_shortcut(&shortcut)
+    );
+    if let Err(e) = app
+        .notification()
+        .builder()
+        .title("Minutes command palette")
+        .body(body)
+        .show()
+    {
+        eprintln!("[palette] first-run notification failed: {}", e);
+    }
+}
+
+/// Render an Accelerator-style shortcut string ("CmdOrCtrl+Shift+K")
+/// as a more readable form ("⌘⇧K"). Used in the first-run notice so
+/// the user can mentally match it to the symbol they'd hit on the
+/// keyboard.
+fn humanize_shortcut(shortcut: &str) -> String {
+    shortcut
+        .split('+')
+        .map(|piece| match piece {
+            "CmdOrCtrl" | "Cmd" | "Command" | "Meta" => "⌘".to_string(),
+            "Shift" => "⇧".to_string(),
+            "Alt" | "Option" | "Opt" => "⌥".to_string(),
+            "Ctrl" | "Control" => "⌃".to_string(),
+            "Space" => "Space".to_string(),
+            other => other.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join("")
 }
 
 fn update_assistant_live_context(workspace: &std::path::Path, live_active: bool) {

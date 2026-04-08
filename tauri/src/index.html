@@ -2861,6 +2861,24 @@
         </div>
       </div>
 
+      <!-- Command palette -->
+      <div style="margin-bottom: 16px;">
+        <div class="about-item-title">COMMAND PALETTE</div>
+        <div class="about-controls">
+          <div class="about-controls-group">
+            <div class="about-controls-copy">Keyboard shortcut</div>
+            <select class="shortcut-select" id="settings-palette-shortcut-select" style="margin-top: 6px;">
+              <option value="CmdOrCtrl+Shift+K">Cmd+Shift+K</option>
+              <option value="CmdOrCtrl+Shift+P">Cmd+Shift+P</option>
+              <option value="CmdOrCtrl+Shift+O">Cmd+Shift+O</option>
+              <option value="CmdOrCtrl+Alt+Space">Cmd+Option+Space</option>
+            </select>
+            <div class="about-controls-meta" id="settings-palette-shortcut-meta">Open the keyboard-first launcher from any app. Disable here if it conflicts with your IDE.</div>
+          </div>
+          <button class="btn btn-secondary btn-sm toggle-btn" id="settings-palette-shortcut">Off</button>
+        </div>
+      </div>
+
       <!-- Transcription -->
       <div class="settings-section">
         <div class="about-item-title">TRANSCRIPTION</div>
@@ -5535,6 +5553,58 @@
     invoke('cmd_live_shortcut_settings').then(settings => {
       setSettingsToggle('settings-live-shortcut', settings.enabled);
       const select = document.getElementById('settings-live-shortcut-select');
+      if (select) select.value = settings.shortcut;
+    }).catch(() => {});
+
+    // ── Command palette shortcut settings ──
+    function showPaletteShortcutMessage(text, isError) {
+      const meta = document.getElementById('settings-palette-shortcut-meta');
+      if (!meta) return;
+      meta.textContent = text;
+      meta.style.color = isError ? '#e5534b' : '';
+    }
+    document.getElementById('settings-palette-shortcut').addEventListener('click', async () => {
+      const select = document.getElementById('settings-palette-shortcut-select');
+      const currentEnabled = document.getElementById('settings-palette-shortcut').textContent === 'On';
+      try {
+        const settings = await invoke('cmd_set_palette_shortcut', {
+          enabled: !currentEnabled,
+          shortcut: select.value,
+        });
+        setSettingsToggle('settings-palette-shortcut', settings.enabled);
+        showPaletteShortcutMessage(
+          settings.enabled
+            ? 'Press the shortcut from any app to open the palette. Disable here if it conflicts.'
+            : 'Palette shortcut disabled. Re-enable any time.',
+          false
+        );
+      } catch (e) {
+        console.error('Palette shortcut:', e);
+        showPaletteShortcutMessage(String(e || 'Could not register shortcut.'), true);
+      }
+    });
+    document.getElementById('settings-palette-shortcut-select').addEventListener('change', async (e) => {
+      const enabled = document.getElementById('settings-palette-shortcut').textContent === 'On';
+      if (!enabled) return;
+      try {
+        const settings = await invoke('cmd_set_palette_shortcut', {
+          enabled: true,
+          shortcut: e.target.value,
+        });
+        setSettingsToggle('settings-palette-shortcut', settings.enabled);
+        showPaletteShortcutMessage(
+          'Press the shortcut from any app to open the palette. Disable here if it conflicts.',
+          false
+        );
+      } catch (e2) {
+        console.error('Palette shortcut change:', e2);
+        showPaletteShortcutMessage(String(e2 || 'Could not register shortcut.'), true);
+      }
+    });
+    // Load initial palette shortcut state
+    invoke('cmd_palette_settings').then(settings => {
+      setSettingsToggle('settings-palette-shortcut', settings.enabled);
+      const select = document.getElementById('settings-palette-shortcut-select');
       if (select) select.value = settings.shortcut;
     }).catch(() => {});
 

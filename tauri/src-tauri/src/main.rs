@@ -793,9 +793,9 @@ fn main() {
             }
 
             // Register the palette shortcut if the config opts into it.
-            // Fresh installs default to enabled via `Default::default` on
-            // `PaletteConfig`; upgrades default to disabled through the
-            // migration path in `Config::load_with_migrations`.
+            // Both fresh installs and upgrades default to enabled — see
+            // `Config::load_with_migrations` for the rationale and the
+            // first-run notification call below.
             if startup_config.palette.shortcut_enabled {
                 use tauri_plugin_global_shortcut::GlobalShortcutExt;
                 let shortcut = if startup_config.palette.shortcut.is_empty() {
@@ -818,6 +818,21 @@ fn main() {
                     };
                 }
             }
+
+            // Fire the one-shot first-run notification announcing the
+            // palette. Idempotent via the marker file at
+            // `~/.minutes/palette_first_run_shown`, so subsequent
+            // launches are no-ops. Deliberately ordered AFTER the
+            // shortcut registration above so the notification only
+            // fires when the palette is actually live and pressing
+            // the chord will do something. The notification text
+            // tells users how to disable from the settings UI in case
+            // the chord conflicts with VS Code, JetBrains, or any
+            // other app they care about. Codex pass 1 P1 was about
+            // avoiding silent hijack — this is the explicit-consent
+            // surface that obsoletes the upgrade-off default we
+            // initially shipped.
+            commands::maybe_show_palette_first_run_notice(app.handle());
 
             // Calendar state for dynamic tray menu items
             let cal_state = Arc::new(std::sync::Mutex::new(CalendarMenuState {
@@ -1335,6 +1350,8 @@ fn main() {
             commands::cmd_install_update,
             commands::palette_close,
             commands::palette_current_meeting,
+            commands::cmd_palette_settings,
+            commands::cmd_set_palette_shortcut,
             palette_dispatch::palette_list,
             palette_dispatch::palette_execute,
         ])

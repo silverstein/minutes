@@ -344,6 +344,30 @@ fn collapse_to_single_speaker_segments(
     segments
 }
 
+fn maybe_relabel_single_call_speaker_to_voice(
+    segments: &mut [SpeakerSegment],
+    voice_values: &[f32],
+    silence_threshold: f32,
+) {
+    if segments.len() != 1 || segments[0].speaker != "SPEAKER_1" {
+        return;
+    }
+
+    let active_voice_windows = voice_values
+        .iter()
+        .filter(|&&rms| rms > silence_threshold)
+        .count();
+    let active_voice_ratio = active_voice_windows as f32 / voice_values.len().max(1) as f32;
+
+    // If the microphone stem is active for most of the recording, this is
+    // likely the local speaker bleeding into the system stem rather than a
+    // true remote-only single speaker. Normalize that case back to
+    // SPEAKER_0 so the self-attribution path can recognize it.
+    if active_voice_ratio >= 0.6 {
+        segments[0].speaker = "SPEAKER_0".into();
+    }
+}
+
 fn diarization_from_energy_windows(
     voice_energy: &[(f64, f32)],
     system_energy: &[(f64, f32)],
@@ -438,9 +462,18 @@ fn diarization_from_energy_windows(
         .collect::<std::collections::HashSet<_>>()
         .len();
 
+    if num_speakers == 1 {
+        maybe_relabel_single_call_speaker_to_voice(&mut segments, &voice_values, silence_threshold);
+    }
+
     if segments.is_empty() {
         None
     } else {
+        let num_speakers = segments
+            .iter()
+            .map(|s| s.speaker.as_str())
+            .collect::<std::collections::HashSet<_>>()
+            .len();
         Some(DiarizationResult {
             segments,
             num_speakers,
@@ -1573,6 +1606,19 @@ mod tests {
         assert_eq!(result.segments.len(), 2);
         assert_eq!(result.segments[0].speaker, "SPEAKER_0");
         assert_eq!(result.segments[1].speaker, "SPEAKER_1");
+    }
+
+    #[test]
+    fn single_system_dominant_speaker_relabels_to_voice_when_mic_is_consistently_active() {
+        let voice_energy = vec![(0.0, 0.020), (1.0, 0.018), (2.0, 0.019), (3.0, 0.021)];
+        let system_energy = vec![(0.0, 0.050), (1.0, 0.048), (2.0, 0.047), (3.0, 0.051)];
+
+        let result = diarization_from_energy_windows(&voice_energy, &system_energy, 1.0)
+            .expect("single dominant system speaker should still produce diarization");
+
+        assert_eq!(result.num_speakers, 1);
+        assert_eq!(result.segments.len(), 1);
+        assert_eq!(result.segments[0].speaker, "SPEAKER_0");
     }
 
     #[test]

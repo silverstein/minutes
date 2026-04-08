@@ -85,6 +85,7 @@ fn match_speakers_by_voice(
 }
 
 fn single_stem_speaker_self_attribution(
+    audio_path: &Path,
     config: &Config,
     voice_result: &VoiceMatchResult,
     diarization_from_stems: bool,
@@ -101,11 +102,32 @@ fn single_stem_speaker_self_attribution(
         "SPEAKER_0".to_string()
     } else if transcript.contains("[UNKNOWN ") {
         "UNKNOWN".to_string()
+    } else if transcript_labels.len() == 1 {
+        transcript_labels[0].clone()
     } else {
         return None;
     };
 
     let my_name = config.identity.name.as_ref()?;
+    if let Some(stems) = diarize::discover_stems(audio_path) {
+        if let Some(voice_stem_result) = diarize::diarize(&stems.voice, config) {
+            let voice_stem_match =
+                match_speakers_by_voice(config, &voice_stem_result.speaker_embeddings);
+            if let Some(self_match) = voice_stem_match
+                .attributions
+                .iter()
+                .find(|attr| attr.name == *my_name)
+            {
+                return Some(diarize::SpeakerAttribution {
+                    speaker_label,
+                    name: self_match.name.clone(),
+                    confidence: self_match.confidence,
+                    source: self_match.source,
+                });
+            }
+        }
+    }
+
     let my_confidence = if voice_result.self_profile_exists {
         diarize::Confidence::High
     } else {
@@ -544,6 +566,7 @@ where
         }
 
         if let Some(attr) = single_stem_speaker_self_attribution(
+            audio_path,
             config,
             &voice_result,
             diarization_from_stems,
@@ -967,6 +990,7 @@ where
         }
 
         if let Some(attr) = single_stem_speaker_self_attribution(
+            audio_path,
             config,
             &voice_result,
             diarization_from_stems,
@@ -1826,6 +1850,7 @@ mod tests {
         let l2_labels = std::collections::HashSet::new();
 
         let attr = single_stem_speaker_self_attribution(
+            Path::new("/fake.wav"),
             &config,
             &voice_result,
             true,
@@ -1854,6 +1879,7 @@ mod tests {
         let l2_labels = std::collections::HashSet::new();
 
         assert!(single_stem_speaker_self_attribution(
+            Path::new("/fake.wav"),
             &config,
             &voice_result,
             true,
@@ -1864,6 +1890,7 @@ mod tests {
         )
         .is_none());
         assert!(single_stem_speaker_self_attribution(
+            Path::new("/fake.wav"),
             &config,
             &voice_result,
             false,
@@ -1885,6 +1912,7 @@ mod tests {
         };
 
         let attr = single_stem_speaker_self_attribution(
+            Path::new("/fake.wav"),
             &config,
             &voice_result,
             true,

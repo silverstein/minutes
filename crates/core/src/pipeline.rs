@@ -1846,28 +1846,24 @@ mod tests {
         let labels = vec!["SPEAKER_1".to_string()];
         let l2_labels = std::collections::HashSet::new();
 
-        assert!(
-            single_stem_speaker_self_attribution(
-                &config,
-                &voice_result,
-                true,
-                1,
-                &labels,
-                &l2_labels,
-            )
-            .is_none()
-        );
-        assert!(
-            single_stem_speaker_self_attribution(
-                &config,
-                &voice_result,
-                false,
-                1,
-                &["SPEAKER_0".to_string()],
-                &std::collections::HashSet::new(),
-            )
-            .is_none()
-        );
+        assert!(single_stem_speaker_self_attribution(
+            &config,
+            &voice_result,
+            true,
+            1,
+            &labels,
+            &l2_labels,
+        )
+        .is_none());
+        assert!(single_stem_speaker_self_attribution(
+            &config,
+            &voice_result,
+            false,
+            1,
+            &["SPEAKER_0".to_string()],
+            &std::collections::HashSet::new(),
+        )
+        .is_none());
     }
 
     #[test]

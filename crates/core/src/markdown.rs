@@ -474,13 +474,19 @@ pub fn rename_meeting(path: &Path, new_title: &str) -> Result<PathBuf, MarkdownE
         .unwrap_or(original.len());
     let new_content = format!("---\n{}\n---\n{}", new_fm_text, &original[body_start..]);
 
-    // Step 7: atomic write through a tmp sibling.
+    // Step 7: atomic write through a tmp sibling. Preserve the
+    // ORIGINAL file's permissions instead of forcing 0o600 — the
+    // user may have chmod'd the file to 0o644 for Obsidian sync, a
+    // local webserver preview, or any other workflow that needs
+    // group-readable. Forcing 0o600 on every rename would silently
+    // break those setups (claude pass 3 P3).
     let tmp_path = path.with_extension("md.rename.tmp");
     fs::write(&tmp_path, &new_content)?;
-    set_permissions(&tmp_path, 0o600).map_err(|e| match e {
-        MarkdownError::Io(io) => MarkdownError::Io(io),
-        other => other,
-    })?;
+    let original_mode = preserved_file_mode(path);
+    if let Err(e) = set_permissions(&tmp_path, original_mode) {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(e);
+    }
 
     // Step 8: parse-after-write validation. Read back what we just
     // wrote and confirm the frontmatter still parses. If it doesn't,
@@ -619,6 +625,23 @@ fn set_permissions(path: &Path, _mode: u32) -> Result<(), MarkdownError> {
         fs::set_permissions(path, perms)?;
     }
     Ok(())
+}
+
+/// Read the existing file's mode bits so a rewrite can preserve
+/// permissions the user may have set deliberately. Returns `0o600`
+/// (the Minutes default) on Windows or if the metadata read fails.
+/// Used by `rename_meeting` to avoid clobbering user-chosen modes.
+fn preserved_file_mode(_path: &Path) -> u32 {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = fs::metadata(_path) {
+            // Mask off the file-type bits, keep only the permission
+            // bits (rwxrwxrwx + setuid/setgid/sticky).
+            return meta.permissions().mode() & 0o7777;
+        }
+    }
+    0o600
 }
 
 // ── Frontmatter parsing utilities (shared across modules) ────
@@ -1215,6 +1238,33 @@ mod tests {
                 entries
             );
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rename_meeting_preserves_user_chosen_file_mode() {
+        // The Minutes default is 0o600, but a user may have chmod'd
+        // their meetings to 0o644 for an Obsidian sync, a local
+        // webserver preview, or any other workflow. The rename must
+        // preserve those bits — codex pass 3 / claude pass 3 P3.
+        use std::os::unix::fs::PermissionsExt;
+        let dir = TempDir::new().unwrap();
+        let path = write_meeting(
+            &dir,
+            "2026-04-07-mode.md",
+            "title: \"Old\"\ntype: meeting\ndate: 2026-04-07T10:00:00-07:00\nduration: 0\n",
+            "## Transcript\n\nHi\n",
+        );
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let new_path = rename_meeting(&path, "New").unwrap();
+        let after_meta = std::fs::metadata(&new_path).unwrap();
+        let after_mode = after_meta.permissions().mode() & 0o777;
+        assert_eq!(
+            after_mode, 0o644,
+            "rename should preserve the original file mode (0o644), got 0o{:o}",
+            after_mode
+        );
     }
 
     #[test]

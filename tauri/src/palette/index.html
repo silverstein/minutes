@@ -197,16 +197,14 @@
       margin-right: 4px;
     }
 
-    .smoke-indicator {
-      position: absolute;
-      bottom: 6px;
-      right: 10px;
-      font-size: 9px;
+    .branding {
+      font-size: 10px;
+      font-weight: 600;
       color: var(--text-tertiary);
-      opacity: 0;
-      transition: opacity 140ms ease;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      margin-right: auto;
     }
-    .smoke-indicator.ok { opacity: 1; color: #46c072; }
   </style>
 </head>
 <body>
@@ -226,12 +224,16 @@
     </div>
     <div class="list" id="list" role="listbox" aria-label="Commands"></div>
     <div class="footer">
+      <!-- Visible Minutes attribution. Codex pass 3 P1 + claude
+           pass 3: a user who hits ⌘⇧K expecting VS Code's Delete
+           Line and gets this overlay needs to know what app is
+           hijacking the chord. The badge tells them. -->
+      <span class="branding">Minutes Palette</span>
       <span><kbd>↑↓</kbd>navigate</span>
       <span><kbd>⏎</kbd>run</span>
       <span><kbd>esc</kbd>close</span>
-      <span style="margin-left:auto" id="count"></span>
+      <span id="count"></span>
     </div>
-    <span class="smoke-indicator" id="smoke">events ok</span>
   </div>
 
   <script type="module">
@@ -259,7 +261,6 @@
     const listEl = document.getElementById("list");
     const countEl = document.getElementById("count");
     const hintEl = document.getElementById("hint");
-    const smokeEl = document.getElementById("smoke");
     const prefixEl = document.querySelector(".prefix");
 
     /** Authoritative command list as last returned by palette_list. */
@@ -822,9 +823,13 @@
       console.warn("[palette] listen dictation:state failed:", e)
     );
 
-    // Capability smoke test (D4).
+    // The capability smoke test (D4 of slice 2 plan) used to live
+    // here as a visible green indicator. It now only runs in
+    // debug builds and only logs to the console — see the
+    // `#[cfg(debug_assertions)]` block in finalize_palette_open.
+    // Codex pass 3 P3 + claude pass 3 P3 #18/#20 both flagged
+    // shipping the indicator to prod users as dev cruft.
     listen("palette:ping", () => {
-      smokeEl.classList.add("ok");
       console.log("[palette] capability smoke test passed");
     }).catch((e) => {
       console.warn("[palette] failed to subscribe to palette:ping:", e);

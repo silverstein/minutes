@@ -34,37 +34,43 @@ If `~/.minutes/palette.json` ever gets corrupted, the palette quarantines it as 
 
 If you've ever been bitten by a rename tool that quietly mangled your YAML, this one is the opposite of that.
 
-### Existing users opt in. Fresh installs see it on first run.
+### Enabled by default with a first-run heads-up
 
-If you're upgrading from v0.10.x, the palette shortcut is **disabled** by default. The first time v0.11.0 loads your existing config, it adds a `[palette]` section with `shortcut_enabled = false` and persists it. This is on purpose: `⌘⇧K` is `Delete Line` in VS Code and `Push...` in JetBrains. We don't want to silently steal a chord you already use.
+The palette shortcut defaults on for both fresh installs and upgrades. The first time v0.11.0 launches and registers `⌘⇧K`, you'll see a one-time macOS notification telling you the binding is live and pointing you at Settings to disable it if it conflicts with your IDE. Subsequent launches are silent.
 
-To enable it:
+`⌘⇧K` overlaps with Finder's "Connect to Server" (rare-use) and Firefox's Web Console. If you use either, or if you have a different `⌘⇧K` binding in another app, open the Settings overlay (gear icon in the main window), find the **Command Palette** section, and either:
+
+- Toggle the shortcut off, or
+- Pick a different binding from the dropdown — `⌘⇧K`, `⌘⇧O`, or `⌘⇧U`. None of these collide with the other Minutes shortcuts (dictation, live transcript, quick thought).
+
+You can also edit `~/.config/minutes/config.toml`:
 
 ```toml
-# ~/.config/minutes/config.toml
 [palette]
-shortcut_enabled = true
-shortcut = "CmdOrCtrl+Shift+K"
+shortcut_enabled = false   # or true
+shortcut = "CmdOrCtrl+Shift+O"
 ```
 
-Restart the desktop app. The shortcut registers immediately. You can rebind to anything Carbon's `RegisterEventHotKey` accepts.
+The overlay itself shows "Minutes Palette" in the footer, so if you ever hit `⌘⇧K` and forgot what installed it, the answer is right there.
 
-Fresh installs default to enabled, so new users discover the feature on first run without hunting.
+An earlier draft of this release defaulted the shortcut **off** for upgrades on the theory that opt-in beats hijacking. Dogfood feedback caught the problem with that design: opt-in via `config.toml` is invisible. Existing users would never discover the feature. The first-run notification + the visible Settings UI surface together replace the opt-in default with explicit consent that's actually findable.
 
-### Under the hood: one registry, four codex passes
+### A note on `OpenLatestMeetingFromToday` recents
+
+The recents store re-runs commands with the same input parameters, not the same output artifact. For most commands that's exactly what you want. For `OpenLatestMeetingFromToday` it means re-running the recent tomorrow opens whatever's "latest from today" tomorrow — i.e., the latest meeting from THAT day, not the meeting that was originally opened. This is intentional ("re-do my morning meeting check") but worth knowing.
+
+### Under the hood: one registry, three codex passes, dual-reviewer final
 
 The palette is built around a single typed command registry in `crates/core/src/palette.rs`. The desktop dispatcher matches on `ActionId` directly — no parallel mirror, no stringly-typed glue. Adding a new variant in core fails the Tauri build until a dispatch arm exists. The exhaustive match is the spec.
 
-This is the same registry pattern slice 1 (`v0.11.0` was developed across two slices, both in this release) introduced in private without a UI. Slice 2 is what makes it visible.
-
-Every architectural decision survived two adversarial codex passes — one on the plan before any Rust got written, one on the diff before this PR opened. Six P1 findings, five P2, three P3 from the plan review alone, all addressed. Findings logged in `PLAN.md.command-palette-slice-2` if you're curious.
+Every architectural decision survived three adversarial review rounds: pass 1 on the plan before any Rust got written (6 P1, 5 P2, 3 P3), pass 2 on the slice 2 implementation diff (2 P1, 3 P2, 3 P3), and a final dual-reviewer round with both codex and a fresh Claude reviewer running in parallel on the design fix (5 P1, 8 P2, 7 P3 combined). Every P1 was addressed. Findings logged in `PLAN.md.command-palette-slice-2` if you want the receipts.
 
 ### Tests
 
 - 25 palette registry + recents tests in `minutes-core`
-- 12 `markdown::rename_meeting` tests covering folded scalars, anchors, literal blocks, slug collisions, no-op renames, special-character escapes, and parse-after-write rollback
-- 20 Tauri palette tests including 11 `ActionResponse` envelope tests (one per variant)
-- 5 config migration tests covering the upgrade path
+- 16 `markdown::rename_meeting` tests covering folded scalars, anchors, aliases, literal blocks, CRLF line endings, slug collisions, no-op renames, special-character escapes, post-write rollback path, and Unix file-mode preservation
+- 22 Tauri palette tests including 11 `ActionResponse` envelope tests, 3 palette shortcut validation tests, the cross-collision smoke test, and the humanize-shortcut renderer
+- 18 config tests including the upgrade migration
 
 All green. `cargo fmt --all -- --check` clean. `cargo clippy --all --no-default-features -- -D warnings` clean.
 

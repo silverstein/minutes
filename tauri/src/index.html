@@ -2869,9 +2869,8 @@
             <div class="about-controls-copy">Keyboard shortcut</div>
             <select class="shortcut-select" id="settings-palette-shortcut-select" style="margin-top: 6px;">
               <option value="CmdOrCtrl+Shift+K">Cmd+Shift+K</option>
-              <option value="CmdOrCtrl+Shift+P">Cmd+Shift+P</option>
               <option value="CmdOrCtrl+Shift+O">Cmd+Shift+O</option>
-              <option value="CmdOrCtrl+Alt+Space">Cmd+Option+Space</option>
+              <option value="CmdOrCtrl+Shift+U">Cmd+Shift+U</option>
             </select>
             <div class="about-controls-meta" id="settings-palette-shortcut-meta">Open the keyboard-first launcher from any app. Disable here if it conflicts with your IDE.</div>
           </div>
@@ -5247,6 +5246,19 @@
               applyDictationHotkeyStatus(restored);
             }
           }
+        }
+        // Re-fetch palette shortcut state from the backend on every
+        // settings overlay open. Codex pass 3 + claude pass 3 P2:
+        // the previous code only loaded palette state once at page
+        // bootstrap (~line 5050), so any setting change made via
+        // CLI, config edit, or another window left the overlay
+        // showing stale toggle state. Refreshing here keeps the
+        // overlay consistent with the live backend.
+        const paletteSettings = await invoke('cmd_palette_settings').catch(() => null);
+        if (paletteSettings) {
+          setSettingsToggle('settings-palette-shortcut', Boolean(paletteSettings.enabled));
+          const paletteSelect = document.getElementById('settings-palette-shortcut-select');
+          if (paletteSelect) paletteSelect.value = paletteSettings.shortcut;
         }
       } catch (e) { console.error('loadSettings:', e); }
       // Always load these, even if other settings fail

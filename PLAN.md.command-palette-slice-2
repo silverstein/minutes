@@ -1237,3 +1237,172 @@ clock.
 
 **Token budget used**: ~198k on pass 1. Pass 2 should stay under ~3M on
 the diff.
+
+### 2026-04-07 — Codex adversarial pass 2 (slice 2 diff)
+
+Codex re-reviewed the slice 2a + 2b + 2c diff after the first
+implementation pass. ~3M tokens. 2 P1, 3 P2, 3 P3 findings, all
+addressed in commit `363abb1` ("fix(palette): codex pass 2 findings"):
+
+**P1 #1** — Frontend listened to `recording:start`/`stop`/`state`
+events the backend never emitted. Palette went stale on every
+recording transition. **Fixed** by emitting `palette:refresh` from
+`update_tray_state_with_mode` (the universal funnel) and trimming
+the frontend listeners to `palette:refresh` + `dictation:state`.
+
+**P1 #2** — Recents bypassed the pre-execute visibility re-fetch.
+A stale recent could fire even though it should have been refused.
+**Fixed** by extracting `executeWithFreshVisibility` as the single
+funnel both `executeAction` and `executeRecent` go through.
+
+**P2 #3** — `palette_current_meeting` called `create_workspace`
+which had side effects (`create_dir_all`, `meetings` symlink, `git
+init`). **Fixed** by switching to `crate::context::workspace_dir()`
+(a pure path computation) and only reading the marker file when the
+workspace already exists.
+
+**P2 #4** — `rename_meeting` test list missed alias, CRLF, and
+post-write rollback. **Fixed** by adding 3 new tests.
+
+**P2 #5** — `PaletteLifecycle::Opening` could wedge on panic.
+**Fixed** by wrapping `create_or_show_palette_window_inner` in
+`catch_unwind`.
+
+**P3 #6/#7/#8** — `cap_enforces` overclaim, `runScorerSelfTest`
+expectation drift, `quarantine_corrupt_file` complexity. First two
+**fixed**; third deferred as a cosmetic nit.
+
+### 2026-04-07 — Design fix: upgrade-on default + settings UI + first-run notice
+
+Dogfood feedback rejected the upgrade-off default that codex pass 1
+P1 had endorsed. The flaw: opt-in via `config.toml` with no settings
+UI is invisible — existing users would never discover the feature.
+Same outcome as not shipping the feature at all.
+
+Commit `506d8ab` reversed the design:
+- `Config::load_with_migrations` no longer flips `shortcut_enabled`
+  to `false`. It still detects the no-`[palette]`-section case and
+  persists the default section, but the persisted value is `true`.
+- New Tauri commands `cmd_palette_settings` + `cmd_set_palette_shortcut`
+  mirroring `cmd_set_live_shortcut`.
+- New COMMAND PALETTE row in the existing Settings overlay.
+- One-shot first-run notification (`maybe_show_palette_first_run_notice`)
+  fired from `setup()` after the shortcut registers, with a marker
+  file at `~/.minutes/palette_first_run_shown` to prevent re-firing.
+
+The codex pass 1 P1 framing was right about the harm scenario
+(don't hijack VS Code's Delete Line silently) but wrong about the
+mitigation. The right mitigation is "default on with discoverable
+disable", not "default off with invisible enable."
+
+### 2026-04-07 — Final dual-reviewer pass (codex + fresh Claude reviewer agent)
+
+Both reviewers ran in parallel on the slice 2 + design-fix diff
+(`feat/command-palette-slice-2`, ~4860 lines, 8 commits) per
+`feedback_multi_agent_adversarial_review.md`. Independent
+triangulation caught more than either reviewer alone. Combined: 5
+P1, 8 P2, 7 P3.
+
+**P1s addressed (both reviewers caught the same thing):**
+
+- **Marker-before-show ordering**: the first-run marker was written
+  before `notification.show()` so a failed dispatch permanently
+  suppressed the only consent surface. **Fixed**: marker now writes
+  only on `Ok` from `show()`. Subsequent launches retry until the
+  notification actually delivers.
+- **Docs lie about upgrade default**: README, release notes, doc
+  comments all still described the upgrade-off design. **Fixed** in
+  README, `notes-release-v0.11.0.md`, `crates/core/src/config.rs`
+  `PaletteConfig` doc comment, and `tauri/src-tauri/src/main.rs`.
+
+**P1 addressed (only codex caught — claude missed):**
+
+- **`RenameCurrentMeeting` leaves `CURRENT_MEETING.md` stale**:
+  the dispatcher returned `MeetingRenamed` so a frontend consumer
+  could refresh the breadcrumb, but no such consumer existed.
+  After a successful rename the assistant workspace's
+  `CURRENT_MEETING.md` still pointed at `oldPath` which no longer
+  existed → `palette_current_meeting()` returned `None` for the
+  next palette open → meeting-scoped commands silently disappeared
+  from the visible set. **Fixed**: dispatcher now calls
+  `crate::context::write_active_meeting_context` immediately after
+  `rename_meeting` succeeds, conditioned on `workspace_dir().exists()`
+  so the side-effect-free guarantee from pass 2 P2 #3 is preserved.
+
+**P1s addressed (only claude caught — codex missed):**
+
+- **`close_palette_window` async-vs-sync race**: Tauri's
+  `WebviewWindow::close()` only enqueues a CloseRequested event,
+  not an immediate teardown. Reopen during in-flight close hits
+  the still-alive old window. **Fixed**: switched to
+  `WebviewWindow::destroy()` which removes the window immediately.
+- **`Focused(false)` race for the wrong window instance**: rapid
+  Open → Close → Open cycles can leave a focus-lost event in
+  flight for the OLD window. **Fixed**: handler now only acts
+  when `palette_lifecycle == Open`.
+- **`OpenLatestMeetingFromToday` recents semantics ambiguous**:
+  resolved by documentation (codex's "defensible if documented"
+  framing); not changing behavior.
+
+**P2s addressed:**
+
+- **Palette unregister failure swallowed** (codex): old chord
+  could remain registered, routing presses to the wrong feature.
+  **Fixed**: `cmd_set_palette_shortcut` treats unregister failures
+  as fatal, mirroring `cmd_set_live_shortcut`.
+- **Settings UI doesn't re-fetch palette state** (both): added a
+  palette re-fetch block to `loadSettings()` so every overlay open
+  pulls fresh state from `cmd_palette_settings`.
+- **Cross-validation gap** (both): `Cmd+Alt+Space` was in BOTH
+  dictation and palette dropdowns; `Cmd+Shift+P` was offered as a
+  default despite VS Code's command palette using it. **Fixed**:
+  dropped both from the dropdown, added
+  `ensure_no_palette_shortcut_collision` helper that checks
+  candidates against dictation/live/quick-thought state before
+  registration. New choice list: K, O, U.
+- **`cmd_set_palette_shortcut` rollback dead-end** (claude): if
+  both new register AND rollback register fail, the palette is
+  silently dead. **Fixed**: rollback failure force-flips
+  `palette_shortcut_enabled` to `false`, persists, and returns a
+  specific error.
+- **Lock poisoning swallow** in `finalize_palette_open` and the
+  toggle path (claude): poisoned lock would silently strand the
+  lifecycle in `Opening`. **Fixed**: `lock_or_recover` helper
+  recovers via `into_inner()`, applied at all four lifecycle
+  access sites.
+- **`AssertUnwindSafe` honesty** (both): kept the catch_unwind
+  because typed atomic state machine is a slice 3 refactor, but
+  added an honest doc comment.
+
+**P3s addressed:**
+
+- **Smoke indicator shipping to prod** (both): green "events ok"
+  pill was visible in production builds. **Fixed**: capability
+  smoke ping is now `#[cfg(debug_assertions)]` only, the smoke
+  indicator HTML is removed, the JS listener only logs to console.
+- **`rename_meeting` clobbers user file modes** (claude): forced
+  0o600 on every rename, breaking 0o644 setups. **Fixed**: new
+  `preserved_file_mode` helper reads the original file's mode bits
+  and applies them to the rewritten file. New unit test
+  `rename_meeting_preserves_user_chosen_file_mode`.
+- **Visible Minutes attribution** (codex): added "Minutes Palette"
+  badge in the overlay footer so users hijacked by `⌘⇧K` can
+  identify what just happened.
+
+**Deferred (filed as follow-ups, not in this slice):**
+
+- Recents file lock for concurrent writers — no CLI writer today
+- `quarantine_corrupt_file` `with_extension` complexity — cosmetic
+- `humanize_shortcut` glyph table for unknown keys
+- `rename_meeting` post-write rollback test that actually exercises
+  the rollback path
+- Migration full-config rewrite + comment loss — pre-existing
+  across the entire `cmd_set_setting` codebase, not unique to
+  palette
+
+**Token budget**: codex pass 3 ~342k. Claude reviewer agent ~221k.
+Combined ~563k for the dual-reviewer round.
+
+**Verdict**: no fourth pass. The fixes land as a single commit on
+top of `506d8ab`. PR #92 is then ready to merge after dev-app
+dogfood.

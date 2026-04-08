@@ -539,6 +539,46 @@ fn dispatch_action(
             let new_title = new_title.ok_or_else(|| "new title is required".to_string())?;
             let new_path = minutes_core::markdown::rename_meeting(&path, &new_title)
                 .map_err(|e| format!("rename failed: {}", e))?;
+
+            // Refresh the assistant workspace's CURRENT_MEETING.md
+            // breadcrumb so subsequent palette actions still recognize
+            // the renamed file as the current meeting. If we don't do
+            // this, the next `palette_current_meeting()` returns None
+            // (the old path no longer exists) and meeting-scoped
+            // commands silently disappear from the visible set.
+            //
+            // Codex pass 3 P1: the dispatcher returns
+            // `MeetingRenamed { oldPath, newPath }` so a frontend
+            // consumer COULD refresh the breadcrumb, but no such
+            // consumer exists today and the breadcrumb file lives in
+            // the assistant workspace which is owned by the backend
+            // anyway. Doing the refresh server-side is the right
+            // place.
+            //
+            // **Side-effect-free guarantee preserved**: only refresh
+            // when the assistant workspace ALREADY exists. We do not
+            // call `create_workspace` here — the rename action must
+            // not materialize the workspace as a side effect (codex
+            // pass 2 P2 #3). If the user has never opened the
+            // assistant, there's no breadcrumb to refresh.
+            let workspace_root = crate::context::workspace_dir();
+            if workspace_root.exists() {
+                let config = Config::load();
+                if let Err(e) = crate::context::write_active_meeting_context(
+                    &workspace_root,
+                    &new_path,
+                    &config,
+                ) {
+                    // Non-fatal: the rename succeeded, the breadcrumb
+                    // refresh is best-effort. Log so future debugging
+                    // has a trail but don't fail the action.
+                    eprintln!(
+                        "[palette] rename succeeded but breadcrumb refresh failed: {}",
+                        e
+                    );
+                }
+            }
+
             Ok(ActionResponse::MeetingRenamed {
                 old_path: path.to_string_lossy().to_string(),
                 new_path: new_path.to_string_lossy().to_string(),

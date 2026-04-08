@@ -479,12 +479,15 @@ fn main() {
         std::process::exit(code);
     }
 
-    // Load with first-run and upgrade migrations. This is the only place
-    // the desktop app reads config at startup; the CLI and non-app code
-    // continue to use `Config::load()` without migrations. See
-    // `Config::load_with_migrations` for the palette upgrade path that
-    // disables `⌘⇧K` by default for existing users so the global shortcut
-    // does not silently hijack their existing bindings.
+    // Load with first-run and upgrade migrations. This is the only
+    // place the desktop app reads config at startup; the CLI and
+    // non-app code continue to use `Config::load()` without
+    // migrations. See `Config::load_with_migrations` for the palette
+    // section persistence path: it ensures `[palette]` is in the user's
+    // `config.toml` so the section is discoverable, but the default
+    // shortcut is enabled for both fresh installs AND upgrades. The
+    // first-run notification fired from `setup()` further down is the
+    // explicit-consent surface for users with a real chord conflict.
     let startup_config_snapshot = minutes_core::config::Config::load_with_migrations();
     let recording = Arc::new(AtomicBool::new(false));
     let starting = Arc::new(AtomicBool::new(false));
@@ -1281,8 +1284,31 @@ fn main() {
                     // through the lifecycle-aware close path so the toggle
                     // hotkey can reopen cleanly. Other windows are
                     // unaffected.
+                    //
+                    // Codex pass 3 caught a race here: rapid Open →
+                    // Close → Open cycles can leave a focus-lost
+                    // event in flight for the OLD window instance.
+                    // Without a guard, that event would call
+                    // `close_palette_window` which then operates on
+                    // the NEW window (because `get_webview_window`
+                    // returns whichever window currently has the
+                    // label), closing the user's just-reopened
+                    // palette. Guard by inspecting the lifecycle:
+                    // only act when the state machine is actually in
+                    // `Open`, which means the focus-lost is for the
+                    // currently-tracked instance.
                     if window.label() == "palette" {
-                        commands::close_palette_window(&window.app_handle().clone());
+                        let app_handle = window.app_handle().clone();
+                        let state = app_handle.state::<commands::AppState>();
+                        let is_open = match state.palette_lifecycle.lock() {
+                            Ok(guard) => *guard == commands::PaletteLifecycle::Open,
+                            Err(poisoned) => {
+                                *poisoned.into_inner() == commands::PaletteLifecycle::Open
+                            }
+                        };
+                        if is_open {
+                            commands::close_palette_window(&app_handle);
+                        }
                     }
                 }
                 _ => {}

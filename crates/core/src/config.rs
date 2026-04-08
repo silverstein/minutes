@@ -37,11 +37,23 @@ pub struct Config {
 /// Command palette configuration.
 ///
 /// The palette is the keyboard-first command surface introduced in v0.11.
-/// Upgrades from earlier versions default `shortcut_enabled` to `false`
-/// so that users who mapped `⌘⇧K` to something else (VS Code Delete Line,
-/// JetBrains Push, etc.) are not surprised by a new global shortcut.
-/// Fresh installs default to `true` via `Default::default` — see
-/// [`Config::load_with_migrations`] for the detection.
+/// Both fresh installs and upgrades default `shortcut_enabled` to
+/// `true`. The Tauri desktop app fires a one-shot system notification
+/// on the first launch that registers the shortcut so users with a
+/// real conflict (VS Code Delete Line, JetBrains Push, etc.) hear
+/// about the new binding immediately and can disable it from the
+/// Settings UI in one click. The first-run marker file lives at
+/// `~/.minutes/palette_first_run_shown` and only commits after the
+/// notification is dispatched successfully — see
+/// `commands::maybe_show_palette_first_run_notice` for the details.
+///
+/// An earlier draft of this struct used a different design where
+/// `Config::load_with_migrations` flipped `shortcut_enabled` to
+/// `false` for upgraders. Dogfood feedback rejected that as
+/// undiscoverable: opt-in via `config.toml` is invisible, and the
+/// settings UI for the palette didn't exist yet. The current design
+/// pairs default-on with a visible Settings UI surface and a
+/// first-run notification.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PaletteConfig {
@@ -53,9 +65,10 @@ pub struct PaletteConfig {
 
 impl Default for PaletteConfig {
     fn default() -> Self {
-        // Fresh-install default. The upgrade path in
-        // `Config::load_with_migrations` rewrites this to `false` for users
-        // who already have a config file without a `[palette]` section.
+        // Both fresh installs and upgrades use this value. The
+        // upgrade migration in `load_with_migrations` only persists
+        // the section to disk so it's discoverable in `config.toml`;
+        // it does NOT flip the bool.
         Self {
             shortcut_enabled: true,
             shortcut: "CmdOrCtrl+Shift+K".into(),

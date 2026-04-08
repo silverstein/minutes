@@ -304,12 +304,7 @@ fn correlation_coefficient(xs: &[f32], ys: &[f32]) -> Option<f32> {
     }
 }
 
-fn merge_or_push_segment(
-    segments: &mut Vec<SpeakerSegment>,
-    speaker: &str,
-    start: f64,
-    end: f64,
-) {
+fn merge_or_push_segment(segments: &mut Vec<SpeakerSegment>, speaker: &str, start: f64, end: f64) {
     if let Some(last) = segments.last_mut() {
         if last.speaker == speaker && (start - last.end).abs() < 0.01 {
             last.end = end;
@@ -362,7 +357,11 @@ fn diarization_from_energy_windows(
     let call_label = "SPEAKER_1";
     let window_count = voice_energy.len().min(system_energy.len());
 
-    let voice_values: Vec<f32> = voice_energy.iter().take(window_count).map(|(_, rms)| *rms).collect();
+    let voice_values: Vec<f32> = voice_energy
+        .iter()
+        .take(window_count)
+        .map(|(_, rms)| *rms)
+        .collect();
     let system_values: Vec<f32> = system_energy
         .iter()
         .take(window_count)
@@ -371,7 +370,9 @@ fn diarization_from_energy_windows(
     let active_windows = voice_values
         .iter()
         .zip(system_values.iter())
-        .filter(|(voice_rms, system_rms)| **voice_rms > silence_threshold || **system_rms > silence_threshold)
+        .filter(|(voice_rms, system_rms)| {
+            **voice_rms > silence_threshold || **system_rms > silence_threshold
+        })
         .count();
     let correlation = correlation_coefficient(&voice_values, &system_values);
 

@@ -52,6 +52,9 @@ pub struct CallDetector {
     /// Back off individual browsers after Apple Events / automation failures so
     /// one denied path does not get retried every poll or suppress other browsers.
     browser_probe_backoff_until: Mutex<HashMap<String, Instant>>,
+    /// Recent successful browser-based Meet detection. Prevents fast native-app
+    /// polling from immediately relabeling the same active session as Slack.
+    recent_google_meet_until: Mutex<Option<Instant>>,
     /// Log mic-gate transitions once instead of spamming every poll.
     last_mic_live: Mutex<Option<bool>>,
 }
@@ -79,8 +82,13 @@ enum DetectionTransition {
 }
 
 enum DetectActiveCallResult {
-    Detected { display_name: String, process_name: String },
-    PermissionWarning { browser_app: String },
+    Detected {
+        display_name: String,
+        process_name: String,
+    },
+    PermissionWarning {
+        browser_app: String,
+    },
     None,
 }
 
@@ -95,6 +103,7 @@ enum BrowserMeetProbe {
 const SAME_APP_REMINDER_SECS: u64 = 20;
 const BROWSER_PROBE_INTERVAL_SECS: u64 = 15;
 const BROWSER_PROBE_BACKOFF_SECS: u64 = 300;
+const GOOGLE_MEET_STICKY_SECS: u64 = 20;
 
 impl CallDetector {
     pub fn new(config: CallDetectionConfig) -> Self {
@@ -103,6 +112,7 @@ impl CallDetector {
             active_call: Mutex::new(None),
             browser_probe_next_allowed_at: Mutex::new(None),
             browser_probe_backoff_until: Mutex::new(HashMap::new()),
+            recent_google_meet_until: Mutex::new(None),
             last_mic_live: Mutex::new(None),
         }
     }
@@ -178,47 +188,48 @@ impl CallDetector {
                         display_name,
                         process_name,
                     } => {
-                    match self.note_active_call(&process_name) {
-                        DetectionTransition::Noop => {}
-                        transition => {
-                            let is_reminder = matches!(transition, DetectionTransition::Reminder);
-                            let action = if is_reminder { "reminder" } else { "detected" };
-                            eprintln!(
-                                "[call-detect] {}: {} ({})",
-                                action, display_name, process_name
-                            );
-                            log_call_detect_event(
-                                "info",
-                                action,
-                                Some(&display_name),
-                                Some(&process_name),
-                                serde_json::json!({
-                                    "recording_active": recording.load(Ordering::Relaxed),
-                                    "reminder_interval_secs": SAME_APP_REMINDER_SECS,
-                                }),
-                            );
-
-                            // Only show a macOS notification on first detection,
-                            // not on periodic reminders — those are too noisy.
-                            if !is_reminder {
-                                crate::commands::show_user_notification(
-                                    &app,
-                                    &format!("{} call detected", display_name),
-                                    "Open Minutes to start recording",
+                        match self.note_active_call(&process_name) {
+                            DetectionTransition::Noop => {}
+                            transition => {
+                                let is_reminder =
+                                    matches!(transition, DetectionTransition::Reminder);
+                                let action = if is_reminder { "reminder" } else { "detected" };
+                                eprintln!(
+                                    "[call-detect] {}: {} ({})",
+                                    action, display_name, process_name
                                 );
-                            }
+                                log_call_detect_event(
+                                    "info",
+                                    action,
+                                    Some(&display_name),
+                                    Some(&process_name),
+                                    serde_json::json!({
+                                        "recording_active": recording.load(Ordering::Relaxed),
+                                        "reminder_interval_secs": SAME_APP_REMINDER_SECS,
+                                    }),
+                                );
 
-                            app.emit(
-                                "call:detected",
-                                CallDetectedPayload {
-                                    app_name: display_name,
-                                    process_name,
-                                    is_reminder,
-                                },
-                            )
-                            .ok();
+                                // Only show a macOS notification on first detection,
+                                // not on periodic reminders — those are too noisy.
+                                if !is_reminder {
+                                    crate::commands::show_user_notification(
+                                        &app,
+                                        &format!("{} call detected", display_name),
+                                        "Open Minutes to start recording",
+                                    );
+                                }
+
+                                app.emit(
+                                    "call:detected",
+                                    CallDetectedPayload {
+                                        app_name: display_name,
+                                        process_name,
+                                        is_reminder,
+                                    },
+                                )
+                                .ok();
+                            }
                         }
-                    }
                     }
                     DetectActiveCallResult::PermissionWarning { browser_app } => {
                         if let Some(previous) = self.clear_active_call() {
@@ -295,6 +306,7 @@ impl CallDetector {
             self.schedule_next_browser_probe();
             match self.detect_google_meet_in_browsers(&running) {
                 BrowserMeetProbe::Detected => {
+                    self.remember_google_meet_detection();
                     return DetectActiveCallResult::Detected {
                         display_name: "Google Meet".into(),
                         process_name: "google-meet".into(),
@@ -307,6 +319,13 @@ impl CallDetector {
                 | BrowserMeetProbe::NoBrowserProcesses
                 | BrowserMeetProbe::NoMatch => {}
             }
+        }
+
+        if has_google_meet && mic_live && self.google_meet_detection_is_sticky() {
+            return DetectActiveCallResult::Detected {
+                display_name: "Google Meet".into(),
+                process_name: "google-meet".into(),
+            };
         }
 
         if !mic_live {
@@ -390,6 +409,23 @@ impl CallDetector {
     fn schedule_next_browser_probe(&self) {
         let mut next_probe = self.browser_probe_next_allowed_at.lock().unwrap();
         *next_probe = Some(Instant::now() + Duration::from_secs(BROWSER_PROBE_INTERVAL_SECS));
+    }
+
+    fn remember_google_meet_detection(&self) {
+        let mut sticky = self.recent_google_meet_until.lock().unwrap();
+        *sticky = Some(Instant::now() + Duration::from_secs(GOOGLE_MEET_STICKY_SECS));
+    }
+
+    fn google_meet_detection_is_sticky(&self) -> bool {
+        let mut sticky = self.recent_google_meet_until.lock().unwrap();
+        match *sticky {
+            Some(until) if Instant::now() < until => true,
+            Some(_) => {
+                *sticky = None;
+                false
+            }
+            None => false,
+        }
     }
 
     fn browser_probe_allowed_for(&self, browser_app: &str) -> bool {
@@ -735,13 +771,11 @@ mod tests {
             apps: vec!["zoom.us".into(), "google-meet".into()],
         });
 
-        assert!(
-            detector
-                .current_config()
-                .apps
-                .iter()
-                .any(|app| app == "google-meet")
-        );
+        assert!(detector
+            .current_config()
+            .apps
+            .iter()
+            .any(|app| app == "google-meet"));
     }
 
     #[test]
@@ -831,6 +865,26 @@ mod tests {
         }
 
         assert!(detector.browser_probe_due());
+    }
+
+    #[test]
+    fn sticky_google_meet_detection_survives_between_browser_probes() {
+        let detector = CallDetector::new(CallDetectionConfig {
+            enabled: true,
+            poll_interval_secs: 1,
+            cooldown_minutes: 5,
+            apps: vec!["Slack".into(), "google-meet".into()],
+        });
+
+        detector.remember_google_meet_detection();
+        assert!(detector.google_meet_detection_is_sticky());
+
+        {
+            let mut sticky = detector.recent_google_meet_until.lock().unwrap();
+            *sticky = Some(Instant::now() - Duration::from_secs(1));
+        }
+
+        assert!(!detector.google_meet_detection_is_sticky());
     }
 
     #[test]

@@ -3991,6 +3991,23 @@ mod tests {
     }
 
     #[test]
+    fn shortcut_collision_error_ignores_disabled_shortcuts() {
+        let in_use = [
+            ("dictation", false, Some("CmdOrCtrl+Shift+K".to_string())),
+            (
+                "live transcript",
+                true,
+                Some("CmdOrCtrl+Shift+O".to_string()),
+            ),
+        ];
+
+        assert!(shortcut_collision_error("CmdOrCtrl+Shift+K", &in_use).is_ok());
+        assert!(shortcut_collision_error("CmdOrCtrl+Shift+O", &in_use)
+            .unwrap_err()
+            .contains("live transcript"));
+    }
+
+    #[test]
     fn humanize_shortcut_renders_modifiers_as_glyphs() {
         assert_eq!(humanize_shortcut("CmdOrCtrl+Shift+K"), "⌘⇧K");
         assert_eq!(humanize_shortcut("CmdOrCtrl+Alt+Space"), "⌘⌥Space");
@@ -4432,25 +4449,33 @@ fn ensure_no_palette_shortcut_collision(state: &AppState, candidate: &str) -> Re
     let in_use = [
         (
             "dictation",
+            state.dictation_shortcut_enabled.load(Ordering::Relaxed),
             state.dictation_shortcut.lock().ok().map(|s| s.clone()),
         ),
         (
             "live transcript",
+            state.live_shortcut_enabled.load(Ordering::Relaxed),
             state.live_shortcut.lock().ok().map(|s| s.clone()),
         ),
         (
             "quick thought hotkey",
+            state.global_hotkey_enabled.load(Ordering::Relaxed),
             state.global_hotkey_shortcut.lock().ok().map(|s| s.clone()),
         ),
     ];
-    for (name, value) in in_use {
-        if let Some(other) = value {
-            if other == candidate {
-                return Err(format!(
-                    "{} is already used by the {} shortcut",
-                    candidate, name
-                ));
-            }
+    shortcut_collision_error(candidate, &in_use)
+}
+
+fn shortcut_collision_error(
+    candidate: &str,
+    in_use: &[(&str, bool, Option<String>)],
+) -> Result<(), String> {
+    for (name, enabled, value) in in_use {
+        if *enabled && value.as_deref().is_some_and(|other| other == candidate) {
+            return Err(format!(
+                "{} is already used by the {} shortcut",
+                candidate, name
+            ));
         }
     }
     Ok(())

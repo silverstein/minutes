@@ -666,7 +666,7 @@ impl Config {
         };
 
         let config = Self::load_from(path);
-        let mut changed = false;
+        let mut migrated_toml: Option<String> = None;
 
         // Palette section persistence: if the config file exists but
         // has no `[palette]` section, write the default section out
@@ -685,7 +685,7 @@ impl Config {
         if file_existed {
             if let Some(raw) = raw_toml.as_deref() {
                 if !raw_toml_has_section(raw, "palette") {
-                    changed = true;
+                    migrated_toml = Some(append_palette_section(raw, &config.palette));
                     tracing::info!(
                         "palette migration: persisting [palette] section in existing config at {}",
                         path.display()
@@ -694,8 +694,8 @@ impl Config {
             }
         }
 
-        if changed {
-            if let Err(e) = config.save_to(path) {
+        if let Some(migrated_toml) = migrated_toml {
+            if let Err(e) = std::fs::write(path, migrated_toml) {
                 tracing::warn!(
                     "failed to persist config migration to {}: {}",
                     path.display(),
@@ -811,6 +811,23 @@ fn raw_toml_has_section(raw: &str, section: &str) -> bool {
         }
     }
     false
+}
+
+fn append_palette_section(raw: &str, palette: &PaletteConfig) -> String {
+    let mut output = raw.trim_end_matches('\n').to_string();
+    if !output.is_empty() {
+        output.push_str("\n\n");
+    }
+    output.push_str("[palette]\n");
+    output.push_str(&format!(
+        "shortcut_enabled = {}\n",
+        palette.shortcut_enabled
+    ));
+    output.push_str(&format!(
+        "shortcut = {}\n",
+        toml::Value::String(palette.shortcut.clone())
+    ));
+    output
 }
 
 #[cfg(test)]
@@ -1012,6 +1029,17 @@ accumulate = false
     }
 
     #[test]
+    fn append_palette_section_preserves_existing_text() {
+        let raw = "# keep this comment\nunknown_key = 7\n";
+        let appended = append_palette_section(raw, &PaletteConfig::default());
+
+        assert!(appended.starts_with("# keep this comment\nunknown_key = 7\n"));
+        assert!(raw_toml_has_section(&appended, "palette"));
+        assert!(appended.contains("shortcut_enabled = true"));
+        assert!(appended.contains("shortcut = \"CmdOrCtrl+Shift+K\""));
+    }
+
+    #[test]
     fn fresh_install_keeps_palette_enabled() {
         let dir = TempDir::new().unwrap();
         let config_path = dir.path().join("config.toml");
@@ -1061,6 +1089,11 @@ model = "small"
         assert!(
             raw_toml_has_section(&reloaded, "palette"),
             "migration should persist a [palette] section to disk"
+        );
+        assert!(
+            reloaded.contains("[transcription]\nmodel = \"small\""),
+            "migration should preserve existing config text, got:\n{}",
+            reloaded
         );
         assert!(
             reloaded.contains("shortcut_enabled = true"),
@@ -1116,5 +1149,23 @@ shortcut_enabled = false
 
         let config = Config::load_with_migrations_from(&config_path);
         assert!(!config.palette.shortcut_enabled);
+    }
+
+    #[test]
+    fn upgrade_preserves_comments_and_unknown_keys_when_adding_palette() {
+        let dir = TempDir::new().unwrap();
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(
+            &config_path,
+            "# top comment\nmystery = \"keep-me\"\n\n[transcription]\nmodel = \"small\"\n",
+        )
+        .unwrap();
+
+        let _ = Config::load_with_migrations_from(&config_path);
+        let reloaded = std::fs::read_to_string(&config_path).unwrap();
+
+        assert!(reloaded.contains("# top comment"));
+        assert!(reloaded.contains("mystery = \"keep-me\""));
+        assert!(raw_toml_has_section(&reloaded, "palette"));
     }
 }

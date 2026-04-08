@@ -347,6 +347,7 @@ fn collapse_to_single_speaker_segments(
 fn maybe_relabel_single_call_speaker_to_voice(
     segments: &mut [SpeakerSegment],
     voice_values: &[f32],
+    system_values: &[f32],
     silence_threshold: f32,
 ) {
     if segments.len() != 1 || segments[0].speaker != "SPEAKER_1" {
@@ -358,12 +359,15 @@ fn maybe_relabel_single_call_speaker_to_voice(
         .filter(|&&rms| rms > silence_threshold)
         .count();
     let active_voice_ratio = active_voice_windows as f32 / voice_values.len().max(1) as f32;
+    let correlated =
+        correlation_coefficient(voice_values, system_values).is_some_and(|value| value >= 0.85);
 
     // If the microphone stem is active for most of the recording, this is
     // likely the local speaker bleeding into the system stem rather than a
-    // true remote-only single speaker. Normalize that case back to
-    // SPEAKER_0 so the self-attribution path can recognize it.
-    if active_voice_ratio >= 0.6 {
+    // true remote-only single speaker, but only when the two stems also move
+    // together strongly. Mere mic-side noise should not relabel remote audio
+    // as the local speaker.
+    if active_voice_ratio >= 0.6 && correlated {
         segments[0].speaker = "SPEAKER_0".into();
     }
 }
@@ -463,7 +467,12 @@ fn diarization_from_energy_windows(
         .len();
 
     if num_speakers == 1 {
-        maybe_relabel_single_call_speaker_to_voice(&mut segments, &voice_values, silence_threshold);
+        maybe_relabel_single_call_speaker_to_voice(
+            &mut segments,
+            &voice_values,
+            &system_values,
+            silence_threshold,
+        );
     }
 
     if segments.is_empty() {
@@ -1703,8 +1712,8 @@ mod tests {
 
     #[test]
     fn single_system_dominant_speaker_relabels_to_voice_when_mic_is_consistently_active() {
-        let voice_energy = vec![(0.0, 0.020), (1.0, 0.018), (2.0, 0.019), (3.0, 0.021)];
-        let system_energy = vec![(0.0, 0.050), (1.0, 0.048), (2.0, 0.047), (3.0, 0.051)];
+        let voice_energy = vec![(0.0, 0.020), (1.0, 0.024), (2.0, 0.018), (3.0, 0.022)];
+        let system_energy = vec![(0.0, 0.050), (1.0, 0.060), (2.0, 0.045), (3.0, 0.055)];
 
         let result = diarization_from_energy_windows(&voice_energy, &system_energy, 1.0)
             .expect("single dominant system speaker should still produce diarization");
@@ -1712,6 +1721,19 @@ mod tests {
         assert_eq!(result.num_speakers, 1);
         assert_eq!(result.segments.len(), 1);
         assert_eq!(result.segments[0].speaker, "SPEAKER_0");
+    }
+
+    #[test]
+    fn single_system_dominant_speaker_stays_remote_when_mic_noise_is_uncorrelated() {
+        let voice_energy = vec![(0.0, 0.020), (1.0, 0.006), (2.0, 0.019), (3.0, 0.007)];
+        let system_energy = vec![(0.0, 0.050), (1.0, 0.048), (2.0, 0.047), (3.0, 0.051)];
+
+        let result = diarization_from_energy_windows(&voice_energy, &system_energy, 1.0)
+            .expect("single dominant system speaker should still produce diarization");
+
+        assert_eq!(result.num_speakers, 1);
+        assert_eq!(result.segments.len(), 1);
+        assert_eq!(result.segments[0].speaker, "SPEAKER_1");
     }
 
     #[test]

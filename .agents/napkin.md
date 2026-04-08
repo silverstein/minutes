@@ -3,6 +3,8 @@
 ## Corrections
 | Date | Source | What Went Wrong | What To Do Instead |
 |------|--------|----------------|-------------------|
+| 2026-04-08 | self | I repeated the repo’s old Cargo habit and passed two positional test filters to `cargo test`, which Cargo treats as an unexpected extra argument | For targeted Rust verification here, run one test filter per `cargo test` invocation (or use a single shared substring) |
+| 2026-04-08 | self | While searching the Minutes repo, I reflexively ran `rg` across generic top-level paths like `src`/`app`/`packages` that do not exist here, which added noisy "No such file or directory" errors right at the start of the investigation | In this repo, scope searches to the actual Rust/Tauri roots (`crates/`, `tauri/`, `docs/`) or use `rg --files` first before naming paths |
 | 2026-04-08 | self | While reviewing the main Tauri surface, I almost treated the top processing bar in isolation and would have missed a state-specific regression that was obvious in the Jobs Center | For Minutes UI reviews, compare duplicate state surfaces (top status bars vs Jobs/Recovery center) before calling a behavior intentional; mismatches often reveal real regressions |
 | 2026-04-05 | self | While reviewing the Tauri auto-updater wiring, I almost treated a darwin-only `latest.json` as harmless even though the plugin is now enabled globally | For updater changes, inspect the manifest targets against every enabled desktop platform; `tauri-plugin-updater` errors with `TargetsNotFound` when the current OS/arch is missing |
 | 2026-03-18 | self | Updated `start_recording` signature for processing-state wiring but missed the tray menu call site in `tauri/src-tauri/src/main.rs` | After widening Tauri command/helper signatures, run `rg` for all call sites before testing so the state plumbing stays consistent |
@@ -65,3 +67,4 @@
 - The worktree may already contain user changes; review around them carefully and do not revert unrelated edits.
 - The desktop app mixes in-memory recording state with PID-file-based status, so app restarts and cross-surface recording flows are easy places for desync bugs.
 - Live coaching is intentionally split across surfaces: the Tauri UI is the on/off control plus lightweight live status, while the actual coaching/advice is meant to happen in Claude Desktop/Code or another agent reading the live transcript context.
+- Early public traction is strongest on the agent-facing distribution surfaces: as of 2026-04-08 the repo has 964 GitHub stars / 95 forks while `minutes-mcp` and `minutes-sdk` each show ~2.6k-2.9k npm downloads over the last month, so strategy discussions should treat "conversation memory for agents" as at least as important as the standalone recorder wedge.

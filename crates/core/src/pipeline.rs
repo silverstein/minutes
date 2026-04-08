@@ -23,6 +23,7 @@ struct VoiceMatchResult {
 #[serde(rename_all = "kebab-case")]
 enum SelfAttributionAppliedVia {
     VoiceStemMatch,
+    SourceBackedStem,
     FallbackIdentityOnly,
 }
 
@@ -319,8 +320,14 @@ fn single_stem_speaker_self_attribution(
         };
     }
 
-    let speaker_label = if transcript_labels.len() == 1 && transcript_labels[0] == "SPEAKER_0" {
-        "SPEAKER_0".to_string()
+    let source_backed_speaker_label = if transcript_labels.iter().any(|label| label == "SPEAKER_0")
+    {
+        Some("SPEAKER_0".to_string())
+    } else {
+        None
+    };
+    let speaker_label = if let Some(label) = source_backed_speaker_label.clone() {
+        label
     } else if transcript_labels.len() == 1 && transcript_labels[0] == "SPEAKER_1" {
         "SPEAKER_1".to_string()
     } else if transcript.contains("[UNKNOWN ") {
@@ -342,26 +349,51 @@ fn single_stem_speaker_self_attribution(
         }
     }
     if let Some(stems) = diarize::discover_stems(audio_path) {
-        if let Some(voice_stem_result) = diarize::diarize(&stems.voice, config) {
-            let voice_stem_match =
-                match_speakers_by_voice(config, &voice_stem_result.speaker_embeddings);
-            if let Some(self_match) = voice_stem_match
-                .attributions
-                .iter()
-                .find(|attr| attr.name == *my_name)
-            {
+        if let Some(source_backed_label) = source_backed_speaker_label.clone() {
+            if let Some(voice_stem_result) = diarize::diarize(&stems.voice, config) {
+                let matched_self =
+                    match_speakers_by_voice(config, &voice_stem_result.speaker_embeddings)
+                        .attributions
+                        .iter()
+                        .any(|attr| attr.name == *my_name);
                 return SelfAttributionOutcome::applied(
                     diarize::SpeakerAttribution {
-                        speaker_label,
-                        name: self_match.name.clone(),
-                        confidence: self_match.confidence,
-                        source: self_match.source,
+                        speaker_label: source_backed_label,
+                        name: my_name.clone(),
+                        confidence: if matched_self {
+                            diarize::Confidence::High
+                        } else {
+                            diarize::Confidence::Medium
+                        },
+                        source: if matched_self {
+                            diarize::AttributionSource::Enrollment
+                        } else {
+                            diarize::AttributionSource::Deterministic
+                        },
                     },
-                    SelfAttributionAppliedVia::VoiceStemMatch,
+                    if matched_self {
+                        SelfAttributionAppliedVia::VoiceStemMatch
+                    } else {
+                        SelfAttributionAppliedVia::SourceBackedStem
+                    },
                     None,
                 );
             }
 
+            return SelfAttributionOutcome::applied(
+                diarize::SpeakerAttribution {
+                    speaker_label: source_backed_label,
+                    name: my_name.clone(),
+                    confidence: diarize::Confidence::Medium,
+                    source: diarize::AttributionSource::Deterministic,
+                },
+                SelfAttributionAppliedVia::SourceBackedStem,
+                Some(SelfAttributionSkippedReason::VoiceStemDiarizationFailed),
+            );
+        }
+
+        if let Some(voice_stem_result) = diarize::diarize(&stems.voice, config) {
+            let _ = voice_stem_result;
             if speaker_label == "SPEAKER_1" {
                 return SelfAttributionOutcome::skipped(
                     SelfAttributionSkippedReason::RemoteOnlyLabel,
@@ -404,7 +436,7 @@ fn attribute_meeting_speakers(
     content_type: ContentType,
     source: Option<&str>,
     config: &Config,
-    attendees: &[String],
+    attribution_attendees: &[String],
     diarization_num_speakers: usize,
     diarization_from_stems: bool,
     diarization_embeddings: &std::collections::HashMap<String, Vec<f32>>,
@@ -429,15 +461,15 @@ fn attribute_meeting_speakers(
             .map(|a| a.speaker_label.clone())
             .collect();
 
-        if !attendees.is_empty()
-            && diarization_num_speakers == attendees.len()
+        if !attribution_attendees.is_empty()
+            && diarization_num_speakers == attribution_attendees.len()
             && diarization_num_speakers == 2
             && transcript_labels.len() == 2
             && l2_labels.is_empty()
         {
             if let Some(my_name) = config.identity.name.as_ref() {
                 let my_slug = slugify(my_name);
-                let other = attendees
+                let other = attribution_attendees
                     .iter()
                     .find(|attendee| slugify(attendee) != my_slug);
                 if let Some(other_name) = other {
@@ -493,7 +525,7 @@ fn attribute_meeting_speakers(
             false
         });
         if has_unmapped {
-            for attribution in summarize::map_speakers(&transcript, attendees, config) {
+            for attribution in summarize::map_speakers(&transcript, attribution_attendees, config) {
                 if !mapped_labels.contains(&attribution.speaker_label) {
                     speaker_map.push(attribution);
                 }
@@ -913,7 +945,7 @@ where
         artifact.frontmatter.r#type,
         artifact.frontmatter.source.as_deref(),
         config,
-        &attendees,
+        &artifact.frontmatter.attendees,
         diarization_num_speakers,
         diarization_from_stems,
         &diarization_embeddings,
@@ -1253,7 +1285,7 @@ where
         content_type,
         sidecar.and_then(|metadata| metadata.source.as_deref()),
         config,
-        &attendees,
+        &calendar_attendees,
         diarization_num_speakers,
         diarization_from_stems,
         &diarization_embeddings,
@@ -2266,6 +2298,39 @@ mod tests {
             .speaker_map
             .iter()
             .all(|entry| entry.confidence == diarize::Confidence::Medium));
+    }
+
+    #[test]
+    fn native_call_without_trusted_attendees_maps_only_local_voice_source() {
+        let mut config = Config::default();
+        config.identity.name = Some("Mat".into());
+
+        let result = attribute_meeting_speakers(
+            Path::new("/Users/test/.minutes/native-captures/fake-call.mov"),
+            ContentType::Meeting,
+            Some("native-call"),
+            &config,
+            &[],
+            2,
+            true,
+            &std::collections::HashMap::new(),
+            "[SPEAKER_1 0:00] hi\n[SPEAKER_0 0:01] hello\n".into(),
+        );
+
+        assert_eq!(result.speaker_map.len(), 1);
+        assert!(result
+            .speaker_map
+            .iter()
+            .any(|entry| entry.speaker_label == "SPEAKER_0"
+                && entry.name == "Mat"
+                && entry.confidence == diarize::Confidence::Medium));
+        assert!(
+            result
+                .speaker_map
+                .iter()
+                .all(|entry| entry.speaker_label != "SPEAKER_1"),
+            "native-call clips without trusted attendees should not invent a remote identity"
+        );
     }
 
     #[test]

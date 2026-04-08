@@ -1526,6 +1526,35 @@
     }
     .speaker-confirm-btn:active { transform: scale(0.96); }
 
+    .speaker-confirm-btn[disabled] {
+      opacity: 0.65;
+      cursor: wait;
+      transform: none;
+    }
+
+    .detail-feedback {
+      margin: 0 24px 16px;
+      padding: 10px 12px;
+      border-radius: 10px;
+      font-size: 13px;
+      font-weight: 500;
+      border: 1px solid rgba(255,255,255,0.06);
+      background: rgba(255,255,255,0.04);
+      color: var(--text);
+    }
+
+    .detail-feedback.success {
+      border-color: rgba(70, 192, 114, 0.28);
+      background: rgba(70, 192, 114, 0.12);
+      color: #8fe0ab;
+    }
+
+    .detail-feedback.error {
+      border-color: rgba(229, 83, 75, 0.28);
+      background: rgba(229, 83, 75, 0.12);
+      color: #ff9d97;
+    }
+
     .detail-section {
       padding-top: 18px;
       border-top: 1px solid rgba(255, 255, 255, 0.04);
@@ -2652,6 +2681,7 @@
           <button class="btn btn-danger btn-sm" id="btn-delete-meeting">Delete</button>
         </div>
       </div>
+      <div class="detail-feedback" id="detail-feedback" hidden></div>
       <div class="detail-scroll" id="detail-scroll">
         <div class="detail-empty">Select a meeting to view transcript and notes.</div>
       </div>
@@ -3294,6 +3324,7 @@
     const detailTitle = document.getElementById('detail-title');
     const detailMeta = document.getElementById('detail-meta');
     const detailScroll = document.getElementById('detail-scroll');
+    const detailFeedback = document.getElementById('detail-feedback');
     const openExternalBtn = document.getElementById('btn-open-external');
     const aboutOverlay = document.getElementById('about-overlay');
     const notificationToggle = document.getElementById('btn-toggle-notifications');
@@ -3328,6 +3359,7 @@
     let activeSearchQuery = '';
     let currentSetup = null;
     let latestOutput = null;
+    let detailFeedbackTimer = null;
     let processingJobs = [];
     let readinessItems = [];
     let recoveryItems = [];
@@ -4546,6 +4578,22 @@
       aboutOverlay.classList.remove('active');
     }
 
+    function showDetailFeedback(message, tone = 'success') {
+      if (detailFeedbackTimer) {
+        clearTimeout(detailFeedbackTimer);
+        detailFeedbackTimer = null;
+      }
+      detailFeedback.hidden = false;
+      detailFeedback.className = `detail-feedback ${tone}`;
+      detailFeedback.textContent = message;
+      detailFeedbackTimer = setTimeout(() => {
+        detailFeedback.hidden = true;
+        detailFeedback.className = 'detail-feedback';
+        detailFeedback.textContent = '';
+        detailFeedbackTimer = null;
+      }, 3200);
+    }
+
     function renderDetailSections(detail) {
       currentMeetingDetail = detail;
       detailTitle.textContent = detail.title || 'Untitled';
@@ -4623,16 +4671,24 @@
             btn.onclick = async () => {
               const newName = prompt(`Confirm speaker name for ${attr.speaker_label}:`, attr.name);
               if (newName) {
+                btn.disabled = true;
+                const previousLabel = btn.textContent;
+                btn.textContent = 'Saving...';
                 try {
-                  await invoke('cmd_confirm_speaker', {
+                  const result = await invoke('cmd_confirm_speaker', {
                     meetingPath: detail.path,
                     speakerLabel: attr.speaker_label,
                     name: newName,
                   });
+                  showDetailFeedback(result || `Confirmed: ${attr.speaker_label} = ${newName}`, 'success');
                   // Refresh the detail view
-                  openMeetingDetail(detail.path);
+                  await openMeetingDetail(detail.path);
                 } catch (e) {
                   console.error('Confirm speaker failed:', e);
+                  showDetailFeedback(`Could not confirm speaker: ${e}`, 'error');
+                } finally {
+                  btn.disabled = false;
+                  btn.textContent = previousLabel;
                 }
               }
             };

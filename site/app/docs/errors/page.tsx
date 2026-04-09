@@ -28,7 +28,7 @@ function LinkPill({ href }: { href: string }) {
       href={href}
       className="inline-flex items-center rounded-full bg-[var(--bg)] px-2.5 py-1 font-mono text-[10px] uppercase tracking-[0.14em] text-[var(--accent)] hover:bg-[var(--bg-hover)]"
     >
-      anchor
+      link
     </a>
   );
 }

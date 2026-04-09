@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { CopyButton } from "@/components/copy-button";
+import { PublicFooter } from "@/components/public-footer";
 
 export const metadata: Metadata = {
   title: "Minutes for agents — integration reference",
@@ -474,13 +475,7 @@ export default function ForAgentsPage() {
         </div>
       </section>
 
-      {/* Footer */}
-      <footer className="mt-16 border-t border-[color:var(--border)] pt-6 text-center font-mono text-[11px] text-[var(--text-tertiary)]">
-        This page is written for machine readers.{" "}
-        <a href="/" className="text-[var(--accent)] hover:underline">
-          Humans start here.
-        </a>
-      </footer>
+      <PublicFooter />
     </div>
   );
 }

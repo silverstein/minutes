@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { PublicFooter } from "@/components/public-footer";
 
 export const metadata: Metadata = {
   title: "Open-source alternatives to Granola AI",
@@ -223,6 +224,8 @@ export default function OpenSourceAlternativesToGranolaPage() {
           ))}
         </ul>
       </section>
+
+      <PublicFooter />
     </div>
   );
 }

@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { PublicFooter } from "@/components/public-footer";
 
 export const metadata: Metadata = {
   title: "Best MCP meeting memory tools",
@@ -230,6 +231,8 @@ export default function BestMcpMeetingMemoryToolsPage() {
           ))}
         </ul>
       </section>
+
+      <PublicFooter />
     </div>
   );
 }

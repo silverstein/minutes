@@ -1,3 +1,5 @@
+import { PublicFooter } from "@/components/public-footer";
+
 type ComparisonRow = {
   label: string;
   competitor: string;
@@ -245,6 +247,8 @@ export function ComparePage({
           ))}
         </ul>
       </section>
+
+      <PublicFooter />
     </div>
   );
 }

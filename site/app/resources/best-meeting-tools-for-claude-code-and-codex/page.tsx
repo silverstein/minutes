@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { PublicFooter } from "@/components/public-footer";
 
 export const metadata: Metadata = {
   title: "Best meeting tools for Claude Code and Codex",
@@ -278,6 +279,8 @@ export default function BestMeetingToolsPage() {
           ))}
         </ul>
       </section>
+
+      <PublicFooter />
     </div>
   );
 }

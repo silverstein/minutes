@@ -194,6 +194,29 @@ If the result is:
 - `commitments-first` → lead with Action Item Audit / stale commitments before decision arcs
 - `memo-heavy` → surface voice memos and idea capture much more prominently in the synthesis
 
+Use this concrete ordering:
+
+- `decisions-first`
+  1. Decision Arcs
+  2. This Week's Themes
+  3. Action Item Audit / stale commitments
+  4. Relationship Pulse
+  5. Attention Monday
+
+- `commitments-first`
+  1. Action Item Audit / stale commitments
+  2. Decision Arcs
+  3. This Week's Themes
+  4. Relationship Pulse
+  5. Attention Monday
+
+- `memo-heavy`
+  1. This Week's Themes, but ensure voice memos and idea capture are surfaced explicitly inside the theme summary
+  2. Action Item Audit
+  3. Decision Arcs
+  4. Relationship Pulse
+  5. Attention Monday
+
 If there is no preference, keep the default order in this skill.
 
 ```

@@ -13,7 +13,7 @@ Walk the user through first-time Minutes setup, step by step.
 
 Run the verify skill's script to see what's already done:
 ```bash
-bash "$MINUTES_SKILL_ROOT/skills/minutes-verify/scripts/verify-setup.sh"
+bash "$MINUTES_SKILLS_ROOT/minutes-verify/scripts/verify-setup.sh"
 ```
 
 Skip any steps that already pass.
@@ -66,7 +66,7 @@ See `minutes-record/references/audio-devices.md` for the full guide.
 
 Run verify again to confirm everything passes:
 ```bash
-bash "$MINUTES_SKILL_ROOT/skills/minutes-verify/scripts/verify-setup.sh"
+bash "$MINUTES_SKILLS_ROOT/minutes-verify/scripts/verify-setup.sh"
 ```
 
 ### 7. Test recording

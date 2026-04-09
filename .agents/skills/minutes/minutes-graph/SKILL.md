@@ -3,6 +3,15 @@ name: minutes-graph
 description: Cross-meeting entity graph — query who/what/when across all your meetings as structured data, with co-occurrence and cross-entity queries that text search can't answer. Use whenever the user says "show me everyone who mentioned X", "every time we talked about Y", "who knows about Z", "graph", "across all meetings", "entity search", "first time we talked about", "trend for X over time", "who's been mentioned alongside", or wants to query meetings as an index rather than full-text search. Builds a JSON entity index on first run (one-time slow), then answers queries instantly. Surface this skill for relationship intelligence, due diligence, or any "across all my history" question that text search alone can't answer.
 ---
 
+## Skill Path
+
+Before running helper scripts or opening bundled references, set:
+
+```bash
+export MINUTES_SKILLS_ROOT="$(git rev-parse --show-toplevel)/.agents/skills/minutes"
+export MINUTES_SKILL_ROOT="$MINUTES_SKILLS_ROOT/minutes-graph"
+```
+
 # /minutes-graph
 
 Cross-meeting entity graph that lets you query your meeting history as structured data — **people and topics** out of the box, with companies and products as an opt-in deep-extraction path.
@@ -46,7 +55,7 @@ To get the meeting count for the warning, use Glob on the meetings dir from `min
 **Run the script:**
 
 ```bash
-python3 "$MINUTES_SKILL_ROOT/skills/minutes-graph/scripts/graph_build.py" --incremental
+python3 "$MINUTES_SKILL_ROOT/scripts/graph_build.py" --incremental
 ```
 
 Defaults:

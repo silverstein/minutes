@@ -95,6 +95,10 @@ export interface CompiledSkillArtifact {
   skillName: string;
   outputPath: string;
   body: string;
+  assetFiles: Array<{
+    sourceRelativePath: string;
+    outputRelativePath: string;
+  }>;
   sidecarFiles: Array<{
     relativePath: string;
     content: string;

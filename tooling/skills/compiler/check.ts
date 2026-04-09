@@ -29,12 +29,14 @@ async function main(): Promise<void> {
       if (
         host.name === "codex" &&
         (artifact.body.includes("${CLAUDE_PLUGIN_ROOT}") ||
-          artifact.body.includes(".claude/plugins/minutes"))
+          artifact.body.includes(".claude/plugins/minutes") ||
+          artifact.body.includes("$MINUTES_SKILL_ROOT/skills/") ||
+          artifact.body.includes("$MINUTES_SKILLS_ROOT/skills/"))
       ) {
         failures.push({
           skill: skill.id,
           host: host.name,
-          message: "Codex output still contains Claude plugin-root references",
+          message: "Codex output still contains unresolved Claude or invalid helper path references",
         });
       }
 
@@ -54,6 +56,20 @@ async function main(): Promise<void> {
           skill: skill.id,
           host: host.name,
           message: "Codex output is missing agents/openai.yaml sidecar metadata",
+        });
+      }
+
+      if (
+        host.name === "codex" &&
+        (skill.frontmatter.assets?.scripts?.length ||
+          skill.frontmatter.assets?.templates?.length ||
+          skill.frontmatter.assets?.references?.length) &&
+        artifact.assetFiles.length === 0
+      ) {
+        failures.push({
+          skill: skill.id,
+          host: host.name,
+          message: "Codex output declares assets but no emitted asset files were planned",
         });
       }
     }

@@ -3,6 +3,15 @@ name: minutes-record
 description: Start or stop recording a meeting, call, or voice memo. Use this whenever the user says "record", "start recording", "capture this meeting", "stop recording", "I'm in a meeting", "take notes on this call", or wants to transcribe live audio. Also use when they ask about recording status or want to know if something is being recorded.
 ---
 
+## Skill Path
+
+Before running helper scripts or opening bundled references, set:
+
+```bash
+export MINUTES_SKILLS_ROOT="$(git rev-parse --show-toplevel)/.agents/skills/minutes"
+export MINUTES_SKILL_ROOT="$MINUTES_SKILLS_ROOT/minutes-record"
+```
+
 # /minutes-record
 
 Record audio from the microphone, transcribe it locally with whisper.cpp, and save as searchable markdown.

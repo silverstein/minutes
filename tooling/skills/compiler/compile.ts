@@ -5,7 +5,7 @@ import { discoverCanonicalSkills } from "./discover.js";
 import { getHostConfig, HOSTS } from "../hosts/index.js";
 import type { HostName } from "../schema.js";
 import { renderSkillForHost } from "./render.js";
-import { validateSkillAssets } from "./validate.js";
+import { resolveSkillAssetSourcePath, validateSkillAssets } from "./validate.js";
 
 interface CompileOptions {
   dryRun: boolean;
@@ -77,6 +77,19 @@ async function main(): Promise<void> {
       const status = await compareOrWrite(rootDir, artifact.outputPath, artifact.body, options.dryRun);
       if (status === "changed") {
         changes.push({ host: hostName, path: artifact.outputPath, kind: "skill" });
+      }
+      for (const asset of artifact.assetFiles) {
+        const sourcePath = await resolveSkillAssetSourcePath(skill, asset.sourceRelativePath);
+        const assetContent = await readFile(sourcePath, "utf8");
+        const assetStatus = await compareOrWrite(
+          rootDir,
+          asset.outputRelativePath,
+          assetContent,
+          options.dryRun,
+        );
+        if (assetStatus === "changed") {
+          changes.push({ host: hostName, path: asset.outputRelativePath, kind: "asset" });
+        }
       }
       for (const sidecar of artifact.sidecarFiles) {
         const sidecarStatus = await compareOrWrite(

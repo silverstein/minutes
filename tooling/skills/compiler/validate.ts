@@ -19,26 +19,35 @@ export function validateCanonicalSkillSource(skill: CanonicalSkillSource): void 
   }
 }
 
-export async function validateSkillAssets(skill: CanonicalSkillSource): Promise<void> {
-  const assetGroups = skill.frontmatter.assets ?? {};
+export async function resolveSkillAssetSourcePath(
+  skill: CanonicalSkillSource,
+  relativeAsset: string,
+): Promise<string> {
   const sourceDir = path.dirname(skill.sourcePath);
   const repoRoot = path.join(sourceDir, "..", "..", "..", "..");
   const legacySkillDir = path.join(repoRoot, ".claude", "plugins", "minutes", "skills", skill.id);
+  const assetPath = path.join(sourceDir, relativeAsset);
+  try {
+    await access(assetPath);
+    return assetPath;
+  } catch {
+    const legacyAssetPath = path.join(legacySkillDir, relativeAsset);
+    try {
+      await access(legacyAssetPath);
+      return legacyAssetPath;
+    } catch {
+      throw new Error(
+        `Canonical skill ${skill.id} references missing asset: ${relativeAsset}`,
+      );
+    }
+  }
+}
+
+export async function validateSkillAssets(skill: CanonicalSkillSource): Promise<void> {
+  const assetGroups = skill.frontmatter.assets ?? {};
   for (const group of [assetGroups.scripts, assetGroups.templates, assetGroups.references]) {
     for (const relativeAsset of group ?? []) {
-      const assetPath = path.join(sourceDir, relativeAsset);
-      try {
-        await access(assetPath);
-      } catch {
-        const legacyAssetPath = path.join(legacySkillDir, relativeAsset);
-        try {
-          await access(legacyAssetPath);
-        } catch {
-          throw new Error(
-            `Canonical skill ${skill.id} references missing asset: ${relativeAsset}`,
-          );
-        }
-      }
+      await resolveSkillAssetSourcePath(skill, relativeAsset);
     }
   }
 }

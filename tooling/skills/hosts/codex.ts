@@ -7,7 +7,6 @@ export const codexHost: HostConfig = {
   pathPolicy: {
     defaultSkillDir: ".",
     pathRewrites: [
-      { from: "${CLAUDE_PLUGIN_ROOT}", to: "$MINUTES_SKILL_ROOT" },
       { from: ".claude/plugins/minutes", to: ".agents/skills/minutes" },
     ],
   },
@@ -28,6 +27,6 @@ export const codexHost: HostConfig = {
     extraNotesPlacement: "append",
   },
   assetPolicy: {
-    mode: "reference",
+    mode: "copy",
   },
 };

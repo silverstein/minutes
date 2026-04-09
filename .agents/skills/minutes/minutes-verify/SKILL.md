@@ -3,6 +3,15 @@ name: minutes-verify
 description: Verify that Minutes is properly set up and working — model downloaded, mic accessible, directories exist, no stale state. Use when the user says "is minutes working", "check my setup", "verify minutes", "test recording setup", "why isn't minutes working", "minutes health check", or after running setup for the first time.
 ---
 
+## Skill Path
+
+Before running helper scripts or opening bundled references, set:
+
+```bash
+export MINUTES_SKILLS_ROOT="$(git rev-parse --show-toplevel)/.agents/skills/minutes"
+export MINUTES_SKILL_ROOT="$MINUTES_SKILLS_ROOT/minutes-verify"
+```
+
 # /minutes-verify
 
 Run a health check on the Minutes installation to confirm everything is working.
@@ -12,7 +21,7 @@ Run a health check on the Minutes installation to confirm everything is working.
 Run the verification script included with this skill:
 
 ```bash
-bash "$MINUTES_SKILL_ROOT/skills/minutes-verify/scripts/verify-setup.sh"
+bash "$MINUTES_SKILL_ROOT/scripts/verify-setup.sh"
 ```
 
 The script checks each component and outputs a pass/fail status for each. Read the output and report results to the user.

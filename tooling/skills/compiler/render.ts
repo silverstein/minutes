@@ -13,6 +13,29 @@ function rewritePaths(body: string, host: HostConfig): string {
   );
 }
 
+function rewriteCodexPluginPaths(body: string, skill: CanonicalSkillSource): string {
+  return body
+    .replace(
+      /\$\{CLAUDE_PLUGIN_ROOT\}\/skills\/([^/]+)\/(scripts|templates|references)\//g,
+      (_match, targetSkill: string, kind: string) =>
+        targetSkill === skill.frontmatter.name
+          ? `$MINUTES_SKILL_ROOT/${kind}/`
+          : `$MINUTES_SKILLS_ROOT/${targetSkill}/${kind}/`,
+    )
+    .replace(
+      /\.claude\/plugins\/minutes\/skills\/([^/]+)\/(scripts|templates|references)\//g,
+      (_match, targetSkill: string, kind: string) =>
+        targetSkill === skill.frontmatter.name
+          ? `$MINUTES_SKILL_ROOT/${kind}/`
+          : `$MINUTES_SKILLS_ROOT/${targetSkill}/${kind}/`,
+    );
+}
+
+function rewriteSkillScopedAssetPaths(body: string, skill: CanonicalSkillSource, host: HostConfig): string {
+  if (host.name !== "codex") return body;
+  return rewriteCodexPluginPaths(body, skill);
+}
+
 function overflowDescription(description: string, host: HostConfig): string {
   const limit = host.descriptionPolicy.maxLength;
   if (!limit || description.length <= limit) return description;
@@ -71,7 +94,11 @@ export function renderSkillForHost(
   host: HostConfig,
 ): CompiledSkillArtifact {
   const override = skill.frontmatter.host_overrides?.[host.name];
-  const rewrittenBody = rewritePaths(skill.body.trimStart(), host);
+  const rewrittenBody = rewriteSkillScopedAssetPaths(
+    rewritePaths(skill.body.trimStart(), host),
+    skill,
+    host,
+  );
   const extraNotes = override?.extra_notes?.trim();
   const outputPath =
     skill.frontmatter.output?.[host.name]?.path ??
@@ -87,12 +114,35 @@ export function renderSkillForHost(
       skill.frontmatter.description,
     host,
   );
+  const assetFiles =
+    host.assetPolicy.mode === "copy"
+      ? [
+          ...(skill.frontmatter.assets?.scripts ?? []).map((asset) => ({
+            sourceRelativePath: asset,
+            outputRelativePath: path.join(path.dirname(outputPath), asset),
+          })),
+          ...(skill.frontmatter.assets?.templates ?? []).map((asset) => ({
+            sourceRelativePath: asset,
+            outputRelativePath: path.join(path.dirname(outputPath), asset),
+          })),
+          ...(skill.frontmatter.assets?.references ?? []).map((asset) => ({
+            sourceRelativePath: asset,
+            outputRelativePath: path.join(path.dirname(outputPath), asset),
+          })),
+        ]
+      : [];
+
+  const codexSkillRootNote =
+    host.name === "codex" && assetFiles.length > 0
+      ? `## Skill Path\n\nBefore running helper scripts or opening bundled references, set:\n\n\`\`\`bash\nexport MINUTES_SKILLS_ROOT=\"$(git rev-parse --show-toplevel)/.agents/skills/minutes\"\nexport MINUTES_SKILL_ROOT=\"$MINUTES_SKILLS_ROOT/${skill.frontmatter.name}\"\n\`\`\`\n\n`
+      : "";
+
   const body =
     host.transformPolicy.extraNotesPlacement === "prepend" && extraNotes
-      ? `${frontmatter}${extraNotes}\n\n${rewrittenBody}\n`
+      ? `${frontmatter}${codexSkillRootNote}${extraNotes}\n\n${rewrittenBody}\n`
       : host.transformPolicy.extraNotesPlacement === "append" && extraNotes
-        ? `${frontmatter}${rewrittenBody}\n\n## Host Notes\n\n${extraNotes}\n`
-        : `${frontmatter}${rewrittenBody}\n`;
+        ? `${frontmatter}${codexSkillRootNote}${rewrittenBody}\n\n## Host Notes\n\n${extraNotes}\n`
+        : `${frontmatter}${codexSkillRootNote}${rewrittenBody}\n`;
 
   const sidecarFiles =
     host.metadataPolicy.generateSidecar && host.metadataPolicy.format === "openai.yaml"
@@ -127,6 +177,7 @@ export function renderSkillForHost(
     skillName: skill.frontmatter.name,
     outputPath,
     body,
+    assetFiles,
     sidecarFiles,
   };
 }

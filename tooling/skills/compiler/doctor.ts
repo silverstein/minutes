@@ -55,6 +55,12 @@ async function main(): Promise<void> {
       if (!(await exists(skillPath))) {
         problems.push(`Missing generated ${hostName} skill output: ${artifact.outputPath}`);
       }
+      for (const asset of artifact.assetFiles) {
+        const assetPath = path.join(repoRoot, asset.outputRelativePath);
+        if (!(await exists(assetPath))) {
+          problems.push(`Missing generated ${hostName} asset output: ${asset.outputRelativePath}`);
+        }
+      }
       for (const sidecar of artifact.sidecarFiles) {
         const sidecarPath = path.join(repoRoot, sidecar.relativePath);
         if (!(await exists(sidecarPath))) {

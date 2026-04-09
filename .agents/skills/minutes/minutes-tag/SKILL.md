@@ -3,6 +3,15 @@ name: minutes-tag
 description: Lightweight outcome tagging for meetings — won, lost, stalled, great, or noise. Use whenever the user says "tag this meeting", "mark that as a win", "that one was a loss", "tag yesterday's call as stalled", "mark this great", "that meeting was noise", "label that meeting", or any time they describe a meeting outcome in passing. Tagging takes 5 seconds and unlocks /minutes-mirror correlation analysis — the more meetings get tagged, the smarter mirror gets at telling the user what behavior patterns lead to wins. Surface this skill any time the user mentions a meeting result, win, loss, or wasted time.
 ---
 
+## Skill Path
+
+Before running helper scripts or opening bundled references, set:
+
+```bash
+export MINUTES_SKILLS_ROOT="$(git rev-parse --show-toplevel)/.agents/skills/minutes"
+export MINUTES_SKILL_ROOT="$MINUTES_SKILLS_ROOT/minutes-tag"
+```
+
 # /minutes-tag
 
 Lightweight outcome tagging — adds an `outcome:` field to a meeting's frontmatter so `/minutes-mirror` can correlate the user's behavior with their results over time.
@@ -64,7 +73,7 @@ If you find a note in the message, use it. If you don't, **leave `outcome_note` 
 **Use the script — do not Edit the frontmatter manually.** YAML frontmatter is fragile, and the script handles all the edge cases (no existing frontmatter, existing outcome that needs replacement, atomic write to prevent half-edits, preservation of all other fields).
 
 ```bash
-python3 "$MINUTES_SKILL_ROOT/skills/minutes-tag/scripts/tag_apply.py" \
+python3 "$MINUTES_SKILL_ROOT/scripts/tag_apply.py" \
   "<absolute-path-to-meeting-file>" \
   --outcome <won|lost|stalled|great|noise|custom> \
   [--note "the optional one-line note from Phase 3"]

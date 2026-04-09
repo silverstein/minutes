@@ -3,6 +3,15 @@ name: minutes-mirror
 description: Self-coaching analysis of your own behavior across meetings — talk-time ratio, filler words, hedging language, monologue length, energy patterns, and (when meetings are tagged via /minutes-tag) what your behavior in winning meetings looks like vs losing ones. Use this whenever the user says "how did I do", "review my last meeting", "mirror", "self-review", "show my patterns", "coach me", "where am I weak", "talk time", "am I improving", "what do I do in meetings I win", "feedback on me", or asks for any kind of personal feedback on their own meeting behavior. This is the rare skill that gives the user a mirror to their own habits — surface it whenever they show curiosity about their own performance, even if they don't use the word "mirror".
 ---
 
+## Skill Path
+
+Before running helper scripts or opening bundled references, set:
+
+```bash
+export MINUTES_SKILLS_ROOT="$(git rev-parse --show-toplevel)/.agents/skills/minutes"
+export MINUTES_SKILL_ROOT="$MINUTES_SKILLS_ROOT/minutes-mirror"
+```
+
 # /minutes-mirror
 
 Self-coaching analysis based on your own meeting transcripts. Two modes:
@@ -73,7 +82,7 @@ If the user named a specific meeting, use `minutes get <filename-without-.md>`. 
 **Compute the metrics with the bundled helper script**, not by counting in-context. LLMs are bad at exact token counting; the script does it deterministically with regex and basic string ops.
 
 ```bash
-python3 "$MINUTES_SKILL_ROOT/skills/minutes-mirror/scripts/mirror_metrics.py" \
+python3 "$MINUTES_SKILL_ROOT/scripts/mirror_metrics.py" \
   "<path-to-meeting-file>" \
   --self "$(cat ~/.minutes/config/self.txt 2>/dev/null | paste -sd, -)"
 ```

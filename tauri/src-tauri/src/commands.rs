@@ -162,6 +162,13 @@ pub struct ArtifactDraft {
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TextFileAccess {
+    pub path: String,
+    pub editable: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct OutputNotice {
     pub kind: String,
     pub title: String,
@@ -1350,6 +1357,12 @@ fn artifact_directory(config: &Config) -> Result<PathBuf, String> {
         )
     })?;
     Ok(artifacts)
+}
+
+fn is_editable_text_file_path(path: &Path, config: &Config) -> bool {
+    let workspace = crate::context::workspace_dir();
+    let trusted_roots = [config.output_dir.clone(), workspace.join("artifacts")];
+    trusted_roots.iter().any(|root| path.starts_with(root))
 }
 
 const MAX_ARTIFACT_SNAPSHOTS_PER_FILE: usize = 20;
@@ -3044,6 +3057,16 @@ pub fn cmd_read_text_file(path: String) -> Result<String, String> {
 }
 
 #[tauri::command]
+pub fn cmd_get_text_file_access(path: String) -> Result<TextFileAccess, String> {
+    let canonical = validate_text_file_path(Path::new(&path))?;
+    let config = Config::load();
+    Ok(TextFileAccess {
+        path: canonical.display().to_string(),
+        editable: is_editable_text_file_path(&canonical, &config),
+    })
+}
+
+#[tauri::command]
 pub fn cmd_set_open_artifact(state: tauri::State<AppState>, path: String) -> Result<(), String> {
     let canonical = validate_text_file_path(Path::new(&path))?;
     let config = Config::load();
@@ -3383,6 +3406,13 @@ pub fn cmd_get_meeting_detail(path: String) -> Result<MeetingDetail, String> {
 #[tauri::command]
 pub fn cmd_write_text_file(path: String, content: String) -> Result<String, String> {
     let canonical = validate_text_file_path(Path::new(&path))?;
+    let config = Config::load();
+    if !is_editable_text_file_path(&canonical, &config) {
+        return Err(format!(
+            "{} is view-only in Minutes. Make an editable copy first.",
+            canonical.display()
+        ));
+    }
     write_text_file_atomic(&canonical, &content)?;
     Ok(format!("Saved {}", canonical.display()))
 }
@@ -3390,6 +3420,13 @@ pub fn cmd_write_text_file(path: String, content: String) -> Result<String, Stri
 #[tauri::command]
 pub fn cmd_restore_text_file_snapshot(path: String) -> Result<String, String> {
     let canonical = validate_text_file_path(Path::new(&path))?;
+    let config = Config::load();
+    if !is_editable_text_file_path(&canonical, &config) {
+        return Err(format!(
+            "{} is view-only in Minutes. Make an editable copy first.",
+            canonical.display()
+        ));
+    }
     let Some(snapshot) = latest_snapshot_for_path(&canonical)? else {
         return Err(format!(
             "No snapshot available yet for {}",
@@ -3423,6 +3460,33 @@ pub fn cmd_restore_text_file_snapshot(path: String) -> Result<String, String> {
         canonical.display(),
         snapshot.display()
     ))
+}
+
+#[tauri::command]
+pub fn cmd_promote_text_file_to_artifact(path: String) -> Result<ArtifactDraft, String> {
+    let canonical = validate_text_file_path(Path::new(&path))?;
+    let config = Config::load();
+    let artifacts_dir = artifact_directory(&config)?;
+    let source_content = std::fs::read_to_string(&canonical)
+        .map_err(|e| format!("Cannot read {}: {}", canonical.display(), e))?;
+    let title = canonical
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .unwrap_or("Working Copy")
+        .replace('-', " ");
+    let stem = format!(
+        "{}-working-copy-{}",
+        chrono::Local::now().format("%Y-%m-%d"),
+        artifact_slug(&title)
+    );
+    let artifact_path = resolve_unique_path(&artifacts_dir, &stem, "md");
+    write_text_file_atomic(&artifact_path, &source_content)?;
+    Ok(ArtifactDraft {
+        path: artifact_path.display().to_string(),
+        title,
+        template_kind: "working-copy".into(),
+        content: source_content,
+    })
 }
 
 #[tauri::command]

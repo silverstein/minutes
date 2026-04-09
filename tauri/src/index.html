@@ -1209,6 +1209,7 @@
     .md-viewer-status.saved { color: var(--green); }
     .md-viewer-status.warning { color: var(--red); }
     .md-viewer-status.external { color: var(--accent); }
+    .md-viewer-status.readonly { color: var(--text-secondary); }
     .artifact-template-overlay {
       position: fixed;
       inset: 0;
@@ -2842,6 +2843,7 @@
       <div class="md-viewer-toolbar">
         <button class="btn btn-secondary btn-sm md-viewer-mode-btn active" id="md-viewer-preview-btn">Preview</button>
         <button class="btn btn-secondary btn-sm md-viewer-mode-btn" id="md-viewer-source-btn">Source</button>
+        <button class="btn btn-secondary btn-sm" id="md-viewer-promote-btn" hidden>Make Editable Copy</button>
         <button class="btn btn-secondary btn-sm" id="md-viewer-save-btn" disabled>Save</button>
         <button class="btn btn-secondary btn-sm" id="md-viewer-revert-btn" disabled>Revert</button>
         <span class="md-viewer-status" id="md-viewer-status">Viewing</span>
@@ -6774,6 +6776,11 @@
 
       await expandRecallPanel();
 
+      // If the panel was already expanded, expandRecallPanel bailed out
+      // and skipped initRecallTerminal. Ensure it's initialized.
+      initRecallTerminal();
+      await registerPtyListeners();
+
       try {
         const opts = { mode };
         if (meetingPath) opts.meetingPath = meetingPath;
@@ -7013,10 +7020,22 @@
 
     document.getElementById('btn-recall-restart').addEventListener('click', async () => {
       recallExitBanner.classList.remove('active');
+
+      // Dispose the old xterm instance and clear its DOM before re-init
+      if (recallTerminal) {
+        try { recallTerminal.dispose(); } catch (_) {}
+        recallTerminal = null;
+        recallFitAddon = null;
+      }
       recallInitialized = false;
       while (recallTerminalContainer.firstChild) {
         recallTerminalContainer.removeChild(recallTerminalContainer.firstChild);
       }
+
+      // Re-init terminal directly since the panel is already expanded
+      // (expandRecallPanel would bail out because recallExpanded is true)
+      initRecallTerminal();
+
       await openRecall('assistant');
     });
 
@@ -7095,6 +7114,7 @@
     const mdViewerFilename = document.getElementById('md-viewer-filename');
     const mdViewerPreviewBtn = document.getElementById('md-viewer-preview-btn');
     const mdViewerSourceBtn = document.getElementById('md-viewer-source-btn');
+    const mdViewerPromoteBtn = document.getElementById('md-viewer-promote-btn');
     const mdViewerSaveBtn = document.getElementById('md-viewer-save-btn');
     const mdViewerRevertBtn = document.getElementById('md-viewer-revert-btn');
     const mdViewerStatus = document.getElementById('md-viewer-status');
@@ -7110,6 +7130,7 @@
     let mdViewerMode = 'preview';
     let openArtifactExternalNotice = null;
     let artifactTemplateResolver = null;
+    let openArtifactEditable = false;
 
     marked.setOptions({ breaks: true });
 
@@ -7171,15 +7192,21 @@
       const sourceMode = mdViewerMode === 'source';
       mdViewerPreviewBtn.classList.toggle('active', !sourceMode);
       mdViewerSourceBtn.classList.toggle('active', sourceMode);
+      mdViewerSourceBtn.disabled = !openArtifactEditable;
+      mdViewerPromoteBtn.hidden = !openArtifactPath || openArtifactEditable;
       mdViewerContent.style.display = sourceMode ? 'none' : 'block';
       mdViewerEditor.classList.toggle('active', sourceMode);
-      mdViewerSaveBtn.disabled = !openArtifactDirty || openArtifactSaving || !openArtifactPath;
+      mdViewerEditor.readOnly = !openArtifactEditable;
+      mdViewerSaveBtn.disabled =
+        !openArtifactEditable || !openArtifactDirty || openArtifactSaving || !openArtifactPath;
       if (mdViewerRevertBtn) {
-        mdViewerRevertBtn.disabled = openArtifactSaving || !openArtifactPath;
+        mdViewerRevertBtn.disabled = !openArtifactEditable || openArtifactSaving || !openArtifactPath;
       }
 
       if (openArtifactSaving) {
         setMdViewerStatus('Saving...', 'saved');
+      } else if (!openArtifactEditable && openArtifactPath) {
+        setMdViewerStatus('Read-only', 'readonly');
       } else if (openArtifactDirty) {
         setMdViewerStatus('Unsaved', 'unsaved');
       } else if (openArtifactExternalNotice) {
@@ -7192,7 +7219,11 @@
     }
 
     function setMdViewerMode(mode) {
-      mdViewerMode = mode === 'source' ? 'source' : 'preview';
+      if (mode === 'source' && !openArtifactEditable) {
+        mdViewerMode = 'preview';
+      } else {
+        mdViewerMode = mode === 'source' ? 'source' : 'preview';
+      }
       if (mdViewerMode === 'source') {
         if (!openArtifactDirty) mdViewerEditor.value = openArtifactContent || '';
       } else {
@@ -7282,12 +7313,14 @@
         return false;
       }
       const initialMode = options.mode === 'source' ? 'source' : 'preview';
+      const editable = options.editable === true;
       openArtifactPath = path;
       openArtifactContent = markdownText;
       openArtifactLastError = null;
       openArtifactDirty = false;
       openArtifactSaving = false;
       openArtifactExternalNotice = null;
+      openArtifactEditable = editable;
       mdViewerMode = initialMode;
       mdViewerFilename.textContent = filename;
       rerenderOpenArtifact(markdownText);
@@ -7327,6 +7360,7 @@
       mdViewerFilename.textContent = '';
       mdViewerContent.textContent = '';
       mdViewerEditor.value = '';
+      openArtifactEditable = false;
       refreshMdViewerChrome();
       try {
         await invoke('cmd_clear_open_artifact');
@@ -7368,6 +7402,7 @@
         const shown = await showMdViewer(draft.path, filename, draft.content, {
           mode: 'source',
           confirmedDiscard: bypassDiscardPrompt,
+          editable: true,
         });
         if (!shown) return;
         showDetailFeedback(`Created ${draft.templateKind.replaceAll('-', ' ')} draft`, 'success');
@@ -7401,6 +7436,25 @@
       }
     }
 
+    async function promoteOpenArtifact() {
+      if (!openArtifactPath || openArtifactSaving || openArtifactEditable) return;
+      try {
+        const draft = await invoke('cmd_promote_text_file_to_artifact', { path: openArtifactPath });
+        const filename = draft.path.split(/[\\/]/).pop() || draft.path;
+        const shown = await showMdViewer(draft.path, filename, draft.content, {
+          mode: 'source',
+          confirmedDiscard: false,
+          editable: true,
+        });
+        if (!shown) return;
+        setMdViewerMode('source');
+        setMdViewerStatus('Editable copy ready', 'saved');
+      } catch (e) {
+        console.error('Promote artifact:', e);
+        setMdViewerStatus('Promote failed', 'warning');
+      }
+    }
+
     async function openMarkdownFile() {
       try {
         const { open } = window.__TAURI__.dialog;
@@ -7411,9 +7465,10 @@
         if (!selected) return;
         const path = Array.isArray(selected) ? selected[0] : selected;
         if (!path) return;
+        const access = await invoke('cmd_get_text_file_access', { path });
         const content = await invoke('cmd_read_text_file', { path });
         const filename = path.split(/[\\/]/).pop() || path;
-        await showMdViewer(path, filename, content);
+        await showMdViewer(path, filename, content, { editable: !!access.editable });
       } catch (e) {
         console.error('Open markdown:', e);
       }
@@ -7423,9 +7478,11 @@
     document.getElementById('md-viewer-back').addEventListener('click', () => { hideMdViewer(); });
     mdViewerPreviewBtn.addEventListener('click', () => setMdViewerMode('preview'));
     mdViewerSourceBtn.addEventListener('click', () => setMdViewerMode('source'));
+    mdViewerPromoteBtn.addEventListener('click', promoteOpenArtifact);
     mdViewerSaveBtn.addEventListener('click', saveOpenArtifact);
     mdViewerRevertBtn?.addEventListener('click', revertOpenArtifactToSnapshot);
     mdViewerEditor.addEventListener('input', () => {
+      if (!openArtifactEditable) return;
       openArtifactDirty = mdViewerEditor.value !== (openArtifactContent || '');
       if (openArtifactDirty) openArtifactExternalNotice = null;
       refreshMdViewerChrome();

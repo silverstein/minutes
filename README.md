@@ -50,6 +50,17 @@ minutes record                # Start recording
 minutes stop                  # Stop and transcribe
 ```
 
+## Docs and agent surfaces
+
+The README is now the product overview and install guide, not the only home for agent-facing reference.
+
+- Agent entry point: <https://useminutes.app/for-agents>
+- MCP tools reference: <https://useminutes.app/docs/mcp/tools>
+- MCP tools markdown mirror: <https://useminutes.app/docs/mcp/tools.md>
+- Error reference: <https://useminutes.app/docs/errors>
+- Concise agent index: <https://useminutes.app/llms.txt>
+- Full agent index: <https://useminutes.app/llms-full.txt>
+
 ## How it works
 
 ```
@@ -383,11 +394,15 @@ Minutes exposes a standard MCP server. Point any MCP-compatible client at it:
 }
 ```
 
-**26 tools:** `start_recording`, `stop_recording`, `get_status`, `list_processing_jobs`, `list_meetings`, `search_meetings`, `get_meeting`, `process_audio`, `add_note`, `consistency_report`, `get_person_profile`, `research_topic`, `qmd_collection_status`, `register_qmd_collection`, `start_dictation`, `stop_dictation`, `track_commitments`, `relationship_map`, `list_voices`, `confirm_speaker`, `get_meeting_insights`, `start_live_transcript`, `read_live_transcript`, `open_dashboard`, `ingest_meeting`, `knowledge_status`
+Canonical MCP reference now lives at:
 
-**7 resources:** `minutes://meetings/recent`, `minutes://status`, `minutes://actions/open`, `minutes://events/recent`, `minutes://meetings/{slug}`, `minutes://ideas/recent`, `ui://minutes/dashboard`
+- <https://useminutes.app/docs/mcp/tools>
+- <https://useminutes.app/docs/mcp/tools.md>
+- <https://useminutes.app/llms.txt>
 
-**Interactive dashboard (Claude Desktop):** Tools render an inline interactive UI via [MCP Apps](https://modelcontextprotocol.io/specification/2025-03-26/server/utilities/apps) — meeting list with filter/search, detail view with fullscreen + "Send to Claude" context injection, **People tab** with relationship cards and click-through profiles, consistency reports. Text-only clients see the same data as plain text.
+The MCP surface currently includes recording control, meeting search/retrieval, relationship memory, structured insights, live transcript reading, dictation, QMD integration, and an interactive dashboard resource. Tool names, resource URIs, and prompt templates are generated from the live product surface instead of hand-maintained in this README.
+
+**Interactive dashboard (Claude Desktop):** tools render an inline interactive UI via [MCP Apps](https://modelcontextprotocol.io/specification/2025-03-26/server/utilities/apps) — meeting list with filter/search, detail view with fullscreen + "Send to Claude" context injection, People tab with relationship cards and click-through profiles, and consistency reports. Text-only clients see the same data as plain text.
 
 ### Mistral Vibe
 
@@ -451,6 +466,12 @@ minutes record → minutes stop       → hook alerts if decisions conflict with
   ↓
 /minutes-graph "everyone who mentioned Stripe"  → cross-meeting entity queries
 ```
+
+For the stable public agent-facing docs surface, use:
+
+- <https://useminutes.app/for-agents>
+- <https://useminutes.app/docs/mcp/tools>
+- <https://useminutes.app/docs/errors>
 
 ### Minutes Desktop Assistant
 

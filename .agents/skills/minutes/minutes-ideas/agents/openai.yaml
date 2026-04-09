@@ -1,0 +1,4 @@
+interface:
+  display_name: "Minutes Ideas"
+  short_description: "Surface recent voice memos and ideas captured from any device."
+  default_prompt: "Use Minutes Ideas for this task."

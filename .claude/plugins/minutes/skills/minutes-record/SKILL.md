@@ -76,3 +76,4 @@ This downloads a ~466MB model. For faster but lower quality: `--model tiny` (75M
 - **"permission denied" on output file** → Output files are `0600` (owner-only). This is intentional — transcripts contain sensitive content. Don't chmod them to be world-readable.
 - **Long meetings (>2 hours)** → Transcription time scales with duration. A 2-hour meeting with the `small` model takes ~3-5 minutes on Apple Silicon. The `tiny` model is ~4x faster but much less accurate.
 - **Recording process disappeared** → If you close the terminal tab where `minutes record` is running, the recording stops but may not process. Always use `minutes stop` from another terminal.
+

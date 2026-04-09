@@ -122,3 +122,4 @@ The marker file is the state. No counting, no edge cases, no risk of repeated nu
 - **Tag freshness matters.** Tags are most valuable within ~24 hours, while the outcome is fresh in the user's head. Tagging two weeks later is fine but worth less. Don't enforce this — just don't make tagging feel like a chore that the user puts off.
 - **Don't try to infer the tag from the transcript.** If the user says "tag this meeting" without saying which outcome, ask. Don't guess from the transcript — your guess will be wrong in the cases that matter most (a meeting that looks like a win on paper but actually wasn't, or vice versa).
 - **The note is optional for a reason.** Most users will skip it. That's fine — the tag itself is the load-bearing data. Don't make the user feel like they're underperforming if they skip the note.
+

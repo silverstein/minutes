@@ -196,3 +196,4 @@ End with three beats:
 - **Preps without recordings might be intentional** — Maybe the meeting was cancelled. Ask, don't assume.
 - **Voice memos count** — Include `~/meetings/memos/` in the weekly scan. Ideas captured on the go are easy to forget.
 - **End-of-week timing** — The user might run this Thursday or Monday morning. "This week" should be the most recent 7 days, regardless of day-of-week.
+

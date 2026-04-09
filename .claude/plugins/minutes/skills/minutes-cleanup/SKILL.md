@@ -86,3 +86,4 @@ rm -f ~/.minutes/last-result.json
 - **WAV deletion is irreversible** — If the user might want to re-transcribe with a better model later, suggest keeping WAVs for recent recordings and only deleting old ones.
 - **Audio is ~10 MB/minute, transcripts are ~1 KB/minute** — Deleting audio saves 99%+ of space while keeping all searchable content.
 - **iCloud sync caveat** — If `~/meetings/` is in an iCloud-synced folder, deleted files go to "Recently Deleted" and still count against storage for 30 days.
+

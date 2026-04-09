@@ -1,0 +1,4 @@
+interface:
+  display_name: "Minutes Note"
+  short_description: "Add a note to the current recording or annotate a past meeting. Use whenever the user says \"note that\", \"remember this\", \"mark this as important\", \"add a note about\", \"annotate the meeting\", or wants to capture a thought during or after a recording. Plain text input — no markdown needed."
+  default_prompt: "Use Minutes Note for this task."

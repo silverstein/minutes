@@ -1,9 +1,6 @@
 ---
 name: minutes-ideas
-description: |
-  Surface recent voice memos and ideas captured from any device.
-  Use when the user asks "what ideas did I have?", "what were my recent memos?",
-  "what did I record while walking?", or wants to recall a captured thought.
+description: Surface recent voice memos and ideas captured from any device. Use when the user asks "what ideas did I have?", "what were my recent memos?", "what did I record while walking?", or wants to recall a captured thought.
 allowed-tools:
   - Bash
   - Read
@@ -49,3 +46,4 @@ observations, or reminders that the user recorded while away from their desk.
 
 When the user asks "what was that idea I had while walking?" — search these
 memos first, then broaden to full meeting search if needed.
+

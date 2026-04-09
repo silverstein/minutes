@@ -37,3 +37,4 @@ To read a specific meeting's full transcript, use `Read` on its `path`.
 - **JSON goes to stdout, human-readable to stderr** — If you pipe the output (e.g., `minutes list | jq`), you get JSON only. The human-readable table goes to stderr.
 - **In-progress recordings don't appear** — List only shows completed, processed recordings. Use `minutes status` to check if something is currently recording.
 - **Sorted by date in frontmatter, not file modification time** — If you manually edit a meeting file, it won't change its position in the list.
+

@@ -45,3 +45,4 @@ If any checks fail, tell the user exactly what to do:
 - **The script is macOS-specific** for the audio input check (uses `system_profiler`). On Linux, that check will be skipped.
 - **"Model not found" is the #1 setup issue** — most people forget to run `minutes setup` after building.
 - **Config file is optional** — if `~/.config/minutes/config.toml` doesn't exist, that's fine. Minutes uses compiled defaults. Only flag it as "not configured" (informational), not as an error.
+

@@ -219,3 +219,4 @@ Don't always nudge. Only when the next move is genuinely useful — otherwise st
 - **`minutes paths` is the source of truth for the meeting directory.** Don't hardcode `~/meetings` — read it from `minutes paths`. Users may sync to Obsidian/Logseq with a custom output directory.
 - **When the answer is already in the CLI, say so.** If a user asks "who am I losing touch with?" — that's `minutes people --json` natively (the `losing_touch: true` field is built-in). Run it and surface the result, then let the user know graph wasn't needed. Trust earned.
 - **Garbage in the people index is normal.** `minutes people --json` may return entries like "Unknown speaker" or "Speaker_3" or "Matt" (lowercase variant of "Mat") — these come from imperfect speaker diarization. When listing people in graph output, filter out obvious garbage (slugs that look like `unknown-speaker`, `speaker-N`, or duplicate variants of the user's own name).
+

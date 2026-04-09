@@ -15,6 +15,10 @@ const ALLOWED_TYPES = new Set([
 ]);
 
 const ALLOWED_SOURCES = new Set(["explicit", "observed", "hook", "skill"]);
+const PRESENTATION_FOCUS_ALLOWLIST = {
+  debrief: new Set(["decisions-first", "actions-first", "relationship-first"]),
+  weekly: new Set(["decisions-first", "commitments-first", "memo-heavy"]),
+};
 
 function ensureDir() {
   mkdirSync(AGENT_DIR, { recursive: true });
@@ -82,6 +86,27 @@ export function rememberExplicit(type, key, value, notes = "") {
     confidence: 1.0,
     notes,
   });
+}
+
+export function rememberPresentationFocus(surface, value, notes = "") {
+  const allowed = PRESENTATION_FOCUS_ALLOWLIST[surface];
+  if (!allowed) {
+    throw new Error(`Unsupported presentation surface: ${surface}`);
+  }
+  if (!allowed.has(value)) {
+    throw new Error(
+      `Unsupported presentation focus for ${surface}: ${value}. Allowed: ${Array.from(allowed).join(", ")}`,
+    );
+  }
+  return rememberExplicit("presentation_preference", `${surface}.default_focus`, value, notes);
+}
+
+export function getPresentationFocus(surface) {
+  const allowed = PRESENTATION_FOCUS_ALLOWLIST[surface];
+  if (!allowed) return null;
+  const latest = getLatestLearning("presentation_preference", `${surface}.default_focus`);
+  if (!latest?.value || !allowed.has(latest.value)) return null;
+  return latest.value;
 }
 
 export function rememberAlias(nameA, nameB, notes = "") {

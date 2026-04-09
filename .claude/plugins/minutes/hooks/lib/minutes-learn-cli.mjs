@@ -5,12 +5,14 @@ import {
   finalizePendingMeetingPrepNudge,
   getAliasCluster,
   getLatestLearning,
+  getPresentationFocus,
   inferMeetingPrepModeFromUsage,
   normalizeLearnings,
   recordPendingMeetingPrepNudge,
   rememberAlias,
   rememberExplicit,
   rememberObserved,
+  rememberPresentationFocus,
   shouldSuppressMeetingPrepNudge,
 } from "./minutes-learn.mjs";
 
@@ -39,9 +41,22 @@ try {
     process.exit(0);
   }
 
+  if (command === "set-presentation-focus") {
+    const [surface, value, ...notes] = args;
+    const result = rememberPresentationFocus(surface, value, notes.join(" "));
+    console.log(JSON.stringify({ status: "ok", result }));
+    process.exit(0);
+  }
+
   if (command === "aliases") {
     const [name] = args;
     console.log(JSON.stringify({ status: "ok", result: getAliasCluster(name) }, null, 2));
+    process.exit(0);
+  }
+
+  if (command === "get-presentation-focus") {
+    const [surface] = args;
+    console.log(JSON.stringify({ status: "ok", result: getPresentationFocus(surface) }));
     process.exit(0);
   }
 
@@ -88,7 +103,7 @@ try {
     JSON.stringify({
       status: "error",
       message:
-        "Usage: minutes-learn-cli.mjs set-explicit <type> <key> <value> [notes...] | set-observed <type> <key> <value> <confidence> [notes...] | set-alias <nameA> <nameB> [notes...] | aliases <name> | get <type> <key> | clear <type> <key> | dump",
+        "Usage: minutes-learn-cli.mjs set-explicit <type> <key> <value> [notes...] | set-observed <type> <key> <value> <confidence> [notes...] | set-alias <nameA> <nameB> [notes...] | aliases <name> | set-presentation-focus <surface> <value> [notes...] | get-presentation-focus <surface> | get <type> <key> | clear <type> <key> | dump",
     }),
   );
   process.exit(1);

@@ -14,9 +14,11 @@ const {
   clearLearning,
   getAliasCluster,
   getLatestLearning,
+  getPresentationFocus,
   inferMeetingPrepModeFromUsage,
   rememberAlias,
   rememberObserved,
+  rememberPresentationFocus,
   recordPendingMeetingPrepNudge,
   shouldSuppressMeetingPrepNudge,
 } = await import(modulePath.href);
@@ -91,6 +93,10 @@ try {
     );
   }
   assert.equal(shouldSuppressMeetingPrepNudge(), true, "recent ignored nudges still dominate");
+
+  rememberPresentationFocus("debrief", "actions-first", "presentation preference test");
+  assert.equal(getPresentationFocus("debrief"), "actions-first");
+  assert.equal(getPresentationFocus("weekly"), null);
 
   console.log("minutes-learn tests passed");
 } finally {

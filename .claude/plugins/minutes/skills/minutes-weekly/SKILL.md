@@ -160,6 +160,19 @@ This catches meetings that happened but weren't recorded, or recordings that wer
 
 Produce a "what deserves your attention Monday" section:
 
+Before deciding how to order the weekly output, check:
+
+```bash
+node "${CLAUDE_PLUGIN_ROOT}/hooks/lib/minutes-learn-cli.mjs" get-presentation-focus weekly
+```
+
+If the result is:
+- `decisions-first` → lead with Decision Arcs and unresolved conflicts before commitments
+- `commitments-first` → lead with Action Item Audit / stale commitments before decision arcs
+- `memo-heavy` → surface voice memos and idea capture much more prominently in the synthesis
+
+If there is no preference, keep the default order in this skill.
+
 ```
 ## Attention Monday
 
@@ -189,6 +202,12 @@ End with three beats:
 
 ## Gotchas
 
+- **Record explicit weekly presentation preferences when the user states them.** If the user says "always show commitments first", "start with decisions", or "surface voice memos more", persist it:
+  ```bash
+  node "${CLAUDE_PLUGIN_ROOT}/hooks/lib/minutes-learn-cli.mjs" set-presentation-focus weekly commitments-first "User explicitly prefers commitments first in weekly synthesis"
+  node "${CLAUDE_PLUGIN_ROOT}/hooks/lib/minutes-learn-cli.mjs" set-presentation-focus weekly decisions-first "User explicitly prefers decisions first in weekly synthesis"
+  node "${CLAUDE_PLUGIN_ROOT}/hooks/lib/minutes-learn-cli.mjs" set-presentation-focus weekly memo-heavy "User explicitly wants stronger voice-memo emphasis"
+  ```
 - **Zero recordings is not an error** — Say "nothing this week" clearly. Don't hallucinate a summary. Offer to extend the range.
 - **Light weeks (1-2 recordings) are still worth summarizing** — A single meeting can have important decisions. Don't dismiss it.
 - **Don't be a nag about overdue items** — Surface them factually. "This is overdue since Friday" not "You really need to get on this."

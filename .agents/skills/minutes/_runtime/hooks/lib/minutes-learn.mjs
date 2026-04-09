@@ -141,6 +141,21 @@ function countMarkdownFiles(dir) {
   return readdirSync(dir).filter((name) => name.endsWith(".md")).length;
 }
 
+function markdownFileStats(dir) {
+  if (!existsSync(dir)) return [];
+  return readdirSync(dir)
+    .filter((name) => name.endsWith(".md"))
+    .map((name) => {
+      const filePath = join(dir, name);
+      return {
+        name,
+        path: filePath,
+        mtimeMs: statSync(filePath).mtimeMs,
+      };
+    })
+    .sort((a, b) => a.mtimeMs - b.mtimeMs);
+}
+
 function latestMarkdownMtime(dir) {
   if (!existsSync(dir)) return 0;
   let latest = 0;
@@ -155,8 +170,10 @@ function latestMarkdownMtime(dir) {
 export function inferMeetingPrepModeFromUsage(baseDir = homedir()) {
   const prepsDir = join(baseDir, ".minutes", "preps");
   const briefsDir = join(baseDir, ".minutes", "briefs");
-  const prepCount = countMarkdownFiles(prepsDir);
-  const briefCount = countMarkdownFiles(briefsDir);
+  const lookbackMs = 30 * 24 * 60 * 60 * 1000;
+  const cutoff = Date.now() - lookbackMs;
+  const prepCount = markdownFileStats(prepsDir).filter((file) => file.mtimeMs >= cutoff).length;
+  const briefCount = markdownFileStats(briefsDir).filter((file) => file.mtimeMs >= cutoff).length;
 
   if (prepCount >= 3 && prepCount >= Math.max(1, briefCount * 2)) return "prep";
   if (briefCount >= 3 && briefCount >= Math.max(1, prepCount * 2)) return "brief";
@@ -195,17 +212,11 @@ export function finalizePendingMeetingPrepNudge(baseDir = homedir()) {
   const prepsDir = join(baseDir, ".minutes", "preps");
   const briefsDir = join(baseDir, ".minutes", "briefs");
 
-  const prepCount = countMarkdownFiles(prepsDir);
-  const briefCount = countMarkdownFiles(briefsDir);
-  const prepMtime = latestMarkdownMtime(prepsDir);
-  const briefMtime = latestMarkdownMtime(briefsDir);
+  const prepFilesAfter = markdownFileStats(prepsDir).filter((file) => file.mtimeMs > shownAt);
+  const briefFilesAfter = markdownFileStats(briefsDir).filter((file) => file.mtimeMs > shownAt);
 
-  const prepAdvanced =
-    prepCount > (pending.value.baselinePrepCount || 0) ||
-    prepMtime > (pending.value.baselinePrepMtime || 0);
-  const briefAdvanced =
-    briefCount > (pending.value.baselineBriefCount || 0) ||
-    briefMtime > (pending.value.baselineBriefMtime || 0);
+  const prepAdvanced = prepFilesAfter.length > 0;
+  const briefAdvanced = briefFilesAfter.length > 0;
 
   let outcome = null;
   let observedMode = pending.value.mode || "auto";
@@ -236,8 +247,15 @@ export function finalizePendingMeetingPrepNudge(baseDir = homedir()) {
 }
 
 export function shouldSuppressMeetingPrepNudge() {
+  const lookbackMs = 7 * 24 * 60 * 60 * 1000;
+  const cutoff = Date.now() - lookbackMs;
   const outcomes = readLearnings()
-    .filter((entry) => entry.type === "nudge_feedback" && entry.key === "meeting_prep_nudge_outcome")
+    .filter(
+      (entry) =>
+        entry.type === "nudge_feedback" &&
+        entry.key === "meeting_prep_nudge_outcome" &&
+        new Date(entry.ts).getTime() >= cutoff,
+    )
     .sort((a, b) => new Date(a.ts).getTime() - new Date(b.ts).getTime())
     .slice(-4);
 

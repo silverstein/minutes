@@ -31,7 +31,13 @@
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "fs";
 import { join } from "path";
 import { homedir } from "os";
-import { getLatestLearning } from "./lib/minutes-learn.mjs";
+import {
+  finalizePendingMeetingPrepNudge,
+  getLatestLearning,
+  inferMeetingPrepModeFromUsage,
+  recordPendingMeetingPrepNudge,
+  shouldSuppressMeetingPrepNudge,
+} from "./lib/minutes-learn.mjs";
 
 // Only run on startup, not resume/compact/clear
 const input = JSON.parse(process.argv[2] || "{}");
@@ -383,10 +389,16 @@ If the user ignores the update mention and stays on task, do not bring it up aga
 //   (3) If raw is empty AND the local check succeeded, skip injection entirely.
 let calendarContext = "";
 let localCheckResolved = false;
+finalizePendingMeetingPrepNudge();
 const learnedPrepMode =
   getLatestLearning("workflow_preference", "meeting_prep_mode")?.value || "auto";
 const learnedNudgeMode =
   getLatestLearning("nudge_feedback", "meeting_prep_nudge")?.value || "active";
+const observedPrepMode = inferMeetingPrepModeFromUsage();
+const effectivePrepMode =
+  learnedPrepMode !== "auto" ? learnedPrepMode : observedPrepMode;
+const shouldSuppressNudge =
+  learnedNudgeMode === "suppress" || shouldSuppressMeetingPrepNudge();
 try {
   const { execFileSync } = await import("child_process");
   // AppleScript: collect events starting in the next 60 min across every
@@ -413,13 +425,14 @@ try {
   }).trim();
   localCheckResolved = true; // osascript ran cleanly — trust its answer
   if (raw && raw.length > 0 && !raw.toLowerCase().startsWith("error")) {
-    if (learnedNudgeMode !== "suppress") {
+    if (!shouldSuppressNudge) {
       calendarContext =
-        learnedPrepMode === "prep"
-          ? `\n\nUpcoming meeting in the next 60 min detected locally. Recommend /minutes-prep in ONE line — the user has a learned preference for the deeper prep flow.`
-          : learnedPrepMode === "brief"
-            ? `\n\nUpcoming meeting in the next 60 min detected locally. Recommend /minutes-brief in ONE line — the user has a learned preference for the fast brief flow.`
+        effectivePrepMode === "prep"
+          ? `\n\nUpcoming meeting in the next 60 min detected locally. Recommend /minutes-prep in ONE line — the user consistently uses the deeper prep flow.`
+          : effectivePrepMode === "brief"
+            ? `\n\nUpcoming meeting in the next 60 min detected locally. Recommend /minutes-brief in ONE line — the user consistently uses the fast brief flow.`
             : `\n\nUpcoming meeting in the next 60 min detected locally. Recommend /minutes-brief (fast, no questions) or /minutes-prep (interactive goal-setting) to the user in ONE line. Prefer brief if the meeting is <20 min away.`;
+      recordPendingMeetingPrepNudge(effectivePrepMode);
     }
   }
   // Empty raw with localCheckResolved=true → no meetings → no injection. Zero cost.
@@ -432,13 +445,14 @@ if (!localCheckResolved) {
   // We couldn't verify locally, so ask Claude to check via MCP if available.
   // This is the graceful fallback for non-Mac users and users without
   // Calendar.app running. One short sentence — minimal context cost.
-  if (learnedNudgeMode !== "suppress") {
+  if (!shouldSuppressNudge) {
     calendarContext =
-      learnedPrepMode === "prep"
-        ? `\n\nIf gcal_list_events MCP is available and the user has a meeting in the next 60 min, recommend /minutes-prep in ONE line — the user has a learned preference for the deeper prep flow. Otherwise stay silent.`
-        : learnedPrepMode === "brief"
-          ? `\n\nIf gcal_list_events MCP is available and the user has a meeting in the next 60 min, recommend /minutes-brief in ONE line — the user has a learned preference for the fast brief flow. Otherwise stay silent.`
+      effectivePrepMode === "prep"
+        ? `\n\nIf gcal_list_events MCP is available and the user has a meeting in the next 60 min, recommend /minutes-prep in ONE line — the user consistently uses the deeper prep flow. Otherwise stay silent.`
+        : effectivePrepMode === "brief"
+          ? `\n\nIf gcal_list_events MCP is available and the user has a meeting in the next 60 min, recommend /minutes-brief in ONE line — the user consistently uses the fast brief flow. Otherwise stay silent.`
           : `\n\nIf gcal_list_events MCP is available and the user has a meeting in the next 60 min, recommend /minutes-brief (fast) or /minutes-prep (goal-setting) in ONE line. Otherwise stay silent.`;
+    recordPendingMeetingPrepNudge(effectivePrepMode);
   }
 }
 

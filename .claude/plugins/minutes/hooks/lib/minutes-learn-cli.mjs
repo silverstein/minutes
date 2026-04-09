@@ -2,12 +2,16 @@
 
 import {
   clearLearning,
+  finalizePendingMeetingPrepNudge,
   getAliasCluster,
   getLatestLearning,
+  inferMeetingPrepModeFromUsage,
   normalizeLearnings,
+  recordPendingMeetingPrepNudge,
   rememberAlias,
   rememberExplicit,
   rememberObserved,
+  shouldSuppressMeetingPrepNudge,
 } from "./minutes-learn.mjs";
 
 const [, , command, ...args] = process.argv;
@@ -38,6 +42,27 @@ try {
   if (command === "aliases") {
     const [name] = args;
     console.log(JSON.stringify({ status: "ok", result: getAliasCluster(name) }, null, 2));
+    process.exit(0);
+  }
+
+  if (command === "infer-meeting-prep-mode") {
+    console.log(JSON.stringify({ status: "ok", result: inferMeetingPrepModeFromUsage() }));
+    process.exit(0);
+  }
+
+  if (command === "record-pending-nudge") {
+    const [mode = "auto"] = args;
+    console.log(JSON.stringify({ status: "ok", result: recordPendingMeetingPrepNudge(mode) }));
+    process.exit(0);
+  }
+
+  if (command === "finalize-pending-nudge") {
+    console.log(JSON.stringify({ status: "ok", result: finalizePendingMeetingPrepNudge() }, null, 2));
+    process.exit(0);
+  }
+
+  if (command === "should-suppress-nudge") {
+    console.log(JSON.stringify({ status: "ok", result: shouldSuppressMeetingPrepNudge() }));
     process.exit(0);
   }
 

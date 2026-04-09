@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { existsSync, mkdirSync, readFileSync, appendFileSync } from "fs";
+import { existsSync, mkdirSync, readFileSync, appendFileSync, readdirSync, statSync } from "fs";
 import { join } from "path";
 import { homedir } from "os";
 
@@ -134,6 +134,116 @@ export function normalizeLearnings() {
     latest.set(`${entry.type}:${entry.key}`, entry);
   }
   return Object.fromEntries(latest.entries());
+}
+
+function countMarkdownFiles(dir) {
+  if (!existsSync(dir)) return 0;
+  return readdirSync(dir).filter((name) => name.endsWith(".md")).length;
+}
+
+function latestMarkdownMtime(dir) {
+  if (!existsSync(dir)) return 0;
+  let latest = 0;
+  for (const name of readdirSync(dir)) {
+    if (!name.endsWith(".md")) continue;
+    const mtime = statSync(join(dir, name)).mtimeMs;
+    if (mtime > latest) latest = mtime;
+  }
+  return latest;
+}
+
+export function inferMeetingPrepModeFromUsage(baseDir = homedir()) {
+  const prepsDir = join(baseDir, ".minutes", "preps");
+  const briefsDir = join(baseDir, ".minutes", "briefs");
+  const prepCount = countMarkdownFiles(prepsDir);
+  const briefCount = countMarkdownFiles(briefsDir);
+
+  if (prepCount >= 3 && prepCount >= Math.max(1, briefCount * 2)) return "prep";
+  if (briefCount >= 3 && briefCount >= Math.max(1, prepCount * 2)) return "brief";
+  return "auto";
+}
+
+export function recordPendingMeetingPrepNudge(mode, baseDir = homedir()) {
+  const prepsDir = join(baseDir, ".minutes", "preps");
+  const briefsDir = join(baseDir, ".minutes", "briefs");
+  return rememberObserved(
+    "nudge_feedback",
+    "meeting_prep_nudge_pending",
+    {
+      mode,
+      shown_at: new Date().toISOString(),
+      baselinePrepCount: countMarkdownFiles(prepsDir),
+      baselineBriefCount: countMarkdownFiles(briefsDir),
+      baselinePrepMtime: latestMarkdownMtime(prepsDir),
+      baselineBriefMtime: latestMarkdownMtime(briefsDir),
+    },
+    0.8,
+    "SessionStart reminder emitted",
+  );
+}
+
+export function finalizePendingMeetingPrepNudge(baseDir = homedir()) {
+  const pending = getLatestLearning("nudge_feedback", "meeting_prep_nudge_pending");
+  if (!pending?.value?.shown_at) return null;
+
+  const shownAt = new Date(pending.value.shown_at).getTime();
+  if (!Number.isFinite(shownAt)) return null;
+
+  const now = Date.now();
+  const ageMs = now - shownAt;
+  const windowMs = 6 * 60 * 60 * 1000;
+  const prepsDir = join(baseDir, ".minutes", "preps");
+  const briefsDir = join(baseDir, ".minutes", "briefs");
+
+  const prepCount = countMarkdownFiles(prepsDir);
+  const briefCount = countMarkdownFiles(briefsDir);
+  const prepMtime = latestMarkdownMtime(prepsDir);
+  const briefMtime = latestMarkdownMtime(briefsDir);
+
+  const prepAdvanced =
+    prepCount > (pending.value.baselinePrepCount || 0) ||
+    prepMtime > (pending.value.baselinePrepMtime || 0);
+  const briefAdvanced =
+    briefCount > (pending.value.baselineBriefCount || 0) ||
+    briefMtime > (pending.value.baselineBriefMtime || 0);
+
+  let outcome = null;
+  let observedMode = pending.value.mode || "auto";
+
+  if (prepAdvanced || briefAdvanced) {
+    outcome = "engaged";
+    if (prepAdvanced && !briefAdvanced) observedMode = "prep";
+    if (briefAdvanced && !prepAdvanced) observedMode = "brief";
+  } else if (ageMs >= windowMs) {
+    outcome = "ignored";
+  }
+
+  if (!outcome) return null;
+
+  rememberObserved(
+    "nudge_feedback",
+    "meeting_prep_nudge_outcome",
+    {
+      mode: observedMode,
+      outcome,
+      shown_at: pending.value.shown_at,
+    },
+    0.7,
+    "Finalized pending SessionStart reminder",
+  );
+  clearLearning("nudge_feedback", "meeting_prep_nudge_pending");
+  return { mode: observedMode, outcome };
+}
+
+export function shouldSuppressMeetingPrepNudge() {
+  const outcomes = readLearnings()
+    .filter((entry) => entry.type === "nudge_feedback" && entry.key === "meeting_prep_nudge_outcome")
+    .sort((a, b) => new Date(a.ts).getTime() - new Date(b.ts).getTime())
+    .slice(-4);
+
+  if (outcomes.length < 3) return false;
+  const lastThree = outcomes.slice(-3);
+  return lastThree.every((entry) => entry.value?.outcome === "ignored");
 }
 
 export function getAliasCluster(name) {

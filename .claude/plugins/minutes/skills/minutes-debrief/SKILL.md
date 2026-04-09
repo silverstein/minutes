@@ -55,7 +55,11 @@ ls ~/.minutes/preps/ 2>/dev/null
 Match logic:
 1. Find `.prep.md` files from today or yesterday (within 48 hours)
 2. Read each file's `person:` frontmatter field
-3. Compare against the recording's `attendees:` list — match on first name
+3. Compare against the recording's `attendees:` list — match on first name, but check learned aliases before deciding there is no match:
+   ```bash
+   node "${CLAUDE_PLUGIN_ROOT}/hooks/lib/minutes-learn-cli.mjs" aliases "<attendee-or-person>" 2>/dev/null
+   ```
+   Treat all returned variants as equivalent during prep-file matching.
 4. If multiple preps match → AskUserQuestion to pick which one
 5. If no prep matches → standalone debrief (skip to Phase 4b)
 
@@ -154,6 +158,10 @@ End with three beats:
 - **Don't hallucinate if there's no recording** — If `minutes list` returns nothing, say so. Don't invent a debrief.
 - **Stale preps (>48h) are ignored** — If the prep file is more than 48 hours old, treat it as no-prep mode. The prep was for a different context.
 - **First-name matching for prep files** — The prep file slug uses first name only (`sarah.prep.md`). Match against attendee first names in the recording frontmatter. "Alex C." matches "sarah".
+- **Teach Minutes aliases when the user corrects matching.** If the user says "That prep was for Sarah Chen, not just Sarah" or clarifies that two names refer to the same person, persist it:
+  ```bash
+  node "${CLAUDE_PLUGIN_ROOT}/hooks/lib/minutes-learn-cli.mjs" set-alias "Sarah Chen" "Sarah" "User corrected prep/debrief matching"
+  ```
 - **Multiple recordings today** — Ask which one. Don't assume the most recent is the right one.
 - **Recordings without frontmatter** — Some recordings only have raw transcripts (no summary, no decisions section). Work with what you have — extract decisions and action items from the transcript text yourself.
 - **Decision evolution can span weeks** — Search the last 30 days for related decisions, not just this week.

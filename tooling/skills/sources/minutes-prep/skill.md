@@ -84,6 +84,12 @@ If Phase 0 already identified the person, skip this phase.
 Otherwise, ask via AskUserQuestion: "Who are you meeting with?"
 
 **If the answer is specific** (a name like "Alex" or "Case"):
+→ Check for learned aliases first:
+```bash
+node "${CLAUDE_PLUGIN_ROOT}/hooks/lib/minutes-learn-cli.mjs" aliases "<name>" 2>/dev/null
+```
+If aliases exist, search across every returned variant and merge the hits before deciding there is no history.
+
 → Search all past meetings:
 ```bash
 minutes search "<name>" --limit 50
@@ -196,6 +202,12 @@ End with three beats:
 
 ```bash
 node "${CLAUDE_PLUGIN_ROOT}/hooks/lib/minutes-learn-cli.mjs" set-explicit workflow_preference meeting_prep_mode prep "User explicitly prefers prep"
+```
+
+- **Record explicit aliases when the user clarifies a person mismatch.** If the user says "Sarah Chen is just Sarah" or "Case and Case Wintermute are the same person", persist it before searching again:
+
+```bash
+node "${CLAUDE_PLUGIN_ROOT}/hooks/lib/minutes-learn-cli.mjs" set-alias "Case Wintermute" "Case" "User confirmed alias"
 ```
 
 - **Calendar auto-detect is best-effort** — If no calendar source is available, silently fall back to asking manually. Never error or nag the user about calendar setup. The Google Calendar MCP (`gcal.mcp.claude.com/mcp`) is the recommended source for Claude users.

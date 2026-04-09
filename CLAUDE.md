@@ -133,7 +133,7 @@ certificate or local notarization credentials.
 | **Tauri command duplication** | Changes to live transcript start/stop logic | Both `cmd_start_live_transcript` and `handle_live_shortcut_event` must use the shared `try_acquire_live` + `run_live_session` functions. Do NOT duplicate logic. |
 | **Desktop app identity** | Any Tauri packaging, dogfooding, Screen Recording, Input Monitoring, Accessibility, call capture, hotkey, or repeated-permission work | Use `./scripts/install-dev-app.sh`, not `rm -rf /Applications/Minutes.app && cp ...`. If a local signing identity exists, export `MINUTES_DEV_SIGNING_IDENTITY` first. Test `~/Applications/Minutes Dev.app`, not `/Applications/Minutes.app`. |
 | **README accuracy** | New/removed tools, features, crates, or CLI commands | Tool/resource counts, crate list in Architecture, feature sections, and CLI examples in README.md must reflect the current state. Check: tool count matches `manifest.json`, crate list matches `ls crates/*/`, module count matches `ls crates/core/src/*.rs` |
-| **Website accuracy** | New/removed tools, CLI commands, features, or version bumps | Tool count, CLI command count, test count, and feature descriptions in `site/app/page.tsx` must reflect the current state. DMG download link must reference the current version. Redeploy with `cd site && vercel deploy --yes --prod --scope evil-genius-laboratory` |
+| **Website accuracy** | New/removed tools, CLI commands, features, or version bumps | Tool count, CLI command count, test count, and feature descriptions in `site/app/page.tsx` must reflect the current state. DMG download link must reference the current version. Redeploy the landing page with the prebuilt Vercel flow from the repo root: `npx vercel@50.38.2 build --prod && npx vercel@50.38.2 deploy --prebuilt --yes --prod --scope evil-genius-laboratory` |
 | **npm dep versions** | Version bumps | `crates/mcp/package.json` `minutes-sdk` dep must reference a version that's actually published on npm. Check with `npm view minutes-sdk versions --json` |
 | **Release notes drafted** | Version bumps / releases | Every release is a visibility moment in followers' GitHub feeds. Draft compelling release notes BEFORE creating the release. No empty releases — ever. See Release Checklist step 5. |
 | **Release warranted?** | New/removed MCP tools, new CLI commands, user-facing features | Manifest changes (new tools, updated description) don't reach Claude Desktop users until a release is cut and `.mcpb` is uploaded. If the change is user-visible, plan a release. |
@@ -207,8 +207,11 @@ cd crates/mcp && npm publish --access public --registry https://registry.npmjs.o
 
 ### 9. Redeploy landing page
 ```bash
-cd site && npm install && vercel deploy --yes --prod --scope evil-genius-laboratory
+npx vercel@50.38.2 build --prod
+npx vercel@50.38.2 deploy --prebuilt --yes --prod --scope evil-genius-laboratory
 ```
+
+**IMPORTANT**: Run these commands from the repo root, not `site/`. The linked Vercel project uses `rootDirectory=site`, and the Git-connected / remote build path is currently failing after successful Next 16.2.3 builds because Vercel looks for `.next/routes-manifest-deterministic.json`. The prebuilt flow uploads the local `.vercel/output` and avoids that failing server-side post-build step.
 
 ### 10. Update Homebrew tap formula if CLI changed
 The formula lives at `silverstein/homebrew-tap` → `Formula/minutes.rb`. Update the `tag:` to the new version:

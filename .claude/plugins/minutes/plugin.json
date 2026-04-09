@@ -1,7 +1,7 @@
 {
   "name": "minutes",
-  "version": "0.7.0",
-  "description": "Conversation memory for AI assistants — record, transcribe, search meetings and voice memos",
+  "version": "0.8.0",
+  "description": "Conversation memory for AI assistants — record, transcribe, search meetings and voice memos. 18 skills for the full meeting lifecycle: brief → prep → record → tag → debrief → mirror → weekly → graph.",
   "skills": [
     { "name": "minutes-record", "path": "skills/minutes-record/SKILL.md" },
     { "name": "minutes-search", "path": "skills/minutes-search/SKILL.md" },
@@ -11,12 +11,16 @@
     { "name": "minutes-verify", "path": "skills/minutes-verify/SKILL.md" },
     { "name": "minutes-setup", "path": "skills/minutes-setup/SKILL.md" },
     { "name": "minutes-cleanup", "path": "skills/minutes-cleanup/SKILL.md" },
+    { "name": "minutes-brief", "path": "skills/minutes-brief/SKILL.md" },
     { "name": "minutes-prep", "path": "skills/minutes-prep/SKILL.md" },
     { "name": "minutes-debrief", "path": "skills/minutes-debrief/SKILL.md" },
+    { "name": "minutes-tag", "path": "skills/minutes-tag/SKILL.md" },
+    { "name": "minutes-mirror", "path": "skills/minutes-mirror/SKILL.md" },
     { "name": "minutes-weekly", "path": "skills/minutes-weekly/SKILL.md" },
     { "name": "minutes-ideas", "path": "skills/minutes-ideas/SKILL.md" },
     { "name": "minutes-lint", "path": "skills/minutes-lint/SKILL.md" },
-    { "name": "minutes-ingest", "path": "skills/minutes-ingest/SKILL.md" }
+    { "name": "minutes-ingest", "path": "skills/minutes-ingest/SKILL.md" },
+    { "name": "minutes-graph", "path": "skills/minutes-graph/SKILL.md" }
   ],
   "agents": [
     { "name": "meeting-analyst", "path": "agents/meeting-analyst.md" }

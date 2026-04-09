@@ -4,11 +4,17 @@
  * SessionStart hook: proactive meeting reminder.
  *
  * When a Claude Code session starts, check if the user has a meeting
- * in the next 60 minutes. If so, nudge them to run /minutes prep.
+ * in the next 60 minutes. If so, nudge them to run /minutes-brief
+ * (or /minutes-prep if they want to think harder about goals first).
+ *
+ * Also surfaces voice memos from the last 3 days and relationship-graph
+ * intelligence (losing-touch alerts, stale commitments) so the agent
+ * walks into the session already aware.
  *
  * Guards against being annoying:
  * - Only fires on startup (not resume/compact/clear)
- * - Only fires if the user has used /minutes prep before (~/.minutes/preps/ exists)
+ * - Only fires if the user has actively used a Minutes skill before
+ *   (~/.minutes/preps/ OR ~/.minutes/briefs/ exists)
  * - Only fires during business hours (8am-6pm, weekdays)
  * - Can be disabled via ~/.config/minutes/config.toml: [reminders] enabled = false
  *
@@ -26,9 +32,11 @@ const event = input.session_event || input.event || "";
 
 if (event !== "startup") process.exit(0);
 
-// Guard 1: Only nudge if the user has actually used /minutes prep before
+// Guard 1: Only nudge if the user has actively used a Minutes skill before.
+// They've adopted the workflow if either preps/ or briefs/ exists.
 const prepsDir = join(homedir(), ".minutes", "preps");
-if (!existsSync(prepsDir)) process.exit(0);
+const briefsDir = join(homedir(), ".minutes", "briefs");
+if (!existsSync(prepsDir) && !existsSync(briefsDir)) process.exit(0);
 
 // Guard 2: Only fire during business hours (8am-6pm, weekdays)
 const now = new Date();
@@ -36,13 +44,22 @@ const hour = now.getHours();
 const day = now.getDay(); // 0=Sun, 6=Sat
 if (day === 0 || day === 6 || hour < 8 || hour >= 18) process.exit(0);
 
-// Guard 3: Check config for opt-out
+// Guard 3: Check config for opt-out. We look for `enabled = false` scoped to
+// the [reminders] section specifically. The earlier `includes("enabled = false")
+// && includes("[reminders]")` shortcut false-positived on configs like
+//   [audio]
+//   enabled = false
+//   [reminders]
+//   enabled = true
+// where an unrelated section's `enabled = false` would silence reminders even
+// though the user explicitly enabled them. The regex below scopes the check by
+// requiring `enabled = false` to appear inside the `[reminders]` block
+// (i.e. before any subsequent `[section]` header).
 const configPath = join(homedir(), ".config", "minutes", "config.toml");
 if (existsSync(configPath)) {
   try {
     const config = readFileSync(configPath, "utf-8");
-    // Simple TOML check — look for reminders.enabled = false
-    if (config.includes("enabled = false") && config.includes("[reminders]")) {
+    if (/\[reminders\][^\[]*\benabled\s*=\s*false\b/.test(config)) {
       process.exit(0);
     }
   } catch {
@@ -139,9 +156,64 @@ try {
   // Non-fatal — relationship graph not available or not yet built
 }
 
-// Output a reminder for Claude to check the calendar
+// Calendar context: three-way decision tree.
+//   (1) Try osascript (Apple Calendar) locally — the precise path. If we can
+//       verify there's a meeting in the next 60 min, inject a specific
+//       recommendation. If we can verify there's NOTHING coming up, inject
+//       zero extra context — this is the "zero cost when quiet" win that lets
+//       us justify running this hook on every startup. Commit 0b8adea once
+//       removed this hook for being too chatty; earning that back means
+//       staying silent when there's nothing to say.
+//   (2) If the local check fails for any reason (non-Mac, Calendar.app not
+//       running, permission denied, timeout), fall back to the lightweight
+//       MCP-check instruction so Claude can still help users on Google
+//       Calendar via gcal_list_events MCP.
+//   (3) If raw is empty AND the local check succeeded, skip injection entirely.
+let calendarContext = "";
+let localCheckResolved = false;
+try {
+  const { execFileSync } = await import("child_process");
+  // AppleScript: collect events starting in the next 60 min across every
+  // calendar. try/end try per calendar so one broken calendar doesn't abort.
+  // execFileSync (not exec) — no shell interpolation, no injection surface.
+  const appleScript = `tell application "Calendar"
+    set nowDate to current date
+    set soonDate to nowDate + 3600
+    set upcoming to {}
+    repeat with c in (every calendar)
+      try
+        set evs to (every event of c whose start date >= nowDate and start date < soonDate)
+        repeat with e in evs
+          set end of upcoming to (summary of e) & "|" & ((start date of e) as string)
+        end repeat
+      end try
+    end repeat
+    return upcoming
+  end tell`;
+  const raw = execFileSync("osascript", ["-e", appleScript], {
+    encoding: "utf-8",
+    timeout: 2000,
+    stdio: ["ignore", "pipe", "ignore"], // swallow stderr
+  }).trim();
+  localCheckResolved = true; // osascript ran cleanly — trust its answer
+  if (raw && raw.length > 0 && !raw.toLowerCase().startsWith("error")) {
+    calendarContext = `\n\nUpcoming meeting in the next 60 min detected locally. Recommend /minutes-brief (fast, no questions) or /minutes-prep (interactive goal-setting) to the user in ONE line. Prefer brief if the meeting is <20 min away.`;
+  }
+  // Empty raw with localCheckResolved=true → no meetings → no injection. Zero cost.
+} catch {
+  // osascript unavailable (non-Mac), Calendar.app not running, permission
+  // denied, or timeout. localCheckResolved stays false → fall through to MCP hint.
+}
+
+if (!localCheckResolved) {
+  // We couldn't verify locally, so ask Claude to check via MCP if available.
+  // This is the graceful fallback for non-Mac users and users without
+  // Calendar.app running. One short sentence — minimal context cost.
+  calendarContext = `\n\nIf gcal_list_events MCP is available and the user has a meeting in the next 60 min, recommend /minutes-brief (fast) or /minutes-prep (goal-setting) in ONE line. Otherwise stay silent.`;
+}
+
 const output = {
-  additionalContext: `Meeting reminder check: The user is an active Minutes user (has used /minutes prep before). If a Google Calendar MCP tool is available (gcal_list_events), check if the user has a meeting in the next 60 minutes. If they do, briefly mention it: "You have [meeting] in [N] minutes. Run /minutes prep to go in prepared." Keep it to one line — don't be pushy. If no calendar tool is available, skip silently. Do NOT mention this check if there are no upcoming meetings.${memoContext}${relationshipContext}`,
+  additionalContext: `Active Minutes user.${calendarContext}${memoContext}${relationshipContext}`,
 };
 
 console.log(JSON.stringify(output));

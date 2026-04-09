@@ -8,8 +8,8 @@
     {
       "name": "minutes",
       "source": "./.claude/plugins/minutes",
-      "description": "12 skills + 1 agent + 2 hooks for meeting recording, search, prep, debrief, weekly synthesis, and cross-device voice memo recall",
-      "version": "0.7.0",
+      "description": "18 skills + 1 agent + 2 hooks for the full meeting lifecycle: brief, prep, record, tag, debrief, mirror, weekly synthesis, entity graph, and cross-device voice memo recall",
+      "version": "0.8.0",
       "author": {
         "name": "Mat Silverstein"
       },

@@ -293,7 +293,7 @@ minutes/
 │       └── ui/                # Interactive dashboard (vanilla TS, builds to single-file HTML)
 ├── site/                      # Landing page (Next.js + Remotion demo player)
 ├── tauri/                     # Tauri v2 menu bar app + singleton AI Assistant
-├── .claude/plugins/minutes/   # Claude Code plugin — 14 skills + 1 agent + 2 hooks
+├── .claude/plugins/minutes/   # Claude Code plugin — 18 skills + 1 agent + 2 hooks
 └── tests/integration/         # Integration tests (including real whisper tests)
 ```
 
@@ -369,10 +369,10 @@ node test/mcp_tools_test.mjs                        # 8 MCP integration tests
 ## Claude Ecosystem Integration
 
 - **MCP Server**: 26 tools + 7 resources for Claude Desktop / Cowork / Dispatch (`npx minutes-mcp` for zero-install)
-- **Claude Code Plugin**: 14 skills (8 core + 4 interactive lifecycle + 2 knowledge) + meeting-analyst agent + PostToolUse hook
-- **Interactive meeting lifecycle**: `/minutes prep` → record → `/minutes debrief` → `/minutes weekly` with skill chaining via `.prep.md` files
+- **Claude Code Plugin**: 18 skills (7 capture + 1 search + 4 lifecycle + 2 coaching + 3 knowledge + 1 intelligence) + meeting-analyst agent + SessionStart + PostToolUse hooks
+- **Interactive meeting lifecycle**: `/minutes-brief` → `/minutes-prep` → record → `/minutes-tag` → `/minutes-debrief` → `/minutes-mirror` → `/minutes-weekly` with skill chaining via `.brief.md` / `.prep.md` files; `/minutes-graph` for cross-meeting entity queries
 - **Conversational summarization**: Claude reads transcripts via MCP, no API key needed
 - **Auto-tagging + alerts**: PostToolUse hook tags meetings with git repo, checks for decision conflicts, surfaces overdue action items
-- **Proactive reminders**: SessionStart hook checks calendar for upcoming meetings and nudges `/minutes prep`
+- **Proactive reminders**: SessionStart hook checks calendar for upcoming meetings and recommends `/minutes-brief` (fast) or `/minutes-prep` (goal-setting) based on time-to-meeting
 - **Desktop assistant**: Tauri AI Assistant is a singleton session that can switch focus into a selected meeting without spawning parallel assistant workspaces
 - **Live coaching**: Tauri Live Mode toggle starts real-time transcription; the assistant workspace `CLAUDE.md` auto-updates so the connected Recall session, Claude Desktop/Code, or any other agent can read the live JSONL file and coach mid-meeting. There is no dedicated transcript/coaching panel in Tauri v1; the coaching happens through the assistant chat surface.

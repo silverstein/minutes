@@ -411,25 +411,36 @@ claude plugin marketplace add silverstein/minutes
 claude plugin install minutes
 ```
 
-14 skills, 1 agent, 2 hooks:
+18 skills, 1 agent, 2 hooks:
 ```
-├── Core: /minutes record, search, list, note, ideas, verify, setup, cleanup
-├── Interactive: /minutes prep, debrief, recap, weekly
-├── Knowledge: /minutes ingest, lint
-├── Agent: meeting-analyst (cross-meeting intelligence)
-└── Hooks: post-recording alerts + proactive meeting/voice memo reminders
+├── Capture:      /minutes-record, note, list, recap, cleanup, verify, setup
+├── Search:       /minutes-search
+├── Lifecycle:    /minutes-brief, prep, debrief, weekly
+├── Coaching:     /minutes-tag, mirror
+├── Knowledge:    /minutes-ideas, lint, ingest
+├── Intelligence: /minutes-graph
+├── Agent:        meeting-analyst (cross-meeting intelligence)
+└── Hooks:        SessionStart meeting briefings + PostToolUse recording alerts
 ```
 
 **Meeting lifecycle skills** — inspired by [gstack](https://github.com/garrytan/gstack)'s interactive skill pattern:
 
 ```
-/minutes prep "call with Alex"     → relationship brief, talking points, .prep.md saved
+/minutes-brief                      → fast one-pager (or fired automatically by hook 15 min before calls)
+  ↓
+/minutes-prep "call with Alex"      → deeper relationship brief + talking points + goal-setting
   ↓
 minutes record → minutes stop       → hook alerts if decisions conflict with prior meetings
   ↓
-/minutes debrief                    → "You wanted to resolve pricing. Did you?"
+/minutes-tag won|lost|stalled       → 5-second outcome label (unlocks mirror correlation)
   ↓
-/minutes weekly                     → themes, decision arcs, stale items, Monday brief
+/minutes-debrief                    → "You wanted to resolve pricing. Did you?"
+  ↓
+/minutes-mirror                     → talk-time, hedging, what your winning meetings have in common
+  ↓
+/minutes-weekly                     → themes, decision arcs, stale items, Monday brief
+  ↓
+/minutes-graph "everyone who mentioned Stripe"  → cross-meeting entity queries
 ```
 
 ### Minutes Desktop Assistant
@@ -854,7 +865,7 @@ minutes/
 ├── crates/mcp/           MCP server — 26 tools + 7 resources + interactive dashboard
 │   └── ui/               MCP App dashboard (vanilla TS → single-file HTML)
 ├── tauri/                Menu bar app — system tray, recording UI, singleton AI Assistant
-└── .claude/plugins/minutes/   Claude Code plugin — 12 skills + 1 agent + 2 hooks
+└── .claude/plugins/minutes/   Claude Code plugin — 18 skills + 1 agent + 2 hooks
 ```
 
 Single `minutes-core` library shared by CLI, MCP server, and Tauri app. Zero code duplication.

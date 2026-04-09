@@ -7,6 +7,7 @@ export const codexHost: HostConfig = {
   pathPolicy: {
     defaultSkillDir: ".",
     pathRewrites: [
+      { from: "${CLAUDE_PLUGIN_ROOT}/hooks/lib", to: "$MINUTES_SKILLS_ROOT/_runtime/hooks/lib" },
       { from: ".claude/plugins/minutes", to: ".agents/skills/minutes" },
     ],
   },

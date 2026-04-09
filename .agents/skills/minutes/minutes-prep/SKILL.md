@@ -3,6 +3,15 @@ name: minutes-prep
 description: Interactive meeting preparation — builds a relationship brief and talking points before a call. Use when the user says "prep me for my call with", "I'm meeting with X", "prepare me for", "what should I bring up with", "meeting prep", "get ready for my call", or wants to review history with someone before a meeting.
 ---
 
+## Skill Path
+
+Before running helper scripts or opening bundled references, set:
+
+```bash
+export MINUTES_SKILLS_ROOT="$(git rev-parse --show-toplevel)/.agents/skills/minutes"
+export MINUTES_SKILL_ROOT="$MINUTES_SKILLS_ROOT/minutes-prep"
+```
+
 # /minutes-prep
 
 Interactive meeting preparation that searches your entire conversation history with someone, synthesizes a relationship brief, and produces talking points — before you walk into the room.
@@ -166,6 +175,12 @@ End with three beats:
 3. **Next skill nudge** — "After your call, run `/minutes-debrief` to capture what you decided and compare it to what you planned."
 
 ## Gotchas
+
+- **Record explicit workflow preferences when the user states them.** If the user says "default to prep", "I want the deep version by default", or "always do prep instead of brief", persist it:
+
+```bash
+node "$MINUTES_SKILLS_ROOT/_runtime/hooks/lib/minutes-learn-cli.mjs" set-explicit workflow_preference meeting_prep_mode prep "User explicitly prefers prep"
+```
 
 - **Calendar auto-detect is best-effort** — If no calendar source is available, silently fall back to asking manually. Never error or nag the user about calendar setup. The Google Calendar MCP (`gcal.mcp.claude.com/mcp`) is the recommended source for Claude users.
 - **Calendar attendee names may differ from meeting transcript names** — Calendar says "Alex Chen (sarah@company.com)" but transcripts say "Alex" or "SPEAKER_0". Match on first name.

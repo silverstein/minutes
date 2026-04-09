@@ -31,6 +31,7 @@
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "fs";
 import { join } from "path";
 import { homedir } from "os";
+import { getLatestLearning } from "./lib/minutes-learn.mjs";
 
 // Only run on startup, not resume/compact/clear
 const input = JSON.parse(process.argv[2] || "{}");
@@ -382,6 +383,10 @@ If the user ignores the update mention and stays on task, do not bring it up aga
 //   (3) If raw is empty AND the local check succeeded, skip injection entirely.
 let calendarContext = "";
 let localCheckResolved = false;
+const learnedPrepMode =
+  getLatestLearning("workflow_preference", "meeting_prep_mode")?.value || "auto";
+const learnedNudgeMode =
+  getLatestLearning("nudge_feedback", "meeting_prep_nudge")?.value || "active";
 try {
   const { execFileSync } = await import("child_process");
   // AppleScript: collect events starting in the next 60 min across every
@@ -408,7 +413,14 @@ try {
   }).trim();
   localCheckResolved = true; // osascript ran cleanly — trust its answer
   if (raw && raw.length > 0 && !raw.toLowerCase().startsWith("error")) {
-    calendarContext = `\n\nUpcoming meeting in the next 60 min detected locally. Recommend /minutes-brief (fast, no questions) or /minutes-prep (interactive goal-setting) to the user in ONE line. Prefer brief if the meeting is <20 min away.`;
+    if (learnedNudgeMode !== "suppress") {
+      calendarContext =
+        learnedPrepMode === "prep"
+          ? `\n\nUpcoming meeting in the next 60 min detected locally. Recommend /minutes-prep in ONE line — the user has a learned preference for the deeper prep flow.`
+          : learnedPrepMode === "brief"
+            ? `\n\nUpcoming meeting in the next 60 min detected locally. Recommend /minutes-brief in ONE line — the user has a learned preference for the fast brief flow.`
+            : `\n\nUpcoming meeting in the next 60 min detected locally. Recommend /minutes-brief (fast, no questions) or /minutes-prep (interactive goal-setting) to the user in ONE line. Prefer brief if the meeting is <20 min away.`;
+    }
   }
   // Empty raw with localCheckResolved=true → no meetings → no injection. Zero cost.
 } catch {
@@ -420,7 +432,14 @@ if (!localCheckResolved) {
   // We couldn't verify locally, so ask Claude to check via MCP if available.
   // This is the graceful fallback for non-Mac users and users without
   // Calendar.app running. One short sentence — minimal context cost.
-  calendarContext = `\n\nIf gcal_list_events MCP is available and the user has a meeting in the next 60 min, recommend /minutes-brief (fast) or /minutes-prep (goal-setting) in ONE line. Otherwise stay silent.`;
+  if (learnedNudgeMode !== "suppress") {
+    calendarContext =
+      learnedPrepMode === "prep"
+        ? `\n\nIf gcal_list_events MCP is available and the user has a meeting in the next 60 min, recommend /minutes-prep in ONE line — the user has a learned preference for the deeper prep flow. Otherwise stay silent.`
+        : learnedPrepMode === "brief"
+          ? `\n\nIf gcal_list_events MCP is available and the user has a meeting in the next 60 min, recommend /minutes-brief in ONE line — the user has a learned preference for the fast brief flow. Otherwise stay silent.`
+          : `\n\nIf gcal_list_events MCP is available and the user has a meeting in the next 60 min, recommend /minutes-brief (fast) or /minutes-prep (goal-setting) in ONE line. Otherwise stay silent.`;
+  }
 }
 
 const output = {

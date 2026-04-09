@@ -4,6 +4,7 @@ import { discoverCanonicalSkills } from "./discover.js";
 import { HOSTS } from "../hosts/index.js";
 import { renderSkillForHost } from "./render.js";
 import { validateSkillAssets } from "./validate.js";
+import { renderClaudePluginManifest } from "./plugin.js";
 
 interface CheckFailure {
   skill: string;
@@ -21,6 +22,18 @@ async function main(): Promise<void> {
   const rootDir = getRootDir();
   const skills = await discoverCanonicalSkills(rootDir);
   const failures: CheckFailure[] = [];
+
+  const expectedClaudeManifest = await renderClaudePluginManifest(rootDir, skills);
+  const actualClaudeManifest = await import("node:fs/promises").then(({ readFile }) =>
+    readFile(path.join(rootDir, "..", "..", ".claude", "plugins", "minutes", "plugin.json"), "utf8"),
+  );
+  if (actualClaudeManifest !== expectedClaudeManifest) {
+    failures.push({
+      skill: "plugin.json",
+      host: "claude",
+      message: "Claude plugin manifest skills[] block is out of sync with canonical skill metadata",
+    });
+  }
 
   for (const skill of skills) {
     await validateSkillAssets(skill);
@@ -72,6 +85,21 @@ async function main(): Promise<void> {
           message: "Codex output declares assets but no emitted asset files were planned",
         });
       }
+    }
+  }
+
+  const codexRuntimeFiles = [
+    ".agents/skills/minutes/_runtime/hooks/lib/minutes-learn.mjs",
+    ".agents/skills/minutes/_runtime/hooks/lib/minutes-learn-cli.mjs",
+  ];
+
+  for (const runtimePath of codexRuntimeFiles) {
+    if (!(await import("node:fs/promises").then(({ access }) => access(path.join(rootDir, "..", "..", runtimePath)).then(() => true).catch(() => false)))) {
+      failures.push({
+        skill: "_runtime",
+        host: "codex",
+        message: `Missing generated Codex runtime helper: ${runtimePath}`,
+      });
     }
   }
 

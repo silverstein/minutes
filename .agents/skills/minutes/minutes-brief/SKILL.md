@@ -3,6 +3,15 @@ name: minutes-brief
 description: Fast non-interactive briefing before any meeting — auto-detects your next calendar event, pulls relationship history, surfaces open commitments, and produces a one-page brief in under 30 seconds. Use this whenever the user says "brief me", "give me a quick brief", "what's coming up", "background on my next call", "who am I meeting next", "brief me on Sarah", "I have a call in 10 min", "quick rundown", or right before walking into a meeting. Different from /minutes-prep — brief is the fast hook-fireable version that doesn't ask questions and doesn't set goals. Use brief when speed matters; use prep when the user wants to think hard about goals first.
 ---
 
+## Skill Path
+
+Before running helper scripts or opening bundled references, set:
+
+```bash
+export MINUTES_SKILLS_ROOT="$(git rev-parse --show-toplevel)/.agents/skills/minutes"
+export MINUTES_SKILL_ROOT="$MINUTES_SKILLS_ROOT/minutes-brief"
+```
+
 # /minutes-brief
 
 Fast, non-interactive briefing that synthesizes your relationship history with someone into a one-page brief — designed so you can read it in 60 seconds before walking into a call.
@@ -161,6 +170,14 @@ End with **exactly one line** — this skill is about speed:
 That's it. No follow-up questions, no "anything else I can help with?". Brief is fast on purpose.
 
 ## Gotchas
+
+- **Record explicit workflow preferences when the user states them.** If the user says something like "default to prep", "always brief me first", or "stop reminding me about meeting prep", persist it:
+
+```bash
+node "$MINUTES_SKILLS_ROOT/_runtime/hooks/lib/minutes-learn-cli.mjs" set-explicit workflow_preference meeting_prep_mode prep "User explicitly prefers prep"
+node "$MINUTES_SKILLS_ROOT/_runtime/hooks/lib/minutes-learn-cli.mjs" set-explicit workflow_preference meeting_prep_mode brief "User explicitly prefers brief"
+node "$MINUTES_SKILLS_ROOT/_runtime/hooks/lib/minutes-learn-cli.mjs" set-explicit nudge_feedback meeting_prep_nudge suppress "User explicitly asked to suppress meeting prep nudges"
+```
 
 - **Hook-fireable mode is silent on failure.** When invoked with `--auto` and nothing matches, exit cleanly with zero output. Hooks should never spam the user. Errors only matter when the user is actively asking.
 - **First-name slugs match the rest of the plugin.** Save files as `sarah.brief.md`, not `sarah-chen.brief.md`. Slug rules: lowercase, ASCII-only (strip diacritics via Unicode NFKD), replace spaces and punctuation with hyphens, take only the first name token. "María José Pérez" → `maria`. "Jean-Claude" → `jean-claude`. Single-name people (`Madonna`) → `madonna`. This matches `/minutes-prep` and `/minutes-debrief` so they can find each other.

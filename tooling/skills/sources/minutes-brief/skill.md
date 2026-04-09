@@ -189,6 +189,14 @@ That's it. No follow-up questions, no "anything else I can help with?". Brief is
 
 ## Gotchas
 
+- **Record explicit workflow preferences when the user states them.** If the user says something like "default to prep", "always brief me first", or "stop reminding me about meeting prep", persist it:
+
+```bash
+node "${CLAUDE_PLUGIN_ROOT}/hooks/lib/minutes-learn-cli.mjs" set-explicit workflow_preference meeting_prep_mode prep "User explicitly prefers prep"
+node "${CLAUDE_PLUGIN_ROOT}/hooks/lib/minutes-learn-cli.mjs" set-explicit workflow_preference meeting_prep_mode brief "User explicitly prefers brief"
+node "${CLAUDE_PLUGIN_ROOT}/hooks/lib/minutes-learn-cli.mjs" set-explicit nudge_feedback meeting_prep_nudge suppress "User explicitly asked to suppress meeting prep nudges"
+```
+
 - **Hook-fireable mode is silent on failure.** When invoked with `--auto` and nothing matches, exit cleanly with zero output. Hooks should never spam the user. Errors only matter when the user is actively asking.
 - **First-name slugs match the rest of the plugin.** Save files as `sarah.brief.md`, not `sarah-chen.brief.md`. Slug rules: lowercase, ASCII-only (strip diacritics via Unicode NFKD), replace spaces and punctuation with hyphens, take only the first name token. "María José Pérez" → `maria`. "Jean-Claude" → `jean-claude`. Single-name people (`Madonna`) → `madonna`. This matches `/minutes-prep` and `/minutes-debrief` so they can find each other.
 - **If the user types two names, ask once.** "brief me on Sarah and Alex" — pick one as the focus and tell the user. "I'll focus the brief on Sarah since you have more history with her, and mention Alex briefly." Don't refuse, don't try to brief both fully.

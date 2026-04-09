@@ -168,6 +168,12 @@ End with three beats:
 
 ## Gotchas
 
+- **Record explicit workflow preferences when the user states them.** If the user says "default to prep", "I want the deep version by default", or "always do prep instead of brief", persist it:
+
+```bash
+node "${CLAUDE_PLUGIN_ROOT}/hooks/lib/minutes-learn-cli.mjs" set-explicit workflow_preference meeting_prep_mode prep "User explicitly prefers prep"
+```
+
 - **Calendar auto-detect is best-effort** — If no calendar source is available, silently fall back to asking manually. Never error or nag the user about calendar setup. The Google Calendar MCP (`gcal.mcp.claude.com/mcp`) is the recommended source for Claude users.
 - **Calendar attendee names may differ from meeting transcript names** — Calendar says "Alex Chen (sarah@company.com)" but transcripts say "Alex" or "SPEAKER_0". Match on first name.
 - **Skip all-day events and solo events** — Only show events with 2+ attendees as prep candidates. All-day events and events where the user is the only attendee aren't meetings.

@@ -6,6 +6,7 @@ import { promisify } from "node:util";
 import { discoverCanonicalSkills } from "./discover.js";
 import { getHostConfig } from "../hosts/index.js";
 import { renderSkillForHost } from "./render.js";
+import { renderClaudePluginManifest } from "./plugin.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -48,6 +49,19 @@ async function main(): Promise<void> {
     problems.push("No canonical skill sources were discovered under tooling/skills/sources.");
   }
 
+  const expectedClaudeManifest = await renderClaudePluginManifest(rootDir, skills);
+  const pluginManifestPath = path.join(repoRoot, ".claude", "plugins", "minutes", "plugin.json");
+  if (!(await exists(pluginManifestPath))) {
+    problems.push("Missing Claude plugin manifest: .claude/plugins/minutes/plugin.json");
+  } else {
+    const pluginManifest = await import("node:fs/promises").then(({ readFile }) =>
+      readFile(pluginManifestPath, "utf8"),
+    );
+    if (pluginManifest !== expectedClaudeManifest) {
+      problems.push("Claude plugin manifest is out of sync with canonical skill registration");
+    }
+  }
+
   for (const skill of skills) {
     for (const hostName of ["claude", "codex"] as const) {
       const artifact = renderSkillForHost(skill, getHostConfig(hostName));
@@ -67,6 +81,15 @@ async function main(): Promise<void> {
           problems.push(`Missing generated ${hostName} sidecar output: ${sidecar.relativePath}`);
         }
       }
+    }
+  }
+
+  for (const runtimePath of [
+    ".agents/skills/minutes/_runtime/hooks/lib/minutes-learn.mjs",
+    ".agents/skills/minutes/_runtime/hooks/lib/minutes-learn-cli.mjs",
+  ]) {
+    if (!(await exists(path.join(repoRoot, runtimePath)))) {
+      problems.push(`Missing generated codex runtime helper: ${runtimePath}`);
     }
   }
 

@@ -6,6 +6,7 @@ import { getHostConfig, HOSTS } from "../hosts/index.js";
 import type { HostName } from "../schema.js";
 import { renderSkillForHost } from "./render.js";
 import { resolveSkillAssetSourcePath, validateSkillAssets } from "./validate.js";
+import { renderClaudePluginManifest } from "./plugin.js";
 
 interface CompileOptions {
   dryRun: boolean;
@@ -102,6 +103,37 @@ async function main(): Promise<void> {
           changes.push({ host: hostName, path: sidecar.relativePath, kind: "sidecar" });
         }
       }
+    }
+  }
+
+  if (options.hosts.includes("codex")) {
+    for (const runtimeRelative of [
+      ".claude/plugins/minutes/hooks/lib/minutes-learn.mjs",
+      ".claude/plugins/minutes/hooks/lib/minutes-learn-cli.mjs",
+    ]) {
+      const runtimeSource = path.join(rootDir, "..", "..", runtimeRelative);
+      const runtimeContent = await readFile(runtimeSource, "utf8");
+      const runtimeTarget = runtimeRelative.replace(
+        ".claude/plugins/minutes/hooks/lib/",
+        ".agents/skills/minutes/_runtime/hooks/lib/",
+      );
+      const runtimeStatus = await compareOrWrite(rootDir, runtimeTarget, runtimeContent, options.dryRun);
+      if (runtimeStatus === "changed") {
+        changes.push({ host: "codex", path: runtimeTarget, kind: "runtime" });
+      }
+    }
+  }
+
+  if (options.hosts.includes("claude")) {
+    const manifestContent = await renderClaudePluginManifest(rootDir, skills);
+    const manifestStatus = await compareOrWrite(
+      rootDir,
+      ".claude/plugins/minutes/plugin.json",
+      manifestContent,
+      options.dryRun,
+    );
+    if (manifestStatus === "changed") {
+      changes.push({ host: "claude", path: ".claude/plugins/minutes/plugin.json", kind: "manifest" });
     }
   }
 

@@ -132,8 +132,14 @@ export function renderSkillForHost(
         ]
       : [];
 
+  const codexNeedsSkillRootNote =
+    host.name === "codex" &&
+    (assetFiles.length > 0 ||
+      rewrittenBody.includes("$MINUTES_SKILL_ROOT") ||
+      rewrittenBody.includes("$MINUTES_SKILLS_ROOT"));
+
   const codexSkillRootNote =
-    host.name === "codex" && assetFiles.length > 0
+    codexNeedsSkillRootNote
       ? `## Skill Path\n\nBefore running helper scripts or opening bundled references, set:\n\n\`\`\`bash\nexport MINUTES_SKILLS_ROOT=\"$(git rev-parse --show-toplevel)/.agents/skills/minutes\"\nexport MINUTES_SKILL_ROOT=\"$MINUTES_SKILLS_ROOT/${skill.frontmatter.name}\"\n\`\`\`\n\n`
       : "";
 

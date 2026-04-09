@@ -3,6 +3,15 @@ name: minutes-setup
 description: Guided first-time setup for Minutes — download whisper model, create directories, configure audio input. Use when the user says "set up minutes", "install minutes", "first time setup", "configure minutes", "get started with minutes", "how do I start using minutes", or when verify shows missing components.
 ---
 
+## Skill Path
+
+Before running helper scripts or opening bundled references, set:
+
+```bash
+export MINUTES_SKILLS_ROOT="$(git rev-parse --show-toplevel)/.agents/skills/minutes"
+export MINUTES_SKILL_ROOT="$MINUTES_SKILLS_ROOT/minutes-setup"
+```
+
 # /minutes-setup
 
 Walk the user through first-time Minutes setup, step by step.

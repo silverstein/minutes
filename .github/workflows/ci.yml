@@ -182,6 +182,15 @@ jobs:
         run: cargo tauri build --ci --bundles nsis --no-sign
         env:
           CARGO_NET_RETRY: 3
+          # Keep the CI desktop artifact aligned with release builds: AVX2 max,
+          # never host-native or AVX-512 from the runner CPU.
+          GGML_NATIVE: "OFF"
+          GGML_AVX: "ON"
+          GGML_AVX2: "ON"
+          GGML_AVX512: "OFF"
+          GGML_AVX512_VBMI: "OFF"
+          GGML_AVX512_VNNI: "OFF"
+          GGML_AVX512_BF16: "OFF"
 
   mcp:
     name: MCP Server

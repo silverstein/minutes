@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { PublicFooter } from "@/components/public-footer";
 
 export const metadata: Metadata = {
   title: "Minutes docs",
@@ -145,6 +146,8 @@ export default function DocsIndexPage() {
           </div>
         ))}
       </section>
+
+      <PublicFooter />
     </div>
   );
 }

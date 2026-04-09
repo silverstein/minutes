@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { PublicFooter } from "@/components/public-footer";
 
 export const metadata: Metadata = {
   title: "Compare Minutes",
@@ -78,6 +79,8 @@ export default function CompareHubPage() {
           </a>
         ))}
       </section>
+
+      <PublicFooter />
     </div>
   );
 }

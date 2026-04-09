@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import data from "./data.json";
+import { PublicFooter } from "@/components/public-footer";
 
 export const metadata: Metadata = {
   title: "Minutes error reference",
@@ -106,6 +107,8 @@ export default function ErrorsPage() {
           ))}
         </div>
       </section>
+
+      <PublicFooter />
     </div>
   );
 }

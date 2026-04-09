@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import data from "./data.json";
+import { PublicFooter } from "@/components/public-footer";
 
 export const metadata: Metadata = {
   title: "Minutes MCP tools",
@@ -189,6 +190,8 @@ export default function MpcToolsPage() {
           ))}
         </div>
       </section>
+
+      <PublicFooter />
     </div>
   );
 }

@@ -22,6 +22,12 @@ const pages = [
     blurb:
       "Best if you are choosing between a hosted meeting assistant for teams and a file-native memory workflow for Claude, Codex, and MCP clients.",
   },
+  {
+    title: "Minutes vs Fireflies",
+    href: "/compare/fireflies-vs-minutes",
+    blurb:
+      "Best if you want the honest tradeoff between a hosted meeting assistant with integrations and a local-first memory layer for agents.",
+  },
 ] as const;
 
 export default function CompareHubPage() {

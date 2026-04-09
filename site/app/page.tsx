@@ -483,7 +483,7 @@ export default function Home() {
                     const isNo = value === "No";
                     return (
                       <td
-                        key={`${feature}-${value}`}
+                        key={`${feature}-${index}-${value}`}
                         className={`border-b border-[color:var(--border)] p-3 ${
                           isMinutes
                             ? "font-semibold text-[var(--text)]"

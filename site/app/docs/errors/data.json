@@ -1,645 +1,689 @@
 {
   "generatedAt": "2026-04-09",
-  "entries": [
+  "visibleCount": 49,
+  "hiddenCount": 15,
+  "groups": [
     {
-      "id": "captureerror-devicenotfound-target-os-macos",
       "enumName": "CaptureError",
-      "variant": "DeviceNotFound",
-      "cfg": "target_os = \"macos\"",
-      "message": "audio device not found — is BlackHole installed? Run: brew install blackhole-2ch",
-      "sourceFile": "crates/core/src/error.rs",
-      "anchorId": "error-captureerror-devicenotfound-target-os-macos",
-      "docsUrl": "https://useminutes.app/docs/errors#error-captureerror-devicenotfound-target-os-macos"
+      "count": 7,
+      "entries": [
+        {
+          "id": "captureerror-devicenotfound-target-os-macos",
+          "enumName": "CaptureError",
+          "variant": "DeviceNotFound",
+          "cfg": "target_os = \"macos\"",
+          "message": "audio device not found — is BlackHole installed? Run: brew install blackhole-2ch",
+          "sourceFile": "crates/core/src/error.rs",
+          "hidden": false,
+          "anchorId": "error-captureerror-devicenotfound-target-os-macos",
+          "docsUrl": "https://useminutes.app/docs/errors#error-captureerror-devicenotfound-target-os-macos"
+        },
+        {
+          "id": "captureerror-devicenotfound-target-os-windows",
+          "enumName": "CaptureError",
+          "variant": "DeviceNotFound",
+          "cfg": "target_os = \"windows\"",
+          "message": "audio device not found — is VB-CABLE installed? See https://vb-audio.com/Cable/",
+          "sourceFile": "crates/core/src/error.rs",
+          "hidden": false,
+          "anchorId": "error-captureerror-devicenotfound-target-os-windows",
+          "docsUrl": "https://useminutes.app/docs/errors#error-captureerror-devicenotfound-target-os-windows"
+        },
+        {
+          "id": "captureerror-devicenotfound-not-any-target-os-macos-target-os-windows",
+          "enumName": "CaptureError",
+          "variant": "DeviceNotFound",
+          "cfg": "not(any(target_os = \"macos\", target_os = \"windows\"))",
+          "message": "audio device not found — check your ALSA/PulseAudio configuration",
+          "sourceFile": "crates/core/src/error.rs",
+          "hidden": false,
+          "anchorId": "error-captureerror-devicenotfound-not-any-target-os-macos-target-os-windows",
+          "docsUrl": "https://useminutes.app/docs/errors#error-captureerror-devicenotfound-not-any-target-os-macos-target-os-windows"
+        },
+        {
+          "id": "captureerror-alreadyrecording",
+          "enumName": "CaptureError",
+          "variant": "AlreadyRecording",
+          "cfg": null,
+          "message": "already recording (PID: {0})",
+          "sourceFile": "crates/core/src/error.rs",
+          "hidden": false,
+          "anchorId": "error-captureerror-alreadyrecording",
+          "docsUrl": "https://useminutes.app/docs/errors#error-captureerror-alreadyrecording"
+        },
+        {
+          "id": "captureerror-notrecording",
+          "enumName": "CaptureError",
+          "variant": "NotRecording",
+          "cfg": null,
+          "message": "no recording in progress",
+          "sourceFile": "crates/core/src/error.rs",
+          "hidden": false,
+          "anchorId": "error-captureerror-notrecording",
+          "docsUrl": "https://useminutes.app/docs/errors#error-captureerror-notrecording"
+        },
+        {
+          "id": "captureerror-stalerecording",
+          "enumName": "CaptureError",
+          "variant": "StaleRecording",
+          "cfg": null,
+          "message": "stale recording found (PID {0} is dead)",
+          "sourceFile": "crates/core/src/error.rs",
+          "hidden": false,
+          "anchorId": "error-captureerror-stalerecording",
+          "docsUrl": "https://useminutes.app/docs/errors#error-captureerror-stalerecording"
+        },
+        {
+          "id": "captureerror-emptyrecording",
+          "enumName": "CaptureError",
+          "variant": "EmptyRecording",
+          "cfg": null,
+          "message": "recording produced empty audio (0 bytes)",
+          "sourceFile": "crates/core/src/error.rs",
+          "hidden": false,
+          "anchorId": "error-captureerror-emptyrecording",
+          "docsUrl": "https://useminutes.app/docs/errors#error-captureerror-emptyrecording"
+        }
+      ]
     },
     {
-      "id": "captureerror-devicenotfound-target-os-windows",
-      "enumName": "CaptureError",
-      "variant": "DeviceNotFound",
-      "cfg": "target_os = \"windows\"",
-      "message": "audio device not found — is VB-CABLE installed? See https://vb-audio.com/Cable/",
-      "sourceFile": "crates/core/src/error.rs",
-      "anchorId": "error-captureerror-devicenotfound-target-os-windows",
-      "docsUrl": "https://useminutes.app/docs/errors#error-captureerror-devicenotfound-target-os-windows"
-    },
-    {
-      "id": "captureerror-devicenotfound-not-any-target-os-macos-target-os-windows",
-      "enumName": "CaptureError",
-      "variant": "DeviceNotFound",
-      "cfg": "not(any(target_os = \"macos\", target_os = \"windows\"))",
-      "message": "audio device not found — check your ALSA/PulseAudio configuration",
-      "sourceFile": "crates/core/src/error.rs",
-      "anchorId": "error-captureerror-devicenotfound-not-any-target-os-macos-target-os-windows",
-      "docsUrl": "https://useminutes.app/docs/errors#error-captureerror-devicenotfound-not-any-target-os-macos-target-os-windows"
-    },
-    {
-      "id": "captureerror-alreadyrecording",
-      "enumName": "CaptureError",
-      "variant": "AlreadyRecording",
-      "cfg": null,
-      "message": "already recording (PID: {0})",
-      "sourceFile": "crates/core/src/error.rs",
-      "anchorId": "error-captureerror-alreadyrecording",
-      "docsUrl": "https://useminutes.app/docs/errors#error-captureerror-alreadyrecording"
-    },
-    {
-      "id": "captureerror-notrecording",
-      "enumName": "CaptureError",
-      "variant": "NotRecording",
-      "cfg": null,
-      "message": "no recording in progress",
-      "sourceFile": "crates/core/src/error.rs",
-      "anchorId": "error-captureerror-notrecording",
-      "docsUrl": "https://useminutes.app/docs/errors#error-captureerror-notrecording"
-    },
-    {
-      "id": "captureerror-stalerecording",
-      "enumName": "CaptureError",
-      "variant": "StaleRecording",
-      "cfg": null,
-      "message": "stale recording found (PID {0} is dead)",
-      "sourceFile": "crates/core/src/error.rs",
-      "anchorId": "error-captureerror-stalerecording",
-      "docsUrl": "https://useminutes.app/docs/errors#error-captureerror-stalerecording"
-    },
-    {
-      "id": "captureerror-emptyrecording",
-      "enumName": "CaptureError",
-      "variant": "EmptyRecording",
-      "cfg": null,
-      "message": "recording produced empty audio (0 bytes)",
-      "sourceFile": "crates/core/src/error.rs",
-      "anchorId": "error-captureerror-emptyrecording",
-      "docsUrl": "https://useminutes.app/docs/errors#error-captureerror-emptyrecording"
-    },
-    {
-      "id": "captureerror-io",
-      "enumName": "CaptureError",
-      "variant": "Io",
-      "cfg": null,
-      "message": "audio I/O error: {0}",
-      "sourceFile": "crates/core/src/error.rs",
-      "anchorId": "error-captureerror-io",
-      "docsUrl": "https://useminutes.app/docs/errors#error-captureerror-io"
-    },
-    {
-      "id": "transcribeerror-modelnotfound",
       "enumName": "TranscribeError",
-      "variant": "ModelNotFound",
-      "cfg": null,
-      "message": "Whisper model not found. {0}\n\nTo fix this, run:\n\n    minutes setup --model tiny",
-      "sourceFile": "crates/core/src/error.rs",
-      "anchorId": "error-transcribeerror-modelnotfound",
-      "docsUrl": "https://useminutes.app/docs/errors#error-transcribeerror-modelnotfound"
+      "count": 9,
+      "entries": [
+        {
+          "id": "transcribeerror-modelnotfound",
+          "enumName": "TranscribeError",
+          "variant": "ModelNotFound",
+          "cfg": null,
+          "message": "Whisper model not found. {0}\n\nTo fix this, run:\n\n    minutes setup --model tiny",
+          "sourceFile": "crates/core/src/error.rs",
+          "hidden": false,
+          "anchorId": "error-transcribeerror-modelnotfound",
+          "docsUrl": "https://useminutes.app/docs/errors#error-transcribeerror-modelnotfound"
+        },
+        {
+          "id": "transcribeerror-modelloaderror",
+          "enumName": "TranscribeError",
+          "variant": "ModelLoadError",
+          "cfg": null,
+          "message": "failed to load whisper model: {0}",
+          "sourceFile": "crates/core/src/error.rs",
+          "hidden": false,
+          "anchorId": "error-transcribeerror-modelloaderror",
+          "docsUrl": "https://useminutes.app/docs/errors#error-transcribeerror-modelloaderror"
+        },
+        {
+          "id": "transcribeerror-emptyaudio",
+          "enumName": "TranscribeError",
+          "variant": "EmptyAudio",
+          "cfg": null,
+          "message": "audio file is empty or has zero duration",
+          "sourceFile": "crates/core/src/error.rs",
+          "hidden": false,
+          "anchorId": "error-transcribeerror-emptyaudio",
+          "docsUrl": "https://useminutes.app/docs/errors#error-transcribeerror-emptyaudio"
+        },
+        {
+          "id": "transcribeerror-unsupportedformat",
+          "enumName": "TranscribeError",
+          "variant": "UnsupportedFormat",
+          "cfg": null,
+          "message": "unsupported audio format: {0}",
+          "sourceFile": "crates/core/src/error.rs",
+          "hidden": false,
+          "anchorId": "error-transcribeerror-unsupportedformat",
+          "docsUrl": "https://useminutes.app/docs/errors#error-transcribeerror-unsupportedformat"
+        },
+        {
+          "id": "transcribeerror-emptytranscript",
+          "enumName": "TranscribeError",
+          "variant": "EmptyTranscript",
+          "cfg": null,
+          "message": "transcription produced no text (below {0} word minimum)",
+          "sourceFile": "crates/core/src/error.rs",
+          "hidden": false,
+          "anchorId": "error-transcribeerror-emptytranscript",
+          "docsUrl": "https://useminutes.app/docs/errors#error-transcribeerror-emptytranscript"
+        },
+        {
+          "id": "transcribeerror-transcriptionfailed",
+          "enumName": "TranscribeError",
+          "variant": "TranscriptionFailed",
+          "cfg": null,
+          "message": "transcription failed: {0}",
+          "sourceFile": "crates/core/src/error.rs",
+          "hidden": false,
+          "anchorId": "error-transcribeerror-transcriptionfailed",
+          "docsUrl": "https://useminutes.app/docs/errors#error-transcribeerror-transcriptionfailed"
+        },
+        {
+          "id": "transcribeerror-enginenotavailable",
+          "enumName": "TranscribeError",
+          "variant": "EngineNotAvailable",
+          "cfg": null,
+          "message": "engine '{0}' not compiled in — rebuild with: cargo build --features {0}",
+          "sourceFile": "crates/core/src/error.rs",
+          "hidden": false,
+          "anchorId": "error-transcribeerror-enginenotavailable",
+          "docsUrl": "https://useminutes.app/docs/errors#error-transcribeerror-enginenotavailable"
+        },
+        {
+          "id": "transcribeerror-parakeetnotfound",
+          "enumName": "TranscribeError",
+          "variant": "ParakeetNotFound",
+          "cfg": null,
+          "message": "parakeet binary not found. Install parakeet.cpp and ensure `parakeet` is in PATH.",
+          "sourceFile": "crates/core/src/error.rs",
+          "hidden": false,
+          "anchorId": "error-transcribeerror-parakeetnotfound",
+          "docsUrl": "https://useminutes.app/docs/errors#error-transcribeerror-parakeetnotfound"
+        },
+        {
+          "id": "transcribeerror-parakeetfailed",
+          "enumName": "TranscribeError",
+          "variant": "ParakeetFailed",
+          "cfg": null,
+          "message": "parakeet transcription failed: {0}",
+          "sourceFile": "crates/core/src/error.rs",
+          "hidden": false,
+          "anchorId": "error-transcribeerror-parakeetfailed",
+          "docsUrl": "https://useminutes.app/docs/errors#error-transcribeerror-parakeetfailed"
+        }
+      ]
     },
     {
-      "id": "transcribeerror-modelloaderror",
-      "enumName": "TranscribeError",
-      "variant": "ModelLoadError",
-      "cfg": null,
-      "message": "failed to load whisper model: {0}",
-      "sourceFile": "crates/core/src/error.rs",
-      "anchorId": "error-transcribeerror-modelloaderror",
-      "docsUrl": "https://useminutes.app/docs/errors#error-transcribeerror-modelloaderror"
-    },
-    {
-      "id": "transcribeerror-emptyaudio",
-      "enumName": "TranscribeError",
-      "variant": "EmptyAudio",
-      "cfg": null,
-      "message": "audio file is empty or has zero duration",
-      "sourceFile": "crates/core/src/error.rs",
-      "anchorId": "error-transcribeerror-emptyaudio",
-      "docsUrl": "https://useminutes.app/docs/errors#error-transcribeerror-emptyaudio"
-    },
-    {
-      "id": "transcribeerror-unsupportedformat",
-      "enumName": "TranscribeError",
-      "variant": "UnsupportedFormat",
-      "cfg": null,
-      "message": "unsupported audio format: {0}",
-      "sourceFile": "crates/core/src/error.rs",
-      "anchorId": "error-transcribeerror-unsupportedformat",
-      "docsUrl": "https://useminutes.app/docs/errors#error-transcribeerror-unsupportedformat"
-    },
-    {
-      "id": "transcribeerror-emptytranscript",
-      "enumName": "TranscribeError",
-      "variant": "EmptyTranscript",
-      "cfg": null,
-      "message": "transcription produced no text (below {0} word minimum)",
-      "sourceFile": "crates/core/src/error.rs",
-      "anchorId": "error-transcribeerror-emptytranscript",
-      "docsUrl": "https://useminutes.app/docs/errors#error-transcribeerror-emptytranscript"
-    },
-    {
-      "id": "transcribeerror-transcriptionfailed",
-      "enumName": "TranscribeError",
-      "variant": "TranscriptionFailed",
-      "cfg": null,
-      "message": "transcription failed: {0}",
-      "sourceFile": "crates/core/src/error.rs",
-      "anchorId": "error-transcribeerror-transcriptionfailed",
-      "docsUrl": "https://useminutes.app/docs/errors#error-transcribeerror-transcriptionfailed"
-    },
-    {
-      "id": "transcribeerror-enginenotavailable",
-      "enumName": "TranscribeError",
-      "variant": "EngineNotAvailable",
-      "cfg": null,
-      "message": "engine '{0}' not compiled in — rebuild with: cargo build --features {0}",
-      "sourceFile": "crates/core/src/error.rs",
-      "anchorId": "error-transcribeerror-enginenotavailable",
-      "docsUrl": "https://useminutes.app/docs/errors#error-transcribeerror-enginenotavailable"
-    },
-    {
-      "id": "transcribeerror-parakeetnotfound",
-      "enumName": "TranscribeError",
-      "variant": "ParakeetNotFound",
-      "cfg": null,
-      "message": "parakeet binary not found. Install parakeet.cpp and ensure `parakeet` is in PATH.",
-      "sourceFile": "crates/core/src/error.rs",
-      "anchorId": "error-transcribeerror-parakeetnotfound",
-      "docsUrl": "https://useminutes.app/docs/errors#error-transcribeerror-parakeetnotfound"
-    },
-    {
-      "id": "transcribeerror-parakeetfailed",
-      "enumName": "TranscribeError",
-      "variant": "ParakeetFailed",
-      "cfg": null,
-      "message": "parakeet transcription failed: {0}",
-      "sourceFile": "crates/core/src/error.rs",
-      "anchorId": "error-transcribeerror-parakeetfailed",
-      "docsUrl": "https://useminutes.app/docs/errors#error-transcribeerror-parakeetfailed"
-    },
-    {
-      "id": "transcribeerror-io",
-      "enumName": "TranscribeError",
-      "variant": "Io",
-      "cfg": null,
-      "message": "I/O error: {0}",
-      "sourceFile": "crates/core/src/error.rs",
-      "anchorId": "error-transcribeerror-io",
-      "docsUrl": "https://useminutes.app/docs/errors#error-transcribeerror-io"
-    },
-    {
-      "id": "watcherror-alreadyrunning",
       "enumName": "WatchError",
-      "variant": "AlreadyRunning",
-      "cfg": null,
-      "message": "another watcher is already running (PID in {0})",
-      "sourceFile": "crates/core/src/error.rs",
-      "anchorId": "error-watcherror-alreadyrunning",
-      "docsUrl": "https://useminutes.app/docs/errors#error-watcherror-alreadyrunning"
+      "count": 4,
+      "entries": [
+        {
+          "id": "watcherror-alreadyrunning",
+          "enumName": "WatchError",
+          "variant": "AlreadyRunning",
+          "cfg": null,
+          "message": "another watcher is already running (PID in {0})",
+          "sourceFile": "crates/core/src/error.rs",
+          "hidden": false,
+          "anchorId": "error-watcherror-alreadyrunning",
+          "docsUrl": "https://useminutes.app/docs/errors#error-watcherror-alreadyrunning"
+        },
+        {
+          "id": "watcherror-dirnotfound",
+          "enumName": "WatchError",
+          "variant": "DirNotFound",
+          "cfg": null,
+          "message": "watch directory does not exist: {0}",
+          "sourceFile": "crates/core/src/error.rs",
+          "hidden": false,
+          "anchorId": "error-watcherror-dirnotfound",
+          "docsUrl": "https://useminutes.app/docs/errors#error-watcherror-dirnotfound"
+        },
+        {
+          "id": "watcherror-moveerror",
+          "enumName": "WatchError",
+          "variant": "MoveError",
+          "cfg": null,
+          "message": "failed to move file to {0}: {1}",
+          "sourceFile": "crates/core/src/error.rs",
+          "hidden": false,
+          "anchorId": "error-watcherror-moveerror",
+          "docsUrl": "https://useminutes.app/docs/errors#error-watcherror-moveerror"
+        },
+        {
+          "id": "watcherror-notifyerror",
+          "enumName": "WatchError",
+          "variant": "NotifyError",
+          "cfg": null,
+          "message": "file system watcher error: {0}",
+          "sourceFile": "crates/core/src/error.rs",
+          "hidden": false,
+          "anchorId": "error-watcherror-notifyerror",
+          "docsUrl": "https://useminutes.app/docs/errors#error-watcherror-notifyerror"
+        }
+      ]
     },
     {
-      "id": "watcherror-dirnotfound",
-      "enumName": "WatchError",
-      "variant": "DirNotFound",
-      "cfg": null,
-      "message": "watch directory does not exist: {0}",
-      "sourceFile": "crates/core/src/error.rs",
-      "anchorId": "error-watcherror-dirnotfound",
-      "docsUrl": "https://useminutes.app/docs/errors#error-watcherror-dirnotfound"
-    },
-    {
-      "id": "watcherror-moveerror",
-      "enumName": "WatchError",
-      "variant": "MoveError",
-      "cfg": null,
-      "message": "failed to move file to {0}: {1}",
-      "sourceFile": "crates/core/src/error.rs",
-      "anchorId": "error-watcherror-moveerror",
-      "docsUrl": "https://useminutes.app/docs/errors#error-watcherror-moveerror"
-    },
-    {
-      "id": "watcherror-notifyerror",
-      "enumName": "WatchError",
-      "variant": "NotifyError",
-      "cfg": null,
-      "message": "file system watcher error: {0}",
-      "sourceFile": "crates/core/src/error.rs",
-      "anchorId": "error-watcherror-notifyerror",
-      "docsUrl": "https://useminutes.app/docs/errors#error-watcherror-notifyerror"
-    },
-    {
-      "id": "watcherror-io",
-      "enumName": "WatchError",
-      "variant": "Io",
-      "cfg": null,
-      "message": "I/O error: {0}",
-      "sourceFile": "crates/core/src/error.rs",
-      "anchorId": "error-watcherror-io",
-      "docsUrl": "https://useminutes.app/docs/errors#error-watcherror-io"
-    },
-    {
-      "id": "searcherror-dirnotfound",
       "enumName": "SearchError",
-      "variant": "DirNotFound",
-      "cfg": null,
-      "message": "search directory does not exist: {0}",
-      "sourceFile": "crates/core/src/error.rs",
-      "anchorId": "error-searcherror-dirnotfound",
-      "docsUrl": "https://useminutes.app/docs/errors#error-searcherror-dirnotfound"
+      "count": 2,
+      "entries": [
+        {
+          "id": "searcherror-dirnotfound",
+          "enumName": "SearchError",
+          "variant": "DirNotFound",
+          "cfg": null,
+          "message": "search directory does not exist: {0}",
+          "sourceFile": "crates/core/src/error.rs",
+          "hidden": false,
+          "anchorId": "error-searcherror-dirnotfound",
+          "docsUrl": "https://useminutes.app/docs/errors#error-searcherror-dirnotfound"
+        },
+        {
+          "id": "searcherror-frontmatterparseerror",
+          "enumName": "SearchError",
+          "variant": "FrontmatterParseError",
+          "cfg": null,
+          "message": "failed to parse frontmatter in {0}: {1}",
+          "sourceFile": "crates/core/src/error.rs",
+          "hidden": false,
+          "anchorId": "error-searcherror-frontmatterparseerror",
+          "docsUrl": "https://useminutes.app/docs/errors#error-searcherror-frontmatterparseerror"
+        }
+      ]
     },
     {
-      "id": "searcherror-frontmatterparseerror",
-      "enumName": "SearchError",
-      "variant": "FrontmatterParseError",
-      "cfg": null,
-      "message": "failed to parse frontmatter in {0}: {1}",
-      "sourceFile": "crates/core/src/error.rs",
-      "anchorId": "error-searcherror-frontmatterparseerror",
-      "docsUrl": "https://useminutes.app/docs/errors#error-searcherror-frontmatterparseerror"
-    },
-    {
-      "id": "searcherror-io",
-      "enumName": "SearchError",
-      "variant": "Io",
-      "cfg": null,
-      "message": "I/O error: {0}",
-      "sourceFile": "crates/core/src/error.rs",
-      "anchorId": "error-searcherror-io",
-      "docsUrl": "https://useminutes.app/docs/errors#error-searcherror-io"
-    },
-    {
-      "id": "configerror-parseerror",
       "enumName": "ConfigError",
-      "variant": "ParseError",
-      "cfg": null,
-      "message": "failed to parse config file {0}: {1}",
-      "sourceFile": "crates/core/src/error.rs",
-      "anchorId": "error-configerror-parseerror",
-      "docsUrl": "https://useminutes.app/docs/errors#error-configerror-parseerror"
+      "count": 1,
+      "entries": [
+        {
+          "id": "configerror-parseerror",
+          "enumName": "ConfigError",
+          "variant": "ParseError",
+          "cfg": null,
+          "message": "failed to parse config file {0}: {1}",
+          "sourceFile": "crates/core/src/error.rs",
+          "hidden": false,
+          "anchorId": "error-configerror-parseerror",
+          "docsUrl": "https://useminutes.app/docs/errors#error-configerror-parseerror"
+        }
+      ]
     },
     {
-      "id": "configerror-io",
+      "enumName": "MarkdownError",
+      "count": 3,
+      "entries": [
+        {
+          "id": "markdownerror-outputdirerror",
+          "enumName": "MarkdownError",
+          "variant": "OutputDirError",
+          "cfg": null,
+          "message": "output directory does not exist and could not be created: {0}",
+          "sourceFile": "crates/core/src/error.rs",
+          "hidden": false,
+          "anchorId": "error-markdownerror-outputdirerror",
+          "docsUrl": "https://useminutes.app/docs/errors#error-markdownerror-outputdirerror"
+        },
+        {
+          "id": "markdownerror-serializationerror",
+          "enumName": "MarkdownError",
+          "variant": "SerializationError",
+          "cfg": null,
+          "message": "failed to serialize frontmatter: {0}",
+          "sourceFile": "crates/core/src/error.rs",
+          "hidden": false,
+          "anchorId": "error-markdownerror-serializationerror",
+          "docsUrl": "https://useminutes.app/docs/errors#error-markdownerror-serializationerror"
+        },
+        {
+          "id": "markdownerror-renamerefused",
+          "enumName": "MarkdownError",
+          "variant": "RenameRefused",
+          "cfg": null,
+          "message": "rename refused: {0}",
+          "sourceFile": "crates/core/src/error.rs",
+          "hidden": false,
+          "anchorId": "error-markdownerror-renamerefused",
+          "docsUrl": "https://useminutes.app/docs/errors#error-markdownerror-renamerefused"
+        }
+      ]
+    },
+    {
+      "enumName": "VaultError",
+      "count": 9,
+      "entries": [
+        {
+          "id": "vaulterror-notconfigured",
+          "enumName": "VaultError",
+          "variant": "NotConfigured",
+          "cfg": null,
+          "message": "vault not configured — run: minutes vault setup",
+          "sourceFile": "crates/core/src/error.rs",
+          "hidden": false,
+          "anchorId": "error-vaulterror-notconfigured",
+          "docsUrl": "https://useminutes.app/docs/errors#error-vaulterror-notconfigured"
+        },
+        {
+          "id": "vaulterror-vaultpathnotfound",
+          "enumName": "VaultError",
+          "variant": "VaultPathNotFound",
+          "cfg": null,
+          "message": "vault path not found: {0}",
+          "sourceFile": "crates/core/src/error.rs",
+          "hidden": false,
+          "anchorId": "error-vaulterror-vaultpathnotfound",
+          "docsUrl": "https://useminutes.app/docs/errors#error-vaulterror-vaultpathnotfound"
+        },
+        {
+          "id": "vaulterror-permissiondenied-target-os-macos",
+          "enumName": "VaultError",
+          "variant": "PermissionDenied",
+          "cfg": "target_os = \"macos\"",
+          "message": "permission denied: {0} — macOS requires Full Disk Access for ~/Documents/",
+          "sourceFile": "crates/core/src/error.rs",
+          "hidden": false,
+          "anchorId": "error-vaulterror-permissiondenied-target-os-macos",
+          "docsUrl": "https://useminutes.app/docs/errors#error-vaulterror-permissiondenied-target-os-macos"
+        },
+        {
+          "id": "vaulterror-permissiondenied-target-os-windows",
+          "enumName": "VaultError",
+          "variant": "PermissionDenied",
+          "cfg": "target_os = \"windows\"",
+          "message": "permission denied: {0} — Windows requires Developer Mode or admin for symlinks",
+          "sourceFile": "crates/core/src/error.rs",
+          "hidden": false,
+          "anchorId": "error-vaulterror-permissiondenied-target-os-windows",
+          "docsUrl": "https://useminutes.app/docs/errors#error-vaulterror-permissiondenied-target-os-windows"
+        },
+        {
+          "id": "vaulterror-permissiondenied-not-any-target-os-macos-target-os-windows",
+          "enumName": "VaultError",
+          "variant": "PermissionDenied",
+          "cfg": "not(any(target_os = \"macos\", target_os = \"windows\"))",
+          "message": "permission denied: {0}",
+          "sourceFile": "crates/core/src/error.rs",
+          "hidden": false,
+          "anchorId": "error-vaulterror-permissiondenied-not-any-target-os-macos-target-os-windows",
+          "docsUrl": "https://useminutes.app/docs/errors#error-vaulterror-permissiondenied-not-any-target-os-macos-target-os-windows"
+        },
+        {
+          "id": "vaulterror-existingdirectory",
+          "enumName": "VaultError",
+          "variant": "ExistingDirectory",
+          "cfg": null,
+          "message": "cannot create symlink — directory already exists: {0}",
+          "sourceFile": "crates/core/src/error.rs",
+          "hidden": false,
+          "anchorId": "error-vaulterror-existingdirectory",
+          "docsUrl": "https://useminutes.app/docs/errors#error-vaulterror-existingdirectory"
+        },
+        {
+          "id": "vaulterror-symlinkfailed",
+          "enumName": "VaultError",
+          "variant": "SymlinkFailed",
+          "cfg": null,
+          "message": "symlink creation failed: {0}",
+          "sourceFile": "crates/core/src/error.rs",
+          "hidden": false,
+          "anchorId": "error-vaulterror-symlinkfailed",
+          "docsUrl": "https://useminutes.app/docs/errors#error-vaulterror-symlinkfailed"
+        },
+        {
+          "id": "vaulterror-copyfailed",
+          "enumName": "VaultError",
+          "variant": "CopyFailed",
+          "cfg": null,
+          "message": "vault copy failed for {0}: {1}",
+          "sourceFile": "crates/core/src/error.rs",
+          "hidden": false,
+          "anchorId": "error-vaulterror-copyfailed",
+          "docsUrl": "https://useminutes.app/docs/errors#error-vaulterror-copyfailed"
+        },
+        {
+          "id": "vaulterror-brokensymlink",
+          "enumName": "VaultError",
+          "variant": "BrokenSymlink",
+          "cfg": null,
+          "message": "broken symlink at {0} (target: {1})",
+          "sourceFile": "crates/core/src/error.rs",
+          "hidden": false,
+          "anchorId": "error-vaulterror-brokensymlink",
+          "docsUrl": "https://useminutes.app/docs/errors#error-vaulterror-brokensymlink"
+        }
+      ]
+    },
+    {
+      "enumName": "PidError",
+      "count": 3,
+      "entries": [
+        {
+          "id": "piderror-alreadyrecording",
+          "enumName": "PidError",
+          "variant": "AlreadyRecording",
+          "cfg": null,
+          "message": "already recording (PID: {0})",
+          "sourceFile": "crates/core/src/error.rs",
+          "hidden": false,
+          "anchorId": "error-piderror-alreadyrecording",
+          "docsUrl": "https://useminutes.app/docs/errors#error-piderror-alreadyrecording"
+        },
+        {
+          "id": "piderror-notrecording",
+          "enumName": "PidError",
+          "variant": "NotRecording",
+          "cfg": null,
+          "message": "no recording in progress",
+          "sourceFile": "crates/core/src/error.rs",
+          "hidden": false,
+          "anchorId": "error-piderror-notrecording",
+          "docsUrl": "https://useminutes.app/docs/errors#error-piderror-notrecording"
+        },
+        {
+          "id": "piderror-stalepid",
+          "enumName": "PidError",
+          "variant": "StalePid",
+          "cfg": null,
+          "message": "stale PID file (process {0} is dead)",
+          "sourceFile": "crates/core/src/error.rs",
+          "hidden": false,
+          "anchorId": "error-piderror-stalepid",
+          "docsUrl": "https://useminutes.app/docs/errors#error-piderror-stalepid"
+        }
+      ]
+    },
+    {
+      "enumName": "DictationError",
+      "count": 6,
+      "entries": [
+        {
+          "id": "dictationerror-recordingactive",
+          "enumName": "DictationError",
+          "variant": "RecordingActive",
+          "cfg": null,
+          "message": "recording in progress — stop recording before dictating",
+          "sourceFile": "crates/core/src/error.rs",
+          "hidden": false,
+          "anchorId": "error-dictationerror-recordingactive",
+          "docsUrl": "https://useminutes.app/docs/errors#error-dictationerror-recordingactive"
+        },
+        {
+          "id": "dictationerror-livetranscriptactive",
+          "enumName": "DictationError",
+          "variant": "LiveTranscriptActive",
+          "cfg": null,
+          "message": "live transcript in progress — stop it before dictating",
+          "sourceFile": "crates/core/src/error.rs",
+          "hidden": false,
+          "anchorId": "error-dictationerror-livetranscriptactive",
+          "docsUrl": "https://useminutes.app/docs/errors#error-dictationerror-livetranscriptactive"
+        },
+        {
+          "id": "dictationerror-alreadyactive",
+          "enumName": "DictationError",
+          "variant": "AlreadyActive",
+          "cfg": null,
+          "message": "dictation already active (PID: {0})",
+          "sourceFile": "crates/core/src/error.rs",
+          "hidden": false,
+          "anchorId": "error-dictationerror-alreadyactive",
+          "docsUrl": "https://useminutes.app/docs/errors#error-dictationerror-alreadyactive"
+        },
+        {
+          "id": "dictationerror-clipboardfailed",
+          "enumName": "DictationError",
+          "variant": "ClipboardFailed",
+          "cfg": null,
+          "message": "clipboard write failed: {0}",
+          "sourceFile": "crates/core/src/error.rs",
+          "hidden": false,
+          "anchorId": "error-dictationerror-clipboardfailed",
+          "docsUrl": "https://useminutes.app/docs/errors#error-dictationerror-clipboardfailed"
+        },
+        {
+          "id": "dictationerror-accessibilitydenied",
+          "enumName": "DictationError",
+          "variant": "AccessibilityDenied",
+          "cfg": null,
+          "message": "accessibility permission required for auto-paste",
+          "sourceFile": "crates/core/src/error.rs",
+          "hidden": false,
+          "anchorId": "error-dictationerror-accessibilitydenied",
+          "docsUrl": "https://useminutes.app/docs/errors#error-dictationerror-accessibilitydenied"
+        },
+        {
+          "id": "dictationerror-notactive",
+          "enumName": "DictationError",
+          "variant": "NotActive",
+          "cfg": null,
+          "message": "dictation not active",
+          "sourceFile": "crates/core/src/error.rs",
+          "hidden": false,
+          "anchorId": "error-dictationerror-notactive",
+          "docsUrl": "https://useminutes.app/docs/errors#error-dictationerror-notactive"
+        }
+      ]
+    },
+    {
+      "enumName": "LiveTranscriptError",
+      "count": 4,
+      "entries": [
+        {
+          "id": "livetranscripterror-recordingactive",
+          "enumName": "LiveTranscriptError",
+          "variant": "RecordingActive",
+          "cfg": null,
+          "message": "recording in progress — stop recording before starting live transcript",
+          "sourceFile": "crates/core/src/error.rs",
+          "hidden": false,
+          "anchorId": "error-livetranscripterror-recordingactive",
+          "docsUrl": "https://useminutes.app/docs/errors#error-livetranscripterror-recordingactive"
+        },
+        {
+          "id": "livetranscripterror-dictationactive",
+          "enumName": "LiveTranscriptError",
+          "variant": "DictationActive",
+          "cfg": null,
+          "message": "dictation in progress — stop dictation before starting live transcript",
+          "sourceFile": "crates/core/src/error.rs",
+          "hidden": false,
+          "anchorId": "error-livetranscripterror-dictationactive",
+          "docsUrl": "https://useminutes.app/docs/errors#error-livetranscripterror-dictationactive"
+        },
+        {
+          "id": "livetranscripterror-alreadyactive",
+          "enumName": "LiveTranscriptError",
+          "variant": "AlreadyActive",
+          "cfg": null,
+          "message": "live transcript already active (PID: {0})",
+          "sourceFile": "crates/core/src/error.rs",
+          "hidden": false,
+          "anchorId": "error-livetranscripterror-alreadyactive",
+          "docsUrl": "https://useminutes.app/docs/errors#error-livetranscripterror-alreadyactive"
+        },
+        {
+          "id": "livetranscripterror-noactivesession",
+          "enumName": "LiveTranscriptError",
+          "variant": "NoActiveSession",
+          "cfg": null,
+          "message": "no live transcript session active",
+          "sourceFile": "crates/core/src/error.rs",
+          "hidden": false,
+          "anchorId": "error-livetranscripterror-noactivesession",
+          "docsUrl": "https://useminutes.app/docs/errors#error-livetranscripterror-noactivesession"
+        }
+      ]
+    },
+    {
+      "enumName": "GraphError",
+      "count": 1,
+      "entries": [
+        {
+          "id": "grapherror-dirnotfound",
+          "enumName": "GraphError",
+          "variant": "DirNotFound",
+          "cfg": null,
+          "message": "meetings directory does not exist: {0}",
+          "sourceFile": "crates/core/src/graph.rs",
+          "hidden": false,
+          "anchorId": "error-grapherror-dirnotfound",
+          "docsUrl": "https://useminutes.app/docs/errors#error-grapherror-dirnotfound"
+        }
+      ]
+    }
+  ],
+  "hiddenEnums": [
+    {
+      "enumName": "CaptureError",
+      "variant": "Io",
+      "sourceFile": "crates/core/src/error.rs"
+    },
+    {
+      "enumName": "TranscribeError",
+      "variant": "Io",
+      "sourceFile": "crates/core/src/error.rs"
+    },
+    {
+      "enumName": "WatchError",
+      "variant": "Io",
+      "sourceFile": "crates/core/src/error.rs"
+    },
+    {
+      "enumName": "SearchError",
+      "variant": "Io",
+      "sourceFile": "crates/core/src/error.rs"
+    },
+    {
       "enumName": "ConfigError",
       "variant": "Io",
-      "cfg": null,
-      "message": "I/O error: {0}",
-      "sourceFile": "crates/core/src/error.rs",
-      "anchorId": "error-configerror-io",
-      "docsUrl": "https://useminutes.app/docs/errors#error-configerror-io"
+      "sourceFile": "crates/core/src/error.rs"
     },
     {
-      "id": "markdownerror-outputdirerror",
-      "enumName": "MarkdownError",
-      "variant": "OutputDirError",
-      "cfg": null,
-      "message": "output directory does not exist and could not be created: {0}",
-      "sourceFile": "crates/core/src/error.rs",
-      "anchorId": "error-markdownerror-outputdirerror",
-      "docsUrl": "https://useminutes.app/docs/errors#error-markdownerror-outputdirerror"
-    },
-    {
-      "id": "markdownerror-serializationerror",
-      "enumName": "MarkdownError",
-      "variant": "SerializationError",
-      "cfg": null,
-      "message": "failed to serialize frontmatter: {0}",
-      "sourceFile": "crates/core/src/error.rs",
-      "anchorId": "error-markdownerror-serializationerror",
-      "docsUrl": "https://useminutes.app/docs/errors#error-markdownerror-serializationerror"
-    },
-    {
-      "id": "markdownerror-renamerefused",
-      "enumName": "MarkdownError",
-      "variant": "RenameRefused",
-      "cfg": null,
-      "message": "rename refused: {0}",
-      "sourceFile": "crates/core/src/error.rs",
-      "anchorId": "error-markdownerror-renamerefused",
-      "docsUrl": "https://useminutes.app/docs/errors#error-markdownerror-renamerefused"
-    },
-    {
-      "id": "markdownerror-io",
       "enumName": "MarkdownError",
       "variant": "Io",
-      "cfg": null,
-      "message": "I/O error: {0}",
-      "sourceFile": "crates/core/src/error.rs",
-      "anchorId": "error-markdownerror-io",
-      "docsUrl": "https://useminutes.app/docs/errors#error-markdownerror-io"
+      "sourceFile": "crates/core/src/error.rs"
     },
     {
-      "id": "vaulterror-notconfigured",
-      "enumName": "VaultError",
-      "variant": "NotConfigured",
-      "cfg": null,
-      "message": "vault not configured — run: minutes vault setup",
-      "sourceFile": "crates/core/src/error.rs",
-      "anchorId": "error-vaulterror-notconfigured",
-      "docsUrl": "https://useminutes.app/docs/errors#error-vaulterror-notconfigured"
-    },
-    {
-      "id": "vaulterror-vaultpathnotfound",
-      "enumName": "VaultError",
-      "variant": "VaultPathNotFound",
-      "cfg": null,
-      "message": "vault path not found: {0}",
-      "sourceFile": "crates/core/src/error.rs",
-      "anchorId": "error-vaulterror-vaultpathnotfound",
-      "docsUrl": "https://useminutes.app/docs/errors#error-vaulterror-vaultpathnotfound"
-    },
-    {
-      "id": "vaulterror-permissiondenied-target-os-macos",
-      "enumName": "VaultError",
-      "variant": "PermissionDenied",
-      "cfg": "target_os = \"macos\"",
-      "message": "permission denied: {0} — macOS requires Full Disk Access for ~/Documents/",
-      "sourceFile": "crates/core/src/error.rs",
-      "anchorId": "error-vaulterror-permissiondenied-target-os-macos",
-      "docsUrl": "https://useminutes.app/docs/errors#error-vaulterror-permissiondenied-target-os-macos"
-    },
-    {
-      "id": "vaulterror-permissiondenied-target-os-windows",
-      "enumName": "VaultError",
-      "variant": "PermissionDenied",
-      "cfg": "target_os = \"windows\"",
-      "message": "permission denied: {0} — Windows requires Developer Mode or admin for symlinks",
-      "sourceFile": "crates/core/src/error.rs",
-      "anchorId": "error-vaulterror-permissiondenied-target-os-windows",
-      "docsUrl": "https://useminutes.app/docs/errors#error-vaulterror-permissiondenied-target-os-windows"
-    },
-    {
-      "id": "vaulterror-permissiondenied-not-any-target-os-macos-target-os-windows",
-      "enumName": "VaultError",
-      "variant": "PermissionDenied",
-      "cfg": "not(any(target_os = \"macos\", target_os = \"windows\"))",
-      "message": "permission denied: {0}",
-      "sourceFile": "crates/core/src/error.rs",
-      "anchorId": "error-vaulterror-permissiondenied-not-any-target-os-macos-target-os-windows",
-      "docsUrl": "https://useminutes.app/docs/errors#error-vaulterror-permissiondenied-not-any-target-os-macos-target-os-windows"
-    },
-    {
-      "id": "vaulterror-existingdirectory",
-      "enumName": "VaultError",
-      "variant": "ExistingDirectory",
-      "cfg": null,
-      "message": "cannot create symlink — directory already exists: {0}",
-      "sourceFile": "crates/core/src/error.rs",
-      "anchorId": "error-vaulterror-existingdirectory",
-      "docsUrl": "https://useminutes.app/docs/errors#error-vaulterror-existingdirectory"
-    },
-    {
-      "id": "vaulterror-symlinkfailed",
-      "enumName": "VaultError",
-      "variant": "SymlinkFailed",
-      "cfg": null,
-      "message": "symlink creation failed: {0}",
-      "sourceFile": "crates/core/src/error.rs",
-      "anchorId": "error-vaulterror-symlinkfailed",
-      "docsUrl": "https://useminutes.app/docs/errors#error-vaulterror-symlinkfailed"
-    },
-    {
-      "id": "vaulterror-copyfailed",
-      "enumName": "VaultError",
-      "variant": "CopyFailed",
-      "cfg": null,
-      "message": "vault copy failed for {0}: {1}",
-      "sourceFile": "crates/core/src/error.rs",
-      "anchorId": "error-vaulterror-copyfailed",
-      "docsUrl": "https://useminutes.app/docs/errors#error-vaulterror-copyfailed"
-    },
-    {
-      "id": "vaulterror-brokensymlink",
-      "enumName": "VaultError",
-      "variant": "BrokenSymlink",
-      "cfg": null,
-      "message": "broken symlink at {0} (target: {1})",
-      "sourceFile": "crates/core/src/error.rs",
-      "anchorId": "error-vaulterror-brokensymlink",
-      "docsUrl": "https://useminutes.app/docs/errors#error-vaulterror-brokensymlink"
-    },
-    {
-      "id": "vaulterror-io",
       "enumName": "VaultError",
       "variant": "Io",
-      "cfg": null,
-      "message": "I/O error: {0}",
-      "sourceFile": "crates/core/src/error.rs",
-      "anchorId": "error-vaulterror-io",
-      "docsUrl": "https://useminutes.app/docs/errors#error-vaulterror-io"
+      "sourceFile": "crates/core/src/error.rs"
     },
     {
-      "id": "piderror-alreadyrecording",
-      "enumName": "PidError",
-      "variant": "AlreadyRecording",
-      "cfg": null,
-      "message": "already recording (PID: {0})",
-      "sourceFile": "crates/core/src/error.rs",
-      "anchorId": "error-piderror-alreadyrecording",
-      "docsUrl": "https://useminutes.app/docs/errors#error-piderror-alreadyrecording"
-    },
-    {
-      "id": "piderror-notrecording",
-      "enumName": "PidError",
-      "variant": "NotRecording",
-      "cfg": null,
-      "message": "no recording in progress",
-      "sourceFile": "crates/core/src/error.rs",
-      "anchorId": "error-piderror-notrecording",
-      "docsUrl": "https://useminutes.app/docs/errors#error-piderror-notrecording"
-    },
-    {
-      "id": "piderror-stalepid",
-      "enumName": "PidError",
-      "variant": "StalePid",
-      "cfg": null,
-      "message": "stale PID file (process {0} is dead)",
-      "sourceFile": "crates/core/src/error.rs",
-      "anchorId": "error-piderror-stalepid",
-      "docsUrl": "https://useminutes.app/docs/errors#error-piderror-stalepid"
-    },
-    {
-      "id": "piderror-io",
       "enumName": "PidError",
       "variant": "Io",
-      "cfg": null,
-      "message": "I/O error: {0}",
-      "sourceFile": "crates/core/src/error.rs",
-      "anchorId": "error-piderror-io",
-      "docsUrl": "https://useminutes.app/docs/errors#error-piderror-io"
+      "sourceFile": "crates/core/src/error.rs"
     },
     {
-      "id": "dictationerror-recordingactive",
-      "enumName": "DictationError",
-      "variant": "RecordingActive",
-      "cfg": null,
-      "message": "recording in progress — stop recording before dictating",
-      "sourceFile": "crates/core/src/error.rs",
-      "anchorId": "error-dictationerror-recordingactive",
-      "docsUrl": "https://useminutes.app/docs/errors#error-dictationerror-recordingactive"
-    },
-    {
-      "id": "dictationerror-livetranscriptactive",
-      "enumName": "DictationError",
-      "variant": "LiveTranscriptActive",
-      "cfg": null,
-      "message": "live transcript in progress — stop it before dictating",
-      "sourceFile": "crates/core/src/error.rs",
-      "anchorId": "error-dictationerror-livetranscriptactive",
-      "docsUrl": "https://useminutes.app/docs/errors#error-dictationerror-livetranscriptactive"
-    },
-    {
-      "id": "dictationerror-alreadyactive",
-      "enumName": "DictationError",
-      "variant": "AlreadyActive",
-      "cfg": null,
-      "message": "dictation already active (PID: {0})",
-      "sourceFile": "crates/core/src/error.rs",
-      "anchorId": "error-dictationerror-alreadyactive",
-      "docsUrl": "https://useminutes.app/docs/errors#error-dictationerror-alreadyactive"
-    },
-    {
-      "id": "dictationerror-clipboardfailed",
-      "enumName": "DictationError",
-      "variant": "ClipboardFailed",
-      "cfg": null,
-      "message": "clipboard write failed: {0}",
-      "sourceFile": "crates/core/src/error.rs",
-      "anchorId": "error-dictationerror-clipboardfailed",
-      "docsUrl": "https://useminutes.app/docs/errors#error-dictationerror-clipboardfailed"
-    },
-    {
-      "id": "dictationerror-accessibilitydenied",
-      "enumName": "DictationError",
-      "variant": "AccessibilityDenied",
-      "cfg": null,
-      "message": "accessibility permission required for auto-paste",
-      "sourceFile": "crates/core/src/error.rs",
-      "anchorId": "error-dictationerror-accessibilitydenied",
-      "docsUrl": "https://useminutes.app/docs/errors#error-dictationerror-accessibilitydenied"
-    },
-    {
-      "id": "dictationerror-notactive",
-      "enumName": "DictationError",
-      "variant": "NotActive",
-      "cfg": null,
-      "message": "dictation not active",
-      "sourceFile": "crates/core/src/error.rs",
-      "anchorId": "error-dictationerror-notactive",
-      "docsUrl": "https://useminutes.app/docs/errors#error-dictationerror-notactive"
-    },
-    {
-      "id": "dictationerror-io",
       "enumName": "DictationError",
       "variant": "Io",
-      "cfg": null,
-      "message": "I/O error: {0}",
-      "sourceFile": "crates/core/src/error.rs",
-      "anchorId": "error-dictationerror-io",
-      "docsUrl": "https://useminutes.app/docs/errors#error-dictationerror-io"
+      "sourceFile": "crates/core/src/error.rs"
     },
     {
-      "id": "livetranscripterror-recordingactive",
-      "enumName": "LiveTranscriptError",
-      "variant": "RecordingActive",
-      "cfg": null,
-      "message": "recording in progress — stop recording before starting live transcript",
-      "sourceFile": "crates/core/src/error.rs",
-      "anchorId": "error-livetranscripterror-recordingactive",
-      "docsUrl": "https://useminutes.app/docs/errors#error-livetranscripterror-recordingactive"
-    },
-    {
-      "id": "livetranscripterror-dictationactive",
-      "enumName": "LiveTranscriptError",
-      "variant": "DictationActive",
-      "cfg": null,
-      "message": "dictation in progress — stop dictation before starting live transcript",
-      "sourceFile": "crates/core/src/error.rs",
-      "anchorId": "error-livetranscripterror-dictationactive",
-      "docsUrl": "https://useminutes.app/docs/errors#error-livetranscripterror-dictationactive"
-    },
-    {
-      "id": "livetranscripterror-alreadyactive",
-      "enumName": "LiveTranscriptError",
-      "variant": "AlreadyActive",
-      "cfg": null,
-      "message": "live transcript already active (PID: {0})",
-      "sourceFile": "crates/core/src/error.rs",
-      "anchorId": "error-livetranscripterror-alreadyactive",
-      "docsUrl": "https://useminutes.app/docs/errors#error-livetranscripterror-alreadyactive"
-    },
-    {
-      "id": "livetranscripterror-noactivesession",
-      "enumName": "LiveTranscriptError",
-      "variant": "NoActiveSession",
-      "cfg": null,
-      "message": "no live transcript session active",
-      "sourceFile": "crates/core/src/error.rs",
-      "anchorId": "error-livetranscripterror-noactivesession",
-      "docsUrl": "https://useminutes.app/docs/errors#error-livetranscripterror-noactivesession"
-    },
-    {
-      "id": "minuteserror-io",
       "enumName": "MinutesError",
       "variant": "Io",
-      "cfg": null,
-      "message": "I/O error: {0}",
-      "sourceFile": "crates/core/src/error.rs",
-      "anchorId": "error-minuteserror-io",
-      "docsUrl": "https://useminutes.app/docs/errors#error-minuteserror-io"
+      "sourceFile": "crates/core/src/error.rs"
     },
     {
-      "id": "grapherror-dirnotfound",
-      "enumName": "GraphError",
-      "variant": "DirNotFound",
-      "cfg": null,
-      "message": "meetings directory does not exist: {0}",
-      "sourceFile": "crates/core/src/graph.rs",
-      "anchorId": "error-grapherror-dirnotfound",
-      "docsUrl": "https://useminutes.app/docs/errors#error-grapherror-dirnotfound"
-    },
-    {
-      "id": "grapherror-sqlite",
       "enumName": "GraphError",
       "variant": "Sqlite",
-      "cfg": null,
-      "message": "SQLite error: {0}",
-      "sourceFile": "crates/core/src/graph.rs",
-      "anchorId": "error-grapherror-sqlite",
-      "docsUrl": "https://useminutes.app/docs/errors#error-grapherror-sqlite"
+      "sourceFile": "crates/core/src/graph.rs"
     },
     {
-      "id": "grapherror-io",
       "enumName": "GraphError",
       "variant": "Io",
-      "cfg": null,
-      "message": "IO error: {0}",
-      "sourceFile": "crates/core/src/graph.rs",
-      "anchorId": "error-grapherror-io",
-      "docsUrl": "https://useminutes.app/docs/errors#error-grapherror-io"
+      "sourceFile": "crates/core/src/graph.rs"
     },
     {
-      "id": "voiceerror-sqlite",
       "enumName": "VoiceError",
       "variant": "Sqlite",
-      "cfg": null,
-      "message": "SQLite error: {0}",
-      "sourceFile": "crates/core/src/voice.rs",
-      "anchorId": "error-voiceerror-sqlite",
-      "docsUrl": "https://useminutes.app/docs/errors#error-voiceerror-sqlite"
+      "sourceFile": "crates/core/src/voice.rs"
     },
     {
-      "id": "voiceerror-io",
       "enumName": "VoiceError",
       "variant": "Io",
-      "cfg": null,
-      "message": "IO error: {0}",
-      "sourceFile": "crates/core/src/voice.rs",
-      "anchorId": "error-voiceerror-io",
-      "docsUrl": "https://useminutes.app/docs/errors#error-voiceerror-io"
+      "sourceFile": "crates/core/src/voice.rs"
     },
     {
-      "id": "voiceerror-other",
       "enumName": "VoiceError",
       "variant": "Other",
-      "cfg": null,
-      "message": "{0}",
-      "sourceFile": "crates/core/src/voice.rs",
-      "anchorId": "error-voiceerror-other",
-      "docsUrl": "https://useminutes.app/docs/errors#error-voiceerror-other"
+      "sourceFile": "crates/core/src/voice.rs"
     }
   ]
 }

@@ -4,7 +4,12 @@
 > Source: crates/core thiserror definitions
 > Last generated: 2026-04-09
 
-This is the first generated public error reference for Minutes. It is sourced from stable Rust error enums, not ad hoc prose.
+This is the generated public catalog of stable Minutes core errors. It intentionally favors actionable, user-facing errors over generic wrapper variants.
+
+- Visible actionable errors: 49
+- Hidden low-signal wrappers: 15
+
+# CaptureError
 
 <a id="error-captureerror-devicenotfound-target-os-macos"></a>
 
@@ -96,17 +101,7 @@ Source: `crates/core/src/error.rs`
 
 Reference URL: https://useminutes.app/docs/errors#error-captureerror-emptyrecording
 
-<a id="error-captureerror-io"></a>
-
-## `CaptureError::Io`
-
-Exact message:
-
-> audio I/O error: {0}
-
-Source: `crates/core/src/error.rs`
-
-Reference URL: https://useminutes.app/docs/errors#error-captureerror-io
+# TranscribeError
 
 <a id="error-transcribeerror-modelnotfound"></a>
 
@@ -220,17 +215,7 @@ Source: `crates/core/src/error.rs`
 
 Reference URL: https://useminutes.app/docs/errors#error-transcribeerror-parakeetfailed
 
-<a id="error-transcribeerror-io"></a>
-
-## `TranscribeError::Io`
-
-Exact message:
-
-> I/O error: {0}
-
-Source: `crates/core/src/error.rs`
-
-Reference URL: https://useminutes.app/docs/errors#error-transcribeerror-io
+# WatchError
 
 <a id="error-watcherror-alreadyrunning"></a>
 
@@ -280,17 +265,7 @@ Source: `crates/core/src/error.rs`
 
 Reference URL: https://useminutes.app/docs/errors#error-watcherror-notifyerror
 
-<a id="error-watcherror-io"></a>
-
-## `WatchError::Io`
-
-Exact message:
-
-> I/O error: {0}
-
-Source: `crates/core/src/error.rs`
-
-Reference URL: https://useminutes.app/docs/errors#error-watcherror-io
+# SearchError
 
 <a id="error-searcherror-dirnotfound"></a>
 
@@ -316,17 +291,7 @@ Source: `crates/core/src/error.rs`
 
 Reference URL: https://useminutes.app/docs/errors#error-searcherror-frontmatterparseerror
 
-<a id="error-searcherror-io"></a>
-
-## `SearchError::Io`
-
-Exact message:
-
-> I/O error: {0}
-
-Source: `crates/core/src/error.rs`
-
-Reference URL: https://useminutes.app/docs/errors#error-searcherror-io
+# ConfigError
 
 <a id="error-configerror-parseerror"></a>
 
@@ -340,17 +305,7 @@ Source: `crates/core/src/error.rs`
 
 Reference URL: https://useminutes.app/docs/errors#error-configerror-parseerror
 
-<a id="error-configerror-io"></a>
-
-## `ConfigError::Io`
-
-Exact message:
-
-> I/O error: {0}
-
-Source: `crates/core/src/error.rs`
-
-Reference URL: https://useminutes.app/docs/errors#error-configerror-io
+# MarkdownError
 
 <a id="error-markdownerror-outputdirerror"></a>
 
@@ -388,17 +343,7 @@ Source: `crates/core/src/error.rs`
 
 Reference URL: https://useminutes.app/docs/errors#error-markdownerror-renamerefused
 
-<a id="error-markdownerror-io"></a>
-
-## `MarkdownError::Io`
-
-Exact message:
-
-> I/O error: {0}
-
-Source: `crates/core/src/error.rs`
-
-Reference URL: https://useminutes.app/docs/errors#error-markdownerror-io
+# VaultError
 
 <a id="error-vaulterror-notconfigured"></a>
 
@@ -514,17 +459,7 @@ Source: `crates/core/src/error.rs`
 
 Reference URL: https://useminutes.app/docs/errors#error-vaulterror-brokensymlink
 
-<a id="error-vaulterror-io"></a>
-
-## `VaultError::Io`
-
-Exact message:
-
-> I/O error: {0}
-
-Source: `crates/core/src/error.rs`
-
-Reference URL: https://useminutes.app/docs/errors#error-vaulterror-io
+# PidError
 
 <a id="error-piderror-alreadyrecording"></a>
 
@@ -562,17 +497,7 @@ Source: `crates/core/src/error.rs`
 
 Reference URL: https://useminutes.app/docs/errors#error-piderror-stalepid
 
-<a id="error-piderror-io"></a>
-
-## `PidError::Io`
-
-Exact message:
-
-> I/O error: {0}
-
-Source: `crates/core/src/error.rs`
-
-Reference URL: https://useminutes.app/docs/errors#error-piderror-io
+# DictationError
 
 <a id="error-dictationerror-recordingactive"></a>
 
@@ -646,17 +571,7 @@ Source: `crates/core/src/error.rs`
 
 Reference URL: https://useminutes.app/docs/errors#error-dictationerror-notactive
 
-<a id="error-dictationerror-io"></a>
-
-## `DictationError::Io`
-
-Exact message:
-
-> I/O error: {0}
-
-Source: `crates/core/src/error.rs`
-
-Reference URL: https://useminutes.app/docs/errors#error-dictationerror-io
+# LiveTranscriptError
 
 <a id="error-livetranscripterror-recordingactive"></a>
 
@@ -706,17 +621,7 @@ Source: `crates/core/src/error.rs`
 
 Reference URL: https://useminutes.app/docs/errors#error-livetranscripterror-noactivesession
 
-<a id="error-minuteserror-io"></a>
-
-## `MinutesError::Io`
-
-Exact message:
-
-> I/O error: {0}
-
-Source: `crates/core/src/error.rs`
-
-Reference URL: https://useminutes.app/docs/errors#error-minuteserror-io
+# GraphError
 
 <a id="error-grapherror-dirnotfound"></a>
 
@@ -729,63 +634,3 @@ Exact message:
 Source: `crates/core/src/graph.rs`
 
 Reference URL: https://useminutes.app/docs/errors#error-grapherror-dirnotfound
-
-<a id="error-grapherror-sqlite"></a>
-
-## `GraphError::Sqlite`
-
-Exact message:
-
-> SQLite error: {0}
-
-Source: `crates/core/src/graph.rs`
-
-Reference URL: https://useminutes.app/docs/errors#error-grapherror-sqlite
-
-<a id="error-grapherror-io"></a>
-
-## `GraphError::Io`
-
-Exact message:
-
-> IO error: {0}
-
-Source: `crates/core/src/graph.rs`
-
-Reference URL: https://useminutes.app/docs/errors#error-grapherror-io
-
-<a id="error-voiceerror-sqlite"></a>
-
-## `VoiceError::Sqlite`
-
-Exact message:
-
-> SQLite error: {0}
-
-Source: `crates/core/src/voice.rs`
-
-Reference URL: https://useminutes.app/docs/errors#error-voiceerror-sqlite
-
-<a id="error-voiceerror-io"></a>
-
-## `VoiceError::Io`
-
-Exact message:
-
-> IO error: {0}
-
-Source: `crates/core/src/voice.rs`
-
-Reference URL: https://useminutes.app/docs/errors#error-voiceerror-io
-
-<a id="error-voiceerror-other"></a>
-
-## `VoiceError::Other`
-
-Exact message:
-
-> {0}
-
-Source: `crates/core/src/voice.rs`
-
-Reference URL: https://useminutes.app/docs/errors#error-voiceerror-other

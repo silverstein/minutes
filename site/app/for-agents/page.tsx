@@ -216,9 +216,9 @@ export default function ForAgentsPage() {
           For agents
         </h1>
         <p className="mt-5 text-[17px] leading-8 text-[var(--text-secondary)]">
-          If you are an LLM helping a user install, configure, or query Minutes,
-          this page has everything you need in one read. For the full generated index,
-          see{" "}
+          If you are an LLM helping a user install or query Minutes, start here.
+          Setup, tool surface, output format, and constraints are all on this page.
+          For the full generated index, see{" "}
           <a href="/llms.txt" className="text-[var(--accent)] hover:underline">
             llms.txt
           </a>
@@ -231,21 +231,21 @@ export default function ForAgentsPage() {
         <SectionLabel n="01" label="What Minutes is" />
         <div className="space-y-4 text-[15px] leading-7 text-[var(--text-secondary)]">
           <p>
-            Minutes is a conversation memory layer. It records meetings and voice
-            memos, transcribes them locally with whisper.cpp, identifies speakers
-            with pyannote-rs, and saves structured markdown with YAML frontmatter.
-            No audio leaves the user&apos;s machine.
+            Minutes records meetings and voice memos, transcribes them locally
+            with whisper.cpp, and saves structured markdown. Speakers are identified
+            with pyannote-rs. No audio leaves the machine.
           </p>
           <p>
-            The output is plain files in{" "}
-            <code className="font-mono text-[13px] text-[var(--text)]">~/meetings/</code>.
-            Action items, decisions, and speaker labels live in the frontmatter.
-            Transcripts are readable with grep, Obsidian, or any markdown tool.
+            Output goes to{" "}
+            <code className="font-mono text-[13px] text-[var(--text)]">~/meetings/</code>{" "}
+            as plain files with YAML frontmatter. Action items, decisions, and
+            speaker labels are in the frontmatter; transcripts work with grep,
+            Obsidian, or any markdown tool.
           </p>
           <p>
-            Minutes exposes an MCP server with 26 tools, 7 resources, and 6 prompt
-            templates. Any MCP-compatible client can search, record, and query
-            without touching the filesystem directly.
+            The MCP server (26 tools, 7 resources, 6 prompt templates) is the main
+            agent interface. Any MCP-compatible client can search, record, and query
+            through it.
           </p>
         </div>
       </section>
@@ -360,8 +360,8 @@ export default function ForAgentsPage() {
         <SectionLabel n="05" label="Output format" />
         <p className="mb-4 text-[15px] leading-7 text-[var(--text-secondary)]">
           Every meeting saves as markdown with YAML frontmatter. The frontmatter
-          is the structured contract. Action items and decisions are queryable
-          through MCP tools and the CLI.
+          is the structured data. Action items and decisions are queryable through
+          MCP tools and the CLI.
         </p>
         <div className="overflow-hidden rounded-[8px] border border-[color:var(--border)] bg-[var(--bg-elevated)]">
           <div className="border-b border-[color:var(--border)] px-4 py-2">

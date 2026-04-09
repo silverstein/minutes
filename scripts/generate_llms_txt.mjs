@@ -172,6 +172,14 @@ async function parseErrorCatalog() {
   return allEntries;
 }
 
+function classifyErrorEntry(entry) {
+  const lowSignalVariants = new Set(["Io", "Sqlite", "Other"]);
+  return {
+    ...entry,
+    hidden: lowSignalVariants.has(entry.variant),
+  };
+}
+
 function buildLlmsTxt({ manifest, resources }) {
   const generatedOn = new Date().toISOString().slice(0, 10);
   const installCommand = "npx minutes-mcp";
@@ -342,12 +350,29 @@ ${resourceLines}
 
 function buildErrorsMarkdown(entries) {
   const generatedOn = new Date().toISOString().slice(0, 10);
-  const sections = entries
-    .map((entry) => {
-      const cfgLine = entry.cfg ? `\n\nPlatform condition: \`${entry.cfg}\`` : "";
-      return `<a id="error-${entry.id}"></a>\n\n## \`${entry.enumName}::${entry.variant}\`\n\nExact message:\n\n> ${entry.message.replace(/\n/g, "\n> ")}${cfgLine}\n\nSource: \`${entry.sourceFile}\`\n\nReference URL: ${errorsBaseUrl}#error-${entry.id}`;
+  const visibleEntries = entries.filter((entry) => !entry.hidden);
+  const hiddenCount = entries.length - visibleEntries.length;
+  const grouped = Object.entries(
+    visibleEntries.reduce((acc, entry) => {
+      acc[entry.enumName] ||= [];
+      acc[entry.enumName].push(entry);
+      return acc;
+    }, {})
+  );
+
+  const sections = grouped
+    .map(([enumName, groupEntries]) => {
+      const block = groupEntries
+        .map((entry) => {
+          const cfgLine = entry.cfg ? `\n\nPlatform condition: \`${entry.cfg}\`` : "";
+          return `<a id="error-${entry.id}"></a>\n\n## \`${entry.enumName}::${entry.variant}\`\n\nExact message:\n\n> ${entry.message.replace(/\n/g, "\n> ")}${cfgLine}\n\nSource: \`${entry.sourceFile}\`\n\nReference URL: ${errorsBaseUrl}#error-${entry.id}`;
+        })
+        .join("\n\n");
+
+      return `# ${enumName}\n\n${block}`;
     })
-    .join("\n\n");
+    .join("\n\n")
+    .trim();
 
   return `# Minutes error reference
 
@@ -355,20 +380,44 @@ function buildErrorsMarkdown(entries) {
 > Source: crates/core thiserror definitions
 > Last generated: ${generatedOn}
 
-This is the first generated public error reference for Minutes. It is sourced from stable Rust error enums, not ad hoc prose.
+This is the generated public catalog of stable Minutes core errors. It intentionally favors actionable, user-facing errors over generic wrapper variants.
+
+- Visible actionable errors: ${visibleEntries.length}
+- Hidden low-signal wrappers: ${hiddenCount}
 
 ${sections}
 `;
 }
 
 function buildErrorsData(entries) {
+  const visibleEntries = entries.filter((entry) => !entry.hidden);
+  const hiddenEntries = entries.filter((entry) => entry.hidden);
+  const groups = Object.entries(
+    visibleEntries.reduce((acc, entry) => {
+      acc[entry.enumName] ||= [];
+      acc[entry.enumName].push(entry);
+      return acc;
+    }, {})
+  ).map(([enumName, groupEntries]) => ({
+    enumName,
+    count: groupEntries.length,
+    entries: groupEntries.map((entry) => ({
+      ...entry,
+      anchorId: `error-${entry.id}`,
+      docsUrl: `${errorsBaseUrl}#error-${entry.id}`,
+    })),
+  }));
+
   return JSON.stringify(
     {
       generatedAt: new Date().toISOString().slice(0, 10),
-      entries: entries.map((entry) => ({
-        ...entry,
-        anchorId: `error-${entry.id}`,
-        docsUrl: `${errorsBaseUrl}#error-${entry.id}`,
+      visibleCount: visibleEntries.length,
+      hiddenCount: hiddenEntries.length,
+      groups,
+      hiddenEnums: hiddenEntries.map((entry) => ({
+        enumName: entry.enumName,
+        variant: entry.variant,
+        sourceFile: entry.sourceFile,
       })),
     },
     null,
@@ -469,7 +518,7 @@ async function main() {
   const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
   const mcpSource = await readFile(mcpSourcePath, "utf8");
   const resources = parseResources(mcpSource);
-  const errorEntries = await parseErrorCatalog();
+  const errorEntries = (await parseErrorCatalog()).map(classifyErrorEntry);
 
   if (resources.length === 0) {
     throw new Error("Failed to extract MCP resources from crates/mcp/src/index.ts");

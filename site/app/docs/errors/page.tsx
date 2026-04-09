@@ -57,33 +57,50 @@ export default function ErrorsPage() {
           Minutes error reference
         </h1>
         <p className="mt-5 text-[17px] leading-8 text-[var(--text-secondary)]">
-          First generated public catalog of stable Minutes core errors. This is intentionally
-          source-backed and lightweight: exact messages, enum/variant identifiers, platform notes,
-          and stable anchors.
+          Generated catalog of stable Minutes core errors. It stays source-backed, but now favors
+          actionable user-facing errors over generic wrapper variants so the page is easier to use
+          in real troubleshooting.
         </p>
       </section>
 
       <section className="mt-14">
-        <SectionLabel label={`Errors (${data.entries.length})`} />
-        <div className="grid gap-4">
-          {data.entries.map((entry) => (
-            <div
-              key={entry.anchorId}
-              id={entry.anchorId}
-              className="rounded-[8px] border border-[color:var(--border)] bg-[var(--bg-elevated)] p-5"
-            >
-              <div className="flex items-start justify-between gap-3">
-                <p className="font-mono text-[13px] text-[var(--text)]">
-                  {entry.enumName}::{entry.variant}
-                </p>
-                <LinkPill href={entry.docsUrl} />
-              </div>
-              <p className="mt-3 whitespace-pre-wrap text-[14px] leading-7 text-[var(--text-secondary)]">
-                {entry.message}
-              </p>
-              <div className="mt-4 space-y-1 font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--text-secondary)]">
-                <div>Source: {entry.sourceFile}</div>
-                {entry.cfg ? <div>Platform: {entry.cfg}</div> : null}
+        <SectionLabel label={`Errors (${data.visibleCount})`} />
+        <div className="mb-8 rounded-[8px] border border-[color:var(--border)] bg-[var(--bg-elevated)] p-5 shadow-[var(--shadow-panel)]">
+          <p className="font-mono text-[11px] uppercase tracking-[0.16em] text-[var(--accent)]">
+            Catalog notes
+          </p>
+          <div className="mt-3 space-y-2 text-[14px] leading-7 text-[var(--text-secondary)]">
+            <p>Visible actionable errors: {data.visibleCount}</p>
+            <p>Hidden low-signal wrappers: {data.hiddenCount}</p>
+          </div>
+        </div>
+
+        <div className="space-y-10">
+          {data.groups.map((group) => (
+            <div key={group.enumName}>
+              <SectionLabel label={`${group.enumName} (${group.count})`} />
+              <div className="grid gap-4">
+                {group.entries.map((entry) => (
+                  <div
+                    key={entry.anchorId}
+                    id={entry.anchorId}
+                    className="rounded-[8px] border border-[color:var(--border)] bg-[var(--bg-elevated)] p-5"
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <p className="font-mono text-[13px] text-[var(--text)]">
+                        {entry.enumName}::{entry.variant}
+                      </p>
+                      <LinkPill href={entry.docsUrl} />
+                    </div>
+                    <p className="mt-3 whitespace-pre-wrap text-[14px] leading-7 text-[var(--text-secondary)]">
+                      {entry.message}
+                    </p>
+                    <div className="mt-4 space-y-1 font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--text-secondary)]">
+                      <div>Source: {entry.sourceFile}</div>
+                      {entry.cfg ? <div>Platform: {entry.cfg}</div> : null}
+                    </div>
+                  </div>
+                ))}
               </div>
             </div>
           ))}

@@ -495,11 +495,11 @@ function buildMcpToolsMarkdown({ manifest, resources }) {
     .sort(([a], [b]) => toolGroupOrder.indexOf(a) - toolGroupOrder.indexOf(b))
     .map(
       ([group, tools]) =>
-        `# ${group}\n\n` +
+        `### ${group}\n\n` +
         tools
           .map(
             (tool) =>
-              `<a id="tool-${anchorSlug(tool.name)}"></a>\n\n## \`${tool.name}\`\n\n${tool.description}\n\nReference URL: ${mcpToolsBaseUrl}#tool-${anchorSlug(tool.name)}`
+              `<a id="tool-${anchorSlug(tool.name)}"></a>\n\n#### \`${tool.name}\`\n\n${tool.description}\n\nReference URL: ${mcpToolsBaseUrl}#tool-${anchorSlug(tool.name)}`
           )
           .join("\n\n")
     )
@@ -515,11 +515,11 @@ function buildMcpToolsMarkdown({ manifest, resources }) {
   )
     .map(
       ([group, resourceEntries]) =>
-        `# ${group}\n\n` +
+        `### ${group}\n\n` +
         resourceEntries
           .map(
             (resource) =>
-              `<a id="resource-${anchorSlug(resource.name)}"></a>\n\n## \`${resource.uri}\`\n\n${resource.description}\n\nReference URL: ${mcpToolsBaseUrl}#resource-${anchorSlug(resource.name)}`
+              `<a id="resource-${anchorSlug(resource.name)}"></a>\n\n#### \`${resource.uri}\`\n\n${resource.description}\n\nReference URL: ${mcpToolsBaseUrl}#resource-${anchorSlug(resource.name)}`
           )
           .join("\n\n")
     )
@@ -535,11 +535,11 @@ function buildMcpToolsMarkdown({ manifest, resources }) {
   )
     .map(
       ([group, prompts]) =>
-        `# ${group}\n\n` +
+        `### ${group}\n\n` +
         prompts
           .map(
             (prompt) =>
-              `<a id="prompt-${anchorSlug(prompt.name)}"></a>\n\n## \`${prompt.name}\`\n\n${prompt.description}\n\nReference URL: ${mcpToolsBaseUrl}#prompt-${anchorSlug(prompt.name)}`
+              `<a id="prompt-${anchorSlug(prompt.name)}"></a>\n\n#### \`${prompt.name}\`\n\n${prompt.description}\n\nReference URL: ${mcpToolsBaseUrl}#prompt-${anchorSlug(prompt.name)}`
           )
           .join("\n\n")
     )
@@ -549,6 +549,7 @@ function buildMcpToolsMarkdown({ manifest, resources }) {
 
 > Generated file. Do not edit by hand.
 > Source: manifest.json + crates/mcp/src/index.ts
+> Regenerate: node scripts/generate_llms_txt.mjs
 > Last generated: ${generatedOn}
 
 Minutes exposes ${manifest.tools.length} tools, ${resources.length} resources, and ${manifest.prompts.length} prompt templates through the MCP server.

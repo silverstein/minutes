@@ -2,6 +2,7 @@
 
 > Generated file. Do not edit by hand.
 > Source: manifest.json + crates/mcp/src/index.ts
+> Regenerate: node scripts/generate_llms_txt.mjs
 > Last generated: 2026-04-09
 
 Minutes exposes 26 tools, 7 resources, and 6 prompt templates through the MCP server.
@@ -21,11 +22,11 @@ Minutes exposes 26 tools, 7 resources, and 6 prompt templates through the MCP se
 
 ## Tools
 
-# Recording
+### Recording
 
 <a id="tool-start-recording"></a>
 
-## `start_recording`
+#### `start_recording`
 
 Start recording audio from the default input device
 
@@ -33,7 +34,7 @@ Reference URL: https://useminutes.app/docs/mcp/tools#tool-start-recording
 
 <a id="tool-stop-recording"></a>
 
-## `stop_recording`
+#### `stop_recording`
 
 Stop the current recording and process it
 
@@ -41,7 +42,7 @@ Reference URL: https://useminutes.app/docs/mcp/tools#tool-stop-recording
 
 <a id="tool-get-status"></a>
 
-## `get_status`
+#### `get_status`
 
 Check if a recording is currently in progress
 
@@ -49,17 +50,17 @@ Reference URL: https://useminutes.app/docs/mcp/tools#tool-get-status
 
 <a id="tool-list-processing-jobs"></a>
 
-## `list_processing_jobs`
+#### `list_processing_jobs`
 
 List background processing jobs for recent recordings
 
 Reference URL: https://useminutes.app/docs/mcp/tools#tool-list-processing-jobs
 
-# Search and recall
+### Search and recall
 
 <a id="tool-list-meetings"></a>
 
-## `list_meetings`
+#### `list_meetings`
 
 List recent meetings and voice memos
 
@@ -67,7 +68,7 @@ Reference URL: https://useminutes.app/docs/mcp/tools#tool-list-meetings
 
 <a id="tool-search-meetings"></a>
 
-## `search_meetings`
+#### `search_meetings`
 
 Search meeting transcripts and voice memos
 
@@ -75,7 +76,7 @@ Reference URL: https://useminutes.app/docs/mcp/tools#tool-search-meetings
 
 <a id="tool-get-meeting"></a>
 
-## `get_meeting`
+#### `get_meeting`
 
 Get full transcript of a specific meeting
 
@@ -83,17 +84,17 @@ Reference URL: https://useminutes.app/docs/mcp/tools#tool-get-meeting
 
 <a id="tool-research-topic"></a>
 
-## `research_topic`
+#### `research_topic`
 
 Research a topic across meetings, decisions, and follow-ups
 
 Reference URL: https://useminutes.app/docs/mcp/tools#tool-research-topic
 
-# People and relationships
+### People and relationships
 
 <a id="tool-consistency-report"></a>
 
-## `consistency_report`
+#### `consistency_report`
 
 Flag conflicting decisions and stale commitments
 
@@ -101,7 +102,7 @@ Reference URL: https://useminutes.app/docs/mcp/tools#tool-consistency-report
 
 <a id="tool-get-person-profile"></a>
 
-## `get_person_profile`
+#### `get_person_profile`
 
 Build a profile for a person across all meetings
 
@@ -109,7 +110,7 @@ Reference URL: https://useminutes.app/docs/mcp/tools#tool-get-person-profile
 
 <a id="tool-track-commitments"></a>
 
-## `track_commitments`
+#### `track_commitments`
 
 List open and stale commitments, optionally filtered by person
 
@@ -117,17 +118,17 @@ Reference URL: https://useminutes.app/docs/mcp/tools#tool-track-commitments
 
 <a id="tool-relationship-map"></a>
 
-## `relationship_map`
+#### `relationship_map`
 
 All contacts with relationship scores and losing-touch alerts
 
 Reference URL: https://useminutes.app/docs/mcp/tools#tool-relationship-map
 
-# Insights
+### Insights
 
 <a id="tool-get-meeting-insights"></a>
 
-## `get_meeting_insights`
+#### `get_meeting_insights`
 
 Query structured meeting insights (decisions, commitments, questions) with confidence filtering
 
@@ -135,7 +136,7 @@ Reference URL: https://useminutes.app/docs/mcp/tools#tool-get-meeting-insights
 
 <a id="tool-ingest-meeting"></a>
 
-## `ingest_meeting`
+#### `ingest_meeting`
 
 Extract facts from a meeting and update the knowledge base (person profiles, log, index)
 
@@ -143,17 +144,17 @@ Reference URL: https://useminutes.app/docs/mcp/tools#tool-ingest-meeting
 
 <a id="tool-knowledge-status"></a>
 
-## `knowledge_status`
+#### `knowledge_status`
 
 Show the current state of the knowledge base — configuration, adapter, people count, log entries
 
 Reference URL: https://useminutes.app/docs/mcp/tools#tool-knowledge-status
 
-# Live and dictation
+### Live and dictation
 
 <a id="tool-start-dictation"></a>
 
-## `start_dictation`
+#### `start_dictation`
 
 Start dictation mode — speech to clipboard and daily notes
 
@@ -161,7 +162,7 @@ Reference URL: https://useminutes.app/docs/mcp/tools#tool-start-dictation
 
 <a id="tool-stop-dictation"></a>
 
-## `stop_dictation`
+#### `stop_dictation`
 
 Stop dictation mode
 
@@ -169,7 +170,7 @@ Reference URL: https://useminutes.app/docs/mcp/tools#tool-stop-dictation
 
 <a id="tool-start-live-transcript"></a>
 
-## `start_live_transcript`
+#### `start_live_transcript`
 
 Start a live transcript session for real-time meeting transcription
 
@@ -177,17 +178,17 @@ Reference URL: https://useminutes.app/docs/mcp/tools#tool-start-live-transcript
 
 <a id="tool-read-live-transcript"></a>
 
-## `read_live_transcript`
+#### `read_live_transcript`
 
 Read utterances from the active live transcript with optional cursor or time window
 
 Reference URL: https://useminutes.app/docs/mcp/tools#tool-read-live-transcript
 
-# Notes and processing
+### Notes and processing
 
 <a id="tool-process-audio"></a>
 
-## `process_audio`
+#### `process_audio`
 
 Process an audio file through the transcription pipeline
 
@@ -195,7 +196,7 @@ Reference URL: https://useminutes.app/docs/mcp/tools#tool-process-audio
 
 <a id="tool-add-note"></a>
 
-## `add_note`
+#### `add_note`
 
 Add a timestamped note to the current recording or an existing meeting
 
@@ -203,17 +204,17 @@ Reference URL: https://useminutes.app/docs/mcp/tools#tool-add-note
 
 <a id="tool-open-dashboard"></a>
 
-## `open_dashboard`
+#### `open_dashboard`
 
 Open the Meeting Intelligence Dashboard in the browser — visual overview of conversation memory
 
 Reference URL: https://useminutes.app/docs/mcp/tools#tool-open-dashboard
 
-# Voice and speaker ID
+### Voice and speaker ID
 
 <a id="tool-list-voices"></a>
 
-## `list_voices`
+#### `list_voices`
 
 List enrolled voice profiles for speaker identification
 
@@ -221,17 +222,17 @@ Reference URL: https://useminutes.app/docs/mcp/tools#tool-list-voices
 
 <a id="tool-confirm-speaker"></a>
 
-## `confirm_speaker`
+#### `confirm_speaker`
 
 Confirm or correct speaker attribution in a meeting transcript
 
 Reference URL: https://useminutes.app/docs/mcp/tools#tool-confirm-speaker
 
-# Integration
+### Integration
 
 <a id="tool-qmd-collection-status"></a>
 
-## `qmd_collection_status`
+#### `qmd_collection_status`
 
 Check if the Minutes output directory is registered as a QMD collection
 
@@ -239,7 +240,7 @@ Reference URL: https://useminutes.app/docs/mcp/tools#tool-qmd-collection-status
 
 <a id="tool-register-qmd-collection"></a>
 
-## `register_qmd_collection`
+#### `register_qmd_collection`
 
 Register the Minutes output directory as a QMD collection
 
@@ -247,21 +248,21 @@ Reference URL: https://useminutes.app/docs/mcp/tools#tool-register-qmd-collectio
 
 ## Resources
 
-# Dashboard
+### Dashboard
 
 <a id="resource-minutes-dashboard"></a>
 
-## `ui://minutes/dashboard`
+#### `ui://minutes/dashboard`
 
 Interactive meeting dashboard and detail viewer
 
 Reference URL: https://useminutes.app/docs/mcp/tools#resource-minutes-dashboard
 
-# Meetings
+### Meetings
 
 <a id="resource-recent-meetings"></a>
 
-## `minutes://meetings/recent`
+#### `minutes://meetings/recent`
 
 List of recent meetings and memos
 
@@ -269,17 +270,17 @@ Reference URL: https://useminutes.app/docs/mcp/tools#resource-recent-meetings
 
 <a id="resource-meeting"></a>
 
-## `minutes://meetings/{slug}`
+#### `minutes://meetings/{slug}`
 
 Get a specific meeting by its filename slug
 
 Reference URL: https://useminutes.app/docs/mcp/tools#resource-meeting
 
-# Status
+### Status
 
 <a id="resource-recording-status"></a>
 
-## `minutes://status`
+#### `minutes://status`
 
 Current recording status
 
@@ -287,17 +288,17 @@ Reference URL: https://useminutes.app/docs/mcp/tools#resource-recording-status
 
 <a id="resource-recent-events"></a>
 
-## `minutes://events/recent`
+#### `minutes://events/recent`
 
 Recent pipeline events (recordings, processing, notes)
 
 Reference URL: https://useminutes.app/docs/mcp/tools#resource-recent-events
 
-# Memory
+### Memory
 
 <a id="resource-open-actions"></a>
 
-## `minutes://actions/open`
+#### `minutes://actions/open`
 
 All open action items across meetings
 
@@ -305,7 +306,7 @@ Reference URL: https://useminutes.app/docs/mcp/tools#resource-open-actions
 
 <a id="resource-recent-ideas"></a>
 
-## `minutes://ideas/recent`
+#### `minutes://ideas/recent`
 
 Recent voice memos and ideas captured from any device (last 14 days)
 
@@ -313,11 +314,11 @@ Reference URL: https://useminutes.app/docs/mcp/tools#resource-recent-ideas
 
 ## Prompt templates
 
-# Prep
+### Prep
 
 <a id="prompt-meeting-prep"></a>
 
-## `meeting_prep`
+#### `meeting_prep`
 
 Prepare for an upcoming meeting
 
@@ -325,7 +326,7 @@ Reference URL: https://useminutes.app/docs/mcp/tools#prompt-meeting-prep
 
 <a id="prompt-person-briefing"></a>
 
-## `person_briefing`
+#### `person_briefing`
 
 Get a briefing on a person before a meeting
 
@@ -333,17 +334,17 @@ Reference URL: https://useminutes.app/docs/mcp/tools#prompt-person-briefing
 
 <a id="prompt-topic-research"></a>
 
-## `topic_research`
+#### `topic_research`
 
 Research a topic across all meetings
 
 Reference URL: https://useminutes.app/docs/mcp/tools#prompt-topic-research
 
-# Review
+### Review
 
 <a id="prompt-weekly-review"></a>
 
-## `weekly_review`
+#### `weekly_review`
 
 Review this week's meetings
 
@@ -351,17 +352,17 @@ Reference URL: https://useminutes.app/docs/mcp/tools#prompt-weekly-review
 
 <a id="prompt-find-action-items"></a>
 
-## `find_action_items`
+#### `find_action_items`
 
 Find action items assigned to someone
 
 Reference URL: https://useminutes.app/docs/mcp/tools#prompt-find-action-items
 
-# Capture
+### Capture
 
 <a id="prompt-start-meeting"></a>
 
-## `start_meeting`
+#### `start_meeting`
 
 Start recording a meeting
 

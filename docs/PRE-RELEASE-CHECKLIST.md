@@ -205,6 +205,7 @@ Anyone running `brew install --cask silverstein/tap/minutes` is silently stuck o
 - `CXXFLAGS += -I<sdk>/usr/include/c++/v1` and `CPLUS_INCLUDE_PATH` — required for whisper.cpp's `std::filesystem` usage on macOS 15+/Xcode 26+ (silverstein/minutes#14)
 - `MACOSX_DEPLOYMENT_TARGET=11.0` and `CMAKE_OSX_DEPLOYMENT_TARGET=11.0` — same root cause; `whisper-rs-sys` hardcodes 10.13 in CMake C/C++ flags, which is incompatible with `std::filesystem`
 - `GGML_CCACHE=OFF` — whisper.cpp's CMakeLists has `GGML_CCACHE=ON` by default; if a user has ccache installed (e.g. via Homebrew), `find_program()` locates it at cmake-configure time but the resulting `RULE_LAUNCH_COMPILE` fails at make-time inside Homebrew's sanitized superenv PATH (silverstein/minutes#89). `whisper-rs-sys` forwards any `GGML_*`, `WHISPER_*`, or `CMAKE_*` env var to cmake as `-D<KEY>=<VALUE>`, which is how this disable propagates.
+- Windows desktop release builds must set `GGML_NATIVE=OFF`, keep `GGML_AVX=ON` / `GGML_AVX2=ON`, and force all `GGML_AVX512*` flags `OFF` — otherwise the GitHub Windows runner can enable AVX-512 code paths in ggml/whisper.cpp that crash on normal consumer CPUs with `STATUS_ILLEGAL_INSTRUCTION` (silverstein/minutes#106)
 
 ### 9.3 crates.io: not currently published
 

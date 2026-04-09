@@ -1,4 +1,4 @@
-# Local-only working docs (not for open-source repo)
+# Local working docs (not for repo)
 .claude/*.local.md
 .claude/extension-stats/
 

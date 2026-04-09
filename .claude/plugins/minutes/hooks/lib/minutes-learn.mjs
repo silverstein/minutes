@@ -20,6 +20,13 @@ function ensureDir() {
   mkdirSync(AGENT_DIR, { recursive: true });
 }
 
+function normalizeLearningKey(type, key) {
+  if (type === "alias") {
+    return normalizePersonName(key);
+  }
+  return key;
+}
+
 export function normalizePersonName(value) {
   return value
     .normalize("NFKD")
@@ -48,8 +55,9 @@ export function readLearnings() {
 }
 
 export function getLatestLearning(type, key) {
+  const normalizedKey = normalizeLearningKey(type, key);
   const matches = readLearnings()
-    .filter((entry) => entry.type === type && entry.key === key)
+    .filter((entry) => entry.type === type && entry.key === normalizedKey)
     .sort((a, b) => new Date(a.ts).getTime() - new Date(b.ts).getTime());
   return matches[matches.length - 1] ?? null;
 }
@@ -64,10 +72,11 @@ export function rememberExplicit(type, key, value, notes = "") {
   if (!ALLOWED_TYPES.has(type)) {
     throw new Error(`Unsupported learning type: ${type}`);
   }
+  const normalizedKey = normalizeLearningKey(type, key);
   return appendLearning({
     ts: new Date().toISOString(),
     type,
-    key,
+    key: normalizedKey,
     value,
     source: "explicit",
     confidence: 1.0,
@@ -134,9 +143,24 @@ export function getAliasCluster(name) {
   const adjacency = new Map();
   const displayNames = new Map();
 
-  for (const entry of readLearnings()) {
+  const entries = readLearnings().sort(
+    (a, b) => new Date(a.ts).getTime() - new Date(b.ts).getTime(),
+  );
+
+  for (const entry of entries) {
     if (entry.type !== "alias") continue;
     const a = normalizePersonName(entry.key || "");
+    if (!a) continue;
+    if (entry.value == null) {
+      const neighbors = adjacency.get(a);
+      if (neighbors) {
+        for (const neighbor of neighbors) {
+          adjacency.get(neighbor)?.delete(a);
+        }
+      }
+      adjacency.set(a, new Set());
+      continue;
+    }
     const b = normalizePersonName(entry.value?.normalized || entry.value?.name || "");
     const displayA = entry.value?.anchor || entry.key;
     const displayB = entry.value?.name || entry.value?.normalized;
@@ -178,10 +202,11 @@ export function clearLearning(type, key) {
   if (!ALLOWED_TYPES.has(type)) {
     throw new Error(`Unsupported learning type: ${type}`);
   }
+  const normalizedKey = normalizeLearningKey(type, key);
   return appendLearning({
     ts: new Date().toISOString(),
     type,
-    key,
+    key: normalizedKey,
     value: null,
     source: "explicit",
     confidence: 1.0,

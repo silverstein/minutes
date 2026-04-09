@@ -3,6 +3,17 @@
 .claude/growth-strategy.md
 .claude/x-threads.md
 .claude/extension-stats/
+
+# Tombstone: the plugin/ directory was deleted in v0.8.0 after the marketplace
+# was switched to .claude/plugins/minutes/ in commit 270839d (Mar 24). The
+# canonical Claude Code plugin tree is at .claude/plugins/minutes/. If a future
+# session re-creates plugin/, that's a regression — block it here.
+plugin/
+
+# Python bytecode from bundled skill helper scripts (mirror_metrics.py, etc.)
+.claude/plugins/minutes/skills/*/scripts/__pycache__/
+__pycache__/
+*.pyc
 docs/marketing/
 docs/demo/node_modules/
 docs/demo/.remotion/
@@ -15,6 +26,7 @@ dist/
 # Environment
 .env
 .env.*
+.env.local
 
 # OS
 .DS_Store

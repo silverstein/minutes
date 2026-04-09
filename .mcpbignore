@@ -45,7 +45,6 @@ crates/mcp/test/
 # Claude Code plugin (separate from MCP extension)
 .claude/
 .agents/
-plugin/hooks/test/
 
 # Rust helper sources not needed by the packaged Node extension
 crates/whisper-guard/

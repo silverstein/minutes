@@ -77,3 +77,4 @@ Done. 6 fact(s) written, 1 skipped, 1 error(s), 3 people updated.
 - **`engine = "agent"` requires an AI CLI** — If the user wants richer LLM-based extraction from transcript body text, they need `claude`, `codex`, or `gemini` on PATH.
 - **PARA adapter writes `items.json`** — If the user's knowledge base uses the PARA format, facts go into `areas/people/{slug}/items.json` with atomic fact schema (id, status, supersededBy).
 - **First run should be dry-run** — Always suggest `minutes ingest --all --dry-run` before the first real run so the user can see what would be extracted.
+

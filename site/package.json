@@ -3,6 +3,8 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
+    "generate:llms": "node ../scripts/generate_llms_txt.mjs",
+    "check:llms": "node ../scripts/generate_llms_txt.mjs --check",
     "dev": "next dev --turbopack",
     "build": "next build",
     "start": "next start"

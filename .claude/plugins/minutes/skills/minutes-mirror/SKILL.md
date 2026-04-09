@@ -215,3 +215,4 @@ End with two beats:
 - **The "one thing" must be testable.** "Be more confident" is useless. "Cut hedging words from your next 3 close calls" is testable. The user will either do it or not, and the next mirror should be able to verify.
 - **Never compare across users.** Mirror is a mirror to **this** user, not a benchmark vs anyone else. Don't say "the average sales rep talks 45%". Compare the user only to themselves.
 - **Hedging matters most around price, scope, and commitment.** A general filler-word count is interesting; flagging that the user hedged the moment Sarah pushed on price is useful. Surface where the hedging happened, not just how much.
+

@@ -1,0 +1,274 @@
+{
+  "generatedAt": "2026-04-09",
+  "installCommand": "npx minutes-mcp",
+  "documentationUrl": "https://useminutes.app/for-agents",
+  "supportUrl": "https://github.com/silverstein/minutes/discussions",
+  "tools": [
+    {
+      "name": "start_recording",
+      "description": "Start recording audio from the default input device",
+      "anchorId": "tool-start-recording",
+      "docsUrl": "https://useminutes.app/docs/mcp/tools#tool-start-recording"
+    },
+    {
+      "name": "stop_recording",
+      "description": "Stop the current recording and process it",
+      "anchorId": "tool-stop-recording",
+      "docsUrl": "https://useminutes.app/docs/mcp/tools#tool-stop-recording"
+    },
+    {
+      "name": "get_status",
+      "description": "Check if a recording is currently in progress",
+      "anchorId": "tool-get-status",
+      "docsUrl": "https://useminutes.app/docs/mcp/tools#tool-get-status"
+    },
+    {
+      "name": "list_processing_jobs",
+      "description": "List background processing jobs for recent recordings",
+      "anchorId": "tool-list-processing-jobs",
+      "docsUrl": "https://useminutes.app/docs/mcp/tools#tool-list-processing-jobs"
+    },
+    {
+      "name": "list_meetings",
+      "description": "List recent meetings and voice memos",
+      "anchorId": "tool-list-meetings",
+      "docsUrl": "https://useminutes.app/docs/mcp/tools#tool-list-meetings"
+    },
+    {
+      "name": "search_meetings",
+      "description": "Search meeting transcripts and voice memos",
+      "anchorId": "tool-search-meetings",
+      "docsUrl": "https://useminutes.app/docs/mcp/tools#tool-search-meetings"
+    },
+    {
+      "name": "get_meeting",
+      "description": "Get full transcript of a specific meeting",
+      "anchorId": "tool-get-meeting",
+      "docsUrl": "https://useminutes.app/docs/mcp/tools#tool-get-meeting"
+    },
+    {
+      "name": "process_audio",
+      "description": "Process an audio file through the transcription pipeline",
+      "anchorId": "tool-process-audio",
+      "docsUrl": "https://useminutes.app/docs/mcp/tools#tool-process-audio"
+    },
+    {
+      "name": "add_note",
+      "description": "Add a timestamped note to the current recording or an existing meeting",
+      "anchorId": "tool-add-note",
+      "docsUrl": "https://useminutes.app/docs/mcp/tools#tool-add-note"
+    },
+    {
+      "name": "consistency_report",
+      "description": "Flag conflicting decisions and stale commitments",
+      "anchorId": "tool-consistency-report",
+      "docsUrl": "https://useminutes.app/docs/mcp/tools#tool-consistency-report"
+    },
+    {
+      "name": "get_person_profile",
+      "description": "Build a profile for a person across all meetings",
+      "anchorId": "tool-get-person-profile",
+      "docsUrl": "https://useminutes.app/docs/mcp/tools#tool-get-person-profile"
+    },
+    {
+      "name": "research_topic",
+      "description": "Research a topic across meetings, decisions, and follow-ups",
+      "anchorId": "tool-research-topic",
+      "docsUrl": "https://useminutes.app/docs/mcp/tools#tool-research-topic"
+    },
+    {
+      "name": "qmd_collection_status",
+      "description": "Check if the Minutes output directory is registered as a QMD collection",
+      "anchorId": "tool-qmd-collection-status",
+      "docsUrl": "https://useminutes.app/docs/mcp/tools#tool-qmd-collection-status"
+    },
+    {
+      "name": "register_qmd_collection",
+      "description": "Register the Minutes output directory as a QMD collection",
+      "anchorId": "tool-register-qmd-collection",
+      "docsUrl": "https://useminutes.app/docs/mcp/tools#tool-register-qmd-collection"
+    },
+    {
+      "name": "start_dictation",
+      "description": "Start dictation mode — speech to clipboard and daily notes",
+      "anchorId": "tool-start-dictation",
+      "docsUrl": "https://useminutes.app/docs/mcp/tools#tool-start-dictation"
+    },
+    {
+      "name": "stop_dictation",
+      "description": "Stop dictation mode",
+      "anchorId": "tool-stop-dictation",
+      "docsUrl": "https://useminutes.app/docs/mcp/tools#tool-stop-dictation"
+    },
+    {
+      "name": "track_commitments",
+      "description": "List open and stale commitments, optionally filtered by person",
+      "anchorId": "tool-track-commitments",
+      "docsUrl": "https://useminutes.app/docs/mcp/tools#tool-track-commitments"
+    },
+    {
+      "name": "relationship_map",
+      "description": "All contacts with relationship scores and losing-touch alerts",
+      "anchorId": "tool-relationship-map",
+      "docsUrl": "https://useminutes.app/docs/mcp/tools#tool-relationship-map"
+    },
+    {
+      "name": "list_voices",
+      "description": "List enrolled voice profiles for speaker identification",
+      "anchorId": "tool-list-voices",
+      "docsUrl": "https://useminutes.app/docs/mcp/tools#tool-list-voices"
+    },
+    {
+      "name": "confirm_speaker",
+      "description": "Confirm or correct speaker attribution in a meeting transcript",
+      "anchorId": "tool-confirm-speaker",
+      "docsUrl": "https://useminutes.app/docs/mcp/tools#tool-confirm-speaker"
+    },
+    {
+      "name": "get_meeting_insights",
+      "description": "Query structured meeting insights (decisions, commitments, questions) with confidence filtering",
+      "anchorId": "tool-get-meeting-insights",
+      "docsUrl": "https://useminutes.app/docs/mcp/tools#tool-get-meeting-insights"
+    },
+    {
+      "name": "start_live_transcript",
+      "description": "Start a live transcript session for real-time meeting transcription",
+      "anchorId": "tool-start-live-transcript",
+      "docsUrl": "https://useminutes.app/docs/mcp/tools#tool-start-live-transcript"
+    },
+    {
+      "name": "read_live_transcript",
+      "description": "Read utterances from the active live transcript with optional cursor or time window",
+      "anchorId": "tool-read-live-transcript",
+      "docsUrl": "https://useminutes.app/docs/mcp/tools#tool-read-live-transcript"
+    },
+    {
+      "name": "open_dashboard",
+      "description": "Open the Meeting Intelligence Dashboard in the browser — visual overview of conversation memory",
+      "anchorId": "tool-open-dashboard",
+      "docsUrl": "https://useminutes.app/docs/mcp/tools#tool-open-dashboard"
+    },
+    {
+      "name": "ingest_meeting",
+      "description": "Extract facts from a meeting and update the knowledge base (person profiles, log, index)",
+      "anchorId": "tool-ingest-meeting",
+      "docsUrl": "https://useminutes.app/docs/mcp/tools#tool-ingest-meeting"
+    },
+    {
+      "name": "knowledge_status",
+      "description": "Show the current state of the knowledge base — configuration, adapter, people count, log entries",
+      "anchorId": "tool-knowledge-status",
+      "docsUrl": "https://useminutes.app/docs/mcp/tools#tool-knowledge-status"
+    }
+  ],
+  "resources": [
+    {
+      "name": "Minutes Dashboard",
+      "uri": "ui://minutes/dashboard",
+      "description": "Interactive meeting dashboard and detail viewer",
+      "anchorId": "resource-minutes-dashboard",
+      "docsUrl": "https://useminutes.app/docs/mcp/tools#resource-minutes-dashboard"
+    },
+    {
+      "name": "recent_meetings",
+      "uri": "minutes://meetings/recent",
+      "description": "List of recent meetings and memos",
+      "anchorId": "resource-recent-meetings",
+      "docsUrl": "https://useminutes.app/docs/mcp/tools#resource-recent-meetings"
+    },
+    {
+      "name": "recording_status",
+      "uri": "minutes://status",
+      "description": "Current recording status",
+      "anchorId": "resource-recording-status",
+      "docsUrl": "https://useminutes.app/docs/mcp/tools#resource-recording-status"
+    },
+    {
+      "name": "open_actions",
+      "uri": "minutes://actions/open",
+      "description": "All open action items across meetings",
+      "anchorId": "resource-open-actions",
+      "docsUrl": "https://useminutes.app/docs/mcp/tools#resource-open-actions"
+    },
+    {
+      "name": "recent_events",
+      "uri": "minutes://events/recent",
+      "description": "Recent pipeline events (recordings, processing, notes)",
+      "anchorId": "resource-recent-events",
+      "docsUrl": "https://useminutes.app/docs/mcp/tools#resource-recent-events"
+    },
+    {
+      "name": "recent-ideas",
+      "uri": "minutes://ideas/recent",
+      "description": "Recent voice memos and ideas captured from any device (last 14 days)",
+      "anchorId": "resource-recent-ideas",
+      "docsUrl": "https://useminutes.app/docs/mcp/tools#resource-recent-ideas"
+    },
+    {
+      "name": "meeting",
+      "uri": "minutes://meetings/{slug}",
+      "description": "Get a specific meeting by its filename slug",
+      "anchorId": "resource-meeting",
+      "docsUrl": "https://useminutes.app/docs/mcp/tools#resource-meeting"
+    }
+  ],
+  "prompts": [
+    {
+      "name": "meeting_prep",
+      "description": "Prepare for an upcoming meeting",
+      "arguments": [
+        "meeting_topic"
+      ],
+      "text": "Search my past meetings about ${arguments.meeting_topic}. Find relevant decisions, open action items, and context I should review before the meeting.",
+      "anchorId": "prompt-meeting-prep",
+      "docsUrl": "https://useminutes.app/docs/mcp/tools#prompt-meeting-prep"
+    },
+    {
+      "name": "weekly_review",
+      "description": "Review this week's meetings",
+      "text": "List my meetings from the past week and summarize key decisions, action items, and commitments. Flag anything overdue.",
+      "anchorId": "prompt-weekly-review",
+      "docsUrl": "https://useminutes.app/docs/mcp/tools#prompt-weekly-review"
+    },
+    {
+      "name": "find_action_items",
+      "description": "Find action items assigned to someone",
+      "arguments": [
+        "person"
+      ],
+      "text": "Search for all open action items assigned to ${arguments.person}. Show what was committed, when, and in which meeting.",
+      "anchorId": "prompt-find-action-items",
+      "docsUrl": "https://useminutes.app/docs/mcp/tools#prompt-find-action-items"
+    },
+    {
+      "name": "person_briefing",
+      "description": "Get a briefing on a person before a meeting",
+      "arguments": [
+        "name"
+      ],
+      "text": "Build a profile for ${arguments.name} across all my meetings. What topics do we discuss? What commitments are open? What decisions have we made together?",
+      "anchorId": "prompt-person-briefing",
+      "docsUrl": "https://useminutes.app/docs/mcp/tools#prompt-person-briefing"
+    },
+    {
+      "name": "topic_research",
+      "description": "Research a topic across all meetings",
+      "arguments": [
+        "topic"
+      ],
+      "text": "Research ${arguments.topic} across all my meetings. Show related decisions, open follow-ups, and which meetings discussed it most.",
+      "anchorId": "prompt-topic-research",
+      "docsUrl": "https://useminutes.app/docs/mcp/tools#prompt-topic-research"
+    },
+    {
+      "name": "start_meeting",
+      "description": "Start recording a meeting",
+      "arguments": [
+        "title"
+      ],
+      "text": "Start recording a meeting titled '${arguments.title}'. I'll transcribe it locally when we're done.",
+      "anchorId": "prompt-start-meeting",
+      "docsUrl": "https://useminutes.app/docs/mcp/tools#prompt-start-meeting"
+    }
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "name": "minutes-skill-tooling",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "compile": "node dist/compiler/compile.js",
+    "compile:dry": "node dist/compiler/compile.js --dry-run --host claude --host codex",
+    "check": "node dist/compiler/check.js",
+    "golden": "node dist/compiler/golden.js",
+    "golden:write": "node dist/compiler/golden.js --write",
+    "doctor": "node dist/compiler/doctor.js",
+    "ci": "npm run build && npm run check && npm run golden && npm run compile:dry"
+  }
+}

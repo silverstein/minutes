@@ -522,6 +522,23 @@ export default function Home() {
           </a>
         </p>
         <p className="mt-3">
+          <a href="/for-agents" className="hover:text-[var(--accent)]">
+            For agents
+          </a>
+          {" · "}
+          <a href="/docs/mcp/tools" className="hover:text-[var(--accent)]">
+            MCP docs
+          </a>
+          {" · "}
+          <a href="/docs/errors" className="hover:text-[var(--accent)]">
+            Errors
+          </a>
+        </p>
+        <p className="mt-1">
+          <a href="/compare" className="hover:text-[var(--accent)]">
+            Compare
+          </a>
+          {" · "}
           <a
             href="https://github.com/silverstein/minutes"
             className="hover:text-[var(--accent)]"

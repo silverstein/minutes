@@ -84,3 +84,4 @@ Suggest search strategies based on what the user is looking for:
 - **QMD semantic search requires separate setup** — If `config.toml` sets `engine = "qmd"` but the QMD collection isn't indexed, search will fail silently. Run `qmd update && qmd embed` first.
 - **Voice memos vs meetings** — Both are searched by default. Use `-t memo` or `-t meeting` to narrow results. Voice memos live in `~/meetings/memos/`, meetings in `~/meetings/`.
 - **Empty results don't mean it wasn't discussed** — If the meeting wasn't transcribed (e.g., recording was stopped before processing), it won't appear in search. Check `minutes list` to see what's been processed.
+

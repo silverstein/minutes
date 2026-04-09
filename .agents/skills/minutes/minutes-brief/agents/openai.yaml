@@ -1,0 +1,4 @@
+interface:
+  display_name: "Minutes Brief"
+  short_description: "Fast meeting briefing from your conversation memory."
+  default_prompt: "Use Minutes Brief to prepare me quickly for an upcoming meeting using my stored meeting history."

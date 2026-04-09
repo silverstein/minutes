@@ -85,3 +85,4 @@ Check the output file exists in `~/meetings/` and has a transcript.
 - **macOS 26 (Tahoe) requires CXXFLAGS** — The whisper.cpp build needs the C++ include path set explicitly. This is a known Apple SDK issue.
 - **First model download can be slow** — The `small` model is 466 MB. On slow connections, `tiny` is a good starting point (75 MB).
 - **BlackHole setup is the hardest part** — Most users struggle with the Audio MIDI Setup step. Offer to walk through it if they get stuck.
+

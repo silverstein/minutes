@@ -14,8 +14,8 @@
     "url": "https://github.com/silverstein/minutes"
   },
   "homepage": "https://useminutes.app",
-  "documentation": "https://github.com/silverstein/minutes/blob/main/README.md",
-  "support": "https://github.com/silverstein/minutes/issues",
+  "documentation": "https://useminutes.app/for-agents",
+  "support": "https://github.com/silverstein/minutes/discussions",
   "license": "MIT",
   "icon": "icon.png",
   "keywords": [

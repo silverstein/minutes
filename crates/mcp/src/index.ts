@@ -53,6 +53,7 @@ import {
 } from "./paths.js";
 
 const UI_RESOURCE_URI = "ui://minutes/dashboard";
+const MCP_TOOLS_DOCS_BASE_URL = "https://useminutes.app/docs/mcp/tools";
 export const MEETING_INSIGHT_KINDS = ["decision", "commitment", "question"] as const;
 export type KnowledgeConfigStatus = {
   enabled: boolean;
@@ -60,6 +61,50 @@ export type KnowledgeConfigStatus = {
   adapter: string;
   engine: string;
 };
+
+function toolDocsUrl(name: string): string {
+  return `${MCP_TOOLS_DOCS_BASE_URL}#tool-${name}`;
+}
+
+function withToolDocs(name: string, description: string): string {
+  return `${description} Docs: ${toolDocsUrl(name)}`;
+}
+
+function registerTool(
+  name: string,
+  description: string,
+  inputSchema: Record<string, unknown>,
+  annotations: Record<string, unknown>,
+  handler: (...args: any[]) => any
+) {
+  return server.tool(
+    name,
+    withToolDocs(name, description),
+    inputSchema as any,
+    annotations as any,
+    handler as any
+  );
+}
+
+function registerDocsAppTool(
+  serverArg: McpServer,
+  name: string,
+  config: Record<string, unknown>,
+  handler: (...args: any[]) => any
+) {
+  const description =
+    typeof config.description === "string" ? config.description : "";
+
+  return registerAppTool(
+    serverArg,
+    name,
+    {
+      ...config,
+      description: withToolDocs(name, description),
+    } as any,
+    handler as any
+  );
+}
 
 const execFileAsync = promisify(execFile);
 
@@ -707,7 +752,7 @@ registerAppResource(
 
 // ── Tool: start_recording ───────────────────────────────────
 
-server.tool(
+registerTool(
  "start_recording",
   "Start recording audio with call-aware preflight. When a known call app is active, Minutes can infer call intent and block silent mic-only call captures unless explicitly allowed.",
   {
@@ -888,7 +933,7 @@ server.tool(
 
 // ── Tool: stop_recording ────────────────────────────────────
 
-server.tool(
+registerTool(
   "stop_recording",
   "Stop the current recording and process it (transcribe, diarize, summarize).",
   {},
@@ -966,7 +1011,7 @@ server.tool(
 
 // ── Tool: get_status ────────────────────────────────────────
 
-server.tool(
+registerTool(
   "get_status",
   "Check if a recording is currently in progress.",
   {},
@@ -989,7 +1034,7 @@ server.tool(
   }
 );
 
-server.tool(
+registerTool(
   "list_processing_jobs",
   "List background processing jobs for recent recordings, including queued, transcript-ready, needs-review, failed, and completed work.",
   {
@@ -1037,7 +1082,7 @@ server.tool(
 
 // ── Tool: list_meetings ─────────────────────────────────────
 
-registerAppTool(
+registerDocsAppTool(
   server,
   "list_meetings",
   {
@@ -1123,7 +1168,7 @@ registerAppTool(
 
 // ── Tool: search_meetings ───────────────────────────────────
 
-registerAppTool(
+registerDocsAppTool(
   server,
   "search_meetings",
   {
@@ -1254,7 +1299,7 @@ registerAppTool(
 
 // ── Tool: consistency_report ───────────────────────────────
 
-registerAppTool(
+registerDocsAppTool(
   server,
   "consistency_report",
   {
@@ -1333,7 +1378,7 @@ registerAppTool(
 
 // ── Tool: get_person_profile ───────────────────────────────
 
-registerAppTool(
+registerDocsAppTool(
   server,
   "get_person_profile",
   {
@@ -1433,7 +1478,7 @@ registerAppTool(
 
 // ── Tool: research_topic ────────────────────────────────────
 
-server.tool(
+registerTool(
   "research_topic",
   "Research a topic across meetings, decisions, and open follow-ups.",
   {
@@ -1534,7 +1579,7 @@ server.tool(
 
 // ── Tool: get_meeting ───────────────────────────────────────
 
-registerAppTool(
+registerDocsAppTool(
   server,
   "get_meeting",
   {
@@ -1564,7 +1609,7 @@ registerAppTool(
 
 // ── Tool: process_audio ─────────────────────────────────────
 
-server.tool(
+registerTool(
   "process_audio",
   "Process an audio file through the transcription pipeline.",
   {
@@ -1613,7 +1658,7 @@ server.tool(
 
 // ── Tool: add_note ───────────────────────────────────────────
 
-server.tool(
+registerTool(
   "add_note",
   "Add a note to the current recording. Notes are timestamped and included in the meeting summary. If no recording is active, annotate an existing meeting file with --meeting.",
   {
@@ -1653,7 +1698,7 @@ server.tool(
 
 // ── Tool: qmd_collection_status ─────────────────────────────
 
-server.tool(
+registerTool(
   "qmd_collection_status",
   "Check whether the Minutes output directory is already registered as a QMD collection.",
   {
@@ -1719,7 +1764,7 @@ server.tool(
 
 // ── Tool: register_qmd_collection ───────────────────────────
 
-server.tool(
+registerTool(
   "register_qmd_collection",
   "Register the Minutes output directory as a QMD collection.",
   {
@@ -1767,7 +1812,7 @@ server.tool(
 
 // ── Tool: track_commitments ─────────────────────────────────
 
-registerAppTool(
+registerDocsAppTool(
   server,
   "track_commitments",
   {
@@ -1832,7 +1877,7 @@ registerAppTool(
 
 // ── Tool: relationship_map ──────────────────────────────────
 
-registerAppTool(
+registerDocsAppTool(
   server,
   "relationship_map",
   {
@@ -2032,7 +2077,7 @@ server.resource(
 
 // ── Tool: start_dictation ──────────────────────────────────
 
-server.tool(
+registerTool(
   "start_dictation",
   "Start dictation mode. Speak naturally — text accumulates across pauses and the combined result is written when dictation ends. Runs until stop_dictation is called or silence timeout.",
   {
@@ -2098,7 +2143,7 @@ server.tool(
 
 // ── Tool: stop_dictation ───────────────────────────────────
 
-server.tool(
+registerTool(
   "stop_dictation",
   "Stop the current dictation session.",
   {},
@@ -2132,7 +2177,7 @@ server.tool(
 
 // ── Tool: list_voices ────────────────────────────────────────
 
-server.tool(
+registerTool(
   "list_voices",
   "List enrolled voice profiles for speaker identification. Shows who has been enrolled, sample count, and model version.",
   {},
@@ -2164,7 +2209,7 @@ server.tool(
 
 // ── Tool: confirm_speaker ────────────────────────────────────
 
-server.tool(
+registerTool(
   "confirm_speaker",
   "Confirm or correct a speaker attribution in a meeting. Promotes the attribution to High confidence and rewrites the transcript label. Optionally saves the speaker's voice profile for future meetings.",
   {
@@ -2202,7 +2247,7 @@ server.tool(
 
 // ── Tool: get_meeting_insights ─────────────────────────────
 
-server.tool(
+registerTool(
   "get_meeting_insights",
   "Query structured insights extracted from meetings — decisions, commitments, and questions with confidence levels. Use this to find what was decided, who committed to what, and what's still open across all meetings. External systems can subscribe to these events for workflow automation.",
   {
@@ -2256,7 +2301,7 @@ server.tool(
 
 // ── Tool: start_live_transcript ──────────────────────────────
 
-server.tool(
+registerTool(
   "start_live_transcript",
   "Start real-time transcription. If a recording is already running, it already includes a live transcript — use read_live_transcript to read it. Runs until stop is called.",
   {
@@ -2333,7 +2378,7 @@ server.tool(
 
 // ── Tool: read_live_transcript ──────────────────────────────
 
-server.tool(
+registerTool(
   "read_live_transcript",
   "Read the live transcript — works during both recordings and live transcript sessions. Use 'since' to get new lines after a cursor (line number) or time window (e.g., '5m', '30s'). Use 'status' mode to check if a session is active.",
   {
@@ -2372,7 +2417,7 @@ server.tool(
 
 // ── Tool: ingest_meeting ────────────────────────────────────
 
-server.tool(
+registerTool(
   "ingest_meeting",
   "Extract facts from a meeting and update the knowledge base (person profiles, log, index). Requires [knowledge] to be configured in config.toml. Uses structured frontmatter data only by default (zero hallucination risk). Set engine to 'agent' for richer LLM-based extraction.",
   {
@@ -2418,7 +2463,7 @@ server.tool(
 
 // ── Tool: knowledge_status ──────────────────────────────────
 
-server.tool(
+registerTool(
   "knowledge_status",
   "Show the current state of the knowledge base — whether it's configured, which adapter is in use, and how many person profiles and log entries exist.",
   {},
@@ -2495,7 +2540,7 @@ server.tool(
 
 // ── Dashboard ───────────────────────────────────────────────
 
-server.tool(
+registerTool(
   "open_dashboard",
   "Open the Meeting Intelligence Dashboard in the browser. Shows a visual overview of your conversation memory: metrics, meeting timeline, decisions, recurring topics, action items, and voice memos. Runs a local HTTP server — data never leaves your machine.",
   {},

@@ -49,3 +49,4 @@ This turns the recap from a passive report into an active reconciliation tool. S
 - **Voice memos are easy to miss** — They live in `~/meetings/memos/`, not the main `~/meetings/` directory. The search command includes both, but double-check if the user says "I recorded a voice memo today" and you don't see it.
 - **Meetings without LLM summarization have less structure** — If a meeting file only has a raw transcript (no Summary, Decisions, or Action Items sections), you'll need to extract insights yourself from the transcript text. Check the YAML frontmatter for `action_items:` and `decisions:` fields.
 - **Cross-day meetings** — A meeting that started at 11 PM and ended at 1 AM will be dated by its start time. If the user asks "what happened today" and is missing a late-night meeting, check yesterday's date too.
+

@@ -3,6 +3,7 @@
 ## Corrections
 | Date | Source | What Went Wrong | What To Do Instead |
 |------|--------|----------------|-------------------|
+| 2026-04-08 | self | I tried to fan out multiple `bd create` writes in parallel, which triggered Dolt serialization conflicts and also made my assumed child IDs drift from creation order | For bead planning here, create issues sequentially when later items depend on earlier IDs; add dependency edges only after verifying the created IDs |
 | 2026-04-08 | self | The native call desktop-control repro looked like a stop/finalization failure in the helper, but the real drop was `minutes stop` sending `SIGTERM` to the desktop app PID from `recording.pid`, killing Tauri before it could enqueue the captured `.mov` | For desktop-managed recordings in Minutes, treat the stop sentinel as authoritative and skip `SIGTERM` when the PID matches a fresh desktop-control heartbeat |
 | 2026-04-08 | self | I repeated the repo’s old Cargo habit and passed two positional test filters to `cargo test`, which Cargo treats as an unexpected extra argument | For targeted Rust verification here, run one test filter per `cargo test` invocation (or use a single shared substring) |
 | 2026-04-08 | self | While searching the Minutes repo, I reflexively ran `rg` across generic top-level paths like `src`/`app`/`packages` that do not exist here, which added noisy "No such file or directory" errors right at the start of the investigation | In this repo, scope searches to the actual Rust/Tauri roots (`crates/`, `tauri/`, `docs/`) or use `rg --files` first before naming paths |
@@ -45,6 +46,7 @@
 | 2026-04-07 | self | While inspecting a sibling Next.js repo from this workspace, I tried to read route-group/dynamic-segment files without quoting the path and zsh treated `(authenticated)` / `[memberId]` as globs | When opening Next.js app-router files from the shell, wrap absolute paths containing `()` or `[]` in single quotes before passing them to `sed`, `nl`, or similar tools |
 | 2026-04-07 | self | While validating an old review note, it would have been easy to assume every cited issue was still current because three nearby findings still reproduced | For stale-review verification in this repo, re-open each exact file and version string independently; release links and line references drift faster than adjacent bugs |
 | 2026-04-07 | self | While investigating the native macOS call-capture helper, I almost blamed ScreenCaptureKit delivery before checking whether the SIGTERM dispatch source still existed long enough to let the helper finalize its files | For media-capture bugs in this repo, verify signal-source lifetime and output finalization before blaming the capture API; forced termination can look exactly like missing samples |
+| 2026-04-08 | self | I initially treated `/site`'s Next 15 banner as if Cathryn's upgrade had been missed, but the committed manifest and lockfile were already on Next 16 and only local `node_modules` was stale | When reported versions disagree in this repo, compare `package.json`, the lockfile, and the installed package tree separately before blaming branch history; `npm ci` may be the only missing step |
 
 ## User Preferences
 - For coding/debugging/testing/review tasks, prioritize technical implementation detail and concrete verification.
@@ -52,10 +54,13 @@
 
 ## Patterns That Work
 - Start by checking repo instructions plus `bd` workflow, then inspect both the Rust crates and the MCP/Tauri surfaces before making claims about app behavior.
+- For roadmap/status checks here, compare `TODOS.md` against the live code, recent commits, GitHub issues, and `bd`; the todo file can lag behind shipped work and blocker changes.
+- Keep local-only `bd` IDs out of public repo docs like `TODOS.md`; use those files for human-readable roadmap/status, and keep execution tracking in beads.
 - On macOS 26+, Rust tests that compile `whisper-rs` need `CXXFLAGS="-I$(xcrun --show-sdk-path)/usr/include/c++/v1"`; core tests pass once that is set.
 - For native macOS hotkeys in Tauri, keep startup non-blocking and report lifecycle changes back to the webview with explicit `starting/active/failed` status events.
 - For releases: create the GitHub release with notes BEFORE pushing the tag (use `gh release create` which creates both). CI workflows only upload assets to an existing release. Never let CI create the release — it produces empty bodies that show up blank in followers' feeds.
 - For time-window adversarial reviews here, anchor the window with `git rev-list --before='24 hours ago'` and inspect `BASE..HEAD`; raw `git diff --since` stats can make the review surface look much larger than the actual code delta.
+- When a tiny community wrapper references Minutes, check current Minutes warnings/docs before dismissing it; wrappers like `meetmix` can encode a real platform-specific gap rather than redundant hobby glue.
 
 ## Patterns That Don't Work
 - Assuming this repo is only a CLI tool misses the Tauri desktop app and MCP integration surfaces that need review too.

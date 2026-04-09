@@ -39,3 +39,4 @@ Appends to the `## Notes` section of the meeting file with a date stamp.
 - **`--meeting` requires the full path** — Use the exact path from `minutes list` or `minutes search`, e.g., `--meeting ~/meetings/2026-03-17-pricing-call.md`. Tab completion works.
 - **Notes don't support markdown** — The note content is plain text. Markdown formatting like `**bold**` or `- lists` will be stored literally, not rendered.
 - **Quotes in notes need escaping** — If your note contains quotes, wrap the whole thing in single quotes or escape them: `minutes note 'Alex said "no way"'`.
+

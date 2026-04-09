@@ -2,6 +2,15 @@
 
 Use this before cutting any `vX.Y.Z` tag. Companion to [`RELEASE-CHANNELS.md`](./RELEASE-CHANNELS.md), [`RELEASE-MACOS.md`](./RELEASE-MACOS.md), and [`RELEASE-WINDOWS.md`](./RELEASE-WINDOWS.md).
 
+> **Plugin-only releases follow a different path.** If the only thing you're
+> shipping is changes under `.claude/plugins/minutes/` (new skills, skill
+> edits, bundled script updates, hook changes) with no touch to `Cargo.toml`,
+> `crates/`, `manifest.json`, or any Rust/npm artifact, you do NOT cut a tag
+> and you do NOT run the full phase 1–9 binary release flow. Jump straight to
+> the ["Plugin-only release path"](#plugin-only-release-path) section at the
+> bottom of this document, which is much shorter and explicitly covers the
+> marketplace-cache quirk that can silently strand users on old versions.
+
 The point of this doc is not to slow releases down. It is to make sure that the boring failure modes (npm publish ordering, off-policy notes, untested workspace) get caught locally instead of on a public tag that cannot be moved.
 
 ## Why this exists
@@ -240,3 +249,123 @@ gh issue list --repo silverstein/minutes --search "v0.10.3 OR 0.10.3" --state al
 [`RELEASE-CHANNELS.md`](./RELEASE-CHANNELS.md) is explicit: do not retag, do not silently replace. Cut a new patch version with the fix and call out the regression in the next release notes.
 
 The tag is immutable. The release notes are not. You can edit the body of an existing release with `gh release edit vX.Y.Z --notes-file fixed.md` to correct typos, missing sections, or to add a "superseded by vX.Y.Z+1" note.
+
+---
+
+## Plugin-only release path
+
+When the only changes are under `.claude/plugins/minutes/` (skills, scripts, hooks, agents, plugin manifests) and nothing in the Rust workspace, JS packages, Tauri app, or binary distribution is touched, the release flow is dramatically shorter than the binary flow above. No tag, no `gh release`, no `.mcpb` rebuild, no Homebrew tap bump.
+
+**Why it's different from binary releases:** the Claude Code plugin marketplace works by serving `main` of this repo directly to users who run `/plugin marketplace add silverstein/minutes`. There is no "release artifact" step — users pull whatever is in `main` whenever they explicitly ask Claude Code to refresh the marketplace mirror. Pushing to `main` **is** the release.
+
+**But there's a catch, and it's the most important thing in this section:** each user's local marketplace mirror is a git clone at `~/.claude/plugins/marketplaces/<name>/` that **only updates when the user explicitly runs `/plugin marketplace update`**. It does not auto-pull. Claude Code's `/plugin update minutes@minutes` command consults that local mirror and trusts its `marketplace.json` → `plugins[0].version` as the source of truth for "what's the latest version". If the mirror is stale, `/plugin update` happily reports "already at latest" and does nothing, even though `main` has moved hundreds of commits ahead.
+
+This means two things, both critical:
+
+1. **Version bumps must happen in `marketplace.json`**, not just `plugin.json`. Bumping `plugin.json` alone does not change what Claude Code advertises as "latest" — Claude Code reads `marketplace.json` → `plugins[0].version`, full stop.
+
+2. **Every release note must include the two-command refresh sequence**, or existing users silently miss everything you ship. The sequence is:
+
+   ```bash
+   /plugin marketplace update minutes      # git-pulls the local mirror
+   /plugin update minutes@minutes          # installs the refreshed version into the cache
+   # Then restart Claude Code to load the new skills into the session
+   ```
+
+   A single `/plugin update minutes@minutes` is the no-op failure mode. Always give users the full sequence.
+
+### Steps
+
+**P1. Verify code is healthy (lightweight).** You're not bumping Rust or npm artifacts, so most of Phase 1 above doesn't apply. Run only what touches plugin files:
+
+```bash
+node --check .claude/plugins/minutes/hooks/*.mjs          # JS hooks parse
+python3 -m py_compile .claude/plugins/minutes/skills/*/scripts/*.py   # Python helpers compile
+```
+
+If any skill has a new CLI command dependency, verify the command exists in the current `minutes` binary:
+
+```bash
+minutes <subcommand> --help
+```
+
+**P2. Version bump (all three version surfaces must match).** This is the single most important step and also the one most likely to get half-done.
+
+```bash
+# The three plugin version surfaces:
+grep '"version"' .claude-plugin/marketplace.json \
+                  .claude/plugins/minutes/plugin.json \
+                  .claude/plugins/minutes/.claude-plugin/plugin.json
+```
+
+All three must show the new version. `marketplace.json` in particular is the one Claude Code trusts, so if it's missing the bump, users will not see the update even if they run the full refresh sequence.
+
+**P3. Write release notes (5-section format, same policy as binary releases).** Create `notes-release-plugin-vX.Y.Z.md` at the repo root. Required sections:
+
+1. **What changed** — each new/modified skill, script, hook, with a sentence of "why"
+2. **Who should care** — who should upgrade vs who can skip
+3. **CLI / MCP / desktop impact** — state explicitly which of those surfaces are unchanged (most of the time all three are)
+4. **Breaking changes or migration notes** — frontmatter schema changes, removed skills, renamed commands
+5. **Known issues** — anything that's imperfect but not a blocker
+
+**Must include the upgrade incantation.** The release-note body must prominently feature the two-command refresh sequence with an explanation of why the single-command path fails. See `notes-release-plugin-v0.8.0.md` as the template.
+
+**P4. Sanity-check the marketplace surface (Phase 8 equivalent).** Before pushing, verify the plugin tree is self-consistent:
+
+```bash
+# All three manifest files aligned on version + skill count
+python3 -c "
+import json
+m1 = json.load(open('.claude/plugins/minutes/plugin.json'))
+m2 = json.load(open('.claude/plugins/minutes/.claude-plugin/plugin.json'))
+m3 = json.load(open('.claude-plugin/marketplace.json'))
+assert m1['version'] == m2['version'] == m3['plugins'][0]['version'], 'version mismatch'
+print(f'version={m1[\"version\"]} skills={len(m1[\"skills\"])}')"
+
+# Every skill listed in plugin.json exists on disk
+python3 -c "
+import json, os
+m = json.load(open('.claude/plugins/minutes/plugin.json'))
+for skill in m['skills']:
+    assert os.path.isfile(os.path.join('.claude/plugins/minutes', skill['path'])), skill['name']
+print(f'all {len(m[\"skills\"])} skills resolve')"
+
+# marketplace.json source path resolves
+python3 -c "
+import json, os
+m = json.load(open('.claude-plugin/marketplace.json'))
+src = m['plugins'][0]['source'].lstrip('./')
+assert os.path.isdir(src), f'source path missing: {src}'
+print(f'marketplace source → {src} OK')"
+```
+
+**P5. Commit, push.** No `gh release create`, no tag — just push to `main`. Users pull when they run the two-command refresh.
+
+```bash
+git push origin main
+```
+
+**P6. Post-push: announce the upgrade incantation.** This is the substitute for a GitHub Release announcement. Since there's no release page, post the release note contents (especially the upgrade incantation) wherever you announce to users: the repo README's "Recent releases" section if you have one, the useminutes.app site, a GitHub Discussion, a pinned issue, Slack, X, wherever your audience is. **Do not skip this step.** Without it, existing users stay on whatever version they installed originally — the update-check hook (v0.8.0+) will eventually notify them, but pre-v0.8.0 users never see the notice.
+
+**P7. Verify the mirror picks up the push.** On a clean test machine (or after clearing your own mirror):
+
+```bash
+/plugin marketplace update minutes
+cat ~/.claude/plugins/marketplaces/minutes/.claude-plugin/marketplace.json | grep version
+```
+
+The version should match what you just pushed. If not, investigate — most likely a `marketplace.json` wasn't bumped, or the push didn't actually land on `main`.
+
+### What's explicitly NOT required for a plugin-only release
+
+- No Rust cargo fmt/clippy/test (nothing touches Rust)
+- No npm build of `crates/sdk` or `crates/mcp`
+- No `npm publish` of any package
+- No tag (`vX.Y.Z`)
+- No `gh release create`
+- No `.mcpb` rebuild or upload
+- No Homebrew tap bump
+- No macOS DMG / Windows NSIS build
+- No `manifest.json` bump (that's the MCP server manifest, not the plugin)
+- No `manifest.mcpb.json` bump (that's vestigial per Phase 9.4 of the binary flow)
+- No asset parity check (no assets to compare)

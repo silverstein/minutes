@@ -38,6 +38,9 @@ export default function CompareHubPage() {
           minutes
         </a>
         <div className="flex gap-5 text-sm text-[var(--text-secondary)]">
+          <a href="/compare.md" className="hover:text-[var(--accent)]">
+            compare.md
+          </a>
           <a href="/for-agents" className="hover:text-[var(--accent)]">
             for agents
           </a>

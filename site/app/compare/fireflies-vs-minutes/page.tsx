@@ -71,6 +71,7 @@ export default function FirefliesVsMinutesPage() {
     <ComparePage
       competitorName="Fireflies"
       competitorLabel="Fireflies"
+      markdownHref="/compare/fireflies-vs-minutes.md"
       heroSummary="Fireflies and Minutes overlap around meeting capture and AI recall, but they are optimized for different jobs. Fireflies is stronger if you want a hosted meeting assistant with integrations, team workflows, and centralized admin. Minutes is stronger if you want local-first meeting memory, inspectable markdown, and agent workflows that live beyond one hosted product."
       quickVerdictCompetitor="you want a hosted meeting assistant with stronger integrations, team workflows, admin controls, and a SaaS collaboration story."
       quickVerdictMinutes="you want local processing, open output, and a memory layer that Claude, Codex, and other MCP clients can query across files and tools."

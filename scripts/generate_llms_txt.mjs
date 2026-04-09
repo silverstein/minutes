@@ -22,6 +22,17 @@ const rustErrorSourcePaths = [
   join(repoRoot, "crates", "core", "src", "voice.rs"),
 ];
 
+const toolGroupOrder = [
+  "Recording",
+  "Search and recall",
+  "People and relationships",
+  "Insights",
+  "Live and dictation",
+  "Notes and processing",
+  "Voice and speaker ID",
+  "Integration",
+];
+
 function extractQuotedValue(input) {
   const match = input.match(/"((?:[^"\\]|\\.)*)"/);
   return match ? match[1].replace(/\\"/g, "\"") : null;
@@ -178,6 +189,51 @@ function classifyErrorEntry(entry) {
     ...entry,
     hidden: lowSignalVariants.has(entry.variant),
   };
+}
+
+function categorizeTool(name) {
+  const groups = {
+    Recording: new Set(["start_recording", "stop_recording", "get_status", "list_processing_jobs"]),
+    "Search and recall": new Set(["list_meetings", "get_meeting", "search_meetings", "research_topic"]),
+    "People and relationships": new Set(["get_person_profile", "relationship_map", "track_commitments", "consistency_report"]),
+    Insights: new Set(["get_meeting_insights", "ingest_meeting", "knowledge_status"]),
+    "Live and dictation": new Set(["start_live_transcript", "read_live_transcript", "start_dictation", "stop_dictation"]),
+    "Notes and processing": new Set(["add_note", "process_audio", "open_dashboard"]),
+    "Voice and speaker ID": new Set(["list_voices", "confirm_speaker"]),
+    Integration: new Set(["qmd_collection_status", "register_qmd_collection"]),
+  };
+
+  for (const [group, names] of Object.entries(groups)) {
+    if (names.has(name)) return group;
+  }
+  return "Other";
+}
+
+function categorizeResource(name) {
+  const groups = {
+    Dashboard: new Set(["Minutes Dashboard"]),
+    Status: new Set(["recording_status", "recent_events"]),
+    Meetings: new Set(["recent_meetings", "meeting"]),
+    Memory: new Set(["open_actions", "recent-ideas"]),
+  };
+
+  for (const [group, names] of Object.entries(groups)) {
+    if (names.has(name)) return group;
+  }
+  return "Other";
+}
+
+function categorizePrompt(name) {
+  const groups = {
+    Prep: new Set(["meeting_prep", "person_briefing", "topic_research"]),
+    Review: new Set(["weekly_review", "find_action_items"]),
+    Capture: new Set(["start_meeting"]),
+  };
+
+  for (const [group, names] of Object.entries(groups)) {
+    if (names.has(name)) return group;
+  }
+  return "Other";
 }
 
 function buildLlmsTxt({ manifest, resources }) {
@@ -428,24 +484,64 @@ function buildErrorsData(entries) {
 function buildMcpToolsMarkdown({ manifest, resources }) {
   const generatedOn = new Date().toISOString().slice(0, 10);
 
-  const tools = manifest.tools
+  const toolGroups = Object.entries(
+    manifest.tools.reduce((acc, tool) => {
+      const group = categorizeTool(tool.name);
+      acc[group] ||= [];
+      acc[group].push(tool);
+      return acc;
+    }, {})
+  )
+    .sort(([a], [b]) => toolGroupOrder.indexOf(a) - toolGroupOrder.indexOf(b))
     .map(
-      (tool) =>
-        `<a id="tool-${anchorSlug(tool.name)}"></a>\n\n## \`${tool.name}\`\n\n${tool.description}\n\nReference URL: ${mcpToolsBaseUrl}#tool-${anchorSlug(tool.name)}`
+      ([group, tools]) =>
+        `# ${group}\n\n` +
+        tools
+          .map(
+            (tool) =>
+              `<a id="tool-${anchorSlug(tool.name)}"></a>\n\n## \`${tool.name}\`\n\n${tool.description}\n\nReference URL: ${mcpToolsBaseUrl}#tool-${anchorSlug(tool.name)}`
+          )
+          .join("\n\n")
     )
     .join("\n\n");
 
-  const resourceDocs = resources
+  const resourceGroups = Object.entries(
+    resources.reduce((acc, resource) => {
+      const group = categorizeResource(resource.name);
+      acc[group] ||= [];
+      acc[group].push(resource);
+      return acc;
+    }, {})
+  )
     .map(
-      (resource) =>
-        `<a id="resource-${anchorSlug(resource.name)}"></a>\n\n## \`${resource.uri}\`\n\n${resource.description}\n\nReference URL: ${mcpToolsBaseUrl}#resource-${anchorSlug(resource.name)}`
+      ([group, resourceEntries]) =>
+        `# ${group}\n\n` +
+        resourceEntries
+          .map(
+            (resource) =>
+              `<a id="resource-${anchorSlug(resource.name)}"></a>\n\n## \`${resource.uri}\`\n\n${resource.description}\n\nReference URL: ${mcpToolsBaseUrl}#resource-${anchorSlug(resource.name)}`
+          )
+          .join("\n\n")
     )
     .join("\n\n");
 
-  const prompts = manifest.prompts
+  const promptGroups = Object.entries(
+    manifest.prompts.reduce((acc, prompt) => {
+      const group = categorizePrompt(prompt.name);
+      acc[group] ||= [];
+      acc[group].push(prompt);
+      return acc;
+    }, {})
+  )
     .map(
-      (prompt) =>
-        `<a id="prompt-${anchorSlug(prompt.name)}"></a>\n\n## \`${prompt.name}\`\n\n${prompt.description}\n\nReference URL: ${mcpToolsBaseUrl}#prompt-${anchorSlug(prompt.name)}`
+      ([group, prompts]) =>
+        `# ${group}\n\n` +
+        prompts
+          .map(
+            (prompt) =>
+              `<a id="prompt-${anchorSlug(prompt.name)}"></a>\n\n## \`${prompt.name}\`\n\n${prompt.description}\n\nReference URL: ${mcpToolsBaseUrl}#prompt-${anchorSlug(prompt.name)}`
+          )
+          .join("\n\n")
     )
     .join("\n\n");
 
@@ -472,15 +568,15 @@ Minutes exposes ${manifest.tools.length} tools, ${resources.length} resources, a
 
 ## Tools
 
-${tools}
+${toolGroups}
 
 ## Resources
 
-${resourceDocs}
+${resourceGroups}
 
 ## Prompt templates
 
-${prompts}
+${promptGroups}
 `;
 }
 
@@ -493,16 +589,19 @@ function buildMcpToolsData({ manifest, resources }) {
       supportUrl: manifest.support,
       tools: manifest.tools.map((tool) => ({
         ...tool,
+        group: categorizeTool(tool.name),
         anchorId: `tool-${anchorSlug(tool.name)}`,
         docsUrl: `${mcpToolsBaseUrl}#tool-${anchorSlug(tool.name)}`,
       })),
       resources: resources.map((resource) => ({
         ...resource,
+        group: categorizeResource(resource.name),
         anchorId: `resource-${anchorSlug(resource.name)}`,
         docsUrl: `${mcpToolsBaseUrl}#resource-${anchorSlug(resource.name)}`,
       })),
       prompts: manifest.prompts.map((prompt) => ({
         ...prompt,
+        group: categorizePrompt(prompt.name),
         anchorId: `prompt-${anchorSlug(prompt.name)}`,
         docsUrl: `${mcpToolsBaseUrl}#prompt-${anchorSlug(prompt.name)}`,
       })),

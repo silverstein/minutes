@@ -68,6 +68,7 @@ export default function OtterVsMinutesPage() {
     <ComparePage
       competitorName="Otter"
       competitorLabel="Otter AI"
+      markdownHref="/compare/otter-vs-minutes.md"
       heroSummary="Otter and Minutes overlap around meeting capture and AI recall, but they are built around different operating assumptions. Otter is stronger if you want a hosted meeting assistant with auto-join, collaboration, and team workflows. Minutes is stronger if you want local-first meeting memory, inspectable markdown, and agent workflows that live beyond one hosted product."
       quickVerdictCompetitor="you want a hosted meeting assistant that joins calls, captures transcripts for teams, and plugs into a broader admin and integrations story."
       quickVerdictMinutes="you want local processing, open output, and a memory layer that Claude, Codex, and other MCP clients can query across files and tools."

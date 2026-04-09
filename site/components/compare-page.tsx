@@ -12,6 +12,7 @@ type SourceLink = {
 type ComparePageProps = {
   competitorName: string;
   competitorLabel: string;
+  markdownHref: string;
   heroSummary: string;
   quickVerdictCompetitor: string;
   quickVerdictMinutes: string;
@@ -39,6 +40,7 @@ function SectionLabel({ label }: { label: string }) {
 export function ComparePage({
   competitorName,
   competitorLabel,
+  markdownHref,
   heroSummary,
   quickVerdictCompetitor,
   quickVerdictMinutes,
@@ -58,6 +60,9 @@ export function ComparePage({
           minutes
         </a>
         <div className="flex gap-5 text-sm text-[var(--text-secondary)]">
+          <a href={markdownHref} className="hover:text-[var(--accent)]">
+            page.md
+          </a>
           <a href="/compare" className="hover:text-[var(--accent)]">
             compare
           </a>

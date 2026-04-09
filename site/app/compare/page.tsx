@@ -23,7 +23,7 @@ const pages = [
       "Best if you are choosing between a hosted meeting assistant for teams and a file-native memory workflow for Claude, Codex, and MCP clients.",
   },
   {
-    title: "Minutes vs Fireflies",
+    title: "Minutes vs Fireflies.ai",
     href: "/compare/fireflies-vs-minutes",
     blurb:
       "Best if you want the honest tradeoff between a hosted meeting assistant with integrations and a local-first memory layer for agents.",
@@ -38,6 +38,9 @@ export default function CompareHubPage() {
           minutes
         </a>
         <div className="flex gap-5 text-sm text-[var(--text-secondary)]">
+          <a href="/compare.md" className="hover:text-[var(--accent)]">
+            compare.md
+          </a>
           <a href="/for-agents" className="hover:text-[var(--accent)]">
             for agents
           </a>
@@ -55,9 +58,8 @@ export default function CompareHubPage() {
           Compare Minutes
         </h1>
         <p className="mt-5 text-[17px] leading-8 text-[var(--text-secondary)]">
-          These comparison pages are fit-based, not teardown posts. The goal is to help the right
-          user pick the right product and make the Minutes wedge clear without pretending every tool
-          should do the same job.
+          These are buying guides, not teardown posts. The point is simple: some people should pick
+          Minutes, and some should not. We want that to be obvious as quickly as possible.
         </p>
       </section>
 

@@ -1,83 +1,55 @@
 import type { Metadata } from "next";
 
 export const metadata: Metadata = {
-  title: "Best meeting tools for Claude Code and Codex",
+  title: "Best MCP meeting memory tools",
   description:
-    "A fit-based guide to the best meeting tools when your real workflow is Claude Code, Codex, MCP, local memory, and durable recall.",
+    "A fit-based guide to the best MCP meeting memory tools for local-first workflows, hosted team assistants, and agent-readable meeting recall.",
   alternates: {
-    canonical: "/resources/best-meeting-tools-for-claude-code-and-codex",
+    canonical: "/resources/best-mcp-meeting-memory-tools",
   },
 };
 
-const tools = [
+const shortlist = [
   {
     name: "Minutes",
-    bestFor: "Local-first agent memory",
+    bestFor: "Local-first MCP meeting memory",
     summary:
       "Best when you want local processing, inspectable markdown, and a meeting memory layer that works across MCP, CLI, desktop, SDK, and Claude Code plugin workflows.",
   },
   {
     name: "Granola AI",
-    bestFor: "Polished AI notepad",
+    bestFor: "Polished AI notepad with MCP",
     summary:
-      "Best when you want a polished AI note-taking experience centered on reading, editing, and sharing enhanced notes inside a hosted product.",
+      "Best when you want a refined AI note-taking experience and also want some MCP access into a hosted product.",
   },
   {
-    name: "Fireflies",
-    bestFor: "Hosted team assistant workflows",
+    name: "Fireflies.ai",
+    bestFor: "Hosted team workflow with MCP",
     summary:
-      "Best when you want a hosted meeting assistant with integrations, admin controls, and broader team workflow automation.",
+      "Best when you want a hosted meeting assistant, broader integrations, and MCP access in a team-centered SaaS workflow.",
   },
   {
     name: "Otter AI",
-    bestFor: "Hosted mainstream meeting assistant",
+    bestFor: "Hosted mainstream meeting assistant with MCP",
     summary:
-      "Best when you want a hosted meeting assistant with centralized transcripts, collaboration, and team-oriented admin and integration surfaces.",
+      "Best when you want a hosted meeting assistant with centralized transcripts, collaboration, and broader team/admin posture.",
   },
 ] as const;
 
 const criteria = [
-  "How good is the MCP / agent workflow, not just whether MCP exists?",
-  "Do you own the output as inspectable files or mostly as data inside one app?",
-  "Is the product built for developers/operators, or for general hosted note-taking?",
-  "How strong are team collaboration, admin controls, and integrations?",
-  "Is the product optimized for local memory and recall, or for hosted assistant workflows?",
-] as const;
-
-const shortlist = [
-  {
-    category: "Best for local-first agent memory",
-    winner: "Minutes",
-    why: "It is the most purpose-built for durable local memory, inspectable markdown, and agent workflows across MCP, CLI, desktop, SDK, and plugin surfaces.",
-  },
-  {
-    category: "Best for polished AI note-taking",
-    winner: "Granola AI",
-    why: "It is stronger if your priority is a refined hosted note-taking experience inside one product.",
-  },
-  {
-    category: "Best for hosted team meeting workflows",
-    winner: "Fireflies",
-    why: "It has the stronger team/integration/admin posture if the job is a managed hosted assistant for an organization.",
-  },
-  {
-    category: "Best for hosted mainstream meeting assistant workflows",
-    winner: "Otter AI",
-    why: "It is a stronger fit if you want a hosted assistant with centralized transcripts and a broad collaboration story.",
-  },
+  "Is the MCP support real and current, not just vague integration language?",
+  "Does the MCP layer expose durable meeting memory or just a narrow hosted slice?",
+  "Can the output be inspected and reused outside one app?",
+  "Is the product optimized for local memory workflows or hosted team workflows?",
 ] as const;
 
 const sources = [
   { label: "Minutes for agents", href: "https://useminutes.app/for-agents" },
   { label: "Minutes MCP reference", href: "https://useminutes.app/docs/mcp/tools" },
-  { label: "Minutes error reference", href: "https://useminutes.app/docs/errors" },
-  { label: "Granola pricing", href: "https://www.granola.ai/pricing/" },
   { label: "Granola MCP", href: "https://help.granola.ai/article/granola-mcp" },
+  { label: "Fireflies MCP server", href: "https://fireflies.ai/blog/fireflies-mcp-server" },
+  { label: "Fireflies MCP docs", href: "https://docs.fireflies.ai/mcp-tools/overview" },
   { label: "Otter pricing", href: "https://otter.ai/pricing" },
-  { label: "Otter apps", href: "https://otter.ai/apps" },
-  { label: "Fireflies pricing", href: "https://fireflies.ai/pricing" },
-  { label: "Fireflies MCP", href: "https://docs.fireflies.ai/mcp-tools/overview" },
-  { label: "Fireflies apps", href: "https://fireflies.ai/apps" },
 ] as const;
 
 function SectionLabel({ label }: { label: string }) {
@@ -91,7 +63,7 @@ function SectionLabel({ label }: { label: string }) {
   );
 }
 
-export default function BestMeetingToolsPage() {
+export default function BestMcpMeetingMemoryToolsPage() {
   return (
     <div className="mx-auto max-w-[980px] px-6 pb-16 pt-10 sm:px-8 sm:pt-14">
       <div className="mb-10 flex items-center justify-between border-b border-[color:var(--border)] pb-4">
@@ -99,14 +71,17 @@ export default function BestMeetingToolsPage() {
           minutes
         </a>
         <div className="flex gap-5 text-sm text-[var(--text-secondary)]">
-          <a href="/compare" className="hover:text-[var(--accent)]">
-            compare
+          <a href="/resources/best-mcp-meeting-memory-tools.md" className="hover:text-[var(--accent)]">
+            page.md
           </a>
           <a href="/for-agents" className="hover:text-[var(--accent)]">
             for agents
           </a>
           <a href="/docs/mcp/tools" className="hover:text-[var(--accent)]">
             MCP docs
+          </a>
+          <a href="/compare" className="hover:text-[var(--accent)]">
+            compare
           </a>
         </div>
       </div>
@@ -116,13 +91,12 @@ export default function BestMeetingToolsPage() {
           Resource
         </p>
         <h1 className="mt-4 font-serif text-[40px] leading-[0.98] tracking-[-0.045em] text-[var(--text)] sm:text-[58px]">
-          Best meeting tools for Claude Code and Codex
+          Best MCP meeting memory tools
         </h1>
         <p className="mt-5 text-[17px] leading-8 text-[var(--text-secondary)]">
-          If your real workflow runs through Claude Code, Codex, MCP, and durable meeting memory,
-          the best tool is not automatically the one with the prettiest summary UI. The real split
-          is simpler than that: do you want a hosted assistant for teams, a polished AI notepad, or
-          a local-first memory layer your agents can actually use across tools?
+          The useful question is not just “which meeting tool has MCP?” It’s “which tool gives my
+          assistants durable meeting memory in a form they can actually use?” That is a smaller,
+          more specific category, and the tools in it are not all good at the same thing.
         </p>
         <div className="mt-6 flex flex-wrap gap-3">
           <span className="rounded-full bg-[var(--bg-elevated)] px-3 py-1 font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--text-secondary)]">
@@ -140,17 +114,17 @@ export default function BestMeetingToolsPage() {
         </p>
         <div className="mt-4 space-y-3 text-[15px] leading-8 text-[var(--text-secondary)]">
           <p>
-            If you want the best local-first meeting memory layer for Claude Code, Codex, and other
-            MCP workflows, <span className="font-medium text-[var(--text)]">Minutes</span> is the
-            strongest fit in this group.
+            If you want the strongest local-first MCP meeting memory layer,{" "}
+            <span className="font-medium text-[var(--text)]">Minutes</span> is the best fit in this
+            group.
           </p>
           <p>
-            If you want a more polished hosted AI notepad,{" "}
-            <span className="font-medium text-[var(--text)]">Granola AI</span> is often the better
-            fit. If you want a hosted team assistant with deeper SaaS workflow posture,{" "}
-            <span className="font-medium text-[var(--text)]">Fireflies</span> or{" "}
+            If you want a more polished hosted AI note-taking product with MCP access,{" "}
+            <span className="font-medium text-[var(--text)]">Granola AI</span> is a stronger fit.
+            If you want a hosted team assistant with broader integration and admin posture,{" "}
+            <span className="font-medium text-[var(--text)]">Fireflies.ai</span> or{" "}
             <span className="font-medium text-[var(--text)]">Otter AI</span> may be the better
-            fit.
+            choice.
           </p>
         </div>
       </section>
@@ -166,26 +140,8 @@ export default function BestMeetingToolsPage() {
 
       <section className="mt-14">
         <SectionLabel label="Shortlist" />
-        <div className="grid gap-4">
-          {shortlist.map((item) => (
-            <div
-              key={item.category}
-              className="rounded-[8px] border border-[color:var(--border)] bg-[var(--bg-elevated)] p-6 shadow-[var(--shadow-panel)]"
-            >
-              <p className="font-mono text-[11px] uppercase tracking-[0.16em] text-[var(--accent)]">
-                {item.category}
-              </p>
-              <p className="mt-3 text-[18px] font-medium text-[var(--text)]">{item.winner}</p>
-              <p className="mt-2 text-[15px] leading-8 text-[var(--text-secondary)]">{item.why}</p>
-            </div>
-          ))}
-        </div>
-      </section>
-
-      <section className="mt-14">
-        <SectionLabel label="Included tools" />
         <div className="grid gap-4 md:grid-cols-2">
-          {tools.map((tool) => (
+          {shortlist.map((tool) => (
             <div
               key={tool.name}
               className="rounded-[8px] border border-[color:var(--border)] bg-[var(--bg-elevated)] p-6 shadow-[var(--shadow-panel)]"
@@ -206,20 +162,16 @@ export default function BestMeetingToolsPage() {
         <SectionLabel label="How to choose" />
         <div className="space-y-4 text-[15px] leading-8 text-[var(--text-secondary)]">
           <p>
-            Pick <span className="font-medium text-[var(--text)]">Minutes</span> if the real
-            output you want is local memory your assistants can query later, not just a transcript
-            or summary inside one hosted app.
+            Pick <span className="font-medium text-[var(--text)]">Minutes</span> if your assistants
+            need local, inspectable meeting memory they can query later across MCP, CLI, desktop,
+            and plugin workflows.
           </p>
           <p>
-            Pick <span className="font-medium text-[var(--text)]">Granola AI</span> if you want
-            the best polished AI notepad experience. Pick{" "}
-            <span className="font-medium text-[var(--text)]">Fireflies</span> or{" "}
+            Pick <span className="font-medium text-[var(--text)]">Granola AI</span> if you want a
+            polished hosted AI notepad with MCP access into that product. Pick{" "}
+            <span className="font-medium text-[var(--text)]">Fireflies.ai</span> or{" "}
             <span className="font-medium text-[var(--text)]">Otter AI</span> if you want a hosted
-            assistant with stronger team and integration posture.
-          </p>
-          <p>
-            The category gets much clearer once you stop asking “which app summarizes meetings
-            best?” and start asking “what workflow am I actually trying to support?”
+            meeting assistant with stronger team and admin posture.
           </p>
         </div>
       </section>
@@ -228,14 +180,14 @@ export default function BestMeetingToolsPage() {
         <SectionLabel label="When Minutes is not the right fit" />
         <div className="space-y-4 text-[15px] leading-8 text-[var(--text-secondary)]">
           <p>
-            Minutes is not the best fit if you want a managed hosted meeting assistant for a team,
-            with centralized admin, deeper SaaS integrations, and a workflow built around one
+            Minutes is not the best fit if the real goal is a managed hosted assistant for a team,
+            with centralized admin, broader SaaS integrations, and a workflow built around one
             polished product experience.
           </p>
           <p>
-            It is strongest when you care about local ownership, open artifacts, agent readability,
-            and multi-surface workflows. If that is not the job, one of the hosted products on this
-            page may be the better choice.
+            It is strongest when you care about local ownership, open artifacts, and agent
+            readability. If that is not the job, one of the hosted tools in this category may be a
+            better fit.
           </p>
         </div>
       </section>
@@ -252,16 +204,16 @@ export default function BestMeetingToolsPage() {
             See agent setup
           </a>
           <a
-            href="/compare"
-            className="inline-flex items-center rounded-[5px] border border-[color:var(--border-mid)] px-5 py-2.5 font-mono text-[11px] uppercase tracking-[0.12em] text-[var(--text)] hover:bg-[var(--bg-hover)]"
-          >
-            Compare pages
-          </a>
-          <a
             href="/docs/mcp/tools"
             className="inline-flex items-center rounded-[5px] border border-[color:var(--border-mid)] px-5 py-2.5 font-mono text-[11px] uppercase tracking-[0.12em] text-[var(--text)] hover:bg-[var(--bg-hover)]"
           >
             MCP docs
+          </a>
+          <a
+            href="/compare"
+            className="inline-flex items-center rounded-[5px] border border-[color:var(--border-mid)] px-5 py-2.5 font-mono text-[11px] uppercase tracking-[0.12em] text-[var(--text)] hover:bg-[var(--bg-hover)]"
+          >
+            Compare pages
           </a>
         </div>
       </section>

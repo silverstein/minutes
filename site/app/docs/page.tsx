@@ -111,13 +111,13 @@ export default function DocsIndexPage() {
           Minutes docs
         </h1>
         <p className="mt-5 text-[17px] leading-8 text-[var(--text-secondary)]">
-          This is the public map of the Minutes knowledge surface. Start with{" "}
+          This is the clean map of the public Minutes docs surface. Start with{" "}
           <a href="/for-agents" className="text-[var(--accent)] hover:underline">
             For agents
           </a>{" "}
           if you are helping someone install or use Minutes. Use the generated references for the
-          canonical MCP and error surfaces. Use the compare and resource pages for discovery and
-          fit-based guidance.
+          MCP and error surfaces. Use the compare and resource pages when the real question is fit,
+          not setup.
         </p>
       </section>
 

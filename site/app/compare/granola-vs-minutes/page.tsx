@@ -68,6 +68,7 @@ export default function GranolaVsMinutesPage() {
     <ComparePage
       competitorName="Granola"
       competitorLabel="Granola AI"
+      markdownHref="/compare/granola-vs-minutes.md"
       heroSummary="Granola and Minutes are both good, but they solve different problems. Granola is a better fit if you want a polished AI note-taking product with stronger collaboration and integration ergonomics. Minutes is a better fit if you want local conversation memory, inspectable markdown, and a workflow your agents can use across MCP, CLI, desktop, and plugin surfaces."
       quickVerdictCompetitor="your top priority is a polished AI notepad, collaboration, and a product built around reading, editing, and sharing notes inside the app."
       quickVerdictMinutes="your top priority is local processing, inspectable files, and a memory layer that Claude, Codex, and other MCP clients can query later."

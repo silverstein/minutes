@@ -46,6 +46,15 @@ jobs:
       - name: Build core with diarization (cross-platform)
         run: cargo build -p minutes-core --no-default-features --features diarize
 
+      - name: Build core with streaming only (downstream consumer path)
+        # Catches cfg gating regressions where streaming-only modules
+        # (streaming_whisper, dictation, live_transcript) accidentally require
+        # whisper. Prompter is the canonical downstream consumer of this
+        # feature combo — it enables `streaming` for AudioStream + Vad but
+        # does its own whisper via whisper-rs directly. Without this step,
+        # breakage here only surfaces when Prompter next runs cargo build.
+        run: cargo build -p minutes-core --no-default-features --features streaming
+
       - name: Build full workspace (macOS only)
         if: runner.os == 'macOS'
         run: cargo build --no-default-features

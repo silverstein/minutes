@@ -34,16 +34,21 @@ pub mod streaming;
 #[cfg(feature = "streaming")]
 pub mod vad;
 
-// Streaming whisper (progressive transcription)
-#[cfg(feature = "streaming")]
+// Streaming whisper (progressive transcription) — requires both features.
+// These modules use whisper_rs + whisper_guard::params internally, so they
+// can only compile when the whisper backend is enabled. Downstream consumers
+// that enable `streaming` alone (e.g. Prompter, which does its own whisper
+// via whisper-rs directly) must not pull these in. The `all(...)` gate
+// matches the existing pattern at capture.rs:803.
+#[cfg(all(feature = "streaming", feature = "whisper"))]
 pub mod streaming_whisper;
 
 // Dictation mode (requires streaming + whisper)
-#[cfg(feature = "streaming")]
+#[cfg(all(feature = "streaming", feature = "whisper"))]
 pub mod dictation;
 
 // Live transcript mode (requires streaming + whisper)
-#[cfg(feature = "streaming")]
+#[cfg(all(feature = "streaming", feature = "whisper"))]
 pub mod live_transcript;
 
 // Native macOS hotkey monitoring via CGEventTap

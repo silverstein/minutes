@@ -1118,35 +1118,16 @@ fn parse_parakeet_output(raw_output: &str, config: &Config) -> Result<String, Tr
         ));
     }
 
-    // Group words into segments at pause boundaries
-    let mut lines = Vec::new();
-    let mut current_words: Vec<&str> = Vec::new();
-    let mut segment_start: f64 = 0.0;
-
-    for (i, word) in words.iter().enumerate() {
-        if current_words.is_empty() {
-            segment_start = word.start;
-        }
-        let w = word.word.trim();
-        if !w.is_empty() {
-            current_words.push(w);
-        }
-
-        // Break segment at pauses > 0.5s or every ~30 words
-        let is_pause = if i + 1 < words.len() {
-            words[i + 1].start - word.end > 0.5
-        } else {
-            true // last word
-        };
-
-        if (is_pause || current_words.len() >= 30) && !current_words.is_empty() {
-            let mins = (segment_start / 60.0) as u64;
-            let secs = (segment_start % 60.0) as u64;
-            let text = current_words.join(" ");
-            lines.push(format!("[{}:{:02}] {}", mins, secs, text));
-            current_words.clear();
-        }
-    }
+    // Delegate word-to-sentence grouping to the parakeet module
+    let grouped: Vec<crate::parakeet::Word> = words
+        .into_iter()
+        .map(|w| crate::parakeet::Word {
+            text: w.word,
+            start: w.start,
+            end: w.end,
+        })
+        .collect();
+    let lines = crate::parakeet::group_words_into_lines(&grouped);
 
     // Apply dedup (reuse existing anti-hallucination safety net)
     let lines = dedup_segments(lines);

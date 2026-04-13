@@ -20,6 +20,9 @@ pub mod vault;
 pub mod voice;
 pub mod watch;
 
+#[cfg(feature = "parakeet")]
+pub mod parakeet;
+
 // Streaming audio API (for Prompter and other real-time consumers)
 #[cfg(feature = "streaming")]
 pub mod streaming;

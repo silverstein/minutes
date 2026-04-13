@@ -3,6 +3,7 @@ use chrono::{Local, TimeZone};
 use clap::{Parser, Subcommand};
 use minutes_core::capture::RecordingIntent;
 use minutes_core::config::VALID_PARAKEET_MODELS;
+use minutes_core::parakeet;
 use minutes_core::{CaptureMode, Config, ContentType};
 use serde::Serialize;
 
@@ -2946,11 +2947,11 @@ fn cmd_setup_parakeet(model: &str) -> Result<()> {
     }
 
     let config = Config::default();
-    let model_dir = config.transcription.model_path.join("parakeet");
+    let model_dir = parakeet::install_dir(&config, model);
     std::fs::create_dir_all(&model_dir)?;
 
-    let dest_model = model_dir.join(format!("{}.safetensors", model));
-    let dest_vocab_name = format!("{}.tokenizer.vocab", model);
+    let dest_model = model_dir.join(parakeet::default_model_filename(model));
+    let dest_vocab_name = parakeet::default_tokenizer_filename(model);
     let dest_vocab = model_dir.join(&dest_vocab_name);
 
     // Map model name to HuggingFace repo
@@ -2972,11 +2973,19 @@ fn cmd_setup_parakeet(model: &str) -> Result<()> {
             size as f64 / 1_048_576.0
         );
         eprintln!("Vocab file: {}", dest_vocab.display());
+        if let Ok(metadata_path) =
+            parakeet::write_install_metadata(&config, model, &dest_model, &dest_vocab)
+        {
+            eprintln!("Metadata file: {}", metadata_path.display());
+        }
     } else {
         eprintln!("Parakeet model setup: {}", model);
         eprintln!();
         eprintln!("Parakeet models require a one-time conversion from NVIDIA's .nemo format.");
         eprintln!("Follow these steps:");
+        eprintln!();
+        eprintln!("  Install directory:");
+        eprintln!("    {}", model_dir.display());
         eprintln!();
         eprintln!("  Step 1: Clone parakeet.cpp");
         eprintln!("    git clone https://github.com/Frikallo/parakeet.cpp");

@@ -42,6 +42,73 @@ pub fn check_all(config: &Config) -> Vec<HealthItem> {
 
 /// Check if the whisper model is downloaded and ready.
 pub fn model_status(config: &Config) -> HealthItem {
+    if config.transcription.engine == "parakeet" {
+        let binary = &config.transcription.parakeet_binary;
+        let binary_found = std::process::Command::new(binary)
+            .arg("--help")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok();
+        let model =
+            crate::parakeet::resolve_model_file(config, &config.transcription.parakeet_model);
+        let tokenizer = crate::parakeet::resolve_tokenizer_file(
+            config,
+            &config.transcription.parakeet_model,
+            &config.transcription.parakeet_vocab,
+        );
+        let metadata =
+            crate::parakeet::read_install_metadata(config, &config.transcription.parakeet_model);
+
+        let all_ready = binary_found && model.is_some() && tokenizer.is_some();
+        let mut problems = Vec::new();
+        if !binary_found {
+            problems.push(format!("binary '{}' not in PATH", binary));
+        }
+        if model.is_none() {
+            problems.push(format!(
+                "model {} not installed",
+                config.transcription.parakeet_model
+            ));
+        }
+        if tokenizer.is_none() {
+            problems.push("SentencePiece tokenizer not installed".to_string());
+        }
+
+        let detail = if all_ready {
+            let model_path = model.unwrap();
+            let tokenizer_path = tokenizer.unwrap();
+            let metadata_suffix = if let Some(metadata) = metadata {
+                format!(
+                    " Metadata: {} from {}.",
+                    metadata.source_artifact, metadata.source_repo
+                )
+            } else {
+                " Metadata missing; rerun `minutes setup --parakeet` after installing files to persist provenance."
+                    .to_string()
+            };
+            format!(
+                "Parakeet {} ready. Model: {}. Tokenizer: {}.{}",
+                config.transcription.parakeet_model,
+                model_path.display(),
+                tokenizer_path.display(),
+                metadata_suffix
+            )
+        } else {
+            format!(
+                "Parakeet not ready: {}. Run `minutes setup --parakeet` for the guided install path.",
+                problems.join(", ")
+            )
+        };
+
+        return HealthItem {
+            label: "Speech model".into(),
+            state: if all_ready { "ready" } else { "attention" }.into(),
+            detail,
+            optional: false,
+        };
+    }
+
     let model_name = &config.transcription.model;
     let model_file = config
         .transcription
@@ -400,6 +467,39 @@ mod tests {
         let status = model_status(&config);
         assert_eq!(status.state, "attention");
         assert!(!status.optional);
+    }
+
+    #[test]
+    fn test_parakeet_model_status_missing_assets() {
+        let mut config = Config::default();
+        config.transcription.engine = "parakeet".into();
+        let tmp = tempfile::TempDir::new().unwrap();
+        config.transcription.model_path = tmp.path().to_path_buf();
+        let status = model_status(&config);
+        assert_eq!(status.state, "attention");
+        assert!(status.detail.contains("Parakeet not ready"));
+    }
+
+    #[test]
+    fn test_parakeet_model_status_ready_with_metadata() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut config = Config::default();
+        config.transcription.engine = "parakeet".into();
+        config.transcription.model_path = tmp.path().to_path_buf();
+        config.transcription.parakeet_binary = "/usr/bin/true".into();
+
+        let install_dir = crate::parakeet::install_dir(&config, "tdt-ctc-110m");
+        std::fs::create_dir_all(&install_dir).unwrap();
+        let model = install_dir.join("tdt-ctc-110m.safetensors");
+        let tokenizer = install_dir.join("tdt-ctc-110m.tokenizer.vocab");
+        std::fs::write(&model, b"model").unwrap();
+        std::fs::write(&tokenizer, b"tokenizer").unwrap();
+        crate::parakeet::write_install_metadata(&config, "tdt-ctc-110m", &model, &tokenizer)
+            .unwrap();
+
+        let status = model_status(&config);
+        assert_eq!(status.state, "ready");
+        assert!(status.detail.contains("Metadata:"));
     }
 
     #[test]

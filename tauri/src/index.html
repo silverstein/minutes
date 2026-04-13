@@ -4694,6 +4694,18 @@
       } catch (_) { }
     }
 
+    async function warmParakeetIfSelected(engine) {
+      if (engine !== 'parakeet') return;
+      try {
+        const result = await invoke('cmd_warm_parakeet');
+        if (result && result.status === 'ok') {
+          console.debug('Parakeet warmup complete', result);
+        }
+      } catch (e) {
+        console.error('parakeet warmup:', e);
+      }
+    }
+
     function currentModeLabel(mode) {
       return mode === 'quick-thought' ? 'Quick Thought' : 'Recording';
     }
@@ -6511,6 +6523,7 @@
         document.getElementById('settings-whisper-section').classList.toggle('is-hidden', eng !== 'whisper');
         document.getElementById('settings-parakeet-section').classList.toggle('is-hidden', eng !== 'parakeet');
         document.getElementById('settings-parakeet-model').value = s.transcription.parakeet_model || 'tdt-ctc-110m';
+        warmParakeetIfSelected(eng);
         document.getElementById('settings-whisper-model').value = s.transcription.model;
         const dl = s.transcription.downloaded_models || [];
         const selectedModel = s.transcription.model;
@@ -6767,11 +6780,13 @@
       await invoke('cmd_set_setting', { section: 'transcription', key: 'engine', value: e.target.value });
       document.getElementById('settings-whisper-section').classList.toggle('is-hidden', e.target.value !== 'whisper');
       document.getElementById('settings-parakeet-section').classList.toggle('is-hidden', e.target.value !== 'parakeet');
+      warmParakeetIfSelected(e.target.value);
     });
     document.getElementById('settings-parakeet-model').addEventListener('change', async (e) => {
       await invoke('cmd_set_setting', { section: 'transcription', key: 'parakeet_model', value: e.target.value });
       const s = await invoke('cmd_get_settings');
       document.getElementById('settings-parakeet-model').value = s.transcription.parakeet_model || 'tdt-ctc-110m';
+      warmParakeetIfSelected('parakeet');
     });
     document.getElementById('settings-whisper-model').addEventListener('change', async (e) => {
       await invoke('cmd_set_setting', { section: 'transcription', key: 'model', value: e.target.value });

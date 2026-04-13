@@ -1,6 +1,6 @@
 use crate::call_capture;
 use minutes_core::capture::RecordingIntent;
-use minutes_core::config::{parakeet_model_tokenizer_candidates, VALID_PARAKEET_MODELS};
+use minutes_core::config::VALID_PARAKEET_MODELS;
 use minutes_core::{CaptureMode, Config, ContentType};
 use std::cmp::Reverse;
 use std::collections::hash_map::DefaultHasher;
@@ -55,38 +55,15 @@ pub struct AppState {
 }
 
 fn resolve_parakeet_model_asset(config: &Config) -> Option<PathBuf> {
-    let model_dir = config.transcription.model_path.join("parakeet");
-    let model_name = &config.transcription.parakeet_model;
-    let candidates = [
-        model_dir.join(format!("{}.safetensors", model_name)),
-        model_dir.join(format!("parakeet-{}.safetensors", model_name)),
-        model_dir.join("model.safetensors"),
-    ];
-    candidates.into_iter().find(|candidate| candidate.exists())
+    minutes_core::parakeet::resolve_model_file(config, &config.transcription.parakeet_model)
 }
 
 fn resolve_parakeet_tokenizer_asset(config: &Config) -> Option<PathBuf> {
-    let model_dir = config.transcription.model_path.join("parakeet");
-    let configured_vocab = config.transcription.parakeet_vocab.as_str();
-    let using_generic_name = matches!(configured_vocab, "" | "tokenizer.vocab" | "vocab.txt");
-    let mut candidates: Vec<PathBuf> = Vec::new();
-    if !using_generic_name {
-        candidates.push(model_dir.join(configured_vocab));
-    }
-    for candidate_name in parakeet_model_tokenizer_candidates(&config.transcription.parakeet_model)
-    {
-        let candidate = model_dir.join(candidate_name);
-        if !candidates.iter().any(|existing| existing == &candidate) {
-            candidates.push(candidate);
-        }
-    }
-    if using_generic_name {
-        let configured = model_dir.join(configured_vocab);
-        if !candidates.iter().any(|existing| existing == &configured) {
-            candidates.push(configured);
-        }
-    }
-    candidates.into_iter().find(|candidate| candidate.exists())
+    minutes_core::parakeet::resolve_tokenizer_file(
+        config,
+        &config.transcription.parakeet_model,
+        &config.transcription.parakeet_vocab,
+    )
 }
 
 /// Lifecycle state for the palette overlay window.
@@ -5252,6 +5229,40 @@ pub fn cmd_get_settings() -> serde_json::Value {
             "hotkey_keycode": config.dictation.hotkey_keycode,
         },
     })
+}
+
+#[tauri::command]
+pub async fn cmd_warm_parakeet() -> Result<serde_json::Value, String> {
+    let config = Config::load();
+    if config.transcription.engine != "parakeet" {
+        return Ok(serde_json::json!({
+            "status": "skipped",
+            "reason": "parakeet not selected",
+        }));
+    }
+    #[cfg(feature = "parakeet")]
+    {
+        let stats = tauri::async_runtime::spawn_blocking(move || {
+            minutes_core::transcribe::warmup_parakeet(&config)
+        })
+        .await
+        .map_err(|error| format!("warmup task failed: {}", error))?
+        .map_err(|error| error.to_string())?;
+
+        return Ok(serde_json::json!({
+            "status": "ok",
+            "model": stats.model,
+            "elapsed_ms": stats.elapsed_ms,
+            "used_gpu": stats.used_gpu,
+        }));
+    }
+    #[cfg(not(feature = "parakeet"))]
+    {
+        Ok(serde_json::json!({
+            "status": "skipped",
+            "reason": "parakeet feature not compiled",
+        }))
+    }
 }
 
 #[tauri::command]

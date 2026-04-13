@@ -119,20 +119,22 @@ minutes setup --parakeet --parakeet-model tdt-600m # Multilingual v3 (25 EU lang
 # Option B: Manual download and conversion
 hf download nvidia/parakeet-tdt-0.6b-v3 parakeet-tdt-0.6b-v3.nemo --local-dir .
 cd parakeet.cpp
-python scripts/convert_nemo.py parakeet-tdt-0.6b-v3.nemo -o ~/.minutes/models/parakeet/tdt-600m.safetensors --model 600m-tdt
+mkdir -p ~/.minutes/models/parakeet/tdt-600m
+python scripts/convert_nemo.py parakeet-tdt-0.6b-v3.nemo -o ~/.minutes/models/parakeet/tdt-600m/tdt-600m.safetensors --model 600m-tdt
 
 # Also convert Silero VAD weights (for silence stripping)
 python scripts/convert_silero_vad.py -o ~/.minutes/models/parakeet/silero_vad_v5.safetensors
 
 # Extract the SentencePiece tokenizer vocab and store it with a model-specific name
 tar xf parakeet-tdt-0.6b-v3.nemo --wildcards --no-anchored '*tokenizer.vocab'
-cp *_tokenizer.vocab ~/.minutes/models/parakeet/tdt-600m.tokenizer.vocab
+cp *_tokenizer.vocab ~/.minutes/models/parakeet/tdt-600m/tdt-600m.tokenizer.vocab
 ```
 
 `parakeet.cpp` expects the SentencePiece `tokenizer.vocab` file, not the
 plain extracted `vocab.txt`. If you install more than one Parakeet model,
-use model-specific filenames such as `tdt-ctc-110m.tokenizer.vocab` and
-`tdt-600m.tokenizer.vocab` so model switches stay deterministic.
+store each model in its own directory and use model-specific filenames such
+as `tdt-ctc-110m/tdt-ctc-110m.tokenizer.vocab` and
+`tdt-600m/tdt-600m.tokenizer.vocab` so model switches stay deterministic.
 
 ## Configure Minutes
 

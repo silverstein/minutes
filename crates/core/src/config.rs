@@ -121,24 +121,6 @@ pub struct TranscriptionConfig {
 
 pub const VALID_PARAKEET_MODELS: &[&str] = &["tdt-ctc-110m", "tdt-600m"];
 
-pub fn parakeet_model_tokenizer_candidates(model: &str) -> &'static [&'static str] {
-    match model {
-        "tdt-ctc-110m" => &[
-            "tdt-ctc-110m.tokenizer.vocab",
-            "tdt-ctc-110m.vocab",
-            "tokenizer.vocab",
-            "vocab.txt",
-        ],
-        "tdt-600m" => &[
-            "tdt-600m.tokenizer.vocab",
-            "tdt-600m.vocab",
-            "tokenizer.vocab",
-            "vocab.txt",
-        ],
-        _ => &["tokenizer.vocab", "vocab.txt"],
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DiarizationConfig {

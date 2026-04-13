@@ -1323,6 +1323,7 @@ fn main() {
             commands::cmd_list_agents,
             commands::cmd_terminal_info,
             commands::cmd_get_settings,
+            commands::cmd_warm_parakeet,
             commands::cmd_set_setting,
             commands::cmd_set_screen_share_hidden,
             commands::cmd_get_autostart,

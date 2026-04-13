@@ -8072,6 +8072,96 @@ pub async fn cmd_install_update(app: tauri::AppHandle) -> Result<serde_json::Val
 }
 
 // ─────────────────────────────────────────────────────────────────────
+// What's New (post-update release notes)
+// ─────────────────────────────────────────────────────────────────────
+
+/// Check whether the user should see "What's New" after an update.
+///
+/// Reads `~/.minutes/whats-new.json` for `last_seen_version`, compares it
+/// to the running app version. If different, fetches the matching GitHub
+/// release notes and returns them. Offline or 404 → still shows the
+/// version bump, just without a body.
+#[tauri::command]
+pub async fn cmd_check_whats_new(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
+    let current = app.config().version.clone().unwrap_or_default();
+    if current.is_empty() {
+        return Ok(serde_json::json!({ "show": false }));
+    }
+
+    let state_path = Config::minutes_dir().join("whats-new.json");
+    let last_seen = std::fs::read_to_string(&state_path)
+        .ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .and_then(|v| {
+            v.get("last_seen_version")
+                .and_then(|v| v.as_str())
+                .map(String::from)
+        })
+        .unwrap_or_default();
+
+    if last_seen == current {
+        return Ok(serde_json::json!({ "show": false }));
+    }
+
+    // First launch ever → record version, don't show notes
+    if last_seen.is_empty() {
+        let payload = serde_json::json!({ "last_seen_version": current });
+        let _ = std::fs::write(
+            &state_path,
+            serde_json::to_string_pretty(&payload).unwrap_or_default(),
+        );
+        return Ok(serde_json::json!({ "show": false }));
+    }
+
+    // Version changed → fetch release notes from GitHub
+    let tag = format!("v{}", current);
+    let url = format!(
+        "https://api.github.com/repos/silverstein/minutes/releases/tags/{}",
+        tag
+    );
+    let body = match ureq::get(&url)
+        .header("Accept", "application/vnd.github.v3+json")
+        .header("User-Agent", "minutes-desktop")
+        .call()
+    {
+        Ok(response) => response
+            .into_body()
+            .read_to_string()
+            .ok()
+            .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+            .and_then(|v| v.get("body").and_then(|b| b.as_str()).map(String::from))
+            .unwrap_or_default(),
+        Err(_) => String::new(),
+    };
+
+    let release_url = format!(
+        "https://github.com/silverstein/minutes/releases/tag/{}",
+        tag
+    );
+
+    Ok(serde_json::json!({
+        "show": true,
+        "version": current,
+        "previousVersion": last_seen,
+        "body": body,
+        "url": release_url,
+    }))
+}
+
+/// Mark the current version as seen so the modal won't show again.
+#[tauri::command]
+pub async fn cmd_dismiss_whats_new(app: tauri::AppHandle) -> Result<(), String> {
+    let current = app.config().version.clone().unwrap_or_default();
+    let state_path = Config::minutes_dir().join("whats-new.json");
+    let payload = serde_json::json!({ "last_seen_version": current });
+    std::fs::write(
+        &state_path,
+        serde_json::to_string_pretty(&payload).unwrap_or_default(),
+    )
+    .map_err(|e| e.to_string())
+}
+
+// ─────────────────────────────────────────────────────────────────────
 // Command palette window management
 // ─────────────────────────────────────────────────────────────────────
 

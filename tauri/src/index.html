@@ -3226,6 +3226,102 @@
       font-size: 11px;
     }
 
+    /* ── What's New modal ── */
+    .whats-new-scrim {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: var(--modal-scrim);
+      z-index: 9000;
+      align-items: center;
+      justify-content: center;
+      animation: processing-enter 0.2s ease-out;
+    }
+    .whats-new-scrim.active {
+      display: flex;
+    }
+    .whats-new-modal {
+      background: var(--bg-elevated);
+      border: 1px solid var(--border-mid);
+      border-radius: var(--radius-lg);
+      width: min(440px, calc(100vw - 32px));
+      max-height: calc(100vh - 64px);
+      display: flex;
+      flex-direction: column;
+      box-shadow: 0 24px 48px var(--shadow-strong), inset 0 1px 0 var(--inset-highlight);
+    }
+    .whats-new-header {
+      padding: 20px 20px 0;
+      flex-shrink: 0;
+    }
+    .whats-new-header h2 {
+      font-family: var(--font-display);
+      font-size: 20px;
+      font-weight: 400;
+      color: var(--text);
+      margin: 0;
+    }
+    .whats-new-header .whats-new-version {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      color: var(--text-secondary);
+      margin-top: 4px;
+    }
+    .whats-new-body {
+      padding: 16px 20px;
+      overflow-y: auto;
+      flex: 1;
+      font-family: var(--font-sans);
+      font-size: 13px;
+      line-height: 1.6;
+      color: var(--text);
+    }
+    .whats-new-body h1, .whats-new-body h2, .whats-new-body h3 {
+      font-family: var(--font-sans);
+      font-weight: 600;
+      margin: 16px 0 8px;
+      font-size: 14px;
+      color: var(--text);
+    }
+    .whats-new-body h1:first-child, .whats-new-body h2:first-child, .whats-new-body h3:first-child {
+      margin-top: 0;
+    }
+    .whats-new-body p { margin: 0 0 12px; }
+    .whats-new-body ul, .whats-new-body ol { margin: 0 0 12px; padding-left: 20px; }
+    .whats-new-body li { margin-bottom: 4px; }
+    .whats-new-body code {
+      font-family: var(--font-mono);
+      font-size: 12px;
+      background: var(--surface-fill-strong);
+      padding: 1px 5px;
+      border-radius: 4px;
+    }
+    .whats-new-body pre {
+      background: var(--surface-fill);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 10px 12px;
+      overflow-x: auto;
+      margin: 0 0 12px;
+    }
+    .whats-new-body pre code {
+      background: none;
+      padding: 0;
+    }
+    .whats-new-body a {
+      color: var(--accent);
+      text-decoration: none;
+    }
+    .whats-new-body a:hover { text-decoration: underline; }
+    .whats-new-footer {
+      padding: 12px 20px 16px;
+      display: flex;
+      gap: 8px;
+      justify-content: flex-end;
+      flex-shrink: 0;
+      border-top: 1px solid var(--border);
+    }
+
     .call-health-chip {
       font-size: 11px;
       border-radius: 999px;
@@ -3574,6 +3670,21 @@
       <div class="update-banner-actions">
         <button class="btn btn-primary btn-sm" id="btn-restart-update">Restart Now</button>
         <button class="btn btn-secondary btn-sm" id="btn-dismiss-update">Later</button>
+      </div>
+    </div>
+
+    <!-- What's New modal (shown once after an update) -->
+    <div class="whats-new-scrim" id="whats-new-scrim">
+      <div class="whats-new-modal">
+        <div class="whats-new-header">
+          <h2>What's New</h2>
+          <div class="whats-new-version" id="whats-new-version"></div>
+        </div>
+        <div class="whats-new-body" id="whats-new-body"></div>
+        <div class="whats-new-footer">
+          <button class="btn btn-secondary btn-sm" id="btn-whats-new-release">View on GitHub</button>
+          <button class="btn btn-primary btn-sm" id="btn-whats-new-dismiss">Got it</button>
+        </div>
       </div>
     </div>
 
@@ -8273,6 +8384,54 @@
       if (updateBanner) updateBanner.classList.remove('active');
       try { localStorage.removeItem('minutes-pending-update'); } catch (_) { }
     });
+
+    // ── What's New modal (shown once after update) ──
+    // The release notes body comes from our own GitHub releases (trusted first-party
+    // content authored by the repo owner). The same `marked.parse()` path is used
+    // by the existing meeting markdown viewer elsewhere in this file.
+    (async () => {
+      try {
+        const result = await invoke('cmd_check_whats_new');
+        if (!result.show) return;
+        const scrim = document.getElementById('whats-new-scrim');
+        const versionEl = document.getElementById('whats-new-version');
+        const bodyEl = document.getElementById('whats-new-body');
+        if (!scrim) return;
+        versionEl.textContent = 'v' + result.version;
+        if (result.body && typeof marked !== 'undefined') {
+          bodyEl.innerHTML = marked.parse(result.body);
+          // Open links externally via Tauri shell
+          bodyEl.querySelectorAll('a').forEach(a => {
+            a.addEventListener('click', (e) => {
+              e.preventDefault();
+              window.__TAURI__.shell.open(a.href);
+            });
+          });
+        } else if (result.body) {
+          bodyEl.textContent = result.body;
+        } else {
+          bodyEl.innerHTML = '<p style="color:var(--text-secondary)">You\'ve updated from v' +
+            result.previousVersion + ' to v' + result.version + '.</p>';
+        }
+        scrim.classList.add('active');
+        document.getElementById('btn-whats-new-dismiss').addEventListener('click', async () => {
+          scrim.classList.remove('active');
+          try { await invoke('cmd_dismiss_whats_new'); } catch (_) { }
+        });
+        document.getElementById('btn-whats-new-release').addEventListener('click', () => {
+          if (result.url) window.__TAURI__.shell.open(result.url);
+        });
+        // Dismiss on scrim click
+        scrim.addEventListener('click', async (e) => {
+          if (e.target === scrim) {
+            scrim.classList.remove('active');
+            try { await invoke('cmd_dismiss_whats_new'); } catch (_) { }
+          }
+        });
+      } catch (e) {
+        console.error('[whats-new]', e);
+      }
+    })();
 
     // ── Listen for live transcript events (T6: immediate UI feedback) ──
     currentWindow.listen('live-transcript:started', () => {

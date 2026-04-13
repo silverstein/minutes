@@ -80,7 +80,17 @@ fn parakeet_helper_envelope<T: Serialize>(
 /// minutes — conversation memory for AI assistants.
 /// Every meeting, every idea, every voice note — searchable by your AI.
 #[derive(Parser)]
-#[command(name = "minutes", version, about, long_about = None)]
+#[command(
+    name = "minutes",
+    version,
+    long_version = concat!(
+        env!("CARGO_PKG_VERSION"),
+        "\nhttps://github.com/silverstein/minutes/releases/tag/v",
+        env!("CARGO_PKG_VERSION"),
+    ),
+    about,
+    long_about = None,
+)]
 struct Cli {
     /// Enable verbose output (debug logs to stderr)
     #[arg(short, long, global = true)]

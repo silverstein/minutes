@@ -59,7 +59,7 @@ jobs:
           key: ${{ runner.os }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Build release binary
-        run: cargo build --release -p minutes-cli --target ${{ matrix.target }}
+        run: cargo build --release -p minutes-cli --features parakeet --target ${{ matrix.target }}
 
       - name: Rename binary
         shell: bash

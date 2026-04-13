@@ -49,7 +49,7 @@ jobs:
 
       - name: Build desktop installer (unsigned)
         working-directory: tauri/src-tauri
-        run: cargo tauri build --ci --bundles nsis --no-sign
+        run: cargo tauri build --features parakeet --ci --bundles nsis --no-sign
         env:
           CARGO_NET_RETRY: 3
           # Cap ggml/whisper.cpp at AVX2-class instructions for the shipped

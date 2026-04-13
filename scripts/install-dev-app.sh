@@ -48,7 +48,7 @@ swiftc -O \
   scripts/calendar-events.swift -o target/release/calendar-events
 
 echo "=== Building ${DEV_PRODUCT_NAME}.app ==="
-cargo tauri build --bundles app --config "$DEV_CONFIG" --no-sign
+cargo tauri build --bundles app --config "$DEV_CONFIG" --features parakeet --no-sign
 
 echo "=== Embedding calendar helper in dev bundle ==="
 APP_RESOURCES="${BUILD_APP}/Contents/Resources"

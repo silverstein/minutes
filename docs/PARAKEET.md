@@ -38,6 +38,7 @@ minutes setup --parakeet
 [transcription]
 engine = "parakeet"
 parakeet_model = "tdt-ctc-110m"
+parakeet_binary = "/Users/you/.local/bin/parakeet"
 parakeet_vocab = "tdt-ctc-110m.tokenizer.vocab"
 ```
 
@@ -52,10 +53,36 @@ If you want the multilingual model instead:
 [transcription]
 engine = "parakeet"
 parakeet_model = "tdt-600m"
+parakeet_binary = "/Users/you/.local/bin/parakeet"
 parakeet_vocab = "tdt-600m.tokenizer.vocab"
 ```
 
 Minutes will continue to run locally either way.
+
+## Important macOS note for desktop users
+
+If you launch Minutes from Finder, Spotlight, or the Dock, the app may not see
+the same `PATH` as your shell.
+
+That means this can work in Terminal:
+
+```bash
+which parakeet
+```
+
+but the desktop app can still fail with "parakeet binary not found."
+
+For the desktop app, prefer an **absolute path** in `config.toml`:
+
+```toml
+[transcription]
+parakeet_binary = "/Users/you/.local/bin/parakeet"
+```
+
+Common macOS install locations:
+- `/opt/homebrew/bin/parakeet`
+- `/usr/local/bin/parakeet`
+- `/Users/you/.local/bin/parakeet`
 
 ## Prerequisites
 
@@ -146,14 +173,15 @@ Edit `~/.config/minutes/config.toml`:
 [transcription]
 engine = "parakeet"              # "whisper" (default) or "parakeet"
 parakeet_model = "tdt-600m"      # "tdt-ctc-110m" (English) or "tdt-600m" (multilingual v3)
-parakeet_binary = "parakeet"     # Path to parakeet.cpp binary (or name in PATH)
+parakeet_binary = "/Users/you/.local/bin/parakeet"  # Prefer an absolute path for desktop app launches
 parakeet_vocab = "tdt-600m.tokenizer.vocab"  # Safer when multiple Parakeet models are installed
 ```
 
 ### Tauri Desktop App
 
 Settings > Transcription > Engine dropdown. Select "Parakeet", then choose the
-model. The app checks that the `parakeet` binary is in PATH on startup.
+model. On macOS, Finder-launched apps may not inherit your shell `PATH`, so
+desktop users should usually configure `parakeet_binary` as an absolute path.
 
 ## Language Support
 
@@ -194,6 +222,10 @@ No rebuild needed — both engines are compiled in when the `parakeet` feature i
 The `parakeet` executable is not in your PATH. Either:
 - Add its location to PATH: `export PATH="$PATH:/path/to/parakeet.cpp/build/bin"`
 - Or set the full path in config: `parakeet_binary = "/path/to/parakeet"`
+
+On macOS desktop builds, the second option is more reliable because Finder /
+Spotlight / Dock launches may not inherit the same shell `PATH` that Terminal
+sees.
 
 ### "unknown parakeet model"
 Only `tdt-ctc-110m` and `tdt-600m` are supported. Check your config.

@@ -12,7 +12,7 @@ const featureGrid = [
     label: "For developers",
     title: "Local and inspectable",
     description:
-      "whisper.cpp transcription, diarized markdown, YAML frontmatter, and a plain-files workflow that still works with grep and git.",
+      "whisper.cpp or parakeet.cpp transcription, diarized markdown, YAML frontmatter, and a plain-files workflow that still works with grep and git.",
   },
   {
     label: "For meetings",

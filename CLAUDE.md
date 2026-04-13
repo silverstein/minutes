@@ -4,7 +4,7 @@
 
 ## Project Overview
 
-**Minutes** — open-source, privacy-first conversation memory layer for AI assistants. Captures any audio (meetings, voice memos, brain dumps), transcribes locally with whisper.cpp, diarizes speakers, and outputs searchable markdown with structured action items and decisions. Built with Rust + Tauri v2 + Node.js (MCP).
+**Minutes** — open-source, privacy-first conversation memory layer for AI assistants. Captures any audio (meetings, voice memos, brain dumps), transcribes locally with whisper.cpp or parakeet.cpp, diarizes speakers, and outputs searchable markdown with structured action items and decisions. Built with Rust + Tauri v2 + Node.js (MCP).
 
 **Four input modes, one pipeline:**
 - **Live recording**: `minutes record` / `minutes stop` — for meetings, calls, conversations
@@ -277,7 +277,7 @@ minutes/
 │   ├── core/src/              # 34 Rust modules — the engine
 │   │   ├── capture.rs         # Audio capture (cpal), device categorization, loopback detection
 │   │   ├── resample.rs        # Shared mono-downmix + 16kHz decimation resampler (used by capture + streaming)
-│   │   ├── transcribe.rs      # Whisper.cpp transcription (delegates to whisper-guard for anti-hallucination, optional nnnoiseless denoise)
+│   │   ├── transcribe.rs      # Transcription: whisper.cpp (default) or parakeet.cpp (opt-in). Delegates to whisper-guard for anti-hallucination, optional nnnoiseless denoise
 │   │   ├── diarize.rs         # Speaker diarization + attribution types (pyannote-rs, or energy-based from per-source stems)
 │   │   ├── summarize.rs       # LLM summarization + speaker mapping (ureq HTTP client)
 │   │   ├── voice.rs           # Voice profile storage and matching (voices.db, enrollment, cosine similarity)
@@ -348,7 +348,8 @@ node test/mcp_tools_test.mjs                        # 8 MCP integration tests
 ## Key Architecture Decisions
 
 - **Rust** for the engine — single 6.7MB binary, cross-platform, fast
-- **whisper-rs** (whisper.cpp) for transcription — local, Apple Silicon optimized, params match whisper-cli defaults (best_of=5, entropy/logprob thresholds)
+- **whisper-rs** (whisper.cpp) for transcription (default) — local, Apple Silicon optimized, params match whisper-cli defaults (best_of=5, entropy/logprob thresholds)
+- **parakeet.cpp** for transcription (opt-in) — NVIDIA FastConformer via subprocess, Metal GPU acceleration on Apple Silicon. Lower WER than Whisper at equivalent model sizes. Requires `--features parakeet` at build time. See `docs/PARAKEET.md` for setup
 - **ffmpeg preferred for audio decoding** — shells out to ffmpeg for m4a/mp3/ogg when available (identical to whisper-cli's pipeline). Falls back to symphonia (pure Rust) when ffmpeg isn't installed. This matters for non-English audio — symphonia's AAC decoder produces subtly different samples that trigger whisper hallucination loops (issue #21).
 - **Silero VAD** (via whisper-rs) — ML-based voice activity detection integrated directly into whisper's transcription params. Prevents hallucination loops by skipping silence segments. Auto-downloaded during `minutes setup`.
 - **whisper-guard** crate — standalone anti-hallucination toolkit extracted from minutes-core. 6-layer defense: Silero VAD gating, no_speech probability filtering (>80% = skip), consecutive segment dedup (3+ similar collapsed), interleaved A/B/A/B pattern detection, foreign-script hallucination detection, language-agnostic noise marker collapse (`[Śmiech]`, `[music]`, `[risas]`, etc.), trailing noise trimming. Publishable to crates.io independently.
@@ -367,7 +368,7 @@ node test/mcp_tools_test.mjs                        # 8 MCP integration tests
 
 ## Key Patterns
 
-- All audio processing is local (whisper.cpp + pyannote-rs + Silero VAD). ffmpeg recommended but optional.
+- All audio processing is local (whisper.cpp or parakeet.cpp + pyannote-rs + Silero VAD). ffmpeg recommended but optional.
 - Claude summarizes via MCP when the user asks (no API key needed)
 - Optional automated summarization via Ollama (local), Mistral, or cloud LLMs
 - Config at `~/.config/minutes/config.toml` (optional, compiled defaults work)

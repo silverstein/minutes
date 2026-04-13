@@ -4038,7 +4038,12 @@ pub fn cmd_list_devices() -> serde_json::Value {
 }
 
 #[tauri::command]
-pub fn cmd_delete_meeting(path: String, with_audio: bool, force: bool) -> Result<String, String> {
+pub fn cmd_delete_meeting(
+    app: tauri::AppHandle,
+    path: String,
+    with_audio: bool,
+    force: bool,
+) -> Result<String, String> {
     let md_path = std::path::PathBuf::from(&path);
     if !md_path.exists() {
         return Err(format!("File not found: {}", path));
@@ -4060,6 +4065,22 @@ pub fn cmd_delete_meeting(path: String, with_audio: bool, force: bool) -> Result
         }
         Ok(format!("Deleted: {}", title))
     } else {
+        // Show native confirmation dialog and wait for user response
+        let confirmed = app
+            .dialog()
+            .message(format!(
+                "Archive \"{}\" and its audio recording?\nThey will be moved to the archive folder.",
+                title
+            ))
+            .title("Archive Meeting")
+            .kind(MessageDialogKind::Warning)
+            .buttons(tauri_plugin_dialog::MessageDialogButtons::OkCancel)
+            .blocking_show();
+
+        if !confirmed {
+            return Ok("Cancelled".into());
+        }
+
         let config = Config::load();
         let archive_dir = config.output_dir.join("archive");
         std::fs::create_dir_all(&archive_dir).map_err(|e| e.to_string())?;

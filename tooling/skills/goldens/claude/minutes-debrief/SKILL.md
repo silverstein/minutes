@@ -55,7 +55,11 @@ ls ~/.minutes/preps/ 2>/dev/null
 Match logic:
 1. Find `.prep.md` files from today or yesterday (within 48 hours)
 2. Read each file's `person:` frontmatter field
-3. Compare against the recording's `attendees:` list — match on first name
+3. Compare against the recording's `attendees:` list — match on first name, but check learned aliases before deciding there is no match:
+   ```bash
+   node "${CLAUDE_PLUGIN_ROOT}/hooks/lib/minutes-learn-cli.mjs" aliases "<attendee-or-person>" 2>/dev/null
+   ```
+   Treat all returned variants as equivalent during prep-file matching.
 4. If multiple preps match → AskUserQuestion to pick which one
 5. If no prep matches → standalone debrief (skip to Phase 4b)
 
@@ -74,6 +78,19 @@ Options:
 - **D) The goal changed during the meeting** → Ask: "What's the new direction?"
 
 Then produce the debrief summary with the prep comparison:
+
+Before writing the output, check for a learned debrief presentation preference:
+
+```bash
+node "${CLAUDE_PLUGIN_ROOT}/hooks/lib/minutes-learn-cli.mjs" get-presentation-focus debrief
+```
+
+If the result is:
+- `decisions-first` → put Decisions before Action Items and Relationship Update
+- `actions-first` → put Action Items first, then Decisions, then Relationship Update
+- `relationship-first` → put Relationship Update first, then Decisions, then Action Items
+
+If there is no preference, keep the default order below.
 
 ```
 ## Debrief: [Meeting Title]
@@ -96,6 +113,14 @@ Then produce the debrief summary with the prep comparison:
 **Phase 4b: Standalone debrief** (no matching prep)
 
 Produce a straightforward debrief:
+
+Before deciding the section order, check:
+
+```bash
+node "${CLAUDE_PLUGIN_ROOT}/hooks/lib/minutes-learn-cli.mjs" get-presentation-focus debrief
+```
+
+Apply the same ordering rules if a preference exists; otherwise keep the default order below.
 
 ```
 ## Debrief: [Meeting Title]
@@ -151,9 +176,19 @@ End with three beats:
 
 ## Gotchas
 
+- **Record explicit presentation preferences when the user states them.** If the user says "show action items first", "lead with decisions", or "start with the relationship read", persist it:
+  ```bash
+  node "${CLAUDE_PLUGIN_ROOT}/hooks/lib/minutes-learn-cli.mjs" set-presentation-focus debrief actions-first "User explicitly prefers action items first"
+  node "${CLAUDE_PLUGIN_ROOT}/hooks/lib/minutes-learn-cli.mjs" set-presentation-focus debrief decisions-first "User explicitly prefers decisions first"
+  node "${CLAUDE_PLUGIN_ROOT}/hooks/lib/minutes-learn-cli.mjs" set-presentation-focus debrief relationship-first "User explicitly prefers relationship updates first"
+  ```
 - **Don't hallucinate if there's no recording** — If `minutes list` returns nothing, say so. Don't invent a debrief.
 - **Stale preps (>48h) are ignored** — If the prep file is more than 48 hours old, treat it as no-prep mode. The prep was for a different context.
 - **First-name matching for prep files** — The prep file slug uses first name only (`sarah.prep.md`). Match against attendee first names in the recording frontmatter. "Alex C." matches "sarah".
+- **Teach Minutes aliases when the user corrects matching.** If the user says "That prep was for Sarah Chen, not just Sarah" or clarifies that two names refer to the same person, persist it:
+  ```bash
+  node "${CLAUDE_PLUGIN_ROOT}/hooks/lib/minutes-learn-cli.mjs" set-alias "Sarah Chen" "Sarah" "User corrected prep/debrief matching"
+  ```
 - **Multiple recordings today** — Ask which one. Don't assume the most recent is the right one.
 - **Recordings without frontmatter** — Some recordings only have raw transcripts (no summary, no decisions section). Work with what you have — extract decisions and action items from the transcript text yourself.
 - **Decision evolution can span weeks** — Search the last 30 days for related decisions, not just this week.

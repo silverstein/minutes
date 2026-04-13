@@ -39,8 +39,8 @@ Use `Read` on the meeting file path. Extract from the transcript and frontmatter
 If the meeting has a `speaker_map:` field in frontmatter, check the confidence levels:
 
 - **All High confidence**: Speakers are confirmed — use real names throughout the debrief.
-- **Any Medium confidence**: Note this — "Speakers were auto-identified (medium confidence). If the names look wrong, open the meeting in the Minutes desktop app and use the Confirm buttons in the Speakers section."
-- **No speaker_map but has SPEAKER_X labels**: The meeting has diarization but no attribution — suggest: "I see anonymous speaker labels. If you know who was in this meeting, open it in the Minutes desktop app and confirm the speakers there."
+- **Any Medium confidence**: Note this — "Speakers were auto-identified (medium confidence). If the names look wrong, run: `minutes confirm --meeting <path>`"
+- **No speaker_map but has SPEAKER_X labels**: The meeting has diarization but no attribution — suggest: "I see anonymous speaker labels. If you know who was in this meeting, run `minutes confirm --meeting <path>` to tag them."
 
 This nudge is brief (one line) — don't make it a blocker.
 
@@ -172,19 +172,7 @@ End with three beats:
    "Send Alex the pricing doc tonight while the conversation is fresh."
    "Update the roadmap doc with today's Q2 timeline change."
 
-3. **Next skill nudges** — pick 1-2 that apply, don't list all three every time:
-
-   a. **Always: tag** — "Tag this meeting: `/minutes-tag won` (or lost/stalled/great/noise) -- takes 5 seconds, unlocks pattern analysis in `/minutes-mirror`."
-
-   b. **If knowledge base is configured: ingest** — Check first:
-      ```bash
-      grep -A5 '^\[knowledge\]' ~/.config/minutes/config.toml 2>/dev/null | grep 'enabled\s*=\s*true'
-      ```
-      If that matches: "Your knowledge base is configured -- run `/minutes-ingest` to update person profiles with today's decisions and commitments."
-      If it doesn't match or the file doesn't exist, skip this nudge entirely.
-
-   c. **On Fridays: weekly** — "End of the week -- run `/minutes-weekly` to see how all your meetings connect and what still needs attention."
-      On other days, skip this nudge. The tag and ingest nudges are more immediately actionable.
+3. **Next skill nudge** — "At the end of the week, run `/minutes-weekly` to see how all your meetings connect and what still needs attention."
 
 ## Gotchas
 
@@ -205,3 +193,4 @@ End with three beats:
 - **Recordings without frontmatter** — Some recordings only have raw transcripts (no summary, no decisions section). Work with what you have — extract decisions and action items from the transcript text yourself.
 - **Decision evolution can span weeks** — Search the last 30 days for related decisions, not just this week.
 - **Don't be preachy about decision changes** — Decisions change for good reasons. Surface the evolution factually. "Here's what shifted" not "You keep changing your mind."
+

@@ -25,7 +25,19 @@ This is the **proactive layer**. It's built to be invoked silently by a hook (e.
 Three ways the user can invoke this:
 
 **1. With a name** (`/minutes-brief sarah`, "brief me on Alex")
-→ Use that name directly. Skip to Phase 1.
+→ Use that name directly. Before searching, check for learned aliases:
+
+```bash
+node "$MINUTES_SKILLS_ROOT/_runtime/hooks/lib/minutes-learn-cli.mjs" aliases "<name>" 2>/dev/null
+```
+
+If aliases exist, search across all returned variants and treat them as the same person for the rest of the flow. If the user explicitly says two names are the same person, persist it:
+
+```bash
+node "$MINUTES_SKILLS_ROOT/_runtime/hooks/lib/minutes-learn-cli.mjs" set-alias "Sarah Chen" "Sarah" "User confirmed these refer to the same person"
+```
+
+Then skip to Phase 1.
 
 **2. With "auto" or no argument** (`/minutes-brief`, "brief me on my next call")
 → Auto-detect the next upcoming calendar event. Try sources in order — use the first that works:
@@ -177,6 +189,12 @@ That's it. No follow-up questions, no "anything else I can help with?". Brief is
 node "$MINUTES_SKILLS_ROOT/_runtime/hooks/lib/minutes-learn-cli.mjs" set-explicit workflow_preference meeting_prep_mode prep "User explicitly prefers prep"
 node "$MINUTES_SKILLS_ROOT/_runtime/hooks/lib/minutes-learn-cli.mjs" set-explicit workflow_preference meeting_prep_mode brief "User explicitly prefers brief"
 node "$MINUTES_SKILLS_ROOT/_runtime/hooks/lib/minutes-learn-cli.mjs" set-explicit nudge_feedback meeting_prep_nudge suppress "User explicitly asked to suppress meeting prep nudges"
+```
+
+- **Record explicit person aliases when the user confirms them.** If the user says "Sarah and Sarah Chen are the same person" or "Dan means Dan Benamoz here", persist it:
+
+```bash
+node "$MINUTES_SKILLS_ROOT/_runtime/hooks/lib/minutes-learn-cli.mjs" set-alias "Sarah Chen" "Sarah" "User confirmed alias"
 ```
 
 - **Hook-fireable mode is silent on failure.** When invoked with `--auto` and nothing matches, exit cleanly with zero output. Hooks should never spam the user. Errors only matter when the user is actively asking.

@@ -6,6 +6,27 @@ use serde::Serialize;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
+/// Directories within `output_dir` that should be excluded from search results.
+/// These contain archived, processed, or failed files that are not active meetings.
+const EXCLUDED_DIRS: &[&str] = &["archive", "processed", "failed", "failed-captures"];
+
+/// Walk `dir` for `.md` files, skipping excluded subdirectories.
+fn walk_meeting_files(dir: &Path) -> impl Iterator<Item = walkdir::DirEntry> {
+    WalkDir::new(dir)
+        .follow_links(true)
+        .into_iter()
+        .filter_entry(|e| {
+            if e.file_type().is_dir() {
+                let name = e.file_name().to_string_lossy();
+                !EXCLUDED_DIRS.contains(&name.as_ref())
+            } else {
+                true
+            }
+        })
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "md"))
+}
+
 // ──────────────────────────────────────────────────────────────
 // Built-in search: walk dir + case-insensitive text match.
 // Zero dependencies beyond walkdir. Fast enough for <1000 files.
@@ -124,12 +145,7 @@ pub fn resolve_slug(slug: &str, config: &Config) -> Option<PathBuf> {
         return None;
     }
 
-    for entry in WalkDir::new(dir)
-        .follow_links(true)
-        .into_iter()
-        .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().is_some_and(|ext| ext == "md"))
-    {
+    for entry in walk_meeting_files(dir) {
         let filename = entry
             .path()
             .file_stem()
@@ -160,12 +176,7 @@ pub fn cross_meeting_research(
     let mut topic_counts: std::collections::HashMap<String, usize> =
         std::collections::HashMap::new();
 
-    for entry in WalkDir::new(dir)
-        .follow_links(true)
-        .into_iter()
-        .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().is_some_and(|ext| ext == "md"))
-    {
+    for entry in walk_meeting_files(dir) {
         let path = entry.path();
         let content = match std::fs::read_to_string(path) {
             Ok(content) => content,
@@ -333,12 +344,7 @@ pub fn search(
     let query_lower = query.to_lowercase();
     let mut results = Vec::new();
 
-    for entry in WalkDir::new(dir)
-        .follow_links(true)
-        .into_iter()
-        .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().is_some_and(|ext| ext == "md"))
-    {
+    for entry in walk_meeting_files(dir) {
         let path = entry.path();
         match process_file(path, &query_lower, filters) {
             Ok(Some(result)) => results.push(result),
@@ -368,12 +374,7 @@ pub fn search_intents(
     let query_lower = query.to_lowercase();
     let mut results = Vec::new();
 
-    for entry in WalkDir::new(dir)
-        .follow_links(true)
-        .into_iter()
-        .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().is_some_and(|ext| ext == "md"))
-    {
+    for entry in walk_meeting_files(dir) {
         let path = entry.path();
         match process_intent_file(path, &query_lower, filters) {
             Ok(mut file_results) => results.append(&mut file_results),
@@ -398,12 +399,7 @@ pub fn consistency_report(
     }
 
     let mut parsed_frontmatters = Vec::new();
-    for entry in WalkDir::new(dir)
-        .follow_links(true)
-        .into_iter()
-        .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().is_some_and(|ext| ext == "md"))
-    {
+    for entry in walk_meeting_files(dir) {
         let path = entry.path();
         let content = match std::fs::read_to_string(path) {
             Ok(content) => content,
@@ -570,12 +566,7 @@ pub fn person_profile(config: &Config, person: &str) -> Result<PersonProfile, Se
 
     let person_lower = person.to_lowercase();
     let mut parsed_frontmatters = Vec::new();
-    for entry in WalkDir::new(dir)
-        .follow_links(true)
-        .into_iter()
-        .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().is_some_and(|ext| ext == "md"))
-    {
+    for entry in walk_meeting_files(dir) {
         let path = entry.path();
         let content = match std::fs::read_to_string(path) {
             Ok(content) => content,
@@ -893,12 +884,7 @@ pub fn find_open_actions(
 
     let mut results = Vec::new();
 
-    for entry in WalkDir::new(dir)
-        .follow_links(true)
-        .into_iter()
-        .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().is_some_and(|ext| ext == "md"))
-    {
+    for entry in walk_meeting_files(dir) {
         let path = entry.path();
         let content = match std::fs::read_to_string(path) {
             Ok(c) => c,

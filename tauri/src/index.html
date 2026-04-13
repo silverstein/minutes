@@ -5567,27 +5567,21 @@
 
     // ── Delete meeting ──
     document.getElementById('btn-delete-meeting').addEventListener('click', async () => {
-      if (!currentMeetingPath) return;
-      const title = document.getElementById('detail-title').textContent || 'this meeting';
-      if (!confirm(`Archive "${title}" and its audio recording? They will be moved to the archive folder.`)) return;
+      const pathToDelete = currentMeetingPath;
+      if (!pathToDelete) return;
       try {
+        // Confirmation dialog is shown natively by the Rust command
         const result = await invoke('cmd_delete_meeting', {
-          path: currentMeetingPath,
+          path: pathToDelete,
           withAudio: true,
           force: false,
         });
+        if (result === 'Cancelled') return;
         console.log(result);
-        // Return to meeting list
-        currentMeetingPath = null;
-        currentMeetingDetail = null;
-        const detailPanel = document.getElementById('detail-scroll');
-        if (detailPanel) detailPanel.replaceChildren();
-        document.getElementById('detail-title').textContent = 'Meeting';
-        document.getElementById('detail-meta').replaceChildren();
+        closeDetailView();
         loadMeetings();
       } catch (e) {
         console.error('Delete:', e);
-        alert('Failed to delete: ' + e);
       }
     });
 
@@ -8911,10 +8905,11 @@
         openArtifactDirty &&
         openArtifactPath &&
         openArtifactPath !== path &&
-        !confirmedDiscard &&
-        !confirm('Discard unsaved changes to the current artifact?')
+        !confirmedDiscard
       ) {
-        return false;
+        const { ask } = window.__TAURI__.dialog;
+        const discard = await ask('Discard unsaved changes to the current artifact?', { title: 'Unsaved Changes', kind: 'warning' });
+        if (!discard) return false;
       }
       const initialMode = options.mode === 'source' ? 'source' : 'preview';
       const editable = options.editable === true;
@@ -8952,8 +8947,10 @@
     }
 
     async function hideMdViewer() {
-      if (openArtifactDirty && !confirm('Discard unsaved changes to this artifact?')) {
-        return;
+      if (openArtifactDirty) {
+        const { ask } = window.__TAURI__.dialog;
+        const discard = await ask('Discard unsaved changes to this artifact?', { title: 'Unsaved Changes', kind: 'warning' });
+        if (!discard) return;
       }
       if (openArtifactPollTimer) {
         clearInterval(openArtifactPollTimer);
@@ -9008,9 +9005,9 @@
       if (!meetingPath) return;
       let bypassDiscardPrompt = false;
       if (mdViewer.classList.contains('active') && openArtifactDirty && openArtifactPath) {
-        if (!confirm('Discard unsaved changes to the current artifact before creating a draft?')) {
-          return;
-        }
+        const { ask } = window.__TAURI__.dialog;
+        const discard = await ask('Discard unsaved changes to the current artifact before creating a draft?', { title: 'Unsaved Changes', kind: 'warning' });
+        if (!discard) return;
         bypassDiscardPrompt = true;
       }
       const kind = await requestArtifactTemplateKind(defaultKind);
@@ -9033,8 +9030,10 @@
 
     async function revertOpenArtifactToSnapshot() {
       if (!openArtifactPath || openArtifactSaving) return;
-      if (!confirm('Restore the most recent snapshot for this artifact? Your current file contents will be replaced.')) {
-        return;
+      {
+        const { ask } = window.__TAURI__.dialog;
+        const restore = await ask('Restore the most recent snapshot for this artifact?\nYour current file contents will be replaced.', { title: 'Revert to Snapshot', kind: 'warning' });
+        if (!restore) return;
       }
       openArtifactSaving = true;
       refreshMdViewerChrome();

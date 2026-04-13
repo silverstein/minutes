@@ -18,6 +18,7 @@ path = "src/main.rs"
 [features]
 default = ["diarize"]
 diarize = ["minutes-core/diarize", "dep:pyannote-rs", "dep:ort", "dep:symphonia"]
+parakeet = ["minutes-core/parakeet"]
 coreml = ["minutes-core/coreml"]
 cuda = ["minutes-core/cuda"]
 hipblas = ["minutes-core/hipblas"]

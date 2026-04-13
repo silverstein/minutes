@@ -10,6 +10,7 @@ cuda = ["minutes-core/cuda"]
 hipblas = ["minutes-core/hipblas"]
 metal = ["minutes-core/metal"]
 vulkan = ["minutes-core/vulkan"]
+parakeet = ["minutes-core/parakeet"]
 
 [dependencies]
 tauri = { version = "2", features = ["tray-icon", "image-png", "devtools", "macos-private-api"] }

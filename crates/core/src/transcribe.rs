@@ -1206,6 +1206,29 @@ fn parse_parakeet_output(
     let mut lines = Vec::new();
     let mut has_timestamps = false;
 
+    // Parakeet.cpp with --timestamps emits one line per *word*, e.g.
+    //   `  [0.08s - 0.16s] (0.60) Bon`
+    // We group words into sentence-level segments (flush on terminal
+    // punctuation or a gap > 0.8s) for a readable transcript.
+    let mut seg_start: Option<f64> = None;
+    let mut seg_prev_end: f64 = 0.0;
+    let mut seg_words: Vec<String> = Vec::new();
+    const GAP_THRESHOLD_SECS: f64 = 0.8;
+
+    let flush = |seg_start: &mut Option<f64>,
+                 seg_words: &mut Vec<String>,
+                 lines: &mut Vec<String>| {
+        if let Some(start_secs) = *seg_start {
+            if !seg_words.is_empty() {
+                let mins = (start_secs / 60.0) as u64;
+                let secs = (start_secs % 60.0) as u64;
+                lines.push(format!("[{}:{:02}] {}", mins, secs, seg_words.join(" ")));
+            }
+        }
+        *seg_start = None;
+        seg_words.clear();
+    };
+
     for line in raw.lines() {
         let line = line.trim();
         if line.is_empty() {
@@ -1218,13 +1241,48 @@ fn parse_parakeet_output(
                 let timestamp_part = &rest[..bracket_end];
                 let text = rest[bracket_end + 1..].trim();
 
-                if let Some((start_str, _end_str)) = timestamp_part.split_once('-') {
-                    if let Ok(start_secs) = start_str.trim().parse::<f64>() {
-                        let mins = (start_secs / 60.0) as u64;
-                        let secs = (start_secs % 60.0) as u64;
-                        if !text.is_empty() {
-                            lines.push(format!("[{}:{:02}] {}", mins, secs, text));
-                            has_timestamps = true;
+                if let Some((start_str, end_str)) = timestamp_part.split_once('-') {
+                    let start_clean = start_str.trim().trim_end_matches('s');
+                    let end_clean = end_str.trim().trim_end_matches('s');
+                    if let Ok(start_secs) = start_clean.parse::<f64>() {
+                        let end_secs = end_clean.parse::<f64>().unwrap_or(start_secs);
+
+                        // Strip a leading `(0.42)` confidence prefix if present.
+                        let word = if let Some(rest) = text.strip_prefix('(') {
+                            if let Some(close) = rest.find(')') {
+                                rest[close + 1..].trim().to_string()
+                            } else {
+                                text.to_string()
+                            }
+                        } else {
+                            text.to_string()
+                        };
+
+                        if word.is_empty() {
+                            continue;
+                        }
+                        has_timestamps = true;
+
+                        // Flush on large gap between previous word and this one.
+                        if seg_start.is_some()
+                            && start_secs - seg_prev_end > GAP_THRESHOLD_SECS
+                        {
+                            flush(&mut seg_start, &mut seg_words, &mut lines);
+                        }
+
+                        if seg_start.is_none() {
+                            seg_start = Some(start_secs);
+                        }
+                        let ends_sentence = word
+                            .chars()
+                            .last()
+                            .map(|c| matches!(c, '.' | '!' | '?' | '。' | '！' | '？'))
+                            .unwrap_or(false);
+                        seg_words.push(word);
+                        seg_prev_end = end_secs;
+
+                        if ends_sentence {
+                            flush(&mut seg_start, &mut seg_words, &mut lines);
                         }
                         continue;
                     }
@@ -1234,6 +1292,8 @@ fn parse_parakeet_output(
 
         // Non-timestamp line — skip (don't fake [0:00] timestamps)
     }
+    // Flush any trailing words that didn't end with terminal punctuation.
+    flush(&mut seg_start, &mut seg_words, &mut lines);
 
     let raw_segments = lines.len();
 

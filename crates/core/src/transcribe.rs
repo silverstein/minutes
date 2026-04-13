@@ -147,6 +147,13 @@ pub struct TranscribeResult {
 /// Handles format conversion (m4a/mp3/ogg → PCM) automatically via symphonia.
 /// Both engines produce identical output format: `[M:SS] text` lines.
 pub fn transcribe(audio_path: &Path, config: &Config) -> Result<TranscribeResult, TranscribeError> {
+    transcribe_dispatch(audio_path, config)
+}
+
+fn transcribe_dispatch(
+    audio_path: &Path,
+    config: &Config,
+) -> Result<TranscribeResult, TranscribeError> {
     match config.transcription.engine.as_str() {
         "whisper" => transcribe_whisper_dispatch(audio_path, config),
         "parakeet" => transcribe_parakeet_dispatch(audio_path, config),
@@ -158,6 +165,96 @@ pub fn transcribe(audio_path: &Path, config: &Config) -> Result<TranscribeResult
             transcribe_whisper_dispatch(audio_path, config)
         }
     }
+}
+
+/// Meeting-specialized transcription path that can split long recordings at
+/// natural pauses before dispatching to the active ASR backend.
+pub fn transcribe_meeting(
+    audio_path: &Path,
+    config: &Config,
+) -> Result<TranscribeResult, TranscribeError> {
+    const MIN_MEETING_CHUNKS: usize = 2;
+
+    let samples = load_audio_samples(audio_path)?;
+    let audio_duration_secs = samples.len() as f64 / 16000.0;
+    let vad_chunks = detect_meeting_vad_chunks(&samples);
+
+    if vad_chunks.len() < MIN_MEETING_CHUNKS {
+        return transcribe_dispatch(audio_path, config);
+    }
+
+    tracing::info!(
+        chunks = vad_chunks.len(),
+        audio_secs = format!("{:.1}", audio_duration_secs),
+        "meeting transcription using VAD-driven chunk rotation"
+    );
+
+    let mut all_lines = Vec::new();
+    let mut aggregate = FilterStats {
+        audio_duration_secs,
+        ..Default::default()
+    };
+
+    for (chunk_index, (start_sample, end_sample)) in vad_chunks.iter().enumerate() {
+        let chunk_samples = &samples[*start_sample..*end_sample];
+        if chunk_samples.is_empty() {
+            continue;
+        }
+
+        let tmp_wav = tempfile::Builder::new()
+            .prefix("minutes-meeting-chunk-")
+            .suffix(".wav")
+            .tempfile()
+            .map_err(TranscribeError::Io)?;
+        write_wav_16k_mono(tmp_wav.path(), chunk_samples)?;
+
+        let chunk_result = match transcribe_dispatch(tmp_wav.path(), config) {
+            Ok(result) => result,
+            Err(TranscribeError::EmptyAudio) | Err(TranscribeError::EmptyTranscript(_)) => {
+                tracing::debug!(
+                    chunk_index,
+                    start_sample,
+                    end_sample,
+                    "skipping empty VAD chunk"
+                );
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        let chunk_offset_secs = *start_sample as f64 / 16000.0;
+        let offset_lines =
+            offset_timestamped_lines(chunk_result.text.lines(), chunk_offset_secs, chunk_index);
+
+        aggregate.samples_after_silence_strip += chunk_result.stats.samples_after_silence_strip;
+        aggregate.raw_segments += chunk_result.stats.raw_segments;
+        aggregate.skipped_no_speech += chunk_result.stats.skipped_no_speech;
+        aggregate.after_no_speech_filter += chunk_result.stats.after_no_speech_filter;
+        aggregate.rescued_no_speech += chunk_result.stats.rescued_no_speech;
+        all_lines.extend(offset_lines);
+    }
+
+    if all_lines.is_empty() {
+        return transcribe_dispatch(audio_path, config);
+    }
+
+    let cleanup = run_transcript_cleanup_pipeline(all_lines);
+    aggregate.after_dedup = cleanup.after(TranscriptCleanupStage::DedupSegments);
+    aggregate.after_interleaved = cleanup.after(TranscriptCleanupStage::DedupInterleaved);
+    aggregate.after_script_filter = cleanup.after(TranscriptCleanupStage::StripForeignScript);
+    aggregate.after_noise_markers = cleanup.after(TranscriptCleanupStage::CollapseNoiseMarkers);
+    aggregate.after_trailing_trim = cleanup.after(TranscriptCleanupStage::TrimTrailingNoise);
+
+    let text = if cleanup.lines.is_empty() {
+        String::new()
+    } else {
+        format!("{}\n", cleanup.lines.join("\n"))
+    };
+    aggregate.final_words = text.split_whitespace().count();
+
+    Ok(TranscribeResult {
+        text,
+        stats: aggregate,
+    })
 }
 
 /// Whisper transcription path (existing behavior).
@@ -467,26 +564,13 @@ fn transcribe_with_whisper(
         );
     }
 
-    // Layer 2: Remove repetition loops — detect consecutive near-identical segments
-    let lines = dedup_segments(lines);
-    stats.after_dedup = lines.len();
-
-    // Layer 4: Remove interleaved repetition (A/B/A/B patterns, filler-separated loops)
-    let lines = dedup_interleaved(lines);
-    stats.after_interleaved = lines.len();
-
-    // Layer 5: Remove foreign-script hallucination (e.g., CJK in a Latin transcript)
-    let lines = strip_foreign_script(lines);
-    stats.after_script_filter = lines.len();
-
-    // Layer 6: Collapse bracketed non-speech markers ([Śmiech], [music], [risas], etc.)
-    // Runs after foreign-script filter so density calculation isn't inflated by CJK lines.
-    let lines = collapse_noise_markers(lines);
-    stats.after_noise_markers = lines.len();
-
-    // Layer 7: Trim trailing noise ([music], [BLANK_AUDIO]) from the end
-    let lines = trim_trailing_noise(lines);
-    stats.after_trailing_trim = lines.len();
+    let cleanup = run_transcript_cleanup_pipeline(lines);
+    stats.after_dedup = cleanup.after(TranscriptCleanupStage::DedupSegments);
+    stats.after_interleaved = cleanup.after(TranscriptCleanupStage::DedupInterleaved);
+    stats.after_script_filter = cleanup.after(TranscriptCleanupStage::StripForeignScript);
+    stats.after_noise_markers = cleanup.after(TranscriptCleanupStage::CollapseNoiseMarkers);
+    stats.after_trailing_trim = cleanup.after(TranscriptCleanupStage::TrimTrailingNoise);
+    let lines = cleanup.lines;
 
     let transcript = lines.join("\n");
     let transcript = if transcript.is_empty() {
@@ -813,6 +897,200 @@ fn strip_foreign_script(lines: Vec<String>) -> Vec<String> {
 }
 fn collapse_noise_markers(lines: Vec<String>) -> Vec<String> {
     wg_segments::collapse_noise_markers(&lines)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TranscriptCleanupStage {
+    DedupSegments,
+    DedupInterleaved,
+    StripForeignScript,
+    CollapseNoiseMarkers,
+    TrimTrailingNoise,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TranscriptCleanupStageStat {
+    stage: TranscriptCleanupStage,
+    before: usize,
+    after: usize,
+}
+
+#[derive(Debug, Clone)]
+struct TranscriptCleanupResult {
+    lines: Vec<String>,
+    stats: Vec<TranscriptCleanupStageStat>,
+}
+
+impl TranscriptCleanupResult {
+    fn after(&self, stage: TranscriptCleanupStage) -> usize {
+        self.stats
+            .iter()
+            .find(|stat| stat.stage == stage)
+            .map(|stat| stat.after)
+            .unwrap_or(self.lines.len())
+    }
+}
+
+/// Shared transcript cleanup for segment-oriented backends.
+///
+/// Applies the same post-transcription cleanup stages for both Whisper and
+/// Parakeet after each backend has produced `[M:SS] text` segment lines.
+fn run_transcript_cleanup_pipeline(lines: Vec<String>) -> TranscriptCleanupResult {
+    let mut stats = Vec::new();
+    let mut current = lines;
+
+    let stages: &[(TranscriptCleanupStage, fn(Vec<String>) -> Vec<String>)] = &[
+        (TranscriptCleanupStage::DedupSegments, dedup_segments),
+        (TranscriptCleanupStage::DedupInterleaved, dedup_interleaved),
+        (
+            TranscriptCleanupStage::StripForeignScript,
+            strip_foreign_script,
+        ),
+        (
+            TranscriptCleanupStage::CollapseNoiseMarkers,
+            collapse_noise_markers,
+        ),
+        (
+            TranscriptCleanupStage::TrimTrailingNoise,
+            trim_trailing_noise,
+        ),
+    ];
+
+    for (stage, apply) in stages {
+        let before = current.len();
+        current = apply(current);
+        stats.push(TranscriptCleanupStageStat {
+            stage: *stage,
+            before,
+            after: current.len(),
+        });
+    }
+
+    TranscriptCleanupResult {
+        lines: current,
+        stats,
+    }
+}
+
+fn detect_meeting_vad_chunks(samples: &[f32]) -> Vec<(usize, usize)> {
+    const SAMPLE_RATE: usize = 16_000;
+    const WINDOW_SAMPLES: usize = 1_600; // 100ms
+    const ROTATE_SILENCE_MS: u64 = 800;
+    const MIN_CHUNK_SAMPLES: usize = SAMPLE_RATE; // 1s
+    const MAX_CHUNK_SAMPLES: usize = SAMPLE_RATE * 45;
+    const NOISE_FLOOR_MIN: f32 = 0.0001;
+    const NOISE_FLOOR_MAX: f32 = 0.02;
+    const NOISE_MULTIPLIER: f32 = 4.0;
+    const HANGOVER_CHUNKS: u32 = 5;
+    const ADAPT_RATE: f32 = 0.02;
+
+    if samples.is_empty() {
+        return Vec::new();
+    }
+
+    let mut noise_floor = 0.001f32;
+    let mut speaking = false;
+    let mut hangover_remaining = 0u32;
+    let mut silence_ms = 0u64;
+    let mut chunks = Vec::new();
+    let mut chunk_start: Option<usize> = None;
+    let mut last_voice_end = 0usize;
+
+    for (window_index, window) in samples.chunks(WINDOW_SAMPLES).enumerate() {
+        let window_start = window_index * WINDOW_SAMPLES;
+        let window_end = (window_start + window.len()).min(samples.len());
+        let rms = (window
+            .iter()
+            .map(|sample| (*sample as f64) * (*sample as f64))
+            .sum::<f64>()
+            / window.len().max(1) as f64)
+            .sqrt() as f32;
+
+        let threshold = noise_floor * NOISE_MULTIPLIER;
+        if rms > threshold {
+            speaking = true;
+            hangover_remaining = HANGOVER_CHUNKS;
+            silence_ms = 0;
+        } else if hangover_remaining > 0 {
+            hangover_remaining -= 1;
+            silence_ms = 0;
+        } else {
+            speaking = false;
+            silence_ms += 100;
+            if rms > noise_floor {
+                noise_floor += (rms - noise_floor) * ADAPT_RATE;
+            } else {
+                noise_floor += (rms - noise_floor) * (ADAPT_RATE * 3.0);
+            }
+            noise_floor = noise_floor.clamp(NOISE_FLOOR_MIN, NOISE_FLOOR_MAX);
+        }
+
+        if speaking {
+            if chunk_start.is_none() {
+                chunk_start = Some(window_start);
+            }
+            last_voice_end = window_end;
+        }
+
+        if let Some(start) = chunk_start {
+            let chunk_len = last_voice_end.saturating_sub(start);
+            if chunk_len >= MAX_CHUNK_SAMPLES {
+                chunks.push((start, last_voice_end.max(window_end)));
+                chunk_start = None;
+                last_voice_end = 0;
+                noise_floor = 0.001;
+                speaking = false;
+                hangover_remaining = 0;
+                silence_ms = 0;
+                continue;
+            }
+
+            if !speaking && silence_ms >= ROTATE_SILENCE_MS && chunk_len >= MIN_CHUNK_SAMPLES {
+                chunks.push((start, last_voice_end));
+                chunk_start = None;
+                last_voice_end = 0;
+                noise_floor = 0.001;
+                speaking = false;
+                hangover_remaining = 0;
+                silence_ms = 0;
+            }
+        }
+    }
+
+    if let Some(start) = chunk_start {
+        let end = if last_voice_end > start {
+            last_voice_end
+        } else {
+            samples.len()
+        };
+        if end > start {
+            chunks.push((start, end));
+        }
+    }
+
+    chunks
+}
+
+fn offset_timestamped_lines<'a>(
+    lines: impl Iterator<Item = &'a str>,
+    offset_secs: f64,
+    _chunk_index: usize,
+) -> Vec<String> {
+    lines
+        .filter_map(|line| {
+            let line = line.trim();
+            let rest = line.strip_prefix('[')?;
+            let close = rest.find(']')?;
+            let timestamp = &rest[..close];
+            let text = rest[close + 1..].trim();
+            let (mins, secs) = timestamp.split_once(':')?;
+            let total_secs = mins.parse::<u64>().ok()? * 60 + secs.parse::<u64>().ok()?;
+            let adjusted = total_secs as f64 + offset_secs;
+            let adjusted_mins = (adjusted / 60.0).floor() as u64;
+            let adjusted_secs = (adjusted % 60.0).floor() as u64;
+            Some(format!("[{}:{:02}] {}", adjusted_mins, adjusted_secs, text))
+        })
+        .collect()
 }
 
 // ── Noise reduction ──────────────────────────────────────────
@@ -1234,23 +1512,14 @@ fn transcribe_with_parakeet(
                 format!("[{}:{:02}] {}", mins, secs, segment.text)
             })
             .collect();
-        let lines = dedup_segments(lines);
-        let after_dedup = lines.len();
-        let lines = dedup_interleaved(lines);
-        let after_interleaved = lines.len();
-        let lines = strip_foreign_script(lines);
-        let after_script_filter = lines.len();
-        let lines = collapse_noise_markers(lines);
-        let after_noise_markers = lines.len();
-        let lines = trim_trailing_noise(lines);
-        let after_trailing_trim = lines.len();
+        let cleanup = run_transcript_cleanup_pipeline(lines);
         ParakeetFilterStats {
             raw_segments,
-            after_dedup,
-            after_interleaved,
-            after_script_filter,
-            after_noise_markers,
-            after_trailing_trim,
+            after_dedup: cleanup.after(TranscriptCleanupStage::DedupSegments),
+            after_interleaved: cleanup.after(TranscriptCleanupStage::DedupInterleaved),
+            after_script_filter: cleanup.after(TranscriptCleanupStage::StripForeignScript),
+            after_noise_markers: cleanup.after(TranscriptCleanupStage::CollapseNoiseMarkers),
+            after_trailing_trim: cleanup.after(TranscriptCleanupStage::TrimTrailingNoise),
         }
     };
     let elapsed_ms = invocation_started.elapsed().as_millis() as u64;
@@ -1570,27 +1839,18 @@ fn parse_parakeet_output(
     }
 
     // Full anti-hallucination pipeline (same as whisper path)
-    let lines = dedup_segments(lines);
-    let after_dedup = lines.len();
-    let lines = dedup_interleaved(lines);
-    let after_interleaved = lines.len();
-    let lines = strip_foreign_script(lines);
-    let after_script_filter = lines.len();
-    let lines = collapse_noise_markers(lines);
-    let after_noise_markers = lines.len();
-    let lines = trim_trailing_noise(lines);
-    let after_trailing_trim = lines.len();
+    let cleanup = run_transcript_cleanup_pipeline(lines);
 
     let pstats = ParakeetFilterStats {
         raw_segments,
-        after_dedup,
-        after_interleaved,
-        after_script_filter,
-        after_noise_markers,
-        after_trailing_trim,
+        after_dedup: cleanup.after(TranscriptCleanupStage::DedupSegments),
+        after_interleaved: cleanup.after(TranscriptCleanupStage::DedupInterleaved),
+        after_script_filter: cleanup.after(TranscriptCleanupStage::StripForeignScript),
+        after_noise_markers: cleanup.after(TranscriptCleanupStage::CollapseNoiseMarkers),
+        after_trailing_trim: cleanup.after(TranscriptCleanupStage::TrimTrailingNoise),
     };
 
-    let transcript = lines.join("\n");
+    let transcript = cleanup.lines.join("\n");
     if transcript.is_empty() {
         return Err(TranscribeError::EmptyTranscript(
             config.transcription.min_words,
@@ -1977,6 +2237,80 @@ mod tests {
         ];
         let result = dedup_segments(lines.clone());
         assert_eq!(result, lines);
+    }
+
+    #[test]
+    fn transcript_cleanup_pipeline_matches_legacy_cleanup_behavior() {
+        let lines = vec![
+            "[0:00] Hello world".into(),
+            "[0:03] Hello world".into(),
+            "[0:06] Hello world".into(),
+            "[0:09] [music]".into(),
+        ];
+
+        let pipeline = run_transcript_cleanup_pipeline(lines.clone());
+        let legacy = trim_trailing_noise(collapse_noise_markers(strip_foreign_script(
+            dedup_interleaved(dedup_segments(lines)),
+        )));
+
+        assert_eq!(pipeline.lines, legacy);
+        assert_eq!(
+            pipeline
+                .stats
+                .iter()
+                .map(|stat| stat.stage)
+                .collect::<Vec<_>>(),
+            vec![
+                TranscriptCleanupStage::DedupSegments,
+                TranscriptCleanupStage::DedupInterleaved,
+                TranscriptCleanupStage::StripForeignScript,
+                TranscriptCleanupStage::CollapseNoiseMarkers,
+                TranscriptCleanupStage::TrimTrailingNoise,
+            ]
+        );
+        assert_eq!(
+            pipeline.after(TranscriptCleanupStage::TrimTrailingNoise),
+            pipeline.lines.len()
+        );
+    }
+
+    fn constant_samples(seconds: usize, amplitude: f32) -> Vec<f32> {
+        vec![amplitude; seconds * 16_000]
+    }
+
+    #[test]
+    fn meeting_vad_chunks_split_on_long_silence() {
+        let mut samples = constant_samples(2, 0.05);
+        samples.extend(constant_samples(2, 0.0));
+        samples.extend(constant_samples(2, 0.05));
+
+        let chunks = detect_meeting_vad_chunks(&samples);
+        assert_eq!(
+            chunks.len(),
+            2,
+            "expected split around long silence: {chunks:?}"
+        );
+    }
+
+    #[test]
+    fn meeting_vad_chunks_keep_short_pause_inside_chunk() {
+        let mut samples = constant_samples(2, 0.05);
+        samples.extend(constant_samples(0, 0.0));
+        samples.extend(vec![0.0; 4_800]); // 300ms silence
+        samples.extend(constant_samples(2, 0.05));
+
+        let chunks = detect_meeting_vad_chunks(&samples);
+        assert_eq!(
+            chunks.len(),
+            1,
+            "short pause should stay in one chunk: {chunks:?}"
+        );
+    }
+
+    #[test]
+    fn offset_timestamped_lines_applies_chunk_offset() {
+        let lines = offset_timestamped_lines(["[0:02] hello", "[0:07] world"].into_iter(), 10.0, 0);
+        assert_eq!(lines, vec!["[0:12] hello", "[0:17] world"]);
     }
 
     #[test]

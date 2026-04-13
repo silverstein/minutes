@@ -3999,7 +3999,11 @@
               <option value="tdt-ctc-110m">tdt-ctc-110m — 110M params, English, fastest</option>
               <option value="tdt-600m">tdt-600m — 600M params, multilingual v3, best quality</option>
             </select>
-            <div class="about-controls-meta">Requires parakeet.cpp installed. See <code>minutes setup --parakeet</code>.</div>
+            <div class="settings-section-inline settings-section-inline-tight">
+              <div class="about-controls-meta" id="settings-parakeet-status">Checking Parakeet readiness…</div>
+              <button class="btn btn-secondary btn-sm" id="btn-open-parakeet-guide">Open Setup Guide</button>
+            </div>
+            <div class="about-controls-meta" id="settings-parakeet-detail">Requires parakeet.cpp installed. See <code>minutes setup --parakeet</code>.</div>
           </div>
         </div>
         <div class="about-controls">
@@ -4635,6 +4639,10 @@
       const watchStep = root.querySelector('#step-watch-artifact');
       const watchStatus = root.querySelector('#step-watch-artifact-status');
 
+      if (!activation.hasModel && activation.nextAction === 'setup-parakeet') {
+        if (modelStatus) modelStatus.textContent = 'Needs setup';
+      }
+
       if (activation.hasModel || milestones.modelReadyAt) {
         modelStep?.classList.add('done');
         if (modelStatus) modelStatus.textContent = 'Done';
@@ -4656,6 +4664,53 @@
         if (watchStatus) {
           watchStatus.textContent = activation.phase === 'processing-first-artifact' ? 'Processing...' : 'Recording...';
         }
+      }
+    }
+
+    function escapeHtml(text) {
+      return String(text)
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;')
+        .replaceAll("'", '&#39;');
+    }
+
+    function describeParakeetStatus(status) {
+      if (!status) {
+        return {
+          summary: 'Parakeet readiness unavailable.',
+          detail: 'Minutes could not determine whether the selected Parakeet model is usable yet.',
+        };
+      }
+
+      if (status.ready) {
+        const installedAt = status.metadata?.installedAt ? ` Installed ${new Date(status.metadata.installedAt).toLocaleString()}.` : '';
+        const tokenizer = status.tokenizerLabel ? ` Tokenizer: ${status.tokenizerLabel}.` : '';
+        return {
+          summary: `${status.model} is ready.`,
+          detail: `Binary: ${status.binary}.${tokenizer}${installedAt}`.trim(),
+        };
+      }
+
+      return {
+        summary: 'Needs setup.',
+        detail: (status.issues && status.issues.length)
+          ? status.issues.join(' • ')
+          : `Run ${status.setupCommand} after installing parakeet.cpp.`,
+      };
+    }
+
+    function renderParakeetSettingsStatus(status) {
+      const summaryEl = document.getElementById('settings-parakeet-status');
+      const detailEl = document.getElementById('settings-parakeet-detail');
+      const guideBtn = document.getElementById('btn-open-parakeet-guide');
+      const view = describeParakeetStatus(status);
+      if (summaryEl) summaryEl.textContent = view.summary;
+      if (detailEl) detailEl.textContent = view.detail;
+      if (guideBtn) {
+        guideBtn.textContent = status?.ready ? 'View Guide' : 'Open Setup Guide';
+        guideBtn.dataset.guideUrl = status?.guideUrl || '';
       }
     }
 
@@ -6324,6 +6379,8 @@
 
     function setupOnboarding(root) {
       applyActivationState(root, currentSetup?.activation || activationState);
+      const setupEngine = currentSetup?.engine || 'whisper';
+      const parakeet = currentSetup?.parakeet || null;
 
       root.querySelectorAll('.model-btn').forEach(btn => {
         btn.addEventListener('click', async () => {
@@ -6367,6 +6424,30 @@
         });
       });
 
+      const parakeetGuideBtn = root.querySelector('#btn-open-parakeet-guide-onboarding');
+      if (parakeetGuideBtn) {
+        parakeetGuideBtn.addEventListener('click', async () => {
+          try {
+            await invoke('cmd_open_file', { path: (parakeet && parakeet.guideUrl) || 'https://github.com/silverstein/minutes/blob/main/docs/PARAKEET.md' });
+          } catch (e) {
+            console.error('open parakeet guide:', e);
+          }
+        });
+      }
+
+      const switchToWhisperBtn = root.querySelector('#btn-switch-to-whisper-onboarding');
+      if (switchToWhisperBtn) {
+        switchToWhisperBtn.addEventListener('click', async () => {
+          try {
+            await invoke('cmd_set_setting', { section: 'transcription', key: 'engine', value: 'whisper' });
+            await checkSetup();
+            loadSettings();
+          } catch (e) {
+            console.error('switch to whisper:', e);
+          }
+        });
+      }
+
       root.querySelector('#btn-start-first-recording').addEventListener('click', async () => {
         try {
           await invoke('cmd_start_recording');
@@ -6377,6 +6458,29 @@
     }
 
     function renderSetupEmptyState() {
+      const setupEngine = currentSetup?.engine || 'whisper';
+      const parakeet = currentSetup?.parakeet || null;
+      const parakeetIssues = (parakeet?.issues || []).map(issue => `<li>${escapeHtml(issue)}</li>`).join('');
+      const modelStepBody = setupEngine === 'parakeet'
+        ? `
+                <p>Minutes is set to use Parakeet, which needs the local <code>parakeet</code> binary plus converted model assets.</p>
+                ${parakeetIssues ? `<ul class="onboarding-list">${parakeetIssues}</ul>` : ''}
+                <div class="model-options">
+                  <button class="btn btn-primary btn-sm" id="btn-open-parakeet-guide-onboarding">Open Parakeet setup guide</button>
+                  <button class="btn btn-secondary btn-sm" id="btn-switch-to-whisper-onboarding">Use Whisper instead</button>
+                </div>
+                <div class="about-controls-meta">${escapeHtml(parakeet?.setupCommand || 'minutes setup --parakeet')}<\/div>`
+        : `
+                <p>Choose a model size:</p>
+                <div class="model-options">
+                  <button class="btn btn-secondary btn-sm model-btn" data-model="tiny">Tiny (75 MB, fast)</button>
+                  <button class="btn btn-primary btn-sm model-btn" data-model="base">Base (141 MB, recommended)</button>
+                  <button class="btn btn-secondary btn-sm model-btn" data-model="small">Small (466 MB, best accuracy)</button>
+                </div>
+                <div class="download-progress ui-hidden">
+                  <div class="progress-bar"><div class="progress-fill"></div></div>
+                  <span class="progress-text">Downloading...</span>
+                </div>`;
       const empty = document.createElement('div');
       empty.className = 'empty-state';
       empty.innerHTML = `
@@ -6387,20 +6491,11 @@
             <div class="onboarding-step" id="step-model">
               <div class="step-header">
                 <span class="step-num">1</span>
-                <span class="step-title">Download speech model</span>
+                <span class="step-title">${setupEngine === 'parakeet' ? 'Set up Parakeet locally' : 'Download speech model'}</span>
                 <span class="step-status" id="step-model-status"></span>
               </div>
               <div class="step-body" id="step-model-body">
-                <p>Choose a model size:</p>
-                <div class="model-options">
-                  <button class="btn btn-secondary btn-sm model-btn" data-model="tiny">Tiny (75 MB, fast)</button>
-                  <button class="btn btn-primary btn-sm model-btn" data-model="base">Base (141 MB, recommended)</button>
-                  <button class="btn btn-secondary btn-sm model-btn" data-model="small">Small (466 MB, best accuracy)</button>
-                </div>
-                <div class="download-progress ui-hidden">
-                  <div class="progress-bar"><div class="progress-fill"></div></div>
-                  <span class="progress-text">Downloading...</span>
-                </div>
+                ${modelStepBody}
               </div>
             </div>
             <div class="onboarding-step disabled" id="step-first-artifact">
@@ -6511,6 +6606,7 @@
         // Engine selector
         const eng = s.transcription.engine || 'whisper';
         const parakeetCompiled = s.transcription.parakeet_compiled || false;
+        const parakeetStatus = s.transcription.parakeet_status || null;
         const engineSelect = document.getElementById('settings-transcription-engine');
         const parakeetOpt = engineSelect.querySelector('option[value="parakeet"]');
         if (parakeetOpt) {
@@ -6523,6 +6619,7 @@
         document.getElementById('settings-whisper-section').classList.toggle('is-hidden', eng !== 'whisper');
         document.getElementById('settings-parakeet-section').classList.toggle('is-hidden', eng !== 'parakeet');
         document.getElementById('settings-parakeet-model').value = s.transcription.parakeet_model || 'tdt-ctc-110m';
+        renderParakeetSettingsStatus(parakeetStatus);
         warmParakeetIfSelected(eng);
         document.getElementById('settings-whisper-model').value = s.transcription.model;
         const dl = s.transcription.downloaded_models || [];
@@ -6778,14 +6875,19 @@
     // Settings change handlers
     document.getElementById('settings-transcription-engine').addEventListener('change', async (e) => {
       await invoke('cmd_set_setting', { section: 'transcription', key: 'engine', value: e.target.value });
+      await checkSetup();
       document.getElementById('settings-whisper-section').classList.toggle('is-hidden', e.target.value !== 'whisper');
       document.getElementById('settings-parakeet-section').classList.toggle('is-hidden', e.target.value !== 'parakeet');
+      const s = await invoke('cmd_get_settings');
+      renderParakeetSettingsStatus(s.transcription.parakeet_status || null);
       warmParakeetIfSelected(e.target.value);
     });
     document.getElementById('settings-parakeet-model').addEventListener('change', async (e) => {
       await invoke('cmd_set_setting', { section: 'transcription', key: 'parakeet_model', value: e.target.value });
+      await checkSetup();
       const s = await invoke('cmd_get_settings');
       document.getElementById('settings-parakeet-model').value = s.transcription.parakeet_model || 'tdt-ctc-110m';
+      renderParakeetSettingsStatus(s.transcription.parakeet_status || null);
       warmParakeetIfSelected('parakeet');
     });
     document.getElementById('settings-whisper-model').addEventListener('change', async (e) => {
@@ -6814,6 +6916,15 @@
       }
       btn.disabled = false;
       btn.textContent = 'Download';
+    });
+    document.getElementById('btn-open-parakeet-guide').addEventListener('click', async () => {
+      const target = document.getElementById('btn-open-parakeet-guide').dataset.guideUrl ||
+        'https://github.com/silverstein/minutes/blob/main/docs/PARAKEET.md';
+      try {
+        await invoke('cmd_open_file', { path: target });
+      } catch (e) {
+        console.error('open parakeet guide:', e);
+      }
     });
     document.getElementById('settings-whisper-language').addEventListener('change', async (e) => {
       await invoke('cmd_set_setting', { section: 'transcription', key: 'language', value: e.target.value });

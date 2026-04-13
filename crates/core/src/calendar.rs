@@ -24,6 +24,9 @@ pub(crate) fn output_with_timeout(
     mut cmd: Command,
     timeout: Duration,
 ) -> Option<std::process::Output> {
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
+
     // Put the child in its own process group so we can kill the whole group.
     #[cfg(unix)]
     {

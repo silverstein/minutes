@@ -66,6 +66,94 @@ fn resolve_parakeet_tokenizer_asset(config: &Config) -> Option<PathBuf> {
     )
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ParakeetStatusView {
+    compiled: bool,
+    model: String,
+    binary: String,
+    ready: bool,
+    binary_found: bool,
+    model_found: bool,
+    tokenizer_found: bool,
+    binary_path: Option<String>,
+    model_path: Option<String>,
+    tokenizer_path: Option<String>,
+    tokenizer_label: Option<String>,
+    install_dir: String,
+    setup_command: String,
+    guide_url: String,
+    issues: Vec<String>,
+    metadata: Option<minutes_core::parakeet::ParakeetInstallMetadata>,
+}
+
+fn parakeet_guide_url() -> &'static str {
+    "https://github.com/silverstein/minutes/blob/main/docs/PARAKEET.md"
+}
+
+fn parakeet_setup_command(model: &str) -> String {
+    format!("minutes setup --parakeet --parakeet-model {}", model)
+}
+
+fn parakeet_status_view(config: &Config) -> ParakeetStatusView {
+    let compiled = cfg!(feature = "parakeet");
+    let binary = config.transcription.parakeet_binary.clone();
+    let model = config.transcription.parakeet_model.clone();
+    let binary_path = which::which(&binary).ok();
+    let resolved_model = resolve_parakeet_model_asset(config);
+    let resolved_tokenizer = resolve_parakeet_tokenizer_asset(config);
+    let metadata = minutes_core::parakeet::read_install_metadata(config, &model);
+    let mut issues = Vec::new();
+
+    if !compiled {
+        issues.push("Parakeet support is not compiled into this build".to_string());
+    }
+    if binary_path.is_none() {
+        issues.push(format!("binary '{}' is not in PATH", binary));
+    }
+    if resolved_model.is_none() {
+        issues.push(format!("model assets for '{}' are not installed", model));
+    }
+    if resolved_tokenizer.is_none() {
+        issues.push("SentencePiece tokenizer is not installed".to_string());
+    }
+    if metadata.is_none() && resolved_model.is_some() && resolved_tokenizer.is_some() {
+        issues.push("install metadata is missing; rerun setup to persist provenance".to_string());
+    }
+
+    let tokenizer_label = resolved_tokenizer.as_ref().and_then(|path| {
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .map(|name| name.to_string())
+    });
+
+    ParakeetStatusView {
+        compiled,
+        model: model.clone(),
+        binary,
+        ready: compiled
+            && binary_path.is_some()
+            && resolved_model.is_some()
+            && resolved_tokenizer.is_some(),
+        binary_found: binary_path.is_some(),
+        model_found: resolved_model.is_some(),
+        tokenizer_found: resolved_tokenizer.is_some(),
+        binary_path: binary_path.map(|path| path.display().to_string()),
+        model_path: resolved_model.map(|path| path.display().to_string()),
+        tokenizer_path: resolved_tokenizer
+            .as_ref()
+            .map(|path| path.display().to_string()),
+        tokenizer_label,
+        install_dir: minutes_core::parakeet::install_dir(config, &model)
+            .display()
+            .to_string(),
+        setup_command: parakeet_setup_command(&model),
+        guide_url: parakeet_guide_url().to_string(),
+        issues,
+        metadata,
+    }
+}
+
 /// Lifecycle state for the palette overlay window.
 ///
 /// Transitions:
@@ -621,6 +709,7 @@ pub fn load_activation_progress(config: &Config) -> Arc<Mutex<ActivationProgress
 }
 
 fn activation_phase(
+    engine: &str,
     progress: &ActivationProgress,
     has_model: bool,
     has_saved_artifact: bool,
@@ -628,7 +717,14 @@ fn activation_phase(
     processing: bool,
 ) -> (&'static str, &'static str) {
     if !has_model {
-        return ("needs-model", "download-model");
+        return (
+            "needs-model",
+            if engine == "parakeet" {
+                "setup-parakeet"
+            } else {
+                "download-model"
+            },
+        );
     }
     if progress.first_recording_started_at.is_none() {
         return ("ready-for-first-recording", "start-first-recording");
@@ -649,6 +745,7 @@ fn activation_phase(
 }
 
 fn activation_status_view(
+    engine: &str,
     progress: &ActivationProgress,
     has_model: bool,
     has_saved_artifact: bool,
@@ -656,6 +753,7 @@ fn activation_status_view(
     processing: bool,
 ) -> ActivationStatusView {
     let (phase, next_action) = activation_phase(
+        engine,
         progress,
         has_model,
         has_saved_artifact,
@@ -2359,45 +2457,23 @@ fn build_artifact_template(
 
 fn model_status(config: &Config) -> ReadinessItem {
     if config.transcription.engine == "parakeet" {
-        let binary = &config.transcription.parakeet_binary;
-        let binary_found = which::which(binary).is_ok();
-        let model_name = &config.transcription.parakeet_model;
-        let resolved_model = resolve_parakeet_model_asset(config);
-        let resolved_vocab = resolve_parakeet_tokenizer_asset(config);
-        let model_found = resolved_model.is_some();
-        let vocab_found = resolved_vocab.is_some();
-        let all_ready = binary_found && model_found && vocab_found;
-
-        let mut issues = Vec::new();
-        if !binary_found {
-            issues.push(format!("binary '{}' not in PATH", binary));
-        }
-        if !model_found {
-            issues.push(format!("model {}.safetensors not found", model_name));
-        }
-        if !vocab_found {
-            issues.push("SentencePiece tokenizer not found".into());
-        }
+        let status = parakeet_status_view(config);
 
         return ReadinessItem {
             label: "Speech model".into(),
-            state: if all_ready { "ready" } else { "attention" }.into(),
-            detail: if all_ready {
-                let tokenizer_label = resolved_vocab
-                    .and_then(|path| {
-                        path.file_name()
-                            .and_then(|name| name.to_str())
-                            .map(|name| name.to_string())
-                    })
+            state: if status.ready { "ready" } else { "attention" }.into(),
+            detail: if status.ready {
+                let tokenizer_label = status
+                    .tokenizer_label
                     .unwrap_or_else(|| "unknown".to_string());
                 format!(
                     "Parakeet engine ({}) ready. Model: {}. Tokenizer: {}.",
-                    binary, model_name, tokenizer_label
+                    status.binary, status.model, tokenizer_label
                 )
             } else {
                 format!(
                     "Parakeet not ready: {}. Run: minutes setup --parakeet",
-                    issues.join(", ")
+                    status.issues.join(", ")
                 )
             },
             optional: false,
@@ -3534,10 +3610,21 @@ pub fn cmd_status(state: tauri::State<AppState>) -> serde_json::Value {
         .map(processing_job_view)
         .collect();
     let config = Config::load();
-    let model_file = model_file_for_config(&config);
-    if model_file.exists() {
-        mark_activation_model_ready(&state.activation_progress, &model_file);
-    }
+    let has_model = if config.transcription.engine == "parakeet" {
+        let parakeet = parakeet_status_view(&config);
+        if parakeet.ready {
+            if let Some(model_path) = parakeet.model_path.as_ref() {
+                mark_activation_model_ready(&state.activation_progress, Path::new(model_path));
+            }
+        }
+        parakeet.ready
+    } else {
+        let model_file = model_file_for_config(&config);
+        if model_file.exists() {
+            mark_activation_model_ready(&state.activation_progress, &model_file);
+        }
+        model_file.exists()
+    };
     let activation_progress = state
         .activation_progress
         .lock()
@@ -3546,8 +3633,9 @@ pub fn cmd_status(state: tauri::State<AppState>) -> serde_json::Value {
         .unwrap_or_default();
     let has_saved_artifact = activation_progress.first_artifact_saved_at.is_some();
     let activation = activation_status_view(
+        &config.transcription.engine,
         &activation_progress,
-        model_file.exists(),
+        has_model,
         has_saved_artifact,
         recording || (status.recording && !processing),
         processing,
@@ -4721,15 +4809,23 @@ pub async fn cmd_upcoming_meetings() -> serde_json::Value {
 #[tauri::command]
 pub fn cmd_needs_setup(state: tauri::State<AppState>) -> serde_json::Value {
     let config = Config::load();
-    let model_name = &config.transcription.model;
-    let has_model = if config.transcription.engine == "parakeet" {
-        let binary_path = which::which(&config.transcription.parakeet_binary).ok();
-        if let Some(binary_path) = binary_path.as_ref() {
-            mark_activation_model_ready(&state.activation_progress, binary_path);
+    let model_name = if config.transcription.engine == "parakeet" {
+        &config.transcription.parakeet_model
+    } else {
+        &config.transcription.model
+    };
+    let parakeet = if config.transcription.engine == "parakeet" {
+        Some(parakeet_status_view(&config))
+    } else {
+        None
+    };
+    let has_model = if let Some(status) = parakeet.as_ref() {
+        if status.ready {
+            if let Some(model_path) = status.model_path.as_ref() {
+                mark_activation_model_ready(&state.activation_progress, Path::new(model_path));
+            }
         }
-        binary_path.is_some()
-            && resolve_parakeet_model_asset(&config).is_some()
-            && resolve_parakeet_tokenizer_asset(&config).is_some()
+        status.ready
     } else {
         let model_file = model_file_for_config(&config);
         let exists = model_file.exists();
@@ -4751,9 +4847,12 @@ pub fn cmd_needs_setup(state: tauri::State<AppState>) -> serde_json::Value {
     serde_json::json!({
         "needsSetup": !has_model,
         "hasModel": has_model,
+        "engine": config.transcription.engine,
         "modelName": model_name,
+        "parakeet": parakeet,
         "hasMeetingsDir": has_meetings_dir,
         "activation": activation_status_view(
+            &config.transcription.engine,
             &activation_progress,
             has_model,
             activation_progress.first_artifact_saved_at.is_some(),
@@ -5179,6 +5278,7 @@ pub fn cmd_get_settings() -> serde_json::Value {
             "parakeet_model": config.transcription.parakeet_model,
             "parakeet_binary": config.transcription.parakeet_binary,
             "parakeet_compiled": cfg!(feature = "parakeet"),
+            "parakeet_status": parakeet_status_view(&config),
         },
         "diarization": {
             "engine": config.diarization.engine,
@@ -5616,10 +5716,19 @@ mod tests {
     #[test]
     fn activation_phase_guides_new_user_to_download_model_first() {
         let progress = ActivationProgress::default();
-        let (phase, action) = activation_phase(&progress, false, false, false, false);
+        let (phase, action) = activation_phase("whisper", &progress, false, false, false, false);
 
         assert_eq!(phase, "needs-model");
         assert_eq!(action, "download-model");
+    }
+
+    #[test]
+    fn activation_phase_guides_parakeet_user_to_setup_flow_first() {
+        let progress = ActivationProgress::default();
+        let (phase, action) = activation_phase("parakeet", &progress, false, false, false, false);
+
+        assert_eq!(phase, "needs-model");
+        assert_eq!(action, "setup-parakeet");
     }
 
     #[test]
@@ -5628,7 +5737,7 @@ mod tests {
             model_ready_at: Some("2026-04-09T12:00:00-07:00".into()),
             ..ActivationProgress::default()
         };
-        let (phase, action) = activation_phase(&progress, true, false, false, false);
+        let (phase, action) = activation_phase("whisper", &progress, true, false, false, false);
 
         assert_eq!(phase, "ready-for-first-recording");
         assert_eq!(action, "start-first-recording");
@@ -5641,7 +5750,7 @@ mod tests {
             first_recording_started_at: Some("2026-04-09T12:01:00-07:00".into()),
             ..ActivationProgress::default()
         };
-        let (phase, action) = activation_phase(&progress, true, false, false, true);
+        let (phase, action) = activation_phase("whisper", &progress, true, false, false, true);
 
         assert_eq!(phase, "processing-first-artifact");
         assert_eq!(action, "wait-for-first-artifact");
@@ -5656,10 +5765,63 @@ mod tests {
             first_artifact_path: Some("/tmp/demo.md".into()),
             ..ActivationProgress::default()
         };
-        let (phase, action) = activation_phase(&progress, true, true, false, false);
+        let (phase, action) = activation_phase("whisper", &progress, true, true, false, false);
 
         assert_eq!(phase, "first-artifact-saved");
         assert_eq!(action, "show-next-step");
+    }
+
+    #[test]
+    fn parakeet_status_reports_missing_assets() {
+        let dir = TempDir::new().unwrap();
+        let mut config = Config::default();
+        config.transcription.engine = "parakeet".into();
+        config.transcription.model_path = dir.path().to_path_buf();
+
+        let status = parakeet_status_view(&config);
+        assert!(!status.ready);
+        assert!(!status.model_found);
+        assert!(!status.tokenizer_found);
+        assert!(
+            status
+                .issues
+                .iter()
+                .any(|issue| issue.contains("model assets")),
+            "expected missing model issue, got {:?}",
+            status.issues
+        );
+    }
+
+    #[test]
+    fn parakeet_status_reports_ready_with_metadata() {
+        let dir = TempDir::new().unwrap();
+        let mut config = Config::default();
+        config.transcription.engine = "parakeet".into();
+        config.transcription.model_path = dir.path().to_path_buf();
+        config.transcription.parakeet_binary = if cfg!(windows) {
+            "cmd".into()
+        } else {
+            "sh".into()
+        };
+
+        let install_dir = minutes_core::parakeet::install_dir(&config, "tdt-ctc-110m");
+        std::fs::create_dir_all(&install_dir).unwrap();
+        let model = install_dir.join("tdt-ctc-110m.safetensors");
+        let tokenizer = install_dir.join("tdt-ctc-110m.tokenizer.vocab");
+        std::fs::write(&model, b"model").unwrap();
+        std::fs::write(&tokenizer, b"tokenizer").unwrap();
+        minutes_core::parakeet::write_install_metadata(&config, "tdt-ctc-110m", &model, &tokenizer)
+            .unwrap();
+
+        let status = parakeet_status_view(&config);
+        assert!(status.ready);
+        assert!(status.model_found);
+        assert!(status.tokenizer_found);
+        assert!(status.metadata.is_some());
+        assert_eq!(
+            status.tokenizer_label.as_deref(),
+            Some("tdt-ctc-110m.tokenizer.vocab")
+        );
     }
 
     #[test]

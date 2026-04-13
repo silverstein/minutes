@@ -21,6 +21,60 @@ struct AutomationRunRecord {
     generated_at: String,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct JsonMeta {
+    schema_version: u32,
+    generated_at: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct JsonEnvelope<T: Serialize> {
+    ok: bool,
+    command: String,
+    data: T,
+    meta: JsonMeta,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ParakeetHelperEnvelope<T: Serialize> {
+    ok: bool,
+    command: String,
+    #[serde(flatten)]
+    transcript: T,
+    meta: JsonMeta,
+}
+
+fn json_meta() -> JsonMeta {
+    JsonMeta {
+        schema_version: 1,
+        generated_at: Local::now().to_rfc3339(),
+    }
+}
+
+fn json_envelope<T: Serialize>(command: &str, data: T) -> JsonEnvelope<T> {
+    JsonEnvelope {
+        ok: true,
+        command: command.into(),
+        data,
+        meta: json_meta(),
+    }
+}
+
+fn parakeet_helper_envelope<T: Serialize>(
+    command: &str,
+    transcript: T,
+) -> ParakeetHelperEnvelope<T> {
+    ParakeetHelperEnvelope {
+        ok: true,
+        command: command.into(),
+        transcript,
+        meta: json_meta(),
+    }
+}
+
 /// minutes — conversation memory for AI assistants.
 /// Every meeting, every idea, every voice note — searchable by your AI.
 #[derive(Parser)]
@@ -1759,7 +1813,8 @@ fn cmd_paths(json: bool, config: &Config) -> Result<()> {
     };
 
     if json {
-        println!("{}", serde_json::to_string_pretty(&report)?);
+        let envelope = json_envelope("minutes paths", report);
+        println!("{}", serde_json::to_string_pretty(&envelope)?);
     } else {
         println!("config_path: {}", report.config_path.display());
         println!("minutes_dir: {}", report.minutes_dir.display());
@@ -2753,7 +2808,8 @@ fn cmd_parakeet_helper(
     let parsed = minutes_core::transcribe::run_parakeet_cli_structured(
         binary, model_path, audio_path, vocab_path, model_id, gpu, config,
     )?;
-    println!("{}", serde_json::to_string(&parsed)?);
+    let envelope = parakeet_helper_envelope("minutes parakeet-helper", parsed);
+    println!("{}", serde_json::to_string(&envelope)?);
     Ok(())
 }
 
@@ -2833,7 +2889,8 @@ fn cmd_parakeet_benchmark(
         "helper_elapsed_ms": helper_ms,
         "helper_segments": helper_json.get("segments").and_then(|v| v.as_array()).map(|v| v.len()).unwrap_or(0),
     });
-    println!("{}", serde_json::to_string_pretty(&report)?);
+    let envelope = json_envelope("minutes parakeet-benchmark", report);
+    println!("{}", serde_json::to_string_pretty(&envelope)?);
     Ok(())
 }
 
@@ -3971,7 +4028,14 @@ fn cmd_logs(errors: bool, lines: usize) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
     use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    #[derive(Serialize)]
+    struct DummyTranscript {
+        transcript: String,
+        segments: Vec<String>,
+    }
 
     fn test_guard() -> MutexGuard<'static, ()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -4027,6 +4091,34 @@ life (qmd://life/)
 
         let collections = parse_qmd_collection_names(output);
         assert_eq!(collections, vec!["minutes".to_string(), "life".to_string()]);
+    }
+
+    #[test]
+    fn json_envelope_includes_schema_metadata() {
+        let envelope = json_envelope("minutes health", json!({ "engine": "parakeet" }));
+        let value = serde_json::to_value(envelope).unwrap();
+        assert_eq!(value["ok"], true);
+        assert_eq!(value["command"], "minutes health");
+        assert_eq!(value["meta"]["schemaVersion"], 1);
+        assert_eq!(value["data"]["engine"], "parakeet");
+        assert!(value["meta"]["generatedAt"].is_string());
+    }
+
+    #[test]
+    fn parakeet_helper_envelope_flattens_transcript_fields() {
+        let envelope = parakeet_helper_envelope(
+            "minutes parakeet-helper",
+            DummyTranscript {
+                transcript: "[0:00] hello".into(),
+                segments: vec!["hello".into()],
+            },
+        );
+        let value = serde_json::to_value(envelope).unwrap();
+        assert_eq!(value["ok"], true);
+        assert_eq!(value["command"], "minutes parakeet-helper");
+        assert_eq!(value["transcript"], "[0:00] hello");
+        assert_eq!(value["segments"][0], "hello");
+        assert_eq!(value["meta"]["schemaVersion"], 1);
     }
 
     #[test]
@@ -4833,7 +4925,18 @@ fn cmd_health(json: bool) -> Result<()> {
     let items = minutes_core::health::check_all(&config);
 
     if json {
-        println!("{}", serde_json::to_string_pretty(&items)?);
+        let attention_count = items
+            .iter()
+            .filter(|item| item.state == "attention")
+            .count();
+        let report = serde_json::json!({
+            "engine": config.transcription.engine,
+            "all_ready": attention_count == 0,
+            "attention_count": attention_count,
+            "items": items,
+        });
+        let envelope = json_envelope("minutes health", report);
+        println!("{}", serde_json::to_string_pretty(&envelope)?);
     } else {
         let all_ready = items.iter().all(|i| i.state == "ready");
         for item in &items {

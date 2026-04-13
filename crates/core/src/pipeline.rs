@@ -712,7 +712,11 @@ pub fn transcribe_to_artifact(
     }
 
     let step_start = std::time::Instant::now();
-    let result = transcribe::transcribe(audio_path, config)?;
+    let result = if content_type == ContentType::Meeting {
+        transcribe::transcribe_meeting(audio_path, config)?
+    } else {
+        transcribe::transcribe(audio_path, config)?
+    };
     let transcribe_ms = step_start.elapsed().as_millis() as u64;
     let transcript = result.text;
     let filter_stats = result.stats;
@@ -1135,7 +1139,11 @@ where
     on_progress(PipelineStage::Transcribing);
     tracing::info!(step = "transcribe", file = %audio_path.display(), "transcribing audio");
     let step_start = std::time::Instant::now();
-    let result = transcribe::transcribe(audio_path, config)?;
+    let result = if content_type == ContentType::Meeting {
+        transcribe::transcribe_meeting(audio_path, config)?
+    } else {
+        transcribe::transcribe(audio_path, config)?
+    };
     let transcribe_ms = step_start.elapsed().as_millis() as u64;
     let transcript = result.text;
     let filter_stats = result.stats;

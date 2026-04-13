@@ -465,6 +465,15 @@ fn should_refresh_meetings_for_paths(paths: &[std::path::PathBuf]) -> bool {
     })
 }
 
+fn bind_meetings_refresh_watcher(
+    watcher: &mut RecommendedWatcher,
+    output_dir: &std::path::Path,
+) -> Result<(), notify::Error> {
+    std::fs::create_dir_all(output_dir)
+        .map_err(|error| notify::Error::generic(&error.to_string()))?;
+    watcher.watch(output_dir, RecursiveMode::Recursive)
+}
+
 fn spawn_meetings_refresh_watcher(app: &tauri::AppHandle, output_dir: std::path::PathBuf) {
     let app_handle = app.clone();
     std::thread::spawn(move || {
@@ -479,16 +488,47 @@ fn spawn_meetings_refresh_watcher(app: &tauri::AppHandle, output_dir: std::path:
             }
         };
 
-        if let Err(error) = watcher.watch(&output_dir, RecursiveMode::Recursive) {
+        let mut watched_output_dir = output_dir;
+
+        if let Err(error) = bind_meetings_refresh_watcher(&mut watcher, &watched_output_dir) {
             eprintln!(
                 "[meetings-watcher] failed to watch {}: {}",
-                output_dir.display(),
+                watched_output_dir.display(),
                 error
             );
             return;
         }
 
-        for event in rx {
+        loop {
+            let configured_output_dir = Config::load().output_dir;
+            if configured_output_dir != watched_output_dir {
+                if let Err(error) = watcher.unwatch(&watched_output_dir) {
+                    eprintln!(
+                        "[meetings-watcher] failed to unwatch {}: {}",
+                        watched_output_dir.display(),
+                        error
+                    );
+                }
+                if let Err(error) =
+                    bind_meetings_refresh_watcher(&mut watcher, &configured_output_dir)
+                {
+                    eprintln!(
+                        "[meetings-watcher] failed to rebind {}: {}",
+                        configured_output_dir.display(),
+                        error
+                    );
+                } else {
+                    watched_output_dir = configured_output_dir;
+                    let _ = app_handle.emit("artifacts:changed", ());
+                }
+            }
+
+            let event = match rx.recv_timeout(std::time::Duration::from_secs(2)) {
+                Ok(event) => event,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            };
+
             match event {
                 Ok(event) if should_refresh_meetings_for_paths(&event.paths) => {
                     let _ = app_handle.emit("artifacts:changed", ());
@@ -1398,6 +1438,8 @@ fn main() {
             commands::cmd_live_shortcut_settings,
             commands::cmd_set_live_shortcut,
             commands::cmd_install_update,
+            commands::cmd_check_whats_new,
+            commands::cmd_dismiss_whats_new,
             commands::palette_close,
             commands::palette_current_meeting,
             commands::cmd_palette_settings,

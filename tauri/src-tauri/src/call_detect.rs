@@ -462,18 +462,26 @@ impl CallDetector {
         let running_lower: Vec<String> = running.iter().map(|s| s.to_lowercase()).collect();
         let mut saw_browser = false;
 
-        for (proc_fragment, app_name, kind) in &[
-            ("google chrome", "Google Chrome", BrowserKind::ChromeLike),
+        for (proc_fragment, app_name, kind, exact) in &[
+            ("google chrome", "Google Chrome", BrowserKind::ChromeLike, false),
             (
                 "chrome canary",
                 "Google Chrome Canary",
                 BrowserKind::ChromeLike,
+                false,
             ),
-            ("chromium", "Chromium", BrowserKind::ChromeLike),
-            ("arc", "Arc", BrowserKind::ChromeLike),
-            ("safari", "Safari", BrowserKind::Safari),
+            ("chromium", "Chromium", BrowserKind::ChromeLike, false),
+            // Arc's binary is exactly "Arc"; substring match would catch
+            // searchpartyd / searchpartyuseragent / TrialArchivingService.
+            ("arc", "Arc", BrowserKind::ChromeLike, true),
+            ("safari", "Safari", BrowserKind::Safari, false),
         ] {
-            if !running_lower.iter().any(|p| p.contains(proc_fragment)) {
+            let proc_match = if *exact {
+                running_lower.iter().any(|p| p == proc_fragment)
+            } else {
+                running_lower.iter().any(|p| p.contains(proc_fragment))
+            };
+            if !proc_match {
                 continue;
             }
             saw_browser = true;
@@ -926,6 +934,47 @@ mod tests {
         }
 
         assert_eq!(detected.as_deref(), Some("zoom.us"));
+    }
+
+    #[test]
+    fn arc_exact_match_does_not_fire_on_system_processes() {
+        let detector = CallDetector::new(CallDetectionConfig {
+            enabled: true,
+            poll_interval_secs: 1,
+            cooldown_minutes: 5,
+            apps: vec!["google-meet".into()],
+        });
+        // These macOS system processes contain "arc" as a substring but must
+        // not be treated as the Arc browser.
+        let running: Vec<String> = vec![
+            "searchpartyd".into(),
+            "searchpartyuseragent".into(),
+            "TrialArchivingService".into(),
+        ];
+        assert!(matches!(
+            detector.detect_google_meet_in_browsers(&running),
+            BrowserMeetProbe::NoBrowserProcesses
+        ));
+    }
+
+    #[test]
+    fn arc_exact_match_fires_on_arc_process() {
+        let detector = CallDetector::new(CallDetectionConfig {
+            enabled: true,
+            poll_interval_secs: 1,
+            cooldown_minutes: 5,
+            apps: vec!["google-meet".into()],
+        });
+        // "Arc" (the browser) must be recognised; "searchpartyd" must not
+        // accidentally satisfy the check on its own.
+        let running: Vec<String> = vec!["searchpartyd".into(), "Arc".into()];
+        // With Arc in the running list the probe attempts browser automation.
+        // We only assert that the result is NOT NoBrowserProcesses — i.e.
+        // `saw_browser` was set to true by the exact-match Arc entry.
+        assert!(!matches!(
+            detector.detect_google_meet_in_browsers(&running),
+            BrowserMeetProbe::NoBrowserProcesses
+        ));
     }
 
     #[test]

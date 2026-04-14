@@ -443,7 +443,7 @@ enum Commands {
         parakeet: bool,
 
         /// Parakeet model to download: tdt-ctc-110m, tdt-600m
-        #[arg(long, default_value = "tdt-ctc-110m")]
+        #[arg(long, default_value = "tdt-600m")]
         parakeet_model: String,
     },
 

@@ -30,31 +30,31 @@ cd parakeet.cpp
 make build
 cp build/bin/parakeet ~/.local/bin/
 
-# 2. Install the English model through Minutes
+# 2. Install the multilingual model through Minutes
 cd /Users/silverbook/Sites/minutes
 minutes setup --parakeet
 
 # 3. Edit ~/.config/minutes/config.toml
 [transcription]
 engine = "parakeet"
-parakeet_model = "tdt-ctc-110m"
+parakeet_model = "tdt-600m"
 parakeet_binary = "/Users/you/.local/bin/parakeet"
-parakeet_vocab = "tdt-ctc-110m.tokenizer.vocab"
+parakeet_vocab = "tdt-600m.tokenizer.vocab"
 ```
 
-That gives you the validated English path:
-- `tdt-ctc-110m`
+That gives you the validated multilingual path:
+- `tdt-600m`
 - local `parakeet.cpp`
 - local Metal GPU acceleration on Apple Silicon
 
-If you want the multilingual model instead:
+If you want the smaller English-only model instead:
 
 ```toml
 [transcription]
 engine = "parakeet"
-parakeet_model = "tdt-600m"
+parakeet_model = "tdt-ctc-110m"
 parakeet_binary = "/Users/you/.local/bin/parakeet"
-parakeet_vocab = "tdt-600m.tokenizer.vocab"
+parakeet_vocab = "tdt-ctc-110m.tokenizer.vocab"
 ```
 
 Minutes will continue to run locally either way.
@@ -140,8 +140,8 @@ converted to safetensors format.
 pip install safetensors torch huggingface_hub
 
 # Option A: Use Minutes setup (recommended)
-minutes setup --parakeet                           # English (tdt-ctc-110m, ~220 MB)
-minutes setup --parakeet --parakeet-model tdt-600m # Multilingual v3 (25 EU languages, ~1.2 GB)
+minutes setup --parakeet                           # Multilingual v3 (tdt-600m, ~1.2 GB)
+minutes setup --parakeet --parakeet-model tdt-ctc-110m # English-only compact model (~220 MB)
 
 # Option B: Manual download and conversion
 hf download nvidia/parakeet-tdt-0.6b-v3 parakeet-tdt-0.6b-v3.nemo --local-dir .

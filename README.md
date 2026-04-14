@@ -810,8 +810,8 @@ minutes setup --diarization
 
 # Alternative: use Parakeet engine (opt-in, local GPU via parakeet.cpp)
 # Requires parakeet.cpp installed: https://github.com/Frikallo/parakeet.cpp
-minutes setup --parakeet                          # English model (tdt-ctc-110m, ~220MB)
-minutes setup --parakeet --parakeet-model tdt-600m  # Multilingual v3 (25 EU languages, ~1.2GB)
+minutes setup --parakeet                          # Multilingual v3 (tdt-600m, ~1.2GB)
+minutes setup --parakeet --parakeet-model tdt-ctc-110m  # English-only compact model (~220MB)
 
 # Enroll your voice for automatic speaker identification
 minutes enroll              # Records 10s of your voice
@@ -966,9 +966,9 @@ engine = "whisper"        # "whisper" (default) or "parakeet" (opt-in, lower WER
 model = "small"           # whisper: tiny (75MB), base, small (466MB), medium, large-v3 (3.1GB)
 # language = "ur"          # Force transcription language (ISO 639-1 code, e.g. "en", "ur", "es", "zh")
                           # Default: auto-detect. Set this for similar-sounding languages (Urdu/Hindi, etc.)
-# parakeet_model = "tdt-ctc-110m"                # parakeet: tdt-ctc-110m (English), tdt-600m (multilingual v3)
+# parakeet_model = "tdt-600m"                    # parakeet: tdt-ctc-110m (English), tdt-600m (multilingual v3)
 # parakeet_binary = "parakeet"                   # Path to parakeet.cpp binary (or name in PATH)
-# parakeet_vocab = "tdt-ctc-110m.tokenizer.vocab"  # Safer when multiple Parakeet models are installed
+# parakeet_vocab = "tdt-600m.tokenizer.vocab"      # Safer when multiple Parakeet models are installed
 # vad_model = "silero-v6.2.0"     # Silero VAD model (auto-downloaded by setup). Empty = disable.
                                    # Prevents whisper hallucination loops on non-English/noisy audio.
 

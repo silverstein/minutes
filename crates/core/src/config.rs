@@ -534,8 +534,8 @@ impl Default for TranscriptionConfig {
             vad_model: "silero-v6.2.0".into(),
             noise_reduction: true,
             parakeet_binary: "parakeet".into(),
-            parakeet_model: "tdt-ctc-110m".into(),
-            parakeet_vocab: "tokenizer.vocab".into(),
+            parakeet_model: "tdt-600m".into(),
+            parakeet_vocab: "tdt-600m.tokenizer.vocab".into(),
         }
     }
 }
@@ -863,8 +863,11 @@ mod tests {
         assert_eq!(config.transcription.model, "small");
         assert_eq!(config.transcription.min_words, 3);
         assert_eq!(config.transcription.parakeet_binary, "parakeet");
-        assert_eq!(config.transcription.parakeet_model, "tdt-ctc-110m");
-        assert_eq!(config.transcription.parakeet_vocab, "tokenizer.vocab");
+        assert_eq!(config.transcription.parakeet_model, "tdt-600m");
+        assert_eq!(
+            config.transcription.parakeet_vocab,
+            "tdt-600m.tokenizer.vocab"
+        );
         assert_eq!(config.diarization.engine, "auto");
         assert_eq!(config.summarization.engine, "auto");
         assert_eq!(config.search.engine, "builtin");

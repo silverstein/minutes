@@ -470,6 +470,7 @@ impl CallDetector {
                 BrowserKind::ChromeLike,
             ),
             ("chromium", "Chromium", BrowserKind::ChromeLike),
+            ("arc", "Arc", BrowserKind::ChromeLike),
             ("safari", "Safari", BrowserKind::Safari),
         ] {
             if !running_lower.iter().any(|p| p.contains(proc_fragment)) {

@@ -567,7 +567,7 @@ impl Default for TranscriptionConfig {
             parakeet_model: "tdt-600m".into(),
             parakeet_boost_limit: 0,
             parakeet_boost_score: 2.0,
-            parakeet_fp16: false,
+            parakeet_fp16: true,
             parakeet_vocab: "tdt-600m.tokenizer.vocab".into(),
         }
     }
@@ -882,7 +882,7 @@ mod tests {
         assert_eq!(config.transcription.parakeet_model, "tdt-600m");
         assert_eq!(config.transcription.parakeet_boost_limit, 0);
         assert_eq!(config.transcription.parakeet_boost_score, 2.0);
-        assert!(!config.transcription.parakeet_fp16);
+        assert!(config.transcription.parakeet_fp16);
         assert_eq!(
             config.transcription.parakeet_vocab,
             "tdt-600m.tokenizer.vocab"

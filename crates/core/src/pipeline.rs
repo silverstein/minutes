@@ -301,6 +301,83 @@ fn log_attribution_decision(
     );
 }
 
+fn summary_signal_chars(summary: &summarize::Summary) -> usize {
+    summary.text.len()
+        + summary
+            .decisions
+            .iter()
+            .map(|item| item.len())
+            .sum::<usize>()
+        + summary
+            .action_items
+            .iter()
+            .map(|item| item.len())
+            .sum::<usize>()
+        + summary
+            .open_questions
+            .iter()
+            .map(|item| item.len())
+            .sum::<usize>()
+        + summary
+            .commitments
+            .iter()
+            .map(|item| item.len())
+            .sum::<usize>()
+        + summary
+            .key_points
+            .iter()
+            .map(|item| item.len())
+            .sum::<usize>()
+        + summary
+            .participants
+            .iter()
+            .map(|item| item.len())
+            .sum::<usize>()
+}
+
+fn serialized_chars<T: serde::Serialize>(value: &T) -> usize {
+    serde_json::to_string(value)
+        .map(|json| json.len())
+        .unwrap_or(0)
+}
+
+struct StructuredLlmLogFields {
+    outcome: &'static str,
+    model: String,
+    input_chars: usize,
+    output_chars: usize,
+    extra: serde_json::Value,
+}
+
+fn log_structured_llm_step(
+    step: &str,
+    audio_path: &Path,
+    started: std::time::Instant,
+    fields: StructuredLlmLogFields,
+) {
+    let mut payload = serde_json::Map::from_iter([
+        ("outcome".to_string(), serde_json::json!(fields.outcome)),
+        ("model".to_string(), serde_json::json!(fields.model)),
+        (
+            "input_chars".to_string(),
+            serde_json::json!(fields.input_chars),
+        ),
+        (
+            "output_chars".to_string(),
+            serde_json::json!(fields.output_chars),
+        ),
+    ]);
+    if let Some(obj) = fields.extra.as_object() {
+        payload.extend(obj.clone());
+    }
+    logging::log_step(
+        step,
+        &audio_path.display().to_string(),
+        started.elapsed().as_millis() as u64,
+        serde_json::Value::Object(payload),
+    );
+}
+
 #[allow(clippy::too_many_arguments)]
 fn single_stem_speaker_self_attribution(
     audio_path: &Path,
@@ -536,7 +613,10 @@ fn attribute_meeting_speakers(
         if has_unmapped {
             // Keep L0 deterministic mapping fenced to trusted attendees; the
             // broader merged attendee list is only for the L1 name-mapping fallback.
-            for attribution in summarize::map_speakers(&transcript, llm_attendees, config) {
+            let log_file = audio_path.display().to_string();
+            for attribution in
+                summarize::map_speakers(&transcript, llm_attendees, config, Some(&log_file))
+            {
                 if !mapped_labels.contains(&attribution.speaker_label) {
                     speaker_map.push(attribution);
                 }
@@ -945,6 +1025,8 @@ where
     let mut structured_actions: Vec<markdown::ActionItem> = Vec::new();
     let mut structured_decisions: Vec<markdown::Decision> = Vec::new();
     let mut structured_intents: Vec<markdown::Intent> = Vec::new();
+    let audio_log_target = audio_path.display().to_string();
+    let summary_model = summarize::summarization_model_hint(config, !screen_files.is_empty());
 
     let mut raw_summary: Option<summarize::Summary> = None;
     let summary = if config.summarization.engine != "none" {
@@ -958,20 +1040,89 @@ where
             transcript.clone()
         };
 
-        summarize::summarize_with_screens(&transcript_with_notes, &screen_files, config).map(
-            |summary| {
-                structured_actions = extract_action_items(&summary);
-                structured_decisions = extract_decisions(&summary);
-                structured_intents = extract_intents(&summary);
-                summary_participants = summary.participants.clone();
-                let formatted = summarize::format_summary(&summary);
-                raw_summary = Some(summary);
-                formatted
-            },
+        summarize::summarize_with_screens(
+            &transcript_with_notes,
+            &screen_files,
+            config,
+            Some(&audio_log_target),
         )
+        .map(|summary| {
+            let summary_chars = summary_signal_chars(&summary);
+
+            let actions_started = std::time::Instant::now();
+            structured_actions = extract_action_items(&summary);
+            log_structured_llm_step(
+                "action_items",
+                audio_path,
+                actions_started,
+                StructuredLlmLogFields {
+                    outcome: if structured_actions.is_empty() {
+                        "empty"
+                    } else {
+                        "ok"
+                    },
+                    model: summary_model.clone(),
+                    input_chars: summary_chars,
+                    output_chars: serialized_chars(&structured_actions),
+                    extra: serde_json::json!({ "count": structured_actions.len() }),
+                },
+            );
+
+            structured_decisions = extract_decisions(&summary);
+
+            let intents_started = std::time::Instant::now();
+            structured_intents = extract_intents(&summary);
+            log_structured_llm_step(
+                "intent_extract",
+                audio_path,
+                intents_started,
+                StructuredLlmLogFields {
+                    outcome: if structured_intents.is_empty() {
+                        "empty"
+                    } else {
+                        "ok"
+                    },
+                    model: summary_model.clone(),
+                    input_chars: summary_chars,
+                    output_chars: serialized_chars(&structured_intents),
+                    extra: serde_json::json!({ "count": structured_intents.len() }),
+                },
+            );
+
+            summary_participants = summary.participants.clone();
+            let formatted = summarize::format_summary(&summary);
+            raw_summary = Some(summary);
+            formatted
+        })
     } else {
         None
     };
+    if summary.is_none() && config.summarization.engine != "none" {
+        log_structured_llm_step(
+            "action_items",
+            audio_path,
+            std::time::Instant::now(),
+            StructuredLlmLogFields {
+                outcome: "fallback",
+                model: summary_model.clone(),
+                input_chars: transcript.len(),
+                output_chars: 0,
+                extra: serde_json::json!({ "count": 0 }),
+            },
+        );
+        log_structured_llm_step(
+            "intent_extract",
+            audio_path,
+            std::time::Instant::now(),
+            StructuredLlmLogFields {
+                outcome: "fallback",
+                model: summary_model.clone(),
+                input_chars: transcript.len(),
+                output_chars: 0,
+                extra: serde_json::json!({ "count": 0 }),
+            },
+        );
+    }
 
     if !screen_files.is_empty()
         && !config.screen_context.keep_after_summary
@@ -999,6 +1150,7 @@ where
     transcript = attribution.transcript;
     let speaker_map = attribution.speaker_map;
 
+    let entities_started = std::time::Instant::now();
     let entities = build_entity_links(
         &artifact.frontmatter.title,
         context.pre_context.as_deref(),
@@ -1007,6 +1159,27 @@ where
         &structured_decisions,
         &structured_intents,
         &artifact.frontmatter.tags,
+    );
+    log_structured_llm_step(
+        "entity_extract",
+        audio_path,
+        entities_started,
+        StructuredLlmLogFields {
+            outcome: if entities.people.is_empty() && entities.projects.is_empty() {
+                "empty"
+            } else if raw_summary.is_some() {
+                "ok"
+            } else {
+                "fallback"
+            },
+            model: summary_model.clone(),
+            input_chars: transcript.len(),
+            output_chars: serialized_chars(&entities),
+            extra: serde_json::json!({
+                "people": entities.people.len(),
+                "projects": entities.projects.len(),
+            }),
+        },
     );
     let people = entities
         .people
@@ -1245,6 +1418,8 @@ where
     };
 
     let mut summary_participants: Vec<String> = Vec::new();
+    let audio_log_target = audio_path.display().to_string();
+    let summary_model = summarize::summarization_model_hint(config, !screen_files.is_empty());
 
     let mut raw_summary: Option<summarize::Summary> = None;
     let summary: Option<String> = if config.summarization.engine != "none" {
@@ -1262,10 +1437,55 @@ where
         };
 
         // Send screenshots as actual images to vision-capable LLMs
-        summarize::summarize_with_screens(&transcript_with_notes, &screen_files, config).map(|s| {
+        summarize::summarize_with_screens(
+            &transcript_with_notes,
+            &screen_files,
+            config,
+            Some(&audio_log_target),
+        )
+        .map(|s| {
+            let summary_chars = summary_signal_chars(&s);
+
+            let actions_started = std::time::Instant::now();
             structured_actions = extract_action_items(&s);
+            log_structured_llm_step(
+                "action_items",
+                audio_path,
+                actions_started,
+                StructuredLlmLogFields {
+                    outcome: if structured_actions.is_empty() {
+                        "empty"
+                    } else {
+                        "ok"
+                    },
+                    model: summary_model.clone(),
+                    input_chars: summary_chars,
+                    output_chars: serialized_chars(&structured_actions),
+                    extra: serde_json::json!({ "count": structured_actions.len() }),
+                },
+            );
+
             structured_decisions = extract_decisions(&s);
+
+            let intents_started = std::time::Instant::now();
             structured_intents = extract_intents(&s);
+            log_structured_llm_step(
+                "intent_extract",
+                audio_path,
+                intents_started,
+                StructuredLlmLogFields {
+                    outcome: if structured_intents.is_empty() {
+                        "empty"
+                    } else {
+                        "ok"
+                    },
+                    model: summary_model.clone(),
+                    input_chars: summary_chars,
+                    output_chars: serialized_chars(&structured_intents),
+                    extra: serde_json::json!({ "count": structured_intents.len() }),
+                },
+            );
+
             summary_participants = s.participants.clone();
             if !summary_participants.is_empty() {
                 tracing::info!(
@@ -1280,6 +1500,32 @@ where
     } else {
         None
     };
+    if summary.is_none() && config.summarization.engine != "none" {
+        log_structured_llm_step(
+            "action_items",
+            audio_path,
+            std::time::Instant::now(),
+            StructuredLlmLogFields {
+                outcome: "fallback",
+                model: summary_model.clone(),
+                input_chars: transcript.len(),
+                output_chars: 0,
+                extra: serde_json::json!({ "count": 0 }),
+            },
+        );
+        log_structured_llm_step(
+            "intent_extract",
+            audio_path,
+            std::time::Instant::now(),
+            StructuredLlmLogFields {
+                outcome: "fallback",
+                model: summary_model.clone(),
+                input_chars: transcript.len(),
+                output_chars: 0,
+                extra: serde_json::json!({ "count": 0 }),
+            },
+        );
+    }
 
     // Clean up screen captures (runs regardless of summarization setting — fixes race)
     if !screen_files.is_empty()
@@ -1349,6 +1595,7 @@ where
                 .unwrap_or_else(|| generate_title(&transcript, pre_context.as_deref()))
         }
     });
+    let entities_started = std::time::Instant::now();
     let entities = build_entity_links(
         &auto_title,
         pre_context.as_deref(),
@@ -1357,6 +1604,27 @@ where
         &structured_decisions,
         &structured_intents,
         &[],
+    );
+    log_structured_llm_step(
+        "entity_extract",
+        audio_path,
+        entities_started,
+        StructuredLlmLogFields {
+            outcome: if entities.people.is_empty() && entities.projects.is_empty() {
+                "empty"
+            } else if raw_summary.is_some() {
+                "ok"
+            } else {
+                "fallback"
+            },
+            model: summary_model.clone(),
+            input_chars: transcript.len(),
+            output_chars: serialized_chars(&entities),
+            extra: serde_json::json!({
+                "people": entities.people.len(),
+                "projects": entities.projects.len(),
+            }),
+        },
     );
     let people = entities
         .people

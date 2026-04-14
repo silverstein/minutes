@@ -1,4 +1,7 @@
 use crate::config::Config;
+use crate::logging;
+use std::path::PathBuf;
+use std::time::Instant;
 
 // ──────────────────────────────────────────────────────────────
 // LLM summarization module (pluggable).
@@ -31,7 +34,7 @@ pub struct Summary {
 /// Optionally includes screen context images for vision-capable models.
 /// Returns None if summarization is disabled or fails gracefully.
 pub fn summarize(transcript: &str, config: &Config) -> Option<Summary> {
-    summarize_with_screens(transcript, &[], config)
+    summarize_with_screens(transcript, &[], config, None)
 }
 
 /// Summarize a transcript with optional screen context screenshots.
@@ -40,10 +43,28 @@ pub fn summarize_with_screens(
     transcript: &str,
     screen_files: &[std::path::PathBuf],
     config: &Config,
+    log_file: Option<&str>,
 ) -> Option<Summary> {
     let engine = &config.summarization.engine;
+    let model = summarization_model_hint(config, !screen_files.is_empty());
+    let input_chars = transcript.len();
+    let step_started = Instant::now();
 
     if engine == "none" {
+        if let Some(file) = log_file {
+            log_llm_step(
+                "summarize",
+                file,
+                step_started,
+                LlmLogFields {
+                    outcome: "fallback",
+                    model: model.clone(),
+                    input_chars,
+                    output_chars: 0,
+                    extra: serde_json::json!({ "reason": "disabled" }),
+                },
+            );
+        }
         return None;
     }
 
@@ -58,6 +79,20 @@ pub fn summarize_with_screens(
                 tracing::info!(
                     "no AI CLI found (claude, codex, gemini, opencode), skipping summarization"
                 );
+                if let Some(file) = log_file {
+                    log_llm_step(
+                        "summarize",
+                        file,
+                        step_started,
+                        LlmLogFields {
+                            outcome: "fallback",
+                            model: model.clone(),
+                            input_chars,
+                            output_chars: 0,
+                            extra: serde_json::json!({ "reason": "no-agent-cli" }),
+                        },
+                    );
+                }
                 return None;
             }
         }
@@ -74,6 +109,35 @@ pub fn summarize_with_screens(
 
     match result {
         Ok(summary) => {
+            if summary_is_empty(&summary) {
+                tracing::warn!(model = %model, "summarization returned no structured content");
+            }
+            if let Some(file) = log_file {
+                let outcome = if summary_is_empty(&summary) {
+                    "empty"
+                } else {
+                    "ok"
+                };
+                log_llm_step(
+                    "summarize",
+                    file,
+                    step_started,
+                    LlmLogFields {
+                        outcome,
+                        model: model.clone(),
+                        input_chars,
+                        output_chars: summary_output_chars(&summary),
+                        extra: serde_json::json!({
+                            "decisions": summary.decisions.len(),
+                            "action_items": summary.action_items.len(),
+                            "open_questions": summary.open_questions.len(),
+                            "commitments": summary.commitments.len(),
+                            "key_points": summary.key_points.len(),
+                            "participants": summary.participants.len(),
+                        }),
+                    },
+                );
+            }
             tracing::info!(
                 decisions = summary.decisions.len(),
                 action_items = summary.action_items.len(),
@@ -85,7 +149,21 @@ pub fn summarize_with_screens(
             Some(summary)
         }
         Err(e) => {
-            tracing::error!(error = %e, "summarization failed, continuing without summary");
+            if let Some(file) = log_file {
+                log_llm_step(
+                    "summarize",
+                    file,
+                    step_started,
+                    LlmLogFields {
+                        outcome: llm_error_outcome(&*e),
+                        model: model.clone(),
+                        input_chars,
+                        output_chars: 0,
+                        extra: serde_json::json!({ "reason": e.to_string() }),
+                    },
+                );
+            }
+            tracing::warn!(error = %e, model = %model, "summarization failed, continuing without summary");
             None
         }
     }
@@ -267,6 +345,142 @@ fn parse_summary_response(response: &str) -> Summary {
         commitments,
         key_points,
         participants,
+    }
+}
+
+fn summary_output_chars(summary: &Summary) -> usize {
+    summary.text.len()
+        + summary
+            .decisions
+            .iter()
+            .map(|item| item.len())
+            .sum::<usize>()
+        + summary
+            .action_items
+            .iter()
+            .map(|item| item.len())
+            .sum::<usize>()
+        + summary
+            .open_questions
+            .iter()
+            .map(|item| item.len())
+            .sum::<usize>()
+        + summary
+            .commitments
+            .iter()
+            .map(|item| item.len())
+            .sum::<usize>()
+        + summary
+            .key_points
+            .iter()
+            .map(|item| item.len())
+            .sum::<usize>()
+        + summary
+            .participants
+            .iter()
+            .map(|item| item.len())
+            .sum::<usize>()
+}
+
+fn summary_is_empty(summary: &Summary) -> bool {
+    summary.text.trim().is_empty()
+        && summary.decisions.is_empty()
+        && summary.action_items.is_empty()
+        && summary.open_questions.is_empty()
+        && summary.commitments.is_empty()
+        && summary.key_points.is_empty()
+        && summary.participants.is_empty()
+}
+
+fn llm_error_outcome(error: &dyn std::fmt::Display) -> &'static str {
+    let message = error.to_string().to_lowercase();
+    if message.contains("rate limit")
+        || message.contains("rate-limited")
+        || message.contains("rate limited")
+        || message.contains("429")
+    {
+        "rate_limited"
+    } else {
+        "error"
+    }
+}
+
+struct LlmLogFields {
+    outcome: &'static str,
+    model: String,
+    input_chars: usize,
+    output_chars: usize,
+    extra: serde_json::Value,
+}
+
+fn log_llm_step(step: &str, file: &str, started: Instant, fields: LlmLogFields) {
+    let mut payload = serde_json::Map::from_iter([
+        ("outcome".to_string(), serde_json::json!(fields.outcome)),
+        ("model".to_string(), serde_json::json!(fields.model)),
+        (
+            "input_chars".to_string(),
+            serde_json::json!(fields.input_chars),
+        ),
+        (
+            "output_chars".to_string(),
+            serde_json::json!(fields.output_chars),
+        ),
+    ]);
+    if let Some(obj) = fields.extra.as_object() {
+        payload.extend(obj.clone());
+    }
+    logging::log_step(
+        step,
+        file,
+        started.elapsed().as_millis() as u64,
+        serde_json::Value::Object(payload),
+    );
+}
+
+fn basename_or_value(value: &str) -> String {
+    PathBuf::from(value)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .map(|stem| stem.to_string())
+        .filter(|stem| !stem.is_empty())
+        .unwrap_or_else(|| value.to_string())
+}
+
+fn configured_agent_hint(config: &Config) -> String {
+    let cmd = if config.summarization.agent_command.is_empty() {
+        "claude"
+    } else {
+        config.summarization.agent_command.as_str()
+    };
+    format!("agent:{}", basename_or_value(cmd))
+}
+
+pub(crate) fn summarization_model_hint(config: &Config, has_screen_context: bool) -> String {
+    match config.summarization.engine.as_str() {
+        "auto" => "agent:auto".into(),
+        "agent" => configured_agent_hint(config),
+        "claude" => "anthropic:claude-sonnet-4-20250514".into(),
+        "openai" => {
+            if has_screen_context {
+                "openai:gpt-4o(+gpt-4o-mini)".into()
+            } else {
+                "openai:gpt-4o-mini".into()
+            }
+        }
+        "mistral" => format!("mistral:{}", config.summarization.mistral_model),
+        "ollama" => format!("ollama:{}", config.summarization.ollama_model),
+        other => other.to_string(),
+    }
+}
+
+pub(crate) fn speaker_mapping_model_hint(config: &Config) -> String {
+    match config.summarization.engine.as_str() {
+        "none" | "auto" | "agent" => configured_agent_hint(config),
+        "claude" => "anthropic:claude-sonnet-4-20250514".into(),
+        "openai" => "openai:gpt-4o-mini".into(),
+        "mistral" => format!("mistral:{}", config.summarization.mistral_model),
+        "ollama" => format!("ollama:{}", config.summarization.ollama_model),
+        other => other.to_string(),
     }
 }
 
@@ -1083,6 +1297,7 @@ pub fn map_speakers(
     transcript: &str,
     attendees: &[String],
     config: &Config,
+    log_file: Option<&str>,
 ) -> Vec<crate::diarize::SpeakerAttribution> {
     if attendees.is_empty() || !transcript.contains("SPEAKER_") {
         return Vec::new();
@@ -1113,6 +1328,8 @@ pub fn map_speakers(
     let prompt = SPEAKER_MAPPING_PROMPT
         .replace("{attendees}", &attendees.join(", "))
         .replace("{transcript}", truncated);
+    let step_started = Instant::now();
+    let model = speaker_mapping_model_hint(config);
 
     let response = if config.summarization.engine != "none" {
         run_speaker_mapping_prompt(&prompt, config)
@@ -1123,12 +1340,56 @@ pub fn map_speakers(
     match response {
         Ok(text) => {
             let mappings = parse_speaker_mapping(&text, &speakers, attendees);
+            if let Some(file) = log_file {
+                let outcome = if mappings.is_empty() { "empty" } else { "ok" };
+                log_llm_step(
+                    "speaker_mapping",
+                    file,
+                    step_started,
+                    LlmLogFields {
+                        outcome,
+                        model: model.clone(),
+                        input_chars: prompt.len(),
+                        output_chars: text.len(),
+                        extra: serde_json::json!({
+                            "speaker_labels": speakers.len(),
+                            "attendees": attendees.len(),
+                            "mapped": mappings.len(),
+                        }),
+                    },
+                );
+            }
             if !mappings.is_empty() {
                 tracing::info!(mapped = mappings.len(), "Level 1: speaker mapping complete");
+            } else {
+                tracing::warn!(
+                    speakers = speakers.len(),
+                    attendees = attendees.len(),
+                    model = %model,
+                    "Level 1: speaker mapping produced no confident matches; continuing without LLM attributions"
+                );
             }
             mappings
         }
         Err(e) => {
+            if let Some(file) = log_file {
+                log_llm_step(
+                    "speaker_mapping",
+                    file,
+                    step_started,
+                    LlmLogFields {
+                        outcome: llm_error_outcome(&*e),
+                        model: model.clone(),
+                        input_chars: prompt.len(),
+                        output_chars: 0,
+                        extra: serde_json::json!({
+                            "speaker_labels": speakers.len(),
+                            "attendees": attendees.len(),
+                            "reason": e.to_string(),
+                        }),
+                    },
+                );
+            }
             tracing::warn!(error = %e, "Level 1: speaker mapping failed");
             Vec::new()
         }
@@ -1495,13 +1756,13 @@ PARTICIPANTS:
     #[test]
     fn map_speakers_empty_when_no_speakers() {
         let config = Config::default();
-        assert!(map_speakers("[0:00] no labels", &["Alex".into()], &config).is_empty());
+        assert!(map_speakers("[0:00] no labels", &["Alex".into()], &config, None).is_empty());
     }
 
     #[test]
     fn map_speakers_empty_when_no_attendees() {
         let config = Config::default();
-        assert!(map_speakers("[SPEAKER_1 0:00] hi", &[], &config).is_empty());
+        assert!(map_speakers("[SPEAKER_1 0:00] hi", &[], &config, None).is_empty());
     }
 
     #[test]

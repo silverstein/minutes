@@ -463,7 +463,12 @@ impl CallDetector {
         let mut saw_browser = false;
 
         for (proc_fragment, app_name, kind, exact) in &[
-            ("google chrome", "Google Chrome", BrowserKind::ChromeLike, false),
+            (
+                "google chrome",
+                "Google Chrome",
+                BrowserKind::ChromeLike,
+                false,
+            ),
             (
                 "chrome canary",
                 "Google Chrome Canary",

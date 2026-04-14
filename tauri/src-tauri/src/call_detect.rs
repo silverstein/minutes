@@ -965,15 +965,16 @@ mod tests {
             cooldown_minutes: 5,
             apps: vec!["google-meet".into()],
         });
+        // Defer the probe so `detect_google_meet_in_browsers` skips the real
+        // AppleScript call to Arc but still records `saw_browser`.
+        detector.defer_browser_probe_for("Arc", "test");
+
         // "Arc" (the browser) must be recognised; "searchpartyd" must not
         // accidentally satisfy the check on its own.
         let running: Vec<String> = vec!["searchpartyd".into(), "Arc".into()];
-        // With Arc in the running list the probe attempts browser automation.
-        // We only assert that the result is NOT NoBrowserProcesses — i.e.
-        // `saw_browser` was set to true by the exact-match Arc entry.
-        assert!(!matches!(
+        assert!(matches!(
             detector.detect_google_meet_in_browsers(&running),
-            BrowserMeetProbe::NoBrowserProcesses
+            BrowserMeetProbe::NoMatch
         ));
     }
 

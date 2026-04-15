@@ -186,27 +186,53 @@ Every release shows up in followers' GitHub feeds — this is free awareness. Wr
 - Match the voice of past releases (see v0.8.0, v0.8.1 for examples)
 - Save to a temp file: `notes.md`
 
-### 6. Commit, push, create release
+### 6. Push commits to `main` and wait for CI to go green
 ```bash
-git push origin main                                          # Push commits first
-gh release create vX.Y.Z -t "vX.Y.Z: Short Title" -F notes.md --target main  # Creates tag + release with notes, triggers CI
+git push origin main
+# Watch CI — do NOT tag or publish until the CI workflow succeeds on this commit.
+gh run list --branch main --limit 3
+gh run watch $(gh run list --branch main --limit 1 --json databaseId --jq '.[0].databaseId')
 ```
-**IMPORTANT**: `gh release create` creates the tag on the remote and triggers CI. Do NOT `git tag` locally — that causes a race where CI creates the release before notes exist. The release must exist with notes BEFORE CI workflows run.
+**Why this step exists**: if you tag first and CI breaks (e.g. a Windows cross-platform build failure), you've already published the version to the public GitHub feed, npm, and brew. Moving a tag after the fact is messy — force-pushing the tag drops the GitHub release to draft, requires re-publishing, and leaves the npm package / brew formula pointing at a different commit than the release tag. Catch the failure *before* any of that happens.
 
-### 7. Build and upload .mcpb
+### 7. Create the GitHub release as a DRAFT
+```bash
+gh release create vX.Y.Z -t "vX.Y.Z: Short Title" -F notes.md --target main --draft
+```
+This creates the tag on the remote and triggers the release workflows (`Release CLI Binaries`, `Release macOS`, `Release Windows Desktop`), but does **not** announce the version in subscribers' GitHub feeds and doesn't mark it as "latest". Drafts can be re-published later with a single flag flip.
+
+Do NOT `git tag` locally — the race it causes (CI creating the release before notes exist) is exactly what the checklist avoids.
+
+### 8. Wait for release workflows to pass
+```bash
+gh run list --workflow="Release CLI Binaries" --limit 1
+gh run list --workflow="Release macOS" --limit 1
+gh run list --workflow="Release Windows Desktop" --limit 1
+```
+If any fail, fix on `main`, `git tag -d vX.Y.Z && git push origin :refs/tags/vX.Y.Z`, re-tag at the new commit, and re-run from step 7. (Cheap because the release is still a draft.)
+
+**Known exception**: `Release macOS` fails with `A required agreement is missing or has expired` when Apple Developer Program enrollment is pending or the agreement hasn't been signed. That is environmental, not a code issue — proceed to step 9 with the understanding that the signed/notarized DMG won't be in this release.
+
+### 9. Publish the draft
+```bash
+gh release edit vX.Y.Z --draft=false
+```
+Now — and only now — does the version show up in followers' feeds and become the "latest" release.
+
+### 10. Build and upload .mcpb
 ```bash
 mcpb pack . minutes.mcpb
 gh release upload vX.Y.Z minutes.mcpb --clobber
 ```
 
-### 8. Publish npm packages
+### 11. Publish npm packages
 ```bash
 cd crates/sdk && npm publish --access public --registry https://registry.npmjs.org
 cd crates/mcp && npm publish --access public --registry https://registry.npmjs.org
 ```
 **IMPORTANT**: `crates/mcp/package.json` must depend on `"minutes-sdk": "^X.Y.Z"` (npm version), NOT `"file:../sdk"` (local path). Check before publishing. If 2FA blocks publish, use a granular access token with "Bypass 2FA" enabled.
 
-### 9. Redeploy landing page
+### 12. Redeploy landing page
 ```bash
 npx vercel@50.38.2 build --prod
 npx vercel@50.38.2 deploy --prebuilt --yes --prod --scope evil-genius-laboratory
@@ -214,7 +240,9 @@ npx vercel@50.38.2 deploy --prebuilt --yes --prod --scope evil-genius-laboratory
 
 **IMPORTANT**: Run these commands from the repo root, not `site/`. The linked Vercel project uses `rootDirectory=site`, and the Git-connected / remote build path is currently failing after successful Next 16.2.3 builds because Vercel looks for `.next/routes-manifest-deterministic.json`. The prebuilt flow uploads the local `.vercel/output` and avoids that failing server-side post-build step.
 
-### 10. Update Homebrew tap formula if CLI changed
+**Check before deploying**: `cat .vercel/project.json` should show `"projectName": "useminutes.app"` with `"framework": "nextjs"`. If it's pointing at a different project (e.g. `rx-vip/minutes`), the build produces an empty static tree (no `index.html`, no SSR functions) and the deploy aliases return 404. Fix the link before building.
+
+### 13. Update Homebrew tap formula if CLI changed
 The formula lives at `silverstein/homebrew-tap` → `Formula/minutes.rb`. Update the `tag:` to the new version:
 ```bash
 # Fetch current SHA, update via GitHub API

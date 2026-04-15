@@ -561,6 +561,12 @@ mod tests {
         restore_env_var("HOME", old_home);
     }
 
+    // Auto-resolution candidate paths are all Unix-style
+    // (/opt/homebrew/bin, /usr/local/bin, ~/.local/bin, ~/.cargo/bin) and
+    // the hardcoded "parakeet" filename has no .exe/.bat extension. On
+    // Windows users install parakeet.cpp differently anyway, so both
+    // tests below are scoped to unix.
+    #[cfg(unix)]
     #[test]
     fn resolve_parakeet_binary_auto_finds_homebrew_candidate() {
         let _env_lock = crate::test_home_env_lock();
@@ -633,6 +639,7 @@ mod tests {
         restore_env_var("HOME", old_home);
     }
 
+    #[cfg(unix)]
     #[test]
     fn resolve_parakeet_binary_falls_back_from_broken_config_when_alternative_exists() {
         let _env_lock = crate::test_home_env_lock();

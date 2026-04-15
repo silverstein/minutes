@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Minutes Download</title>
+    <style>
+      :root {
+        color-scheme: light;
+        font-family:
+          "Geist Mono", "SFMono-Regular", "SF Mono", ui-monospace, Menlo, Monaco,
+          Consolas, monospace;
+        background: #f4efe6;
+        color: #1d1b17;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        padding: 24px;
+      }
+
+      main {
+        width: min(100%, 520px);
+        border: 1px solid rgba(29, 27, 23, 0.12);
+        background: rgba(255, 255, 255, 0.82);
+        box-shadow: 0 18px 45px rgba(29, 27, 23, 0.08);
+        padding: 28px;
+      }
+
+      h1 {
+        margin: 0 0 12px;
+        font-size: 14px;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+      }
+
+      p {
+        margin: 0;
+        font-size: 13px;
+        line-height: 1.7;
+        color: rgba(29, 27, 23, 0.72);
+      }
+
+      a {
+        color: inherit;
+      }
+
+      .muted {
+        margin-top: 16px;
+        font-size: 12px;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Redirecting to the latest Apple Silicon build…</h1>
+      <p id="status">
+        Looking up the newest desktop release so this link keeps working across
+        future Minutes versions.
+      </p>
+      <p class="muted">
+        If the redirect does not happen, open the
+        <a id="fallback-link" href="https://github.com/silverstein/minutes/releases">Minutes releases page</a>.
+      </p>
+    </main>
+
+    <script>
+      const RELEASES_API = "https://api.github.com/repos/silverstein/minutes/releases?per_page=10";
+      const RELEASES_PAGE = "https://github.com/silverstein/minutes/releases";
+      const DMG_ASSET_PATTERN = /^Minutes_.*_aarch64\.dmg$/;
+      const status = document.getElementById("status");
+      const fallbackLink = document.getElementById("fallback-link");
+
+      function updateStatus(message) {
+        if (status) {
+          status.textContent = message;
+        }
+      }
+
+      async function redirectToLatestAppleSiliconBuild() {
+        try {
+          const response = await fetch(RELEASES_API, {
+            headers: {
+              Accept: "application/vnd.github+json",
+            },
+          });
+
+          if (!response.ok) {
+            throw new Error("GitHub API request failed");
+          }
+
+          const releases = await response.json();
+          if (!Array.isArray(releases)) {
+            throw new Error("Unexpected GitHub API response");
+          }
+
+          for (const release of releases) {
+            if (!release || release.draft || release.prerelease || !Array.isArray(release.assets)) {
+              continue;
+            }
+
+            const asset = release.assets.find(
+              (entry) =>
+                typeof entry?.name === "string" &&
+                typeof entry?.browser_download_url === "string" &&
+                DMG_ASSET_PATTERN.test(entry.name),
+            );
+
+            if (asset) {
+              window.location.replace(asset.browser_download_url);
+              return;
+            }
+          }
+
+          throw new Error("No Apple Silicon DMG asset found");
+        } catch (error) {
+          updateStatus(
+            "Couldn’t resolve the latest direct download automatically. Opening the releases page instead.",
+          );
+          if (fallbackLink) {
+            fallbackLink.href = RELEASES_PAGE;
+          }
+          window.location.replace(RELEASES_PAGE);
+        }
+      }
+
+      redirectToLatestAppleSiliconBuild();
+    </script>
+  </body>
+</html>

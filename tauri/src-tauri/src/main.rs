@@ -1540,6 +1540,11 @@ fn main() {
             palette_dispatch::palette_list,
             palette_dispatch::palette_execute,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running minutes app");
+        .build(tauri::generate_context!())
+        .expect("error while building minutes app")
+        .run(|_, event| {
+            if matches!(event, tauri::RunEvent::Exit) {
+                minutes_core::parakeet_sidecar::shutdown_global_parakeet_sidecar();
+            }
+        });
 }

@@ -744,7 +744,7 @@ fn main() -> Result<()> {
     // Rotate old log files at startup
     minutes_core::logging::rotate_logs().ok();
 
-    match cli.command {
+    let result = match cli.command {
         Commands::Record {
             title,
             context,
@@ -787,22 +787,22 @@ fn main() -> Result<()> {
             }
 
             if let Some(wav_path) = diagnose {
-                return cmd_diagnose(&wav_path, title.as_deref(), &config);
-            }
-
-            let effective_intent = if call && intent == "auto" {
-                "call"
+                cmd_diagnose(&wav_path, title.as_deref(), &config)
             } else {
-                &intent
-            };
-            cmd_record(
-                title,
-                context,
-                &mode,
-                effective_intent,
-                allow_degraded,
-                &config,
-            )
+                let effective_intent = if call && intent == "auto" {
+                    "call"
+                } else {
+                    &intent
+                };
+                cmd_record(
+                    title,
+                    context,
+                    &mode,
+                    effective_intent,
+                    allow_degraded,
+                    &config,
+                )
+            }
         }
         Commands::Note { text, meeting } => cmd_note(&text, meeting.as_deref(), &config),
         Commands::Stop => cmd_stop(&config),
@@ -1071,7 +1071,10 @@ fn main() -> Result<()> {
             format,
         } => cmd_transcript(since.as_deref(), status, &format),
         Commands::Dashboard { port, no_open } => dashboard::serve(&config, port, !no_open),
-    }
+    };
+
+    minutes_core::parakeet_sidecar::shutdown_global_parakeet_sidecar();
+    result
 }
 
 fn cmd_note(text: &str, meeting: Option<&Path>, config: &Config) -> Result<()> {

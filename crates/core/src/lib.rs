@@ -17,6 +17,7 @@ pub mod markdown;
 pub mod notes;
 pub mod palette;
 pub mod parakeet;
+pub mod parakeet_sidecar;
 pub(crate) mod person_identity;
 pub mod pid;
 pub mod pipeline;

@@ -1414,6 +1414,40 @@ fn transcribe_with_parakeet(
     // Step 3: Resolve model and vocab paths
     let model_path = resolve_parakeet_model_path(config)?;
     let vocab_path = resolve_parakeet_vocab_path(config)?;
+    let sidecar_audio_duration_secs = samples.len() as f64 / 16000.0;
+
+    if config.transcription.parakeet_sidecar_enabled {
+        match crate::parakeet_sidecar::transcribe_via_global_sidecar(
+            config,
+            &model_path,
+            &vocab_path,
+            native_vad_path.as_deref(),
+            tmp_wav.path(),
+            sidecar_audio_duration_secs,
+        ) {
+            Ok(result) => {
+                tracing::info!(
+                    "parakeet-sidecar: using warm server path elapsed_ms={} first_request={} fp16={}",
+                    result.elapsed_ms,
+                    result.first_request_on_process,
+                    result.effective_fp16
+                );
+                return transcribe_result_from_parakeet_parsed(
+                    result.transcript,
+                    stats,
+                    result.first_request_on_process,
+                    result.elapsed_ms,
+                    config,
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    "parakeet-sidecar: falling back to subprocess path: {}",
+                    error
+                );
+            }
+        }
+    }
 
     // Step 4: Run parakeet subprocess
     // CLI syntax: parakeet <model.safetensors> <audio.wav> --vocab <tokenizer.vocab>
@@ -2001,18 +2035,7 @@ fn parse_parakeet_output(
         // Non-timestamp line — skip (don't fake [0:00] timestamps)
     }
 
-    let segments = crate::parakeet::group_word_segments(&segments);
-    let lines: Vec<String> = segments
-        .iter()
-        .map(|segment| {
-            let mins = (segment.start_secs / 60.0) as u64;
-            let secs = (segment.start_secs % 60.0) as u64;
-            format!("[{}:{:02}] {}", mins, secs, segment.text)
-        })
-        .collect();
-    let raw_segments = lines.len();
-
-    if lines.is_empty() {
+    if segments.is_empty() {
         let zero_token_banner = raw
             .lines()
             .map(str::trim)
@@ -2031,12 +2054,45 @@ fn parse_parakeet_output(
                 preview
             )));
         }
+    }
+
+    parakeet_transcript_from_segments_with_stats(raw, segments, config)
+}
+
+#[cfg(feature = "parakeet")]
+pub(crate) fn parakeet_transcript_from_segments(
+    raw_output: &str,
+    segments: Vec<ParakeetCliSegment>,
+    config: &Config,
+) -> Result<ParakeetCliTranscript, TranscribeError> {
+    let (parsed, _, _) =
+        parakeet_transcript_from_segments_with_stats(raw_output, segments, config)?;
+    Ok(parsed)
+}
+
+#[cfg(feature = "parakeet")]
+fn parakeet_transcript_from_segments_with_stats(
+    raw_output: &str,
+    segments: Vec<ParakeetCliSegment>,
+    config: &Config,
+) -> Result<(ParakeetCliTranscript, String, ParakeetFilterStats), TranscribeError> {
+    let segments = crate::parakeet::group_word_segments(&segments);
+    let lines: Vec<String> = segments
+        .iter()
+        .map(|segment| {
+            let mins = (segment.start_secs / 60.0) as u64;
+            let secs = (segment.start_secs % 60.0) as u64;
+            format!("[{}:{:02}] {}", mins, secs, segment.text)
+        })
+        .collect();
+    let raw_segments = lines.len();
+
+    if lines.is_empty() {
         return Err(TranscribeError::EmptyTranscript(
             config.transcription.min_words,
         ));
     }
 
-    // Full anti-hallucination pipeline (same as whisper path)
     let cleanup = run_transcript_cleanup_pipeline(lines);
 
     let pstats = ParakeetFilterStats {
@@ -2054,10 +2110,11 @@ fn parse_parakeet_output(
             config.transcription.min_words,
         ));
     }
+
     let transcript_with_newline = format!("{}\n", transcript);
     Ok((
         ParakeetCliTranscript {
-            raw_output: raw.to_string(),
+            raw_output: raw_output.to_string(),
             segments,
             transcript: transcript_with_newline.clone(),
         },
@@ -2067,7 +2124,7 @@ fn parse_parakeet_output(
 }
 
 /// Write f32 samples as a 16kHz mono 16-bit WAV file.
-fn write_wav_16k_mono(path: &Path, samples: &[f32]) -> Result<(), TranscribeError> {
+pub(crate) fn write_wav_16k_mono(path: &Path, samples: &[f32]) -> Result<(), TranscribeError> {
     let spec = hound::WavSpec {
         channels: 1,
         sample_rate: 16000,
@@ -2092,7 +2149,7 @@ fn write_wav_16k_mono(path: &Path, samples: &[f32]) -> Result<(), TranscribeErro
 ///
 /// Looks for `.safetensors` files in `~/.minutes/models/parakeet/`.
 #[cfg(feature = "parakeet")]
-fn resolve_parakeet_model_path(config: &Config) -> Result<PathBuf, TranscribeError> {
+pub(crate) fn resolve_parakeet_model_path(config: &Config) -> Result<PathBuf, TranscribeError> {
     let model_name = &config.transcription.parakeet_model;
     let model_dir = crate::parakeet::installs_root(config);
 
@@ -2128,7 +2185,7 @@ fn resolve_parakeet_model_path(config: &Config) -> Result<PathBuf, TranscribeErr
 ///
 /// Looks for the vocab file in `~/.minutes/models/parakeet/` alongside the model.
 #[cfg(feature = "parakeet")]
-fn resolve_parakeet_vocab_path(config: &Config) -> Result<PathBuf, TranscribeError> {
+pub(crate) fn resolve_parakeet_vocab_path(config: &Config) -> Result<PathBuf, TranscribeError> {
     let model_dir = crate::parakeet::installs_root(config);
     let vocab_name = &config.transcription.parakeet_vocab;
     if let Some(candidate) = crate::parakeet::resolve_tokenizer_file(

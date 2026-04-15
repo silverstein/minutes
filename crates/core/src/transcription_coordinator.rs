@@ -220,7 +220,11 @@ pub fn parakeet_setup_command(model: &str) -> String {
 }
 
 pub fn parakeet_backend_status(config: &Config) -> ParakeetBackendStatus {
-    let backend_id = "parakeet".to_string();
+    let backend_id = if config.transcription.parakeet_sidecar_enabled {
+        "parakeet-sidecar".to_string()
+    } else {
+        "parakeet".to_string()
+    };
     let compiled = cfg!(feature = "parakeet");
     let binary = config.transcription.parakeet_binary.clone();
     let model = config.transcription.parakeet_model.clone();
@@ -252,6 +256,11 @@ pub fn parakeet_backend_status(config: &Config) -> ParakeetBackendStatus {
     }
     if metadata.is_none() && resolved_model.is_some() && resolved_tokenizer.is_some() {
         issues.push("install metadata is missing; rerun setup to persist provenance".to_string());
+    }
+    if config.transcription.parakeet_sidecar_enabled
+        && crate::parakeet_sidecar::resolve_server_binary(&binary).is_none()
+    {
+        issues.push("warm sidecar is enabled but example-server could not be resolved".to_string());
     }
 
     let tokenizer_label = resolved_tokenizer.as_ref().and_then(|path| {
@@ -351,6 +360,27 @@ pub fn warmup_active_backend(config: &Config) -> Result<BackendWarmupResult, Tra
 
     #[cfg(feature = "parakeet")]
     {
+        if config.transcription.parakeet_sidecar_enabled {
+            let model_path = transcribe::resolve_parakeet_model_path(config)?;
+            let vocab_path = transcribe::resolve_parakeet_vocab_path(config)?;
+            let vad_path = transcribe::resolve_parakeet_native_vad_path(config);
+            let started = std::time::Instant::now();
+            let _started_now = crate::parakeet_sidecar::warmup_global_sidecar(
+                config,
+                &model_path,
+                &vocab_path,
+                vad_path.as_deref(),
+            )
+            .map_err(|error| TranscribeError::ParakeetFailed(error.to_string()))?;
+            mark_backend_warm("parakeet-sidecar", &config.transcription.parakeet_model);
+            return Ok(BackendWarmupResult {
+                backend_id: "parakeet-sidecar".into(),
+                model: config.transcription.parakeet_model.clone(),
+                elapsed_ms: started.elapsed().as_millis() as u64,
+                used_gpu: cfg!(all(target_os = "macos", target_arch = "aarch64")),
+            });
+        }
+
         let stats = transcribe::warmup_parakeet(config)?;
         mark_backend_warm("parakeet", &stats.model);
         return Ok(BackendWarmupResult {

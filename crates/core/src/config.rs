@@ -124,6 +124,10 @@ pub struct TranscriptionConfig {
     /// runtime it can add noticeable cold-start latency because the model is
     /// cast to fp16 on each run.
     pub parakeet_fp16: bool,
+    /// Enable the warm Parakeet example-server sidecar path.
+    ///
+    /// This is beta and remains opt-in until more real-world validation lands.
+    pub parakeet_sidecar_enabled: bool,
     /// SentencePiece vocab filename (resolved under model_path/parakeet/).
     ///
     /// If left at the default generic name, Minutes still prefers model-specific
@@ -568,6 +572,7 @@ impl Default for TranscriptionConfig {
             parakeet_boost_limit: 0,
             parakeet_boost_score: 2.0,
             parakeet_fp16: true,
+            parakeet_sidecar_enabled: false,
             parakeet_vocab: "tdt-600m.tokenizer.vocab".into(),
         }
     }
@@ -883,6 +888,7 @@ mod tests {
         assert_eq!(config.transcription.parakeet_boost_limit, 0);
         assert_eq!(config.transcription.parakeet_boost_score, 2.0);
         assert!(config.transcription.parakeet_fp16);
+        assert!(!config.transcription.parakeet_sidecar_enabled);
         assert_eq!(
             config.transcription.parakeet_vocab,
             "tdt-600m.tokenizer.vocab"
@@ -1026,6 +1032,7 @@ parakeet_binary = "/usr/local/bin/parakeet"
             config.transcription.parakeet_binary,
             "/usr/local/bin/parakeet"
         );
+        assert!(!config.transcription.parakeet_sidecar_enabled);
         // Other fields should be defaults
         assert_eq!(config.transcription.model, "small");
         assert_eq!(config.transcription.min_words, 3);
@@ -1047,6 +1054,23 @@ model = "tiny"
         let config = Config::load_from(&config_path);
         assert_eq!(config.transcription.engine, "whisper");
         assert_eq!(config.transcription.parakeet_binary, "parakeet");
+    }
+
+    #[test]
+    fn parakeet_sidecar_flag_can_be_enabled_from_toml() {
+        let dir = TempDir::new().unwrap();
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(
+            &config_path,
+            r#"
+[transcription]
+parakeet_sidecar_enabled = true
+"#,
+        )
+        .unwrap();
+
+        let config = Config::load_from(&config_path);
+        assert!(config.transcription.parakeet_sidecar_enabled);
     }
 
     #[test]

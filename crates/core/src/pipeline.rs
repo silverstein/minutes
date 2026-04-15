@@ -3030,7 +3030,12 @@ fn normalize_entity_topic(text: &str) -> String {
 fn is_task_like_project_candidate(normalized: &str, source: Option<&str>) -> bool {
     const ACTION_VERBS: &[&str] = &[
         "add", "ask", "asked", "build", "call", "check", "confirm", "create", "deliver", "email",
-        "follow", "provide", "reach", "review", "schedule", "send", "share", "update",
+        "follow", "provide", "reach", "review", "run", "schedule", "send", "share", "study",
+        "update",
+    ];
+    const TASK_START_RED_FLAGS: &[&str] = &[
+        "a", "an", "the", "to", "my", "our", "your", "his", "her", "their", "this", "that",
+        "these", "those", "me", "us", "him", "them",
     ];
 
     if parse_speaker_reference(normalized).is_some() {
@@ -3039,10 +3044,6 @@ fn is_task_like_project_candidate(normalized: &str, source: Option<&str>) -> boo
 
     let words: Vec<&str> = normalized.split_whitespace().collect();
     if words.is_empty() {
-        return true;
-    }
-
-    if ACTION_VERBS.contains(&words[0]) {
         return true;
     }
 
@@ -3055,13 +3056,33 @@ fn is_task_like_project_candidate(normalized: &str, source: Option<&str>) -> boo
         return true;
     }
 
-    let source_words = source
+    let source_words: Vec<String> = source
         .unwrap_or(normalized)
         .split_whitespace()
-        .filter(|word| !word.trim().is_empty())
-        .count();
+        .map(|word| {
+            word.trim_matches(|c: char| !c.is_alphanumeric())
+                .to_lowercase()
+        })
+        .filter(|word| !word.is_empty())
+        .collect();
 
-    verb_hits >= 2 || (verb_hits >= 1 && source_words > words.len() + 1)
+    let starts_with_action = ACTION_VERBS.contains(&words[0]);
+    if starts_with_action {
+        if words.len() == 1 {
+            return true;
+        }
+
+        let has_follow_on_signal = source_words.len() > words.len()
+            || source_words
+                .get(1)
+                .is_some_and(|word| TASK_START_RED_FLAGS.contains(&word.as_str()));
+
+        if has_follow_on_signal || verb_hits >= 2 {
+            return true;
+        }
+    }
+
+    verb_hits >= 2
 }
 
 /// Execute the post_record hook if configured.
@@ -3927,6 +3948,38 @@ mod tests {
         assert!(!project_slugs.contains(&"speaker-1-provide-speaker"));
         assert!(!project_slugs.contains(&"reach-out"));
         assert!(!project_slugs.contains(&"pioneer-asked-build"));
+    }
+
+    #[test]
+    fn is_task_like_project_candidate_requires_more_than_a_verb_like_start() {
+        assert!(!is_task_like_project_candidate(
+            "review board",
+            Some("Review Board"),
+        ));
+        assert!(!is_task_like_project_candidate(
+            "run club",
+            Some("Run Club")
+        ));
+        assert!(!is_task_like_project_candidate(
+            "study group",
+            Some("Study Group"),
+        ));
+        assert!(is_task_like_project_candidate(
+            "review q3 budget",
+            Some("Review the Q3 budget"),
+        ));
+        assert!(is_task_like_project_candidate(
+            "run tests",
+            Some("Run the tests"),
+        ));
+        assert!(is_task_like_project_candidate(
+            "speaker 1 provide quarterly report",
+            Some("Speaker 1 provide quarterly report"),
+        ));
+        assert!(!is_task_like_project_candidate(
+            "asana migration",
+            Some("Asana migration"),
+        ));
     }
 
     #[test]

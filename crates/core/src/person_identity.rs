@@ -132,26 +132,46 @@ impl PersonCanonicalizer {
     }
 
     fn pick_best_index(&self, indices: &[usize]) -> Option<usize> {
-        let mut best: Option<(usize, usize, usize)> = None;
+        let mut best_idx: Option<usize> = None;
+        let mut best_support = 0usize;
+        let mut best_alias = 0usize;
+        let mut ambiguous = false;
 
         for &idx in indices {
             let candidate = &self.candidates[idx];
-            let score = (candidate.support_score, candidate.alias_score);
-            match best {
-                None => best = Some((idx, score.0, score.1)),
-                Some((_, best_support, best_alias)) => {
-                    if score.0 > best_support || (score.0 == best_support && score.1 > best_alias) {
-                        best = Some((idx, score.0, score.1));
-                    } else if score.0 == best_support && score.1 == best_alias {
-                        best = Some((usize::MAX, best_support, best_alias));
+            let support = candidate.support_score;
+            let alias = candidate.alias_score;
+
+            match best_idx {
+                None => {
+                    best_idx = Some(idx);
+                    best_support = support;
+                    best_alias = alias;
+                }
+                Some(_) if ambiguous => {
+                    if support > best_support && alias > best_alias {
+                        best_idx = Some(idx);
+                        best_support = support;
+                        best_alias = alias;
+                        ambiguous = false;
+                    }
+                }
+                Some(_) => {
+                    if support > best_support || (support == best_support && alias > best_alias) {
+                        best_idx = Some(idx);
+                        best_support = support;
+                        best_alias = alias;
+                    } else if support == best_support && alias == best_alias {
+                        ambiguous = true;
                     }
                 }
             }
         }
 
-        match best {
-            Some((idx, _, _)) if idx != usize::MAX => Some(idx),
-            _ => None,
+        if ambiguous {
+            None
+        } else {
+            best_idx
         }
     }
 }
@@ -317,5 +337,47 @@ mod tests {
         let identity = resolver.resolve("Dan").expect("ambiguous fallback");
         assert_eq!(identity.slug, "dan");
         assert_eq!(identity.name, "Dan");
+    }
+
+    fn candidate(alias_score: usize, support_score: usize) -> PersonCandidate {
+        PersonCandidate {
+            identity: PersonIdentity {
+                slug: format!("candidate-{alias_score}-{support_score}"),
+                name: format!("Candidate {alias_score}/{support_score}"),
+                aliases: vec![],
+            },
+            alias_score,
+            support_score,
+        }
+    }
+
+    #[test]
+    fn pick_best_index_keeps_ambiguity_latched_after_equal_top_tie() {
+        let canonicalizer = PersonCanonicalizer {
+            candidates: vec![candidate(2, 1), candidate(2, 1), candidate(3, 1)],
+            ..Default::default()
+        };
+
+        assert_eq!(canonicalizer.pick_best_index(&[0, 1, 2]), None);
+    }
+
+    #[test]
+    fn pick_best_index_returns_strictly_higher_scoring_candidate() {
+        let canonicalizer = PersonCanonicalizer {
+            candidates: vec![candidate(2, 1), candidate(2, 1), candidate(3, 2)],
+            ..Default::default()
+        };
+
+        assert_eq!(canonicalizer.pick_best_index(&[0, 1, 2]), Some(2));
+    }
+
+    #[test]
+    fn pick_best_index_returns_none_when_all_top_candidates_tie() {
+        let canonicalizer = PersonCanonicalizer {
+            candidates: vec![candidate(2, 1), candidate(2, 1), candidate(2, 1)],
+            ..Default::default()
+        };
+
+        assert_eq!(canonicalizer.pick_best_index(&[0, 1, 2]), None);
     }
 }

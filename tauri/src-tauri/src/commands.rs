@@ -8557,6 +8557,36 @@ pub fn debug_emit_update_state(app: &tauri::AppHandle, scenario: &str) -> Result
 // What's New (post-update release notes)
 // ─────────────────────────────────────────────────────────────────────
 
+fn github_release_url_for_version(version: &str) -> String {
+    format!(
+        "https://github.com/silverstein/minutes/releases/tag/v{}",
+        version
+    )
+}
+
+fn fetch_github_release_notes(version: &str) -> String {
+    let tag = format!("v{}", version);
+    let url = format!(
+        "https://api.github.com/repos/silverstein/minutes/releases/tags/{}",
+        tag
+    );
+
+    match ureq::get(&url)
+        .header("Accept", "application/vnd.github.v3+json")
+        .header("User-Agent", "minutes-desktop")
+        .call()
+    {
+        Ok(response) => response
+            .into_body()
+            .read_to_string()
+            .ok()
+            .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+            .and_then(|v| v.get("body").and_then(|b| b.as_str()).map(String::from))
+            .unwrap_or_default(),
+        Err(_) => String::new(),
+    }
+}
+
 /// Check whether the user should see "What's New" after an update.
 ///
 /// Reads `~/.minutes/whats-new.json` for `last_seen_version`, compares it
@@ -8596,30 +8626,8 @@ pub async fn cmd_check_whats_new(app: tauri::AppHandle) -> Result<serde_json::Va
     }
 
     // Version changed → fetch release notes from GitHub
-    let tag = format!("v{}", current);
-    let url = format!(
-        "https://api.github.com/repos/silverstein/minutes/releases/tags/{}",
-        tag
-    );
-    let body = match ureq::get(&url)
-        .header("Accept", "application/vnd.github.v3+json")
-        .header("User-Agent", "minutes-desktop")
-        .call()
-    {
-        Ok(response) => response
-            .into_body()
-            .read_to_string()
-            .ok()
-            .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
-            .and_then(|v| v.get("body").and_then(|b| b.as_str()).map(String::from))
-            .unwrap_or_default(),
-        Err(_) => String::new(),
-    };
-
-    let release_url = format!(
-        "https://github.com/silverstein/minutes/releases/tag/{}",
-        tag
-    );
+    let body = fetch_github_release_notes(&current);
+    let release_url = github_release_url_for_version(&current);
 
     Ok(serde_json::json!({
         "show": true,
@@ -8627,6 +8635,34 @@ pub async fn cmd_check_whats_new(app: tauri::AppHandle) -> Result<serde_json::Va
         "previousVersion": last_seen,
         "body": body,
         "url": release_url,
+    }))
+}
+
+/// Fetch the current version's release notes for a manual "What's New" view.
+#[tauri::command]
+pub async fn cmd_get_whats_new(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
+    let current = app.config().version.clone().unwrap_or_default();
+    if current.is_empty() {
+        return Err("App version is unavailable.".into());
+    }
+
+    let state_path = Config::minutes_dir().join("whats-new.json");
+    let last_seen = std::fs::read_to_string(&state_path)
+        .ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .and_then(|v| {
+            v.get("last_seen_version")
+                .and_then(|v| v.as_str())
+                .map(String::from)
+        })
+        .unwrap_or_default();
+
+    Ok(serde_json::json!({
+        "show": true,
+        "version": current,
+        "previousVersion": last_seen,
+        "body": fetch_github_release_notes(&current),
+        "url": github_release_url_for_version(&current),
     }))
 }
 

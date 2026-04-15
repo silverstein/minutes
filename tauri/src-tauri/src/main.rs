@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::{
-    menu::{Menu, MenuItem},
+    menu::{Menu, MenuItem, SubmenuBuilder},
     tray::TrayIconBuilder,
     Emitter, Manager, WebviewUrl, WebviewWindowBuilder,
 };
@@ -22,6 +22,10 @@ mod context;
 mod palette_dispatch;
 mod pty;
 mod shortcut_manager;
+
+const MINUTES_WEBSITE_URL: &str = "https://useminutes.app";
+const MINUTES_CHANGELOG_URL: &str = "https://github.com/silverstein/minutes/releases";
+const MINUTES_DISCUSSIONS_URL: &str = "https://github.com/silverstein/minutes/discussions";
 
 #[cfg(target_os = "macos")]
 fn maybe_run_hotkey_diagnostic() -> Option<i32> {
@@ -215,22 +219,41 @@ pub fn update_tray_state_with_mode(app: &tauri::AppHandle, is_active: bool, is_l
 
 // ── Auto-updater ────────────────────────────────────────────
 
-async fn check_for_update(app: &tauri::AppHandle) {
+async fn check_for_update(app: &tauri::AppHandle, manual: bool) {
     use tauri_plugin_updater::UpdaterExt;
 
     let updater = match app.updater() {
         Ok(u) => u,
         Err(e) => {
             eprintln!("[updater] init failed (non-fatal): {}", e);
+            if manual {
+                commands::show_user_notification(
+                    app,
+                    "Updates",
+                    &format!("Could not initialize the updater: {}", e),
+                );
+            }
             return;
         }
     };
 
     let update = match updater.check().await {
         Ok(Some(u)) => u,
-        Ok(None) => return,
+        Ok(None) => {
+            if manual {
+                commands::show_user_notification(app, "Updates", "Minutes is up to date.");
+            }
+            return;
+        }
         Err(e) => {
             eprintln!("[updater] check failed (non-fatal): {}", e);
+            if manual {
+                commands::show_user_notification(
+                    app,
+                    "Updates",
+                    &format!("Could not check for updates: {}", e),
+                );
+            }
             return;
         }
     };
@@ -263,11 +286,175 @@ async fn check_for_update(app: &tauri::AppHandle) {
             || state.dictation_active.load(Ordering::Relaxed)
         {
             eprintln!("[updater] deferring notification (session active)");
+            if manual {
+                commands::show_user_notification(
+                    app,
+                    "Update available",
+                    &format!(
+                        "Minutes {} is ready. Finish the current session and the update banner will appear.",
+                        version
+                    ),
+                );
+            }
             return;
         }
     }
 
+    if manual {
+        show_main_window(app);
+    }
     notify_update_available(app, &version, &body, download_bytes);
+}
+
+fn build_app_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
+    #[cfg(target_os = "macos")]
+    let app_menu = {
+        let about_item =
+            MenuItem::with_id(app, "app-show-about", "About Minutes", true, None::<&str>)?;
+        let whats_new_item =
+            MenuItem::with_id(app, "app-show-whats-new", "What’s New…", true, None::<&str>)?;
+        let settings_item =
+            MenuItem::with_id(app, "app-open-settings", "Settings…", true, Some("Cmd+,"))?;
+        let check_updates_item = MenuItem::with_id(
+            app,
+            "app-check-for-updates",
+            "Check for Updates…",
+            true,
+            None::<&str>,
+        )?;
+        let quit_item = MenuItem::with_id(app, "app-quit", "Quit Minutes", true, Some("Cmd+Q"))?;
+
+        SubmenuBuilder::new(app, &app.package_info().name)
+            .item(&about_item)
+            .item(&whats_new_item)
+            .item(&settings_item)
+            .item(&check_updates_item)
+            .separator()
+            .services()
+            .separator()
+            .hide()
+            .hide_others()
+            .show_all()
+            .separator()
+            .item(&quit_item)
+            .build()?
+    };
+
+    let file_menu = {
+        let open_item =
+            MenuItem::with_id(app, "app-open-main", "Open Minutes", true, Some("Cmd+O"))?;
+        let note_item =
+            MenuItem::with_id(app, "app-add-note", "Add Note…", true, Some("Cmd+Shift+N"))?;
+        let list_item = MenuItem::with_id(
+            app,
+            "app-open-meetings-folder",
+            "Open Meetings Folder",
+            true,
+            None::<&str>,
+        )?;
+
+        #[cfg(target_os = "macos")]
+        {
+            SubmenuBuilder::new(app, "File")
+                .item(&open_item)
+                .separator()
+                .item(&note_item)
+                .item(&list_item)
+                .separator()
+                .close_window()
+                .build()?
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            let quit_item = MenuItem::with_id(app, "app-quit", "Quit Minutes", true, None::<&str>)?;
+
+            SubmenuBuilder::new(app, "File")
+                .item(&open_item)
+                .separator()
+                .item(&note_item)
+                .item(&list_item)
+                .separator()
+                .close_window()
+                .item(&quit_item)
+                .build()?
+        }
+    };
+
+    let edit_menu = SubmenuBuilder::new(app, "Edit")
+        .undo()
+        .redo()
+        .separator()
+        .cut()
+        .copy()
+        .paste()
+        .select_all()
+        .build()?;
+
+    #[cfg(target_os = "macos")]
+    let view_menu = SubmenuBuilder::new(app, "View").fullscreen().build()?;
+
+    let window_menu = {
+        let bring_all_to_front = MenuItem::with_id(
+            app,
+            "window-bring-all-to-front",
+            "Bring All to Front",
+            true,
+            None::<&str>,
+        )?;
+
+        SubmenuBuilder::new(app, "Window")
+            .minimize()
+            .maximize()
+            .separator()
+            .item(&bring_all_to_front)
+            .close_window()
+            .build()?
+    };
+
+    let help_menu = {
+        let website_item = MenuItem::with_id(
+            app,
+            "help-open-website",
+            "Minutes Website",
+            true,
+            None::<&str>,
+        )?;
+        let changelog_item = MenuItem::with_id(
+            app,
+            "help-open-changelog",
+            "Release Notes",
+            true,
+            None::<&str>,
+        )?;
+        let discussions_item = MenuItem::with_id(
+            app,
+            "help-open-discussions",
+            "Get Help / Discussions",
+            true,
+            None::<&str>,
+        )?;
+
+        SubmenuBuilder::new(app, "Help")
+            .item(&website_item)
+            .item(&changelog_item)
+            .item(&discussions_item)
+            .build()?
+    };
+
+    Menu::with_items(
+        app,
+        &[
+            #[cfg(target_os = "macos")]
+            &app_menu,
+            &file_menu,
+            &edit_menu,
+            #[cfg(target_os = "macos")]
+            &view_menu,
+            &window_menu,
+            &help_menu,
+        ],
+    )
 }
 
 fn notify_update_available(
@@ -631,6 +818,87 @@ fn main() {
     let stop_clone = stop_flag.clone();
 
     tauri::Builder::default()
+        .menu(build_app_menu)
+        .on_menu_event(|app, event| match event.id().as_ref() {
+            "app-show-about" => {
+                show_main_window(app);
+                let _ = app.emit("minutes://show-about", ());
+            }
+            "app-show-whats-new" => {
+                show_main_window(app);
+                let _ = app.emit("minutes://show-whats-new", ());
+            }
+            "app-open-settings" => {
+                show_main_window(app);
+                let _ = app.emit("minutes://show-settings", ());
+            }
+            "app-check-for-updates" => {
+                let handle = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    check_for_update(&handle, true).await;
+                });
+            }
+            "app-open-main" => {
+                show_main_window(app);
+            }
+            "app-add-note" => {
+                show_main_window(app);
+                show_note_window(app);
+            }
+            "app-open-meetings-folder" => {
+                let meetings_dir = minutes_core::config::Config::load().output_dir;
+                if let Err(err) = commands::open_target(app, &meetings_dir.display().to_string()) {
+                    commands::show_user_notification(app, "Meetings", &err);
+                }
+            }
+            "help-open-website" => {
+                if let Err(err) = commands::open_target(app, MINUTES_WEBSITE_URL) {
+                    commands::show_user_notification(app, "Minutes Website", &err);
+                }
+            }
+            "help-open-changelog" => {
+                if let Err(err) = commands::open_target(app, MINUTES_CHANGELOG_URL) {
+                    commands::show_user_notification(app, "Release Notes", &err);
+                }
+            }
+            "help-open-discussions" => {
+                if let Err(err) = commands::open_target(app, MINUTES_DISCUSSIONS_URL) {
+                    commands::show_user_notification(app, "Discussions", &err);
+                }
+            }
+            "window-bring-all-to-front" => {
+                let mut windows: Vec<_> = app.webview_windows().into_values().collect();
+                windows
+                    .sort_by_key(|window| (window.label() != "main", window.label().to_string()));
+                for window in &windows {
+                    let _ = window.unminimize();
+                    let _ = window.show();
+                }
+                if let Some(main) = app.get_webview_window("main") {
+                    let _ = main.set_focus();
+                }
+            }
+            "app-quit" => {
+                if let Ok(mut mgr) = app.state::<commands::AppState>().pty_manager.lock() {
+                    mgr.kill_all();
+                }
+                let state = app.state::<commands::AppState>();
+                let recording = state.recording.clone();
+                let stop = state.stop_flag.clone();
+                if commands::recording_active(&recording) {
+                    if commands::request_stop(&recording, &stop).is_err() {
+                        return;
+                    }
+                    std::thread::spawn(|| {
+                        commands::wait_for_recording_shutdown_forever();
+                        std::process::exit(0);
+                    });
+                } else {
+                    std::process::exit(0);
+                }
+            }
+            _ => {}
+        })
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, shortcut, event| {
@@ -848,7 +1116,7 @@ fn main() {
                     const DEFERRED_POLL_SECS: u64 = 30;
 
                     loop {
-                        tauri::async_runtime::block_on(check_for_update(&update_handle));
+                        tauri::async_runtime::block_on(check_for_update(&update_handle, false));
 
                         let polls = CHECK_INTERVAL_SECS / DEFERRED_POLL_SECS;
                         for _ in 0..polls {
@@ -1274,7 +1542,7 @@ fn main() {
                         "check-for-updates" => {
                             let handle = app.clone();
                             tauri::async_runtime::spawn(async move {
-                                check_for_update(&handle).await;
+                                check_for_update(&handle, true).await;
                             });
                         }
                         "quit" => {
@@ -1532,6 +1800,7 @@ fn main() {
             commands::cmd_cancel_update_install,
             commands::cmd_debug_simulate_update,
             commands::cmd_check_whats_new,
+            commands::cmd_get_whats_new,
             commands::cmd_dismiss_whats_new,
             commands::palette_close,
             commands::palette_current_meeting,

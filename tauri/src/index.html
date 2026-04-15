@@ -2506,6 +2506,20 @@
       line-height: 1.45;
     }
 
+    .about-meta-line {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 10px;
+      font-size: 11px;
+      color: var(--text-tertiary);
+      line-height: 1.5;
+    }
+
+    .about-meta-sep {
+      opacity: 0.45;
+    }
+
     .about-grid {
       display: grid;
       grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -2600,6 +2614,24 @@
 
     .about-controls-meta.error {
       color: var(--orange);
+    }
+
+    .about-link-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 14px;
+      padding-top: 14px;
+      border-top: 1px solid var(--border);
+    }
+
+    .about-signoff {
+      margin-top: 14px;
+      padding-top: 14px;
+      border-top: 1px solid var(--border);
+      font-size: 12px;
+      color: var(--text-secondary);
+      line-height: 1.55;
     }
 
     /* ── Readiness view ── */
@@ -4032,8 +4064,14 @@
         <div class="about-brand">
           <div class="about-copy">
             <h2 id="about-title">Minutes</h2>
-            <p>Local-first conversation memory that stays useful in the tray, the terminal, and inside agent workflows.
-            </p>
+            <p>Conversation memory for humans and agents. Capture once, keep the transcript, decisions, and context useful everywhere.</p>
+            <div class="about-meta-line">
+              <span id="about-version">Desktop app</span>
+              <span class="about-meta-sep">•</span>
+              <span>Created by Mat Silverstein</span>
+              <span class="about-meta-sep">•</span>
+              <span>Open-source conversation memory for AI assistants</span>
+            </div>
           </div>
         </div>
         <button class="btn btn-secondary btn-sm" id="btn-about-close">Close</button>
@@ -4065,29 +4103,15 @@
         Power-user tray actions copy the latest summary or transcript and try to paste it into your previous app when
         macOS automation allows it.
       </div>
-      <div class="about-controls">
-        <div class="about-controls-copy">
-          Show completion alerts when processing finishes in the background.
-        </div>
-        <button class="btn btn-secondary btn-sm toggle-btn" id="btn-toggle-notifications">On</button>
+      <div class="about-link-row">
+        <button class="btn btn-secondary btn-sm" id="btn-about-website">Website</button>
+        <button class="btn btn-secondary btn-sm" id="btn-about-whats-new">What’s New</button>
+        <button class="btn btn-secondary btn-sm" id="btn-about-settings">Settings</button>
+        <button class="btn btn-secondary btn-sm" id="btn-about-changelog">Release Notes</button>
+        <button class="btn btn-secondary btn-sm" id="btn-about-discussions">Discussions</button>
       </div>
-      <div class="about-controls">
-        <div class="about-controls-copy">
-          Play original Minutes cues for start, stop, complete, and error events.
-        </div>
-        <button class="btn btn-secondary btn-sm toggle-btn" id="btn-toggle-cues">On</button>
-      </div>
-      <div class="about-controls">
-        <div class="about-controls-group">
-          <div class="about-controls-copy">
-            Opt-in global shortcut for quick-thought capture. Hold to record a short thought, or tap to lock recording
-            hands-free and tap again to stop.
-          </div>
-          <select class="shortcut-select" id="select-hotkey-shortcut"></select>
-          <div class="about-controls-meta" id="hotkey-status">Off by default. If the shortcut is already owned by
-            another app, Minutes leaves it disabled.</div>
-        </div>
-        <button class="btn btn-secondary btn-sm toggle-btn" id="btn-toggle-hotkey">Off</button>
+      <div class="about-signoff">
+        Built as a local-first desktop app with a tray workflow, CLI, and MCP surfaces that all point at the same markdown-backed record of your conversations.
       </div>
     </div>
   </div>
@@ -4683,6 +4707,12 @@
     const detailScroll = document.getElementById('detail-scroll');
     const openExternalBtn = document.getElementById('btn-open-external');
     const aboutOverlay = document.getElementById('about-overlay');
+    const aboutVersion = document.getElementById('about-version');
+    const aboutWebsiteButton = document.getElementById('btn-about-website');
+    const aboutWhatsNewButton = document.getElementById('btn-about-whats-new');
+    const aboutSettingsButton = document.getElementById('btn-about-settings');
+    const aboutChangelogButton = document.getElementById('btn-about-changelog');
+    const aboutDiscussionsButton = document.getElementById('btn-about-discussions');
     const notificationToggle = document.getElementById('btn-toggle-notifications');
     const cueToggle = document.getElementById('btn-toggle-cues');
     const hotkeyToggle = document.getElementById('btn-toggle-hotkey');
@@ -5520,17 +5550,21 @@
 
     function setNotificationToggle(enabled) {
       notifyOnCompletion = enabled;
-      notificationToggle.textContent = enabled ? 'On' : 'Off';
-      notificationToggle.classList.toggle('btn-primary', enabled);
-      notificationToggle.classList.toggle('btn-secondary', !enabled);
+      if (notificationToggle) {
+        notificationToggle.textContent = enabled ? 'On' : 'Off';
+        notificationToggle.classList.toggle('btn-primary', enabled);
+        notificationToggle.classList.toggle('btn-secondary', !enabled);
+      }
       localStorage.setItem('minutes.notifyOnCompletion', enabled ? 'true' : 'false');
     }
 
     function setCueToggle(enabled) {
       playCaptureCues = enabled;
-      cueToggle.textContent = enabled ? 'On' : 'Off';
-      cueToggle.classList.toggle('btn-primary', enabled);
-      cueToggle.classList.toggle('btn-secondary', !enabled);
+      if (cueToggle) {
+        cueToggle.textContent = enabled ? 'On' : 'Off';
+        cueToggle.classList.toggle('btn-primary', enabled);
+        cueToggle.classList.toggle('btn-secondary', !enabled);
+      }
       localStorage.setItem('minutes.playCaptureCues', enabled ? 'true' : 'false');
     }
 
@@ -5559,15 +5593,18 @@
     }
 
     function setHotkeyStatus(text, isError = false) {
+      if (!hotkeyStatus) return;
       hotkeyStatus.textContent = text;
       hotkeyStatus.classList.toggle('error', isError);
     }
 
     function setHotkeyToggle(enabled) {
       hotkeyEnabled = enabled;
-      hotkeyToggle.textContent = enabled ? 'On' : 'Off';
-      hotkeyToggle.classList.toggle('btn-primary', enabled);
-      hotkeyToggle.classList.toggle('btn-secondary', !enabled);
+      if (hotkeyToggle) {
+        hotkeyToggle.textContent = enabled ? 'On' : 'Off';
+        hotkeyToggle.classList.toggle('btn-primary', enabled);
+        hotkeyToggle.classList.toggle('btn-secondary', !enabled);
+      }
       localStorage.setItem('minutes.globalHotkeyEnabled', enabled ? 'true' : 'false');
       setHotkeyStatus(
         enabled
@@ -5578,6 +5615,7 @@
     }
 
     function applyHotkeySettings(settings) {
+      if (!hotkeySelect) return;
       hotkeySelect.replaceChildren();
       for (const choice of settings.choices || []) {
         const option = document.createElement('option');
@@ -5601,9 +5639,11 @@
         console.error('Set hotkey:', e);
         hotkeyEnabled = false;
         localStorage.setItem('minutes.globalHotkeyEnabled', 'false');
-        hotkeyToggle.textContent = 'Off';
-        hotkeyToggle.classList.remove('btn-primary');
-        hotkeyToggle.classList.add('btn-secondary');
+        if (hotkeyToggle) {
+          hotkeyToggle.textContent = 'Off';
+          hotkeyToggle.classList.remove('btn-primary');
+          hotkeyToggle.classList.add('btn-secondary');
+        }
         setHotkeyStatus(String(e), true);
       }
     }
@@ -5992,7 +6032,7 @@
       if (e.target === jobsOverlay) closeJobs();
     });
 
-    notificationToggle.addEventListener('click', async () => {
+    notificationToggle?.addEventListener('click', async () => {
       const next = !notifyOnCompletion;
       try {
         await invoke('cmd_set_completion_notifications', { enabled: next });
@@ -6002,16 +6042,16 @@
       }
     });
 
-    cueToggle.addEventListener('click', () => {
+    cueToggle?.addEventListener('click', () => {
       setCueToggle(!playCaptureCues);
     });
 
-    hotkeyToggle.addEventListener('click', async () => {
-      await syncHotkey(!hotkeyEnabled, hotkeySelect.value || hotkeyShortcut);
+    hotkeyToggle?.addEventListener('click', async () => {
+      await syncHotkey(!hotkeyEnabled, hotkeySelect?.value || hotkeyShortcut);
     });
 
-    hotkeySelect.addEventListener('change', async () => {
-      await syncHotkey(hotkeyEnabled, hotkeySelect.value || hotkeyShortcut);
+    hotkeySelect?.addEventListener('change', async () => {
+      await syncHotkey(hotkeyEnabled, hotkeySelect?.value || hotkeyShortcut);
     });
 
     recoveryButton.addEventListener('click', () => {
@@ -6154,6 +6194,10 @@
 
     function closeAbout() {
       aboutOverlay.classList.remove('active');
+    }
+
+    function openAbout() {
+      aboutOverlay.classList.add('active');
     }
 
     function showDetailFeedback(message, tone = 'success') {
@@ -6889,6 +6933,8 @@
     function openSettings() { settingsOverlay.classList.add('active'); loadSettings(); }
     function closeSettings() { settingsOverlay.classList.remove('active'); }
 
+    document.getElementById('btn-about-close').addEventListener('click', closeAbout);
+    aboutOverlay.addEventListener('click', (e) => { if (e.target === aboutOverlay) closeAbout(); });
     document.getElementById('btn-settings').addEventListener('click', openSettings);
     document.getElementById('btn-settings-close').addEventListener('click', closeSettings);
     settingsOverlay.addEventListener('click', (e) => { if (e.target === settingsOverlay) closeSettings(); });
@@ -8053,21 +8099,15 @@
         console.error('Set screen share privacy:', e);
       }
     });
-    notificationToggle.addEventListener('click', async () => {
-      const next = !notifyOnCompletion;
-      try {
-        await invoke('cmd_set_completion_notifications', { enabled: next });
-        setNotificationToggle(next);
-      } catch (e) {
-        console.error('Set notifications:', e);
-      }
-    });
     document.addEventListener('keydown', (e) => {
       // Cmd+Shift+R toggles Recall panel (handler defined in Recall section below)
       if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key === 'r') {
         e.preventDefault();
         if (typeof toggleRecallPanel === 'function') toggleRecallPanel();
         return;
+      }
+      if (e.key === 'Escape' && whatsNewScrim?.classList.contains('active')) {
+        closeWhatsNewModal();
       }
       if (e.key === 'Escape' && aboutOverlay.classList.contains('active')) {
         closeAbout();
@@ -8103,6 +8143,44 @@
 
     const { getCurrentWindow } = window.__TAURI__.window;
     const currentWindow = getCurrentWindow();
+
+    window.__TAURI__.app.getVersion?.().then((version) => {
+      if (aboutVersion) aboutVersion.textContent = `Desktop app v${version}`;
+    }).catch(() => { });
+
+    aboutWebsiteButton?.addEventListener('click', () => {
+      window.__TAURI__.shell.open('https://useminutes.app');
+    });
+    aboutWhatsNewButton?.addEventListener('click', async () => {
+      closeAbout();
+      await openWhatsNewManually();
+    });
+    aboutSettingsButton?.addEventListener('click', () => {
+      closeAbout();
+      openSettings();
+    });
+    aboutChangelogButton?.addEventListener('click', () => {
+      window.__TAURI__.shell.open('https://github.com/silverstein/minutes/releases');
+    });
+    aboutDiscussionsButton?.addEventListener('click', () => {
+      window.__TAURI__.shell.open('https://github.com/silverstein/minutes/discussions');
+    });
+
+    currentWindow.listen('minutes://show-about', () => {
+      closeSettings();
+      openAbout();
+    });
+
+    currentWindow.listen('minutes://show-whats-new', async () => {
+      closeAbout();
+      closeSettings();
+      await openWhatsNewManually();
+    });
+
+    currentWindow.listen('minutes://show-settings', () => {
+      closeAbout();
+      openSettings();
+    });
 
     const recallPanel = document.getElementById('recall-panel');
     const recallDot = document.getElementById('recall-dot');
@@ -8775,53 +8853,85 @@
       showUpdateBanner('0.12.0', '', 48 * 1024 * 1024);
     });
 
-    // ── What's New modal (shown once after update) ──
+    // ── What's New modal ──
     // The release notes body comes from our own GitHub releases (trusted first-party
     // content authored by the repo owner). The same `marked.parse()` path is used
     // by the existing meeting markdown viewer elsewhere in this file.
-    (async () => {
+    const whatsNewScrim = document.getElementById('whats-new-scrim');
+    const whatsNewVersionEl = document.getElementById('whats-new-version');
+    const whatsNewBodyEl = document.getElementById('whats-new-body');
+    const whatsNewReleaseButton = document.getElementById('btn-whats-new-release');
+    const whatsNewDismissButton = document.getElementById('btn-whats-new-dismiss');
+    let whatsNewCurrent = null;
+    let whatsNewDismissMarksSeen = false;
+
+    function renderWhatsNewBody(result) {
+      if (!whatsNewBodyEl) return;
+      if (result.body && typeof marked !== 'undefined') {
+        whatsNewBodyEl.innerHTML = marked.parse(result.body);
+        whatsNewBodyEl.querySelectorAll('a').forEach((a) => {
+          a.addEventListener('click', (e) => {
+            e.preventDefault();
+            window.__TAURI__.shell.open(a.href);
+          });
+        });
+      } else if (result.body) {
+        whatsNewBodyEl.textContent = result.body;
+      } else if (result.previousVersion) {
+        whatsNewBodyEl.innerHTML = '<p style="color:var(--text-secondary)">You\'ve updated from v' +
+          result.previousVersion + ' to v' + result.version + '.</p>';
+      } else {
+        whatsNewBodyEl.innerHTML = '<p style="color:var(--text-secondary)">Release notes for v' +
+          result.version + ' are not available offline right now.</p>';
+      }
+    }
+
+    function showWhatsNewModal(result, options = {}) {
+      if (!whatsNewScrim) return;
+      whatsNewCurrent = result;
+      whatsNewDismissMarksSeen = !!options.markSeenOnDismiss;
+      if (whatsNewVersionEl) whatsNewVersionEl.textContent = 'v' + result.version;
+      renderWhatsNewBody(result);
+      whatsNewScrim.classList.add('active');
+    }
+
+    async function closeWhatsNewModal() {
+      if (!whatsNewScrim) return;
+      whatsNewScrim.classList.remove('active');
+      if (whatsNewDismissMarksSeen) {
+        try { await invoke('cmd_dismiss_whats_new'); } catch (_) { }
+      }
+      whatsNewDismissMarksSeen = false;
+    }
+
+    async function maybeShowWhatsNewAfterUpdate() {
       try {
         const result = await invoke('cmd_check_whats_new');
         if (!result.show) return;
-        const scrim = document.getElementById('whats-new-scrim');
-        const versionEl = document.getElementById('whats-new-version');
-        const bodyEl = document.getElementById('whats-new-body');
-        if (!scrim) return;
-        versionEl.textContent = 'v' + result.version;
-        if (result.body && typeof marked !== 'undefined') {
-          bodyEl.innerHTML = marked.parse(result.body);
-          // Open links externally via Tauri shell
-          bodyEl.querySelectorAll('a').forEach(a => {
-            a.addEventListener('click', (e) => {
-              e.preventDefault();
-              window.__TAURI__.shell.open(a.href);
-            });
-          });
-        } else if (result.body) {
-          bodyEl.textContent = result.body;
-        } else {
-          bodyEl.innerHTML = '<p style="color:var(--text-secondary)">You\'ve updated from v' +
-            result.previousVersion + ' to v' + result.version + '.</p>';
-        }
-        scrim.classList.add('active');
-        document.getElementById('btn-whats-new-dismiss').addEventListener('click', async () => {
-          scrim.classList.remove('active');
-          try { await invoke('cmd_dismiss_whats_new'); } catch (_) { }
-        });
-        document.getElementById('btn-whats-new-release').addEventListener('click', () => {
-          if (result.url) window.__TAURI__.shell.open(result.url);
-        });
-        // Dismiss on scrim click
-        scrim.addEventListener('click', async (e) => {
-          if (e.target === scrim) {
-            scrim.classList.remove('active');
-            try { await invoke('cmd_dismiss_whats_new'); } catch (_) { }
-          }
-        });
+        showWhatsNewModal(result, { markSeenOnDismiss: true });
       } catch (e) {
         console.error('[whats-new]', e);
       }
-    })();
+    }
+
+    async function openWhatsNewManually() {
+      try {
+        const result = await invoke('cmd_get_whats_new');
+        showWhatsNewModal(result, { markSeenOnDismiss: false });
+      } catch (e) {
+        console.error('[whats-new/manual]', e);
+      }
+    }
+
+    whatsNewDismissButton?.addEventListener('click', closeWhatsNewModal);
+    whatsNewReleaseButton?.addEventListener('click', () => {
+      if (whatsNewCurrent?.url) window.__TAURI__.shell.open(whatsNewCurrent.url);
+    });
+    whatsNewScrim?.addEventListener('click', async (e) => {
+      if (e.target === whatsNewScrim) await closeWhatsNewModal();
+    });
+
+    maybeShowWhatsNewAfterUpdate();
 
     // ── Listen for live transcript events (T6: immediate UI feedback) ──
     currentWindow.listen('live-transcript:started', () => {

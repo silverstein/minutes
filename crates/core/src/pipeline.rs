@@ -1152,6 +1152,10 @@ where
     let attribution_ms = attribution_start.elapsed().as_millis() as u64;
     transcript = attribution.transcript;
     let speaker_map = attribution.speaker_map;
+    let attendees = normalize_attendees_with_speaker_map(&attendees, &speaker_map);
+    let structured_actions =
+        normalize_action_items_with_speaker_map(structured_actions, &speaker_map);
+    let structured_intents = normalize_intents_with_speaker_map(structured_intents, &speaker_map);
 
     let entities_started = std::time::Instant::now();
     let entities = build_entity_links(
@@ -1610,6 +1614,10 @@ where
     let attribution_ms = attribution_start.elapsed().as_millis() as u64;
     let transcript = attribution.transcript;
     let speaker_map = attribution.speaker_map;
+    let attendees = normalize_attendees_with_speaker_map(&attendees, &speaker_map);
+    let structured_actions =
+        normalize_action_items_with_speaker_map(structured_actions, &speaker_map);
+    let structured_intents = normalize_intents_with_speaker_map(structured_intents, &speaker_map);
 
     // Step 5: Write markdown (always)
     let duration = estimate_duration(audio_path);
@@ -2245,16 +2253,150 @@ fn select_calendar_event(
 }
 
 fn merge_attendees(existing: &[String], additions: &[String]) -> Vec<String> {
-    let mut attendees = existing.to_vec();
-    let mut seen_lower: std::collections::HashSet<String> =
-        attendees.iter().map(|name| name.to_lowercase()).collect();
-    for participant in additions {
-        let lower = participant.to_lowercase();
-        if !lower.is_empty() && seen_lower.insert(lower) {
-            attendees.push(participant.clone());
+    let mut attendees = Vec::new();
+    let mut seen_lower = std::collections::HashSet::new();
+
+    for participant in existing.iter().chain(additions.iter()) {
+        let Some(normalized) = normalize_attendee_candidate(participant) else {
+            continue;
+        };
+        let lower = normalized.to_lowercase();
+        if seen_lower.insert(lower) {
+            attendees.push(normalized);
         }
     }
     attendees
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ParsedSpeakerReference<'a> {
+    label: String,
+    name_hint: Option<&'a str>,
+}
+
+fn parse_speaker_reference(raw: &str) -> Option<ParsedSpeakerReference<'_>> {
+    let trimmed = raw.trim().trim_start_matches('@').trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let lower = trimmed.to_ascii_lowercase();
+    if !lower.starts_with("speaker") {
+        return None;
+    }
+
+    let suffix = &trimmed["speaker".len()..];
+    let suffix = suffix.trim_start_matches(['_', ' ']);
+    let digits_len = suffix.chars().take_while(|c| c.is_ascii_digit()).count();
+    if digits_len == 0 {
+        return None;
+    }
+
+    let label = format!("SPEAKER_{}", &suffix[..digits_len]);
+    let rest = suffix[digits_len..].trim();
+    let name_hint = if let Some(name) = rest.strip_prefix('/') {
+        let name = name.trim();
+        (!name.is_empty()).then_some(name)
+    } else if rest.starts_with('(') && rest.ends_with(')') {
+        let name = rest.trim_start_matches('(').trim_end_matches(')').trim();
+        (!name.is_empty()).then_some(name)
+    } else {
+        None
+    };
+
+    Some(ParsedSpeakerReference { label, name_hint })
+}
+
+fn normalize_attendee_candidate(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if let Some(reference) = parse_speaker_reference(trimmed) {
+        return reference.name_hint.map(str::to_string);
+    }
+
+    Some(trimmed.to_string())
+}
+
+fn resolve_speaker_reference(
+    raw: &str,
+    speaker_map: &[diarize::SpeakerAttribution],
+    include_confidence_hint: bool,
+) -> Option<String> {
+    let reference = parse_speaker_reference(raw)?;
+    let mapped = speaker_map
+        .iter()
+        .find(|attr| attr.speaker_label.eq_ignore_ascii_case(&reference.label));
+
+    match mapped {
+        Some(attr) if include_confidence_hint && attr.confidence != diarize::Confidence::High => {
+            Some(format!("{} ({})", attr.name, attr.speaker_label))
+        }
+        Some(attr) => Some(attr.name.clone()),
+        None => reference.name_hint.map(str::to_string),
+    }
+}
+
+fn normalize_attendees_with_speaker_map(
+    attendees: &[String],
+    speaker_map: &[diarize::SpeakerAttribution],
+) -> Vec<String> {
+    let mut normalized = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    for attendee in attendees {
+        let cleaned = match resolve_speaker_reference(attendee, speaker_map, false)
+            .or_else(|| normalize_attendee_candidate(attendee))
+        {
+            Some(cleaned) => cleaned,
+            None if parse_speaker_reference(attendee).is_some() => continue,
+            None => attendee.trim().to_string(),
+        };
+        if cleaned.is_empty() {
+            continue;
+        }
+
+        let key = cleaned.to_lowercase();
+        if seen.insert(key) {
+            normalized.push(cleaned);
+        }
+    }
+
+    normalized
+}
+
+fn normalize_action_items_with_speaker_map(
+    action_items: Vec<markdown::ActionItem>,
+    speaker_map: &[diarize::SpeakerAttribution],
+) -> Vec<markdown::ActionItem> {
+    action_items
+        .into_iter()
+        .map(|mut item| {
+            if let Some(assignee) = resolve_speaker_reference(&item.assignee, speaker_map, true) {
+                item.assignee = assignee;
+            }
+            item
+        })
+        .collect()
+}
+
+fn normalize_intents_with_speaker_map(
+    intents: Vec<markdown::Intent>,
+    speaker_map: &[diarize::SpeakerAttribution],
+) -> Vec<markdown::Intent> {
+    intents
+        .into_iter()
+        .map(|mut intent| {
+            intent.who = intent
+                .who
+                .as_deref()
+                .and_then(|who| resolve_speaker_reference(who, speaker_map, true))
+                .or(intent.who);
+            intent
+        })
+        .collect()
 }
 
 fn strip_conversational_prefixes(line: &str) -> String {
@@ -2594,10 +2736,11 @@ fn infer_topic(text: &str) -> Option<String> {
         .collect();
 
     if words.is_empty() {
-        None
-    } else {
-        Some(words.join(" ").to_lowercase())
+        return None;
     }
+
+    let candidate = words.join(" ").to_lowercase();
+    (!is_task_like_project_candidate(&candidate, Some(text))).then_some(candidate)
 }
 
 fn build_entity_links(
@@ -2727,7 +2870,19 @@ fn derive_structured_tags(
 }
 
 fn add_person_entity(entities: &mut BTreeMap<String, (String, BTreeSet<String>)>, raw: &str) {
-    let trimmed = raw.trim().trim_start_matches('@').trim();
+    let Some(trimmed) = (match resolve_speaker_reference(raw, &[], false) {
+        Some(name) => Some(name),
+        None => {
+            let trimmed = raw.trim().trim_start_matches('@').trim();
+            if parse_speaker_reference(trimmed).is_some() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        }
+    }) else {
+        return;
+    };
     if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("unassigned") {
         return;
     }
@@ -2758,6 +2913,10 @@ fn add_project_entity(
 ) {
     let normalized = normalize_entity_topic(raw);
     if normalized.is_empty() {
+        return;
+    }
+
+    if is_task_like_project_candidate(&normalized, alias_source.or(Some(raw))) {
         return;
     }
 
@@ -2829,6 +2988,43 @@ fn normalize_entity_topic(text: &str) -> String {
         .map(|word| word.to_lowercase())
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+fn is_task_like_project_candidate(normalized: &str, source: Option<&str>) -> bool {
+    const ACTION_VERBS: &[&str] = &[
+        "add", "ask", "asked", "build", "call", "check", "confirm", "create", "deliver", "email",
+        "follow", "provide", "reach", "review", "schedule", "send", "share", "update",
+    ];
+
+    if parse_speaker_reference(normalized).is_some() {
+        return true;
+    }
+
+    let words: Vec<&str> = normalized.split_whitespace().collect();
+    if words.is_empty() {
+        return true;
+    }
+
+    if ACTION_VERBS.contains(&words[0]) {
+        return true;
+    }
+
+    let verb_hits = words
+        .iter()
+        .filter(|word| ACTION_VERBS.contains(word))
+        .count();
+
+    if normalized.contains("reach out") || normalized.contains("follow up") {
+        return true;
+    }
+
+    let source_words = source
+        .unwrap_or(normalized)
+        .split_whitespace()
+        .filter(|word| !word.trim().is_empty())
+        .count();
+
+    verb_hits >= 2 || (verb_hits >= 1 && source_words > words.len() + 1)
 }
 
 /// Execute the post_record hook if configured.
@@ -3364,6 +3560,19 @@ mod tests {
     }
 
     #[test]
+    fn merge_attendees_collapses_compound_speaker_labels_to_names() {
+        let merged = merge_attendees(
+            &["Andrea".into(), "Dan".into()],
+            &[
+                "Speaker 1 / Samantha".into(),
+                "Speaker_2 (Mat)".into(),
+                "Samantha".into(),
+            ],
+        );
+        assert_eq!(merged, vec!["Andrea", "Dan", "Samantha", "Mat"]);
+    }
+
+    #[test]
     fn select_calendar_event_prefers_closest_candidate() {
         let selected = select_calendar_event(
             &[
@@ -3483,6 +3692,59 @@ mod tests {
     }
 
     #[test]
+    fn action_item_assignee_uses_name_for_high_confidence_speaker_map() {
+        let items = normalize_action_items_with_speaker_map(
+            vec![markdown::ActionItem {
+                assignee: "Speaker_1 (Samantha)".into(),
+                task: "Provide the quarterly file".into(),
+                due: None,
+                status: "open".into(),
+            }],
+            &[diarize::SpeakerAttribution {
+                speaker_label: "SPEAKER_1".into(),
+                name: "Samantha".into(),
+                confidence: diarize::Confidence::High,
+                source: diarize::AttributionSource::Enrollment,
+            }],
+        );
+
+        assert_eq!(items[0].assignee, "Samantha");
+    }
+
+    #[test]
+    fn action_item_and_intent_keep_speaker_hint_for_medium_confidence() {
+        let speaker_map = vec![diarize::SpeakerAttribution {
+            speaker_label: "SPEAKER_1".into(),
+            name: "Samantha".into(),
+            confidence: diarize::Confidence::Medium,
+            source: diarize::AttributionSource::Llm,
+        }];
+
+        let items = normalize_action_items_with_speaker_map(
+            vec![markdown::ActionItem {
+                assignee: "Speaker_1 (Samantha)".into(),
+                task: "Provide the quarterly file".into(),
+                due: None,
+                status: "open".into(),
+            }],
+            &speaker_map,
+        );
+        assert_eq!(items[0].assignee, "Samantha (SPEAKER_1)");
+
+        let intents = normalize_intents_with_speaker_map(
+            vec![markdown::Intent {
+                kind: markdown::IntentKind::Commitment,
+                what: "Provide the quarterly file".into(),
+                who: Some("Speaker_1 (Samantha)".into()),
+                status: "open".into(),
+                by_date: None,
+            }],
+            &speaker_map,
+        );
+        assert_eq!(intents[0].who.as_deref(), Some("Samantha (SPEAKER_1)"));
+    }
+
+    #[test]
     fn generate_title_rejects_hallucinated_cjk() {
         // Whisper hallucinates CJK text on silence — title_from_transcript
         // rejects non-ASCII-dominant candidates, so generate_title falls back
@@ -3588,6 +3850,152 @@ mod tests {
             .projects
             .iter()
             .any(|entity| entity.slug == "advisor-platform"));
+    }
+
+    #[test]
+    fn build_entity_links_rejects_task_like_or_speaker_labeled_projects() {
+        let entities = build_entity_links(
+            "CCRx Data Access",
+            Some("Vantus Cardinal portal"),
+            &["Samantha".into()],
+            &[],
+            &[
+                markdown::Decision {
+                    text: "Speaker_1 provide speaker roster and contact notes".into(),
+                    topic: Some("speaker 1 provide speaker".into()),
+                },
+                markdown::Decision {
+                    text: "Reach out to Cardinal about access".into(),
+                    topic: Some("reach out".into()),
+                },
+                markdown::Decision {
+                    text: "Pioneer asked build the custom report after review".into(),
+                    topic: Some("pioneer asked build".into()),
+                },
+                markdown::Decision {
+                    text: "LeaderNet 835 reconciliation remains the core workflow".into(),
+                    topic: Some("leadernet 835 reconciliation".into()),
+                },
+            ],
+            &[],
+            &[],
+        );
+
+        let project_slugs: Vec<&str> = entities
+            .projects
+            .iter()
+            .map(|entity| entity.slug.as_str())
+            .collect();
+        assert!(project_slugs.contains(&"leadernet-835-reconciliation"));
+        assert!(!project_slugs.contains(&"speaker-1-provide-speaker"));
+        assert!(!project_slugs.contains(&"reach-out"));
+        assert!(!project_slugs.contains(&"pioneer-asked-build"));
+    }
+
+    #[test]
+    fn synthetic_frontmatter_cleanup_keeps_names_and_drops_bad_projects() {
+        let attendees = normalize_attendees_with_speaker_map(
+            &merge_attendees(
+                &["Andrea".into(), "Dan".into()],
+                &["Speaker 1 / Samantha".into(), "Speaker_2 (Mat)".into()],
+            ),
+            &[diarize::SpeakerAttribution {
+                speaker_label: "SPEAKER_1".into(),
+                name: "Samantha".into(),
+                confidence: diarize::Confidence::Medium,
+                source: diarize::AttributionSource::Llm,
+            }],
+        );
+        let action_items = normalize_action_items_with_speaker_map(
+            vec![markdown::ActionItem {
+                assignee: "Speaker_1 (Samantha)".into(),
+                task: "Provide the quarterly LeaderNet file".into(),
+                due: None,
+                status: "open".into(),
+            }],
+            &[diarize::SpeakerAttribution {
+                speaker_label: "SPEAKER_1".into(),
+                name: "Samantha".into(),
+                confidence: diarize::Confidence::Medium,
+                source: diarize::AttributionSource::Llm,
+            }],
+        );
+        let intents = normalize_intents_with_speaker_map(
+            vec![markdown::Intent {
+                kind: markdown::IntentKind::Commitment,
+                what: "Provide the quarterly LeaderNet file".into(),
+                who: Some("Speaker_1 (Samantha)".into()),
+                status: "open".into(),
+                by_date: None,
+            }],
+            &[diarize::SpeakerAttribution {
+                speaker_label: "SPEAKER_1".into(),
+                name: "Samantha".into(),
+                confidence: diarize::Confidence::Medium,
+                source: diarize::AttributionSource::Llm,
+            }],
+        );
+        let entities = build_entity_links(
+            "CCRx Data Access",
+            Some("LeaderNet 835 reconciliation"),
+            &attendees,
+            &action_items,
+            &[markdown::Decision {
+                text: "Speaker_1 provide speaker roster and contact notes".into(),
+                topic: Some("speaker 1 provide speaker".into()),
+            }],
+            &intents,
+            &[],
+        );
+
+        let frontmatter = markdown::Frontmatter {
+            title: "CCRx Data Access".into(),
+            r#type: ContentType::Meeting,
+            date: Local::now(),
+            duration: "21m".into(),
+            source: None,
+            status: Some(OutputStatus::Complete),
+            tags: vec![],
+            attendees,
+            attendees_raw: None,
+            calendar_event: None,
+            people: entities
+                .people
+                .iter()
+                .map(|entity| entity.label.clone())
+                .collect(),
+            entities,
+            device: None,
+            captured_at: None,
+            context: None,
+            action_items,
+            decisions: vec![],
+            intents,
+            recorded_by: Some("Mat".into()),
+            visibility: None,
+            speaker_map: vec![diarize::SpeakerAttribution {
+                speaker_label: "SPEAKER_1".into(),
+                name: "Samantha".into(),
+                confidence: diarize::Confidence::Medium,
+                source: diarize::AttributionSource::Llm,
+            }],
+            filter_diagnosis: None,
+        };
+
+        assert_eq!(
+            frontmatter.attendees,
+            vec!["Andrea", "Dan", "Samantha", "Mat"]
+        );
+        assert_eq!(frontmatter.action_items[0].assignee, "Samantha (SPEAKER_1)");
+        assert_eq!(
+            frontmatter.intents[0].who.as_deref(),
+            Some("Samantha (SPEAKER_1)")
+        );
+        assert!(frontmatter
+            .entities
+            .projects
+            .iter()
+            .all(|entity| entity.slug != "speaker-1-provide-speaker"));
     }
 
     #[test]

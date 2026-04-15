@@ -1415,6 +1415,14 @@ fn transcribe_with_parakeet(
     let model_path = resolve_parakeet_model_path(config)?;
     let vocab_path = resolve_parakeet_vocab_path(config)?;
     let sidecar_audio_duration_secs = samples.len() as f64 / 16000.0;
+    let resolved_binary = crate::parakeet::resolve_parakeet_binary(
+        &config.transcription.parakeet_binary,
+        crate::parakeet::ResolveParakeetBinaryMode::WarnAndFallback,
+    )
+    .map_err(|error| TranscribeError::ParakeetFailed(error.to_string()))?;
+    let resolved_binary_str = resolved_binary.to_str().ok_or_else(|| {
+        TranscribeError::ParakeetFailed("resolved parakeet binary path is not valid UTF-8".into())
+    })?;
 
     if config.transcription.parakeet_sidecar_enabled {
         match crate::parakeet_sidecar::transcribe_via_global_sidecar(
@@ -1452,9 +1460,8 @@ fn transcribe_with_parakeet(
     // Step 4: Run parakeet subprocess
     // CLI syntax: parakeet <model.safetensors> <audio.wav> --vocab <tokenizer.vocab>
     // [--model type] [--timestamps] [--gpu]
-    let binary = &config.transcription.parakeet_binary;
     tracing::info!(
-        binary = %binary,
+        binary = %resolved_binary.display(),
         model = %model_path.display(),
         vocab = %vocab_path.display(),
         audio = %audio_path.display(),
@@ -1464,7 +1471,7 @@ fn transcribe_with_parakeet(
     let invocation_started = Instant::now();
     let host_process_key = format!(
         "{}::{}",
-        binary,
+        resolved_binary.display(),
         config.transcription.parakeet_model.as_str()
     );
     let host_process_first_use = {
@@ -1483,7 +1490,7 @@ fn transcribe_with_parakeet(
             let mut helper_command = std::process::Command::new(helper_path);
             helper_command
                 .arg("parakeet-helper")
-                .args(["--binary", binary])
+                .args(["--binary", resolved_binary_str])
                 .args([
                     "--model-path",
                     model_path.to_str().ok_or_else(|| {
@@ -1527,7 +1534,7 @@ fn transcribe_with_parakeet(
                 Ok(output) => {
                     let stderr = String::from_utf8_lossy(&output.stderr);
                     match run_parakeet_cli_structured(
-                        binary,
+                        resolved_binary_str,
                         &model_path,
                         tmp_wav.path(),
                         &vocab_path,
@@ -1554,7 +1561,7 @@ fn transcribe_with_parakeet(
                     }
                 }
                 Err(_) => run_parakeet_cli_structured(
-                    binary,
+                    resolved_binary_str,
                     &model_path,
                     tmp_wav.path(),
                     &vocab_path,
@@ -1567,7 +1574,7 @@ fn transcribe_with_parakeet(
             }
         } else {
             run_parakeet_cli_structured(
-                binary,
+                resolved_binary_str,
                 &model_path,
                 tmp_wav.path(),
                 &vocab_path,
@@ -1580,7 +1587,7 @@ fn transcribe_with_parakeet(
         }
     } else {
         run_parakeet_cli_structured(
-            binary,
+            resolved_binary_str,
             &model_path,
             tmp_wav.path(),
             &vocab_path,
@@ -2247,11 +2254,18 @@ pub fn transcribe_parakeet_batch(
     let model_path = resolve_parakeet_model_path(config)?;
     let vocab_path = resolve_parakeet_vocab_path(config)?;
     let native_vad_path = resolve_parakeet_native_vad_path(config);
-    let binary = &config.transcription.parakeet_binary;
+    let resolved_binary = crate::parakeet::resolve_parakeet_binary(
+        &config.transcription.parakeet_binary,
+        crate::parakeet::ResolveParakeetBinaryMode::WarnAndFallback,
+    )
+    .map_err(|error| TranscribeError::ParakeetFailed(error.to_string()))?;
+    let resolved_binary_str = resolved_binary.to_str().ok_or_else(|| {
+        TranscribeError::ParakeetFailed("resolved parakeet binary path is not valid UTF-8".into())
+    })?;
     let use_gpu = cfg!(all(target_os = "macos", target_arch = "aarch64"));
     let host_process_key = format!(
         "{}::{}",
-        binary,
+        resolved_binary.display(),
         config.transcription.parakeet_model.as_str()
     );
     let host_process_first_use = {
@@ -2277,7 +2291,7 @@ pub fn transcribe_parakeet_batch(
 
     let invocation_started = Instant::now();
     let parsed_batch = run_parakeet_cli_structured_batch(
-        binary,
+        resolved_binary_str,
         &model_path,
         audio_paths,
         &vocab_path,
@@ -2312,7 +2326,11 @@ pub fn warmup_parakeet(config: &Config) -> Result<ParakeetWarmupStats, Transcrib
 
     let model_path = resolve_parakeet_model_path(config)?;
     let vocab_path = resolve_parakeet_vocab_path(config)?;
-    let binary = &config.transcription.parakeet_binary;
+    let resolved_binary = crate::parakeet::resolve_parakeet_binary(
+        &config.transcription.parakeet_binary,
+        crate::parakeet::ResolveParakeetBinaryMode::WarnAndFallback,
+    )
+    .map_err(|error| TranscribeError::ParakeetFailed(error.to_string()))?;
     let native_vad_path = resolve_parakeet_native_vad_path(config);
 
     let tmp_wav = tempfile::Builder::new()
@@ -2336,7 +2354,7 @@ pub fn warmup_parakeet(config: &Config) -> Result<ParakeetWarmupStats, Transcrib
     let used_gpu = cfg!(all(target_os = "macos", target_arch = "aarch64"));
     let used_fp16 = used_gpu && config.transcription.parakeet_fp16;
     let started = Instant::now();
-    let mut command = Command::new(binary);
+    let mut command = Command::new(&resolved_binary);
     command
         .arg(model_str)
         .arg(wav_str)

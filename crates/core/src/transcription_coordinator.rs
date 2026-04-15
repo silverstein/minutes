@@ -228,7 +228,11 @@ pub fn parakeet_backend_status(config: &Config) -> ParakeetBackendStatus {
     let compiled = cfg!(feature = "parakeet");
     let binary = config.transcription.parakeet_binary.clone();
     let model = config.transcription.parakeet_model.clone();
-    let binary_path = which::which(&binary).ok();
+    let resolved_binary = crate::parakeet::resolve_parakeet_binary(
+        &binary,
+        crate::parakeet::ResolveParakeetBinaryMode::WarnAndFallback,
+    )
+    .ok();
     let resolved_model = parakeet::resolve_model_file(config, &model);
     let resolved_tokenizer =
         parakeet::resolve_tokenizer_file(config, &model, &config.transcription.parakeet_vocab);
@@ -245,8 +249,8 @@ pub fn parakeet_backend_status(config: &Config) -> ParakeetBackendStatus {
             VALID_PARAKEET_MODELS.join(", ")
         ));
     }
-    if binary_path.is_none() {
-        issues.push(format!("binary '{}' is not in PATH", binary));
+    if resolved_binary.is_none() {
+        issues.push(format!("binary '{}' could not be resolved", binary));
     }
     if resolved_model.is_none() {
         issues.push(format!("model assets for '{}' are not installed", model));
@@ -276,14 +280,14 @@ pub fn parakeet_backend_status(config: &Config) -> ParakeetBackendStatus {
         warm: backend_is_warm(&backend_id, &model),
         ready: compiled
             && VALID_PARAKEET_MODELS.contains(&model.as_str())
-            && binary_path.is_some()
+            && resolved_binary.is_some()
             && resolved_model.is_some()
             && resolved_tokenizer.is_some(),
         binary,
-        binary_found: binary_path.is_some(),
+        binary_found: resolved_binary.is_some(),
         model_found: resolved_model.is_some(),
         tokenizer_found: resolved_tokenizer.is_some(),
-        binary_path: binary_path.map(|path| path.display().to_string()),
+        binary_path: resolved_binary.map(|path| path.display().to_string()),
         model_path: resolved_model.map(|path| path.display().to_string()),
         tokenizer_path: resolved_tokenizer
             .as_ref()

@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Once;
+use thiserror::Error;
 
 pub const PARAKEET_SCHEMA_VERSION: u32 = 1;
 
@@ -203,6 +205,177 @@ pub fn valid_model(model: &str) -> bool {
     VALID_PARAKEET_MODELS.contains(&model)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResolveParakeetBinaryMode {
+    WarnAndFallback,
+    Strict,
+}
+
+#[derive(Debug, Error)]
+#[error("{message}")]
+pub struct ResolveParakeetBinaryError {
+    message: String,
+}
+
+impl ResolveParakeetBinaryError {
+    fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+}
+
+pub fn resolve_parakeet_binary(
+    configured_path: &str,
+    mode: ResolveParakeetBinaryMode,
+) -> Result<PathBuf, ResolveParakeetBinaryError> {
+    let configured_path = configured_path.trim();
+    let auto_resolution_requested = configured_path.is_empty() || configured_path == "parakeet";
+
+    if !auto_resolution_requested {
+        let configured_candidate = PathBuf::from(configured_path);
+        if verify_parakeet_binary(&configured_candidate).is_ok() {
+            return Ok(configured_candidate);
+        }
+
+        return match mode {
+            ResolveParakeetBinaryMode::Strict => Err(ResolveParakeetBinaryError::new(format!(
+                "Configured parakeet binary '{}' is not executable or failed `--version`.",
+                configured_path
+            ))),
+            ResolveParakeetBinaryMode::WarnAndFallback => match auto_resolve_parakeet_binary() {
+                Ok((resolved, candidates_tried)) => {
+                    log_configured_fallback_once(configured_path, &resolved);
+                    log_auto_resolve_once(&candidates_tried, &resolved);
+                    Ok(resolved)
+                }
+                Err(auto_error) => Err(ResolveParakeetBinaryError::new(format!(
+                    "Configured parakeet binary '{}' is not executable or failed `--version`. {}",
+                    configured_path, auto_error
+                ))),
+            },
+        };
+    }
+
+    let (resolved, candidates_tried) = auto_resolve_parakeet_binary()?;
+    log_auto_resolve_once(&candidates_tried, &resolved);
+    Ok(resolved)
+}
+
+fn auto_resolve_parakeet_binary() -> Result<(PathBuf, Vec<String>), ResolveParakeetBinaryError> {
+    let candidates = parakeet_binary_candidates();
+    let mut candidates_tried = Vec::new();
+
+    for candidate in candidates {
+        candidates_tried.push(candidate.display().to_string());
+        if verify_parakeet_binary(&candidate).is_ok() {
+            return Ok((candidate, candidates_tried));
+        }
+    }
+
+    Err(ResolveParakeetBinaryError::new(format!(
+        "No working parakeet binary was found. Tried: {}. Run `minutes setup --parakeet` or install parakeet.cpp from https://github.com/Frikallo/parakeet.cpp.",
+        if candidates_tried.is_empty() {
+            "<none>".to_string()
+        } else {
+            candidates_tried.join(", ")
+        }
+    )))
+}
+
+fn parakeet_binary_candidates() -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+
+    if let Some(homebrew_prefix) = std::env::var_os("HOMEBREW_PREFIX") {
+        candidates.push(PathBuf::from(homebrew_prefix).join("bin").join("parakeet"));
+    }
+
+    candidates.push(PathBuf::from("/opt/homebrew/bin/parakeet"));
+    candidates.push(PathBuf::from("/usr/local/bin/parakeet"));
+
+    if let Some(home_dir) = std::env::var_os("HOME") {
+        let home_dir = PathBuf::from(home_dir);
+        candidates.push(home_dir.join(".local/bin/parakeet"));
+        candidates.push(home_dir.join(".cargo/bin/parakeet"));
+    }
+
+    if let Ok(path_binary) = which::which("parakeet") {
+        candidates.push(path_binary);
+    }
+
+    let mut deduped = Vec::new();
+    for candidate in candidates {
+        if !deduped
+            .iter()
+            .any(|existing: &PathBuf| existing == &candidate)
+        {
+            deduped.push(candidate);
+        }
+    }
+    deduped
+}
+
+fn verify_parakeet_binary(path: &Path) -> Result<(), ()> {
+    if !path.is_file() {
+        return Err(());
+    }
+
+    let status = std::process::Command::new(path)
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map_err(|_| ())?;
+
+    if status.success() {
+        Ok(())
+    } else {
+        Err(())
+    }
+}
+
+fn log_auto_resolve_once(candidates_tried: &[String], chosen_path: &Path) {
+    static LOG_ONCE: Once = Once::new();
+
+    let chosen_path = chosen_path.display().to_string();
+    let candidates_tried = candidates_tried.to_vec();
+
+    LOG_ONCE.call_once(move || {
+        tracing::info!(
+            step = "parakeet_resolve",
+            chosen_path = %chosen_path,
+            candidates_tried = ?candidates_tried,
+            "resolved parakeet binary"
+        );
+        crate::logging::log_step(
+            "parakeet_resolve",
+            &chosen_path,
+            0,
+            serde_json::json!({
+                "candidates_tried": candidates_tried,
+                "chosen_path": chosen_path,
+            }),
+        );
+    });
+}
+
+fn log_configured_fallback_once(configured_path: &str, resolved_path: &Path) {
+    static WARN_ONCE: Once = Once::new();
+
+    let configured_path = configured_path.to_string();
+    let resolved_path = resolved_path.display().to_string();
+
+    WARN_ONCE.call_once(move || {
+        tracing::warn!(
+            configured_path = %configured_path,
+            found_path = %resolved_path,
+            "configured parakeet_binary at {} is not executable; auto-resolving to {}. Update your config to silence this warning.",
+            configured_path,
+            resolved_path
+        );
+    });
+}
+
 // ── Word-to-sentence grouping ───────────────────────────────────
 
 #[cfg(feature = "parakeet")]
@@ -283,6 +456,47 @@ pub fn group_word_segments(words: &[ParakeetCliSegment]) -> Vec<ParakeetCliSegme
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::env;
+
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+
+    fn set_env_var(key: &str, value: &std::ffi::OsStr) -> Option<std::ffi::OsString> {
+        let previous = env::var_os(key);
+        env::set_var(key, value);
+        previous
+    }
+
+    fn restore_env_var(key: &str, previous: Option<std::ffi::OsString>) {
+        if let Some(previous) = previous {
+            env::set_var(key, previous);
+        } else {
+            env::remove_var(key);
+        }
+    }
+
+    #[cfg(unix)]
+    fn write_fake_parakeet_binary(path: &Path) {
+        fs::write(path, "#!/bin/sh\nprintf 'parakeet 0.1.0\\n'\n").unwrap();
+        let mut permissions = fs::metadata(path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(path, permissions).unwrap();
+    }
+
+    #[cfg(windows)]
+    fn write_fake_parakeet_binary(path: &Path) {
+        fs::write(path, "@echo off\r\necho parakeet 0.1.0\r\n").unwrap();
+    }
+
+    #[cfg(windows)]
+    fn fake_parakeet_filename() -> &'static str {
+        "parakeet.bat"
+    }
+
+    #[cfg(not(windows))]
+    fn fake_parakeet_filename() -> &'static str {
+        "parakeet"
+    }
 
     #[test]
     fn resolve_model_prefers_model_directory() {
@@ -327,6 +541,161 @@ mod tests {
             metadata.tokenizer_file.filename,
             "tdt-ctc-110m.tokenizer.vocab"
         );
+    }
+
+    #[test]
+    fn resolve_parakeet_binary_prefers_working_configured_path() {
+        let _env_lock = crate::test_home_env_lock();
+        let dir = tempfile::TempDir::new().unwrap();
+        let binary_path = dir.path().join(fake_parakeet_filename());
+        write_fake_parakeet_binary(&binary_path);
+
+        let home = tempfile::TempDir::new().unwrap();
+        let homebrew_prefix = tempfile::TempDir::new().unwrap();
+        let empty_path = tempfile::TempDir::new().unwrap();
+
+        let old_home = set_env_var("HOME", home.path().as_os_str());
+        let old_homebrew_prefix =
+            set_env_var("HOMEBREW_PREFIX", homebrew_prefix.path().as_os_str());
+        let old_path = set_env_var("PATH", empty_path.path().as_os_str());
+
+        let resolved = resolve_parakeet_binary(
+            binary_path.to_str().unwrap(),
+            ResolveParakeetBinaryMode::WarnAndFallback,
+        )
+        .unwrap();
+        assert_eq!(resolved, binary_path);
+
+        restore_env_var("PATH", old_path);
+        restore_env_var("HOMEBREW_PREFIX", old_homebrew_prefix);
+        restore_env_var("HOME", old_home);
+    }
+
+    #[test]
+    fn resolve_parakeet_binary_auto_finds_homebrew_candidate() {
+        let _env_lock = crate::test_home_env_lock();
+        let home = tempfile::TempDir::new().unwrap();
+        let homebrew_prefix = tempfile::TempDir::new().unwrap();
+        let empty_path = tempfile::TempDir::new().unwrap();
+        let brew_bin_dir = homebrew_prefix.path().join("bin");
+        fs::create_dir_all(&brew_bin_dir).unwrap();
+        let binary_path = brew_bin_dir.join(fake_parakeet_filename());
+        write_fake_parakeet_binary(&binary_path);
+
+        let old_home = set_env_var("HOME", home.path().as_os_str());
+        let old_homebrew_prefix =
+            set_env_var("HOMEBREW_PREFIX", homebrew_prefix.path().as_os_str());
+        let old_path = set_env_var("PATH", empty_path.path().as_os_str());
+
+        let resolved =
+            resolve_parakeet_binary("parakeet", ResolveParakeetBinaryMode::WarnAndFallback)
+                .unwrap();
+        assert_eq!(resolved, binary_path);
+
+        restore_env_var("PATH", old_path);
+        restore_env_var("HOMEBREW_PREFIX", old_homebrew_prefix);
+        restore_env_var("HOME", old_home);
+    }
+
+    #[test]
+    fn resolve_parakeet_binary_errors_when_nothing_is_available() {
+        let _env_lock = crate::test_home_env_lock();
+        let home = tempfile::TempDir::new().unwrap();
+        let homebrew_prefix = tempfile::TempDir::new().unwrap();
+        let empty_path = tempfile::TempDir::new().unwrap();
+
+        let old_home = set_env_var("HOME", home.path().as_os_str());
+        let old_homebrew_prefix =
+            set_env_var("HOMEBREW_PREFIX", homebrew_prefix.path().as_os_str());
+        let old_path = set_env_var("PATH", empty_path.path().as_os_str());
+
+        let error = resolve_parakeet_binary("parakeet", ResolveParakeetBinaryMode::WarnAndFallback)
+            .unwrap_err();
+        assert!(error.to_string().contains("minutes setup --parakeet"));
+
+        restore_env_var("PATH", old_path);
+        restore_env_var("HOMEBREW_PREFIX", old_homebrew_prefix);
+        restore_env_var("HOME", old_home);
+    }
+
+    #[test]
+    fn resolve_parakeet_binary_can_fail_strictly_for_broken_config() {
+        let _env_lock = crate::test_home_env_lock();
+        let home = tempfile::TempDir::new().unwrap();
+        let homebrew_prefix = tempfile::TempDir::new().unwrap();
+        let empty_path = tempfile::TempDir::new().unwrap();
+        let missing_binary = home.path().join("missing-parakeet");
+
+        let old_home = set_env_var("HOME", home.path().as_os_str());
+        let old_homebrew_prefix =
+            set_env_var("HOMEBREW_PREFIX", homebrew_prefix.path().as_os_str());
+        let old_path = set_env_var("PATH", empty_path.path().as_os_str());
+
+        let error = resolve_parakeet_binary(
+            missing_binary.to_str().unwrap(),
+            ResolveParakeetBinaryMode::Strict,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("Configured parakeet binary"));
+
+        restore_env_var("PATH", old_path);
+        restore_env_var("HOMEBREW_PREFIX", old_homebrew_prefix);
+        restore_env_var("HOME", old_home);
+    }
+
+    #[test]
+    fn resolve_parakeet_binary_falls_back_from_broken_config_when_alternative_exists() {
+        let _env_lock = crate::test_home_env_lock();
+        let home = tempfile::TempDir::new().unwrap();
+        let homebrew_prefix = tempfile::TempDir::new().unwrap();
+        let empty_path = tempfile::TempDir::new().unwrap();
+        let missing_binary = home.path().join("missing-parakeet");
+        let brew_bin_dir = homebrew_prefix.path().join("bin");
+        fs::create_dir_all(&brew_bin_dir).unwrap();
+        let fallback_binary = brew_bin_dir.join(fake_parakeet_filename());
+        write_fake_parakeet_binary(&fallback_binary);
+
+        let old_home = set_env_var("HOME", home.path().as_os_str());
+        let old_homebrew_prefix =
+            set_env_var("HOMEBREW_PREFIX", homebrew_prefix.path().as_os_str());
+        let old_path = set_env_var("PATH", empty_path.path().as_os_str());
+
+        let resolved = resolve_parakeet_binary(
+            missing_binary.to_str().unwrap(),
+            ResolveParakeetBinaryMode::WarnAndFallback,
+        )
+        .unwrap();
+        assert_eq!(resolved, fallback_binary);
+
+        restore_env_var("PATH", old_path);
+        restore_env_var("HOMEBREW_PREFIX", old_homebrew_prefix);
+        restore_env_var("HOME", old_home);
+    }
+
+    #[test]
+    fn resolve_parakeet_binary_combines_error_when_fallback_also_fails() {
+        let _env_lock = crate::test_home_env_lock();
+        let home = tempfile::TempDir::new().unwrap();
+        let homebrew_prefix = tempfile::TempDir::new().unwrap();
+        let empty_path = tempfile::TempDir::new().unwrap();
+        let missing_binary = home.path().join("missing-parakeet");
+
+        let old_home = set_env_var("HOME", home.path().as_os_str());
+        let old_homebrew_prefix =
+            set_env_var("HOMEBREW_PREFIX", homebrew_prefix.path().as_os_str());
+        let old_path = set_env_var("PATH", empty_path.path().as_os_str());
+
+        let error = resolve_parakeet_binary(
+            missing_binary.to_str().unwrap(),
+            ResolveParakeetBinaryMode::WarnAndFallback,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("Configured parakeet binary"));
+        assert!(error.to_string().contains("minutes setup --parakeet"));
+
+        restore_env_var("PATH", old_path);
+        restore_env_var("HOMEBREW_PREFIX", old_homebrew_prefix);
+        restore_env_var("HOME", old_home);
     }
 
     #[cfg(feature = "parakeet")]

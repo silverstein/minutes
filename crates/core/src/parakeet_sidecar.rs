@@ -990,18 +990,10 @@ mod imp {
             return Some(path_binary);
         }
 
-        let parakeet_path = PathBuf::from(parakeet_binary);
-        if parakeet_path.is_absolute() {
-            if let Some(parent) = parakeet_path.parent() {
-                let sibling = parent.join("example-server");
-                if sibling.exists() {
-                    return Some(sibling);
-                }
-            }
-            return None;
-        }
-
-        if let Ok(resolved_parakeet) = which::which(parakeet_binary) {
+        if let Ok(resolved_parakeet) = crate::parakeet::resolve_parakeet_binary(
+            parakeet_binary,
+            crate::parakeet::ResolveParakeetBinaryMode::WarnAndFallback,
+        ) {
             if let Some(parent) = resolved_parakeet.parent() {
                 let sibling = parent.join("example-server");
                 if sibling.exists() {

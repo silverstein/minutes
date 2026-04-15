@@ -2843,8 +2843,15 @@ fn cmd_parakeet_helper(
     vad_threshold: f32,
     config: &Config,
 ) -> Result<()> {
-    let parsed = minutes_core::transcribe::run_parakeet_cli_structured(
+    let resolved_binary = minutes_core::parakeet::resolve_parakeet_binary(
         binary,
+        minutes_core::parakeet::ResolveParakeetBinaryMode::WarnAndFallback,
+    )
+    .map_err(anyhow::Error::msg)?;
+    let parsed = minutes_core::transcribe::run_parakeet_cli_structured(
+        resolved_binary
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("resolved parakeet binary path is not valid UTF-8"))?,
         model_path,
         audio_path,
         vocab_path,
@@ -3304,17 +3311,15 @@ fn cmd_setup_parakeet(model: &str) -> Result<()> {
 
     // Verify parakeet binary is available
     eprintln!();
-    match std::process::Command::new("parakeet")
-        .arg("--help")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-    {
-        Ok(status) if status.success() => {
-            eprintln!("parakeet binary found in PATH.");
+    match minutes_core::parakeet::resolve_parakeet_binary(
+        "parakeet",
+        minutes_core::parakeet::ResolveParakeetBinaryMode::WarnAndFallback,
+    ) {
+        Ok(path) => {
+            eprintln!("Resolved parakeet binary: {}", path.display());
         }
-        _ => {
-            eprintln!("Warning: `parakeet` binary not found in PATH.");
+        Err(_) => {
+            eprintln!("Warning: no working `parakeet` binary was found.");
             eprintln!("See: https://github.com/Frikallo/parakeet.cpp");
         }
     }

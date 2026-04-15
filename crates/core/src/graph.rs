@@ -1,9 +1,10 @@
 use crate::config::Config;
 use crate::markdown::{split_frontmatter, ContentType, Frontmatter};
+use crate::person_identity::PersonCanonicalizer;
 use chrono::Local;
 use rusqlite::{params, Connection};
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 use walkdir::WalkDir;
@@ -90,6 +91,61 @@ fn set_db_permissions(path: &Path) {
     if path.exists() {
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).ok();
     }
+}
+
+fn merge_person_aliases(existing: &mut Vec<String>, incoming: &[String]) {
+    let mut seen: HashSet<String> = existing
+        .iter()
+        .map(|alias| alias.to_ascii_lowercase())
+        .collect();
+    for alias in incoming {
+        let trimmed = alias.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        let key = trimmed.to_ascii_lowercase();
+        if seen.insert(key) {
+            existing.push(trimmed.to_string());
+        }
+    }
+}
+
+fn person_role_priority(role: &str) -> u8 {
+    match role {
+        "attendee" => 3,
+        "speaker" => 2,
+        "mentioned" => 1,
+        _ => 0,
+    }
+}
+
+fn push_file_person(
+    file_people: &mut Vec<(String, String, Vec<String>, &'static str)>,
+    slug: String,
+    name: String,
+    aliases: Vec<String>,
+    role: &'static str,
+) {
+    if slug.is_empty() {
+        return;
+    }
+
+    if let Some((_, existing_name, existing_aliases, existing_role)) = file_people
+        .iter_mut()
+        .find(|(existing_slug, _, _, _)| *existing_slug == slug)
+    {
+        if name.trim().len() > existing_name.trim().len() {
+            *existing_name = name;
+        }
+        merge_person_aliases(existing_aliases, &aliases);
+        if person_role_priority(role) > person_role_priority(existing_role) {
+            *existing_role = role;
+        }
+        return;
+    }
+
+    file_people.push((slug, name, aliases, role));
 }
 
 #[cfg(not(unix))]
@@ -376,50 +432,101 @@ pub fn rebuild_index_at(config: &Config, path: &Path) -> Result<GraphStats, Grap
         )?;
         meeting_count += 1;
 
+        let speakers = extract_speakers_from_transcript(body);
+        let normalized_attendees = frontmatter.normalized_attendees();
+        let context_names: Vec<&str> = normalized_attendees
+            .iter()
+            .map(String::as_str)
+            .chain(frontmatter.people.iter().map(String::as_str))
+            .chain(speakers.iter().map(String::as_str))
+            .chain(
+                frontmatter
+                    .speaker_map
+                    .iter()
+                    .filter(|attr| attr.confidence == crate::diarize::Confidence::High)
+                    .map(|attr| attr.name.as_str()),
+            )
+            .chain(
+                frontmatter
+                    .action_items
+                    .iter()
+                    .map(|item| item.assignee.as_str()),
+            )
+            .chain(
+                frontmatter
+                    .intents
+                    .iter()
+                    .filter_map(|intent| intent.who.as_deref()),
+            )
+            .collect();
+        let canonicalizer = PersonCanonicalizer::new(&frontmatter.entities.people, context_names);
+
         // Extract people from multiple sources
-        let mut file_people: Vec<(String, String, Vec<String>, &str)> = Vec::new(); // (slug, name, aliases, role)
+        let mut file_people: Vec<(String, String, Vec<String>, &'static str)> = Vec::new(); // (slug, name, aliases, role)
 
         // Source 1: frontmatter.attendees
-        for attendee in frontmatter.normalized_attendees() {
-            let slug = slugify(&attendee);
-            file_people.push((slug, attendee, vec![], "attendee"));
+        for attendee in normalized_attendees {
+            if let Some(identity) = canonicalizer.resolve(&attendee) {
+                push_file_person(
+                    &mut file_people,
+                    identity.slug,
+                    identity.name,
+                    identity.aliases,
+                    "attendee",
+                );
+            }
         }
 
         // Source 2: frontmatter.people
         for person in &frontmatter.people {
-            let slug = slugify(person);
-            if !file_people.iter().any(|(s, _, _, _)| *s == slug) {
-                file_people.push((slug, person.clone(), vec![], "mentioned"));
+            if let Some(identity) = canonicalizer.resolve(person) {
+                push_file_person(
+                    &mut file_people,
+                    identity.slug,
+                    identity.name,
+                    identity.aliases,
+                    "mentioned",
+                );
             }
         }
 
         // Source 3: entities.people (richest — has slug + aliases)
         for entity in &frontmatter.entities.people {
-            if !file_people.iter().any(|(s, _, _, _)| *s == entity.slug) {
-                file_people.push((
-                    entity.slug.clone(),
-                    entity.label.clone(),
-                    entity.aliases.clone(),
+            if let Some(identity) = canonicalizer.resolve_entity(entity) {
+                push_file_person(
+                    &mut file_people,
+                    identity.slug,
+                    identity.name,
+                    identity.aliases,
                     "attendee",
-                ));
+                );
             }
         }
 
         // Source 4: transcript speaker labels [NAME HH:MM] or [NAME M:SS]
-        let speakers = extract_speakers_from_transcript(body);
         for speaker in &speakers {
-            let slug = slugify(speaker);
-            if !file_people.iter().any(|(s, _, _, _)| *s == slug) {
-                file_people.push((slug, speaker.clone(), vec![], "speaker"));
+            if let Some(identity) = canonicalizer.resolve(speaker) {
+                push_file_person(
+                    &mut file_people,
+                    identity.slug,
+                    identity.name,
+                    identity.aliases,
+                    "speaker",
+                );
             }
         }
 
         // Source 5: speaker_map (confirmed speaker attributions)
         for attr in &frontmatter.speaker_map {
             if attr.confidence == crate::diarize::Confidence::High {
-                let slug = slugify(&attr.name);
-                if !file_people.iter().any(|(s, _, _, _)| *s == slug) {
-                    file_people.push((slug, attr.name.clone(), vec![], "speaker"));
+                if let Some(identity) = canonicalizer.resolve(&attr.name) {
+                    push_file_person(
+                        &mut file_people,
+                        identity.slug,
+                        identity.name,
+                        identity.aliases,
+                        "speaker",
+                    );
                 }
             }
         }
@@ -459,17 +566,14 @@ pub fn rebuild_index_at(config: &Config, path: &Path) -> Result<GraphStats, Grap
 
         // Extract commitments from action_items
         for item in &frontmatter.action_items {
-            let person_id = if !item.assignee.is_empty() {
-                let slug = slugify(&item.assignee);
+            let person_id = canonicalizer.resolve(&item.assignee).and_then(|identity| {
                 conn.query_row(
                     "SELECT id FROM people WHERE slug = ?1",
-                    params![slug],
+                    params![identity.slug],
                     |row| row.get::<_, i64>(0),
                 )
                 .ok()
-            } else {
-                None
-            };
+            });
             conn.execute(
                 "INSERT INTO commitments (meeting_id, person_id, text, status, due_date, created_at, commitment_type)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'action_item')",
@@ -481,10 +585,10 @@ pub fn rebuild_index_at(config: &Config, path: &Path) -> Result<GraphStats, Grap
         // Extract commitments from intents
         for intent in &frontmatter.intents {
             let person_id = intent.who.as_ref().and_then(|who| {
-                let slug = slugify(who);
+                let identity = canonicalizer.resolve(who)?;
                 conn.query_row(
                     "SELECT id FROM people WHERE slug = ?1",
-                    params![slug],
+                    params![identity.slug],
                     |row| row.get::<_, i64>(0),
                 )
                 .ok()
@@ -1580,6 +1684,84 @@ Short meeting.
             )
             .unwrap();
         assert_eq!(count, 1, "Sarah should appear once (deduped)");
+    }
+
+    #[test]
+    fn test_canonicalizes_attendee_aliases_to_entity_slug() {
+        let tmp = TempDir::new().unwrap();
+        let meetings = tmp.path().join("meetings");
+        fs::create_dir_all(&meetings).unwrap();
+        let meeting = r#"---
+title: Canonical Dan
+type: meeting
+date: 2026-03-20T14:00:00-07:00
+duration: 10m
+attendees: [Dan]
+entities:
+  people:
+    - slug: dan-benamoz
+      label: Dan Benamoz
+      aliases: [Dan, dan]
+action_items:
+  - assignee: Dan
+    task: Review extraction pass
+    status: open
+intents:
+  - kind: commitment
+    what: Follow up with Mat
+    who: DAN
+    status: open
+---
+
+## Transcript
+[DAN 0:00] Happy to help
+"#;
+        write_meeting(&meetings, "canonical-dan.md", meeting);
+        let config = test_config(&meetings);
+        let db = tmp.path().join("graph.db");
+        rebuild_index_at(&config, &db).unwrap();
+        let conn = open_db(&db).unwrap();
+
+        let canonical_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM people WHERE slug = 'dan-benamoz'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let alias_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM people WHERE slug = 'dan'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        let (name, aliases): (String, String) = conn
+            .query_row(
+                "SELECT name, aliases FROM people WHERE slug = 'dan-benamoz'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        let commitment_owner_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM commitments c
+                 JOIN people p ON c.person_id = p.id
+                 WHERE p.slug = 'dan-benamoz'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(canonical_count, 1, "canonical person row should exist once");
+        assert_eq!(
+            alias_count, 0,
+            "raw alias slug should not be written separately"
+        );
+        assert_eq!(name, "Dan Benamoz");
+        assert!(aliases.contains("Dan"));
+        assert!(
+            commitment_owner_count >= 2,
+            "action items and intents should resolve to canonical person"
+        );
     }
 
     #[test]

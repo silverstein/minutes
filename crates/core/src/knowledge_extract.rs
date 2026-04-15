@@ -6,15 +6,10 @@
 //! 2. **LLM extraction** (optional, engine != "none"): mine transcript body for richer facts.
 //!    Conservative prompt: "only extract explicitly stated facts, never infer."
 
-use crate::knowledge::{slugify, Confidence, Fact, PersonFacts};
-use crate::markdown::{EntityRef, Frontmatter};
-use std::collections::{HashMap, HashSet};
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct PersonIdentity {
-    slug: String,
-    name: String,
-}
+use crate::knowledge::{Confidence, Fact, PersonFacts};
+use crate::markdown::Frontmatter;
+use crate::person_identity::{PersonCanonicalizer, PersonIdentity};
+use std::collections::HashMap;
 
 /// Extract facts from structured frontmatter only (phase 1 — zero hallucination risk).
 /// This is the default mode when `[knowledge] engine = "none"`.
@@ -27,7 +22,7 @@ pub fn extract_from_frontmatter(fm: &Frontmatter, meeting_path: &str) -> Vec<Per
         .trim_end_matches(".md")
         .to_string();
 
-    let canonical_people = build_canonical_person_index(&fm.entities.people);
+    let canonical_people = build_canonical_person_index(fm);
     let mut person_map: HashMap<String, PersonFacts> = HashMap::new();
 
     // Extract from action_items (high-value: explicit assignee + task)
@@ -90,7 +85,7 @@ pub fn extract_from_frontmatter(fm: &Frontmatter, meeting_path: &str) -> Vec<Per
 
     // Extract from entities.people (presence facts — they were in this meeting)
     for entity in &fm.entities.people {
-        let Some(identity) = resolve_entity_identity(entity) else {
+        let Some(identity) = canonical_people.resolve_entity(entity) else {
             continue;
         };
         // Only create the entry if they don't already have facts from above.
@@ -147,117 +142,24 @@ pub fn extract_from_frontmatter(fm: &Frontmatter, meeting_path: &str) -> Vec<Per
     person_map.into_values().collect()
 }
 
-fn build_canonical_person_index(entities: &[EntityRef]) -> HashMap<String, PersonIdentity> {
-    let mut direct_candidates: HashMap<String, Vec<PersonIdentity>> = HashMap::new();
-    let mut first_name_candidates: HashMap<String, Vec<PersonIdentity>> = HashMap::new();
-
-    for entity in entities {
-        let Some(identity) = resolve_entity_identity(entity) else {
-            continue;
-        };
-
-        let mut candidates = HashSet::new();
-        candidates.insert(identity.slug.clone());
-
-        let label_slug = slugify(&entity.label);
-        if !label_slug.is_empty() {
-            candidates.insert(label_slug);
-        }
-
-        for alias in &entity.aliases {
-            let alias_slug = slugify(alias);
-            if !alias_slug.is_empty() {
-                candidates.insert(alias_slug);
-            }
-        }
-
-        for candidate in candidates {
-            direct_candidates
-                .entry(candidate)
-                .or_default()
-                .push(identity.clone());
-        }
-
-        let first_name_slug = entity
-            .label
-            .split_whitespace()
-            .next()
-            .map(slugify)
-            .unwrap_or_default();
-        if !first_name_slug.is_empty() {
-            first_name_candidates
-                .entry(first_name_slug)
-                .or_default()
-                .push(identity.clone());
-        }
-    }
-
-    let mut resolved = HashMap::new();
-    for (candidate, identities) in direct_candidates {
-        if let Some(identity) = unique_identity(&identities) {
-            resolved.insert(candidate, identity);
-        }
-    }
-
-    for (candidate, identities) in first_name_candidates {
-        if resolved.contains_key(&candidate) {
-            continue;
-        }
-        if let Some(identity) = unique_identity(&identities) {
-            resolved.insert(candidate, identity);
-        }
-    }
-
-    resolved
-}
-
-fn unique_identity(identities: &[PersonIdentity]) -> Option<PersonIdentity> {
-    let unique_slugs: HashSet<&str> = identities
+fn build_canonical_person_index(fm: &Frontmatter) -> PersonCanonicalizer {
+    let attendees = fm.normalized_attendees();
+    let context_names: Vec<&str> = attendees
         .iter()
-        .map(|identity| identity.slug.as_str())
+        .map(String::as_str)
+        .chain(fm.people.iter().map(String::as_str))
+        .chain(fm.action_items.iter().map(|item| item.assignee.as_str()))
+        .chain(fm.intents.iter().filter_map(|intent| intent.who.as_deref()))
         .collect();
-    if unique_slugs.len() == 1 {
-        identities.first().cloned()
-    } else {
-        None
-    }
-}
 
-fn resolve_entity_identity(entity: &EntityRef) -> Option<PersonIdentity> {
-    let slug = slugify(&entity.slug);
-    if slug.is_empty() {
-        return None;
-    }
-
-    let name = if entity.label.trim().is_empty() {
-        entity.slug.trim().to_string()
-    } else {
-        entity.label.trim().to_string()
-    };
-
-    Some(PersonIdentity { slug, name })
+    PersonCanonicalizer::new(&fm.entities.people, context_names)
 }
 
 fn resolve_person_identity(
     raw: &str,
-    canonical_people: &HashMap<String, PersonIdentity>,
+    canonical_people: &PersonCanonicalizer,
 ) -> Option<PersonIdentity> {
-    let trimmed = raw.trim().trim_start_matches('@').trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-
-    let slug = slugify(trimmed);
-    if slug.is_empty() {
-        return None;
-    }
-
-    canonical_people.get(&slug).cloned().or_else(|| {
-        Some(PersonIdentity {
-            slug,
-            name: trimmed.to_string(),
-        })
-    })
+    canonical_people.resolve(raw)
 }
 
 fn capitalize_first(s: &str) -> String {
@@ -299,7 +201,7 @@ mod tests {
                     EntityRef {
                         slug: "dan-benamoz".into(),
                         label: "Dan Benamoz".into(),
-                        aliases: vec![],
+                        aliases: vec!["Dan".into(), "dan".into()],
                     },
                 ],
                 projects: vec![],
@@ -418,7 +320,8 @@ mod tests {
 
     #[test]
     fn first_name_matching_stays_disabled_when_entities_are_ambiguous() {
-        let identities = build_canonical_person_index(&[
+        let mut fm = test_frontmatter();
+        fm.entities.people = vec![
             EntityRef {
                 slug: "dan-benamoz".into(),
                 label: "Dan Benamoz".into(),
@@ -429,9 +332,9 @@ mod tests {
                 label: "Dan Smith".into(),
                 aliases: vec![],
             },
-        ]);
+        ];
+        let identities = build_canonical_person_index(&fm);
 
-        assert!(!identities.contains_key("dan"));
         let fallback = resolve_person_identity("Dan", &identities).expect("fallback identity");
         assert_eq!(fallback.slug, "dan");
         assert_eq!(fallback.name, "Dan");

@@ -5732,6 +5732,7 @@ pub fn cmd_get_settings() -> serde_json::Value {
             "cooldown_minutes": config.call_detection.cooldown_minutes,
             "apps": config.call_detection.apps,
             "google_meet_enabled": call_detection_has_sentinel(&config, "google-meet"),
+            "teams_web_enabled": call_detection_has_sentinel(&config, "teams-web"),
             "stop_when_call_ends": config.call_detection.stop_when_call_ends,
             "call_end_stop_countdown_secs": config.call_detection.call_end_stop_countdown_secs,
         },
@@ -5874,6 +5875,9 @@ pub fn cmd_set_setting(section: String, key: String, value: String) -> Result<St
         }
         ("call_detection", "google_meet_enabled") => {
             set_call_detection_sentinel(&mut config, "google-meet", value == "true");
+        }
+        ("call_detection", "teams_web_enabled") => {
+            set_call_detection_sentinel(&mut config, "teams-web", value == "true");
         }
         ("call_detection", "stop_when_call_ends") => {
             config.call_detection.stop_when_call_ends = value == "true";
@@ -6133,6 +6137,22 @@ mod tests {
 
         set_call_detection_sentinel(&mut config, "google-meet", false);
         assert!(!call_detection_has_sentinel(&config, "google-meet"));
+    }
+
+    #[test]
+    fn call_detection_teams_web_sentinel_toggle_is_independent() {
+        let mut config = Config::default();
+        assert!(!call_detection_has_sentinel(&config, "teams-web"));
+        assert!(!call_detection_has_sentinel(&config, "google-meet"));
+
+        set_call_detection_sentinel(&mut config, "teams-web", true);
+        set_call_detection_sentinel(&mut config, "google-meet", true);
+        assert!(call_detection_has_sentinel(&config, "teams-web"));
+        assert!(call_detection_has_sentinel(&config, "google-meet"));
+
+        set_call_detection_sentinel(&mut config, "teams-web", false);
+        assert!(!call_detection_has_sentinel(&config, "teams-web"));
+        assert!(call_detection_has_sentinel(&config, "google-meet"));
     }
 
     #[test]

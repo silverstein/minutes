@@ -55,6 +55,9 @@ pub struct CallDetector {
     /// Recent successful browser-based Meet detection. Prevents fast native-app
     /// polling from immediately relabeling the same active session as Slack.
     recent_google_meet_until: Mutex<Option<Instant>>,
+    /// Recent successful browser-based Teams detection. Same role as the Meet
+    /// sticky field but for Microsoft Teams in a browser tab.
+    recent_teams_web_until: Mutex<Option<Instant>>,
     /// Log mic-gate transitions once instead of spamming every poll.
     last_mic_live: Mutex<Option<bool>>,
 }
@@ -118,8 +121,56 @@ enum DetectActiveCallResult {
     None,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MeetingProvider {
+    GoogleMeet,
+    TeamsWeb,
+}
+
+impl MeetingProvider {
+    /// Returns (display name, process sentinel) for the provider. The sentinel
+    /// is the same opaque string stored in `CallDetectionConfig::apps`.
+    fn names(self) -> (&'static str, &'static str) {
+        match self {
+            MeetingProvider::GoogleMeet => ("Google Meet", "google-meet"),
+            MeetingProvider::TeamsWeb => ("Teams", "teams-web"),
+        }
+    }
+
+    fn sticky_duration(self) -> Duration {
+        match self {
+            MeetingProvider::GoogleMeet => Duration::from_secs(GOOGLE_MEET_STICKY_SECS),
+            MeetingProvider::TeamsWeb => Duration::from_secs(TEAMS_WEB_STICKY_SECS),
+        }
+    }
+}
+
+fn detected_for(provider: MeetingProvider) -> DetectActiveCallResult {
+    let (display_name, process_name) = provider.names();
+    DetectActiveCallResult::Detected {
+        display_name: display_name.into(),
+        process_name: process_name.into(),
+    }
+}
+
+fn remember_sticky(sticky: &Mutex<Option<Instant>>, ttl: Duration) {
+    *sticky.lock().unwrap() = Some(Instant::now() + ttl);
+}
+
+fn sticky_alive(sticky: &Mutex<Option<Instant>>) -> bool {
+    let mut guard = sticky.lock().unwrap();
+    match *guard {
+        Some(until) if Instant::now() < until => true,
+        Some(_) => {
+            *guard = None;
+            false
+        }
+        None => false,
+    }
+}
+
 enum BrowserMeetProbe {
-    Detected,
+    Detected { provider: MeetingProvider },
     PermissionDenied { browser_app: String },
     Error,
     NoBrowserProcesses,
@@ -130,6 +181,7 @@ const SAME_APP_REMINDER_SECS: u64 = 20;
 const BROWSER_PROBE_INTERVAL_SECS: u64 = 15;
 const BROWSER_PROBE_BACKOFF_SECS: u64 = 300;
 const GOOGLE_MEET_STICKY_SECS: u64 = 20;
+const TEAMS_WEB_STICKY_SECS: u64 = 20;
 
 impl CallDetector {
     pub fn new(config: CallDetectionConfig) -> Self {
@@ -139,6 +191,7 @@ impl CallDetector {
             browser_probe_next_allowed_at: Mutex::new(None),
             browser_probe_backoff_until: Mutex::new(HashMap::new()),
             recent_google_meet_until: Mutex::new(None),
+            recent_teams_web_until: Mutex::new(None),
             last_mic_live: Mutex::new(None),
         }
     }
@@ -287,9 +340,9 @@ impl CallDetector {
                         }
                         crate::commands::show_user_notification(
                             &app,
-                            "Google Meet detection needs browser access",
+                            "Browser meeting detection needs access",
                             &format!(
-                                "Allow Minutes to control {} in System Settings > Privacy & Security > Automation so Meet detection can see browser tabs.",
+                                "Allow Minutes to control {} in System Settings > Privacy & Security > Automation so Meet and Teams detection can see browser tabs.",
                                 browser_app
                             ),
                         );
@@ -467,18 +520,20 @@ impl CallDetector {
         self.note_mic_state(mic_live);
 
         let has_google_meet = config.apps.iter().any(|app| app == "google-meet");
+        let has_teams_web = config.apps.iter().any(|app| app == "teams-web");
         let native_apps: Vec<&String> = config
             .apps
             .iter()
-            .filter(|app| app.as_str() != "google-meet")
+            .filter(|app| app.as_str() != "google-meet" && app.as_str() != "teams-web")
             .collect();
         let running = running_process_names();
 
-        if has_google_meet && mic_live && self.google_meet_detection_is_sticky() {
-            return DetectActiveCallResult::Detected {
-                display_name: "Google Meet".into(),
-                process_name: "google-meet".into(),
-            };
+        if has_google_meet && mic_live && sticky_alive(&self.recent_google_meet_until) {
+            return detected_for(MeetingProvider::GoogleMeet);
+        }
+
+        if has_teams_web && mic_live && sticky_alive(&self.recent_teams_web_until) {
+            return detected_for(MeetingProvider::TeamsWeb);
         }
 
         if !mic_live {
@@ -508,15 +563,16 @@ impl CallDetector {
             }
         }
 
-        if has_google_meet && self.browser_probe_due() {
+        if (has_google_meet || has_teams_web) && self.browser_probe_due() {
             self.schedule_next_browser_probe();
-            match self.detect_google_meet_in_browsers(&running) {
-                BrowserMeetProbe::Detected => {
-                    self.remember_google_meet_detection();
-                    return DetectActiveCallResult::Detected {
-                        display_name: "Google Meet".into(),
-                        process_name: "google-meet".into(),
+            match self.detect_browser_meeting(&running, has_google_meet, has_teams_web) {
+                BrowserMeetProbe::Detected { provider } => {
+                    let sticky = match provider {
+                        MeetingProvider::GoogleMeet => &self.recent_google_meet_until,
+                        MeetingProvider::TeamsWeb => &self.recent_teams_web_until,
                     };
+                    remember_sticky(sticky, provider.sticky_duration());
+                    return detected_for(provider);
                 }
                 BrowserMeetProbe::PermissionDenied { browser_app } => {
                     return DetectActiveCallResult::PermissionWarning { browser_app };
@@ -614,23 +670,6 @@ impl CallDetector {
         *next_probe = Some(Instant::now() + Duration::from_secs(BROWSER_PROBE_INTERVAL_SECS));
     }
 
-    fn remember_google_meet_detection(&self) {
-        let mut sticky = self.recent_google_meet_until.lock().unwrap();
-        *sticky = Some(Instant::now() + Duration::from_secs(GOOGLE_MEET_STICKY_SECS));
-    }
-
-    fn google_meet_detection_is_sticky(&self) -> bool {
-        let mut sticky = self.recent_google_meet_until.lock().unwrap();
-        match *sticky {
-            Some(until) if Instant::now() < until => true,
-            Some(_) => {
-                *sticky = None;
-                false
-            }
-            None => false,
-        }
-    }
-
     fn browser_probe_allowed_for(&self, browser_app: &str) -> bool {
         let mut backoff = self.browser_probe_backoff_until.lock().unwrap();
         match backoff.get(browser_app).copied() {
@@ -652,7 +691,7 @@ impl CallDetector {
         log_call_detect_event(
             "warn",
             "browser_probe_backoff",
-            Some("Google Meet"),
+            None,
             Some(browser_app),
             serde_json::json!({
                 "reason": reason,
@@ -661,7 +700,12 @@ impl CallDetector {
         );
     }
 
-    fn detect_google_meet_in_browsers(&self, running: &[String]) -> BrowserMeetProbe {
+    fn detect_browser_meeting(
+        &self,
+        running: &[String],
+        want_meet: bool,
+        want_teams: bool,
+    ) -> BrowserMeetProbe {
         let running_lower: Vec<String> = running.iter().map(|s| s.to_lowercase()).collect();
         let mut saw_browser = false;
 
@@ -697,13 +741,19 @@ impl CallDetector {
                 continue;
             }
 
-            match query_browser_urls(app_name, *kind) {
-                AppleScriptProbe::Urls(urls) => {
-                    if urls
-                        .iter()
-                        .any(|url| looks_like_google_meet_meeting_url(url))
-                    {
-                        return BrowserMeetProbe::Detected;
+            match query_browser_tabs(app_name, *kind) {
+                AppleScriptProbe::Tabs(tabs) => {
+                    for tab in &tabs {
+                        if want_meet && looks_like_google_meet_meeting_url(&tab.url) {
+                            return BrowserMeetProbe::Detected {
+                                provider: MeetingProvider::GoogleMeet,
+                            };
+                        }
+                        if want_teams && looks_like_teams_meeting_tab(&tab.url, &tab.title) {
+                            return BrowserMeetProbe::Detected {
+                                provider: MeetingProvider::TeamsWeb,
+                            };
+                        }
                     }
                 }
                 AppleScriptProbe::PermissionDenied => {
@@ -712,8 +762,14 @@ impl CallDetector {
                         browser_app: (*app_name).to_string(),
                     };
                 }
-                AppleScriptProbe::Error => {
-                    self.defer_browser_probe_for(app_name, "browser_probe_error");
+                AppleScriptProbe::Error { stderr } => {
+                    let snippet: String = stderr.chars().take(240).collect();
+                    let reason = if snippet.is_empty() {
+                        "browser_probe_error".to_string()
+                    } else {
+                        format!("browser_probe_error: {snippet}")
+                    };
+                    self.defer_browser_probe_for(app_name, &reason);
                     return BrowserMeetProbe::Error;
                 }
             }
@@ -736,6 +792,7 @@ fn display_name_for(process: &str) -> String {
         "Webex" => "Webex".into(),
         "Slack" => "Slack".into(),
         "google-meet" => "Google Meet".into(),
+        "teams-web" => "Teams".into(),
         other => other.into(),
     }
 }
@@ -746,68 +803,93 @@ enum BrowserKind {
     Safari,
 }
 
+#[derive(Debug, Clone)]
+struct BrowserTab {
+    url: String,
+    title: String,
+}
+
 enum AppleScriptProbe {
-    Urls(Vec<String>),
+    Tabs(Vec<BrowserTab>),
     PermissionDenied,
-    Error,
+    Error { stderr: String },
 }
 
-fn query_browser_urls(app_name: &str, kind: BrowserKind) -> AppleScriptProbe {
-    let script = match kind {
-        BrowserKind::ChromeLike => format!(
-            r#"tell application "{app_name}"
-set output to ""
-repeat with w in windows
-  repeat with t in tabs of w
-    set output to output & (URL of t as text) & linefeed
-  end repeat
-end repeat
-return output
-end tell"#
-        ),
-        BrowserKind::Safari => format!(
-            r#"tell application "{app_name}"
-set output to ""
-repeat with w in windows
-  repeat with t in tabs of w
-    set output to output & (URL of t as text) & linefeed
-  end repeat
-end repeat
-return output
-end tell"#
-        ),
+fn query_browser_tabs(app_name: &str, kind: BrowserKind) -> AppleScriptProbe {
+    // Chromium tabs expose `title`; Safari tabs expose `name`. The output is
+    // line-pairs of URL + title, parsed by `run_applescript_tabs` below.
+    let title_property = match kind {
+        BrowserKind::ChromeLike => "title",
+        BrowserKind::Safari => "name",
     };
-    run_applescript_urls(&script)
+    let script = format!(
+        r#"tell application "{app_name}"
+set output to ""
+repeat with w in windows
+  repeat with t in tabs of w
+    set tabUrl to ""
+    set tabTitle to ""
+    try
+      set tabUrl to (URL of t as text)
+    end try
+    try
+      set tabTitle to ({title_property} of t as text)
+    end try
+    set output to output & tabUrl & linefeed & tabTitle & linefeed
+  end repeat
+end repeat
+return output
+end tell"#
+    );
+    run_applescript_tabs(&script)
 }
 
-fn run_applescript_urls(script: &str) -> AppleScriptProbe {
+fn run_applescript_tabs(script: &str) -> AppleScriptProbe {
     let output = match std::process::Command::new("osascript")
         .arg("-e")
         .arg(script)
         .output()
     {
         Ok(output) => output,
-        Err(_) => return AppleScriptProbe::Error,
+        Err(e) => {
+            return AppleScriptProbe::Error {
+                stderr: format!("osascript spawn failed: {e}"),
+            }
+        }
     };
 
     if output.status.success() {
-        let urls = String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty())
-            .map(ToOwned::to_owned)
-            .collect();
-        return AppleScriptProbe::Urls(urls);
+        let text = String::from_utf8_lossy(&output.stdout);
+        let lines: Vec<&str> = text.lines().collect();
+        let mut tabs = Vec::with_capacity(lines.len() / 2);
+        for chunk in lines.chunks(2) {
+            let url = chunk
+                .first()
+                .map(|s| s.trim().to_string())
+                .unwrap_or_default();
+            let title = chunk
+                .get(1)
+                .map(|s| s.trim().to_string())
+                .unwrap_or_default();
+            if url.is_empty() && title.is_empty() {
+                continue;
+            }
+            tabs.push(BrowserTab { url, title });
+        }
+        return AppleScriptProbe::Tabs(tabs);
     }
 
-    let stderr = String::from_utf8_lossy(&output.stderr).to_lowercase();
-    if stderr.contains("not authorized")
-        || stderr.contains("not permitted")
-        || stderr.contains("(-1743)")
+    let stderr_raw = String::from_utf8_lossy(&output.stderr).to_string();
+    let stderr_lc = stderr_raw.to_lowercase();
+    if stderr_lc.contains("not authorized")
+        || stderr_lc.contains("not permitted")
+        || stderr_lc.contains("(-1743)")
     {
         AppleScriptProbe::PermissionDenied
     } else {
-        AppleScriptProbe::Error
+        AppleScriptProbe::Error {
+            stderr: stderr_raw.trim().to_string(),
+        }
     }
 }
 
@@ -844,6 +926,146 @@ fn looks_like_google_meet_meeting_code(segment: &str) -> bool {
         .all(|(part, expected_len)| {
             part.len() == expected_len && part.chars().all(|ch| ch.is_ascii_lowercase())
         })
+}
+
+/// Localized title prefixes the Teams web client sets on `document.title`
+/// when the tab is in a meeting or 1:1 call. Chat/calendar/activity tabs use
+/// other prefixes (e.g. "Czat | …"), so a prefix match disambiguates the
+/// otherwise opaque `teams.*/v2/` URL.
+///
+/// The list is intentionally small — extend as new locales are reported.
+/// All entries must be lowercase; matching is performed against
+/// `title.to_lowercase().starts_with(prefix)`.
+const TEAMS_MEETING_TITLE_PREFIXES: &[&str] = &[
+    // English
+    "meeting",
+    "call ",
+    "calling",
+    // Polish
+    "spotkanie",
+    "połączenie",
+    "trwa połączenie",
+    // Spanish
+    "reunión",
+    "reunion",
+    "llamada",
+    // French
+    "réunion",
+    "appel",
+    // German
+    "besprechung",
+    "anruf",
+    // Portuguese
+    "reunião",
+    "chamada",
+    // Italian
+    "riunione",
+    "chiamata",
+    // Dutch
+    "vergadering",
+    "gesprek",
+    // Russian
+    "собрание",
+    "встреча",
+    "вызов",
+    // Czech
+    "schůzka",
+    "hovor",
+    // Hungarian
+    "értekezlet",
+    "hívás",
+    // Romanian
+    "ședință",
+    "apel",
+    // Turkish
+    "toplantı",
+    "arama",
+    // CJK
+    "会議",
+    "会议",
+    "會議",
+    "회의",
+];
+
+fn title_indicates_teams_meeting(title: &str) -> bool {
+    let lower = title.trim().to_lowercase();
+    if lower.is_empty() {
+        return false;
+    }
+    TEAMS_MEETING_TITLE_PREFIXES
+        .iter()
+        .any(|prefix| lower.starts_with(prefix))
+}
+
+fn is_teams_v2_root(url: &str) -> bool {
+    let lower = url.trim().to_lowercase();
+    let without_scheme = lower
+        .strip_prefix("https://")
+        .or_else(|| lower.strip_prefix("http://"))
+        .unwrap_or(&lower);
+    without_scheme.starts_with("teams.live.com/v2/")
+        || without_scheme.starts_with("teams.microsoft.com/v2/")
+        || without_scheme == "teams.live.com/v2"
+        || without_scheme == "teams.microsoft.com/v2"
+}
+
+/// Combined Teams meeting check: URL pattern OR (Teams v2 root + meeting-y
+/// tab title). The title fallback exists because the Teams web SPA does not
+/// surface the in-meeting hash route via AppleScript's `URL of t`.
+fn looks_like_teams_meeting_tab(url: &str, title: &str) -> bool {
+    if looks_like_teams_meeting_url(url) {
+        return true;
+    }
+    is_teams_v2_root(url) && title_indicates_teams_meeting(title)
+}
+
+/// Match a Microsoft Teams in-browser meeting URL.
+///
+/// Accepts the specific paths used for active meeting sessions and rejects the
+/// Teams chat / calendar home URLs — matching those would false-positive every
+/// time a user leaves Teams open in a tab. The Live v2 web client puts both
+/// chat and meetings under `/v2/`, so we cannot accept the bare `/v2/` root.
+fn looks_like_teams_meeting_url(url: &str) -> bool {
+    let lower = url.trim().to_lowercase();
+    let without_scheme = lower
+        .strip_prefix("https://")
+        .or_else(|| lower.strip_prefix("http://"))
+        .unwrap_or(&lower);
+
+    // Personal Teams (teams.live.com).
+    if let Some(rest) = without_scheme.strip_prefix("teams.live.com/") {
+        if rest.starts_with("meet/") {
+            return true;
+        }
+        // Hash- or query-routed meeting markers, including under /v2/.
+        return rest.contains("pre-join-calling/")
+            || rest.contains("meetup-join/")
+            || rest.contains("modern-calling/")
+            || rest.contains("calling-screen/")
+            || rest.contains("meet/");
+    }
+
+    let Some(rest) = without_scheme.strip_prefix("teams.microsoft.com/") else {
+        return false;
+    };
+
+    // Classic join links: /l/meetup-join/... and /meetup-join/...
+    if rest.starts_with("l/meetup-join/") || rest.starts_with("meetup-join/") {
+        return true;
+    }
+
+    // Hash-routed pre-join / in-meeting screens on both the legacy and v2
+    // clients. Example: _#/pre-join-calling/..., v2/_#/pre-join-calling/...,
+    // v2/#/meetup-join/..., v2/#/modern-calling/...
+    if rest.contains("pre-join-calling/")
+        || rest.contains("meetup-join/")
+        || rest.contains("modern-calling/")
+        || rest.contains("calling-screen/")
+    {
+        return true;
+    }
+
+    false
 }
 
 // ── macOS-specific detection ──────────────────────────────────
@@ -1004,7 +1226,7 @@ mod tests {
         let detector = CallDetector::new(test_call_detection_config(vec!["google-meet".into()]));
         let running: Vec<String> = vec!["Finder".into(), "launchd".into()];
         assert!(matches!(
-            detector.detect_google_meet_in_browsers(&running),
+            detector.detect_browser_meeting(&running, true, false),
             BrowserMeetProbe::NoBrowserProcesses
         ));
     }
@@ -1034,8 +1256,8 @@ mod tests {
     #[test]
     fn malformed_applescript_fails_gracefully() {
         assert!(matches!(
-            run_applescript_urls("this is not valid applescript @@@@"),
-            AppleScriptProbe::Error
+            run_applescript_tabs("this is not valid applescript @@@@"),
+            AppleScriptProbe::Error { .. }
         ));
     }
 
@@ -1080,15 +1302,18 @@ mod tests {
             "google-meet".into(),
         ]));
 
-        detector.remember_google_meet_detection();
-        assert!(detector.google_meet_detection_is_sticky());
+        remember_sticky(
+            &detector.recent_google_meet_until,
+            MeetingProvider::GoogleMeet.sticky_duration(),
+        );
+        assert!(sticky_alive(&detector.recent_google_meet_until));
 
         {
             let mut sticky = detector.recent_google_meet_until.lock().unwrap();
             *sticky = Some(Instant::now() - Duration::from_secs(1));
         }
 
-        assert!(!detector.google_meet_detection_is_sticky());
+        assert!(!sticky_alive(&detector.recent_google_meet_until));
     }
 
     #[test]
@@ -1140,7 +1365,7 @@ mod tests {
             "TrialArchivingService".into(),
         ];
         assert!(matches!(
-            detector.detect_google_meet_in_browsers(&running),
+            detector.detect_browser_meeting(&running, true, false),
             BrowserMeetProbe::NoBrowserProcesses
         ));
     }
@@ -1148,7 +1373,7 @@ mod tests {
     #[test]
     fn arc_exact_match_fires_on_arc_process() {
         let detector = CallDetector::new(test_call_detection_config(vec!["google-meet".into()]));
-        // Defer the probe so `detect_google_meet_in_browsers` skips the real
+        // Defer the probe so `detect_browser_meeting` skips the real
         // AppleScript call to Arc but still records `saw_browser`.
         detector.defer_browser_probe_for("Arc", "test");
 
@@ -1156,7 +1381,7 @@ mod tests {
         // accidentally satisfy the check on its own.
         let running: Vec<String> = vec!["searchpartyd".into(), "Arc".into()];
         assert!(matches!(
-            detector.detect_google_meet_in_browsers(&running),
+            detector.detect_browser_meeting(&running, true, false),
             BrowserMeetProbe::NoMatch
         ));
     }
@@ -1168,7 +1393,10 @@ mod tests {
             "google-meet".into(),
         ]));
 
-        detector.remember_google_meet_detection();
+        remember_sticky(
+            &detector.recent_google_meet_until,
+            MeetingProvider::GoogleMeet.sticky_duration(),
+        );
         let running = ["Safari".into()];
         let config = detector.current_config();
         let native_apps: Vec<&String> = config
@@ -1188,7 +1416,7 @@ mod tests {
         });
 
         assert!(!native_detected);
-        assert!(detector.google_meet_detection_is_sticky());
+        assert!(sticky_alive(&detector.recent_google_meet_until));
     }
 
     #[test]
@@ -1257,5 +1485,104 @@ mod tests {
         let snap = detector.active_call_snapshot().unwrap();
         assert_eq!(snap.0, "Microsoft Teams");
         assert!(!snap.2, "new session must reset call_end_fired");
+    }
+
+    #[test]
+    fn teams_url_requires_real_meeting_path() {
+        // Positive cases — these are live meeting URL shapes.
+        assert!(looks_like_teams_meeting_url(
+            "https://teams.microsoft.com/l/meetup-join/19%3ameeting_abc%40thread.v2/0?context=x"
+        ));
+        assert!(looks_like_teams_meeting_url(
+            "https://teams.microsoft.com/meetup-join/19%3ameeting_abc%40thread.v2/0"
+        ));
+        assert!(looks_like_teams_meeting_url(
+            "https://teams.live.com/meet/9876543210"
+        ));
+        assert!(looks_like_teams_meeting_url(
+            "https://teams.live.com/v2/#/modern-calling/19:meeting_x@thread.v2/0"
+        ));
+        assert!(looks_like_teams_meeting_url(
+            "https://teams.live.com/v2/#/calling-screen/19:meeting_y@thread.v2"
+        ));
+        // Teams Live v2 chat / home — must NOT match.
+        assert!(!looks_like_teams_meeting_url("https://teams.live.com/v2/"));
+        assert!(!looks_like_teams_meeting_url(
+            "https://teams.live.com/v2/#/conversations/19:abc@thread.v2"
+        ));
+        assert!(looks_like_teams_meeting_url(
+            "https://teams.microsoft.com/_#/pre-join-calling/19:meeting_abc@thread.v2"
+        ));
+        assert!(looks_like_teams_meeting_url(
+            "https://teams.microsoft.com/v2/#/meetup-join/19:meeting_xyz@thread.v2/0"
+        ));
+
+        // Negative cases — these are Teams UI pages, not meetings.
+        assert!(!looks_like_teams_meeting_url(
+            "https://teams.microsoft.com/"
+        ));
+        assert!(!looks_like_teams_meeting_url(
+            "https://teams.microsoft.com/_#/conversations/foo"
+        ));
+        assert!(!looks_like_teams_meeting_url(
+            "https://teams.microsoft.com/_#/calendarv2"
+        ));
+        assert!(!looks_like_teams_meeting_url("https://teams.live.com/"));
+        assert!(!looks_like_teams_meeting_url(
+            "https://example.com/l/meetup-join/abc"
+        ));
+    }
+
+    #[test]
+    fn teams_v2_root_with_meeting_title_matches() {
+        // Real-world example pulled from the user's Teams Live tab while in a
+        // meeting — URL is opaque, title carries the localized "Spotkanie" prefix.
+        assert!(looks_like_teams_meeting_tab(
+            "https://teams.live.com/v2/",
+            "Spotkanie | Meeting with Romuald Członkowski | Microsoft Teams"
+        ));
+        assert!(looks_like_teams_meeting_tab(
+            "https://teams.live.com/v2/",
+            "Meeting | Standup | Microsoft Teams"
+        ));
+        assert!(looks_like_teams_meeting_tab(
+            "https://teams.microsoft.com/v2/",
+            "Calling Romuald | Microsoft Teams"
+        ));
+        // Chat tab on the same `/v2/` URL must not match — title prefix differs.
+        assert!(!looks_like_teams_meeting_tab(
+            "https://teams.live.com/v2/",
+            "Czat | 🔒 GitHub Secure | Microsoft Teams"
+        ));
+        assert!(!looks_like_teams_meeting_tab(
+            "https://teams.live.com/v2/",
+            "Chat | Project Apollo | Microsoft Teams"
+        ));
+        // Off-Teams URL with a meeting-y title should still be rejected.
+        assert!(!looks_like_teams_meeting_tab(
+            "https://example.com/v2/",
+            "Meeting notes | Example"
+        ));
+    }
+
+    #[test]
+    fn sticky_teams_web_detection_survives_between_browser_probes() {
+        let detector = CallDetector::new(test_call_detection_config(vec![
+            "Slack".into(),
+            "teams-web".into(),
+        ]));
+
+        remember_sticky(
+            &detector.recent_teams_web_until,
+            MeetingProvider::TeamsWeb.sticky_duration(),
+        );
+        assert!(sticky_alive(&detector.recent_teams_web_until));
+
+        {
+            let mut sticky = detector.recent_teams_web_until.lock().unwrap();
+            *sticky = Some(Instant::now() - Duration::from_secs(1));
+        }
+
+        assert!(!sticky_alive(&detector.recent_teams_web_until));
     }
 }

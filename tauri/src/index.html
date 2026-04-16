@@ -4505,6 +4505,15 @@
         </div>
         <div class="about-controls">
           <div class="about-controls-group">
+            <div class="about-controls-copy">Microsoft Teams (web) detection (experimental)</div>
+            <div class="about-controls-meta">Opt-in browser integration for Teams meetings in Arc, Chrome, and Safari.
+              Matches Teams meeting URLs only (chat/calendar pages are ignored). Requires macOS browser automation
+              permission on first use, and backs off after failures instead of probing every second.</div>
+          </div>
+          <button class="btn btn-secondary btn-sm toggle-btn" id="settings-call-detection-teams-web">Off</button>
+        </div>
+        <div class="about-controls">
+          <div class="about-controls-group">
             <div class="about-controls-copy">Stop when call ends</div>
             <div class="about-controls-meta">When the detected call app exits mid-recording, show a countdown prompt
               with Stop now and Keep recording. Only applies to recordings started from the call-detection banner.</div>
@@ -7145,6 +7154,7 @@
           document.getElementById('settings-call-detection-polling-interval').value = String(s.call_detection.poll_interval_secs ?? 1);
           document.getElementById('settings-call-detection-cooldown').value = String(s.call_detection.cooldown_minutes ?? 5);
           setSettingsToggle('settings-call-detection-google-meet', Boolean(s.call_detection.google_meet_enabled));
+          setSettingsToggle('settings-call-detection-teams-web', Boolean(s.call_detection.teams_web_enabled));
           setSettingsToggle('settings-call-detection-stop-when-call-ends', Boolean(s.call_detection.stop_when_call_ends));
           document.getElementById('settings-call-detection-countdown-secs').value = String(s.call_detection.call_end_stop_countdown_secs ?? 30);
         }
@@ -7459,6 +7469,12 @@
       const next = !Boolean(s.call_detection.google_meet_enabled);
       await invoke('cmd_set_setting', { section: 'call_detection', key: 'google_meet_enabled', value: String(next) });
       setSettingsToggle('settings-call-detection-google-meet', next);
+    });
+    document.getElementById('settings-call-detection-teams-web').addEventListener('click', async () => {
+      const s = await invoke('cmd_get_settings');
+      const next = !Boolean(s.call_detection.teams_web_enabled);
+      await invoke('cmd_set_setting', { section: 'call_detection', key: 'teams_web_enabled', value: String(next) });
+      setSettingsToggle('settings-call-detection-teams-web', next);
     });
     document.getElementById('settings-call-detection-stop-when-call-ends').addEventListener('click', async () => {
       const s = await invoke('cmd_get_settings');

@@ -1,8 +1,4 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
-// Tauri event dispatch uses nested `if` inside `match` arms where converting
-// to a guard would change fall-through semantics (an unmatched guard would
-// fall through to later arms instead of no-op). Keep the nested `if` form.
-#![allow(clippy::collapsible_match)]
 
 use minutes_core::Config;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
@@ -1433,30 +1429,28 @@ fn main() {
                                 update_tray_state(&app_done, false);
                             });
                         }
-                        "stop" => {
-                            if commands::request_stop(&recording, &stop).is_ok() {
-                                rec_item.set_text("Stopping...").ok();
-                                rec_item.set_enabled(false).ok();
-                                quick_item.set_text("Quick Thought").ok();
-                                quick_item.set_enabled(false).ok();
-                                stp_item.set_enabled(false).ok();
-                                let app_done = app.clone();
-                                let ri = rec_item.clone();
-                                let qi = quick_item.clone();
-                                let si = stp_item.clone();
-                                std::thread::spawn(move || {
-                                    if commands::wait_for_recording_shutdown(
-                                        std::time::Duration::from_secs(120),
-                                    ) {
-                                        ri.set_text("Start Recording").ok();
-                                        ri.set_enabled(true).ok();
-                                        qi.set_text("Quick Thought").ok();
-                                        qi.set_enabled(true).ok();
-                                        si.set_enabled(false).ok();
-                                        update_tray_state(&app_done, false);
-                                    }
-                                });
-                            }
+                        "stop" if commands::request_stop(&recording, &stop).is_ok() => {
+                            rec_item.set_text("Stopping...").ok();
+                            rec_item.set_enabled(false).ok();
+                            quick_item.set_text("Quick Thought").ok();
+                            quick_item.set_enabled(false).ok();
+                            stp_item.set_enabled(false).ok();
+                            let app_done = app.clone();
+                            let ri = rec_item.clone();
+                            let qi = quick_item.clone();
+                            let si = stp_item.clone();
+                            std::thread::spawn(move || {
+                                if commands::wait_for_recording_shutdown(
+                                    std::time::Duration::from_secs(120),
+                                ) {
+                                    ri.set_text("Start Recording").ok();
+                                    ri.set_enabled(true).ok();
+                                    qi.set_text("Quick Thought").ok();
+                                    qi.set_enabled(true).ok();
+                                    si.set_enabled(false).ok();
+                                    update_tray_state(&app_done, false);
+                                }
+                            });
                         }
                         "note" => {
                             show_note_window(app);
@@ -1697,27 +1691,23 @@ fn main() {
         })
         .on_window_event(|window, event| {
             match event {
-                tauri::WindowEvent::CloseRequested { api, .. } => {
-                    if window.label() == "main" {
-                        // Hide main window on close instead of quitting (app stays in tray)
-                        // PTY session persists — user can reopen and resume where they left off
-                        api.prevent_close();
-                        window.hide().ok();
-                    }
+                tauri::WindowEvent::CloseRequested { api, .. } if window.label() == "main" => {
+                    // Hide main window on close instead of quitting (app stays in tray)
+                    // PTY session persists — user can reopen and resume where they left off
+                    api.prevent_close();
+                    window.hide().ok();
                 }
-                tauri::WindowEvent::Focused(false) => {
-                    if window.label() == "palette" {
-                        let app_handle = window.app_handle().clone();
-                        let state = app_handle.state::<commands::AppState>();
-                        let is_open = match state.palette_lifecycle.lock() {
-                            Ok(guard) => *guard == commands::PaletteLifecycle::Open,
-                            Err(poisoned) => {
-                                *poisoned.into_inner() == commands::PaletteLifecycle::Open
-                            }
-                        };
-                        if is_open {
-                            commands::close_palette_window(&app_handle);
+                tauri::WindowEvent::Focused(false) if window.label() == "palette" => {
+                    let app_handle = window.app_handle().clone();
+                    let state = app_handle.state::<commands::AppState>();
+                    let is_open = match state.palette_lifecycle.lock() {
+                        Ok(guard) => *guard == commands::PaletteLifecycle::Open,
+                        Err(poisoned) => {
+                            *poisoned.into_inner() == commands::PaletteLifecycle::Open
                         }
+                    };
+                    if is_open {
+                        commands::close_palette_window(&app_handle);
                     }
                 }
                 _ => {}

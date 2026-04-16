@@ -5839,14 +5839,31 @@
         defaultOpt.value = '';
         defaultOpt.textContent = 'System Default';
         devicePicker.appendChild(defaultOpt);
-        for (const fullName of result.devices) {
-          const opt = document.createElement('option');
-          opt.value = fullName;
-          opt.textContent = fullName;
-          if (result.configured_device && fullName === result.configured_device) {
-            opt.selected = true;
+        // Prefer structured entries so we store the canonical CPAL name
+        // in config. Older hosts only return the decorated `devices` list,
+        // in which case we fall back and let the backend's suffix stripper
+        // resolve the selection at capture time.
+        const configured = result.configured_device || '';
+        if (Array.isArray(result.entries) && result.entries.length > 0) {
+          for (const entry of result.entries) {
+            const opt = document.createElement('option');
+            opt.value = entry.name;
+            opt.textContent = entry.label;
+            if (configured && (entry.name === configured || entry.label === configured)) {
+              opt.selected = true;
+            }
+            devicePicker.appendChild(opt);
           }
-          devicePicker.appendChild(opt);
+        } else {
+          for (const fullName of result.devices || []) {
+            const opt = document.createElement('option');
+            opt.value = fullName;
+            opt.textContent = fullName;
+            if (configured && fullName === configured) {
+              opt.selected = true;
+            }
+            devicePicker.appendChild(opt);
+          }
         }
       } catch (e) {
         console.error('Load devices:', e);

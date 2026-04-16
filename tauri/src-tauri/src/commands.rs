@@ -4326,9 +4326,14 @@ pub fn cmd_search(query: String) -> serde_json::Value {
 pub fn cmd_list_devices() -> serde_json::Value {
     let config = Config::load();
     let configured_device = config.recording.device.clone();
-    let devices = minutes_core::capture::list_input_devices();
+    let entries = minutes_core::capture::list_input_devices_detailed();
+    // Back-compat: preserve the decorated label list for any caller that
+    // still reads `devices`, while exposing structured entries so pickers
+    // can store the canonical name instead of the label.
+    let legacy_labels: Vec<String> = entries.iter().map(|e| e.label.clone()).collect();
     serde_json::json!({
-        "devices": devices,
+        "devices": legacy_labels,
+        "entries": entries,
         "configured_device": configured_device,
     })
 }

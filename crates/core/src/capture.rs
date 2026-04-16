@@ -1503,9 +1503,42 @@ fn start_live_sidecar(
     (None, None)
 }
 
+/// If `name` ends with the decorated format produced by [`list_input_devices`]
+/// (e.g. `"Ground Control (16000Hz, 1 ch)"`), return the bare device name.
+/// Otherwise, return the input unchanged.
+///
+/// This lets callers accept either form: saved configs that captured the
+/// decorated label from the Tauri picker still resolve to the bare CPAL name.
+pub fn strip_device_format_suffix(name: &str) -> &str {
+    let Some(open_idx) = name.rfind(" (") else {
+        return name;
+    };
+    let inside = &name[open_idx + 2..];
+    let Some(inside) = inside.strip_suffix(')') else {
+        return name;
+    };
+    let Some((hz_part, ch_part)) = inside.split_once(", ") else {
+        return name;
+    };
+    let Some(hz_num) = hz_part.strip_suffix("Hz") else {
+        return name;
+    };
+    let Some(ch_num) = ch_part.strip_suffix(" ch") else {
+        return name;
+    };
+    if hz_num.parse::<u32>().is_err() || ch_num.parse::<u16>().is_err() {
+        return name;
+    }
+    &name[..open_idx]
+}
+
 /// Select the best input device.
 ///
 /// If `device_name` is provided, matches by name against available devices.
+/// The match first tries the exact string, then falls back to the bare name
+/// if `device_name` is in the decorated `"Name (NHz, N ch)"` format. That
+/// fallback is what lets legacy configs saved from the Tauri settings UI
+/// (which used to persist the decorated label) continue to resolve.
 /// Otherwise, queries the macOS system default (via `system_profiler`),
 /// then falls back to cpal's `default_input_device()`.
 ///
@@ -1522,11 +1555,12 @@ pub fn select_input_device(
 
     // If a specific device was requested, find it by name
     if let Some(requested) = device_name {
+        let bare = strip_device_format_suffix(requested);
         if let Ok(devices) = host.input_devices() {
             for device in devices {
                 if let Ok(desc) = device.description() {
                     let name = desc.name().to_string();
-                    if name == requested {
+                    if name == requested || name == bare {
                         tracing::info!(device = %name, "using requested input device");
                         return Ok(device);
                     }
@@ -1957,8 +1991,24 @@ fn send_device_change_notification(old_device: &str, new_device: &str) {
     }
 }
 
-/// List available audio input devices (for diagnostics / `minutes setup`).
-pub fn list_input_devices() -> Vec<String> {
+/// An input device entry with both the canonical CPAL name and the
+/// human-readable label shown in diagnostics and device pickers.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct InputDeviceEntry {
+    /// Canonical device name as reported by CPAL. This is the string that
+    /// must be stored in `config.recording.device` so that capture can
+    /// match it back to a device later.
+    pub name: String,
+    /// Human-readable label (e.g. `"Ground Control (16000Hz, 1 ch)"`).
+    /// Suitable for UI display and `minutes devices` output.
+    pub label: String,
+}
+
+/// List available audio input devices with both canonical names and labels.
+///
+/// Prefer this over [`list_input_devices`] when building UIs or storing
+/// a device selection: save `name` into config, show `label` to the user.
+pub fn list_input_devices_detailed() -> Vec<InputDeviceEntry> {
     use cpal::traits::{DeviceTrait, HostTrait};
 
     let host = cpal::default_host();
@@ -1969,7 +2019,7 @@ pub fn list_input_devices() -> Vec<String> {
         for device in input_devices {
             if let Ok(desc) = device.description() {
                 let name = desc.name().to_string();
-                let info = if let Ok(config) = device.default_input_config() {
+                let label = if let Ok(config) = device.default_input_config() {
                     format!(
                         "{} ({}Hz, {} ch)",
                         name,
@@ -1977,14 +2027,27 @@ pub fn list_input_devices() -> Vec<String> {
                         config.channels()
                     )
                 } else {
-                    name
+                    name.clone()
                 };
-                devices.push(info);
+                devices.push(InputDeviceEntry { name, label });
             }
         }
     }
 
     devices
+}
+
+/// List available audio input devices as decorated label strings.
+///
+/// Kept for backwards compatibility with existing diagnostics output
+/// (`minutes devices`, `minutes setup`). For UI pickers or any caller
+/// that will persist the selection, use [`list_input_devices_detailed`]
+/// so the canonical name can be stored separately from the label.
+pub fn list_input_devices() -> Vec<String> {
+    list_input_devices_detailed()
+        .into_iter()
+        .map(|entry| entry.label)
+        .collect()
 }
 
 /// A device with its category for the `minutes sources` command.
@@ -2061,6 +2124,57 @@ pub fn detect_loopback_device() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn strip_device_format_suffix_strips_decorated_label() {
+        assert_eq!(
+            strip_device_format_suffix("Ground Control (16000Hz, 1 ch)"),
+            "Ground Control"
+        );
+        assert_eq!(
+            strip_device_format_suffix("MacBook Pro Microphone (48000Hz, 2 ch)"),
+            "MacBook Pro Microphone"
+        );
+    }
+
+    #[test]
+    fn strip_device_format_suffix_passes_through_bare_names() {
+        assert_eq!(
+            strip_device_format_suffix("Ground Control"),
+            "Ground Control"
+        );
+        assert_eq!(strip_device_format_suffix(""), "");
+    }
+
+    #[test]
+    fn strip_device_format_suffix_ignores_non_matching_parens() {
+        // Device names can legitimately contain parentheses; only the exact
+        // "(NHz, N ch)" format produced by list_input_devices should be
+        // stripped.
+        assert_eq!(
+            strip_device_format_suffix("USB Mic (rev 2)"),
+            "USB Mic (rev 2)"
+        );
+        assert_eq!(
+            strip_device_format_suffix("Mic (16000Hz, two ch)"),
+            "Mic (16000Hz, two ch)"
+        );
+        assert_eq!(
+            strip_device_format_suffix("Mic (abcHz, 1 ch)"),
+            "Mic (abcHz, 1 ch)"
+        );
+    }
+
+    #[test]
+    fn strip_device_format_suffix_roundtrips_list_output() {
+        // Anything list_input_devices_detailed produces as a label must
+        // strip back to the canonical name.
+        let entry = InputDeviceEntry {
+            name: "Ground Control".into(),
+            label: "Ground Control (16000Hz, 1 ch)".into(),
+        };
+        assert_eq!(strip_device_format_suffix(&entry.label), entry.name);
+    }
 
     #[test]
     fn categorize_pipewire_sink_returns_system_audio() {

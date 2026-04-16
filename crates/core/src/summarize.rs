@@ -389,7 +389,7 @@ fn build_title_refinement_input(
 /// language is explicitly configured, the transcription language is used
 /// instead so that summaries are written in the same language as the audio.
 /// If neither is set, `"auto"` is returned (the LLM mirrors the transcript).
-pub fn get_effective_summary_language<'a>(config: &'a Config) -> &'a str {
+pub fn get_effective_summary_language(config: &Config) -> &str {
     if config.summarization.language != "auto" {
         &config.summarization.language
     } else {
@@ -2225,6 +2225,30 @@ PARTICIPANTS:
             assert_eq!(mode, 0o600);
         }
         std::fs::remove_file(prompt_path).unwrap();
+    }
+
+    #[test]
+    fn effective_language_uses_summarization_language_when_set() {
+        let mut config = Config::default();
+        config.summarization.language = "fr".to_string();
+        config.transcription.language = Some("en".to_string());
+        assert_eq!(get_effective_summary_language(&config), "fr");
+    }
+
+    #[test]
+    fn effective_language_falls_back_to_transcription_language() {
+        let mut config = Config::default();
+        config.summarization.language = "auto".to_string();
+        config.transcription.language = Some("es".to_string());
+        assert_eq!(get_effective_summary_language(&config), "es");
+    }
+
+    #[test]
+    fn effective_language_defaults_to_auto_when_both_unset() {
+        let mut config = Config::default();
+        config.summarization.language = "auto".to_string();
+        config.transcription.language = None;
+        assert_eq!(get_effective_summary_language(&config), "auto");
     }
 
     #[test]

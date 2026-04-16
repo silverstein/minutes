@@ -459,8 +459,13 @@ fn run_inner(
     let mut stream = AudioStream::start(device_override)?;
     tracing::info!(device = %stream.device_name, "live transcript audio stream started");
 
-    // Device change monitor for auto-reconnection
-    let mut device_monitor = crate::device_monitor::DeviceMonitor::new(&stream.device_name);
+    // Device change monitor for auto-reconnection. Pinned when the user
+    // supplied an explicit device override.
+    let mut device_monitor = if device_override.is_some() {
+        crate::device_monitor::DeviceMonitor::pinned(&stream.device_name)
+    } else {
+        crate::device_monitor::DeviceMonitor::new(&stream.device_name)
+    };
 
     // Only now create the writer (which truncates the JSONL and WAV files)
     let mut writer = LiveTranscriptWriter::new(config)?;

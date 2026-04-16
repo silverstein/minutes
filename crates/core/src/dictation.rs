@@ -246,8 +246,13 @@ where
         let mut stream = AudioStream::start(device_override)?;
         tracing::info!(device = %stream.device_name, "dictation audio stream started");
 
-        // Device change monitor for auto-reconnection
-        let mut device_monitor = crate::device_monitor::DeviceMonitor::new(&stream.device_name);
+        // Device change monitor for auto-reconnection. Pinned when the user
+        // supplied an explicit device override.
+        let mut device_monitor = if device_override.is_some() {
+            crate::device_monitor::DeviceMonitor::pinned(&stream.device_name)
+        } else {
+            crate::device_monitor::DeviceMonitor::new(&stream.device_name)
+        };
 
         let mut vad = Vad::new();
         let mut streaming = StreamingWhisper::new(config.transcription.language.clone());

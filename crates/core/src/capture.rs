@@ -884,9 +884,14 @@ fn record_to_wav_dual_source(
 
     let mut voice_stream = Some(AudioStream::start(plan.voice_override.as_deref())?);
     let mut system_stream = Some(AudioStream::start(Some(&plan.call_override))?);
-    let mut device_monitor = crate::device_monitor::MultiDeviceMonitor::new(
+    // Call side is always a pinned override; voice side is pinned iff the caller
+    // supplied an explicit override. Pinned sides skip default-device-change polling.
+    let voice_pinned = plan.voice_override.is_some();
+    let mut device_monitor = crate::device_monitor::MultiDeviceMonitor::with_pinned(
         &voice_stream.as_ref().expect("voice stream").device_name,
+        voice_pinned,
         &system_stream.as_ref().expect("system stream").device_name,
+        true,
     );
 
     eprintln!(
@@ -1008,9 +1013,11 @@ fn record_to_wav_dual_source(
                         "[minutes] Dual-source capture reconnected: {} + {}",
                         new_voice.device_name, new_system.device_name
                     );
-                    device_monitor = crate::device_monitor::MultiDeviceMonitor::new(
+                    device_monitor = crate::device_monitor::MultiDeviceMonitor::with_pinned(
                         &new_voice.device_name,
+                        voice_pinned,
                         &new_system.device_name,
+                        true,
                     );
                     voice_stream = Some(new_voice);
                     system_stream = Some(new_system);
@@ -1252,8 +1259,15 @@ pub fn record_to_wav(
     )?);
     tracing::info!("audio capture started");
 
-    // Device change monitor
-    let mut device_monitor = crate::device_monitor::DeviceMonitor::new(&device_name);
+    // Device change monitor. When the user pinned a specific device via config
+    // or --device, don't auto-switch on default-device changes — the override is
+    // explicit intent. Also avoids a spurious reconnect loop on Linux where
+    // cpal's "default" name doesn't match the pinned name (e.g. "pulse").
+    let mut device_monitor = if device_override.is_some() {
+        crate::device_monitor::DeviceMonitor::pinned(&device_name)
+    } else {
+        crate::device_monitor::DeviceMonitor::new(&device_name)
+    };
     let mut current_device_name = device_name;
 
     // Start screen context capture if enabled (with permission check)
@@ -1512,6 +1526,58 @@ fn start_live_sidecar(
 /// cpal's `default_input_device()` picks the first device in enumeration order,
 /// which on macOS is often a virtual device (Descript Loopback, Zoom Audio, etc.)
 /// rather than the actual system default.
+/// Remembers which cpal `HostId` successfully resolved a pinned device name
+/// this process. cpal's Linux `default_host()` is nondeterministic when PipeWire
+/// and ALSA are both compiled in (successive calls can return different hosts,
+/// and re-creating PipeWire via `host_from_id` sometimes enumerates zero
+/// devices). Caching the first host that works keeps later lookups stable.
+static PREFERRED_HOST: std::sync::OnceLock<std::sync::Mutex<Option<cpal::HostId>>> =
+    std::sync::OnceLock::new();
+
+fn preferred_host_id() -> Option<cpal::HostId> {
+    *PREFERRED_HOST
+        .get_or_init(|| std::sync::Mutex::new(None))
+        .lock()
+        .ok()?
+}
+
+fn set_preferred_host_id(id: cpal::HostId) {
+    if let Ok(mut guard) = PREFERRED_HOST
+        .get_or_init(|| std::sync::Mutex::new(None))
+        .lock()
+    {
+        *guard = Some(id);
+    }
+}
+
+/// Look up a device by exact name on the given host. Retries enumeration a few
+/// times because the PipeWire cpal backend occasionally reports zero devices on
+/// the first `input_devices()` call after a fresh `host_from_id`.
+fn find_device_on_host(host: &cpal::Host, requested: &str) -> Option<cpal::Device> {
+    use cpal::traits::{DeviceTrait, HostTrait};
+    for attempt in 0..3 {
+        if let Ok(devices) = host.input_devices() {
+            for device in devices {
+                if let Ok(desc) = device.description() {
+                    if desc.name() == requested {
+                        tracing::info!(
+                            device = %requested,
+                            host_id = ?host.id(),
+                            attempt,
+                            "using requested input device"
+                        );
+                        return Some(device);
+                    }
+                }
+            }
+        }
+        if attempt < 2 {
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+    }
+    None
+}
+
 pub fn select_input_device(
     host: &cpal::Host,
     device_name: Option<&str>,
@@ -1522,18 +1588,57 @@ pub fn select_input_device(
 
     // If a specific device was requested, find it by name
     if let Some(requested) = device_name {
-        if let Ok(devices) = host.input_devices() {
-            for device in devices {
-                if let Ok(desc) = device.description() {
-                    let name = desc.name().to_string();
-                    if name == requested {
-                        tracing::info!(device = %name, "using requested input device");
-                        return Ok(device);
-                    }
+        // Fast path: previous call in this process already proved a host works.
+        if let Some(preferred) = preferred_host_id() {
+            if preferred == host.id() {
+                if let Some(device) = find_device_on_host(host, requested) {
+                    return Ok(device);
+                }
+            } else if let Ok(preferred_host) = cpal::host_from_id(preferred) {
+                if let Some(device) = find_device_on_host(&preferred_host, requested) {
+                    tracing::info!(
+                        device = %requested,
+                        from_host = ?preferred,
+                        called_with_host = ?host.id(),
+                        "using cached preferred cpal host"
+                    );
+                    return Ok(device);
                 }
             }
         }
-        // Collect available device names for a helpful error message
+
+        // Try the host the caller handed us.
+        let primary_id = host.id();
+        if let Some(device) = find_device_on_host(host, requested) {
+            set_preferred_host_id(primary_id);
+            return Ok(device);
+        }
+
+        // Fallback: cpal's `default_host()` on Linux is nondeterministic when both
+        // PipeWire and ALSA are available — successive calls can return different
+        // hosts. Try every other compiled-in host before giving up so a pinned
+        // device name (e.g. "sink_default" on PipeWire, "pulse" on ALSA) keeps
+        // working regardless of which host was handed to us.
+        let mut searched_hosts = vec![format!("{:?}", primary_id)];
+        for host_id in cpal::available_hosts() {
+            if host_id == primary_id {
+                continue;
+            }
+            searched_hosts.push(format!("{:?}", host_id));
+            if let Ok(alt_host) = cpal::host_from_id(host_id) {
+                if let Some(device) = find_device_on_host(&alt_host, requested) {
+                    tracing::info!(
+                        device = %requested,
+                        from_host = ?host_id,
+                        primary_host = ?primary_id,
+                        "recovered pinned device from alternate cpal host"
+                    );
+                    set_preferred_host_id(host_id);
+                    return Ok(device);
+                }
+            }
+        }
+
         let available: Vec<String> = host
             .input_devices()
             .map(|devs| {
@@ -1543,6 +1648,7 @@ pub fn select_input_device(
             .unwrap_or_default();
         tracing::error!(
             requested = %requested,
+            searched_hosts = ?searched_hosts,
             available = ?available,
             "requested audio device not found"
         );
@@ -2403,5 +2509,28 @@ mod tests {
         let devices = list_input_devices();
         // Should return a Vec<String> (may be empty in CI, but must not panic)
         assert!(devices.iter().all(|d| !d.is_empty()));
+    }
+
+    /// Round-trip: `set_preferred_host_id` is observable via `preferred_host_id`.
+    /// Uses a serial guard because `PREFERRED_HOST` is process-wide static and
+    /// other parallel tests could otherwise race the read/write.
+    #[test]
+    fn preferred_host_cache_round_trips() {
+        use cpal::traits::HostTrait;
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _g = LOCK.lock().unwrap();
+
+        let prior = preferred_host_id();
+        let id = cpal::default_host().id();
+        set_preferred_host_id(id);
+        assert_eq!(preferred_host_id(), Some(id));
+
+        // Restore prior state so other tests see what they expect.
+        if let Some(p) = prior {
+            set_preferred_host_id(p);
+        } else {
+            // No public clear; overwrite with current default is fine for tests.
+            set_preferred_host_id(id);
+        }
     }
 }

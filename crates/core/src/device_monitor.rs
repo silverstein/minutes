@@ -27,6 +27,9 @@ pub struct DeviceMonitor {
     device_changed: Arc<AtomicBool>,
     /// Debounce: when the last reconnection happened.
     last_reconnect: Instant,
+    /// When true, the user pinned a specific device via config/override and the
+    /// monitor should not react to system-default-device changes.
+    pinned: bool,
     /// macOS CoreAudio listener handle (unregisters on drop).
     #[cfg(target_os = "macos")]
     _listener: Option<coreaudio_listener::CoreAudioListener>,
@@ -36,15 +39,31 @@ impl DeviceMonitor {
     /// Create a new monitor tracking the given device name.
     /// On macOS, registers a CoreAudio listener for instant device-change notification.
     pub fn new(initial_device: &str) -> Self {
+        Self::with_pinned(initial_device, false)
+    }
+
+    /// Create a monitor that never reports changes. Use when the caller explicitly
+    /// pinned a device (e.g., `[recording] device = "pulse"`) and does not want
+    /// the recording to auto-switch when the system default changes.
+    pub fn pinned(initial_device: &str) -> Self {
+        Self::with_pinned(initial_device, true)
+    }
+
+    fn with_pinned(initial_device: &str, pinned: bool) -> Self {
         let device_changed = Arc::new(AtomicBool::new(false));
 
         #[cfg(target_os = "macos")]
-        let _listener = coreaudio_listener::CoreAudioListener::new(Arc::clone(&device_changed));
+        let _listener = if pinned {
+            None
+        } else {
+            coreaudio_listener::CoreAudioListener::new(Arc::clone(&device_changed))
+        };
 
         Self {
             current_device: initial_device.to_string(),
             device_changed,
             last_reconnect: Instant::now(),
+            pinned,
             #[cfg(target_os = "macos")]
             _listener,
         }
@@ -56,6 +75,11 @@ impl DeviceMonitor {
     /// On other platforms: queries the current default and compares names.
     /// Respects the debounce interval to prevent rapid reconnection thrashing.
     pub fn has_device_changed(&self) -> bool {
+        // Pinned device: caller asked for a specific device, don't auto-switch.
+        if self.pinned {
+            return false;
+        }
+
         // Debounce: don't trigger again within RECONNECT_DEBOUNCE_SECS of last reconnect
         if self.last_reconnect.elapsed().as_secs() < RECONNECT_DEBOUNCE_SECS {
             return false;
@@ -132,6 +156,27 @@ impl MultiDeviceMonitor {
         Self {
             voice: DeviceMonitor::new(voice_device),
             call: DeviceMonitor::new(call_device),
+        }
+    }
+
+    /// Create a monitor with per-side pinning. Pinned sides never report changes.
+    pub fn with_pinned(
+        voice_device: &str,
+        voice_pinned: bool,
+        call_device: &str,
+        call_pinned: bool,
+    ) -> Self {
+        Self {
+            voice: if voice_pinned {
+                DeviceMonitor::pinned(voice_device)
+            } else {
+                DeviceMonitor::new(voice_device)
+            },
+            call: if call_pinned {
+                DeviceMonitor::pinned(call_device)
+            } else {
+                DeviceMonitor::new(call_device)
+            },
         }
     }
 
@@ -346,6 +391,26 @@ mod tests {
         // Note: can't easily test without waiting, so just verify the struct works
         assert_eq!(mon.voice().current_device_name(), "Mic");
         assert_eq!(mon.call().current_device_name(), "BlackHole");
+    }
+
+    #[test]
+    fn pinned_monitor_never_flags_change() {
+        let mon = DeviceMonitor::pinned("pulse");
+        // Simulate the OS listener or poll setting the flag.
+        mon.device_changed.store(true, Ordering::Relaxed);
+        assert!(
+            !mon.has_device_changed(),
+            "pinned monitor must ignore device-change signals"
+        );
+        assert_eq!(mon.current_device_name(), "pulse");
+    }
+
+    #[test]
+    fn multi_device_monitor_with_pinned_voice_never_flags() {
+        let mon = MultiDeviceMonitor::with_pinned("pulse", true, "BlackHole", true);
+        mon.voice().device_changed.store(true, Ordering::Relaxed);
+        mon.call().device_changed.store(true, Ordering::Relaxed);
+        assert!(mon.check_changes().is_none());
     }
 
     #[test]

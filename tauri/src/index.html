@@ -4188,6 +4188,32 @@
         <button class="btn btn-secondary btn-sm" id="btn-settings-close">Close</button>
       </div>
 
+      <!-- Identity -->
+      <div class="settings-section">
+        <div class="about-item-title">IDENTITY</div>
+        <div class="about-controls">
+          <div class="about-controls-group">
+            <div class="about-controls-copy">Your name</div>
+            <div class="about-controls-meta">Used to attribute meeting content to you ("Mat said…"). Leave blank if you'd rather stay anonymous.</div>
+            <input type="text" id="settings-identity-name" class="settings-field" placeholder="e.g. Mat Silverstein" spellcheck="false">
+          </div>
+        </div>
+        <div class="about-controls">
+          <div class="about-controls-group">
+            <div class="about-controls-copy">Your email addresses</div>
+            <div class="about-controls-meta">Comma-separated. Every address you send from, so calendar attendees arriving under different emails fold onto the same person.</div>
+            <input type="text" id="settings-identity-emails" class="settings-field" placeholder="you@work.com, you@personal.com" spellcheck="false">
+          </div>
+        </div>
+        <div class="about-controls">
+          <div class="about-controls-group">
+            <div class="about-controls-copy">Name variants</div>
+            <div class="about-controls-meta">Comma-separated. Alternate forms — nicknames, formal spellings — so everything folds onto your canonical name.</div>
+            <input type="text" id="settings-identity-aliases" class="settings-field" placeholder="e.g. Mathieu, Matt, Matthew" spellcheck="false">
+          </div>
+        </div>
+      </div>
+
       <!-- General -->
       <div class="settings-section">
         <div class="about-item-title">GENERAL</div>
@@ -7068,6 +7094,15 @@
       try {
         const s = await invoke('cmd_get_settings');
         document.getElementById('settings-config-path').textContent = s.config_path;
+        // Identity — populate name, emails, and aliases. The legacy
+        // `identity.email` field (single) is merged into the emails list
+        // via IdentityConfig::all_user_aliases downstream, so we only edit
+        // the plural lists here and leave the legacy field in TOML alone.
+        if (s.identity) {
+          document.getElementById('settings-identity-name').value = s.identity.name || '';
+          document.getElementById('settings-identity-emails').value = (s.identity.emails || []).join(', ');
+          document.getElementById('settings-identity-aliases').value = (s.identity.aliases || []).join(', ');
+        }
         // General: sync with existing app state
         setSettingsToggle('settings-notifications', notifyOnCompletion);
         setSettingsToggle('settings-cues', playCaptureCues);
@@ -7328,6 +7363,25 @@
           'Meetings: ' + f(st.meetings.bytes) + ' (' + st.meetings.count + ' files)  •  Memos: ' + f(st.memos.bytes) + ' (' + st.memos.count + ')  •  Models: ' + f(st.models.bytes) + '  •  Screenshots: ' + f(st.screens.bytes) + '  •  Total: ' + f(st.total_bytes);
       } catch (e) { document.getElementById('settings-storage-info').textContent = 'Could not load.'; }
     }
+    // Identity handlers — save each field on blur (`change` event fires on blur
+    // for text inputs). Empty-string submits clear the field (Rust maps "" → None
+    // for name; empty Vec for emails/aliases).
+    document.getElementById('settings-identity-name').addEventListener('change', async (e) => {
+      try {
+        await invoke('cmd_set_setting', { section: 'identity', key: 'name', value: e.target.value });
+      } catch (err) { console.error('identity name save:', err); }
+    });
+    document.getElementById('settings-identity-emails').addEventListener('change', async (e) => {
+      try {
+        await invoke('cmd_set_setting', { section: 'identity', key: 'emails', value: e.target.value });
+      } catch (err) { console.error('identity emails save:', err); }
+    });
+    document.getElementById('settings-identity-aliases').addEventListener('change', async (e) => {
+      try {
+        await invoke('cmd_set_setting', { section: 'identity', key: 'aliases', value: e.target.value });
+      } catch (err) { console.error('identity aliases save:', err); }
+    });
+
     // Settings General handlers — delegate to existing app logic
     document.getElementById('settings-notifications').addEventListener('click', async () => {
       const next = !notifyOnCompletion;

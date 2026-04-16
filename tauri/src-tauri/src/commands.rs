@@ -1984,6 +1984,18 @@ fn parse_optional_string_setting(value: &str) -> Option<String> {
     }
 }
 
+/// Parse a comma-separated setting string (e.g. `"foo, bar, baz"`) into a
+/// `Vec<String>`. Trims whitespace around each entry, drops empties, preserves
+/// input order. Case-sensitive — callers that need case-insensitive dedup
+/// should use `IdentityConfig::all_user_aliases` downstream.
+fn parse_comma_separated_setting(value: &str) -> Vec<String> {
+    value
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
 fn call_detection_has_sentinel(config: &Config, sentinel: &str) -> bool {
     config.call_detection.apps.iter().any(|app| app == sentinel)
 }
@@ -5754,6 +5766,12 @@ pub fn cmd_get_settings() -> serde_json::Value {
             "shortcut_enabled": config.palette.shortcut_enabled,
             "shortcut": config.palette.shortcut,
         },
+        "identity": {
+            "name": config.identity.name,
+            "email": config.identity.email,
+            "emails": config.identity.emails,
+            "aliases": config.identity.aliases,
+        },
     })
 }
 
@@ -5962,6 +5980,20 @@ pub fn cmd_set_setting(section: String, key: String, value: String) -> Result<St
         }
         ("palette", "shortcut") => config.palette.shortcut = value.clone(),
 
+        // Identity — name + email list + alias list. Used by the attribution
+        // pipeline to fold calendar attendees arriving under different emails
+        // or name spellings onto the canonical user entity. See
+        // `IdentityConfig::all_user_aliases` at config.rs for the merge path.
+        ("identity", "name") => {
+            config.identity.name = parse_optional_string_setting(&value);
+        }
+        ("identity", "emails") => {
+            config.identity.emails = parse_comma_separated_setting(&value);
+        }
+        ("identity", "aliases") => {
+            config.identity.aliases = parse_comma_separated_setting(&value);
+        }
+
         _ => return Err(format!("Unknown setting: {}.{}", section, key)),
     }
 
@@ -6127,6 +6159,25 @@ mod tests {
         assert_eq!(
             parse_optional_string_setting(" es "),
             Some("es".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_comma_separated_setting_splits_trims_and_drops_empties() {
+        assert_eq!(parse_comma_separated_setting(""), Vec::<String>::new());
+        assert_eq!(parse_comma_separated_setting("   "), Vec::<String>::new());
+        assert_eq!(parse_comma_separated_setting(","), Vec::<String>::new());
+        assert_eq!(
+            parse_comma_separated_setting("a@x.com"),
+            vec!["a@x.com".to_string()]
+        );
+        assert_eq!(
+            parse_comma_separated_setting("a@x.com, b@y.com"),
+            vec!["a@x.com".to_string(), "b@y.com".to_string()]
+        );
+        assert_eq!(
+            parse_comma_separated_setting("  a , ,   b  "),
+            vec!["a".to_string(), "b".to_string()]
         );
     }
 

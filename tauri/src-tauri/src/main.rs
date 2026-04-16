@@ -1,4 +1,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+// Tauri event dispatch uses nested `if` inside `match` arms where converting
+// to a guard would change fall-through semantics (an unmatched guard would
+// fall through to later arms instead of no-op). Keep the nested `if` form.
+#![allow(clippy::collapsible_match)]
 
 use minutes_core::Config;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};

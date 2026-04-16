@@ -304,7 +304,7 @@ fn collect_dashboard_data(config: &Config) -> DashboardData {
         .into_iter()
         .map(|(tag, count)| TopicEntry { tag, count })
         .collect();
-    topics.sort_by(|a, b| b.count.cmp(&a.count));
+    topics.sort_by_key(|t| std::cmp::Reverse(t.count));
 
     // Format hours
     let hours = total_seconds as f64 / 3600.0;

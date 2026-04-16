@@ -1702,9 +1702,7 @@ fn main() {
                     let state = app_handle.state::<commands::AppState>();
                     let is_open = match state.palette_lifecycle.lock() {
                         Ok(guard) => *guard == commands::PaletteLifecycle::Open,
-                        Err(poisoned) => {
-                            *poisoned.into_inner() == commands::PaletteLifecycle::Open
-                        }
+                        Err(poisoned) => *poisoned.into_inner() == commands::PaletteLifecycle::Open,
                     };
                     if is_open {
                         commands::close_palette_window(&app_handle);

@@ -816,6 +816,13 @@ fn main() {
     let recording_for_detector = recording.clone();
     let processing_clone = processing.clone();
     let stop_clone = stop_flag.clone();
+    let recording_started_by_call_detect = Arc::new(AtomicBool::new(false));
+    let call_end_countdown_cancel = Arc::new(AtomicBool::new(false));
+    let call_end_countdown_active = Arc::new(AtomicBool::new(false));
+    let started_by_call_detect_for_detector = recording_started_by_call_detect.clone();
+    let countdown_cancel_for_detector = call_end_countdown_cancel.clone();
+    let countdown_active_for_detector = call_end_countdown_active.clone();
+    let stop_for_detector = stop_flag.clone();
 
     tauri::Builder::default()
         .menu(build_app_menu)
@@ -1058,6 +1065,9 @@ fn main() {
             palette_lifecycle: palette_lifecycle.clone(),
             palette_reopen_pending: palette_reopen_pending.clone(),
             pending_meeting_prompts: Arc::new(Mutex::new(HashMap::new())),
+            recording_started_by_call_detect: recording_started_by_call_detect.clone(),
+            call_end_countdown_cancel: call_end_countdown_cancel.clone(),
+            call_end_countdown_active: call_end_countdown_active.clone(),
         })
         .manage(Arc::new(Mutex::new(
             shortcut_manager::ShortcutManager::new(),
@@ -1611,6 +1621,12 @@ fn main() {
                     app.handle().clone(),
                     recording_for_detector,
                     processing_clone,
+                    call_detect::CallEndAutoStopHandles {
+                        recording_started_by_call_detect: started_by_call_detect_for_detector,
+                        countdown_cancel: countdown_cancel_for_detector,
+                        countdown_active: countdown_active_for_detector,
+                        stop_flag: stop_for_detector,
+                    },
                 );
             }
 
@@ -1719,6 +1735,7 @@ fn main() {
             commands::cmd_add_note,
             commands::cmd_start_recording,
             commands::cmd_stop_recording,
+            commands::cmd_cancel_call_end_countdown,
             commands::cmd_extend_recording,
             commands::cmd_open_file,
             commands::cmd_read_text_file,

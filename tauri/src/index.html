@@ -3216,6 +3216,56 @@
       margin-top: 8px;
     }
 
+    /* ── Call ended countdown banner ── */
+    .call-ended {
+      display: none;
+      align-items: flex-start;
+      gap: 10px;
+      padding: 12px 16px;
+      background: var(--red-bg);
+      border-bottom: 1px solid var(--red-border-strong);
+    }
+
+    .call-ended.active {
+      display: flex;
+    }
+
+    .call-ended-icon {
+      font-size: 16px;
+      flex-shrink: 0;
+    }
+
+    .call-ended-info {
+      flex: 1;
+      min-width: 0;
+    }
+
+    .call-ended-title {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text);
+    }
+
+    .call-ended-subtitle {
+      font-size: 11px;
+      color: var(--red);
+      font-weight: 600;
+      margin-top: 2px;
+    }
+
+    .call-ended-detail {
+      font-size: 11px;
+      color: var(--text-secondary);
+      margin-top: 6px;
+      line-height: 1.35;
+    }
+
+    .call-ended-actions {
+      display: flex;
+      gap: 6px;
+      align-items: flex-start;
+    }
+
     /* ── Update available banner ── */
     .update-banner {
       display: none;
@@ -3792,6 +3842,20 @@
       <div class="call-detected-actions">
         <button class="btn btn-primary btn-sm" id="btn-record-call">Record</button>
         <button class="btn btn-secondary btn-sm" id="btn-dismiss-call">Dismiss</button>
+      </div>
+    </div>
+
+    <!-- Call ended countdown banner -->
+    <div class="call-ended" id="call-ended-banner" role="alert" aria-live="polite">
+      <div class="call-ended-icon">⏲</div>
+      <div class="call-ended-info">
+        <div class="call-ended-title" id="call-ended-title">Call ended</div>
+        <div class="call-ended-subtitle" id="call-ended-subtitle">Stopping in 30s</div>
+        <div class="call-ended-detail" id="call-ended-detail">Keep recording if you're wrapping up notes or takeaways. Otherwise Minutes will stop and process this session.</div>
+      </div>
+      <div class="call-ended-actions">
+        <button class="btn btn-primary btn-sm" id="btn-call-end-stop">Stop now</button>
+        <button class="btn btn-secondary btn-sm" id="btn-call-end-keep">Keep recording</button>
       </div>
     </div>
 
@@ -8583,7 +8647,10 @@
 
     document.getElementById('btn-record-call').addEventListener('click', async () => {
       try {
-        await invoke('cmd_start_recording', { intent: 'call' });
+        // Mark the session as call-detection-initiated so stop_when_call_ends
+        // knows this recording is eligible for the auto-stop prompt when the
+        // call app exits. Manual `minutes record` / hotkey starts never set this.
+        await invoke('cmd_start_recording', { intent: 'call', source: 'call_detect' });
       } catch (e) {
         console.error('Call recording:', e);
       }
@@ -8592,6 +8659,90 @@
     document.getElementById('btn-dismiss-call').addEventListener('click', () => {
       if (activeCallSession) activeCallSession.dismissed = true;
       callBanner.classList.remove('active');
+    });
+
+    // ── Call-end auto-stop countdown ──
+    // Backend emits `call:ended` with { app_name, countdown_secs } when the
+    // call app that started this recording exits. Frontend ticks a local
+    // countdown (cosmetic); the backend thread is the authoritative timer.
+    const callEndedBanner = document.getElementById('call-ended-banner');
+    const callEndedTitle = document.getElementById('call-ended-title');
+    const callEndedSubtitle = document.getElementById('call-ended-subtitle');
+    const callEndedDetail = document.getElementById('call-ended-detail');
+    let callEndCountdownInterval = null;
+    let callEndCountdownDeadline = null;
+
+    function clearCallEndCountdown() {
+      if (callEndCountdownInterval) {
+        clearInterval(callEndCountdownInterval);
+        callEndCountdownInterval = null;
+      }
+      callEndCountdownDeadline = null;
+      callEndedBanner.classList.remove('active');
+    }
+
+    function tickCallEndCountdown() {
+      if (!callEndCountdownDeadline) return;
+      const remaining = Math.max(
+        0,
+        Math.round((callEndCountdownDeadline - Date.now()) / 1000)
+      );
+      callEndedSubtitle.textContent =
+        remaining > 0 ? `Stopping in ${remaining}s` : 'Stopping now...';
+      if (remaining <= 0) {
+        // Backend is about to fire stop; hide buttons visually.
+        clearInterval(callEndCountdownInterval);
+        callEndCountdownInterval = null;
+      }
+    }
+
+    currentWindow.listen('call:ended', (event) => {
+      const { app_name, countdown_secs } = event.payload || {};
+      const secs = Number.isFinite(countdown_secs) && countdown_secs > 0
+        ? countdown_secs
+        : 30;
+      callEndedTitle.textContent = `${app_name || 'Call'} ended`;
+      callEndedDetail.textContent =
+        'Keep recording if you\'re wrapping up notes or takeaways. Otherwise Minutes will stop and process this session.';
+      callEndCountdownDeadline = Date.now() + secs * 1000;
+      if (callEndCountdownInterval) clearInterval(callEndCountdownInterval);
+      callEndCountdownInterval = setInterval(tickCallEndCountdown, 250);
+      tickCallEndCountdown();
+      // Hide the "call detected" banner — we're past that now.
+      callBanner.classList.remove('active');
+      callEndedBanner.classList.add('active');
+    });
+
+    currentWindow.listen('call:end-countdown:cancelled', () => {
+      clearCallEndCountdown();
+    });
+
+    currentWindow.listen('call:end-countdown:fired', () => {
+      clearCallEndCountdown();
+    });
+
+    document.getElementById('btn-call-end-keep').addEventListener('click', async () => {
+      clearCallEndCountdown();
+      try {
+        await invoke('cmd_cancel_call_end_countdown');
+      } catch (e) {
+        console.error('cancel countdown:', e);
+      }
+    });
+
+    document.getElementById('btn-call-end-stop').addEventListener('click', async () => {
+      clearCallEndCountdown();
+      try {
+        // Cancel the backend timer first so Stop now doesn't double-fire.
+        await invoke('cmd_cancel_call_end_countdown');
+      } catch (e) {
+        console.error('cancel countdown before stop:', e);
+      }
+      try {
+        await invoke('cmd_stop_recording');
+      } catch (e) {
+        console.error('stop now:', e);
+      }
     });
 
     currentWindow.listen('dictation-hotkey:status', (event) => {

@@ -250,6 +250,14 @@ pub struct CallDetectionConfig {
     pub poll_interval_secs: u64,
     pub cooldown_minutes: u64,
     pub apps: Vec<String>,
+    /// When a call that the detector started a recording for ends, show a
+    /// countdown banner that auto-stops the recording. Default: false.
+    /// Named for the behavior (an assistive prompt, not a silent hard stop);
+    /// people often keep recording 30-90s past hangup for takeaways.
+    pub stop_when_call_ends: bool,
+    /// Seconds the user has to cancel auto-stop before it fires.
+    /// Only meaningful when `stop_when_call_ends` is true. Default: 30.
+    pub call_end_stop_countdown_secs: u64,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -531,6 +539,8 @@ impl Default for CallDetectionConfig {
             poll_interval_secs: 1,
             cooldown_minutes: 5,
             apps: vec!["zoom.us".into(), "Microsoft Teams".into(), "Webex".into()],
+            stop_when_call_ends: false,
+            call_end_stop_countdown_secs: 30,
         }
     }
 }
@@ -1151,6 +1161,56 @@ accumulate = false
 
         let config = Config::load_from(&config_path);
         assert!(!config.dictation.accumulate);
+    }
+
+    // ── Call detection: stop-when-call-ends opt-in ────────────
+
+    #[test]
+    fn stop_when_call_ends_is_off_by_default() {
+        let config = Config::default();
+        assert!(!config.call_detection.stop_when_call_ends);
+        assert_eq!(config.call_detection.call_end_stop_countdown_secs, 30);
+    }
+
+    #[test]
+    fn stop_when_call_ends_round_trips_through_toml() {
+        let dir = TempDir::new().unwrap();
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(
+            &config_path,
+            r#"
+[call_detection]
+enabled = true
+stop_when_call_ends = true
+call_end_stop_countdown_secs = 45
+"#,
+        )
+        .unwrap();
+
+        let config = Config::load_from(&config_path);
+        assert!(config.call_detection.stop_when_call_ends);
+        assert_eq!(config.call_detection.call_end_stop_countdown_secs, 45);
+        // Sibling fields still populated from defaults.
+        assert_eq!(config.call_detection.poll_interval_secs, 1);
+        assert!(!config.call_detection.apps.is_empty());
+    }
+
+    #[test]
+    fn stop_when_call_ends_omitted_keeps_default_off() {
+        let dir = TempDir::new().unwrap();
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(
+            &config_path,
+            r#"
+[call_detection]
+enabled = true
+"#,
+        )
+        .unwrap();
+
+        let config = Config::load_from(&config_path);
+        assert!(!config.call_detection.stop_when_call_ends);
+        assert_eq!(config.call_detection.call_end_stop_countdown_secs, 30);
     }
 
     // ── Palette config + upgrade migration ────────────────────

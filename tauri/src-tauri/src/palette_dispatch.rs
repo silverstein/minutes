@@ -346,7 +346,7 @@ fn dispatch_action(
             }
             // Palette launches with pipeline defaults — users who need flags
             // reach for the CLI or the existing tray menu.
-            cmd_start_recording(app, state, None, None, None, None, None)?;
+            cmd_start_recording(app, state, None, None, None, None, None, None)?;
             Ok(ActionResponse::Ok)
         }
         ActionId::StopRecording => {

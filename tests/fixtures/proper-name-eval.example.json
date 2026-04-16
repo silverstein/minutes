@@ -1,0 +1,30 @@
+[
+  {
+    "id": "advisor-intro-parakeet",
+    "audio_path": "/absolute/path/to/recording.wav",
+    "content_type": "meeting",
+    "engine": "parakeet",
+    "reference_text": "Mat Silverstein and Alex Chen discussed X1 Planning and Asana migration.",
+    "title": "X1 / Planning Review",
+    "calendar_event_title": "Mat with Alex Chen",
+    "pre_context": "Asana migration with Box",
+    "attendees": [
+      "mat@example.com",
+      "alex.chen@example.com"
+    ],
+    "identity_name": "Mat",
+    "identity_aliases": [
+      "Mathieu",
+      "Matthew"
+    ],
+    "max_wer_regression": 0.02,
+    "require_hinted_terms": [
+      "mat",
+      "alex chen",
+      "x1 planning"
+    ],
+    "forbid_hinted_terms": [
+      "matt mullenweg"
+    ]
+  }
+]

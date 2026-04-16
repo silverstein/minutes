@@ -1192,6 +1192,7 @@ mod imp {
         config: &Config,
         wav_path: &Path,
         use_vad: bool,
+        hints: &crate::transcribe::DecodeHints,
     ) -> Result<SidecarRequest, SidecarError> {
         let audio_path = wav_path.to_str().ok_or_else(|| {
             SidecarError::new(format!("{LOG_PREFIX} temp WAV path is not valid UTF-8"))
@@ -1206,23 +1207,13 @@ mod imp {
             beam_width: 8,
             lm_path: String::new(),
             lm_weight: 0.5,
-            boost_phrases: load_boost_phrases(config),
+            boost_phrases: load_boost_phrases(config, hints),
             boost_score: config.transcription.parakeet_boost_score,
         })
     }
 
-    fn load_boost_phrases(config: &Config) -> Vec<String> {
-        let limit = config.transcription.parakeet_boost_limit;
-        if limit == 0 {
-            return Vec::new();
-        }
-        match crate::graph::parakeet_boost_phrases(limit) {
-            Ok(phrases) => phrases,
-            Err(error) => {
-                tracing::debug!("{} could not load boost phrases: {}", LOG_PREFIX, error);
-                Vec::new()
-            }
-        }
+    fn load_boost_phrases(config: &Config, hints: &crate::transcribe::DecodeHints) -> Vec<String> {
+        crate::transcribe::combined_parakeet_boost_phrases(config, hints)
     }
 
     pub fn resolve_server_binary(parakeet_binary: &str) -> Option<PathBuf> {
@@ -1264,13 +1255,14 @@ mod imp {
         vad_path: Option<&Path>,
         wav_path: &Path,
         audio_duration_secs: f64,
+        hints: &crate::transcribe::DecodeHints,
     ) -> Result<SidecarTranscriptResult, SidecarError> {
         let spec = build_launch_spec(config, model_path, vocab_path, vad_path)?;
         let manager = global_manager();
         let mut guard = manager
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let request = build_request(&mut guard, config, wav_path, vad_path.is_some())?;
+        let request = build_request(&mut guard, config, wav_path, vad_path.is_some(), hints)?;
         guard.transcribe(spec, request, config, audio_duration_secs)
     }
 
@@ -1604,6 +1596,7 @@ mod imp_stub {
         _vad_path: Option<&Path>,
         _wav_path: &Path,
         _audio_duration_secs: f64,
+        _hints: &crate::transcribe::DecodeHints,
     ) -> Result<SidecarTranscriptResult, SidecarError> {
         Err(SidecarError {
             message: "parakeet-sidecar: unavailable on this build".into(),

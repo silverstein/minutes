@@ -1,6 +1,9 @@
 use anyhow::Result;
 use chrono::{Local, TimeZone};
 use clap::{Parser, Subcommand};
+use minutes_core::autoresearch::{
+    self, DecodeHintEvalArtifactPaths, DecodeHintEvalOptions, DecodeHintEvalRequest,
+};
 use minutes_core::capture::RecordingIntent;
 use minutes_core::config::VALID_PARAKEET_MODELS;
 use minutes_core::parakeet;
@@ -270,6 +273,13 @@ enum Commands {
 
         #[arg(long)]
         json: bool,
+    },
+
+    /// Experimental local-first research loops for maintainers.
+    #[command(hide = true)]
+    Autoresearch {
+        #[command(subcommand)]
+        action: AutoresearchAction,
     },
 
     /// Check if a recording is in progress
@@ -770,6 +780,28 @@ enum VaultAction {
     Sync,
 }
 
+#[derive(Subcommand)]
+enum AutoresearchAction {
+    /// Compare decode-hint baseline vs candidate runs against a local corpus.
+    DecodeHints {
+        /// Path to the local corpus manifest JSON
+        #[arg(long)]
+        corpus: PathBuf,
+
+        /// Output root for local research artifacts (defaults to ~/.minutes/research/decode-hints)
+        #[arg(long)]
+        out: Option<PathBuf>,
+
+        /// Force a specific engine for every case (for example: whisper, parakeet)
+        #[arg(long)]
+        engine: Option<String>,
+
+        /// Print the full JSON report envelope to stdout
+        #[arg(long)]
+        json: bool,
+    },
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
@@ -907,6 +939,14 @@ fn main() -> Result<()> {
         Commands::Status => cmd_status(),
         Commands::Jobs { all, json, limit } => cmd_jobs(all, json, limit),
         Commands::Paths { json } => cmd_paths(json, &config),
+        Commands::Autoresearch { action } => match action {
+            AutoresearchAction::DecodeHints {
+                corpus,
+                out,
+                engine,
+                json,
+            } => cmd_autoresearch_decode_hints(&corpus, out.as_deref(), engine.as_deref(), json),
+        },
         Commands::Search {
             query,
             content_type,
@@ -2902,6 +2942,7 @@ fn cmd_parakeet_helper(
         vad_path,
         vad_threshold,
         config,
+        &minutes_core::transcribe::DecodeHints::default(),
     )?;
     let envelope = parakeet_helper_envelope("minutes parakeet-helper", parsed);
     println!("{}", serde_json::to_string(&envelope)?);
@@ -2974,6 +3015,91 @@ fn cmd_parakeet_benchmark(
     anyhow::bail!(
         "Parakeet benchmark is not compiled in. Rebuild with `cargo build --features parakeet`."
     );
+}
+
+fn cmd_autoresearch_decode_hints(
+    corpus: &Path,
+    output_root: Option<&Path>,
+    engine: Option<&str>,
+    json: bool,
+) -> Result<()> {
+    let options = DecodeHintEvalOptions {
+        engine_override: engine.map(|value| value.to_string()),
+    };
+    let report = autoresearch::run_decode_hint_eval_corpus(corpus, &options)?;
+
+    let request = DecodeHintEvalRequest {
+        command: "minutes autoresearch decode-hints".into(),
+        generated_at: Local::now().to_rfc3339(),
+        corpus_path: corpus.to_path_buf(),
+        output_root: output_root
+            .map(Path::to_path_buf)
+            .unwrap_or_else(autoresearch::default_research_root),
+        git_commit: current_git_commit(),
+        options,
+    };
+    let artifacts = autoresearch::write_decode_hint_eval_artifacts(&request, &report)?;
+    let failed = !report.failure_messages.is_empty();
+
+    if json {
+        #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct AutoresearchDecodeHintsOutput {
+            report: minutes_core::autoresearch::DecodeHintEvalReport,
+            artifacts: DecodeHintEvalArtifactPaths,
+        }
+
+        let envelope = json_envelope(
+            "minutes autoresearch decode-hints",
+            AutoresearchDecodeHintsOutput {
+                report,
+                artifacts: artifacts.clone(),
+            },
+        );
+        println!("{}", serde_json::to_string_pretty(&envelope)?);
+    } else {
+        let verdict = if failed { "FAIL" } else { "PASS" };
+        println!("Decode hint eval: {verdict}");
+        println!("Cases: {}", report.totals.cases_total);
+        println!("Passed: {}", report.totals.cases_passed);
+        println!("Failed: {}", report.totals.cases_failed);
+        println!("Artifacts: {}", artifacts.run_dir.display());
+        if failed {
+            println!();
+            println!("Failure messages:");
+            for failure in &report.failure_messages {
+                println!("- {failure}");
+            }
+        }
+    }
+
+    if failed {
+        anyhow::bail!(
+            "decode hint eval failed; see {}",
+            artifacts.summary_md.display()
+        );
+    }
+
+    Ok(())
+}
+
+fn current_git_commit() -> Option<String> {
+    let output = std::process::Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let value = String::from_utf8(output.stdout).ok()?;
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
 }
 
 fn cmd_watch(dir: Option<&Path>, config: &Config) -> Result<()> {

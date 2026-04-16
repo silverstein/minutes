@@ -7402,12 +7402,23 @@
     document.getElementById('settings-whisper-language').addEventListener('change', async (e) => {
       await invoke('cmd_set_setting', { section: 'transcription', key: 'language', value: e.target.value });
     });
+    // Toggle handlers flip based on the *visible* state, not a fresh
+    // backend read. If the UI is out of sync with disk (e.g. a prior
+    // loadSettings threw before reaching this row), the user's click
+    // still does what they asked — otherwise the first click silently
+    // "corrects" the UI to match disk and feels like a dead button.
     document.getElementById('settings-diarization').addEventListener('click', async () => {
-      const s = await invoke('cmd_get_settings');
-      // Toggle: none → pyannote-rs, anything else (auto/pyannote-rs/pyannote) → none
-      const next = s.diarization.engine === 'none' ? 'pyannote-rs' : 'none';
-      await invoke('cmd_set_setting', { section: 'diarization', key: 'engine', value: next });
-      setSettingsToggle('settings-diarization', next !== 'none');
+      const btn = document.getElementById('settings-diarization');
+      const currentlyOn = btn.textContent.trim() === 'On';
+      const next = !currentlyOn;
+      const nextEngine = next ? 'pyannote-rs' : 'none';
+      setSettingsToggle('settings-diarization', next);
+      try {
+        await invoke('cmd_set_setting', { section: 'diarization', key: 'engine', value: nextEngine });
+      } catch (e) {
+        setSettingsToggle('settings-diarization', currentlyOn);
+        console.error('diarization toggle:', e);
+      }
     });
     document.getElementById('settings-summarization-engine').addEventListener('change', async (e) => {
       await invoke('cmd_set_setting', { section: 'summarization', key: 'engine', value: e.target.value });
@@ -7420,11 +7431,18 @@
       document.getElementById('settings-agent-command-status').textContent = agents.find(a => a.name === e.target.value) ? 'Installed' : 'Not found on this machine';
     });
     document.getElementById('settings-screen-context').addEventListener('click', async () => {
-      const s = await invoke('cmd_get_settings');
-      const next = !s.screen_context.enabled;
-      await invoke('cmd_set_setting', { section: 'screen_context', key: 'enabled', value: String(next) });
+      const btn = document.getElementById('settings-screen-context');
+      const currentlyOn = btn.textContent.trim() === 'On';
+      const next = !currentlyOn;
       setSettingsToggle('settings-screen-context', next);
       document.getElementById('settings-screen-interval-row').classList.toggle('is-hidden', !next);
+      try {
+        await invoke('cmd_set_setting', { section: 'screen_context', key: 'enabled', value: String(next) });
+      } catch (e) {
+        setSettingsToggle('settings-screen-context', currentlyOn);
+        document.getElementById('settings-screen-interval-row').classList.toggle('is-hidden', !currentlyOn);
+        console.error('screen_context toggle:', e);
+      }
     });
     document.getElementById('settings-screen-interval').addEventListener('change', (e) => invoke('cmd_set_setting', { section: 'screen_context', key: 'interval_secs', value: e.target.value }));
     document.getElementById('settings-agent').addEventListener('change', async (e) => {
@@ -7457,18 +7475,30 @@
 
     // Call detection settings handlers
     document.getElementById('settings-call-detection').addEventListener('click', async () => {
-      const s = await invoke('cmd_get_settings');
-      const next = !s.call_detection.enabled;
-      await invoke('cmd_set_setting', { section: 'call_detection', key: 'enabled', value: String(next) });
+      const btn = document.getElementById('settings-call-detection');
+      const currentlyOn = btn.textContent.trim() === 'On';
+      const next = !currentlyOn;
       setSettingsToggle('settings-call-detection', next);
+      try {
+        await invoke('cmd_set_setting', { section: 'call_detection', key: 'enabled', value: String(next) });
+      } catch (e) {
+        setSettingsToggle('settings-call-detection', currentlyOn);
+        console.error('call_detection toggle:', e);
+      }
     });
     document.getElementById('settings-call-detection-polling-interval').addEventListener('change', (e) => invoke('cmd_set_setting', { section: 'call_detection', key: 'poll_interval_secs', value: e.target.value }));
     document.getElementById('settings-call-detection-cooldown').addEventListener('change', (e) => invoke('cmd_set_setting', { section: 'call_detection', key: 'cooldown_minutes', value: e.target.value }));
     document.getElementById('settings-call-detection-google-meet').addEventListener('click', async () => {
-      const s = await invoke('cmd_get_settings');
-      const next = !Boolean(s.call_detection.google_meet_enabled);
-      await invoke('cmd_set_setting', { section: 'call_detection', key: 'google_meet_enabled', value: String(next) });
+      const btn = document.getElementById('settings-call-detection-google-meet');
+      const currentlyOn = btn.textContent.trim() === 'On';
+      const next = !currentlyOn;
       setSettingsToggle('settings-call-detection-google-meet', next);
+      try {
+        await invoke('cmd_set_setting', { section: 'call_detection', key: 'google_meet_enabled', value: String(next) });
+      } catch (e) {
+        setSettingsToggle('settings-call-detection-google-meet', currentlyOn);
+        console.error('google_meet toggle:', e);
+      }
     });
     document.getElementById('settings-call-detection-teams-web').addEventListener('click', async () => {
       const s = await invoke('cmd_get_settings');
@@ -8221,12 +8251,14 @@
     });
 
     document.getElementById('settings-screen-share').addEventListener('click', async () => {
+      const btn = document.getElementById('settings-screen-share');
+      const currentlyOn = btn.textContent.trim() === 'On';
+      const next = !currentlyOn;
+      setSettingsToggle('settings-screen-share', next);
       try {
-        const s = await invoke('cmd_get_settings');
-        const next = !Boolean(s.privacy?.hide_from_screen_share);
         await invoke('cmd_set_screen_share_hidden', { hidden: next });
-        setSettingsToggle('settings-screen-share', next);
       } catch (e) {
+        setSettingsToggle('settings-screen-share', currentlyOn);
         console.error('Set screen share privacy:', e);
       }
     });

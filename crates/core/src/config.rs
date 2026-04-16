@@ -166,6 +166,8 @@ pub struct SummarizationConfig {
     pub ollama_url: String,
     pub ollama_model: String,
     pub mistral_model: String,
+    pub language: String,
+
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -654,6 +656,7 @@ impl Default for SummarizationConfig {
             ollama_url: "http://localhost:11434".into(),
             ollama_model: "llama3.2".into(),
             mistral_model: "mistral-large-latest".into(),
+            language: "auto".into(),
         }
     }
 }
@@ -1383,5 +1386,28 @@ shortcut_enabled = false
         assert!(reloaded.contains("# top comment"));
         assert!(reloaded.contains("mystery = \"keep-me\""));
         assert!(raw_toml_has_section(&reloaded, "palette"));
+    }
+
+    #[test]
+    fn summarization_language_defaults_to_auto() {
+        let config = Config::default();
+        assert_eq!(config.summarization.language, "auto");
+    }
+
+    #[test]
+    fn summarization_language_can_be_set_from_toml() {
+        let dir = TempDir::new().unwrap();
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(
+            &config_path,
+            r#"
+[summarization]
+language = "fr"
+"#,
+        )
+        .unwrap();
+
+        let config = Config::load_from(&config_path);
+        assert_eq!(config.summarization.language, "fr");
     }
 }

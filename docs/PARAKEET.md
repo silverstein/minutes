@@ -125,11 +125,92 @@ sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
 xcodebuild -downloadComponent MetalToolchain
 ```
 
-### Linux / Windows
+### Linux / Windows (parakeet.cpp, CPU only)
 
 parakeet.cpp does not yet have CUDA support (WIP in the axiom tensor library).
 CPU-only builds work but lose the speed advantage. Monitor the
 [parakeet.cpp repo](https://github.com/Frikallo/parakeet.cpp) for CUDA updates.
+
+### Linux with an NVIDIA GPU (NeMo wrapper, CUDA)
+
+If you have an NVIDIA GPU on Linux, NVIDIA's [NeMo toolkit](https://github.com/NVIDIA/NeMo)
+supports Parakeet natively with full CUDA acceleration. The `parakeet_binary`
+config key accepts any executable that follows the parakeet.cpp CLI contract,
+so you can point it at a small Python wrapper around NeMo and get GPU-backed
+transcription without waiting on parakeet.cpp CUDA support.
+
+This approach was contributed by [@ed0c](https://github.com/silverstein/minutes/issues/122).
+Tested on an RTX 3090 with CUDA 13.2: a 68-minute French meeting transcribes
+in about 3.5 minutes total, with quality that beats Whisper large-v3 on
+mixed-language audio.
+
+**1. Create a Python venv with NeMo**
+
+```bash
+python3 -m venv ~/parakeet-env
+source ~/parakeet-env/bin/activate
+pip install nemo_toolkit[asr]
+```
+
+**2. Create the wrapper script**
+
+Save this as `~/bin/parakeet-nemo` (or any path you control) and `chmod +x` it:
+
+```bash
+#!/bin/bash
+source ~/parakeet-env/bin/activate
+
+python3 - "$@" << 'EOF'
+import sys
+import os
+import contextlib
+
+os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
+
+audio_files = [a for a in sys.argv[1:] if a.endswith('.wav')]
+if not audio_files:
+    sys.exit(0)
+
+with contextlib.redirect_stdout(sys.stderr):
+    import nemo.collections.asr as nemo_asr
+    model = nemo_asr.models.ASRModel.from_pretrained('nvidia/parakeet-tdt-0.6b-v3')
+    model = model.cuda()
+
+output = model.transcribe(audio_files, timestamps=True)
+for result in output:
+    segments = result.timestamp.get('segment', [])
+    if segments:
+        for seg in segments:
+            text = seg['segment'].strip()
+            if text:
+                sys.stdout.write(f"[{seg['start']:.2f} - {seg['end']:.2f}] {text}\n")
+                sys.stdout.flush()
+    elif result.text.strip():
+        sys.stdout.write(f"[0.00 - 1.00] {result.text.strip()}\n")
+        sys.stdout.flush()
+EOF
+```
+
+**3. Point Minutes at it**
+
+In `~/.config/minutes/config.toml`:
+
+```toml
+[transcription]
+engine = "parakeet"
+parakeet_binary = "/home/you/bin/parakeet-nemo"
+parakeet_model = "tdt-600m"
+parakeet_vocab = "tdt-600m.tokenizer.vocab"
+```
+
+**Known limitation: per-chunk model reload**
+
+Minutes invokes the parakeet binary once per audio chunk, so the NeMo
+wrapper reloads the model from disk cache on every call (about 4 to 5
+seconds of overhead per chunk). For long recordings this adds up. A
+persistent daemon that keeps the model resident in VRAM eliminates the
+reload cost; see [#122](https://github.com/silverstein/minutes/issues/122)
+if you want to help land one.
 
 ## Build parakeet.cpp
 

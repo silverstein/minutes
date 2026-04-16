@@ -821,7 +821,9 @@ pub fn transcribe_to_artifact(
         decode_hints,
     )?;
     let transcript = if content_type == ContentType::Meeting {
-        if let Some(identity) = Some(&config.identity).filter(|identity| user_is_participant(&attendees, identity)) {
+        if let Some(identity) =
+            Some(&config.identity).filter(|identity| user_is_participant(&attendees, identity))
+        {
             if let Some(canonical) = identity.name.as_deref() {
                 let variants = collect_user_participant_variants(&attendees, identity);
                 normalize_self_name_refs_in_transcript(&result.text, canonical, &variants)
@@ -2417,7 +2419,10 @@ pub(crate) fn build_decode_hints(
     crate::transcribe::DecodeHints::from_candidates(&priority, &contextual)
 }
 
-fn collect_user_participant_variants(attendees: &[String], identity: &IdentityConfig) -> Vec<String> {
+fn collect_user_participant_variants(
+    attendees: &[String],
+    identity: &IdentityConfig,
+) -> Vec<String> {
     let Some(name) = identity
         .name
         .as_deref()
@@ -2491,7 +2496,12 @@ fn rewrite_intro_prefix_case_insensitive(
         return None;
     }
 
-    Some(format!("{}{}{}", &body[..prefix.len()], replacement, remainder))
+    Some(format!(
+        "{}{}{}",
+        &body[..prefix.len()],
+        replacement,
+        remainder
+    ))
 }
 
 fn rewrite_exact_prefix_case_insensitive(
@@ -2529,11 +2539,7 @@ fn levenshtein_distance_ascii(a: &str, b: &str) -> usize {
     for (i, row) in dp.iter_mut().enumerate().take(a_bytes.len() + 1) {
         row[0] = i;
     }
-    for (j, cell) in dp[0]
-        .iter_mut()
-        .enumerate()
-        .take(b_bytes.len() + 1)
-    {
+    for (j, cell) in dp[0].iter_mut().enumerate().take(b_bytes.len() + 1) {
         *cell = j;
     }
     for i in 1..=a_bytes.len() {
@@ -4773,11 +4779,8 @@ mod tests {
     #[test]
     fn normalize_self_name_refs_in_transcript_rewrites_intro_patterns_only() {
         let transcript = "[SPEAKER_1 0:00] Hey, this is Matt testing one more time.\n[SPEAKER_1 0:04] Matt is testing the path repro.\n[SPEAKER_2 0:08] Another speaker said Matt Mullenweg messaged me.\n";
-        let normalized = normalize_self_name_refs_in_transcript(
-            transcript,
-            "Mat",
-            &["Matt".into()],
-        );
+        let normalized =
+            normalize_self_name_refs_in_transcript(transcript, "Mat", &["Matt".into()]);
 
         assert!(normalized.contains("Hey, this is Mat testing one more time."));
         assert!(normalized.contains("Mat is testing the path repro."));
@@ -4806,10 +4809,8 @@ mod tests {
             aliases: vec!["Mathieu".into()],
         };
 
-        let variants = collect_user_participant_variants(
-            &["Matt".into(), "Alex Chen".into()],
-            &identity,
-        );
+        let variants =
+            collect_user_participant_variants(&["Matt".into(), "Alex Chen".into()], &identity);
 
         // "Matt" no longer needs to be treated as an explicit participant
         // variant here because the guarded intro matcher handles close

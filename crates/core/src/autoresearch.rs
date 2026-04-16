@@ -442,8 +442,11 @@ fn transcribe_case(
     }?;
 
     if case.content_type == ContentType::Meeting && !hints.is_empty() {
-        result.text =
-            normalize_transcript_for_self_name_participant(&result.text, &case.attendees, &config.identity);
+        result.text = normalize_transcript_for_self_name_participant(
+            &result.text,
+            &case.attendees,
+            &config.identity,
+        );
     }
 
     Ok(result)

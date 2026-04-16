@@ -589,7 +589,7 @@ pub fn person_profile(config: &Config, person: &str) -> Result<PersonProfile, Se
         }
     }
 
-    parsed_frontmatters.sort_by(|a, b| b.1.date.cmp(&a.1.date));
+    parsed_frontmatters.sort_by_key(|entry| std::cmp::Reverse(entry.1.date));
 
     let mut recent_meetings = Vec::new();
     let mut open_intents = Vec::new();

@@ -16,7 +16,7 @@ export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-11.0}"
 # cargo-tauri to produce a signed + notarized bundle.
 
 echo "=== Building CLI (release) ==="
-cargo build --release -p minutes-cli
+cargo build --release -p minutes-cli --features metal
 
 echo "=== Building calendar helper ==="
 swiftc -O \
@@ -26,7 +26,7 @@ swiftc -O \
 echo "  Built target/release/calendar-events"
 
 echo "=== Building Tauri app ==="
-cargo tauri build --bundles app
+cargo tauri build --features metal --bundles app
 
 echo "=== Embedding calendar helper in app bundle ==="
 APP_RESOURCES="target/release/bundle/macos/Minutes.app/Contents/Resources"

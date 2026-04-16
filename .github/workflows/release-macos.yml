@@ -96,7 +96,7 @@ jobs:
           APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
-        run: cargo tauri build --features parakeet --bundles app,dmg
+        run: cargo tauri build --features parakeet,metal --bundles app,dmg
 
       - name: Upload signed app bundle
         uses: actions/upload-artifact@v4

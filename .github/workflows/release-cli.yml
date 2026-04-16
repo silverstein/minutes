@@ -24,14 +24,17 @@ jobs:
             os: macos-latest
             binary: minutes
             asset: minutes-macos-arm64
+            features: parakeet,metal
           - target: x86_64-pc-windows-msvc
             os: windows-latest
             binary: minutes.exe
             asset: minutes-windows-x64.exe
+            features: parakeet
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
             binary: minutes
             asset: minutes-linux-x64
+            features: parakeet
 
     steps:
       - uses: actions/checkout@v4
@@ -59,7 +62,7 @@ jobs:
           key: ${{ runner.os }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Build release binary
-        run: cargo build --release -p minutes-cli --features parakeet --target ${{ matrix.target }}
+        run: cargo build --release -p minutes-cli --features ${{ matrix.features }} --target ${{ matrix.target }}
 
       - name: Rename binary
         shell: bash

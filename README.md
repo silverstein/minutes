@@ -739,28 +739,31 @@ If `minutes health` flags the mic as missing, the ChromeOS mic toggle is off —
 
 If Crostini support breaks for you, please [open an issue](https://github.com/silverstein/minutes/issues) — Chromebook isn't a first-class test target yet, so real bug reports are the fastest way to harden it.
 
-### GPU acceleration (optional)
+### GPU acceleration
 
-Build with GPU support for significantly faster transcription:
+macOS release binaries (DMG + `cargo install minutes-cli` from published CI
+artifacts) ship with Metal enabled — `large-v3` runs ~2× faster than the
+CPU-only build and offloads nearly all work to the GPU. Other backends remain
+opt-in at build time.
 
-| Backend | Platform | Feature flag | Prerequisites |
-|---------|----------|-------------|---------------|
-| Metal | macOS | `metal` | Xcode Command Line Tools |
-| CoreML | macOS | `coreml` | Xcode Command Line Tools |
-| CUDA | Windows/Linux | `cuda` | [CUDA Toolkit](https://developer.nvidia.com/cuda-toolkit) |
-| ROCm/HIP | Linux | `hipblas` | [ROCm](https://rocm.docs.amd.com/) 6.1+ (`hipcc`, `hipblas`, `rocblas`) |
-| Vulkan | Windows/Linux | `vulkan` | [Vulkan SDK](https://vulkan.lunarg.com/sdk/home) (+ `vulkan-headers` on Arch) |
+| Backend | Platform | Feature flag | Prerequisites | Default in release |
+|---------|----------|-------------|---------------|--------------------|
+| Metal | macOS | `metal` | Xcode Command Line Tools | **Yes** |
+| CoreML | macOS | `coreml` | Xcode Command Line Tools + `.mlmodelc` bundle | No |
+| CUDA | Windows/Linux | `cuda` | [CUDA Toolkit](https://developer.nvidia.com/cuda-toolkit) | No |
+| ROCm/HIP | Linux | `hipblas` | [ROCm](https://rocm.docs.amd.com/) 6.1+ (`hipcc`, `hipblas`, `rocblas`) | No |
+| Vulkan | Windows/Linux | `vulkan` | [Vulkan SDK](https://vulkan.lunarg.com/sdk/home) (+ `vulkan-headers` on Arch) | No |
 
 Metal is the only backend that is exercised daily by the maintainer. CUDA, ROCm/HIP,
 and Vulkan should be considered experimental: they wire through to whisper.cpp via
 whisper-rs and are expected to work, but have not been validated in CI.
 
 ```bash
-# Apple Metal (macOS)
+# Apple Metal (macOS) — already enabled in the release DMG; use this for source builds
 cargo install --path crates/cli --features metal
 
-# Apple CoreML (macOS Neural Engine)
-cargo install --path crates/cli --features coreml
+# Apple CoreML (macOS Neural Engine) — encoder-only; see note below
+cargo install --path crates/cli --features metal,coreml
 
 # NVIDIA GPU (Windows/Linux)
 cargo install --path crates/cli --features cuda
@@ -771,6 +774,15 @@ cargo install --path crates/cli --features hipblas
 # Vulkan (Windows/Linux — experimental)
 cargo install --path crates/cli --features vulkan
 ```
+
+> **CoreML note:** `--features coreml` only accelerates the Whisper encoder on
+> the Apple Neural Engine. It requires the companion `ggml-<model>-encoder.mlmodelc`
+> bundle next to the `.bin` weights (e.g. for `large-v3`, download
+> [`ggml-large-v3-encoder.mlmodelc.zip`](https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-encoder.mlmodelc.zip)
+> and unzip into `~/.minutes/models/`). Without it, whisper.cpp silently falls
+> back to the CPU/Metal encoder. Stack it with `metal` for the best of both
+> worlds — a subsequent PR will fetch the bundle automatically from
+> `minutes setup --model large-v3 --coreml`.
 
 > **Windows CUDA users:** You may need to set environment variables before building:
 > ```powershell

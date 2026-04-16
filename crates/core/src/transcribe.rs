@@ -176,6 +176,24 @@ impl DecodeHints {
         self.priority_phrases.is_empty() && self.contextual_phrases.is_empty()
     }
 
+    pub fn with_additional_candidates(&self, priority: &[String], contextual: &[String]) -> Self {
+        let mut merged_priority = self.priority_phrases.clone();
+        merged_priority.extend(priority.iter().cloned());
+
+        let mut merged_contextual = self.contextual_phrases.clone();
+        merged_contextual.extend(contextual.iter().cloned());
+
+        Self::from_candidates(&merged_priority, &merged_contextual)
+    }
+
+    pub(crate) fn debug_priority_phrases(&self) -> Vec<String> {
+        self.priority_phrases.clone()
+    }
+
+    pub(crate) fn debug_contextual_phrases(&self) -> Vec<String> {
+        self.contextual_phrases.clone()
+    }
+
     fn combined_phrases(&self, limit: usize) -> Vec<String> {
         self.priority_phrases
             .iter()
@@ -3465,6 +3483,25 @@ Hello there.
         assert!(prompt.contains("Alex Chen"));
         assert!(prompt.contains("X1 Planning"));
         assert!(prompt.contains("Preserve spelling exactly"));
+    }
+
+    #[test]
+    fn decode_hints_merge_additional_candidates() {
+        let base = DecodeHints::from_candidates(&["Mat".to_string()], &["X1 Planning".to_string()]);
+        let merged = base.with_additional_candidates(
+            &["Garrett Gunderson".to_string()],
+            &["Well Factory".to_string()],
+        );
+
+        assert_eq!(
+            merged.combined_phrases(10),
+            vec![
+                "Mat".to_string(),
+                "Garrett Gunderson".to_string(),
+                "X1 Planning".to_string(),
+                "Well Factory".to_string(),
+            ]
+        );
     }
 
     #[test]

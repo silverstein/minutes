@@ -1,7 +1,7 @@
 // Generated from manifest.json by scripts/sync_site_release_version.mjs.
 // Do not edit by hand.
 
-export const MINUTES_RELEASE_VERSION = "0.12.1";
+export const MINUTES_RELEASE_VERSION = "0.12.2";
 export const MINUTES_RELEASE_TAG = `v${MINUTES_RELEASE_VERSION}`;
 
 export const APPLE_SILICON_DMG =

@@ -125,6 +125,141 @@ pub struct TranscribeResult {
     pub stats: FilterStats,
 }
 
+/// Meeting-local lexical hints that can safely inform batch decoding.
+///
+/// These are intentionally narrower than the global graph-derived phrase set:
+/// the goal is to bias decoding toward names and terms that are plausible in
+/// this specific recording, without dragging in the user's full history.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DecodeHints {
+    priority_phrases: Vec<String>,
+    contextual_phrases: Vec<String>,
+}
+
+impl DecodeHints {
+    pub fn from_candidates(priority: &[String], contextual: &[String]) -> Self {
+        let mut seen = std::collections::HashSet::new();
+        let mut priority_phrases = Vec::new();
+        let mut contextual_phrases = Vec::new();
+
+        for candidate in priority {
+            if let Some(normalized) = normalize_decode_hint_candidate(candidate, true) {
+                let key = normalized.to_ascii_lowercase();
+                if seen.insert(key) {
+                    priority_phrases.push(normalized);
+                }
+            }
+            if priority_phrases.len() >= 8 {
+                break;
+            }
+        }
+
+        for candidate in contextual {
+            if let Some(normalized) = normalize_decode_hint_candidate(candidate, false) {
+                let key = normalized.to_ascii_lowercase();
+                if seen.insert(key) {
+                    contextual_phrases.push(normalized);
+                }
+            }
+            if contextual_phrases.len() >= 6 {
+                break;
+            }
+        }
+
+        Self {
+            priority_phrases,
+            contextual_phrases,
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.priority_phrases.is_empty() && self.contextual_phrases.is_empty()
+    }
+
+    fn combined_phrases(&self, limit: usize) -> Vec<String> {
+        self.priority_phrases
+            .iter()
+            .chain(self.contextual_phrases.iter())
+            .take(limit)
+            .cloned()
+            .collect()
+    }
+
+    pub fn whisper_initial_prompt(&self) -> Option<String> {
+        let phrases = self.combined_phrases(12);
+        if phrases.is_empty() {
+            return None;
+        }
+        Some(format!(
+            "Names and terms that may appear in this audio: {}. Preserve spelling exactly when heard.",
+            phrases.join(", ")
+        ))
+    }
+
+    #[cfg(feature = "parakeet")]
+    fn parakeet_local_boost_phrases(&self) -> Vec<String> {
+        self.combined_phrases(8)
+            .into_iter()
+            .filter(|phrase| {
+                let has_digit = phrase.chars().any(|c| c.is_ascii_digit());
+                let token_count = phrase.split_whitespace().count();
+                has_digit || token_count > 1
+            })
+            .collect()
+    }
+}
+
+fn normalize_decode_hint_candidate(
+    candidate: &str,
+    allow_short_single_token: bool,
+) -> Option<String> {
+    let trimmed = candidate
+        .trim()
+        .trim_matches(|c: char| c == '"' || c == '\'')
+        .trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let lower = trimmed.to_ascii_lowercase();
+    if matches!(
+        lower.as_str(),
+        "unknown"
+            | "unknown speaker"
+            | "speaker 0"
+            | "speaker 1"
+            | "speaker 2"
+            | "speaker 3"
+            | "unassigned"
+    ) {
+        return None;
+    }
+    if let Some((local, domain)) = trimmed.split_once('@') {
+        if !local.is_empty() && domain.contains('.') {
+            return None;
+        }
+    }
+
+    let word_count = trimmed.split_whitespace().count();
+    let has_signal = trimmed
+        .chars()
+        .any(|c| c.is_ascii_uppercase() || c.is_ascii_digit());
+    if word_count == 1 {
+        let len = trimmed.chars().count();
+        if len < 3 && !trimmed.chars().any(|c| c.is_ascii_digit()) {
+            return None;
+        }
+        if !allow_short_single_token && len < 5 && !trimmed.chars().any(|c| c.is_ascii_digit()) {
+            return None;
+        }
+        if !has_signal && trimmed.chars().all(|c| c.is_ascii_lowercase()) {
+            return None;
+        }
+    }
+
+    Some(trimmed.to_string())
+}
+
 // ──────────────────────────────────────────────────────────────
 // Transcription pipeline:
 //
@@ -152,22 +287,31 @@ pub struct TranscribeResult {
 /// Handles format conversion (m4a/mp3/ogg → PCM) automatically via symphonia.
 /// Both engines produce identical output format: `[M:SS] text` lines.
 pub fn transcribe(audio_path: &Path, config: &Config) -> Result<TranscribeResult, TranscribeError> {
-    transcribe_dispatch(audio_path, config)
+    transcribe_with_hints(audio_path, config, &DecodeHints::default())
+}
+
+pub fn transcribe_with_hints(
+    audio_path: &Path,
+    config: &Config,
+    hints: &DecodeHints,
+) -> Result<TranscribeResult, TranscribeError> {
+    transcribe_dispatch(audio_path, config, hints)
 }
 
 fn transcribe_dispatch(
     audio_path: &Path,
     config: &Config,
+    hints: &DecodeHints,
 ) -> Result<TranscribeResult, TranscribeError> {
     match config.transcription.engine.as_str() {
-        "whisper" => transcribe_whisper_dispatch(audio_path, config),
-        "parakeet" => transcribe_parakeet_dispatch(audio_path, config),
+        "whisper" => transcribe_whisper_dispatch(audio_path, config, hints),
+        "parakeet" => transcribe_parakeet_dispatch(audio_path, config, hints),
         other => {
             tracing::warn!(
                 engine = other,
                 "unknown transcription engine — falling back to whisper"
             );
-            transcribe_whisper_dispatch(audio_path, config)
+            transcribe_whisper_dispatch(audio_path, config, hints)
         }
     }
 }
@@ -244,6 +388,7 @@ fn transcribe_chunk_ranges(
     chunk_ranges: &[(usize, usize)],
     audio_duration_secs: f64,
     config: &Config,
+    hints: &DecodeHints,
 ) -> Result<Option<TranscribeResult>, TranscribeError> {
     let mut all_lines = Vec::new();
     let mut aggregate = FilterStats {
@@ -260,7 +405,7 @@ fn transcribe_chunk_ranges(
         let tmp_wav = temp_wav_path("minutes-meeting-chunk")?;
         write_wav_16k_mono(&tmp_wav, chunk_samples)?;
 
-        let chunk_result = match transcribe_dispatch(&tmp_wav, config) {
+        let chunk_result = match transcribe_dispatch(&tmp_wav, config, hints) {
             Ok(result) => result,
             Err(TranscribeError::EmptyAudio) | Err(TranscribeError::EmptyTranscript(_)) => {
                 tracing::debug!(
@@ -320,6 +465,14 @@ pub fn transcribe_meeting(
     audio_path: &Path,
     config: &Config,
 ) -> Result<TranscribeResult, TranscribeError> {
+    transcribe_meeting_with_hints(audio_path, config, &DecodeHints::default())
+}
+
+pub fn transcribe_meeting_with_hints(
+    audio_path: &Path,
+    config: &Config,
+    hints: &DecodeHints,
+) -> Result<TranscribeResult, TranscribeError> {
     const MIN_MEETING_CHUNKS: usize = 2;
 
     let samples = load_audio_samples(audio_path)?;
@@ -327,7 +480,7 @@ pub fn transcribe_meeting(
     let vad_chunks = detect_meeting_vad_chunks(&samples);
 
     if vad_chunks.len() < MIN_MEETING_CHUNKS {
-        return transcribe_dispatch(audio_path, config);
+        return transcribe_dispatch(audio_path, config, hints);
     }
 
     tracing::info!(
@@ -337,18 +490,19 @@ pub fn transcribe_meeting(
     );
 
     if let Some(result) =
-        transcribe_chunk_ranges(&samples, &vad_chunks, audio_duration_secs, config)?
+        transcribe_chunk_ranges(&samples, &vad_chunks, audio_duration_secs, config, hints)?
     {
         return Ok(result);
     }
 
-    transcribe_dispatch(audio_path, config)
+    transcribe_dispatch(audio_path, config, hints)
 }
 
 /// Whisper transcription path (existing behavior).
 fn transcribe_whisper_dispatch(
     audio_path: &Path,
     config: &Config,
+    hints: &DecodeHints,
 ) -> Result<TranscribeResult, TranscribeError> {
     let mut stats = FilterStats::default();
 
@@ -396,7 +550,7 @@ fn transcribe_whisper_dispatch(
     // Step 3: Transcribe
     #[cfg(feature = "whisper")]
     {
-        let result = transcribe_with_whisper(&samples, audio_path, config, stats, false)?;
+        let result = transcribe_with_whisper(&samples, audio_path, config, stats, false, hints)?;
 
         // Step 4: Auto-retry without VAD if the first attempt blanked on long audio.
         // Silero VAD can be too aggressive on certain acoustic profiles or non-English
@@ -418,7 +572,14 @@ fn transcribe_whisper_dispatch(
             let stripped = strip_silence(&samples, 16000);
             retry_stats.samples_after_silence_strip = stripped.len();
             if !stripped.is_empty() {
-                return transcribe_with_whisper(&stripped, audio_path, config, retry_stats, true);
+                return transcribe_with_whisper(
+                    &stripped,
+                    audio_path,
+                    config,
+                    retry_stats,
+                    true,
+                    hints,
+                );
             }
         }
 
@@ -428,6 +589,7 @@ fn transcribe_whisper_dispatch(
     #[cfg(not(feature = "whisper"))]
     {
         let _ = config; // suppress unused warning
+        let _ = hints; // only used when the whisper feature is enabled
         let duration_secs = samples.len() as f64 / 16000.0;
         let text = format!(
             "[Transcription placeholder — whisper feature not enabled]\n\
@@ -448,6 +610,7 @@ fn transcribe_whisper_dispatch(
 fn transcribe_parakeet_dispatch(
     audio_path: &Path,
     config: &Config,
+    hints: &DecodeHints,
 ) -> Result<TranscribeResult, TranscribeError> {
     #[cfg(feature = "parakeet")]
     {
@@ -478,21 +641,25 @@ fn transcribe_parakeet_dispatch(
                 native_vad = native_vad_path.is_some(),
                 "chunking long parakeet transcription to avoid monolithic decode"
             );
-            if let Some(result) =
-                transcribe_chunk_ranges(&samples, &chunk_ranges, audio_duration_secs, config)?
-            {
+            if let Some(result) = transcribe_chunk_ranges(
+                &samples,
+                &chunk_ranges,
+                audio_duration_secs,
+                config,
+                hints,
+            )? {
                 return Ok(result);
             }
             return Err(TranscribeError::EmptyTranscript(
                 config.transcription.min_words,
             ));
         }
-        transcribe_with_parakeet(audio_path, config)
+        transcribe_with_parakeet(audio_path, config, hints)
     }
 
     #[cfg(not(feature = "parakeet"))]
     {
-        let _ = (audio_path, config);
+        let _ = (audio_path, config, hints);
         Err(TranscribeError::EngineNotAvailable("parakeet".into()))
     }
 }
@@ -546,6 +713,7 @@ fn transcribe_with_whisper(
     config: &Config,
     mut stats: FilterStats,
     force_disable_vad: bool,
+    hints: &DecodeHints,
 ) -> Result<TranscribeResult, TranscribeError> {
     // Load whisper model
     let model_path = resolve_model_path(config)?;
@@ -581,6 +749,13 @@ fn transcribe_with_whisper(
     params.set_n_threads(num_cpus());
     params.set_language(config.transcription.language.as_deref());
     params.set_token_timestamps(true);
+    if let Some(initial_prompt) = hints.whisper_initial_prompt() {
+        tracing::debug!(
+            phrases = hints.combined_phrases(12).len(),
+            "applying whisper decode hints"
+        );
+        params.set_initial_prompt(&initial_prompt);
+    }
 
     // Abort callback: prevents infinite hangs on large models with problematic audio.
     // Timeout: base 5 min + 3x audio length, capped at 1 hour.
@@ -1363,6 +1538,7 @@ fn num_cpus() -> i32 {
 fn transcribe_with_parakeet(
     audio_path: &Path,
     config: &Config,
+    hints: &DecodeHints,
 ) -> Result<TranscribeResult, TranscribeError> {
     let mut stats = FilterStats::default();
 
@@ -1432,6 +1608,7 @@ fn transcribe_with_parakeet(
             native_vad_path.as_deref(),
             tmp_wav.path(),
             sidecar_audio_duration_secs,
+            hints,
         ) {
             Ok(result) => {
                 tracing::info!(
@@ -1483,7 +1660,8 @@ fn transcribe_with_parakeet(
 
     let use_gpu = cfg!(all(target_os = "macos", target_arch = "aarch64"));
     let use_fp16 = use_gpu && config.transcription.parakeet_fp16;
-    let helper_allowed = std::env::var_os("MINUTES_PARAKEET_FORCE_DIRECT").is_none()
+    let helper_allowed = hints.is_empty()
+        && std::env::var_os("MINUTES_PARAKEET_FORCE_DIRECT").is_none()
         && std::env::var_os("MINUTES_PARAKEET_HELPER_ACTIVE").is_none();
     let parsed = if helper_allowed {
         if let Some(helper_path) = resolve_minutes_parakeet_helper() {
@@ -1543,6 +1721,7 @@ fn transcribe_with_parakeet(
                         native_vad_path.as_deref(),
                         PARAKEET_NATIVE_VAD_THRESHOLD,
                         config,
+                        hints,
                     ) {
                         Ok(parsed) => parsed,
                         Err(error @ TranscribeError::EmptyAudio)
@@ -1570,6 +1749,7 @@ fn transcribe_with_parakeet(
                     native_vad_path.as_deref(),
                     PARAKEET_NATIVE_VAD_THRESHOLD,
                     config,
+                    hints,
                 )?,
             }
         } else {
@@ -1583,6 +1763,7 @@ fn transcribe_with_parakeet(
                 native_vad_path.as_deref(),
                 PARAKEET_NATIVE_VAD_THRESHOLD,
                 config,
+                hints,
             )?
         }
     } else {
@@ -1596,6 +1777,7 @@ fn transcribe_with_parakeet(
             native_vad_path.as_deref(),
             PARAKEET_NATIVE_VAD_THRESHOLD,
             config,
+            hints,
         )?
     };
     let elapsed_ms = invocation_started.elapsed().as_millis() as u64;
@@ -1724,28 +1906,56 @@ fn parakeet_seen_models() -> &'static Mutex<HashSet<String>> {
 }
 
 #[cfg(feature = "parakeet")]
-fn append_parakeet_boost_args(command: &mut std::process::Command, config: &Config) {
+pub(crate) fn combined_parakeet_boost_phrases(config: &Config, hints: &DecodeHints) -> Vec<String> {
+    let mut phrases = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    for phrase in hints.parakeet_local_boost_phrases() {
+        let key = phrase.to_ascii_lowercase();
+        if seen.insert(key) {
+            phrases.push(phrase);
+        }
+    }
+
     let limit = config.transcription.parakeet_boost_limit;
-    if limit == 0 {
+    if limit > 0 {
+        match crate::graph::parakeet_boost_phrases(limit) {
+            Ok(global_phrases) => {
+                for phrase in global_phrases {
+                    let key = phrase.to_ascii_lowercase();
+                    if seen.insert(key) {
+                        phrases.push(phrase);
+                    }
+                }
+            }
+            Err(error) => {
+                tracing::debug!(error = %error, "could not load parakeet boost phrases");
+            }
+        }
+    }
+
+    phrases
+}
+
+#[cfg(feature = "parakeet")]
+fn append_parakeet_boost_args(
+    command: &mut std::process::Command,
+    config: &Config,
+    hints: &DecodeHints,
+) {
+    let phrases = combined_parakeet_boost_phrases(config, hints);
+    if phrases.is_empty() {
         return;
     }
 
-    match crate::graph::parakeet_boost_phrases(limit) {
-        Ok(phrases) if !phrases.is_empty() => {
-            command.args([
-                "--boost-score",
-                &config.transcription.parakeet_boost_score.to_string(),
-            ]);
-            for phrase in &phrases {
-                command.args(["--boost", phrase]);
-            }
-            tracing::debug!(phrases = phrases.len(), "applied parakeet boost phrases");
-        }
-        Ok(_) => {}
-        Err(error) => {
-            tracing::debug!(error = %error, "could not load parakeet boost phrases");
-        }
+    command.args([
+        "--boost-score",
+        &config.transcription.parakeet_boost_score.to_string(),
+    ]);
+    for phrase in &phrases {
+        command.args(["--boost", phrase]);
     }
+    tracing::debug!(phrases = phrases.len(), "applied parakeet boost phrases");
 }
 
 #[cfg(feature = "parakeet")]
@@ -1792,6 +2002,7 @@ pub fn run_parakeet_cli_structured(
     vad_path: Option<&Path>,
     vad_threshold: f32,
     config: &Config,
+    hints: &DecodeHints,
 ) -> Result<ParakeetCliTranscript, TranscribeError> {
     use std::process::Command;
 
@@ -1824,7 +2035,7 @@ pub fn run_parakeet_cli_structured(
             .args(["--vad", vad_path])
             .args(["--vad-threshold", &vad_threshold.to_string()]);
     }
-    append_parakeet_boost_args(&mut command, config);
+    append_parakeet_boost_args(&mut command, config, hints);
     let output = command
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -1860,6 +2071,7 @@ pub fn run_parakeet_cli_structured_batch(
     vad_path: Option<&Path>,
     vad_threshold: f32,
     config: &Config,
+    hints: &DecodeHints,
 ) -> Result<Vec<Result<ParakeetCliTranscript, TranscribeError>>, TranscribeError> {
     use std::process::Command;
 
@@ -1899,7 +2111,7 @@ pub fn run_parakeet_cli_structured_batch(
             .args(["--vad", vad_path])
             .args(["--vad-threshold", &vad_threshold.to_string()]);
     }
-    append_parakeet_boost_args(&mut command, config);
+    append_parakeet_boost_args(&mut command, config, hints);
 
     let output = command
         .stdout(std::process::Stdio::piped())
@@ -2300,6 +2512,7 @@ pub fn transcribe_parakeet_batch(
         native_vad_path.as_deref(),
         PARAKEET_NATIVE_VAD_THRESHOLD,
         config,
+        &DecodeHints::default(),
     )?;
     let elapsed_ms = invocation_started.elapsed().as_millis() as u64;
 
@@ -2373,7 +2586,7 @@ pub fn warmup_parakeet(config: &Config) -> Result<ParakeetWarmupStats, Transcrib
             &PARAKEET_NATIVE_VAD_THRESHOLD.to_string(),
         ]);
     }
-    append_parakeet_boost_args(&mut command, config);
+    append_parakeet_boost_args(&mut command, config, &DecodeHints::default());
     let output = command
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
@@ -3211,5 +3424,62 @@ Hello there.
         let short_audio = 30.0_f64;
         let timeout = (300.0 + (short_audio * 3.0)).min(3600.0);
         assert_eq!(timeout, 390.0, "short audio should not be capped");
+    }
+
+    #[test]
+    fn decode_hints_keep_priority_names_and_filter_weak_context() {
+        let hints = DecodeHints::from_candidates(
+            &[
+                "Mat".to_string(),
+                "Mathieu".to_string(),
+                "Mat".to_string(),
+                "alex@example.com".to_string(),
+            ],
+            &[
+                "X1 Integration".to_string(),
+                "Box".to_string(),
+                "plan".to_string(),
+                "AI".to_string(),
+            ],
+        );
+
+        assert_eq!(
+            hints.combined_phrases(10),
+            vec![
+                "Mat".to_string(),
+                "Mathieu".to_string(),
+                "X1 Integration".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn decode_hints_build_whisper_prompt() {
+        let hints = DecodeHints::from_candidates(
+            &["Mat".to_string(), "Alex Chen".to_string()],
+            &["X1 Planning".to_string()],
+        );
+
+        let prompt = hints.whisper_initial_prompt().expect("prompt");
+        assert!(prompt.contains("Mat"));
+        assert!(prompt.contains("Alex Chen"));
+        assert!(prompt.contains("X1 Planning"));
+        assert!(prompt.contains("Preserve spelling exactly"));
+    }
+
+    #[test]
+    #[cfg(feature = "parakeet")]
+    fn local_parakeet_hints_apply_even_when_global_boost_disabled() {
+        let config = Config::default();
+        let hints = DecodeHints::from_candidates(
+            &["Mat".to_string(), "Alex Chen".to_string()],
+            &["X1 Planning".to_string()],
+        );
+
+        let phrases = combined_parakeet_boost_phrases(&config, &hints);
+        assert_eq!(
+            phrases,
+            vec!["Alex Chen".to_string(), "X1 Planning".to_string(),]
+        );
     }
 }

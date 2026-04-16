@@ -69,10 +69,36 @@ pub struct CallDetectedPayload {
     pub is_reminder: bool,
 }
 
+/// Emitted when the call app that triggered the current recording is no
+/// longer detected. The frontend shows a countdown banner with Stop now /
+/// Keep recording, and the backend arms a cancellable auto-stop timer.
+#[derive(Clone, serde::Serialize)]
+pub struct CallEndedPayload {
+    pub app_name: String,
+    pub process_name: String,
+    pub countdown_secs: u64,
+}
+
+/// Handles shared with the desktop app state so this module can observe and
+/// arm the auto-stop countdown without having to reach into `commands::AppState`
+/// directly.
+#[derive(Clone)]
+pub struct CallEndAutoStopHandles {
+    pub recording_started_by_call_detect: Arc<AtomicBool>,
+    pub countdown_cancel: Arc<AtomicBool>,
+    pub countdown_active: Arc<AtomicBool>,
+    pub stop_flag: Arc<AtomicBool>,
+}
+
 #[derive(Clone)]
 struct ActiveCallState {
     process_name: String,
+    display_name: String,
     last_notified_at: Instant,
+    /// Set after `call:ended` has been emitted for the current session.
+    /// Keeps repeated "no longer detected" polls from re-arming the
+    /// countdown if the user hit "Keep recording".
+    call_end_fired: bool,
 }
 
 enum DetectionTransition {
@@ -134,6 +160,7 @@ impl CallDetector {
         app: tauri::AppHandle,
         recording: Arc<AtomicBool>,
         _processing: Arc<AtomicBool>,
+        auto_stop: CallEndAutoStopHandles,
     ) {
         let startup_config = self.current_config();
         let interval = Duration::from_secs(startup_config.poll_interval_secs.max(1));
@@ -178,8 +205,16 @@ impl CallDetector {
                 let interval = Duration::from_secs(config.poll_interval_secs.max(1));
                 std::thread::sleep(interval);
 
-                // Skip only while the mic is already in use.
-                if recording.load(Ordering::Relaxed) {
+                let is_recording = recording.load(Ordering::Relaxed);
+                let started_by_call_detect = auto_stop
+                    .recording_started_by_call_detect
+                    .load(Ordering::Relaxed);
+
+                // Default behavior preserved: when something else is recording
+                // (manual `minutes record`, hotkey, live transcript), skip detection
+                // entirely. Only observe calls when the detector's own banner
+                // launched this recording AND the user opted into auto-stop.
+                if is_recording && !(started_by_call_detect && config.stop_when_call_ends) {
                     continue;
                 }
 
@@ -188,7 +223,14 @@ impl CallDetector {
                         display_name,
                         process_name,
                     } => {
-                        match self.note_active_call(&process_name) {
+                        // Call came back (same app): if the previous call
+                        // already fired a countdown that the user dismissed
+                        // with "Keep recording", clear the latch so a later
+                        // call-end can re-arm the auto-stop prompt.
+                        if is_recording && started_by_call_detect {
+                            self.reset_call_end_latch();
+                        }
+                        match self.note_active_call(&process_name, &display_name) {
                             DetectionTransition::Noop => {}
                             transition => {
                                 let is_reminder =
@@ -253,7 +295,29 @@ impl CallDetector {
                         );
                     }
                     DetectActiveCallResult::None => {
-                        if let Some(previous) = self.clear_active_call() {
+                        // When a recording started via this detector is in
+                        // flight and the call has ended (app quit or mic
+                        // release), arm the auto-stop countdown — once per
+                        // session. The mark_call_end_fired guard keeps
+                        // repeat polls from re-firing if the user already
+                        // hit "Keep recording".
+                        if is_recording && started_by_call_detect && config.stop_when_call_ends {
+                            if let Some((process_name, display_name, already_fired)) =
+                                self.active_call_snapshot()
+                            {
+                                if !already_fired {
+                                    self.mark_call_end_fired();
+                                    self.arm_call_end_countdown(
+                                        &app,
+                                        &auto_stop,
+                                        &recording,
+                                        &display_name,
+                                        &process_name,
+                                        config.call_end_stop_countdown_secs,
+                                    );
+                                }
+                            }
+                        } else if let Some(previous) = self.clear_active_call() {
                             log_call_detect_event(
                                 "info",
                                 "cleared",
@@ -265,6 +329,114 @@ impl CallDetector {
                             );
                         }
                     }
+                }
+            }
+        });
+    }
+
+    /// Emit `call:ended` to the frontend and spawn a thread that auto-stops
+    /// the recording when the countdown elapses, unless the user cancels.
+    /// Returns immediately; the thread owns its own wakeup cadence.
+    fn arm_call_end_countdown(
+        &self,
+        app: &tauri::AppHandle,
+        auto_stop: &CallEndAutoStopHandles,
+        recording: &Arc<AtomicBool>,
+        display_name: &str,
+        process_name: &str,
+        countdown_secs: u64,
+    ) {
+        // Bail if another countdown is already in flight. The UI should only
+        // ever see one active banner per call-end transition.
+        if auto_stop
+            .countdown_active
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return;
+        }
+        auto_stop.countdown_cancel.store(false, Ordering::Relaxed);
+
+        let secs = countdown_secs.max(1);
+        eprintln!(
+            "[call-detect] call ended: {} ({}). Auto-stop armed for {}s",
+            display_name, process_name, secs
+        );
+        log_call_detect_event(
+            "info",
+            "call_ended",
+            Some(display_name),
+            Some(process_name),
+            serde_json::json!({
+                "countdown_secs": secs,
+                "reason": "call app no longer detected while recording",
+            }),
+        );
+
+        app.emit(
+            "call:ended",
+            CallEndedPayload {
+                app_name: display_name.to_string(),
+                process_name: process_name.to_string(),
+                countdown_secs: secs,
+            },
+        )
+        .ok();
+
+        let app_for_thread = app.clone();
+        let cancel = auto_stop.countdown_cancel.clone();
+        let active = auto_stop.countdown_active.clone();
+        let started_by = auto_stop.recording_started_by_call_detect.clone();
+        let stop_flag = auto_stop.stop_flag.clone();
+        let recording_flag = recording.clone();
+        let display_for_thread = display_name.to_string();
+
+        std::thread::spawn(move || {
+            // Poll every 250ms so cancellation and external stops are snappy
+            // without busy-spinning.
+            let tick = Duration::from_millis(250);
+            let total = Duration::from_secs(secs);
+            let start = Instant::now();
+            loop {
+                std::thread::sleep(tick);
+
+                if cancel.load(Ordering::Relaxed) {
+                    eprintln!(
+                        "[call-detect] auto-stop cancelled for {}",
+                        display_for_thread
+                    );
+                    active.store(false, Ordering::Relaxed);
+                    app_for_thread.emit("call:end-countdown:cancelled", ()).ok();
+                    return;
+                }
+
+                if !recording_flag.load(Ordering::Relaxed) {
+                    eprintln!("[call-detect] auto-stop aborted — recording already stopped");
+                    active.store(false, Ordering::Relaxed);
+                    app_for_thread.emit("call:end-countdown:cancelled", ()).ok();
+                    return;
+                }
+
+                if start.elapsed() >= total {
+                    // Timer elapsed: fire stop via the same mechanism as the
+                    // "Stop" button. `request_stop` would require AppState;
+                    // the stop_flag is what the recording loop observes.
+                    eprintln!(
+                        "[call-detect] auto-stop firing stop for {}",
+                        display_for_thread
+                    );
+                    log_call_detect_event(
+                        "info",
+                        "call_end_auto_stop_fired",
+                        Some(&display_for_thread),
+                        None,
+                        serde_json::json!({ "countdown_secs": secs }),
+                    );
+                    stop_flag.store(true, Ordering::Relaxed);
+                    started_by.store(false, Ordering::Relaxed);
+                    active.store(false, Ordering::Relaxed);
+                    app_for_thread.emit("call:end-countdown:fired", ()).ok();
+                    return;
                 }
             }
         });
@@ -358,21 +530,25 @@ impl CallDetector {
         DetectActiveCallResult::None
     }
 
-    fn note_active_call(&self, process_name: &str) -> DetectionTransition {
+    fn note_active_call(&self, process_name: &str, display_name: &str) -> DetectionTransition {
         let mut active = self.active_call.lock().unwrap();
         let now = Instant::now();
         match active.as_mut() {
             None => {
                 *active = Some(ActiveCallState {
                     process_name: process_name.to_string(),
+                    display_name: display_name.to_string(),
                     last_notified_at: now,
+                    call_end_fired: false,
                 });
                 DetectionTransition::NewSession
             }
             Some(state) if state.process_name != process_name => {
                 *state = ActiveCallState {
                     process_name: process_name.to_string(),
+                    display_name: display_name.to_string(),
                     last_notified_at: now,
+                    call_end_fired: false,
                 };
                 DetectionTransition::NewSession
             }
@@ -386,6 +562,33 @@ impl CallDetector {
                     DetectionTransition::Noop
                 }
             }
+        }
+    }
+
+    /// Snapshot of the currently-active call session if any. Returns owned
+    /// strings so callers don't have to hold the lock.
+    fn active_call_snapshot(&self) -> Option<(String, String, bool)> {
+        self.active_call.lock().unwrap().as_ref().map(|state| {
+            (
+                state.process_name.clone(),
+                state.display_name.clone(),
+                state.call_end_fired,
+            )
+        })
+    }
+
+    fn mark_call_end_fired(&self) {
+        if let Some(state) = self.active_call.lock().unwrap().as_mut() {
+            state.call_end_fired = true;
+        }
+    }
+
+    /// Drop the "countdown already fired this session" latch. Used when a
+    /// new call session becomes active during an ongoing recording so
+    /// subsequent call-ends can re-arm the auto-stop prompt.
+    fn reset_call_end_latch(&self) {
+        if let Some(state) = self.active_call.lock().unwrap().as_mut() {
+            state.call_end_fired = false;
         }
     }
 
@@ -739,30 +942,36 @@ fn find_mic_check_binary() -> Option<std::path::PathBuf> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn call_session_rearms_when_process_changes_or_ends() {
-        let detector = CallDetector::new(CallDetectionConfig {
+    fn test_call_detection_config(apps: Vec<String>) -> CallDetectionConfig {
+        CallDetectionConfig {
             enabled: true,
             poll_interval_secs: 1,
             cooldown_minutes: 5,
-            apps: vec!["zoom.us".into()],
-        });
+            apps,
+            stop_when_call_ends: false,
+            call_end_stop_countdown_secs: 30,
+        }
+    }
+
+    #[test]
+    fn call_session_rearms_when_process_changes_or_ends() {
+        let detector = CallDetector::new(test_call_detection_config(vec!["zoom.us".into()]));
 
         assert!(matches!(
-            detector.note_active_call("zoom.us"),
+            detector.note_active_call("zoom.us", "Zoom"),
             DetectionTransition::NewSession
         ));
         assert!(matches!(
-            detector.note_active_call("zoom.us"),
+            detector.note_active_call("zoom.us", "Zoom"),
             DetectionTransition::Noop
         ));
         detector.clear_active_call();
         assert!(matches!(
-            detector.note_active_call("zoom.us"),
+            detector.note_active_call("zoom.us", "Zoom"),
             DetectionTransition::NewSession
         ));
         assert!(matches!(
-            detector.note_active_call("face.time"),
+            detector.note_active_call("face.time", "FaceTime"),
             DetectionTransition::NewSession
         ));
     }
@@ -778,12 +987,10 @@ mod tests {
 
     #[test]
     fn google_meet_detection_is_opt_in_via_sentinel() {
-        let detector = CallDetector::new(CallDetectionConfig {
-            enabled: true,
-            poll_interval_secs: 1,
-            cooldown_minutes: 5,
-            apps: vec!["zoom.us".into(), "google-meet".into()],
-        });
+        let detector = CallDetector::new(test_call_detection_config(vec![
+            "zoom.us".into(),
+            "google-meet".into(),
+        ]));
 
         assert!(detector
             .current_config()
@@ -794,12 +1001,7 @@ mod tests {
 
     #[test]
     fn browser_probe_is_skipped_when_no_browser_processes_exist() {
-        let detector = CallDetector::new(CallDetectionConfig {
-            enabled: true,
-            poll_interval_secs: 1,
-            cooldown_minutes: 5,
-            apps: vec!["google-meet".into()],
-        });
+        let detector = CallDetector::new(test_call_detection_config(vec!["google-meet".into()]));
         let running: Vec<String> = vec!["Finder".into(), "launchd".into()];
         assert!(matches!(
             detector.detect_google_meet_in_browsers(&running),
@@ -839,12 +1041,7 @@ mod tests {
 
     #[test]
     fn browser_probe_backoff_resets_after_expiry() {
-        let detector = CallDetector::new(CallDetectionConfig {
-            enabled: true,
-            poll_interval_secs: 1,
-            cooldown_minutes: 5,
-            apps: vec!["google-meet".into()],
-        });
+        let detector = CallDetector::new(test_call_detection_config(vec!["google-meet".into()]));
 
         detector.defer_browser_probe_for("Google Chrome", "test");
         assert!(!detector.browser_probe_allowed_for("Google Chrome"));
@@ -863,12 +1060,7 @@ mod tests {
 
     #[test]
     fn browser_probe_global_interval_resets_after_expiry() {
-        let detector = CallDetector::new(CallDetectionConfig {
-            enabled: true,
-            poll_interval_secs: 1,
-            cooldown_minutes: 5,
-            apps: vec!["google-meet".into()],
-        });
+        let detector = CallDetector::new(test_call_detection_config(vec!["google-meet".into()]));
 
         detector.schedule_next_browser_probe();
         assert!(!detector.browser_probe_due());
@@ -883,12 +1075,10 @@ mod tests {
 
     #[test]
     fn sticky_google_meet_detection_survives_between_browser_probes() {
-        let detector = CallDetector::new(CallDetectionConfig {
-            enabled: true,
-            poll_interval_secs: 1,
-            cooldown_minutes: 5,
-            apps: vec!["Slack".into(), "google-meet".into()],
-        });
+        let detector = CallDetector::new(test_call_detection_config(vec![
+            "Slack".into(),
+            "google-meet".into(),
+        ]));
 
         detector.remember_google_meet_detection();
         assert!(detector.google_meet_detection_is_sticky());
@@ -903,12 +1093,10 @@ mod tests {
 
     #[test]
     fn native_app_detection_wins_before_browser_meet_probe() {
-        let detector = CallDetector::new(CallDetectionConfig {
-            enabled: true,
-            poll_interval_secs: 1,
-            cooldown_minutes: 5,
-            apps: vec!["zoom.us".into(), "google-meet".into()],
-        });
+        let detector = CallDetector::new(test_call_detection_config(vec![
+            "zoom.us".into(),
+            "google-meet".into(),
+        ]));
 
         let running = ["zoom.us".into(), "Safari".into()];
         let mic_live = true;
@@ -943,12 +1131,7 @@ mod tests {
 
     #[test]
     fn arc_exact_match_does_not_fire_on_system_processes() {
-        let detector = CallDetector::new(CallDetectionConfig {
-            enabled: true,
-            poll_interval_secs: 1,
-            cooldown_minutes: 5,
-            apps: vec!["google-meet".into()],
-        });
+        let detector = CallDetector::new(test_call_detection_config(vec!["google-meet".into()]));
         // These macOS system processes contain "arc" as a substring but must
         // not be treated as the Arc browser.
         let running: Vec<String> = vec![
@@ -964,12 +1147,7 @@ mod tests {
 
     #[test]
     fn arc_exact_match_fires_on_arc_process() {
-        let detector = CallDetector::new(CallDetectionConfig {
-            enabled: true,
-            poll_interval_secs: 1,
-            cooldown_minutes: 5,
-            apps: vec!["google-meet".into()],
-        });
+        let detector = CallDetector::new(test_call_detection_config(vec!["google-meet".into()]));
         // Defer the probe so `detect_google_meet_in_browsers` skips the real
         // AppleScript call to Arc but still records `saw_browser`.
         detector.defer_browser_probe_for("Arc", "test");
@@ -985,12 +1163,10 @@ mod tests {
 
     #[test]
     fn sticky_google_meet_still_wins_when_no_native_app_is_active() {
-        let detector = CallDetector::new(CallDetectionConfig {
-            enabled: true,
-            poll_interval_secs: 1,
-            cooldown_minutes: 5,
-            apps: vec!["zoom.us".into(), "google-meet".into()],
-        });
+        let detector = CallDetector::new(test_call_detection_config(vec![
+            "zoom.us".into(),
+            "google-meet".into(),
+        ]));
 
         detector.remember_google_meet_detection();
         let running = ["Safari".into()];
@@ -1027,5 +1203,59 @@ mod tests {
         // Just verify the function returns without crashing.
         // Will return false unless something is using the mic right now.
         let _result = is_mic_in_use();
+    }
+
+    #[test]
+    fn call_end_fires_once_per_session() {
+        let detector = CallDetector::new(test_call_detection_config(vec!["zoom.us".into()]));
+
+        assert!(matches!(
+            detector.note_active_call("zoom.us", "Zoom"),
+            DetectionTransition::NewSession
+        ));
+
+        let snap = detector.active_call_snapshot().unwrap();
+        assert_eq!(snap.0, "zoom.us");
+        assert_eq!(snap.1, "Zoom");
+        assert!(!snap.2, "call_end_fired should start false");
+
+        detector.mark_call_end_fired();
+        let snap = detector.active_call_snapshot().unwrap();
+        assert!(snap.2, "call_end_fired must flip to true");
+
+        detector.clear_active_call();
+        assert!(
+            detector.active_call_snapshot().is_none(),
+            "clearing the call must reset the snapshot"
+        );
+
+        assert!(matches!(
+            detector.note_active_call("zoom.us", "Zoom"),
+            DetectionTransition::NewSession
+        ));
+        let snap = detector.active_call_snapshot().unwrap();
+        assert!(!snap.2);
+    }
+
+    #[test]
+    fn new_session_after_process_change_resets_call_end_fired() {
+        // Ending Zoom, auto-stopping, then joining a Teams call must let the
+        // Teams session auto-stop too. The "already fired" flag is per-session,
+        // not per-detector.
+        let detector = CallDetector::new(test_call_detection_config(vec![
+            "zoom.us".into(),
+            "Microsoft Teams".into(),
+        ]));
+
+        detector.note_active_call("zoom.us", "Zoom");
+        detector.mark_call_end_fired();
+
+        assert!(matches!(
+            detector.note_active_call("Microsoft Teams", "Teams"),
+            DetectionTransition::NewSession
+        ));
+        let snap = detector.active_call_snapshot().unwrap();
+        assert_eq!(snap.0, "Microsoft Teams");
+        assert!(!snap.2, "new session must reset call_end_fired");
     }
 }

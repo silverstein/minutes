@@ -66,6 +66,17 @@ pub struct AppState {
     /// second prompt fires before the first overlay's JS has consumed its
     /// payload — see `show_meeting_prompt` in main.rs.
     pub pending_meeting_prompts: Arc<Mutex<HashMap<u64, MeetingPromptData>>>,
+    /// `true` iff the currently-active recording was started by a user click
+    /// on the call detection banner. Scopes `stop_when_call_ends` so manual
+    /// `cmd_start_recording` sessions are never auto-stopped.
+    pub recording_started_by_call_detect: Arc<AtomicBool>,
+    /// Set by the frontend's "Keep recording" button during an auto-stop
+    /// countdown. Read by the countdown thread in `call_detect.rs` to bail
+    /// out before calling stop.
+    pub call_end_countdown_cancel: Arc<AtomicBool>,
+    /// `true` while a call-end auto-stop countdown is running. Keeps repeat
+    /// call-end transitions from spawning parallel countdown threads.
+    pub call_end_countdown_active: Arc<AtomicBool>,
 }
 
 type ParakeetStatusView = minutes_core::transcription_coordinator::ParakeetBackendStatus;
@@ -3198,6 +3209,43 @@ fn scan_recovery_items(config: &Config) -> Vec<RecoveryItem> {
     found.into_iter().map(|(_, item)| item).collect()
 }
 
+/// Handles that `start_recording` clears at the end of a session. Keeps the
+/// auto-stop state tied to a single recording: if the user started this
+/// recording via the call detection banner, these flags live until the
+/// recording ends; after that, a subsequent manual `minutes record` must not
+/// be treated as call-detection-started.
+#[derive(Clone)]
+pub struct CallDetectSessionHandles {
+    pub started_by_call_detect: Arc<AtomicBool>,
+    pub countdown_active: Arc<AtomicBool>,
+    pub countdown_cancel: Arc<AtomicBool>,
+}
+
+/// RAII guard that clears the call-detect session flags when dropped.
+/// Used to keep every exit path in `start_recording` / `start_native_call_recording`
+/// (including early returns on capture failure) from leaving stale state.
+pub struct CallDetectSessionGuard {
+    handles: CallDetectSessionHandles,
+}
+
+impl CallDetectSessionGuard {
+    pub fn new(handles: CallDetectSessionHandles) -> Self {
+        Self { handles }
+    }
+}
+
+impl Drop for CallDetectSessionGuard {
+    fn drop(&mut self) {
+        self.handles
+            .started_by_call_detect
+            .store(false, Ordering::Relaxed);
+        self.handles
+            .countdown_active
+            .store(false, Ordering::Relaxed);
+        self.handles.countdown_cancel.store(true, Ordering::Relaxed);
+    }
+}
+
 /// Start recording in a background thread.
 #[allow(clippy::too_many_arguments)]
 pub fn start_recording(
@@ -3213,12 +3261,16 @@ pub fn start_recording(
     completion_notifications_enabled: Arc<AtomicBool>,
     hotkey_runtime: Option<Arc<Mutex<HotkeyRuntime>>>,
     discard_short_hotkey_capture: Option<Arc<AtomicBool>>,
+    call_detect_session: CallDetectSessionHandles,
     mode: CaptureMode,
     requested_intent: Option<RecordingIntent>,
     allow_degraded: bool,
     requested_title: Option<String>,
     language_override: Option<String>,
 ) {
+    // Drop on any exit path (early returns, panic, normal exit) clears the
+    // session flags so a subsequent manual recording isn't auto-stopped.
+    let _session_guard = CallDetectSessionGuard::new(call_detect_session);
     let mut config = Config::load();
     if let Some(language) = language_override {
         config.transcription.language = Some(language);
@@ -3517,6 +3569,11 @@ pub fn launch_recording(
     let activation_progress = state.activation_progress.clone();
     let call_capture_health = state.call_capture_health.clone();
     let completion_notifications_enabled = state.completion_notifications_enabled.clone();
+    let call_detect_session = CallDetectSessionHandles {
+        started_by_call_detect: state.recording_started_by_call_detect.clone(),
+        countdown_active: state.call_end_countdown_active.clone(),
+        countdown_cancel: state.call_end_countdown_cancel.clone(),
+    };
     let app_done = app.clone();
     mark_activation_first_recording_started(&activation_progress);
 
@@ -3534,6 +3591,7 @@ pub fn launch_recording(
             completion_notifications_enabled,
             hotkey_runtime,
             discard_short_hotkey_capture,
+            call_detect_session,
             mode,
             requested_intent,
             allow_degraded,
@@ -3831,6 +3889,7 @@ pub fn handle_dictation_shortcut_event(
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub fn cmd_start_recording(
     app: tauri::AppHandle,
     state: tauri::State<AppState>,
@@ -3839,9 +3898,22 @@ pub fn cmd_start_recording(
     allow_degraded: Option<bool>,
     title: Option<String>,
     language: Option<String>,
+    source: Option<String>,
 ) -> Result<(), String> {
     let capture_mode = parse_capture_mode(mode.as_deref())?;
     let requested_intent = parse_recording_intent(intent.as_deref())?;
+
+    // Session-level flag that scopes the stop_when_call_ends auto-stop only
+    // to recordings started via the call detection banner. Manual starts
+    // never get auto-stopped, even when the config flag is on.
+    let from_call_detect = source.as_deref() == Some("call_detect");
+    state
+        .recording_started_by_call_detect
+        .store(from_call_detect, Ordering::Relaxed);
+    // Starting a fresh recording always cancels any in-flight countdown so
+    // the UI doesn't auto-stop a session the user has already moved past.
+    cancel_call_end_countdown(&state);
+
     launch_recording(
         app,
         &state,
@@ -3853,6 +3925,30 @@ pub fn cmd_start_recording(
         None,
         None,
     )
+}
+
+/// Clear countdown state — both the active flag and (as a no-op safety net)
+/// the cancel flag. Used when a new recording starts, when the countdown
+/// elapses, and when the user cancels via "Keep recording".
+pub fn cancel_call_end_countdown(state: &AppState) {
+    state
+        .call_end_countdown_cancel
+        .store(true, Ordering::Relaxed);
+    state
+        .call_end_countdown_active
+        .store(false, Ordering::Relaxed);
+}
+
+#[tauri::command]
+pub fn cmd_cancel_call_end_countdown(
+    app: tauri::AppHandle,
+    state: tauri::State<AppState>,
+) -> Result<(), String> {
+    cancel_call_end_countdown(&state);
+    // Tell the UI to hide the banner immediately; the countdown thread will
+    // observe the cancel flag on its next tick and exit without stopping.
+    app.emit("call:end-countdown:cancelled", ()).ok();
+    Ok(())
 }
 
 #[tauri::command]
@@ -4326,9 +4422,14 @@ pub fn cmd_search(query: String) -> serde_json::Value {
 pub fn cmd_list_devices() -> serde_json::Value {
     let config = Config::load();
     let configured_device = config.recording.device.clone();
-    let devices = minutes_core::capture::list_input_devices();
+    let entries = minutes_core::capture::list_input_devices_detailed();
+    // Back-compat: preserve the decorated label list for any caller that
+    // still reads `devices`, while exposing structured entries so pickers
+    // can store the canonical name instead of the label.
+    let legacy_labels: Vec<String> = entries.iter().map(|e| e.label.clone()).collect();
     serde_json::json!({
-        "devices": devices,
+        "devices": legacy_labels,
+        "entries": entries,
         "configured_device": configured_device,
     })
 }
@@ -5631,6 +5732,8 @@ pub fn cmd_get_settings() -> serde_json::Value {
             "cooldown_minutes": config.call_detection.cooldown_minutes,
             "apps": config.call_detection.apps,
             "google_meet_enabled": call_detection_has_sentinel(&config, "google-meet"),
+            "stop_when_call_ends": config.call_detection.stop_when_call_ends,
+            "call_end_stop_countdown_secs": config.call_detection.call_end_stop_countdown_secs,
         },
         "dictation": {
             "model": config.dictation.model,
@@ -5771,6 +5874,21 @@ pub fn cmd_set_setting(section: String, key: String, value: String) -> Result<St
         }
         ("call_detection", "google_meet_enabled") => {
             set_call_detection_sentinel(&mut config, "google-meet", value == "true");
+        }
+        ("call_detection", "stop_when_call_ends") => {
+            config.call_detection.stop_when_call_ends = value == "true";
+        }
+        ("call_detection", "call_end_stop_countdown_secs") => {
+            let parsed: u64 = value
+                .parse()
+                .map_err(|_| "call_end_stop_countdown_secs must be a number")?;
+            // 1s minimum: the detector clamps with max(1) anyway, but reject 0
+            // at the settings boundary so a misclick in the UI doesn't persist
+            // a nonsensical "0s" countdown.
+            if parsed == 0 {
+                return Err("call_end_stop_countdown_secs must be at least 1".into());
+            }
+            config.call_detection.call_end_stop_countdown_secs = parsed;
         }
 
         // Dictation

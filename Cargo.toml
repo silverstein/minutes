@@ -3,7 +3,7 @@ members = ["crates/core", "crates/cli", "crates/reader", "crates/whisper-guard",
 resolver = "2"
 
 [workspace.package]
-version = "0.12.1"
+version = "0.12.2"
 edition = "2021"
 license = "MIT"
 authors = ["Mat Silverstein"]

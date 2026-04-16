@@ -1,3 +1,4 @@
+pub mod autoresearch;
 pub mod calendar;
 pub mod capture;
 pub mod config;

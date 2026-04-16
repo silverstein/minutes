@@ -3216,6 +3216,56 @@
       margin-top: 8px;
     }
 
+    /* ── Call ended countdown banner ── */
+    .call-ended {
+      display: none;
+      align-items: flex-start;
+      gap: 10px;
+      padding: 12px 16px;
+      background: var(--red-bg);
+      border-bottom: 1px solid var(--red-border-strong);
+    }
+
+    .call-ended.active {
+      display: flex;
+    }
+
+    .call-ended-icon {
+      font-size: 16px;
+      flex-shrink: 0;
+    }
+
+    .call-ended-info {
+      flex: 1;
+      min-width: 0;
+    }
+
+    .call-ended-title {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text);
+    }
+
+    .call-ended-subtitle {
+      font-size: 11px;
+      color: var(--red);
+      font-weight: 600;
+      margin-top: 2px;
+    }
+
+    .call-ended-detail {
+      font-size: 11px;
+      color: var(--text-secondary);
+      margin-top: 6px;
+      line-height: 1.35;
+    }
+
+    .call-ended-actions {
+      display: flex;
+      gap: 6px;
+      align-items: flex-start;
+    }
+
     /* ── Update available banner ── */
     .update-banner {
       display: none;
@@ -3792,6 +3842,20 @@
       <div class="call-detected-actions">
         <button class="btn btn-primary btn-sm" id="btn-record-call">Record</button>
         <button class="btn btn-secondary btn-sm" id="btn-dismiss-call">Dismiss</button>
+      </div>
+    </div>
+
+    <!-- Call ended countdown banner -->
+    <div class="call-ended" id="call-ended-banner" role="alert" aria-live="polite">
+      <div class="call-ended-icon">⏲</div>
+      <div class="call-ended-info">
+        <div class="call-ended-title" id="call-ended-title">Call ended</div>
+        <div class="call-ended-subtitle" id="call-ended-subtitle">Stopping in 30s</div>
+        <div class="call-ended-detail" id="call-ended-detail">Keep recording if you're wrapping up notes or takeaways. Otherwise Minutes will stop and process this session.</div>
+      </div>
+      <div class="call-ended-actions">
+        <button class="btn btn-primary btn-sm" id="btn-call-end-stop">Stop now</button>
+        <button class="btn btn-secondary btn-sm" id="btn-call-end-keep">Keep recording</button>
       </div>
     </div>
 
@@ -4438,6 +4502,21 @@
               instead of probing every second.</div>
           </div>
           <button class="btn btn-secondary btn-sm toggle-btn" id="settings-call-detection-google-meet">Off</button>
+        </div>
+        <div class="about-controls">
+          <div class="about-controls-group">
+            <div class="about-controls-copy">Stop when call ends</div>
+            <div class="about-controls-meta">When the detected call app exits mid-recording, show a countdown prompt
+              with Stop now and Keep recording. Only applies to recordings started from the call-detection banner.</div>
+          </div>
+          <button class="btn btn-secondary btn-sm toggle-btn" id="settings-call-detection-stop-when-call-ends">Off</button>
+        </div>
+        <div class="about-controls">
+          <div class="about-controls-group">
+            <div class="about-controls-copy">Auto-stop countdown</div>
+            <div class="about-controls-meta">Seconds to wait before stopping when the call ends.</div>
+            <input type="number" id="settings-call-detection-countdown-secs" min="1" class="settings-field">
+          </div>
         </div>
       </div>
 
@@ -5839,14 +5918,31 @@
         defaultOpt.value = '';
         defaultOpt.textContent = 'System Default';
         devicePicker.appendChild(defaultOpt);
-        for (const fullName of result.devices) {
-          const opt = document.createElement('option');
-          opt.value = fullName;
-          opt.textContent = fullName;
-          if (result.configured_device && fullName === result.configured_device) {
-            opt.selected = true;
+        // Prefer structured entries so we store the canonical CPAL name
+        // in config. Older hosts only return the decorated `devices` list,
+        // in which case we fall back and let the backend's suffix stripper
+        // resolve the selection at capture time.
+        const configured = result.configured_device || '';
+        if (Array.isArray(result.entries) && result.entries.length > 0) {
+          for (const entry of result.entries) {
+            const opt = document.createElement('option');
+            opt.value = entry.name;
+            opt.textContent = entry.label;
+            if (configured && (entry.name === configured || entry.label === configured)) {
+              opt.selected = true;
+            }
+            devicePicker.appendChild(opt);
           }
-          devicePicker.appendChild(opt);
+        } else {
+          for (const fullName of result.devices || []) {
+            const opt = document.createElement('option');
+            opt.value = fullName;
+            opt.textContent = fullName;
+            if (configured && fullName === configured) {
+              opt.selected = true;
+            }
+            devicePicker.appendChild(opt);
+          }
         }
       } catch (e) {
         console.error('Load devices:', e);
@@ -7049,6 +7145,8 @@
           document.getElementById('settings-call-detection-polling-interval').value = String(s.call_detection.poll_interval_secs ?? 1);
           document.getElementById('settings-call-detection-cooldown').value = String(s.call_detection.cooldown_minutes ?? 5);
           setSettingsToggle('settings-call-detection-google-meet', Boolean(s.call_detection.google_meet_enabled));
+          setSettingsToggle('settings-call-detection-stop-when-call-ends', Boolean(s.call_detection.stop_when_call_ends));
+          document.getElementById('settings-call-detection-countdown-secs').value = String(s.call_detection.call_end_stop_countdown_secs ?? 30);
         }
         // Dictation settings
         if (s.dictation) {
@@ -7361,6 +7459,23 @@
       const next = !Boolean(s.call_detection.google_meet_enabled);
       await invoke('cmd_set_setting', { section: 'call_detection', key: 'google_meet_enabled', value: String(next) });
       setSettingsToggle('settings-call-detection-google-meet', next);
+    });
+    document.getElementById('settings-call-detection-stop-when-call-ends').addEventListener('click', async () => {
+      const s = await invoke('cmd_get_settings');
+      const next = !Boolean(s.call_detection.stop_when_call_ends);
+      await invoke('cmd_set_setting', { section: 'call_detection', key: 'stop_when_call_ends', value: String(next) });
+      setSettingsToggle('settings-call-detection-stop-when-call-ends', next);
+    });
+    document.getElementById('settings-call-detection-countdown-secs').addEventListener('change', async (e) => {
+      try {
+        await invoke('cmd_set_setting', { section: 'call_detection', key: 'call_end_stop_countdown_secs', value: e.target.value });
+      } catch (err) {
+        // Reject of 0/invalid — snap back to the persisted value rather than
+        // leaving the user staring at a rejected input.
+        console.error('countdown secs:', err);
+        const s = await invoke('cmd_get_settings');
+        e.target.value = String(s.call_detection.call_end_stop_countdown_secs ?? 30);
+      }
     });
 
     // Dictation settings handlers — guarded for removed HTML elements
@@ -8566,7 +8681,10 @@
 
     document.getElementById('btn-record-call').addEventListener('click', async () => {
       try {
-        await invoke('cmd_start_recording', { intent: 'call' });
+        // Mark the session as call-detection-initiated so stop_when_call_ends
+        // knows this recording is eligible for the auto-stop prompt when the
+        // call app exits. Manual `minutes record` / hotkey starts never set this.
+        await invoke('cmd_start_recording', { intent: 'call', source: 'call_detect' });
       } catch (e) {
         console.error('Call recording:', e);
       }
@@ -8575,6 +8693,90 @@
     document.getElementById('btn-dismiss-call').addEventListener('click', () => {
       if (activeCallSession) activeCallSession.dismissed = true;
       callBanner.classList.remove('active');
+    });
+
+    // ── Call-end auto-stop countdown ──
+    // Backend emits `call:ended` with { app_name, countdown_secs } when the
+    // call app that started this recording exits. Frontend ticks a local
+    // countdown (cosmetic); the backend thread is the authoritative timer.
+    const callEndedBanner = document.getElementById('call-ended-banner');
+    const callEndedTitle = document.getElementById('call-ended-title');
+    const callEndedSubtitle = document.getElementById('call-ended-subtitle');
+    const callEndedDetail = document.getElementById('call-ended-detail');
+    let callEndCountdownInterval = null;
+    let callEndCountdownDeadline = null;
+
+    function clearCallEndCountdown() {
+      if (callEndCountdownInterval) {
+        clearInterval(callEndCountdownInterval);
+        callEndCountdownInterval = null;
+      }
+      callEndCountdownDeadline = null;
+      callEndedBanner.classList.remove('active');
+    }
+
+    function tickCallEndCountdown() {
+      if (!callEndCountdownDeadline) return;
+      const remaining = Math.max(
+        0,
+        Math.round((callEndCountdownDeadline - Date.now()) / 1000)
+      );
+      callEndedSubtitle.textContent =
+        remaining > 0 ? `Stopping in ${remaining}s` : 'Stopping now...';
+      if (remaining <= 0) {
+        // Backend is about to fire stop; hide buttons visually.
+        clearInterval(callEndCountdownInterval);
+        callEndCountdownInterval = null;
+      }
+    }
+
+    currentWindow.listen('call:ended', (event) => {
+      const { app_name, countdown_secs } = event.payload || {};
+      const secs = Number.isFinite(countdown_secs) && countdown_secs > 0
+        ? countdown_secs
+        : 30;
+      callEndedTitle.textContent = `${app_name || 'Call'} ended`;
+      callEndedDetail.textContent =
+        'Keep recording if you\'re wrapping up notes or takeaways. Otherwise Minutes will stop and process this session.';
+      callEndCountdownDeadline = Date.now() + secs * 1000;
+      if (callEndCountdownInterval) clearInterval(callEndCountdownInterval);
+      callEndCountdownInterval = setInterval(tickCallEndCountdown, 250);
+      tickCallEndCountdown();
+      // Hide the "call detected" banner — we're past that now.
+      callBanner.classList.remove('active');
+      callEndedBanner.classList.add('active');
+    });
+
+    currentWindow.listen('call:end-countdown:cancelled', () => {
+      clearCallEndCountdown();
+    });
+
+    currentWindow.listen('call:end-countdown:fired', () => {
+      clearCallEndCountdown();
+    });
+
+    document.getElementById('btn-call-end-keep').addEventListener('click', async () => {
+      clearCallEndCountdown();
+      try {
+        await invoke('cmd_cancel_call_end_countdown');
+      } catch (e) {
+        console.error('cancel countdown:', e);
+      }
+    });
+
+    document.getElementById('btn-call-end-stop').addEventListener('click', async () => {
+      clearCallEndCountdown();
+      try {
+        // Cancel the backend timer first so Stop now doesn't double-fire.
+        await invoke('cmd_cancel_call_end_countdown');
+      } catch (e) {
+        console.error('cancel countdown before stop:', e);
+      }
+      try {
+        await invoke('cmd_stop_recording');
+      } catch (e) {
+        console.error('stop now:', e);
+      }
     });
 
     currentWindow.listen('dictation-hotkey:status', (event) => {

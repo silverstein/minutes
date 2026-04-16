@@ -772,6 +772,8 @@ pub fn transcribe_to_artifact(
     if metadata.len() == 0 {
         return Err(crate::error::TranscribeError::EmptyAudio.into());
     }
+    let recording_date =
+        infer_recording_date(context.recorded_at, context.sidecar.as_ref(), &metadata);
 
     if let Ok(canonical) = audio_path.canonicalize() {
         let allowed = &config.security.allowed_audio_dirs;
@@ -791,13 +793,49 @@ pub fn transcribe_to_artifact(
         }
     }
 
+    let matched_event = if content_type == ContentType::Meeting {
+        context.calendar_event.clone().or_else(|| {
+            select_calendar_event(&crate::calendar::events_overlapping(recording_date), title)
+        })
+    } else {
+        None
+    };
+    let calendar_event_title = matched_event.as_ref().map(|event| event.title.clone());
+    let attendees = matched_event
+        .as_ref()
+        .map(|event| event.attendees.clone())
+        .unwrap_or_default();
+    let decode_hints = build_decode_hints(
+        title,
+        calendar_event_title.as_deref(),
+        context.pre_context.as_deref(),
+        &attendees,
+        Some(&config.identity),
+    );
+
     let step_start = std::time::Instant::now();
-    let result = crate::transcription_coordinator::transcribe_path_for_content(
+    let result = crate::transcription_coordinator::transcribe_path_for_content_with_hints(
         audio_path,
         content_type,
         config,
+        decode_hints,
     )?;
-    let transcript = result.text;
+    let transcript = if content_type == ContentType::Meeting {
+        if let Some(identity) =
+            Some(&config.identity).filter(|identity| user_is_participant(&attendees, identity))
+        {
+            if let Some(canonical) = identity.name.as_deref() {
+                let variants = collect_user_participant_variants(&attendees, identity);
+                normalize_self_name_refs_in_transcript(&result.text, canonical, &variants)
+            } else {
+                result.text
+            }
+        } else {
+            result.text
+        }
+    } else {
+        result.text
+    };
     let filter_stats = result.stats;
     write_transcript_artifact(
         audio_path,
@@ -1367,17 +1405,57 @@ where
         }
     }
 
+    // Read user notes and pre-meeting context before transcription so they can
+    // inform batch decode hints.
+    let user_notes = notes::read_notes();
+    let pre_context = notes::read_context();
+
+    let calendar_events = if content_type == ContentType::Meeting {
+        crate::calendar::events_overlapping(recording_date)
+    } else {
+        Vec::new()
+    };
+    let matched_event = select_calendar_event(&calendar_events, title);
+    let calendar_event_title = matched_event.as_ref().map(|e| e.title.clone());
+    let calendar_attendees: Vec<String> = matched_event
+        .as_ref()
+        .map(|e| e.attendees.clone())
+        .unwrap_or_default();
+    let decode_hints = build_decode_hints(
+        title,
+        calendar_event_title.as_deref(),
+        pre_context.as_deref(),
+        &calendar_attendees,
+        Some(&config.identity),
+    );
+
     // Step 1: Transcribe (always)
     on_progress(PipelineStage::Transcribing);
     tracing::info!(step = "transcribe", file = %audio_path.display(), "transcribing audio");
     let step_start = std::time::Instant::now();
-    let result = crate::transcription_coordinator::transcribe_path_for_content(
+    let result = crate::transcription_coordinator::transcribe_path_for_content_with_hints(
         audio_path,
         content_type,
         config,
+        decode_hints,
     )?;
     let transcribe_ms = step_start.elapsed().as_millis() as u64;
-    let transcript = result.text;
+    let transcript = if content_type == ContentType::Meeting {
+        if let Some(identity) = Some(&config.identity)
+            .filter(|identity| user_is_participant(&calendar_attendees, identity))
+        {
+            if let Some(canonical) = identity.name.as_deref() {
+                let variants = collect_user_participant_variants(&calendar_attendees, identity);
+                normalize_self_name_refs_in_transcript(&result.text, canonical, &variants)
+            } else {
+                result.text
+            }
+        } else {
+            result.text
+        }
+    } else {
+        result.text
+    };
     let filter_stats = result.stats;
 
     let word_count = transcript.split_whitespace().count();
@@ -1429,10 +1507,6 @@ where
     } else {
         transcript
     };
-
-    // Read user notes and pre-meeting context (if any)
-    let user_notes = notes::read_notes();
-    let pre_context = notes::read_context();
 
     // Step 3: Summarize (optional — depends on config.summarization.engine)
     // Pass user notes to the summarizer as high-priority context
@@ -1573,22 +1647,6 @@ where
 
     // Step 4: Match calendar event + merge attendees
     on_progress(PipelineStage::Saving);
-
-    // Query calendar for events overlapping the recording window
-    let calendar_events = if content_type == ContentType::Meeting {
-        crate::calendar::events_overlapping(recording_date)
-    } else {
-        Vec::new()
-    };
-
-    // Pick the best matching calendar event based on recording-time proximity,
-    // with an extra title-similarity guard when the user supplied `--title`.
-    let matched_event = select_calendar_event(&calendar_events, title);
-    let calendar_event_title = matched_event.as_ref().map(|e| e.title.clone());
-    let calendar_attendees: Vec<String> = matched_event
-        .as_ref()
-        .map(|e| e.attendees.clone())
-        .unwrap_or_default();
 
     if let Some(ref title) = calendar_event_title {
         tracing::info!(event = %title, attendees = calendar_attendees.len(), "matched calendar event");
@@ -2171,7 +2229,7 @@ fn title_from_transcript(transcript: &str) -> Option<String> {
     Some(to_display_title(&candidate))
 }
 
-fn clean_transcript_line(line: &str) -> Option<String> {
+pub(crate) fn clean_transcript_line(line: &str) -> Option<String> {
     let mut remaining = line.trim();
 
     while let Some(rest) = remaining.strip_prefix('[') {
@@ -2218,7 +2276,7 @@ fn strip_lead_in_phrase(line: &str) -> String {
     cleaned
 }
 
-fn normalize_space(text: &str) -> String {
+pub(crate) fn normalize_space(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
@@ -2289,6 +2347,392 @@ fn merge_attendees(existing: &[String], additions: &[String]) -> Vec<String> {
         }
     }
     attendees
+}
+
+fn split_decode_hint_fragments(text: &str) -> Vec<String> {
+    text.replace(['—', '&', ',', '/'], "|")
+        .split('|')
+        .flat_map(|part| part.split(" with "))
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .map(|part| part.to_string())
+        .collect()
+}
+
+pub(crate) fn build_decode_hints(
+    title: Option<&str>,
+    calendar_event_title: Option<&str>,
+    pre_context: Option<&str>,
+    attendees: &[String],
+    identity: Option<&IdentityConfig>,
+) -> crate::transcribe::DecodeHints {
+    let mut priority = Vec::new();
+    let mut contextual = Vec::new();
+
+    if let Some(identity) = identity.filter(|identity| user_is_participant(attendees, identity)) {
+        if let Some(name) = identity
+            .name
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            priority.push(name.to_string());
+        }
+        for alias in &identity.aliases {
+            let normalized = strip_email_domain(strip_name_disambiguation(alias.trim())).trim();
+            if !normalized.is_empty() {
+                priority.push(normalized.to_string());
+            }
+        }
+    }
+
+    for attendee in attendees {
+        if let Some(normalized) = normalize_attendee_candidate(attendee) {
+            let canonical = strip_email_domain(strip_name_disambiguation(&normalized)).trim();
+            if canonical.is_empty() {
+                continue;
+            }
+            if canonical.contains('.') || canonical.contains('_') {
+                let humanized = canonical
+                    .split(['.', '_'])
+                    .filter(|part| !part.is_empty())
+                    .map(capitalize_token)
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                if !humanized.is_empty() {
+                    priority.push(humanized);
+                    continue;
+                }
+            }
+            priority.push(canonical.to_string());
+        }
+    }
+
+    for candidate in title
+        .into_iter()
+        .chain(calendar_event_title)
+        .chain(pre_context)
+    {
+        contextual.extend(split_decode_hint_fragments(candidate));
+    }
+
+    crate::transcribe::DecodeHints::from_candidates(&priority, &contextual)
+}
+
+fn collect_user_participant_variants(
+    attendees: &[String],
+    identity: &IdentityConfig,
+) -> Vec<String> {
+    let Some(name) = identity
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Vec::new();
+    };
+
+    let canonical_slug = slugify(name);
+    if canonical_slug.is_empty() {
+        return Vec::new();
+    }
+
+    let canonical_lower = name.to_lowercase();
+    let mut variants = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    for alias in &identity.aliases {
+        let normalized = strip_email_domain(strip_name_disambiguation(alias.trim())).trim();
+        if normalized.is_empty() {
+            continue;
+        }
+        let lower = normalized.to_lowercase();
+        if lower != canonical_lower && seen.insert(lower) {
+            variants.push(normalized.to_string());
+        }
+    }
+
+    for attendee in attendees {
+        let Some(normalized) = normalize_attendee_candidate(attendee) else {
+            continue;
+        };
+        let canonical = strip_email_domain(strip_name_disambiguation(&normalized)).trim();
+        if slugify(canonical) != canonical_slug {
+            continue;
+        }
+        let lower = canonical.to_lowercase();
+        if lower != canonical_lower && seen.insert(lower) {
+            variants.push(canonical.to_string());
+        }
+    }
+
+    variants
+}
+
+fn rewrite_intro_prefix_case_insensitive(
+    body: &str,
+    prefix: &str,
+    variant: &str,
+    replacement: &str,
+) -> Option<String> {
+    if !(body.is_ascii() && prefix.is_ascii() && variant.is_ascii() && replacement.is_ascii()) {
+        return None;
+    }
+
+    let body_lower = body.to_ascii_lowercase();
+    let prefix_lower = prefix.to_ascii_lowercase();
+    let variant_lower = variant.to_ascii_lowercase();
+    let target = format!("{prefix_lower}{variant_lower}");
+    if !body_lower.starts_with(&target) {
+        return None;
+    }
+
+    let remainder = &body[target.len()..];
+    if remainder
+        .chars()
+        .next()
+        .is_some_and(|ch| ch.is_ascii_alphanumeric())
+    {
+        return None;
+    }
+
+    Some(format!(
+        "{}{}{}",
+        &body[..prefix.len()],
+        replacement,
+        remainder
+    ))
+}
+
+fn rewrite_exact_prefix_case_insensitive(
+    body: &str,
+    target: &str,
+    replacement: &str,
+) -> Option<String> {
+    if !(body.is_ascii() && target.is_ascii() && replacement.is_ascii()) {
+        return None;
+    }
+
+    let body_lower = body.to_ascii_lowercase();
+    let target_lower = target.to_ascii_lowercase();
+    if !body_lower.starts_with(&target_lower) {
+        return None;
+    }
+
+    Some(format!("{}{}", replacement, &body[target.len()..]))
+}
+
+fn leading_name_token(text: &str) -> Option<&str> {
+    let token = text.split_whitespace().next()?;
+    let trimmed = token.trim_matches(|c: char| !c.is_ascii_alphanumeric());
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
+    }
+}
+
+fn levenshtein_distance_ascii(a: &str, b: &str) -> usize {
+    let a_bytes = a.as_bytes();
+    let b_bytes = b.as_bytes();
+    let mut dp = vec![vec![0usize; b_bytes.len() + 1]; a_bytes.len() + 1];
+    for (i, row) in dp.iter_mut().enumerate().take(a_bytes.len() + 1) {
+        row[0] = i;
+    }
+    for (j, cell) in dp[0].iter_mut().enumerate().take(b_bytes.len() + 1) {
+        *cell = j;
+    }
+    for i in 1..=a_bytes.len() {
+        for j in 1..=b_bytes.len() {
+            let cost = usize::from(a_bytes[i - 1] != b_bytes[j - 1]);
+            dp[i][j] = (dp[i - 1][j] + 1)
+                .min(dp[i][j - 1] + 1)
+                .min(dp[i - 1][j - 1] + cost);
+        }
+    }
+    dp[a_bytes.len()][b_bytes.len()]
+}
+
+fn is_safe_self_name_fuzzy_match(token: &str, canonical: &str) -> bool {
+    if !(token.is_ascii() && canonical.is_ascii()) {
+        return false;
+    }
+    let token_lower = token.to_ascii_lowercase();
+    let canonical_lower = canonical.to_ascii_lowercase();
+    if token_lower == canonical_lower {
+        return false;
+    }
+    if token_lower
+        .chars()
+        .next()
+        .zip(canonical_lower.chars().next())
+        .is_none_or(|(left, right)| left != right)
+    {
+        return false;
+    }
+    if !(token_lower.starts_with(&canonical_lower) || canonical_lower.starts_with(&token_lower)) {
+        return false;
+    }
+    let distance = levenshtein_distance_ascii(&token_lower, &canonical_lower);
+    distance <= 1
+}
+
+fn rewrite_intro_fuzzy_self_name(body: &str, prefix: &str, canonical: &str) -> Option<String> {
+    if !(body.is_ascii() && prefix.is_ascii() && canonical.is_ascii()) {
+        return None;
+    }
+    let body_lower = body.to_ascii_lowercase();
+    let prefix_lower = prefix.to_ascii_lowercase();
+    if !body_lower.starts_with(&prefix_lower) {
+        return None;
+    }
+
+    let remainder = &body[prefix.len()..];
+    let token = leading_name_token(remainder)?;
+    if !is_safe_self_name_fuzzy_match(token, canonical) {
+        return None;
+    }
+    let token_start = prefix.len();
+    let token_end = token_start + token.len();
+    Some(format!(
+        "{}{}{}",
+        &body[..token_start],
+        canonical,
+        &body[token_end..]
+    ))
+}
+
+fn normalize_self_name_refs_in_transcript(
+    transcript: &str,
+    canonical: &str,
+    variants: &[String],
+) -> String {
+    if canonical.trim().is_empty() {
+        return transcript.to_string();
+    }
+
+    let intro_prefixes = [
+        "this is ",
+        "hey, this is ",
+        "hey this is ",
+        "okay, this is ",
+        "ok, this is ",
+        "all right, this is ",
+        "alright, this is ",
+    ];
+
+    let mut out = Vec::new();
+    for line in transcript.lines() {
+        if let Some((head, body)) = line.split_once("] ") {
+            let mut rewritten = None;
+            for variant in variants {
+                for prefix in intro_prefixes {
+                    if let Some(new_body) =
+                        rewrite_intro_prefix_case_insensitive(body, prefix, variant, canonical)
+                    {
+                        rewritten = Some(new_body);
+                        break;
+                    }
+                }
+                if rewritten.is_none() {
+                    let pattern = format!("{variant} is ");
+                    let replacement = format!("{canonical} is ");
+                    if let Some(new_body) =
+                        rewrite_exact_prefix_case_insensitive(body, &pattern, &replacement)
+                    {
+                        rewritten = Some(new_body);
+                    }
+                }
+                if rewritten.is_some() {
+                    break;
+                }
+            }
+            if rewritten.is_none() {
+                for prefix in intro_prefixes {
+                    if let Some(new_body) = rewrite_intro_fuzzy_self_name(body, prefix, canonical) {
+                        rewritten = Some(new_body);
+                        break;
+                    }
+                }
+            }
+            if rewritten.is_none() {
+                let lower = body.to_ascii_lowercase();
+                if let Some(position) = lower.find(" is ") {
+                    let token = body[..position].trim_matches(|c: char| !c.is_ascii_alphanumeric());
+                    if is_safe_self_name_fuzzy_match(token, canonical) {
+                        rewritten = Some(format!("{canonical}{}", &body[position..]));
+                    }
+                }
+            }
+            if let Some(new_body) = rewritten {
+                out.push(format!("{head}] {new_body}"));
+                continue;
+            }
+        }
+        out.push(line.to_string());
+    }
+
+    if transcript.ends_with('\n') {
+        format!("{}\n", out.join("\n"))
+    } else {
+        out.join("\n")
+    }
+}
+
+pub(crate) fn normalize_transcript_for_self_name_participant(
+    transcript: &str,
+    attendees: &[String],
+    identity: &IdentityConfig,
+) -> String {
+    if !user_is_participant(attendees, identity) {
+        return transcript.to_string();
+    }
+
+    let Some(canonical) = identity
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return transcript.to_string();
+    };
+
+    let variants = collect_user_participant_variants(attendees, identity);
+    normalize_self_name_refs_in_transcript(transcript, canonical, &variants)
+}
+
+fn user_is_participant(attendees: &[String], identity: &IdentityConfig) -> bool {
+    let Some(name) = identity
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return false;
+    };
+
+    let canonical_slug = slugify(name);
+    if canonical_slug.is_empty() {
+        return false;
+    }
+
+    let mut participant_slugs = std::collections::HashSet::new();
+    participant_slugs.insert(canonical_slug.clone());
+    for alias in identity.all_user_aliases() {
+        let normalized = strip_email_domain(strip_name_disambiguation(alias.trim())).trim();
+        let slug = slugify(normalized);
+        if !slug.is_empty() {
+            participant_slugs.insert(slug);
+        }
+    }
+
+    attendees.iter().any(|attendee| {
+        normalize_attendee_candidate(attendee).is_some_and(|normalized| {
+            let canonical = strip_email_domain(strip_name_disambiguation(&normalized)).trim();
+            let slug = slugify(canonical);
+            !slug.is_empty() && participant_slugs.contains(&slug)
+        })
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -4276,6 +4720,105 @@ mod tests {
     }
 
     #[test]
+    fn build_decode_hints_uses_identity_aliases_attendees_and_context() {
+        let identity = IdentityConfig {
+            name: Some("Mat".into()),
+            email: Some("mat@example.com".into()),
+            emails: vec!["mathieu@work.com".into()],
+            aliases: vec!["Mathieu".into(), "Matthew".into()],
+        };
+
+        let hints = build_decode_hints(
+            Some("X1 / Planning Review"),
+            Some("Mat with Alex Chen"),
+            Some("Asana migration with Box"),
+            &[
+                "mat@example.com".into(),
+                "alex.chen@example.com".into(),
+                "Casey / Casey Winters".into(),
+            ],
+            Some(&identity),
+        );
+
+        assert_eq!(
+            hints.whisper_initial_prompt().as_deref(),
+            Some(
+                "Names and terms that may appear in this audio: Mat, Mathieu, Matthew, Alex Chen, Casey, X1, Planning Review, Asana migration. Preserve spelling exactly when heard."
+            )
+        );
+    }
+
+    #[test]
+    fn build_decode_hints_skips_identity_when_user_not_in_attendees() {
+        let identity = IdentityConfig {
+            name: Some("Mat".into()),
+            email: Some("mat@example.com".into()),
+            emails: vec!["mathieu@work.com".into()],
+            aliases: vec!["Mathieu".into(), "Matthew".into()],
+        };
+
+        let hints = build_decode_hints(
+            Some("X1 / Planning Review"),
+            Some("Alex Chen with Casey Winters"),
+            Some("Asana migration with Box"),
+            &[
+                "alex.chen@example.com".into(),
+                "Casey / Casey Winters".into(),
+            ],
+            Some(&identity),
+        );
+
+        let prompt = hints.whisper_initial_prompt().expect("prompt");
+        assert!(!prompt.contains("Mathieu"));
+        assert!(!prompt.contains("Matthew"));
+        assert!(!prompt.contains("Mat,"));
+        assert!(prompt.contains("Alex Chen"));
+        assert!(prompt.contains("Casey"));
+    }
+
+    #[test]
+    fn normalize_self_name_refs_in_transcript_rewrites_intro_patterns_only() {
+        let transcript = "[SPEAKER_1 0:00] Hey, this is Matt testing one more time.\n[SPEAKER_1 0:04] Matt is testing the path repro.\n[SPEAKER_2 0:08] Another speaker said Matt Mullenweg messaged me.\n";
+        let normalized =
+            normalize_self_name_refs_in_transcript(transcript, "Mat", &["Matt".into()]);
+
+        assert!(normalized.contains("Hey, this is Mat testing one more time."));
+        assert!(normalized.contains("Mat is testing the path repro."));
+        assert!(normalized.contains("Matt Mullenweg messaged me."));
+        assert!(!normalized.contains("Hey, this is Matt testing one more time."));
+    }
+
+    #[test]
+    fn normalize_self_name_refs_in_transcript_uses_fuzzy_intro_match_without_explicit_variant() {
+        let transcript = "[SPEAKER_1 0:00] This is Matt and I'm testing.\n";
+        let normalized = normalize_self_name_refs_in_transcript(transcript, "Mat", &[]);
+
+        assert!(
+            normalized.contains("This is Mat and I'm testing."),
+            "{}",
+            normalized
+        );
+    }
+
+    #[test]
+    fn collect_user_participant_variants_uses_attendee_forms_matching_identity() {
+        let identity = IdentityConfig {
+            name: Some("Mat".into()),
+            email: Some("mat@example.com".into()),
+            emails: vec![],
+            aliases: vec!["Mathieu".into()],
+        };
+
+        let variants =
+            collect_user_participant_variants(&["Matt".into(), "Alex Chen".into()], &identity);
+
+        // "Matt" no longer needs to be treated as an explicit participant
+        // variant here because the guarded intro matcher handles close
+        // self-name fuzz like "This is Matt" at rewrite time.
+        assert_eq!(variants, vec!["Mathieu".to_string()]);
+    }
+
+    #[test]
     fn is_task_like_project_candidate_requires_more_than_a_verb_like_start() {
         assert!(!is_task_like_project_candidate(
             "review board",
@@ -4509,5 +5052,36 @@ mod tests {
         assert!(marker.exists(), "hook should have created the marker file");
         let contents = std::fs::read_to_string(&marker).unwrap();
         assert_eq!(contents, "test content");
+    }
+
+    #[test]
+    #[ignore = "requires MINUTES_PROPER_NAME_EVAL_CORPUS pointing at a local corpus manifest"]
+    fn proper_name_eval_corpus() {
+        let corpus_path = match std::env::var("MINUTES_PROPER_NAME_EVAL_CORPUS") {
+            Ok(path) => std::path::PathBuf::from(path),
+            Err(_) => {
+                eprintln!(
+                    "proper-name-eval skipped: set MINUTES_PROPER_NAME_EVAL_CORPUS=/abs/path/to/corpus.json"
+                );
+                return;
+            }
+        };
+
+        let report = crate::autoresearch::run_decode_hint_eval_corpus(
+            &corpus_path,
+            &crate::autoresearch::DecodeHintEvalOptions::default(),
+        )
+        .unwrap_or_else(|error| panic!("proper-name eval failed: {}", error));
+
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&report).expect("serialize eval results")
+        );
+        if !report.failure_messages.is_empty() {
+            panic!(
+                "proper-name eval failures:\n{}",
+                report.failure_messages.join("\n")
+            );
+        }
     }
 }

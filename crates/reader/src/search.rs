@@ -12,7 +12,7 @@ pub fn list_meetings(dir: &Path, limit: usize) -> Vec<ParsedMeeting> {
         .filter_map(|e| parse_meeting(e.path()).ok())
         .collect();
 
-    meetings.sort_by(|a, b| b.frontmatter.date.cmp(&a.frontmatter.date));
+    meetings.sort_by_key(|meeting| std::cmp::Reverse(meeting.frontmatter.date));
     meetings.truncate(limit);
     meetings
 }
@@ -32,7 +32,7 @@ pub fn search_meetings(dir: &Path, query: &str, limit: usize) -> Vec<ParsedMeeti
         })
         .collect();
 
-    results.sort_by(|a, b| b.frontmatter.date.cmp(&a.frontmatter.date));
+    results.sort_by_key(|meeting| std::cmp::Reverse(meeting.frontmatter.date));
     results.truncate(limit);
     results
 }

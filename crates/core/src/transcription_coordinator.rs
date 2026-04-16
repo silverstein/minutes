@@ -14,6 +14,7 @@ use whisper_guard::segments as wg_segments;
 pub struct TranscriptionRequest {
     pub audio_path: PathBuf,
     pub content_type: ContentType,
+    pub decode_hints: transcribe::DecodeHints,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -194,8 +195,12 @@ pub fn transcribe_request(
     config: &Config,
 ) -> Result<TranscribeResult, TranscribeError> {
     match request.content_type {
-        ContentType::Meeting => transcribe::transcribe_meeting(&request.audio_path, config),
-        _ => transcribe::transcribe(&request.audio_path, config),
+        ContentType::Meeting => transcribe::transcribe_meeting_with_hints(
+            &request.audio_path,
+            config,
+            &request.decode_hints,
+        ),
+        _ => transcribe::transcribe_with_hints(&request.audio_path, config, &request.decode_hints),
     }
 }
 
@@ -207,6 +212,21 @@ pub fn transcribe_path_for_content(
     let request = TranscriptionRequest {
         audio_path: audio_path.to_path_buf(),
         content_type,
+        decode_hints: transcribe::DecodeHints::default(),
+    };
+    transcribe_request(&request, config)
+}
+
+pub fn transcribe_path_for_content_with_hints(
+    audio_path: &Path,
+    content_type: ContentType,
+    config: &Config,
+    decode_hints: transcribe::DecodeHints,
+) -> Result<TranscribeResult, TranscribeError> {
+    let request = TranscriptionRequest {
+        audio_path: audio_path.to_path_buf(),
+        content_type,
+        decode_hints,
     };
     transcribe_request(&request, config)
 }
@@ -425,6 +445,7 @@ pub fn benchmark_parakeet(
         vad_path,
         vad_threshold,
         config,
+        &transcribe::DecodeHints::default(),
     )
     .map_err(|error| error.to_string())?;
     let direct_elapsed_ms = started.elapsed().as_millis() as u64;

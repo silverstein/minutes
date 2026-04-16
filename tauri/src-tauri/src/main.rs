@@ -816,6 +816,13 @@ fn main() {
     let recording_for_detector = recording.clone();
     let processing_clone = processing.clone();
     let stop_clone = stop_flag.clone();
+    let recording_started_by_call_detect = Arc::new(AtomicBool::new(false));
+    let call_end_countdown_cancel = Arc::new(AtomicBool::new(false));
+    let call_end_countdown_active = Arc::new(AtomicBool::new(false));
+    let started_by_call_detect_for_detector = recording_started_by_call_detect.clone();
+    let countdown_cancel_for_detector = call_end_countdown_cancel.clone();
+    let countdown_active_for_detector = call_end_countdown_active.clone();
+    let stop_for_detector = stop_flag.clone();
 
     tauri::Builder::default()
         .menu(build_app_menu)
@@ -1058,6 +1065,9 @@ fn main() {
             palette_lifecycle: palette_lifecycle.clone(),
             palette_reopen_pending: palette_reopen_pending.clone(),
             pending_meeting_prompts: Arc::new(Mutex::new(HashMap::new())),
+            recording_started_by_call_detect: recording_started_by_call_detect.clone(),
+            call_end_countdown_cancel: call_end_countdown_cancel.clone(),
+            call_end_countdown_active: call_end_countdown_active.clone(),
         })
         .manage(Arc::new(Mutex::new(
             shortcut_manager::ShortcutManager::new(),
@@ -1429,30 +1439,28 @@ fn main() {
                                 update_tray_state(&app_done, false);
                             });
                         }
-                        "stop" => {
-                            if commands::request_stop(&recording, &stop).is_ok() {
-                                rec_item.set_text("Stopping...").ok();
-                                rec_item.set_enabled(false).ok();
-                                quick_item.set_text("Quick Thought").ok();
-                                quick_item.set_enabled(false).ok();
-                                stp_item.set_enabled(false).ok();
-                                let app_done = app.clone();
-                                let ri = rec_item.clone();
-                                let qi = quick_item.clone();
-                                let si = stp_item.clone();
-                                std::thread::spawn(move || {
-                                    if commands::wait_for_recording_shutdown(
-                                        std::time::Duration::from_secs(120),
-                                    ) {
-                                        ri.set_text("Start Recording").ok();
-                                        ri.set_enabled(true).ok();
-                                        qi.set_text("Quick Thought").ok();
-                                        qi.set_enabled(true).ok();
-                                        si.set_enabled(false).ok();
-                                        update_tray_state(&app_done, false);
-                                    }
-                                });
-                            }
+                        "stop" if commands::request_stop(&recording, &stop).is_ok() => {
+                            rec_item.set_text("Stopping...").ok();
+                            rec_item.set_enabled(false).ok();
+                            quick_item.set_text("Quick Thought").ok();
+                            quick_item.set_enabled(false).ok();
+                            stp_item.set_enabled(false).ok();
+                            let app_done = app.clone();
+                            let ri = rec_item.clone();
+                            let qi = quick_item.clone();
+                            let si = stp_item.clone();
+                            std::thread::spawn(move || {
+                                if commands::wait_for_recording_shutdown(
+                                    std::time::Duration::from_secs(120),
+                                ) {
+                                    ri.set_text("Start Recording").ok();
+                                    ri.set_enabled(true).ok();
+                                    qi.set_text("Quick Thought").ok();
+                                    qi.set_enabled(true).ok();
+                                    si.set_enabled(false).ok();
+                                    update_tray_state(&app_done, false);
+                                }
+                            });
                         }
                         "note" => {
                             show_note_window(app);
@@ -1613,6 +1621,12 @@ fn main() {
                     app.handle().clone(),
                     recording_for_detector,
                     processing_clone,
+                    call_detect::CallEndAutoStopHandles {
+                        recording_started_by_call_detect: started_by_call_detect_for_detector,
+                        countdown_cancel: countdown_cancel_for_detector,
+                        countdown_active: countdown_active_for_detector,
+                        stop_flag: stop_for_detector,
+                    },
                 );
             }
 
@@ -1693,27 +1707,21 @@ fn main() {
         })
         .on_window_event(|window, event| {
             match event {
-                tauri::WindowEvent::CloseRequested { api, .. } => {
-                    if window.label() == "main" {
-                        // Hide main window on close instead of quitting (app stays in tray)
-                        // PTY session persists — user can reopen and resume where they left off
-                        api.prevent_close();
-                        window.hide().ok();
-                    }
+                tauri::WindowEvent::CloseRequested { api, .. } if window.label() == "main" => {
+                    // Hide main window on close instead of quitting (app stays in tray)
+                    // PTY session persists — user can reopen and resume where they left off
+                    api.prevent_close();
+                    window.hide().ok();
                 }
-                tauri::WindowEvent::Focused(false) => {
-                    if window.label() == "palette" {
-                        let app_handle = window.app_handle().clone();
-                        let state = app_handle.state::<commands::AppState>();
-                        let is_open = match state.palette_lifecycle.lock() {
-                            Ok(guard) => *guard == commands::PaletteLifecycle::Open,
-                            Err(poisoned) => {
-                                *poisoned.into_inner() == commands::PaletteLifecycle::Open
-                            }
-                        };
-                        if is_open {
-                            commands::close_palette_window(&app_handle);
-                        }
+                tauri::WindowEvent::Focused(false) if window.label() == "palette" => {
+                    let app_handle = window.app_handle().clone();
+                    let state = app_handle.state::<commands::AppState>();
+                    let is_open = match state.palette_lifecycle.lock() {
+                        Ok(guard) => *guard == commands::PaletteLifecycle::Open,
+                        Err(poisoned) => *poisoned.into_inner() == commands::PaletteLifecycle::Open,
+                    };
+                    if is_open {
+                        commands::close_palette_window(&app_handle);
                     }
                 }
                 _ => {}
@@ -1727,6 +1735,7 @@ fn main() {
             commands::cmd_add_note,
             commands::cmd_start_recording,
             commands::cmd_stop_recording,
+            commands::cmd_cancel_call_end_countdown,
             commands::cmd_extend_recording,
             commands::cmd_open_file,
             commands::cmd_read_text_file,

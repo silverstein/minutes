@@ -4811,7 +4811,10 @@ mod tests {
             &identity,
         );
 
-        assert_eq!(variants, vec!["Mathieu".to_string(), "Matt".to_string()]);
+        // "Matt" no longer needs to be treated as an explicit participant
+        // variant here because the guarded intro matcher handles close
+        // self-name fuzz like "This is Matt" at rewrite time.
+        assert_eq!(variants, vec!["Mathieu".to_string()]);
     }
 
     #[test]

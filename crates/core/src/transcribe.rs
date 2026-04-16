@@ -589,6 +589,7 @@ fn transcribe_whisper_dispatch(
     #[cfg(not(feature = "whisper"))]
     {
         let _ = config; // suppress unused warning
+        let _ = hints; // only used when the whisper feature is enabled
         let duration_secs = samples.len() as f64 / 16000.0;
         let text = format!(
             "[Transcription placeholder — whisper feature not enabled]\n\

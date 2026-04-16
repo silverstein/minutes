@@ -422,7 +422,7 @@ pub fn consistency_report(
         }
     }
 
-    parsed_frontmatters.sort_by(|a, b| a.1.date.cmp(&b.1.date));
+    parsed_frontmatters.sort_by_key(|entry| entry.1.date);
 
     let owner_lower = owner.map(|value| value.to_lowercase());
     let now = Local::now();

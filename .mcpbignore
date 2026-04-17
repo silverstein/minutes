@@ -80,8 +80,8 @@ integrations/
 # Launchd plist (dev convenience, not needed in extension)
 *.plist
 
-# Schema (informational, not needed at runtime)
-schema/
+# Repo-root schema docs (not runtime package schema directories)
+/schema/
 
 # Git and misc
 .git/

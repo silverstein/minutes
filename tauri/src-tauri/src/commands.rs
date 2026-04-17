@@ -6584,16 +6584,18 @@ mod tests {
     }
 
     #[test]
-    fn parakeet_status_reports_ready_with_metadata() {
+    fn parakeet_status_reports_installed_metadata_across_build_flavors() {
         let dir = TempDir::new().unwrap();
         let mut config = Config::default();
         config.transcription.engine = "parakeet".into();
         config.transcription.model_path = dir.path().to_path_buf();
-        config.transcription.parakeet_binary = if cfg!(windows) {
-            "cmd".into()
+        config.transcription.parakeet_model = "tdt-ctc-110m".into();
+        let binary = if cfg!(windows) {
+            which::which("cmd").unwrap()
         } else {
-            "sh".into()
+            which::which("sh").unwrap()
         };
+        config.transcription.parakeet_binary = binary.display().to_string();
 
         let install_dir = minutes_core::parakeet::install_dir(&config, "tdt-ctc-110m");
         std::fs::create_dir_all(&install_dir).unwrap();
@@ -6605,7 +6607,6 @@ mod tests {
             .unwrap();
 
         let status = parakeet_status_view(&config);
-        assert!(status.ready);
         assert!(status.model_found);
         assert!(status.tokenizer_found);
         assert!(status.metadata.is_some());
@@ -6613,6 +6614,19 @@ mod tests {
             status.tokenizer_label.as_deref(),
             Some("tdt-ctc-110m.tokenizer.vocab")
         );
+        if cfg!(feature = "parakeet") {
+            assert!(status.ready);
+        } else {
+            assert!(!status.ready);
+            assert!(
+                status
+                    .issues
+                    .iter()
+                    .any(|issue| issue.contains("not compiled into this build")),
+                "expected missing compile support issue, got {:?}",
+                status.issues
+            );
+        }
     }
 
     #[test]

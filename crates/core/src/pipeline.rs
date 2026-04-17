@@ -3697,8 +3697,10 @@ mod tests {
 
     fn write_test_meeting(title: &str) -> (tempfile::TempDir, WriteResult, Frontmatter) {
         let dir = tempfile::TempDir::new().unwrap();
-        let mut config = Config::default();
-        config.output_dir = dir.path().to_path_buf();
+        let config = Config {
+            output_dir: dir.path().to_path_buf(),
+            ..Config::default()
+        };
 
         let frontmatter = Frontmatter {
             title: title.into(),

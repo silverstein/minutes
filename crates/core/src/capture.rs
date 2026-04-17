@@ -2633,7 +2633,6 @@ mod tests {
     /// other parallel tests could otherwise race the read/write.
     #[test]
     fn preferred_host_cache_round_trips() {
-        use cpal::traits::HostTrait;
         static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
         let _g = LOCK.lock().unwrap();
 

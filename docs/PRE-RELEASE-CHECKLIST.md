@@ -32,7 +32,7 @@ export CXXFLAGS="-I$(xcrun --show-sdk-path)/usr/include/c++/v1"  # macOS only
 cargo fmt --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test -p minutes-core --lib
-cargo test -p minutes-cli --lib
+cargo test -p minutes-cli
 cargo check -p minutes-app
 ```
 
@@ -43,8 +43,8 @@ If any of these fail, stop. Fix the underlying issue before bumping versions.
 The MCP server and SDK are real npm packages. They have their own build steps and their own dependency resolution. The Rust workspace tooling does not catch problems in either.
 
 ```bash
-(cd crates/sdk && npm run build)
-(cd crates/mcp && npm run build)
+(cd crates/sdk && npm install && npm run build)
+(cd crates/mcp && npm install && npm run build)
 (cd crates/mcp && npm install --dry-run)   # surfaces unresolved versions early
 ```
 
@@ -124,10 +124,13 @@ The `minutes.mcpb` Claude Desktop marketplace bundle is NOT built by any release
 # From the repo root, after Phase 4 has completed (MCP and SDK already published).
 (cd crates/mcp && npm run build)   # ensures dist/ and dist-ui/ are fresh
 mcpb pack                            # writes minutes.mcpb at repo root
+./scripts/check_mcpb_bundle.sh minutes.mcpb
 gh release upload vX.Y.Z minutes.mcpb --repo silverstein/minutes
 ```
 
 `mcpb pack` writes the bundle to `minutes.mcpb` at the repo root, internally versioned to whatever is in `manifest.json` (so make sure that file was bumped in Phase 3). The release page convention is the unversioned filename `minutes.mcpb`, matching v0.10.2 and earlier.
+
+The bundle check is not optional. We have already shipped a broken extension once where `.mcpbignore` excluded `crates/mcp/node_modules/yaml/dist/schema/yaml-1.1/*`, which let the server answer `initialize` and then crash immediately in Claude Desktop with `Cannot find module '../schema/yaml-1.1/merge.js'`.
 
 ## Phase 7: Watch the release workflows
 

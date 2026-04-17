@@ -2,7 +2,8 @@ use anyhow::Result;
 use chrono::{Local, TimeZone};
 use clap::{Parser, Subcommand};
 use minutes_core::autoresearch::{
-    self, DecodeHintEvalArtifactPaths, DecodeHintEvalOptions, DecodeHintEvalRequest,
+    self, DecodeHintEvalArtifactPaths, DecodeHintEvalComparisonArtifactPaths,
+    DecodeHintEvalComparisonRequest, DecodeHintEvalOptions, DecodeHintEvalRequest,
 };
 use minutes_core::capture::RecordingIntent;
 use minutes_core::config::VALID_PARAKEET_MODELS;
@@ -793,7 +794,8 @@ enum VaultAction {
 #[derive(Subcommand)]
 enum AutoresearchAction {
     /// Compare decode-hint baseline vs candidate runs against a local corpus.
-    DecodeHints {
+    #[command(name = "decode-hints")]
+    Run {
         /// Path to the local corpus manifest JSON
         #[arg(long)]
         corpus: PathBuf,
@@ -807,6 +809,38 @@ enum AutoresearchAction {
         engine: Option<String>,
 
         /// Print the full JSON report envelope to stdout
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Compare two prior decode-hint eval reports or run directories.
+    #[command(name = "compare-decode-hints")]
+    Compare {
+        /// Left/base report path or run directory
+        #[arg(long)]
+        left: PathBuf,
+
+        /// Right/candidate report path or run directory
+        #[arg(long)]
+        right: PathBuf,
+
+        /// Output root for local comparison artifacts (defaults to ~/.minutes/research/decode-hints-comparisons)
+        #[arg(long)]
+        out: Option<PathBuf>,
+
+        /// Print the full JSON comparison envelope to stdout
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// List recent decode-hint eval and comparison runs.
+    #[command(name = "list-decode-hints")]
+    List {
+        /// Maximum number of recent runs to show
+        #[arg(long, default_value_t = 10)]
+        limit: usize,
+
+        /// Print the full JSON listing to stdout
         #[arg(long)]
         json: bool,
     },
@@ -950,12 +984,21 @@ fn main() -> Result<()> {
         Commands::Jobs { all, json, limit } => cmd_jobs(all, json, limit),
         Commands::Paths { json } => cmd_paths(json, &config),
         Commands::Autoresearch { action } => match action {
-            AutoresearchAction::DecodeHints {
+            AutoresearchAction::Run {
                 corpus,
                 out,
                 engine,
                 json,
             } => cmd_autoresearch_decode_hints(&corpus, out.as_deref(), engine.as_deref(), json),
+            AutoresearchAction::Compare {
+                left,
+                right,
+                out,
+                json,
+            } => cmd_autoresearch_compare_decode_hints(&left, &right, out.as_deref(), json),
+            AutoresearchAction::List { limit, json } => {
+                cmd_autoresearch_list_decode_hints(limit, json)
+            }
         },
         Commands::Search {
             query,
@@ -3095,6 +3138,87 @@ fn cmd_autoresearch_decode_hints(
             "decode hint eval failed; see {}",
             artifacts.summary_md.display()
         );
+    }
+
+    Ok(())
+}
+
+fn cmd_autoresearch_compare_decode_hints(
+    left: &Path,
+    right: &Path,
+    output_root: Option<&Path>,
+    json: bool,
+) -> Result<()> {
+    let report = autoresearch::compare_decode_hint_eval_reports(left, right)?;
+    let request = DecodeHintEvalComparisonRequest {
+        command: "minutes autoresearch compare-decode-hints".into(),
+        generated_at: Local::now().to_rfc3339(),
+        left_path: left.to_path_buf(),
+        right_path: right.to_path_buf(),
+        output_root: output_root
+            .map(Path::to_path_buf)
+            .unwrap_or_else(autoresearch::default_comparison_root),
+    };
+    let artifacts = autoresearch::write_decode_hint_eval_comparison_artifacts(&request, &report)?;
+
+    if json {
+        #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct AutoresearchDecodeHintsComparisonOutput {
+            report: minutes_core::autoresearch::DecodeHintEvalComparisonReport,
+            artifacts: DecodeHintEvalComparisonArtifactPaths,
+        }
+
+        let envelope = json_envelope(
+            "minutes autoresearch compare-decode-hints",
+            AutoresearchDecodeHintsComparisonOutput {
+                report,
+                artifacts: artifacts.clone(),
+            },
+        );
+        println!("{}", serde_json::to_string_pretty(&envelope)?);
+    } else {
+        println!("Decode hint eval comparison");
+        println!("Shared cases: {}", report.totals.shared_cases);
+        println!("Added cases: {}", report.totals.added_cases);
+        println!("Removed cases: {}", report.totals.removed_cases);
+        println!("Improved cases: {}", report.totals.improved_cases);
+        println!("Regressed cases: {}", report.totals.regressed_cases);
+        println!("Newly passing: {}", report.totals.newly_passing_cases);
+        println!("Newly failing: {}", report.totals.newly_failing_cases);
+        println!("Artifacts: {}", artifacts.run_dir.display());
+    }
+
+    Ok(())
+}
+
+fn cmd_autoresearch_list_decode_hints(limit: usize, json: bool) -> Result<()> {
+    let runs = autoresearch::list_decode_hint_runs(limit)?;
+
+    if json {
+        let envelope = json_envelope("minutes autoresearch list-decode-hints", runs);
+        println!("{}", serde_json::to_string_pretty(&envelope)?);
+    } else if runs.is_empty() {
+        println!("No decode-hint research runs found.");
+    } else {
+        println!("Recent decode-hint research runs");
+        for run in runs {
+            println!(
+                "- {} [{}] {} cases, {} failed, {} improved, {} regressed, {} newly passing, {} newly failing",
+                run.generated_at,
+                run.kind,
+                run.cases_total,
+                run.cases_failed,
+                run.improved_cases,
+                run.regressed_cases,
+                run.newly_passing_cases,
+                run.newly_failing_cases
+            );
+            println!("  status: {}", run.status);
+            println!("  source: {}", run.source_path.display());
+            println!("  dir: {}", run.run_dir.display());
+            println!("  summary: {}", run.summary_path.display());
+        }
     }
 
     Ok(())

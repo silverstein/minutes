@@ -1612,9 +1612,9 @@ mod tests {
         let tail_silence = silence_needed - lead_silence;
 
         let mut padded = Vec::with_capacity(target_total_samples);
-        padded.extend(std::iter::repeat(0.0).take(lead_silence));
+        padded.extend(std::iter::repeat_n(0.0, lead_silence));
         padded.extend_from_slice(samples);
-        padded.extend(std::iter::repeat(0.0).take(tail_silence));
+        padded.extend(std::iter::repeat_n(0.0, tail_silence));
         padded
     }
 

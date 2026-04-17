@@ -90,7 +90,7 @@ while IFS=$'\t' read -r sha subject; do
   if [[ "$matched" -eq 0 ]]; then
     echo "$line" >> "$other_file"
   fi
-done < <(git log --reverse --pretty=format:'%H%x09%s' "${from_ref}..${to_ref}")
+done < <(git log --reverse --pretty=format:'%H%x09%s%n' "${from_ref}..${to_ref}")
 
 count_lines() {
   local file="$1"

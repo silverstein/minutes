@@ -314,7 +314,7 @@ pub fn run_decode_hint_eval_corpus(
             whisper_prompt_phrases: hints
                 .debug_priority_phrases()
                 .into_iter()
-                .chain(hints.debug_contextual_phrases().into_iter())
+                .chain(hints.debug_contextual_phrases())
                 .take(12)
                 .collect(),
             parakeet_boost_phrases: effective_parakeet_boost_phrases(&config, &hints),

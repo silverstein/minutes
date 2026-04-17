@@ -4692,6 +4692,25 @@
         </div>
       </div>
 
+      <!-- Advanced -->
+      <div class="settings-section">
+        <div class="about-item-title">ADVANCED</div>
+        <div class="about-controls">
+          <div class="about-controls-group">
+            <div class="about-controls-copy">Edit config.toml</div>
+            <div class="about-controls-meta">Tuning knobs not shown in this panel — silence thresholds, diarization parameters, watcher paths, knowledge-base integration, and more — live in your config file.</div>
+          </div>
+          <button class="btn btn-secondary btn-sm" id="settings-open-config-file">Open</button>
+        </div>
+        <div class="about-controls">
+          <div class="about-controls-group">
+            <div class="about-controls-copy">Configuration reference</div>
+            <div class="about-controls-meta">Full list of every config key, its default, and what it does.</div>
+          </div>
+          <button class="btn btn-secondary btn-sm" id="settings-open-config-docs">View docs</button>
+        </div>
+      </div>
+
       <div class="about-footer settings-footer about-footer-small">
         Config file: <span id="settings-config-path" class="settings-config-path"></span>
       </div>
@@ -7438,6 +7457,30 @@
       const isOn = await invoke('cmd_get_autostart').catch(() => false);
       const next = !isOn;
       try { await invoke('cmd_set_autostart', { enabled: next }); setSettingsToggle('settings-autostart', next); } catch (e) { console.error('autostart toggle:', e); }
+    });
+    // Advanced: open config.toml in the user's default editor + docs link.
+    // cmd_get_settings already ships config_path for the footer; we re-fetch
+    // on click so a moved/renamed config gets picked up without a reload.
+    document.getElementById('settings-open-config-file').addEventListener('click', async () => {
+      try {
+        const s = await invoke('cmd_get_settings');
+        if (!s || !s.config_path) {
+          console.error('settings: no config_path from cmd_get_settings');
+          return;
+        }
+        await invoke('cmd_open_file', { path: s.config_path });
+      } catch (e) {
+        console.error('open config.toml:', e);
+      }
+    });
+    document.getElementById('settings-open-config-docs').addEventListener('click', async () => {
+      try {
+        await invoke('cmd_open_file', {
+          path: 'https://github.com/silverstein/minutes/blob/main/docs/CONFIG.md',
+        });
+      } catch (e) {
+        console.error('open config docs:', e);
+      }
     });
     // Legacy hotkey settings — guarded for removed HTML elements
     if (document.getElementById('settings-hotkey')) {

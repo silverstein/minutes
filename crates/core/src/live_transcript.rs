@@ -73,18 +73,30 @@ pub enum TranscriptSource {
 }
 
 pub const PARAKEET_SCOPE_DOC_REF: &str = "docs/PARAKEET.md#scope";
-pub const PARAKEET_RECORDING_LIVE_SCOPE_WARNING: &str =
-    "live transcription during recording still uses whisper (parakeet live streaming is not yet wired; see docs/PARAKEET.md#scope)";
+/// Shown at session start when the user configured `engine = "parakeet"` but the
+/// binary was built without the `parakeet` Cargo feature. The engine choice is
+/// silently honored as whisper for this session.
+pub const PARAKEET_LIVE_SCOPE_WARNING: &str =
+    "this build does not include parakeet; live transcription uses whisper (see docs/PARAKEET.md#scope)";
+/// Shown at runtime when the parakeet engine IS compiled in but fails during a
+/// live session (warmup error, sidecar unreachable, transcribe error). The
+/// session transparently falls back to whisper for the remainder.
+#[cfg(feature = "parakeet")]
+pub const PARAKEET_LIVE_FALLBACK_WARNING: &str =
+    "parakeet live transcription failed; falling back to whisper for this session (see docs/PARAKEET.md#scope)";
 
-fn recording_sidecar_engine_scope_warning(engine: &str) -> Option<&'static str> {
-    if engine.eq_ignore_ascii_case("parakeet") && !recording_sidecar_supports_parakeet(engine) {
-        Some(PARAKEET_RECORDING_LIVE_SCOPE_WARNING)
+/// True iff this build can route `engine = "parakeet"` to the parakeet path.
+/// Used at session start to decide between scope-warning (compile-time gap)
+/// and the real parakeet dispatch.
+fn live_engine_scope_warning(engine: &str) -> Option<&'static str> {
+    if engine.eq_ignore_ascii_case("parakeet") && !live_supports_parakeet(engine) {
+        Some(PARAKEET_LIVE_SCOPE_WARNING)
     } else {
         None
     }
 }
 
-fn recording_sidecar_supports_parakeet(engine: &str) -> bool {
+fn live_supports_parakeet(engine: &str) -> bool {
     #[cfg(feature = "parakeet")]
     {
         engine.eq_ignore_ascii_case("parakeet")
@@ -97,13 +109,17 @@ fn recording_sidecar_supports_parakeet(engine: &str) -> bool {
     }
 }
 
-fn emit_recording_sidecar_engine_scope_warning(engine: &str) {
-    let Some(message) = recording_sidecar_engine_scope_warning(engine) else {
+/// Session-start warning: fires only when `engine = "parakeet"` was requested
+/// and the current build cannot honor it (parakeet feature not compiled in).
+/// Always visible on stderr so the user sees that their engine choice was
+/// silently downgraded.
+fn emit_live_engine_scope_warning(engine: &str, source: &'static str) {
+    let Some(message) = live_engine_scope_warning(engine) else {
         return;
     };
 
     eprintln!("[minutes] {}", message);
-    tracing::warn!(engine, "{}", message);
+    tracing::warn!(engine, source, "{}", message);
     crate::logging::append_log(&serde_json::json!({
         "ts": Local::now().to_rfc3339(),
         "level": "warn",
@@ -112,7 +128,33 @@ fn emit_recording_sidecar_engine_scope_warning(engine: &str) {
         "message": message,
         "extra": {
             "engine": engine,
-            "source": "recording-sidecar",
+            "source": source,
+            "doc_ref": PARAKEET_SCOPE_DOC_REF,
+        }
+    }))
+    .ok();
+}
+
+/// Runtime fallback warning: fires when the parakeet path fails mid-session
+/// (warmup error or transcribe error) and the session is transparently switched
+/// to whisper for the remainder. Always visible on stderr — the user needs to
+/// know their transcripts changed engines.
+#[cfg(feature = "parakeet")]
+fn emit_live_engine_fallback_warning(source: &'static str, detail: &str) {
+    eprintln!(
+        "[minutes] {} (detail: {})",
+        PARAKEET_LIVE_FALLBACK_WARNING, detail
+    );
+    tracing::warn!(source, detail, "{}", PARAKEET_LIVE_FALLBACK_WARNING);
+    crate::logging::append_log(&serde_json::json!({
+        "ts": Local::now().to_rfc3339(),
+        "level": "warn",
+        "step": "live_transcript_fallback",
+        "file": "",
+        "message": PARAKEET_LIVE_FALLBACK_WARNING,
+        "extra": {
+            "source": source,
+            "detail": detail,
             "doc_ref": PARAKEET_SCOPE_DOC_REF,
         }
     }))
@@ -473,10 +515,75 @@ fn run_inner(
 
     let mut vad = Vad::new();
     let mut streaming = StreamingWhisper::new(config.transcription.language.clone());
+
+    // Parakeet engine dispatch — mirrors run_sidecar_inner_mpsc. When the user
+    // configures `engine = "parakeet"` and the parakeet feature is compiled in,
+    // utterance samples are accumulated and routed through the parakeet path
+    // (warm sidecar socket when `parakeet_sidecar_enabled = true`, subprocess
+    // otherwise) at VAD-end. On failure the session transparently falls back
+    // to whisper for the remainder. See RFC 0002.
+    #[cfg(feature = "parakeet")]
+    let mut parakeet_utterance_samples: Vec<f32> = Vec::new();
+    #[cfg(feature = "parakeet")]
+    let mut parakeet_live_enabled = live_supports_parakeet(&config.transcription.engine);
+    #[cfg(not(feature = "parakeet"))]
+    let parakeet_live_enabled = false;
+
     let mut was_speaking = false;
     let mut utterance_samples: usize = 0;
     let max_utterance_secs = config.live_transcript.max_utterance_secs.max(5);
     let max_utterance_samples = (max_utterance_secs as usize).saturating_mul(16000);
+
+    // One-time scope warning when the user configured parakeet but the feature
+    // isn't compiled in. Same warning the recording sidecar emits.
+    if config.transcription.engine.eq_ignore_ascii_case("parakeet") && !parakeet_live_enabled {
+        emit_live_engine_scope_warning(&config.transcription.engine, "standalone");
+    }
+
+    // Warm the parakeet sidecar at session start so the first utterance doesn't
+    // pay subprocess-spawn + model-load latency. We only warm the sidecar lane
+    // because:
+    //   - `parakeet_sidecar_enabled = true` → warmup leaves a hot example-server
+    //     child + loaded model, making subsequent utterances fast.
+    //   - `parakeet_sidecar_enabled = false` → warmup would just be a throwaway
+    //     subprocess on a silent WAV; it wouldn't leave a hot backend behind,
+    //     so the first real utterance still pays full spawn/model-load cost.
+    //     Skipping the no-op warmup avoids a 4-5s startup stall for nothing.
+    //
+    // Warmup failure is ADVISORY. We do NOT disable parakeet for the session
+    // on warmup error, because `crate::transcribe::transcribe()` already falls
+    // back sidecar→subprocess gracefully on a per-utterance basis. Forcing
+    // whisper here would be strictly worse than what the per-utterance code
+    // already does.
+    #[cfg(feature = "parakeet")]
+    if parakeet_live_enabled && config.transcription.parakeet_sidecar_enabled {
+        eprintln!("[minutes] Warming parakeet sidecar... (first-run cold start can take 10-30s)");
+        let started = std::time::Instant::now();
+        match crate::transcription_coordinator::warmup_active_backend(config) {
+            Ok(result) => {
+                tracing::info!(
+                    backend_id = %result.backend_id,
+                    elapsed_ms = result.elapsed_ms,
+                    "parakeet backend warmed for live session"
+                );
+                eprintln!("[minutes] parakeet sidecar ready ({}ms)", result.elapsed_ms);
+            }
+            Err(error) => {
+                // Log loudly, but keep parakeet_live_enabled = true so the
+                // per-utterance transcribe() path gets a chance to fall back
+                // sidecar→subprocess on its own.
+                tracing::warn!(
+                    error = %error,
+                    elapsed_ms = started.elapsed().as_millis() as u64,
+                    "parakeet sidecar warmup failed; falling through to per-utterance dispatch (may still succeed via subprocess)"
+                );
+                eprintln!(
+                    "[minutes] parakeet sidecar warmup failed ({}); will try per-utterance subprocess path",
+                    error
+                );
+            }
+        }
+    }
 
     tracing::info!("live transcript session started");
 
@@ -486,9 +593,18 @@ fn run_inner(
         if stop_flag.load(Ordering::Relaxed) {
             // Finalize any in-progress utterance
             if utterance_samples > 0 {
-                if let Some(sr) = streaming.finalize(&whisper_ctx) {
-                    writer.write_utterance(&sr.text, sr.duration_secs);
-                }
+                #[cfg(feature = "parakeet")]
+                finalize_on_exit(
+                    &mut writer,
+                    &mut parakeet_live_enabled,
+                    &mut parakeet_utterance_samples,
+                    config,
+                    &mut streaming,
+                    &whisper_ctx,
+                    "standalone",
+                );
+                #[cfg(not(feature = "parakeet"))]
+                finalize_on_exit(&mut writer, &mut streaming, &whisper_ctx);
             }
             break;
         }
@@ -496,9 +612,18 @@ fn run_inner(
         // Check for stop sentinel (from `minutes stop`)
         if pid::check_and_clear_sentinel() {
             if utterance_samples > 0 {
-                if let Some(sr) = streaming.finalize(&whisper_ctx) {
-                    writer.write_utterance(&sr.text, sr.duration_secs);
-                }
+                #[cfg(feature = "parakeet")]
+                finalize_on_exit(
+                    &mut writer,
+                    &mut parakeet_live_enabled,
+                    &mut parakeet_utterance_samples,
+                    config,
+                    &mut streaming,
+                    &whisper_ctx,
+                    "standalone",
+                );
+                #[cfg(not(feature = "parakeet"))]
+                finalize_on_exit(&mut writer, &mut streaming, &whisper_ctx);
             }
             break;
         }
@@ -516,14 +641,38 @@ fn run_inner(
                     );
                     device_monitor.update_device(&new_stream.device_name);
                     stream = new_stream;
+                    // Discard any partial utterance — mic dropped mid-speech,
+                    // pre-reconnect audio is unreliable. Splicing pre+post
+                    // reconnect samples into one JSONL line would be silent
+                    // transcript corruption.
+                    if utterance_samples > 0 {
+                        tracing::info!(
+                            samples_discarded = utterance_samples,
+                            "discarding partial utterance across device reconnect"
+                        );
+                    }
+                    streaming.reset();
+                    #[cfg(feature = "parakeet")]
+                    parakeet_utterance_samples.clear();
+                    utterance_samples = 0;
+                    was_speaking = false;
                     continue;
                 }
                 Err(e) => {
                     tracing::error!("live transcript reconnect failed: {}", e);
                     if utterance_samples > 0 {
-                        if let Some(sr) = streaming.finalize(&whisper_ctx) {
-                            writer.write_utterance(&sr.text, sr.duration_secs);
-                        }
+                        #[cfg(feature = "parakeet")]
+                        finalize_on_exit(
+                            &mut writer,
+                            &mut parakeet_live_enabled,
+                            &mut parakeet_utterance_samples,
+                            config,
+                            &mut streaming,
+                            &whisper_ctx,
+                            "standalone",
+                        );
+                        #[cfg(not(feature = "parakeet"))]
+                        finalize_on_exit(&mut writer, &mut streaming, &whisper_ctx);
                     }
                     break;
                 }
@@ -549,14 +698,36 @@ fn run_inner(
                         );
                         device_monitor.update_device(&new_stream.device_name);
                         stream = new_stream;
+                        // Discard partial utterance — see comment above the
+                        // device-change reconnect branch for rationale.
+                        if utterance_samples > 0 {
+                            tracing::info!(
+                                samples_discarded = utterance_samples,
+                                "discarding partial utterance across stream reconnect"
+                            );
+                        }
+                        streaming.reset();
+                        #[cfg(feature = "parakeet")]
+                        parakeet_utterance_samples.clear();
+                        utterance_samples = 0;
+                        was_speaking = false;
                         continue;
                     }
                     Err(e) => {
                         tracing::error!("reconnect after disconnect failed: {}", e);
                         if utterance_samples > 0 {
-                            if let Some(sr) = streaming.finalize(&whisper_ctx) {
-                                writer.write_utterance(&sr.text, sr.duration_secs);
-                            }
+                            #[cfg(feature = "parakeet")]
+                            finalize_on_exit(
+                                &mut writer,
+                                &mut parakeet_live_enabled,
+                                &mut parakeet_utterance_samples,
+                                config,
+                                &mut streaming,
+                                &whisper_ctx,
+                                "standalone",
+                            );
+                            #[cfg(not(feature = "parakeet"))]
+                            finalize_on_exit(&mut writer, &mut streaming, &whisper_ctx);
                         }
                         break;
                     }
@@ -573,35 +744,69 @@ fn run_inner(
             was_speaking = true;
             utterance_samples += chunk.samples.len();
 
-            // Feed to streaming whisper
-            if let Some(_sr) = streaming.feed(&chunk.samples, &whisper_ctx) {
-                // Partial result available — could emit event, but for now just continue
+            if parakeet_live_enabled {
+                #[cfg(feature = "parakeet")]
+                {
+                    parakeet_utterance_samples.extend_from_slice(&chunk.samples);
+                }
+            } else if let Some(_sr) = streaming.feed(&chunk.samples, &whisper_ctx) {
+                // Partial result available — could emit event in the future
             }
 
             // Force-finalize if max utterance reached
             if utterance_samples >= max_utterance_samples {
                 tracing::info!("max utterance duration reached, force-finalizing");
-                if let Some(sr) = streaming.finalize(&whisper_ctx) {
-                    if !writer.write_utterance(&sr.text, sr.duration_secs) {
-                        tracing::error!(
-                            "JSONL write failed — stopping session to prevent data loss"
-                        );
-                        break;
-                    }
+                #[cfg(feature = "parakeet")]
+                let write_ok = finalize_live_utterance(
+                    &mut writer,
+                    &mut parakeet_live_enabled,
+                    &mut parakeet_utterance_samples,
+                    config,
+                    &mut streaming,
+                    &whisper_ctx,
+                    "standalone",
+                );
+                #[cfg(not(feature = "parakeet"))]
+                let write_ok = if let Some(sr) = streaming.finalize(&whisper_ctx) {
+                    let ok = writer.write_utterance(&sr.text, sr.duration_secs);
+                    streaming.reset();
+                    ok
+                } else {
+                    streaming.reset();
+                    true
+                };
+                if !write_ok {
+                    tracing::error!("JSONL write failed — stopping session to prevent data loss");
+                    break;
                 }
-                streaming.reset();
                 utterance_samples = 0;
                 was_speaking = false;
             }
         } else if was_speaking && utterance_samples > 0 {
             // Speech just ended — finalize the utterance
-            if let Some(sr) = streaming.finalize(&whisper_ctx) {
-                if !writer.write_utterance(&sr.text, sr.duration_secs) {
-                    tracing::error!("JSONL write failed — stopping session to prevent data loss");
-                    break;
-                }
+            #[cfg(feature = "parakeet")]
+            let write_ok = finalize_live_utterance(
+                &mut writer,
+                &mut parakeet_live_enabled,
+                &mut parakeet_utterance_samples,
+                config,
+                &mut streaming,
+                &whisper_ctx,
+                "standalone",
+            );
+            #[cfg(not(feature = "parakeet"))]
+            let write_ok = if let Some(sr) = streaming.finalize(&whisper_ctx) {
+                let ok = writer.write_utterance(&sr.text, sr.duration_secs);
+                streaming.reset();
+                ok
+            } else {
+                streaming.reset();
+                true
+            };
+            if !write_ok {
+                tracing::error!("JSONL write failed — stopping session to prevent data loss");
+                break;
             }
-            streaming.reset();
             utterance_samples = 0;
             was_speaking = false;
             // No silence timeout — keep running until stop
@@ -872,12 +1077,21 @@ fn transcribe_with_whisper_for_live_sidecar(
         .map(|result| (result.text, result.duration_secs))
 }
 
+/// Minimum utterance length for the parakeet path — mirrors
+/// `StreamingWhisper::MIN_TRANSCRIBE_SAMPLES`. VAD blips shorter than this
+/// are dropped without hitting the sidecar/subprocess, avoiding temp-file
+/// churn and latency spikes on noisy inputs.
+#[cfg(feature = "parakeet")]
+const PARAKEET_LIVE_MIN_SAMPLES: usize = 16_000; // 1 second at 16kHz
+
 #[cfg(feature = "parakeet")]
 fn transcribe_with_parakeet_for_live_sidecar(
     samples: &[f32],
     config: &Config,
 ) -> Result<Option<(String, f64)>, MinutesError> {
-    if samples.is_empty() {
+    if samples.len() < PARAKEET_LIVE_MIN_SAMPLES {
+        // Drop sub-1s blips silently — they're almost always noise or mic
+        // pops that VAD didn't fully suppress. Same threshold whisper uses.
         return Ok(None);
     }
 
@@ -892,6 +1106,119 @@ fn transcribe_with_parakeet_for_live_sidecar(
         Ok(result) => Ok(Some((result.text, samples.len() as f64 / 16000.0))),
         Err(TranscribeError::EmptyAudio) | Err(TranscribeError::EmptyTranscript(_)) => Ok(None),
         Err(error) => Err(error.into()),
+    }
+}
+
+/// Finalize one utterance via the active engine (parakeet if enabled, else whisper)
+/// and write the resulting JSONL line.
+///
+/// Returns `true` if the write succeeded (or there was no text to write) and the
+/// session should continue; `false` on JSONL write failure, which signals the
+/// caller to stop to prevent data loss.
+///
+/// On parakeet failure, the function automatically falls back to whisper for
+/// the accumulated samples and flips `parakeet_live_enabled` to `false` so the
+/// remainder of the session uses whisper. This matches the recording-sidecar
+/// behavior — no runtime retries, one error per session.
+#[cfg(all(feature = "whisper", feature = "parakeet"))]
+fn finalize_live_utterance(
+    writer: &mut LiveTranscriptWriter,
+    parakeet_live_enabled: &mut bool,
+    parakeet_utterance_samples: &mut Vec<f32>,
+    config: &Config,
+    streaming: &mut StreamingWhisper,
+    whisper_ctx: &whisper_rs::WhisperContext,
+    source: &'static str,
+) -> bool {
+    if *parakeet_live_enabled {
+        match transcribe_with_parakeet_for_live_sidecar(parakeet_utterance_samples, config) {
+            Ok(Some((text, duration_secs))) => {
+                let ok = writer.write_utterance(&text, duration_secs);
+                parakeet_utterance_samples.clear();
+                return ok;
+            }
+            Ok(None) => {
+                parakeet_utterance_samples.clear();
+                return true;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    "live parakeet path failed — switching this session to whisper"
+                );
+                *parakeet_live_enabled = false;
+                emit_live_engine_fallback_warning(source, &error.to_string());
+                // Fall back: transcribe the accumulated samples via whisper so
+                // this utterance still lands in the JSONL.
+                if let Some((text, duration_secs)) = transcribe_with_whisper_for_live_sidecar(
+                    parakeet_utterance_samples,
+                    whisper_ctx,
+                    config.transcription.language.clone(),
+                ) {
+                    let ok = writer.write_utterance(&text, duration_secs);
+                    parakeet_utterance_samples.clear();
+                    return ok;
+                }
+                parakeet_utterance_samples.clear();
+                return true;
+            }
+        }
+    }
+
+    // Whisper path
+    let write_ok = if let Some(sr) = streaming.finalize(whisper_ctx) {
+        writer.write_utterance(&sr.text, sr.duration_secs)
+    } else {
+        true
+    };
+    streaming.reset();
+    write_ok
+}
+
+/// Shutdown-time helper: finalize any partial utterance and log loudly on
+/// JSONL write failure. Called at every early-exit branch of `run_inner`
+/// (stop flag, stop sentinel, reconnect failure, stream disconnect failure).
+///
+/// We can't propagate the write_ok signal back into the caller's control flow
+/// at these branches — we're already breaking out of the loop. But if the
+/// write failed, the last utterance is silently dropped unless we log it.
+#[cfg(all(feature = "whisper", feature = "parakeet"))]
+fn finalize_on_exit(
+    writer: &mut LiveTranscriptWriter,
+    parakeet_live_enabled: &mut bool,
+    parakeet_utterance_samples: &mut Vec<f32>,
+    config: &Config,
+    streaming: &mut StreamingWhisper,
+    whisper_ctx: &whisper_rs::WhisperContext,
+    source: &'static str,
+) {
+    if !finalize_live_utterance(
+        writer,
+        parakeet_live_enabled,
+        parakeet_utterance_samples,
+        config,
+        streaming,
+        whisper_ctx,
+        source,
+    ) {
+        tracing::error!(
+            "JSONL write failed while finalizing last utterance on shutdown — last utterance may be lost"
+        );
+    }
+}
+
+#[cfg(all(feature = "whisper", not(feature = "parakeet")))]
+fn finalize_on_exit(
+    writer: &mut LiveTranscriptWriter,
+    streaming: &mut StreamingWhisper,
+    whisper_ctx: &whisper_rs::WhisperContext,
+) {
+    if let Some(sr) = streaming.finalize(whisper_ctx) {
+        if !writer.write_utterance(&sr.text, sr.duration_secs) {
+            tracing::error!(
+                "JSONL write failed while finalizing last utterance on shutdown — last utterance may be lost"
+            );
+        }
     }
 }
 
@@ -974,8 +1301,7 @@ fn run_sidecar_inner_mpsc(
     #[cfg(feature = "parakeet")]
     let mut parakeet_utterance_samples: Vec<f32> = Vec::new();
     #[cfg(feature = "parakeet")]
-    let mut parakeet_live_enabled =
-        recording_sidecar_supports_parakeet(&config.transcription.engine);
+    let mut parakeet_live_enabled = live_supports_parakeet(&config.transcription.engine);
     #[cfg(not(feature = "parakeet"))]
     let parakeet_live_enabled = false;
     let mut was_speaking = false;
@@ -985,7 +1311,7 @@ fn run_sidecar_inner_mpsc(
     let max_utterance_samples = (max_utterance_secs as usize).saturating_mul(16000);
 
     if config.transcription.engine.eq_ignore_ascii_case("parakeet") && !parakeet_live_enabled {
-        emit_recording_sidecar_engine_scope_warning(&config.transcription.engine);
+        emit_live_engine_scope_warning(&config.transcription.engine, "recording-sidecar");
     }
 
     tracing::info!("live sidecar started (recording mode)");
@@ -1112,7 +1438,10 @@ fn run_sidecar_inner_mpsc(
                                     "live recording-sidecar parakeet path failed — switching this session to whisper"
                                 );
                                 parakeet_live_enabled = false;
-                                emit_recording_sidecar_engine_scope_warning("parakeet");
+                                emit_live_engine_fallback_warning(
+                                    "recording-sidecar",
+                                    &error.to_string(),
+                                );
                                 if let Some((text, duration_secs)) =
                                     transcribe_with_whisper_for_live_sidecar(
                                         &parakeet_utterance_samples,
@@ -1151,7 +1480,10 @@ fn run_sidecar_inner_mpsc(
                                 "live recording-sidecar parakeet path failed — switching this session to whisper"
                             );
                             parakeet_live_enabled = false;
-                            emit_recording_sidecar_engine_scope_warning("parakeet");
+                            emit_live_engine_fallback_warning(
+                                "recording-sidecar",
+                                &error.to_string(),
+                            );
                             if let Some((text, duration_secs)) =
                                 transcribe_with_whisper_for_live_sidecar(
                                     &parakeet_utterance_samples,
@@ -1466,9 +1798,11 @@ pub fn clear_status_file() {
 
 #[cfg(test)]
 mod tests {
-    use super::recording_sidecar_engine_scope_warning;
+    use super::live_engine_scope_warning;
+    #[cfg(feature = "parakeet")]
+    use super::PARAKEET_LIVE_FALLBACK_WARNING;
     #[cfg(not(feature = "parakeet"))]
-    use super::PARAKEET_RECORDING_LIVE_SCOPE_WARNING;
+    use super::PARAKEET_LIVE_SCOPE_WARNING;
     use super::*;
     use chrono::Duration as ChronoDuration;
     use std::io::Write;
@@ -1759,24 +2093,78 @@ mod tests {
     }
 
     #[test]
-    fn recording_sidecar_scope_warning_only_applies_to_parakeet() {
+    fn live_scope_warning_only_applies_to_parakeet() {
         #[cfg(feature = "parakeet")]
         {
-            assert_eq!(recording_sidecar_engine_scope_warning("parakeet"), None);
-            assert_eq!(recording_sidecar_engine_scope_warning("PaRaKeEt"), None);
+            assert_eq!(live_engine_scope_warning("parakeet"), None);
+            assert_eq!(live_engine_scope_warning("PaRaKeEt"), None);
         }
         #[cfg(not(feature = "parakeet"))]
         {
             assert_eq!(
-                recording_sidecar_engine_scope_warning("parakeet"),
-                Some(PARAKEET_RECORDING_LIVE_SCOPE_WARNING)
+                live_engine_scope_warning("parakeet"),
+                Some(PARAKEET_LIVE_SCOPE_WARNING)
             );
             assert_eq!(
-                recording_sidecar_engine_scope_warning("PaRaKeEt"),
-                Some(PARAKEET_RECORDING_LIVE_SCOPE_WARNING)
+                live_engine_scope_warning("PaRaKeEt"),
+                Some(PARAKEET_LIVE_SCOPE_WARNING)
             );
         }
-        assert_eq!(recording_sidecar_engine_scope_warning("whisper"), None);
+        assert_eq!(live_engine_scope_warning("whisper"), None);
+    }
+
+    /// Scope-warning and runtime-fallback-warning are semantically distinct:
+    /// - scope = "this build doesn't support parakeet"
+    /// - fallback = "parakeet failed at runtime; falling back"
+    /// If they drift to the same message, users can't distinguish whether
+    /// their config was ignored at compile time or broken at runtime.
+    #[cfg(feature = "parakeet")]
+    #[test]
+    fn scope_and_fallback_warnings_are_distinct_messages() {
+        // The fallback message must not claim the feature is unavailable —
+        // by definition it fires when the feature IS compiled in.
+        assert!(!PARAKEET_LIVE_FALLBACK_WARNING.contains("does not include"));
+        assert!(PARAKEET_LIVE_FALLBACK_WARNING.contains("fall"));
+    }
+
+    /// The parakeet live helper drops sub-1s utterances without hitting the
+    /// sidecar/subprocess. This guards against temp-file churn and latency
+    /// spikes on VAD blips. Matches StreamingWhisper::MIN_TRANSCRIBE_SAMPLES.
+    #[cfg(feature = "parakeet")]
+    #[test]
+    fn parakeet_live_helper_drops_subsecond_utterances() {
+        use super::transcribe_with_parakeet_for_live_sidecar;
+        let cfg = Config::default();
+        // 0.5s of silence at 16kHz. Should return Ok(None) without attempting
+        // to write a temp WAV or spawn a subprocess. If the floor is missing
+        // and this test reaches the parakeet subprocess path, it will fail or
+        // hang (no parakeet binary configured in default test Config).
+        let samples = vec![0.0f32; 8_000];
+        let result = transcribe_with_parakeet_for_live_sidecar(&samples, &cfg);
+        assert!(matches!(result, Ok(None)));
+    }
+
+    /// Zero-length and exactly-at-threshold edge cases for the 1s floor.
+    #[cfg(feature = "parakeet")]
+    #[test]
+    fn parakeet_live_helper_threshold_edges() {
+        use super::transcribe_with_parakeet_for_live_sidecar;
+        use super::PARAKEET_LIVE_MIN_SAMPLES;
+        let cfg = Config::default();
+        // Empty buffer — drop.
+        assert!(matches!(
+            transcribe_with_parakeet_for_live_sidecar(&[], &cfg),
+            Ok(None)
+        ));
+        // One sample below threshold — drop.
+        let below = vec![0.0f32; PARAKEET_LIVE_MIN_SAMPLES - 1];
+        assert!(matches!(
+            transcribe_with_parakeet_for_live_sidecar(&below, &cfg),
+            Ok(None)
+        ));
+        // (We can't assert the threshold-exceeds branch here — it requires a
+        // real parakeet binary. The subprocess path is exercised by the smoke
+        // test in the RFC.)
     }
 
     #[test]

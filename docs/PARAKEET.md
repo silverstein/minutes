@@ -25,18 +25,32 @@ Today, `engine = "parakeet"` is wired for these paths:
 - post-recording batch transcription (`minutes process`, desktop processing, and the shared cleanup pipeline)
 - folder watcher memo processing after a file lands on disk
 - recording-sidecar live transcription during `minutes record`
+- standalone live transcription (`minutes live` and desktop Live Mode) — see RFC 0002
 
-The recording sidecar routes each finalized utterance through the Parakeet path. If
-`parakeet_sidecar_enabled = true`, it reuses the warm `example-server` socket; otherwise
-it falls back to the Parakeet subprocess path for each utterance.
+Both live paths route each VAD-gated utterance through the Parakeet path. If
+`parakeet_sidecar_enabled = true`, they reuse the warm `example-server` socket;
+otherwise they fall back to the Parakeet subprocess path for each utterance.
+The standalone live path additionally warms the sidecar at session start so the
+first utterance does not pay the subprocess-spawn + model-load cost.
+
+Strongly recommended for live use: set `parakeet_sidecar_enabled = true` and
+ensure `example-server` is discoverable (either on `PATH` or via
+`MINUTES_PARAKEET_SERVER_BINARY`). Without the warm sidecar, every live
+utterance incurs full subprocess startup, which makes live mode visibly slow.
 
 These paths still use Whisper today, even if the global transcription engine is set to `parakeet`:
 
-- standalone live transcription (`minutes live` and desktop Live Mode)
-- dictation
+- dictation (`minutes dictate` and the dictation hotkey) — deferred to a future RFC because dictation streams mid-utterance partials for the overlay typing effect, which requires a different socket integration than utterance-granular live mode
 
-If Parakeet support is not compiled into the current build, Minutes logs a warning and
-falls back to Whisper for `minutes record` live transcription.
+If Parakeet support is not compiled into the current build, Minutes logs a
+warning and falls back to Whisper for both live paths.
+
+Note: both live paths still require the `whisper` Cargo feature to be compiled
+in. Whisper is the runtime fallback when Parakeet fails mid-session (warmup
+error, sidecar unreachable, transcription failure), so builds with
+`--features parakeet` and `--no-default-features` (no whisper) cannot run
+`minutes live` — the session errors out immediately. Whisper is a default
+feature, so this only matters for unusual build configurations.
 
 ## Fastest Path on Apple Silicon
 
@@ -314,9 +328,9 @@ cargo build --release -p minutes-cli --features parakeet
 
 Note: The `parakeet` feature is opt-in and not included in the default build.
 Whisper is always compiled in (it's the default feature). Both engines can coexist
-in the same binary — today the config file selects the offline/batch path plus
-recording-sidecar live transcription during `minutes record`, while standalone
-live transcription and dictation still use Whisper. See [Scope](#scope).
+in the same binary — the config file selects the offline/batch path plus both
+live transcription paths (`minutes record` sidecar and standalone `minutes live`).
+Dictation still uses Whisper. See [Scope](#scope).
 
 ## Switching Back to Whisper
 

@@ -10,8 +10,38 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # Detect which areas of the repo changed so heavy Rust/Tauri jobs can
+  # skip when a PR only touches docs, site/, MCP, skills, or scripts.
+  # The Windows Desktop Installer job alone is ~20 min; on a no-Rust PR
+  # that's pure waste. Any path touched by the `rust` filter triggers the
+  # full desktop/test/install matrix. The workflow file itself is in the
+  # filter defensively, so edits to CI always get verified end-to-end.
+  changes:
+    name: Detect changed paths
+    runs-on: ubuntu-latest
+    outputs:
+      rust: ${{ steps.filter.outputs.rust }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            rust:
+              - 'tauri/**'
+              - 'crates/core/**'
+              - 'crates/cli/**'
+              - 'crates/reader/**'
+              - 'crates/whisper-guard/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'rust-toolchain.toml'
+              - '.github/workflows/ci.yml'
+
   test:
     name: Test (${{ matrix.os }})
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -92,6 +122,8 @@ jobs:
 
   install:
     name: Install CLI (${{ matrix.os }})
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -136,6 +168,8 @@ jobs:
     # (~5 min vs ~15 min cold) compound across every PR. release-cli.yml still
     # does the release build at tag time as the final gate.
     name: Build CLI (ubuntu-latest, default features)
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -170,6 +204,8 @@ jobs:
 
   desktop_windows:
     name: Desktop App Installer (windows-latest)
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4

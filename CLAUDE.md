@@ -131,6 +131,7 @@ certificate or local notarization credentials.
 | **Manifest description** | New user-facing features | Read `long_description` in `manifest.json` — does it mention the new capability? |
 | **Manifest version** | Version bumps | `manifest.json` version must match all other version sources |
 | **MCP server rebuild** | Any change to `crates/mcp/src/` or `crates/mcp/ui/` | `cd crates/mcp && npm run build` |
+| **MCPB bundle guard** | Any change to `.mcpbignore`, `crates/mcp/**`, `crates/sdk/**`, `manifest.json`, or anything else that affects what lands in the packed extension | `mcpb pack . minutes.mcpb && ./scripts/check_mcpb_bundle.sh minutes.mcpb && ./scripts/smoke_mcpb_handshake.sh minutes.mcpb`. The `MCP Server` CI job runs this on every push since issue #149; running it locally first saves a round-trip. |
 | **cargo fmt** | Any Rust change | `cargo fmt --all -- --check` |
 | **cargo clippy** | Any Rust change | `cargo clippy --all --no-default-features -- -D warnings` |
 | **cargo test** | Any Rust change | `cargo test -p minutes-core --no-default-features --lib` — CI runs the full suite; the local no-default-features run catches most regressions without needing the whisper model. |

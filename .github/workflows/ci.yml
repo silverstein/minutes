@@ -229,6 +229,30 @@ jobs:
         working-directory: crates/mcp
         run: npx tsc --noEmit
 
+      # Regression guard for issue #149: v0.13.0 shipped an MCPB bundle
+      # that Claude Desktop 1.3109.0 refused to unzip because the bundle
+      # contained Next.js chunks with `..` in their filenames. Pack the
+      # bundle on every push, run the static bundle check (forbidden
+      # prefixes, `..` paths, required runtime files), and smoke-test the
+      # handshake. This class of regression now fails CI before a release
+      # can ship it.
+
+      - name: Build MCP server
+        working-directory: crates/mcp
+        run: npm run build
+
+      - name: Install mcpb CLI
+        run: npm install -g @anthropic-ai/mcpb
+
+      - name: Pack MCPB bundle
+        run: mcpb pack . minutes.mcpb
+
+      - name: Static bundle check
+        run: ./scripts/check_mcpb_bundle.sh minutes.mcpb
+
+      - name: Handshake smoke test
+        run: ./scripts/smoke_mcpb_handshake.sh minutes.mcpb
+
   site_release_consistency:
     name: Site Release Link Consistency
     runs-on: ubuntu-latest

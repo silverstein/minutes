@@ -223,7 +223,14 @@ jobs:
 
       - name: Install MCP dependencies
         working-directory: crates/mcp
-        run: npm install
+        # npm/cli#4828: `npm install` sometimes skips platform-specific
+        # optional deps (rollup's Linux binary in our case) when the
+        # lockfile was generated on a different OS. Delete the lockfile
+        # so Linux-host npm re-resolves optional deps cleanly. Safe in CI
+        # because we don't commit the regenerated lockfile back.
+        run: |
+          rm -f package-lock.json
+          npm install
 
       - name: TypeScript check
         working-directory: crates/mcp

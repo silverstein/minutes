@@ -312,13 +312,17 @@ minutes/
 ├── BUILD-STATUS.md            # Build progress tracker
 ├── Cargo.toml                 # Workspace root
 ├── crates/
-│   ├── core/src/              # 34 Rust modules — the engine
+│   ├── core/src/              # 40 Rust modules — the engine
 │   │   ├── capture.rs         # Audio capture (cpal), device categorization, loopback detection
 │   │   ├── resample.rs        # Shared mono-downmix + 16kHz decimation resampler (used by capture + streaming)
 │   │   ├── transcribe.rs      # Transcription: whisper.cpp (default) or parakeet.cpp (opt-in). Delegates to whisper-guard for anti-hallucination, optional nnnoiseless denoise
+│   │   ├── transcription_coordinator.rs # Engine dispatch (whisper vs parakeet); keeps pipeline engine-agnostic
+│   │   ├── parakeet.rs        # parakeet.cpp transcription path (gated behind `parakeet` feature)
+│   │   ├── parakeet_sidecar.rs # Parakeet sidecar process management (unix/non-unix split via cfg stubs — see Pre-Commit Checklist)
 │   │   ├── diarize.rs         # Speaker diarization + attribution types (pyannote-rs, or energy-based from per-source stems)
 │   │   ├── summarize.rs       # LLM summarization + speaker mapping (ureq HTTP client)
-│   │   ├── voice.rs           # Voice profile storage and matching (voices.db, enrollment, cosine similarity)
+│   │   ├── voice.rs           # Voice profile storage and matching (voices.db, enrollment self/teammate via `--name`, optional `--persona` label, cosine similarity)
+│   │   ├── person_identity.rs # User identity profile (name, emails, variants) for cross-meeting "me" attribution
 │   │   ├── pipeline.rs        # Orchestrates the full flow + structured extraction
 │   │   ├── notes.rs           # Timestamped notetaking during/after recordings
 │   │   ├── watch.rs           # Folder watcher (settle delay, dedup, lock)
@@ -343,6 +347,7 @@ minutes/
 │   │   ├── vault.rs           # Obsidian/Logseq vault sync
 │   │   ├── knowledge.rs       # Knowledge base adapters (wiki/PARA/Obsidian) + fact writing
 │   │   ├── knowledge_extract.rs # Structured fact extraction from meeting frontmatter
+│   │   ├── autoresearch.rs    # Background research runs + decode-hint eval comparison (CLI-surfaced)
 │   │   ├── desktop_control.rs # Desktop automation (AppleScript, tray interactions)
 │   │   ├── graph.rs           # Conversation knowledge graph (people, decisions, commitments)
 │   │   ├── jobs.rs            # Background job queue for async processing
@@ -388,6 +393,9 @@ node test/mcp_tools_test.mjs                        # 8 MCP integration tests
 - **Rust** for the engine — single 6.7MB binary, cross-platform, fast
 - **whisper-rs** (whisper.cpp) for transcription (default) — local, Apple Silicon optimized, params match whisper-cli defaults (best_of=5, entropy/logprob thresholds)
 - **parakeet.cpp** for transcription (opt-in) — NVIDIA FastConformer via subprocess, Metal GPU acceleration on Apple Silicon. Lower WER than Whisper at equivalent model sizes. Requires `--features parakeet` at build time. See `docs/PARAKEET.md` for setup
+- **Transcription coordinator** — `transcription_coordinator.rs` dispatches to whisper or parakeet per call so the rest of the pipeline stays engine-agnostic. Any struct/field the coordinator reads off a parakeet result must exist on both the real unix impl and the non-unix stub (see Pre-Commit Checklist → "Feature-gated stub struct parity").
+- **Person identity** — `person_identity.rs` stores the user's name, email addresses, and variants so diarization/attribution can confidently map "me" across meeting memory. Separate from voice profiles (`voices.db`) and the conversation graph (`graph.db`); survives rebuilds.
+- **Autoresearch** — `autoresearch.rs` runs background research jobs and supports comparing decode-hint eval runs. CLI surfaces recent output; used for transcription-quality regression investigations.
 - **ffmpeg preferred for audio decoding** — shells out to ffmpeg for m4a/mp3/ogg when available (identical to whisper-cli's pipeline). Falls back to symphonia (pure Rust) when ffmpeg isn't installed. This matters for non-English audio — symphonia's AAC decoder produces subtly different samples that trigger whisper hallucination loops (issue #21).
 - **Silero VAD** (via whisper-rs) — ML-based voice activity detection integrated directly into whisper's transcription params. Prevents hallucination loops by skipping silence segments. Auto-downloaded during `minutes setup`.
 - **whisper-guard** crate — standalone anti-hallucination toolkit extracted from minutes-core. 6-layer defense: Silero VAD gating, no_speech probability filtering (>80% = skip), consecutive segment dedup (3+ similar collapsed), interleaved A/B/A/B pattern detection, foreign-script hallucination detection, language-agnostic noise marker collapse (`[Śmiech]`, `[music]`, `[risas]`, etc.), trailing noise trimming. Publishable to crates.io independently.
@@ -434,7 +442,7 @@ node test/mcp_tools_test.mjs                        # 8 MCP integration tests
 
 ## Claude Ecosystem Integration
 
-- **MCP Server**: 26 tools + 6 resources for Claude Desktop / Cowork / Dispatch (`npx minutes-mcp` for zero-install)
+- **MCP Server**: 26 tools + 6 resources + 6 prompt templates for Claude Desktop / Cowork / Dispatch (`npx minutes-mcp` for zero-install)
 - **Claude Code Plugin**: 18 skills (7 capture + 1 search + 4 lifecycle + 2 coaching + 3 knowledge + 1 intelligence) + meeting-analyst agent + SessionStart + PostToolUse hooks
 - **Interactive meeting lifecycle**: `/minutes-brief` → `/minutes-prep` → record → `/minutes-tag` → `/minutes-debrief` → `/minutes-mirror` → `/minutes-weekly` with skill chaining via `.brief.md` / `.prep.md` files; `/minutes-graph` for cross-meeting entity queries
 - **Conversational summarization**: Claude reads transcripts via MCP, no API key needed

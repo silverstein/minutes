@@ -675,7 +675,7 @@ enum Commands {
         action: VaultAction,
     },
 
-    /// Enroll your voice for automatic speaker identification
+    /// Enroll a voice for automatic speaker identification (self, or a teammate via --name)
     Enroll {
         /// Enroll from an existing audio file instead of recording
         #[arg(long)]
@@ -683,6 +683,12 @@ enum Commands {
         /// Recording duration in seconds (default: 10)
         #[arg(long, default_value = "10")]
         duration: u64,
+        /// Enroll a voice profile for someone other than you. Omit to enroll yourself.
+        #[arg(long)]
+        name: Option<String>,
+        /// Optional label for this profile (e.g. "PM", "client-sarah", "quiet-room"). Metadata only — does not affect matching.
+        #[arg(long)]
+        persona: Option<String>,
     },
 
     /// List and manage enrolled voice profiles
@@ -1179,7 +1185,18 @@ fn main() -> Result<()> {
             VaultAction::Unlink => cmd_vault_unlink(config),
             VaultAction::Sync => cmd_vault_sync(&config),
         },
-        Commands::Enroll { file, duration } => cmd_enroll(file.as_deref(), duration, &config),
+        Commands::Enroll {
+            file,
+            duration,
+            name,
+            persona,
+        } => cmd_enroll(
+            file.as_deref(),
+            duration,
+            name.as_deref(),
+            persona.as_deref(),
+            &config,
+        ),
         Commands::Voices { delete, json } => cmd_voices(delete, json),
         Commands::Delete {
             meeting,
@@ -5512,40 +5529,59 @@ fn cmd_dictate(stdout: bool, note_only: bool, config: &Config) -> Result<()> {
     Ok(())
 }
 
-fn cmd_enroll(file: Option<&Path>, duration: u64, config: &Config) -> Result<()> {
+fn cmd_enroll(
+    file: Option<&Path>,
+    duration: u64,
+    name: Option<&str>,
+    persona: Option<&str>,
+    config: &Config,
+) -> Result<()> {
     use minutes_core::voice;
 
-    // Step 1: Check name — offer to set it if missing
-    let my_name = match config.identity.name.as_ref() {
-        Some(name) if !name.is_empty() => name.clone(),
-        _ => {
-            eprintln!(
-                "Your name isn't set yet. This is needed so Minutes knows which speaker is you."
-            );
-            eprint!("What's your name? ");
-            let mut input = String::new();
-            std::io::stdin().read_line(&mut input)?;
-            let name = input.trim().to_string();
-            if name.is_empty() {
-                return Err(anyhow::anyhow!("Name is required for voice enrollment."));
-            }
-            // Save to config file
-            let config_path = dirs::config_dir()
-                .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".config"))
-                .join("minutes/config.toml");
-            if config_path.exists() {
-                let mut content = std::fs::read_to_string(&config_path)?;
-                if content.contains("[identity]") {
-                    // Add name under existing [identity] section
-                    content =
-                        content.replace("[identity]", &format!("[identity]\nname = \"{}\"", name));
-                } else {
-                    content.push_str(&format!("\n[identity]\nname = \"{}\"\n", name));
+    // Resolve: are we enrolling self, or someone else?
+    // When --name is provided and differs from the configured identity name,
+    // this is "other" enrollment — skip config-write entirely.
+    let explicit_name = name.map(|s| s.trim()).filter(|s| !s.is_empty());
+    let is_self = match (explicit_name, config.identity.name.as_deref()) {
+        (None, _) => true,
+        (Some(n), Some(id)) if n.eq_ignore_ascii_case(id.trim()) => true,
+        (Some(_), _) => false,
+    };
+
+    let enroll_name = if let Some(n) = explicit_name {
+        n.to_string()
+    } else {
+        // Step 1 (self path only): check name — offer to set it if missing
+        match config.identity.name.as_ref() {
+            Some(n) if !n.is_empty() => n.clone(),
+            _ => {
+                eprintln!(
+                    "Your name isn't set yet. This is needed so Minutes knows which speaker is you."
+                );
+                eprint!("What's your name? ");
+                let mut input = String::new();
+                std::io::stdin().read_line(&mut input)?;
+                let n = input.trim().to_string();
+                if n.is_empty() {
+                    return Err(anyhow::anyhow!("Name is required for voice enrollment."));
                 }
-                std::fs::write(&config_path, content)?;
-                eprintln!("Saved to {}", config_path.display());
+                // Save to config file (self path only — never for --name enrollments)
+                let config_path = dirs::config_dir()
+                    .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".config"))
+                    .join("minutes/config.toml");
+                if config_path.exists() {
+                    let mut content = std::fs::read_to_string(&config_path)?;
+                    if content.contains("[identity]") {
+                        content =
+                            content.replace("[identity]", &format!("[identity]\nname = \"{}\"", n));
+                    } else {
+                        content.push_str(&format!("\n[identity]\nname = \"{}\"\n", n));
+                    }
+                    std::fs::write(&config_path, content)?;
+                    eprintln!("Saved to {}", config_path.display());
+                }
+                n
             }
-            name
         }
     };
 
@@ -5559,11 +5595,41 @@ fn cmd_enroll(file: Option<&Path>, duration: u64, config: &Config) -> Result<()>
         ));
     }
 
+    // Step 2.5: Slug + collision guard.
+    // Catches cases like `minutes enroll --name Alex` colliding with an
+    // existing profile for a different human who slugs the same. Without
+    // this guard, save_profile_blended would silently average two humans'
+    // embeddings under the first human's name.
+    let conn = voice::open_db().map_err(|e| anyhow::anyhow!("{}", e))?;
+    let slug = voice::slugify(&enroll_name);
+    if slug.is_empty() {
+        return Err(anyhow::anyhow!(
+            "Name '{}' slugs to an empty string. Use letters or numbers.",
+            enroll_name
+        ));
+    }
+    if let Some(existing_name) =
+        voice::lookup_name_for_slug(&conn, &slug).map_err(|e| anyhow::anyhow!("{}", e))?
+    {
+        if existing_name != enroll_name {
+            return Err(anyhow::anyhow!(
+                "A voice profile already exists for slug '{}' with name '{}'. \
+                 Use a more specific name (e.g. 'Alex Chen' instead of 'Alex'), \
+                 or delete the existing profile first with `minutes voices --delete`.",
+                slug,
+                existing_name
+            ));
+        }
+    }
+
     // Step 3: Record or load audio
     eprintln!();
+    let header_persona = persona
+        .map(|p| format!("  \x1b[2m·\x1b[0m \x1b[3m{}\x1b[0m", p))
+        .unwrap_or_default();
     eprintln!(
-        "  \x1b[1;36m◉ Voice Enrollment\x1b[0m  \x1b[2mfor\x1b[0m \x1b[1m{}\x1b[0m",
-        my_name
+        "  \x1b[1;36m◉ Voice Enrollment\x1b[0m  \x1b[2mfor\x1b[0m \x1b[1m{}\x1b[0m{}",
+        enroll_name, header_persona
     );
     eprintln!();
 
@@ -5574,11 +5640,22 @@ fn cmd_enroll(file: Option<&Path>, duration: u64, config: &Config) -> Result<()>
         eprintln!("  Using audio file: {}", path.display());
         path.to_path_buf()
     } else {
-        eprintln!("  This creates a voice profile so Minutes can identify you");
-        eprintln!(
-            "  in future meetings. Just talk normally for {} seconds.",
-            duration
-        );
+        if is_self {
+            eprintln!("  This creates a voice profile so Minutes can identify you");
+            eprintln!(
+                "  in future meetings. Just talk normally for {} seconds.",
+                duration
+            );
+        } else {
+            eprintln!(
+                "  This creates a voice profile so Minutes can identify {} in",
+                enroll_name
+            );
+            eprintln!(
+                "  future meetings. They should talk normally for {} seconds.",
+                duration
+            );
+        }
         eprintln!();
         eprintln!("  Tips:");
         eprintln!("  - Use the same mic you use for meetings");
@@ -5611,18 +5688,19 @@ fn cmd_enroll(file: Option<&Path>, duration: u64, config: &Config) -> Result<()>
     };
 
     // Step 4: Extract voice embedding
-    eprintln!("  \x1b[2mAnalyzing your voice...\x1b[0m");
-    let result = minutes_core::diarize::diarize(&audio_path, config)
-        .ok_or_else(|| anyhow::anyhow!(
-            "Could not analyze the recording. Make sure you spoke clearly and your mic is working.\n\
+    eprintln!("  \x1b[2mAnalyzing voice...\x1b[0m");
+    let result = minutes_core::diarize::diarize(&audio_path, config).ok_or_else(|| {
+        anyhow::anyhow!(
+            "Could not analyze the recording. Make sure audio is clear and your mic is working.\n\
              Check with: minutes devices"
-        ))?;
+        )
+    })?;
 
     if result.segments.is_empty() {
         return Err(anyhow::anyhow!(
             "No speech detected in the recording.\n\n\
              Try again:\n\
-             - Make sure your mic is not muted\n\
+             - Make sure the mic is not muted\n\
              - Speak at normal volume\n\
              - Reduce background noise\n\
              - Check your mic: minutes devices"
@@ -5635,10 +5713,10 @@ fn cmd_enroll(file: Option<&Path>, duration: u64, config: &Config) -> Result<()>
             "multiple speakers detected during enrollment — picking an arbitrary one"
         );
         eprintln!(
-            "  ⚠ Detected {} voices — the enrolled profile may not be yours.",
+            "  ⚠ Detected {} voices — the enrolled profile may be wrong.",
             result.num_speakers
         );
-        eprintln!("  For best results, re-run in a quiet room with just you speaking.");
+        eprintln!("  For best results, re-run in a quiet room with just one speaker.");
     }
 
     eprintln!("  \x1b[2mComputing voice profile...\x1b[0m");
@@ -5654,41 +5732,59 @@ fn cmd_enroll(file: Option<&Path>, duration: u64, config: &Config) -> Result<()>
     let embedding = embedding.clone();
 
     // Step 5: Save
-    let conn = voice::open_db().map_err(|e| anyhow::anyhow!("{}", e))?;
-    let slug: String = my_name
-        .to_lowercase()
-        .chars()
-        .map(|c: char| if c.is_alphanumeric() { c } else { '-' })
-        .collect::<String>()
-        .trim_matches('-')
-        .to_string();
+    let source = if is_self {
+        "self-enrollment"
+    } else {
+        "other-enrollment"
+    };
     voice::save_profile_blended(
         &conn,
         &slug,
-        &my_name,
+        &enroll_name,
         &embedding,
-        "self-enrollment",
+        source,
         voice::model_version(config),
+        persona,
     )
     .map_err(|e| anyhow::anyhow!("{}", e))?;
 
     let profiles = voice::list_profiles(&conn).map_err(|e| anyhow::anyhow!("{}", e))?;
-    if let Some(p) = profiles.iter().find(|p| p.person_slug == slug) {
+    if let Some(p) = profiles.iter().find(|prof| prof.person_slug == slug) {
         eprintln!();
         eprintln!("  \x1b[1;32m✓ Voice profile saved!\x1b[0m");
         eprintln!("  \x1b[2m───────────────────────\x1b[0m");
         eprintln!("  \x1b[2mName:\x1b[0m     \x1b[1m{}\x1b[0m", p.name);
+        if let Some(persona) = p.persona.as_deref() {
+            eprintln!("  \x1b[2mPersona:\x1b[0m  {}", persona);
+        }
         eprintln!("  \x1b[2mSamples:\x1b[0m  {}", p.sample_count);
         eprintln!("  \x1b[2mModel:\x1b[0m    {}", p.model_version);
         eprintln!();
         eprintln!("  \x1b[36mWhat happens next:\x1b[0m");
-        eprintln!("  \x1b[2m›\x1b[0m Your voice will be auto-identified in future meetings");
-        eprintln!(
-            "  \x1b[2m›\x1b[0m Your lines show as \x1b[1m[{}]\x1b[0m instead of [SPEAKER_X]",
-            p.name
-        );
-        eprintln!("  \x1b[2m›\x1b[0m Run \x1b[33mminutes enroll\x1b[0m again to improve accuracy");
-        eprintln!("  \x1b[2m›\x1b[0m Run \x1b[33mminutes voices\x1b[0m to see your profile");
+        if is_self {
+            eprintln!("  \x1b[2m›\x1b[0m Your voice will be auto-identified in future meetings");
+            eprintln!(
+                "  \x1b[2m›\x1b[0m Your lines show as \x1b[1m[{}]\x1b[0m instead of [SPEAKER_X]",
+                p.name
+            );
+            eprintln!(
+                "  \x1b[2m›\x1b[0m Run \x1b[33mminutes enroll\x1b[0m again to improve accuracy"
+            );
+        } else {
+            eprintln!(
+                "  \x1b[2m›\x1b[0m {}'s voice will be auto-identified in future meetings",
+                p.name
+            );
+            eprintln!(
+                "  \x1b[2m›\x1b[0m Their lines show as \x1b[1m[{}]\x1b[0m instead of [SPEAKER_X]",
+                p.name
+            );
+            eprintln!(
+                "  \x1b[2m›\x1b[0m Run \x1b[33mminutes enroll --name \"{}\"\x1b[0m again to improve accuracy",
+                p.name
+            );
+        }
+        eprintln!("  \x1b[2m›\x1b[0m Run \x1b[33mminutes voices\x1b[0m to see all profiles");
     }
 
     if file.is_none() {
@@ -5723,9 +5819,14 @@ fn cmd_voices(delete: bool, json: bool) -> Result<()> {
     }
     eprintln!("Voice profiles:");
     for p in &profiles {
+        let persona_suffix = p
+            .persona
+            .as_deref()
+            .map(|s| format!(" [{}]", s))
+            .unwrap_or_default();
         eprintln!(
-            "  {} — {} samples, {} ({})",
-            p.name, p.sample_count, p.source, p.model_version
+            "  {}{} — {} samples, {} ({})",
+            p.name, persona_suffix, p.sample_count, p.source, p.model_version
         );
         eprintln!(
             "    enrolled: {}, updated: {}",
@@ -5810,6 +5911,7 @@ fn cmd_confirm(
                             embedding,
                             "confirmed",
                             voice::model_version(config),
+                            None,
                         )
                         .map_err(|e| anyhow::anyhow!("{}", e))?;
                         eprintln!(
@@ -5903,6 +6005,7 @@ fn cmd_confirm(
                                 embedding,
                                 "confirmed",
                                 voice::model_version(config),
+                                None,
                             )
                             .map_err(|e| anyhow::anyhow!("{}", e))?;
                             eprintln!("  Voice profile saved for {}", attr.name);

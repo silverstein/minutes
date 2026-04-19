@@ -827,8 +827,11 @@ minutes setup --parakeet --parakeet-model tdt-ctc-110m  # English-only compact m
 # Also installs native Silero VAD weights for the parakeet.cpp --vad path
 
 # Enroll your voice for automatic speaker identification
-minutes enroll              # Records 10s of your voice
-minutes voices              # View enrolled profiles
+minutes enroll                                         # Records 10s of your voice
+minutes enroll --name "Alex Chen"                      # Enroll a teammate
+minutes enroll --name "Alex Chen" --persona "PM" \
+  --file ./alex-sample.wav                             # Enroll from existing audio + tag with a persona
+minutes voices                                         # View enrolled profiles
 ```
 
 ### Speaker identification
@@ -852,8 +855,9 @@ Only **High**-confidence attributions rewrite transcript labels. Medium/Low are 
 name = "Your Name"
 
 # Enroll your voice (Level 2)
-minutes enroll                    # Record 10s sample
-minutes enroll --file sample.wav  # Or from existing audio
+minutes enroll                                   # Record 10s sample (enrolls yourself)
+minutes enroll --file sample.wav                 # Or from existing audio
+minutes enroll --name "Alex Chen" --persona "PM" # Enroll a teammate with an optional role label
 
 # Confirm attributions after a meeting (Level 3)
 minutes confirm --meeting ~/meetings/2026-03-25-standup.md

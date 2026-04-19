@@ -36,6 +36,10 @@ pub struct VoiceProfile {
     pub sample_count: u32,
     pub source: String,
     pub model_version: String,
+    /// Optional free-form label describing this profile's context or role
+    /// (e.g. "PM", "external-client", "quiet-room"). Metadata only —
+    /// does not affect voice matching.
+    pub persona: Option<String>,
 }
 
 pub struct VoiceProfileWithEmbedding {
@@ -73,6 +77,14 @@ pub fn open_db_at(path: &Path) -> Result<Connection, VoiceError> {
             model_version TEXT NOT NULL
         );",
     )?;
+    // Additive migration: add `persona` column to pre-existing voice_profiles tables.
+    // SQLite returns a "duplicate column name" error when the column already exists —
+    // safe to swallow because the column is nullable and we don't rewrite data.
+    if let Err(e) = conn.execute("ALTER TABLE voice_profiles ADD COLUMN persona TEXT", []) {
+        if !e.to_string().to_lowercase().contains("duplicate column") {
+            return Err(e.into());
+        }
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -114,16 +126,18 @@ pub fn save_profile(
     embedding: &[f32],
     source: &str,
     model_version: &str,
+    persona: Option<&str>,
 ) -> Result<(), VoiceError> {
     let now = chrono::Local::now().to_rfc3339();
     let blob = embedding_to_bytes(embedding);
     conn.execute(
-        "INSERT INTO voice_profiles (person_slug, name, embedding, enrolled_at, updated_at, sample_count, source, model_version)
-         VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6, ?7)
+        "INSERT INTO voice_profiles (person_slug, name, embedding, enrolled_at, updated_at, sample_count, source, model_version, persona)
+         VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6, ?7, ?8)
          ON CONFLICT(person_slug) DO UPDATE SET
             name = excluded.name, embedding = excluded.embedding, updated_at = excluded.updated_at,
-            sample_count = sample_count + 1, source = excluded.source, model_version = excluded.model_version",
-        params![slug, name, blob, now, now, source, model_version],
+            sample_count = sample_count + 1, source = excluded.source, model_version = excluded.model_version,
+            persona = excluded.persona",
+        params![slug, name, blob, now, now, source, model_version, persona],
     )?;
     Ok(())
 }
@@ -135,6 +149,7 @@ pub fn save_profile_blended(
     new_embedding: &[f32],
     source: &str,
     model_version: &str,
+    persona: Option<&str>,
 ) -> Result<(), VoiceError> {
     if let Some(existing) = load_profile_with_embedding(conn, slug)? {
         let total = existing.sample_count as f32 + 1.0;
@@ -145,9 +160,17 @@ pub fn save_profile_blended(
             .zip(new_embedding.iter())
             .map(|(old, new)| (old * old_weight + new) / total)
             .collect();
-        save_profile(conn, slug, name, &blended, source, model_version)
+        save_profile(conn, slug, name, &blended, source, model_version, persona)
     } else {
-        save_profile(conn, slug, name, new_embedding, source, model_version)
+        save_profile(
+            conn,
+            slug,
+            name,
+            new_embedding,
+            source,
+            model_version,
+            persona,
+        )
     }
 }
 
@@ -172,7 +195,7 @@ fn load_profile_with_embedding(
 }
 
 pub fn list_profiles(conn: &Connection) -> Result<Vec<VoiceProfile>, VoiceError> {
-    let mut stmt = conn.prepare("SELECT person_slug, name, enrolled_at, updated_at, sample_count, source, model_version FROM voice_profiles ORDER BY updated_at DESC")?;
+    let mut stmt = conn.prepare("SELECT person_slug, name, enrolled_at, updated_at, sample_count, source, model_version, persona FROM voice_profiles ORDER BY updated_at DESC")?;
     let profiles = stmt
         .query_map([], |row| {
             Ok(VoiceProfile {
@@ -183,6 +206,7 @@ pub fn list_profiles(conn: &Connection) -> Result<Vec<VoiceProfile>, VoiceError>
                 sample_count: row.get(4)?,
                 source: row.get(5)?,
                 model_version: row.get(6)?,
+                persona: row.get(7)?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
@@ -213,6 +237,17 @@ pub fn delete_profile(conn: &Connection, slug: &str) -> Result<bool, VoiceError>
         "DELETE FROM voice_profiles WHERE person_slug = ?1",
         params![slug],
     )? > 0)
+}
+
+/// Look up the display name currently stored for a given slug, if any.
+/// Used by enrollment to detect slug collisions between different humans.
+pub fn lookup_name_for_slug(conn: &Connection, slug: &str) -> Result<Option<String>, VoiceError> {
+    let mut stmt = conn.prepare("SELECT name FROM voice_profiles WHERE person_slug = ?1")?;
+    match stmt.query_row(params![slug], |row| row.get::<_, String>(0)) {
+        Ok(name) => Ok(Some(name)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e.into()),
+    }
 }
 
 pub fn match_embedding(
@@ -303,7 +338,7 @@ pub fn load_self_profile(config: &Config) -> Option<VoiceProfileWithEmbedding> {
     load_profile_with_embedding(&conn, &slug).ok().flatten()
 }
 
-fn slugify(text: &str) -> String {
+pub fn slugify(text: &str) -> String {
     let slug: String = text
         .to_lowercase()
         .chars()
@@ -367,6 +402,7 @@ mod tests {
             &vec![0.1f32; 512],
             "self-enrollment",
             TEST_MODEL_VERSION,
+            None,
         )
         .unwrap();
         let profiles = list_profiles(&conn).unwrap();
@@ -385,6 +421,7 @@ mod tests {
             &[0.1f32; 4],
             "self-enrollment",
             TEST_MODEL_VERSION,
+            None,
         )
         .unwrap();
         save_profile(
@@ -394,6 +431,7 @@ mod tests {
             &[0.2f32; 4],
             "self-enrollment",
             TEST_MODEL_VERSION,
+            None,
         )
         .unwrap();
         assert_eq!(list_profiles(&conn).unwrap()[0].sample_count, 2);
@@ -409,6 +447,7 @@ mod tests {
             &[1.0f32; 4],
             "self-enrollment",
             TEST_MODEL_VERSION,
+            None,
         )
         .unwrap();
         save_profile_blended(
@@ -418,6 +457,7 @@ mod tests {
             &[3.0f32; 4],
             "self-enrollment",
             TEST_MODEL_VERSION,
+            None,
         )
         .unwrap();
         let p = load_profile_with_embedding(&conn, "mat").unwrap().unwrap();
@@ -434,6 +474,7 @@ mod tests {
             &[0.1f32; 4],
             "self-enrollment",
             TEST_MODEL_VERSION,
+            None,
         )
         .unwrap();
         assert!(delete_profile(&conn, "mat").unwrap());
@@ -513,6 +554,167 @@ mod tests {
         assert_eq!(
             p.file_name().unwrap().to_str().unwrap(),
             ".2026-03-25-standup.embeddings"
+        );
+    }
+
+    #[test]
+    fn persona_round_trips() {
+        let (conn, _tmp) = test_db();
+        save_profile(
+            &conn,
+            "alex-chen",
+            "Alex Chen",
+            &[0.1f32; 4],
+            "other-enrollment",
+            TEST_MODEL_VERSION,
+            Some("PM"),
+        )
+        .unwrap();
+        let p = &list_profiles(&conn).unwrap()[0];
+        assert_eq!(p.persona.as_deref(), Some("PM"));
+        assert_eq!(p.source, "other-enrollment");
+    }
+
+    #[test]
+    fn persona_defaults_to_none() {
+        let (conn, _tmp) = test_db();
+        save_profile(
+            &conn,
+            "mat",
+            "Mat",
+            &[0.1f32; 4],
+            "self-enrollment",
+            TEST_MODEL_VERSION,
+            None,
+        )
+        .unwrap();
+        assert!(list_profiles(&conn).unwrap()[0].persona.is_none());
+    }
+
+    #[test]
+    fn persona_is_updatable_via_upsert() {
+        let (conn, _tmp) = test_db();
+        save_profile(
+            &conn,
+            "alex-chen",
+            "Alex Chen",
+            &[0.1f32; 4],
+            "other-enrollment",
+            TEST_MODEL_VERSION,
+            None,
+        )
+        .unwrap();
+        assert!(list_profiles(&conn).unwrap()[0].persona.is_none());
+
+        save_profile_blended(
+            &conn,
+            "alex-chen",
+            "Alex Chen",
+            &[0.1f32; 4],
+            "other-enrollment",
+            TEST_MODEL_VERSION,
+            Some("PM"),
+        )
+        .unwrap();
+        assert_eq!(
+            list_profiles(&conn).unwrap()[0].persona.as_deref(),
+            Some("PM")
+        );
+    }
+
+    #[test]
+    fn migration_adds_persona_column_to_legacy_db() {
+        // Simulate a pre-migration database: create the voice_profiles table
+        // WITHOUT the persona column, then reopen via open_db_at() and verify
+        // the additive ALTER TABLE runs cleanly and the column is usable.
+        let tmp = NamedTempFile::new().unwrap();
+        {
+            let conn = Connection::open(tmp.path()).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE voice_profiles (
+                    id INTEGER PRIMARY KEY,
+                    person_slug TEXT UNIQUE NOT NULL,
+                    name TEXT NOT NULL,
+                    embedding BLOB NOT NULL,
+                    enrolled_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    sample_count INTEGER DEFAULT 1,
+                    source TEXT NOT NULL,
+                    model_version TEXT NOT NULL
+                );",
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO voice_profiles
+                    (person_slug, name, embedding, enrolled_at, updated_at, sample_count, source, model_version)
+                 VALUES ('mat', 'Mat', X'0102', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 1, 'self-enrollment', 'v1')",
+                [],
+            )
+            .unwrap();
+        }
+        // Reopen — migration runs. Existing row survives; persona reads as NULL.
+        let conn = open_db_at(tmp.path()).unwrap();
+        let profiles = list_profiles(&conn).unwrap();
+        assert_eq!(profiles.len(), 1);
+        assert_eq!(profiles[0].person_slug, "mat");
+        assert!(profiles[0].persona.is_none());
+
+        // New writes can set persona.
+        save_profile(
+            &conn,
+            "alex-chen",
+            "Alex Chen",
+            &[0.1f32; 4],
+            "other-enrollment",
+            TEST_MODEL_VERSION,
+            Some("PM"),
+        )
+        .unwrap();
+        let by_slug: Vec<_> = list_profiles(&conn)
+            .unwrap()
+            .into_iter()
+            .filter(|p| p.person_slug == "alex-chen")
+            .collect();
+        assert_eq!(by_slug[0].persona.as_deref(), Some("PM"));
+    }
+
+    #[test]
+    fn migration_is_idempotent() {
+        let tmp = NamedTempFile::new().unwrap();
+        // Open twice — second call must not error on the already-added column.
+        let _c1 = open_db_at(tmp.path()).unwrap();
+        let _c2 = open_db_at(tmp.path()).unwrap();
+        let conn = open_db_at(tmp.path()).unwrap();
+        save_profile(
+            &conn,
+            "mat",
+            "Mat",
+            &[0.1f32; 4],
+            "self-enrollment",
+            TEST_MODEL_VERSION,
+            None,
+        )
+        .unwrap();
+        assert_eq!(list_profiles(&conn).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn lookup_name_for_slug_roundtrips() {
+        let (conn, _tmp) = test_db();
+        assert!(lookup_name_for_slug(&conn, "nobody").unwrap().is_none());
+        save_profile(
+            &conn,
+            "alex-chen",
+            "Alex Chen",
+            &[0.1f32; 4],
+            "other-enrollment",
+            TEST_MODEL_VERSION,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            lookup_name_for_slug(&conn, "alex-chen").unwrap().as_deref(),
+            Some("Alex Chen")
         );
     }
 }

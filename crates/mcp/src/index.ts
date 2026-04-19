@@ -2190,7 +2190,7 @@ registerTool(
 
 registerTool(
   "list_voices",
-  "List enrolled voice profiles for speaker identification. Shows who has been enrolled, sample count, and model version.",
+  "List enrolled voice profiles for speaker identification. Shows each profile's name, optional persona label (e.g. 'PM', 'external-client'), sample count, source ('self-enrollment', 'other-enrollment', 'confirmed'), and model version.",
   {},
   { title: "Voice Profiles", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   async () => {
@@ -2203,13 +2203,14 @@ registerTool(
 
     if (!Array.isArray(profiles) || profiles.length === 0) {
       return {
-        content: [{ type: "text" as const, text: "No voice profiles enrolled. The user can enroll with: minutes enroll" }],
+        content: [{ type: "text" as const, text: "No voice profiles enrolled. The user can enroll with: minutes enroll (self), or minutes enroll --name \"<name>\" [--persona \"<label>\"] for a teammate." }],
       };
     }
 
-    const lines = profiles.map((p: any) =>
-      `${p.name} — ${p.sample_count} samples, ${p.source} (${p.model_version})`
-    );
+    const lines = profiles.map((p: any) => {
+      const personaSuffix = p.persona ? ` [${p.persona}]` : "";
+      return `${p.name}${personaSuffix} — ${p.sample_count} samples, ${p.source} (${p.model_version})`;
+    });
 
     return {
       content: [{ type: "text" as const, text: `Voice profiles (${profiles.length}):\n\n${lines.join("\n")}` }],

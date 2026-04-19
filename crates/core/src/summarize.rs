@@ -1856,6 +1856,15 @@ fn run_speaker_mapping_prompt(
 ) -> Result<String, Box<dyn std::error::Error>> {
     let agent = http_agent();
     match config.summarization.engine.as_str() {
+        "auto" => {
+            if let Some(cli) = detect_agent_cli() {
+                let mut cfg = config.clone();
+                cfg.summarization.agent_command = cli;
+                run_speaker_mapping_via_agent(prompt, &cfg)
+            } else {
+                Err("no AI CLI found (claude, codex, gemini, opencode)".into())
+            }
+        }
         "agent" => run_speaker_mapping_via_agent(prompt, config),
         "claude" => {
             let api_key =

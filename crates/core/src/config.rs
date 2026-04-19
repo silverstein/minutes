@@ -138,6 +138,11 @@ pub struct TranscriptionConfig {
     /// If left at the default generic name, Minutes still prefers model-specific
     /// tokenizer files such as `tdt-ctc-110m.tokenizer.vocab` when they exist.
     pub parakeet_vocab: String,
+    /// Number of parallel workers used when transcribing long audio split into chunks.
+    /// Each parakeet worker runs its own sidecar process with its own model replica,
+    /// so memory scales linearly with this value (~1.2GB per parakeet-tdt-0.6b worker).
+    /// `None` = auto-detect (currently `min(num_chunks, 4)` for parakeet, always 1 for whisper).
+    pub chunk_workers: Option<usize>,
 }
 
 pub const VALID_PARAKEET_MODELS: &[&str] = &["tdt-ctc-110m", "tdt-600m"];
@@ -631,6 +636,7 @@ impl Default for TranscriptionConfig {
             parakeet_sidecar_enabled: false,
             parakeet_fp16_blacklist_reset: false,
             parakeet_vocab: "tdt-600m.tokenizer.vocab".into(),
+            chunk_workers: None,
         }
     }
 }

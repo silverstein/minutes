@@ -987,6 +987,12 @@ model = "small"           # whisper: tiny (75MB), base, small (466MB), medium, l
 # parakeet_boost_score = 2.0                     # Experimental tuning for parakeet.cpp --boost-score
 # parakeet_fp16 = true                           # Default on macOS Apple Silicon: ~35% faster transcription with lower GPU memory (see docs/designs/parakeet-perf-2026-04-14.md)
 # parakeet_vocab = "tdt-600m.tokenizer.vocab"      # Safer when multiple Parakeet models are installed
+# chunk_workers = 4                              # Parakeet: parallel workers for long-audio chunked transcription.
+                                                  # Each worker runs its own sidecar (~1.2 GB RAM per tdt-600m replica).
+                                                  # Default: auto = min(num_chunks, 4). Increase on a 32 GB+ Mac for
+                                                  # a bigger speedup on multi-hour recordings; drop to 1 to disable parallelism.
+                                                  # Per-chunk completions are emitted to ~/.minutes/events.jsonl as
+                                                  # TranscribeChunkCompleted events so agents/UIs can show live progress.
 # vad_model = "silero-v6.2.0"     # Silero VAD model (auto-downloaded by setup). Empty = disable.
                                    # Prevents whisper hallucination loops on non-English/noisy audio.
 

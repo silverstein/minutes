@@ -154,6 +154,37 @@ pub enum MinutesEvent {
         facts_skipped: usize,
         people_updated: Vec<String>,
     },
+    /// Chunked transcription started. Emitted once at the top of a chunked run
+    /// so UIs can render a progress shell before any chunk finishes.
+    TranscribeStarted {
+        /// Absolute path to the audio file being transcribed.
+        audio_path: String,
+        chunk_count: u32,
+        total_duration_sec: f64,
+        engine: String,
+        worker_count: u32,
+    },
+    /// A single chunk finished transcribing. `chunk_index` is zero-based and
+    /// chunks MAY complete out of order — subscribers should not assume
+    /// sequential arrival.
+    TranscribeChunkCompleted {
+        audio_path: String,
+        chunk_index: u32,
+        chunk_count: u32,
+        start_sec: f64,
+        end_sec: f64,
+        words: usize,
+        duration_ms: u64,
+        engine: String,
+    },
+    /// Chunked transcription finished — emitted after all chunks assemble.
+    TranscribeFinished {
+        audio_path: String,
+        chunk_count: u32,
+        total_words: usize,
+        total_duration_ms: u64,
+        engine: String,
+    },
 }
 
 fn events_path() -> PathBuf {
@@ -791,6 +822,83 @@ mod tests {
                 MinutesEvent::NoteAdded { text, .. } => assert_eq!(text, "newer"),
                 _ => panic!("expected newer NoteAdded"),
             }
+        });
+    }
+
+    #[test]
+    fn transcribe_progress_events_roundtrip() {
+        with_temp_home(|_| {
+            let started = EventEnvelope {
+                timestamp: Local::now(),
+                event: MinutesEvent::TranscribeStarted {
+                    audio_path: "/tmp/session.wav".into(),
+                    chunk_count: 3,
+                    total_duration_sec: 1800.0,
+                    engine: "parakeet".into(),
+                    worker_count: 2,
+                },
+            };
+            let chunk = EventEnvelope {
+                timestamp: Local::now(),
+                event: MinutesEvent::TranscribeChunkCompleted {
+                    audio_path: "/tmp/session.wav".into(),
+                    chunk_index: 0,
+                    chunk_count: 3,
+                    start_sec: 0.0,
+                    end_sec: 600.0,
+                    words: 1234,
+                    duration_ms: 42_000,
+                    engine: "parakeet".into(),
+                },
+            };
+            let finished = EventEnvelope {
+                timestamp: Local::now(),
+                event: MinutesEvent::TranscribeFinished {
+                    audio_path: "/tmp/session.wav".into(),
+                    chunk_count: 3,
+                    total_words: 3800,
+                    total_duration_ms: 126_000,
+                    engine: "parakeet".into(),
+                },
+            };
+
+            append_event_inner(&started).unwrap();
+            append_event_inner(&chunk).unwrap();
+            append_event_inner(&finished).unwrap();
+
+            let events = read_events_inner(None, None).unwrap();
+            assert_eq!(events.len(), 3);
+            assert!(matches!(
+                &events[0].event,
+                MinutesEvent::TranscribeStarted {
+                    chunk_count: 3,
+                    worker_count: 2,
+                    ..
+                }
+            ));
+            assert!(matches!(
+                &events[1].event,
+                MinutesEvent::TranscribeChunkCompleted {
+                    chunk_index: 0,
+                    words: 1234,
+                    ..
+                }
+            ));
+            assert!(matches!(
+                &events[2].event,
+                MinutesEvent::TranscribeFinished {
+                    total_words: 3800,
+                    ..
+                }
+            ));
+
+            // Tag shape — serde flatten should produce `event_type` alongside
+            // `audio_path` etc., so any JSONL consumer tailing `events.jsonl`
+            // sees a discriminated union.
+            let raw = std::fs::read_to_string(events_path()).unwrap();
+            assert!(raw.contains("\"event_type\":\"TranscribeStarted\""));
+            assert!(raw.contains("\"event_type\":\"TranscribeChunkCompleted\""));
+            assert!(raw.contains("\"event_type\":\"TranscribeFinished\""));
         });
     }
 

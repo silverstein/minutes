@@ -12,7 +12,7 @@ categories = ["multimedia::audio", "command-line-utilities"]
 [features]
 default = ["whisper"]
 whisper = ["dep:whisper-rs", "whisper-guard/whisper"]
-parakeet = ["dep:tempfile"]  # subprocess-based, uses tempfile for concurrent safety
+parakeet = ["dep:tempfile", "dep:crossbeam-channel"]  # subprocess + parallel chunk worker pool
 diarize = ["dep:pyannote-rs", "dep:ort", "dep:ndarray"]
 coreml = ["whisper-rs/coreml"]
 cuda = ["whisper-rs/cuda"]

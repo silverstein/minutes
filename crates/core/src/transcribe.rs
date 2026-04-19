@@ -402,12 +402,39 @@ fn parakeet_chunk_ranges(
 }
 
 fn transcribe_chunk_ranges(
+    audio_path: &Path,
     samples: &[f32],
     chunk_ranges: &[(usize, usize)],
     audio_duration_secs: f64,
     config: &Config,
     hints: &DecodeHints,
 ) -> Result<Option<TranscribeResult>, TranscribeError> {
+    // Parallel fast path: when Parakeet is the engine and the user has
+    // opted into (or the default permits) >=2 workers, dispatch chunks
+    // through `ParakeetPool`. The pool emits per-chunk progress events
+    // so agents/UIs can tail `~/.minutes/events.jsonl` live. Whisper
+    // continues through the sequential loop below — whisper-rs is
+    // thread-safe but each model replica is expensive and the existing
+    // internal windowing already handles long audio acceptably.
+    #[cfg(all(feature = "parakeet", unix))]
+    {
+        if config.transcription.engine == "parakeet" {
+            let worker_count = effective_parakeet_worker_count(config, chunk_ranges.len());
+            if worker_count >= 2 {
+                return transcribe_chunk_ranges_parakeet_pool(
+                    audio_path,
+                    samples,
+                    chunk_ranges,
+                    audio_duration_secs,
+                    config,
+                    hints,
+                    worker_count,
+                );
+            }
+        }
+    }
+    let _ = audio_path; // unused in the sequential path
+
     let mut all_lines = Vec::new();
     let mut aggregate = FilterStats {
         audio_duration_secs,
@@ -477,6 +504,180 @@ fn transcribe_chunk_ranges(
     }))
 }
 
+/// Choose the number of parallel parakeet workers for a chunked transcription.
+///
+/// Config `chunk_workers = Some(n)` is used as-is, clamped to `[1, num_chunks]`.
+/// `None` means auto — `min(num_chunks, 4)` by default, a conservative
+/// starting point that avoids running the Mac out of RAM on a 16 GB machine
+/// while still giving a 3–4× speedup over the sequential baseline.
+#[cfg(feature = "parakeet")]
+pub(crate) fn effective_parakeet_worker_count(config: &Config, num_chunks: usize) -> usize {
+    if num_chunks == 0 {
+        return 1;
+    }
+    let requested = config
+        .transcription
+        .chunk_workers
+        .unwrap_or_else(|| num_chunks.min(4));
+    requested.clamp(1, num_chunks)
+}
+
+/// Parallel fast path for parakeet chunked transcription.
+/// Launches a `ParakeetPool` with `worker_count` sidecars, dispatches each
+/// chunk, emits per-chunk completion events, and assembles the final
+/// transcript using the same cleanup pipeline as the sequential path.
+#[cfg(all(feature = "parakeet", unix))]
+fn transcribe_chunk_ranges_parakeet_pool(
+    audio_path: &Path,
+    samples: &[f32],
+    chunk_ranges: &[(usize, usize)],
+    audio_duration_secs: f64,
+    config: &Config,
+    hints: &DecodeHints,
+    worker_count: usize,
+) -> Result<Option<TranscribeResult>, TranscribeError> {
+    use crate::events::{append_event, MinutesEvent};
+    use crate::parakeet_pool::{ChunkJob, ParakeetPool};
+    use std::time::Instant;
+
+    let model_path = resolve_parakeet_model_path(config)?;
+    let vocab_path = resolve_parakeet_vocab_path(config)?;
+    let vad_path = resolve_parakeet_native_vad_path(config);
+
+    let mut pool = ParakeetPool::new(
+        config,
+        &model_path,
+        &vocab_path,
+        vad_path.as_deref(),
+        worker_count,
+    )
+    .map_err(|e| TranscribeError::ParakeetFailed(format!("parakeet pool init failed: {}", e)))?;
+
+    let jobs: Vec<ChunkJob> = chunk_ranges
+        .iter()
+        .enumerate()
+        .filter_map(|(index, (start, end))| {
+            let slice = &samples[*start..*end];
+            if slice.is_empty() {
+                None
+            } else {
+                Some(ChunkJob {
+                    index: index as u32,
+                    start_sample: *start,
+                    end_sample: *end,
+                    samples: slice.to_vec(),
+                })
+            }
+        })
+        .collect();
+
+    if jobs.is_empty() {
+        return Ok(None);
+    }
+
+    let chunk_count = chunk_ranges.len() as u32;
+    let run_started = Instant::now();
+    append_event(MinutesEvent::TranscribeStarted {
+        audio_path: audio_path.to_string_lossy().to_string(),
+        chunk_count,
+        total_duration_sec: audio_duration_secs,
+        engine: "parakeet".to_string(),
+        worker_count: worker_count as u32,
+    });
+    let outcomes = pool
+        .run_chunks(jobs, config, hints, |outcome| match outcome {
+            Ok(success) => {
+                crate::parakeet_pool::emit_chunk_completed_event(
+                    audio_path,
+                    success,
+                    chunk_count,
+                    "parakeet",
+                );
+            }
+            Err((idx, err)) => {
+                tracing::warn!(
+                    chunk_index = idx,
+                    error = %err,
+                    "parakeet pool chunk failed"
+                );
+            }
+        })
+        .map_err(|e| TranscribeError::ParakeetFailed(format!("parakeet pool run failed: {}", e)))?;
+
+    // Assembly: iterate chunks in input order, skipping failures + empties.
+    let mut indexed: Vec<Option<crate::parakeet_pool::ChunkSuccess>> =
+        (0..chunk_ranges.len()).map(|_| None).collect();
+    for success in outcomes.into_iter().flatten() {
+        let i = success.index as usize;
+        indexed[i] = Some(success);
+    }
+
+    let mut all_lines = Vec::new();
+    let mut aggregate = FilterStats {
+        audio_duration_secs,
+        ..Default::default()
+    };
+
+    for (chunk_index, slot) in indexed.into_iter().enumerate() {
+        let Some(success) = slot else { continue };
+        // Re-run the per-chunk cleanup pipeline (same as the sequential path
+        // does via `transcribe_result_from_parakeet_parsed`). Keeps aggregate
+        // stats comparable and lets us reuse `offset_timestamped_lines`.
+        let per_chunk = transcribe_result_from_parakeet_parsed(
+            success.result.transcript,
+            FilterStats::default(),
+            success.result.first_request_on_process,
+            success.result.elapsed_ms,
+            config,
+        );
+        let chunk_result = match per_chunk {
+            Ok(r) => r,
+            Err(TranscribeError::EmptyAudio) | Err(TranscribeError::EmptyTranscript(_)) => continue,
+            Err(e) => return Err(e),
+        };
+        let chunk_offset_secs = success.start_sample as f64 / 16000.0;
+        let offset_lines =
+            offset_timestamped_lines(chunk_result.text.lines(), chunk_offset_secs, chunk_index);
+        aggregate.samples_after_silence_strip += chunk_result.stats.samples_after_silence_strip;
+        aggregate.raw_segments += chunk_result.stats.raw_segments;
+        aggregate.skipped_no_speech += chunk_result.stats.skipped_no_speech;
+        aggregate.after_no_speech_filter += chunk_result.stats.after_no_speech_filter;
+        aggregate.rescued_no_speech += chunk_result.stats.rescued_no_speech;
+        all_lines.extend(offset_lines);
+    }
+
+    if all_lines.is_empty() {
+        return Ok(None);
+    }
+
+    let cleanup = run_transcript_cleanup_pipeline(all_lines);
+    aggregate.after_dedup = cleanup.after(TranscriptCleanupStage::DedupSegments);
+    aggregate.after_interleaved = cleanup.after(TranscriptCleanupStage::DedupInterleaved);
+    aggregate.after_script_filter = cleanup.after(TranscriptCleanupStage::StripForeignScript);
+    aggregate.after_noise_markers = cleanup.after(TranscriptCleanupStage::CollapseNoiseMarkers);
+    aggregate.after_trailing_trim = cleanup.after(TranscriptCleanupStage::TrimTrailingNoise);
+
+    let text = if cleanup.lines.is_empty() {
+        String::new()
+    } else {
+        format!("{}\n", cleanup.lines.join("\n"))
+    };
+    aggregate.final_words = text.split_whitespace().count();
+
+    append_event(MinutesEvent::TranscribeFinished {
+        audio_path: audio_path.to_string_lossy().to_string(),
+        chunk_count,
+        total_words: aggregate.final_words,
+        total_duration_ms: run_started.elapsed().as_millis() as u64,
+        engine: "parakeet".to_string(),
+    });
+
+    Ok(Some(TranscribeResult {
+        text,
+        stats: aggregate,
+    }))
+}
+
 /// Meeting-specialized transcription path that can split long recordings at
 /// natural pauses before dispatching to the active ASR backend.
 pub fn transcribe_meeting(
@@ -507,9 +708,14 @@ pub fn transcribe_meeting_with_hints(
         "meeting transcription using VAD-driven chunk rotation"
     );
 
-    if let Some(result) =
-        transcribe_chunk_ranges(&samples, &vad_chunks, audio_duration_secs, config, hints)?
-    {
+    if let Some(result) = transcribe_chunk_ranges(
+        audio_path,
+        &samples,
+        &vad_chunks,
+        audio_duration_secs,
+        config,
+        hints,
+    )? {
         return Ok(result);
     }
 
@@ -660,6 +866,7 @@ fn transcribe_parakeet_dispatch(
                 "chunking long parakeet transcription to avoid monolithic decode"
             );
             if let Some(result) = transcribe_chunk_ranges(
+                audio_path,
                 &samples,
                 &chunk_ranges,
                 audio_duration_secs,
@@ -3338,6 +3545,33 @@ hello there friend
         let chunk_ranges = parakeet_chunk_ranges(total_samples, 61.0, false).unwrap();
         assert_eq!(chunk_ranges.len(), 2);
         assert_eq!(chunk_ranges[0], (0, 16000 * PARAKEET_LONG_AUDIO_CHUNK_SECS));
+    }
+
+    #[test]
+    #[cfg(feature = "parakeet")]
+    fn effective_parakeet_worker_count_defaults_to_at_most_four() {
+        let cfg = Config::default();
+        // Many chunks, no explicit config → clamp to 4.
+        assert_eq!(effective_parakeet_worker_count(&cfg, 20), 4);
+        // Few chunks → clamp down to chunk count (can't have more workers than jobs).
+        assert_eq!(effective_parakeet_worker_count(&cfg, 2), 2);
+        // Single chunk → single worker (the pool will not be used).
+        assert_eq!(effective_parakeet_worker_count(&cfg, 1), 1);
+        // Empty → still returns 1 so callers see a non-zero value.
+        assert_eq!(effective_parakeet_worker_count(&cfg, 0), 1);
+    }
+
+    #[test]
+    #[cfg(feature = "parakeet")]
+    fn effective_parakeet_worker_count_honors_explicit_config() {
+        let mut cfg = Config::default();
+        cfg.transcription.chunk_workers = Some(8);
+        // Explicit value is clamped by the number of chunks — can't be greater.
+        assert_eq!(effective_parakeet_worker_count(&cfg, 3), 3);
+        assert_eq!(effective_parakeet_worker_count(&cfg, 20), 8);
+
+        cfg.transcription.chunk_workers = Some(1);
+        assert_eq!(effective_parakeet_worker_count(&cfg, 20), 1);
     }
 
     #[test]

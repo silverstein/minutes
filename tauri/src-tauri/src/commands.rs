@@ -5426,6 +5426,15 @@ fn is_shell_command(command: &str) -> bool {
     )
 }
 
+fn filtered_agent_args(agent_name: &str, args: &[String]) -> Vec<String> {
+    let supports_skip_permissions = matches!(agent_name, "claude" | "codex");
+
+    args.iter()
+        .filter(|arg| supports_skip_permissions || arg.as_str() != "--dangerously-skip-permissions")
+        .cloned()
+        .collect()
+}
+
 fn context_switch_prompt(command: &str, mode: &str, title: &str) -> String {
     let plain_text = match mode {
         "meeting" => format!(
@@ -5559,12 +5568,14 @@ pub fn spawn_terminal(
             )
         })?;
 
+        let agent_args = filtered_agent_args(agent_name, &config.assistant.agent_args);
+
         manager.spawn(
             crate::pty::SpawnConfig {
                 session_id: crate::pty::ASSISTANT_SESSION_ID.into(),
                 app_handle: app.clone(),
                 command: agent_bin.to_str().unwrap_or(agent_name).to_string(),
-                args: config.assistant.agent_args.clone(),
+                args: agent_args,
                 cwd: workspace.clone(),
                 context_dir: workspace.clone(),
                 title: title.clone(),
@@ -6102,6 +6113,21 @@ pub fn cmd_open_meeting_url(app: tauri::AppHandle, url: String) -> Result<(), St
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn filtered_agent_args_drops_skip_permissions_for_unsupported_agents() {
+        let args = vec![
+            "--dangerously-skip-permissions".to_string(),
+            "--model".to_string(),
+            "openai/gpt-5.4".to_string(),
+        ];
+
+        assert_eq!(
+            filtered_agent_args("opencode", &args),
+            vec!["--model".to_string(), "openai/gpt-5.4".to_string()]
+        );
+        assert_eq!(filtered_agent_args("claude", &args), args);
+    }
 
     /// Arms that have no current caller but are deliberately kept pending a
     /// UI surface. Each entry is a documented audit finding (see the
@@ -6694,6 +6720,8 @@ mod tests {
             decisions: vec![minutes_core::markdown::Decision {
                 text: "Ship the new pricing page".into(),
                 topic: Some("pricing".into()),
+                authority: None,
+                supersedes: None,
             }],
             intents: vec![],
             recorded_by: None,
@@ -6747,6 +6775,8 @@ mod tests {
             decisions: vec![minutes_core::markdown::Decision {
                 text: "Ship the new pricing page".into(),
                 topic: Some("pricing".into()),
+                authority: None,
+                supersedes: None,
             }],
             intents: vec![],
             recorded_by: None,

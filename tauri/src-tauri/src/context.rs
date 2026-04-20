@@ -1,12 +1,21 @@
 use minutes_core::config::Config;
 use minutes_core::markdown::{split_frontmatter, Frontmatter, IntentKind};
 use minutes_core::search::{self, SearchFilters};
+use std::fs;
 use std::path::{Path, PathBuf};
 
 pub const ACTIVE_MEETING_FILE: &str = "CURRENT_MEETING.md";
 pub const ACTIVE_ARTIFACT_FILE: &str = "CURRENT_ARTIFACT.md";
 
 const ARTIFACT_INSTRUCTION: &str = "If CURRENT_ARTIFACT.md exists in this directory, the user has that file open in the Minutes viewer. You can read and edit it at the path shown. Changes you make will appear in real time in the viewer.";
+const ASSISTANT_SKILL_BUNDLE_ENV: &str = "MINUTES_ASSISTANT_SKILL_BUNDLE_ROOT";
+
+#[derive(Debug, Clone)]
+struct AssistantSkillBundle {
+    agents_skills: PathBuf,
+    opencode_skills: PathBuf,
+    opencode_commands: PathBuf,
+}
 
 fn intent_label(kind: IntentKind) -> &'static str {
     match kind {
@@ -22,12 +31,150 @@ pub fn workspace_dir() -> PathBuf {
     Config::minutes_dir().join("assistant")
 }
 
+impl AssistantSkillBundle {
+    fn from_root(root: PathBuf) -> Option<Self> {
+        let agents_skills = root.join("agents-skills");
+        let opencode_skills = root.join("opencode-skills");
+        let opencode_commands = root.join("opencode-commands");
+        if agents_skills.exists() && opencode_skills.exists() && opencode_commands.exists() {
+            Some(Self {
+                agents_skills,
+                opencode_skills,
+                opencode_commands,
+            })
+        } else {
+            None
+        }
+    }
+}
+
+fn repo_assistant_skill_bundle() -> Option<AssistantSkillBundle> {
+    AssistantSkillBundle::from_root(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("resources")
+            .join("assistant-skill-bundle"),
+    )
+    .or_else(|| {
+        let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let agents_skills = repo_root.join(".agents").join("skills");
+        let opencode_skills = repo_root.join(".opencode").join("skills");
+        let opencode_commands = repo_root.join(".opencode").join("commands");
+        if agents_skills.exists() && opencode_skills.exists() && opencode_commands.exists() {
+            Some(AssistantSkillBundle {
+                agents_skills,
+                opencode_skills,
+                opencode_commands,
+            })
+        } else {
+            None
+        }
+    })
+}
+
+fn bundled_assistant_skill_bundle() -> Option<AssistantSkillBundle> {
+    let exe = std::env::current_exe().ok()?;
+    let exe_dir = exe.parent()?;
+    let macos_dir = exe_dir.file_name().and_then(|name| name.to_str()) == Some("MacOS");
+    let resources_parent = if macos_dir {
+        exe_dir.parent()?.join("Resources")
+    } else {
+        exe_dir.to_path_buf()
+    };
+
+    [
+        resources_parent.join("assistant-skill-bundle"),
+        resources_parent
+            .join("resources")
+            .join("assistant-skill-bundle"),
+    ]
+    .into_iter()
+    .find_map(AssistantSkillBundle::from_root)
+}
+
+fn resolve_assistant_skill_bundle() -> Option<AssistantSkillBundle> {
+    if let Some(override_root) = std::env::var_os(ASSISTANT_SKILL_BUNDLE_ENV) {
+        if let Some(bundle) = AssistantSkillBundle::from_root(PathBuf::from(override_root)) {
+            return Some(bundle);
+        }
+    }
+
+    bundled_assistant_skill_bundle().or_else(repo_assistant_skill_bundle)
+}
+
+fn remove_path(path: &Path) -> Result<(), String> {
+    if !path.exists() && fs::symlink_metadata(path).is_err() {
+        return Ok(());
+    }
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|e| format!("Failed to inspect {}: {}", path.display(), e))?;
+    if metadata.file_type().is_symlink() || metadata.is_file() {
+        fs::remove_file(path).map_err(|e| format!("Failed to remove {}: {}", path.display(), e))
+    } else {
+        fs::remove_dir_all(path).map_err(|e| format!("Failed to remove {}: {}", path.display(), e))
+    }
+}
+
+fn copy_dir_recursive(source: &Path, target: &Path) -> Result<(), String> {
+    fs::create_dir_all(target)
+        .map_err(|e| format!("Failed to create {}: {}", target.display(), e))?;
+    for entry in
+        fs::read_dir(source).map_err(|e| format!("Failed to read {}: {}", source.display(), e))?
+    {
+        let entry = entry.map_err(|e| format!("Bad dir entry in {}: {}", source.display(), e))?;
+        let from = entry.path();
+        let to = target.join(entry.file_name());
+        let metadata = entry
+            .metadata()
+            .map_err(|e| format!("Failed to stat {}: {}", from.display(), e))?;
+        if metadata.is_dir() {
+            copy_dir_recursive(&from, &to)?;
+        } else {
+            if let Some(parent) = to.parent() {
+                fs::create_dir_all(parent)
+                    .map_err(|e| format!("Failed to create {}: {}", parent.display(), e))?;
+            }
+            fs::copy(&from, &to).map_err(|e| {
+                format!(
+                    "Failed to copy {} to {}: {}",
+                    from.display(),
+                    to.display(),
+                    e
+                )
+            })?;
+        }
+    }
+    Ok(())
+}
+
+fn replace_dir_contents(target: &Path, source: &Path) -> Result<(), String> {
+    remove_path(target)?;
+    copy_dir_recursive(source, target)
+}
+
+fn sync_assistant_skill_mirrors(workspace: &Path) -> Result<(), String> {
+    let Some(bundle) = resolve_assistant_skill_bundle() else {
+        return Ok(());
+    };
+
+    let agents_root = workspace.join(".agents");
+    fs::create_dir_all(&agents_root)
+        .map_err(|e| format!("Failed to create {}: {}", agents_root.display(), e))?;
+    replace_dir_contents(&agents_root.join("skills"), &bundle.agents_skills)?;
+
+    let opencode_root = workspace.join(".opencode");
+    fs::create_dir_all(&opencode_root)
+        .map_err(|e| format!("Failed to create {}: {}", opencode_root.display(), e))?;
+    replace_dir_contents(&opencode_root.join("skills"), &bundle.opencode_skills)?;
+    replace_dir_contents(&opencode_root.join("commands"), &bundle.opencode_commands)?;
+
+    Ok(())
+}
+
 /// Ensure the singleton assistant workspace exists and return its path.
 pub fn create_workspace(config: &Config) -> Result<PathBuf, String> {
     let workspace = workspace_dir();
 
-    std::fs::create_dir_all(&workspace)
-        .map_err(|e| format!("Failed to create workspace: {}", e))?;
+    fs::create_dir_all(&workspace).map_err(|e| format!("Failed to create workspace: {}", e))?;
 
     let meetings_link = workspace.join("meetings");
     if !meetings_link.exists() {
@@ -36,10 +183,12 @@ pub fn create_workspace(config: &Config) -> Result<PathBuf, String> {
             .map_err(|e| format!("Failed to symlink meetings dir: {}", e))?;
     }
 
-    // Skills and agents live in ~/.minutes/.agents/ and are symlinked
-    // into the workspace's .claude/ directory. This is set up once
-    // (manually or by minutes setup) — we don't touch .claude/ here
-    // to avoid overwriting user configuration.
+    // Refresh assistant-local skill mirrors from the generated portable
+    // trees so Recall sees the same Minutes lifecycle skills as the repo.
+    sync_assistant_skill_mirrors(&workspace)?;
+
+    // .claude is still user-owned. We keep the existing symlink layout
+    // intact and only refresh the app-managed .agents/.opencode mirrors.
 
     // git init on the assistant workspace (idempotent) so Claude Code discovers CLAUDE.md.
     if !workspace.join(".git").exists() {
@@ -447,8 +596,6 @@ pub fn cleanup_stale_workspaces() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
-
     #[test]
     fn assistant_context_mentions_open_artifact_contract() {
         let config = Config::default();
@@ -477,5 +624,48 @@ mod tests {
         assert!(written.contains("line 200"));
         assert!(!written.contains("line 205"));
         assert!(written.contains("[preview truncated]"));
+    }
+
+    #[test]
+    fn sync_assistant_skill_mirrors_replaces_stale_flat_skills_with_generated_trees() {
+        let temp = tempfile::tempdir().unwrap();
+        let bundle_root = temp.path().join("bundle");
+        let agents_source = bundle_root
+            .join("agents-skills")
+            .join("minutes")
+            .join("minutes-prep");
+        let opencode_skill = bundle_root.join("opencode-skills").join("minutes-prep");
+        let opencode_command = bundle_root.join("opencode-commands");
+        fs::create_dir_all(&agents_source).unwrap();
+        fs::create_dir_all(&opencode_skill).unwrap();
+        fs::create_dir_all(&opencode_command).unwrap();
+        fs::write(agents_source.join("SKILL.md"), "codex prep").unwrap();
+        fs::write(opencode_skill.join("SKILL.md"), "opencode prep").unwrap();
+        fs::write(opencode_command.join("minutes-prep.md"), "command stub").unwrap();
+
+        let workspace = temp.path().join("assistant");
+        fs::create_dir_all(workspace.join(".agents/skills/minutes-search")).unwrap();
+        fs::write(
+            workspace.join(".agents/skills/minutes-search/SKILL.md"),
+            "stale search",
+        )
+        .unwrap();
+
+        std::env::set_var(ASSISTANT_SKILL_BUNDLE_ENV, &bundle_root);
+        sync_assistant_skill_mirrors(&workspace).unwrap();
+        std::env::remove_var(ASSISTANT_SKILL_BUNDLE_ENV);
+
+        assert!(workspace
+            .join(".agents/skills/minutes/minutes-prep/SKILL.md")
+            .exists());
+        assert!(!workspace
+            .join(".agents/skills/minutes-search/SKILL.md")
+            .exists());
+        assert!(workspace
+            .join(".opencode/skills/minutes-prep/SKILL.md")
+            .exists());
+        assert!(workspace
+            .join(".opencode/commands/minutes-prep.md")
+            .exists());
     }
 }

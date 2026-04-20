@@ -16,6 +16,9 @@
   },
   "bundle": {
     "createUpdaterArtifacts": true,
+    "resources": [
+      "resources/assistant-skill-bundle/**/*"
+    ],
     "icon": [
       "icons/icon.icns",
       "icons/icon.ico",

@@ -5426,11 +5426,25 @@ fn is_shell_command(command: &str) -> bool {
     )
 }
 
+fn is_approval_bypass_flag(arg: &str) -> bool {
+    matches!(
+        arg,
+        "--dangerously-skip-permissions" | "--dangerously-bypass-approvals-and-sandbox"
+    )
+}
+
 fn filtered_agent_args(agent_name: &str, args: &[String]) -> Vec<String> {
-    let supports_skip_permissions = matches!(agent_name, "claude" | "codex");
+    let allowed_bypass_flag = match agent_name {
+        "claude" => Some("--dangerously-skip-permissions"),
+        "codex" => Some("--dangerously-bypass-approvals-and-sandbox"),
+        _ => None,
+    };
 
     args.iter()
-        .filter(|arg| supports_skip_permissions || arg.as_str() != "--dangerously-skip-permissions")
+        .filter(|arg| {
+            !is_approval_bypass_flag(arg)
+                || allowed_bypass_flag.is_some_and(|allowed| arg.as_str() == allowed)
+        })
         .cloned()
         .collect()
 }
@@ -6127,6 +6141,25 @@ mod tests {
             vec!["--model".to_string(), "openai/gpt-5.4".to_string()]
         );
         assert_eq!(filtered_agent_args("claude", &args), args);
+    }
+
+    #[test]
+    fn filtered_agent_args_keeps_codex_specific_bypass_flag_only_for_codex() {
+        let args = vec![
+            "--dangerously-bypass-approvals-and-sandbox".to_string(),
+            "--model".to_string(),
+            "gpt-5-codex".to_string(),
+        ];
+
+        assert_eq!(filtered_agent_args("codex", &args), args);
+        assert_eq!(
+            filtered_agent_args("claude", &args),
+            vec!["--model".to_string(), "gpt-5-codex".to_string()]
+        );
+        assert_eq!(
+            filtered_agent_args("opencode", &args),
+            vec!["--model".to_string(), "gpt-5-codex".to_string()]
+        );
     }
 
     /// Arms that have no current caller but are deliberately kept pending a

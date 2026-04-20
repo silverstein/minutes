@@ -7248,8 +7248,9 @@
         // Agent launch flags — separate skip-permissions toggle from extra args
         try {
           const argsArr = s.assistant.agent_args || [];
-          const skipPerm = argsArr.includes('--dangerously-skip-permissions');
-          const extraArgs = argsArr.filter(a => a !== '--dangerously-skip-permissions');
+          const bypassFlag = approvalBypassFlag(s.assistant.agent);
+          const skipPerm = Boolean(bypassFlag && argsArr.includes(bypassFlag));
+          const extraArgs = argsArr.filter(a => !isApprovalBypassFlag(a));
           setSettingsToggle('settings-skip-permissions', skipPerm);
           document.getElementById('settings-skip-permissions-hint').textContent = skipPerm
             ? 'The agent will run without asking for approval. Takes effect next session.'
@@ -7410,20 +7411,28 @@
       if (agent === 'gemini') return 'e.g. --model gemini-2.5-pro';
       return 'e.g. --model <provider/model>';
     }
+    function approvalBypassFlag(agent) {
+      if (agent === 'claude') return '--dangerously-skip-permissions';
+      if (agent === 'codex') return '--dangerously-bypass-approvals-and-sandbox';
+      return null;
+    }
+    function isApprovalBypassFlag(arg) {
+      return arg === '--dangerously-skip-permissions' || arg === '--dangerously-bypass-approvals-and-sandbox';
+    }
     function sanitizeAssistantExtraArgs(agent, extraArgs) {
-      const supportsSkip = ['claude', 'codex'].includes(agent);
+      const bypassFlag = approvalBypassFlag(agent);
       const sanitized = [];
-      let removedUnsupportedSkip = false;
+      let removedUnsupportedBypass = false;
       for (const arg of extraArgs) {
-        if (!supportsSkip && arg === '--dangerously-skip-permissions') {
-          removedUnsupportedSkip = true;
+        if (isApprovalBypassFlag(arg) && arg !== bypassFlag) {
+          removedUnsupportedBypass = true;
           continue;
         }
         sanitized.push(arg);
       }
-      return { sanitized, supportsSkip, removedUnsupportedSkip };
+      return { sanitized, supportsSkip: Boolean(bypassFlag), bypassFlag, removedUnsupportedBypass };
     }
-    function updateAssistantAgentUi(agent, extraArgs, removedUnsupportedSkip = false) {
+    function updateAssistantAgentUi(agent, extraArgs, removedUnsupportedBypass = false) {
       const argsInput = document.getElementById('settings-agent-args');
       const argsStatus = document.getElementById('settings-agent-args-status');
       const argsHelp = document.getElementById('settings-agent-args-help');
@@ -7436,12 +7445,12 @@
       skipRow.classList.toggle('is-hidden', !supportsSkip);
       skipHint.classList.toggle('is-hidden', !supportsSkip);
       if (!supportsSkip) setSettingsToggle('settings-skip-permissions', false);
-      if (removedUnsupportedSkip) {
-        argsHelp.textContent = 'Removed --dangerously-skip-permissions because this agent does not support it.';
+      if (removedUnsupportedBypass) {
+        argsHelp.textContent = 'Removed an approval-bypass flag that does not match the selected agent.';
       } else if (agent === 'opencode') {
         argsHelp.textContent = 'OpenCode works best with provider/model flags like --model openai/gpt-5.4.';
       } else if (agent === 'codex') {
-        argsHelp.textContent = 'Codex supports --dangerously-skip-permissions and model selection flags.';
+        argsHelp.textContent = 'Codex uses --dangerously-bypass-approvals-and-sandbox for full auto-approval.';
       } else if (agent === 'claude') {
         argsHelp.textContent = 'Claude supports --dangerously-skip-permissions and model selection flags.';
       } else {
@@ -7699,9 +7708,9 @@
       const skipOn = document.getElementById('settings-skip-permissions').textContent.trim() === 'On';
       const extra = document.getElementById('settings-agent-args').value.trim();
       const extraParts = extra ? extra.split(/\s+/) : [];
-      const { sanitized, supportsSkip, removedUnsupportedSkip } = sanitizeAssistantExtraArgs(agent, extraParts);
+      const { sanitized, supportsSkip, bypassFlag, removedUnsupportedBypass } = sanitizeAssistantExtraArgs(agent, extraParts);
       const parts = [];
-      if (skipOn && supportsSkip) parts.push('--dangerously-skip-permissions');
+      if (skipOn && supportsSkip && bypassFlag) parts.push(bypassFlag);
       if (sanitized.length) parts.push(...sanitized);
       await invoke('cmd_set_setting', { section: 'assistant', key: 'agent_args', value: parts.join(' ') });
       document.getElementById('settings-skip-permissions-hint').textContent = skipOn
@@ -7710,7 +7719,7 @@
       if (!supportsSkip) {
         document.getElementById('settings-skip-permissions-hint').textContent = '';
       }
-      updateAssistantAgentUi(agent, sanitized, removedUnsupportedSkip || (skipOn && !supportsSkip));
+      updateAssistantAgentUi(agent, sanitized, removedUnsupportedBypass || (skipOn && !supportsSkip));
     }
     document.getElementById('settings-skip-permissions').addEventListener('click', async () => {
       const btn = document.getElementById('settings-skip-permissions');

@@ -226,6 +226,8 @@ mod tests {
             decisions: vec![Decision {
                 text: "Switch to monthly billing for pharmacy consultations".into(),
                 topic: Some("pricing".into()),
+                authority: None,
+                supersedes: None,
             }],
             intents: vec![],
             recorded_by: None,

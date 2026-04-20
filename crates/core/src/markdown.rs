@@ -175,11 +175,23 @@ pub struct ActionItem {
 
 /// A structured decision extracted from a meeting.
 /// Queryable via MCP tools: search across all meetings for decision history.
+///
+/// Frontmatter v2 fields (optional, backward compatible):
+/// - `authority`: "high" | "medium" | "low" — the decision's weight. A CEO
+///   commitment is high; a drive-by aside is low. Consumers can use this to
+///   rank conflicting decisions or surface the authoritative one.
+/// - `supersedes`: free-text reference to the earlier decision this one
+///   replaces. When set, the consistency report treats the topic conflict as
+///   a documented supersession rather than an unresolved contradiction.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct Decision {
     pub text: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub topic: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authority: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supersedes: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

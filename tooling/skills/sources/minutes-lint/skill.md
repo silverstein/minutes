@@ -56,6 +56,20 @@ For each conflict, show:
 - **Status**: These decisions may contradict each other.
 ```
 
+**Frontmatter v2: resolved supersessions.** When the `resolution` field is
+present on a conflict, the newer decision has a `supersedes:` entry in its
+frontmatter. Treat this as informational, not a red flag. Format as:
+
+```
+**Topic: {topic}** ✓ Resolved
+- Current: "{latest decision text}" — *{meeting title}* ({date})
+- Superseded: "{prior decision text}" — *{meeting title}* ({date})
+- **Status**: {resolution text}
+```
+
+If the latest decision also carries an `authority` field (`high`/`medium`/`low`),
+surface it next to the title. Authority is optional — when absent, omit the tag.
+
 ### Stale Commitments
 
 For each stale item, show:

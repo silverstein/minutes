@@ -67,6 +67,11 @@ pub struct ReportEntry {
     pub what: String,
     pub who: Option<String>,
     pub by_date: Option<String>,
+    /// Frontmatter v2: optional authority grade ("high" | "medium" | "low").
+    /// Propagated from the source decision when present. None for pre-v2
+    /// frontmatter.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub authority: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -74,6 +79,12 @@ pub struct DecisionConflict {
     pub topic: String,
     pub latest: ReportEntry,
     pub previous: Vec<ReportEntry>,
+    /// Frontmatter v2: when the latest decision explicitly `supersedes` an
+    /// earlier one, this carries the supersession rationale. Consumers like
+    /// `/minutes-lint` should treat resolved conflicts as informational
+    /// rather than red flags. None means this is an unresolved contradiction.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolution: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -258,6 +269,7 @@ pub fn cross_meeting_research(
                     what: decision.text.clone(),
                     who: None,
                     by_date: None,
+                    authority: decision.authority.clone(),
                 });
             }
         }
@@ -426,7 +438,10 @@ pub fn consistency_report(
 
     let owner_lower = owner.map(|value| value.to_lowercase());
     let now = Local::now();
-    let mut decision_groups: std::collections::HashMap<String, Vec<ReportEntry>> =
+    // Each entry carries its source decision's `supersedes` value alongside the
+    // ReportEntry so we can detect documented supersessions when the topic
+    // group has conflicting decisions.
+    let mut decision_groups: std::collections::HashMap<String, Vec<(ReportEntry, Option<String>)>> =
         std::collections::HashMap::new();
     let mut stale_commitments = Vec::new();
 
@@ -442,14 +457,18 @@ pub fn consistency_report(
                 continue;
             }
 
-            decision_groups.entry(topic).or_default().push(ReportEntry {
-                path: path.clone(),
-                title: frontmatter.title.clone(),
-                date: frontmatter.date.to_rfc3339(),
-                what: decision.text.clone(),
-                who: None,
-                by_date: None,
-            });
+            decision_groups.entry(topic).or_default().push((
+                ReportEntry {
+                    path: path.clone(),
+                    title: frontmatter.title.clone(),
+                    date: frontmatter.date.to_rfc3339(),
+                    what: decision.text.clone(),
+                    who: None,
+                    by_date: None,
+                    authority: decision.authority.clone(),
+                },
+                decision.supersedes.clone(),
+            ));
         }
 
         for intent in &frontmatter.intents {
@@ -521,6 +540,7 @@ pub fn consistency_report(
                         what: intent.what.clone(),
                         who: intent.who.clone(),
                         by_date: intent.by_date.clone(),
+                        authority: None,
                     },
                     meetings_since,
                     age_days,
@@ -533,18 +553,24 @@ pub fn consistency_report(
 
     let mut decision_conflicts = Vec::new();
     for (topic, mut entries) in decision_groups {
-        entries.sort_by(|a, b| a.date.cmp(&b.date));
+        entries.sort_by(|a, b| a.0.date.cmp(&b.0.date));
         let mut unique_values = std::collections::HashSet::new();
-        for entry in &entries {
+        for (entry, _) in &entries {
             unique_values.insert(normalize_decision_value(&entry.what));
         }
 
         if unique_values.len() > 1 {
-            let latest = entries.pop().expect("entries not empty");
+            let (latest_entry, latest_supersedes) = entries.pop().expect("entries not empty");
+            let resolution = latest_supersedes
+                .as_ref()
+                .map(|value| value.trim())
+                .filter(|value| !value.is_empty())
+                .map(|value| format!("Resolved by explicit supersedes: {}", value));
             decision_conflicts.push(DecisionConflict {
                 topic,
-                latest,
-                previous: entries,
+                latest: latest_entry,
+                previous: entries.into_iter().map(|(entry, _)| entry).collect(),
+                resolution,
             });
         }
     }
@@ -647,6 +673,7 @@ pub fn person_profile(config: &Config, person: &str) -> Result<PersonProfile, Se
                 what: decision.text.clone(),
                 who: None,
                 by_date: None,
+                authority: decision.authority.clone(),
             });
 
             let topic = decision
@@ -1344,6 +1371,60 @@ mod tests {
                 .map(|meeting| meeting.title.as_str()),
             Some("Another Follow-up")
         );
+    }
+
+    #[test]
+    fn consistency_report_marks_conflict_resolved_when_supersedes_is_set() {
+        let dir = TempDir::new().unwrap();
+        create_test_file(
+            dir.path(),
+            "2026-02-28-a.md",
+            "---\ntitle: Pricing Strategy\ntype: meeting\ndate: 2026-02-28T10:00:00-07:00\nduration: 30m\nstatus: complete\ntags: []\nattendees: []\npeople: []\naction_items: []\ndecisions:\n  - text: Launch monthly billing for consultants\n    topic: pricing\n    authority: high\nintents: []\n---\n\n## Transcript\n\nDecision A.\n",
+        );
+        create_test_file(
+            dir.path(),
+            "2026-03-25-b.md",
+            "---\ntitle: Pricing Reversal\ntype: meeting\ndate: 2026-03-25T10:00:00-07:00\nduration: 30m\nstatus: complete\ntags: []\nattendees: []\npeople: []\naction_items: []\ndecisions:\n  - text: Revert to annual-only billing across all segments\n    topic: pricing\n    authority: high\n    supersedes: \"2026-02-28 monthly billing decision\"\nintents: []\n---\n\n## Transcript\n\nDecision B reverses A.\n",
+        );
+
+        let config = Config {
+            output_dir: dir.path().to_path_buf(),
+            ..Config::default()
+        };
+
+        let report = consistency_report(&config, None, 7).unwrap();
+        assert_eq!(report.decision_conflicts.len(), 1);
+        let conflict = &report.decision_conflicts[0];
+        assert_eq!(conflict.topic, "pricing");
+        assert!(conflict.resolution.is_some());
+        assert!(conflict.resolution.as_ref().unwrap().contains("2026-02-28"));
+        assert_eq!(conflict.latest.authority.as_deref(), Some("high"));
+        assert_eq!(conflict.previous[0].authority.as_deref(), Some("high"));
+    }
+
+    #[test]
+    fn consistency_report_leaves_resolution_none_without_supersedes() {
+        let dir = TempDir::new().unwrap();
+        create_test_file(
+            dir.path(),
+            "2026-03-01-a.md",
+            "---\ntitle: A\ntype: meeting\ndate: 2026-03-01T12:00:00-07:00\nduration: 30m\nstatus: complete\ntags: []\nattendees: []\npeople: []\naction_items: []\ndecisions:\n  - text: Launch monthly billing\n    topic: pricing\nintents: []\n---\n\n## Transcript\n\nA.\n",
+        );
+        create_test_file(
+            dir.path(),
+            "2026-03-12-b.md",
+            "---\ntitle: B\ntype: meeting\ndate: 2026-03-12T12:00:00-07:00\nduration: 30m\nstatus: complete\ntags: []\nattendees: []\npeople: []\naction_items: []\ndecisions:\n  - text: Stay on annual billing\n    topic: pricing\nintents: []\n---\n\n## Transcript\n\nB without supersedes.\n",
+        );
+
+        let config = Config {
+            output_dir: dir.path().to_path_buf(),
+            ..Config::default()
+        };
+
+        let report = consistency_report(&config, None, 7).unwrap();
+        assert_eq!(report.decision_conflicts.len(), 1);
+        assert!(report.decision_conflicts[0].resolution.is_none());
+        assert!(report.decision_conflicts[0].latest.authority.is_none());
     }
 
     #[test]

@@ -304,6 +304,8 @@ mod tests {
         fm.decisions = vec![Decision {
             text: "Switch to monthly billing".into(),
             topic: Some("pricing".into()),
+            authority: None,
+            supersedes: None,
         }];
         fm.action_items = vec![
             ActionItem {

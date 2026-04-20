@@ -3090,6 +3090,8 @@ fn extract_decisions(summary: &summarize::Summary) -> Vec<markdown::Decision> {
             markdown::Decision {
                 text: text.clone(),
                 topic,
+                authority: None,
+                supersedes: None,
             }
         })
         .collect()
@@ -4427,6 +4429,8 @@ mod tests {
         let decisions = vec![markdown::Decision {
             text: "Launch pricing at monthly billing per month".into(),
             topic: Some("pricing strategy".into()),
+            authority: None,
+            supersedes: None,
         }];
         let intents = vec![markdown::Intent {
             kind: markdown::IntentKind::Commitment,
@@ -4477,18 +4481,26 @@ mod tests {
                 markdown::Decision {
                     text: "Speaker_1 provide speaker roster and contact notes".into(),
                     topic: Some("speaker 1 provide speaker".into()),
+                    authority: None,
+                    supersedes: None,
                 },
                 markdown::Decision {
                     text: "Reach out to Cardinal about access".into(),
                     topic: Some("reach out".into()),
+                    authority: None,
+                    supersedes: None,
                 },
                 markdown::Decision {
                     text: "Pioneer asked build the custom report after review".into(),
                     topic: Some("pioneer asked build".into()),
+                    authority: None,
+                    supersedes: None,
                 },
                 markdown::Decision {
                     text: "LeaderNet 835 reconciliation remains the core workflow".into(),
                     topic: Some("leadernet 835 reconciliation".into()),
+                    authority: None,
+                    supersedes: None,
                 },
             ],
             &[],
@@ -4903,6 +4915,8 @@ mod tests {
             &[markdown::Decision {
                 text: "Speaker_1 provide speaker roster and contact notes".into(),
                 topic: Some("speaker 1 provide speaker".into()),
+                authority: None,
+                supersedes: None,
             }],
             &intents,
             &[],
@@ -4969,6 +4983,8 @@ mod tests {
             &[markdown::Decision {
                 text: "Use annual billing for premium users".into(),
                 topic: Some("pricing strategy".into()),
+                authority: None,
+                supersedes: None,
             }],
             &[markdown::Intent {
                 kind: markdown::IntentKind::Commitment,
@@ -4989,6 +5005,8 @@ mod tests {
             &[markdown::Decision {
                 text: "Use annual billing for premium users".into(),
                 topic: Some("pricing strategy".into()),
+                authority: None,
+                supersedes: None,
             }],
             &[markdown::Intent {
                 kind: markdown::IntentKind::Commitment,

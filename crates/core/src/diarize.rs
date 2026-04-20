@@ -357,6 +357,7 @@ fn maybe_relabel_single_call_speaker_to_voice(
     voice_values: &[f32],
     system_values: &[f32],
     silence_threshold: f32,
+    stem_correlation_threshold: f32,
 ) {
     if segments.len() != 1 || segments[0].speaker != "SPEAKER_1" {
         return;
@@ -367,14 +368,18 @@ fn maybe_relabel_single_call_speaker_to_voice(
         .filter(|&&rms| rms > silence_threshold)
         .count();
     let active_voice_ratio = active_voice_windows as f32 / voice_values.len().max(1) as f32;
-    let correlated =
-        correlation_coefficient(voice_values, system_values).is_some_and(|value| value >= 0.85);
+    let correlated = correlation_coefficient(voice_values, system_values)
+        .is_some_and(|value| value >= stem_correlation_threshold);
 
     // If the microphone stem is active for most of the recording, this is
     // likely the local speaker bleeding into the system stem rather than a
     // true remote-only single speaker, but only when the two stems also move
     // together strongly. Mere mic-side noise should not relabel remote audio
     // as the local speaker.
+    //
+    // Shares stem_correlation_threshold with the primary collapse path.
+    // Raising the threshold (e.g. to 1.0) disables both correlation-driven
+    // collapses, which is what open-speaker-mic users need (issue #157).
     if active_voice_ratio >= 0.6 && correlated {
         segments[0].speaker = "SPEAKER_0".into();
     }
@@ -384,6 +389,7 @@ fn diarization_from_energy_windows(
     voice_energy: &[(f64, f32)],
     system_energy: &[(f64, f32)],
     window_secs: f64,
+    stem_correlation_threshold: f32,
 ) -> Option<DiarizationResult> {
     // Energy threshold: below this RMS, the source is considered silent.
     // Typical speech RMS is 0.01-0.1; noise floor is <0.001.
@@ -415,7 +421,12 @@ fn diarization_from_energy_windows(
     // When both stems move together for most windows, we're likely seeing the
     // same person bleeding into both sources (for example your own voice plus
     // system echo / self-monitor). Treat that as one human, not two speakers.
-    if active_windows >= 3 && correlation.is_some_and(|value| value >= 0.85) {
+    //
+    // This heuristic misfires for open-speaker mic setups where the mic
+    // acoustically picks up multi-speaker system audio. Users hitting that
+    // case can raise stem_correlation_threshold (config: diarization section)
+    // to 1.0 or higher to disable the collapse.
+    if active_windows >= 3 && correlation.is_some_and(|value| value >= stem_correlation_threshold) {
         let segments = collapse_to_single_speaker_segments(
             voice_energy,
             system_energy,
@@ -430,6 +441,7 @@ fn diarization_from_energy_windows(
         tracing::info!(
             active_windows,
             correlation = correlation,
+            threshold = stem_correlation_threshold,
             "stem energies strongly correlated — collapsing to one speaker"
         );
 
@@ -480,6 +492,7 @@ fn diarization_from_energy_windows(
             &voice_values,
             &system_values,
             silence_threshold,
+            stem_correlation_threshold,
         );
     }
 
@@ -503,7 +516,7 @@ fn diarization_from_energy_windows(
 /// Speaker attribution from per-source audio stems (no ML diarization).
 /// Compares energy levels between voice and system stems per time window,
 /// assigning "SPEAKER_0" (you) or "SPEAKER_1" (remote) to each window.
-pub fn diarize_from_stems(stems: &StemPaths, _config: &Config) -> Option<DiarizationResult> {
+pub fn diarize_from_stems(stems: &StemPaths, config: &Config) -> Option<DiarizationResult> {
     let window_secs = 1.0; // 1-second energy windows
 
     let voice_energy = match compute_energy_windows(&stems.voice, window_secs) {
@@ -521,8 +534,13 @@ pub fn diarize_from_stems(stems: &StemPaths, _config: &Config) -> Option<Diariza
         }
     };
 
-    let Some(result) = diarization_from_energy_windows(&voice_energy, &system_energy, window_secs)
-    else {
+    let stem_correlation_threshold = config.diarization.stem_correlation_threshold;
+    let Some(result) = diarization_from_energy_windows(
+        &voice_energy,
+        &system_energy,
+        window_secs,
+        stem_correlation_threshold,
+    ) else {
         tracing::warn!("stem-based diarization produced no segments (all silent), falling back");
         return None;
     };
@@ -1715,7 +1733,7 @@ mod tests {
         let voice_energy = vec![(0.0, 0.12), (1.0, 0.20), (2.0, 0.18), (3.0, 0.11)];
         let system_energy = vec![(0.0, 0.08), (1.0, 0.14), (2.0, 0.13), (3.0, 0.07)];
 
-        let result = diarization_from_energy_windows(&voice_energy, &system_energy, 1.0)
+        let result = diarization_from_energy_windows(&voice_energy, &system_energy, 1.0, 0.85)
             .expect("correlated stems should still produce diarization");
 
         assert_eq!(result.num_speakers, 1);
@@ -1726,11 +1744,40 @@ mod tests {
     }
 
     #[test]
+    fn stem_correlation_threshold_of_one_preserves_remote_label_on_open_speaker_bleed() {
+        // Reproduces issue #157: open-speaker mic (Studio Display, laptop,
+        // etc.) acoustically picks up multi-speaker system audio. The system
+        // stem is louder than the mic (remote voices on speakers), and the
+        // mic follows that waveform at lower amplitude — high correlation,
+        // but system is the real source.
+        //
+        // At the default threshold (0.85) both correlation gates fire and
+        // everything collapses to SPEAKER_0. Raising the threshold to 1.0
+        // must suppress both the primary collapse (line ~418) and the
+        // single-speaker relabel (line ~371), leaving the system-dominant
+        // per-window attribution intact as SPEAKER_1.
+        let voice_energy = vec![(0.0, 0.08), (1.0, 0.14), (2.0, 0.12), (3.0, 0.06)];
+        let system_energy = vec![(0.0, 0.20), (1.0, 0.28), (2.0, 0.24), (3.0, 0.12)];
+
+        // Default threshold → collapses to single SPEAKER_0 (the bug).
+        let collapsed = diarization_from_energy_windows(&voice_energy, &system_energy, 1.0, 0.85)
+            .expect("default threshold should produce a diarization result");
+        assert_eq!(collapsed.segments.len(), 1);
+        assert_eq!(collapsed.segments[0].speaker, "SPEAKER_0");
+
+        // Raised threshold → correlation gates skipped, per-window attribution
+        // wins, system-dominant windows stay labeled as the remote speaker.
+        let preserved = diarization_from_energy_windows(&voice_energy, &system_energy, 1.0, 1.0)
+            .expect("threshold=1.0 must not suppress diarization, only the collapse");
+        assert_eq!(preserved.segments[0].speaker, "SPEAKER_1");
+    }
+
+    #[test]
     fn stem_energy_distinguishes_two_sources_when_patterns_diverge() {
         let voice_energy = vec![(0.0, 0.16), (1.0, 0.14), (2.0, 0.0), (3.0, 0.0)];
         let system_energy = vec![(0.0, 0.0), (1.0, 0.0), (2.0, 0.18), (3.0, 0.15)];
 
-        let result = diarization_from_energy_windows(&voice_energy, &system_energy, 1.0)
+        let result = diarization_from_energy_windows(&voice_energy, &system_energy, 1.0, 0.85)
             .expect("distinct stem patterns should produce diarization");
 
         assert_eq!(result.num_speakers, 2);
@@ -1744,7 +1791,7 @@ mod tests {
         let voice_energy = vec![(0.0, 0.020), (1.0, 0.024), (2.0, 0.018), (3.0, 0.022)];
         let system_energy = vec![(0.0, 0.050), (1.0, 0.060), (2.0, 0.045), (3.0, 0.055)];
 
-        let result = diarization_from_energy_windows(&voice_energy, &system_energy, 1.0)
+        let result = diarization_from_energy_windows(&voice_energy, &system_energy, 1.0, 0.85)
             .expect("single dominant system speaker should still produce diarization");
 
         assert_eq!(result.num_speakers, 1);
@@ -1757,7 +1804,7 @@ mod tests {
         let voice_energy = vec![(0.0, 0.020), (1.0, 0.006), (2.0, 0.019), (3.0, 0.007)];
         let system_energy = vec![(0.0, 0.050), (1.0, 0.048), (2.0, 0.047), (3.0, 0.051)];
 
-        let result = diarization_from_energy_windows(&voice_energy, &system_energy, 1.0)
+        let result = diarization_from_energy_windows(&voice_energy, &system_energy, 1.0, 0.85)
             .expect("single dominant system speaker should still produce diarization");
 
         assert_eq!(result.num_speakers, 1);

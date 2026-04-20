@@ -155,6 +155,16 @@ pub struct DiarizationConfig {
     /// similarities, so `voice.match_threshold` must be lowered (~0.1–0.2)
     /// for voice enrollment matching to work reliably.
     pub embedding_model: String,
+    /// Correlation threshold (0.0–1.0) above which stem-based diarization
+    /// collapses voice + system stems to a single speaker. The check
+    /// assumes high cross-stem correlation means one person bleeding into
+    /// both sources (self-monitor / headphone leak), but it misfires for
+    /// open-speaker mic setups (Studio Display Mic, laptop mic, desk USB
+    /// mic near speakers) where the mic acoustically picks up multi-
+    /// speaker system audio from a Zoom/Meet call. Raise to 1.0 or higher
+    /// to disable the collapse and rely on per-window energy attribution.
+    /// Default 0.85 preserves historical behavior.
+    pub stem_correlation_threshold: f32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -642,6 +652,7 @@ impl Default for DiarizationConfig {
             model_path: minutes_dir().join("models").join("diarization"),
             threshold: 0.4,
             embedding_model: "cam++".into(),
+            stem_correlation_threshold: 0.85,
         }
     }
 }

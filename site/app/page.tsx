@@ -117,6 +117,8 @@ const comparisons = [
   ["Voice memos", "No", "No", "No", "iPhone pipeline"],
   ["People memory", "No", "No", "No", "Yes"],
   ["Data ownership", "Their servers", "Their servers", "Local", "Local"],
+  ["Data format", "Cloud DB", "Cloud DB", "Markdown", "Markdown + YAML"],
+  ["Agent-agnostic", "No", "No", "No", "Yes"],
 ] as const;
 
 function SectionLabel({ n, label }: { n: string; label: string }) {
@@ -224,6 +226,9 @@ export default function Home() {
           <a href="#pipeline" className="hover:text-[var(--accent)]">
             Pipeline
           </a>
+          <a href="/for-agents" className="hover:text-[var(--accent)]">
+            For agents
+          </a>
           <a href="/llms.txt" className="hover:text-[var(--accent)]">
             llms.txt
           </a>
@@ -232,7 +237,7 @@ export default function Home() {
 
       <section className="pb-16 pt-16 text-center sm:pb-20 sm:pt-24">
         <p className="mb-5 font-mono text-[11px] uppercase tracking-[0.18em] text-[var(--accent)]">
-          Open-source conversation memory
+          Open-source. MCP-native.
         </p>
         <p className="mx-auto mb-5 max-w-[720px] font-mono text-[12px] uppercase tracking-[0.14em] text-[var(--text-secondary)]">
           v0.13.2 • 26 MCP tools • 45 CLI commands • 620 tests
@@ -243,9 +248,9 @@ export default function Home() {
           <span className="italic text-[var(--accent)]">structured and searchable.</span>
         </h1>
         <p className="mx-auto mt-5 max-w-[600px] text-[16px] leading-7 text-[var(--text-secondary)] sm:text-[17px]">
-          Agents already have run logs. Humans have conversations. Minutes
-          captures meetings and voice memos locally, turns them into structured
-          markdown, and makes the record queryable by your tools.
+          Cloud meeting tools rent your own conversations back to you. Minutes
+          captures meetings and voice memos locally, writes them as structured
+          markdown to your disk, and lets every AI you use read the same folder.
         </p>
 
         <div className="mt-8 flex flex-wrap justify-center gap-3">

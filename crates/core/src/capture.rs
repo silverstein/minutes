@@ -469,7 +469,7 @@ fn select_device_with_override(
 }
 
 fn resolve_capture_plan(config: &Config) -> Result<CapturePlan, CaptureError> {
-    let host = cpal::default_host();
+    let host = cached_default_host();
     resolve_capture_plan_with_host(&host, config)
 }
 
@@ -1246,7 +1246,7 @@ pub fn record_to_wav(
     #[cfg(feature = "streaming")]
     crate::streaming::clear_mic_mute_for_new_recording();
 
-    let host = cpal::default_host();
+    let host = cached_default_host();
     let device_override = match &capture_plan {
         CapturePlan::Single(plan) => plan.device_override.as_deref(),
         #[cfg(feature = "streaming")]
@@ -1596,6 +1596,30 @@ pub fn strip_device_format_suffix(name: &str) -> &str {
 /// devices). Caching the first host that works keeps later lookups stable.
 static PREFERRED_HOST: std::sync::OnceLock<std::sync::Mutex<Option<cpal::HostId>>> =
     std::sync::OnceLock::new();
+
+/// AIDEV-NOTE: Keeps the cpal `Host` alive for the entire process lifetime.
+/// On Linux with the PipeWire backend, dropping a `cpal::Host` calls `pw_deinit()`,
+/// and re-creating one calls `pw_init()` again — but PipeWire's internal state is
+/// corrupted after deinit/reinit, causing a segfault in `pw_main_loop_new()`.
+/// By leaking the Host (intentionally never freeing it), we prevent Drop from
+/// running, so PipeWire stays initialized. The leak is negligible: one Host per
+/// process lifetime. This matches cpal's own `PwInitGuard` design intent (the
+/// Host holds the guard), but ensures the guard survives across multiple
+/// `default_host()` call sites within minutes.
+static HOST_CACHE: std::sync::OnceLock<&'static cpal::Host> = std::sync::OnceLock::new();
+
+/// Return a reference to the process-wide cached `cpal::Host`, creating it on
+/// first call. Uses `cpal::default_host()` internally, but ensures the Host
+/// (and its PipeWire init guard) is never dropped, preventing the segfault
+/// described in HOST_CACHE.
+pub fn cached_default_host() -> &'static cpal::Host {
+    HOST_CACHE.get_or_init(|| {
+        // Intentionally leak: Host must live for the process duration so that
+        // PipeWire's pw_deinit() is never called between enumeration and stream
+        // creation, which would corrupt PipeWire state and segfault on re-init.
+        Box::leak(Box::new(cpal::default_host()))
+    })
+}
 
 fn preferred_host_id() -> Option<cpal::HostId> {
     *PREFERRED_HOST
@@ -1956,7 +1980,7 @@ fn is_pipewire_host(_: cpal::HostId) -> bool {
 pub fn selected_input_device_name(config: &Config) -> Result<String, CaptureError> {
     use cpal::traits::DeviceTrait;
 
-    let host = cpal::default_host();
+    let host = cached_default_host();
     let device = select_input_device(&host, config.recording.device.as_deref())?;
     device
         .description()
@@ -2150,7 +2174,7 @@ pub struct InputDeviceEntry {
 pub fn list_input_devices_detailed() -> Vec<InputDeviceEntry> {
     use cpal::traits::{DeviceTrait, HostTrait};
 
-    let host = cpal::default_host();
+    let host = cached_default_host();
     tracing::debug!(host_id = ?host.id(), "cpal host for input device listing");
     let mut devices = Vec::new();
 
@@ -2210,7 +2234,7 @@ pub enum DeviceCategory {
 pub fn list_devices_categorized() -> Vec<CategorizedDevice> {
     use cpal::traits::{DeviceTrait, HostTrait};
 
-    let host = cpal::default_host();
+    let host = cached_default_host();
     let host_id = host.id();
     tracing::debug!(host_id = ?host_id, "cpal host for categorized device listing");
     let is_pipewire = is_pipewire_host(host_id);
@@ -2667,7 +2691,7 @@ mod tests {
         let _g = LOCK.lock().unwrap();
 
         let prior = preferred_host_id();
-        let id = cpal::default_host().id();
+        let id = cached_default_host().id();
         set_preferred_host_id(id);
         assert_eq!(preferred_host_id(), Some(id));
 

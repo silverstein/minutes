@@ -115,7 +115,7 @@ impl DeviceMonitor {
         #[cfg(not(target_os = "macos"))]
         {
             use cpal::traits::{DeviceTrait, HostTrait};
-            cpal::default_host()
+            crate::capture::cached_default_host()
                 .default_input_device()
                 .and_then(|d| d.description().ok().map(|desc| desc.name().to_string()))
         }

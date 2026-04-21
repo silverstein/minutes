@@ -3915,6 +3915,17 @@ pub fn cmd_start_recording(
     let capture_mode = parse_capture_mode(mode.as_deref())?;
     let requested_intent = parse_recording_intent(intent.as_deref())?;
 
+    // Early-out BEFORE mutating any call-detect session atomics: if another
+    // recording is already in flight, launch_recording will reject this call
+    // anyway, and we must not leave mangled state behind. Previously a
+    // rejected start would still flip `recording_started_by_call_detect` and
+    // cancel an in-flight auto-stop countdown — which is exactly the state
+    // athal7 hit in issue #129: the auto-stop countdown got silently killed
+    // mid-call by a start request that never actually became a recording.
+    if recording_active(&state.recording) || state.starting.load(Ordering::Relaxed) {
+        return Err("Already recording".into());
+    }
+
     // Session-level flag that scopes the stop_when_call_ends auto-stop only
     // to recordings started via the call detection banner. Manual starts
     // never get auto-stopped, even when the config flag is on.

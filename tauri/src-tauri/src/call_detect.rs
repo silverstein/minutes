@@ -121,6 +121,38 @@ enum DetectActiveCallResult {
     None,
 }
 
+/// Decision the detector's polling loop makes when `detect_active_call`
+/// returns `None`. Extracted as an enum so the invariants can be exercised
+/// by a unit test without spinning up the full poll thread.
+#[derive(Debug, PartialEq, Eq)]
+enum NoCallDecision {
+    /// A countdown is already ticking — let its thread own the lifecycle.
+    /// Skip all state mutation and logging for this poll.
+    DeferToCountdown,
+    /// Active call ended and nothing is armed yet — fire the countdown if
+    /// an active session exists that hasn't already fired.
+    MaybeArmCountdown,
+    /// No recording is in scope for auto-stop — safe to clear any stale
+    /// `active_call` state and emit the "cleared" log.
+    ClearIfStale,
+}
+
+fn decide_no_call_action(
+    is_recording: bool,
+    started_by_call_detect: bool,
+    stop_when_call_ends: bool,
+    countdown_active: bool,
+) -> NoCallDecision {
+    if countdown_active {
+        return NoCallDecision::DeferToCountdown;
+    }
+    if is_recording && started_by_call_detect && stop_when_call_ends {
+        NoCallDecision::MaybeArmCountdown
+    } else {
+        NoCallDecision::ClearIfStale
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MeetingProvider {
     GoogleMeet,
@@ -279,8 +311,24 @@ impl CallDetector {
                         // Call came back (same app): if the previous call
                         // already fired a countdown that the user dismissed
                         // with "Keep recording", clear the latch so a later
-                        // call-end can re-arm the auto-stop prompt.
+                        // call-end can re-arm the auto-stop prompt. If a
+                        // countdown is still ticking from a transient "no
+                        // call" poll (e.g. Zoom hiccup, user coming back from
+                        // mute), cancel it — the user is back on the call and
+                        // doesn't want auto-stop to fire in the middle of it.
                         if is_recording && started_by_call_detect {
+                            if auto_stop.countdown_active.load(Ordering::Relaxed) {
+                                auto_stop.countdown_cancel.store(true, Ordering::Relaxed);
+                                log_call_detect_event(
+                                    "info",
+                                    "call_end_countdown_cancelled_by_redetect",
+                                    Some(&display_name),
+                                    Some(&process_name),
+                                    serde_json::json!({
+                                        "reason": "same call re-detected while countdown was ticking",
+                                    }),
+                                );
+                            }
                             self.reset_call_end_latch();
                         }
                         match self.note_active_call(&process_name, &display_name) {
@@ -348,38 +396,53 @@ impl CallDetector {
                         );
                     }
                     DetectActiveCallResult::None => {
-                        // When a recording started via this detector is in
-                        // flight and the call has ended (app quit or mic
-                        // release), arm the auto-stop countdown — once per
-                        // session. The mark_call_end_fired guard keeps
-                        // repeat polls from re-firing if the user already
-                        // hit "Keep recording".
-                        if is_recording && started_by_call_detect && config.stop_when_call_ends {
-                            if let Some((process_name, display_name, already_fired)) =
-                                self.active_call_snapshot()
-                            {
-                                if !already_fired {
-                                    self.mark_call_end_fired();
-                                    self.arm_call_end_countdown(
-                                        &app,
-                                        &auto_stop,
-                                        &recording,
-                                        &display_name,
-                                        &process_name,
-                                        config.call_end_stop_countdown_secs,
+                        // A countdown already in flight owns the lifecycle.
+                        // Without this guard any atomics flip mid-countdown
+                        // (recording transiently going false, started_by
+                        // cleared by a stray cmd_start_recording, etc.)
+                        // orphans the countdown: the ClearIfStale arm below
+                        // would wipe active_call and a later detector tick
+                        // couldn't observe the ended call anymore even
+                        // though the user's intent was still to auto-stop.
+                        // This is the bug athal7 hit in issue #129.
+                        let countdown_active = auto_stop.countdown_active.load(Ordering::Relaxed);
+                        match decide_no_call_action(
+                            is_recording,
+                            started_by_call_detect,
+                            config.stop_when_call_ends,
+                            countdown_active,
+                        ) {
+                            NoCallDecision::DeferToCountdown => {}
+                            NoCallDecision::MaybeArmCountdown => {
+                                if let Some((process_name, display_name, already_fired)) =
+                                    self.active_call_snapshot()
+                                {
+                                    if !already_fired {
+                                        self.mark_call_end_fired();
+                                        self.arm_call_end_countdown(
+                                            &app,
+                                            &auto_stop,
+                                            &recording,
+                                            &display_name,
+                                            &process_name,
+                                            config.call_end_stop_countdown_secs,
+                                        );
+                                    }
+                                }
+                            }
+                            NoCallDecision::ClearIfStale => {
+                                if let Some(previous) = self.clear_active_call() {
+                                    log_call_detect_event(
+                                        "info",
+                                        "cleared",
+                                        None,
+                                        Some(&previous),
+                                        serde_json::json!({
+                                            "reason": "no active call detected on current poll"
+                                        }),
                                     );
                                 }
                             }
-                        } else if let Some(previous) = self.clear_active_call() {
-                            log_call_detect_event(
-                                "info",
-                                "cleared",
-                                None,
-                                Some(&previous),
-                                serde_json::json!({
-                                    "reason": "no active call detected on current poll"
-                                }),
-                            );
                         }
                     }
                 }
@@ -1463,6 +1526,62 @@ mod tests {
         ));
         let snap = detector.active_call_snapshot().unwrap();
         assert!(!snap.2);
+    }
+
+    #[test]
+    fn active_countdown_defers_state_transitions() {
+        // Regression for issue #129 follow-up (athal7): once the call-end
+        // countdown is armed, subsequent "no active call" polls must not
+        // clear active_call or re-arm. Only the countdown thread (or a
+        // re-detected call) should end the countdown.
+        //
+        // Before the fix, any transient flip of `is_recording` /
+        // `started_by_call_detect` during the 30s window sent the poll into
+        // ClearIfStale, which wiped active_call and orphaned the countdown.
+
+        // Happy path: recording + call-detect + stop_when_call_ends, no
+        // countdown yet → arm one.
+        assert_eq!(
+            decide_no_call_action(true, true, true, false),
+            NoCallDecision::MaybeArmCountdown
+        );
+
+        // Countdown now active. Same inputs → defer, don't re-arm.
+        assert_eq!(
+            decide_no_call_action(true, true, true, true),
+            NoCallDecision::DeferToCountdown
+        );
+
+        // Countdown active AND is_recording flipped false mid-countdown
+        // (e.g. native call capture's target disappeared when Zoom quit).
+        // Before the fix this returned ClearIfStale and wiped active_call.
+        // After the fix it must defer, leaving the countdown thread to
+        // observe `!recording_flag` and shut itself down cleanly.
+        assert_eq!(
+            decide_no_call_action(false, true, true, true),
+            NoCallDecision::DeferToCountdown
+        );
+
+        // Countdown active AND started_by flipped false (e.g. stray
+        // cmd_start_recording) — same invariant: defer, don't wipe state.
+        assert_eq!(
+            decide_no_call_action(true, false, true, true),
+            NoCallDecision::DeferToCountdown
+        );
+
+        // No countdown + no recording in scope → free to clear stale state.
+        assert_eq!(
+            decide_no_call_action(false, false, true, false),
+            NoCallDecision::ClearIfStale
+        );
+        assert_eq!(
+            decide_no_call_action(true, false, true, false),
+            NoCallDecision::ClearIfStale
+        );
+        assert_eq!(
+            decide_no_call_action(true, true, false, false),
+            NoCallDecision::ClearIfStale
+        );
     }
 
     #[test]

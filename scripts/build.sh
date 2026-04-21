@@ -16,7 +16,20 @@ export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-11.0}"
 # cargo-tauri to produce a signed + notarized bundle.
 
 echo "=== Building CLI (release) ==="
-cargo build --release -p minutes-cli --features metal
+_build_tmp=$(mktemp)
+if ! cargo build --release -p minutes-cli --features metal 2>&1 | tee "$_build_tmp"; then
+    if grep -q "library 'clang_rt\." "$_build_tmp"; then
+        echo ""
+        echo "  Stale ort-sys clang runtime path (Xcode/CLT upgrade detected)."
+        echo "  Cleaning stale build cache and retrying..."
+        rm -rf target/*/build/ort-sys-*
+        cargo build --release -p minutes-cli --features metal
+    else
+        rm -f "$_build_tmp"
+        exit 1
+    fi
+fi
+rm -f "$_build_tmp"
 
 echo "=== Building calendar helper ==="
 swiftc -O \

@@ -453,12 +453,17 @@ fn query_overlap_via_eventkit_with_helper(
 ///
 /// Lookup order:
 /// 1. `<exe>/../Resources/calendar-events` — inside a packaged .app bundle
+///    (populated by Tauri's bundler from `tauri/src-tauri/resources/calendar-events`)
 /// 2. `<exe>/calendar-events` — beside the main binary
-/// 3. Workspace `target/release/calendar-events` — dev fallback for anyone
-///    running `cargo tauri dev` against the source tree after `./scripts/build.sh`
-///    has compiled the Swift helper. The workspace root is derived from
-///    `CARGO_MANIFEST_DIR` at compile time so it works regardless of where
-///    the user cloned the repo.
+/// 3. Workspace `tauri/src-tauri/resources/calendar-events` — dev fallback.
+///    `tauri/src-tauri/build.rs` compiles the Swift helper here on every
+///    `cargo tauri build` / `cargo tauri dev`, so the CLI finds it when
+///    running from source after at least one Tauri build has completed.
+/// 4. Workspace `target/release/calendar-events` — legacy dev fallback for
+///    older local workflows that compiled the helper directly into `target/`.
+///
+/// The workspace root is derived from `CARGO_MANIFEST_DIR` at compile time
+/// so it works regardless of where the user cloned the repo.
 fn find_calendar_helper() -> Option<std::path::PathBuf> {
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
@@ -477,9 +482,13 @@ fn find_calendar_helper() -> Option<std::path::PathBuf> {
         .parent()
         .and_then(|p| p.parent());
     if let Some(root) = workspace_root {
-        let dev = root.join("target/release/calendar-events");
-        if dev.exists() {
-            return Some(dev);
+        let staged = root.join("tauri/src-tauri/resources/calendar-events");
+        if staged.exists() {
+            return Some(staged);
+        }
+        let legacy = root.join("target/release/calendar-events");
+        if legacy.exists() {
+            return Some(legacy);
         }
     }
     None

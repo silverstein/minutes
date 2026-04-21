@@ -31,21 +31,11 @@ if ! cargo build --release -p minutes-cli --features metal 2>&1 | tee "$_build_t
 fi
 rm -f "$_build_tmp"
 
-echo "=== Building calendar helper ==="
-swiftc -O \
-    -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist \
-    -Xlinker scripts/calendar-helper-Info.plist \
-    scripts/calendar-events.swift -o target/release/calendar-events
-echo "  Built target/release/calendar-events"
-
 echo "=== Building Tauri app ==="
+# The calendar-events Swift helper is compiled and staged into
+# tauri/src-tauri/resources/ by tauri/src-tauri/build.rs, and Tauri bundles it
+# into Minutes.app/Contents/Resources/ automatically via tauri.conf.json.
 cargo tauri build --features metal --bundles app
-
-echo "=== Embedding calendar helper in app bundle ==="
-APP_RESOURCES="target/release/bundle/macos/Minutes.app/Contents/Resources"
-mkdir -p "$APP_RESOURCES"
-cp -f target/release/calendar-events "$APP_RESOURCES/calendar-events"
-echo "  Embedded in $APP_RESOURCES/"
 
 echo "=== Signing + Installing CLI ==="
 mkdir -p ~/.local/bin

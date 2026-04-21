@@ -17,7 +17,8 @@
   "bundle": {
     "createUpdaterArtifacts": true,
     "resources": [
-      "resources/assistant-skill-bundle/**/*"
+      "resources/assistant-skill-bundle/**/*",
+      "resources/calendar-events"
     ],
     "icon": [
       "icons/icon.icns",

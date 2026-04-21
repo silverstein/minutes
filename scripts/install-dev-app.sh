@@ -41,19 +41,11 @@ fi
 echo "=== Building CLI (release) ==="
 cargo build --release -p minutes-cli --features metal
 
-echo "=== Building calendar helper ==="
-swiftc -O \
-  -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist \
-  -Xlinker scripts/calendar-helper-Info.plist \
-  scripts/calendar-events.swift -o target/release/calendar-events
-
 echo "=== Building ${DEV_PRODUCT_NAME}.app ==="
+# The calendar-events Swift helper is compiled and staged into
+# tauri/src-tauri/resources/ by tauri/src-tauri/build.rs, and Tauri bundles it
+# into the .app automatically via tauri.conf.json.
 cargo tauri build --bundles app --config "$DEV_CONFIG" --features parakeet,metal --no-sign
-
-echo "=== Embedding calendar helper in dev bundle ==="
-APP_RESOURCES="${BUILD_APP}/Contents/Resources"
-mkdir -p "$APP_RESOURCES"
-cp -f target/release/calendar-events "$APP_RESOURCES/calendar-events"
 
 if [[ "$SIGN_MODE" == "identity" ]]; then
   echo "=== Pre-signing nested executables with configured identity ==="

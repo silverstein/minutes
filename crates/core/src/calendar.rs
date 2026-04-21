@@ -243,10 +243,12 @@ fn is_calendar_app_running() -> bool {
 }
 
 /// AppleScript query that fetches current/recent events WITH attendee names.
+#[cfg(target_os = "macos")]
 fn query_events_with_attendees() -> Vec<CalendarEvent> {
     query_events_with_attendees_at(Local::now())
 }
 
+#[cfg(target_os = "macos")]
 fn applescript_month(month: u32) -> &'static str {
     match month {
         1 => "January",
@@ -266,6 +268,7 @@ fn applescript_month(month: u32) -> &'static str {
 }
 
 /// AppleScript query centered on an explicit timestamp.
+#[cfg(target_os = "macos")]
 fn query_events_with_attendees_at(center: DateTime<Local>) -> Vec<CalendarEvent> {
     // Never auto-launch Calendar.app from a background query. `tell
     // application "Calendar"` launches the app as a side effect, which
@@ -496,6 +499,7 @@ fn find_calendar_helper() -> Option<std::path::PathBuf> {
 
 /// AppleScript approach: fetch ALL events for today+tomorrow, filter by time.
 /// Avoids `whose start date >= ...` which times out on CalDAV calendars.
+#[cfg(target_os = "macos")]
 fn query_via_applescript(lookahead_minutes: u32) -> Vec<CalendarEvent> {
     // See `query_events_with_attendees_at`: skip when Calendar.app isn't
     // already running so periodic polling never auto-launches the app.

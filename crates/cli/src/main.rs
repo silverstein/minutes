@@ -4859,6 +4859,62 @@ life (qmd://life/)
     }
 
     #[test]
+    fn cmd_delete_archives_all_audio_artifacts_with_with_audio() {
+        with_temp_home(|dir| {
+            let meetings = dir.join("meetings");
+            std::fs::create_dir_all(&meetings).unwrap();
+            let md = meetings.join("2026-04-01-artifacts.md");
+            std::fs::write(&md, "---\ntitle: Artifacts\n---\nContent").unwrap();
+            let wav = meetings.join("2026-04-01-artifacts.wav");
+            std::fs::write(&wav, b"fake audio").unwrap();
+            let voice = meetings.join("2026-04-01-artifacts.voice.wav");
+            std::fs::write(&voice, b"fake voice stem").unwrap();
+            let system = meetings.join("2026-04-01-artifacts.system.wav");
+            std::fs::write(&system, b"fake system stem").unwrap();
+            let embeddings = meetings.join(".2026-04-01-artifacts.embeddings");
+            std::fs::write(&embeddings, b"{\"Speaker 1\":[0.1,0.2]}").unwrap();
+
+            let config = Config {
+                output_dir: meetings.clone(),
+                ..Config::default()
+            };
+
+            cmd_delete("2026-04-01-artifacts", true, false, &config).unwrap();
+            assert!(!md.exists(), "md should be moved");
+            assert!(
+                meetings.join("archive/2026-04-01-artifacts.md").exists(),
+                "md should be in archive"
+            );
+            assert!(!wav.exists(), "merged wav should be moved");
+            assert!(!voice.exists(), "voice stem should be moved");
+            assert!(!system.exists(), "system stem should be moved");
+            assert!(!embeddings.exists(), "embeddings sidecar should be moved");
+            assert!(
+                meetings.join("archive/2026-04-01-artifacts.wav").exists(),
+                "merged wav should be archived"
+            );
+            assert!(
+                meetings
+                    .join("archive/2026-04-01-artifacts.voice.wav")
+                    .exists(),
+                "voice stem should be archived"
+            );
+            assert!(
+                meetings
+                    .join("archive/2026-04-01-artifacts.system.wav")
+                    .exists(),
+                "system stem should be archived"
+            );
+            assert!(
+                meetings
+                    .join("archive/.2026-04-01-artifacts.embeddings")
+                    .exists(),
+                "embeddings sidecar should be archived"
+            );
+        });
+    }
+
+    #[test]
     fn cmd_delete_force_permanently_removes() {
         with_temp_home(|dir| {
             let meetings = dir.join("meetings");
@@ -4867,6 +4923,12 @@ life (qmd://life/)
             std::fs::write(&md, "---\ntitle: Force\n---\nContent").unwrap();
             let wav = meetings.join("2026-04-01-force.wav");
             std::fs::write(&wav, b"fake audio").unwrap();
+            let voice = meetings.join("2026-04-01-force.voice.wav");
+            std::fs::write(&voice, b"fake voice stem").unwrap();
+            let system = meetings.join("2026-04-01-force.system.wav");
+            std::fs::write(&system, b"fake system stem").unwrap();
+            let embeddings = meetings.join(".2026-04-01-force.embeddings");
+            std::fs::write(&embeddings, b"{\"Speaker 1\":[0.1,0.2]}").unwrap();
 
             let config = Config {
                 output_dir: meetings.clone(),
@@ -4879,6 +4941,9 @@ life (qmd://life/)
                 !wav.exists(),
                 "wav should be gone with --with-audio --force"
             );
+            assert!(!voice.exists(), "voice stem should be gone");
+            assert!(!system.exists(), "system stem should be gone");
+            assert!(!embeddings.exists(), "embeddings sidecar should be gone");
             assert!(
                 !meetings.join("archive/2026-04-01-force.md").exists(),
                 "nothing in archive for force delete"
@@ -4949,9 +5014,8 @@ fn cmd_delete(meeting: &str, with_audio: bool, force: bool, config: &Config) -> 
         .to_string_lossy()
         .to_string();
 
-    // Find associated audio file (.wav with same stem in same directory)
-    let audio_path = md_path.with_extension("wav");
-    let has_audio = audio_path.exists();
+    let audio_artifacts = meeting_audio_artifacts(&md_path);
+    let has_audio = audio_artifacts.iter().any(|path| path.exists());
 
     if force {
         // Permanent delete
@@ -4959,8 +5023,10 @@ fn cmd_delete(meeting: &str, with_audio: bool, force: bool, config: &Config) -> 
         eprintln!("Deleted: {}", md_path.display());
 
         if with_audio && has_audio {
-            std::fs::remove_file(&audio_path)?;
-            eprintln!("Deleted audio: {}", audio_path.display());
+            for path in audio_artifacts.iter().filter(|path| path.exists()) {
+                std::fs::remove_file(path)?;
+                eprintln!("Deleted audio artifact: {}", path.display());
+            }
         }
     } else {
         // Soft delete: move to archive directory
@@ -4972,20 +5038,38 @@ fn cmd_delete(meeting: &str, with_audio: bool, force: bool, config: &Config) -> 
         eprintln!("Archived: {} → {}", title, dest_md.display());
 
         if with_audio && has_audio {
-            let dest_audio = archive_dir.join(audio_path.file_name().unwrap());
-            std::fs::rename(&audio_path, &dest_audio)?;
-            eprintln!("Archived audio: {}", dest_audio.display());
+            for path in audio_artifacts.iter().filter(|path| path.exists()) {
+                let dest_audio = archive_dir.join(path.file_name().unwrap());
+                std::fs::rename(path, &dest_audio)?;
+                eprintln!("Archived audio artifact: {}", dest_audio.display());
+            }
         }
     }
 
     if has_audio && !with_audio {
         eprintln!(
-            "Note: audio file still exists at {}. Use --with-audio to remove it.",
-            audio_path.display()
+            "Note: audio artifacts still exist alongside {}. Use --with-audio to remove them.",
+            md_path.display()
         );
     }
 
     Ok(())
+}
+
+fn meeting_audio_artifacts(md_path: &Path) -> Vec<PathBuf> {
+    let audio_path = md_path.with_extension("wav");
+    let mut paths = vec![audio_path.clone()];
+
+    if let Some(stems) = minutes_core::capture::stem_paths_for(&audio_path) {
+        paths.push(stems.voice);
+        paths.push(stems.system);
+    }
+
+    let dir = md_path.parent().unwrap_or_else(|| Path::new("."));
+    let stem = md_path.file_name().unwrap_or_default().to_string_lossy();
+    paths.push(dir.join(format!(".{}.embeddings", stem.trim_end_matches(".md"))));
+
+    paths
 }
 
 fn cmd_schema() -> Result<()> {

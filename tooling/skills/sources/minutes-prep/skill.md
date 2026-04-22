@@ -14,6 +14,9 @@ metadata:
   display_name: Minutes Prep
   short_description: Interactive meeting prep from your conversation history.
   default_prompt: Use Minutes Prep to help me prepare for an upcoming meeting using relationship history, open commitments, and prior decisions.
+  site_category: Lifecycle
+  site_example: /minutes-prep Alex
+  site_best_for: Do a deeper relationship brief and talking-point prep before an important call.
 assets:
   scripts: []
   templates: []

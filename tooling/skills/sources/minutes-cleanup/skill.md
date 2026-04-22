@@ -12,6 +12,9 @@ metadata:
   display_name: Minutes Cleanup
   short_description: Manage old recordings — find large files, archive old meetings, delete processed originals.
   default_prompt: Use Minutes Cleanup for this task.
+  site_category: Capture
+  site_example: /minutes-cleanup
+  site_best_for: Archive or delete old recordings when storage starts piling up.
 assets:
   scripts: []
   templates: []

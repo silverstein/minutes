@@ -7,6 +7,7 @@ import type { HostName } from "../schema.js";
 import { renderSkillForHost } from "./render.js";
 import { resolveSkillAssetSourcePath, validateSkillAssets } from "./validate.js";
 import { renderClaudePluginManifest } from "./plugin.js";
+import { renderSiteSkillCatalog } from "./site.js";
 
 interface CompileOptions {
   dryRun: boolean;
@@ -139,6 +140,17 @@ async function main(): Promise<void> {
     if (manifestStatus === "changed") {
       changes.push({ host: "claude", path: ".claude/plugins/minutes/plugin.json", kind: "manifest" });
     }
+  }
+
+  const siteCatalogContent = renderSiteSkillCatalog(skills);
+  const siteCatalogStatus = await compareOrWrite(
+    rootDir,
+    "site/lib/skills-catalog.json",
+    siteCatalogContent,
+    options.dryRun,
+  );
+  if (siteCatalogStatus === "changed") {
+    changes.push({ host: "site", path: "site/lib/skills-catalog.json", kind: "site-catalog" });
   }
 
   if (changes.length === 0) {

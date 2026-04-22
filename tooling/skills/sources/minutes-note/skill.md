@@ -12,6 +12,9 @@ metadata:
   display_name: Minutes Note
   short_description: Add a note to the current recording or annotate a past meeting. Use whenever the user says "note that", "remember this", "mark this as important", "add a note about", "annotate the meeting", or wants to capture a thought during or after a recording. Plain text input — no markdown needed.
   default_prompt: Use Minutes Note for this task.
+  site_category: Capture
+  site_example: /minutes-note Alex wants monthly billing
+  site_best_for: Drop a timestamped note into the current recording or annotate a past one.
 assets:
   scripts: []
   templates: []

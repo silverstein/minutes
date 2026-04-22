@@ -467,6 +467,7 @@ Then use commands like:
 /minutes-prep Alex
 /minutes-debrief
 /minutes-weekly
+/minutes-video-review /absolute/path/to/demo.mp4
 ```
 
 ### Mistral Vibe
@@ -500,7 +501,7 @@ claude plugin update minutes@minutes        # installs the new version into the 
 # Restart Claude Code to apply
 ```
 
-18 skills, 1 agent, 2 hooks:
+19 skills, 1 agent, 2 hooks:
 ```
 ├── Capture:      /minutes-record, note, list, recap, cleanup, verify, setup
 ├── Search:       /minutes-search
@@ -508,6 +509,7 @@ claude plugin update minutes@minutes        # installs the new version into the 
 ├── Coaching:     /minutes-tag, mirror
 ├── Knowledge:    /minutes-ideas, lint, ingest
 ├── Intelligence: /minutes-graph
+├── Artifacts:    /minutes-video-review
 ├── Agent:        meeting-analyst (cross-meeting intelligence)
 └── Hooks:        SessionStart meeting briefings + PostToolUse recording alerts
 ```
@@ -528,6 +530,8 @@ minutes record → minutes stop       → hook alerts if decisions conflict with
 /minutes-mirror                     → talk-time, hedging, what your winning meetings have in common
   ↓
 /minutes-weekly                     → themes, decision arcs, stale items, Monday brief
+  ↓
+/minutes-video-review <video-or-url> → durable artifact bundle from a Loom, ScreenPal, or local walkthrough
   ↓
 /minutes-graph "everyone who mentioned Stripe"  → cross-meeting entity queries
 ```

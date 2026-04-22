@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { CopyButton } from "@/components/copy-button";
 import { PublicFooter } from "@/components/public-footer";
 import surfaces from "@/lib/product-surfaces.json";
+import skillsCatalog from "@/lib/skills-catalog.json";
 
 export const metadata: Metadata = {
   title: "Minutes — the audio layer for agent memory",
@@ -165,8 +166,53 @@ const tasks = [
 ] as const;
 
 export default function ForAgentsPage() {
+  const skillCount = skillsCatalog.length;
+  const skillCategories = Array.from(
+    skillsCatalog.reduce((acc, skill) => {
+      const bucket = acc.get(skill.category) ?? [];
+      bucket.push(skill);
+      acc.set(skill.category, bucket);
+      return acc;
+    }, new Map<string, (typeof skillsCatalog)[number][]>())
+  );
+
+  const skillCatalogJsonLd = {
+    "@context": "https://schema.org",
+    "@type": "ItemList",
+    name: "Minutes skill catalog",
+    description:
+      "Workflow-level skills that turn Minutes MCP tools into operator motions like meeting prep, debrief, and cross-meeting graph queries.",
+    numberOfItems: skillsCatalog.length,
+    itemListElement: skillsCatalog.map((skill, index) => ({
+      "@type": "ListItem",
+      position: index + 1,
+      url: `https://useminutes.app/for-agents#${skill.name}`,
+      item: {
+        "@type": "HowTo",
+        name: skill.displayName,
+        description: skill.shortDescription,
+        about: skill.bestFor,
+        step: {
+          "@type": "HowToStep",
+          name: "Invoke",
+          text: skill.example,
+        },
+      },
+    })),
+  };
+
+  const jsonLdHtml = JSON.stringify(skillCatalogJsonLd).replace(
+    /</g,
+    "\\u003c",
+  );
+
   return (
     <div className="mx-auto max-w-[920px] px-6 pb-16 pt-10 sm:px-8 sm:pt-14">
+      <script
+        type="application/ld+json"
+        // Server-controlled catalog JSON only. Canonical Next.js JSON-LD pattern.
+        dangerouslySetInnerHTML={{ __html: jsonLdHtml }}
+      />
       {/* Nav */}
       <div className="mb-10 flex items-center justify-between border-b border-[color:var(--border)] pb-4">
         <a
@@ -315,7 +361,7 @@ export default function ForAgentsPage() {
               <tbody className="font-mono leading-6 text-[var(--text)]">
                 <tr className="border-b border-[color:var(--border)]">
                   <td className="py-2 pr-3">Claude Code</td>
-                  <td className="py-2 pr-3">18 skills + 2 hooks</td>
+                  <td className="py-2 pr-3">{skillCount} skills + 2 hooks</td>
                   <td className="py-2 pr-3">26 tools</td>
                   <td className="py-2">
                     <code className="text-[11px]">/plugin install minutes@minutes</code>
@@ -332,7 +378,7 @@ export default function ForAgentsPage() {
                 </tr>
                 <tr className="border-b border-[color:var(--border)]">
                   <td className="py-2 pr-3">Codex</td>
-                  <td className="py-2 pr-3">18 skills via <code className="text-[11px]">.agents/</code></td>
+                  <td className="py-2 pr-3">{skillCount} skills via <code className="text-[11px]">.agents/</code></td>
                   <td className="py-2 pr-3">26 tools</td>
                   <td className="py-2">
                     <code className="text-[11px]">npx minutes-mcp</code>
@@ -340,7 +386,7 @@ export default function ForAgentsPage() {
                 </tr>
                 <tr className="border-b border-[color:var(--border)]">
                   <td className="py-2 pr-3">Gemini CLI</td>
-                  <td className="py-2 pr-3">18 skills via <code className="text-[11px]">.agents/</code></td>
+                  <td className="py-2 pr-3">{skillCount} skills via <code className="text-[11px]">.agents/</code></td>
                   <td className="py-2 pr-3">26 tools</td>
                   <td className="py-2">
                     <code className="text-[11px]">npx minutes-mcp</code>
@@ -358,7 +404,7 @@ export default function ForAgentsPage() {
                 <tr className="border-b border-[color:var(--border)]">
                   <td className="py-2 pr-3">OpenCode</td>
                   <td className="py-2 pr-3">
-                    18 skills + <code className="text-[11px]">/minutes-*</code> commands
+                    {skillCount} skills + <code className="text-[11px]">/minutes-*</code> commands
                   </td>
                   <td className="py-2 pr-3">26 tools</td>
                   <td className="py-2">
@@ -380,8 +426,74 @@ export default function ForAgentsPage() {
           <p className="mt-4 text-[12px] leading-6 text-[var(--text-secondary)]">
             Every agent reads the same{" "}
             <code className="font-mono text-[12px] text-[var(--text)]">~/meetings/</code>{" "}
-            folder. Switch hosts without migrating data.
+            folder. Switch hosts without migrating data. The portable skill pack
+            also includes artifact workflows like{" "}
+            <code className="font-mono text-[12px] text-[var(--text)]">/minutes-video-review</code>{" "}
+            for Loom, ScreenPal, and local walkthrough videos.
           </p>
+        </div>
+      </section>
+
+      {/* Skill catalog */}
+      <section className="mt-14 max-w-[860px]">
+        <div className="rounded-[8px] border border-[color:var(--border)] bg-[var(--bg-elevated)] p-5">
+          <p className="font-mono text-[11px] uppercase tracking-[0.16em] text-[var(--accent)]">
+            Native skill catalog
+          </p>
+          <p className="mt-3 text-[13px] leading-6 text-[var(--text-secondary)]">
+            Skills are the workflow layer above raw MCP tools. They tell the agent
+            how to turn Minutes primitives into useful operator motions like
+            meeting prep, debrief, graph queries, and artifact review. The
+            catalog below is generated from the canonical skill sources so the
+            website stays in sync with what the plugin and portable skill pack
+            actually ship.
+          </p>
+
+          <div className="mt-6 space-y-8">
+            {skillCategories.map(([category, skills]) => (
+              <div key={category}>
+                <div className="border-b border-[color:var(--border)] pb-2">
+                  <p className="font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--text-secondary)]">
+                    {category}
+                  </p>
+                </div>
+                <div className="mt-4 grid gap-4 sm:grid-cols-2">
+                  {skills.map((skill) => (
+                    <div
+                      key={skill.name}
+                      id={skill.name}
+                      className="scroll-mt-8 rounded-[8px] border border-[color:var(--border)] bg-[var(--bg)] p-4"
+                    >
+                      <div className="flex items-start justify-between gap-3">
+                        <div>
+                          <p className="text-[15px] font-medium text-[var(--text)]">
+                            {skill.displayName}
+                          </p>
+                          <p className="mt-1 text-[12px] leading-6 text-[var(--text-secondary)]">
+                            {skill.shortDescription}
+                          </p>
+                        </div>
+                        <a
+                          href={`#${skill.name}`}
+                          aria-label={`Permalink to ${skill.displayName}`}
+                          className="shrink-0 rounded bg-[var(--bg-elevated)] px-2 py-1 font-mono text-[11px] text-[var(--text)] hover:text-[var(--accent)]"
+                        >
+                          {skill.name}
+                        </a>
+                      </div>
+                      <p className="mt-3 text-[12px] leading-6 text-[var(--text-secondary)]">
+                        <span className="text-[var(--text)]">Best for:</span>{" "}
+                        {skill.bestFor}
+                      </p>
+                      <div className="mt-3 rounded-[6px] bg-[var(--bg-elevated)] px-3 py-2 font-mono text-[12px] text-[var(--text)]">
+                        {skill.example}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
         </div>
       </section>
 

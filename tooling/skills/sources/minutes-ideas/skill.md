@@ -13,6 +13,9 @@ metadata:
   display_name: Minutes Ideas
   short_description: Surface recent voice memos and ideas captured from any device.
   default_prompt: Use Minutes Ideas for this task.
+  site_category: Knowledge
+  site_example: /minutes-ideas
+  site_best_for: Surface recent voice memos and loose ideas captured from any device.
 assets:
   scripts: []
   templates: []

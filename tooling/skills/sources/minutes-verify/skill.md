@@ -13,6 +13,9 @@ metadata:
   display_name: Minutes Verify
   short_description: Verify that Minutes is properly set up and working — model downloaded, mic accessible, directories exist, no stale state.
   default_prompt: Use Minutes Verify for this task.
+  site_category: Capture
+  site_example: /minutes-verify
+  site_best_for: Health-check the install, models, mic, and stale state before trusting it in production.
 assets:
   scripts:
     - scripts/verify-setup.sh

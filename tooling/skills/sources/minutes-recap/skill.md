@@ -12,6 +12,9 @@ metadata:
   display_name: Minutes Recap
   short_description: Generate a daily digest of today's meetings and voice memos — key decisions, action items, and themes across all recordings.
   default_prompt: Use Minutes Recap for this task.
+  site_category: Capture
+  site_example: /minutes-recap
+  site_best_for: Get a same-day digest across meetings and voice memos.
 assets:
   scripts: []
   templates:

@@ -16,6 +16,9 @@ metadata:
   display_name: Minutes Brief
   short_description: Fast meeting briefing from your conversation memory.
   default_prompt: Use Minutes Brief to prepare me quickly for an upcoming meeting using my stored meeting history.
+  site_category: Lifecycle
+  site_example: /minutes-brief
+  site_best_for: Get a fast one-page brief before an upcoming meeting.
 assets:
   scripts: []
   templates: []

@@ -86,7 +86,7 @@ Minutes is conversation memory for AI. Record, transcribe, search, and query eve
   - When: User works in Claude Code and wants meeting lifecycle skills and proactive hooks.
   - Install: `claude plugin marketplace add silverstein/minutes`
   - Best for: Best for workflow guidance, prep, debrief, and meeting coaching.
-  - Notes: 18 skills (brief, prep, record, tag, debrief, mirror, weekly, graph) plus a meeting-analyst agent and SessionStart/PostToolUse hooks.
+  - Notes: 19 skills (brief, prep, record, tag, debrief, mirror, weekly, graph, video review) plus a meeting-analyst agent and SessionStart/PostToolUse hooks.
 - Desktop app
   - When: User wants a menu bar app with one-click recording, Recall, and artifact drafting.
   - Install: `brew install --cask silverstein/tap/minutes`

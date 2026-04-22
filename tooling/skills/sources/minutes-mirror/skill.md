@@ -18,6 +18,9 @@ metadata:
   display_name: Minutes Mirror
   short_description: Self-coaching analysis of your own behavior across meetings — talk-time ratio, filler words, hedging language, monologue length, energy patterns, and (when meetings are tagged via /minutes-tag) what your behavior in winning meetings looks like vs losing ones. Use this whenever the user says "how did I do", "review my last meeting", "mirror", "self-review", "show my patterns", "coach me", "where am I weak", "talk time", "am I improving", "what do I do in meetings I win", "feedback on me", or asks for any kind of personal feedback on their own meeting behavior. This is the rare skill that gives the user a mirror to their own habits — surface it whenever they show curiosity about their own performance, even if they don't use the word "mirror".
   default_prompt: Use Minutes Mirror for this task.
+  site_category: Coaching
+  site_example: /minutes-mirror
+  site_best_for: Review your own talk-time, hedging, and performance patterns across meetings.
 assets:
   scripts:
     - scripts/mirror_metrics.py

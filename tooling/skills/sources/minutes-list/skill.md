@@ -11,6 +11,9 @@ metadata:
   display_name: Minutes List
   short_description: List recent meetings and voice memos.
   default_prompt: Use Minutes List for this task.
+  site_category: Capture
+  site_example: /minutes-list
+  site_best_for: Browse recent meetings and voice memos when you need to find the right artifact first.
 assets:
   scripts: []
   templates: []

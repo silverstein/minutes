@@ -13,6 +13,9 @@ metadata:
   display_name: Minutes Weekly
   short_description: Weekly meeting synthesis — themes, decision arcs, stale commitments, and what deserves your attention next week.
   default_prompt: Use Minutes Weekly for this task.
+  site_category: Lifecycle
+  site_example: /minutes-weekly
+  site_best_for: See weekly themes, stale commitments, and what deserves attention next.
 assets:
   scripts: []
   templates: []

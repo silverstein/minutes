@@ -293,6 +293,9 @@ This means two things, both critical:
 ```bash
 node --check .claude/plugins/minutes/hooks/*.mjs          # JS hooks parse
 python3 -m py_compile .claude/plugins/minutes/skills/*/scripts/*.py   # Python helpers compile
+npm --prefix tooling/skills run build                     # skill compiler builds
+npm --prefix tooling/skills run check                     # plugin + portable skill pack + website skill catalog stay in sync
+cd tooling/skills && node dist/compiler/compile.js --dry-run --host claude --host codex --host opencode
 ```
 
 If any skill has a new CLI command dependency, verify the command exists in the current `minutes` binary:
@@ -350,6 +353,15 @@ src = m['plugins'][0]['source'].lstrip('./')
 assert os.path.isdir(src), f'source path missing: {src}'
 print(f'marketplace source → {src} OK')"
 ```
+
+If the release includes a new, renamed, or removed skill, verify that the public agent docs surface reflects it. `npm --prefix tooling/skills run check` fails if it doesn't, but a quick visual spot-check is still worth doing:
+
+```bash
+jq '.[].name' site/lib/skills-catalog.json
+jq -r '.[] | "\(.category)\t\(.name)"' site/lib/skills-catalog.json | sort
+```
+
+`site/lib/skills-catalog.json` is generated from canonical skill frontmatter — do not hand-edit. The `/for-agents` page reads it for both the rendered skill cards and the JSON-LD `ItemList` structured data. New skills require `metadata.site_category`, `metadata.site_example`, and `metadata.site_best_for` in the skill source frontmatter; the compiler throws on any missing field.
 
 **P5. Commit, push.** Push to `main`. Users pull the new plugin state when they run the two-command marketplace refresh (see P6 / P7).
 

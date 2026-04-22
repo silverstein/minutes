@@ -4,12 +4,13 @@
   "type": "module",
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "test": "node --test dist/compiler/site.test.js",
     "compile": "node dist/compiler/compile.js",
     "compile:dry": "node dist/compiler/compile.js --dry-run --host claude --host codex --host opencode",
     "check": "node dist/compiler/check.js",
     "golden": "node dist/compiler/golden.js",
     "golden:write": "node dist/compiler/golden.js --write",
     "doctor": "node dist/compiler/doctor.js",
-    "ci": "npm run build && npm run check && npm run golden && npm run compile:dry"
+    "ci": "npm run build && npm run test && npm run check && npm run golden && npm run compile:dry"
   }
 }

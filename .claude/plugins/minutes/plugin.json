@@ -20,7 +20,8 @@
     { "name": "minutes-ideas", "path": "skills/minutes-ideas/SKILL.md" },
     { "name": "minutes-lint", "path": "skills/minutes-lint/SKILL.md" },
     { "name": "minutes-ingest", "path": "skills/minutes-ingest/SKILL.md" },
-    { "name": "minutes-graph", "path": "skills/minutes-graph/SKILL.md" }
+    { "name": "minutes-graph", "path": "skills/minutes-graph/SKILL.md" },
+    { "name": "minutes-video-review", "path": "skills/minutes-video-review/SKILL.md" }
   ],
   "agents": [
     { "name": "meeting-analyst", "path": "agents/meeting-analyst.md" }

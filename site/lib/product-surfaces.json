@@ -17,7 +17,7 @@
     "name": "Claude Code plugin",
     "when": "User works in Claude Code and wants meeting lifecycle skills and proactive hooks.",
     "install": "claude plugin marketplace add silverstein/minutes",
-    "note": "18 skills (brief, prep, record, tag, debrief, mirror, weekly, graph) plus a meeting-analyst agent and SessionStart/PostToolUse hooks.",
+    "note": "19 skills (brief, prep, debrief, graph, video review, and the rest of the meeting lifecycle) plus a meeting-analyst agent and SessionStart/PostToolUse hooks.",
     "activation": "Best for workflow guidance, prep, debrief, and meeting coaching."
   },
   {

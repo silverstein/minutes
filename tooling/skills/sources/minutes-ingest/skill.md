@@ -12,6 +12,9 @@ metadata:
   display_name: Minutes Ingest
   short_description: Extract facts from meetings and update your knowledge base — person profiles, chronological log, and index.
   default_prompt: Use Minutes Ingest for this task.
+  site_category: Knowledge
+  site_example: /minutes-ingest
+  site_best_for: Extract structured facts from meetings into an external knowledge base.
 assets:
   scripts: []
   templates: []

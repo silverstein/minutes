@@ -1,0 +1,367 @@
+[
+  {
+    "name": "minutes-video-review",
+    "displayName": "Minutes Video Review",
+    "category": "Artifacts",
+    "shortDescription": "Review a demo, walkthrough, or bug video into a durable brief.",
+    "description": "Analyze a product walkthrough, bug report video, Loom, or ScreenPal using Minutes transcription plus visual review. Use when the user wants a recorded demo or bug clip turned into a durable brief with transcript, key frames, issues, and next steps.",
+    "bestFor": "Turn a Loom, ScreenPal, or local walkthrough video into a durable artifact bundle for agent review.",
+    "example": "/minutes-video-review https://go.screenpal.com/watch/...",
+    "triggers": [
+      "analyze this video",
+      "review this video",
+      "review this walkthrough",
+      "review this bug report video",
+      "summarize this Loom",
+      "summarize this ScreenPal",
+      "video intel"
+    ],
+    "phase": null,
+    "userInvocable": true
+  },
+  {
+    "name": "minutes-cleanup",
+    "displayName": "Minutes Cleanup",
+    "category": "Capture",
+    "shortDescription": "Manage old recordings — find large files, archive old meetings, delete processed originals.",
+    "description": "Manage old recordings — find large files, archive old meetings, delete processed originals. Use when the user says \"clean up recordings\", \"how much space are meetings using\", \"delete old recordings\", \"archive meetings\", \"manage meeting storage\", or asks about disk space from minutes.",
+    "bestFor": "Archive or delete old recordings when storage starts piling up.",
+    "example": "/minutes-cleanup",
+    "triggers": [
+      "clean up recordings",
+      "how much space are meetings using",
+      "delete old recordings",
+      "archive meetings",
+      "manage meeting storage"
+    ],
+    "phase": null,
+    "userInvocable": true
+  },
+  {
+    "name": "minutes-list",
+    "displayName": "Minutes List",
+    "category": "Capture",
+    "shortDescription": "List recent meetings and voice memos.",
+    "description": "List recent meetings and voice memos. Use when the user asks \"what meetings did I have\", \"show my recent recordings\", \"any meetings today\", \"list my voice memos\", or wants an overview of their meeting history. Also use when they need to find a specific meeting by browsing rather than searching.",
+    "bestFor": "Browse recent meetings and voice memos when you need to find the right artifact first.",
+    "example": "/minutes-list",
+    "triggers": [
+      "what meetings did I have",
+      "show my recent recordings",
+      "any meetings today",
+      "list my voice memos"
+    ],
+    "phase": null,
+    "userInvocable": true
+  },
+  {
+    "name": "minutes-note",
+    "displayName": "Minutes Note",
+    "category": "Capture",
+    "shortDescription": "Add a note to the current recording or annotate a past meeting. Use whenever the user says \"note that\", \"remember this\", \"mark this as important\", \"add a note about\", \"annotate the meeting\", or wants to capture a thought during or after a recording. Plain text input — no markdown needed.",
+    "description": "Add a note to the current recording or annotate a past meeting. Use whenever the user says \"note that\", \"remember this\", \"mark this as important\", \"add a note about\", \"annotate the meeting\", or wants to capture a thought during or after a recording. Plain text input — no markdown needed.",
+    "bestFor": "Drop a timestamped note into the current recording or annotate a past one.",
+    "example": "/minutes-note Alex wants monthly billing",
+    "triggers": [
+      "note that",
+      "remember this",
+      "mark this as important",
+      "add a note about",
+      "annotate the meeting"
+    ],
+    "phase": null,
+    "userInvocable": true
+  },
+  {
+    "name": "minutes-recap",
+    "displayName": "Minutes Recap",
+    "category": "Capture",
+    "shortDescription": "Generate a daily digest of today's meetings and voice memos — key decisions, action items, and themes across all recordings.",
+    "description": "Generate a daily digest of today's meetings and voice memos — key decisions, action items, and themes across all recordings. Use when the user asks \"recap my day\", \"what happened in my meetings today\", \"daily summary\", \"what did I discuss today\", \"any action items from today\", or wants a consolidated view of the day's conversations.",
+    "bestFor": "Get a same-day digest across meetings and voice memos.",
+    "example": "/minutes-recap",
+    "triggers": [
+      "recap my day",
+      "what happened in my meetings today",
+      "daily summary",
+      "what did I discuss today",
+      "any action items from today"
+    ],
+    "phase": null,
+    "userInvocable": true
+  },
+  {
+    "name": "minutes-record",
+    "displayName": "Minutes Record",
+    "category": "Capture",
+    "shortDescription": "Start or stop recording a meeting, call, or voice memo. Use this whenever the user says \"record\", \"start recording\", \"capture this meeting\", \"stop recording\", \"I'm in a meeting\", \"take notes on this call\", or wants to transcribe live audio. Also use when they ask about recording status or want to know if something is being recorded.",
+    "description": "Start or stop recording a meeting, call, or voice memo. Use this whenever the user says \"record\", \"start recording\", \"capture this meeting\", \"stop recording\", \"I'm in a meeting\", \"take notes on this call\", or wants to transcribe live audio. Also use when they ask about recording status or want to know if something is being recorded.",
+    "bestFor": "Start or stop a meeting, call, or voice memo recording.",
+    "example": "/minutes-record",
+    "triggers": [
+      "record",
+      "start recording",
+      "capture this meeting",
+      "stop recording",
+      "I'm in a meeting",
+      "take notes on this call"
+    ],
+    "phase": null,
+    "userInvocable": true
+  },
+  {
+    "name": "minutes-setup",
+    "displayName": "Minutes Setup",
+    "category": "Capture",
+    "shortDescription": "Guided first-time setup for Minutes — download whisper model, create directories, configure audio input.",
+    "description": "Guided first-time setup for Minutes — download whisper model, create directories, configure audio input. Use when the user says \"set up minutes\", \"install minutes\", \"first time setup\", \"configure minutes\", \"get started with minutes\", \"how do I start using minutes\", or when verify shows missing components.",
+    "bestFor": "Walk a first-time user through getting Minutes ready to record.",
+    "example": "/minutes-setup",
+    "triggers": [
+      "set up minutes",
+      "install minutes",
+      "first time setup",
+      "configure minutes",
+      "get started with minutes",
+      "how do I start using minutes"
+    ],
+    "phase": null,
+    "userInvocable": true
+  },
+  {
+    "name": "minutes-verify",
+    "displayName": "Minutes Verify",
+    "category": "Capture",
+    "shortDescription": "Verify that Minutes is properly set up and working — model downloaded, mic accessible, directories exist, no stale state.",
+    "description": "Verify that Minutes is properly set up and working — model downloaded, mic accessible, directories exist, no stale state. Use when the user says \"is minutes working\", \"check my setup\", \"verify minutes\", \"test recording setup\", \"why isn't minutes working\", \"minutes health check\", or after running setup for the first time.",
+    "bestFor": "Health-check the install, models, mic, and stale state before trusting it in production.",
+    "example": "/minutes-verify",
+    "triggers": [
+      "is minutes working",
+      "check my setup",
+      "verify minutes",
+      "test recording setup",
+      "why isn't minutes working",
+      "minutes health check"
+    ],
+    "phase": null,
+    "userInvocable": true
+  },
+  {
+    "name": "minutes-mirror",
+    "displayName": "Minutes Mirror",
+    "category": "Coaching",
+    "shortDescription": "Self-coaching analysis of your own behavior across meetings — talk-time ratio, filler words, hedging language, monologue length, energy patterns, and (when meetings are tagged via /minutes-tag) what your behavior in winning meetings looks like vs losing ones. Use this whenever the user says \"how did I do\", \"review my last meeting\", \"mirror\", \"self-review\", \"show my patterns\", \"coach me\", \"where am I weak\", \"talk time\", \"am I improving\", \"what do I do in meetings I win\", \"feedback on me\", or asks for any kind of personal feedback on their own meeting behavior. This is the rare skill that gives the user a mirror to their own habits — surface it whenever they show curiosity about their own performance, even if they don't use the word \"mirror\".",
+    "description": "Self-coaching analysis of your own behavior across meetings — talk-time ratio, filler words, hedging language, monologue length, energy patterns, and (when meetings are tagged via /minutes-tag) what your behavior in winning meetings looks like vs losing ones. Use this whenever the user says \"how did I do\", \"review my last meeting\", \"mirror\", \"self-review\", \"show my patterns\", \"coach me\", \"where am I weak\", \"talk time\", \"am I improving\", \"what do I do in meetings I win\", \"feedback on me\", or asks for any kind of personal feedback on their own meeting behavior. This is the rare skill that gives the user a mirror to their own habits — surface it whenever they show curiosity about their own performance, even if they don't use the word \"mirror\".",
+    "bestFor": "Review your own talk-time, hedging, and performance patterns across meetings.",
+    "example": "/minutes-mirror",
+    "triggers": [
+      "how did I do",
+      "review my last meeting",
+      "mirror",
+      "self-review",
+      "show my patterns",
+      "coach me",
+      "where am I weak",
+      "talk time",
+      "am I improving",
+      "what do I do in meetings I win",
+      "feedback on me"
+    ],
+    "phase": null,
+    "userInvocable": true
+  },
+  {
+    "name": "minutes-tag",
+    "displayName": "Minutes Tag",
+    "category": "Coaching",
+    "shortDescription": "Lightweight outcome tagging for meetings — won, lost, stalled, great, or noise. Use whenever the user says \"tag this meeting\", \"mark that as a win\", \"that one was a loss\", \"tag yesterday's call as stalled\", \"mark this great\", \"that meeting was noise\", \"label that meeting\", or any time they describe a meeting outcome in passing. Tagging takes 5 seconds and unlocks /minutes-mirror correlation analysis — the more meetings get tagged, the smarter mirror gets at telling the user what behavior patterns lead to wins. Surface this skill any time the user mentions a meeting result, win, loss, or wasted time.",
+    "description": "Lightweight outcome tagging for meetings — won, lost, stalled, great, or noise. Use whenever the user says \"tag this meeting\", \"mark that as a win\", \"that one was a loss\", \"tag yesterday's call as stalled\", \"mark this great\", \"that meeting was noise\", \"label that meeting\", or any time they describe a meeting outcome in passing. Tagging takes 5 seconds and unlocks /minutes-mirror correlation analysis — the more meetings get tagged, the smarter mirror gets at telling the user what behavior patterns lead to wins. Surface this skill any time the user mentions a meeting result, win, loss, or wasted time.",
+    "bestFor": "Label a meeting outcome in five seconds so later coaching gets smarter.",
+    "example": "/minutes-tag won",
+    "triggers": [
+      "tag this meeting",
+      "mark that as a win",
+      "that one was a loss",
+      "tag yesterday's call as stalled",
+      "mark this great",
+      "that meeting was noise",
+      "label that meeting"
+    ],
+    "phase": null,
+    "userInvocable": true
+  },
+  {
+    "name": "minutes-graph",
+    "displayName": "Minutes Graph",
+    "category": "Intelligence",
+    "shortDescription": "Cross-meeting entity graph — query who/what/when across all your meetings as structured data, with co-occurrence and cross-entity queries that text search can't answer. Use whenever the user says \"show me everyone who mentioned X\", \"every time we talked about Y\", \"who knows about Z\", \"graph\", \"across all meetings\", \"entity search\", \"first time we talked about\", \"trend for X over time\", \"who's been mentioned alongside\", or wants to query meetings as an index rather than full-text search. Builds a JSON entity index on first run (one-time slow), then answers queries instantly. Surface this skill for relationship intelligence, due diligence, or any \"across all my history\" question that text search alone can't answer.",
+    "description": "Cross-meeting entity graph — query who/what/when across all your meetings as structured data, with co-occurrence and cross-entity queries that text search can't answer. Use whenever the user says \"show me everyone who mentioned X\", \"every time we talked about Y\", \"who knows about Z\", \"graph\", \"across all meetings\", \"entity search\", \"first time we talked about\", \"trend for X over time\", \"who's been mentioned alongside\", or wants to query meetings as an index rather than full-text search. Builds a JSON entity index on first run (one-time slow), then answers queries instantly. Surface this skill for relationship intelligence, due diligence, or any \"across all my history\" question that text search alone can't answer.",
+    "bestFor": "Query who mentioned what across all meetings as a relationship graph.",
+    "example": "/minutes-graph everyone who mentioned Stripe",
+    "triggers": [
+      "show me everyone who mentioned X",
+      "every time we talked about Y",
+      "who knows about Z",
+      "graph",
+      "across all meetings",
+      "entity search",
+      "first time we talked about",
+      "trend for X over time",
+      "who's been mentioned alongside",
+      "across all my history"
+    ],
+    "phase": null,
+    "userInvocable": true
+  },
+  {
+    "name": "minutes-ideas",
+    "displayName": "Minutes Ideas",
+    "category": "Knowledge",
+    "shortDescription": "Surface recent voice memos and ideas captured from any device.",
+    "description": "Surface recent voice memos and ideas captured from any device. Use when the user asks \"what ideas did I have?\", \"what were my recent memos?\", \"what did I record while walking?\", or wants to recall a captured thought.",
+    "bestFor": "Surface recent voice memos and loose ideas captured from any device.",
+    "example": "/minutes-ideas",
+    "triggers": [
+      "what ideas did I have?",
+      "what were my recent memos?",
+      "what did I record while walking?"
+    ],
+    "phase": null,
+    "userInvocable": true
+  },
+  {
+    "name": "minutes-ingest",
+    "displayName": "Minutes Ingest",
+    "category": "Knowledge",
+    "shortDescription": "Extract facts from meetings and update your knowledge base — person profiles, chronological log, and index.",
+    "description": "Extract facts from meetings and update your knowledge base — person profiles, chronological log, and index. Use when the user asks \"ingest my meetings\", \"update my knowledge base\", \"extract facts from meetings\", \"sync meetings to wiki\", \"backfill knowledge\", or wants their PARA/Obsidian/wiki profiles updated from conversation data.",
+    "bestFor": "Extract structured facts from meetings into an external knowledge base.",
+    "example": "/minutes-ingest",
+    "triggers": [
+      "ingest my meetings",
+      "update my knowledge base",
+      "extract facts from meetings",
+      "sync meetings to wiki",
+      "backfill knowledge"
+    ],
+    "phase": null,
+    "userInvocable": true
+  },
+  {
+    "name": "minutes-lint",
+    "displayName": "Minutes Lint",
+    "category": "Knowledge",
+    "shortDescription": "Health-check your meeting knowledge for contradictions, stale commitments, and decision conflicts.",
+    "description": "Health-check your meeting knowledge for contradictions, stale commitments, and decision conflicts. Use when the user asks \"any conflicts in my meetings\", \"check for stale action items\", \"lint my meetings\", \"consistency check\", \"are there contradictions\", or wants to audit their decision history.",
+    "bestFor": "Audit meeting memory for contradictions, stale commitments, and decision conflicts.",
+    "example": "/minutes-lint",
+    "triggers": [
+      "any conflicts in my meetings",
+      "check for stale action items",
+      "lint my meetings",
+      "consistency check",
+      "are there contradictions"
+    ],
+    "phase": null,
+    "userInvocable": true
+  },
+  {
+    "name": "minutes-brief",
+    "displayName": "Minutes Brief",
+    "category": "Lifecycle",
+    "shortDescription": "Fast meeting briefing from your conversation memory.",
+    "description": "Fast non-interactive briefing before any meeting — auto-detects your next calendar event, pulls relationship history, surfaces open commitments, and produces a one-page brief in under 30 seconds. Use this whenever the user says \"brief me\", \"give me a quick brief\", \"what's coming up\", \"background on my next call\", \"who am I meeting next\", \"brief me on Sarah\", \"I have a call in 10 min\", \"quick rundown\", or right before walking into a meeting. Different from /minutes-prep — brief is the fast hook-fireable version that doesn't ask questions and doesn't set goals. Use brief when speed matters; use prep when the user wants to think hard about goals first.",
+    "bestFor": "Get a fast one-page brief before an upcoming meeting.",
+    "example": "/minutes-brief",
+    "triggers": [
+      "brief me",
+      "give me a quick brief",
+      "what's coming up",
+      "background on my next call",
+      "who am I meeting next",
+      "brief me on Sarah",
+      "I have a call in 10 min",
+      "quick rundown"
+    ],
+    "phase": "lifecycle",
+    "userInvocable": true
+  },
+  {
+    "name": "minutes-debrief",
+    "displayName": "Minutes Debrief",
+    "category": "Lifecycle",
+    "shortDescription": "Post-meeting debrief tied back to prep and decisions.",
+    "description": "Post-meeting debrief — analyzes what happened, compares outcomes to your prep intentions, tracks decision evolution. Use when the user says \"debrief\", \"what just happened in that meeting\", \"what did we decide\", \"debrief that call\", \"post-meeting\", \"what changed\", or right after stopping a recording.",
+    "bestFor": "Turn the latest meeting into decisions, follow-ups, and what changed from prep.",
+    "example": "/minutes-debrief",
+    "triggers": [
+      "debrief",
+      "what just happened in that meeting",
+      "what did we decide",
+      "debrief that call",
+      "post-meeting",
+      "what changed"
+    ],
+    "phase": "lifecycle",
+    "userInvocable": true
+  },
+  {
+    "name": "minutes-prep",
+    "displayName": "Minutes Prep",
+    "category": "Lifecycle",
+    "shortDescription": "Interactive meeting prep from your conversation history.",
+    "description": "Interactive meeting preparation — builds a relationship brief and talking points before a call. Use when the user says \"prep me for my call with\", \"I'm meeting with X\", \"prepare me for\", \"what should I bring up with\", \"meeting prep\", \"get ready for my call\", or wants to review history with someone before a meeting.",
+    "bestFor": "Do a deeper relationship brief and talking-point prep before an important call.",
+    "example": "/minutes-prep Alex",
+    "triggers": [
+      "prep me for my call with",
+      "I'm meeting with",
+      "prepare me for",
+      "what should I bring up with",
+      "meeting prep",
+      "get ready for my call"
+    ],
+    "phase": "lifecycle",
+    "userInvocable": true
+  },
+  {
+    "name": "minutes-weekly",
+    "displayName": "Minutes Weekly",
+    "category": "Lifecycle",
+    "shortDescription": "Weekly meeting synthesis — themes, decision arcs, stale commitments, and what deserves your attention next week.",
+    "description": "Weekly meeting synthesis — themes, decision arcs, stale commitments, and what deserves your attention next week. Use when the user says \"weekly review\", \"what happened this week\", \"weekly summary\", \"recap my week\", \"any outstanding items\", \"week in review\", or at the end of a work week.",
+    "bestFor": "See weekly themes, stale commitments, and what deserves attention next.",
+    "example": "/minutes-weekly",
+    "triggers": [
+      "weekly review",
+      "what happened this week",
+      "weekly summary",
+      "recap my week",
+      "any outstanding items",
+      "week in review"
+    ],
+    "phase": null,
+    "userInvocable": true
+  },
+  {
+    "name": "minutes-search",
+    "displayName": "Minutes Search",
+    "category": "Search",
+    "shortDescription": "Search past meeting transcripts and voice memos for specific topics, people, decisions, or ideas. Use this whenever the user asks \"what did we discuss about X\", \"find that meeting where we talked about Y\", \"what did Alex say\", \"did we decide on\", \"what was that idea about\", or any question that could be answered by searching their meeting history. Also use for \"do I have any notes about\" or \"check my meetings for\".",
+    "description": "Search past meeting transcripts and voice memos for specific topics, people, decisions, or ideas. Use this whenever the user asks \"what did we discuss about X\", \"find that meeting where we talked about Y\", \"what did Alex say\", \"did we decide on\", \"what was that idea about\", or any question that could be answered by searching their meeting history. Also use for \"do I have any notes about\" or \"check my meetings for\".",
+    "bestFor": "Find a topic, quote, person, or decision across past transcripts.",
+    "example": "/minutes-search pricing strategy",
+    "triggers": [
+      "what did we discuss about X",
+      "find that meeting where we talked about Y",
+      "what did Alex say",
+      "did we decide on",
+      "what was that idea about",
+      "do I have any notes about",
+      "check my meetings for"
+    ],
+    "phase": null,
+    "userInvocable": true
+  }
+]

@@ -13,6 +13,9 @@ metadata:
   display_name: Minutes Record
   short_description: Start or stop recording a meeting, call, or voice memo. Use this whenever the user says "record", "start recording", "capture this meeting", "stop recording", "I'm in a meeting", "take notes on this call", or wants to transcribe live audio. Also use when they ask about recording status or want to know if something is being recorded.
   default_prompt: Use Minutes Record for this task.
+  site_category: Capture
+  site_example: /minutes-record
+  site_best_for: Start or stop a meeting, call, or voice memo recording.
 assets:
   scripts: []
   templates: []

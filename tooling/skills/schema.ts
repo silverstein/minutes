@@ -25,6 +25,9 @@ export interface CanonicalSkillFrontmatter {
     default_prompt?: string;
     icon_small?: string;
     icon_large?: string;
+    site_category?: string;
+    site_example?: string;
+    site_best_for?: string;
   };
   assets?: {
     scripts?: string[];

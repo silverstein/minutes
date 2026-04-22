@@ -14,6 +14,9 @@ metadata:
   display_name: Minutes Debrief
   short_description: Post-meeting debrief tied back to prep and decisions.
   default_prompt: Use Minutes Debrief to analyze the latest meeting, compare it to prep goals, and surface decision changes and next actions.
+  site_category: Lifecycle
+  site_example: /minutes-debrief
+  site_best_for: Turn the latest meeting into decisions, follow-ups, and what changed from prep.
 assets:
   scripts: []
   templates: []

@@ -13,6 +13,9 @@ metadata:
   display_name: Minutes Setup
   short_description: Guided first-time setup for Minutes — download whisper model, create directories, configure audio input.
   default_prompt: Use Minutes Setup for this task.
+  site_category: Capture
+  site_example: /minutes-setup
+  site_best_for: Walk a first-time user through getting Minutes ready to record.
 assets:
   scripts: []
   templates: []

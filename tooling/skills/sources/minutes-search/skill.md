@@ -14,6 +14,9 @@ metadata:
   display_name: Minutes Search
   short_description: Search past meeting transcripts and voice memos for specific topics, people, decisions, or ideas. Use this whenever the user asks "what did we discuss about X", "find that meeting where we talked about Y", "what did Alex say", "did we decide on", "what was that idea about", or any question that could be answered by searching their meeting history. Also use for "do I have any notes about" or "check my meetings for".
   default_prompt: Use Minutes Search for this task.
+  site_category: Search
+  site_example: /minutes-search pricing strategy
+  site_best_for: Find a topic, quote, person, or decision across past transcripts.
 assets:
   scripts: []
   templates: []

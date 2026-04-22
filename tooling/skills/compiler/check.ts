@@ -1,10 +1,13 @@
 import path from "node:path";
+import { constants } from "node:fs";
+import { access, readFile } from "node:fs/promises";
 import { cwd, exit } from "node:process";
 import { discoverCanonicalSkills } from "./discover.js";
 import { HOSTS } from "../hosts/index.js";
 import { renderSkillForHost } from "./render.js";
 import { validateSkillAssets } from "./validate.js";
 import { renderClaudePluginManifest } from "./plugin.js";
+import { renderSiteSkillCatalog } from "./site.js";
 
 interface CheckFailure {
   skill: string;
@@ -24,14 +27,35 @@ async function main(): Promise<void> {
   const failures: CheckFailure[] = [];
 
   const expectedClaudeManifest = await renderClaudePluginManifest(rootDir, skills);
-  const actualClaudeManifest = await import("node:fs/promises").then(({ readFile }) =>
-    readFile(path.join(rootDir, "..", "..", ".claude", "plugins", "minutes", "plugin.json"), "utf8"),
+  const actualClaudeManifest = await readFile(
+    path.join(rootDir, "..", "..", ".claude", "plugins", "minutes", "plugin.json"),
+    "utf8",
   );
   if (actualClaudeManifest !== expectedClaudeManifest) {
     failures.push({
       skill: "plugin.json",
       host: "claude",
       message: "Claude plugin manifest skills[] block is out of sync with canonical skill metadata",
+    });
+  }
+
+  const expectedSiteCatalog = renderSiteSkillCatalog(skills);
+  let actualSiteCatalog: string | null = null;
+  try {
+    actualSiteCatalog = await readFile(
+      path.join(rootDir, "..", "..", "site", "lib", "skills-catalog.json"),
+      "utf8",
+    );
+  } catch (error) {
+    if (!(error instanceof Error) || !("code" in error) || error.code !== "ENOENT") {
+      throw error;
+    }
+  }
+  if (actualSiteCatalog !== expectedSiteCatalog) {
+    failures.push({
+      skill: "skills-catalog.json",
+      host: "site",
+      message: "Public website skill catalog is out of sync with canonical skill metadata",
     });
   }
 
@@ -125,7 +149,9 @@ async function main(): Promise<void> {
   ];
 
   for (const runtimePath of runtimeFiles) {
-    if (!(await import("node:fs/promises").then(({ access }) => access(path.join(rootDir, "..", "..", runtimePath)).then(() => true).catch(() => false)))) {
+    try {
+      await access(path.join(rootDir, "..", "..", runtimePath), constants.F_OK);
+    } catch {
       failures.push({
         skill: "_runtime",
         host: runtimePath.includes(".opencode/") ? "opencode" : "codex",

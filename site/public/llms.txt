@@ -24,7 +24,7 @@ minutes exposes a standard MCP server with 26 tools, 7 resources, and 6 prompt t
 
 - MCP server — When: User has Claude Desktop, Codex, Gemini CLI, or any MCP client. Install: `npx minutes-mcp` Best for: Best for agent-first search, recall, and meeting-memory workflows.
 - CLI — When: User wants terminal-first recording, search, import, and vault sync. Install: `brew tap silverstein/tap && brew install minutes` Best for: Best for local operator workflows and scripting.
-- Claude Code plugin — When: User works in Claude Code and wants meeting lifecycle skills and proactive hooks. Install: `claude plugin marketplace add silverstein/minutes` Best for: Best for workflow guidance, prep, debrief, and meeting coaching.
+- Claude Code plugin — When: User works in Claude Code and wants meeting lifecycle skills and proactive hooks. Install: `claude plugin marketplace add silverstein/minutes` Best for: Best for workflow guidance, prep, debrief, meeting coaching, and artifact review workflows like `minutes-video-review`.
 - Desktop app — When: User wants a menu bar app with one-click recording, Recall, and artifact drafting. Install: `brew install --cask silverstein/tap/minutes` Best for: Best for first recording, live capture, and post-meeting artifact work.
 
 Recommended install:

@@ -12,6 +12,9 @@ metadata:
   display_name: Minutes Lint
   short_description: Health-check your meeting knowledge for contradictions, stale commitments, and decision conflicts.
   default_prompt: Use Minutes Lint for this task.
+  site_category: Knowledge
+  site_example: /minutes-lint
+  site_best_for: Audit meeting memory for contradictions, stale commitments, and decision conflicts.
 assets:
   scripts: []
   templates: []

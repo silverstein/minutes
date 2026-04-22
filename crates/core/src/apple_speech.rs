@@ -489,21 +489,21 @@ fn aggregate_metrics(
         let result = select(case);
         if result.status == "ok" {
             metrics.cases_succeeded += 1;
-        }
-        if case.reference_available {
-            metrics.cases_with_reference += 1;
-        }
-        if let Some(elapsed) = result.total_elapsed_ms {
-            elapsed_sum += elapsed as f64;
-            elapsed_count += 1;
-        }
-        if let Some(first) = result.first_result_elapsed_ms {
-            first_sum += first as f64;
-            first_count += 1;
-        }
-        if let Some(wer) = result.wer {
-            wer_sum += wer;
-            wer_count += 1;
+            if case.reference_available {
+                metrics.cases_with_reference += 1;
+            }
+            if let Some(elapsed) = result.total_elapsed_ms {
+                elapsed_sum += elapsed as f64;
+                elapsed_count += 1;
+            }
+            if let Some(first) = result.first_result_elapsed_ms {
+                first_sum += first as f64;
+                first_count += 1;
+            }
+            if let Some(wer) = result.wer {
+                wer_sum += wer;
+                wer_count += 1;
+            }
         }
     }
 

@@ -44,6 +44,8 @@ dist/
 
 # Exception: bundled demo asset (include_bytes! at compile time)
 !crates/assets/demo.wav
+!tests/eval/fixtures/audio/apple-speech-dictation.wav
+!tests/eval/fixtures/audio/apple-speech-meeting.wav
 
 # Whisper models (large, downloaded locally)
 models/
@@ -70,3 +72,6 @@ notes-release-v*.md
 
 # Local scratch
 tmp/
+docs/assets/demo*
+.agents/napkin.md
+.claude/scheduled_tasks.lock

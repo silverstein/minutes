@@ -29,7 +29,7 @@ Corpus:
   - `meeting-longer`
 
 Artifact output used for the recommendation below:
-- `~/.minutes/research/apple-speech/2026-04-22T18-52-06Z`
+- `~/.minutes/research/apple-speech/2026-04-22T22-00-34Z`
 
 Related first-install run:
 - `~/.minutes/research/apple-speech/2026-04-22T18-45-27Z`
@@ -38,8 +38,7 @@ Related first-install run:
 
 Important limitation:
 - this corpus is synthetic TTS speech, not real human meeting audio
-- the current CLI build used for this run did **not** include the `parakeet`
-  feature, so Parakeet could not be compared head-to-head in this artifact
+- the result is useful for relative backend shape, not for a final product default
 
 ## Measured result
 
@@ -47,22 +46,24 @@ Aggregate summary from the run:
 
 | Backend | Cases succeeded | Avg elapsed | Avg first result | Avg WER |
 |---|---:|---:|---:|---:|
-| `SpeechTranscriber` | 2/2 | 248 ms | 196.5 ms | 11.54% |
-| `DictationTranscriber` | 2/2 | 321 ms | 312.5 ms | 32.69% |
-| `whisper` | 2/2 | 1,753 ms | n/a | 9.62% |
-| `parakeet` | 0/2 | n/a | n/a | n/a |
+| `SpeechTranscriber` | 2/2 | 309 ms | 258.0 ms | 11.54% |
+| `DictationTranscriber` | 2/2 | 352 ms | 343.5 ms | 32.69% |
+| `whisper` | 2/2 | 1,684.5 ms | n/a | 9.62% |
+| `parakeet` | 2/2 | 1,498.0 ms | n/a | 9.62% |
 
 Case highlights:
 
 - `dictation-short`
-  - `SpeechTranscriber`: 212 ms warm, 7.69% WER
-  - `DictationTranscriber`: 205 ms warm, 15.38% WER
-  - `whisper`: 1,668 ms, 0.00% WER
+  - `SpeechTranscriber`: 300 ms warm, 7.69% WER
+  - `DictationTranscriber`: 262 ms warm, 15.38% WER
+  - `whisper`: 1,616 ms, 0.00% WER
+  - `parakeet`: 1,461 ms, 0.00% WER
 
 - `meeting-longer`
-  - `SpeechTranscriber`: 284 ms warm, 15.38% WER
-  - `DictationTranscriber`: 437 ms warm, 50.00% WER
-  - `whisper`: 1,838 ms, 19.23% WER
+  - `SpeechTranscriber`: 318 ms warm, 15.38% WER
+  - `DictationTranscriber`: 442 ms warm, 50.00% WER
+  - `whisper`: 1,753 ms, 19.23% WER
+  - `parakeet`: 1,535 ms, 19.23% WER
 
 ## What this means
 
@@ -101,10 +102,11 @@ That matches the product intuition that `DictationTranscriber` may be useful
 for dictation-style compatibility or broader device coverage, but not as the
 primary Apple backend candidate for Minutes.
 
-### 4. Whisper remains the quality baseline in this first corpus
+### 4. Whisper and Parakeet remain the quality baselines in this first corpus
 
-Whisper was dramatically slower in this current file-based benchmark path, but
-its transcripts were still strongest overall on the synthetic corpus.
+Whisper and Parakeet tied on WER in this synthetic corpus, while both were much
+slower than `SpeechTranscriber`. Parakeet was also modestly faster than Whisper
+on elapsed time.
 
 That means this run does **not** justify switching Minutes defaults to Apple
 speech.
@@ -118,17 +120,17 @@ The recommendation from the April 22, 2026 run is:
 
 2. **Do not switch Minutes' default backend based on this run.**
    - The corpus is too small and too synthetic.
-   - Whisper still edges out `SpeechTranscriber` on average WER here.
+   - `SpeechTranscriber` is much faster, but Whisper/Parakeet still set the
+     quality bar on this corpus.
 
 3. **If Minutes productizes any Apple path next, start with `SpeechTranscriber`, not `DictationTranscriber`.**
    - `SpeechTranscriber` is the only Apple candidate from this run that looks
      both fast and credible enough to merit a real human-audio follow-up.
 
-4. **Run the same benchmark on a real human corpus and a Parakeet-enabled build before making a keep/defer product call.**
+4. **Run the same benchmark on a real human corpus before making a keep/defer product call.**
    - The next decision-quality run should include:
      - real human dictation audio
      - real far-field meeting audio
-     - a build with `parakeet` enabled
      - at least one Apple-ineligible or Apple-limited machine, if available
 
 ## Explicit non-recommendations

@@ -1897,11 +1897,47 @@ where
 /// Estimate audio duration from file size (rough approximation).
 /// 16kHz mono 16-bit WAV ≈ 32KB/sec.
 fn estimate_duration(audio_path: &Path) -> String {
+    if let Some(duration_secs) = probe_audio_duration_secs(audio_path) {
+        return format_duration_secs(duration_secs);
+    }
+
     let bytes = std::fs::metadata(audio_path).map(|m| m.len()).unwrap_or(0);
 
     // WAV header is 44 bytes, then raw PCM at 32000 bytes/sec (16kHz 16-bit mono)
     let secs = if bytes > 44 { (bytes - 44) / 32_000 } else { 0 };
 
+    format_duration_secs(secs as f64)
+}
+
+fn probe_audio_duration_secs(audio_path: &Path) -> Option<f64> {
+    use symphonia::core::io::MediaSourceStream;
+    use symphonia::core::probe::Hint;
+
+    let file = std::fs::File::open(audio_path).ok()?;
+    let mss = MediaSourceStream::new(Box::new(file), Default::default());
+
+    let mut hint = Hint::new();
+    if let Some(ext) = audio_path.extension().and_then(|e| e.to_str()) {
+        hint.with_extension(ext);
+    }
+
+    let probed = symphonia::default::get_probe()
+        .format(&hint, mss, &Default::default(), &Default::default())
+        .ok()?;
+
+    let track = probed.format.default_track()?;
+    let params = &track.codec_params;
+    let n_frames = params.n_frames?;
+    let sample_rate = params.sample_rate?;
+    if sample_rate == 0 {
+        return None;
+    }
+
+    Some(n_frames as f64 / sample_rate as f64)
+}
+
+fn format_duration_secs(duration_secs: f64) -> String {
+    let secs = duration_secs.round().max(0.0) as u64;
     let mins = secs / 60;
     let remaining_secs = secs % 60;
     if mins > 0 {
@@ -3898,6 +3934,13 @@ mod tests {
 
         let duration = estimate_duration(&path);
         assert_eq!(duration, "1m 30s");
+    }
+
+    #[test]
+    fn format_duration_secs_rounds_to_nearest_second() {
+        assert_eq!(format_duration_secs(4313.6), "71m 54s");
+        assert_eq!(format_duration_secs(59.6), "1m 0s");
+        assert_eq!(format_duration_secs(0.4), "0s");
     }
 
     #[test]

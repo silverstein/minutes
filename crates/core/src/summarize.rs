@@ -962,7 +962,21 @@ fn summarize_with_agent_impl(
     config: &Config,
     agent_cmd: String,
 ) -> Result<Summary, Box<dyn std::error::Error>> {
-    use std::io::Write;
+    summarize_with_agent_impl_timeout(
+        transcript,
+        config,
+        agent_cmd,
+        std::time::Duration::from_secs(300),
+    )
+}
+
+fn summarize_with_agent_impl_timeout(
+    transcript: &str,
+    config: &Config,
+    agent_cmd: String,
+    timeout: std::time::Duration,
+) -> Result<Summary, Box<dyn std::error::Error>> {
+    use std::io::{Read, Write};
 
     // Truncate at a safe UTF-8 char boundary to avoid panics
     let max_transcript = 100_000;
@@ -1004,6 +1018,30 @@ fn summarize_with_agent_impl(
             )
         })?;
 
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "Agent stdout unexpectedly unavailable".to_string())?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| "Agent stderr unexpectedly unavailable".to_string())?;
+
+    // Drain child output while it runs so verbose CLIs like `codex exec`
+    // cannot block on full stdout/stderr pipes before they exit.
+    let stdout_handle = std::thread::spawn(move || {
+        let mut reader = std::io::BufReader::new(stdout);
+        let mut buf = Vec::new();
+        let _ = reader.read_to_end(&mut buf);
+        buf
+    });
+    let stderr_handle = std::thread::spawn(move || {
+        let mut reader = std::io::BufReader::new(stderr);
+        let mut buf = Vec::new();
+        let _ = reader.read_to_end(&mut buf);
+        buf
+    });
+
     if let Some(prompt_bytes) = invocation.stdin_payload.clone() {
         let mut stdin = child
             .stdin
@@ -1014,27 +1052,29 @@ fn summarize_with_agent_impl(
         });
     }
 
-    // Wait with a 5-minute timeout (long meetings = long summaries)
-    let timeout = std::time::Duration::from_secs(300);
     let start = std::time::Instant::now();
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
-                let output = child
-                    .wait_with_output()
-                    .map_err(|e| format!("Failed to read agent output: {}", e))?;
+                let _ = child.wait();
+                let stdout = stdout_handle
+                    .join()
+                    .map_err(|_| "Failed to join agent stdout reader thread".to_string())?;
+                let stderr = stderr_handle
+                    .join()
+                    .map_err(|_| "Failed to join agent stderr reader thread".to_string())?;
                 if let Some(path) = cleanup_path.as_ref() {
                     let _ = std::fs::remove_file(path);
                 }
 
                 if !status.success() {
-                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    let stderr = String::from_utf8_lossy(&stderr);
                     return Err(
                         format!("Agent '{}' exited with error: {}", agent_cmd, stderr).into(),
                     );
                 }
 
-                let response = String::from_utf8_lossy(&output.stdout).to_string();
+                let response = String::from_utf8_lossy(&stdout).to_string();
                 if response.trim().is_empty() {
                     return Err(format!("Agent '{}' returned empty output", agent_cmd).into());
                 }
@@ -1051,6 +1091,9 @@ fn summarize_with_agent_impl(
                 // Still running
                 if start.elapsed() > timeout {
                     child.kill().ok();
+                    let _ = child.wait();
+                    let _ = stdout_handle.join();
+                    let _ = stderr_handle.join();
                     if let Some(path) = cleanup_path.as_ref() {
                         let _ = std::fs::remove_file(path);
                     }
@@ -2289,5 +2332,65 @@ ENGAGEMENTS:
         assert!(!summary.text.is_empty() || !summary.key_points.is_empty());
         // Verify the full response text round-trips without corruption
         assert!(summary.text.contains('é') || summary.key_points.iter().any(|p| p.contains('é')));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn summarize_with_agent_drains_stderr_while_waiting() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let script_path = dir.path().join("noisy-agent.sh");
+        fs::write(
+            &script_path,
+            r#"#!/bin/sh
+cat >/dev/null
+i=0
+while [ "$i" -lt 5000 ]; do
+  echo "progress-line-$i-abcdefghijklmnopqrstuvwxyz" 1>&2
+  i=$((i + 1))
+done
+cat <<'EOF'
+KEY POINTS:
+- summary ok
+
+DECISIONS:
+- decision ok
+
+ACTION ITEMS:
+- @mat: verify fix
+
+OPEN QUESTIONS:
+- none
+
+COMMITMENTS:
+- @minutes: avoid deadlocks
+
+PARTICIPANTS:
+- Mat
+EOF
+"#,
+        )
+        .unwrap();
+        let mut perms = fs::metadata(&script_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script_path, perms).unwrap();
+
+        let mut config = Config::default();
+        config.summarization.engine = "agent".into();
+
+        let summary = summarize_with_agent_impl_timeout(
+            "short transcript",
+            &config,
+            script_path.display().to_string(),
+            std::time::Duration::from_secs(5),
+        )
+        .expect("summary should complete without blocking on stderr");
+
+        assert_eq!(summary.key_points, vec!["summary ok"]);
+        assert_eq!(summary.decisions, vec!["decision ok"]);
+        assert_eq!(summary.action_items, vec!["@mat: verify fix"]);
+        assert_eq!(summary.participants, vec!["Mat"]);
     }
 }

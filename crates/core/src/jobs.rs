@@ -5,6 +5,7 @@ use crate::markdown::{ContentType, OutputStatus};
 use crate::pid::{self, CaptureMode, PidGuard};
 use crate::pipeline::{self, BackgroundPipelineContext, PipelineStage};
 use chrono::{DateTime, Local};
+use serde_json::json;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -67,6 +68,8 @@ pub struct ProcessingJob {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recording_finished_at: Option<DateTime<Local>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_notes: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pre_context: Option<String>,
@@ -96,6 +99,7 @@ pub fn queue_live_capture(
     pre_context: Option<String>,
     recording_started_at: Option<DateTime<Local>>,
     recording_finished_at: Option<DateTime<Local>>,
+    context_session_id: Option<String>,
     calendar_event: Option<CalendarEvent>,
 ) -> std::io::Result<ProcessingJob> {
     let job_id = next_job_id();
@@ -116,6 +120,7 @@ pub fn queue_live_capture(
         finished_at: None,
         recording_started_at,
         recording_finished_at,
+        context_session_id,
         user_notes,
         pre_context,
         calendar_event,
@@ -136,6 +141,7 @@ pub fn queue_live_capture(
         }
         return Err(error);
     }
+    maybe_mark_context_session_processing(&job, &audio_path);
     Ok(job)
 }
 
@@ -253,6 +259,7 @@ pub fn enqueue_capture_job(
     pre_context: Option<String>,
     recording_started_at: Option<DateTime<Local>>,
     recording_finished_at: Option<DateTime<Local>>,
+    context_session_id: Option<String>,
     calendar_event: Option<CalendarEvent>,
 ) -> std::io::Result<ProcessingJob> {
     let job = ProcessingJob {
@@ -269,6 +276,7 @@ pub fn enqueue_capture_job(
         finished_at: None,
         recording_started_at,
         recording_finished_at,
+        context_session_id,
         user_notes,
         pre_context,
         calendar_event,
@@ -277,7 +285,92 @@ pub fn enqueue_capture_job(
         owner_pid: None,
     };
     write_job(&job)?;
+    maybe_mark_context_session_processing(&job, Path::new(&job.audio_path));
     Ok(job)
+}
+
+fn maybe_mark_context_session_processing(job: &ProcessingJob, audio_path: &Path) {
+    let Some(session_id) = job.context_session_id.as_deref() else {
+        return;
+    };
+
+    if let Err(error) = crate::context_store::mark_capture_session_processing(
+        session_id,
+        &job.id,
+        audio_path,
+        job.recording_finished_at,
+    ) {
+        tracing::warn!(
+            session_id,
+            job_id = %job.id,
+            error = %error,
+            "failed to mark context session as processing"
+        );
+    }
+}
+
+fn maybe_mark_context_session_complete(job: &ProcessingJob, content_type: ContentType) {
+    let Some(session_id) = job.context_session_id.as_deref() else {
+        return;
+    };
+    let Some(output_path) = job.output_path.as_deref() else {
+        return;
+    };
+
+    let metadata = json!({
+        "job_id": job.id,
+        "job_state": match job.state {
+            JobState::NeedsReview => "needs-review",
+            JobState::Complete => "complete",
+            JobState::Failed => "failed",
+            JobState::Queued => "queued",
+            JobState::Transcribing => "transcribing",
+            JobState::TranscriptOnly => "transcript-only",
+            JobState::Diarizing => "diarizing",
+            JobState::Summarizing => "summarizing",
+            JobState::Saving => "saving",
+        },
+    });
+
+    if let Err(error) = crate::context_store::mark_capture_session_complete(
+        session_id,
+        Path::new(output_path),
+        Some(Path::new(&job.audio_path)),
+        content_type,
+        job.finished_at,
+        metadata,
+    ) {
+        tracing::warn!(
+            session_id,
+            job_id = %job.id,
+            error = %error,
+            "failed to finalize context session"
+        );
+    }
+}
+
+fn maybe_mark_context_session_failed(
+    job: &ProcessingJob,
+    diagnostic: &str,
+    preserved_path: Option<&Path>,
+) {
+    let Some(session_id) = job.context_session_id.as_deref() else {
+        return;
+    };
+
+    if let Err(error) = crate::context_store::mark_capture_session_failed(
+        session_id,
+        job.finished_at.or(job.recording_finished_at),
+        diagnostic,
+        preserved_path,
+    ) {
+        tracing::warn!(
+            session_id,
+            job_id = %job.id,
+            error = %error,
+            "failed to mark context session as failed"
+        );
+    }
 }
 
 pub fn write_job(job: &ProcessingJob) -> std::io::Result<()> {
@@ -618,6 +711,7 @@ where
                     sync_processing_status();
                     continue;
                 };
+                maybe_mark_context_session_failed(&failed_job, &error.to_string(), None);
                 sync_processing_status();
                 on_job_update(&failed_job);
                 continue;
@@ -654,6 +748,7 @@ where
                 &artifact.write_result,
                 &recording_duration(&review_job),
             ));
+            maybe_mark_context_session_complete(&review_job, artifact.write_result.content_type);
             if let Err(error) = crate::graph::rebuild_index(config) {
                 tracing::warn!(error = %error, "graph index rebuild failed after queued job");
             }
@@ -730,6 +825,7 @@ where
                 }
                 // Reload job after preserve may have updated audio_path
                 let final_job = load_job(&completed_job.id).unwrap_or(completed_job);
+                maybe_mark_context_session_complete(&final_job, result.content_type);
                 sync_processing_status();
                 on_job_update(&final_job);
             }
@@ -745,6 +841,7 @@ where
                     sync_processing_status();
                     continue;
                 };
+                maybe_mark_context_session_failed(&failed_job, &error.to_string(), None);
                 sync_processing_status();
                 on_job_update(&failed_job);
             }
@@ -804,6 +901,7 @@ mod tests {
                 Some(Local::now()),
                 Some(Local::now()),
                 None,
+                None,
             )
             .unwrap();
 
@@ -835,6 +933,7 @@ mod tests {
                 None,
                 Some(Local::now()),
                 Some(Local::now()),
+                None,
                 None,
             )
             .unwrap();
@@ -879,6 +978,7 @@ mod tests {
                 finished_at: None,
                 recording_started_at: None,
                 recording_finished_at: None,
+                context_session_id: None,
                 user_notes: None,
                 pre_context: None,
                 calendar_event: None,
@@ -961,6 +1061,7 @@ mod tests {
                 finished_at: None,
                 recording_started_at: None,
                 recording_finished_at: None,
+                context_session_id: None,
                 user_notes: None,
                 pre_context: None,
                 calendar_event: None,
@@ -996,6 +1097,7 @@ mod tests {
                 finished_at: Some(Local::now()),
                 recording_started_at: None,
                 recording_finished_at: None,
+                context_session_id: None,
                 user_notes: None,
                 pre_context: None,
                 calendar_event: None,
@@ -1032,6 +1134,7 @@ mod tests {
                 finished_at: None,
                 recording_started_at: None,
                 recording_finished_at: None,
+                context_session_id: None,
                 user_notes: None,
                 pre_context: None,
                 calendar_event: None,
@@ -1053,6 +1156,7 @@ mod tests {
                 finished_at: None,
                 recording_started_at: None,
                 recording_finished_at: None,
+                context_session_id: None,
                 user_notes: None,
                 pre_context: None,
                 calendar_event: None,

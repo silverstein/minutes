@@ -101,6 +101,8 @@ impl CaptureMode {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RecordingMetadata {
     pub mode: CaptureMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -118,12 +120,22 @@ pub struct ProcessingStatus {
 }
 
 pub fn write_recording_metadata(mode: CaptureMode) -> std::io::Result<()> {
+    write_recording_metadata_with_context(mode, None)
+}
+
+pub fn write_recording_metadata_with_context(
+    mode: CaptureMode,
+    context_session_id: Option<&str>,
+) -> std::io::Result<()> {
     let path = recording_meta_path();
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
 
-    let metadata = RecordingMetadata { mode };
+    let metadata = RecordingMetadata {
+        mode,
+        context_session_id: context_session_id.map(str::to_string),
+    };
     let json = serde_json::to_string(&metadata)?;
     fs::write(path, json)
 }

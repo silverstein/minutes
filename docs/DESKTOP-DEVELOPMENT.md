@@ -171,3 +171,22 @@ When working in this repo:
 - prefer the built-in `--diagnose-hotkey` probe before speculating about
   Input Monitoring state
 - distinguish Screen Recording issues from Input Monitoring issues explicitly
+
+## Desktop Context Build Rules
+
+For meeting-adjacent desktop-context work, keep the platform and packaging
+contract explicit:
+
+- macOS-first implementation is acceptable; do not fake cross-platform parity
+- if you add a macOS-only helper or resource, compile or stage it from
+  `tauri/src-tauri/build.rs`
+- declare macOS-only bundled resources in
+  `tauri/src-tauri/tauri.macos.conf.json`, not the shared
+  `tauri/src-tauri/tauri.conf.json`
+- if the capability is feature-gated, keep the CLI and desktop app aligned on
+  `MINUTES_BUILD_FEATURES`
+- keep desktop context in `~/.minutes/context.db`; do not move meetings/memos
+  out of markdown or overload `graph.db` with raw desktop events
+
+That combination is what keeps a useful macOS-only slice from accidentally
+breaking Windows builds or local build scripts.

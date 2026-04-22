@@ -46,6 +46,41 @@ struct JsonEnvelope<T: Serialize> {
 }
 
 #[derive(Serialize)]
+struct ContextSummaryOutput {
+    session: Option<minutes_core::context_store::ContextSession>,
+    links: Vec<minutes_core::context_store::ContextLink>,
+    events: Vec<minutes_core::context_store::ContextEvent>,
+    top_apps: Vec<ContextCount>,
+    top_windows: Vec<ContextCount>,
+    window: ContextWindow,
+}
+
+#[derive(Serialize)]
+struct ContextSearchOutput {
+    results: Vec<minutes_core::context_store::ContextEvent>,
+}
+
+#[derive(Serialize)]
+struct ContextMomentOutput {
+    session: Option<minutes_core::context_store::ContextSession>,
+    links: Vec<minutes_core::context_store::ContextLink>,
+    events: Vec<minutes_core::context_store::ContextEvent>,
+    window: ContextWindow,
+}
+
+#[derive(Serialize)]
+struct ContextWindow {
+    start: String,
+    end: String,
+}
+
+#[derive(Serialize)]
+struct ContextCount {
+    name: String,
+    count: usize,
+}
+
+#[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 #[cfg(feature = "parakeet")]
 struct ParakeetHelperEnvelope<T: Serialize> {
@@ -669,6 +704,12 @@ enum Commands {
         actionable: bool,
     },
 
+    /// Query meeting-adjacent desktop context from the local sidecar store
+    Context {
+        #[command(subcommand)]
+        action: ContextAction,
+    },
+
     /// Import meetings from another app (e.g., Granola)
     Import {
         /// Source app: granola
@@ -856,6 +897,73 @@ enum AutoresearchAction {
         limit: usize,
 
         /// Print the full JSON listing to stdout
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum ContextAction {
+    /// Summarize desktop context for a session, artifact, or explicit time window
+    ActivitySummary {
+        /// Explicit context session id
+        #[arg(long)]
+        session: Option<String>,
+
+        /// Artifact path already linked to a context session
+        #[arg(long)]
+        path: Option<PathBuf>,
+
+        /// Window start (RFC3339 timestamp)
+        #[arg(long)]
+        start: Option<String>,
+
+        /// Window end (RFC3339 timestamp)
+        #[arg(long)]
+        end: Option<String>,
+
+        /// Output raw JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Search app/window/browser-title context events
+    Search {
+        /// Text query
+        query: String,
+
+        /// Maximum number of results
+        #[arg(short, long, default_value = "20")]
+        limit: usize,
+
+        /// Output raw JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Show the local rewind around a session, linked artifact, or timestamp
+    GetMoment {
+        /// Explicit context session id
+        #[arg(long)]
+        session: Option<String>,
+
+        /// Linked artifact path
+        #[arg(long)]
+        path: Option<PathBuf>,
+
+        /// Explicit timestamp (RFC3339)
+        #[arg(long)]
+        at: Option<String>,
+
+        /// Minutes before the anchor
+        #[arg(long, default_value = "10")]
+        before_minutes: i64,
+
+        /// Minutes after the anchor
+        #[arg(long, default_value = "10")]
+        after_minutes: i64,
+
+        /// Output raw JSON
         #[arg(long)]
         json: bool,
     },
@@ -1190,6 +1298,7 @@ fn main() -> Result<()> {
             limit,
             actionable,
         } => cmd_insights(kind, confidence, participant, since, limit, actionable),
+        Commands::Context { action } => cmd_context(action),
         Commands::Import { from, dir, dry_run } => {
             cmd_import(&from, dir.as_deref(), dry_run, &config)
         }
@@ -1446,9 +1555,24 @@ fn cmd_record(
     }
 
     // Check if already recording
-    minutes_core::pid::create().map_err(|e| anyhow::anyhow!("{}", e))?;
-    minutes_core::pid::write_recording_metadata(capture_mode).ok();
     let recording_started_at = Local::now();
+    minutes_core::pid::create().map_err(|e| anyhow::anyhow!("{}", e))?;
+    let context_session_id = match minutes_core::context_store::start_capture_session(
+        capture_mode,
+        title.clone(),
+        recording_started_at,
+    ) {
+        Ok(session) => Some(session.id),
+        Err(error) => {
+            tracing::warn!(error = %error, "failed to create context session for recording");
+            None
+        }
+    };
+    minutes_core::pid::write_recording_metadata_with_context(
+        capture_mode,
+        context_session_id.as_deref(),
+    )
+    .ok();
 
     // Save recording start time (for timestamping notes)
     minutes_core::notes::save_recording_start()?;
@@ -1513,6 +1637,7 @@ fn cmd_record(
             pre_context,
             Some(recording_started_at),
             Some(recording_finished_at),
+            context_session_id.clone(),
             calendar_event,
         )?;
 
@@ -1539,6 +1664,23 @@ fn cmd_record(
         spawn_queue_worker()?;
         Ok((job, queued_result))
     })();
+
+    if let Err(error) = &queued {
+        if let Some(session_id) = context_session_id.as_deref() {
+            if let Err(mark_error) = minutes_core::context_store::mark_capture_session_failed(
+                session_id,
+                Some(recording_finished_at),
+                &error.to_string(),
+                None,
+            ) {
+                tracing::warn!(
+                    session_id,
+                    error = %mark_error,
+                    "failed to mark context session after queue error"
+                );
+            }
+        }
+    }
 
     cleanup_live_capture_state();
 
@@ -4879,6 +5021,282 @@ fn cmd_insights(
     Ok(())
 }
 
+fn cmd_context(action: ContextAction) -> Result<()> {
+    match action {
+        ContextAction::ActivitySummary {
+            session,
+            path,
+            start,
+            end,
+            json,
+        } => cmd_context_activity_summary(
+            session.as_deref(),
+            path.as_deref(),
+            start.as_deref(),
+            end.as_deref(),
+            json,
+        ),
+        ContextAction::Search { query, limit, json } => cmd_context_search(&query, limit, json),
+        ContextAction::GetMoment {
+            session,
+            path,
+            at,
+            before_minutes,
+            after_minutes,
+            json,
+        } => cmd_context_get_moment(
+            session.as_deref(),
+            path.as_deref(),
+            at.as_deref(),
+            before_minutes,
+            after_minutes,
+            json,
+        ),
+    }
+}
+
+fn parse_rfc3339_local(raw: &str) -> Result<chrono::DateTime<Local>> {
+    let parsed = chrono::DateTime::parse_from_rfc3339(raw)?;
+    Ok(parsed.with_timezone(&Local))
+}
+
+fn resolve_context_session(
+    session: Option<&str>,
+    path: Option<&Path>,
+) -> Result<Option<minutes_core::context_store::ContextSession>> {
+    if let Some(session_id) = session {
+        return Ok(minutes_core::context_store::get_session(session_id)?);
+    }
+    if let Some(path) = path {
+        let canonical = path
+            .canonicalize()
+            .unwrap_or_else(|_| path.to_path_buf())
+            .display()
+            .to_string();
+        if let Some(session) = minutes_core::context_store::get_session_for_artifact(&canonical)? {
+            return Ok(Some(session));
+        }
+        let original = path.display().to_string();
+        return Ok(minutes_core::context_store::get_session_for_artifact(
+            &original,
+        )?);
+    }
+    Ok(None)
+}
+
+fn summarize_counts(values: impl Iterator<Item = Option<String>>) -> Vec<ContextCount> {
+    let mut counts = std::collections::HashMap::<String, usize>::new();
+    for value in values.flatten() {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        *counts.entry(trimmed.to_string()).or_insert(0) += 1;
+    }
+    let mut pairs = counts
+        .into_iter()
+        .map(|(name, count)| ContextCount { name, count })
+        .collect::<Vec<_>>();
+    pairs.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.name.cmp(&b.name)));
+    pairs.truncate(10);
+    pairs
+}
+
+fn cmd_context_activity_summary(
+    session: Option<&str>,
+    path: Option<&Path>,
+    start: Option<&str>,
+    end: Option<&str>,
+    json: bool,
+) -> Result<()> {
+    let resolved_session = resolve_context_session(session, path)?;
+
+    let (events, links, window_start, window_end) = if let Some(session_row) = &resolved_session {
+        let events =
+            minutes_core::context_store::list_events_for_session(&session_row.id, None, None)?;
+        let links = minutes_core::context_store::list_links_for_session(&session_row.id)?;
+        let start = session_row.started_at;
+        let end = session_row.ended_at.unwrap_or_else(Local::now);
+        (events, links, start, end)
+    } else {
+        let start_dt = start.map(parse_rfc3339_local).transpose()?.ok_or_else(|| {
+            anyhow::anyhow!("provide --session, --path, or both --start and --end")
+        })?;
+        let end_dt = end.map(parse_rfc3339_local).transpose()?.ok_or_else(|| {
+            anyhow::anyhow!("provide --session, --path, or both --start and --end")
+        })?;
+        let events = minutes_core::context_store::list_events_in_window(start_dt, end_dt)?;
+        (events, vec![], start_dt, end_dt)
+    };
+
+    let output = ContextSummaryOutput {
+        session: resolved_session,
+        links,
+        top_apps: summarize_counts(events.iter().map(|e| e.app_name.clone())),
+        top_windows: summarize_counts(events.iter().map(|e| e.window_title.clone())),
+        events,
+        window: ContextWindow {
+            start: window_start.to_rfc3339(),
+            end: window_end.to_rfc3339(),
+        },
+    };
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&output)?);
+        return Ok(());
+    }
+
+    eprintln!(
+        "Desktop context summary: {} → {}",
+        output.window.start, output.window.end
+    );
+    if let Some(session_row) = &output.session {
+        eprintln!(
+            "  session: {} [{} / {}]",
+            session_row.id,
+            serde_json::to_string(&session_row.session_type)?,
+            serde_json::to_string(&session_row.state)?
+        );
+    }
+    if !output.top_apps.is_empty() {
+        eprintln!(
+            "  top apps: {}",
+            output
+                .top_apps
+                .iter()
+                .map(|entry| format!("{} ({})", entry.name, entry.count))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    if !output.top_windows.is_empty() {
+        eprintln!(
+            "  top windows: {}",
+            output
+                .top_windows
+                .iter()
+                .map(|entry| format!("{} ({})", entry.name, entry.count))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    println!("{}", serde_json::to_string_pretty(&output)?);
+    Ok(())
+}
+
+fn cmd_context_search(query: &str, limit: usize, json: bool) -> Result<()> {
+    let results = minutes_core::context_store::search_events(query, limit)?;
+    let output = ContextSearchOutput { results };
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&output)?);
+        return Ok(());
+    }
+
+    if output.results.is_empty() {
+        eprintln!("No desktop-context events found for \"{}\".", query);
+        println!("{}", serde_json::to_string_pretty(&output)?);
+        return Ok(());
+    }
+
+    eprintln!("Desktop-context matches for \"{}\":", query);
+    for event in &output.results {
+        eprintln!(
+            "  {} — {}{}{}",
+            event.observed_at.to_rfc3339(),
+            event
+                .app_name
+                .as_deref()
+                .or(event.bundle_id.as_deref())
+                .unwrap_or("unknown"),
+            event
+                .window_title
+                .as_deref()
+                .map(|title| format!(" :: {}", title))
+                .unwrap_or_default(),
+            event
+                .url
+                .as_deref()
+                .map(|url| format!(" <{}>", url))
+                .unwrap_or_default()
+        );
+    }
+    println!("{}", serde_json::to_string_pretty(&output)?);
+    Ok(())
+}
+
+fn cmd_context_get_moment(
+    session: Option<&str>,
+    path: Option<&Path>,
+    at: Option<&str>,
+    before_minutes: i64,
+    after_minutes: i64,
+    json: bool,
+) -> Result<()> {
+    let resolved_session = resolve_context_session(session, path)?;
+    let anchor = if let Some(session_row) = &resolved_session {
+        session_row.started_at
+    } else if let Some(raw) = at {
+        parse_rfc3339_local(raw)?
+    } else {
+        anyhow::bail!("provide --session, --path, or --at");
+    };
+
+    let window_start = anchor - chrono::Duration::minutes(before_minutes);
+    let window_end = anchor + chrono::Duration::minutes(after_minutes);
+    let events = if let Some(session_row) = &resolved_session {
+        minutes_core::context_store::list_events_for_session(
+            &session_row.id,
+            Some(window_start),
+            Some(window_end),
+        )?
+    } else {
+        minutes_core::context_store::list_events_in_window(window_start, window_end)?
+    };
+    let links = if let Some(session_row) = &resolved_session {
+        minutes_core::context_store::list_links_for_session(&session_row.id)?
+    } else {
+        vec![]
+    };
+
+    let output = ContextMomentOutput {
+        session: resolved_session,
+        links,
+        events,
+        window: ContextWindow {
+            start: window_start.to_rfc3339(),
+            end: window_end.to_rfc3339(),
+        },
+    };
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&output)?);
+        return Ok(());
+    }
+
+    eprintln!(
+        "Desktop-context moment window: {} → {}",
+        output.window.start, output.window.end
+    );
+    if let Some(session_row) = &output.session {
+        eprintln!("  session: {}", session_row.id);
+    }
+    for event in &output.events {
+        eprintln!(
+            "  {} — {}{}",
+            event.observed_at.to_rfc3339(),
+            event.app_name.as_deref().unwrap_or("unknown"),
+            event
+                .window_title
+                .as_deref()
+                .map(|title| format!(" :: {}", title))
+                .unwrap_or_default()
+        );
+    }
+    println!("{}", serde_json::to_string_pretty(&output)?);
+    Ok(())
+}
+
 // ── Import ──────────────────────────────────────────────────
 
 fn cmd_import(from: &str, dir: Option<&Path>, dry_run: bool, config: &Config) -> Result<()> {
@@ -6009,7 +6427,7 @@ fn cmd_live(config: &Config) -> Result<()> {
 
     // No sentinel watcher needed — run_inner already polls check_and_clear_sentinel
     // directly in its main loop, avoiding the thread-join and double-consume race.
-    match minutes_core::live_transcript::run(stop, config) {
+    match minutes_core::live_transcript::run(stop, config, None) {
         Ok((lines, duration, path)) => {
             eprintln!("\nLive transcript complete:");
             eprintln!("  {} utterances in {:.0}s", lines, duration);

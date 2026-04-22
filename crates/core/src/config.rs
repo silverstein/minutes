@@ -23,6 +23,7 @@ pub struct Config {
     pub assistant: AssistantConfig,
     pub privacy: PrivacyConfig,
     pub screen_context: ScreenContextConfig,
+    pub desktop_context: DesktopContextConfig,
     pub calendar: CalendarConfig,
     pub call_detection: CallDetectionConfig,
     pub identity: IdentityConfig,
@@ -223,6 +224,18 @@ pub struct ScreenContextConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
+pub struct DesktopContextConfig {
+    pub enabled: bool,
+    pub capture_window_titles: bool,
+    pub capture_browser_context: bool,
+    pub allowed_apps: Vec<String>,
+    pub denied_apps: Vec<String>,
+    pub allowed_domains: Vec<String>,
+    pub denied_domains: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct PrivacyConfig {
     pub hide_from_screen_share: bool,
 }
@@ -250,6 +263,20 @@ impl Default for PrivacyConfig {
     fn default() -> Self {
         Self {
             hide_from_screen_share: true,
+        }
+    }
+}
+
+impl Default for DesktopContextConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            capture_window_titles: true,
+            capture_browser_context: false,
+            allowed_apps: vec![],
+            denied_apps: vec![],
+            allowed_domains: vec![],
+            denied_domains: vec![],
         }
     }
 }
@@ -608,6 +635,7 @@ impl Default for Config {
             assistant: AssistantConfig::default(),
             privacy: PrivacyConfig::default(),
             screen_context: ScreenContextConfig::default(),
+            desktop_context: DesktopContextConfig::default(),
             calendar: CalendarConfig::default(),
             call_detection: CallDetectionConfig::default(),
             identity: IdentityConfig::default(),

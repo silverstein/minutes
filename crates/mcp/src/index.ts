@@ -12,6 +12,9 @@
  *   - get_meeting: Get full transcript of a specific meeting
  *   - process_audio: Process an audio file through the pipeline
  *   - add_note: Add a timestamped note to a recording or meeting
+ *   - activity_summary: Summarize meeting-adjacent desktop context for a session/path/window
+ *   - search_context: Search app/window/browser-title desktop context
+ *   - get_moment: Show the local rewind around a linked artifact, session, or timestamp
  *   - consistency_report: Flag conflicting decisions and stale commitments
  *   - get_person_profile: Rich relationship profile for a person (graph index)
  *   - track_commitments: List open/stale commitments, filter by person
@@ -1401,6 +1404,150 @@ registerDocsAppTool(
       content: [{ type: "text" as const, text }],
       structuredContent: { meetings, actions: [], view: "dashboard" },
       _meta: { ui: { resourceUri: UI_RESOURCE_URI }, view: "dashboard" },
+    };
+  }
+);
+
+// ── Tool: activity_summary ──────────────────────────────────
+
+registerDocsAppTool(
+  server,
+  "activity_summary",
+  {
+    description: "Summarize meeting-adjacent desktop context for a linked artifact, context session, or explicit time window.",
+    inputSchema: {
+      session_id: z.string().optional().describe("Explicit desktop-context session id"),
+      path: z.string().optional().describe("Linked artifact path, such as a meeting markdown file or live transcript JSONL"),
+      start: z.string().optional().describe("Window start (RFC3339); use with end when no session/path is provided"),
+      end: z.string().optional().describe("Window end (RFC3339); use with start when no session/path is provided"),
+    },
+    annotations: { title: "Activity Summary", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    _meta: { ui: { resourceUri: UI_RESOURCE_URI } },
+  },
+  async ({ session_id, path, start, end }) => {
+    if (!(await isCliAvailable())) {
+      return { content: [{ type: "text" as const, text: `Desktop-context summaries require the full CLI.\n\n${CLI_INSTALL_MSG}` }] };
+    }
+
+    const args = ["context", "activity-summary", "--json"];
+    if (session_id) args.push("--session", session_id);
+    if (path) args.push("--path", path);
+    if (start) args.push("--start", start);
+    if (end) args.push("--end", end);
+
+    const { stdout, stderr } = await runMinutes(args);
+    const parsed = parseJsonOutput(stdout);
+    if (!parsed || typeof parsed !== "object") {
+      return { content: [{ type: "text" as const, text: stderr || stdout }] };
+    }
+
+    const apps = Array.isArray((parsed as any).top_apps) ? (parsed as any).top_apps : [];
+    const windows = Array.isArray((parsed as any).top_windows) ? (parsed as any).top_windows : [];
+    const events = Array.isArray((parsed as any).events) ? (parsed as any).events : [];
+    const lines = [
+      `Desktop context summary: ${(parsed as any).window?.start || "?"} -> ${(parsed as any).window?.end || "?"}`,
+      apps.length ? `Top apps: ${apps.map((entry: any) => `${entry.name} (${entry.count})`).join(", ")}` : "",
+      windows.length ? `Top windows: ${windows.map((entry: any) => `${entry.name} (${entry.count})`).join(", ")}` : "",
+      events.length ? `Events: ${events.length}` : "Events: 0",
+    ].filter(Boolean);
+
+    return {
+      content: [{ type: "text" as const, text: lines.join("\n") }],
+      structuredContent: { ...(parsed as any), kind: "activity_summary", view: "context" },
+      _meta: { ui: { resourceUri: UI_RESOURCE_URI }, view: "context", kind: "activity_summary" },
+    };
+  }
+);
+
+// ── Tool: search_context ────────────────────────────────────
+
+registerDocsAppTool(
+  server,
+  "search_context",
+  {
+    description: "Search desktop-context events across app focus, window titles, and browser-title context.",
+    inputSchema: {
+      query: z.string().describe("Text query for app names, bundle ids, window titles, URLs, or domains"),
+      limit: z.number().optional().default(20).describe("Maximum results"),
+    },
+    annotations: { title: "Search Context", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    _meta: { ui: { resourceUri: UI_RESOURCE_URI } },
+  },
+  async ({ query, limit }) => {
+    if (!(await isCliAvailable())) {
+      return { content: [{ type: "text" as const, text: `Desktop-context search requires the full CLI.\n\n${CLI_INSTALL_MSG}` }] };
+    }
+
+    const { stdout, stderr } = await runMinutes(["context", "search", query, "--limit", String(limit), "--json"]);
+    const parsed = parseJsonOutput(stdout);
+    if (!parsed || typeof parsed !== "object") {
+      return { content: [{ type: "text" as const, text: stderr || stdout }] };
+    }
+
+    const results = Array.isArray((parsed as any).results) ? (parsed as any).results : [];
+    const text = results.length === 0
+      ? `No desktop-context events found for "${query}".`
+      : results
+          .map(
+            (event: any) =>
+              `${event.observed_at} — ${event.app_name || event.bundle_id || "unknown"}${event.window_title ? ` :: ${event.window_title}` : ""}${event.url ? ` <${event.url}>` : ""}`
+          )
+          .join("\n");
+
+    return {
+      content: [{ type: "text" as const, text }],
+      structuredContent: { query, results, view: "context", kind: "search_context" },
+      _meta: { ui: { resourceUri: UI_RESOURCE_URI }, view: "context", kind: "search_context" },
+    };
+  }
+);
+
+// ── Tool: get_moment ────────────────────────────────────────
+
+registerDocsAppTool(
+  server,
+  "get_moment",
+  {
+    description: "Show the local rewind around a linked artifact, context session, or explicit timestamp.",
+    inputSchema: {
+      session_id: z.string().optional().describe("Explicit desktop-context session id"),
+      path: z.string().optional().describe("Linked artifact path, such as a meeting markdown file or live transcript JSONL"),
+      at: z.string().optional().describe("Explicit anchor timestamp (RFC3339)"),
+      before_minutes: z.number().optional().default(10).describe("Minutes before the anchor"),
+      after_minutes: z.number().optional().default(10).describe("Minutes after the anchor"),
+    },
+    annotations: { title: "Get Moment", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    _meta: { ui: { resourceUri: UI_RESOURCE_URI } },
+  },
+  async ({ session_id, path, at, before_minutes, after_minutes }) => {
+    if (!(await isCliAvailable())) {
+      return { content: [{ type: "text" as const, text: `Desktop-context rewind requires the full CLI.\n\n${CLI_INSTALL_MSG}` }] };
+    }
+
+    const args = ["context", "get-moment", "--json", "--before-minutes", String(before_minutes), "--after-minutes", String(after_minutes)];
+    if (session_id) args.push("--session", session_id);
+    if (path) args.push("--path", path);
+    if (at) args.push("--at", at);
+
+    const { stdout, stderr } = await runMinutes(args);
+    const parsed = parseJsonOutput(stdout);
+    if (!parsed || typeof parsed !== "object") {
+      return { content: [{ type: "text" as const, text: stderr || stdout }] };
+    }
+
+    const events = Array.isArray((parsed as any).events) ? (parsed as any).events : [];
+    const text = [
+      `Moment window: ${(parsed as any).window?.start || "?"} -> ${(parsed as any).window?.end || "?"}`,
+      ...events.map(
+        (event: any) =>
+          `${event.observed_at} — ${event.app_name || event.bundle_id || "unknown"}${event.window_title ? ` :: ${event.window_title}` : ""}`
+      ),
+    ].join("\n");
+
+    return {
+      content: [{ type: "text" as const, text }],
+      structuredContent: { ...(parsed as any), view: "context", kind: "get_moment" },
+      _meta: { ui: { resourceUri: UI_RESOURCE_URI }, view: "context", kind: "get_moment" },
     };
   }
 );

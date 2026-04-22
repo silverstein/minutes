@@ -1686,6 +1686,17 @@ fn start_native_call_recording(
     };
     let output_path = session.output_path().to_path_buf();
     let recording_started_at = chrono::Local::now();
+    let context_session_id = match minutes_core::context_store::start_capture_session(
+        mode,
+        requested_title.clone(),
+        recording_started_at,
+    ) {
+        Ok(session) => Some(session.id),
+        Err(error) => {
+            tracing::warn!(error = %error, mode = ?mode, "failed to create context session for native recording");
+            None
+        }
+    };
 
     starting.store(false, Ordering::Relaxed);
     recording.store(true, Ordering::Relaxed);
@@ -1695,7 +1706,8 @@ fn start_native_call_recording(
     if let Ok(mut health) = call_capture_health.lock() {
         *health = Some(session.source_health());
     }
-    minutes_core::pid::write_recording_metadata(mode).ok();
+    minutes_core::pid::write_recording_metadata_with_context(mode, context_session_id.as_deref())
+        .ok();
     crate::update_tray_state(app_handle, true);
     minutes_core::notes::save_recording_start().ok();
 
@@ -1703,6 +1715,21 @@ fn start_native_call_recording(
         "[minutes] Native call capture started: {}",
         output_path.display()
     );
+
+    #[cfg(target_os = "macos")]
+    let _desktop_context_collector = context_session_id.as_ref().and_then(|session_id| {
+        match crate::desktop_context::DesktopContextCollector::start(
+            session_id.clone(),
+            crate::desktop_context::DesktopContextSessionKind::Recording,
+            config.desktop_context.clone(),
+        ) {
+            Ok(collector) => Some(collector),
+            Err(error) => {
+                tracing::warn!(error = %error, mode = ?mode, "desktop context collector unavailable for native call recording");
+                None
+            }
+        }
+    });
 
     while !stop_flag.load(Ordering::Relaxed) {
         std::thread::sleep(Duration::from_millis(100));
@@ -1715,6 +1742,15 @@ fn start_native_call_recording(
         if let Some(status) = session.try_wait()? {
             if !status.success() {
                 let preserved = preserve_failed_capture_path(&output_path, config);
+                if let Some(session_id) = context_session_id.as_deref() {
+                    minutes_core::context_store::mark_capture_session_failed(
+                        session_id,
+                        Some(chrono::Local::now()),
+                        "native call capture exited early",
+                        preserved.as_deref(),
+                    )
+                    .ok();
+                }
                 minutes_core::pid::remove().ok();
                 minutes_core::pid::clear_recording_metadata().ok();
                 minutes_core::notes::cleanup();
@@ -1748,6 +1784,15 @@ fn start_native_call_recording(
 
     if let Err(error) = session.stop() {
         let preserved = preserve_failed_capture_path(&output_path, config);
+        if let Some(session_id) = context_session_id.as_deref() {
+            minutes_core::context_store::mark_capture_session_failed(
+                session_id,
+                Some(chrono::Local::now()),
+                &format!("stopping native call capture failed: {}", error),
+                preserved.as_deref(),
+            )
+            .ok();
+        }
         minutes_core::notes::cleanup();
         minutes_core::pid::remove().ok();
         minutes_core::pid::clear_recording_metadata().ok();
@@ -1788,6 +1833,13 @@ fn start_native_call_recording(
         if output_path.exists() {
             std::fs::remove_file(&output_path).ok();
         }
+        if let Some(session_id) = context_session_id.as_deref() {
+            minutes_core::context_store::mark_capture_session_discarded(
+                session_id,
+                Some(chrono::Local::now()),
+            )
+            .ok();
+        }
         minutes_core::notes::cleanup();
         minutes_core::pid::remove().ok();
         minutes_core::pid::clear_recording_metadata().ok();
@@ -1814,6 +1866,7 @@ fn start_native_call_recording(
         pre_context,
         Some(recording_started_at),
         Some(recording_finished_at),
+        context_session_id.clone(),
         calendar_event,
     ) {
         Ok(job) => {
@@ -1845,6 +1898,15 @@ fn start_native_call_recording(
         }
         Err(error) => {
             let preserved = preserve_failed_capture_path(&output_path, config);
+            if let Some(session_id) = context_session_id.as_deref() {
+                minutes_core::context_store::mark_capture_session_failed(
+                    session_id,
+                    Some(recording_finished_at),
+                    &format!("failed to queue native call capture: {}", error),
+                    preserved.as_deref(),
+                )
+                .ok();
+            }
             minutes_core::notes::cleanup();
             minutes_core::pid::remove().ok();
             minutes_core::pid::clear_recording_metadata().ok();
@@ -3393,7 +3455,19 @@ pub fn start_recording(
     stop_flag.store(false, Ordering::Relaxed);
     sync_processing_indicator(&processing, &processing_stage);
     set_latest_output(&latest_output, None);
-    minutes_core::pid::write_recording_metadata(mode).ok();
+    let context_session_id = match minutes_core::context_store::start_capture_session(
+        mode,
+        requested_title.clone(),
+        recording_started_at,
+    ) {
+        Ok(session) => Some(session.id),
+        Err(error) => {
+            tracing::warn!(error = %error, mode = ?mode, "failed to create context session for recording");
+            None
+        }
+    };
+    minutes_core::pid::write_recording_metadata_with_context(mode, context_session_id.as_deref())
+        .ok();
     crate::update_tray_state(&app_handle, true);
 
     minutes_core::notes::save_recording_start().ok();
@@ -3404,6 +3478,21 @@ pub fn start_recording(
     if let Ok(workspace) = crate::context::create_workspace(&config) {
         update_assistant_live_context(&workspace, true);
     }
+
+    #[cfg(target_os = "macos")]
+    let _desktop_context_collector = context_session_id.as_ref().and_then(|session_id| {
+        match crate::desktop_context::DesktopContextCollector::start(
+            session_id.clone(),
+            crate::desktop_context::DesktopContextSessionKind::Recording,
+            config.desktop_context.clone(),
+        ) {
+            Ok(collector) => Some(collector),
+            Err(error) => {
+                tracing::warn!(error = %error, mode = ?mode, "desktop context collector unavailable for recording session");
+                None
+            }
+        }
+    });
 
     let mut clear_processing_on_exit = true;
     match minutes_core::capture::record_to_wav(&wav_path, stop_flag, &config) {
@@ -3416,6 +3505,13 @@ pub fn start_recording(
             if should_discard {
                 if wav_path.exists() {
                     std::fs::remove_file(&wav_path).ok();
+                }
+                if let Some(session_id) = context_session_id.as_deref() {
+                    minutes_core::context_store::mark_capture_session_discarded(
+                        session_id,
+                        Some(chrono::Local::now()),
+                    )
+                    .ok();
                 }
                 eprintln!("Discarded short {} capture.", mode.noun());
             } else {
@@ -3434,6 +3530,7 @@ pub fn start_recording(
                     pre_context,
                     Some(recording_started_at),
                     Some(recording_finished_at),
+                    context_session_id.clone(),
                     calendar_event,
                 ) {
                     Ok(job) => {
@@ -3461,7 +3558,17 @@ pub fn start_recording(
                         );
                     }
                     Err(e) => {
-                        if let Some(saved) = preserve_failed_capture(&wav_path, &config) {
+                        let preserved = preserve_failed_capture(&wav_path, &config);
+                        if let Some(session_id) = context_session_id.as_deref() {
+                            minutes_core::context_store::mark_capture_session_failed(
+                                session_id,
+                                Some(recording_finished_at),
+                                &format!("failed to queue capture for processing: {}", e),
+                                preserved.as_deref(),
+                            )
+                            .ok();
+                        }
+                        if let Some(saved) = preserved {
                             let notice = OutputNotice {
                                 kind: "preserved-capture".into(),
                                 title: "Raw capture preserved".into(),
@@ -3491,7 +3598,17 @@ pub fn start_recording(
         }
         Err(e) => {
             recording.store(false, Ordering::Relaxed);
-            if let Some(saved) = preserve_failed_capture(&wav_path, &config) {
+            let preserved = preserve_failed_capture(&wav_path, &config);
+            if let Some(session_id) = context_session_id.as_deref() {
+                minutes_core::context_store::mark_capture_session_failed(
+                    session_id,
+                    Some(chrono::Local::now()),
+                    &e.to_string(),
+                    preserved.as_deref(),
+                )
+                .ok();
+            }
+            if let Some(saved) = preserved {
                 let detail = match mode {
                     CaptureMode::Meeting => {
                         "Recording failed before processing, but the captured meeting audio was preserved."
@@ -5712,6 +5829,25 @@ pub fn cmd_terminal_info(state: tauri::State<AppState>, session_id: String) -> T
 pub fn cmd_get_settings() -> serde_json::Value {
     let config = Config::load();
     let path = Config::config_path();
+    let recording_status = minutes_core::pid::status();
+    let live_status = minutes_core::live_transcript::session_status();
+    #[cfg(target_os = "macos")]
+    let accessibility_trusted = minutes_core::hotkey_macos::is_accessibility_trusted();
+    #[cfg(not(target_os = "macos"))]
+    let accessibility_trusted = false;
+    let desktop_context_filtered = !config.desktop_context.denied_apps.is_empty()
+        || !config.desktop_context.allowed_apps.is_empty()
+        || !config.desktop_context.allowed_domains.is_empty()
+        || !config.desktop_context.denied_domains.is_empty();
+    let desktop_context_limited =
+        config.desktop_context.capture_window_titles && !accessibility_trusted;
+    let desktop_context_state = if !config.desktop_context.enabled {
+        "off"
+    } else if recording_status.recording || live_status.active {
+        "recording"
+    } else {
+        "idle"
+    };
 
     // Check env vars for API key status
     let anthropic_key_set = std::env::var("ANTHROPIC_API_KEY").is_ok();
@@ -5780,6 +5916,18 @@ pub fn cmd_get_settings() -> serde_json::Value {
             "enabled": config.screen_context.enabled,
             "interval_secs": config.screen_context.interval_secs,
             "keep_after_summary": config.screen_context.keep_after_summary,
+        },
+        "desktop_context": {
+            "enabled": config.desktop_context.enabled,
+            "capture_window_titles": config.desktop_context.capture_window_titles,
+            "capture_browser_context": config.desktop_context.capture_browser_context,
+            "allowed_apps": config.desktop_context.allowed_apps,
+            "denied_apps": config.desktop_context.denied_apps,
+            "allowed_domains": config.desktop_context.allowed_domains,
+            "denied_domains": config.desktop_context.denied_domains,
+            "state": desktop_context_state,
+            "filtered": desktop_context_filtered,
+            "limited": desktop_context_limited,
         },
         "privacy": {
             "hide_from_screen_share": config.privacy.hide_from_screen_share,
@@ -5922,6 +6070,29 @@ pub fn cmd_set_setting(section: String, key: String, value: String) -> Result<St
         }
         ("screen_context", "keep_after_summary") => {
             config.screen_context.keep_after_summary = value == "true";
+        }
+
+        // Desktop context
+        ("desktop_context", "enabled") => {
+            config.desktop_context.enabled = value == "true";
+        }
+        ("desktop_context", "capture_window_titles") => {
+            config.desktop_context.capture_window_titles = value == "true";
+        }
+        ("desktop_context", "capture_browser_context") => {
+            config.desktop_context.capture_browser_context = value == "true";
+        }
+        ("desktop_context", "allowed_apps") => {
+            config.desktop_context.allowed_apps = parse_comma_separated_setting(&value);
+        }
+        ("desktop_context", "denied_apps") => {
+            config.desktop_context.denied_apps = parse_comma_separated_setting(&value);
+        }
+        ("desktop_context", "allowed_domains") => {
+            config.desktop_context.allowed_domains = parse_comma_separated_setting(&value);
+        }
+        ("desktop_context", "denied_domains") => {
+            config.desktop_context.denied_domains = parse_comma_separated_setting(&value);
         }
 
         // Assistant
@@ -7128,6 +7299,7 @@ mod tests {
             finished_at: Some(chrono::Local::now()),
             recording_started_at: None,
             recording_finished_at: None,
+            context_session_id: None,
             user_notes: None,
             pre_context: None,
             calendar_event: None,
@@ -7529,9 +7701,38 @@ fn run_live_session(app: tauri::AppHandle, active: Arc<AtomicBool>, stop_flag: A
         update_assistant_live_context(&workspace, true);
     }
 
+    let live_context_session_id = match minutes_core::context_store::start_live_transcript_session(
+        chrono::Local::now(),
+    ) {
+        Ok(session) => Some(session.id),
+        Err(error) => {
+            tracing::warn!(error = %error, "failed to create context session for live transcript");
+            None
+        }
+    };
+
+    #[cfg(target_os = "macos")]
+    let _desktop_context_collector = live_context_session_id.as_ref().and_then(|session_id| {
+        match crate::desktop_context::DesktopContextCollector::start(
+            session_id.clone(),
+            crate::desktop_context::DesktopContextSessionKind::LiveTranscript,
+            config.desktop_context.clone(),
+        ) {
+            Ok(collector) => Some(collector),
+            Err(error) => {
+                tracing::warn!(error = %error, "desktop context collector unavailable for live transcript session");
+                None
+            }
+        }
+    });
+
     crate::update_tray_state_with_mode(&app, true, true);
 
-    let result = minutes_core::live_transcript::run(stop_flag.clone(), &config);
+    let result = minutes_core::live_transcript::run(
+        stop_flag.clone(),
+        &config,
+        live_context_session_id.clone(),
+    );
 
     stop_flag.store(false, Ordering::Relaxed);
 

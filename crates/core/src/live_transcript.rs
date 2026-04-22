@@ -9,6 +9,7 @@ use crate::vad::Vad;
 use crate::vad::VadResult;
 use chrono::{DateTime, Local};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -168,6 +169,8 @@ pub struct SessionStatus {
     pub pid: Option<u32>,
     pub line_count: usize,
     pub duration_secs: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
     pub jsonl_path: Option<String>,
     /// How the transcript is being produced (standalone or recording sidecar).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -179,6 +182,7 @@ pub struct SessionStatus {
 
 /// Manages writing the JSONL and optional WAV file during a live session.
 struct LiveTranscriptWriter {
+    session_id: Option<String>,
     jsonl_writer: BufWriter<File>,
     wav_writer: Option<hound::WavWriter<BufWriter<File>>>,
     line_count: usize,
@@ -210,6 +214,8 @@ pub struct LiveStatus {
     pub last_offset_ms: u64,
     pub last_duration_ms: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diagnostic: Option<String>,
 }
 
@@ -218,7 +224,7 @@ const SIDECAR_HEALTH_STALE_AFTER_SECS: i64 = 3;
 const SIDECAR_STARTUP_TIMEOUT_SECS: i64 = 10;
 
 impl LiveTranscriptWriter {
-    fn new(config: &Config) -> Result<Self, MinutesError> {
+    fn new(config: &Config, session_id: Option<String>) -> Result<Self, MinutesError> {
         let jsonl_path = pid::live_transcript_jsonl_path();
         if let Some(parent) = jsonl_path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -256,6 +262,7 @@ impl LiveTranscriptWriter {
 
         let start_wall = Local::now();
         let writer = Self {
+            session_id,
             jsonl_writer,
             wav_writer,
             line_count: 0,
@@ -286,6 +293,7 @@ impl LiveTranscriptWriter {
             line_count: self.line_count,
             last_offset_ms: self.start_time.elapsed().as_millis() as u64,
             last_duration_ms,
+            session_id: self.session_id.clone(),
             diagnostic: diagnostic.map(str::to_string),
         };
         write_live_status(&status);
@@ -445,6 +453,7 @@ fn is_live_noise_marker(text: &str) -> bool {
 pub fn run(
     stop_flag: Arc<AtomicBool>,
     config: &Config,
+    existing_context_session_id: Option<String>,
 ) -> Result<(usize, f64, PathBuf), MinutesError> {
     // Check conflicts: recording must not be active
     if let Ok(Some(_)) = pid::check_recording() {
@@ -471,13 +480,55 @@ pub fn run(
 
     // Guard holds the flock — dropped when this function returns, cleaning up the PID file
     write_live_status_transition(LiveStatusState::Starting, None);
-    run_inner(stop_flag, config)
+    let context_session_id = if let Some(session_id) = existing_context_session_id {
+        Some(session_id)
+    } else {
+        match crate::context_store::start_live_transcript_session(Local::now()) {
+            Ok(session) => Some(session.id),
+            Err(error) => {
+                tracing::warn!(error = %error, "failed to create context session for live transcript");
+                None
+            }
+        }
+    };
+
+    match run_inner(stop_flag, config, context_session_id.clone()) {
+        Ok((lines, duration, path)) => {
+            if let Some(session_id) = context_session_id.as_deref() {
+                let wav_path = pid::live_transcript_wav_path();
+                crate::context_store::mark_live_transcript_complete(
+                    session_id,
+                    &path,
+                    wav_path.exists().then_some(wav_path.as_path()),
+                    Some(Local::now()),
+                    json!({
+                        "line_count": lines,
+                        "duration_secs": duration,
+                    }),
+                )
+                .ok();
+            }
+            Ok((lines, duration, path))
+        }
+        Err(error) => {
+            if let Some(session_id) = context_session_id.as_deref() {
+                crate::context_store::mark_live_transcript_failed(
+                    session_id,
+                    Some(Local::now()),
+                    &error.to_string(),
+                )
+                .ok();
+            }
+            Err(error)
+        }
+    }
 }
 
 #[cfg(feature = "whisper")]
 fn run_inner(
     stop_flag: Arc<AtomicBool>,
     config: &Config,
+    context_session_id: Option<String>,
 ) -> Result<(usize, f64, PathBuf), MinutesError> {
     // Load whisper model: use live_transcript.model if set, otherwise dictation.model
     let whisper_ctx = {
@@ -510,7 +561,7 @@ fn run_inner(
     };
 
     // Only now create the writer (which truncates the JSONL and WAV files)
-    let mut writer = LiveTranscriptWriter::new(config)?;
+    let mut writer = LiveTranscriptWriter::new(config, context_session_id)?;
     writer.mark_healthy();
 
     let mut vad = Vad::new();
@@ -1293,7 +1344,7 @@ fn run_sidecar_inner_mpsc(
 
     let mut sidecar_config = config.clone();
     sidecar_config.live_transcript.save_wav = false;
-    let mut writer = LiveTranscriptWriter::new(&sidecar_config)?;
+    let mut writer = LiveTranscriptWriter::new(&sidecar_config, None)?;
     writer.mark_healthy();
 
     let mut vad = RecordingSidecarVad::new(config);
@@ -1659,6 +1710,9 @@ fn derive_session_status(
         pid,
         line_count,
         duration_secs,
+        session_id: live_status
+            .as_ref()
+            .and_then(|status| status.session_id.clone()),
         jsonl_path: if jsonl_path.exists() {
             Some(jsonl_path.to_string_lossy().to_string())
         } else {
@@ -1695,6 +1749,7 @@ fn write_live_status_transition(state: LiveStatusState, diagnostic: Option<&str>
         line_count: existing.as_ref().map(|s| s.line_count).unwrap_or(0),
         last_offset_ms: existing.as_ref().map(|s| s.last_offset_ms).unwrap_or(0),
         last_duration_ms: existing.as_ref().map(|s| s.last_duration_ms).unwrap_or(0),
+        session_id: existing.as_ref().and_then(|s| s.session_id.clone()),
         diagnostic: diagnostic.map(str::to_string),
     };
     write_live_status(&status);
@@ -1816,6 +1871,7 @@ mod tests {
             line_count: 3,
             last_offset_ms: 1200,
             last_duration_ms: 400,
+            session_id: None,
             diagnostic: None,
         }
     }

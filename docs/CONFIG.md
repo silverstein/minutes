@@ -182,13 +182,38 @@ hotkey_keycode = 57   # Caps Lock (macOS) — requires Input Monitoring
 | `enabled` | `true` | Learn voices across recordings |
 | `match_threshold` | `0.65` | Cosine similarity cutoff for voice enrollment matching |
 
-### `[screen_context]` — ambient screenshots
+### `[screen_context]` — recording-time screenshots
 
 | key | default | meaning |
 |---|---|---|
 | `enabled` | `false` | Capture periodic screenshots during recording |
 | `interval_secs` | `30` | Seconds between captures |
 | `keep_after_summary` | `false` | Retain screenshots after summarization |
+
+This section is intentionally narrow:
+
+- it only affects screenshots during an active recording
+- it is off by default
+- it is not a general ambient desktop-capture mode
+
+### `[desktop_context]` — meeting-adjacent app/window context
+
+| key | default | meaning |
+|---|---|---|
+| `enabled` | `false` | Capture app/window context during recordings and live sessions |
+| `capture_window_titles` | `true` | Include focused window titles when macOS Accessibility is available |
+| `capture_browser_context` | `false` | Opt in to browser-page title context (URL/domain enrichment remains deferred) |
+| `allowed_apps` | `[]` | Optional allowlist of app or bundle-id fragments |
+| `denied_apps` | `[]` | Optional denylist of app or bundle-id fragments |
+| `allowed_domains` | `[]` | Reserved for future browser URL/domain enrichment policy |
+| `denied_domains` | `[]` | Reserved for future browser URL/domain enrichment policy |
+
+This section is the policy layer for meeting-adjacent desktop context:
+
+- it is off by default
+- it applies to recording/live-session context, not a 24/7 ambient mode
+- app filters are enforced today
+- domain lists are forward-compatible policy hooks for future browser URL enrichment
 
 ### `[search]` — search backend
 

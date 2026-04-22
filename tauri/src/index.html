@@ -3537,6 +3537,10 @@
       display: none;
     }
 
+    .is-deferred {
+      opacity: 0.55;
+    }
+
     .footer-hidden {
       display: none;
     }
@@ -4606,6 +4610,57 @@
         <div class="about-controls">
           <div class="about-controls-copy">Hide windows from screen sharing</div>
           <button class="btn btn-secondary btn-sm toggle-btn" id="settings-screen-share">On</button>
+        </div>
+        <div class="about-controls">
+          <div class="about-controls-group">
+            <div class="about-controls-copy">Meeting-adjacent desktop context</div>
+            <div class="about-controls-meta" id="settings-desktop-context-status">
+              Off. App/window context stays disabled until you turn it on.
+            </div>
+          </div>
+          <button class="btn btn-secondary btn-sm toggle-btn" id="settings-desktop-context">Off</button>
+        </div>
+        <div class="about-controls">
+          <div class="about-controls-group">
+            <div class="about-controls-copy">Focused window titles</div>
+            <div class="about-controls-meta">Uses macOS Accessibility when available. If denied, desktop context runs in a limited mode.</div>
+          </div>
+          <button class="btn btn-secondary btn-sm toggle-btn" id="settings-desktop-window-titles">Off</button>
+        </div>
+        <div class="about-controls">
+          <div class="about-controls-group">
+            <div class="about-controls-copy">Browser title context</div>
+            <div class="about-controls-meta">Opt-in browser-page titles only. URL/domain enrichment remains deferred and privacy-gated.</div>
+          </div>
+          <button class="btn btn-secondary btn-sm toggle-btn" id="settings-desktop-browser-context">Off</button>
+        </div>
+        <div class="about-controls">
+          <div class="about-controls-group">
+            <div class="about-controls-copy">Allowed apps</div>
+            <div class="about-controls-meta">Optional comma-separated allowlist. Leave empty to allow all apps except denied ones.</div>
+            <input type="text" id="settings-desktop-allowed-apps" placeholder="e.g. zoom.us, Arc, Safari" class="settings-field">
+          </div>
+        </div>
+        <div class="about-controls">
+          <div class="about-controls-group">
+            <div class="about-controls-copy">Denied apps</div>
+            <div class="about-controls-meta">Comma-separated app or bundle-id fragments to suppress from desktop context capture.</div>
+            <input type="text" id="settings-desktop-denied-apps" placeholder="e.g. 1password, Messages" class="settings-field">
+          </div>
+        </div>
+        <div class="about-controls is-deferred">
+          <div class="about-controls-group">
+            <div class="about-controls-copy">Allowed domains</div>
+            <div class="about-controls-meta">Reserved for future browser URL enrichment. Safe to leave empty for now.</div>
+            <input type="text" id="settings-desktop-allowed-domains" placeholder="e.g. docs.stripe.com, linear.app" class="settings-field">
+          </div>
+        </div>
+        <div class="about-controls is-deferred">
+          <div class="about-controls-group">
+            <div class="about-controls-copy">Denied domains</div>
+            <div class="about-controls-meta">Reserved for future browser URL enrichment. Useful to preconfigure sensitive sites.</div>
+            <input type="text" id="settings-desktop-denied-domains" placeholder="e.g. mail.google.com, bank.example" class="settings-field">
+          </div>
         </div>
         <div class="about-controls">
           <div class="about-controls-group">
@@ -7234,6 +7289,21 @@
           document.getElementById('settings-agent-command-status').textContent = sumAgents.find(a => a.name === currentCmd) ? 'Installed' : 'Custom command';
         } catch (e) { console.error('agent command picker:', e); }
         setSettingsToggle('settings-screen-share', Boolean(s.privacy?.hide_from_screen_share));
+        if (s.desktop_context) {
+          setSettingsToggle('settings-desktop-context', Boolean(s.desktop_context.enabled));
+          setSettingsToggle('settings-desktop-window-titles', s.desktop_context.capture_window_titles !== false);
+          setSettingsToggle('settings-desktop-browser-context', Boolean(s.desktop_context.capture_browser_context));
+          document.getElementById('settings-desktop-context-status').textContent =
+            desktopContextStateLabel(s.desktop_context.state, Boolean(s.desktop_context.filtered), Boolean(s.desktop_context.limited));
+          document.getElementById('settings-desktop-allowed-apps').value =
+            (s.desktop_context.allowed_apps || []).join(', ');
+          document.getElementById('settings-desktop-denied-apps').value =
+            (s.desktop_context.denied_apps || []).join(', ');
+          document.getElementById('settings-desktop-allowed-domains').value =
+            (s.desktop_context.allowed_domains || []).join(', ');
+          document.getElementById('settings-desktop-denied-domains').value =
+            (s.desktop_context.denied_domains || []).join(', ');
+        }
         setSettingsToggle('settings-screen-context', s.screen_context.enabled);
         document.getElementById('settings-screen-interval-row').classList.toggle('is-hidden', !s.screen_context.enabled);
         document.getElementById('settings-screen-interval').value = String(s.screen_context.interval_secs);
@@ -7404,6 +7474,24 @@
     });
 
     function setSettingsToggle(id, on) { const b = document.getElementById(id); b.textContent = on ? 'On' : 'Off'; b.style.opacity = on ? '1' : '0.5'; }
+    function desktopContextStateLabel(state, filtered = false, limited = false) {
+      if (state === 'recording') {
+        if (limited && filtered) return 'Active during a recording or live session. Limited by Accessibility availability and narrowed by app/domain filters.';
+        if (limited) return 'Active during a recording or live session. Limited because Accessibility-backed window titles are unavailable right now.';
+        if (filtered) return 'Active during a recording or live session. Filters are narrowing what is collected.';
+        return 'Active during a recording or live session.';
+      }
+      if (state === 'idle') {
+        if (limited && filtered) return 'Enabled. Currently limited by Accessibility availability and narrowed by app/domain filters.';
+        if (limited) return 'Enabled, but limited. Accessibility-backed window titles are unavailable right now.';
+        if (filtered) return 'Enabled and filtered. App/domain rules will narrow what gets collected.';
+        return 'Enabled. Desktop context will attach to the next recording or live session.';
+      }
+      if (limited && filtered) return 'Limited by Accessibility availability and narrowed by app/domain filters.';
+      if (limited) return 'Limited. Accessibility-backed window titles are unavailable right now.';
+      if (filtered) return 'Filtered. Capture is on, but app/domain rules are narrowing what is collected.';
+      return 'Off. App/window context stays disabled until you turn it on.';
+    }
     function assistantAgentPlaceholder(agent) {
       if (agent === 'claude') return 'e.g. --model sonnet';
       if (agent === 'codex') return 'e.g. --model gpt-5-codex';
@@ -7698,6 +7786,41 @@
       }
     });
     document.getElementById('settings-screen-interval').addEventListener('change', (e) => invoke('cmd_set_setting', { section: 'screen_context', key: 'interval_secs', value: e.target.value }));
+    async function refreshDesktopContextStatus() {
+      const s = await invoke('cmd_get_settings');
+      document.getElementById('settings-desktop-context-status').textContent =
+        desktopContextStateLabel(s.desktop_context?.state, Boolean(s.desktop_context?.filtered), Boolean(s.desktop_context?.limited));
+    }
+    function wireDesktopContextToggle(id, key, label) {
+      document.getElementById(id).addEventListener('click', async () => {
+        const btn = document.getElementById(id);
+        const currentlyOn = btn.textContent.trim() === 'On';
+        const next = !currentlyOn;
+        setSettingsToggle(id, next);
+        try {
+          await invoke('cmd_set_setting', { section: 'desktop_context', key, value: String(next) });
+          await refreshDesktopContextStatus();
+        } catch (e) {
+          setSettingsToggle(id, currentlyOn);
+          console.error(`desktop_context ${label}:`, e);
+        }
+      });
+    }
+    function wireDesktopContextList(id, key, label) {
+      document.getElementById(id).addEventListener('change', async (e) => {
+        try {
+          await invoke('cmd_set_setting', { section: 'desktop_context', key, value: e.target.value });
+          await refreshDesktopContextStatus();
+        } catch (err) { console.error(`desktop_context ${label}:`, err); }
+      });
+    }
+    wireDesktopContextToggle('settings-desktop-context', 'enabled', 'toggle');
+    wireDesktopContextToggle('settings-desktop-window-titles', 'capture_window_titles', 'window titles');
+    wireDesktopContextToggle('settings-desktop-browser-context', 'capture_browser_context', 'browser context');
+    wireDesktopContextList('settings-desktop-allowed-apps', 'allowed_apps', 'allowed apps');
+    wireDesktopContextList('settings-desktop-denied-apps', 'denied_apps', 'denied apps');
+    wireDesktopContextList('settings-desktop-allowed-domains', 'allowed_domains', 'allowed domains');
+    wireDesktopContextList('settings-desktop-denied-domains', 'denied_domains', 'denied domains');
     document.getElementById('settings-agent').addEventListener('change', async (e) => {
       await invoke('cmd_set_setting', { section: 'assistant', key: 'agent', value: e.target.value });
       await saveAgentArgs();

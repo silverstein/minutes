@@ -19,6 +19,7 @@ mod call_capture;
 mod call_detect;
 mod commands;
 mod context;
+mod desktop_context;
 mod palette_dispatch;
 mod pty;
 mod shortcut_manager;

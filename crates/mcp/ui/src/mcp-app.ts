@@ -703,6 +703,93 @@ function renderReport(data: any) {
   showView("report");
 }
 
+function renderContext(data: any) {
+  const kind = data.kind || "context";
+  const session = data.session || null;
+  const events: any[] = Array.isArray(data.events) ? data.events : [];
+  const links: any[] = Array.isArray(data.links) ? data.links : [];
+  const topApps: any[] = Array.isArray(data.top_apps) ? data.top_apps : [];
+  const topWindows: any[] = Array.isArray(data.top_windows) ? data.top_windows : [];
+  const timeWindow = data.window || {};
+
+  const sections: string[] = [];
+  sections.push(
+    `<div class="report-section">
+      <div class="report-title">${escapeHtml(kind.replaceAll("_", " "))}</div>
+      <div class="report-summary">${escapeHtml(timeWindow.start || "?")} → ${escapeHtml(timeWindow.end || "?")}</div>
+    </div>`
+  );
+
+  if (session) {
+    sections.push(
+      `<div class="report-section">
+        <div class="report-title">Session</div>
+        <div class="report-summary">${escapeHtml(session.id || "")}</div>
+      </div>`
+    );
+  }
+
+  const renderTally = (title: string, entries: any[]) =>
+    `<div class="report-section">
+      <div class="report-title">${escapeHtml(title)}</div>
+      <div class="intent-list">
+        ${entries
+          .map(
+            (entry: any) => `
+          <div class="intent-item">
+            <div class="intent-what">${escapeHtml(entry.name || "unknown")}</div>
+            <div class="intent-source">${escapeHtml(String(entry.count ?? 0))}</div>
+          </div>`
+          )
+          .join("")}
+      </div>
+    </div>`;
+
+  if (topApps.length > 0) sections.push(renderTally("Top Apps", topApps));
+  if (topWindows.length > 0) sections.push(renderTally("Top Windows", topWindows));
+
+  if (links.length > 0) {
+    sections.push(
+      `<div class="report-section">
+        <div class="report-title">Linked Artifacts</div>
+        <div class="intent-list">
+          ${links
+            .map(
+              (link: any) => `
+            <div class="intent-item">
+              <div class="intent-what">${escapeHtml(link.kind || "")}</div>
+              <div class="intent-source">${escapeHtml(link.target || "")}</div>
+            </div>`
+            )
+            .join("")}
+        </div>
+      </div>`
+    );
+  }
+
+  if (events.length > 0) {
+    sections.push(
+      `<div class="report-section">
+        <div class="report-title">Events</div>
+        <div class="intent-list">
+          ${events
+            .map(
+              (event: any) => `
+            <div class="intent-item">
+              <div class="intent-what">${escapeHtml(event.app_name || event.bundle_id || "unknown")}${event.window_title ? ` :: ${escapeHtml(event.window_title)}` : ""}</div>
+              <div class="intent-source">${escapeHtml(event.observed_at || "")}${event.url ? ` • ${escapeHtml(event.url)}` : ""}</div>
+            </div>`
+            )
+            .join("")}
+        </div>
+      </div>`
+    );
+  }
+
+  setInner($("report-body"), sections.join(""));
+  showView("report");
+}
+
 // ─── Tool Result Router ──────────────────────────────────────────────────────
 
 function handleToolResult(result: CallToolResult) {
@@ -748,6 +835,9 @@ function handleToolResult(result: CallToolResult) {
       break;
     case "report":
       renderReport(data);
+      break;
+    case "context":
+      renderContext(data);
       break;
     default:
       showError(`Unknown view: ${view}`);

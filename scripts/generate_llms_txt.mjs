@@ -737,23 +737,36 @@ async function main() {
   const nextErrorsData = buildErrorsData(errorEntries);
 
   if (checkMode) {
-    const current = await readFile(llmsPath, "utf8");
-    const currentFull = await readFile(llmsFullPath, "utf8");
-    const currentMcpToolsMarkdown = await readFile(mcpToolsMarkdownPath, "utf8");
-    const currentMcpToolsData = await readFile(mcpToolsDataPath, "utf8");
-    const currentErrorsMarkdown = await readFile(errorsMarkdownPath, "utf8");
-    const currentErrorsData = await readFile(errorsDataPath, "utf8");
+    // Ignore the current date when comparing — the generator embeds
+    // `new Date()` in every output, so a pure date-only diff would fail
+    // `--check` on any day where nothing else actually changed.
+    const stripGeneratedDate = (content) =>
+      content
+        .replace(/^> Last generated: \d{4}-\d{2}-\d{2}$/m, "> Last generated: <date>")
+        .replace(/"generatedAt": "\d{4}-\d{2}-\d{2}"/, '"generatedAt": "<date>"');
 
-    if (
-      current !== next ||
-      currentFull !== nextFull ||
-      currentMcpToolsMarkdown !== nextMcpToolsMarkdown ||
-      currentMcpToolsData !== nextMcpToolsData ||
-      currentErrorsMarkdown !== nextErrorsMarkdown ||
-      currentErrorsData !== nextErrorsData
-    ) {
+    const compare = async (actualPath, expected) => {
+      const current = await readFile(actualPath, "utf8");
+      return stripGeneratedDate(current) !== stripGeneratedDate(expected);
+    };
+
+    const staleFiles = [];
+    if (await compare(llmsPath, next)) staleFiles.push(llmsPath);
+    if (await compare(llmsFullPath, nextFull)) staleFiles.push(llmsFullPath);
+    if (await compare(mcpToolsMarkdownPath, nextMcpToolsMarkdown))
+      staleFiles.push(mcpToolsMarkdownPath);
+    if (await compare(mcpToolsDataPath, nextMcpToolsData))
+      staleFiles.push(mcpToolsDataPath);
+    if (await compare(errorsMarkdownPath, nextErrorsMarkdown))
+      staleFiles.push(errorsMarkdownPath);
+    if (await compare(errorsDataPath, nextErrorsData))
+      staleFiles.push(errorsDataPath);
+
+    if (staleFiles.length > 0) {
       console.error(
-        "Generated agent docs are stale. Run: node scripts/generate_llms_txt.mjs"
+        `Generated agent docs are stale. Run: node scripts/generate_llms_txt.mjs\nStale:\n${staleFiles
+          .map((f) => `  - ${f}`)
+          .join("\n")}`
       );
       process.exit(1);
     }

@@ -34,6 +34,6 @@ export const claudeHost: HostConfig = {
     extraNotesPlacement: "append",
   },
   assetPolicy: {
-    mode: "reference",
+    mode: "copy",
   },
 };

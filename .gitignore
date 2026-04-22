@@ -8,6 +8,7 @@ docs/plans/reviews/
 
 # Local bd export state
 .beads/export-state.json
+/.beads/issues.jsonl
 
 # Tombstone: the plugin/ directory was deleted in v0.8.0 after the marketplace
 # was switched to .claude/plugins/minutes/ in commit 270839d (Mar 24). The

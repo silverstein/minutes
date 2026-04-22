@@ -123,11 +123,7 @@ fn live_supports_apple_speech() -> bool {
     {
         match crate::apple_speech::probe_capabilities() {
             Ok(report) => {
-                report.runtime_supported
-                    && report
-                        .speech_transcriber
-                        .is_available
-                        .unwrap_or(false)
+                report.runtime_supported && report.speech_transcriber.is_available.unwrap_or(false)
             }
             Err(error) => {
                 tracing::warn!(
@@ -644,7 +640,10 @@ fn run_inner(
     #[cfg(target_os = "macos")]
     let mut apple_utterance_samples: Vec<f32> = Vec::new();
     #[cfg(target_os = "macos")]
-    let mut apple_live_enabled = config.transcription.engine.eq_ignore_ascii_case("apple-speech")
+    let mut apple_live_enabled = config
+        .transcription
+        .engine
+        .eq_ignore_ascii_case("apple-speech")
         && live_supports_apple_speech();
     #[cfg(not(target_os = "macos"))]
     let mut apple_live_enabled = false;
@@ -1339,8 +1338,7 @@ fn transcribe_with_apple_speech_for_live_sidecar(
     ));
     crate::transcribe::write_wav_16k_mono(&tmp_wav, samples)?;
 
-    let locale =
-        crate::apple_speech::live_locale_hint(config.transcription.language.as_deref());
+    let locale = crate::apple_speech::live_locale_hint(config.transcription.language.as_deref());
     let result = crate::apple_speech::transcribe_with_apple_speech(
         &tmp_wav,
         locale.as_deref(),

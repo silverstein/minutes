@@ -282,8 +282,12 @@ pub fn run_benchmark_corpus(
     config: &Config,
 ) -> Result<AppleSpeechBenchmarkReport> {
     let raw = fs::read_to_string(corpus_path)?;
-    let cases: Vec<AppleSpeechBenchmarkCase> = serde_json::from_str(&raw)
-        .map_err(|error| MinutesError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string())))?;
+    let cases: Vec<AppleSpeechBenchmarkCase> = serde_json::from_str(&raw).map_err(|error| {
+        MinutesError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            error.to_string(),
+        ))
+    })?;
     if cases.is_empty() {
         return Err(MinutesError::Io(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -334,13 +338,21 @@ pub fn write_benchmark_artifacts(
 
     fs::write(
         &request_json,
-        serde_json::to_string_pretty(request)
-            .map_err(|error| MinutesError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string())))?,
+        serde_json::to_string_pretty(request).map_err(|error| {
+            MinutesError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                error.to_string(),
+            ))
+        })?,
     )?;
     fs::write(
         &results_json,
-        serde_json::to_string_pretty(report)
-            .map_err(|error| MinutesError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string())))?,
+        serde_json::to_string_pretty(report).map_err(|error| {
+            MinutesError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                error.to_string(),
+            ))
+        })?,
     )?;
     fs::write(&summary_md, render_benchmark_summary(report))?;
 
@@ -535,8 +547,12 @@ fn run_benchmark_case(
 
     let speech_transcriber =
         benchmark_apple_mode(case, &locale, AppleSpeechMode::Speech, reference.as_deref())?;
-    let dictation_transcriber =
-        benchmark_apple_mode(case, &locale, AppleSpeechMode::Dictation, reference.as_deref())?;
+    let dictation_transcriber = benchmark_apple_mode(
+        case,
+        &locale,
+        AppleSpeechMode::Dictation,
+        reference.as_deref(),
+    )?;
     let whisper = benchmark_minutes_backend(case, &locale, "whisper", config, reference.as_deref());
     let parakeet =
         benchmark_minutes_backend(case, &locale, "parakeet", config, reference.as_deref());
@@ -627,23 +643,23 @@ fn benchmark_minutes_backend(
                     TranscribeError::EngineNotAvailable(_) | TranscribeError::ParakeetFailed(_)
                 );
             AppleSpeechBackendBenchmark {
-            backend_id: engine.into(),
-            status: if is_parakeet_unavailable {
-                "unsupported".into()
-            } else {
-                "error".into()
-            },
-            cold_elapsed_ms: None,
-            warm_elapsed_ms: None,
-            total_elapsed_ms: None,
-            first_result_elapsed_ms: None,
-            word_count: 0,
-            transcript: String::new(),
-            segment_count: 0,
-            has_timestamps: false,
-            wer: None,
-            error: Some(error.to_string()),
-        }
+                backend_id: engine.into(),
+                status: if is_parakeet_unavailable {
+                    "unsupported".into()
+                } else {
+                    "error".into()
+                },
+                cold_elapsed_ms: None,
+                warm_elapsed_ms: None,
+                total_elapsed_ms: None,
+                first_result_elapsed_ms: None,
+                word_count: 0,
+                transcript: String::new(),
+                segment_count: 0,
+                has_timestamps: false,
+                wer: None,
+                error: Some(error.to_string()),
+            }
         }
     }
 }
@@ -673,14 +689,22 @@ fn word_error_rate(reference: &str, hypothesis: &str) -> f64 {
     let reference_words: Vec<&str> = reference.split_whitespace().collect();
     let hypothesis_words: Vec<&str> = hypothesis.split_whitespace().collect();
     if reference_words.is_empty() {
-        return if hypothesis_words.is_empty() { 0.0 } else { 1.0 };
+        return if hypothesis_words.is_empty() {
+            0.0
+        } else {
+            1.0
+        };
     }
 
     let mut dp = vec![vec![0usize; hypothesis_words.len() + 1]; reference_words.len() + 1];
     for (i, row) in dp.iter_mut().enumerate().take(reference_words.len() + 1) {
         row[0] = i;
     }
-    for (j, cell) in dp[0].iter_mut().enumerate().take(hypothesis_words.len() + 1) {
+    for (j, cell) in dp[0]
+        .iter_mut()
+        .enumerate()
+        .take(hypothesis_words.len() + 1)
+    {
         *cell = j;
     }
     for i in 1..=reference_words.len() {
@@ -711,8 +735,12 @@ fn run_helper_capabilities(helper: &Path) -> Result<AppleSpeechCapabilityReport>
             String::from_utf8_lossy(&output.stderr)
         ))));
     }
-    serde_json::from_slice(&output.stdout)
-        .map_err(|error| MinutesError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string())))
+    serde_json::from_slice(&output.stdout).map_err(|error| {
+        MinutesError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            error.to_string(),
+        ))
+    })
 }
 
 #[cfg(target_os = "macos")]
@@ -749,8 +777,13 @@ fn run_helper_transcription(
             "apple speech helper transcription timed out",
         ))
     })?;
-    let parsed: AppleSpeechTranscriptionResult = serde_json::from_slice(&output.stdout)
-        .map_err(|error| MinutesError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string())))?;
+    let parsed: AppleSpeechTranscriptionResult =
+        serde_json::from_slice(&output.stdout).map_err(|error| {
+            MinutesError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                error.to_string(),
+            ))
+        })?;
     if !output.status.success() && parsed.error.is_none() {
         return Err(MinutesError::Io(std::io::Error::other(format!(
             "apple speech helper failed: {}",
@@ -762,7 +795,9 @@ fn run_helper_transcription(
 
 #[cfg(target_os = "macos")]
 fn ensure_helper_installed() -> Result<PathBuf> {
-    let bin_path = Config::minutes_dir().join("bin").join("apple-speech-helper");
+    let bin_path = Config::minutes_dir()
+        .join("bin")
+        .join("apple-speech-helper");
     let source_path = Config::minutes_dir()
         .join("lib")
         .join("apple-speech-helper.swift");
@@ -842,11 +877,7 @@ fn locale_language_hint(locale: &str) -> Option<String> {
     if trimmed.is_empty() {
         return None;
     }
-    let primary = trimmed
-        .split(['_', '-'])
-        .next()
-        .unwrap_or(trimmed)
-        .trim();
+    let primary = trimmed.split(['_', '-']).next().unwrap_or(trimmed).trim();
     if primary.is_empty() {
         None
     } else {
@@ -867,8 +898,7 @@ mod tests {
 
     #[test]
     fn word_error_rate_normalizes_timestamped_minutes_output() {
-        let reference =
-            "Matt and Wesley are reviewing the Minutes Apple speech benchmark.";
+        let reference = "Matt and Wesley are reviewing the Minutes Apple speech benchmark.";
         let hypothesis =
             "[0:00] Matt and Wesley are reviewing the Minute's Apple Speech Benchmark.\n";
         let wer = word_error_rate(reference, hypothesis);

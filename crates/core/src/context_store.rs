@@ -342,15 +342,33 @@ pub fn open_db_at(path: &Path) -> Result<Connection, ContextStoreError> {
          PRAGMA synchronous=NORMAL;",
     )?;
     create_schema(&conn)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if path.exists() {
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).ok();
-        }
-    }
+    set_db_permissions(path);
     Ok(conn)
 }
+
+fn sqlite_sidecar_path(path: &Path, suffix: &str) -> PathBuf {
+    let mut sidecar = path.as_os_str().to_os_string();
+    sidecar.push(suffix);
+    PathBuf::from(sidecar)
+}
+
+#[cfg(unix)]
+fn set_db_permissions(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+
+    for candidate in [
+        path.to_path_buf(),
+        sqlite_sidecar_path(path, "-wal"),
+        sqlite_sidecar_path(path, "-shm"),
+    ] {
+        if candidate.exists() {
+            std::fs::set_permissions(&candidate, std::fs::Permissions::from_mode(0o600)).ok();
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn set_db_permissions(_path: &Path) {}
 
 fn create_schema(conn: &Connection) -> Result<(), ContextStoreError> {
     conn.execute_batch(
@@ -1192,5 +1210,33 @@ mod tests {
             session_type_for_capture_mode(CaptureMode::QuickThought),
             ContextSessionType::MemoWindow
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_db_hardens_main_db_and_wal_sidecars_to_0600() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("context.db");
+        let conn = open_db_at(&path).unwrap();
+        conn.execute_batch(
+            "PRAGMA wal_autocheckpoint=0;
+             INSERT INTO context_meta (key, value) VALUES ('perm-test', '1')
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value;",
+        )
+        .unwrap();
+
+        let wal_path = sqlite_sidecar_path(&path, "-wal");
+        let shm_path = sqlite_sidecar_path(&path, "-shm");
+
+        assert!(path.exists());
+        assert!(wal_path.exists());
+        assert!(shm_path.exists());
+
+        for candidate in [&path, &wal_path, &shm_path] {
+            let mode = std::fs::metadata(candidate).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "{} should be 0600", candidate.display());
+        }
     }
 }

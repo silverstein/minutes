@@ -4342,8 +4342,9 @@
             <select id="settings-transcription-engine" class="settings-field">
               <option value="whisper">Whisper — broad language support, built-in</option>
               <option value="parakeet">Parakeet — lower WER, fast on Apple Silicon</option>
-              <option value="apple-speech">Apple Speech — experimental live-only path on macOS 26+</option>
+              <option value="apple-speech" hidden disabled>Apple Speech — standalone live transcript only; configured outside desktop settings</option>
             </select>
+            <div class="about-controls-meta" id="settings-transcription-engine-detail">Whisper and Parakeet are the configurable transcription engines in desktop settings.</div>
           </div>
         </div>
         <div class="about-controls" id="settings-whisper-section">
@@ -4624,7 +4625,7 @@
         <div class="about-controls">
           <div class="about-controls-group">
             <div class="about-controls-copy">Focused window titles</div>
-            <div class="about-controls-meta">Uses macOS Accessibility when available. If denied, desktop context runs in a limited mode.</div>
+            <div class="about-controls-meta">Uses the best available platform APIs for focused-window titles. On macOS, missing Accessibility permission limits title capture.</div>
           </div>
           <button class="btn btn-secondary btn-sm toggle-btn" id="settings-desktop-window-titles">Off</button>
         </div>
@@ -7221,13 +7222,26 @@
         const parakeetStatus = s.transcription.parakeet_status || null;
         const engineSelect = document.getElementById('settings-transcription-engine');
         const parakeetOpt = engineSelect.querySelector('option[value="parakeet"]');
+        const appleSpeechOpt = engineSelect.querySelector('option[value="apple-speech"]');
+        const engineDetail = document.getElementById('settings-transcription-engine-detail');
+        const appleSpeechConfigured = eng === 'apple-speech';
         if (parakeetOpt) {
           parakeetOpt.disabled = !parakeetCompiled;
           parakeetOpt.textContent = parakeetCompiled
             ? 'Parakeet — local backend, best quality on Apple Silicon'
             : 'Parakeet — unavailable in this build';
         }
-        engineSelect.value = eng;
+        if (appleSpeechOpt) {
+          appleSpeechOpt.disabled = true;
+          appleSpeechOpt.hidden = !appleSpeechConfigured;
+          appleSpeechOpt.textContent = 'Apple Speech — standalone live transcript only; configured outside desktop settings';
+        }
+        if (engineDetail) {
+          engineDetail.textContent = appleSpeechConfigured
+            ? 'Apple Speech is configured outside desktop settings for standalone live transcript experiments. Recording and batch flows still use Whisper today.'
+            : 'Whisper and Parakeet are the configurable transcription engines in desktop settings.';
+        }
+        engineSelect.value = appleSpeechConfigured ? 'apple-speech' : eng;
         document.getElementById('settings-whisper-section').classList.toggle('is-hidden', eng !== 'whisper');
         document.getElementById('settings-parakeet-section').classList.toggle('is-hidden', eng !== 'parakeet');
         document.getElementById('settings-parakeet-model').value = s.transcription.parakeet_model || 'tdt-ctc-110m';

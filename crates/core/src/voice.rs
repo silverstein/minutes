@@ -260,7 +260,7 @@ pub fn save_meeting_embeddings(
     if embeddings.is_empty() {
         return;
     }
-    let sidecar = sidecar_path(meeting_path);
+    let sidecar = meeting_embeddings_sidecar_path(meeting_path);
     let data = serde_json::to_vec(embeddings).unwrap_or_default();
     if let Err(e) = std::fs::write(&sidecar, &data) {
         tracing::warn!(path = %sidecar.display(), error = %e, "failed to write meeting embeddings");
@@ -279,12 +279,12 @@ pub fn save_meeting_embeddings(
 pub fn load_meeting_embeddings(
     meeting_path: &std::path::Path,
 ) -> Option<std::collections::HashMap<String, Vec<f32>>> {
-    let sidecar = sidecar_path(meeting_path);
+    let sidecar = meeting_embeddings_sidecar_path(meeting_path);
     let data = std::fs::read(&sidecar).ok()?;
     serde_json::from_slice(&data).ok()
 }
 
-fn sidecar_path(meeting_path: &std::path::Path) -> std::path::PathBuf {
+pub fn meeting_embeddings_sidecar_path(meeting_path: &std::path::Path) -> std::path::PathBuf {
     let dir = meeting_path.parent().unwrap_or(std::path::Path::new("."));
     let stem = meeting_path
         .file_name()
@@ -509,7 +509,9 @@ mod tests {
 
     #[test]
     fn sidecar_path_is_hidden_file() {
-        let p = sidecar_path(std::path::Path::new("/tmp/meetings/2026-03-25-standup.md"));
+        let p = meeting_embeddings_sidecar_path(std::path::Path::new(
+            "/tmp/meetings/2026-03-25-standup.md",
+        ));
         assert_eq!(
             p.file_name().unwrap().to_str().unwrap(),
             ".2026-03-25-standup.embeddings"

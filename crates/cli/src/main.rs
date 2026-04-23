@@ -5184,7 +5184,7 @@ fn cmd_delete(meeting: &str, with_audio: bool, force: bool, config: &Config) -> 
         .to_string_lossy()
         .to_string();
 
-    let audio_artifacts = meeting_audio_artifacts(&md_path);
+    let audio_artifacts = minutes_core::capture::meeting_audio_artifact_paths(&md_path);
     let has_audio = audio_artifacts.iter().any(|path| path.exists());
 
     if force {
@@ -5224,22 +5224,6 @@ fn cmd_delete(meeting: &str, with_audio: bool, force: bool, config: &Config) -> 
     }
 
     Ok(())
-}
-
-fn meeting_audio_artifacts(md_path: &Path) -> Vec<PathBuf> {
-    let audio_path = md_path.with_extension("wav");
-    let mut paths = vec![audio_path.clone()];
-
-    if let Some(stems) = minutes_core::capture::stem_paths_for(&audio_path) {
-        paths.push(stems.voice);
-        paths.push(stems.system);
-    }
-
-    let dir = md_path.parent().unwrap_or_else(|| Path::new("."));
-    let stem = md_path.file_name().unwrap_or_default().to_string_lossy();
-    paths.push(dir.join(format!(".{}.embeddings", stem.trim_end_matches(".md"))));
-
-    paths
 }
 
 fn cmd_schema() -> Result<()> {

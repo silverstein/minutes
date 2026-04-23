@@ -1,7 +1,7 @@
 use crate::config::Config;
 use crate::error::CaptureError;
 use crate::pid::CaptureMode;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
@@ -445,6 +445,19 @@ pub fn stem_paths_for(audio_path: &Path) -> Option<crate::diarize::StemPaths> {
         voice: dir.join(format!("{}.voice.wav", stem)),
         system: dir.join(format!("{}.system.wav", stem)),
     })
+}
+
+pub fn meeting_audio_artifact_paths(markdown_path: &Path) -> Vec<PathBuf> {
+    let audio_path = markdown_path.with_extension("wav");
+    let mut paths = vec![audio_path.clone()];
+
+    if let Some(stems) = stem_paths_for(&audio_path) {
+        paths.push(stems.voice);
+        paths.push(stems.system);
+    }
+
+    paths.push(crate::voice::meeting_embeddings_sidecar_path(markdown_path));
+    paths
 }
 
 fn normalize_source_name(value: Option<&str>) -> Option<String> {
@@ -2337,6 +2350,26 @@ mod tests {
             label: "Ground Control (16000Hz, 1 ch)".into(),
         };
         assert_eq!(strip_device_format_suffix(&entry.label), entry.name);
+    }
+
+    #[test]
+    fn meeting_audio_artifact_paths_include_stems_and_embeddings_sidecar() {
+        let markdown = Path::new("/tmp/meetings/2026-04-01-standup.md");
+        let artifacts = meeting_audio_artifact_paths(markdown);
+        let rendered = artifacts
+            .iter()
+            .map(|path| path.to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            rendered,
+            vec![
+                "/tmp/meetings/2026-04-01-standup.wav",
+                "/tmp/meetings/2026-04-01-standup.voice.wav",
+                "/tmp/meetings/2026-04-01-standup.system.wav",
+                "/tmp/meetings/.2026-04-01-standup.embeddings",
+            ]
+        );
     }
 
     #[test]

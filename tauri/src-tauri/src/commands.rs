@@ -1469,6 +1469,19 @@ pub fn folder_reveal_label() -> &'static str {
     }
 }
 
+fn desktop_context_limited(config: &Config, accessibility_trusted: bool) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        config.desktop_context.capture_window_titles && !accessibility_trusted
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (config, accessibility_trusted);
+        false
+    }
+}
+
 pub fn default_hotkey_shortcut() -> &'static str {
     HOTKEY_CHOICES[0].0
 }
@@ -4597,14 +4610,10 @@ pub fn cmd_delete_meeting(
         .to_string_lossy()
         .to_string();
 
-    let audio_path = md_path.with_extension("wav");
-    let has_audio = audio_path.exists();
+    let audio_artifacts = minutes_core::capture::meeting_audio_artifact_paths(&md_path);
 
     if force {
-        std::fs::remove_file(&md_path).map_err(|e| e.to_string())?;
-        if with_audio && has_audio {
-            std::fs::remove_file(&audio_path).map_err(|e| e.to_string())?;
-        }
+        delete_meeting_artifacts(&md_path, &audio_artifacts, with_audio)?;
         Ok(format!("Deleted: {}", title))
     } else {
         // Show native confirmation dialog and wait for user response
@@ -4627,15 +4636,49 @@ pub fn cmd_delete_meeting(
         let archive_dir = config.output_dir.join("archive");
         std::fs::create_dir_all(&archive_dir).map_err(|e| e.to_string())?;
 
-        let dest_md = archive_dir.join(md_path.file_name().unwrap());
-        std::fs::rename(&md_path, &dest_md).map_err(|e| e.to_string())?;
-
-        if with_audio && has_audio {
-            let dest_audio = archive_dir.join(audio_path.file_name().unwrap());
-            std::fs::rename(&audio_path, &dest_audio).map_err(|e| e.to_string())?;
-        }
+        archive_meeting_artifacts(&md_path, &archive_dir, &audio_artifacts, with_audio)?;
         Ok(format!("Archived: {}", title))
     }
+}
+
+fn delete_meeting_artifacts(
+    md_path: &Path,
+    audio_artifacts: &[PathBuf],
+    with_audio: bool,
+) -> Result<(), String> {
+    std::fs::remove_file(md_path).map_err(|e| e.to_string())?;
+    if with_audio {
+        for path in audio_artifacts.iter().filter(|path| path.exists()) {
+            std::fs::remove_file(path).map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
+}
+
+fn archive_meeting_artifacts(
+    md_path: &Path,
+    archive_dir: &Path,
+    audio_artifacts: &[PathBuf],
+    with_audio: bool,
+) -> Result<(), String> {
+    let dest_md = archive_dir.join(
+        md_path
+            .file_name()
+            .ok_or_else(|| format!("missing filename for {}", md_path.display()))?,
+    );
+    std::fs::rename(md_path, &dest_md).map_err(|e| e.to_string())?;
+
+    if with_audio {
+        for path in audio_artifacts.iter().filter(|path| path.exists()) {
+            let file_name = path
+                .file_name()
+                .ok_or_else(|| format!("missing filename for {}", path.display()))?;
+            let dest_audio = archive_dir.join(file_name);
+            std::fs::rename(path, &dest_audio).map_err(|e| e.to_string())?;
+        }
+    }
+
+    Ok(())
 }
 
 #[tauri::command]
@@ -5825,8 +5868,7 @@ pub fn cmd_get_settings() -> serde_json::Value {
     let accessibility_trusted = false;
     let desktop_context_filtered = !config.desktop_context.denied_apps.is_empty()
         || !config.desktop_context.allowed_apps.is_empty();
-    let desktop_context_limited =
-        config.desktop_context.capture_window_titles && !accessibility_trusted;
+    let desktop_context_limited = desktop_context_limited(&config, accessibility_trusted);
     let desktop_context_state = if !config.desktop_context.enabled {
         "off"
     } else if recording_status.recording || live_status.active {
@@ -6002,9 +6044,14 @@ pub fn cmd_set_setting(section: String, key: String, value: String) -> Result<St
     match (section.as_str(), key.as_str()) {
         // Transcription
         ("transcription", "engine") => {
-            if !["whisper", "parakeet", "apple-speech"].contains(&value.as_str()) {
+            if value == "apple-speech" {
+                return Err(
+                    "apple-speech is experimental and only applies to standalone live transcript today; configure it via CLI or the config file, not desktop settings".into(),
+                );
+            }
+            if !["whisper", "parakeet"].contains(&value.as_str()) {
                 return Err(format!(
-                    "unknown transcription engine '{}'. Valid: whisper, parakeet, apple-speech",
+                    "unknown transcription engine '{}'. Valid: whisper, parakeet",
                     value
                 ));
             }
@@ -6635,6 +6682,86 @@ mod tests {
         assert!(!wav.exists());
         assert!(preserved.exists());
         assert!(preserved.starts_with(config.output_dir.join("failed-captures")));
+    }
+
+    #[test]
+    fn desktop_context_limited_matches_platform_behavior() {
+        let config = Config {
+            desktop_context: minutes_core::config::DesktopContextConfig {
+                enabled: true,
+                capture_window_titles: true,
+                ..Config::default().desktop_context
+            },
+            ..Config::default()
+        };
+
+        #[cfg(target_os = "macos")]
+        {
+            assert!(desktop_context_limited(&config, false));
+            assert!(!desktop_context_limited(&config, true));
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            assert!(!desktop_context_limited(&config, false));
+            assert!(!desktop_context_limited(&config, true));
+        }
+    }
+
+    #[test]
+    fn desktop_settings_reject_apple_speech_engine_selection() {
+        let error = cmd_set_setting(
+            "transcription".into(),
+            "engine".into(),
+            "apple-speech".into(),
+        )
+        .unwrap_err();
+
+        assert!(error.contains("standalone live transcript"));
+    }
+
+    #[test]
+    fn delete_meeting_artifacts_removes_all_audio_sidecars() {
+        let dir = TempDir::new().unwrap();
+        let md = dir.path().join("2026-04-01-artifacts.md");
+        std::fs::write(&md, "---\ntitle: Test\n---\n").unwrap();
+        let artifacts = minutes_core::capture::meeting_audio_artifact_paths(&md);
+        for path in &artifacts {
+            std::fs::write(path, "artifact").unwrap();
+        }
+
+        delete_meeting_artifacts(&md, &artifacts, true).unwrap();
+
+        assert!(!md.exists());
+        for path in &artifacts {
+            assert!(!path.exists(), "{} should be removed", path.display());
+        }
+    }
+
+    #[test]
+    fn archive_meeting_artifacts_moves_all_audio_sidecars() {
+        let dir = TempDir::new().unwrap();
+        let archive_dir = dir.path().join("archive");
+        std::fs::create_dir_all(&archive_dir).unwrap();
+        let md = dir.path().join("2026-04-01-artifacts.md");
+        std::fs::write(&md, "---\ntitle: Test\n---\n").unwrap();
+        let artifacts = minutes_core::capture::meeting_audio_artifact_paths(&md);
+        for path in &artifacts {
+            std::fs::write(path, "artifact").unwrap();
+        }
+
+        archive_meeting_artifacts(&md, &archive_dir, &artifacts, true).unwrap();
+
+        assert!(!md.exists());
+        assert!(archive_dir.join("2026-04-01-artifacts.md").exists());
+        for path in &artifacts {
+            assert!(!path.exists(), "{} should be moved", path.display());
+            assert!(
+                archive_dir.join(path.file_name().unwrap()).exists(),
+                "{} should be archived",
+                path.display()
+            );
+        }
     }
 
     #[test]

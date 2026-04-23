@@ -572,6 +572,7 @@ impl CallDetector {
 
                 if !recording_flag.load(Ordering::Relaxed) {
                     eprintln!("[call-detect] auto-stop aborted — recording already stopped");
+                    cancel.store(true, Ordering::Relaxed);
                     active.store(false, Ordering::Relaxed);
                     app_for_thread.emit("call:end-countdown:cancelled", ()).ok();
                     return;
@@ -594,6 +595,7 @@ impl CallDetector {
                     );
                     stop_flag.store(true, Ordering::Relaxed);
                     started_by.store(false, Ordering::Relaxed);
+                    cancel.store(true, Ordering::Relaxed);
                     active.store(false, Ordering::Relaxed);
                     app_for_thread.emit("call:end-countdown:fired", ()).ok();
                     return;
@@ -1633,8 +1635,9 @@ mod tests {
             NoCallDecision::RearmCountdown
         );
 
-        // Explicit cancellation ("Keep recording" / "Stop now") is still a
-        // real terminal transition. Do not re-arm after the user cancels.
+        // Explicit cancellation ("Keep recording" / "Stop now") and terminal
+        // countdown completion are real terminal transitions. Do not re-arm
+        // after the countdown is intentionally done.
         assert_eq!(
             decide_no_call_action(true, true, true, false, true, true),
             NoCallDecision::ClearIfStale

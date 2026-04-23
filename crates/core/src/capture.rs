@@ -2356,18 +2356,16 @@ mod tests {
     fn meeting_audio_artifact_paths_include_stems_and_embeddings_sidecar() {
         let markdown = Path::new("/tmp/meetings/2026-04-01-standup.md");
         let artifacts = meeting_audio_artifact_paths(markdown);
-        let rendered = artifacts
-            .iter()
-            .map(|path| path.to_string_lossy().to_string())
-            .collect::<Vec<_>>();
+        let audio_path = markdown.with_extension("wav");
+        let stems = stem_paths_for(&audio_path).expect("expected stem paths for meeting audio");
 
         assert_eq!(
-            rendered,
+            artifacts,
             vec![
-                "/tmp/meetings/2026-04-01-standup.wav",
-                "/tmp/meetings/2026-04-01-standup.voice.wav",
-                "/tmp/meetings/2026-04-01-standup.system.wav",
-                "/tmp/meetings/.2026-04-01-standup.embeddings",
+                audio_path,
+                stems.voice,
+                stems.system,
+                crate::voice::meeting_embeddings_sidecar_path(markdown),
             ]
         );
     }

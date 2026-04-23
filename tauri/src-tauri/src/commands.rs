@@ -3390,10 +3390,14 @@ pub fn start_recording(
     if let Some(language) = language_override {
         config.transcription.language = Some(language);
     }
-    let preflight = match minutes_core::capture::preflight_recording(
+    let preflight = match minutes_core::capture::preflight_recording_with_native_call_capture(
         mode,
         requested_intent,
         allow_degraded,
+        matches!(
+            call_capture::availability(),
+            call_capture::CallCaptureAvailability::Available { .. }
+        ),
         &config,
     ) {
         Ok(preflight) => preflight,

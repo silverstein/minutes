@@ -326,10 +326,14 @@ fn dispatch_action(
             // `start_recording`. A real `validate_recording_start`
             // refactor is filed as a follow-up issue.
             let config = Config::load();
-            let preflight = minutes_core::capture::preflight_recording(
+            let preflight = minutes_core::capture::preflight_recording_with_native_call_capture(
                 minutes_core::CaptureMode::Meeting,
                 None,
                 false,
+                matches!(
+                    crate::call_capture::availability(),
+                    crate::call_capture::CallCaptureAvailability::Available { .. }
+                ),
                 &config,
             )
             .map_err(|e| format!("preflight failed: {}", e))?;

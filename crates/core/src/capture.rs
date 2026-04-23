@@ -438,6 +438,9 @@ impl CapturePlan {
     }
 }
 
+const MISSING_DUAL_SOURCE_LOOPBACK_MESSAGE: &str =
+    "no loopback/system-audio device detected for dual-source capture";
+
 pub fn stem_paths_for(audio_path: &Path) -> Option<crate::diarize::StemPaths> {
     let stem = audio_path.file_stem()?.to_str()?;
     let dir = audio_path.parent()?;
@@ -517,9 +520,7 @@ fn resolve_capture_plan_with_host(
         let (_, voice_name) = select_device_with_override(host, voice_override.as_deref())?;
         let resolved_call = if call_override.eq_ignore_ascii_case("auto") {
             detect_loopback_device().ok_or_else(|| {
-                CaptureError::Io(std::io::Error::other(
-                    "no loopback/system-audio device detected for dual-source capture",
-                ))
+                CaptureError::Io(std::io::Error::other(MISSING_DUAL_SOURCE_LOOPBACK_MESSAGE))
             })?
         } else {
             call_override.to_string()
@@ -544,6 +545,51 @@ fn resolve_capture_plan_with_host(
         device_override: single_override,
         device_name,
     }))
+}
+
+fn resolve_native_call_preflight_capture_plan_with_host(
+    host: &cpal::Host,
+    config: &Config,
+) -> Result<CapturePlan, CaptureError> {
+    let voice_override = normalize_source_name(
+        config
+            .recording
+            .sources
+            .as_ref()
+            .and_then(|sources| sources.voice.as_deref()),
+    );
+    let single_override = voice_override.or_else(|| config.recording.device.clone());
+    let (_, device_name) = select_device_with_override(host, single_override.as_deref())?;
+    Ok(CapturePlan::Single(SingleCapturePlan {
+        device_override: single_override,
+        device_name,
+    }))
+}
+
+fn configured_call_source_is_auto(config: &Config) -> bool {
+    config
+        .recording
+        .sources
+        .as_ref()
+        .and_then(|sources| sources.call.as_deref())
+        .map(str::trim)
+        .is_some_and(|value| value.eq_ignore_ascii_case("auto"))
+}
+
+fn should_bypass_loopback_preflight_for_native_call_capture(
+    intent: RecordingIntent,
+    native_call_capture_available: bool,
+    config: &Config,
+    error: &CaptureError,
+) -> bool {
+    if intent != RecordingIntent::Call
+        || !native_call_capture_available
+        || !configured_call_source_is_auto(config)
+    {
+        return false;
+    }
+
+    matches!(error, CaptureError::Io(io_error) if io_error.to_string() == MISSING_DUAL_SOURCE_LOOPBACK_MESSAGE)
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -2084,11 +2130,44 @@ pub fn preflight_recording(
     allow_degraded: bool,
     config: &Config,
 ) -> Result<CapturePreflight, String> {
-    let detected_call_app = detect_active_call_app(config);
-    let capture_plan = resolve_capture_plan(config).map_err(|error| error.to_string())?;
-    let mut preflight = evaluate_capture_preflight(
+    preflight_recording_with_native_call_capture(
         mode,
         requested_intent,
+        allow_degraded,
+        false,
+        config,
+    )
+}
+
+pub fn preflight_recording_with_native_call_capture(
+    mode: CaptureMode,
+    requested_intent: Option<RecordingIntent>,
+    allow_degraded: bool,
+    native_call_capture_available: bool,
+    config: &Config,
+) -> Result<CapturePreflight, String> {
+    let host = cached_default_host();
+    let detected_call_app = detect_active_call_app(config);
+    let intent =
+        infer_recording_intent(mode, requested_intent, detected_call_app.as_deref(), config)?;
+    let capture_plan = match resolve_capture_plan_with_host(host, config) {
+        Ok(plan) => plan,
+        Err(error)
+            if should_bypass_loopback_preflight_for_native_call_capture(
+                intent,
+                native_call_capture_available,
+                config,
+                &error,
+            ) =>
+        {
+            resolve_native_call_preflight_capture_plan_with_host(host, config)
+                .map_err(|fallback_error| fallback_error.to_string())?
+        }
+        Err(error) => return Err(error.to_string()),
+    };
+    let mut preflight = evaluate_capture_preflight(
+        mode,
+        Some(intent),
         detected_call_app,
         capture_plan.input_summary(),
         allow_degraded,
@@ -2578,6 +2657,61 @@ mod tests {
         assert!(preflight.blocking_reason.is_none());
         assert!(preflight.allow_degraded);
         assert!(!preflight.warnings.is_empty());
+    }
+
+    #[test]
+    fn native_call_capture_bypass_only_applies_to_call_auto_loopback_failure() {
+        let mut config = Config::default();
+        config.recording.sources = Some(crate::config::SourcesConfig {
+            voice: Some("default".into()),
+            call: Some("auto".into()),
+        });
+
+        let loopback_error =
+            CaptureError::Io(std::io::Error::other(MISSING_DUAL_SOURCE_LOOPBACK_MESSAGE));
+        assert!(should_bypass_loopback_preflight_for_native_call_capture(
+            RecordingIntent::Call,
+            true,
+            &config,
+            &loopback_error,
+        ));
+
+        assert!(!should_bypass_loopback_preflight_for_native_call_capture(
+            RecordingIntent::Room,
+            true,
+            &config,
+            &loopback_error,
+        ));
+
+        assert!(!should_bypass_loopback_preflight_for_native_call_capture(
+            RecordingIntent::Call,
+            false,
+            &config,
+            &loopback_error,
+        ));
+
+        config.recording.sources = Some(crate::config::SourcesConfig {
+            voice: Some("default".into()),
+            call: Some("BlackHole 2ch".into()),
+        });
+        assert!(!should_bypass_loopback_preflight_for_native_call_capture(
+            RecordingIntent::Call,
+            true,
+            &config,
+            &loopback_error,
+        ));
+
+        let different_error = CaptureError::Io(std::io::Error::other("different error"));
+        config.recording.sources = Some(crate::config::SourcesConfig {
+            voice: Some("default".into()),
+            call: Some("auto".into()),
+        });
+        assert!(!should_bypass_loopback_preflight_for_native_call_capture(
+            RecordingIntent::Call,
+            true,
+            &config,
+            &different_error,
+        ));
     }
 
     fn test_config() -> crate::config::RecordingConfig {

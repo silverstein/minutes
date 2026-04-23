@@ -223,7 +223,7 @@ pub struct ScreenContextConfig {
     pub keep_after_summary: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DesktopContextConfig {
     pub enabled: bool,

@@ -7472,6 +7472,10 @@
 
     function setSettingsToggle(id, on) { const b = document.getElementById(id); b.textContent = on ? 'On' : 'Off'; b.style.opacity = on ? '1' : '0.5'; }
     function desktopContextStateLabel(state, filtered = false, limited = false) {
+      if (state === 'unsupported') {
+        if (filtered) return 'Enabled in config, but unavailable on this platform right now. Saved app filters will apply once desktop-context capture is supported.';
+        return 'Enabled in config, but unavailable on this platform right now.';
+      }
       if (state === 'recording') {
         if (limited && filtered) return 'Active during a recording or live session. Limited by Accessibility availability and narrowed by app filters.';
         if (limited) return 'Active during a recording or live session. Limited because Accessibility-backed window titles are unavailable right now.';

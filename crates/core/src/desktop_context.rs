@@ -123,19 +123,36 @@ impl Drop for DesktopContextCollector {
     }
 }
 
+fn load_runtime_settings() -> DesktopContextConfig {
+    crate::config::Config::load().desktop_context
+}
+
 fn run_collector_loop(
     stop: Arc<AtomicBool>,
     session_id: String,
     session_kind: DesktopContextSessionKind,
-    settings: DesktopContextConfig,
+    initial_settings: DesktopContextConfig,
 ) {
     let mut previous: Option<PlatformSnapshot> = None;
+    let mut settings = initial_settings;
+    let mut previous_settings = settings.clone();
 
     while !stop.load(Ordering::Relaxed) {
+        settings = load_runtime_settings();
+        if settings != previous_settings {
+            previous = None;
+            previous_settings = settings.clone();
+        }
+        if !settings.enabled {
+            previous = None;
+            sleep_with_stop(&stop, Duration::from_millis(DEFAULT_POLL_INTERVAL_MS));
+            continue;
+        }
+
         match platform::snapshot_frontmost_context() {
             Ok(Some(current)) => {
                 if !app_allowed(&settings, current.bundle_id.as_deref(), &current.app_name) {
-                    previous = Some(current);
+                    previous = None;
                     sleep_with_stop(&stop, Duration::from_millis(DEFAULT_POLL_INTERVAL_MS));
                     continue;
                 }
@@ -178,12 +195,12 @@ fn run_collector_loop(
                         let browser_candidate =
                             is_browser_candidate(current.bundle_id.as_deref(), &current.app_name);
                         if browser_candidate && !settings.capture_browser_context {
-                            previous = Some(current);
+                            previous = None;
                             sleep_with_stop(&stop, Duration::from_millis(DEFAULT_POLL_INTERVAL_MS));
                             continue;
                         }
                         if !browser_candidate && !settings.capture_window_titles {
-                            previous = Some(current);
+                            previous = None;
                             sleep_with_stop(&stop, Duration::from_millis(DEFAULT_POLL_INTERVAL_MS));
                             continue;
                         }
@@ -822,6 +839,35 @@ mod platform {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::TempDir;
+
+    fn with_temp_home<T>(f: impl FnOnce(&TempDir) -> T) -> T {
+        let _lock = crate::test_home_env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let original_home = std::env::var_os("HOME");
+        #[cfg(windows)]
+        let original_userprofile = std::env::var_os("USERPROFILE");
+
+        std::env::set_var("HOME", dir.path());
+        #[cfg(windows)]
+        std::env::set_var("USERPROFILE", dir.path());
+
+        let result = f(&dir);
+
+        if let Some(home) = original_home {
+            std::env::set_var("HOME", home);
+        } else {
+            std::env::remove_var("HOME");
+        }
+        #[cfg(windows)]
+        if let Some(userprofile) = original_userprofile {
+            std::env::set_var("USERPROFILE", userprofile);
+        } else {
+            std::env::remove_var("USERPROFILE");
+        }
+
+        result
+    }
 
     #[test]
     fn desktop_context_session_tracking_requires_opt_in() {
@@ -873,5 +919,31 @@ mod tests {
         let session =
             maybe_start_live_transcript_session(&DesktopContextConfig::default(), Local::now());
         assert!(session.is_none());
+    }
+
+    #[test]
+    fn desktop_context_runtime_settings_reload_from_saved_config() {
+        with_temp_home(|_| {
+            let path = crate::config::Config::config_path();
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(
+                &path,
+                r#"[desktop_context]
+enabled = true
+capture_window_titles = false
+capture_browser_context = true
+allowed_apps = ["Arc"]
+denied_apps = ["Messages"]
+"#,
+            )
+            .unwrap();
+
+            let settings = load_runtime_settings();
+            assert!(settings.enabled);
+            assert!(!settings.capture_window_titles);
+            assert!(settings.capture_browser_context);
+            assert_eq!(settings.allowed_apps, vec!["Arc"]);
+            assert_eq!(settings.denied_apps, vec!["Messages"]);
+        });
     }
 }

@@ -205,13 +205,7 @@ pub fn live_locale_hint(language: Option<&str>) -> Option<String> {
     if trimmed.is_empty() {
         return None;
     }
-    if trimmed.contains('_') {
-        return Some(trimmed.to_string());
-    }
-    if trimmed.contains('-') {
-        return Some(trimmed.replace('-', "_"));
-    }
-    None
+    Some(trimmed.replace('-', "_"))
 }
 
 pub fn probe_capabilities() -> Result<AppleSpeechCapabilityReport> {
@@ -931,6 +925,15 @@ mod tests {
         assert_eq!(locale_language_hint("en_US"), Some("en".into()));
         assert_eq!(locale_language_hint("pt-BR"), Some("pt".into()));
         assert_eq!(locale_language_hint(""), None);
+    }
+
+    #[test]
+    fn live_locale_hint_preserves_plain_language_codes() {
+        assert_eq!(live_locale_hint(Some("en")), Some("en".into()));
+        assert_eq!(live_locale_hint(Some(" fr ")), Some("fr".into()));
+        assert_eq!(live_locale_hint(Some("pt-BR")), Some("pt_BR".into()));
+        assert_eq!(live_locale_hint(Some("")), None);
+        assert_eq!(live_locale_hint(None), None);
     }
 
     #[test]

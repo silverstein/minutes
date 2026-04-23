@@ -1472,13 +1472,31 @@ pub fn folder_reveal_label() -> &'static str {
 fn desktop_context_limited(config: &Config, accessibility_trusted: bool) -> bool {
     #[cfg(target_os = "macos")]
     {
-        config.desktop_context.capture_window_titles && !accessibility_trusted
+        (config.desktop_context.capture_window_titles
+            || config.desktop_context.capture_browser_context)
+            && !accessibility_trusted
     }
 
     #[cfg(not(target_os = "macos"))]
     {
         let _ = (config, accessibility_trusted);
         false
+    }
+}
+
+fn desktop_context_state(
+    config: &Config,
+    capture_supported: bool,
+    capture_active: bool,
+) -> &'static str {
+    if !config.desktop_context.enabled {
+        "off"
+    } else if !capture_supported {
+        "unsupported"
+    } else if capture_active {
+        "recording"
+    } else {
+        "idle"
     }
 }
 
@@ -5862,6 +5880,7 @@ pub fn cmd_get_settings() -> serde_json::Value {
     let path = Config::config_path();
     let recording_status = minutes_core::pid::status();
     let live_status = minutes_core::live_transcript::session_status();
+    let desktop_context_supported = minutes_core::desktop_context::capture_supported();
     #[cfg(target_os = "macos")]
     let accessibility_trusted = minutes_core::hotkey_macos::is_accessibility_trusted();
     #[cfg(not(target_os = "macos"))]
@@ -5869,13 +5888,11 @@ pub fn cmd_get_settings() -> serde_json::Value {
     let desktop_context_filtered = !config.desktop_context.denied_apps.is_empty()
         || !config.desktop_context.allowed_apps.is_empty();
     let desktop_context_limited = desktop_context_limited(&config, accessibility_trusted);
-    let desktop_context_state = if !config.desktop_context.enabled {
-        "off"
-    } else if recording_status.recording || live_status.active {
-        "recording"
-    } else {
-        "idle"
-    };
+    let desktop_context_state = desktop_context_state(
+        &config,
+        desktop_context_supported,
+        recording_status.recording || live_status.active,
+    );
 
     // Check env vars for API key status
     let anthropic_key_set = std::env::var("ANTHROPIC_API_KEY").is_ok();
@@ -5951,6 +5968,7 @@ pub fn cmd_get_settings() -> serde_json::Value {
             "capture_browser_context": config.desktop_context.capture_browser_context,
             "allowed_apps": config.desktop_context.allowed_apps,
             "denied_apps": config.desktop_context.denied_apps,
+            "supported": desktop_context_supported,
             "state": desktop_context_state,
             "filtered": desktop_context_filtered,
             "limited": desktop_context_limited,
@@ -6686,14 +6704,10 @@ mod tests {
 
     #[test]
     fn desktop_context_limited_matches_platform_behavior() {
-        let config = Config {
-            desktop_context: minutes_core::config::DesktopContextConfig {
-                enabled: true,
-                capture_window_titles: true,
-                ..Config::default().desktop_context
-            },
-            ..Config::default()
-        };
+        let mut config = Config::default();
+        config.desktop_context.enabled = true;
+        config.desktop_context.capture_window_titles = false;
+        config.desktop_context.capture_browser_context = true;
 
         #[cfg(target_os = "macos")]
         {
@@ -6706,6 +6720,20 @@ mod tests {
             assert!(!desktop_context_limited(&config, false));
             assert!(!desktop_context_limited(&config, true));
         }
+    }
+
+    #[test]
+    fn desktop_context_state_reports_unsupported_before_idle_or_recording() {
+        let mut config = Config::default();
+        config.desktop_context.enabled = true;
+
+        assert_eq!(desktop_context_state(&config, false, false), "unsupported");
+        assert_eq!(desktop_context_state(&config, false, true), "unsupported");
+        assert_eq!(desktop_context_state(&config, true, false), "idle");
+        assert_eq!(desktop_context_state(&config, true, true), "recording");
+
+        config.desktop_context.enabled = false;
+        assert_eq!(desktop_context_state(&config, false, true), "off");
     }
 
     #[test]

@@ -1342,7 +1342,7 @@ where
         Option<&str>,
         crate::apple_speech::AppleSpeechMode,
         bool,
-    ) -> Result<crate::apple_speech::AppleSpeechTranscriptionResult>,
+    ) -> crate::error::Result<crate::apple_speech::AppleSpeechTranscriptionResult>,
 {
     if samples.len() < APPLE_SPEECH_LIVE_MIN_SAMPLES {
         return Ok(None);

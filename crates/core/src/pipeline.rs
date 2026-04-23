@@ -2372,126 +2372,13 @@ fn merge_attendees(existing: &[String], additions: &[String]) -> Vec<String> {
 }
 
 fn split_decode_hint_fragments(text: &str) -> Vec<String> {
-    let mut fragments = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-
-    for part in text
-        .replace(['—', '&', ',', '/'], "|")
+    text.replace(['—', '&', ',', '/'], "|")
         .split('|')
         .flat_map(|part| part.split(" with "))
         .map(str::trim)
         .filter(|part| !part.is_empty())
-    {
-        for variant in contextual_decode_hint_variants(part) {
-            let key = variant.to_ascii_lowercase();
-            if seen.insert(key) {
-                fragments.push(variant);
-            }
-        }
-    }
-
-    fragments
-}
-
-fn contextual_decode_hint_variants(fragment: &str) -> Vec<String> {
-    let normalized = normalize_space(
-        fragment.trim_matches(|c: char| c.is_ascii_punctuation() || c.is_whitespace()),
-    );
-    if normalized.is_empty() {
-        return Vec::new();
-    }
-
-    let stripped_suffix = trim_decode_hint_suffix(&normalized);
-    let title_span = leading_decode_hint_title_span(&stripped_suffix);
-
-    let mut variants = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-    if let Some(span) = title_span {
-        let key = span.to_ascii_lowercase();
-        if seen.insert(key) {
-            variants.push(span);
-        }
-    }
-    if !stripped_suffix.is_empty() {
-        let key = stripped_suffix.to_ascii_lowercase();
-        if seen.insert(key) {
-            variants.push(stripped_suffix);
-        }
-    }
-    if variants.is_empty() {
-        variants.push(normalized);
-    }
-
-    variants
-}
-
-fn trim_decode_hint_suffix(fragment: &str) -> String {
-    let mut words: Vec<&str> = fragment.split_whitespace().collect();
-    let suffixes: &[&[&str]] = &[
-        &["follow-up"],
-        &["follow", "up"],
-        &["check-in"],
-        &["check", "in"],
-        &["review"],
-        &["meeting"],
-        &["sync"],
-        &["call"],
-        &["session"],
-        &["prep"],
-        &["discussion"],
-        &["update"],
-    ];
-
-    while words.len() > 1 {
-        let mut removed = false;
-        for suffix in suffixes {
-            if words.len() >= suffix.len()
-                && words.len().saturating_sub(suffix.len()) >= 2
-                && words[words.len() - suffix.len()..]
-                    .iter()
-                    .map(|word| {
-                        word.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '-')
-                            .to_ascii_lowercase()
-                    })
-                    .eq(suffix.iter().map(|word| word.to_string()))
-            {
-                words.truncate(words.len() - suffix.len());
-                removed = true;
-                break;
-            }
-        }
-        if !removed {
-            break;
-        }
-    }
-
-    words.join(" ")
-}
-
-fn leading_decode_hint_title_span(fragment: &str) -> Option<String> {
-    let mut tokens = Vec::new();
-    for token in fragment.split_whitespace() {
-        let trimmed =
-            token.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '\'');
-        if trimmed.is_empty() {
-            continue;
-        }
-
-        let has_signal = trimmed
-            .chars()
-            .any(|c| c.is_ascii_uppercase() || c.is_ascii_digit());
-        let starts_upper = trimmed
-            .chars()
-            .next()
-            .is_some_and(|c| c.is_ascii_uppercase());
-        if has_signal && starts_upper {
-            tokens.push(trimmed.to_string());
-            continue;
-        }
-        break;
-    }
-
-    (tokens.len() >= 2).then(|| tokens.join(" "))
+        .map(|part| part.to_string())
+        .collect()
 }
 
 pub(crate) fn build_decode_hints(
@@ -4930,38 +4817,6 @@ mod tests {
         assert!(!prompt.contains("Mat,"));
         assert!(prompt.contains("Alex Chen"));
         assert!(prompt.contains("Casey"));
-    }
-
-    #[test]
-    fn contextual_decode_hint_variants_strip_meeting_suffixes_and_extract_title_spans() {
-        assert_eq!(
-            contextual_decode_hint_variants("Well Factory follow-up"),
-            vec!["Well Factory".to_string()]
-        );
-        assert_eq!(
-            contextual_decode_hint_variants("PDF Toolkit packaging review"),
-            vec![
-                "PDF Toolkit".to_string(),
-                "PDF Toolkit packaging".to_string()
-            ]
-        );
-    }
-
-    #[test]
-    fn build_decode_hints_prefers_clean_external_proper_noun_fragments() {
-        let hints = build_decode_hints(
-            Some("Garrett / Well Factory follow-up"),
-            None,
-            Some("PDF Toolkit packaging review"),
-            &[],
-            None,
-        );
-
-        let prompt = hints.whisper_initial_prompt().expect("prompt");
-        assert!(prompt.contains("Well Factory"));
-        assert!(prompt.contains("PDF Toolkit"));
-        assert!(!prompt.contains("Well Factory follow-up"));
-        assert!(!prompt.contains("PDF Toolkit packaging review"));
     }
 
     #[test]

@@ -61,6 +61,8 @@ pub struct DecodeHintEvalCase {
     pub disable_extra_priority_hints: bool,
     #[serde(default)]
     pub disable_extra_context_hints: bool,
+    #[serde(default)]
+    pub force_extra_context_hints_for_decode: bool,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -314,7 +316,7 @@ pub fn run_decode_hint_eval_corpus(
         config.identity.aliases = case.identity_aliases.clone();
 
         let reference = eval_text_for_compare(&load_reference_text(&case)?);
-        let hints = build_eval_case_hints(&case, &config.identity);
+        let hints = build_eval_case_hints(&case, &config);
         let hint_debug = DecodeHintEvalHintDebug {
             priority_phrases: hints.debug_priority_phrases(),
             contextual_phrases: hints.debug_contextual_phrases(),
@@ -986,10 +988,8 @@ fn invalid_data_error(error: impl std::fmt::Display) -> MinutesError {
     ))
 }
 
-fn build_eval_case_hints(
-    case: &DecodeHintEvalCase,
-    identity: &crate::config::IdentityConfig,
-) -> DecodeHints {
+fn build_eval_case_hints(case: &DecodeHintEvalCase, config: &Config) -> DecodeHints {
+    let identity = &config.identity;
     let identity_for_hints = (!case.disable_identity_hints).then_some(identity);
     let attendees = if case.disable_attendee_hints {
         &[][..]
@@ -1010,7 +1010,9 @@ fn build_eval_case_hints(
     } else {
         case.extra_priority_hints.as_slice()
     };
-    let extra_context_hints = if case.disable_extra_context_hints {
+    let allow_extra_context_hints = !case.disable_extra_context_hints
+        && (config.transcription.engine != "parakeet" || case.force_extra_context_hints_for_decode);
+    let extra_context_hints = if !allow_extra_context_hints {
         &[][..]
     } else {
         case.extra_context_hints.as_slice()
@@ -1254,6 +1256,7 @@ mod tests {
             disable_context_hints: false,
             disable_extra_priority_hints: false,
             disable_extra_context_hints: false,
+            force_extra_context_hints_for_decode: false,
         }
     }
 
@@ -1277,14 +1280,12 @@ mod tests {
 
     #[test]
     fn build_eval_case_hints_respects_ablation_flags() {
-        let identity = crate::config::IdentityConfig {
-            name: Some("Mat".into()),
-            email: Some("mat@example.com".into()),
-            emails: vec![],
-            aliases: vec!["Mathieu".into(), "Matthew".into()],
-        };
+        let mut whisper_config = Config::default();
+        whisper_config.transcription.engine = "whisper".into();
+        whisper_config.identity.name = Some("Mat".into());
+        whisper_config.identity.aliases = vec!["Mathieu".into(), "Matthew".into()];
 
-        let full = build_eval_case_hints(&sample_eval_case(), &identity);
+        let full = build_eval_case_hints(&sample_eval_case(), &whisper_config);
         assert!(full.debug_priority_phrases().iter().any(|v| v == "Mat"));
         assert!(full
             .debug_priority_phrases()
@@ -1309,9 +1310,29 @@ mod tests {
         ablated.disable_context_hints = true;
         ablated.disable_extra_priority_hints = true;
         ablated.disable_extra_context_hints = true;
-        let suppressed = build_eval_case_hints(&ablated, &identity);
+        let suppressed = build_eval_case_hints(&ablated, &whisper_config);
         assert!(suppressed.debug_priority_phrases().is_empty());
         assert!(suppressed.debug_contextual_phrases().is_empty());
+
+        let mut parakeet_config = whisper_config.clone();
+        parakeet_config.transcription.engine = "parakeet".into();
+        let parakeet_default = build_eval_case_hints(&sample_eval_case(), &parakeet_config);
+        assert!(!parakeet_default
+            .debug_priority_phrases()
+            .iter()
+            .any(|v| v == "Well Factory"));
+        assert!(!parakeet_default
+            .debug_contextual_phrases()
+            .iter()
+            .any(|v| v == "Well Factory"));
+
+        let mut forced = sample_eval_case();
+        forced.force_extra_context_hints_for_decode = true;
+        let forced_hints = build_eval_case_hints(&forced, &parakeet_config);
+        assert!(forced_hints
+            .debug_contextual_phrases()
+            .iter()
+            .any(|v| v == "Well Factory"));
     }
 
     #[test]

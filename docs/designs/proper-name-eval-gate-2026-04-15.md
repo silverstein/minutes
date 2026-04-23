@@ -68,6 +68,7 @@ Each entry can specify:
 - `disable_context_hints`
 - `disable_extra_priority_hints`
 - `disable_extra_context_hints`
+- `force_extra_context_hints_for_decode`
 
 ## What the harness measures
 

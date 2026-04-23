@@ -194,6 +194,10 @@ pub struct DecodeHintEvalComparisonCase {
     pub lost_focus_hits: Vec<String>,
     pub newly_missing_terms: Vec<String>,
     pub resolved_failures: Vec<String>,
+    #[serde(default)]
+    pub newly_allowed_failures: Vec<String>,
+    #[serde(default)]
+    pub resolved_allowed_failures: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -576,6 +580,10 @@ pub fn compare_decode_hint_eval_reports(
                     left_case.failure_reasons.iter().cloned().collect();
                 let right_failures: std::collections::BTreeSet<_> =
                     right_case.failure_reasons.iter().cloned().collect();
+                let left_allowed_failures: std::collections::BTreeSet<_> =
+                    left_case.allowed_failure_reasons.iter().cloned().collect();
+                let right_allowed_failures: std::collections::BTreeSet<_> =
+                    right_case.allowed_failure_reasons.iter().cloned().collect();
 
                 DecodeHintEvalComparisonCase {
                     id,
@@ -592,6 +600,14 @@ pub fn compare_decode_hint_eval_reports(
                         .cloned()
                         .collect(),
                     resolved_failures: left_failures.difference(&right_failures).cloned().collect(),
+                    newly_allowed_failures: right_allowed_failures
+                        .difference(&left_allowed_failures)
+                        .cloned()
+                        .collect(),
+                    resolved_allowed_failures: left_allowed_failures
+                        .difference(&right_allowed_failures)
+                        .cloned()
+                        .collect(),
                 }
             }
             (None, Some(right_case)) => {
@@ -608,6 +624,8 @@ pub fn compare_decode_hint_eval_reports(
                     lost_focus_hits: Vec::new(),
                     newly_missing_terms: right_case.failure_reasons.clone(),
                     resolved_failures: Vec::new(),
+                    newly_allowed_failures: right_case.allowed_failure_reasons.clone(),
+                    resolved_allowed_failures: Vec::new(),
                 }
             }
             (Some(left_case), None) => {
@@ -624,6 +642,8 @@ pub fn compare_decode_hint_eval_reports(
                     lost_focus_hits: left_case.candidate.focus_hits.clone(),
                     newly_missing_terms: Vec::new(),
                     resolved_failures: left_case.failure_reasons.clone(),
+                    newly_allowed_failures: Vec::new(),
+                    resolved_allowed_failures: left_case.allowed_failure_reasons.clone(),
                 }
             }
             (None, None) => continue,
@@ -800,6 +820,18 @@ pub fn render_decode_hint_eval_comparison_summary(
             lines.push(format!(
                 "  new failures: {}",
                 case.newly_missing_terms.join("; ")
+            ));
+        }
+        if !case.newly_allowed_failures.is_empty() {
+            lines.push(format!(
+                "  new allowed failures: {}",
+                case.newly_allowed_failures.join("; ")
+            ));
+        }
+        if !case.resolved_allowed_failures.is_empty() {
+            lines.push(format!(
+                "  resolved allowed failures: {}",
+                case.resolved_allowed_failures.join("; ")
             ));
         }
     }
@@ -1184,6 +1216,8 @@ mod tests {
         right.cases[0].candidate.focus_hits.push("mat".into());
         right.cases[0].failure_reasons =
             vec!["missing required hinted term 'pdf extension'".into()];
+        right.cases[0].allowed_failure_reasons =
+            vec!["missing required hinted term 'garrett gunderson'".into()];
         right.failure_messages = right.cases[0]
             .failure_reasons
             .iter()
@@ -1211,6 +1245,54 @@ mod tests {
             .resolved_failures
             .iter()
             .any(|reason| reason.contains("matt mullenweg")));
+        assert!(comparison.cases[0]
+            .newly_allowed_failures
+            .iter()
+            .any(|reason| reason.contains("garrett gunderson")));
+    }
+
+    #[test]
+    fn comparison_summary_surfaces_allowed_failure_transitions() {
+        let report = DecodeHintEvalComparisonReport {
+            generated_at: "2026-04-16T13:00:00Z".into(),
+            left_path: PathBuf::from("/tmp/left.json"),
+            right_path: PathBuf::from("/tmp/right.json"),
+            totals: DecodeHintEvalComparisonTotals {
+                shared_cases: 1,
+                added_cases: 0,
+                removed_cases: 0,
+                improved_cases: 0,
+                regressed_cases: 0,
+                newly_passing_cases: 0,
+                newly_failing_cases: 0,
+                unchanged_cases: 1,
+            },
+            cases: vec![DecodeHintEvalComparisonCase {
+                id: "external-proper-noun-research".into(),
+                status: "shared".into(),
+                left_candidate_wer: Some(0.10),
+                right_candidate_wer: Some(0.10),
+                candidate_wer_delta: Some(0.0),
+                left_passed: Some(true),
+                right_passed: Some(true),
+                gained_focus_hits: vec![],
+                lost_focus_hits: vec![],
+                newly_missing_terms: vec![],
+                resolved_failures: vec![],
+                newly_allowed_failures: vec![
+                    "missing required hinted term 'garrett gunderson'".into()
+                ],
+                resolved_allowed_failures: vec![
+                    "missing required hinted term 'well factory'".into()
+                ],
+            }],
+        };
+
+        let summary = render_decode_hint_eval_comparison_summary(&report);
+        assert!(summary
+            .contains("new allowed failures: missing required hinted term 'garrett gunderson'"));
+        assert!(summary
+            .contains("resolved allowed failures: missing required hinted term 'well factory'"));
     }
 
     #[test]

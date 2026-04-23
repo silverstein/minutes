@@ -3358,17 +3358,34 @@ fn cmd_autoresearch_decode_hints(
         );
         println!("{}", serde_json::to_string_pretty(&envelope)?);
     } else {
-        let verdict = if failed { "FAIL" } else { "PASS" };
+        let verdict = if failed {
+            "FAIL"
+        } else if report.totals.cases_allowed_failures > 0 {
+            "PASS WITH ALLOWED FAILURES"
+        } else {
+            "PASS"
+        };
         println!("Decode hint eval: {verdict}");
         println!("Cases: {}", report.totals.cases_total);
         println!("Passed: {}", report.totals.cases_passed);
         println!("Failed: {}", report.totals.cases_failed);
+        println!("Allowed failures: {}", report.totals.cases_allowed_failures);
         println!("Artifacts: {}", artifacts.run_dir.display());
         if failed {
             println!();
             println!("Failure messages:");
             for failure in &report.failure_messages {
                 println!("- {failure}");
+            }
+        } else if report.totals.cases_allowed_failures > 0 {
+            println!();
+            println!("Allowed-failure cases:");
+            for case in report
+                .cases
+                .iter()
+                .filter(|case| !case.allowed_failure_reasons.is_empty())
+            {
+                println!("- {}: {}", case.id, case.allowed_failure_reasons.join("; "));
             }
         }
     }

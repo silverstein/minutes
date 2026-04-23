@@ -675,10 +675,12 @@ pub fn write_decode_hint_eval_comparison_artifacts(
 }
 
 pub fn render_decode_hint_eval_summary(report: &DecodeHintEvalReport) -> String {
-    let verdict = if report.failure_messages.is_empty() {
-        "PASS"
-    } else {
+    let verdict = if !report.failure_messages.is_empty() {
         "FAIL"
+    } else if report.totals.cases_allowed_failures > 0 {
+        "PASS WITH ALLOWED FAILURES"
+    } else {
+        "PASS"
     };
     let mut lines = vec![
         "# Decode Hint Eval Summary".to_string(),
@@ -1091,12 +1093,65 @@ mod tests {
         }
     }
 
+    fn sample_allowed_failure_report() -> DecodeHintEvalReport {
+        DecodeHintEvalReport {
+            generated_at: "2026-04-15T12:00:00Z".into(),
+            corpus_path: PathBuf::from("/tmp/corpus.json"),
+            options: DecodeHintEvalOptions::default(),
+            totals: DecodeHintEvalTotals {
+                cases_total: 1,
+                cases_passed: 1,
+                cases_failed: 0,
+                cases_allowed_failures: 1,
+                improved_cases: 0,
+                regressed_cases: 0,
+                average_delta_wer: 0.0,
+            },
+            cases: vec![DecodeHintEvalCaseResult {
+                id: "research-case".into(),
+                engine: "parakeet".into(),
+                hint_debug: DecodeHintEvalHintDebug::default(),
+                baseline: DecodeHintEvalTranscriptMetrics {
+                    wer: 0.12,
+                    focus_hits: vec![],
+                    forbidden_hits: vec![],
+                },
+                candidate: DecodeHintEvalTranscriptMetrics {
+                    wer: 0.12,
+                    focus_hits: vec!["pdf toolkit".into()],
+                    forbidden_hits: vec![],
+                },
+                delta_wer: 0.0,
+                max_wer_regression: Some(0.02),
+                required_terms: vec!["garrett gunderson".into()],
+                forbidden_terms: vec![],
+                passed: true,
+                status: "allowed-failure".into(),
+                failure_reasons: vec![],
+                allowed_failure_reasons: vec![
+                    "missing required hinted term 'garrett gunderson'".into()
+                ],
+            }],
+            failure_messages: vec![],
+        }
+    }
+
     #[test]
     fn render_summary_surfaces_failures() {
         let summary = render_decode_hint_eval_summary(&sample_report());
         assert!(summary.contains("Verdict: **FAIL**"));
         assert!(summary.contains("case-1"));
         assert!(summary.contains("matt mullenweg"));
+    }
+
+    #[test]
+    fn render_summary_surfaces_allowed_failure_verdict() {
+        let summary = render_decode_hint_eval_summary(&sample_allowed_failure_report());
+        assert!(summary.contains("Verdict: **PASS WITH ALLOWED FAILURES**"));
+        assert!(summary.contains("Allowed failures: 1"));
+        assert!(
+            summary.contains("allowed failures: missing required hinted term 'garrett gunderson'")
+        );
     }
 
     #[test]

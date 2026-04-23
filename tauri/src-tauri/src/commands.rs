@@ -3608,7 +3608,6 @@ fn scan_recovery_items(config: &Config) -> Vec<RecoveryItem> {
 #[derive(Clone)]
 pub struct CallDetectSessionHandles {
     pub started_by_call_detect: Arc<AtomicBool>,
-    pub countdown_active: Arc<AtomicBool>,
     pub countdown_cancel: Arc<AtomicBool>,
 }
 
@@ -3630,9 +3629,10 @@ impl Drop for CallDetectSessionGuard {
         self.handles
             .started_by_call_detect
             .store(false, Ordering::Relaxed);
-        self.handles
-            .countdown_active
-            .store(false, Ordering::Relaxed);
+        // Do not force `countdown_active=false` here. If the recording thread
+        // exits while a call-end countdown is armed, the countdown thread must
+        // observe cancellation and own the state transition; otherwise the
+        // detector can see `call_ended` followed by a premature `cleared`.
         self.handles.countdown_cancel.store(true, Ordering::Relaxed);
     }
 }
@@ -4015,7 +4015,6 @@ pub fn launch_recording(
     let completion_notifications_enabled = state.completion_notifications_enabled.clone();
     let call_detect_session = CallDetectSessionHandles {
         started_by_call_detect: state.recording_started_by_call_detect.clone(),
-        countdown_active: state.call_end_countdown_active.clone(),
         countdown_cancel: state.call_end_countdown_cancel.clone(),
     };
     let app_done = app.clone();

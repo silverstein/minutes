@@ -131,7 +131,11 @@ enum NoCallDecision {
     DeferToCountdown,
     /// Active call ended and nothing is armed yet — fire the countdown if
     /// an active session exists that hasn't already fired.
-    MaybeArmCountdown,
+    ArmCountdown,
+    /// We already emitted `call:ended`, but the active atomic is no longer
+    /// set and no explicit cancellation was observed. Re-arm instead of
+    /// clearing so an orphaned countdown cannot leave recording running.
+    RearmCountdown,
     /// No recording is in scope for auto-stop — safe to clear any stale
     /// `active_call` state and emit the "cleared" log.
     ClearIfStale,
@@ -142,12 +146,22 @@ fn decide_no_call_action(
     started_by_call_detect: bool,
     stop_when_call_ends: bool,
     countdown_active: bool,
+    call_end_fired: bool,
+    countdown_cancelled: bool,
 ) -> NoCallDecision {
     if countdown_active {
         return NoCallDecision::DeferToCountdown;
     }
     if is_recording && started_by_call_detect && stop_when_call_ends {
-        NoCallDecision::MaybeArmCountdown
+        if call_end_fired {
+            if countdown_cancelled {
+                NoCallDecision::ClearIfStale
+            } else {
+                NoCallDecision::RearmCountdown
+            }
+        } else {
+            NoCallDecision::ArmCountdown
+        }
     } else {
         NoCallDecision::ClearIfStale
     }
@@ -406,16 +420,25 @@ impl CallDetector {
                         // though the user's intent was still to auto-stop.
                         // This is the bug athal7 hit in issue #129.
                         let countdown_active = auto_stop.countdown_active.load(Ordering::Relaxed);
+                        let active_snapshot = self.active_call_snapshot();
+                        let call_end_fired = active_snapshot
+                            .as_ref()
+                            .map(|(_, _, already_fired)| *already_fired)
+                            .unwrap_or(false);
+                        let countdown_cancelled =
+                            auto_stop.countdown_cancel.load(Ordering::Relaxed);
                         match decide_no_call_action(
                             is_recording,
                             started_by_call_detect,
                             config.stop_when_call_ends,
                             countdown_active,
+                            call_end_fired,
+                            countdown_cancelled,
                         ) {
                             NoCallDecision::DeferToCountdown => {}
-                            NoCallDecision::MaybeArmCountdown => {
+                            NoCallDecision::ArmCountdown => {
                                 if let Some((process_name, display_name, already_fired)) =
-                                    self.active_call_snapshot()
+                                    active_snapshot
                                 {
                                     if !already_fired {
                                         self.mark_call_end_fired();
@@ -428,6 +451,27 @@ impl CallDetector {
                                             config.call_end_stop_countdown_secs,
                                         );
                                     }
+                                }
+                            }
+                            NoCallDecision::RearmCountdown => {
+                                if let Some((process_name, display_name, _)) = active_snapshot {
+                                    log_call_detect_event(
+                                        "warn",
+                                        "call_end_countdown_rearmed",
+                                        Some(&display_name),
+                                        Some(&process_name),
+                                        serde_json::json!({
+                                            "reason": "countdown latch was set but countdown_active was false before explicit cancellation or timer firing"
+                                        }),
+                                    );
+                                    self.arm_call_end_countdown(
+                                        &app,
+                                        &auto_stop,
+                                        &recording,
+                                        &display_name,
+                                        &process_name,
+                                        config.call_end_stop_countdown_secs,
+                                    );
                                 }
                             }
                             NoCallDecision::ClearIfStale => {
@@ -1143,20 +1187,24 @@ fn running_process_names() -> Vec<String> {
     match output {
         Ok(out) if out.status.success() => {
             let text = String::from_utf8_lossy(&out.stdout);
-            text.lines()
-                .filter_map(|line| {
-                    // ps returns full paths like /Applications/zoom.us.app/Contents/MacOS/zoom.us
-                    // Extract just the binary name
-                    let trimmed = line.trim();
-                    if trimmed.is_empty() {
-                        return None;
-                    }
-                    Some(trimmed.rsplit('/').next().unwrap_or(trimmed).to_string())
-                })
-                .collect()
+            process_names_from_ps_output(&text)
         }
         _ => Vec::new(),
     }
+}
+
+fn process_names_from_ps_output(text: &str) -> Vec<String> {
+    text.lines()
+        .filter_map(|line| {
+            // ps returns full paths like /Applications/zoom.us.app/Contents/MacOS/zoom.us.
+            // Extract just the binary name.
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                return None;
+            }
+            Some(trimmed.rsplit('/').next().unwrap_or(trimmed).to_string())
+        })
+        .collect()
 }
 
 /// Check if the default audio input device is currently being used.
@@ -1483,10 +1531,17 @@ mod tests {
     }
 
     #[test]
-    fn process_list_returns_real_results() {
-        let procs = running_process_names();
-        // ps should always return at least a few processes
-        assert!(!procs.is_empty(), "process list should not be empty");
+    fn process_list_parser_extracts_binary_names() {
+        let procs = process_names_from_ps_output(
+            "\n/Applications/zoom.us.app/Contents/MacOS/zoom.us\nSafari\n  \n",
+        );
+
+        assert_eq!(procs, vec!["zoom.us", "Safari"]);
+    }
+
+    #[test]
+    fn process_list_probe_does_not_panic() {
+        let _procs = running_process_names();
     }
 
     #[test]
@@ -1542,13 +1597,13 @@ mod tests {
         // Happy path: recording + call-detect + stop_when_call_ends, no
         // countdown yet → arm one.
         assert_eq!(
-            decide_no_call_action(true, true, true, false),
-            NoCallDecision::MaybeArmCountdown
+            decide_no_call_action(true, true, true, false, false, false),
+            NoCallDecision::ArmCountdown
         );
 
         // Countdown now active. Same inputs → defer, don't re-arm.
         assert_eq!(
-            decide_no_call_action(true, true, true, true),
+            decide_no_call_action(true, true, true, true, true, false),
             NoCallDecision::DeferToCountdown
         );
 
@@ -1558,28 +1613,44 @@ mod tests {
         // After the fix it must defer, leaving the countdown thread to
         // observe `!recording_flag` and shut itself down cleanly.
         assert_eq!(
-            decide_no_call_action(false, true, true, true),
+            decide_no_call_action(false, true, true, true, true, false),
             NoCallDecision::DeferToCountdown
         );
 
         // Countdown active AND started_by flipped false (e.g. stray
         // cmd_start_recording) — same invariant: defer, don't wipe state.
         assert_eq!(
-            decide_no_call_action(true, false, true, true),
+            decide_no_call_action(true, false, true, true, true, false),
             NoCallDecision::DeferToCountdown
+        );
+
+        // Regression for the v0.14.0 follow-up: call_ended already fired,
+        // but countdown_active was unexpectedly cleared before the timer
+        // emitted call_end_auto_stop_fired. Re-arm rather than logging
+        // `cleared` and leaving the recording running forever.
+        assert_eq!(
+            decide_no_call_action(true, true, true, false, true, false),
+            NoCallDecision::RearmCountdown
+        );
+
+        // Explicit cancellation ("Keep recording" / "Stop now") is still a
+        // real terminal transition. Do not re-arm after the user cancels.
+        assert_eq!(
+            decide_no_call_action(true, true, true, false, true, true),
+            NoCallDecision::ClearIfStale
         );
 
         // No countdown + no recording in scope → free to clear stale state.
         assert_eq!(
-            decide_no_call_action(false, false, true, false),
+            decide_no_call_action(false, false, true, false, false, false),
             NoCallDecision::ClearIfStale
         );
         assert_eq!(
-            decide_no_call_action(true, false, true, false),
+            decide_no_call_action(true, false, true, false, false, false),
             NoCallDecision::ClearIfStale
         );
         assert_eq!(
-            decide_no_call_action(true, true, false, false),
+            decide_no_call_action(true, true, false, false, false, false),
             NoCallDecision::ClearIfStale
         );
     }

@@ -775,27 +775,34 @@ fn merge_remote_diarization_into_stem_result(
     }
 }
 
-fn has_multi_party_remote_structure(result: &DiarizationResult) -> bool {
-    let mut remote_durations: std::collections::HashMap<&str, f64> =
+fn meaningful_speaker_count_excluding(result: &DiarizationResult, ignored: &[&str]) -> usize {
+    let mut speaker_durations: std::collections::HashMap<&str, f64> =
         std::collections::HashMap::new();
     for segment in &result.segments {
-        if segment.speaker == "SPEAKER_0" {
+        if ignored.contains(&segment.speaker.as_str()) {
             continue;
         }
 
         let duration = (segment.end - segment.start).max(0.0);
         if duration > 0.0 {
-            *remote_durations
+            *speaker_durations
                 .entry(segment.speaker.as_str())
                 .or_insert(0.0) += duration;
         }
     }
 
-    remote_durations
+    speaker_durations
         .values()
         .filter(|&&duration| duration >= 0.5)
         .count()
-        >= 2
+}
+
+fn has_meaningful_remote_structure(result: &DiarizationResult) -> bool {
+    meaningful_speaker_count_excluding(result, &["SPEAKER_0"]) >= 1
+}
+
+fn has_meaningful_system_stem_labels(result: &DiarizationResult) -> bool {
+    meaningful_speaker_count_excluding(result, &["SPEAKER_0", "SPEAKER_1"]) >= 1
 }
 
 fn diarize_from_source_aware_stems(
@@ -840,10 +847,10 @@ fn diarize_from_source_aware_stems(
     };
 
     let remapped_remote = remap_diarization_labels(&remote_result, 2);
-    if !has_multi_party_remote_structure(&remapped_remote) {
+    if !has_meaningful_remote_structure(&remapped_remote) {
         tracing::info!(
             remote_speakers = remapped_remote.num_speakers,
-            "system-stem diarization did not find stable multi-party structure, keeping stem-only attribution"
+            "system-stem diarization did not find stable remote structure, keeping stem-only attribution"
         );
         return Some(stem_result);
     }
@@ -855,11 +862,11 @@ fn diarize_from_source_aware_stems(
     };
     let merged = merge_remote_diarization_into_stem_result(merge_base, &remapped_remote);
 
-    if merged.num_speakers <= stem_result.num_speakers {
+    if !has_meaningful_system_stem_labels(&merged) {
         tracing::info!(
             stem_speakers = stem_result.num_speakers,
             merged_speakers = merged.num_speakers,
-            "system-stem diarization did not add stable remote speaker structure, keeping stem-only attribution"
+            "system-stem diarization did not contribute stable remote speaker labels, keeping stem-only attribution"
         );
         return Some(stem_result);
     }
@@ -2199,7 +2206,7 @@ mod tests {
     }
 
     #[test]
-    fn has_multi_party_remote_structure_requires_two_meaningful_remote_speakers() {
+    fn has_meaningful_remote_structure_rejects_noise_but_accepts_one_remote_speaker() {
         let weak_remote = DiarizationResult {
             segments: vec![
                 SpeakerSegment {
@@ -2221,6 +2228,17 @@ mod tests {
             num_speakers: 3,
             from_stems: true,
             source_aware: true,
+            speaker_embeddings: std::collections::HashMap::new(),
+        };
+        let single_remote = DiarizationResult {
+            segments: vec![SpeakerSegment {
+                speaker: "SPEAKER_2".into(),
+                start: 1.0,
+                end: 2.2,
+            }],
+            num_speakers: 1,
+            from_stems: false,
+            source_aware: false,
             speaker_embeddings: std::collections::HashMap::new(),
         };
         let strong_remote = DiarizationResult {
@@ -2247,8 +2265,58 @@ mod tests {
             speaker_embeddings: std::collections::HashMap::new(),
         };
 
-        assert!(!has_multi_party_remote_structure(&weak_remote));
-        assert!(has_multi_party_remote_structure(&strong_remote));
+        assert!(!has_meaningful_remote_structure(&weak_remote));
+        assert!(has_meaningful_remote_structure(&single_remote));
+        assert!(has_meaningful_remote_structure(&strong_remote));
+    }
+
+    #[test]
+    fn merged_system_stem_label_is_useful_even_without_more_speakers() {
+        let stem_result = DiarizationResult {
+            segments: vec![
+                SpeakerSegment {
+                    speaker: "SPEAKER_0".into(),
+                    start: 0.0,
+                    end: 2.0,
+                },
+                SpeakerSegment {
+                    speaker: "SPEAKER_1".into(),
+                    start: 2.0,
+                    end: 5.0,
+                },
+            ],
+            num_speakers: 2,
+            from_stems: true,
+            source_aware: true,
+            speaker_embeddings: std::collections::HashMap::new(),
+        };
+        let remote_result = DiarizationResult {
+            segments: vec![SpeakerSegment {
+                speaker: "SPEAKER_2".into(),
+                start: 2.0,
+                end: 5.0,
+            }],
+            num_speakers: 1,
+            from_stems: false,
+            source_aware: false,
+            speaker_embeddings: std::collections::HashMap::from([(
+                "SPEAKER_2".to_string(),
+                vec![0.2],
+            )]),
+        };
+
+        let merged = merge_remote_diarization_into_stem_result(&stem_result, &remote_result);
+
+        assert_eq!(merged.num_speakers, 2);
+        assert!(has_meaningful_system_stem_labels(&merged));
+        assert_eq!(
+            merged
+                .segments
+                .iter()
+                .map(|segment| (segment.speaker.as_str(), segment.start, segment.end))
+                .collect::<Vec<_>>(),
+            vec![("SPEAKER_0", 0.0, 2.0), ("SPEAKER_2", 2.0, 5.0)]
+        );
     }
 
     #[test]

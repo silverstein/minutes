@@ -88,9 +88,9 @@ pub const PARAKEET_LIVE_FALLBACK_WARNING: &str =
 
 pub const APPLE_SPEECH_SCOPE_DOC_REF: &str = "docs/designs/apple-speech-benchmark-2026-04-22.md";
 pub const APPLE_SPEECH_LIVE_SCOPE_WARNING: &str =
-    "apple-speech live transcript is unavailable on this machine; falling back to whisper for this session";
+    "apple-speech live transcript is unavailable on this machine; falling back to parakeet or whisper for this session";
 pub const APPLE_SPEECH_LIVE_FALLBACK_WARNING: &str =
-    "apple-speech live transcription failed; falling back to whisper for this session";
+    "apple-speech live transcription failed; falling back to parakeet or whisper for this session";
 
 /// True iff this build can route `engine = "parakeet"` to the parakeet path.
 /// Used at session start to decide between scope-warning (compile-time gap)
@@ -116,6 +116,17 @@ fn live_supports_parakeet(engine: &str) -> bool {
         let _ = engine;
         false
     }
+}
+
+#[cfg(feature = "parakeet")]
+fn live_ready_parakeet_fallback(config: &Config) -> bool {
+    crate::transcription_coordinator::parakeet_backend_status(config).ready
+}
+
+#[cfg(not(feature = "parakeet"))]
+#[allow(dead_code)]
+fn live_ready_parakeet_fallback(_config: &Config) -> bool {
+    false
 }
 
 fn live_supports_apple_speech() -> bool {
@@ -601,22 +612,7 @@ fn run_inner(
     config: &Config,
     context_session_id: Option<String>,
 ) -> Result<(usize, f64, PathBuf), MinutesError> {
-    // Load whisper model: use live_transcript.model if set, otherwise dictation.model
-    let whisper_ctx = {
-        let model_path = if config.live_transcript.model.is_empty() {
-            crate::transcribe::resolve_model_path_for_dictation(config)?
-        } else {
-            crate::transcribe::resolve_model_path_by_name(&config.live_transcript.model, config)?
-        };
-        tracing::info!(model = %model_path.display(), "loading whisper model for live transcript");
-        whisper_rs::WhisperContext::new_with_params(
-            model_path
-                .to_str()
-                .ok_or_else(|| TranscribeError::ModelLoadError("invalid path".into()))?,
-            crate::transcribe::whisper_context_params(),
-        )
-        .map_err(|e| TranscribeError::ModelLoadError(format!("{}", e)))?
-    };
+    let mut whisper_ctx: Option<whisper_rs::WhisperContext> = None;
 
     // Start audio stream FIRST — validate mic access before truncating any files
     let device_override = config.recording.device.as_deref();
@@ -658,8 +654,12 @@ fn run_inner(
     let mut parakeet_utterance_samples: Vec<f32> = Vec::new();
     #[cfg(feature = "parakeet")]
     let mut parakeet_live_enabled = live_supports_parakeet(&config.transcription.engine);
+    #[cfg(feature = "parakeet")]
+    let parakeet_fallback_ready = live_ready_parakeet_fallback(config);
     #[cfg(not(feature = "parakeet"))]
     let parakeet_live_enabled = false;
+    #[cfg(not(feature = "parakeet"))]
+    let parakeet_fallback_ready = false;
 
     let mut was_speaking = false;
     let mut utterance_samples: usize = 0;
@@ -742,11 +742,12 @@ fn run_inner(
                     &mut apple_live_enabled,
                     #[cfg(target_os = "macos")]
                     &mut apple_utterance_samples,
+                    parakeet_fallback_ready,
                     &mut parakeet_live_enabled,
                     &mut parakeet_utterance_samples,
                     config,
                     &mut streaming,
-                    &whisper_ctx,
+                    &mut whisper_ctx,
                     "standalone",
                 );
                 #[cfg(not(feature = "parakeet"))]
@@ -755,9 +756,10 @@ fn run_inner(
                     &mut apple_live_enabled,
                     #[cfg(target_os = "macos")]
                     &mut apple_utterance_samples,
+                    parakeet_fallback_ready,
                     config,
                     &mut streaming,
-                    &whisper_ctx,
+                    &mut whisper_ctx,
                     "standalone",
                 );
             }
@@ -773,11 +775,12 @@ fn run_inner(
                     &mut apple_live_enabled,
                     #[cfg(target_os = "macos")]
                     &mut apple_utterance_samples,
+                    parakeet_fallback_ready,
                     &mut parakeet_live_enabled,
                     &mut parakeet_utterance_samples,
                     config,
                     &mut streaming,
-                    &whisper_ctx,
+                    &mut whisper_ctx,
                     "standalone",
                 );
                 #[cfg(not(feature = "parakeet"))]
@@ -786,9 +789,10 @@ fn run_inner(
                     &mut apple_live_enabled,
                     #[cfg(target_os = "macos")]
                     &mut apple_utterance_samples,
+                    parakeet_fallback_ready,
                     config,
                     &mut streaming,
-                    &whisper_ctx,
+                    &mut whisper_ctx,
                     "standalone",
                 );
             }
@@ -836,11 +840,12 @@ fn run_inner(
                             &mut apple_live_enabled,
                             #[cfg(target_os = "macos")]
                             &mut apple_utterance_samples,
+                            parakeet_fallback_ready,
                             &mut parakeet_live_enabled,
                             &mut parakeet_utterance_samples,
                             config,
                             &mut streaming,
-                            &whisper_ctx,
+                            &mut whisper_ctx,
                             "standalone",
                         );
                         #[cfg(not(feature = "parakeet"))]
@@ -849,9 +854,10 @@ fn run_inner(
                             &mut apple_live_enabled,
                             #[cfg(target_os = "macos")]
                             &mut apple_utterance_samples,
+                            parakeet_fallback_ready,
                             config,
                             &mut streaming,
-                            &whisper_ctx,
+                            &mut whisper_ctx,
                             "standalone",
                         );
                     }
@@ -905,11 +911,12 @@ fn run_inner(
                                 &mut apple_live_enabled,
                                 #[cfg(target_os = "macos")]
                                 &mut apple_utterance_samples,
+                                parakeet_fallback_ready,
                                 &mut parakeet_live_enabled,
                                 &mut parakeet_utterance_samples,
                                 config,
                                 &mut streaming,
-                                &whisper_ctx,
+                                &mut whisper_ctx,
                                 "standalone",
                             );
                             #[cfg(not(feature = "parakeet"))]
@@ -918,9 +925,10 @@ fn run_inner(
                                 &mut apple_live_enabled,
                                 #[cfg(target_os = "macos")]
                                 &mut apple_utterance_samples,
+                                parakeet_fallback_ready,
                                 config,
                                 &mut streaming,
-                                &whisper_ctx,
+                                &mut whisper_ctx,
                                 "standalone",
                             );
                         }
@@ -949,8 +957,10 @@ fn run_inner(
                 {
                     parakeet_utterance_samples.extend_from_slice(&chunk.samples);
                 }
-            } else if let Some(_sr) = streaming.feed(&chunk.samples, &whisper_ctx) {
-                // Partial result available — could emit event in the future
+            } else if let Ok(whisper_ctx) = ensure_live_whisper_ctx(&mut whisper_ctx, config) {
+                if let Some(_sr) = streaming.feed(&chunk.samples, whisper_ctx) {
+                    // Partial result available — could emit event in the future
+                }
             }
 
             // Force-finalize if max utterance reached
@@ -962,11 +972,12 @@ fn run_inner(
                     &mut apple_live_enabled,
                     #[cfg(target_os = "macos")]
                     &mut apple_utterance_samples,
+                    parakeet_fallback_ready,
                     &mut parakeet_live_enabled,
                     &mut parakeet_utterance_samples,
                     config,
                     &mut streaming,
-                    &whisper_ctx,
+                    &mut whisper_ctx,
                     "standalone",
                 );
                 #[cfg(not(feature = "parakeet"))]
@@ -975,9 +986,10 @@ fn run_inner(
                     &mut apple_live_enabled,
                     #[cfg(target_os = "macos")]
                     &mut apple_utterance_samples,
+                    parakeet_fallback_ready,
                     config,
                     &mut streaming,
-                    &whisper_ctx,
+                    &mut whisper_ctx,
                     "standalone",
                 );
                 if !write_ok {
@@ -995,11 +1007,12 @@ fn run_inner(
                 &mut apple_live_enabled,
                 #[cfg(target_os = "macos")]
                 &mut apple_utterance_samples,
+                parakeet_fallback_ready,
                 &mut parakeet_live_enabled,
                 &mut parakeet_utterance_samples,
                 config,
                 &mut streaming,
-                &whisper_ctx,
+                &mut whisper_ctx,
                 "standalone",
             );
             #[cfg(not(feature = "parakeet"))]
@@ -1008,9 +1021,10 @@ fn run_inner(
                 &mut apple_live_enabled,
                 #[cfg(target_os = "macos")]
                 &mut apple_utterance_samples,
+                parakeet_fallback_ready,
                 config,
                 &mut streaming,
-                &whisper_ctx,
+                &mut whisper_ctx,
                 "standalone",
             );
             if !write_ok {
@@ -1373,6 +1387,57 @@ where
     Ok(Some((result.transcript, samples.len() as f64 / 16000.0)))
 }
 
+#[cfg(feature = "whisper")]
+fn ensure_live_whisper_ctx<'a>(
+    whisper_ctx: &'a mut Option<whisper_rs::WhisperContext>,
+    config: &Config,
+) -> Result<&'a whisper_rs::WhisperContext, MinutesError> {
+    if whisper_ctx.is_none() {
+        let model_path = if config.live_transcript.model.is_empty() {
+            crate::transcribe::resolve_model_path_for_dictation(config)?
+        } else {
+            crate::transcribe::resolve_model_path_by_name(&config.live_transcript.model, config)?
+        };
+        tracing::info!(
+            model = %model_path.display(),
+            "loading whisper model for live transcript fallback"
+        );
+        let ctx = whisper_rs::WhisperContext::new_with_params(
+            model_path
+                .to_str()
+                .ok_or_else(|| TranscribeError::ModelLoadError("invalid path".into()))?,
+            crate::transcribe::whisper_context_params(),
+        )
+        .map_err(|e| TranscribeError::ModelLoadError(format!("{}", e)))?;
+        *whisper_ctx = Some(ctx);
+    }
+
+    Ok(whisper_ctx
+        .as_ref()
+        .expect("whisper context should exist after ensure_live_whisper_ctx"))
+}
+
+#[cfg(all(feature = "whisper", feature = "parakeet"))]
+fn resolve_apple_speech_live_fallback<P, W>(
+    parakeet_fallback_ready: bool,
+    mut try_parakeet: P,
+    mut try_whisper: W,
+) -> Result<Option<(String, f64)>, MinutesError>
+where
+    P: FnMut() -> Result<Option<(String, f64)>, MinutesError>,
+    W: FnMut() -> Result<Option<(String, f64)>, MinutesError>,
+{
+    if parakeet_fallback_ready {
+        match try_parakeet() {
+            Ok(Some(result)) => return Ok(Some(result)),
+            Ok(None) => return Ok(None),
+            Err(_) => {}
+        }
+    }
+
+    try_whisper()
+}
+
 /// Finalize one utterance via the active engine (apple-speech, parakeet, or whisper)
 /// and write the resulting JSONL line.
 ///
@@ -1384,15 +1449,17 @@ where
 /// for the accumulated samples and flips that engine flag to `false` so the
 /// remainder of the session uses whisper.
 #[cfg(all(feature = "whisper", feature = "parakeet"))]
+#[allow(clippy::too_many_arguments)]
 fn finalize_live_utterance(
     writer: &mut LiveTranscriptWriter,
     apple_live_enabled: &mut bool,
     #[cfg(target_os = "macos")] apple_utterance_samples: &mut Vec<f32>,
+    parakeet_fallback_ready: bool,
     parakeet_live_enabled: &mut bool,
     parakeet_utterance_samples: &mut Vec<f32>,
     config: &Config,
     streaming: &mut StreamingWhisper,
-    whisper_ctx: &whisper_rs::WhisperContext,
+    whisper_ctx: &mut Option<whisper_rs::WhisperContext>,
     source: &'static str,
 ) -> bool {
     #[cfg(target_os = "macos")]
@@ -1410,18 +1477,56 @@ fn finalize_live_utterance(
             Err(error) => {
                 tracing::warn!(
                     error = %error,
-                    "live apple-speech path failed — switching this session to whisper"
+                    "live apple-speech path failed — switching this session to fallback backend"
                 );
                 *apple_live_enabled = false;
                 emit_apple_speech_fallback_warning(source, &error.to_string());
-                if let Some((text, duration_secs)) = transcribe_with_whisper_for_live_sidecar(
-                    apple_utterance_samples,
-                    whisper_ctx,
-                    config.transcription.language.clone(),
-                ) {
-                    let ok = writer.write_utterance(&text, duration_secs);
-                    apple_utterance_samples.clear();
-                    return ok;
+                let fallback_result = resolve_apple_speech_live_fallback(
+                    parakeet_fallback_ready,
+                    || {
+                        *parakeet_live_enabled = true;
+                        match transcribe_with_parakeet_for_live_sidecar(
+                            apple_utterance_samples,
+                            config,
+                        ) {
+                            Ok(result) => Ok(result),
+                            Err(parakeet_error) => {
+                                tracing::warn!(
+                                    error = %parakeet_error,
+                                    "parakeet fallback after apple-speech live failure also failed — switching this session to whisper"
+                                );
+                                *parakeet_live_enabled = false;
+                                Err(parakeet_error)
+                            }
+                        }
+                    },
+                    || {
+                        let whisper_ctx = ensure_live_whisper_ctx(whisper_ctx, config).map_err(|load_error| {
+                            tracing::error!(
+                                error = %load_error,
+                                "failed to load whisper fallback after apple-speech live failure"
+                            );
+                            load_error
+                        })?;
+                        Ok(transcribe_with_whisper_for_live_sidecar(
+                            apple_utterance_samples,
+                            whisper_ctx,
+                            config.transcription.language.clone(),
+                        ))
+                    },
+                );
+
+                match fallback_result {
+                    Ok(Some((text, duration_secs))) => {
+                        let ok = writer.write_utterance(&text, duration_secs);
+                        apple_utterance_samples.clear();
+                        return ok;
+                    }
+                    Ok(None) => {
+                        apple_utterance_samples.clear();
+                        return true;
+                    }
+                    Err(_) => {}
                 }
                 apple_utterance_samples.clear();
                 return true;
@@ -1447,16 +1552,26 @@ fn finalize_live_utterance(
                 );
                 *parakeet_live_enabled = false;
                 emit_live_engine_fallback_warning(source, &error.to_string());
-                // Fall back: transcribe the accumulated samples via whisper so
-                // this utterance still lands in the JSONL.
-                if let Some((text, duration_secs)) = transcribe_with_whisper_for_live_sidecar(
-                    parakeet_utterance_samples,
-                    whisper_ctx,
-                    config.transcription.language.clone(),
-                ) {
-                    let ok = writer.write_utterance(&text, duration_secs);
-                    parakeet_utterance_samples.clear();
-                    return ok;
+                match ensure_live_whisper_ctx(whisper_ctx, config) {
+                    Ok(whisper_ctx) => {
+                        if let Some((text, duration_secs)) =
+                            transcribe_with_whisper_for_live_sidecar(
+                                parakeet_utterance_samples,
+                                whisper_ctx,
+                                config.transcription.language.clone(),
+                            )
+                        {
+                            let ok = writer.write_utterance(&text, duration_secs);
+                            parakeet_utterance_samples.clear();
+                            return ok;
+                        }
+                    }
+                    Err(load_error) => {
+                        tracing::error!(
+                            error = %load_error,
+                            "failed to load whisper fallback after parakeet live failure"
+                        );
+                    }
                 }
                 parakeet_utterance_samples.clear();
                 return true;
@@ -1465,12 +1580,25 @@ fn finalize_live_utterance(
     }
 
     // Whisper path
-    let write_ok = if let Some(sr) = streaming.finalize(whisper_ctx) {
-        writer.write_utterance(&sr.text, sr.duration_secs)
-    } else {
-        true
+    let write_ok = match ensure_live_whisper_ctx(whisper_ctx, config) {
+        Ok(whisper_ctx) => {
+            let ok = if let Some(sr) = streaming.finalize(whisper_ctx) {
+                writer.write_utterance(&sr.text, sr.duration_secs)
+            } else {
+                true
+            };
+            streaming.reset();
+            ok
+        }
+        Err(error) => {
+            tracing::error!(
+                error = %error,
+                "failed to load whisper backend for live transcript"
+            );
+            streaming.reset();
+            false
+        }
     };
-    streaming.reset();
     write_ok
 }
 
@@ -1482,15 +1610,17 @@ fn finalize_live_utterance(
 /// at these branches — we're already breaking out of the loop. But if the
 /// write failed, the last utterance is silently dropped unless we log it.
 #[cfg(all(feature = "whisper", feature = "parakeet"))]
+#[allow(clippy::too_many_arguments)]
 fn finalize_on_exit(
     writer: &mut LiveTranscriptWriter,
     apple_live_enabled: &mut bool,
     #[cfg(target_os = "macos")] apple_utterance_samples: &mut Vec<f32>,
+    parakeet_fallback_ready: bool,
     parakeet_live_enabled: &mut bool,
     parakeet_utterance_samples: &mut Vec<f32>,
     config: &Config,
     streaming: &mut StreamingWhisper,
-    whisper_ctx: &whisper_rs::WhisperContext,
+    whisper_ctx: &mut Option<whisper_rs::WhisperContext>,
     source: &'static str,
 ) {
     if !finalize_live_utterance(
@@ -1498,6 +1628,7 @@ fn finalize_on_exit(
         apple_live_enabled,
         #[cfg(target_os = "macos")]
         apple_utterance_samples,
+        parakeet_fallback_ready,
         parakeet_live_enabled,
         parakeet_utterance_samples,
         config,
@@ -1512,13 +1643,15 @@ fn finalize_on_exit(
 }
 
 #[cfg(all(feature = "whisper", not(feature = "parakeet")))]
+#[allow(clippy::too_many_arguments)]
 fn finalize_live_utterance(
     writer: &mut LiveTranscriptWriter,
     apple_live_enabled: &mut bool,
     #[cfg(target_os = "macos")] apple_utterance_samples: &mut Vec<f32>,
+    _parakeet_fallback_ready: bool,
     config: &Config,
     streaming: &mut StreamingWhisper,
-    whisper_ctx: &whisper_rs::WhisperContext,
+    whisper_ctx: &mut Option<whisper_rs::WhisperContext>,
     source: &'static str,
 ) -> bool {
     #[cfg(target_os = "macos")]
@@ -1540,14 +1673,26 @@ fn finalize_live_utterance(
                 );
                 *apple_live_enabled = false;
                 emit_apple_speech_fallback_warning(source, &error.to_string());
-                if let Some((text, duration_secs)) = transcribe_with_whisper_for_live_sidecar(
-                    apple_utterance_samples,
-                    whisper_ctx,
-                    config.transcription.language.clone(),
-                ) {
-                    let ok = writer.write_utterance(&text, duration_secs);
-                    apple_utterance_samples.clear();
-                    return ok;
+                match ensure_live_whisper_ctx(whisper_ctx, config) {
+                    Ok(whisper_ctx) => {
+                        if let Some((text, duration_secs)) =
+                            transcribe_with_whisper_for_live_sidecar(
+                                apple_utterance_samples,
+                                whisper_ctx,
+                                config.transcription.language.clone(),
+                            )
+                        {
+                            let ok = writer.write_utterance(&text, duration_secs);
+                            apple_utterance_samples.clear();
+                            return ok;
+                        }
+                    }
+                    Err(load_error) => {
+                        tracing::error!(
+                            error = %load_error,
+                            "failed to load whisper fallback after apple-speech live failure"
+                        );
+                    }
                 }
                 apple_utterance_samples.clear();
                 return true;
@@ -1555,10 +1700,21 @@ fn finalize_live_utterance(
         }
     }
 
-    let write_ok = if let Some(sr) = streaming.finalize(whisper_ctx) {
-        writer.write_utterance(&sr.text, sr.duration_secs)
-    } else {
-        true
+    let write_ok = match ensure_live_whisper_ctx(whisper_ctx, config) {
+        Ok(whisper_ctx) => {
+            if let Some(sr) = streaming.finalize(whisper_ctx) {
+                writer.write_utterance(&sr.text, sr.duration_secs)
+            } else {
+                true
+            }
+        }
+        Err(error) => {
+            tracing::error!(
+                error = %error,
+                "failed to load whisper backend for live transcript"
+            );
+            false
+        }
     };
     #[cfg(not(target_os = "macos"))]
     let _ = (&apple_live_enabled, &config, source);
@@ -1567,13 +1723,15 @@ fn finalize_live_utterance(
 }
 
 #[cfg(all(feature = "whisper", not(feature = "parakeet")))]
+#[allow(clippy::too_many_arguments)]
 fn finalize_on_exit(
     writer: &mut LiveTranscriptWriter,
     apple_live_enabled: &mut bool,
     #[cfg(target_os = "macos")] apple_utterance_samples: &mut Vec<f32>,
+    parakeet_fallback_ready: bool,
     config: &Config,
     streaming: &mut StreamingWhisper,
-    whisper_ctx: &whisper_rs::WhisperContext,
+    whisper_ctx: &mut Option<whisper_rs::WhisperContext>,
     source: &'static str,
 ) {
     if !finalize_live_utterance(
@@ -1581,6 +1739,7 @@ fn finalize_on_exit(
         apple_live_enabled,
         #[cfg(target_os = "macos")]
         apple_utterance_samples,
+        parakeet_fallback_ready,
         config,
         streaming,
         whisper_ctx,
@@ -2608,6 +2767,69 @@ mod tests {
         // (We can't assert the threshold-exceeds branch here — it requires a
         // real parakeet binary. The subprocess path is exercised by the smoke
         // test in the RFC.)
+    }
+
+    #[cfg(all(feature = "whisper", feature = "parakeet"))]
+    #[test]
+    fn apple_speech_fallback_prefers_ready_parakeet_before_whisper() {
+        let calls = std::sync::Mutex::new(Vec::<&'static str>::new());
+        let result = resolve_apple_speech_live_fallback(
+            true,
+            || {
+                calls.lock().unwrap().push("parakeet");
+                Ok(Some(("parakeet transcript".into(), 1.2)))
+            },
+            || {
+                calls.lock().unwrap().push("whisper");
+                Ok(Some(("whisper transcript".into(), 1.2)))
+            },
+        )
+        .unwrap();
+
+        assert_eq!(calls.lock().unwrap().as_slice(), &["parakeet"]);
+        assert_eq!(result, Some(("parakeet transcript".into(), 1.2)));
+    }
+
+    #[cfg(all(feature = "whisper", feature = "parakeet"))]
+    #[test]
+    fn apple_speech_fallback_uses_whisper_when_parakeet_is_not_ready() {
+        let calls = std::sync::Mutex::new(Vec::<&'static str>::new());
+        let result = resolve_apple_speech_live_fallback(
+            false,
+            || {
+                calls.lock().unwrap().push("parakeet");
+                Ok(Some(("parakeet transcript".into(), 1.2)))
+            },
+            || {
+                calls.lock().unwrap().push("whisper");
+                Ok(Some(("whisper transcript".into(), 1.2)))
+            },
+        )
+        .unwrap();
+
+        assert_eq!(calls.lock().unwrap().as_slice(), &["whisper"]);
+        assert_eq!(result, Some(("whisper transcript".into(), 1.2)));
+    }
+
+    #[cfg(all(feature = "whisper", feature = "parakeet"))]
+    #[test]
+    fn apple_speech_fallback_tries_whisper_after_parakeet_error() {
+        let calls = std::sync::Mutex::new(Vec::<&'static str>::new());
+        let result = resolve_apple_speech_live_fallback(
+            true,
+            || {
+                calls.lock().unwrap().push("parakeet");
+                Err(MinutesError::Io(std::io::Error::other("parakeet failed")))
+            },
+            || {
+                calls.lock().unwrap().push("whisper");
+                Ok(Some(("whisper transcript".into(), 0.9)))
+            },
+        )
+        .unwrap();
+
+        assert_eq!(calls.lock().unwrap().as_slice(), &["parakeet", "whisper"]);
+        assert_eq!(result, Some(("whisper transcript".into(), 0.9)));
     }
 
     #[test]

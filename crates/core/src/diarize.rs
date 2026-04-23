@@ -38,6 +38,9 @@ pub struct DiarizationResult {
     pub speaker_embeddings: std::collections::HashMap<String, Vec<f32>>,
 }
 
+type EnergyWindow = (f64, f32);
+type StemEnergyWindows = (Vec<EnergyWindow>, Vec<EnergyWindow>);
+
 // ── Speaker attribution ──────────────────────────────────────
 
 /// How confident we are that a speaker label maps to a real person.
@@ -291,7 +294,7 @@ fn compute_energy_windows(wav_path: &Path, window_secs: f64) -> Result<Vec<(f64,
 fn read_stem_energy_windows(
     stems: &StemPaths,
     window_secs: f64,
-) -> Result<(Vec<(f64, f32)>, Vec<(f64, f32)>), String> {
+) -> Result<StemEnergyWindows, String> {
     let voice_energy = compute_energy_windows(&stems.voice, window_secs)
         .map_err(|error| format!("failed to read voice stem: {error}"))?;
     let system_energy = compute_energy_windows(&stems.system, window_secs)
@@ -566,7 +569,7 @@ pub fn diarize_from_stems(stems: &StemPaths, config: &Config) -> Option<Diarizat
     Some(result)
 }
 
-fn resolve_diarization_engine<'a>(config: &'a Config) -> Option<&'a str> {
+fn resolve_diarization_engine(config: &Config) -> Option<&str> {
     match config.diarization.engine.as_str() {
         "none" => None,
         "auto" => {

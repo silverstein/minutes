@@ -33,6 +33,13 @@ otherwise they fall back to the Parakeet subprocess path for each utterance.
 The standalone live path additionally warms the sidecar at session start so the
 first utterance does not pay the subprocess-spawn + model-load cost.
 
+Parakeet also participates in the experimental Apple Speech standalone-live
+path as the **first runtime fallback**. If `engine = "apple-speech"` is set for
+`minutes live` and Apple Speech cannot run or fails mid-session, Minutes tries
+a ready Parakeet backend before falling back to Whisper. Apple Speech itself is
+still configured separately and remains standalone-live-only; this note is just
+about the fallback order behind that path.
+
 Strongly recommended for live use: set `parakeet_sidecar_enabled = true` and
 ensure `example-server` is discoverable (either on `PATH` or via
 `MINUTES_PARAKEET_SERVER_BINARY`). Without the warm sidecar, every live

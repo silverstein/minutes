@@ -28,7 +28,11 @@ pub struct SpeakerSegment {
 pub struct DiarizationResult {
     pub segments: Vec<SpeakerSegment>,
     pub num_speakers: usize,
+    /// Whether transcript attribution should use the wider stem-timing tolerance.
     pub from_stems: bool,
+    /// Whether the result came from source-aware capture and still has a stable
+    /// local-vs-remote distinction available to downstream attribution.
+    pub source_aware: bool,
     /// Per-speaker averaged embeddings (for Level 3 confirmed learning).
     /// Empty when using the Python subprocess engine.
     pub speaker_embeddings: std::collections::HashMap<String, Vec<f32>>,
@@ -284,6 +288,17 @@ fn compute_energy_windows(wav_path: &Path, window_secs: f64) -> Result<Vec<(f64,
     Ok(windows)
 }
 
+fn read_stem_energy_windows(
+    stems: &StemPaths,
+    window_secs: f64,
+) -> Result<(Vec<(f64, f32)>, Vec<(f64, f32)>), String> {
+    let voice_energy = compute_energy_windows(&stems.voice, window_secs)
+        .map_err(|error| format!("failed to read voice stem: {error}"))?;
+    let system_energy = compute_energy_windows(&stems.system, window_secs)
+        .map_err(|error| format!("failed to read system stem: {error}"))?;
+    Ok((voice_energy, system_energy))
+}
+
 fn correlation_coefficient(xs: &[f32], ys: &[f32]) -> Option<f32> {
     if xs.len() != ys.len() || xs.len() < 2 {
         return None;
@@ -449,6 +464,7 @@ fn diarization_from_energy_windows(
             segments,
             num_speakers: 1,
             from_stems: true,
+            source_aware: true,
             speaker_embeddings: std::collections::HashMap::new(),
         });
     }
@@ -508,6 +524,7 @@ fn diarization_from_energy_windows(
             segments,
             num_speakers,
             from_stems: true,
+            source_aware: true,
             speaker_embeddings: std::collections::HashMap::new(),
         })
     }
@@ -519,17 +536,10 @@ fn diarization_from_energy_windows(
 pub fn diarize_from_stems(stems: &StemPaths, config: &Config) -> Option<DiarizationResult> {
     let window_secs = 1.0; // 1-second energy windows
 
-    let voice_energy = match compute_energy_windows(&stems.voice, window_secs) {
-        Ok(e) => e,
+    let (voice_energy, system_energy) = match read_stem_energy_windows(stems, window_secs) {
+        Ok(energies) => energies,
         Err(error) => {
-            tracing::warn!(error = %error, "failed to read voice stem, falling back to ML diarization");
-            return None;
-        }
-    };
-    let system_energy = match compute_energy_windows(&stems.system, window_secs) {
-        Ok(e) => e,
-        Err(error) => {
-            tracing::warn!(error = %error, "failed to read system stem, falling back to ML diarization");
+            tracing::warn!(error = %error, "failed to read source-aware stems, falling back to ML diarization");
             return None;
         }
     };
@@ -556,53 +566,39 @@ pub fn diarize_from_stems(stems: &StemPaths, config: &Config) -> Option<Diarizat
     Some(result)
 }
 
-/// Run speaker diarization on an audio file.
-/// Returns None if diarization is disabled or models are not available.
-///
-/// When per-source stems are available alongside the audio file,
-/// uses energy-based attribution instead of ML diarization.
-///
-/// Engine options:
-/// - `"auto"` (default): use pyannote-rs if models are downloaded, otherwise skip
-/// - `"pyannote-rs"`: native Rust diarization (requires `minutes setup --diarization`)
-/// - `"pyannote"`: legacy Python subprocess (requires `pip install pyannote.audio`)
-/// - `"none"`: explicitly disabled
-pub fn diarize(audio_path: &Path, config: &Config) -> Option<DiarizationResult> {
-    let engine = &config.diarization.engine;
-
-    if engine == "none" {
-        return None;
-    }
-
-    // Check for per-source stems alongside the audio file.
-    // If stems exist, use energy-based attribution (zero ML cost).
-    if let Some(stems) = discover_stems(audio_path) {
-        if let Some(result) = diarize_from_stems(&stems, config) {
-            return Some(result);
+fn resolve_diarization_engine<'a>(config: &'a Config) -> Option<&'a str> {
+    match config.diarization.engine.as_str() {
+        "none" => None,
+        "auto" => {
+            if models_installed(config) {
+                tracing::info!("diarization models found — auto-enabling pyannote-rs");
+                Some("pyannote-rs")
+            } else {
+                tracing::debug!(
+                    "diarization models not found — skipping (run `minutes setup --diarization` to enable)"
+                );
+                None
+            }
         }
-        // Stem attribution failed, fall through to ML diarization
-        tracing::warn!("stem-based diarization failed, falling back to ML engine");
+        other => Some(other),
     }
+}
 
-    // "auto" mode: use pyannote-rs if models are downloaded, otherwise skip silently
-    let resolved_engine = if engine == "auto" {
-        if models_installed(config) {
-            tracing::info!("diarization models found — auto-enabling pyannote-rs");
-            "pyannote-rs"
-        } else {
-            tracing::debug!("diarization models not found — skipping (run `minutes setup --diarization` to enable)");
-            return None;
-        }
-    } else {
-        engine.as_str()
-    };
-
-    tracing::info!(engine = %resolved_engine, file = %audio_path.display(), "running diarization");
+fn run_diarization_engine(
+    audio_path: &Path,
+    config: &Config,
+    resolved_engine: &str,
+) -> Option<DiarizationResult> {
+    tracing::info!(
+        engine = %resolved_engine,
+        file = %audio_path.display(),
+        "running diarization"
+    );
 
     // Pre-process: resample to 16kHz mono via ffmpeg if available.
     // pyannote-rs/symphonia can struggle with 44.1kHz F32 WAVs from live capture.
     // This matches how transcribe.rs preprocesses audio for whisper.
-    let (effective_path, _temp_file) = preprocess_audio(audio_path);
+    let (effective_path, temp_file) = preprocess_audio(audio_path);
 
     // Run diarization in a separate thread so we can detect panics and
     // keep the main pipeline from getting stuck on ONNX inference issues.
@@ -619,9 +615,7 @@ pub fn diarize(audio_path: &Path, config: &Config) -> Option<DiarizationResult> 
                 Err("pyannote-rs engine requires the 'diarize' feature. Rebuild with: cargo build --features diarize".into())
             }
             "pyannote" => diarize_with_pyannote(&effective_path_owned),
-            other => {
-                Err(format!("unknown diarization engine: {}", other).into())
-            }
+            other => Err(format!("unknown diarization engine: {}", other).into()),
         };
         result.map_err(|e| e.to_string())
     });
@@ -635,7 +629,7 @@ pub fn diarize(audio_path: &Path, config: &Config) -> Option<DiarizationResult> 
     };
 
     // Clean up preprocessed temp file
-    if let Some(ref temp) = _temp_file {
+    if let Some(ref temp) = temp_file {
         std::fs::remove_file(temp).ok();
     }
 
@@ -654,6 +648,263 @@ pub fn diarize(audio_path: &Path, config: &Config) -> Option<DiarizationResult> 
         }
         None => None,
     }
+}
+
+fn remap_diarization_labels(
+    result: &DiarizationResult,
+    starting_label: usize,
+) -> DiarizationResult {
+    let mut label_map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut next_label = starting_label;
+
+    let mut remap_label = |raw: &str| {
+        label_map
+            .entry(raw.to_string())
+            .or_insert_with(|| {
+                let label = format!("SPEAKER_{}", next_label);
+                next_label += 1;
+                label
+            })
+            .clone()
+    };
+
+    let segments = result
+        .segments
+        .iter()
+        .map(|segment| SpeakerSegment {
+            speaker: remap_label(&segment.speaker),
+            start: segment.start,
+            end: segment.end,
+        })
+        .collect();
+
+    let mut embedding_keys: Vec<String> = result.speaker_embeddings.keys().cloned().collect();
+    embedding_keys.sort();
+
+    let mut speaker_embeddings = std::collections::HashMap::new();
+    for raw_label in embedding_keys {
+        let remapped_label = remap_label(&raw_label);
+        if let Some(embedding) = result.speaker_embeddings.get(&raw_label) {
+            speaker_embeddings.insert(remapped_label, embedding.clone());
+        }
+    }
+
+    DiarizationResult {
+        segments,
+        num_speakers: label_map.len(),
+        from_stems: result.from_stems,
+        source_aware: result.source_aware,
+        speaker_embeddings,
+    }
+}
+
+fn merge_remote_diarization_into_stem_result(
+    stem_result: &DiarizationResult,
+    remote_result: &DiarizationResult,
+) -> DiarizationResult {
+    let mut base_segments = stem_result.segments.clone();
+    base_segments.sort_by(|a, b| {
+        a.start
+            .partial_cmp(&b.start)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let mut remote_segments = remote_result.segments.clone();
+    remote_segments.sort_by(|a, b| {
+        a.start
+            .partial_cmp(&b.start)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let mut merged = Vec::new();
+    let mut remote_cursor = 0usize;
+
+    for segment in base_segments {
+        if segment.speaker != "SPEAKER_1" {
+            merge_or_push_segment(&mut merged, &segment.speaker, segment.start, segment.end);
+            continue;
+        }
+
+        while remote_cursor < remote_segments.len()
+            && remote_segments[remote_cursor].end <= segment.start
+        {
+            remote_cursor += 1;
+        }
+
+        let mut idx = remote_cursor;
+        let mut cursor = segment.start;
+        while idx < remote_segments.len() && remote_segments[idx].start < segment.end {
+            let remote = &remote_segments[idx];
+            let start = segment.start.max(remote.start).max(cursor);
+            let end = segment.end.min(remote.end);
+            if start > cursor {
+                merge_or_push_segment(&mut merged, "SPEAKER_1", cursor, start);
+            }
+            if end > start {
+                merge_or_push_segment(&mut merged, &remote.speaker, start, end);
+                cursor = end;
+            }
+            idx += 1;
+        }
+
+        if cursor < segment.end {
+            merge_or_push_segment(&mut merged, "SPEAKER_1", cursor, segment.end);
+        }
+    }
+
+    let present_labels: std::collections::HashSet<String> = merged
+        .iter()
+        .map(|segment| segment.speaker.clone())
+        .collect();
+    let speaker_embeddings = remote_result
+        .speaker_embeddings
+        .iter()
+        .filter(|(label, _)| present_labels.contains(*label))
+        .map(|(label, embedding)| (label.clone(), embedding.clone()))
+        .collect();
+
+    DiarizationResult {
+        num_speakers: present_labels.len(),
+        segments: merged,
+        from_stems: false,
+        source_aware: true,
+        speaker_embeddings,
+    }
+}
+
+fn has_multi_party_remote_structure(result: &DiarizationResult) -> bool {
+    let mut remote_durations: std::collections::HashMap<&str, f64> =
+        std::collections::HashMap::new();
+    for segment in &result.segments {
+        if segment.speaker == "SPEAKER_0" {
+            continue;
+        }
+
+        let duration = (segment.end - segment.start).max(0.0);
+        if duration > 0.0 {
+            *remote_durations
+                .entry(segment.speaker.as_str())
+                .or_insert(0.0) += duration;
+        }
+    }
+
+    remote_durations
+        .values()
+        .filter(|&&duration| duration >= 0.5)
+        .count()
+        >= 2
+}
+
+fn diarize_from_source_aware_stems(
+    stems: &StemPaths,
+    config: &Config,
+    resolved_engine: Option<&str>,
+) -> Option<DiarizationResult> {
+    let window_secs = 1.0;
+    let (voice_energy, system_energy) = match read_stem_energy_windows(stems, window_secs) {
+        Ok(energies) => energies,
+        Err(error) => {
+            tracing::warn!(error = %error, "failed to read source-aware stems, falling back to ML diarization");
+            return None;
+        }
+    };
+
+    let stem_result = diarization_from_energy_windows(
+        &voice_energy,
+        &system_energy,
+        window_secs,
+        config.diarization.stem_correlation_threshold,
+    )?;
+    let local_only_collapse = stem_result.num_speakers == 1
+        && !stem_result.segments.is_empty()
+        && stem_result
+            .segments
+            .iter()
+            .all(|segment| segment.speaker == "SPEAKER_0");
+    let non_collapsed_stem_result =
+        diarization_from_energy_windows(&voice_energy, &system_energy, window_secs, 2.0);
+
+    let Some(resolved_engine) = resolved_engine else {
+        return Some(stem_result);
+    };
+
+    let Some(remote_result) = run_diarization_engine(&stems.system, config, resolved_engine) else {
+        tracing::warn!(
+            system_stem = %stems.system.display(),
+            "system-stem diarization failed, keeping stem-only attribution"
+        );
+        return Some(stem_result);
+    };
+
+    let remapped_remote = remap_diarization_labels(&remote_result, 2);
+    if !has_multi_party_remote_structure(&remapped_remote) {
+        tracing::info!(
+            remote_speakers = remapped_remote.num_speakers,
+            "system-stem diarization did not find stable multi-party structure, keeping stem-only attribution"
+        );
+        return Some(stem_result);
+    }
+
+    let merge_base = if local_only_collapse {
+        non_collapsed_stem_result.as_ref().unwrap_or(&stem_result)
+    } else {
+        &stem_result
+    };
+    let merged = merge_remote_diarization_into_stem_result(merge_base, &remapped_remote);
+
+    if merged.num_speakers <= stem_result.num_speakers {
+        tracing::info!(
+            stem_speakers = stem_result.num_speakers,
+            merged_speakers = merged.num_speakers,
+            "system-stem diarization did not add stable remote speaker structure, keeping stem-only attribution"
+        );
+        return Some(stem_result);
+    }
+
+    tracing::info!(
+        stem_speakers = stem_result.num_speakers,
+        merged_speakers = merged.num_speakers,
+        "hybrid source-aware diarization complete"
+    );
+
+    Some(merged)
+}
+
+/// Run speaker diarization on an audio file.
+/// Returns None if diarization is disabled or models are not available.
+///
+/// When per-source stems are available alongside the audio file,
+/// prefers source-aware attribution and, when available, uses ML diarization
+/// on the system stem to split remote participants without overriding local
+/// voice-stem ownership.
+///
+/// Engine options:
+/// - `"auto"` (default): use pyannote-rs if models are downloaded, otherwise skip
+/// - `"pyannote-rs"`: native Rust diarization (requires `minutes setup --diarization`)
+/// - `"pyannote"`: legacy Python subprocess (requires `pip install pyannote.audio`)
+/// - `"none"`: explicitly disabled
+pub fn diarize(audio_path: &Path, config: &Config) -> Option<DiarizationResult> {
+    let engine = &config.diarization.engine;
+
+    if engine == "none" {
+        return None;
+    }
+
+    let resolved_engine = resolve_diarization_engine(config);
+
+    // Check for per-source stems alongside the audio file.
+    // If stems exist, prefer source-aware attribution and opportunistically
+    // refine remote/system windows with ML diarization.
+    if let Some(stems) = discover_stems(audio_path) {
+        if let Some(result) = diarize_from_source_aware_stems(&stems, config, resolved_engine) {
+            return Some(result);
+        }
+        // Stem attribution failed, fall through to ML diarization
+        tracing::warn!("source-aware stem diarization failed, falling back to ML engine");
+    }
+
+    let resolved_engine = resolved_engine?;
+    run_diarization_engine(audio_path, config, resolved_engine)
 }
 
 /// Apply diarization results to a transcript.
@@ -1175,6 +1426,7 @@ fn diarize_with_pyannote_rs(
         segments,
         num_speakers,
         from_stems: false,
+        source_aware: false,
         speaker_embeddings,
     })
 }
@@ -1498,6 +1750,7 @@ except Exception as e:
         segments,
         num_speakers,
         from_stems: false,
+        source_aware: false,
         speaker_embeddings: std::collections::HashMap::new(), // Python path can't extract embeddings
     })
 }
@@ -1645,6 +1898,7 @@ mod tests {
             ],
             num_speakers: 2,
             from_stems: false,
+            source_aware: false,
             speaker_embeddings: std::collections::HashMap::new(),
         };
 
@@ -1673,6 +1927,7 @@ mod tests {
             ],
             num_speakers: 2,
             from_stems: false,
+            source_aware: false,
             speaker_embeddings: std::collections::HashMap::new(),
         };
 
@@ -1704,6 +1959,7 @@ mod tests {
             ],
             num_speakers: 2,
             from_stems: true,
+            source_aware: true,
             speaker_embeddings: std::collections::HashMap::new(),
         };
 
@@ -1810,6 +2066,186 @@ mod tests {
         assert_eq!(result.num_speakers, 1);
         assert_eq!(result.segments.len(), 1);
         assert_eq!(result.segments[0].speaker, "SPEAKER_1");
+    }
+
+    #[test]
+    fn remap_diarization_labels_rebases_remote_namespace() {
+        let result = DiarizationResult {
+            segments: vec![
+                SpeakerSegment {
+                    speaker: "remote-alex".into(),
+                    start: 0.0,
+                    end: 1.0,
+                },
+                SpeakerSegment {
+                    speaker: "remote-sam".into(),
+                    start: 1.0,
+                    end: 2.0,
+                },
+                SpeakerSegment {
+                    speaker: "remote-alex".into(),
+                    start: 2.0,
+                    end: 3.0,
+                },
+            ],
+            num_speakers: 2,
+            from_stems: false,
+            source_aware: false,
+            speaker_embeddings: std::collections::HashMap::from([
+                ("remote-alex".to_string(), vec![0.1, 0.2]),
+                ("remote-sam".to_string(), vec![0.3, 0.4]),
+            ]),
+        };
+
+        let remapped = remap_diarization_labels(&result, 1);
+        assert_eq!(remapped.num_speakers, 2);
+        assert_eq!(remapped.segments[0].speaker, "SPEAKER_1");
+        assert_eq!(remapped.segments[1].speaker, "SPEAKER_2");
+        assert_eq!(remapped.segments[2].speaker, "SPEAKER_1");
+        assert!(remapped.speaker_embeddings.contains_key("SPEAKER_1"));
+        assert!(remapped.speaker_embeddings.contains_key("SPEAKER_2"));
+    }
+
+    #[test]
+    fn merge_remote_diarization_into_stem_result_keeps_local_and_splits_remote_windows() {
+        let stem_result = DiarizationResult {
+            segments: vec![
+                SpeakerSegment {
+                    speaker: "SPEAKER_0".into(),
+                    start: 0.0,
+                    end: 2.0,
+                },
+                SpeakerSegment {
+                    speaker: "SPEAKER_1".into(),
+                    start: 2.0,
+                    end: 6.0,
+                },
+                SpeakerSegment {
+                    speaker: "SPEAKER_0".into(),
+                    start: 6.0,
+                    end: 7.0,
+                },
+                SpeakerSegment {
+                    speaker: "SPEAKER_1".into(),
+                    start: 7.0,
+                    end: 10.0,
+                },
+            ],
+            num_speakers: 2,
+            from_stems: true,
+            source_aware: true,
+            speaker_embeddings: std::collections::HashMap::new(),
+        };
+        let remote_result = DiarizationResult {
+            segments: vec![
+                SpeakerSegment {
+                    speaker: "SPEAKER_2".into(),
+                    start: 2.1,
+                    end: 3.6,
+                },
+                SpeakerSegment {
+                    speaker: "SPEAKER_3".into(),
+                    start: 3.6,
+                    end: 5.8,
+                },
+                SpeakerSegment {
+                    speaker: "SPEAKER_3".into(),
+                    start: 7.2,
+                    end: 8.4,
+                },
+                SpeakerSegment {
+                    speaker: "SPEAKER_2".into(),
+                    start: 8.4,
+                    end: 9.9,
+                },
+            ],
+            num_speakers: 2,
+            from_stems: false,
+            source_aware: false,
+            speaker_embeddings: std::collections::HashMap::from([
+                ("SPEAKER_2".to_string(), vec![0.1]),
+                ("SPEAKER_3".to_string(), vec![0.2]),
+            ]),
+        };
+
+        let merged = merge_remote_diarization_into_stem_result(&stem_result, &remote_result);
+        assert_eq!(merged.num_speakers, 4);
+        assert!(!merged.from_stems);
+        assert!(merged.source_aware);
+        assert_eq!(
+            merged
+                .segments
+                .iter()
+                .map(|segment| (segment.speaker.as_str(), segment.start, segment.end))
+                .collect::<Vec<_>>(),
+            vec![
+                ("SPEAKER_0", 0.0, 2.0),
+                ("SPEAKER_1", 2.0, 2.1),
+                ("SPEAKER_2", 2.1, 3.6),
+                ("SPEAKER_3", 3.6, 5.8),
+                ("SPEAKER_1", 5.8, 6.0),
+                ("SPEAKER_0", 6.0, 7.0),
+                ("SPEAKER_1", 7.0, 7.2),
+                ("SPEAKER_3", 7.2, 8.4),
+                ("SPEAKER_2", 8.4, 9.9),
+                ("SPEAKER_1", 9.9, 10.0),
+            ]
+        );
+        assert!(merged.speaker_embeddings.contains_key("SPEAKER_2"));
+        assert!(merged.speaker_embeddings.contains_key("SPEAKER_3"));
+    }
+
+    #[test]
+    fn has_multi_party_remote_structure_requires_two_meaningful_remote_speakers() {
+        let weak_remote = DiarizationResult {
+            segments: vec![
+                SpeakerSegment {
+                    speaker: "SPEAKER_0".into(),
+                    start: 0.0,
+                    end: 2.0,
+                },
+                SpeakerSegment {
+                    speaker: "SPEAKER_1".into(),
+                    start: 2.0,
+                    end: 2.4,
+                },
+                SpeakerSegment {
+                    speaker: "SPEAKER_2".into(),
+                    start: 2.4,
+                    end: 2.8,
+                },
+            ],
+            num_speakers: 3,
+            from_stems: true,
+            source_aware: true,
+            speaker_embeddings: std::collections::HashMap::new(),
+        };
+        let strong_remote = DiarizationResult {
+            segments: vec![
+                SpeakerSegment {
+                    speaker: "SPEAKER_0".into(),
+                    start: 0.0,
+                    end: 1.0,
+                },
+                SpeakerSegment {
+                    speaker: "SPEAKER_1".into(),
+                    start: 1.0,
+                    end: 1.7,
+                },
+                SpeakerSegment {
+                    speaker: "SPEAKER_2".into(),
+                    start: 1.7,
+                    end: 2.4,
+                },
+            ],
+            num_speakers: 3,
+            from_stems: true,
+            source_aware: true,
+            speaker_embeddings: std::collections::HashMap::new(),
+        };
+
+        assert!(!has_multi_party_remote_structure(&weak_remote));
+        assert!(has_multi_party_remote_structure(&strong_remote));
     }
 
     #[test]

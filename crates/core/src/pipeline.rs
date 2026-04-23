@@ -1032,7 +1032,7 @@ where
         if let Some(result) = diarize::diarize(audio_path, config) {
             let diarize_ms = diarize_start.elapsed().as_millis() as u64;
             diarization_num_speakers = result.num_speakers;
-            diarization_from_stems = result.from_stems;
+            diarization_from_stems = result.source_aware;
             diarization_embeddings = result.speaker_embeddings.clone();
             logging::log_step(
                 "diarize",
@@ -1498,7 +1498,7 @@ where
         tracing::info!(step = "diarize", "running speaker diarization");
         if let Some(result) = diarize::diarize(audio_path, config) {
             diarization_num_speakers = result.num_speakers;
-            diarization_from_stems = result.from_stems;
+            diarization_from_stems = result.source_aware;
             diarization_embeddings = result.speaker_embeddings.clone();
             diarize::apply_speakers(&transcript, &result)
         } else {

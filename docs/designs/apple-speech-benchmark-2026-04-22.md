@@ -3,6 +3,32 @@
 This document records the first real local benchmark run for Minutes' Apple
 speech evaluation path.
 
+It now also serves as the practical scope note for the current Apple Speech
+experiment, because the runtime warnings and CLI help text point users toward
+this document when they ask "what does Apple Speech actually do today?"
+
+## Current product scope
+
+As of the current `main` branch:
+
+- `engine = "apple-speech"` is an **experimental standalone live-transcript
+  path**. It applies to `minutes live` only.
+- Apple Speech does **not** currently replace the recording-sidecar live path,
+  dictation, or post-recording / batch transcription.
+- The desktop settings UI can surface Apple Speech availability, but it does
+  **not** let you switch to Apple Speech from the transcription-engine picker.
+  Configure it via the config file or CLI flows instead.
+- If standalone live transcript is configured to use Apple Speech and Apple
+  Speech cannot run or fails mid-session, Minutes falls back to:
+  1. a ready Parakeet backend, if one is available
+  2. Whisper, if Parakeet is unavailable or also fails
+- The benchmark commands below remain useful for evaluation, but the benchmark
+  memo is still narrower than a full backend decision or product rollout plan.
+
+If you are looking for the current user-facing behavior rather than the
+historical benchmark snapshot, treat this section as authoritative and the
+benchmark results below as background evidence.
+
 It is intentionally narrower than a final backend decision memo. The goal of
 this run was to answer:
 
@@ -39,6 +65,9 @@ Related first-install run:
 Important limitation:
 - this corpus is synthetic TTS speech, not real human meeting audio
 - the result is useful for relative backend shape, not for a final product default
+- the summary table below captures the first benchmark snapshot; later product
+  updates added richer reporting such as punctuation-insensitive WER and
+  per-content-type slices in generated benchmark artifacts
 
 ## Measured result
 

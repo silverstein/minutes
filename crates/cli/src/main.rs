@@ -6726,7 +6726,7 @@ fn cmd_live(config: &Config) -> Result<()> {
     eprintln!("Starting live transcript session...");
     if config.transcription.engine == "apple-speech" {
         eprintln!(
-            "[minutes] Apple Speech experimental live path selected. If unavailable, Minutes will fall back to whisper for this session."
+            "[minutes] Apple Speech experimental live path selected. If unavailable or weak, Minutes will fall back to Parakeet or Whisper for this session."
         );
     }
     eprintln!("Press Ctrl-C or run `minutes stop` to end.\n");

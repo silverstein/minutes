@@ -127,6 +127,7 @@ pub struct AppleSpeechBackendBenchmark {
     pub segment_count: usize,
     pub has_timestamps: bool,
     pub wer: Option<f64>,
+    pub wer_punct_insensitive: Option<f64>,
     pub error: Option<String>,
 }
 
@@ -153,6 +154,7 @@ pub struct AppleSpeechAggregateMetrics {
     pub average_elapsed_ms: Option<f64>,
     pub average_first_result_elapsed_ms: Option<f64>,
     pub average_wer: Option<f64>,
+    pub average_wer_punct_insensitive: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -166,6 +168,15 @@ pub struct AppleSpeechBenchmarkTotals {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct AppleSpeechBenchmarkSlices {
+    pub overall: AppleSpeechBenchmarkTotals,
+    pub meeting: AppleSpeechBenchmarkTotals,
+    pub dictation: AppleSpeechBenchmarkTotals,
+    pub memo: AppleSpeechBenchmarkTotals,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AppleSpeechBenchmarkReport {
     pub generated_at: String,
     pub corpus_path: PathBuf,
@@ -173,6 +184,7 @@ pub struct AppleSpeechBenchmarkReport {
     pub capabilities: AppleSpeechCapabilityReport,
     pub cases: Vec<AppleSpeechBenchmarkCaseResult>,
     pub totals: AppleSpeechBenchmarkTotals,
+    pub slices: AppleSpeechBenchmarkSlices,
     pub notes: Vec<String>,
 }
 
@@ -309,11 +321,30 @@ pub fn run_benchmark_corpus(
         corpus_path: corpus_path.to_path_buf(),
         configured_engine: config.transcription.engine.clone(),
         capabilities,
-        totals: AppleSpeechBenchmarkTotals {
-            speech_transcriber: aggregate_metrics(&results, |case| &case.speech_transcriber),
-            dictation_transcriber: aggregate_metrics(&results, |case| &case.dictation_transcriber),
-            whisper: aggregate_metrics(&results, |case| &case.whisper),
-            parakeet: aggregate_metrics(&results, |case| &case.parakeet),
+        totals: totals_for_cases(&results),
+        slices: AppleSpeechBenchmarkSlices {
+            overall: totals_for_cases(&results),
+            meeting: totals_for_cases(
+                &results
+                    .iter()
+                    .filter(|case| case.content_type == ContentType::Meeting)
+                    .cloned()
+                    .collect::<Vec<_>>(),
+            ),
+            dictation: totals_for_cases(
+                &results
+                    .iter()
+                    .filter(|case| case.content_type == ContentType::Dictation)
+                    .cloned()
+                    .collect::<Vec<_>>(),
+            ),
+            memo: totals_for_cases(
+                &results
+                    .iter()
+                    .filter(|case| case.content_type == ContentType::Memo)
+                    .cloned()
+                    .collect::<Vec<_>>(),
+            ),
         },
         cases: results,
         notes,
@@ -430,7 +461,7 @@ pub fn render_benchmark_summary(report: &AppleSpeechBenchmarkReport) -> String {
         ));
     }
     lines.push(String::new());
-    lines.push("## Aggregate metrics".to_string());
+    lines.push("## Overall metrics".to_string());
     lines.push(String::new());
     for (label, metrics) in [
         ("SpeechTranscriber", &report.totals.speech_transcriber),
@@ -439,14 +470,49 @@ pub fn render_benchmark_summary(report: &AppleSpeechBenchmarkReport) -> String {
         ("Parakeet", &report.totals.parakeet),
     ] {
         lines.push(format!(
-            "- {}: succeeded `{}/{}`; avg elapsed `{}` ms; avg first-result `{}` ms; avg WER `{}`",
+            "- {}: succeeded `{}/{}`; avg elapsed `{}` ms; avg first-result `{}` ms; avg WER `{}`; avg WER (punct-insensitive) `{}`",
             label,
             metrics.cases_succeeded,
             metrics.cases_total,
             format_optional_f64(metrics.average_elapsed_ms),
             format_optional_f64(metrics.average_first_result_elapsed_ms),
             format_optional_f64(metrics.average_wer.map(|value| value * 100.0)),
+            format_optional_f64(
+                metrics
+                    .average_wer_punct_insensitive
+                    .map(|value| value * 100.0)
+            ),
         ));
+    }
+    for (slice_label, totals) in [
+        ("meeting", &report.slices.meeting),
+        ("dictation", &report.slices.dictation),
+        ("memo", &report.slices.memo),
+    ] {
+        lines.push(String::new());
+        lines.push(format!("## {} metrics", slice_label));
+        lines.push(String::new());
+        for (label, metrics) in [
+            ("SpeechTranscriber", &totals.speech_transcriber),
+            ("DictationTranscriber", &totals.dictation_transcriber),
+            ("Whisper", &totals.whisper),
+            ("Parakeet", &totals.parakeet),
+        ] {
+            lines.push(format!(
+                "- {}: succeeded `{}/{}`; avg elapsed `{}` ms; avg first-result `{}` ms; avg WER `{}`; avg WER (punct-insensitive) `{}`",
+                label,
+                metrics.cases_succeeded,
+                metrics.cases_total,
+                format_optional_f64(metrics.average_elapsed_ms),
+                format_optional_f64(metrics.average_first_result_elapsed_ms),
+                format_optional_f64(metrics.average_wer.map(|value| value * 100.0)),
+                format_optional_f64(
+                    metrics
+                        .average_wer_punct_insensitive
+                        .map(|value| value * 100.0)
+                ),
+            ));
+        }
     }
     lines.push(String::new());
     lines.push("## Cases".to_string());
@@ -459,40 +525,60 @@ pub fn render_benchmark_summary(report: &AppleSpeechBenchmarkReport) -> String {
             case.locale
         ));
         lines.push(format!(
-            "  speech: {} / {} ms / WER {}",
+            "  speech: {} / {} ms / WER {} / WER no-punct {}",
             case.speech_transcriber.status,
             case.speech_transcriber
                 .total_elapsed_ms
                 .map(|value| value.to_string())
                 .unwrap_or_else(|| "n/a".into()),
             format_optional_f64(case.speech_transcriber.wer.map(|value| value * 100.0)),
+            format_optional_f64(
+                case.speech_transcriber
+                    .wer_punct_insensitive
+                    .map(|value| value * 100.0)
+            ),
         ));
         lines.push(format!(
-            "  dictation: {} / {} ms / WER {}",
+            "  dictation: {} / {} ms / WER {} / WER no-punct {}",
             case.dictation_transcriber.status,
             case.dictation_transcriber
                 .total_elapsed_ms
                 .map(|value| value.to_string())
                 .unwrap_or_else(|| "n/a".into()),
             format_optional_f64(case.dictation_transcriber.wer.map(|value| value * 100.0)),
+            format_optional_f64(
+                case.dictation_transcriber
+                    .wer_punct_insensitive
+                    .map(|value| value * 100.0)
+            ),
         ));
         lines.push(format!(
-            "  whisper: {} / {} ms / WER {}",
+            "  whisper: {} / {} ms / WER {} / WER no-punct {}",
             case.whisper.status,
             case.whisper
                 .total_elapsed_ms
                 .map(|value| value.to_string())
                 .unwrap_or_else(|| "n/a".into()),
             format_optional_f64(case.whisper.wer.map(|value| value * 100.0)),
+            format_optional_f64(
+                case.whisper
+                    .wer_punct_insensitive
+                    .map(|value| value * 100.0)
+            ),
         ));
         lines.push(format!(
-            "  parakeet: {} / {} ms / WER {}",
+            "  parakeet: {} / {} ms / WER {} / WER no-punct {}",
             case.parakeet.status,
             case.parakeet
                 .total_elapsed_ms
                 .map(|value| value.to_string())
                 .unwrap_or_else(|| "n/a".into()),
             format_optional_f64(case.parakeet.wer.map(|value| value * 100.0)),
+            format_optional_f64(
+                case.parakeet
+                    .wer_punct_insensitive
+                    .map(|value| value * 100.0)
+            ),
         ));
     }
     lines.push(String::new());
@@ -523,6 +609,8 @@ fn aggregate_metrics(
     let mut first_count = 0usize;
     let mut wer_sum = 0f64;
     let mut wer_count = 0usize;
+    let mut wer_punct_insensitive_sum = 0f64;
+    let mut wer_punct_insensitive_count = 0usize;
 
     for case in cases {
         let result = select(case);
@@ -543,13 +631,28 @@ fn aggregate_metrics(
                 wer_sum += wer;
                 wer_count += 1;
             }
+            if let Some(wer) = result.wer_punct_insensitive {
+                wer_punct_insensitive_sum += wer;
+                wer_punct_insensitive_count += 1;
+            }
         }
     }
 
     metrics.average_elapsed_ms = average(elapsed_sum, elapsed_count);
     metrics.average_first_result_elapsed_ms = average(first_sum, first_count);
     metrics.average_wer = average(wer_sum, wer_count);
+    metrics.average_wer_punct_insensitive =
+        average(wer_punct_insensitive_sum, wer_punct_insensitive_count);
     metrics
+}
+
+fn totals_for_cases(cases: &[AppleSpeechBenchmarkCaseResult]) -> AppleSpeechBenchmarkTotals {
+    AppleSpeechBenchmarkTotals {
+        speech_transcriber: aggregate_metrics(cases, |case| &case.speech_transcriber),
+        dictation_transcriber: aggregate_metrics(cases, |case| &case.dictation_transcriber),
+        whisper: aggregate_metrics(cases, |case| &case.whisper),
+        parakeet: aggregate_metrics(cases, |case| &case.parakeet),
+    }
 }
 
 fn average(sum: f64, count: usize) -> Option<f64> {
@@ -629,6 +732,8 @@ fn benchmark_apple_mode(
             .iter()
             .any(|segment| segment.start_ms > 0 || segment.duration_ms > 0),
         wer: reference_text.map(|reference| word_error_rate(reference, &selected.transcript)),
+        wer_punct_insensitive: reference_text
+            .map(|reference| word_error_rate_punct_insensitive(reference, &selected.transcript)),
         error: selected.error.clone(),
     })
 }
@@ -663,6 +768,8 @@ fn benchmark_minutes_backend(
             segment_count: result.text.lines().count(),
             has_timestamps: result.text.lines().any(|line| line.starts_with('[')),
             wer: reference_text.map(|reference| word_error_rate(reference, &result.text)),
+            wer_punct_insensitive: reference_text
+                .map(|reference| word_error_rate_punct_insensitive(reference, &result.text)),
             error: None,
         },
         Err(error) => {
@@ -687,6 +794,7 @@ fn benchmark_minutes_backend(
                 segment_count: 0,
                 has_timestamps: false,
                 wer: None,
+                wer_punct_insensitive: None,
                 error: Some(error.to_string()),
             }
         }
@@ -712,9 +820,61 @@ fn eval_text_for_compare(text: &str) -> String {
         .join(" ")
 }
 
+fn eval_text_for_compare_punct_insensitive(text: &str) -> String {
+    eval_text_for_compare(text)
+        .chars()
+        .map(|ch| {
+            if ch.is_alphanumeric() || ch.is_whitespace() {
+                ch
+            } else {
+                ' '
+            }
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn word_error_rate(reference: &str, hypothesis: &str) -> f64 {
     let reference = eval_text_for_compare(reference);
     let hypothesis = eval_text_for_compare(hypothesis);
+    let reference_words: Vec<&str> = reference.split_whitespace().collect();
+    let hypothesis_words: Vec<&str> = hypothesis.split_whitespace().collect();
+    if reference_words.is_empty() {
+        return if hypothesis_words.is_empty() {
+            0.0
+        } else {
+            1.0
+        };
+    }
+
+    let mut dp = vec![vec![0usize; hypothesis_words.len() + 1]; reference_words.len() + 1];
+    for (i, row) in dp.iter_mut().enumerate().take(reference_words.len() + 1) {
+        row[0] = i;
+    }
+    for (j, cell) in dp[0]
+        .iter_mut()
+        .enumerate()
+        .take(hypothesis_words.len() + 1)
+    {
+        *cell = j;
+    }
+    for i in 1..=reference_words.len() {
+        for j in 1..=hypothesis_words.len() {
+            let cost = usize::from(reference_words[i - 1] != hypothesis_words[j - 1]);
+            dp[i][j] = (dp[i - 1][j] + 1)
+                .min(dp[i][j - 1] + 1)
+                .min(dp[i - 1][j - 1] + cost);
+        }
+    }
+
+    dp[reference_words.len()][hypothesis_words.len()] as f64 / reference_words.len() as f64
+}
+
+fn word_error_rate_punct_insensitive(reference: &str, hypothesis: &str) -> f64 {
+    let reference = eval_text_for_compare_punct_insensitive(reference);
+    let hypothesis = eval_text_for_compare_punct_insensitive(hypothesis);
     let reference_words: Vec<&str> = reference.split_whitespace().collect();
     let hypothesis_words: Vec<&str> = hypothesis.split_whitespace().collect();
     if reference_words.is_empty() {
@@ -985,5 +1145,16 @@ mod tests {
             Some(corpus_dir.join(Path::new("refs").join("sample.txt")))
         );
         assert_eq!(cases[1].audio_path, absolute_audio);
+    }
+
+    #[test]
+    fn punct_insensitive_wer_ignores_terminal_punctuation() {
+        let reference = "Minutes benchmark dictation check. Apple speech should handle short form voice notes locally.";
+        let hypothesis =
+            "Minutes benchmark dictation check Apple speech should handle short form voice notes locally";
+        let punct_sensitive = word_error_rate(reference, hypothesis);
+        let punct_insensitive = word_error_rate_punct_insensitive(reference, hypothesis);
+        assert!(punct_sensitive > punct_insensitive);
+        assert_eq!(punct_insensitive, 0.0);
     }
 }

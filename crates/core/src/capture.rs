@@ -884,6 +884,11 @@ fn padded_slot(samples: Option<Vec<f32>>) -> Vec<f32> {
 }
 
 #[cfg(feature = "streaming")]
+fn dual_source_slot_for_chunk(base_slot: u64, chunk: &crate::streaming::AudioChunk) -> u64 {
+    base_slot + chunk.index
+}
+
+#[cfg(feature = "streaming")]
 #[derive(Default)]
 struct DualSlotStats {
     both: u64,
@@ -1013,12 +1018,12 @@ fn record_to_wav_dual_source(
         safety_guard = safety_guard.with_intent(intent);
     }
 
-    let session_start = Instant::now();
     let mut next_slot: Option<u64> = None;
     let mut max_voice_slot: Option<u64> = None;
     let mut max_system_slot: Option<u64> = None;
     let mut pending_voice = std::collections::BTreeMap::<u64, Vec<f32>>::new();
     let mut pending_system = std::collections::BTreeMap::<u64, Vec<f32>>::new();
+    let mut slot_base: u64 = 0;
     // Mixer stats for diagnosing dual-source issues
     let mut slot_stats = DualSlotStats::default();
     let mut peak_level: u32 = 0;
@@ -1087,6 +1092,11 @@ fn record_to_wav_dual_source(
                         &new_system.device_name,
                         true,
                     );
+                    slot_base = max_voice_slot
+                        .into_iter()
+                        .chain(max_system_slot)
+                        .max()
+                        .map_or(slot_base, |slot| slot.saturating_add(1));
                     voice_stream = Some(new_voice);
                     system_stream = Some(new_system);
                     safety_guard.extend();
@@ -1114,18 +1124,6 @@ fn record_to_wav_dual_source(
             .receiver
             .clone();
 
-        // Derive slot from wall-clock timestamp relative to session start.
-        // Both streams share the same session_start anchor, so slots from
-        // different devices correspond to the same real-world time window.
-        let slot_for = |chunk: &crate::streaming::AudioChunk| -> u64 {
-            chunk
-                .timestamp
-                .checked_duration_since(session_start)
-                .unwrap_or_default()
-                .as_millis() as u64
-                / 100
-        };
-
         // Drain all available chunks from both channels before flushing.
         // The old code used select! to grab ONE chunk per iteration, which
         // on slower machines meant one source got flushed before the other
@@ -1145,14 +1143,14 @@ fn record_to_wav_dual_source(
 
         let mut got_any = false;
         while let Ok(chunk) = voice_rx.try_recv() {
-            let slot = slot_for(&chunk);
+            let slot = dual_source_slot_for_chunk(slot_base, &chunk);
             next_slot.get_or_insert(slot);
             max_voice_slot = Some(max_voice_slot.map_or(slot, |s| s.max(slot)));
             pending_voice.insert(slot, mute_voice_if_needed(chunk.samples));
             got_any = true;
         }
         while let Ok(chunk) = system_rx.try_recv() {
-            let slot = slot_for(&chunk);
+            let slot = dual_source_slot_for_chunk(slot_base, &chunk);
             next_slot.get_or_insert(slot);
             max_system_slot = Some(max_system_slot.map_or(slot, |s| s.max(slot)));
             pending_system.insert(slot, chunk.samples);
@@ -1164,7 +1162,7 @@ fn record_to_wav_dual_source(
             crossbeam_channel::select! {
                 recv(voice_rx) -> chunk => {
                     if let Ok(chunk) = chunk {
-                        let slot = slot_for(&chunk);
+                        let slot = dual_source_slot_for_chunk(slot_base, &chunk);
                         next_slot.get_or_insert(slot);
                         max_voice_slot = Some(max_voice_slot.map_or(slot, |s| s.max(slot)));
                         pending_voice.insert(slot, mute_voice_if_needed(chunk.samples));
@@ -1172,7 +1170,7 @@ fn record_to_wav_dual_source(
                 }
                 recv(system_rx) -> chunk => {
                     if let Ok(chunk) = chunk {
-                        let slot = slot_for(&chunk);
+                        let slot = dual_source_slot_for_chunk(slot_base, &chunk);
                         next_slot.get_or_insert(slot);
                         max_system_slot = Some(max_system_slot.map_or(slot, |s| s.max(slot)));
                         pending_system.insert(slot, chunk.samples);
@@ -2736,6 +2734,31 @@ mod tests {
             &config,
             &different_error,
         ));
+    }
+
+    #[cfg(feature = "streaming")]
+    #[test]
+    fn dual_source_slot_for_chunk_ignores_wall_clock_jitter() {
+        use crate::streaming::{AudioChunk, SourceRole};
+
+        let base = 40;
+        let first = AudioChunk {
+            samples: vec![0.0; 1600],
+            rms: 0.0,
+            timestamp: Instant::now(),
+            index: 7,
+            source: SourceRole::Voice,
+        };
+        let delayed = AudioChunk {
+            samples: vec![0.0; 1600],
+            rms: 0.0,
+            timestamp: Instant::now() + std::time::Duration::from_millis(175),
+            index: 7,
+            source: SourceRole::Call,
+        };
+
+        assert_eq!(dual_source_slot_for_chunk(base, &first), 47);
+        assert_eq!(dual_source_slot_for_chunk(base, &delayed), 47);
     }
 
     fn test_config() -> crate::config::RecordingConfig {

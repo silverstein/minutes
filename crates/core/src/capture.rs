@@ -1635,6 +1635,17 @@ pub fn strip_device_format_suffix(name: &str) -> &str {
     &name[..open_idx]
 }
 
+/// Normalize a persisted input-device setting to the canonical CPAL device
+/// name by trimming whitespace and stripping any UI decoration suffix like
+/// `" (16000Hz, 1 ch)"`.
+pub fn canonicalize_input_device_setting(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(strip_device_format_suffix(trimmed).to_string())
+}
+
 /// Select the best input device.
 ///
 /// If `device_name` is provided, matches by name against available devices.
@@ -2429,6 +2440,19 @@ mod tests {
             label: "Ground Control (16000Hz, 1 ch)".into(),
         };
         assert_eq!(strip_device_format_suffix(&entry.label), entry.name);
+    }
+
+    #[test]
+    fn canonicalize_input_device_setting_strips_picker_decoration() {
+        assert_eq!(
+            canonicalize_input_device_setting(" Ground Control (16000Hz, 1 ch) "),
+            Some("Ground Control".into())
+        );
+        assert_eq!(
+            canonicalize_input_device_setting("Ground Control"),
+            Some("Ground Control".into())
+        );
+        assert_eq!(canonicalize_input_device_setting("   "), None);
     }
 
     #[test]

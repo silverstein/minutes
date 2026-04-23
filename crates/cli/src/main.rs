@@ -1455,7 +1455,7 @@ fn normalize_source_override(source: Option<&str>) -> Option<String> {
     match source.map(str::trim) {
         Some("") | None => None,
         Some(value) if value.eq_ignore_ascii_case("default") => None,
-        Some(value) => Some(value.to_string()),
+        Some(value) => minutes_core::capture::canonicalize_input_device_setting(value),
     }
 }
 
@@ -1501,7 +1501,7 @@ fn resolve_recording_device_overrides(
 
     if let Some(dev) = device {
         config.recording.sources = None;
-        config.recording.device = Some(dev);
+        config.recording.device = minutes_core::capture::canonicalize_input_device_setting(&dev);
         return Ok(());
     }
 
@@ -4983,6 +4983,19 @@ life (qmd://life/)
             .expect("explicit --device should override config sources");
         assert_eq!(config.recording.device.as_deref(), Some("USB Mic"));
         assert!(config.recording.sources.is_none());
+    }
+
+    #[test]
+    fn resolve_recording_device_overrides_normalizes_decorated_explicit_device() {
+        let mut config = Config::default();
+        resolve_recording_device_overrides(
+            &mut config,
+            &[],
+            Some("Ground Control (16000Hz, 1 ch)".into()),
+            false,
+        )
+        .expect("decorated --device value should normalize");
+        assert_eq!(config.recording.device.as_deref(), Some("Ground Control"));
     }
 
     #[test]

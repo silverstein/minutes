@@ -6411,7 +6411,8 @@ pub fn cmd_set_setting(section: String, key: String, value: String) -> Result<St
 
         // Recording
         ("recording", "device") => {
-            config.recording.device = parse_optional_string_setting(&value);
+            config.recording.device =
+                minutes_core::capture::canonicalize_input_device_setting(&value);
         }
 
         // Diarization
@@ -7089,6 +7090,19 @@ mod tests {
             .unwrap_err();
 
         assert!(error.contains("unknown live transcript backend"));
+    }
+
+    #[test]
+    fn desktop_settings_normalize_decorated_recording_device_name() {
+        cmd_set_setting(
+            "recording".into(),
+            "device".into(),
+            "Ground Control (16000Hz, 1 ch)".into(),
+        )
+        .unwrap();
+
+        let config = Config::load();
+        assert_eq!(config.recording.device.as_deref(), Some("Ground Control"));
     }
 
     #[test]

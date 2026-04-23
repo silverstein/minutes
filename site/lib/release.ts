@@ -2,7 +2,7 @@
 // scripts/sync_site_release_version.mjs.
 // Do not edit by hand. Run `node scripts/sync_site_release_version.mjs`.
 
-export const MINUTES_RELEASE_VERSION = "0.14.0";
+export const MINUTES_RELEASE_VERSION = "0.14.1";
 export const MINUTES_RELEASE_TAG = `v${MINUTES_RELEASE_VERSION}`;
 
 export const MINUTES_MCP_TOOL_COUNT = 29;

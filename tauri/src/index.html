@@ -7220,6 +7220,7 @@
         const eng = s.transcription.engine || 'whisper';
         const parakeetCompiled = s.transcription.parakeet_compiled || false;
         const parakeetStatus = s.transcription.parakeet_status || null;
+        const appleSpeechStatus = s.transcription.apple_speech_status || null;
         const engineSelect = document.getElementById('settings-transcription-engine');
         const parakeetOpt = engineSelect.querySelector('option[value="parakeet"]');
         const appleSpeechOpt = engineSelect.querySelector('option[value="apple-speech"]');
@@ -7234,12 +7235,18 @@
         if (appleSpeechOpt) {
           appleSpeechOpt.disabled = true;
           appleSpeechOpt.hidden = !appleSpeechConfigured;
-          appleSpeechOpt.textContent = 'Apple Speech — standalone live transcript only; configured outside desktop settings';
+          appleSpeechOpt.textContent = appleSpeechConfigured
+            ? 'Apple Speech — standalone live transcript only; configured outside desktop settings'
+            : (appleSpeechStatus && appleSpeechStatus.selectable)
+              ? 'Apple Speech — available for standalone live transcript, but not configurable here'
+              : 'Apple Speech — unavailable on this Mac';
         }
         if (engineDetail) {
           engineDetail.textContent = appleSpeechConfigured
             ? 'Apple Speech is configured outside desktop settings for standalone live transcript experiments. Recording and batch flows still use Whisper today.'
-            : 'Whisper and Parakeet are the configurable transcription engines in desktop settings.';
+            : (appleSpeechStatus && appleSpeechStatus.selectable)
+              ? 'This Mac supports Apple Speech for standalone live transcript experiments, but desktop settings still only configure Whisper and Parakeet.'
+              : 'Whisper and Parakeet are the configurable transcription engines in desktop settings.';
         }
         engineSelect.value = appleSpeechConfigured ? 'apple-speech' : eng;
         document.getElementById('settings-whisper-section').classList.toggle('is-hidden', eng !== 'whisper');

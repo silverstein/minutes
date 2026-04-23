@@ -85,6 +85,22 @@ fn parakeet_status_view(config: &Config) -> ParakeetStatusView {
     minutes_core::transcription_coordinator::parakeet_backend_status(config)
 }
 
+fn apple_speech_status_view() -> serde_json::Value {
+    match minutes_core::apple_speech::probe_capabilities() {
+        Ok(report) => serde_json::json!({
+            "supported": report.runtime_supported,
+            "selectable": report.runtime_supported
+                && report.speech_transcriber.is_available.unwrap_or(false),
+            "report": report,
+        }),
+        Err(error) => serde_json::json!({
+            "supported": false,
+            "selectable": false,
+            "error": error.to_string(),
+        }),
+    }
+}
+
 /// Lifecycle state for the palette overlay window.
 ///
 /// Transitions:
@@ -5944,6 +5960,7 @@ pub fn cmd_get_settings() -> serde_json::Value {
             "parakeet_sidecar_enabled": config.transcription.parakeet_sidecar_enabled,
             "parakeet_compiled": cfg!(feature = "parakeet"),
             "parakeet_status": parakeet_status_view(&config),
+            "apple_speech_status": apple_speech_status_view(),
         },
         "diarization": {
             "engine": config.diarization.engine,

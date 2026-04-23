@@ -146,7 +146,7 @@ minutes consistency                                # Flag contradicting decision
 minutes live                                     # Start real-time transcription
 minutes stop                                     # Stop live session
 ```
-Streams local transcription to a JSONL file in real time — any AI agent can read it mid-meeting for live coaching. Depending on your build and config, live mode can run on Whisper, Parakeet, or the experimental Apple Speech standalone-live path. Apple Speech currently applies only to standalone live transcript (`minutes live`), not recording-sidecar, dictation, or batch transcription, and it falls back to a ready Parakeet backend before Whisper if Apple Speech is unavailable or fails mid-session. The MCP `read_live_transcript` tool provides delta reads (by line cursor or wall-clock duration). Works with Claude Code, Codex, OpenCode, Gemini CLI, or any agent that reads files. The Tauri desktop app has a Live Mode toggle that starts this with one click.
+Streams local transcription to a JSONL file in real time — any AI agent can read it mid-meeting for live coaching. Depending on your build and config, live mode can run on Whisper, Parakeet, or the experimental Apple Speech standalone-live path. Apple Speech currently applies only to standalone live transcript (`minutes live`), not recording-sidecar, dictation, or batch transcription, and it falls back to a ready Parakeet backend before Whisper if Apple Speech is unavailable or fails mid-session. See [docs/APPLE_SPEECH.md](docs/APPLE_SPEECH.md) for the current Apple Speech scope. The MCP `read_live_transcript` tool provides delta reads (by line cursor or wall-clock duration). Works with Claude Code, Codex, OpenCode, Gemini CLI, or any agent that reads files. The Tauri desktop app has a Live Mode toggle that starts this with one click.
 
 ### Dictation mode
 ```bash
@@ -998,6 +998,7 @@ model = "small"           # whisper: tiny (75MB), base, small (466MB), medium, l
                           # Default: auto-detect. Set this for similar-sounding languages (Urdu/Hindi, etc.)
 # engine = "apple-speech"  # Experimental: standalone `minutes live` only. Configure via config file or CLI, not desktop settings.
 #                         # If Apple Speech cannot run, standalone live falls back to a ready Parakeet backend, then Whisper.
+#                         # See docs/APPLE_SPEECH.md for current scope and limitations.
 # parakeet_model = "tdt-600m"                    # parakeet: tdt-ctc-110m (English), tdt-600m (multilingual v3)
 # parakeet_binary = "parakeet"                   # Path to parakeet.cpp binary (or name in PATH)
 # parakeet_boost_limit = 25                      # Experimental: boost top graph-derived phrases (0 disables)

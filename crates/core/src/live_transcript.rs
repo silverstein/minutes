@@ -1324,28 +1324,44 @@ fn transcribe_with_apple_speech_for_live_sidecar(
     samples: &[f32],
     config: &Config,
 ) -> Result<Option<(String, f64)>, MinutesError> {
+    transcribe_with_apple_speech_for_live_sidecar_impl(
+        samples,
+        config,
+        crate::apple_speech::transcribe_with_apple_speech,
+    )
+}
+
+fn transcribe_with_apple_speech_for_live_sidecar_impl<F>(
+    samples: &[f32],
+    config: &Config,
+    transcribe_fn: F,
+) -> Result<Option<(String, f64)>, MinutesError>
+where
+    F: FnOnce(
+        &Path,
+        Option<&str>,
+        crate::apple_speech::AppleSpeechMode,
+        bool,
+    ) -> Result<crate::apple_speech::AppleSpeechTranscriptionResult>,
+{
     if samples.len() < APPLE_SPEECH_LIVE_MIN_SAMPLES {
         return Ok(None);
     }
 
-    let tmp_wav = std::env::temp_dir().join(format!(
-        "minutes-live-apple-speech-{}-{}.wav",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos()
-    ));
-    crate::transcribe::write_wav_16k_mono(&tmp_wav, samples)?;
+    let tmp_wav = tempfile::Builder::new()
+        .prefix("minutes-live-apple-speech-")
+        .suffix(".wav")
+        .tempfile()
+        .map_err(TranscribeError::Io)?;
+    crate::transcribe::write_wav_16k_mono(tmp_wav.path(), samples)?;
 
     let locale = crate::apple_speech::live_locale_hint(config.transcription.language.as_deref());
-    let result = crate::apple_speech::transcribe_with_apple_speech(
-        &tmp_wav,
+    let result = transcribe_fn(
+        tmp_wav.path(),
         locale.as_deref(),
         crate::apple_speech::AppleSpeechMode::Speech,
         true,
     )?;
-    std::fs::remove_file(&tmp_wav).ok();
 
     if let Some(error) = result.error {
         return Err(MinutesError::Io(std::io::Error::other(error)));
@@ -2592,6 +2608,31 @@ mod tests {
         // (We can't assert the threshold-exceeds branch here — it requires a
         // real parakeet binary. The subprocess path is exercised by the smoke
         // test in the RFC.)
+    }
+
+    #[test]
+    fn apple_speech_live_helper_cleans_up_tempfile_on_error() {
+        let cfg = Config::default();
+        let samples = vec![0.0f32; APPLE_SPEECH_LIVE_MIN_SAMPLES];
+        let seen_path = std::sync::Mutex::new(None::<PathBuf>);
+
+        let result = transcribe_with_apple_speech_for_live_sidecar_impl(
+            &samples,
+            &cfg,
+            |path, _locale, _mode, _ensure_assets| {
+                *seen_path.lock().unwrap() = Some(path.to_path_buf());
+                Err(MinutesError::Io(std::io::Error::other(
+                    "simulated apple speech failure",
+                )))
+            },
+        );
+
+        assert!(result.is_err());
+        let leaked_path = seen_path.lock().unwrap().clone().unwrap();
+        assert!(
+            !leaked_path.exists(),
+            "temporary WAV should be cleaned up after helper failure"
+        );
     }
 
     #[test]

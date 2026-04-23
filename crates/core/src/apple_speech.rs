@@ -1,4 +1,3 @@
-use crate::calendar::output_with_timeout;
 use crate::config::Config;
 use crate::error::{MinutesError, Result, TranscribeError};
 use crate::pipeline::{clean_transcript_line, normalize_space};
@@ -7,11 +6,20 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::time::{Duration, Instant};
+#[cfg(target_os = "macos")]
+use std::time::Duration;
+use std::time::Instant;
 
+#[cfg(target_os = "macos")]
+use crate::calendar::output_with_timeout;
+#[cfg(target_os = "macos")]
+use std::process::Command;
+
+#[cfg(target_os = "macos")]
 const HELPER_SOURCE: &str = include_str!("../resources/apple-speech-helper.swift");
+#[cfg(target_os = "macos")]
 const HELPER_TIMEOUT: Duration = Duration::from_secs(30);
+#[cfg(target_os = "macos")]
 const HELPER_TRANSCRIBE_TIMEOUT: Duration = Duration::from_secs(900);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -74,6 +82,7 @@ pub enum AppleSpeechMode {
 }
 
 impl AppleSpeechMode {
+    #[cfg(target_os = "macos")]
     fn as_helper_arg(self) -> &'static str {
         match self {
             Self::Speech => "speech",
@@ -281,13 +290,7 @@ pub fn run_benchmark_corpus(
     corpus_path: &Path,
     config: &Config,
 ) -> Result<AppleSpeechBenchmarkReport> {
-    let raw = fs::read_to_string(corpus_path)?;
-    let cases: Vec<AppleSpeechBenchmarkCase> = serde_json::from_str(&raw).map_err(|error| {
-        MinutesError::Io(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            error.to_string(),
-        ))
-    })?;
+    let cases = load_benchmark_cases(corpus_path)?;
     if cases.is_empty() {
         return Err(MinutesError::Io(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -321,6 +324,38 @@ pub fn run_benchmark_corpus(
         cases: results,
         notes,
     })
+}
+
+fn load_benchmark_cases(corpus_path: &Path) -> Result<Vec<AppleSpeechBenchmarkCase>> {
+    let raw = fs::read_to_string(corpus_path)?;
+    let mut cases: Vec<AppleSpeechBenchmarkCase> = serde_json::from_str(&raw).map_err(|error| {
+        MinutesError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            error.to_string(),
+        ))
+    })?;
+    normalize_benchmark_case_paths(&mut cases, corpus_path);
+    Ok(cases)
+}
+
+fn normalize_benchmark_case_paths(cases: &mut [AppleSpeechBenchmarkCase], corpus_path: &Path) {
+    let Some(corpus_dir) = corpus_path.parent() else {
+        return;
+    };
+    for case in cases {
+        case.audio_path = resolve_corpus_relative_path(corpus_dir, &case.audio_path);
+        if let Some(reference_path) = case.reference_path.as_mut() {
+            *reference_path = resolve_corpus_relative_path(corpus_dir, reference_path);
+        }
+    }
+}
+
+fn resolve_corpus_relative_path(base_dir: &Path, path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        base_dir.join(path)
+    }
 }
 
 pub fn write_benchmark_artifacts(
@@ -888,6 +923,8 @@ fn locale_language_hint(locale: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
+    use tempfile::tempdir;
 
     #[test]
     fn locale_language_hint_uses_primary_subtag() {
@@ -904,5 +941,46 @@ mod tests {
         let wer = word_error_rate(reference, hypothesis);
         assert!(wer >= 0.0);
         assert!(wer < 0.34);
+    }
+
+    #[test]
+    fn benchmark_case_paths_resolve_relative_to_corpus_file() {
+        let dir = tempdir().unwrap();
+        let corpus_dir = dir.path().join("fixtures");
+        std::fs::create_dir_all(corpus_dir.join("audio")).unwrap();
+        std::fs::create_dir_all(corpus_dir.join("refs")).unwrap();
+        let absolute_audio = dir.path().join("absolute.wav");
+
+        let corpus_path = corpus_dir.join("apple-speech-corpus.json");
+        std::fs::write(
+            &corpus_path,
+            serde_json::json!([
+                {
+                    "id": "case-1",
+                    "audioPath": "audio/sample.wav",
+                    "contentType": "meeting",
+                    "referencePath": "refs/sample.txt"
+                },
+                {
+                    "id": "case-2",
+                    "audioPath": absolute_audio,
+                    "contentType": "dictation"
+                }
+            ])
+            .to_string(),
+        )
+        .unwrap();
+
+        let cases = load_benchmark_cases(&corpus_path).unwrap();
+
+        assert_eq!(
+            cases[0].audio_path,
+            corpus_dir.join(Path::new("audio").join("sample.wav"))
+        );
+        assert_eq!(
+            cases[0].reference_path,
+            Some(corpus_dir.join(Path::new("refs").join("sample.txt")))
+        );
+        assert_eq!(cases[1].audio_path, absolute_audio);
     }
 }

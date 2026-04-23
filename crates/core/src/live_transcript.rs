@@ -633,14 +633,12 @@ fn run_inner(
 
     let mut vad = Vad::new();
     let mut streaming = StreamingWhisper::new(config.transcription.language.clone());
+    let standalone_backend = config.effective_live_transcript_backend();
     #[cfg(target_os = "macos")]
     let mut apple_utterance_samples: Vec<f32> = Vec::new();
     #[cfg(target_os = "macos")]
-    let mut apple_live_enabled = config
-        .transcription
-        .engine
-        .eq_ignore_ascii_case("apple-speech")
-        && live_supports_apple_speech();
+    let mut apple_live_enabled =
+        standalone_backend.eq_ignore_ascii_case("apple-speech") && live_supports_apple_speech();
     #[cfg(not(target_os = "macos"))]
     let mut apple_live_enabled = false;
 
@@ -653,7 +651,7 @@ fn run_inner(
     #[cfg(feature = "parakeet")]
     let mut parakeet_utterance_samples: Vec<f32> = Vec::new();
     #[cfg(feature = "parakeet")]
-    let mut parakeet_live_enabled = live_supports_parakeet(&config.transcription.engine);
+    let mut parakeet_live_enabled = live_supports_parakeet(standalone_backend);
     #[cfg(feature = "parakeet")]
     let parakeet_fallback_ready = live_ready_parakeet_fallback(config);
     #[cfg(not(feature = "parakeet"))]
@@ -668,16 +666,11 @@ fn run_inner(
 
     // One-time scope warning when the user configured parakeet but the feature
     // isn't compiled in. Same warning the recording sidecar emits.
-    if config.transcription.engine.eq_ignore_ascii_case("parakeet") && !parakeet_live_enabled {
-        emit_live_engine_scope_warning(&config.transcription.engine, "standalone");
+    if standalone_backend.eq_ignore_ascii_case("parakeet") && !parakeet_live_enabled {
+        emit_live_engine_scope_warning(standalone_backend, "standalone");
     }
-    if config
-        .transcription
-        .engine
-        .eq_ignore_ascii_case("apple-speech")
-        && !apple_live_enabled
-    {
-        emit_live_engine_scope_warning(&config.transcription.engine, "standalone");
+    if standalone_backend.eq_ignore_ascii_case("apple-speech") && !apple_live_enabled {
+        emit_live_engine_scope_warning(standalone_backend, "standalone");
     }
     if apple_live_enabled {
         eprintln!("[minutes] Apple Speech live transcript enabled (experimental, standalone only)");

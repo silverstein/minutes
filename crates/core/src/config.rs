@@ -527,6 +527,13 @@ pub struct HooksConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LiveTranscriptConfig {
+    /// Standalone live transcript backend selection.
+    ///
+    /// - `"inherit"` (default): follow `transcription.engine`
+    /// - `"whisper"`: force Whisper for standalone live transcript
+    /// - `"parakeet"`: force Parakeet for standalone live transcript
+    /// - `"apple-speech"`: experimental macOS standalone-live-only path
+    pub backend: String,
     /// Whisper model to use for live transcription.
     /// Empty string means "use the dictation model".
     pub model: String,
@@ -543,6 +550,7 @@ pub struct LiveTranscriptConfig {
 impl Default for LiveTranscriptConfig {
     fn default() -> Self {
         Self {
+            backend: LIVE_TRANSCRIPT_BACKEND_INHERIT.into(),
             model: String::new(), // empty = use dictation model
             max_utterance_secs: 30,
             save_wav: true,
@@ -551,6 +559,14 @@ impl Default for LiveTranscriptConfig {
         }
     }
 }
+
+pub const LIVE_TRANSCRIPT_BACKEND_INHERIT: &str = "inherit";
+pub const VALID_LIVE_TRANSCRIPT_BACKENDS: &[&str] = &[
+    LIVE_TRANSCRIPT_BACKEND_INHERIT,
+    "whisper",
+    "parakeet",
+    "apple-speech",
+];
 
 impl Default for ScreenContextConfig {
     fn default() -> Self {
@@ -746,6 +762,39 @@ impl Default for WatchConfig {
 // ── Loading ──────────────────────────────────────────────────
 
 impl Config {
+    /// Effective backend for the standalone live transcript path.
+    ///
+    /// `live_transcript.backend = "inherit"` follows `transcription.engine`,
+    /// except for the legacy `transcription.engine = "apple-speech"` case,
+    /// which older configs used to express the standalone-live-only Apple
+    /// experiment. We keep honoring that value here so non-Tauri consumers
+    /// preserve behavior even before the migration has rewritten the file.
+    pub fn effective_live_transcript_backend(&self) -> &str {
+        let backend = self.live_transcript.backend.trim();
+        if backend.is_empty() || backend == LIVE_TRANSCRIPT_BACKEND_INHERIT {
+            if self
+                .transcription
+                .engine
+                .eq_ignore_ascii_case("apple-speech")
+            {
+                "apple-speech"
+            } else {
+                &self.transcription.engine
+            }
+        } else {
+            &self.live_transcript.backend
+        }
+    }
+
+    pub fn standalone_live_backend_setting(&self) -> &str {
+        let backend = self.live_transcript.backend.trim();
+        if backend.is_empty() {
+            LIVE_TRANSCRIPT_BACKEND_INHERIT
+        } else {
+            &self.live_transcript.backend
+        }
+    }
+
     /// Standard config file location.
     pub fn config_path() -> PathBuf {
         config_base_dir().join("minutes").join("config.toml")
@@ -805,8 +854,41 @@ impl Config {
             None
         };
 
-        let config = Self::load_from(path);
+        let mut config = Self::load_from(path);
         let mut migrated_toml: Option<String> = None;
+
+        // Apple Speech migration: older configs overloaded
+        // `transcription.engine = "apple-speech"` to mean "standalone live
+        // transcript should try Apple Speech". That was always a product/model
+        // mismatch because batch and recording-sidecar flows never actually
+        // used Apple Speech. Normalize those existing configs to:
+        //
+        //   [transcription]
+        //   engine = "whisper"
+        //
+        //   [live_transcript]
+        //   backend = "apple-speech"
+        //
+        // We intentionally persist the migrated config back to disk so the
+        // desktop app stops carrying the old overload forward after the first
+        // upgraded launch.
+        if file_existed
+            && config
+                .transcription
+                .engine
+                .eq_ignore_ascii_case("apple-speech")
+            && raw_toml.as_deref().is_some_and(|raw| {
+                !raw_toml_has_setting_in_section(raw, "live_transcript", "backend")
+            })
+        {
+            config.transcription.engine = "whisper".into();
+            config.live_transcript.backend = "apple-speech".into();
+            migrated_toml = toml::to_string_pretty(&config).ok();
+            tracing::info!(
+                "live transcript backend migration: moved legacy apple-speech engine setting into [live_transcript].backend at {}",
+                path.display()
+            );
+        }
 
         // Palette section persistence: if the config file exists but
         // has no `[palette]` section, write the default section out
@@ -822,7 +904,7 @@ impl Config {
         // fills missing sections with `Default`, so the parsed struct
         // alone cannot distinguish "user opted out" from "field never
         // seen" — only a text check on the raw TOML can.
-        if file_existed {
+        if file_existed && migrated_toml.is_none() {
             if let Some(raw) = raw_toml.as_deref() {
                 if !raw_toml_has_section(raw, "palette") {
                     migrated_toml = Some(append_palette_section(raw, &config.palette));
@@ -953,6 +1035,26 @@ fn raw_toml_has_section(raw: &str, section: &str) -> bool {
     false
 }
 
+fn raw_toml_has_setting_in_section(raw: &str, section: &str, key: &str) -> bool {
+    let target = format!("[{}]", section);
+    let key_prefix = format!("{} =", key);
+    let mut in_section = false;
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('#') {
+            continue;
+        }
+        if trimmed.starts_with('[') {
+            in_section = trimmed == target;
+            continue;
+        }
+        if in_section && trimmed.starts_with(&key_prefix) {
+            return true;
+        }
+    }
+    false
+}
+
 fn append_palette_section(raw: &str, palette: &PaletteConfig) -> String {
     let mut output = raw.trim_end_matches('\n').to_string();
     if !output.is_empty() {
@@ -979,6 +1081,10 @@ mod tests {
     fn default_config_is_valid() {
         let config = Config::default();
         assert_eq!(config.transcription.engine, "whisper");
+        assert_eq!(
+            config.live_transcript.backend,
+            LIVE_TRANSCRIPT_BACKEND_INHERIT
+        );
         assert_eq!(config.transcription.model, "small");
         assert_eq!(config.transcription.min_words, 3);
         assert_eq!(config.transcription.parakeet_binary, "parakeet");
@@ -1155,6 +1261,46 @@ model = "tiny"
     }
 
     #[test]
+    fn effective_live_transcript_backend_inherits_batch_engine_by_default() {
+        let mut config = Config::default();
+        config.transcription.engine = "parakeet".into();
+
+        assert_eq!(config.standalone_live_backend_setting(), "inherit");
+        assert_eq!(config.effective_live_transcript_backend(), "parakeet");
+    }
+
+    #[test]
+    fn effective_live_transcript_backend_preserves_legacy_apple_engine_configs() {
+        let mut config = Config::default();
+        config.transcription.engine = "apple-speech".into();
+
+        assert_eq!(config.standalone_live_backend_setting(), "inherit");
+        assert_eq!(config.effective_live_transcript_backend(), "apple-speech");
+    }
+
+    #[test]
+    fn live_transcript_backend_can_be_set_from_toml() {
+        let dir = TempDir::new().unwrap();
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(
+            &config_path,
+            r#"
+[transcription]
+engine = "whisper"
+
+[live_transcript]
+backend = "apple-speech"
+"#,
+        )
+        .unwrap();
+
+        let config = Config::load_from(&config_path);
+        assert_eq!(config.live_transcript.backend, "apple-speech");
+        assert_eq!(config.effective_live_transcript_backend(), "apple-speech");
+        assert_eq!(config.transcription.engine, "whisper");
+    }
+
+    #[test]
     fn parakeet_sidecar_flag_can_be_enabled_from_toml() {
         let dir = TempDir::new().unwrap();
         let config_path = dir.path().join("config.toml");
@@ -1284,6 +1430,26 @@ enabled = true
     fn raw_toml_has_section_rejects_non_matching_sections() {
         assert!(!raw_toml_has_section("[dictation]\n", "palette"));
         assert!(!raw_toml_has_section("[palette.inner]\n", "palette"));
+    }
+
+    #[test]
+    fn raw_toml_has_setting_in_section_matches_exact_key() {
+        let raw = r#"
+[live_transcript]
+backend = "apple-speech"
+shortcut = "CmdOrCtrl+Shift+L"
+"#;
+
+        assert!(raw_toml_has_setting_in_section(
+            raw,
+            "live_transcript",
+            "backend"
+        ));
+        assert!(!raw_toml_has_setting_in_section(
+            raw,
+            "live_transcript",
+            "missing"
+        ));
     }
 
     #[test]
@@ -1425,6 +1591,53 @@ shortcut_enabled = false
         assert!(reloaded.contains("# top comment"));
         assert!(reloaded.contains("mystery = \"keep-me\""));
         assert!(raw_toml_has_section(&reloaded, "palette"));
+    }
+
+    #[test]
+    fn upgrade_migrates_legacy_apple_engine_into_live_backend() {
+        let dir = TempDir::new().unwrap();
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(
+            &config_path,
+            r#"
+[transcription]
+engine = "apple-speech"
+model = "small"
+"#,
+        )
+        .unwrap();
+
+        let config = Config::load_with_migrations_from(&config_path);
+        assert_eq!(config.transcription.engine, "whisper");
+        assert_eq!(config.live_transcript.backend, "apple-speech");
+        assert_eq!(config.effective_live_transcript_backend(), "apple-speech");
+
+        let reloaded = std::fs::read_to_string(&config_path).unwrap();
+        assert!(reloaded.contains("engine = \"whisper\""));
+        assert!(reloaded.contains("[live_transcript]"));
+        assert!(reloaded.contains("backend = \"apple-speech\""));
+    }
+
+    #[test]
+    fn upgrade_does_not_override_explicit_live_backend_setting() {
+        let dir = TempDir::new().unwrap();
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(
+            &config_path,
+            r#"
+[transcription]
+engine = "apple-speech"
+
+[live_transcript]
+backend = "whisper"
+"#,
+        )
+        .unwrap();
+
+        let config = Config::load_with_migrations_from(&config_path);
+        assert_eq!(config.transcription.engine, "apple-speech");
+        assert_eq!(config.live_transcript.backend, "whisper");
+        assert_eq!(config.effective_live_transcript_backend(), "whisper");
     }
 
     #[test]

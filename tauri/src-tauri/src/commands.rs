@@ -3,7 +3,7 @@ use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use futures_util::StreamExt;
 use minisign_verify::{PublicKey, Signature};
 use minutes_core::capture::RecordingIntent;
-use minutes_core::config::VALID_PARAKEET_MODELS;
+use minutes_core::config::{VALID_LIVE_TRANSCRIPT_BACKENDS, VALID_PARAKEET_MODELS};
 use minutes_core::{CaptureMode, Config, ContentType};
 use reqwest::header::{ACCEPT, CONTENT_LENGTH};
 use std::cmp::Reverse;
@@ -98,6 +98,319 @@ fn apple_speech_status_view() -> serde_json::Value {
             "selectable": false,
             "error": error.to_string(),
         }),
+    }
+}
+
+fn live_transcript_fallback_order_view(config: &Config) -> Vec<String> {
+    let resolved = config.effective_live_transcript_backend();
+    let parakeet_ready = parakeet_status_view(config).ready;
+    match resolved {
+        "apple-speech" => {
+            let mut order = vec!["apple-speech".to_string()];
+            if parakeet_ready {
+                order.push("parakeet".to_string());
+            }
+            order.push("whisper".to_string());
+            order
+        }
+        "parakeet" => vec!["parakeet".to_string(), "whisper".to_string()],
+        _ => vec!["whisper".to_string()],
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SurfaceReadinessView {
+    configured_backend: String,
+    resolved_backend: String,
+    ready: bool,
+    model_name: String,
+    detail: String,
+    next_action: String,
+    fallback_order: Vec<String>,
+}
+
+fn whisper_model_file(config: &Config, model_name: &str) -> PathBuf {
+    config
+        .transcription
+        .model_path
+        .join(format!("ggml-{}.bin", model_name))
+}
+
+fn whisper_model_readiness(
+    config: &Config,
+    model_name: &str,
+) -> (bool, String, std::path::PathBuf) {
+    let selected_model = if model_name.trim().is_empty() {
+        config.transcription.model.clone()
+    } else {
+        model_name.to_string()
+    };
+    let model_file = whisper_model_file(config, &selected_model);
+    (model_file.exists(), selected_model, model_file)
+}
+
+fn apple_speech_selectable() -> bool {
+    match minutes_core::apple_speech::probe_capabilities() {
+        Ok(report) => {
+            report.runtime_supported && report.speech_transcriber.is_available.unwrap_or(false)
+        }
+        Err(_) => false,
+    }
+}
+
+fn batch_transcription_readiness_view(config: &Config) -> SurfaceReadinessView {
+    if config.transcription.engine == "parakeet" {
+        let status = parakeet_status_view(config);
+        let detail = if status.ready {
+            let tokenizer_label = status
+                .tokenizer_label
+                .clone()
+                .unwrap_or_else(|| "unknown".to_string());
+            format!(
+                "Batch and recording transcription use Parakeet. Model: {}. Tokenizer: {}. Warm: {}.",
+                status.model,
+                tokenizer_label,
+                if status.warm { "yes" } else { "no" }
+            )
+        } else {
+            format!(
+                "Batch and recording transcription need Parakeet setup: {}. Run: {}",
+                status.issues.join(", "),
+                status.setup_command
+            )
+        };
+        return SurfaceReadinessView {
+            configured_backend: "parakeet".into(),
+            resolved_backend: "parakeet".into(),
+            ready: status.ready,
+            model_name: status.model,
+            detail,
+            next_action: if status.ready {
+                "none".into()
+            } else {
+                "setup-parakeet".into()
+            },
+            fallback_order: vec!["parakeet".into()],
+        };
+    }
+
+    let (ready, model_name, model_file) =
+        whisper_model_readiness(config, &config.transcription.model);
+    SurfaceReadinessView {
+        configured_backend: config.transcription.engine.clone(),
+        resolved_backend: "whisper".into(),
+        ready,
+        model_name: model_name.clone(),
+        detail: if ready {
+            format!(
+                "Batch and recording transcription use Whisper. {} is installed at {}.",
+                model_name,
+                model_file.display()
+            )
+        } else {
+            format!(
+                "Batch and recording transcription need a Whisper model. {} is missing at {}.",
+                model_name,
+                model_file.display()
+            )
+        },
+        next_action: if ready {
+            "none".into()
+        } else {
+            "download-model".into()
+        },
+        fallback_order: vec!["whisper".into()],
+    }
+}
+
+fn standalone_live_readiness_view(config: &Config) -> SurfaceReadinessView {
+    let configured_backend = config.standalone_live_backend_setting().to_string();
+    let resolved_backend = config.effective_live_transcript_backend().to_string();
+    let fallback_order = live_transcript_fallback_order_view(config);
+    let parakeet = parakeet_status_view(config);
+    let live_whisper_model = if config.live_transcript.model.trim().is_empty() {
+        config.transcription.model.as_str()
+    } else {
+        config.live_transcript.model.as_str()
+    };
+    let (whisper_ready, whisper_model_name, whisper_model_file) =
+        whisper_model_readiness(config, live_whisper_model);
+    let apple_selectable = apple_speech_selectable();
+
+    match resolved_backend.as_str() {
+        "parakeet" => SurfaceReadinessView {
+            configured_backend,
+            resolved_backend,
+            ready: parakeet.ready,
+            model_name: parakeet.model.clone(),
+            detail: if parakeet.ready {
+                format!(
+                    "Standalone live transcript uses Parakeet. Fallback order: {}.",
+                    fallback_order.join(" -> ")
+                )
+            } else {
+                format!(
+                    "Standalone live transcript needs Parakeet setup: {}. Fallback order: {}.",
+                    parakeet.issues.join(", "),
+                    fallback_order.join(" -> ")
+                )
+            },
+            next_action: if parakeet.ready {
+                "none".into()
+            } else {
+                "setup-parakeet".into()
+            },
+            fallback_order,
+        },
+        "apple-speech" => {
+            let ready = apple_selectable || parakeet.ready || whisper_ready;
+            let (detail, next_action) = if apple_selectable {
+                (
+                    format!(
+                        "Standalone live transcript can use Apple Speech directly. Fallback order: {}.",
+                        fallback_order.join(" -> ")
+                    ),
+                    "none".into(),
+                )
+            } else if parakeet.ready {
+                (
+                    format!(
+                        "Apple Speech is unavailable on this Mac, but standalone live transcript can run through Parakeet fallback. Fallback order: {}.",
+                        fallback_order.join(" -> ")
+                    ),
+                    "none".into(),
+                )
+            } else if whisper_ready {
+                (
+                    format!(
+                        "Apple Speech is unavailable on this Mac, but standalone live transcript can still run through Whisper fallback. Fallback order: {}.",
+                        fallback_order.join(" -> ")
+                    ),
+                    "none".into(),
+                )
+            } else {
+                (
+                    format!(
+                        "Apple Speech is unavailable on this Mac and no fallback backend is ready. Install a Whisper model at {} or set up Parakeet. Fallback order: {}.",
+                        whisper_model_file.display(),
+                        fallback_order.join(" -> ")
+                    ),
+                    "download-model".into(),
+                )
+            };
+            SurfaceReadinessView {
+                configured_backend,
+                resolved_backend,
+                ready,
+                model_name: "apple-speech".into(),
+                detail,
+                next_action,
+                fallback_order,
+            }
+        }
+        _ => SurfaceReadinessView {
+            configured_backend,
+            resolved_backend,
+            ready: whisper_ready,
+            model_name: whisper_model_name.clone(),
+            detail: if whisper_ready {
+                format!(
+                    "Standalone live transcript uses Whisper. {} is installed at {}.",
+                    whisper_model_name,
+                    whisper_model_file.display()
+                )
+            } else {
+                format!(
+                    "Standalone live transcript needs a Whisper model. {} is missing at {}.",
+                    whisper_model_name,
+                    whisper_model_file.display()
+                )
+            },
+            next_action: if whisper_ready {
+                "none".into()
+            } else {
+                "download-model".into()
+            },
+            fallback_order,
+        },
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TranscriptionSurfaceSetupView {
+    pub surface: String,
+    pub engine: String,
+    pub model_name: String,
+    pub has_model: bool,
+    pub needs_setup: bool,
+    pub parakeet: Option<ParakeetStatusView>,
+    pub activation: ActivationStatusView,
+}
+
+fn transcription_surface_setup_view(
+    config: &Config,
+    surface: &str,
+    readiness: &SurfaceReadinessView,
+    progress: &ActivationProgress,
+    has_saved_artifact: bool,
+    recording: bool,
+    processing: bool,
+) -> TranscriptionSurfaceSetupView {
+    let engine = readiness.resolved_backend.as_str();
+    TranscriptionSurfaceSetupView {
+        surface: surface.into(),
+        engine: readiness.resolved_backend.clone(),
+        model_name: readiness.model_name.clone(),
+        has_model: readiness.ready,
+        needs_setup: readiness.next_action != "none",
+        parakeet: (engine == "parakeet").then(|| parakeet_status_view(config)),
+        activation: activation_status_view(
+            engine,
+            progress,
+            readiness.ready,
+            has_saved_artifact,
+            recording,
+            processing,
+        ),
+    }
+}
+
+fn primary_setup_surface<'a>(
+    batch: &'a TranscriptionSurfaceSetupView,
+    standalone_live: &'a TranscriptionSurfaceSetupView,
+) -> &'a TranscriptionSurfaceSetupView {
+    if batch.needs_setup {
+        batch
+    } else if standalone_live.needs_setup {
+        standalone_live
+    } else {
+        batch
+    }
+}
+
+fn mark_model_ready_for_surface(
+    config: &Config,
+    readiness: &SurfaceReadinessView,
+    activation_progress: &Arc<Mutex<ActivationProgress>>,
+) {
+    match readiness.resolved_backend.as_str() {
+        "parakeet" => {
+            let parakeet = parakeet_status_view(config);
+            if parakeet.ready {
+                if let Some(model_path) = parakeet.model_path.as_ref() {
+                    mark_activation_model_ready(activation_progress, Path::new(model_path));
+                }
+            }
+        }
+        "whisper" => {
+            let model_file = whisper_model_file(config, &readiness.model_name);
+            if model_file.exists() {
+                mark_activation_model_ready(activation_progress, &model_file);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -950,10 +1263,7 @@ fn mark_activation_next_step_nudge_shown(
 }
 
 fn model_file_for_config(config: &Config) -> PathBuf {
-    config
-        .transcription
-        .model_path
-        .join(format!("ggml-{}.bin", config.transcription.model))
+    whisper_model_file(config, &config.transcription.model)
 }
 
 fn latest_saved_artifact_from_search(config: &Config) -> Option<PathBuf> {
@@ -2869,50 +3179,16 @@ fn build_artifact_template(
 }
 
 fn model_status(config: &Config) -> ReadinessItem {
-    if config.transcription.engine == "parakeet" {
-        let status = parakeet_status_view(config);
-
-        return ReadinessItem {
-            label: "Speech model".into(),
-            state: if status.ready { "ready" } else { "attention" }.into(),
-            detail: if status.ready {
-                let tokenizer_label = status
-                    .tokenizer_label
-                    .unwrap_or_else(|| "unknown".to_string());
-                format!(
-                    "Parakeet backend ready. Model: {}. Tokenizer: {}. Warm: {}.",
-                    status.model,
-                    tokenizer_label,
-                    if status.warm { "yes" } else { "no" }
-                )
-            } else {
-                format!(
-                    "Parakeet backend needs setup: {}. Run: minutes setup --parakeet",
-                    status.issues.join(", ")
-                )
-            },
-            optional: false,
-        };
-    }
-
-    let model_name = &config.transcription.model;
-    let model_file = config
-        .transcription
-        .model_path
-        .join(format!("ggml-{}.bin", model_name));
-    let exists = model_file.exists();
-
+    let batch = batch_transcription_readiness_view(config);
+    let live = standalone_live_readiness_view(config);
     ReadinessItem {
-        label: "Speech model".into(),
-        state: if exists { "ready" } else { "attention" }.into(),
-        detail: if exists {
-            format!("{} is installed at {}.", model_name, model_file.display())
+        label: "Speech backends".into(),
+        state: if batch.ready && live.ready {
+            "ready".into()
         } else {
-            format!(
-                "{} is not installed yet. Download it before recording.",
-                model_name
-            )
+            "attention".into()
         },
+        detail: format!("Batch: {} Live: {}", batch.detail, live.detail),
         optional: false,
     }
 }
@@ -4193,21 +4469,10 @@ pub fn cmd_status(state: tauri::State<AppState>) -> serde_json::Value {
         .map(|guard| guard.clone())
         .unwrap_or_default();
     let config = Config::load();
-    let has_model = if config.transcription.engine == "parakeet" {
-        let parakeet = parakeet_status_view(&config);
-        if parakeet.ready {
-            if let Some(model_path) = parakeet.model_path.as_ref() {
-                mark_activation_model_ready(&state.activation_progress, Path::new(model_path));
-            }
-        }
-        parakeet.ready
-    } else {
-        let model_file = model_file_for_config(&config);
-        if model_file.exists() {
-            mark_activation_model_ready(&state.activation_progress, &model_file);
-        }
-        model_file.exists()
-    };
+    let batch_readiness = batch_transcription_readiness_view(&config);
+    let live_readiness = standalone_live_readiness_view(&config);
+    mark_model_ready_for_surface(&config, &batch_readiness, &state.activation_progress);
+    mark_model_ready_for_surface(&config, &live_readiness, &state.activation_progress);
     let activation_progress = state
         .activation_progress
         .lock()
@@ -4215,17 +4480,29 @@ pub fn cmd_status(state: tauri::State<AppState>) -> serde_json::Value {
         .map(|progress| progress.clone())
         .unwrap_or_default();
     let has_saved_artifact = activation_progress.first_artifact_saved_at.is_some();
-    let activation = activation_status_view(
-        &config.transcription.engine,
+    let recording_active = recording || (status.recording && !processing);
+    let batch_setup = transcription_surface_setup_view(
+        &config,
+        "batch",
+        &batch_readiness,
         &activation_progress,
-        has_model,
         has_saved_artifact,
-        recording || (status.recording && !processing),
+        recording_active,
         processing,
     );
+    let standalone_live_setup = transcription_surface_setup_view(
+        &config,
+        "standalone-live",
+        &live_readiness,
+        &activation_progress,
+        has_saved_artifact,
+        recording_active,
+        processing,
+    );
+    let primary_setup = primary_setup_surface(&batch_setup, &standalone_live_setup);
 
     // Get elapsed time if recording
-    let elapsed = if recording || (status.recording && !processing) {
+    let elapsed = if recording_active {
         let start_path = minutes_core::notes::recording_start_path();
         if start_path.exists() {
             if let Ok(s) = std::fs::read_to_string(&start_path) {
@@ -4249,7 +4526,7 @@ pub fn cmd_status(state: tauri::State<AppState>) -> serde_json::Value {
         None
     };
 
-    let audio_level = if recording || (status.recording && !processing) {
+    let audio_level = if recording_active {
         minutes_core::capture::audio_level()
     } else {
         0
@@ -4267,7 +4544,14 @@ pub fn cmd_status(state: tauri::State<AppState>) -> serde_json::Value {
         "processingJobs": processing_jobs,
         "updateState": update_state,
         "latestOutput": latest_output,
-        "activation": activation,
+        "activation": primary_setup.activation.clone(),
+        "batch_transcription": batch_readiness,
+        "standalone_live": live_readiness,
+        "transcriptionSetup": {
+            "needsSetup": batch_setup.needs_setup || standalone_live_setup.needs_setup,
+            "batch": batch_setup,
+            "standaloneLive": standalone_live_setup,
+        },
         "callCaptureHealth": call_capture_health,
         "pid": status.pid,
         "elapsed": elapsed,
@@ -5449,31 +5733,10 @@ pub async fn cmd_upcoming_meetings() -> serde_json::Value {
 #[tauri::command]
 pub fn cmd_needs_setup(state: tauri::State<AppState>) -> serde_json::Value {
     let config = Config::load();
-    let model_name = if config.transcription.engine == "parakeet" {
-        &config.transcription.parakeet_model
-    } else {
-        &config.transcription.model
-    };
-    let parakeet = if config.transcription.engine == "parakeet" {
-        Some(parakeet_status_view(&config))
-    } else {
-        None
-    };
-    let has_model = if let Some(status) = parakeet.as_ref() {
-        if status.ready {
-            if let Some(model_path) = status.model_path.as_ref() {
-                mark_activation_model_ready(&state.activation_progress, Path::new(model_path));
-            }
-        }
-        status.ready
-    } else {
-        let model_file = model_file_for_config(&config);
-        let exists = model_file.exists();
-        if exists {
-            mark_activation_model_ready(&state.activation_progress, &model_file);
-        }
-        exists
-    };
+    let batch_readiness = batch_transcription_readiness_view(&config);
+    let live_readiness = standalone_live_readiness_view(&config);
+    mark_model_ready_for_surface(&config, &batch_readiness, &state.activation_progress);
+    mark_model_ready_for_surface(&config, &live_readiness, &state.activation_progress);
 
     let meetings_dir = config.output_dir.clone();
     let has_meetings_dir = meetings_dir.exists();
@@ -5483,22 +5746,41 @@ pub fn cmd_needs_setup(state: tauri::State<AppState>) -> serde_json::Value {
         .ok()
         .map(|progress| progress.clone())
         .unwrap_or_default();
+    let has_saved_artifact = activation_progress.first_artifact_saved_at.is_some();
+    let batch_setup = transcription_surface_setup_view(
+        &config,
+        "batch",
+        &batch_readiness,
+        &activation_progress,
+        has_saved_artifact,
+        false,
+        false,
+    );
+    let standalone_live_setup = transcription_surface_setup_view(
+        &config,
+        "standalone-live",
+        &live_readiness,
+        &activation_progress,
+        has_saved_artifact,
+        false,
+        false,
+    );
+    let primary_setup = primary_setup_surface(&batch_setup, &standalone_live_setup);
 
     serde_json::json!({
-        "needsSetup": !has_model,
-        "hasModel": has_model,
-        "engine": config.transcription.engine,
-        "modelName": model_name,
-        "parakeet": parakeet,
+        "needsSetup": batch_setup.needs_setup || standalone_live_setup.needs_setup,
+        "hasModel": primary_setup.has_model,
+        "engine": primary_setup.engine.clone(),
+        "modelName": primary_setup.model_name.clone(),
+        "parakeet": primary_setup.parakeet.clone(),
+        "batch_transcription": batch_readiness,
+        "standalone_live": live_readiness,
+        "transcriptionSetup": {
+            "batch": batch_setup,
+            "standaloneLive": standalone_live_setup,
+        },
         "hasMeetingsDir": has_meetings_dir,
-        "activation": activation_status_view(
-            &config.transcription.engine,
-            &activation_progress,
-            has_model,
-            activation_progress.first_artifact_saved_at.is_some(),
-            false,
-            false,
-        ),
+        "activation": primary_setup.activation.clone(),
     })
 }
 
@@ -6024,6 +6306,16 @@ pub fn cmd_get_settings() -> serde_json::Value {
             "hotkey_enabled": config.dictation.hotkey_enabled,
             "hotkey_keycode": config.dictation.hotkey_keycode,
         },
+        "live_transcript": {
+            "backend": config.standalone_live_backend_setting(),
+            "resolved_backend": config.effective_live_transcript_backend(),
+            "fallback_order": live_transcript_fallback_order_view(&config),
+            "model": config.live_transcript.model,
+            "max_utterance_secs": config.live_transcript.max_utterance_secs,
+            "save_wav": config.live_transcript.save_wav,
+            "shortcut_enabled": config.live_transcript.shortcut_enabled,
+            "shortcut": config.live_transcript.shortcut,
+        },
         "palette": {
             "shortcut_enabled": config.palette.shortcut_enabled,
             "shortcut": config.palette.shortcut,
@@ -6040,10 +6332,12 @@ pub fn cmd_get_settings() -> serde_json::Value {
 #[tauri::command]
 pub async fn cmd_warm_parakeet() -> Result<serde_json::Value, String> {
     let config = Config::load();
-    if config.transcription.engine != "parakeet" {
+    if config.transcription.engine != "parakeet"
+        && config.effective_live_transcript_backend() != "parakeet"
+    {
         return Ok(serde_json::json!({
             "status": "skipped",
-            "reason": "parakeet not selected",
+            "reason": "parakeet not selected for batch or standalone live transcript",
         }));
     }
     #[cfg(feature = "parakeet")]
@@ -6248,6 +6542,16 @@ pub fn cmd_set_setting(section: String, key: String, value: String) -> Result<St
         }
 
         // Live transcript
+        ("live_transcript", "backend") => {
+            if !VALID_LIVE_TRANSCRIPT_BACKENDS.contains(&value.as_str()) {
+                return Err(format!(
+                    "unknown live transcript backend '{}'. Valid: {}",
+                    value,
+                    VALID_LIVE_TRANSCRIPT_BACKENDS.join(", ")
+                ));
+            }
+            config.live_transcript.backend = value.clone();
+        }
         ("live_transcript", "shortcut_enabled") => {
             config.live_transcript.shortcut_enabled = value == "true";
         }
@@ -6763,6 +7067,118 @@ mod tests {
         .unwrap_err();
 
         assert!(error.contains("standalone live transcript"));
+    }
+
+    #[test]
+    fn desktop_settings_accept_live_transcript_backend_selection() {
+        cmd_set_setting(
+            "live_transcript".into(),
+            "backend".into(),
+            "apple-speech".into(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn desktop_settings_reject_unknown_live_transcript_backend() {
+        let error = cmd_set_setting("live_transcript".into(), "backend".into(), "laser".into())
+            .unwrap_err();
+
+        assert!(error.contains("unknown live transcript backend"));
+    }
+
+    #[test]
+    fn primary_setup_surface_switches_to_live_parakeet_when_batch_is_ready() {
+        let dir = TempDir::new().unwrap();
+        let mut config = Config::default();
+        config.transcription.engine = "whisper".into();
+        config.transcription.model_path = dir.path().to_path_buf();
+        config.live_transcript.backend = "parakeet".into();
+
+        let whisper_model = model_file_for_config(&config);
+        std::fs::create_dir_all(whisper_model.parent().unwrap()).unwrap();
+        std::fs::write(&whisper_model, b"model").unwrap();
+
+        let batch_readiness = batch_transcription_readiness_view(&config);
+        let live_readiness = standalone_live_readiness_view(&config);
+        let progress = ActivationProgress::default();
+        let batch_setup = transcription_surface_setup_view(
+            &config,
+            "batch",
+            &batch_readiness,
+            &progress,
+            false,
+            false,
+            false,
+        );
+        let standalone_live_setup = transcription_surface_setup_view(
+            &config,
+            "standalone-live",
+            &live_readiness,
+            &progress,
+            false,
+            false,
+            false,
+        );
+        let primary = primary_setup_surface(&batch_setup, &standalone_live_setup);
+
+        assert!(!batch_setup.needs_setup);
+        assert!(standalone_live_setup.needs_setup);
+        assert_eq!(primary.engine, "parakeet");
+        assert_eq!(primary.activation.next_action, "setup-parakeet");
+    }
+
+    #[test]
+    fn primary_setup_surface_keeps_batch_when_batch_needs_setup() {
+        let dir = TempDir::new().unwrap();
+        let mut config = Config::default();
+        config.transcription.model_path = dir.path().to_path_buf();
+        let batch_readiness = batch_transcription_readiness_view(&config);
+        let live_readiness = standalone_live_readiness_view(&config);
+        let progress = ActivationProgress::default();
+        let batch_setup = transcription_surface_setup_view(
+            &config,
+            "batch",
+            &batch_readiness,
+            &progress,
+            false,
+            false,
+            false,
+        );
+        let standalone_live_setup = transcription_surface_setup_view(
+            &config,
+            "standalone-live",
+            &live_readiness,
+            &progress,
+            false,
+            false,
+            false,
+        );
+        let primary = primary_setup_surface(&batch_setup, &standalone_live_setup);
+
+        assert!(batch_setup.needs_setup);
+        assert_eq!(primary.engine, batch_setup.engine);
+        assert_eq!(primary.surface, "batch");
+    }
+
+    #[test]
+    fn standalone_live_readiness_uses_live_whisper_model_name() {
+        let dir = TempDir::new().unwrap();
+        let mut config = Config::default();
+        config.transcription.model_path = dir.path().to_path_buf();
+        config.transcription.model = "base".into();
+        config.live_transcript.backend = "whisper".into();
+        config.live_transcript.model = "small".into();
+
+        let batch_model = whisper_model_file(&config, &config.transcription.model);
+        std::fs::create_dir_all(batch_model.parent().unwrap()).unwrap();
+        std::fs::write(&batch_model, b"base-model").unwrap();
+
+        let live = standalone_live_readiness_view(&config);
+
+        assert_eq!(live.model_name, "small");
+        assert!(!live.ready);
+        assert!(live.detail.contains("ggml-small.bin"));
     }
 
     #[test]
@@ -7560,7 +7976,7 @@ mod tests {
         };
 
         let status = model_status(&config);
-        assert_eq!(status.label, "Speech model");
+        assert_eq!(status.label, "Speech backends");
         assert_eq!(status.state, "attention");
     }
 

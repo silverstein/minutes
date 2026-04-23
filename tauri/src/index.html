@@ -4304,6 +4304,18 @@
         <div class="about-item-title">LIVE TRANSCRIPT</div>
         <div class="about-controls">
           <div class="about-controls-group">
+            <div class="about-controls-copy">Backend</div>
+            <select id="settings-live-backend" class="settings-field">
+              <option value="inherit">Inherit main transcription engine</option>
+              <option value="whisper">Whisper — built-in, broad language support</option>
+              <option value="parakeet">Parakeet — lower WER, fast on Apple Silicon</option>
+              <option value="apple-speech">Apple Speech — experimental standalone live transcript</option>
+            </select>
+            <div class="about-controls-meta" id="settings-live-backend-detail">Standalone live transcript currently inherits your main transcription engine.</div>
+          </div>
+        </div>
+        <div class="about-controls">
+          <div class="about-controls-group">
             <div class="about-controls-copy">Keyboard shortcut</div>
             <select class="shortcut-select settings-field" id="settings-live-shortcut-select">
               <option value="CmdOrCtrl+Shift+L">Cmd+Shift+L</option>
@@ -4342,9 +4354,8 @@
             <select id="settings-transcription-engine" class="settings-field">
               <option value="whisper">Whisper — broad language support, built-in</option>
               <option value="parakeet">Parakeet — lower WER, fast on Apple Silicon</option>
-              <option value="apple-speech" hidden disabled>Apple Speech — standalone live transcript only; configured outside desktop settings</option>
             </select>
-            <div class="about-controls-meta" id="settings-transcription-engine-detail">Whisper and Parakeet are the configurable transcription engines in desktop settings.</div>
+            <div class="about-controls-meta" id="settings-transcription-engine-detail">Whisper and Parakeet control batch, recording, and recording-sidecar transcription. Standalone live transcript has its own backend setting above.</div>
           </div>
         </div>
         <div class="about-controls" id="settings-whisper-section">
@@ -5184,6 +5195,16 @@
       }
     }
 
+    function renderStandaloneLiveNote(setup) {
+      const live = setup?.standalone_live || null;
+      if (!live) return '';
+      const configured = live.configured_backend || 'inherit';
+      if (configured === 'inherit') return '';
+      const detail = escapeHtml(live.detail || '');
+      const status = live.ready ? 'Ready' : 'Needs setup';
+      return `<p class="about-controls-meta"><strong>Standalone live transcript:</strong> ${status}. ${detail}</p>`;
+    }
+
     function escapeHtml(text) {
       return String(text)
         .replaceAll('&', '&amp;')
@@ -5277,6 +5298,37 @@
       } catch (e) {
         console.error('parakeet warmup:', e);
       }
+    }
+
+    function backendLabel(backend) {
+      switch (backend) {
+        case 'apple-speech': return 'Apple Speech';
+        case 'parakeet': return 'Parakeet';
+        case 'whisper': return 'Whisper';
+        case 'inherit': return 'your main transcription engine';
+        default: return backend || 'Whisper';
+      }
+    }
+
+    function fallbackOrderLabel(order) {
+      const list = Array.isArray(order) ? order : [];
+      if (!list.length) return 'Whisper';
+      return list.map(backendLabel).join(' -> ');
+    }
+
+    function describeLiveBackendSelection(selectedBackend, resolvedBackend, fallbackOrder, batchEngine) {
+      const fallbackText = fallbackOrderLabel(fallbackOrder);
+      const batchLabel = backendLabel(batchEngine);
+      if (selectedBackend === 'inherit') {
+        return `Standalone live transcript currently inherits ${backendLabel(resolvedBackend)} from the main transcription engine. Fallback order: ${fallbackText}. Recording-sidecar live and batch transcription stay on ${batchLabel}.`;
+      }
+      if (selectedBackend === 'apple-speech') {
+        return `Standalone live transcript will try Apple Speech first. Fallback order: ${fallbackText}. Recording-sidecar live and batch transcription remain on ${batchLabel}.`;
+      }
+      if (selectedBackend === 'parakeet') {
+        return `Standalone live transcript will use Parakeet when available. Fallback order: ${fallbackText}. Recording-sidecar live and batch transcription remain on ${batchLabel}.`;
+      }
+      return `Standalone live transcript will use Whisper. Fallback order: ${fallbackText}. Recording-sidecar live and batch transcription remain on ${batchLabel}.`;
     }
 
     function currentModeLabel(mode) {
@@ -7060,9 +7112,11 @@
     }
 
     function renderSetupEmptyState() {
-      const setupEngine = currentSetup?.engine || 'whisper';
+      const batchSetup = currentSetup?.batch_transcription || null;
+      const setupEngine = batchSetup?.resolved_backend || currentSetup?.engine || 'whisper';
       const parakeet = currentSetup?.parakeet || null;
       const parakeetIssues = (parakeet?.issues || []).map(issue => `<li>${escapeHtml(issue)}</li>`).join('');
+      const standaloneLiveNote = renderStandaloneLiveNote(currentSetup);
       const modelStepBody = setupEngine === 'parakeet'
         ? `
                 <p>Minutes is set to use Parakeet, which needs the local <code>parakeet</code> binary plus converted model assets.</p>
@@ -7071,7 +7125,8 @@
                   <button class="btn btn-primary btn-sm" id="btn-open-parakeet-guide-onboarding">Open Parakeet setup guide</button>
                   <button class="btn btn-secondary btn-sm" id="btn-switch-to-whisper-onboarding">Use Whisper instead</button>
                 </div>
-                <div class="about-controls-meta">${escapeHtml(parakeet?.setupCommand || 'minutes setup --parakeet')}<\/div>`
+                <div class="about-controls-meta">${escapeHtml(parakeet?.setupCommand || 'minutes setup --parakeet')}<\/div>
+                ${standaloneLiveNote}`
         : `
                 <p>Choose a model size:</p>
                 <div class="model-options">
@@ -7082,7 +7137,8 @@
                 <div class="download-progress ui-hidden">
                   <div class="progress-bar"><div class="progress-fill"></div></div>
                   <span class="progress-text">Downloading...</span>
-                </div>`;
+                </div>
+                ${standaloneLiveNote}`;
       const empty = document.createElement('div');
       empty.className = 'empty-state';
       empty.innerHTML = `
@@ -7218,42 +7274,60 @@
         }
         // Engine selector
         const eng = s.transcription.engine || 'whisper';
+        const liveTranscript = s.live_transcript || {};
+        const liveBackend = liveTranscript.backend || 'inherit';
+        const resolvedLiveBackend = liveTranscript.resolved_backend || eng;
+        const liveFallbackOrder = liveTranscript.fallback_order || [resolvedLiveBackend];
+        const liveMentionsParakeet = liveBackend === 'parakeet' || liveBackend === 'apple-speech' || liveFallbackOrder.includes('parakeet');
         const parakeetCompiled = s.transcription.parakeet_compiled || false;
         const parakeetStatus = s.transcription.parakeet_status || null;
         const appleSpeechStatus = s.transcription.apple_speech_status || null;
         const engineSelect = document.getElementById('settings-transcription-engine');
         const parakeetOpt = engineSelect.querySelector('option[value="parakeet"]');
-        const appleSpeechOpt = engineSelect.querySelector('option[value="apple-speech"]');
         const engineDetail = document.getElementById('settings-transcription-engine-detail');
-        const appleSpeechConfigured = eng === 'apple-speech';
+        const liveBackendSelect = document.getElementById('settings-live-backend');
+        const liveBackendDetail = document.getElementById('settings-live-backend-detail');
+        const liveParakeetOpt = liveBackendSelect ? liveBackendSelect.querySelector('option[value="parakeet"]') : null;
+        const liveAppleOpt = liveBackendSelect ? liveBackendSelect.querySelector('option[value="apple-speech"]') : null;
         if (parakeetOpt) {
           parakeetOpt.disabled = !parakeetCompiled;
           parakeetOpt.textContent = parakeetCompiled
             ? 'Parakeet — local backend, best quality on Apple Silicon'
             : 'Parakeet — unavailable in this build';
         }
-        if (appleSpeechOpt) {
-          appleSpeechOpt.disabled = true;
-          appleSpeechOpt.hidden = !appleSpeechConfigured;
-          appleSpeechOpt.textContent = appleSpeechConfigured
-            ? 'Apple Speech — standalone live transcript only; configured outside desktop settings'
-            : (appleSpeechStatus && appleSpeechStatus.selectable)
-              ? 'Apple Speech — available for standalone live transcript, but not configurable here'
-              : 'Apple Speech — unavailable on this Mac';
-        }
         if (engineDetail) {
-          engineDetail.textContent = appleSpeechConfigured
-            ? 'Apple Speech is configured outside desktop settings for standalone live transcript experiments. Recording and batch flows still use Whisper today.'
-            : (appleSpeechStatus && appleSpeechStatus.selectable)
-              ? 'This Mac supports Apple Speech for standalone live transcript experiments, but desktop settings still only configure Whisper and Parakeet.'
-              : 'Whisper and Parakeet are the configurable transcription engines in desktop settings.';
+          engineDetail.textContent = 'Whisper and Parakeet control batch, recording, and recording-sidecar transcription. Standalone live transcript has its own backend setting above.';
         }
-        engineSelect.value = appleSpeechConfigured ? 'apple-speech' : eng;
+        engineSelect.value = eng;
+        if (liveParakeetOpt) {
+          liveParakeetOpt.disabled = !parakeetCompiled;
+          liveParakeetOpt.textContent = parakeetCompiled
+            ? 'Parakeet — lower WER, fast on Apple Silicon'
+            : 'Parakeet — unavailable in this build';
+        }
+        if (liveAppleOpt) {
+          const appleSelectable = Boolean(appleSpeechStatus && appleSpeechStatus.selectable);
+          liveAppleOpt.disabled = !appleSelectable && liveBackend !== 'apple-speech';
+          liveAppleOpt.textContent = appleSelectable
+            ? 'Apple Speech — experimental standalone live transcript'
+            : 'Apple Speech — unavailable on this Mac';
+        }
+        if (liveBackendSelect) {
+          liveBackendSelect.value = liveBackend;
+        }
+        if (liveBackendDetail) {
+          liveBackendDetail.textContent = describeLiveBackendSelection(
+            liveBackend,
+            resolvedLiveBackend,
+            liveFallbackOrder,
+            eng,
+          );
+        }
         document.getElementById('settings-whisper-section').classList.toggle('is-hidden', eng !== 'whisper');
-        document.getElementById('settings-parakeet-section').classList.toggle('is-hidden', eng !== 'parakeet');
+        document.getElementById('settings-parakeet-section').classList.toggle('is-hidden', !(eng === 'parakeet' || liveMentionsParakeet));
         document.getElementById('settings-parakeet-model').value = s.transcription.parakeet_model || 'tdt-ctc-110m';
         renderParakeetSettingsStatus(parakeetStatus);
-        warmParakeetIfSelected(eng);
+        warmParakeetIfSelected(eng === 'parakeet' || resolvedLiveBackend === 'parakeet' ? 'parakeet' : eng);
         document.getElementById('settings-whisper-model').value = s.transcription.model;
         const dl = s.transcription.downloaded_models || [];
         const selectedModel = s.transcription.model;
@@ -7651,19 +7725,12 @@
     document.getElementById('settings-transcription-engine').addEventListener('change', async (e) => {
       await invoke('cmd_set_setting', { section: 'transcription', key: 'engine', value: e.target.value });
       await checkSetup();
-      document.getElementById('settings-whisper-section').classList.toggle('is-hidden', e.target.value !== 'whisper');
-      document.getElementById('settings-parakeet-section').classList.toggle('is-hidden', e.target.value !== 'parakeet');
-      const s = await invoke('cmd_get_settings');
-      renderParakeetSettingsStatus(s.transcription.parakeet_status || null);
-      warmParakeetIfSelected(e.target.value);
+      await loadSettings();
     });
     document.getElementById('settings-parakeet-model').addEventListener('change', async (e) => {
       await invoke('cmd_set_setting', { section: 'transcription', key: 'parakeet_model', value: e.target.value });
       await checkSetup();
-      const s = await invoke('cmd_get_settings');
-      document.getElementById('settings-parakeet-model').value = s.transcription.parakeet_model || 'tdt-ctc-110m';
-      renderParakeetSettingsStatus(s.transcription.parakeet_status || null);
-      warmParakeetIfSelected('parakeet');
+      await loadSettings();
     });
     document.getElementById('settings-whisper-model').addEventListener('change', async (e) => {
       await invoke('cmd_set_setting', { section: 'transcription', key: 'model', value: e.target.value });
@@ -7994,6 +8061,11 @@
       const select = document.getElementById('settings-live-shortcut-select');
       if (select) select.value = settings.shortcut;
     }).catch(() => { });
+    document.getElementById('settings-live-backend').addEventListener('change', async (e) => {
+      await invoke('cmd_set_setting', { section: 'live_transcript', key: 'backend', value: e.target.value });
+      await loadSettings();
+      await checkSetup();
+    });
 
     // ── Command palette shortcut settings ──
     // Backend (cmd_set_palette_shortcut at commands.rs:7356) exists and

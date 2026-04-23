@@ -375,11 +375,14 @@ pub fn diagnostics_snapshot(config: &Config) -> TranscriptionDiagnosticsSnapshot
     }
 }
 
+fn parakeet_warmup_selected(config: &Config) -> bool {
+    config.transcription.engine == "parakeet"
+        || config.effective_live_transcript_backend() == "parakeet"
+}
+
 pub fn warmup_active_backend(config: &Config) -> Result<BackendWarmupResult, TranscribeError> {
-    if config.transcription.engine != "parakeet" {
-        return Err(TranscribeError::EngineNotAvailable(
-            config.transcription.engine.clone(),
-        ));
+    if !parakeet_warmup_selected(config) {
+        return Err(TranscribeError::EngineNotAvailable("parakeet".into()));
     }
 
     #[cfg(feature = "parakeet")]
@@ -418,6 +421,30 @@ pub fn warmup_active_backend(config: &Config) -> Result<BackendWarmupResult, Tra
     #[cfg(not(feature = "parakeet"))]
     {
         Err(TranscribeError::EngineNotAvailable("parakeet".into()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parakeet_warmup_selected;
+    use crate::Config;
+
+    #[test]
+    fn parakeet_warmup_selection_includes_live_backend() {
+        let mut config = Config::default();
+        config.transcription.engine = "whisper".into();
+        config.live_transcript.backend = "parakeet".into();
+
+        assert!(parakeet_warmup_selected(&config));
+    }
+
+    #[test]
+    fn parakeet_warmup_selection_skips_non_parakeet_backends() {
+        let mut config = Config::default();
+        config.transcription.engine = "whisper".into();
+        config.live_transcript.backend = "apple-speech".into();
+
+        assert!(!parakeet_warmup_selected(&config));
     }
 }
 

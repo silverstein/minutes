@@ -46,6 +46,19 @@ def slugify(value: str) -> str:
     return lowered or "video-review"
 
 
+def resolved_home_dir() -> Path:
+    home = os.environ.get("HOME")
+    if home:
+        return Path(home).expanduser()
+    return Path.home()
+
+
+def source_minutes_config_path() -> Path:
+    xdg_config_home = os.environ.get("XDG_CONFIG_HOME")
+    config_base = Path(xdg_config_home).expanduser() if xdg_config_home else resolved_home_dir() / ".config"
+    return config_base / "minutes" / "config.toml"
+
+
 def load_env_file(env_file: Path) -> None:
     if not env_file.exists():
         raise RuntimeError(f"Env file not found: {env_file}")
@@ -462,22 +475,27 @@ def detect_minutes_config_engine(source_config: Path) -> str:
     return "whisper"
 
 
+def load_source_minutes_config(source_config: Path) -> dict[str, Any]:
+    if not source_config.exists():
+        return {}
+    try:
+        return tomllib.loads(source_config.read_text(encoding="utf-8", errors="ignore"))
+    except tomllib.TOMLDecodeError:
+        return {}
+
+
 def write_minutes_config(
     config_path: Path,
     output_dir: Path,
+    source_config_data: dict[str, Any],
     source_engine: str,
     language: str | None,
     forced_engine: str | None,
 ) -> None:
-    source_config = Path.home() / ".config" / "minutes" / "config.toml"
-    data: dict[str, Any] = {}
-    if source_config.exists():
-        data = tomllib.loads(source_config.read_text(encoding="utf-8", errors="ignore"))
-
-    transcription = dict(data.get("transcription", {}))
+    transcription = dict(source_config_data.get("transcription", {}))
     transcription["engine"] = forced_engine or source_engine
     if "model_path" not in transcription:
-        transcription["model_path"] = str(Path.home() / ".minutes" / "models")
+        transcription["model_path"] = str(resolved_home_dir() / ".minutes" / "models")
     if language:
         transcription["language"] = language
     if "min_words" not in transcription:
@@ -537,7 +555,8 @@ def transcribe_with_minutes(audio_path: Path, workspace: Path) -> tuple[str | No
     if backend_mode in {"0", "false", "off", "disabled"}:
         return None, None
 
-    source_config = Path.home() / ".config" / "minutes" / "config.toml"
+    source_config = source_minutes_config_path()
+    source_config_data = load_source_minutes_config(source_config)
     configured_engine = detect_minutes_config_engine(source_config)
     requested_engine = configured_engine if backend_mode == "auto" else backend_mode
     language = os.environ.get("VIDEO_REVIEW_TRANSCRIPT_LANGUAGE", "en")
@@ -548,7 +567,14 @@ def transcribe_with_minutes(audio_path: Path, workspace: Path) -> tuple[str | No
     config_path = xdg_config_home / "minutes" / "config.toml"
 
     def run_minutes_process(forced_engine: str | None) -> tuple[str | None, str | None]:
-        write_minutes_config(config_path, output_dir, configured_engine, language, forced_engine)
+        write_minutes_config(
+            config_path,
+            output_dir,
+            source_config_data,
+            configured_engine,
+            language,
+            forced_engine,
+        )
         env = os.environ.copy()
         env["XDG_CONFIG_HOME"] = str(xdg_config_home)
         result = subprocess.run(
@@ -690,6 +716,12 @@ def transcribe_with_openai(audio_path: Path) -> str | None:
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
         return None
+    if not shutil.which("openai"):
+        print(
+            "Warning: OPENAI_API_KEY is set but the openai CLI is not installed; skipping OpenAI transcription fallback.",
+            file=sys.stderr,
+        )
+        return None
 
     model = os.environ.get("VIDEO_REVIEW_OPENAI_TRANSCRIBE_MODEL", "gpt-4o-transcribe")
     try:
@@ -706,20 +738,29 @@ def transcribe_with_openai(audio_path: Path) -> str | None:
                 "text",
             ]
         )
-    except RuntimeError:
-        result = run(
-            [
-                "openai",
-                "api",
-                "audio.transcriptions.create",
-                "-m",
-                "whisper-1",
-                "-f",
-                str(audio_path),
-                "--response-format",
-                "text",
-            ]
-        )
+    except RuntimeError as first_error:
+        try:
+            result = run(
+                [
+                    "openai",
+                    "api",
+                    "audio.transcriptions.create",
+                    "-m",
+                    "whisper-1",
+                    "-f",
+                    str(audio_path),
+                    "--response-format",
+                    "text",
+                ]
+            )
+        except RuntimeError as second_error:
+            print(
+                "Warning: OpenAI transcription fallback unavailable.\n"
+                f"Primary attempt: {first_error}\n"
+                f"Fallback attempt: {second_error}",
+                file=sys.stderr,
+            )
+            return None
 
     transcript = (result.stdout or "").strip()
     return transcript if transcript else None

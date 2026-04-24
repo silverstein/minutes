@@ -28,12 +28,19 @@ pub struct SpeakerConfirmation {
 ///
 /// This is additive state layered over immutable meeting markdown. Deleting it
 /// removes user-confirmed corrections but never damages raw capture files.
-pub fn db_path() -> PathBuf {
-    let base = dirs::home_dir()
+pub fn default_db_path() -> PathBuf {
+    dirs::home_dir()
         .expect("home directory must exist for overlays.db")
-        .join(".minutes");
-    std::fs::create_dir_all(&base).ok();
-    base.join("overlays.db")
+        .join(".minutes")
+        .join("overlays.db")
+}
+
+pub fn db_path() -> PathBuf {
+    let path = default_db_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+    path
 }
 
 /// Resolve the overlay database next to a graph database.

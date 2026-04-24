@@ -2254,6 +2254,20 @@ fn cmd_paths(json: bool, config: &Config) -> Result<()> {
     Ok(())
 }
 
+fn owner_display(
+    who: Option<&str>,
+    who_original: Option<&str>,
+    who_provenance: Option<&str>,
+) -> String {
+    let owner = who.unwrap_or("unassigned");
+    match (who_original, who_provenance) {
+        (Some(original), Some(provenance)) if original != owner => {
+            format!("{owner} ({provenance}: {original})")
+        }
+        _ => owner.to_string(),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn cmd_search(
     query: &str,
@@ -2298,7 +2312,11 @@ fn cmd_search(
             }
         } else {
             for result in &limited {
-                let who = result.who.as_deref().unwrap_or("unassigned");
+                let who = owner_display(
+                    result.who.as_deref(),
+                    result.who_original.as_deref(),
+                    result.who_provenance.as_deref(),
+                );
                 let due = result.by_date.as_deref().unwrap_or("no due date");
                 eprintln!(
                     "\n{} — {} [{}]",
@@ -2474,7 +2492,11 @@ fn cmd_consistency(owner: Option<&str>, stale_after_days: i64, config: &Config) 
     if !report.stale_commitments.is_empty() {
         eprintln!("\nStale commitments ({}):", report.stale_commitments.len());
         for stale in &report.stale_commitments {
-            let who = stale.entry.who.as_deref().unwrap_or("unassigned");
+            let who = owner_display(
+                stale.entry.who.as_deref(),
+                stale.entry.who_original.as_deref(),
+                stale.entry.who_provenance.as_deref(),
+            );
             let due = stale.entry.by_date.as_deref().unwrap_or("no due date");
             let reasons = stale.reasons.join(", ");
             eprintln!(
@@ -2755,7 +2777,11 @@ fn cmd_research(
     if !report.related_open_intents.is_empty() {
         eprintln!("  Open follow-ups:");
         for intent in &report.related_open_intents {
-            let owner = intent.who.as_deref().unwrap_or("unassigned");
+            let owner = owner_display(
+                intent.who.as_deref(),
+                intent.who_original.as_deref(),
+                intent.who_provenance.as_deref(),
+            );
             let due = intent.by_date.as_deref().unwrap_or("no due date");
             eprintln!(
                 "    {:?}: {} (@{}, {})",

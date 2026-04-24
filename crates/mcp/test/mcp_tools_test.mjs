@@ -16,6 +16,8 @@
  */
 
 import { execFileSync } from "child_process";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "fs";
+import { tmpdir } from "os";
 import { join } from "path";
 
 let passed = 0;
@@ -153,6 +155,77 @@ test("MCP server module loads without error", async () => {
   const { existsSync } = await import("fs");
   const dist = join(import.meta.dirname, "..", "dist", "index.js");
   assert(existsSync(dist), "dist/index.js should exist after build");
+});
+
+// ── Test 9: minutes get --json applies speaker overlays end-to-end ──
+// MCP's get_meeting tool shells to `minutes get <path> --json` to surface
+// overlay-applied speaker_map to clients. This verifies the contract: a
+// confirmation written via the CLI `confirm` subcommand is reflected in the
+// JSON payload without the meeting markdown being mutated.
+//
+// Note: kept fully synchronous so failures propagate through the shared
+// sync test() harness. An async callback would resolve its Promise after
+// the runner returned PASS.
+test("minutes get --json applies speaker overlay from confirm", () => {
+  const sandbox = mkdtempSync(join(tmpdir(), "minutes-get-overlay-"));
+  const meetingsDir = join(sandbox, "meetings");
+  mkdirSync(meetingsDir, { recursive: true });
+  const meetingPath = join(meetingsDir, "2026-04-24-overlay-smoke.md");
+  const rawMarkdown = [
+    "---",
+    "title: Overlay Smoke",
+    "type: meeting",
+    "date: 2026-04-24T10:00:00-07:00",
+    "duration: 10m",
+    "tags: []",
+    "attendees: []",
+    "people: []",
+    "action_items: []",
+    "decisions: []",
+    "intents: []",
+    "speaker_map:",
+    "  - speaker_label: SPEAKER_0",
+    "    name: Speaker 0",
+    "    confidence: medium",
+    "    source: llm",
+    "---",
+    "",
+    "## Transcript",
+    "",
+    "SPEAKER_0: hi there",
+    "",
+  ].join("\n");
+  writeFileSync(meetingPath, rawMarkdown);
+
+  const bin = join(import.meta.dirname, "..", "..", "..", "target", "debug", "minutes");
+  const env = { ...process.env, HOME: sandbox, USERPROFILE: sandbox, RUST_LOG: "error" };
+
+  // Confirm via CLI — same overlay path the desktop app now uses.
+  execFileSync(
+    bin,
+    ["confirm", "--meeting", meetingPath, "--speaker", "SPEAKER_0", "--name", "Alex Kim"],
+    { encoding: "utf-8", timeout: 10000, env }
+  );
+
+  const before = readFileSync(meetingPath, "utf-8");
+  const jsonOut = execFileSync(bin, ["get", meetingPath, "--json"], {
+    encoding: "utf-8",
+    timeout: 10000,
+    env,
+  });
+  const after = readFileSync(meetingPath, "utf-8");
+  assertEqual(before, after, "raw meeting markdown must not be rewritten by get --json");
+
+  const payload = JSON.parse(jsonOut);
+  assert(payload.overlay_applied === true, "overlay_applied must be true after a confirmation");
+  const attr = (payload.frontmatter?.speaker_map || []).find(
+    (entry) => entry.speaker_label === "SPEAKER_0"
+  );
+  assert(attr, "SPEAKER_0 must appear in returned speaker_map");
+  assertEqual(attr.name, "Alex Kim", "overlay name must appear in JSON speaker_map");
+  assertEqual(attr.confidence, "high", "overlay confirmations carry high confidence");
+
+  rmSync(sandbox, { recursive: true, force: true });
 });
 
 // ── Summary ──

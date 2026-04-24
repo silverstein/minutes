@@ -685,10 +685,14 @@ enum Commands {
     /// Output the JSON Schema for the meeting frontmatter format
     Schema,
 
-    /// Get a meeting by filename slug
+    /// Get a meeting by filename slug or path
     Get {
-        /// Filename slug to match (e.g., "2026-03-17-advisor-call")
+        /// Filename slug (e.g., "2026-03-17-advisor-call") or full meeting path
         slug: String,
+
+        /// Emit structured JSON with overlay-applied speaker_map instead of raw markdown
+        #[arg(long)]
+        json: bool,
     },
 
     /// Show recent events from the event log
@@ -1348,7 +1352,7 @@ fn main() -> Result<()> {
             }
         }
         Commands::Schema => cmd_schema(),
-        Commands::Get { slug } => cmd_get(&slug, &config),
+        Commands::Get { slug, json } => cmd_get(&slug, json, &config),
         Commands::Events { limit, since } => cmd_events(limit, since, &config),
         Commands::Insights {
             kind,
@@ -5571,17 +5575,65 @@ fn cmd_schema() -> Result<()> {
     Ok(())
 }
 
-fn cmd_get(slug: &str, config: &Config) -> Result<()> {
-    match minutes_core::search::resolve_slug(slug, config) {
-        Some(path) => {
-            let content = std::fs::read_to_string(&path)?;
-            println!("{}", content);
-            Ok(())
+fn cmd_get(slug_or_path: &str, json: bool, config: &Config) -> Result<()> {
+    // Accept either a slug ("2026-03-17-advisor-call") or a path to the
+    // meeting markdown. MCP and Tauri pass paths; humans pass slugs. Paths —
+    // whether absolute or relative to cwd — must resolve to a .md file
+    // inside the configured meetings directory. The check happens via
+    // `notes::validate_meeting_path`, which canonicalizes both sides and
+    // rejects escapes (preventing `minutes get /etc/passwd.md` from
+    // leaking arbitrary files).
+    let path = if let Some(p) = minutes_core::search::resolve_slug(slug_or_path, config) {
+        p
+    } else {
+        let candidate = std::path::PathBuf::from(slug_or_path);
+        if !candidate.exists() || candidate.extension().and_then(|s| s.to_str()) != Some("md") {
+            anyhow::bail!("no meeting found matching slug or path: {}", slug_or_path);
         }
-        None => {
-            anyhow::bail!("no meeting found matching slug: {}", slug);
+        if let Err(msg) = minutes_core::notes::validate_meeting_path(&candidate, &config.output_dir)
+        {
+            anyhow::bail!("{}", msg);
         }
+        candidate
+    };
+
+    let content = std::fs::read_to_string(&path)?;
+
+    if !json {
+        println!("{}", content);
+        return Ok(());
     }
+
+    // Structured JSON with overlays layered in. Raw body is preserved verbatim;
+    // only speaker_map is rewritten to reflect sidecar confirmations. Agents
+    // and UIs can apply the renaming to body lines themselves if they want to,
+    // but the markdown on disk stays untouched.
+    let (frontmatter_str, body) = minutes_core::markdown::split_frontmatter(&content);
+    let mut frontmatter: minutes_core::markdown::Frontmatter = if frontmatter_str.is_empty() {
+        anyhow::bail!("meeting has no frontmatter: {}", path.display());
+    } else {
+        serde_yaml::from_str(frontmatter_str.trim())?
+    };
+
+    let overlay_db = minutes_core::overlays::default_db_path();
+    let confirmations =
+        minutes_core::overlays::load_speaker_confirmations_for_meeting_at(&overlay_db, &path)
+            .unwrap_or_default();
+    let overlay_applied = !confirmations.is_empty();
+    minutes_core::overlays::apply_speaker_confirmations(
+        &mut frontmatter.speaker_map,
+        &confirmations,
+    );
+
+    let payload = serde_json::json!({
+        "path": path.to_string_lossy(),
+        "frontmatter": frontmatter,
+        "body": body,
+        "raw_markdown": content,
+        "overlay_applied": overlay_applied,
+    });
+    println!("{}", serde_json::to_string_pretty(&payload)?);
+    Ok(())
 }
 
 fn cmd_events(limit: usize, since: Option<String>, _config: &Config) -> Result<()> {

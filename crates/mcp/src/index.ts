@@ -1882,7 +1882,7 @@ registerDocsAppTool(
   server,
   "get_meeting",
   {
-    description: "Get the full transcript and details of a specific meeting or memo.",
+    description: "Get the full transcript and details of a specific meeting or memo. Speaker attributions reflect sidecar overlay confirmations.",
     inputSchema: {
       path: z.string().describe("Path to the meeting markdown file"),
     },
@@ -1892,10 +1892,40 @@ registerDocsAppTool(
   async ({ path: filePath }) => {
     try {
       const resolved = validatePathInDirectory(filePath, await getEffectiveMeetingsDir(), [".md"]);
-      const content = await readFile(resolved, "utf-8");
+      const rawContent = await readFile(resolved, "utf-8");
+
+      // Ask the CLI for an overlay-applied structured view. Raw markdown on
+      // disk is never mutated — the CLI just layers ~/.minutes/overlays.db on
+      // top of the parsed frontmatter. If the CLI is unavailable or the call
+      // fails, degrade gracefully to raw content.
+      let structured: {
+        path: string;
+        view: string;
+        speaker_map?: unknown;
+        overlay_applied?: boolean;
+      } = { path: resolved, view: "detail" };
+
+      if (await isCliAvailable()) {
+        try {
+          const { stdout } = await runMinutes(["get", resolved, "--json"], 10000);
+          const parsed = parseJsonOutput(stdout);
+          if (parsed && typeof parsed === "object" && !parsed.raw) {
+            const speakerMap = parsed.frontmatter?.speaker_map;
+            structured = {
+              path: resolved,
+              view: "detail",
+              speaker_map: Array.isArray(speakerMap) ? speakerMap : [],
+              overlay_applied: Boolean(parsed.overlay_applied),
+            };
+          }
+        } catch {
+          // Non-fatal: fall through to raw content with no speaker_map enrichment.
+        }
+      }
+
       return {
-        content: [{ type: "text" as const, text: content }],
-        structuredContent: { path: resolved, view: "detail" },
+        content: [{ type: "text" as const, text: rawContent }],
+        structuredContent: structured,
         _meta: { ui: { resourceUri: UI_RESOURCE_URI }, view: "detail", path: resolved },
       };
     } catch (error: any) {

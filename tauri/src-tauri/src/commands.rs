@@ -5462,8 +5462,27 @@ pub fn cmd_get_meeting_detail(path: String) -> Result<MeetingDetail, String> {
 
     let content = std::fs::read_to_string(&meeting_path).map_err(|e| e.to_string())?;
     let (frontmatter_str, body) = minutes_core::markdown::split_frontmatter(&content);
-    let frontmatter: minutes_core::markdown::Frontmatter =
+    let mut frontmatter: minutes_core::markdown::Frontmatter =
         serde_yaml::from_str(frontmatter_str.trim()).map_err(|e| e.to_string())?;
+
+    // Layer sidecar overlays over raw frontmatter so desktop reflects
+    // confirmations written by the CLI, MCP tools, or other Minutes surfaces.
+    match minutes_core::overlays::load_speaker_confirmations_for_meeting_at(
+        &minutes_core::overlays::default_db_path(),
+        &meeting_path,
+    ) {
+        Ok(confirmations) if !confirmations.is_empty() => {
+            minutes_core::overlays::apply_speaker_confirmations(
+                &mut frontmatter.speaker_map,
+                &confirmations,
+            );
+        }
+        Ok(_) => {}
+        Err(e) => eprintln!(
+            "[meeting_detail] overlay load failed (showing raw frontmatter): {}",
+            e
+        ),
+    }
 
     let content_type = match frontmatter.r#type {
         ContentType::Meeting => "meeting",
@@ -5691,34 +5710,52 @@ pub async fn cmd_confirm_speaker(
     }
 
     let content = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
-    let (fm_str, body) = minutes_core::markdown::split_frontmatter(&content);
+    let (fm_str, _body) = minutes_core::markdown::split_frontmatter(&content);
     if fm_str.is_empty() {
         return Err("Meeting has no frontmatter".into());
     }
 
-    let mut frontmatter: minutes_core::markdown::Frontmatter =
+    let frontmatter: minutes_core::markdown::Frontmatter =
         serde_yaml::from_str(fm_str).map_err(|e| e.to_string())?;
 
-    let found = frontmatter
+    let existing = frontmatter
         .speaker_map
-        .iter_mut()
+        .iter()
         .find(|a| a.speaker_label == speaker_label);
 
-    if let Some(attr) = found {
-        attr.name = name.clone();
-        attr.confidence = minutes_core::diarize::Confidence::High;
-        attr.source = minutes_core::diarize::AttributionSource::Manual;
-    } else {
-        return Err(format!(
-            "Speaker '{}' not found in speaker_map",
-            speaker_label
-        ));
-    }
+    let previous_name = match existing {
+        Some(attr) => attr.name.clone(),
+        None => {
+            return Err(format!(
+                "Speaker '{}' not found in speaker_map",
+                speaker_label
+            ));
+        }
+    };
 
-    let new_body = minutes_core::diarize::apply_confirmed_names(body, &frontmatter.speaker_map);
-    let new_yaml = serde_yaml::to_string(&frontmatter).map_err(|e| e.to_string())?;
-    let new_content = format!("---\n{}---\n{}", new_yaml, new_body);
-    std::fs::write(&path, new_content).map_err(|e| e.to_string())?;
+    minutes_core::overlays::write_speaker_confirmation(
+        &path,
+        &speaker_label,
+        &name,
+        Some(&previous_name),
+        Some("desktop confirm"),
+    )
+    .map_err(|e| format!("Could not write speaker overlay: {}", e))?;
+
+    // Refresh graph projection so other surfaces reflect the correction
+    // immediately. Run on a blocking thread so we don't stall the async
+    // Tauri runtime — graph rebuild walks every meeting file and can take
+    // seconds on a large corpus. Failure is non-fatal because the overlay
+    // already persisted and future rebuilds will pick it up.
+    tauri::async_runtime::spawn_blocking(|| {
+        let config = Config::load();
+        if let Err(e) = minutes_core::graph::rebuild_index(&config) {
+            eprintln!(
+                "[confirm_speaker] overlay saved, but graph rebuild failed: {}",
+                e
+            );
+        }
+    });
 
     Ok(format!("Confirmed: {} = {}", speaker_label, name))
 }
@@ -8264,6 +8301,92 @@ mod tests {
     fn extract_paste_text_rejects_missing_summary() {
         let content = "---\ntitle: Demo\n---\n\n## Transcript\n\nFull transcript.\n";
         assert!(extract_paste_text(content, "summary").is_err());
+    }
+
+    /// Core cohesion invariant for 8zgi.2: a speaker confirmation written to
+    /// the sidecar overlay store (by the CLI, the desktop app, or any other
+    /// surface) must surface in the meeting detail view without mutating the
+    /// raw markdown on disk.
+    #[test]
+    fn meeting_detail_reflects_speaker_overlay_confirmations() {
+        with_temp_home(|home| {
+            // Config::load resolves output_dir to $HOME/meetings when no
+            // config file exists, which is what we want for this isolated run.
+            let meetings_dir = home.join("meetings");
+            std::fs::create_dir_all(&meetings_dir).unwrap();
+
+            let meeting_path = meetings_dir.join("2026-04-24-cohesion-check.md");
+            let raw_markdown = concat!(
+                "---\n",
+                "title: Cohesion Check\n",
+                "type: meeting\n",
+                "date: 2026-04-24T10:00:00-07:00\n",
+                "duration: 15m\n",
+                "tags: []\n",
+                "attendees: []\n",
+                "people: []\n",
+                "action_items: []\n",
+                "decisions: []\n",
+                "intents: []\n",
+                "speaker_map:\n",
+                "  - speaker_label: SPEAKER_0\n",
+                "    name: Speaker 0\n",
+                "    confidence: medium\n",
+                "    source: llm\n",
+                "---\n\n",
+                "## Transcript\n\n",
+                "SPEAKER_0: hello there\n",
+            );
+            std::fs::write(&meeting_path, raw_markdown).unwrap();
+            let hash_before = hash_file_bytes(&meeting_path);
+
+            // Simulate a CLI-initiated or desktop-initiated confirmation by
+            // writing directly to the overlay store at the HOME-rooted path.
+            let overlay_db = minutes_core::overlays::default_db_path();
+            minutes_core::overlays::write_speaker_confirmation_at(
+                &overlay_db,
+                &meeting_path,
+                "SPEAKER_0",
+                "Alex Kim",
+                Some("Speaker 0"),
+                Some("overlay test"),
+            )
+            .unwrap();
+
+            let detail =
+                cmd_get_meeting_detail(meeting_path.to_string_lossy().to_string()).unwrap();
+
+            let alex = detail
+                .speaker_map
+                .iter()
+                .find(|attr| attr.speaker_label == "SPEAKER_0")
+                .expect("SPEAKER_0 must appear in meeting detail");
+            assert_eq!(
+                alex.name, "Alex Kim",
+                "overlay confirmation must surface in meeting detail speaker_map"
+            );
+            assert_eq!(
+                alex.confidence, "high",
+                "overlay confirmations carry high confidence"
+            );
+            assert_eq!(
+                alex.source, "manual",
+                "overlay confirmations attribute the source as manual"
+            );
+
+            let hash_after = hash_file_bytes(&meeting_path);
+            assert_eq!(
+                hash_before, hash_after,
+                "overlay write must not mutate the raw meeting markdown"
+            );
+        });
+    }
+
+    fn hash_file_bytes(path: &Path) -> u64 {
+        let bytes = std::fs::read(path).expect("meeting file must exist");
+        let mut hasher = DefaultHasher::new();
+        bytes.hash(&mut hasher);
+        hasher.finish()
     }
 }
 

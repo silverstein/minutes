@@ -225,6 +225,9 @@ export default function ForAgentsPage() {
           <a href="/compare" className="hover:text-[var(--accent)]">
             compare
           </a>
+          <a href="/proof" className="hover:text-[var(--accent)]">
+            proof
+          </a>
           <a href="/docs/mcp/tools" className="hover:text-[var(--accent)]">
             MCP tools
           </a>
@@ -264,7 +267,7 @@ export default function ForAgentsPage() {
       </section>
 
       {/* Try in 60 seconds */}
-      <section className="mt-8 max-w-[760px]">
+      <section className="mt-8 max-w-[760px]" id="try">
         <div className="rounded-[8px] border border-[color:var(--border)] bg-[var(--bg-elevated)] p-5">
           <p className="font-mono text-[11px] uppercase tracking-[0.16em] text-[var(--accent)]">
             Try it in 60 seconds
@@ -294,6 +297,47 @@ export default function ForAgentsPage() {
               current?&rdquo;
             </em>
           </p>
+        </div>
+      </section>
+
+      <section className="mt-10 max-w-[760px]">
+        <div className="rounded-[8px] border border-[color:var(--border)] bg-[var(--bg-elevated)] p-5">
+          <p className="font-mono text-[11px] uppercase tracking-[0.16em] text-[var(--accent)]">
+            Proof path
+          </p>
+          <div className="mt-4 space-y-3 text-[13px] leading-6 text-[var(--text-secondary)]">
+            <p>
+              After the demo, audit the current eval artifact before trusting any
+              score. v0.1 is a runnable 10-file, 20-question smoke test with a
+              provisional 20/20 Claude-on-Claude pre-grade. It is useful evidence
+              that the harness works, not an independent benchmark.
+            </p>
+            <p>
+              Reference adapters for Mem0 and Graphiti show how the markdown
+              contract maps into external memory systems. Treat them as runnable
+              examples until the v2 hardening work lands.
+            </p>
+          </div>
+          <div className="mt-4 flex flex-wrap gap-3">
+            <a
+              href="/proof"
+              className="inline-flex items-center rounded-[5px] bg-[var(--accent)] px-4 py-2 font-mono text-[11px] uppercase tracking-[0.12em] text-black hover:bg-[var(--accent-hover)]"
+            >
+              See proof
+            </a>
+            <a
+              href="https://github.com/silverstein/minutes/blob/main/docs/eval/results-v0.1.md"
+              className="inline-flex items-center rounded-[5px] border border-[color:var(--border-mid)] px-4 py-2 font-mono text-[11px] uppercase tracking-[0.12em] text-[var(--text)] hover:bg-[var(--bg-hover)]"
+            >
+              Audit eval
+            </a>
+            <a
+              href="https://github.com/silverstein/minutes/tree/main/examples"
+              className="inline-flex items-center rounded-[5px] border border-[color:var(--border-mid)] px-4 py-2 font-mono text-[11px] uppercase tracking-[0.12em] text-[var(--text)] hover:bg-[var(--bg-hover)]"
+            >
+              Adapter examples
+            </a>
+          </div>
         </div>
       </section>
 
@@ -735,6 +779,7 @@ export default function ForAgentsPage() {
           {[
             ["/llms.txt", "llms.txt", "Concise agent index with tool names, descriptions, and doc links"],
             ["/llms-full.txt", "llms-full.txt", "Full agent reference with product description and all entry points"],
+            ["/proof", "/proof", "Honest proof page: demo, eval v0.1 caveats, and adapter status"],
             ["/docs/mcp/tools", "/docs/mcp/tools", "Generated MCP tool reference with stable anchor links"],
             ["/docs/mcp/tools.md", "/docs/mcp/tools.md", "Same reference as raw markdown for direct context ingestion"],
             ["/docs/errors", "/docs/errors", "Generated error catalog from Rust thiserror definitions"],

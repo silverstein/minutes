@@ -232,6 +232,9 @@ export default function Home() {
           <a href="#pipeline" className="hover:text-[var(--accent)]">
             Pipeline
           </a>
+          <a href="/proof" className="hover:text-[var(--accent)]">
+            Proof
+          </a>
           <a href="/for-agents" className="hover:text-[var(--accent)]">
             For agents
           </a>
@@ -287,6 +290,12 @@ export default function Home() {
             className="inline-flex items-center gap-2 rounded-[5px] border border-[color:var(--border-mid)] px-6 py-2.5 font-mono text-[11px] uppercase tracking-[0.1em] text-[var(--text-secondary)] hover:border-[color:var(--accent)] hover:text-[var(--accent)]"
           >
             View on GitHub
+          </a>
+          <a
+            href="/proof"
+            className="inline-flex items-center gap-2 rounded-[5px] border border-[color:var(--border-mid)] px-6 py-2.5 font-mono text-[11px] uppercase tracking-[0.1em] text-[var(--text-secondary)] hover:border-[color:var(--accent)] hover:text-[var(--accent)]"
+          >
+            See proof
           </a>
         </div>
 
@@ -396,8 +405,53 @@ export default function Home() {
         </div>
       </section>
 
+      <section className="border-t border-[color:var(--border)] py-16">
+        <SectionLabel n="01" label="Proof" />
+        <h2 className="font-serif text-[30px] leading-tight tracking-[-0.035em] text-[var(--text)] sm:text-[32px]">
+          Start with the evidence, not the pitch.
+        </h2>
+        <div className="mt-8 grid gap-4 md:grid-cols-3">
+          <a
+            href="/for-agents#try"
+            className="rounded-[8px] border border-[color:var(--border)] bg-[var(--bg-elevated)] p-5 shadow-[var(--shadow-panel)] transition hover:border-[color:var(--border-mid)] hover:bg-[var(--bg-hover)]"
+          >
+            <p className="font-mono text-[11px] uppercase tracking-[0.16em] text-[var(--accent)]">
+              Runnable demo
+            </p>
+            <p className="mt-3 text-[14px] leading-7 text-[var(--text-secondary)]">
+              One command installs a five-meeting fixture corpus and prints an
+              MCP config pointed at it.
+            </p>
+          </a>
+          <a
+            href="/proof"
+            className="rounded-[8px] border border-[color:var(--border)] bg-[var(--bg-elevated)] p-5 shadow-[var(--shadow-panel)] transition hover:border-[color:var(--border-mid)] hover:bg-[var(--bg-hover)]"
+          >
+            <p className="font-mono text-[11px] uppercase tracking-[0.16em] text-[var(--accent)]">
+              Honest eval
+            </p>
+            <p className="mt-3 text-[14px] leading-7 text-[var(--text-secondary)]">
+              v0.1 is a public smoke test with a provisional 20/20 pre-grade,
+              not benchmark evidence.
+            </p>
+          </a>
+          <a
+            href="https://github.com/silverstein/minutes/tree/main/examples"
+            className="rounded-[8px] border border-[color:var(--border)] bg-[var(--bg-elevated)] p-5 shadow-[var(--shadow-panel)] transition hover:border-[color:var(--border-mid)] hover:bg-[var(--bg-hover)]"
+          >
+            <p className="font-mono text-[11px] uppercase tracking-[0.16em] text-[var(--accent)]">
+              Adapter examples
+            </p>
+            <p className="mt-3 text-[14px] leading-7 text-[var(--text-secondary)]">
+              Mem0 and Graphiti examples show the file contract; v2 hardening is
+              tracked separately.
+            </p>
+          </a>
+        </div>
+      </section>
+
       <section id="pipeline" className="border-t border-[color:var(--border)] py-16">
-        <SectionLabel n="01" label="Pipeline" />
+        <SectionLabel n="02" label="Pipeline" />
         <h2 className="font-serif text-[30px] leading-tight tracking-[-0.035em] text-[var(--text)] sm:text-[32px]">
           How it works
         </h2>
@@ -418,7 +472,7 @@ export default function Home() {
       </section>
 
       <section className="border-t border-[color:var(--border)] py-16">
-        <SectionLabel n="02" label="Audience" />
+        <SectionLabel n="03" label="Audience" />
         <h2 className="max-w-[620px] font-serif text-[30px] leading-tight tracking-[-0.035em] text-[var(--text)] sm:text-[32px]">
           Capture it anywhere. Find it everywhere.
         </h2>
@@ -443,7 +497,7 @@ export default function Home() {
       </section>
 
       <section className="border-t border-[color:var(--border)] py-16">
-        <SectionLabel n="03" label="Features" />
+        <SectionLabel n="04" label="Features" />
         <h2 className="font-serif text-[30px] leading-tight tracking-[-0.035em] text-[var(--text)] sm:text-[32px]">
           What you get
         </h2>
@@ -474,7 +528,7 @@ export default function Home() {
       </section>
 
       <section className="border-t border-[color:var(--border)] py-16">
-        <SectionLabel n="04" label="Comparison" />
+        <SectionLabel n="05" label="Comparison" />
         <h2 className="font-serif text-[30px] leading-tight tracking-[-0.035em] text-[var(--text)] sm:text-[32px]">
           How it compares
         </h2>

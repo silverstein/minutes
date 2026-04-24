@@ -3,8 +3,9 @@
 Small working adapters that pipe Minutes markdown output into third-party
 agent-memory platforms. Each one demonstrates that the
 [Minutes frontmatter contract](../docs/frontmatter-schema.md) interoperates
-cleanly with the rest of the agent-memory ecosystem. The filesystem is the
-integration contract; these adapters are proof.
+with the rest of the agent-memory ecosystem at a baseline level. The filesystem
+is the integration contract; these adapters are runnable proof sketches, not
+production-grade integrations.
 
 ## Quickest path
 
@@ -36,6 +37,9 @@ Minutes install uses a custom path you don't have to repeat it.
 - **Isn't:** a supported SDK, a shipping product, or a commitment to maintain
   compatibility with future versions of Mem0 or Graphiti. Platform SDKs evolve;
   when they do, treat these adapters as starting points, not libraries.
+- **Still missing from v1:** per-attendee identity mapping, duplicate-safe
+  manifests, exact dependency pins, and CI dry-runs. Those are tracked as the
+  reference-adapter v2 hardening path.
 
 ## Contributing a new adapter
 

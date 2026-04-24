@@ -2,7 +2,7 @@
 
 > Generated file. Do not edit by hand.
 > Source: manifest.json + crates/mcp/src/index.ts + site/lib/skills-catalog.json
-> Last generated: 2026-04-23
+> Last generated: 2026-04-24
 
 ## Product
 
@@ -73,6 +73,7 @@ Minutes is an open-source meeting corpus you own. Record, transcribe, search, an
 
 - Website: https://useminutes.app
 - Agent entry point: https://useminutes.app/for-agents
+- Proof and eval caveats: https://useminutes.app/proof
 - Concise agent index: https://useminutes.app/llms.txt
 - MCP tools reference (HTML): https://useminutes.app/docs/mcp/tools
 - MCP tools reference (Markdown): https://useminutes.app/docs/mcp/tools.md

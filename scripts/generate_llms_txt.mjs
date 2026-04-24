@@ -378,6 +378,7 @@ decisions:
 ## Documentation
 
 - Agent entry point: ${manifest.documentation}
+- Proof and eval caveats: ${manifest.homepage}/proof
 - Full agent index: ${manifest.homepage}/llms-full.txt
 - MCP tools reference: ${mcpToolsBaseUrl}
 - MCP tools markdown: ${mcpToolsBaseUrl}.md
@@ -449,6 +450,7 @@ ${surfaceLines}
 
 - Website: ${manifest.homepage}
 - Agent entry point: ${manifest.documentation}
+- Proof and eval caveats: ${manifest.homepage}/proof
 - Concise agent index: ${manifest.homepage}/llms.txt
 - MCP tools reference (HTML): ${manifest.homepage}/docs/mcp/tools
 - MCP tools reference (Markdown): ${manifest.homepage}/docs/mcp/tools.md

@@ -33,6 +33,12 @@ const docsSections = [
         blurb:
           "Long-form machine-readable agent reference with the canonical public surfaces.",
       },
+      {
+        title: "Proof",
+        href: "/proof",
+        blurb:
+          "Current proof artifacts, eval caveats, and the milestones still needed before stronger claims are fair.",
+      },
     ],
   },
   {

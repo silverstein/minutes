@@ -215,14 +215,14 @@ function TranscriptCard() {
 export default function Home() {
   return (
     <div className="mx-auto max-w-[840px] px-6 pb-16 sm:px-8">
-      <nav className="sticky top-0 z-40 flex items-center justify-between border-b border-[color:var(--border)] bg-[var(--bg)] py-4 backdrop-blur-sm">
+      <nav className="sticky top-0 z-40 flex flex-wrap items-center justify-between gap-3 border-b border-[color:var(--border)] bg-[var(--bg)] py-4 backdrop-blur-sm">
         <a
           href="/"
           className="font-mono text-[15px] font-medium text-[var(--text)]"
         >
           minutes
         </a>
-        <div className="flex gap-6 text-sm text-[var(--text-secondary)] max-sm:gap-4 max-sm:text-xs">
+        <div className="flex flex-wrap justify-end gap-x-6 gap-y-2 text-sm text-[var(--text-secondary)] max-sm:gap-x-4 max-sm:text-xs">
           <a href="https://github.com/silverstein/minutes" className="hover:text-[var(--accent)]">
             GitHub
           </a>

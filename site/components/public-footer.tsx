@@ -15,6 +15,10 @@ export function PublicFooter() {
           For agents
         </a>
         <span aria-hidden="true">·</span>
+        <a href="/proof" className="hover:text-[var(--accent)]">
+          Proof
+        </a>
+        <span aria-hidden="true">·</span>
         <a href="/compare" className="hover:text-[var(--accent)]">
           Compare
         </a>

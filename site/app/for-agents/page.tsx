@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { CopyButton } from "@/components/copy-button";
 import { PublicFooter } from "@/components/public-footer";
 import surfaces from "@/lib/product-surfaces.json";
+import { MINUTES_MCP_TOOL_COUNT } from "@/lib/release";
 import skillsCatalog from "@/lib/skills-catalog.json";
 
 export const metadata: Metadata = {
@@ -37,6 +38,9 @@ const toolGroups = [
       ["get_meeting", "Retrieve the full transcript and frontmatter of a specific meeting."],
       ["search_meetings", "Full-text search across all meeting transcripts."],
       ["research_topic", "Cross-meeting research: decisions, follow-ups, and mentions of a topic."],
+      ["activity_summary", "Summarize meeting-adjacent desktop context for an artifact, session, or time window."],
+      ["search_context", "Search opted-in desktop context across app focus and window titles."],
+      ["get_moment", "Show the local desktop-context rewind around an artifact, session, or timestamp."],
     ],
   },
   {
@@ -288,7 +292,7 @@ export default function ForAgentsPage() {
             <code className="flex-1 overflow-x-auto">
               npx minutes-mcp --demo
             </code>
-            <CopyButton label="Copy" cmd="npx minutes-mcp --demo" />
+            <CopyButton label="Copy" cmd="npx minutes-mcp --demo" compact />
           </div>
           <p className="mt-4 text-[12px] leading-6 text-[var(--text-secondary)]">
             Paste the printed config into your agent host. Try:{" "}
@@ -381,7 +385,7 @@ export default function ForAgentsPage() {
             Agent compatibility
           </p>
           <p className="mt-3 text-[13px] leading-6 text-[var(--text-secondary)]">
-            First-class support across every major agent runtime. Same folder,
+            Working paths across the major agent runtimes. Same folder,
             different hosts, no vendor lock-in.
           </p>
           <div className="mt-4 overflow-x-auto">
@@ -406,7 +410,7 @@ export default function ForAgentsPage() {
                 <tr className="border-b border-[color:var(--border)]">
                   <td className="py-2 pr-3">Claude Code</td>
                   <td className="py-2 pr-3">{skillCount} skills + 2 hooks</td>
-                  <td className="py-2 pr-3">26 tools</td>
+                  <td className="py-2 pr-3">{MINUTES_MCP_TOOL_COUNT} tools</td>
                   <td className="py-2">
                     <code className="text-[11px]">/plugin install minutes@minutes</code>
                   </td>
@@ -414,7 +418,7 @@ export default function ForAgentsPage() {
                 <tr className="border-b border-[color:var(--border)]">
                   <td className="py-2 pr-3">Claude Desktop</td>
                   <td className="py-2 pr-3 text-[var(--text-secondary)]">—</td>
-                  <td className="py-2 pr-3">26 tools + MCP App</td>
+                  <td className="py-2 pr-3">{MINUTES_MCP_TOOL_COUNT} tools + MCP App</td>
                   <td className="py-2">
                     <code className="text-[11px]">npx minutes-mcp</code>{" "}
                     <span className="text-[var(--text-secondary)]">or .mcpb</span>
@@ -423,7 +427,7 @@ export default function ForAgentsPage() {
                 <tr className="border-b border-[color:var(--border)]">
                   <td className="py-2 pr-3">Codex</td>
                   <td className="py-2 pr-3">{skillCount} skills via <code className="text-[11px]">.agents/</code></td>
-                  <td className="py-2 pr-3">26 tools</td>
+                  <td className="py-2 pr-3">{MINUTES_MCP_TOOL_COUNT} tools</td>
                   <td className="py-2">
                     <code className="text-[11px]">npx minutes-mcp</code>
                   </td>
@@ -431,7 +435,7 @@ export default function ForAgentsPage() {
                 <tr className="border-b border-[color:var(--border)]">
                   <td className="py-2 pr-3">Gemini CLI</td>
                   <td className="py-2 pr-3">{skillCount} skills via <code className="text-[11px]">.agents/</code></td>
-                  <td className="py-2 pr-3">26 tools</td>
+                  <td className="py-2 pr-3">{MINUTES_MCP_TOOL_COUNT} tools</td>
                   <td className="py-2">
                     <code className="text-[11px]">npx minutes-mcp</code>
                   </td>
@@ -439,7 +443,7 @@ export default function ForAgentsPage() {
                 <tr className="border-b border-[color:var(--border)]">
                   <td className="py-2 pr-3">Cursor</td>
                   <td className="py-2 pr-3 text-[var(--text-secondary)]">—</td>
-                  <td className="py-2 pr-3">26 tools</td>
+                  <td className="py-2 pr-3">{MINUTES_MCP_TOOL_COUNT} tools</td>
                   <td className="py-2">
                     <code className="text-[11px]">npx minutes-mcp</code>{" "}
                     <span className="text-[var(--text-secondary)]">in Cursor MCP settings</span>
@@ -450,7 +454,7 @@ export default function ForAgentsPage() {
                   <td className="py-2 pr-3">
                     {skillCount} skills + <code className="text-[11px]">/minutes-*</code> commands
                   </td>
-                  <td className="py-2 pr-3">26 tools</td>
+                  <td className="py-2 pr-3">{MINUTES_MCP_TOOL_COUNT} tools</td>
                   <td className="py-2">
                     <code className="text-[11px]">.opencode/</code>{" "}
                     <span className="text-[var(--text-secondary)]">auto-discovered</span>
@@ -459,7 +463,7 @@ export default function ForAgentsPage() {
                 <tr>
                   <td className="py-2 pr-3">Any MCP client</td>
                   <td className="py-2 pr-3 text-[var(--text-secondary)]">—</td>
-                  <td className="py-2 pr-3">26 tools</td>
+                  <td className="py-2 pr-3">{MINUTES_MCP_TOOL_COUNT} tools</td>
                   <td className="py-2">
                     <code className="text-[11px]">npx minutes-mcp</code>
                   </td>
@@ -558,9 +562,9 @@ export default function ForAgentsPage() {
             Obsidian, or any markdown tool.
           </p>
           <p>
-            The MCP server (26 tools, 7 resources, 6 prompt templates) is the main
-            agent interface. Any MCP-compatible client can search, record, and query
-            through it.
+            The MCP server ({MINUTES_MCP_TOOL_COUNT} tools, 7 resources, 6
+            prompt templates) is the main agent interface. Any MCP-compatible
+            client can search, record, and query through it.
           </p>
         </div>
       </section>
@@ -577,7 +581,7 @@ export default function ForAgentsPage() {
             <span className="font-mono text-[11px] uppercase tracking-[0.16em] text-[var(--text-secondary)]">
               MCP config
             </span>
-            <CopyButton label="Copy" cmd={mcpConfig} />
+            <CopyButton label="Copy" cmd={mcpConfig} compact />
           </div>
           <pre className="overflow-x-auto px-5 py-4 font-mono text-[12px] leading-6 text-[var(--text)]">
             {mcpConfig}
@@ -616,7 +620,7 @@ export default function ForAgentsPage() {
               </p>
               <div className="mt-3 flex items-center gap-2 rounded-[4px] bg-[var(--bg)] px-3 py-2 font-mono text-[12px] text-[var(--text)]">
                 <code className="flex-1 overflow-x-auto">{s.install}</code>
-                <CopyButton label="Copy" cmd={s.install} />
+                <CopyButton label="Copy" cmd={s.install} compact />
               </div>
               <p className="mt-3 text-[13px] leading-6 text-[var(--text-secondary)]">
                 {s.note}
@@ -634,8 +638,8 @@ export default function ForAgentsPage() {
       <section className="mt-14">
         <SectionLabel n="04" label="MCP tool surface" />
         <p className="mb-5 text-[15px] leading-7 text-[var(--text-secondary)]">
-          26 tools grouped by function. Full reference with stable anchor
-          links:{" "}
+          {MINUTES_MCP_TOOL_COUNT} tools grouped by function. Full reference
+          with stable anchor links:{" "}
           <a
             href="/docs/mcp/tools"
             className="text-[var(--accent)] hover:underline"

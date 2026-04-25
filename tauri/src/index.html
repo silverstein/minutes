@@ -7032,23 +7032,32 @@
       }
     }
 
+    async function refreshOpenMeetingDetail() {
+      if (!currentMeetingDetail || !detailOverlay.classList.contains('active')) return;
+      const path = currentMeetingDetail.path;
+      if (!path) return;
+      try {
+        const detail = await invoke('cmd_get_meeting_detail', { path });
+        renderDetailSections(detail);
+      } catch (e) {
+        console.error('Detail refresh:', e);
+        renderDetailSections(currentMeetingDetail);
+      }
+    }
+
     async function refreshMeetingsForCurrentView() {
       if (activeSearchQuery) {
         try {
           const results = await invoke('cmd_search', { query: activeSearchQuery });
           renderMeetings(results);
-          if (currentMeetingDetail && detailOverlay.classList.contains('active')) {
-            renderDetailSections(currentMeetingDetail);
-          }
+          await refreshOpenMeetingDetail();
         } catch (e) {
           console.error('Search refresh:', e);
         }
         return;
       }
       await loadMeetings();
-      if (currentMeetingDetail && detailOverlay.classList.contains('active')) {
-        renderDetailSections(currentMeetingDetail);
-      }
+      await refreshOpenMeetingDetail();
     }
 
     function scheduleMeetingsRefresh(delay = 350) {
@@ -7073,9 +7082,7 @@
         try {
           const results = await invoke('cmd_search', { query });
           renderMeetings(results);
-          if (currentMeetingDetail && detailOverlay.classList.contains('active')) {
-            renderDetailSections(currentMeetingDetail);
-          }
+          await refreshOpenMeetingDetail();
         } catch (e) { console.error('Search:', e); }
       }, 250);
     });
@@ -9995,6 +10002,39 @@
 
     currentWindow.listen('artifacts:changed', () => {
       scheduleMeetingsRefresh();
+    });
+
+    currentWindow.listen('speakers:changed', async (event) => {
+      const changedPath = event.payload?.path || '';
+      if (
+        currentMeetingDetail &&
+        detailOverlay.classList.contains('active') &&
+        currentMeetingDetail.path === changedPath
+      ) {
+        await refreshOpenMeetingDetail();
+        const label = event.payload?.speakerLabel || 'Speaker';
+        const name = event.payload?.name || 'confirmed';
+        showDetailFeedback(`${label} confirmed as ${name}`, 'success');
+      } else {
+        scheduleMeetingsRefresh(0);
+      }
+    });
+
+    currentWindow.listen('palette:artifact-created', async (event) => {
+      const draft = event.payload || {};
+      if (!draft.path || typeof draft.content !== 'string') {
+        scheduleMeetingsRefresh(0);
+        return;
+      }
+      const filename = draft.path.split(/[\\/]/).pop() || draft.path;
+      const shown = await showMdViewer(draft.path, filename, draft.content, {
+        mode: 'source',
+        editable: true,
+      });
+      if (shown && currentMeetingDetail && detailOverlay.classList.contains('active')) {
+        showDetailFeedback(`Created ${String(draft.templateKind || 'debrief-memo').replaceAll('-', ' ')} draft`, 'success');
+      }
+      scheduleMeetingsRefresh(0);
     });
 
     // ── Listen for recall:expand events from Rust backend ──

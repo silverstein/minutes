@@ -280,6 +280,7 @@
       dictation: "Dictation",
       navigation: "Navigation",
       search: "Search",
+      meeting: "Meeting",
     };
 
     const SECTION_ICONS = {
@@ -287,6 +288,7 @@
       dictation: "◉",
       navigation: "→",
       search: "⌕",
+      meeting: "✓",
     };
 
     // ─────────────────────────────────────────────────────────────
@@ -532,7 +534,7 @@
       desc.style.lineHeight = "1.4";
       desc.textContent = cmd.input === "inline-query"
         ? "Type your query, then press Enter to run. Escape to cancel."
-        : "Type your text, then press Enter to run. Escape to cancel.";
+        : `${cmd.description}. Press Enter to run. Escape to cancel.`;
       empty.appendChild(title);
       empty.appendChild(desc);
       listEl.appendChild(empty);
@@ -618,6 +620,8 @@
           return { id: "research-topic", query: trimmed };
         case "add-note":
           return { id: "add-note", text: trimmed };
+        case "confirm-current-speaker":
+          return { id: "confirm-current-speaker", confirmation: trimmed };
         case "rename-current-meeting":
           return { id: "rename-current-meeting", new_title: trimmed };
         default:

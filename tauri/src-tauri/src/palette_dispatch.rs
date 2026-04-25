@@ -39,20 +39,21 @@
 //! `OpenAssistantWorkspace` and `CopyMeetingMarkdown` are wired now per
 //! slice 1 finding 5 — they did not need new core logic after all.
 
+use std::path::Path;
 use std::sync::atomic::Ordering;
 
 use serde::Deserialize;
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Emitter, State};
 
 use minutes_core::palette::recents::RecentsStore;
 use minutes_core::palette::{visible_commands, ActionId, Command, Context, InputKind, StateFlags};
 use minutes_core::Config;
 
 use crate::commands::{
-    cmd_add_note, cmd_open_meeting_url, cmd_search, cmd_start_dictation, cmd_start_live_transcript,
-    cmd_start_recording, cmd_stop_dictation, cmd_stop_live_transcript, cmd_stop_recording,
-    cmd_upcoming_meetings, copy_to_clipboard, dictation_pid_active, open_target, recording_active,
-    AppState,
+    cmd_add_note, cmd_create_artifact_from_meeting, cmd_open_meeting_url, cmd_search,
+    cmd_start_dictation, cmd_start_live_transcript, cmd_start_recording, cmd_stop_dictation,
+    cmd_stop_live_transcript, cmd_stop_recording, cmd_upcoming_meetings, copy_to_clipboard,
+    dictation_pid_active, open_target, recording_active, AppState,
 };
 
 // ─────────────────────────────────────────────────────────────────────
@@ -149,6 +150,22 @@ pub enum ActionResponse {
         #[serde(rename = "newPath")]
         new_path: String,
     },
+    /// CreateDebriefDraftFromCurrentMeeting — an editable artifact was
+    /// created from the currently focused meeting.
+    ArtifactCreated {
+        path: String,
+        title: String,
+        #[serde(rename = "templateKind")]
+        template_kind: String,
+    },
+    /// ConfirmCurrentSpeaker — a speaker overlay was written for the
+    /// currently focused meeting.
+    SpeakerConfirmed {
+        path: String,
+        #[serde(rename = "speakerLabel")]
+        speaker_label: String,
+        name: String,
+    },
 }
 
 impl From<&Command> for CommandDto {
@@ -171,6 +188,7 @@ fn section_name(s: minutes_core::palette::Section) -> &'static str {
         Section::Dictation => "dictation",
         Section::Navigation => "navigation",
         Section::Search => "search",
+        Section::Meeting => "meeting",
     }
 }
 
@@ -227,6 +245,87 @@ fn merge_context(state: &AppState, ui: PaletteUiContext) -> Context {
         current_meeting: ui.current_meeting,
         selected_text: ui.selected_text,
     }
+}
+
+fn parse_speaker_confirmation(input: &str) -> Result<(String, String), String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Err("Use SPEAKER_0 = Alex".into());
+    }
+
+    let (label, name) = trimmed
+        .split_once('=')
+        .or_else(|| trimmed.split_once(':'))
+        .ok_or_else(|| "Use SPEAKER_0 = Alex".to_string())?;
+
+    let speaker_label = label.trim();
+    let speaker_name = name.trim();
+    if speaker_label.is_empty() || speaker_name.is_empty() {
+        return Err("Use SPEAKER_0 = Alex".into());
+    }
+
+    Ok((speaker_label.to_string(), speaker_name.to_string()))
+}
+
+fn confirm_speaker_for_meeting(
+    meeting_path: &Path,
+    speaker_label: &str,
+    name: &str,
+) -> Result<(), String> {
+    let config = Config::load();
+    minutes_core::notes::validate_meeting_path(meeting_path, &config.output_dir)?;
+
+    let content = std::fs::read_to_string(meeting_path)
+        .map_err(|e| format!("read meeting {}: {}", meeting_path.display(), e))?;
+    let (fm_str, _body) = minutes_core::markdown::split_frontmatter(&content);
+    if fm_str.trim().is_empty() {
+        return Err("meeting has no frontmatter".into());
+    }
+
+    let frontmatter: minutes_core::markdown::Frontmatter =
+        serde_yaml::from_str(fm_str).map_err(|e| format!("bad frontmatter: {}", e))?;
+    let previous_name = frontmatter
+        .speaker_map
+        .iter()
+        .find(|a| a.speaker_label == speaker_label)
+        .map(|a| a.name.clone())
+        .ok_or_else(|| {
+            let available = frontmatter
+                .speaker_map
+                .iter()
+                .map(|a| a.speaker_label.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            if available.is_empty() {
+                format!("{} is not in this meeting's speaker map", speaker_label)
+            } else {
+                format!(
+                    "{} is not in this meeting's speaker map. Available: {}",
+                    speaker_label, available
+                )
+            }
+        })?;
+
+    minutes_core::overlays::write_speaker_confirmation(
+        meeting_path,
+        speaker_label,
+        name,
+        Some(&previous_name),
+        Some("palette confirm"),
+    )
+    .map_err(|e| format!("could not write speaker overlay: {}", e))?;
+
+    tauri::async_runtime::spawn_blocking(|| {
+        let config = Config::load();
+        if let Err(e) = minutes_core::graph::rebuild_index(&config) {
+            eprintln!(
+                "[palette] speaker overlay saved, but graph rebuild failed: {}",
+                e
+            );
+        }
+    });
+
+    Ok(())
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -536,6 +635,40 @@ fn dispatch_action(
             copy_to_clipboard(&content)?;
             Ok(ActionResponse::Ok)
         }
+        ActionId::CreateDebriefDraftFromCurrentMeeting => {
+            let path = ui
+                .current_meeting
+                .ok_or_else(|| "no current meeting in palette context".to_string())?;
+            let draft = cmd_create_artifact_from_meeting(
+                path.to_string_lossy().to_string(),
+                "debrief-memo".into(),
+            )?;
+            app.emit("palette:artifact-created", &draft).ok();
+            Ok(ActionResponse::ArtifactCreated {
+                path: draft.path,
+                title: draft.title,
+                template_kind: draft.template_kind,
+            })
+        }
+        ActionId::ConfirmCurrentSpeaker { confirmation } => {
+            let path = ui
+                .current_meeting
+                .ok_or_else(|| "no current meeting in palette context".to_string())?;
+            let confirmation = confirmation.unwrap_or_default();
+            let (speaker_label, name) = parse_speaker_confirmation(&confirmation)?;
+            confirm_speaker_for_meeting(&path, &speaker_label, &name)?;
+            let payload = serde_json::json!({
+                "path": path.to_string_lossy(),
+                "speakerLabel": speaker_label,
+                "name": name,
+            });
+            app.emit("speakers:changed", payload).ok();
+            Ok(ActionResponse::SpeakerConfirmed {
+                path: path.to_string_lossy().to_string(),
+                speaker_label,
+                name,
+            })
+        }
         ActionId::RenameCurrentMeeting { new_title } => {
             let path = ui
                 .current_meeting
@@ -648,6 +781,36 @@ mod tests {
             }
             other => panic!("expected AddNote, got {:?}", other),
         }
+
+        let req: ActionId = serde_json::from_str(
+            r#"{"id":"confirm-current-speaker","confirmation":"SPEAKER_0 = Alex"}"#,
+        )
+        .unwrap();
+        match req {
+            ActionId::ConfirmCurrentSpeaker { confirmation } => {
+                assert_eq!(confirmation.as_deref(), Some("SPEAKER_0 = Alex"));
+            }
+            other => panic!("expected ConfirmCurrentSpeaker, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_speaker_confirmation_accepts_simple_forms() {
+        assert_eq!(
+            parse_speaker_confirmation("SPEAKER_0 = Alex Chen").unwrap(),
+            ("SPEAKER_0".into(), "Alex Chen".into())
+        );
+        assert_eq!(
+            parse_speaker_confirmation("SPEAKER_1: Priya").unwrap(),
+            ("SPEAKER_1".into(), "Priya".into())
+        );
+    }
+
+    #[test]
+    fn parse_speaker_confirmation_rejects_ambiguous_input() {
+        assert!(parse_speaker_confirmation("").is_err());
+        assert!(parse_speaker_confirmation("SPEAKER_0").is_err());
+        assert!(parse_speaker_confirmation("SPEAKER_0 = ").is_err());
     }
 
     #[test]
@@ -797,5 +960,40 @@ mod tests {
             v.get("newPath").and_then(|x| x.as_str()),
             Some("/tmp/new.md")
         );
+    }
+
+    #[test]
+    fn action_response_artifact_created_has_payload() {
+        let v = serde_json::to_value(ActionResponse::ArtifactCreated {
+            path: "/tmp/draft.md".into(),
+            title: "Debrief Memo".into(),
+            template_kind: "debrief-memo".into(),
+        })
+        .unwrap();
+        assert_kind(&v, "artifact-created");
+        assert_eq!(
+            v.get("path").and_then(|x| x.as_str()),
+            Some("/tmp/draft.md")
+        );
+        assert_eq!(
+            v.get("templateKind").and_then(|x| x.as_str()),
+            Some("debrief-memo")
+        );
+    }
+
+    #[test]
+    fn action_response_speaker_confirmed_has_payload() {
+        let v = serde_json::to_value(ActionResponse::SpeakerConfirmed {
+            path: "/tmp/meeting.md".into(),
+            speaker_label: "SPEAKER_0".into(),
+            name: "Alex".into(),
+        })
+        .unwrap();
+        assert_kind(&v, "speaker-confirmed");
+        assert_eq!(
+            v.get("speakerLabel").and_then(|x| x.as_str()),
+            Some("SPEAKER_0")
+        );
+        assert_eq!(v.get("name").and_then(|x| x.as_str()), Some("Alex"));
     }
 }

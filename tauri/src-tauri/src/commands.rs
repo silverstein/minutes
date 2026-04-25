@@ -10577,12 +10577,15 @@ fn finalize_palette_open(app: &tauri::AppHandle) {
 /// pass 2 P2 #3.
 #[tauri::command]
 pub fn palette_current_meeting() -> Option<PathBuf> {
-    let workspace_root = crate::context::workspace_dir();
-    if !workspace_root.exists() {
-        return None;
+    // Prefer the desktop workspace state first. That is the meeting the
+    // user is actively looking at in the detail view, even if Recall was
+    // previously focused on a different meeting.
+    if let Some(candidate) = recall_workspace_current_meeting() {
+        return Some(candidate);
     }
+
+    let workspace_root = crate::context::workspace_dir();
     let marker = workspace_root.join(crate::context::ACTIVE_MEETING_FILE);
-    let contents = std::fs::read_to_string(&marker).ok()?;
 
     // CURRENT_MEETING.md stores a link or raw path to the current meeting
     // markdown. Accepted forms (pick the first matching line):
@@ -10590,18 +10593,37 @@ pub fn palette_current_meeting() -> Option<PathBuf> {
     //   2. Bare path line: `/abs/path.md`
     //   3. `path: /abs/path.md` frontmatter-ish line
     // Anything else → `None`.
-    for line in contents.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            continue;
-        }
-        if let Some(path) = extract_current_meeting_path(trimmed) {
-            let candidate = PathBuf::from(path);
-            if candidate.exists() && candidate.is_file() {
-                return Some(candidate);
+    if workspace_root.exists() {
+        if let Ok(contents) = std::fs::read_to_string(&marker) {
+            for line in contents.lines() {
+                let trimmed = line.trim();
+                if trimmed.is_empty() || trimmed.starts_with('#') {
+                    continue;
+                }
+                if let Some(path) = extract_current_meeting_path(trimmed) {
+                    let candidate = PathBuf::from(path);
+                    if candidate.exists() && candidate.is_file() {
+                        return Some(candidate);
+                    }
+                }
             }
         }
     }
+
+    None
+}
+
+fn recall_workspace_current_meeting() -> Option<PathBuf> {
+    let state = load_recall_workspace_state_from(&recall_workspace_state_path());
+    let candidate = state.current_meeting_path.as_ref().map(PathBuf::from)?;
+    let config = Config::load();
+    if candidate.exists()
+        && candidate.is_file()
+        && minutes_core::notes::validate_meeting_path(&candidate, &config.output_dir).is_ok()
+    {
+        return Some(candidate);
+    }
+
     None
 }
 

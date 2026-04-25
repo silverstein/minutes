@@ -116,6 +116,12 @@ pub enum ActionId {
 
     // Meeting-context actions (only visible with current_meeting)
     CopyMeetingMarkdown,
+    CreateDebriefDraftFromCurrentMeeting,
+    ConfirmCurrentSpeaker {
+        /// Prompt text in the simple form `SPEAKER_0 = Alex`.
+        #[serde(default)]
+        confirmation: Option<String>,
+    },
     /// Rename the meeting that the assistant workspace currently points
     /// at. The new title comes from the palette's PromptText input.
     RenameCurrentMeeting {
@@ -150,6 +156,10 @@ impl ActionId {
             ActionId::FindOpenActionItems => "find-open-action-items",
             ActionId::FindRecentDecisions => "find-recent-decisions",
             ActionId::CopyMeetingMarkdown => "copy-meeting-markdown",
+            ActionId::CreateDebriefDraftFromCurrentMeeting => {
+                "create-debrief-draft-from-current-meeting"
+            }
+            ActionId::ConfirmCurrentSpeaker { .. } => "confirm-current-speaker",
             ActionId::RenameCurrentMeeting { .. } => "rename-current-meeting",
         }
     }
@@ -179,6 +189,7 @@ pub enum Section {
     Dictation,
     Navigation,
     Search,
+    Meeting,
 }
 
 /// Predicate that decides whether a command should be offered for the current
@@ -514,7 +525,7 @@ pub fn commands() -> Vec<Command> {
             title: "Copy meeting markdown",
             description: "Copy the current meeting's markdown to clipboard",
             keywords: &["copy", "clipboard", "export"],
-            section: Section::Search,
+            section: Section::Meeting,
             visibility: Visibility {
                 requires: StateFlags::MEETING_OPEN,
                 forbids: StateFlags::empty(),
@@ -522,11 +533,35 @@ pub fn commands() -> Vec<Command> {
             input: InputKind::None,
         },
         Command {
+            id: ActionId::CreateDebriefDraftFromCurrentMeeting,
+            title: "Create debrief draft",
+            description: "Open an editable draft from the current meeting",
+            keywords: &["artifact", "draft", "memo", "create", "recall"],
+            section: Section::Meeting,
+            visibility: Visibility {
+                requires: StateFlags::MEETING_OPEN,
+                forbids: StateFlags::empty(),
+            },
+            input: InputKind::None,
+        },
+        Command {
+            id: ActionId::ConfirmCurrentSpeaker { confirmation: None },
+            title: "Confirm speaker name",
+            description: "Type SPEAKER_0 = Alex for the open meeting",
+            keywords: &["speaker", "correct", "confirm", "name", "attribution"],
+            section: Section::Meeting,
+            visibility: Visibility {
+                requires: StateFlags::MEETING_OPEN,
+                forbids: StateFlags::empty(),
+            },
+            input: InputKind::PromptText,
+        },
+        Command {
             id: ActionId::RenameCurrentMeeting { new_title: None },
             title: "Rename current meeting",
             description: "Type a new title for the open meeting",
             keywords: &["rename", "title", "edit"],
-            section: Section::Search,
+            section: Section::Meeting,
             visibility: Visibility {
                 requires: StateFlags::MEETING_OPEN,
                 forbids: StateFlags::empty(),
@@ -1140,13 +1175,12 @@ mod tests {
     #[test]
     fn registry_has_seed_commands() {
         let all = commands();
-        // Slice 2 grows the registry to 20 commands. The two new
-        // entries since slice 1 are OpenLatestMeetingFromToday and
-        // RenameCurrentMeeting; both ship with backing dispatchers.
+        // The launch-cohesion slice adds two meeting-context commands
+        // on top of slice 2: create a debrief draft and confirm a speaker.
         assert_eq!(
             all.len(),
-            20,
-            "slice 2 should have exactly 20 commands with backing dispatchers"
+            22,
+            "registry should have exactly 22 commands with backing dispatchers"
         );
     }
 
@@ -1196,6 +1230,16 @@ mod tests {
             .unwrap();
         assert_eq!(add_note.id, ActionId::AddNote { text: None });
         assert_eq!(add_note.input, InputKind::PromptText);
+
+        let confirm = all
+            .iter()
+            .find(|c| matches!(c.id, ActionId::ConfirmCurrentSpeaker { .. }))
+            .unwrap();
+        assert_eq!(
+            confirm.id,
+            ActionId::ConfirmCurrentSpeaker { confirmation: None }
+        );
+        assert_eq!(confirm.input, InputKind::PromptText);
     }
 
     #[test]
@@ -1208,6 +1252,7 @@ mod tests {
                 ActionId::SearchTranscripts { .. }
                     | ActionId::ResearchTopic { .. }
                     | ActionId::AddNote { .. }
+                    | ActionId::ConfirmCurrentSpeaker { .. }
                     | ActionId::RenameCurrentMeeting { .. }
             );
             if parameterized {
@@ -1222,12 +1267,18 @@ mod tests {
     }
 
     #[test]
-    fn copy_meeting_markdown_only_when_meeting_open() {
+    fn meeting_context_commands_only_when_meeting_open() {
         let idle = visible_commands(&idle_ctx());
-        assert!(!kebabs(&idle).contains(&"copy-meeting-markdown"));
+        let idle_kebabs = kebabs(&idle);
+        assert!(!idle_kebabs.contains(&"copy-meeting-markdown"));
+        assert!(!idle_kebabs.contains(&"create-debrief-draft-from-current-meeting"));
+        assert!(!idle_kebabs.contains(&"confirm-current-speaker"));
 
         let meeting = visible_commands(&meeting_open_idle_ctx());
-        assert!(kebabs(&meeting).contains(&"copy-meeting-markdown"));
+        let meeting_kebabs = kebabs(&meeting);
+        assert!(meeting_kebabs.contains(&"copy-meeting-markdown"));
+        assert!(meeting_kebabs.contains(&"create-debrief-draft-from-current-meeting"));
+        assert!(meeting_kebabs.contains(&"confirm-current-speaker"));
     }
 
     #[test]
@@ -1251,6 +1302,15 @@ mod tests {
             v,
             serde_json::json!({ "id": "search-transcripts", "query": "pricing" })
         );
+
+        let v = serde_json::to_value(&ActionId::ConfirmCurrentSpeaker {
+            confirmation: Some("SPEAKER_0 = Alex".into()),
+        })
+        .unwrap();
+        assert_eq!(
+            v,
+            serde_json::json!({ "id": "confirm-current-speaker", "confirmation": "SPEAKER_0 = Alex" })
+        );
     }
 
     #[test]
@@ -1273,6 +1333,17 @@ mod tests {
         // Missing optional field deserializes to None.
         let id: ActionId = serde_json::from_value(serde_json::json!({ "id": "add-note" })).unwrap();
         assert_eq!(id, ActionId::AddNote { text: None });
+
+        let id: ActionId = serde_json::from_value(
+            serde_json::json!({ "id": "confirm-current-speaker", "confirmation": "SPEAKER_0 = Alex" }),
+        )
+        .unwrap();
+        assert_eq!(
+            id,
+            ActionId::ConfirmCurrentSpeaker {
+                confirmation: Some("SPEAKER_0 = Alex".into())
+            }
+        );
     }
 
     #[test]

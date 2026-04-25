@@ -832,11 +832,9 @@ fn write_agent_prompt_file(
     prompt: &str,
 ) -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
     use std::io::{ErrorKind, Write};
-    use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp"));
-    let base_dir = home.join(".minutes").join("tmp");
+    let base_dir = Config::minutes_dir().join("tmp");
     std::fs::create_dir_all(&base_dir)?;
     #[cfg(unix)]
     {

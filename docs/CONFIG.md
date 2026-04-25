@@ -46,11 +46,16 @@ So `minutes record --device "MacBook Pro Microphone"` always wins over `[recordi
 | key | default | meaning |
 |---|---|---|
 | `engine` | `"none"` | `"none"`, `"agent"`, `"ollama"`, `"claude"`, `"openai"`, `"mistral"` |
-| `agent_command` | `"claude"` | CLI to shell out to when engine = `"agent"` |
+| `agent_command` | `"claude"` | CLI to shell out to when engine = `"agent"` (`claude`, `codex`, `opencode`, `pi`, etc.) |
 | `ollama_url` | `http://localhost:11434` | Ollama server URL |
 | `ollama_model` | `"llama3.2"` | Model name pulled in Ollama |
 | `mistral_model` | `"mistral-large-latest"` | Mistral API model |
 | `chunk_max_tokens` | `4000` | Max tokens per chunk when splitting long transcripts |
+
+For Pi coding-agent support, use `engine = "agent"` with `agent_command = "pi"`.
+Minutes invokes Pi in non-interactive, no-tools mode. This is distinct from
+Inflection's Pi models; do not route transcript data to Inflection unless the
+user explicitly opts into that provider and its data terms.
 
 ### `[recording]` — capture behavior
 
@@ -116,7 +121,7 @@ So `minutes record --device "MacBook Pro Microphone"` always wins over `[recordi
 | `path` | unset | Wiki root (e.g. `~/Documents/life`) |
 | `adapter` | `"wiki"` | `"wiki"`, `"para"`, `"obsidian"` |
 | `engine` | `"none"` | `"agent"`, `"ollama"`, `"none"` |
-| `agent_command` | `"claude"` | Agent CLI when engine = `"agent"` |
+| `agent_command` | `"claude"` | Agent CLI when engine = `"agent"` (`claude`, `codex`, `opencode`, `pi`, etc.) |
 | `log_file` / `index_file` | `log.md` / `index.md` | Chronological + content-oriented index |
 | `min_confidence` | `"strong"` | `"explicit"`, `"strong"`, `"inferred"`, `"tentative"` |
 

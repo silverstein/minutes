@@ -4515,7 +4515,7 @@
               automatically in the recording pipeline.</div>
             <select id="settings-summarization-engine" class="settings-field">
               <option value="none">Off — Claude summarizes when you ask (recommended)</option>
-              <option value="agent">Agent CLI — uses your Claude Code, Codex, or OpenCode subscription</option>
+              <option value="agent">Agent CLI — uses your Claude Code, Codex, OpenCode, or Pi subscription</option>
               <option value="ollama">Ollama — local, free, runs on your machine</option>
               <option value="claude">Claude API — direct API key (legacy)</option>
               <option value="openai">OpenAI API — direct API key (legacy)</option>
@@ -7578,6 +7578,7 @@
       if (agent === 'claude') return 'e.g. --model sonnet';
       if (agent === 'codex') return 'e.g. --model gpt-5-codex';
       if (agent === 'opencode') return 'e.g. --model openai/gpt-5.4';
+      if (agent === 'pi') return 'e.g. --provider openai --model gpt-4o-mini';
       if (agent === 'gemini') return 'e.g. --model gemini-2.5-pro';
       return 'e.g. --model <provider/model>';
     }
@@ -7619,6 +7620,8 @@
         argsHelp.textContent = 'Removed an approval-bypass flag that does not match the selected agent.';
       } else if (agent === 'opencode') {
         argsHelp.textContent = 'OpenCode works best with provider/model flags like --model openai/gpt-5.4.';
+      } else if (agent === 'pi') {
+        argsHelp.textContent = 'Pi works best with provider/model flags like --provider openai --model gpt-4o-mini.';
       } else if (agent === 'codex') {
         argsHelp.textContent = 'Codex uses --dangerously-bypass-approvals-and-sandbox for full auto-approval.';
       } else if (agent === 'claude') {

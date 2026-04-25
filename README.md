@@ -9,7 +9,7 @@ Agents have run logs. Humans have conversations. **minutes** captures the human 
 
 Record a meeting. Capture a voice memo on a walk. Ask Claude *"what did I promise Sarah?"* — and get an answer. Your AI remembers every conversation you've had.
 
-> **Own every conversation you've ever had.** Cloud meeting tools rent your own conversations back to you. Minutes writes every meeting to `~/meetings/` as plain markdown, which every AI you use (Claude Code, Codex, Gemini CLI, Cursor, OpenCode) reads directly. No SDK. No API key. No vendor to outlive. Ten years from now, `grep` still works on your corpus. &nbsp;[**For agents →**](https://useminutes.app/for-agents) &nbsp;·&nbsp; [**Frontmatter schema →**](docs/frontmatter-schema.md)
+> **Own every conversation you've ever had.** Cloud meeting tools rent your own conversations back to you. Minutes writes every meeting to `~/meetings/` as plain markdown, which every AI you use (Claude Code, Codex, Gemini CLI, Cursor, OpenCode, Pi) reads directly. No SDK. No API key. No vendor to outlive. Ten years from now, `grep` still works on your corpus. &nbsp;[**For agents →**](https://useminutes.app/for-agents) &nbsp;·&nbsp; [**Frontmatter schema →**](docs/frontmatter-schema.md)
 
 <p align="center">
   <img src="docs/assets/demo.gif" alt="minutes demo — record, dictate, phone sync, AI recall" width="750">
@@ -21,6 +21,7 @@ Record a meeting. Capture a voice memo on a walk. Ask Claude *"what did I promis
   <a href="#claude-code-plugin">Claude Code</a> &bull;
   <a href="#any-mcp-client-claude-code-codex-gemini-cli-claude-desktop-or-your-own-agent">Codex</a> &bull;
   <a href="#opencode-cli">OpenCode</a> &bull;
+  <a href="#pi-coding-agent">Pi</a> &bull;
   <a href="#any-mcp-client-claude-code-codex-gemini-cli-claude-desktop-or-your-own-agent">Gemini CLI</a> &bull;
   <a href="#any-mcp-client-claude-code-codex-gemini-cli-claude-desktop-or-your-own-agent">Claude Desktop</a> &bull;
   <a href="#mistral-vibe">Mistral Vibe</a> &bull;
@@ -470,6 +471,26 @@ Then use commands like:
 /minutes-video-review /absolute/path/to/demo.mp4
 ```
 
+### Pi coding agent
+
+Minutes works with Mario Zechner's `pi` coding agent in two places:
+
+- `engine = "agent"` can call `pi` directly for local meeting summarization.
+- Pi auto-discovers this repo's existing `.agents/skills/minutes/` skill pack, so there is no separate `.pi/skills` tree to keep in sync.
+
+Install Pi, log in or configure a provider, then set:
+
+```toml
+[summarization]
+engine = "agent"
+agent_command = "pi"
+agent_args = "--provider openai --model gpt-4o-mini"
+```
+
+Minutes invokes Pi in non-interactive, no-tools mode with a private prompt file. That keeps summarization opt-in and prevents the agent from writing to the repo while it is turning a transcript into notes.
+
+This is separate from Inflection's Pi chatbot/model. Inflection's Pi models are optimized for warmth and emotional intelligence, but the Inflection API terms say not to send regulated personal data. Meeting transcripts often contain personal data, so Minutes does not route transcripts to Inflection by default.
+
 ### Mistral Vibe
 
 Add Minutes to your `~/.vibe/config.toml`:
@@ -557,10 +578,10 @@ The currently verified path for Cowork is plugin-oriented, not “raw MCP automa
 ### Optional: automated summarization
 
 ```toml
-# Use your existing Claude Code, Codex, or OpenCode subscription (recommended)
+# Use your existing Claude Code, Codex, OpenCode, or Pi subscription (recommended)
 [summarization]
 engine = "agent"
-agent_command = "claude"  # or "codex" / "opencode"
+agent_command = "claude"  # or "codex" / "opencode" / "pi"
 
 # Or use Mistral API (requires MISTRAL_API_KEY)
 [summarization]
@@ -1010,10 +1031,10 @@ model = "small"           # whisper: tiny (75MB), base, small (466MB), medium, l
 
 [summarization]
 engine = "none"           # Default: Claude summarizes conversationally via MCP
-                          # "agent" = uses your Claude Code, Codex, or OpenCode subscription (no API key)
+                          # "agent" = uses your Claude Code, Codex, OpenCode, or Pi subscription (no API key)
                           # "ollama" = local, free
                           # "claude" / "openai" = direct API key (legacy)
-agent_command = "claude"  # Which CLI to use when engine = "agent" (claude, codex, opencode, etc.)
+agent_command = "claude"  # Which CLI to use when engine = "agent" (claude, codex, opencode, pi, etc.)
 ollama_url = "http://localhost:11434"
 ollama_model = "llama3.2"
 

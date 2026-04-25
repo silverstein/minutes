@@ -6181,7 +6181,7 @@ pub fn cmd_pty_kill(state: tauri::State<AppState>, session_id: String) -> Result
 }
 
 /// Well-known agent CLIs to check for in cmd_list_agents.
-const WELL_KNOWN_AGENTS: &[&str] = &["claude", "codex", "gemini", "opencode", "bash", "zsh"];
+const WELL_KNOWN_AGENTS: &[&str] = &["claude", "codex", "gemini", "opencode", "pi", "bash", "zsh"];
 
 #[tauri::command]
 pub fn cmd_list_agents() -> serde_json::Value {

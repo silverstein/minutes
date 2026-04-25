@@ -99,6 +99,6 @@ Done. 6 fact(s) written, 1 skipped, 1 error(s), 3 people updated.
 ## Gotchas
 
 - **Meetings without summarization have no structured data** — If a meeting was recorded before summarization was enabled, its frontmatter won't have `action_items` or `decisions`. The ingest will correctly extract 0 facts. This is expected, not an error.
-- **`engine = "agent"` requires an AI CLI** — If the user wants richer LLM-based extraction from transcript body text, they need `claude`, `codex`, or `gemini` on PATH.
+- **`engine = "agent"` requires an AI CLI** — If the user wants richer LLM-based extraction from transcript body text, they need `claude`, `codex`, `gemini`, `opencode`, or `pi` on PATH.
 - **PARA adapter writes `items.json`** — If the user's knowledge base uses the PARA format, facts go into `areas/people/{slug}/items.json` with atomic fact schema (id, status, supersededBy).
 - **First run should be dry-run** — Always suggest `minutes ingest --all --dry-run` before the first real run so the user can see what would be extracted.

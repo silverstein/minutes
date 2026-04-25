@@ -9,7 +9,7 @@ use std::time::Instant;
 // Supported engines:
 //   "auto"    → Detect installed AI CLI (claude > codex > gemini > opencode), skip if none found (default)
 //   "none"    → Skip summarization — Claude summarizes via MCP when asked
-//   "agent"   → Agent CLI (claude -p, codex exec, gemini -p, opencode run) — uses existing subscription, no API key
+//   "agent"   → Agent CLI (claude -p, codex exec, gemini -p, opencode run, pi -p) — uses existing subscription, no API key
 //   "ollama"  → Local Ollama server (no API key needed)
 //   "claude"  → Anthropic Claude API (ANTHROPIC_API_KEY env var, legacy)
 //   "openai"  → OpenAI API (OPENAI_API_KEY env var, legacy)
@@ -698,6 +698,7 @@ pub(crate) fn speaker_mapping_model_hint(config: &Config) -> String {
 //   "codex"    → `codex exec - -s read-only` (OpenAI Codex CLI)
 //   "gemini"   → `gemini -p -` (Gemini CLI)
 //   "opencode" → `opencode run --file <prompt-file> ...` (OpenCode CLI)
+//   "pi"       → `pi --no-session --no-tools -p @<prompt-file>` (Pi coding agent)
 //   Any other → treated as a command that accepts a prompt on stdin
 //
 // The agent command is configurable via [summarization] agent_command.
@@ -921,6 +922,25 @@ fn prepare_agent_invocation(
                 "Follow the attached file exactly and return only the requested output.".into(),
                 "--file".into(),
                 prompt_path.display().to_string(),
+            ],
+            stdin_payload: None,
+            cleanup_path: Some(prompt_path),
+        });
+    }
+
+    if matches_agent_binary(agent_cmd, "pi") {
+        let prompt_path = write_agent_prompt_file("pi", prompt)?;
+        return Ok(AgentInvocation {
+            cmd: agent_cmd.to_string(),
+            args: vec![
+                "--no-session".into(),
+                "--no-tools".into(),
+                "--no-extensions".into(),
+                "--no-skills".into(),
+                "--no-prompt-templates".into(),
+                "--no-context-files".into(),
+                "-p".into(),
+                format!("@{}", prompt_path.display()),
             ],
             stdin_payload: None,
             cleanup_path: Some(prompt_path),
@@ -2085,6 +2105,43 @@ fn parse_speaker_mapping(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsString;
+    use std::path::Path;
+    use std::sync::{Mutex, OnceLock};
+
+    fn home_env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    struct HomeOverride {
+        previous: Option<OsString>,
+    }
+
+    impl HomeOverride {
+        fn set(path: &Path) -> Self {
+            let previous = std::env::var_os("HOME");
+            std::env::set_var("HOME", path);
+            Self { previous }
+        }
+    }
+
+    impl Drop for HomeOverride {
+        fn drop(&mut self) {
+            if let Some(previous) = &self.previous {
+                std::env::set_var("HOME", previous);
+            } else {
+                std::env::remove_var("HOME");
+            }
+        }
+    }
+
+    fn with_temp_home<T>(f: impl FnOnce(&Path) -> T) -> T {
+        let _guard = home_env_lock().lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let _home = HomeOverride::set(dir.path());
+        f(dir.path())
+    }
 
     #[test]
     fn parse_summary_response_extracts_sections() {
@@ -2249,39 +2306,75 @@ PARTICIPANTS:
 
     #[test]
     fn prepare_agent_invocation_for_opencode_uses_message_before_file_and_no_stdin() {
-        let invocation = prepare_agent_invocation("opencode", "sensitive prompt").unwrap();
-        assert_eq!(invocation.cmd, "opencode");
-        assert_eq!(invocation.args[0], "run");
-        assert_eq!(
-            invocation.args[1],
-            "Follow the attached file exactly and return only the requested output."
-        );
-        assert_eq!(invocation.args[2], "--file");
-        assert!(invocation.stdin_payload.is_none());
-        let prompt_path = invocation.cleanup_path.expect("prompt path");
-        assert!(prompt_path.starts_with(dirs::home_dir().unwrap().join(".minutes").join("tmp")));
-        let file_contents = std::fs::read_to_string(&prompt_path).unwrap();
-        assert_eq!(file_contents, "sensitive prompt");
-        std::fs::remove_file(prompt_path).unwrap();
+        with_temp_home(|home| {
+            let invocation = prepare_agent_invocation("opencode", "sensitive prompt").unwrap();
+            assert_eq!(invocation.cmd, "opencode");
+            assert_eq!(invocation.args[0], "run");
+            assert_eq!(
+                invocation.args[1],
+                "Follow the attached file exactly and return only the requested output."
+            );
+            assert_eq!(invocation.args[2], "--file");
+            assert!(invocation.stdin_payload.is_none());
+            let prompt_path = invocation.cleanup_path.expect("prompt path");
+            assert!(prompt_path.starts_with(home.join(".minutes").join("tmp")));
+            let file_contents = std::fs::read_to_string(&prompt_path).unwrap();
+            assert_eq!(file_contents, "sensitive prompt");
+            std::fs::remove_file(prompt_path).unwrap();
+        });
+    }
+
+    #[test]
+    fn prepare_agent_invocation_for_pi_uses_private_file_and_no_tools() {
+        with_temp_home(|home| {
+            let invocation = prepare_agent_invocation("pi", "sensitive prompt").unwrap();
+            assert_eq!(invocation.cmd, "pi");
+            let arg_prefix = invocation.args[..7]
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                arg_prefix,
+                vec![
+                    "--no-session",
+                    "--no-tools",
+                    "--no-extensions",
+                    "--no-skills",
+                    "--no-prompt-templates",
+                    "--no-context-files",
+                    "-p",
+                ]
+            );
+            assert!(invocation.args[7].starts_with('@'));
+            assert!(invocation.stdin_payload.is_none());
+            let prompt_path = invocation.cleanup_path.expect("prompt path");
+            assert!(prompt_path.starts_with(home.join(".minutes").join("tmp")));
+            assert_eq!(invocation.args[7], format!("@{}", prompt_path.display()));
+            let file_contents = std::fs::read_to_string(&prompt_path).unwrap();
+            assert_eq!(file_contents, "sensitive prompt");
+            std::fs::remove_file(prompt_path).unwrap();
+        });
     }
 
     #[test]
     fn write_agent_prompt_file_creates_private_minutes_temp_file() {
-        let prompt_path = write_agent_prompt_file("opencode", "top secret").unwrap();
-        assert!(prompt_path.starts_with(dirs::home_dir().unwrap().join(".minutes").join("tmp")));
-        let contents = std::fs::read_to_string(&prompt_path).unwrap();
-        assert_eq!(contents, "top secret");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mode = std::fs::metadata(&prompt_path)
-                .unwrap()
-                .permissions()
-                .mode()
-                & 0o777;
-            assert_eq!(mode, 0o600);
-        }
-        std::fs::remove_file(prompt_path).unwrap();
+        with_temp_home(|home| {
+            let prompt_path = write_agent_prompt_file("opencode", "top secret").unwrap();
+            assert!(prompt_path.starts_with(home.join(".minutes").join("tmp")));
+            let contents = std::fs::read_to_string(&prompt_path).unwrap();
+            assert_eq!(contents, "top secret");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = std::fs::metadata(&prompt_path)
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777;
+                assert_eq!(mode, 0o600);
+            }
+            std::fs::remove_file(prompt_path).unwrap();
+        });
     }
 
     #[test]

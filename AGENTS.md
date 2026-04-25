@@ -28,7 +28,7 @@ This repo has GitHub Discussions enabled (`silverstein/minutes`). Issues are for
 This repo maintains skill outputs in **three locations**:
 
 - `.claude/plugins/minutes/` — Claude Code plugin (uses `${CLAUDE_PLUGIN_ROOT}`)
-- `.agents/skills/minutes/` — Agent-agnostic mirror for Codex, Gemini, and other agents (uses `$MINUTES_SKILLS_ROOT`)
+- `.agents/skills/minutes/` — Agent-agnostic mirror for Codex, Gemini, Pi, and other agents (uses `$MINUTES_SKILLS_ROOT`)
 - `.opencode/skills/` — OpenCode-native mirror (one-level discovery path + matching `.opencode/commands/`)
 
 **What lives where:**
@@ -50,7 +50,7 @@ npm run compile:dry
 npm run check
 ```
 
-**Why multiple trees?** Claude Code plugins use `${CLAUDE_PLUGIN_ROOT}` and plugin metadata. Codex/Gemini consume the `.agents/skills/minutes/` mirror. OpenCode only auto-discovers `skills/*/SKILL.md` one directory deep and has its own `.opencode/commands/` surface, so it needs a flattened generated tree.
+**Why multiple trees?** Claude Code plugins use `${CLAUDE_PLUGIN_ROOT}` and plugin metadata. Codex/Gemini/Pi consume the `.agents/skills/minutes/` mirror. OpenCode only auto-discovers `skills/*/SKILL.md` one directory deep and has its own `.opencode/commands/` surface, so it needs a flattened generated tree.
 
 ## Non-Interactive Shell Commands
 

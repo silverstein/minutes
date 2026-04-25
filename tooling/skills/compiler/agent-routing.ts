@@ -10,7 +10,7 @@ import { discoverCanonicalSkills } from "./discover.js";
 import type { RoutingFixture } from "./routing.fixtures.js";
 import { ROUTING_FIXTURES } from "./routing.fixtures.js";
 
-export type AgentId = "claude" | "codex" | "gemini" | "opencode";
+export type AgentId = "claude" | "codex" | "gemini" | "opencode" | "pi";
 
 export interface AgentRoutingOptions {
   agent: AgentId;
@@ -100,8 +100,8 @@ function parseArgs(rawArgs: string[]): {
     }
   }
 
-  if (!agent || !["claude", "codex", "gemini", "opencode"].includes(agent)) {
-    throw new Error("Usage: --agent <claude|codex|gemini|opencode> [--fixture N] [--limit N] [--timeout-ms N] [--dry-run]");
+  if (!agent || !["claude", "codex", "gemini", "opencode", "pi"].includes(agent)) {
+    throw new Error("Usage: --agent <claude|codex|gemini|opencode|pi> [--fixture N] [--limit N] [--timeout-ms N] [--dry-run]");
   }
 
   return {
@@ -234,6 +234,23 @@ async function buildAgentInvocation(
             ],
             cwd: repoRoot,
         };
+  }
+
+  if (agent === "pi") {
+    return {
+      command: [
+        "pi",
+        "--no-session",
+        "--no-tools",
+        "--no-extensions",
+        "--no-skills",
+        "--no-prompt-templates",
+        "--no-context-files",
+        "-p",
+        prompt,
+      ],
+      cwd: repoRoot,
+    };
   }
 
   return {

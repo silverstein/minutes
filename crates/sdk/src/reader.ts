@@ -46,6 +46,21 @@ export interface SpeakerAttribution {
   source: "deterministic" | "llm" | "enrollment" | "manual";
 }
 
+/**
+ * A user-confirmed speaker correction stored in the sidecar overlay store
+ * (`~/.minutes/overlays.db`). Overlays layer over raw frontmatter at read
+ * time without ever mutating the meeting markdown on disk.
+ *
+ * Confirmations carry high confidence and `manual` source by definition —
+ * they record an explicit user action, not a model inference.
+ */
+export interface SpeakerConfirmation {
+  speaker_label: string;
+  name: string;
+  /** Optional name the overlay overrode, useful for "undo" UIs. */
+  previous_name?: string;
+}
+
 export interface Frontmatter {
   title: string;
   type: string;
@@ -174,6 +189,23 @@ export function parseFrontmatter(
             by_date: i.by_date ? String(i.by_date) : undefined,
           }))
         : [],
+      speaker_map: Array.isArray(parsed.speaker_map)
+        ? parsed.speaker_map.map((s: any) => ({
+            speaker_label: String(s.speaker_label || ""),
+            name: String(s.name || ""),
+            confidence: (s.confidence === "high" ||
+              s.confidence === "medium" ||
+              s.confidence === "low"
+              ? s.confidence
+              : "medium") as "high" | "medium" | "low",
+            source: (s.source === "deterministic" ||
+              s.source === "llm" ||
+              s.source === "enrollment" ||
+              s.source === "manual"
+              ? s.source
+              : "llm") as "deterministic" | "llm" | "enrollment" | "manual",
+          }))
+        : undefined,
     };
 
     return { frontmatter: fm, body, path: filePath };
@@ -298,6 +330,133 @@ export async function getMeeting(
   filePath: string
 ): Promise<MeetingFile | null> {
   return readMeetingFile(filePath);
+}
+
+/**
+ * Layer sidecar speaker confirmations over a meeting's `speaker_map`,
+ * returning a new MeetingFile with the corrections applied. The original
+ * meeting object is not mutated, and the body text is not rewritten —
+ * Minutes treats raw markdown as immutable capture.
+ *
+ * For each confirmation:
+ *   - if a `speaker_map` entry with the same `speaker_label` exists, its
+ *     `name` is replaced and confidence/source are bumped to high/manual
+ *   - if no entry exists, a new one is appended
+ *
+ * Pass an empty `confirmations` array to no-op.
+ */
+export function applySpeakerOverlays(
+  meeting: MeetingFile,
+  confirmations: SpeakerConfirmation[]
+): MeetingFile {
+  if (!confirmations || confirmations.length === 0) {
+    return meeting;
+  }
+
+  const baseMap = meeting.frontmatter.speaker_map ?? [];
+  const merged: SpeakerAttribution[] = baseMap.map((attr) => ({ ...attr }));
+
+  for (const confirmation of confirmations) {
+    if (!confirmation.speaker_label || !confirmation.name) continue;
+
+    const existing = merged.find(
+      (attr) => attr.speaker_label === confirmation.speaker_label
+    );
+    if (existing) {
+      existing.name = confirmation.name;
+      existing.confidence = "high";
+      existing.source = "manual";
+    } else {
+      merged.push({
+        speaker_label: confirmation.speaker_label,
+        name: confirmation.name,
+        confidence: "high",
+        source: "manual",
+      });
+    }
+  }
+
+  return {
+    ...meeting,
+    frontmatter: { ...meeting.frontmatter, speaker_map: merged },
+  };
+}
+
+/**
+ * Get a meeting with sidecar overlay confirmations layered over its
+ * `speaker_map`. Best-effort convenience: shells to the local `minutes`
+ * CLI (`minutes get <path> --json`) which reads `~/.minutes/overlays.db`
+ * server-side and returns an overlay-applied payload. If the CLI is not
+ * available or the call fails, falls back to plain `getMeeting()` so
+ * consumers always get a usable result.
+ *
+ * For full control over which overlays apply (e.g. to layer a remote
+ * overlay store, or to test against fixtures), use `applySpeakerOverlays`
+ * directly with confirmations sourced however you prefer.
+ */
+export async function getMeetingWithOverlays(
+  filePath: string,
+  options: { minutesBin?: string; timeoutMs?: number } = {}
+): Promise<MeetingFile | null> {
+  const fallback = await getMeeting(filePath);
+  if (!fallback) return null;
+
+  // Dynamically import child_process so this module still loads in
+  // environments without it (browsers, Edge runtimes). The function
+  // simply degrades to non-overlay behavior in those cases.
+  let execFile: typeof import("child_process").execFile;
+  try {
+    ({ execFile } = await import("child_process"));
+  } catch {
+    return fallback;
+  }
+
+  const bin = options.minutesBin ?? process.env.MINUTES_BIN ?? "minutes";
+  const timeoutMs = options.timeoutMs ?? 10_000;
+
+  const stdout = await new Promise<string | null>((resolve) => {
+    execFile(
+      bin,
+      ["get", filePath, "--json"],
+      { timeout: timeoutMs, maxBuffer: 8 * 1024 * 1024 },
+      (err, out) => {
+        if (err) resolve(null);
+        else resolve(out.toString());
+      }
+    );
+  });
+
+  if (!stdout) return fallback;
+
+  try {
+    const payload = JSON.parse(stdout);
+    const overlaidMap = payload?.frontmatter?.speaker_map;
+    if (!Array.isArray(overlaidMap)) return fallback;
+
+    return {
+      ...fallback,
+      frontmatter: {
+        ...fallback.frontmatter,
+        speaker_map: overlaidMap.map((attr: any) => ({
+          speaker_label: String(attr.speaker_label || ""),
+          name: String(attr.name || ""),
+          confidence: (attr.confidence === "high" ||
+            attr.confidence === "medium" ||
+            attr.confidence === "low"
+            ? attr.confidence
+            : "medium") as "high" | "medium" | "low",
+          source: (attr.source === "deterministic" ||
+            attr.source === "llm" ||
+            attr.source === "enrollment" ||
+            attr.source === "manual"
+            ? attr.source
+            : "llm") as "deterministic" | "llm" | "enrollment" | "manual",
+        })),
+      },
+    };
+  } catch {
+    return fallback;
+  }
 }
 
 /**

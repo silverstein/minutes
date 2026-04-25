@@ -16,6 +16,8 @@ export {
   type Intent,
   type Frontmatter,
   type MeetingFile,
+  type SpeakerAttribution,
+  type SpeakerConfirmation,
 
   // Config
   defaultDir,
@@ -28,6 +30,8 @@ export {
   listMeetings,
   searchMeetings,
   getMeeting,
+  getMeetingWithOverlays,
+  applySpeakerOverlays,
   findOpenActions,
   findDecisions,
   getPersonProfile,

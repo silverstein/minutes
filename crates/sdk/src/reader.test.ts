@@ -8,8 +8,11 @@ import {
   listMeetings,
   searchMeetings,
   getMeeting,
+  getMeetingWithOverlays,
+  applySpeakerOverlays,
   findOpenActions,
   getPersonProfile,
+  type MeetingFile,
 } from "./reader.js";
 
 // ── Test fixtures ────────────────────────────────────────────
@@ -366,5 +369,187 @@ describe("getPersonProfile", () => {
 
     const profile = await getPersonProfile(tempDir, "UnknownPerson");
     expect(profile.meetings).toHaveLength(0);
+  });
+});
+
+// ── speaker_map parsing ──────────────────────────────────────
+
+describe("parseFrontmatter speaker_map", () => {
+  const MEETING_WITH_SPEAKERS = `---
+title: Speaker Test
+type: meeting
+date: "2026-04-25T10:00:00"
+duration: 10m
+tags: []
+attendees: []
+people: []
+action_items: []
+decisions: []
+intents: []
+speaker_map:
+  - speaker_label: SPEAKER_0
+    name: Speaker 0
+    confidence: medium
+    source: llm
+  - speaker_label: SPEAKER_1
+    name: Alex Kim
+    confidence: high
+    source: manual
+---
+
+## Transcript
+
+SPEAKER_0: hello
+`;
+
+  it("parses speaker_map entries when present", () => {
+    const result = parseFrontmatter(MEETING_WITH_SPEAKERS, "/t/m.md");
+    expect(result?.frontmatter.speaker_map).toHaveLength(2);
+    expect(result?.frontmatter.speaker_map?.[0]).toEqual({
+      speaker_label: "SPEAKER_0",
+      name: "Speaker 0",
+      confidence: "medium",
+      source: "llm",
+    });
+    expect(result?.frontmatter.speaker_map?.[1].source).toBe("manual");
+  });
+
+  it("returns undefined speaker_map when YAML omits the field", () => {
+    const stripped = MEETING_WITH_SPEAKERS.replace(
+      /speaker_map:[\s\S]*?(?=---)/,
+      ""
+    );
+    const result = parseFrontmatter(stripped, "/t/m.md");
+    expect(result?.frontmatter.speaker_map).toBeUndefined();
+  });
+
+  it("falls back to safe defaults for unknown confidence/source values", () => {
+    const sketchy = MEETING_WITH_SPEAKERS.replace(
+      /confidence: medium/,
+      "confidence: bogus"
+    ).replace(/source: llm/, "source: aliens");
+    const result = parseFrontmatter(sketchy, "/t/m.md");
+    expect(result?.frontmatter.speaker_map?.[0].confidence).toBe("medium");
+    expect(result?.frontmatter.speaker_map?.[0].source).toBe("llm");
+  });
+});
+
+// ── applySpeakerOverlays ─────────────────────────────────────
+
+describe("applySpeakerOverlays", () => {
+  function meetingWith(speakers: any[] | undefined): MeetingFile {
+    return {
+      frontmatter: {
+        title: "T",
+        type: "meeting",
+        date: "2026-04-25T10:00:00",
+        duration: "1m",
+        tags: [],
+        attendees: [],
+        people: [],
+        action_items: [],
+        decisions: [],
+        intents: [],
+        speaker_map: speakers as any,
+      },
+      body: "## Transcript\n\nSPEAKER_0: hi\n",
+      path: "/t/m.md",
+    };
+  }
+
+  it("returns the input meeting unchanged when no confirmations", () => {
+    const meeting = meetingWith([
+      { speaker_label: "SPEAKER_0", name: "Alex", confidence: "low", source: "llm" },
+    ]);
+    expect(applySpeakerOverlays(meeting, [])).toBe(meeting);
+  });
+
+  it("overrides existing speaker_map entries with high/manual", () => {
+    const meeting = meetingWith([
+      { speaker_label: "SPEAKER_0", name: "Speaker 0", confidence: "medium", source: "llm" },
+    ]);
+    const out = applySpeakerOverlays(meeting, [
+      { speaker_label: "SPEAKER_0", name: "Alex Kim", previous_name: "Speaker 0" },
+    ]);
+    expect(out.frontmatter.speaker_map?.[0]).toEqual({
+      speaker_label: "SPEAKER_0",
+      name: "Alex Kim",
+      confidence: "high",
+      source: "manual",
+    });
+  });
+
+  it("appends confirmations for speakers not yet in the map", () => {
+    const meeting = meetingWith([]);
+    const out = applySpeakerOverlays(meeting, [
+      { speaker_label: "SPEAKER_2", name: "Jordan" },
+    ]);
+    expect(out.frontmatter.speaker_map).toHaveLength(1);
+    expect(out.frontmatter.speaker_map?.[0].name).toBe("Jordan");
+  });
+
+  it("does not mutate the input meeting object", () => {
+    const meeting = meetingWith([
+      { speaker_label: "SPEAKER_0", name: "Speaker 0", confidence: "medium", source: "llm" },
+    ]);
+    applySpeakerOverlays(meeting, [
+      { speaker_label: "SPEAKER_0", name: "Alex Kim" },
+    ]);
+    expect(meeting.frontmatter.speaker_map?.[0].name).toBe("Speaker 0");
+  });
+
+  it("handles meetings whose frontmatter has no speaker_map", () => {
+    const meeting = meetingWith(undefined);
+    const out = applySpeakerOverlays(meeting, [
+      { speaker_label: "SPEAKER_0", name: "Alex Kim" },
+    ]);
+    expect(out.frontmatter.speaker_map).toEqual([
+      {
+        speaker_label: "SPEAKER_0",
+        name: "Alex Kim",
+        confidence: "high",
+        source: "manual",
+      },
+    ]);
+  });
+
+  it("ignores confirmations missing speaker_label or name", () => {
+    const meeting = meetingWith([]);
+    const out = applySpeakerOverlays(meeting, [
+      { speaker_label: "", name: "Ghost" },
+      { speaker_label: "SPEAKER_3", name: "" },
+      { speaker_label: "SPEAKER_4", name: "Real" },
+    ]);
+    expect(out.frontmatter.speaker_map).toEqual([
+      {
+        speaker_label: "SPEAKER_4",
+        name: "Real",
+        confidence: "high",
+        source: "manual",
+      },
+    ]);
+  });
+});
+
+// ── getMeetingWithOverlays graceful fallback ─────────────────
+
+describe("getMeetingWithOverlays", () => {
+  it("falls back to plain getMeeting when the CLI is unavailable", async () => {
+    const path = writeMeeting("meeting.md", VALID_MEETING);
+    // Point at a binary that definitely doesn't exist so the helper's
+    // execFile path errors and the function falls back cleanly.
+    const out = await getMeetingWithOverlays(path, {
+      minutesBin: "/nonexistent/minutes-binary-for-test",
+      timeoutMs: 2000,
+    });
+    expect(out?.frontmatter.title).toBe("Q2 Pricing Discussion");
+  });
+
+  it("returns null for a nonexistent meeting file even with overlay flag", async () => {
+    const out = await getMeetingWithOverlays(
+      join(tempDir, "does-not-exist.md"),
+      { minutesBin: "/nonexistent" }
+    );
+    expect(out).toBeNull();
   });
 });

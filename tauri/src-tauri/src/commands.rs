@@ -6235,6 +6235,13 @@ pub fn cmd_get_settings() -> serde_json::Value {
     // Check env vars for API key status
     let anthropic_key_set = std::env::var("ANTHROPIC_API_KEY").is_ok();
     let openai_key_set = std::env::var("OPENAI_API_KEY").is_ok();
+    let openai_compatible_api_key_env = config
+        .summarization
+        .openai_compatible_api_key_env
+        .trim()
+        .to_string();
+    let openai_compatible_key_set = openai_compatible_api_key_env.is_empty()
+        || std::env::var(&openai_compatible_api_key_env).is_ok();
 
     // Check Ollama reachability
     let ollama_reachable = ureq::Agent::new_with_config(
@@ -6292,6 +6299,10 @@ pub fn cmd_get_settings() -> serde_json::Value {
             "agent_command": config.summarization.agent_command,
             "ollama_model": config.summarization.ollama_model,
             "ollama_url": config.summarization.ollama_url,
+            "openai_compatible_base_url": config.summarization.openai_compatible_base_url,
+            "openai_compatible_model": config.summarization.openai_compatible_model,
+            "openai_compatible_api_key_env": config.summarization.openai_compatible_api_key_env,
+            "openai_compatible_key_set": openai_compatible_key_set,
             "anthropic_key_set": anthropic_key_set,
             "openai_key_set": openai_key_set,
             "ollama_reachable": ollama_reachable,
@@ -6459,6 +6470,15 @@ pub fn cmd_set_setting(section: String, key: String, value: String) -> Result<St
         ("summarization", "agent_command") => config.summarization.agent_command = value.clone(),
         ("summarization", "ollama_model") => config.summarization.ollama_model = value.clone(),
         ("summarization", "ollama_url") => config.summarization.ollama_url = value.clone(),
+        ("summarization", "openai_compatible_base_url") => {
+            config.summarization.openai_compatible_base_url = value.clone()
+        }
+        ("summarization", "openai_compatible_model") => {
+            config.summarization.openai_compatible_model = value.clone()
+        }
+        ("summarization", "openai_compatible_api_key_env") => {
+            config.summarization.openai_compatible_api_key_env = value.clone()
+        }
 
         // Screen context
         ("screen_context", "enabled") => {

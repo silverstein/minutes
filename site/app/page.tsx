@@ -103,7 +103,7 @@ const capabilityColumns = [
       ],
       [
         "Any LLM",
-        "Use Ollama, OpenAI, or skip summarization entirely if markdown is enough.",
+        "Use Ollama, OpenAI-compatible gateways, local servers, or skip summarization entirely.",
       ],
       [
         "Markdown is truth",

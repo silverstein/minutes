@@ -592,6 +592,13 @@ mistral_model = "mistral-large-latest"
 [summarization]
 engine = "ollama"
 ollama_model = "llama3.2"
+
+# Or use any OpenAI-compatible gateway/local server
+[summarization]
+engine = "openai-compatible"
+openai_compatible_base_url = "https://openrouter.ai/api/v1"
+openai_compatible_model = "openai/gpt-4o-mini"
+openai_compatible_api_key_env = "OPENROUTER_API_KEY" # leave blank for local servers
 ```
 
 ### File-backed automation primitives
@@ -1033,10 +1040,14 @@ model = "small"           # whisper: tiny (75MB), base, small (466MB), medium, l
 engine = "none"           # Default: Claude summarizes conversationally via MCP
                           # "agent" = uses your Claude Code, Codex, OpenCode, or Pi subscription (no API key)
                           # "ollama" = local, free
+                          # "openai-compatible" = OpenRouter, Vercel/Cloudflare gateways, llama.cpp, LM Studio, etc.
                           # "claude" / "openai" = direct API key (legacy)
 agent_command = "claude"  # Which CLI to use when engine = "agent" (claude, codex, opencode, pi, etc.)
 ollama_url = "http://localhost:11434"
 ollama_model = "llama3.2"
+openai_compatible_base_url = "http://localhost:11434/v1"
+openai_compatible_model = "llama3.2"
+openai_compatible_api_key_env = "" # Optional env var name; blank means no Authorization header.
 
 [diarization]
 engine = "auto"           # "auto" (default — uses pyannote-rs if models downloaded, otherwise skips),

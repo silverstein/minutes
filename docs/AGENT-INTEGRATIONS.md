@@ -53,9 +53,9 @@ Recommended config shape for future direct backends:
 ```toml
 [summarization]
 engine = "openai-compatible"
-model = "anthropic/claude-sonnet-4.6"
-base_url = "https://gateway.example.com/v1"
-api_key_env = "AI_GATEWAY_API_KEY"
+openai_compatible_model = "openai/gpt-4o-mini"
+openai_compatible_base_url = "https://gateway.example.com/v1"
+openai_compatible_api_key_env = "AI_GATEWAY_API_KEY"
 ```
 
 ## Checklist

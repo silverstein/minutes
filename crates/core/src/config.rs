@@ -177,6 +177,9 @@ pub struct SummarizationConfig {
     pub chunk_max_tokens: usize,
     pub ollama_url: String,
     pub ollama_model: String,
+    pub openai_compatible_base_url: String,
+    pub openai_compatible_model: String,
+    pub openai_compatible_api_key_env: String,
     pub mistral_model: String,
     pub language: String,
 }
@@ -710,6 +713,9 @@ impl Default for SummarizationConfig {
             chunk_max_tokens: 4000,
             ollama_url: "http://localhost:11434".into(),
             ollama_model: "llama3.2".into(),
+            openai_compatible_base_url: "http://localhost:11434/v1".into(),
+            openai_compatible_model: "llama3.2".into(),
+            openai_compatible_api_key_env: String::new(),
             mistral_model: "mistral-large-latest".into(),
             language: "auto".into(),
         }

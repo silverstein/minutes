@@ -4517,6 +4517,7 @@
               <option value="none">Off — Claude summarizes when you ask (recommended)</option>
               <option value="agent">Agent CLI — uses your Claude Code, Codex, OpenCode, or Pi subscription</option>
               <option value="ollama">Ollama — local, free, runs on your machine</option>
+              <option value="openai-compatible">OpenAI-compatible API — gateways and local servers</option>
               <option value="claude">Claude API — direct API key (legacy)</option>
               <option value="openai">OpenAI API — direct API key (legacy)</option>
             </select>
@@ -4544,6 +4545,41 @@
             <div class="about-controls-copy">Ollama model</div>
             <div class="about-controls-meta">Name of a model you've pulled in Ollama (e.g. llama3.2, qwen2.5, gemma3).</div>
             <input type="text" id="settings-ollama-model" class="settings-field" placeholder="llama3.2" spellcheck="false">
+          </div>
+        </div>
+        <div class="about-controls is-hidden" id="settings-openai-compatible-preset-row">
+          <div class="about-controls-group">
+            <div class="about-controls-copy">Connection type</div>
+            <div class="about-controls-meta">Pick the closest match. Minutes will fill the technical fields below.</div>
+            <select id="settings-openai-compatible-preset" class="settings-field">
+              <option value="local">Local server — Ollama, LM Studio, llama.cpp</option>
+              <option value="openrouter">OpenRouter</option>
+              <option value="vercel">Vercel AI Gateway</option>
+              <option value="cloudflare">Cloudflare AI Gateway</option>
+              <option value="custom">Custom OpenAI-compatible URL</option>
+            </select>
+          </div>
+        </div>
+        <div class="about-controls is-hidden" id="settings-openai-compatible-base-url-row">
+          <div class="about-controls-group">
+            <div class="about-controls-copy">Connection URL</div>
+            <div class="about-controls-meta">Paste the base URL ending in /v1, /openai, or /compat. Minutes adds /chat/completions automatically.</div>
+            <input type="text" id="settings-openai-compatible-base-url" class="settings-field" placeholder="http://localhost:11434/v1" spellcheck="false">
+            <div class="about-controls-meta" id="settings-openai-compatible-status"></div>
+          </div>
+        </div>
+        <div class="about-controls is-hidden" id="settings-openai-compatible-model-row">
+          <div class="about-controls-group">
+            <div class="about-controls-copy">Model</div>
+            <div class="about-controls-meta">Use the model name your server or gateway expects.</div>
+            <input type="text" id="settings-openai-compatible-model" class="settings-field" placeholder="llama3.2" spellcheck="false">
+          </div>
+        </div>
+        <div class="about-controls is-hidden" id="settings-openai-compatible-api-key-row">
+          <div class="about-controls-group">
+            <div class="about-controls-copy">API key environment variable</div>
+            <div class="about-controls-meta">Leave blank for local servers. For cloud gateways, set the key in your shell and put only the variable name here.</div>
+            <input type="text" id="settings-openai-compatible-api-key-env" class="settings-field" placeholder="OPENROUTER_API_KEY" spellcheck="false">
           </div>
         </div>
       </div>
@@ -7353,6 +7389,7 @@
         document.getElementById('settings-ollama-model').value = s.summarization.ollama_model || '';
         document.getElementById('settings-ollama-url-status').textContent =
           s.summarization.ollama_reachable ? 'Reachable' : 'Not reachable — is Ollama running?';
+        renderOpenAiCompatibleSettings(s);
         // Post-record hook
         const postRecord = (s.hooks && s.hooks.post_record) || '';
         document.getElementById('settings-hooks-post-record').value = postRecord;
@@ -7631,11 +7668,79 @@
       }
       return { sanitized, supportsSkip };
     }
+    const openAiCompatiblePresets = {
+      local: {
+        baseUrl: 'http://localhost:11434/v1',
+        model: 'llama3.2',
+        apiKeyEnv: '',
+      },
+      openrouter: {
+        baseUrl: 'https://openrouter.ai/api/v1',
+        model: 'openai/gpt-4o-mini',
+        apiKeyEnv: 'OPENROUTER_API_KEY',
+      },
+      vercel: {
+        baseUrl: 'https://ai-gateway.vercel.sh/v1',
+        model: 'openai/gpt-4o-mini',
+        apiKeyEnv: 'AI_GATEWAY_API_KEY',
+      },
+      cloudflare: {
+        baseUrl: 'https://gateway.ai.cloudflare.com/v1/<account_id>/<gateway_id>/compat',
+        model: 'openai/gpt-4o-mini',
+        apiKeyEnv: 'CLOUDFLARE_AI_GATEWAY_API_KEY',
+      },
+    };
+    function isOpenAiCompatibleEngine(engine) {
+      return engine === 'openai-compatible' || engine === 'openai_compatible';
+    }
+    function inferOpenAiCompatiblePreset(s) {
+      const baseUrl = (s.summarization.openai_compatible_base_url || '').trim();
+      if (baseUrl === openAiCompatiblePresets.local.baseUrl) return 'local';
+      if (baseUrl === openAiCompatiblePresets.openrouter.baseUrl) return 'openrouter';
+      if (baseUrl === openAiCompatiblePresets.vercel.baseUrl) return 'vercel';
+      if (baseUrl.includes('gateway.ai.cloudflare.com')) return 'cloudflare';
+      return 'custom';
+    }
+    function openAiCompatibleStatusText(s) {
+      const baseUrl = (s.summarization.openai_compatible_base_url || '').trim();
+      const model = (s.summarization.openai_compatible_model || '').trim();
+      const apiKeyEnv = (s.summarization.openai_compatible_api_key_env || '').trim();
+      if (!baseUrl) return 'Paste a connection URL before automatic summaries can use this backend.';
+      if (baseUrl.includes('<') || baseUrl.includes('>')) return 'Replace the placeholder account/gateway values in the URL.';
+      if (!model) return 'Enter the model name your server or gateway expects.';
+      if (!apiKeyEnv) return 'Local mode: no Authorization header will be sent.';
+      if (!s.summarization.openai_compatible_key_set) return apiKeyEnv + ' not found in this app environment.';
+      let host = baseUrl;
+      try { host = new URL(baseUrl).host; } catch (_) {}
+      return 'Ready. Minutes will send summaries to ' + host + ' using ' + model + '.';
+    }
+    function renderOpenAiCompatibleSettings(s) {
+      const visible = isOpenAiCompatibleEngine(s.summarization.engine);
+      const rowIds = [
+        'settings-openai-compatible-preset-row',
+        'settings-openai-compatible-base-url-row',
+        'settings-openai-compatible-model-row',
+        'settings-openai-compatible-api-key-row',
+      ];
+      for (const id of rowIds) {
+        document.getElementById(id).classList.toggle('is-hidden', !visible);
+      }
+      document.getElementById('settings-openai-compatible-preset').value = inferOpenAiCompatiblePreset(s);
+      document.getElementById('settings-openai-compatible-base-url').value =
+        s.summarization.openai_compatible_base_url || '';
+      document.getElementById('settings-openai-compatible-model').value =
+        s.summarization.openai_compatible_model || '';
+      document.getElementById('settings-openai-compatible-api-key-env').value =
+        s.summarization.openai_compatible_api_key_env || '';
+      document.getElementById('settings-openai-compatible-status').textContent =
+        visible ? openAiCompatibleStatusText(s) : '';
+    }
     function updateSumStatus(s) {
       const el = document.getElementById('settings-summarization-status');
       if (s.summarization.engine === 'none') el.textContent = '';
       else if (s.summarization.engine === 'agent') el.textContent = 'Using: ' + (s.summarization.agent_command || 'claude') + ' — no API key needed, uses your existing subscription';
       else if (s.summarization.engine === 'ollama') el.textContent = s.summarization.ollama_reachable ? 'Ollama reachable (' + s.summarization.ollama_model + ')' : 'Ollama not reachable at ' + s.summarization.ollama_url;
+      else if (isOpenAiCompatibleEngine(s.summarization.engine)) el.textContent = openAiCompatibleStatusText(s);
       else if (s.summarization.engine === 'claude') el.textContent = s.summarization.anthropic_key_set ? 'API key set' : 'ANTHROPIC_API_KEY not found in environment';
       else if (s.summarization.engine === 'openai') el.textContent = s.summarization.openai_key_set ? 'API key set' : 'OPENAI_API_KEY not found in environment';
     }
@@ -7798,7 +7903,17 @@
       const ollamaVisible = e.target.value === 'ollama';
       document.getElementById('settings-ollama-url-row').classList.toggle('is-hidden', !ollamaVisible);
       document.getElementById('settings-ollama-model-row').classList.toggle('is-hidden', !ollamaVisible);
+      const openAiCompatibleVisible = isOpenAiCompatibleEngine(e.target.value);
+      for (const id of [
+        'settings-openai-compatible-preset-row',
+        'settings-openai-compatible-base-url-row',
+        'settings-openai-compatible-model-row',
+        'settings-openai-compatible-api-key-row',
+      ]) {
+        document.getElementById(id).classList.toggle('is-hidden', !openAiCompatibleVisible);
+      }
       const s = await invoke('cmd_get_settings'); updateSumStatus(s);
+      renderOpenAiCompatibleSettings(s);
       if (ollamaVisible) {
         document.getElementById('settings-ollama-url-status').textContent =
           s.summarization.ollama_reachable ? 'Reachable' : 'Not reachable — is Ollama running?';
@@ -7834,6 +7949,43 @@
       } catch (err) {
         console.error('ollama model save:', err);
       }
+    });
+    document.getElementById('settings-openai-compatible-preset').addEventListener('change', async (e) => {
+      const preset = openAiCompatiblePresets[e.target.value];
+      if (!preset) return;
+      document.getElementById('settings-openai-compatible-base-url').value = preset.baseUrl;
+      document.getElementById('settings-openai-compatible-model').value = preset.model;
+      document.getElementById('settings-openai-compatible-api-key-env').value = preset.apiKeyEnv;
+      await invoke('cmd_set_setting', { section: 'summarization', key: 'openai_compatible_base_url', value: preset.baseUrl });
+      await invoke('cmd_set_setting', { section: 'summarization', key: 'openai_compatible_model', value: preset.model });
+      await invoke('cmd_set_setting', { section: 'summarization', key: 'openai_compatible_api_key_env', value: preset.apiKeyEnv });
+      const s = await invoke('cmd_get_settings');
+      updateSumStatus(s);
+      renderOpenAiCompatibleSettings(s);
+    });
+    document.getElementById('settings-openai-compatible-base-url').addEventListener('change', async (e) => {
+      const value = e.target.value.trim() || 'http://localhost:11434/v1';
+      e.target.value = value;
+      await invoke('cmd_set_setting', { section: 'summarization', key: 'openai_compatible_base_url', value });
+      const s = await invoke('cmd_get_settings');
+      updateSumStatus(s);
+      renderOpenAiCompatibleSettings(s);
+    });
+    document.getElementById('settings-openai-compatible-model').addEventListener('change', async (e) => {
+      const value = e.target.value.trim() || 'llama3.2';
+      e.target.value = value;
+      await invoke('cmd_set_setting', { section: 'summarization', key: 'openai_compatible_model', value });
+      const s = await invoke('cmd_get_settings');
+      updateSumStatus(s);
+      renderOpenAiCompatibleSettings(s);
+    });
+    document.getElementById('settings-openai-compatible-api-key-env').addEventListener('change', async (e) => {
+      const value = e.target.value.trim();
+      e.target.value = value;
+      await invoke('cmd_set_setting', { section: 'summarization', key: 'openai_compatible_api_key_env', value });
+      const s = await invoke('cmd_get_settings');
+      updateSumStatus(s);
+      renderOpenAiCompatibleSettings(s);
     });
     // Post-record hook — empty string clears the hook (Rust side maps "" → None).
     document.getElementById('settings-hooks-post-record').addEventListener('change', async (e) => {

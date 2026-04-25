@@ -14,6 +14,7 @@ use std::time::Instant;
 //   "claude"  → Anthropic Claude API (ANTHROPIC_API_KEY env var, legacy)
 //   "openai"  → OpenAI API (OPENAI_API_KEY env var, legacy)
 //   "mistral" → Mistral API (MISTRAL_API_KEY env var)
+//   "openai-compatible" → OpenAI-compatible chat completions endpoint
 //
 // For long transcripts: map-reduce chunking.
 //   Chunk by time segments → summarize each chunk → synthesize final.
@@ -108,6 +109,9 @@ pub fn summarize_with_screens(
         "openai" => summarize_with_openai(transcript, screen_files, config),
         "mistral" => summarize_with_mistral(transcript, screen_files, config),
         "ollama" => summarize_with_ollama(transcript, config),
+        "openai-compatible" | "openai_compatible" => {
+            summarize_with_openai_compatible(transcript, screen_files, config)
+        }
         other => {
             tracing::warn!(engine = %other, "unknown summarization engine, skipping");
             return None;
@@ -295,6 +299,10 @@ pub fn title_refinement_model(config: &Config) -> Option<String> {
         "openai" => Some(format!("openai:{}", OPENAI_TITLE_MODEL)),
         "mistral" => Some(format!("mistral:{}", config.summarization.mistral_model)),
         "ollama" => Some(format!("ollama:{}", config.summarization.ollama_model)),
+        "openai-compatible" | "openai_compatible" => Some(format!(
+            "openai-compatible:{}",
+            config.summarization.openai_compatible_model
+        )),
         _ => None,
     }
 }
@@ -673,6 +681,10 @@ pub(crate) fn summarization_model_hint(config: &Config, has_screen_context: bool
         }
         "mistral" => format!("mistral:{}", config.summarization.mistral_model),
         "ollama" => format!("ollama:{}", config.summarization.ollama_model),
+        "openai-compatible" | "openai_compatible" => format!(
+            "openai-compatible:{}",
+            config.summarization.openai_compatible_model
+        ),
         other => other.to_string(),
     }
 }
@@ -684,6 +696,10 @@ pub(crate) fn speaker_mapping_model_hint(config: &Config) -> String {
         "openai" => "openai:gpt-4o-mini".into(),
         "mistral" => format!("mistral:{}", config.summarization.mistral_model),
         "ollama" => format!("ollama:{}", config.summarization.ollama_model),
+        "openai-compatible" | "openai_compatible" => format!(
+            "openai-compatible:{}",
+            config.summarization.openai_compatible_model
+        ),
         other => other.to_string(),
     }
 }
@@ -1440,6 +1456,116 @@ fn summarize_with_mistral(
     Ok(parse_summary_response(&final_text))
 }
 
+// ── OpenAI-compatible APIs ──────────────────────────────────
+
+fn openai_compatible_chat_url(config: &Config) -> Result<String, Box<dyn std::error::Error>> {
+    let base_url = config.summarization.openai_compatible_base_url.trim();
+    if base_url.is_empty() {
+        return Err("openai_compatible_base_url is empty".into());
+    }
+
+    let base_url = base_url.trim_end_matches('/');
+    if base_url.ends_with("/chat/completions") {
+        Ok(base_url.to_string())
+    } else {
+        Ok(format!("{}/chat/completions", base_url))
+    }
+}
+
+fn openai_compatible_model(config: &Config) -> Result<&str, Box<dyn std::error::Error>> {
+    let model = config.summarization.openai_compatible_model.trim();
+    if model.is_empty() {
+        Err("openai_compatible_model is empty".into())
+    } else {
+        Ok(model)
+    }
+}
+
+fn openai_compatible_api_key(
+    config: &Config,
+) -> Result<Option<String>, Box<dyn std::error::Error>> {
+    let env_name = config.summarization.openai_compatible_api_key_env.trim();
+    if env_name.is_empty() {
+        return Ok(None);
+    }
+
+    std::env::var(env_name)
+        .map(Some)
+        .map_err(|_| format!("{} not set", env_name).into())
+}
+
+fn post_openai_compatible_chat(
+    body: &serde_json::Value,
+    config: &Config,
+    label: &str,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let url = openai_compatible_chat_url(config)?;
+
+    let response = if let Some(api_key) = openai_compatible_api_key(config)? {
+        let auth = format!("Bearer {}", api_key);
+        http_post(
+            &url,
+            body,
+            &[
+                ("Authorization", &auth),
+                ("Content-Type", "application/json"),
+            ],
+        )?
+    } else {
+        http_post(&url, body, &[("Content-Type", "application/json")])?
+    };
+
+    extract_chat_completion_text(&response, label)
+}
+
+fn summarize_with_openai_compatible(
+    transcript: &str,
+    screen_files: &[std::path::PathBuf],
+    config: &Config,
+) -> Result<Summary, Box<dyn std::error::Error>> {
+    let model = openai_compatible_model(config)?;
+    let chunks = build_prompt(transcript, config.summarization.chunk_max_tokens);
+    let mut all_text = String::new();
+
+    let screen_content = encode_screens_for_openai(screen_files);
+
+    for (i, chunk) in chunks.iter().enumerate() {
+        let mut content_parts: Vec<serde_json::Value> = Vec::new();
+
+        if i == 0 && !screen_content.is_empty() {
+            tracing::info!(
+                images = screen_content.len(),
+                "sending screen context to OpenAI-compatible endpoint"
+            );
+            content_parts.extend(screen_content.clone());
+            content_parts.push(serde_json::json!({
+                "type": "text",
+                "text": "The images above show what was on screen during this meeting. Use them for context.\n\n"
+            }));
+        }
+
+        content_parts.push(serde_json::json!({
+            "type": "text",
+            "text": format!("Summarize this transcript:\n\n<transcript>\n{}\n</transcript>", chunk)
+        }));
+
+        let body = serde_json::json!({
+            "model": model,
+            "messages": [
+                { "role": "system", "content": build_system_prompt(get_effective_summary_language(config)) },
+                { "role": "user", "content": content_parts }
+            ],
+            "max_tokens": 1024,
+        });
+
+        let text = post_openai_compatible_chat(&body, config, "OpenAI-compatible")?;
+        all_text.push_str(&text);
+        all_text.push('\n');
+    }
+
+    Ok(parse_summary_response(&all_text))
+}
+
 // ── Ollama (local) ───────────────────────────────────────────
 
 fn summarize_with_ollama(
@@ -1674,6 +1800,17 @@ fn run_title_refinement_prompt(
                 ],
             )?;
             extract_chat_completion_text(&response, "Mistral")
+        }
+        "openai-compatible" | "openai_compatible" => {
+            let body = serde_json::json!({
+                "model": openai_compatible_model(config)?,
+                "messages": [{
+                    "role": "user",
+                    "content": prompt
+                }],
+                "max_tokens": 64,
+            });
+            post_openai_compatible_chat(&body, config, "OpenAI-compatible")
         }
         "ollama" => {
             let url = format!("{}/api/generate", config.summarization.ollama_url);
@@ -1977,6 +2114,10 @@ fn run_speaker_mapping_prompt(
                 .map(|s| s.to_string())
                 .ok_or_else(|| "No text in response".into())
         }
+        "openai-compatible" | "openai_compatible" => {
+            let body = serde_json::json!({"model": openai_compatible_model(config)?, "max_tokens": 256, "messages":[{"role":"user","content":prompt}]});
+            post_openai_compatible_chat(&body, config, "OpenAI-compatible")
+        }
         "ollama" => {
             let url = format!("{}/api/generate", config.summarization.ollama_url);
             let body = serde_json::json!({"model": config.summarization.ollama_model, "prompt": prompt, "stream": false});
@@ -2200,6 +2341,43 @@ COMMITMENTS:
             .collect::<String>();
         let chunks = build_prompt(&transcript, 25);
         assert!(chunks.len() > 1, "should split into multiple chunks");
+    }
+
+    #[test]
+    fn openai_compatible_url_appends_chat_completions_once() {
+        let mut config = Config::default();
+        config.summarization.openai_compatible_base_url = "http://localhost:11434/v1".into();
+        assert_eq!(
+            openai_compatible_chat_url(&config).unwrap(),
+            "http://localhost:11434/v1/chat/completions"
+        );
+
+        config.summarization.openai_compatible_base_url =
+            "https://example.test/v1/chat/completions/".into();
+        assert_eq!(
+            openai_compatible_chat_url(&config).unwrap(),
+            "https://example.test/v1/chat/completions"
+        );
+    }
+
+    #[test]
+    fn openai_compatible_hints_use_configured_model() {
+        let mut config = Config::default();
+        config.summarization.engine = "openai-compatible".into();
+        config.summarization.openai_compatible_model = "openai/gpt-4o-mini".into();
+
+        assert_eq!(
+            summarization_model_hint(&config, false),
+            "openai-compatible:openai/gpt-4o-mini"
+        );
+        assert_eq!(
+            speaker_mapping_model_hint(&config),
+            "openai-compatible:openai/gpt-4o-mini"
+        );
+        assert_eq!(
+            title_refinement_model(&config),
+            Some("openai-compatible:openai/gpt-4o-mini".into())
+        );
     }
 
     #[test]

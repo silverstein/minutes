@@ -45,10 +45,13 @@ So `minutes record --device "MacBook Pro Microphone"` always wins over `[recordi
 
 | key | default | meaning |
 |---|---|---|
-| `engine` | `"none"` | `"none"`, `"agent"`, `"ollama"`, `"claude"`, `"openai"`, `"mistral"` |
+| `engine` | `"none"` | `"none"`, `"agent"`, `"ollama"`, `"openai-compatible"`, `"claude"`, `"openai"`, `"mistral"` |
 | `agent_command` | `"claude"` | CLI to shell out to when engine = `"agent"` (`claude`, `codex`, `opencode`, `pi`, etc.) |
 | `ollama_url` | `http://localhost:11434` | Ollama server URL |
 | `ollama_model` | `"llama3.2"` | Model name pulled in Ollama |
+| `openai_compatible_base_url` | `http://localhost:11434/v1` | OpenAI-compatible base URL. Minutes appends `/chat/completions` unless it is already present. |
+| `openai_compatible_model` | `"llama3.2"` | Model name for the compatible endpoint. |
+| `openai_compatible_api_key_env` | unset | Optional environment variable name containing the API key. Leave blank for local servers. |
 | `mistral_model` | `"mistral-large-latest"` | Mistral API model |
 | `chunk_max_tokens` | `4000` | Max tokens per chunk when splitting long transcripts |
 
@@ -56,6 +59,28 @@ For Pi coding-agent support, use `engine = "agent"` with `agent_command = "pi"`.
 Minutes invokes Pi in non-interactive, no-tools mode. This is distinct from
 Inflection's Pi models; do not route transcript data to Inflection unless the
 user explicitly opts into that provider and its data terms.
+
+For OpenRouter, Vercel AI Gateway, Cloudflare AI Gateway, llama.cpp,
+LM Studio, vLLM, LocalAI, or any other OpenAI-compatible server, use one
+generic backend instead of adding a provider-specific engine:
+
+```toml
+[summarization]
+engine = "openai-compatible"
+openai_compatible_base_url = "https://openrouter.ai/api/v1"
+openai_compatible_model = "openai/gpt-4o-mini"
+openai_compatible_api_key_env = "OPENROUTER_API_KEY"
+```
+
+Local servers can omit the API key env:
+
+```toml
+[summarization]
+engine = "openai-compatible"
+openai_compatible_base_url = "http://localhost:11434/v1"
+openai_compatible_model = "llama3.2"
+openai_compatible_api_key_env = ""
+```
 
 ### `[recording]` — capture behavior
 

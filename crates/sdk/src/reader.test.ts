@@ -10,6 +10,7 @@ import {
   getMeeting,
   getMeetingWithOverlays,
   applySpeakerOverlays,
+  humanizeTranscript,
   findOpenActions,
   getPersonProfile,
   type MeetingFile,
@@ -528,6 +529,80 @@ describe("applySpeakerOverlays", () => {
         source: "manual",
       },
     ]);
+  });
+});
+
+// ── humanizeTranscript ───────────────────────────────────────
+
+describe("humanizeTranscript", () => {
+  const HIGH_ALEX = {
+    speaker_label: "SPEAKER_0",
+    name: "Alex Kim",
+    confidence: "high" as const,
+    source: "manual" as const,
+  };
+  const HIGH_JORDAN = {
+    speaker_label: "SPEAKER_1",
+    name: "Jordan Park",
+    confidence: "high" as const,
+    source: "manual" as const,
+  };
+  const MEDIUM_ALEX = {
+    speaker_label: "SPEAKER_0",
+    name: "Alex Kim",
+    confidence: "medium" as const,
+    source: "llm" as const,
+  };
+
+  it("rewrites bracketed speaker prefixes for high-confidence entries", () => {
+    const body = "[SPEAKER_0 0:00] hello\n[SPEAKER_1 0:05] hi\n";
+    const out = humanizeTranscript(body, [HIGH_ALEX, HIGH_JORDAN]);
+    expect(out).toBe("[Alex Kim 0:00] hello\n[Jordan Park 0:05] hi\n");
+  });
+
+  it("leaves medium/low-confidence speakers untouched", () => {
+    const body = "[SPEAKER_0 0:00] hello\n";
+    expect(humanizeTranscript(body, [MEDIUM_ALEX])).toBe(body);
+  });
+
+  it("returns body unchanged when speaker_map is empty or undefined", () => {
+    const body = "[SPEAKER_0 0:00] hello\n";
+    expect(humanizeTranscript(body, undefined)).toBe(body);
+    expect(humanizeTranscript(body, [])).toBe(body);
+  });
+
+  it("preserves non-lexical event tags inside the body", () => {
+    const body = "[SPEAKER_0 0:00] [laughter]\n[SPEAKER_0 0:05] real words\n";
+    const out = humanizeTranscript(body, [HIGH_ALEX]);
+    expect(out).toBe("[SPEAKER_0 0:00] [laughter]\n[Alex Kim 0:05] real words\n");
+  });
+
+  it("leaves non-bracketed lines (headings, prose, blanks) alone", () => {
+    const body = "## Transcript\n\nSome free-form note.\n[SPEAKER_0 0:00] hi\n";
+    const out = humanizeTranscript(body, [HIGH_ALEX]);
+    expect(out).toBe(
+      "## Transcript\n\nSome free-form note.\n[Alex Kim 0:00] hi\n"
+    );
+  });
+
+  it("is idempotent on already-humanized text", () => {
+    const body = "[Alex Kim 0:00] hello\n";
+    expect(humanizeTranscript(body, [HIGH_ALEX])).toBe(body);
+  });
+
+  it("is non-mutating on the input string", () => {
+    const original = "[SPEAKER_0 0:00] hello\n";
+    const body = original;
+    humanizeTranscript(body, [HIGH_ALEX]);
+    expect(body).toBe(original);
+  });
+
+  it("handles malformed bracket lines gracefully", () => {
+    const body = "[SPEAKER_0 hello\n[NoTimestamp]\n[SPEAKER_0 0:00] real\n";
+    const out = humanizeTranscript(body, [HIGH_ALEX]);
+    expect(out).toBe(
+      "[SPEAKER_0 hello\n[NoTimestamp]\n[Alex Kim 0:00] real\n"
+    );
   });
 });
 

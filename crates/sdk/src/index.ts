@@ -32,6 +32,7 @@ export {
   getMeeting,
   getMeetingWithOverlays,
   applySpeakerOverlays,
+  humanizeTranscript,
   findOpenActions,
   findDecisions,
   getPersonProfile,

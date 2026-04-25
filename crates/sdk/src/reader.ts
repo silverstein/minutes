@@ -383,6 +383,70 @@ export function applySpeakerOverlays(
 }
 
 /**
+ * Rewrite `[SPEAKER_N <timestamp>] text` line prefixes in a meeting
+ * transcript body to use the speaker's mapped name. Mirrors the Rust
+ * `apply_confirmed_names` helper:
+ *
+ *   - Only attributions with `confidence: "high"` are applied — model
+ *     guesses below that bar do not silently rewrite the transcript.
+ *   - If a line's body itself looks like a non-lexical event marker
+ *     (e.g. `[laughter]`, `[music]`), the speaker label is left alone
+ *     so the rendered output keeps the event tag instead of saying
+ *     "Alex Kim: [laughter]".
+ *   - Non-bracketed lines (headings, prose, blank) are returned
+ *     unchanged.
+ *
+ * The function is pure: the input string is not mutated.
+ */
+export function humanizeTranscript(
+  body: string,
+  speakerMap: SpeakerAttribution[] | undefined
+): string {
+  if (!speakerMap || speakerMap.length === 0) return body;
+
+  const highMap = new Map<string, string>();
+  for (const attr of speakerMap) {
+    if (attr.confidence === "high" && attr.speaker_label && attr.name) {
+      highMap.set(attr.speaker_label, attr.name);
+    }
+  }
+  if (highMap.size === 0) return body;
+
+  const out: string[] = [];
+  for (const line of body.split("\n")) {
+    out.push(humanizeOneLine(line, highMap));
+  }
+  return out.join("\n");
+}
+
+function humanizeOneLine(line: string, highMap: Map<string, string>): string {
+  if (!line.startsWith("[")) return line;
+
+  const close = line.indexOf("]");
+  if (close < 0) return line;
+
+  const inside = line.slice(1, close);
+  const space = inside.indexOf(" ");
+  if (space < 0) return line;
+
+  const label = inside.slice(0, space);
+  const replacement = highMap.get(label);
+  if (!replacement) return line;
+
+  const remainder = inside.slice(space + 1);
+  const after = line.slice(close + 1);
+
+  // Skip rewriting when the body is itself a bracketed event tag —
+  // matches Rust's is_non_lexical_event_text guard.
+  const trimmedAfter = after.trimStart();
+  if (trimmedAfter.startsWith("[") && trimmedAfter.trimEnd().endsWith("]")) {
+    return line;
+  }
+
+  return `[${replacement} ${remainder}]${after}`;
+}
+
+/**
  * Get a meeting with sidecar overlay confirmations layered over its
  * `speaker_map`. Best-effort convenience: shells to the local `minutes`
  * CLI (`minutes get <path> --json`) which reads `~/.minutes/overlays.db`

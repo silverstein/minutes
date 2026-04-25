@@ -4515,6 +4515,7 @@
               automatically in the recording pipeline.</div>
             <select id="settings-summarization-engine" class="settings-field">
               <option value="none">Off — Claude summarizes when you ask (recommended)</option>
+              <option value="auto">Auto-detect an agent CLI — advanced</option>
               <option value="agent">Agent CLI — uses your Claude Code, Codex, OpenCode, or Pi subscription</option>
               <option value="ollama">Ollama — local, free, runs on your machine</option>
               <option value="openai-compatible">OpenAI-compatible API — gateways and local servers</option>
@@ -4577,8 +4578,8 @@
         </div>
         <div class="about-controls is-hidden" id="settings-openai-compatible-api-key-row">
           <div class="about-controls-group">
-            <div class="about-controls-copy">API key environment variable</div>
-            <div class="about-controls-meta">Leave blank for local servers. For cloud gateways, set the key in your shell and put only the variable name here.</div>
+            <div class="about-controls-copy">Advanced: API key variable name</div>
+            <div class="about-controls-meta">Leave blank for local servers. For cloud gateways, put only the environment variable name here, never the key itself.</div>
             <input type="text" id="settings-openai-compatible-api-key-env" class="settings-field" placeholder="OPENROUTER_API_KEY" spellcheck="false">
           </div>
         </div>
@@ -7712,7 +7713,7 @@
       if (!s.summarization.openai_compatible_key_set) return apiKeyEnv + ' not found in this app environment.';
       let host = baseUrl;
       try { host = new URL(baseUrl).host; } catch (_) {}
-      return 'Ready. Minutes will send summaries to ' + host + ' using ' + model + '.';
+      return 'Advanced cloud mode. Minutes will send summaries to ' + host + ' using ' + model + '.';
     }
     function renderOpenAiCompatibleSettings(s) {
       const visible = isOpenAiCompatibleEngine(s.summarization.engine);
@@ -7738,6 +7739,7 @@
     function updateSumStatus(s) {
       const el = document.getElementById('settings-summarization-status');
       if (s.summarization.engine === 'none') el.textContent = '';
+      else if (s.summarization.engine === 'auto') el.textContent = 'Advanced: Minutes will auto-detect an installed agent CLI for pipeline summaries.';
       else if (s.summarization.engine === 'agent') el.textContent = 'Using: ' + (s.summarization.agent_command || 'claude') + ' — no API key needed, uses your existing subscription';
       else if (s.summarization.engine === 'ollama') el.textContent = s.summarization.ollama_reachable ? 'Ollama reachable (' + s.summarization.ollama_model + ')' : 'Ollama not reachable at ' + s.summarization.ollama_url;
       else if (isOpenAiCompatibleEngine(s.summarization.engine)) el.textContent = openAiCompatibleStatusText(s);

@@ -45,7 +45,7 @@ So `minutes record --device "MacBook Pro Microphone"` always wins over `[recordi
 
 | key | default | meaning |
 |---|---|---|
-| `engine` | `"none"` | `"none"`, `"agent"`, `"ollama"`, `"openai-compatible"`, `"claude"`, `"openai"`, `"mistral"` |
+| `engine` | `"none"` | `"none"`, `"auto"`, `"agent"`, `"ollama"`, `"openai-compatible"`, `"claude"`, `"openai"`, `"mistral"` |
 | `agent_command` | `"claude"` | CLI to shell out to when engine = `"agent"` (`claude`, `codex`, `opencode`, `pi`, etc.) |
 | `ollama_url` | `http://localhost:11434` | Ollama server URL |
 | `ollama_model` | `"llama3.2"` | Model name pulled in Ollama |
@@ -64,6 +64,10 @@ For OpenRouter, Vercel AI Gateway, Cloudflare AI Gateway, llama.cpp,
 LM Studio, vLLM, LocalAI, or any other OpenAI-compatible server, use one
 generic backend instead of adding a provider-specific engine:
 
+The local path is simplest and does not require an API key. Cloud gateways are
+advanced: set the key in your environment and put only the variable name in
+config. Minutes never stores the key itself.
+
 ```toml
 [summarization]
 engine = "openai-compatible"
@@ -81,6 +85,10 @@ openai_compatible_base_url = "http://localhost:11434/v1"
 openai_compatible_model = "llama3.2"
 openai_compatible_api_key_env = ""
 ```
+
+Screenshot context requires an endpoint that accepts OpenAI-style image content
+parts. Text-only summaries use plain string chat content for broader local
+server compatibility.
 
 ### `[recording]` — capture behavior
 

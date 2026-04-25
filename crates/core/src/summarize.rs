@@ -1518,45 +1518,70 @@ fn post_openai_compatible_chat(
     extract_chat_completion_text(&response, label)
 }
 
+fn openai_compatible_summary_user_content(
+    chunk: &str,
+    screen_content: &[serde_json::Value],
+) -> serde_json::Value {
+    let text = format!(
+        "Summarize this transcript:\n\n<transcript>\n{}\n</transcript>",
+        chunk
+    );
+
+    if screen_content.is_empty() {
+        serde_json::Value::String(text)
+    } else {
+        let mut content_parts = screen_content.to_vec();
+        content_parts.push(serde_json::json!({
+            "type": "text",
+            "text": "The images above show what was on screen during this meeting. Use them for context.\n\n"
+        }));
+        content_parts.push(serde_json::json!({
+            "type": "text",
+            "text": text
+        }));
+        serde_json::Value::Array(content_parts)
+    }
+}
+
+fn openai_compatible_summary_body(
+    chunk: &str,
+    screen_content: &[serde_json::Value],
+    config: &Config,
+) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+    Ok(serde_json::json!({
+        "model": openai_compatible_model(config)?,
+        "messages": [
+            { "role": "system", "content": build_system_prompt(get_effective_summary_language(config)) },
+            { "role": "user", "content": openai_compatible_summary_user_content(chunk, screen_content) }
+        ],
+        "max_tokens": 1024,
+    }))
+}
+
 fn summarize_with_openai_compatible(
     transcript: &str,
     screen_files: &[std::path::PathBuf],
     config: &Config,
 ) -> Result<Summary, Box<dyn std::error::Error>> {
-    let model = openai_compatible_model(config)?;
     let chunks = build_prompt(transcript, config.summarization.chunk_max_tokens);
     let mut all_text = String::new();
 
     let screen_content = encode_screens_for_openai(screen_files);
 
     for (i, chunk) in chunks.iter().enumerate() {
-        let mut content_parts: Vec<serde_json::Value> = Vec::new();
-
         if i == 0 && !screen_content.is_empty() {
             tracing::info!(
                 images = screen_content.len(),
                 "sending screen context to OpenAI-compatible endpoint"
             );
-            content_parts.extend(screen_content.clone());
-            content_parts.push(serde_json::json!({
-                "type": "text",
-                "text": "The images above show what was on screen during this meeting. Use them for context.\n\n"
-            }));
         }
 
-        content_parts.push(serde_json::json!({
-            "type": "text",
-            "text": format!("Summarize this transcript:\n\n<transcript>\n{}\n</transcript>", chunk)
-        }));
-
-        let body = serde_json::json!({
-            "model": model,
-            "messages": [
-                { "role": "system", "content": build_system_prompt(get_effective_summary_language(config)) },
-                { "role": "user", "content": content_parts }
-            ],
-            "max_tokens": 1024,
-        });
+        let chunk_screen_content = if i == 0 {
+            screen_content.as_slice()
+        } else {
+            &[]
+        };
+        let body = openai_compatible_summary_body(chunk, chunk_screen_content, config)?;
 
         let text = post_openai_compatible_chat(&body, config, "OpenAI-compatible")?;
         all_text.push_str(&text);
@@ -2378,6 +2403,51 @@ COMMITMENTS:
             title_refinement_model(&config),
             Some("openai-compatible:openai/gpt-4o-mini".into())
         );
+    }
+
+    #[test]
+    fn openai_compatible_text_only_body_uses_string_content() {
+        let mut config = Config::default();
+        config.summarization.engine = "openai-compatible".into();
+        config.summarization.openai_compatible_model = "local-model".into();
+
+        let body = openai_compatible_summary_body("hello world", &[], &config).unwrap();
+        assert_eq!(body["model"], "local-model");
+        let user_content = &body["messages"][1]["content"];
+        assert!(
+            user_content.is_string(),
+            "text-only OpenAI-compatible requests should use plain string content for stricter local servers: {body}"
+        );
+        assert!(user_content
+            .as_str()
+            .unwrap()
+            .contains("<transcript>\nhello world\n</transcript>"));
+    }
+
+    #[test]
+    fn openai_compatible_screen_body_uses_multimodal_content_parts() {
+        let mut config = Config::default();
+        config.summarization.engine = "openai-compatible".into();
+        config.summarization.openai_compatible_model = "vision-model".into();
+        let screen_content = vec![serde_json::json!({
+            "type": "image_url",
+            "image_url": { "url": "data:image/png;base64,abc", "detail": "low" }
+        })];
+
+        let body =
+            openai_compatible_summary_body("screen aware transcript", &screen_content, &config)
+                .unwrap();
+        let user_content = &body["messages"][1]["content"];
+        let parts = user_content
+            .as_array()
+            .expect("screen context should use multimodal content parts");
+        assert_eq!(parts[0]["type"], "image_url");
+        assert_eq!(parts[1]["type"], "text");
+        assert_eq!(parts[2]["type"], "text");
+        assert!(parts[2]["text"]
+            .as_str()
+            .unwrap()
+            .contains("screen aware transcript"));
     }
 
     #[test]

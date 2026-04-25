@@ -593,7 +593,8 @@ mistral_model = "mistral-large-latest"
 engine = "ollama"
 ollama_model = "llama3.2"
 
-# Or use any OpenAI-compatible gateway/local server
+# Or use any OpenAI-compatible gateway/local server.
+# Local servers can leave openai_compatible_api_key_env blank.
 [summarization]
 engine = "openai-compatible"
 openai_compatible_base_url = "https://openrouter.ai/api/v1"
@@ -1038,6 +1039,7 @@ model = "small"           # whisper: tiny (75MB), base, small (466MB), medium, l
 
 [summarization]
 engine = "none"           # Default: Claude summarizes conversationally via MCP
+                          # "auto" = auto-detect an installed agent CLI for pipeline summaries
                           # "agent" = uses your Claude Code, Codex, OpenCode, or Pi subscription (no API key)
                           # "ollama" = local, free
                           # "openai-compatible" = OpenRouter, Vercel/Cloudflare gateways, llama.cpp, LM Studio, etc.

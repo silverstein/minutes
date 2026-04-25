@@ -4,7 +4,7 @@ import { PublicFooter } from "@/components/public-footer";
 export const metadata: Metadata = {
   title: "Adding agent integrations — Minutes",
   description:
-    "How to decide which Minutes surface a new agent host needs: files, MCP, portable skills, host-specific skills, agent_command, and routing evals.",
+    "How to decide whether a new AI tool belongs in Minutes as files, MCP, portable skills, an agent command, or an OpenAI-compatible model backend.",
   alternates: {
     canonical: "/docs/agent-integrations",
   },
@@ -16,7 +16,29 @@ const surfaces = [
   ["Portable skills", "The host discovers Agent Skills-style .agents/skills folders.", "Codex, Gemini CLI, Pi"],
   ["Host-specific skills", "The host needs a different generated shape.", "Claude Code plugin, OpenCode commands"],
   ["agent_command backend", "Minutes should call the agent CLI for summaries.", "claude, codex, opencode, pi"],
+  [
+    "OpenAI-compatible backend",
+    "Minutes should call a model API directly, not an agent loop.",
+    "OpenRouter, Vercel AI Gateway, Cloudflare AI Gateway, llama.cpp",
+  ],
   ["Routing eval", "The agent has a non-interactive prompt mode worth benchmarking.", "routing:agents -- --agent codex"],
+] as const;
+
+const modelBackends = [
+  ["Ollama", "Local model runtime", "Already supported directly; can also be reached through its OpenAI-compatible endpoint."],
+  ["llama.cpp", "Local model runtime", "Use an OpenAI-compatible base URL. Do not add it as an agent option."],
+  ["vLLM / LM Studio / LocalAI", "Local or self-hosted runtime", "Use the same OpenAI-compatible path when available."],
+  ["OpenRouter", "Cloud model router", "Preset candidate for one-key access to many providers."],
+  ["Vercel AI Gateway", "Cloud model gateway", "Preset candidate for teams already using Vercel routing, billing, or AI SDK workflows."],
+  ["Cloudflare AI Gateway", "Cloud model gateway", "Preset candidate for observability, rate limits, caching, retries, and Cloudflare routing."],
+] as const;
+
+const experimentalRuntimes = [
+  ["Goose", "Open-source on-machine agent with CLI, API, MCP extensions, and custom OpenAI-compatible provider support."],
+  ["Hermes Agent", "Persistent personal agent with gateway, memory, skills, browser control, OpenRouter, custom APIs, and local vLLM support."],
+  ["OpenClaw", "Local-first personal automation gateway with messaging channels, tools, and daemon-style routing."],
+  ["Aider", "Open-source terminal pair programmer with broad model support, including OpenRouter."],
+  ["OpenHands", "Open-source agent platform and SDK with local and sandboxed deployment modes."],
 ] as const;
 
 const checklist = [
@@ -24,6 +46,7 @@ const checklist = [
   "Reuse .agents/skills when the host already discovers it. Do not add a duplicate generated tree just for symmetry.",
   "Add a host-specific skill compiler target only when the host cannot consume the portable skill pack.",
   "For summarization backends, update summarize.rs, desktop settings, docs/CONFIG.md, and targeted invocation tests.",
+  "For model providers, prefer one generic OpenAI-compatible backend with presets over one top-level engine per gateway.",
   "For routing evals, update tooling/skills/compiler/agent-routing.ts and run the routing-agent smoke where auth allows.",
   "Update README, /for-agents, product-surfaces.json, manifest.json, llms.txt, and any provider-specific docs.",
   "Run Rust, skill-tooling, llms, and site gates before shipping.",
@@ -80,6 +103,25 @@ export default function AgentIntegrationsPage() {
         </p>
       </section>
 
+      <section className="mt-12 grid gap-6 md:grid-cols-2">
+        <div className="rounded-[8px] border border-[color:var(--border)] bg-[var(--bg-elevated)] p-5">
+          <p className="font-mono text-[12px] text-[var(--text)]">Agent hosts</p>
+          <p className="mt-3 text-[14px] leading-7 text-[var(--text-secondary)]">
+            Hosts run their own agent loop, prompt wrapper, tools, and memory.
+            Add them to <span className="font-mono text-[var(--text)]">agent_command</span>{" "}
+            only after a non-interactive stdout contract is proven.
+          </p>
+        </div>
+        <div className="rounded-[8px] border border-[color:var(--border)] bg-[var(--bg-elevated)] p-5">
+          <p className="font-mono text-[12px] text-[var(--text)]">Model providers</p>
+          <p className="mt-3 text-[14px] leading-7 text-[var(--text-secondary)]">
+            Providers expose inference APIs. OpenRouter, Vercel AI Gateway,
+            Cloudflare AI Gateway, and llama.cpp belong behind a generic
+            OpenAI-compatible backend, not in the agent list.
+          </p>
+        </div>
+      </section>
+
       <section className="mt-12">
         <SectionLabel label="Choose the surface" />
         <div className="overflow-hidden rounded-[8px] border border-[color:var(--border)] bg-[var(--bg-elevated)]">
@@ -103,6 +145,36 @@ export default function AgentIntegrationsPage() {
                   <td className="px-4 py-3 font-mono text-[var(--text)]">{surface}</td>
                   <td className="px-4 py-3 leading-6 text-[var(--text-secondary)]">{useWhen}</td>
                   <td className="px-4 py-3 leading-6 text-[var(--text-secondary)]">{examples}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section className="mt-12">
+        <SectionLabel label="Model backends" />
+        <div className="overflow-hidden rounded-[8px] border border-[color:var(--border)] bg-[var(--bg-elevated)]">
+          <table className="w-full border-collapse text-[13px]">
+            <thead>
+              <tr className="border-b border-[color:var(--border)]">
+                <th className="px-4 py-3 text-left font-mono text-[10px] uppercase tracking-[0.14em] text-[var(--text-secondary)]">
+                  Backend
+                </th>
+                <th className="px-4 py-3 text-left font-mono text-[10px] uppercase tracking-[0.14em] text-[var(--text-secondary)]">
+                  Class
+                </th>
+                <th className="px-4 py-3 text-left font-mono text-[10px] uppercase tracking-[0.14em] text-[var(--text-secondary)]">
+                  Posture
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              {modelBackends.map(([backend, className, posture]) => (
+                <tr key={backend} className="border-b border-[color:var(--border)] last:border-0">
+                  <td className="px-4 py-3 font-mono text-[var(--text)]">{backend}</td>
+                  <td className="px-4 py-3 leading-6 text-[var(--text-secondary)]">{className}</td>
+                  <td className="px-4 py-3 leading-6 text-[var(--text-secondary)]">{posture}</td>
                 </tr>
               ))}
             </tbody>
@@ -140,6 +212,28 @@ export default function AgentIntegrationsPage() {
             ))}
           </div>
         </div>
+      </section>
+
+      <section className="mt-12">
+        <SectionLabel label="Experimental runtimes" />
+        <div className="grid gap-3 sm:grid-cols-2">
+          {experimentalRuntimes.map(([name, detail]) => (
+            <div
+              key={name}
+              className="rounded-[8px] border border-[color:var(--border)] bg-[var(--bg-elevated)] p-4"
+            >
+              <p className="font-mono text-[12px] text-[var(--text)]">{name}</p>
+              <p className="mt-2 text-[13px] leading-6 text-[var(--text-secondary)]">
+                {detail}
+              </p>
+            </div>
+          ))}
+        </div>
+        <p className="mt-4 text-[13px] leading-6 text-[var(--text-tertiary)]">
+          These should stay in docs or recipes until a spike verifies read-only
+          behavior, non-interactive execution, stable stdout, and permission
+          boundaries.
+        </p>
       </section>
 
       <section className="mt-12 rounded-[8px] border border-[color:var(--border)] bg-[var(--bg-elevated)] p-5">

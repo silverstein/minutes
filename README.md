@@ -1051,7 +1051,7 @@ ollama_url = "http://localhost:11434"
 ollama_model = "llama3.2"
 openai_compatible_base_url = "http://localhost:11434/v1"
 openai_compatible_model = "llama3.2"
-openai_compatible_api_key_env = "" # Blank means no Authorization header. Desktop cloud presets keep this blank and use a runtime-only Keychain secret.
+openai_compatible_api_key_env = "" # Blank means no Authorization header for local endpoints. Desktop cloud endpoints can still use a saved Keychain key without rewriting config.
 
 [diarization]
 engine = "auto"           # "auto" (default — uses pyannote-rs if models downloaded, otherwise skips),

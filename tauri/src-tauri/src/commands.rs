@@ -6242,8 +6242,16 @@ pub fn cmd_get_settings() -> serde_json::Value {
         .openai_compatible_api_key_env
         .trim()
         .to_string();
+    let openai_compatible_endpoint_is_local =
+        minutes_core::config::openai_compatible_base_url_is_local(
+            &config.summarization.openai_compatible_base_url,
+        );
     let openai_compatible_key_set = if openai_compatible_api_key_env.is_empty() {
-        openai_compatible_secret_status.key_set
+        if openai_compatible_endpoint_is_local {
+            false
+        } else {
+            openai_compatible_secret_status.key_set
+        }
     } else if openai_compatible_api_key_env == crate::secret_store::OPENAI_COMPATIBLE_API_KEY_ENV {
         openai_compatible_secret_status.key_set
     } else {
@@ -6309,6 +6317,7 @@ pub fn cmd_get_settings() -> serde_json::Value {
             "openai_compatible_base_url": config.summarization.openai_compatible_base_url,
             "openai_compatible_model": config.summarization.openai_compatible_model,
             "openai_compatible_api_key_env": config.summarization.openai_compatible_api_key_env,
+            "openai_compatible_endpoint_is_local": openai_compatible_endpoint_is_local,
             "openai_compatible_key_set": openai_compatible_key_set,
             "openai_compatible_desktop_api_key_env": crate::secret_store::OPENAI_COMPATIBLE_API_KEY_ENV,
             "openai_compatible_keychain_supported": openai_compatible_secret_status.supported,

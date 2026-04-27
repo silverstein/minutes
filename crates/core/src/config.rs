@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 // ──────────────────────────────────────────────────────────────
 
 /// Desktop-only fallback env var used when the Tauri app hydrates an
-/// OpenAI-compatible gateway key from macOS Keychain.
+/// OpenAI-compatible gateway key from macOS Keychain for non-local endpoints.
 pub const OPENAI_COMPATIBLE_DESKTOP_API_KEY_ENV: &str = "MINUTES_OPENAI_COMPATIBLE_API_KEY";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -863,6 +863,10 @@ impl Config {
         } else {
             None
         };
+        let raw_compat = raw_toml
+            .as_deref()
+            .map(inspect_raw_toml_compat)
+            .unwrap_or_default();
 
         let mut config = Self::load_from(path);
         let mut migrated_toml: Option<String> = None;
@@ -908,21 +912,14 @@ impl Config {
         //    drop comments / unknown keys just to preserve legacy behavior.
         // 2. Clear the desktop-only key env marker out of shared config files.
         if file_existed {
-            if raw_toml
-                .as_deref()
-                .is_some_and(|raw| !raw_toml_has_setting_in_section(raw, "summarization", "engine"))
-            {
-                config.summarization.engine = "auto".into();
+            if raw_compat.preserve_legacy_auto_summarization {
                 tracing::info!(
                     "summarization migration: preserving legacy auto engine for sparse config at {}",
                     path.display()
                 );
             }
 
-            if config.summarization.openai_compatible_api_key_env.trim()
-                == OPENAI_COMPATIBLE_DESKTOP_API_KEY_ENV
-            {
-                config.summarization.openai_compatible_api_key_env.clear();
+            if raw_compat.clear_desktop_openai_compatible_env_marker {
                 tracing::info!(
                     "summarization migration: clearing desktop-only key env marker from shared config at {}",
                     path.display()
@@ -979,7 +976,10 @@ impl Config {
 
         match std::fs::read_to_string(path) {
             Ok(contents) => match toml::from_str(&contents) {
-                Ok(config) => config,
+                Ok(mut config) => {
+                    apply_raw_toml_compat(&mut config, inspect_raw_toml_compat(&contents));
+                    config
+                }
                 Err(e) => {
                     tracing::warn!(
                         "invalid config at {}: {}. Using defaults.",
@@ -1049,6 +1049,61 @@ impl Config {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+struct RawTomlCompat {
+    preserve_legacy_auto_summarization: bool,
+    clear_desktop_openai_compatible_env_marker: bool,
+}
+
+fn inspect_raw_toml_compat(raw: &str) -> RawTomlCompat {
+    RawTomlCompat {
+        preserve_legacy_auto_summarization: !raw_toml_has_setting_in_section(
+            raw,
+            "summarization",
+            "engine",
+        ),
+        clear_desktop_openai_compatible_env_marker: raw_toml_setting_equals_in_section(
+            raw,
+            "summarization",
+            "openai_compatible_api_key_env",
+            OPENAI_COMPATIBLE_DESKTOP_API_KEY_ENV,
+        ),
+    }
+}
+
+fn apply_raw_toml_compat(config: &mut Config, compat: RawTomlCompat) {
+    if compat.preserve_legacy_auto_summarization {
+        config.summarization.engine = "auto".into();
+    }
+    if compat.clear_desktop_openai_compatible_env_marker {
+        config.summarization.openai_compatible_api_key_env.clear();
+    }
+}
+
+pub fn openai_compatible_base_url_is_local(base_url: &str) -> bool {
+    let trimmed = base_url.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+
+    let without_scheme = trimmed
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or(trimmed);
+    let authority = without_scheme.split('/').next().unwrap_or(without_scheme);
+    let host_port = authority.rsplit('@').next().unwrap_or(authority);
+    let host = if let Some(stripped) = host_port.strip_prefix('[') {
+        stripped.split(']').next().unwrap_or(stripped)
+    } else {
+        host_port.split(':').next().unwrap_or(host_port)
+    };
+
+    matches!(
+        host.to_ascii_lowercase().as_str(),
+        "localhost" | "127.0.0.1" | "0.0.0.0" | "::1"
+    )
+}
+
 /// Return `true` iff the raw TOML text contains a top-level `[section]`
 /// header. This is a deliberately primitive text check — we cannot use
 /// `toml::from_str` to answer this question because serde's `#[serde(default)]`
@@ -1091,6 +1146,27 @@ fn raw_toml_has_setting_in_section(raw: &str, section: &str, key: &str) -> bool 
         }
         if in_section && trimmed.starts_with(&key_prefix) {
             return true;
+        }
+    }
+    false
+}
+
+fn raw_toml_setting_equals_in_section(raw: &str, section: &str, key: &str, expected: &str) -> bool {
+    let target = format!("[{}]", section);
+    let key_prefix = format!("{} =", key);
+    let expected_value = toml::Value::String(expected.to_string()).to_string();
+    let mut in_section = false;
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('#') {
+            continue;
+        }
+        if trimmed.starts_with('[') {
+            in_section = trimmed == target;
+            continue;
+        }
+        if in_section && trimmed.starts_with(&key_prefix) {
+            return trimmed[key_prefix.len()..].trim() == expected_value;
         }
     }
     false
@@ -1707,6 +1783,23 @@ shortcut_enabled = true
     }
 
     #[test]
+    fn load_from_preserves_legacy_auto_summarization_when_engine_is_missing() {
+        let dir = TempDir::new().unwrap();
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(
+            &config_path,
+            r#"
+[transcription]
+model = "small"
+"#,
+        )
+        .unwrap();
+
+        let config = Config::load_from(&config_path);
+        assert_eq!(config.summarization.engine, "auto");
+    }
+
+    #[test]
     fn upgrade_clears_desktop_only_openai_compatible_env_marker() {
         let dir = TempDir::new().unwrap();
         let config_path = dir.path().join("config.toml");
@@ -1733,6 +1826,44 @@ openai_compatible_api_key_env = "{}"
 
         let reloaded = std::fs::read_to_string(&config_path).unwrap();
         assert!(reloaded.contains("openai_compatible_api_key_env = \"\""));
+    }
+
+    #[test]
+    fn load_from_clears_desktop_only_openai_compatible_env_marker() {
+        let dir = TempDir::new().unwrap();
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(
+            &config_path,
+            format!(
+                r#"
+[summarization]
+engine = "openai-compatible"
+openai_compatible_api_key_env = "{}"
+"#,
+                OPENAI_COMPATIBLE_DESKTOP_API_KEY_ENV
+            ),
+        )
+        .unwrap();
+
+        let config = Config::load_from(&config_path);
+        assert!(config
+            .summarization
+            .openai_compatible_api_key_env
+            .is_empty());
+    }
+
+    #[test]
+    fn openai_compatible_base_url_detects_local_hosts() {
+        assert!(openai_compatible_base_url_is_local(
+            "http://localhost:11434/v1"
+        ));
+        assert!(openai_compatible_base_url_is_local(
+            "http://127.0.0.1:11434/v1"
+        ));
+        assert!(openai_compatible_base_url_is_local("http://[::1]:11434/v1"));
+        assert!(!openai_compatible_base_url_is_local(
+            "https://openrouter.ai/api/v1"
+        ));
     }
 
     #[test]

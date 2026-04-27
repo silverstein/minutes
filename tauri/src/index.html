@@ -7732,9 +7732,22 @@
       if (baseUrl.includes('gateway.ai.cloudflare.com')) return 'cloudflare';
       return 'custom';
     }
+    function openAiCompatibleEndpointIsLocal(s) {
+      if (typeof s.summarization.openai_compatible_endpoint_is_local === 'boolean') {
+        return s.summarization.openai_compatible_endpoint_is_local;
+      }
+      const baseUrl = (s.summarization.openai_compatible_base_url || '').trim();
+      if (!baseUrl) return false;
+      try {
+        const host = new URL(baseUrl).hostname.toLowerCase();
+        return host === 'localhost' || host === '127.0.0.1' || host === '0.0.0.0' || host === '::1';
+      } catch (_) {
+        return false;
+      }
+    }
     function openAiCompatibleShouldOfferKey(s) {
       const apiKeyEnv = (s.summarization.openai_compatible_api_key_env || '').trim();
-      return Boolean(apiKeyEnv) || inferOpenAiCompatiblePreset(s) !== 'local';
+      return Boolean(apiKeyEnv) || !openAiCompatibleEndpointIsLocal(s);
     }
     function openAiCompatibleStatusText(s) {
       const baseUrl = (s.summarization.openai_compatible_base_url || '').trim();

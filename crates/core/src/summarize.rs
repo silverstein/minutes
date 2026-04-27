@@ -1484,6 +1484,11 @@ fn openai_compatible_api_key(
 ) -> Result<Option<String>, Box<dyn std::error::Error>> {
     let env_name = config.summarization.openai_compatible_api_key_env.trim();
     if env_name.is_empty() {
+        if crate::config::openai_compatible_base_url_is_local(
+            &config.summarization.openai_compatible_base_url,
+        ) {
+            return Ok(None);
+        }
         return Ok(
             std::env::var(crate::config::OPENAI_COMPATIBLE_DESKTOP_API_KEY_ENV)
                 .ok()
@@ -2593,7 +2598,7 @@ COMMITMENTS:
     }
 
     #[test]
-    fn summarize_with_openai_compatible_uses_desktop_fallback_env_when_config_env_is_blank() {
+    fn summarize_with_openai_compatible_does_not_use_desktop_fallback_env_for_local_base_url() {
         let _guard = api_env_lock().lock().unwrap();
         std::env::set_var(
             crate::config::OPENAI_COMPATIBLE_DESKTOP_API_KEY_ENV,
@@ -2613,13 +2618,29 @@ COMMITMENTS:
 
         let captured = handle.join().unwrap();
         assert!(
-            captured
-                .headers
-                .to_lowercase()
-                .contains("authorization: bearer desktop-keychain-token"),
-            "desktop fallback env should send bearer auth when config env is blank: {}",
+            !captured.headers.to_lowercase().contains("authorization:"),
+            "local blank-env mode should not send bearer auth even if a desktop key is loaded: {}",
             captured.headers
         );
+    }
+
+    #[test]
+    fn openai_compatible_api_key_uses_desktop_fallback_for_nonlocal_blank_config() {
+        let _guard = api_env_lock().lock().unwrap();
+        std::env::set_var(
+            crate::config::OPENAI_COMPATIBLE_DESKTOP_API_KEY_ENV,
+            "desktop-keychain-token",
+        );
+
+        let mut config = Config::default();
+        config.summarization.engine = "openai-compatible".into();
+        config.summarization.openai_compatible_base_url = "https://openrouter.ai/api/v1".into();
+        config.summarization.openai_compatible_api_key_env = String::new();
+
+        let api_key = openai_compatible_api_key(&config).unwrap();
+        std::env::remove_var(crate::config::OPENAI_COMPATIBLE_DESKTOP_API_KEY_ENV);
+
+        assert_eq!(api_key.as_deref(), Some("desktop-keychain-token"));
     }
 
     #[test]

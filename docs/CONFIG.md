@@ -51,7 +51,7 @@ So `minutes record --device "MacBook Pro Microphone"` always wins over `[recordi
 | `ollama_model` | `"llama3.2"` | Model name pulled in Ollama |
 | `openai_compatible_base_url` | `http://localhost:11434/v1` | OpenAI-compatible base URL. Minutes appends `/chat/completions` unless it is already present. |
 | `openai_compatible_model` | `"llama3.2"` | Model name for the compatible endpoint. |
-| `openai_compatible_api_key_env` | unset | Optional environment variable name containing the API key. Leave blank for local servers. The desktop app can also save a gateway key in macOS Keychain and hydrate its own runtime secret without rewriting shared config. |
+| `openai_compatible_api_key_env` | unset | Optional environment variable name containing the API key. Leave blank for local servers. The desktop app can also save a gateway key in macOS Keychain and use that runtime secret for non-local endpoints without rewriting shared config. |
 | `mistral_model` | `"mistral-large-latest"` | Mistral API model |
 | `chunk_max_tokens` | `4000` | Max tokens per chunk when splitting long transcripts |
 

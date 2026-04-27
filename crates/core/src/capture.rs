@@ -2314,6 +2314,80 @@ pub fn list_input_devices() -> Vec<String> {
         .collect()
 }
 
+/// Result of checking whether a configured input device is currently
+/// available on the host. Three-state because audio enumeration can
+/// itself fail (e.g. coreaudiod crashed mid-launch), and we don't want
+/// to clobber a real config based on a transient failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeviceAvailability {
+    /// Device is present (or `name` is empty/whitespace, meaning "use default").
+    Available,
+    /// Enumeration succeeded and the device is definitely not present.
+    Missing,
+    /// Enumeration returned no devices at all — can't be sure.
+    Unknown,
+}
+
+/// Check whether a previously-configured input device name is currently
+/// resolvable. Empty/whitespace input is treated as "use default" and
+/// reported `Available`. Legacy decorated values like
+/// `"MacBook Pro Microphone (96000Hz, 1 ch)"` are accepted too —
+/// canonicalized via [`canonicalize_input_device_setting`] before lookup
+/// so older configs that persisted the picker label are not falsely
+/// flagged Missing.
+pub fn check_input_device_availability(name: &str) -> DeviceAvailability {
+    let Some(canonical) = canonicalize_input_device_setting(name) else {
+        return DeviceAvailability::Available;
+    };
+    let devices = list_input_devices_detailed();
+    if devices.is_empty() {
+        return DeviceAvailability::Unknown;
+    }
+    let matches = |entry: &InputDeviceEntry| {
+        entry.name == canonical || strip_device_format_suffix(entry.label.as_str()) == canonical
+    };
+    if devices.iter().any(matches) {
+        DeviceAvailability::Available
+    } else {
+        DeviceAvailability::Missing
+    }
+}
+
+/// Auto-heal a stale `recording.device` pin. Used at startup so that
+/// when a previously-pinned device (USB mixer, Bluetooth headset,
+/// virtual loopback) is unplugged before launch, we transparently fall
+/// back to the system default instead of failing recording start —
+/// historically a deterministic crash path on the desktop because the
+/// missing-device error reached call sites that aborted the process.
+///
+/// Returns `true` when the config was modified. Caller decides whether
+/// to persist (`Config::save`); leaving persistence to the caller keeps
+/// this function side-effect-free for tests.
+pub fn auto_heal_missing_recording_device(config: &mut crate::config::Config) -> bool {
+    let Some(name) = config
+        .recording
+        .device
+        .as_deref()
+        .map(|s| s.trim().to_string())
+    else {
+        return false;
+    };
+    if name.is_empty() {
+        return false;
+    }
+    match check_input_device_availability(&name) {
+        DeviceAvailability::Missing => {
+            tracing::warn!(
+                device = %name,
+                "configured recording.device is not available; clearing pin and falling back to system default. Re-pin via Settings when the device is reconnected."
+            );
+            config.recording.device = None;
+            true
+        }
+        DeviceAvailability::Available | DeviceAvailability::Unknown => false,
+    }
+}
+
 /// A device with its category for the `minutes sources` command.
 #[derive(Debug, Clone)]
 pub struct CategorizedDevice {
@@ -2913,6 +2987,88 @@ mod tests {
         } else {
             // No public clear; overwrite with current default is fine for tests.
             set_preferred_host_id(id);
+        }
+    }
+
+    #[test]
+    fn check_input_device_availability_treats_empty_as_available() {
+        assert_eq!(
+            check_input_device_availability(""),
+            DeviceAvailability::Available
+        );
+        assert_eq!(
+            check_input_device_availability("   "),
+            DeviceAvailability::Available
+        );
+    }
+
+    /// Older configs persisted the decorated picker label
+    /// (`"Name (NHz, N ch)"`) rather than the canonical CPAL name.
+    /// The availability check must canonicalize the input first or it
+    /// would falsely flag legitimate pins as Missing and clear them.
+    #[test]
+    fn check_input_device_availability_handles_decorated_pin() {
+        // Find an actually-available device on this host, then build a
+        // decorated form of its canonical name and verify the check
+        // accepts it. If enumeration returns nothing (CI sans audio),
+        // the test trivially passes — `Unknown` is also valid.
+        let devices = list_input_devices_detailed();
+        let Some(any) = devices.first() else {
+            return;
+        };
+        let decorated = format!(" {} (96000Hz, 1 ch) ", any.name);
+        assert_eq!(
+            check_input_device_availability(&decorated),
+            DeviceAvailability::Available,
+            "decorated form of an existing device should canonicalize and resolve"
+        );
+    }
+
+    #[test]
+    fn auto_heal_missing_recording_device_noop_when_unset() {
+        let mut config = crate::config::Config::default();
+        config.recording.device = None;
+        assert!(!auto_heal_missing_recording_device(&mut config));
+        assert!(config.recording.device.is_none());
+    }
+
+    #[test]
+    fn auto_heal_missing_recording_device_noop_when_empty_string() {
+        let mut config = crate::config::Config::default();
+        config.recording.device = Some(String::new());
+        assert!(!auto_heal_missing_recording_device(&mut config));
+        // Empty string is left as-is — caller can normalize separately.
+        // The healer only acts when there's a real pin that fails.
+        assert_eq!(config.recording.device, Some(String::new()));
+    }
+
+    #[test]
+    fn auto_heal_missing_recording_device_clears_when_definitely_missing() {
+        // Use a device name that no real system would expose so the
+        // verdict is deterministic regardless of the test host's audio
+        // setup, but only act if enumeration actually returned devices
+        // (CI runners with no audio hardware get DeviceAvailability::Unknown
+        // and the healer correctly leaves the pin alone).
+        let mut config = crate::config::Config::default();
+        let bogus = "__minutes_test_device_that_should_never_exist_12345__";
+        config.recording.device = Some(bogus.to_string());
+
+        let changed = auto_heal_missing_recording_device(&mut config);
+        match check_input_device_availability(bogus) {
+            DeviceAvailability::Missing => {
+                assert!(changed, "should clear pin when device is missing");
+                assert!(
+                    config.recording.device.is_none(),
+                    "missing pin should be cleared"
+                );
+            }
+            DeviceAvailability::Unknown => {
+                assert!(!changed, "Unknown verdict must not modify config");
+                assert_eq!(config.recording.device.as_deref(), Some(bogus));
+            }
+            DeviceAvailability::Available => {
+                panic!("bogus device name unexpectedly available — test invariant violated");
+            }
         }
     }
 }

@@ -3087,4 +3087,53 @@ mod tests {
             }
         }
     }
+
+    /// Issue #189 regression guard. The desktop's recording entry
+    /// points (`start_recording`, `run_live_session`,
+    /// `start_dictation_session`) call `auto_heal_missing_recording_device`
+    /// against an in-memory `Config` clone; they must NOT persist the
+    /// healed config. Persistence is the startup-only concern handled
+    /// in `main.rs` so users keep their pin for when the device
+    /// reconnects on a future launch.
+    ///
+    /// This test confirms the function leaves persistence to the
+    /// caller by writing a config to disk, healing an in-memory copy
+    /// with a missing device, and verifying the on-disk config is
+    /// unchanged.
+    #[test]
+    #[cfg_attr(target_os = "windows", ignore)]
+    fn auto_heal_in_memory_does_not_persist() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("config.toml");
+
+        // Write a config with a real-looking but missing device pin.
+        let bogus = "__minutes_test_device_that_should_never_exist_runtime__";
+        let original = format!(
+            "[recording]\ndevice = \"{}\"\nallow_degraded_call_capture = false\n",
+            bogus
+        );
+        std::fs::write(&path, &original).expect("write");
+
+        // Heal an in-memory copy.
+        let mut runtime = crate::config::Config::load_from(&path);
+        let result = check_input_device_availability(bogus);
+        let changed = auto_heal_missing_recording_device(&mut runtime);
+
+        // On hosts where enumeration returns Unknown, the test trivially
+        // passes — there's nothing to heal.
+        if matches!(result, DeviceAvailability::Unknown) {
+            assert!(!changed);
+            return;
+        }
+
+        // Otherwise: in-memory copy was modified, on-disk file was not.
+        assert!(changed, "should heal an in-memory missing pin");
+        assert!(runtime.recording.device.is_none());
+        let disk_after = std::fs::read_to_string(&path).expect("read");
+        assert!(
+            disk_after.contains(bogus),
+            "on-disk config must still reference the original pin so users can reconnect later; runtime heal must NOT touch the file. Got:\n{}",
+            disk_after
+        );
+    }
 }

@@ -14,8 +14,24 @@ fn text_part(line: &str) -> &str {
     line.find("] ").map(|i| &line[i + 2..]).unwrap_or(line)
 }
 
+/// Whisper noise tokens that are NEVER legitimate transcript content.
+/// These can be trimmed at any count and should be skipped by the dedup pass
+/// so the dedicated noise handlers (`collapse_noise_markers`, `trim_trailing_noise`)
+/// can deal with them.
+fn is_always_noise(text: &str) -> bool {
+    let t = text.trim().to_lowercase();
+    t == "[music]" || t == "[blank_audio]" || t == "[silence]" || t == "music"
+}
+
 /// Statistics from transcript cleaning.
+///
+/// Each `after_*` field records the segment count *after* that pass ran. If a pass
+/// is disabled in [`CleanOptions`], its field carries the count from the previous
+/// (enabled) pass - making it safe to compute pass-level deltas like
+/// `stats.original_lines - stats.after_consecutive_dedup` without checking which
+/// passes ran.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 pub struct CleanStats {
     pub original_lines: usize,
@@ -25,38 +41,277 @@ pub struct CleanStats {
     pub after_noise_markers: usize,
     pub after_trailing_trim: usize,
     pub after_command_strip: usize,
+    /// **Net** segment count delta (`original_lines - after_noise_markers`,
+    /// where `after_noise_markers` is the final output count post-pipeline),
+    /// not the raw count of input lines that were dropped.
+    ///
+    /// The dedup pass inserts a single `[...] [repeated audio removed]`
+    /// annotation line in place of each collapsed run, so collapsing 5
+    /// inputs to 1 occurrence + 1 annotation produces a net change of `-3`.
+    /// To get the cleaner "input minus output" count, suppress the annotations
+    /// via [`CleanOptions::keep_dedup_annotations`] = `false`.
     pub lines_removed: usize,
 }
 
-/// Clean an existing transcript by running all post-processing dedup layers.
-///
-/// Takes the raw transcript text (lines like `[0:00] some text`) and returns
-/// cleaned text with hallucination patterns removed, plus statistics.
-///
-/// This is idempotent: running it on already-cleaned text produces the same output.
-pub fn clean_transcript(transcript: &str) -> (String, CleanStats) {
-    let lines: Vec<String> = transcript.lines().map(|l| l.to_string()).collect();
-    let original_count = lines.len();
+impl CleanStats {
+    /// Compact one-line summary for logging.
+    ///
+    /// ```
+    /// use whisper_guard::segments::{clean_segments, CleanStats};
+    ///
+    /// let (_, stats) = clean_segments(&[
+    ///     "Thank you.".into(),
+    ///     "Thank you.".into(),
+    ///     "Thank you.".into(),
+    ///     "Real content here.".into(),
+    /// ]);
+    /// assert!(stats.summary().starts_with("whisper-guard:"));
+    /// ```
+    pub fn summary(&self) -> String {
+        // `after_noise_markers` is the final segment count post-pipeline
+        // (collapse_noise_markers runs last; see clean_segments_with_options).
+        format!(
+            "whisper-guard: {} → {} segments ({} removed)",
+            self.original_lines, self.after_noise_markers, self.lines_removed,
+        )
+    }
+}
 
-    let lines = dedup_segments(&lines);
+/// Toggles for each cleaning pass.
+///
+/// All passes default to enabled - `CleanOptions::default()` matches the production
+/// configuration used by [Minutes](https://github.com/silverstein/minutes).
+/// Use [`CleanOptions::none`] as a starting point if you want to enable only specific passes.
+///
+/// Passes always run in this order (fixed; the order matters for correctness):
+///
+/// 1. `dedup_consecutive` - collapse runs of repeated real-content segments.
+///    Always-noise tokens (`[music]`, `[blank_audio]`, `[silence]`, `music`) are
+///    skipped here so the noise-aware passes downstream can handle them.
+/// 2. `dedup_interleaved` - collapse A/B/A/B hallucination patterns
+/// 3. `strip_foreign_script` - drop segments in unrelated writing systems
+/// 4. `strip_trailing_commands` - strip `stop recording`-style voice commands.
+///    Runs BEFORE trim so noise markers hidden behind a trailing command get
+///    exposed to the trim pass.
+/// 5. `trim_trailing_noise` - trim noise markers off the end. Always-noise
+///    tokens get trimmed at any count; filler words (`yeah.`, `okay.`, `you`)
+///    need a 5+ run to trigger.
+/// 6. `collapse_noise_markers` - collapse middle-of-transcript `[music]`/
+///    `[Śmiech]`/etc. runs. Runs LAST so trim has first crack at trailing
+///    noise; whatever survives in the middle gets collapsed cleanly.
+///
+/// ```
+/// use whisper_guard::segments::{clean_segments_with_options, CleanOptions};
+///
+/// // Only run the two dedup passes; leave foreign script and noise markers alone.
+/// let opts = CleanOptions {
+///     dedup_consecutive: true,
+///     dedup_interleaved: true,
+///     ..CleanOptions::none()
+/// };
+///
+/// let (cleaned, stats) = clean_segments_with_options(
+///     &["Hello.".into(), "Hello.".into(), "Hello.".into(), "World.".into()],
+///     &opts,
+/// );
+/// // 3 "Hello." + 1 "World." → "Hello." + dedup-annotation + "World."
+/// assert_eq!(cleaned.len(), 3);
+/// assert!(cleaned.iter().any(|s| s.contains("World")));
+/// assert!(stats.lines_removed >= 1);
+/// ```
+// NOTE: deliberately NOT `#[non_exhaustive]`. Functional record update
+// (`..CleanOptions::default()`) is the primary ergonomic pattern for this struct,
+// and `#[non_exhaustive]` blocks it from external crates. New fields will be
+// added as minor-version bumps with a CHANGELOG entry.
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct CleanOptions {
+    pub dedup_consecutive: bool,
+    pub dedup_interleaved: bool,
+    pub strip_foreign_script: bool,
+    pub collapse_noise_markers: bool,
+    pub trim_trailing_noise: bool,
+    pub strip_trailing_commands: bool,
+    /// Keep the `[...] [repeated audio removed - N identical segments collapsed]`
+    /// annotation lines that the consecutive-dedup pass inserts.
+    ///
+    /// `true` (default) preserves them as a human-readable trail of what was
+    /// stripped. Set to `false` for a cleaner output stream - useful when the
+    /// segments are about to be fed to an LLM, joined into a flat string, or
+    /// otherwise consumed by code rather than read by a human.
+    pub keep_dedup_annotations: bool,
+}
+
+impl Default for CleanOptions {
+    /// All passes enabled and dedup annotations preserved.
+    /// Matches the production tuning used by Minutes.
+    fn default() -> Self {
+        Self {
+            dedup_consecutive: true,
+            dedup_interleaved: true,
+            strip_foreign_script: true,
+            collapse_noise_markers: true,
+            trim_trailing_noise: true,
+            strip_trailing_commands: true,
+            keep_dedup_annotations: true,
+        }
+    }
+}
+
+impl CleanOptions {
+    /// All passes enabled. Equivalent to `CleanOptions::default()`.
+    pub fn all() -> Self {
+        Self::default()
+    }
+
+    /// All passes disabled. Useful as a base when you want to enable specific
+    /// passes from scratch via the `..CleanOptions::none()` shorthand.
+    ///
+    /// Note: `keep_dedup_annotations` stays `true` here - it controls how dedup
+    /// emits its output, not whether dedup runs. If you opt back into
+    /// `dedup_consecutive`, you get the same annotation-emitting behavior as
+    /// the default config; suppress annotations explicitly with
+    /// `keep_dedup_annotations: false` if you don't want them.
+    pub fn none() -> Self {
+        Self {
+            dedup_consecutive: false,
+            dedup_interleaved: false,
+            strip_foreign_script: false,
+            collapse_noise_markers: false,
+            trim_trailing_noise: false,
+            strip_trailing_commands: false,
+            keep_dedup_annotations: true,
+        }
+    }
+}
+
+/// Prefix used to identify dedup annotation lines so they can be filtered.
+const DEDUP_ANNOTATION_PREFIX: &str = "[...] [repeated audio removed";
+
+/// Clean a list of raw transcript segments.
+///
+/// **This is the entry point if you're calling whisper-rs directly** (or any other
+/// transcription engine that hands you `Vec<String>` segments). It runs every
+/// hallucination guard with default settings and returns the cleaned segments plus
+/// statistics about what was removed.
+///
+/// Idempotent: running it twice produces the same output.
+///
+/// # When to use this vs. [`clean_transcript`]
+///
+/// - Use [`clean_segments`] if you have raw segment text (the common case for
+///   `whisper_state.get_segment(i).to_str()` callers).
+/// - Use [`clean_transcript`] if you have a single string with timestamped lines
+///   like `[0:00] hello world`.
+///
+/// # Example: cleaning whisper-rs output
+///
+/// ```
+/// use whisper_guard::segments::clean_segments;
+///
+/// // Whisper hallucination pattern: same phrase repeated on silence
+/// let raw = vec![
+///     "Thank you.".to_string(),
+///     "Thank you.".to_string(),
+///     "Thank you.".to_string(),
+///     "Thank you.".to_string(),
+///     "What's the budget for this quarter?".to_string(),
+/// ];
+///
+/// let (cleaned, stats) = clean_segments(&raw);
+///
+/// // Consecutive dedup keeps the first occurrence + an annotation line
+/// // showing what was removed, so 4 repeats collapse to 2 segments.
+/// assert!(stats.lines_removed >= 2);
+/// assert!(cleaned.iter().any(|s| s.contains("budget")));
+/// ```
+pub fn clean_segments(segments: &[String]) -> (Vec<String>, CleanStats) {
+    clean_segments_with_options(segments, &CleanOptions::default())
+}
+
+/// Clean a list of raw transcript segments with caller-controlled passes.
+///
+/// Like [`clean_segments`], but lets you disable specific passes if they cause
+/// false positives in your pipeline. Pass order is fixed - see [`CleanOptions`]
+/// for the rationale.
+///
+/// # Example: opt out of foreign-script filtering for multilingual transcripts
+///
+/// ```
+/// use whisper_guard::segments::{clean_segments_with_options, CleanOptions};
+///
+/// let opts = CleanOptions {
+///     strip_foreign_script: false,  // we expect mixed scripts
+///     ..CleanOptions::default()
+/// };
+///
+/// let segments = vec![
+///     "Hello world".to_string(),
+///     "你好世界".to_string(),  // would normally be filtered as foreign script
+/// ];
+/// let (cleaned, _stats) = clean_segments_with_options(&segments, &opts);
+/// assert_eq!(cleaned.len(), 2);
+/// ```
+pub fn clean_segments_with_options(
+    segments: &[String],
+    opts: &CleanOptions,
+) -> (Vec<String>, CleanStats) {
+    let original_count = segments.len();
+    let mut lines: Vec<String> = segments.to_vec();
+
+    if opts.dedup_consecutive {
+        lines = dedup_segments(&lines);
+        if !opts.keep_dedup_annotations {
+            lines.retain(|s| !s.starts_with(DEDUP_ANNOTATION_PREFIX));
+        }
+    }
     let after_consecutive = lines.len();
 
-    let lines = dedup_interleaved(&lines);
+    if opts.dedup_interleaved {
+        lines = dedup_interleaved(&lines);
+    }
     let after_interleaved = lines.len();
 
-    let lines = strip_foreign_script(&lines);
+    if opts.strip_foreign_script {
+        lines = strip_foreign_script(&lines);
+    }
     let after_script = lines.len();
 
-    // Noise marker collapse runs after foreign-script filter so the density
-    // calculation in Pass 2 isn't inflated by CJK/Cyrillic hallucination lines.
-    let lines = collapse_noise_markers(&lines);
-    let after_noise = lines.len();
+    // Pipeline ordering rationale (matters for correctness):
+    //
+    //   1. dedup_consecutive (already ran above) - skips always-noise tokens
+    //      so they flow downstream as a run for the noise-aware passes.
+    //   2. dedup_interleaved (already ran above).
+    //   3. strip_foreign_script (already ran above).
+    //   4. strip_trailing_commands ← here. Runs BEFORE trim so that any
+    //      always-noise markers hidden behind a trailing voice command
+    //      (e.g. "…content [music] [music] Stop recording.") are exposed.
+    //   5. trim_trailing_noise ← here. Catches all-noise tails at any count
+    //      (always-noise tokens) and 5+ filler runs (`yeah.`, `okay.`, `you`).
+    //   6. collapse_noise_markers ← runs LAST, so middle-of-transcript noise
+    //      runs that survived trim get collapsed cleanly. If this ran earlier
+    //      it would convert trailing `[music]` runs into `[music] + annotation`
+    //      and trim would be blocked from cleaning them up.
+    //
+    // Each `after_X` stat reports the count after pass X ran, regardless of
+    // chronological position in the pipeline. So `after_command_strip <=
+    // after_trailing_trim` and `after_noise_markers >= after_trailing_trim`
+    // are no longer guaranteed - the field name maps to a pass, not an
+    // ordinal position.
+    if opts.strip_trailing_commands {
+        lines = strip_trailing_commands(&lines);
+    }
+    let after_command = lines.len();
 
-    let lines = trim_trailing_noise(&lines);
+    if opts.trim_trailing_noise {
+        lines = trim_trailing_noise(&lines);
+    }
     let after_trim = lines.len();
 
-    let lines = strip_trailing_commands(&lines);
-    let after_command = lines.len();
+    if opts.collapse_noise_markers {
+        lines = collapse_noise_markers(&lines);
+    }
+    let after_noise = lines.len();
 
     let stats = CleanStats {
         original_lines: original_count,
@@ -66,10 +321,37 @@ pub fn clean_transcript(transcript: &str) -> (String, CleanStats) {
         after_noise_markers: after_noise,
         after_trailing_trim: after_trim,
         after_command_strip: after_command,
-        lines_removed: original_count.saturating_sub(after_command),
+        // Net change from input to final output. `collapse_noise_markers`
+        // runs last (per the pipeline-order rationale above), so
+        // `after_noise_markers` is the final segment count.
+        lines_removed: original_count.saturating_sub(after_noise),
     };
 
-    (lines.join("\n"), stats)
+    (lines, stats)
+}
+
+/// Clean an existing transcript by running all post-processing dedup layers.
+///
+/// **Use this if your transcript is already a single string with timestamped lines**
+/// like `[0:00] some text`. For raw segments straight from whisper, prefer
+/// [`clean_segments`] - it skips the unnecessary parse/format round-trip.
+///
+/// Idempotent: running it on already-cleaned text produces the same output.
+///
+/// # Example
+///
+/// ```
+/// use whisper_guard::segments::clean_transcript;
+///
+/// let raw = "[0:00] Hello world\n[0:03] Hello world\n[0:06] Hello world\n[0:09] Real content";
+/// let (cleaned, stats) = clean_transcript(raw);
+/// assert!(stats.lines_removed > 0);
+/// assert!(cleaned.contains("Real content"));
+/// ```
+pub fn clean_transcript(transcript: &str) -> (String, CleanStats) {
+    let lines: Vec<String> = transcript.lines().map(|l| l.to_string()).collect();
+    let (cleaned, stats) = clean_segments(&lines);
+    (cleaned.join("\n"), stats)
 }
 
 /// Detect and remove repetition loops from whisper output.
@@ -117,6 +399,18 @@ pub fn dedup_segments(lines: &[String]) -> Vec<String> {
 
     while i < lines.len() {
         let base_text = text_part(&lines[i]);
+
+        // Always-noise tokens are NOT collapsed by dedup - they're handed to
+        // collapse_noise_markers / trim_trailing_noise which know how to treat
+        // them as a class. Collapsing here would prematurely turn a noise run
+        // into "marker + annotation", which then can't be trimmed even if it's
+        // entirely trailing.
+        if is_always_noise(base_text) {
+            result.push(lines[i].clone());
+            i += 1;
+            continue;
+        }
+
         let mut run_end = i + 1;
 
         while run_end < lines.len() {
@@ -135,12 +429,13 @@ pub fn dedup_segments(lines: &[String]) -> Vec<String> {
                 first_segment = i,
                 repeated_count = run_len,
                 text = base_text,
-                "detected repetition loop in whisper output — collapsing {} segments",
+                "detected repetition loop in whisper output - collapsing {} segments",
                 run_len
             );
             result.push(lines[i].clone());
             result.push(format!(
-                "[...] [repeated audio removed — {} identical segments collapsed]",
+                "{} - {} identical segments collapsed]",
+                DEDUP_ANNOTATION_PREFIX,
                 run_len - 1
             ));
             i = run_end;
@@ -272,7 +567,7 @@ pub fn dedup_interleaved(lines: &[String]) -> Vec<String> {
                     occurrences = actual_count,
                     filler_count = (i..region_end).filter(|&j| fillers[j]).count(),
                     phrase = phrase,
-                    "detected interleaved hallucination loop — marking {} lines for removal",
+                    "detected interleaved hallucination loop - marking {} lines for removal",
                     region_len
                 );
                 let mut kept_first = false;
@@ -302,7 +597,7 @@ pub fn dedup_interleaved(lines: &[String]) -> Vec<String> {
                     in_removed_run = true;
                     let run_len = (idx..lines.len()).take_while(|&j| remove[j]).count();
                     result.push(format!(
-                        "[...] [hallucinated repetition removed — {} lines collapsed]",
+                        "[...] [hallucinated repetition removed - {} lines collapsed]",
                         run_len
                     ));
                 }
@@ -332,7 +627,7 @@ pub fn dedup_interleaved(lines: &[String]) -> Vec<String> {
 /// `[risas]` (Spanish laughter), etc.
 ///
 /// The existing `trim_trailing_noise` only catches trailing English markers. This
-/// function is language-agnostic — it detects any line whose text (after timestamp)
+/// function is language-agnostic - it detects any line whose text (after timestamp)
 /// is a short bracketed expression `[word(s)]` and collapses consecutive runs of 3+.
 /// It also collapses scattered patterns when >50% of a window are noise markers.
 pub fn collapse_noise_markers(lines: &[String]) -> Vec<String> {
@@ -364,7 +659,7 @@ pub fn collapse_noise_markers(lines: &[String]) -> Vec<String> {
         if inner.chars().all(|c| c.is_ascii_digit() || c == ':') {
             return false;
         }
-        // Must be short (1-4 words, ≤40 chars) — non-speech markers are brief
+        // Must be short (1-4 words, ≤40 chars) - non-speech markers are brief
         let word_count = inner.split_whitespace().count();
         (1..=4).contains(&word_count) && inner.len() <= 40
     }
@@ -387,7 +682,7 @@ pub fn collapse_noise_markers(lines: &[String]) -> Vec<String> {
             if run_len >= 3 {
                 result.push(lines[run_start].clone());
                 result.push(format!(
-                    "[...] [non-speech audio removed — {} markers collapsed]",
+                    "[...] [non-speech audio removed - {} markers collapsed]",
                     run_len - 1
                 ));
                 tracing::debug!(
@@ -408,7 +703,7 @@ pub fn collapse_noise_markers(lines: &[String]) -> Vec<String> {
         }
     }
 
-    // Pass 2: Ratio check — if ≥2/3 of remaining lines are noise markers, strip them all.
+    // Pass 2: Ratio check - if ≥2/3 of remaining lines are noise markers, strip them all.
     // After pass 1 collapses consecutive runs, scattered markers that still dominate
     // the transcript are almost certainly hallucination. Real recordings rarely have
     // this density (e.g., a comedy show might have 30-40% [laughter] annotations, not 66%+).
@@ -424,7 +719,7 @@ pub fn collapse_noise_markers(lines: &[String]) -> Vec<String> {
                 markers = remaining_markers,
                 total = result.len(),
                 ratio = format!("{:.0}%", ratio * 100.0),
-                "high noise marker density — stripping scattered markers"
+                "high noise marker density - stripping scattered markers"
             );
             let mut stripped = Vec::with_capacity(content_lines + 1);
             let mut removed = 0usize;
@@ -458,7 +753,7 @@ pub fn collapse_noise_markers(lines: &[String]) -> Vec<String> {
 /// Detect and remove lines with hallucinated foreign script.
 ///
 /// When whisper processes silence or very low-signal audio, it often hallucinates
-/// text in scripts unrelated to the actual audio — most commonly CJK characters
+/// text in scripts unrelated to the actual audio - most commonly CJK characters
 /// (Japanese/Chinese/Korean), Arabic, or Cyrillic in an otherwise Latin transcript.
 ///
 /// This function determines the dominant script of the transcript and removes lines
@@ -506,7 +801,7 @@ pub fn strip_foreign_script(lines: &[String]) -> Vec<String> {
     } else if other_count as f64 / meaningful as f64 >= 0.7 {
         Script::Other
     } else {
-        return lines.to_vec(); // No clear majority — don't filter
+        return lines.to_vec(); // No clear majority - don't filter
     };
 
     let mut result = Vec::with_capacity(lines.len());
@@ -598,40 +893,49 @@ pub fn trim_trailing_noise(lines: &[String]) -> Vec<String> {
         return Vec::new();
     }
 
-    fn is_noise(text: &str) -> bool {
+    /// Filler tokens that COULD be legitimate one-word closings ("Thanks.",
+    /// "Yeah.", "Okay."). These need a higher floor to avoid trimming real
+    /// terse content; only trim when there's a 5+ run of them.
+    fn is_filler(text: &str) -> bool {
         let t = text.trim().to_lowercase();
-        t == "[music]"
-            || t == "[blank_audio]"
-            || t == "[silence]"
-            || t == "music"
-            || t == "you"                // common whisper hallucination on silence
-            || t == "okay."
-            || t == "yeah."
-        // Note: collapse markers ("[...] [repeated ...]") are NOT noise —
+        t == "you" || t == "okay." || t == "yeah."
+        // Note: collapse markers ("[...] [repeated ...]") are NOT noise -
         // treating them as noise would make clean_transcript non-idempotent.
     }
 
-    // Walk backward from the end, counting consecutive noise lines
+    // Walk backward from the end, counting trailing noise/filler lines and
+    // tracking how many were always-noise vs filler.
     let mut trim_from = lines.len();
+    let mut always_noise_count = 0usize;
     for i in (0..lines.len()).rev() {
         let text = text_part(&lines[i]);
-        if is_noise(text) {
+        if is_always_noise(text) {
+            trim_from = i;
+            always_noise_count += 1;
+        } else if is_filler(text) {
             trim_from = i;
         } else {
             break;
         }
     }
 
-    // Only trim if we're removing a significant trailing block (5+ lines)
     let trimmed_count = lines.len() - trim_from;
-    if trimmed_count >= 5 {
+
+    // Trim if EITHER:
+    //   - any always-noise marker is in the trailing block (those are never
+    //     legitimate transcript content, regardless of count), OR
+    //   - the trailing filler block is 5+ lines (protects "Thanks." closings)
+    let should_trim = always_noise_count > 0 || trimmed_count >= 5;
+
+    if should_trim {
         tracing::info!(
             trimmed = trimmed_count,
+            always_noise = always_noise_count,
             "removed trailing noise from transcript"
         );
         let mut result: Vec<String> = lines[..trim_from].to_vec();
         result.push(format!(
-            "[Recording ended — {} lines of trailing noise removed]",
+            "[Recording ended - {} lines of trailing noise removed]",
             trimmed_count
         ));
         result
@@ -662,7 +966,7 @@ pub fn strip_trailing_commands(lines: &[String]) -> Vec<String> {
     ];
 
     let mut result = lines.to_vec();
-    // Check last 2 lines — the command might be split across whisper segments
+    // Check last 2 lines - the command might be split across whisper segments
     for _ in 0..2 {
         if let Some(last) = result.last() {
             let text = text_part(last).trim().to_lowercase();
@@ -875,15 +1179,47 @@ mod tests {
     }
 
     #[test]
-    fn trim_keeps_short_trailing_noise() {
-        let lines = vec![
+    fn trim_short_run_of_always_noise_now_trimmed() {
+        // 0.2.0 behavior change: always-noise tokens (`[music]`, `[blank_audio]`,
+        // `[silence]`, `music`) are NEVER legitimate transcript content, so they
+        // get trimmed at any count. The 5-line floor still protects filler words
+        // (`you`, `okay.`, `yeah.`) that COULD be legitimate one-word closings -
+        // see `trim_keeps_short_trailing_filler` below.
+        let lines: Vec<String> = vec![
             "[0:00] Hello world".into(),
             "[0:05] [music]".into(),
             "[0:10] [music]".into(),
             "[0:15] [music]".into(),
         ];
         let result = trim_trailing_noise(&lines);
-        assert_eq!(result, lines);
+        assert_eq!(result.len(), 2);
+        assert!(result[0].contains("Hello world"));
+        assert!(result[1].contains("trailing noise removed"));
+    }
+
+    #[test]
+    fn trim_keeps_short_trailing_filler() {
+        // Filler words at the end MUST survive - common legitimate closing.
+        let lines: Vec<String> = vec!["[0:00] That wraps it".into(), "[0:05] yeah.".into()];
+        let result = trim_trailing_noise(&lines);
+        assert_eq!(result, lines, "single-filler closing must survive");
+    }
+
+    #[test]
+    fn trim_long_run_of_filler_is_trimmed() {
+        // 5+ filler in a row is suspicious enough to trim.
+        let lines: Vec<String> = vec![
+            "[0:00] Real content".into(),
+            "[0:05] yeah.".into(),
+            "[0:10] yeah.".into(),
+            "[0:15] yeah.".into(),
+            "[0:20] yeah.".into(),
+            "[0:25] yeah.".into(),
+        ];
+        let result = trim_trailing_noise(&lines);
+        assert_eq!(result.len(), 2);
+        assert!(result[0].contains("Real content"));
+        assert!(result[1].contains("trailing noise removed"));
     }
 
     #[test]
@@ -938,7 +1274,7 @@ mod tests {
 
     #[test]
     fn script_no_action_on_mixed_transcript() {
-        // No clear majority (50/50 split) — don't filter anything
+        // No clear majority (50/50 split) - don't filter anything
         let lines = vec![
             "[0:00] Hello world".into(),
             "[0:05] こんにちは".into(),
@@ -953,7 +1289,7 @@ mod tests {
     fn script_handles_single_line() {
         let lines = vec!["[0:00] スパイシー".into()];
         let result = strip_foreign_script(&lines);
-        assert_eq!(result, lines); // Single line — no majority to compare against
+        assert_eq!(result, lines); // Single line - no majority to compare against
     }
 
     #[test]
@@ -1109,9 +1445,9 @@ mod tests {
         // Prior dedup pass markers should not be treated as noise
         let lines = vec![
             "[0:00] Hello world".into(),
-            "[...] [repeated audio removed — 5 identical segments collapsed]".into(),
+            "[...] [repeated audio removed - 5 identical segments collapsed]".into(),
             "[0:30] Something else".into(),
-            "[...] [hallucinated repetition removed — 10 lines collapsed]".into(),
+            "[...] [hallucinated repetition removed - 10 lines collapsed]".into(),
             "[1:00] Final line".into(),
         ];
         let result = collapse_noise_markers(&lines);
@@ -1182,7 +1518,7 @@ mod tests {
 
     #[test]
     fn noise_markers_below_threshold_kept() {
-        // 50% markers (5 of 10) — below the 66% threshold, all kept
+        // 50% markers (5 of 10) - below the 66% threshold, all kept
         let lines = vec![
             "[0:00] Real content one".into(),
             "[0:03] [laughter]".into(),
@@ -1196,7 +1532,7 @@ mod tests {
             "[0:27] [laughter]".into(),
         ];
         let result = collapse_noise_markers(&lines);
-        // No markers stripped — density is too low for pass 2
+        // No markers stripped - density is too low for pass 2
         assert_eq!(result, lines);
     }
 
@@ -1318,6 +1654,239 @@ mod tests {
         let (cleaned, stats) = clean_transcript(input);
         assert!(!cleaned.contains("Stop recording"));
         assert!(cleaned.contains("Action item for Bob"));
-        assert!(stats.after_command_strip < stats.after_trailing_trim);
+        // Command-strip runs before trim now, so after_command_strip is the
+        // count BEFORE the (no-op) trim runs. Trim is a no-op here, so the two
+        // counts match.
+        assert!(stats.after_command_strip <= stats.after_trailing_trim);
+        assert_eq!(stats.lines_removed, 1);
+    }
+
+    // ---- clean_segments + CleanOptions ----
+
+    #[test]
+    fn clean_segments_handles_empty() {
+        let (cleaned, stats) = clean_segments(&[]);
+        assert!(cleaned.is_empty());
+        assert_eq!(stats.original_lines, 0);
+        assert_eq!(stats.lines_removed, 0);
+    }
+
+    #[test]
+    fn clean_segments_passes_through_clean_input() {
+        let input: Vec<String> = vec![
+            "Welcome to the meeting.".into(),
+            "Let's discuss Q3 numbers.".into(),
+            "Revenue is up twelve percent.".into(),
+        ];
+        let (cleaned, stats) = clean_segments(&input);
+        assert_eq!(cleaned, input, "clean input should be untouched");
+        assert_eq!(stats.lines_removed, 0);
+        assert_eq!(stats.after_command_strip, 3);
+    }
+
+    #[test]
+    fn clean_segments_dedups_repeated_hallucination() {
+        let input: Vec<String> = vec![
+            "Thank you.".into(),
+            "Thank you.".into(),
+            "Thank you.".into(),
+            "Thank you.".into(),
+            "What's the budget for Q3?".into(),
+        ];
+        let (cleaned, stats) = clean_segments(&input);
+        // Real content survives; the hallucination loop collapses to
+        // first occurrence + annotation line.
+        assert!(cleaned.iter().any(|s| s.contains("budget")));
+        assert!(stats.lines_removed >= 2);
+        // Annotation line is inserted to mark what was collapsed.
+        assert!(cleaned.iter().any(|s| s.contains("repeated audio removed")));
+    }
+
+    #[test]
+    fn clean_segments_is_idempotent() {
+        let input: Vec<String> = vec![
+            "Real content.".into(),
+            "Thank you.".into(),
+            "Thank you.".into(),
+            "Thank you.".into(),
+            "Thank you.".into(),
+            "More real content.".into(),
+        ];
+        let (first, _) = clean_segments(&input);
+        let (second, second_stats) = clean_segments(&first);
+        assert_eq!(first, second, "second pass should be a no-op");
+        assert_eq!(second_stats.lines_removed, 0);
+    }
+
+    #[test]
+    fn clean_segments_with_options_respects_disabled_passes() {
+        let input: Vec<String> = vec![
+            "Hello.".into(),
+            "Hello.".into(),
+            "Hello.".into(),
+            "Hello.".into(),
+        ];
+        // Disable consecutive dedup; everything else still runs.
+        let opts = CleanOptions {
+            dedup_consecutive: false,
+            ..CleanOptions::default()
+        };
+        let (cleaned, _) = clean_segments_with_options(&input, &opts);
+        assert_eq!(cleaned.len(), input.len(), "dedup disabled → no removal");
+    }
+
+    #[test]
+    fn clean_options_none_runs_no_passes() {
+        let input: Vec<String> = vec![
+            "Thank you.".into(),
+            "Thank you.".into(),
+            "Thank you.".into(),
+            "Thank you.".into(),
+            "Stop recording.".into(),
+        ];
+        let (cleaned, stats) = clean_segments_with_options(&input, &CleanOptions::none());
+        assert_eq!(cleaned, input, "no passes → no changes");
+        assert_eq!(stats.lines_removed, 0);
+    }
+
+    #[test]
+    fn clean_options_all_matches_default() {
+        // Same default config exercised two ways must produce the same output.
+        let input: Vec<String> = vec![
+            "Real meeting content.".into(),
+            "Thank you.".into(),
+            "Thank you.".into(),
+            "Thank you.".into(),
+            "[music]".into(),
+        ];
+        let (default_out, default_stats) = clean_segments(&input);
+        let (all_out, all_stats) = clean_segments_with_options(&input, &CleanOptions::all());
+        assert_eq!(default_out, all_out);
+        assert_eq!(default_stats, all_stats);
+    }
+
+    #[test]
+    fn clean_segments_works_on_raw_segments_without_timestamps() {
+        // The fork-user case: raw segments straight from whisper_state.get_segment(i).
+        // No timestamp brackets. Cleaning should still work end-to-end.
+        let raw_segments: Vec<String> = vec![
+            " Thank you.".into(), // whisper segments often have leading space
+            " Thank you.".into(),
+            " Thank you.".into(),
+            " Thank you.".into(),
+            " So what's our action plan?".into(),
+        ];
+        let (cleaned, stats) = clean_segments(&raw_segments);
+        assert!(stats.lines_removed >= 2);
+        assert!(cleaned.iter().any(|s| s.contains("action plan")));
+    }
+
+    #[test]
+    fn clean_transcript_delegates_to_clean_segments() {
+        // Both entry points should produce the same logical output
+        // for an input where formatting doesn't matter.
+        let raw = "Thank you.\nThank you.\nThank you.\nReal content.";
+        let segments: Vec<String> = raw.lines().map(String::from).collect();
+        let (transcript_out, _t_stats) = clean_transcript(raw);
+        let (segments_out, _s_stats) = clean_segments(&segments);
+        assert_eq!(transcript_out, segments_out.join("\n"));
+    }
+
+    #[test]
+    fn clean_stats_summary_is_human_readable() {
+        let input: Vec<String> = vec![
+            "Hello.".into(),
+            "Hello.".into(),
+            "Hello.".into(),
+            "World.".into(),
+        ];
+        let (_, stats) = clean_segments(&input);
+        let summary = stats.summary();
+        assert!(summary.contains("whisper-guard:"));
+        assert!(summary.contains("4")); // original count
+    }
+
+    #[test]
+    fn clean_segments_with_huge_input_does_not_panic() {
+        // Defensive: 10k segments, all identical, should not blow up.
+        let input: Vec<String> = (0..10_000).map(|_| "Thank you.".to_string()).collect();
+        let (cleaned, stats) = clean_segments(&input);
+        assert_eq!(stats.original_lines, 10_000);
+        assert!(cleaned.len() < 10);
+    }
+
+    #[test]
+    fn clean_segments_handles_unicode_correctly() {
+        // Mixed scripts within a single legitimate segment shouldn't trigger filtering.
+        let input: Vec<String> = vec![
+            "Café meeting at 9am with Søren and José".into(),
+            "Discussed naïve Bayes models".into(),
+        ];
+        let (cleaned, _) = clean_segments(&input);
+        assert_eq!(cleaned.len(), 2, "unicode-in-Latin should not be filtered");
+    }
+
+    #[test]
+    fn keep_dedup_annotations_default_true_preserves_marker() {
+        let input: Vec<String> = vec![
+            "Thank you.".into(),
+            "Thank you.".into(),
+            "Thank you.".into(),
+            "Thank you.".into(),
+            "Real content.".into(),
+        ];
+        let (cleaned, _) = clean_segments(&input);
+        assert!(
+            cleaned
+                .iter()
+                .any(|s| s.starts_with(DEDUP_ANNOTATION_PREFIX)),
+            "default behavior should preserve the annotation line"
+        );
+    }
+
+    #[test]
+    fn keep_dedup_annotations_false_strips_marker() {
+        let input: Vec<String> = vec![
+            "Thank you.".into(),
+            "Thank you.".into(),
+            "Thank you.".into(),
+            "Thank you.".into(),
+            "Real content.".into(),
+        ];
+        let opts = CleanOptions {
+            keep_dedup_annotations: false,
+            ..CleanOptions::default()
+        };
+        let (cleaned, stats) = clean_segments_with_options(&input, &opts);
+        assert!(
+            !cleaned
+                .iter()
+                .any(|s| s.starts_with(DEDUP_ANNOTATION_PREFIX)),
+            "annotation should be removed"
+        );
+        // With annotation suppressed, output is just "Thank you." + "Real content."
+        // Net removed: 5 - 2 = 3.
+        assert_eq!(cleaned.len(), 2);
+        assert_eq!(stats.lines_removed, 3);
+    }
+
+    #[test]
+    fn keep_dedup_annotations_does_not_strip_other_bracket_content() {
+        // A real segment that happens to start with a bracket should NOT be filtered.
+        let input: Vec<String> = vec![
+            "Thank you.".into(),
+            "Thank you.".into(),
+            "Thank you.".into(),
+            "[NAME] said the deal closed.".into(),
+        ];
+        let opts = CleanOptions {
+            keep_dedup_annotations: false,
+            ..CleanOptions::default()
+        };
+        let (cleaned, _) = clean_segments_with_options(&input, &opts);
+        assert!(
+            cleaned.iter().any(|s| s.contains("[NAME]")),
+            "non-annotation bracket content must survive"
+        );
     }
 }

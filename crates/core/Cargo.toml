@@ -45,7 +45,7 @@ crossbeam-channel = { workspace = true, optional = true }
 pyannote-rs = { workspace = true, optional = true }
 ort = { workspace = true, optional = true }
 ndarray = { workspace = true, optional = true }
-whisper-guard = { path = "../whisper-guard", version = "0.1.2" }
+whisper-guard = { path = "../whisper-guard", version = "0.2.0" }
 nnnoiseless = { workspace = true, optional = true }
 base64 = "0.22"
 rusqlite = { workspace = true }

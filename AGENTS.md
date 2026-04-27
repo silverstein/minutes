@@ -100,6 +100,33 @@ Why:
 - ad-hoc local rebuilds of `/Applications/Minutes.app` can trigger repeated or misleading permission prompts
 - the signed dev app is the stable local identity for permission-sensitive testing
 
+## Independent-cadence crate: `whisper-guard`
+
+`crates/whisper-guard/` is published to crates.io on its own cadence — separate from the main Minutes release.
+It is NOT in the main Release Checklist's "all 6 versions must match" list.
+
+**When you change anything under `crates/whisper-guard/src/`:**
+
+1. Bump `crates/whisper-guard/Cargo.toml` `version` (semver).
+2. Publish independently:
+   ```bash
+   cd crates/whisper-guard
+   cargo publish --dry-run && cargo publish
+   ```
+3. Do NOT bump the main Minutes version just because whisper-guard changed.
+
+**Before cutting a Minutes release, verify whisper-guard is in sync:**
+
+```bash
+PUBLISHED=$(curl -s https://crates.io/api/v1/crates/whisper-guard | jq -r '.crate.max_stable_version')
+LAST_PUBLISH_COMMIT=$(git log --grep="whisper-guard $PUBLISHED" --format="%H" | head -1)
+git log "$LAST_PUBLISH_COMMIT"..HEAD -- crates/whisper-guard/
+```
+
+If that diff is non-empty, publish whisper-guard first. The full procedure lives in `CLAUDE.md` Release Checklist Step 11.5.
+
+**Why this matters:** whisper-guard has external consumers (~277 downloads at last check). Repo state drifting ahead of crates.io means downstream users — including potentially Tracegrain (`~/Sites/patternwork`) — silently miss anti-hallucination fixes shipped here.
+
 <!-- BEGIN BEADS INTEGRATION profile:full hash:d4f96305 -->
 ## Issue Tracking with bd (beads)
 

@@ -166,6 +166,13 @@ grep version Cargo.toml tauri/src-tauri/tauri.conf.json crates/mcp/package.json 
   crates/sdk/package.json manifest.json && grep 'version:' crates/mcp/src/index.ts
 ```
 
+**Independent-cadence crates.** `crates/whisper-guard/Cargo.toml` is published to crates.io on its own cadence — it does NOT need to match the main version. Check whether it has unreleased changes before tagging the main release:
+```bash
+PUBLISHED=$(curl -s https://crates.io/api/v1/crates/whisper-guard | jq -r '.crate.max_stable_version')
+LAST_PUBLISH_COMMIT=$(git log --grep="whisper-guard $PUBLISHED" --format="%H" | head -1)
+git log "$LAST_PUBLISH_COMMIT"..HEAD -- crates/whisper-guard/   # any commits → bump + publish in Step 11.5
+```
+
 ### 2. Manifest sync
 - Tools in `manifest.json` match tools registered in `crates/mcp/src/index.ts`
 - `long_description` reflects current capabilities
@@ -239,6 +246,17 @@ cd crates/sdk && npm publish --access public --registry https://registry.npmjs.o
 cd crates/mcp && npm publish --access public --registry https://registry.npmjs.org
 ```
 **IMPORTANT**: `crates/mcp/package.json` must depend on `"minutes-sdk": "^X.Y.Z"` (npm version), NOT `"file:../sdk"` (local path). Check before publishing. If 2FA blocks publish, use a granular access token with "Bypass 2FA" enabled.
+
+### 11.5. Publish independent-cadence crates (whisper-guard) if bumped
+Skip this step if Step 1 showed no changes to `crates/whisper-guard/` since the last whisper-guard publish.
+```bash
+cd crates/whisper-guard
+cargo publish --dry-run                  # verify packaging cleanly
+cargo publish                            # actual publish
+# Confirm:
+sleep 30 && curl -s https://crates.io/api/v1/crates/whisper-guard | jq '.crate.max_stable_version'
+```
+whisper-guard is a standalone MIT crate consumed outside this repo (currently 277+ downloads). Bump independently of the main release; do NOT couple to the Minutes version. If you skip the publish, the crates.io users miss the fix and you create silent drift between repo state and published artifact.
 
 ### 12. Refresh the landing page copy, then redeploy
 Before deploying, make sure the site matches what just shipped:
@@ -429,7 +447,7 @@ node test/mcp_tools_test.mjs                        # 8 MCP integration tests
 ## Test Coverage
 
 ~290 tests total:
-- 49 whisper-guard unit tests (resample, normalize, strip_silence, dedup_segments, dedup_interleaved, collapse_noise_markers, strip_foreign_script, trim_trailing_noise, clean_transcript + 1 doctest)
+- 85 whisper-guard tests (72 unit + 7 integration + 6 doctest) covering resample, normalize, strip_silence, dedup_segments, dedup_interleaved, collapse_noise_markers, strip_foreign_script, trim_trailing_noise, clean_transcript, clean_segments, CleanOptions toggles + keep_dedup_annotations, CleanStats summary, fork-user integration path, idempotency, pathological inputs, and known-limitation regression guards
 - 130 core unit tests (all modules including screen, calendar, config, watch, streaming whisper, vault, dictation, live_transcript, health, vad, hotkey, device_monitor, diarize)
 - 10 integration tests (pipeline, permissions, collisions, search filters)
 - 33 Tauri unit tests (commands, call detection, call capture)

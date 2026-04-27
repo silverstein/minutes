@@ -1,14 +1,16 @@
 [package]
 name = "whisper-guard"
-version = "0.1.2"
+version = "0.2.0"
 edition = "2021"
+rust-version = "1.75"
 license = "MIT"
 authors = ["Mat Silverstein"]
-description = "Anti-hallucination toolkit for whisper-rs — segment dedup, silence stripping, parameter presets"
+description = "The post-processing layer Whisper should have shipped with - segment dedup, foreign-script rejection, noise-marker collapse, voice-command strip"
 keywords = ["whisper", "transcription", "audio", "speech", "hallucination"]
 categories = ["multimedia::audio", "text-processing"]
 repository = "https://github.com/silverstein/minutes"
 homepage = "https://useminutes.app"
+readme = "README.md"
 
 [package.metadata.docs.rs]
 all-features = true
@@ -16,7 +18,11 @@ all-features = true
 [features]
 default = []
 whisper = ["dep:whisper-rs"]
+# Adds Serialize/Deserialize derives to CleanStats and CleanOptions so they
+# can flow through serde-based logging, config files, IPC, etc.
+serde = ["dep:serde"]
 
 [dependencies]
 tracing = "0.1"
 whisper-rs = { version = "0.16", optional = true }
+serde = { version = "1", optional = true, features = ["derive"] }

@@ -718,6 +718,7 @@ fn write_dictation_file(text: &str, duration_secs: f64, config: &Config) -> Opti
         recorded_by: config.identity.name.clone(),
         visibility: None,
         speaker_map: vec![],
+        template: None,
         filter_diagnosis: None,
     };
 

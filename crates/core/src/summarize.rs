@@ -1,5 +1,6 @@
 use crate::config::Config;
 use crate::logging;
+use crate::template::{compose_additional_instructions, Template};
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -53,6 +54,19 @@ pub fn summarize_with_screens(
     config: &Config,
     log_file: Option<&str>,
 ) -> Option<Summary> {
+    summarize_with_template(transcript, screen_files, config, None, log_file)
+}
+
+/// Summarize a transcript with an optional template applied. The template's
+/// `additional_instructions` and `language` (if set) are layered on top of the
+/// baseline structured-extraction prompt. Pass `None` for the legacy behavior.
+pub fn summarize_with_template(
+    transcript: &str,
+    screen_files: &[std::path::PathBuf],
+    config: &Config,
+    template: Option<&Template>,
+    log_file: Option<&str>,
+) -> Option<Summary> {
     let engine = &config.summarization.engine;
     let model = summarization_model_hint(config, !screen_files.is_empty());
     let input_chars = transcript.len();
@@ -82,7 +96,7 @@ pub fn summarize_with_screens(
         "auto" => {
             if let Some(agent) = detect_agent_cli() {
                 tracing::info!(agent = %agent, "auto-detected AI CLI for summarization");
-                summarize_with_agent_cmd(transcript, config, &agent)
+                summarize_with_agent_cmd(transcript, config, template, &agent)
             } else {
                 tracing::info!(
                     "no AI CLI found (claude, codex, gemini, opencode), skipping summarization"
@@ -104,13 +118,13 @@ pub fn summarize_with_screens(
                 return None;
             }
         }
-        "agent" => summarize_with_agent(transcript, config),
-        "claude" => summarize_with_claude(transcript, screen_files, config),
-        "openai" => summarize_with_openai(transcript, screen_files, config),
-        "mistral" => summarize_with_mistral(transcript, screen_files, config),
-        "ollama" => summarize_with_ollama(transcript, config),
+        "agent" => summarize_with_agent(transcript, config, template),
+        "claude" => summarize_with_claude(transcript, screen_files, config, template),
+        "openai" => summarize_with_openai(transcript, screen_files, config, template),
+        "mistral" => summarize_with_mistral(transcript, screen_files, config, template),
+        "ollama" => summarize_with_ollama(transcript, config, template),
         "openai-compatible" | "openai_compatible" => {
-            summarize_with_openai_compatible(transcript, screen_files, config)
+            summarize_with_openai_compatible(transcript, screen_files, config, template)
         }
         other => {
             tracing::warn!(engine = %other, "unknown summarization engine, skipping");
@@ -409,7 +423,15 @@ pub fn get_effective_summary_language(config: &Config) -> &str {
     }
 }
 
-fn build_system_prompt(language: &str) -> String {
+fn build_system_prompt(language: &str, template: Option<&Template>) -> String {
+    let effective_language = template
+        .and_then(|t| t.frontmatter.language.as_deref())
+        .unwrap_or(language);
+    let base = build_base_system_prompt(effective_language);
+    compose_additional_instructions(&base, template)
+}
+
+fn build_base_system_prompt(language: &str) -> String {
     let lang_instruction = if language == "auto" {
         "IMPORTANT: Respond in the same language as the transcript. If the transcript is in French, respond in French. If in Spanish, respond in Spanish. Match the transcript's language exactly. Only the section headers (KEY POINTS, DECISIONS, etc.) should remain in English for machine parsing.".to_string()
     } else {
@@ -973,14 +995,16 @@ fn prepare_agent_invocation(
 fn summarize_with_agent_cmd(
     transcript: &str,
     config: &Config,
+    template: Option<&Template>,
     cmd: &str,
 ) -> Result<Summary, Box<dyn std::error::Error>> {
-    summarize_with_agent_impl(transcript, config, cmd.to_string())
+    summarize_with_agent_impl(transcript, config, template, cmd.to_string())
 }
 
 fn summarize_with_agent(
     transcript: &str,
     config: &Config,
+    template: Option<&Template>,
 ) -> Result<Summary, Box<dyn std::error::Error>> {
     let agent_cmd = if config.summarization.agent_command.is_empty() {
         "claude".to_string()
@@ -988,17 +1012,19 @@ fn summarize_with_agent(
         config.summarization.agent_command.clone()
     };
     let agent_cmd = resolve_agent_path(&agent_cmd);
-    summarize_with_agent_impl(transcript, config, agent_cmd)
+    summarize_with_agent_impl(transcript, config, template, agent_cmd)
 }
 
 fn summarize_with_agent_impl(
     transcript: &str,
     config: &Config,
+    template: Option<&Template>,
     agent_cmd: String,
 ) -> Result<Summary, Box<dyn std::error::Error>> {
     summarize_with_agent_impl_timeout(
         transcript,
         config,
+        template,
         agent_cmd,
         std::time::Duration::from_secs(300),
     )
@@ -1007,6 +1033,7 @@ fn summarize_with_agent_impl(
 fn summarize_with_agent_impl_timeout(
     transcript: &str,
     config: &Config,
+    template: Option<&Template>,
     agent_cmd: String,
     timeout: std::time::Duration,
 ) -> Result<Summary, Box<dyn std::error::Error>> {
@@ -1026,7 +1053,7 @@ fn summarize_with_agent_impl_timeout(
 
     let prompt = format!(
         "{}\n\nSummarize this transcript:\n\n<transcript>\n{}\n</transcript>",
-        build_system_prompt(get_effective_summary_language(config)),
+        build_system_prompt(get_effective_summary_language(config), template),
         truncated
     );
 
@@ -1153,6 +1180,7 @@ fn summarize_with_claude(
     transcript: &str,
     screen_files: &[std::path::PathBuf],
     config: &Config,
+    template: Option<&Template>,
 ) -> Result<Summary, Box<dyn std::error::Error>> {
     let api_key = std::env::var("ANTHROPIC_API_KEY")
         .map_err(|_| "ANTHROPIC_API_KEY not set. Export it or switch to engine = \"ollama\"")?;
@@ -1192,7 +1220,7 @@ fn summarize_with_claude(
         let body = serde_json::json!({
             "model": CLAUDE_MODEL,
             "max_tokens": 1024,
-            "system": build_system_prompt(get_effective_summary_language(config)),
+            "system": build_system_prompt(get_effective_summary_language(config), template),
             "messages": [{
                 "role": "user",
                 "content": content_blocks
@@ -1286,6 +1314,7 @@ fn summarize_with_openai(
     transcript: &str,
     screen_files: &[std::path::PathBuf],
     config: &Config,
+    template: Option<&Template>,
 ) -> Result<Summary, Box<dyn std::error::Error>> {
     let api_key = std::env::var("OPENAI_API_KEY")
         .map_err(|_| "OPENAI_API_KEY not set. Export it or switch to engine = \"ollama\"")?;
@@ -1326,7 +1355,7 @@ fn summarize_with_openai(
         let body = serde_json::json!({
             "model": model,
             "messages": [
-                { "role": "system", "content": build_system_prompt(get_effective_summary_language(config)) },
+                { "role": "system", "content": build_system_prompt(get_effective_summary_language(config), template) },
                 { "role": "user", "content": content_parts }
             ],
             "max_tokens": 1024,
@@ -1355,6 +1384,7 @@ fn summarize_with_mistral(
     transcript: &str,
     screen_files: &[std::path::PathBuf],
     config: &Config,
+    template: Option<&Template>,
 ) -> Result<Summary, Box<dyn std::error::Error>> {
     let api_key = std::env::var("MISTRAL_API_KEY")
         .map_err(|_| "MISTRAL_API_KEY not set. Export it or switch to engine = \"ollama\"")?;
@@ -1392,7 +1422,7 @@ fn summarize_with_mistral(
         let body = serde_json::json!({
             "model": model,
             "messages": [
-                { "role": "system", "content": build_system_prompt(get_effective_summary_language(config)) },
+                { "role": "system", "content": build_system_prompt(get_effective_summary_language(config), template) },
                 { "role": "user", "content": content_parts }
             ],
             "max_tokens": 1024,
@@ -1554,11 +1584,12 @@ fn openai_compatible_summary_body(
     chunk: &str,
     screen_content: &[serde_json::Value],
     config: &Config,
+    template: Option<&Template>,
 ) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
     Ok(serde_json::json!({
         "model": openai_compatible_model(config)?,
         "messages": [
-            { "role": "system", "content": build_system_prompt(get_effective_summary_language(config)) },
+            { "role": "system", "content": build_system_prompt(get_effective_summary_language(config), template) },
             { "role": "user", "content": openai_compatible_summary_user_content(chunk, screen_content) }
         ],
         "max_tokens": 1024,
@@ -1569,6 +1600,7 @@ fn summarize_with_openai_compatible(
     transcript: &str,
     screen_files: &[std::path::PathBuf],
     config: &Config,
+    template: Option<&Template>,
 ) -> Result<Summary, Box<dyn std::error::Error>> {
     let chunks = build_prompt(transcript, config.summarization.chunk_max_tokens);
     let mut all_text = String::new();
@@ -1588,7 +1620,7 @@ fn summarize_with_openai_compatible(
         } else {
             &[]
         };
-        let body = openai_compatible_summary_body(chunk, chunk_screen_content, config)?;
+        let body = openai_compatible_summary_body(chunk, chunk_screen_content, config, template)?;
 
         let text = post_openai_compatible_chat(&body, config, "OpenAI-compatible")?;
         all_text.push_str(&text);
@@ -1603,6 +1635,7 @@ fn summarize_with_openai_compatible(
 fn summarize_with_ollama(
     transcript: &str,
     config: &Config,
+    template: Option<&Template>,
 ) -> Result<Summary, Box<dyn std::error::Error>> {
     let chunks = build_prompt(transcript, config.summarization.chunk_max_tokens);
     let mut all_text = String::new();
@@ -1610,7 +1643,7 @@ fn summarize_with_ollama(
     for chunk in &chunks {
         let body = serde_json::json!({
             "model": &config.summarization.ollama_model,
-            "prompt": format!("{}\n\nSummarize this transcript:\n\n<transcript>\n{}\n</transcript>", build_system_prompt(get_effective_summary_language(config)), chunk),
+            "prompt": format!("{}\n\nSummarize this transcript:\n\n<transcript>\n{}\n</transcript>", build_system_prompt(get_effective_summary_language(config), template), chunk),
             "stream": false,
         });
 
@@ -2500,7 +2533,7 @@ COMMITMENTS:
         config.summarization.engine = "openai-compatible".into();
         config.summarization.openai_compatible_model = "local-model".into();
 
-        let body = openai_compatible_summary_body("hello world", &[], &config).unwrap();
+        let body = openai_compatible_summary_body("hello world", &[], &config, None).unwrap();
         assert_eq!(body["model"], "local-model");
         let user_content = &body["messages"][1]["content"];
         assert!(
@@ -2523,9 +2556,13 @@ COMMITMENTS:
             "image_url": { "url": "data:image/png;base64,abc", "detail": "low" }
         })];
 
-        let body =
-            openai_compatible_summary_body("screen aware transcript", &screen_content, &config)
-                .unwrap();
+        let body = openai_compatible_summary_body(
+            "screen aware transcript",
+            &screen_content,
+            &config,
+            None,
+        )
+        .unwrap();
         let user_content = &body["messages"][1]["content"];
         let parts = user_content
             .as_array()
@@ -2549,7 +2586,8 @@ COMMITMENTS:
         config.summarization.openai_compatible_api_key_env = String::new();
 
         let summary =
-            summarize_with_openai_compatible("hello from a local server", &[], &config).unwrap();
+            summarize_with_openai_compatible("hello from a local server", &[], &config, None)
+                .unwrap();
         assert_eq!(summary.key_points, vec!["Local compatible server worked"]);
         assert_eq!(summary.decisions, vec!["Use generic backend"]);
 
@@ -2582,7 +2620,7 @@ COMMITMENTS:
         config.summarization.openai_compatible_model = "gateway-test-model".into();
         config.summarization.openai_compatible_api_key_env = env_name.into();
 
-        let result = summarize_with_openai_compatible("cloud gateway path", &[], &config);
+        let result = summarize_with_openai_compatible("cloud gateway path", &[], &config, None);
         std::env::remove_var(env_name);
         result.unwrap();
 
@@ -2612,7 +2650,7 @@ COMMITMENTS:
         config.summarization.openai_compatible_model = "desktop-fallback-model".into();
         config.summarization.openai_compatible_api_key_env = String::new();
 
-        let result = summarize_with_openai_compatible("desktop fallback path", &[], &config);
+        let result = summarize_with_openai_compatible("desktop fallback path", &[], &config, None);
         std::env::remove_var(crate::config::OPENAI_COMPATIBLE_DESKTOP_API_KEY_ENV);
         result.unwrap();
 
@@ -2917,6 +2955,7 @@ EOF
         let summary = summarize_with_agent_impl_timeout(
             "short transcript",
             &config,
+            None,
             script_path.display().to_string(),
             std::time::Duration::from_secs(5),
         )

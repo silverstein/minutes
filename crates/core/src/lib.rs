@@ -31,6 +31,7 @@ pub(crate) mod resample;
 pub mod screen;
 pub mod search;
 pub mod summarize;
+pub mod template;
 pub mod transcribe;
 pub mod transcription_coordinator;
 pub mod vault;
@@ -70,6 +71,7 @@ pub use error::{MinutesError, Result};
 pub use markdown::{ContentType, WriteResult};
 pub use pid::CaptureMode;
 pub use pipeline::process;
+pub use template::{Template, TemplateResolver, TemplateSource, DEFAULT_TEMPLATE_SLUG};
 
 #[cfg(feature = "streaming")]
 pub use streaming::{AudioChunk, AudioStream};

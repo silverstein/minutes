@@ -694,6 +694,9 @@ pub struct BackgroundPipelineContext {
     pub calendar_event: Option<crate::calendar::CalendarEvent>,
     pub recorded_at: Option<DateTime<Local>>,
     pub requested_title: Option<String>,
+    /// Optional template applied to summarization. Recorded in frontmatter
+    /// so Phase 2 reprocessing knows which template produced this file.
+    pub template: Option<crate::template::Template>,
 }
 
 #[derive(Debug, Clone)]
@@ -743,6 +746,7 @@ where
         title,
         config,
         sidecar,
+        None,
         on_progress,
     )
 }
@@ -757,7 +761,41 @@ pub fn process_with_progress<F>(
 where
     F: FnMut(PipelineStage),
 {
-    process_with_progress_and_sidecar(audio_path, content_type, title, config, None, on_progress)
+    process_with_progress_and_sidecar(
+        audio_path,
+        content_type,
+        title,
+        config,
+        None,
+        None,
+        on_progress,
+    )
+}
+
+/// Process an audio file with an optional template applied to summarization.
+/// The template's slug is recorded in the meeting's frontmatter so a Phase 2
+/// reprocessor can identify which template produced the file.
+pub fn process_with_template<F>(
+    audio_path: &Path,
+    content_type: ContentType,
+    title: Option<&str>,
+    config: &Config,
+    sidecar: Option<&SidecarMetadata>,
+    template: Option<&crate::template::Template>,
+    on_progress: F,
+) -> Result<WriteResult, MinutesError>
+where
+    F: FnMut(PipelineStage),
+{
+    process_with_progress_and_sidecar(
+        audio_path,
+        content_type,
+        title,
+        config,
+        sidecar,
+        template,
+        on_progress,
+    )
 }
 
 pub fn transcribe_to_artifact(
@@ -966,6 +1004,7 @@ pub fn write_transcript_artifact(
         recorded_by: config.identity.name.clone(),
         visibility: None,
         speaker_map: vec![],
+        template: context.template.as_ref().map(|t| t.slug().to_string()),
         filter_diagnosis: if status == Some(OutputStatus::NoSpeech) {
             Some(filter_stats.diagnosis())
         } else {
@@ -1075,10 +1114,11 @@ where
             transcript.clone()
         };
 
-        summarize::summarize_with_screens(
+        summarize::summarize_with_template(
             &transcript_with_notes,
             &screen_files,
             config,
+            context.template.as_ref(),
             Some(&audio_log_target),
         )
         .map(|summary| {
@@ -1359,6 +1399,7 @@ fn process_with_progress_and_sidecar<F>(
     title: Option<&str>,
     config: &Config,
     sidecar: Option<&SidecarMetadata>,
+    template: Option<&crate::template::Template>,
     mut on_progress: F,
 ) -> Result<WriteResult, MinutesError>
 where
@@ -1533,10 +1574,11 @@ where
         };
 
         // Send screenshots as actual images to vision-capable LLMs
-        summarize::summarize_with_screens(
+        summarize::summarize_with_template(
             &transcript_with_notes,
             &screen_files,
             config,
+            template,
             Some(&audio_log_target),
         )
         .map(|s| {
@@ -1771,6 +1813,7 @@ where
         recorded_by: config.identity.name.clone(),
         visibility: None,
         speaker_map,
+        template: template.map(|t| t.slug().to_string()),
         filter_diagnosis: if status == Some(OutputStatus::NoSpeech) {
             Some(filter_stats.diagnosis())
         } else {
@@ -3748,6 +3791,7 @@ mod tests {
             recorded_by: Some("Mat".into()),
             visibility: None,
             speaker_map: vec![],
+            template: None,
             filter_diagnosis: None,
         };
 
@@ -5037,6 +5081,7 @@ mod tests {
                 confidence: diarize::Confidence::Medium,
                 source: diarize::AttributionSource::Llm,
             }],
+            template: None,
             filter_diagnosis: None,
         };
 

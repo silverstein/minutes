@@ -215,6 +215,27 @@ pub enum LiveTranscriptError {
     NoActiveSession,
 }
 
+#[derive(Debug, Error)]
+pub enum TemplateError {
+    #[error("template not found: {0}")]
+    NotFound(String),
+
+    #[error("invalid template at {path}: {message}")]
+    Invalid { path: String, message: String },
+
+    #[error("template at {path} uses field '{field}' not supported by this Minutes version (introduced in a later phase). Upgrade Minutes or remove the field.")]
+    UnsupportedField { path: String, field: String },
+
+    #[error("template at {path} has invalid slug '{slug}': must be lowercase alphanumeric with hyphens (e.g. 'standup', '1-on-1')")]
+    InvalidSlug { path: String, slug: String },
+
+    #[error("template at {path} has invalid version '{version}': must be semver (e.g. '1.0.0')")]
+    InvalidVersion { path: String, version: String },
+
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
+}
+
 /// Unified error type for the minutes-core crate.
 /// CLI matches on this for user-facing error messages.
 #[derive(Debug, Error)]
@@ -248,6 +269,9 @@ pub enum MinutesError {
 
     #[error(transparent)]
     LiveTranscript(#[from] LiveTranscriptError),
+
+    #[error(transparent)]
+    Template(#[from] TemplateError),
 
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),

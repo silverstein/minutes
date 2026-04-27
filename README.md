@@ -98,6 +98,7 @@ minutes record                                    # Record from mic
 minutes record --title "Standup" --context "Sprint 4 blockers"  # With context
 minutes record --language ur                      # Force Urdu (ISO 639-1 code)
 minutes record --device "AirPods Pro"             # Use specific audio device
+minutes record --template standup                 # Apply a summary template
 minutes stop                                      # Stop from another terminal
 ```
 
@@ -160,6 +161,15 @@ Text streams progressively as you speak (partial results every 2 seconds). By de
 Press `⌘⇧K` from anywhere on macOS to open a keyboard-first palette of every Minutes command. Start a recording, drop a note into the active session, jump to the latest meeting, search transcripts, or rename the meeting open in your assistant — all without leaving the keyboard. Backed by a single typed command registry in `minutes-core`, so visibility follows real backend state: stop-recording only appears while you're recording, mid-recording dictation rows are hidden, and the list re-fetches automatically when state changes.
 
 Recents float to the top with their original payload intact (re-running a `Search transcripts: pricing` from history skips the retype). The shortcut defaults on for both fresh installs and upgrades, with a one-time macOS notification on first launch announcing the binding. Disable it from the Settings overlay (Command Palette section) or by setting `[palette] shortcut_enabled = false` in your config file (`$XDG_CONFIG_HOME/minutes/config.toml` when `XDG_CONFIG_HOME` is set, otherwise `~/.config/minutes/config.toml`). The Settings dropdown also offers `⌘⇧O` and `⌘⇧U` if `⌘⇧K` collides with your IDE.
+
+### Templates (RFC 0001, Phase 1)
+```bash
+minutes template list                             # Bundled + project + user templates
+minutes template show standup                     # Inspect a template
+minutes record --template standup                 # Apply when recording
+minutes process voice-memo.m4a --template voice-memo
+```
+Templates layer prompt-level guidance on top of the baseline structured extraction (`KEY POINTS`, `DECISIONS`, `ACTION ITEMS`, `OPEN QUESTIONS`, `COMMITMENTS`, `PARTICIPANTS`). Phase 1 ships four bundled templates (`meeting`, `standup`, `1-on-1`, `voice-memo`) and resolves overrides from `.minutes/templates/` (project) and `~/.minutes/templates/` (user). Custom `extract:` schemas, compliance rules, and clinical templates land in later phases — see [`docs/rfcs/0001-templates.md`](docs/rfcs/0001-templates.md).
 
 ### Try it without a mic
 ```bash
@@ -1103,8 +1113,8 @@ agent_args = []           # Optional extra args, e.g. ["--dangerously-skip-permi
 
 ```
 minutes/
-├── crates/core/          43 Rust modules — the engine (shared by all interfaces)
-├── crates/cli/           CLI binary — 47 commands (recording, search, health, workflows)
+├── crates/core/          45 Rust modules — the engine (shared by all interfaces)
+├── crates/cli/           CLI binary — 49 commands (recording, search, health, templates, workflows)
 ├── crates/whisper-guard/ Anti-hallucination toolkit (VAD gating, dedup, noise trimming)
 ├── crates/reader/        Lightweight read-only meeting parser (no audio deps)
 ├── crates/assets/        Bundled assets (demo.wav)

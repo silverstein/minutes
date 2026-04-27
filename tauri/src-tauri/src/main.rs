@@ -788,7 +788,21 @@ fn main() {
 
     // Load with first-run and upgrade migrations so palette defaults
     // stay enabled across upgrades and fresh installs.
-    let startup_config_snapshot = minutes_core::config::Config::load_with_migrations();
+    let mut startup_config_snapshot = minutes_core::config::Config::load_with_migrations();
+    // Auto-heal a stale `recording.device` pin: when the configured
+    // input device (USB mixer, Bluetooth headset, virtual loopback) is
+    // unplugged before launch, clear it and fall back to the system
+    // default. Historically this caused a deterministic crash on
+    // record start because the missing-device error reached call sites
+    // that aborted the process.
+    if minutes_core::capture::auto_heal_missing_recording_device(&mut startup_config_snapshot) {
+        if let Err(e) = startup_config_snapshot.save() {
+            tracing::warn!(
+                "failed to persist auto-healed recording.device clear: {}",
+                e
+            );
+        }
+    }
     let _ = secret_store::hydrate_openai_compatible_api_key_env();
     let recording = Arc::new(AtomicBool::new(false));
     let starting = Arc::new(AtomicBool::new(false));

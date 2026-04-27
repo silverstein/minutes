@@ -2219,6 +2219,7 @@ fn start_native_call_recording(
         Some(recording_finished_at),
         context_session_id.clone(),
         calendar_event,
+        None,
     ) {
         Ok(job) => {
             processing.store(true, Ordering::Relaxed);
@@ -3847,6 +3848,7 @@ pub fn start_recording(
                     Some(recording_finished_at),
                     context_session_id.clone(),
                     calendar_event,
+                    None,
                 ) {
                     Ok(job) => {
                         processing.store(true, Ordering::Relaxed);
@@ -7742,6 +7744,7 @@ mod tests {
             recorded_by: None,
             visibility: None,
             speaker_map: vec![],
+            template: None,
             filter_diagnosis: None,
         };
         let sections = vec![MeetingSection {
@@ -7797,6 +7800,7 @@ mod tests {
             recorded_by: None,
             visibility: None,
             speaker_map: vec![],
+            template: None,
             filter_diagnosis: None,
         };
         let sections = vec![MeetingSection {
@@ -7843,6 +7847,7 @@ mod tests {
             recorded_by: None,
             visibility: None,
             speaker_map: vec![],
+            template: None,
             filter_diagnosis: None,
         };
         let sections = vec![MeetingSection {
@@ -8103,6 +8108,7 @@ mod tests {
             user_notes: None,
             pre_context: None,
             calendar_event: None,
+            template_slug: None,
             word_count: Some(0),
             owner_pid: None,
         };

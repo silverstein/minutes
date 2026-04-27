@@ -233,6 +233,7 @@ mod tests {
             recorded_by: None,
             visibility: None,
             speaker_map: vec![],
+            template: None,
             filter_diagnosis: None,
         }
     }

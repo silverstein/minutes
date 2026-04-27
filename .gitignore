@@ -9,6 +9,11 @@ docs/plans/reviews/
 # Local bd export state
 .beads/export-state.json
 /.beads/issues.jsonl
+# The bd pre-commit hook occasionally drops a copy of .beads/issues.jsonl
+# at the repo root; keep that out of every commit too. Recent main history
+# shows recurring "chore: remove exported issues artifact" cleanups for
+# exactly this case.
+/issues.jsonl
 
 # Tombstone: the plugin/ directory was deleted in v0.8.0 after the marketplace
 # was switched to .claude/plugins/minutes/ in commit 270839d (Mar 24). The

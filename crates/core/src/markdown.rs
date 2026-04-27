@@ -73,6 +73,11 @@ pub struct Frontmatter {
     pub visibility: Option<Visibility>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub speaker_map: Vec<crate::diarize::SpeakerAttribution>,
+    /// Slug of the template applied to this recording, if any.
+    /// Recorded so a Phase 2 reprocessor knows which template produced the
+    /// summary. `None` means no template was passed (legacy / default flow).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub template: Option<String>,
     /// Diagnostic string from the transcription filter pipeline.
     /// Not serialized to YAML — only used for the NoSpeech hint in rendered markdown.
     #[serde(skip)]
@@ -788,6 +793,7 @@ mod tests {
             recorded_by: None,
             visibility: None,
             speaker_map: vec![],
+            template: None,
             filter_diagnosis: None,
         }
     }

@@ -75,6 +75,11 @@ pub struct ProcessingJob {
     pub pre_context: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub calendar_event: Option<CalendarEvent>,
+    /// Slug of the template selected at record time, if any. Read by the
+    /// queue worker so the pipeline applies the same template the user
+    /// chose when starting the recording.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template_slug: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub word_count: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -101,6 +106,7 @@ pub fn queue_live_capture(
     recording_finished_at: Option<DateTime<Local>>,
     context_session_id: Option<String>,
     calendar_event: Option<CalendarEvent>,
+    template_slug: Option<String>,
 ) -> std::io::Result<ProcessingJob> {
     let job_id = next_job_id();
     let old_screen_dir = crate::screen::screens_dir_for(current_wav);
@@ -124,6 +130,7 @@ pub fn queue_live_capture(
         user_notes,
         pre_context,
         calendar_event,
+        template_slug,
         word_count: None,
         error: None,
         owner_pid: None,
@@ -261,6 +268,7 @@ pub fn enqueue_capture_job(
     recording_finished_at: Option<DateTime<Local>>,
     context_session_id: Option<String>,
     calendar_event: Option<CalendarEvent>,
+    template_slug: Option<String>,
 ) -> std::io::Result<ProcessingJob> {
     let job = ProcessingJob {
         id: next_job_id(),
@@ -280,6 +288,7 @@ pub fn enqueue_capture_job(
         user_notes,
         pre_context,
         calendar_event,
+        template_slug,
         word_count: None,
         error: None,
         owner_pid: None,
@@ -647,6 +656,15 @@ fn refresh_qmd_collection(config: &Config) {
 }
 
 fn job_context(job: &ProcessingJob) -> BackgroundPipelineContext {
+    let template = job.template_slug.as_deref().and_then(|slug| {
+        match crate::template::TemplateResolver::new().resolve(slug) {
+            Ok(t) => Some(t),
+            Err(error) => {
+                tracing::warn!(slug = %slug, error = %error, "queued template could not be resolved; processing without template");
+                None
+            }
+        }
+    });
     BackgroundPipelineContext {
         sidecar: None,
         user_notes: job.user_notes.clone(),
@@ -654,6 +672,7 @@ fn job_context(job: &ProcessingJob) -> BackgroundPipelineContext {
         calendar_event: job.calendar_event.clone(),
         recorded_at: job.recording_started_at.or(job.recording_finished_at),
         requested_title: job.title.clone(),
+        template,
     }
 }
 
@@ -902,6 +921,7 @@ mod tests {
                 Some(Local::now()),
                 None,
                 None,
+                None,
             )
             .unwrap();
 
@@ -933,6 +953,7 @@ mod tests {
                 None,
                 Some(Local::now()),
                 Some(Local::now()),
+                None,
                 None,
                 None,
             )
@@ -982,6 +1003,7 @@ mod tests {
                 user_notes: None,
                 pre_context: None,
                 calendar_event: None,
+                template_slug: None,
                 word_count: None,
                 error: None,
                 owner_pid: None,
@@ -1032,6 +1054,7 @@ mod tests {
                 recorded_by: None,
                 visibility: None,
                 speaker_map: vec![],
+                template: None,
                 filter_diagnosis: Some("silence strip removed ALL audio".into()),
             },
             transcript: String::new(),
@@ -1065,6 +1088,7 @@ mod tests {
                 user_notes: None,
                 pre_context: None,
                 calendar_event: None,
+                template_slug: None,
                 word_count: None,
                 error: None,
                 owner_pid: Some(99_999_999),
@@ -1101,6 +1125,7 @@ mod tests {
                 user_notes: None,
                 pre_context: None,
                 calendar_event: None,
+                template_slug: None,
                 word_count: Some(42),
                 error: Some("boom".into()),
                 owner_pid: None,
@@ -1138,6 +1163,7 @@ mod tests {
                 user_notes: None,
                 pre_context: None,
                 calendar_event: None,
+                template_slug: None,
                 word_count: None,
                 error: None,
                 owner_pid: None,
@@ -1160,6 +1186,7 @@ mod tests {
                 user_notes: None,
                 pre_context: None,
                 calendar_event: None,
+                template_slug: None,
                 word_count: None,
                 error: None,
                 owner_pid: None,

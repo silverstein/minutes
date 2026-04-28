@@ -915,6 +915,25 @@ fn diarize_from_source_aware_stems(
     Some(merged)
 }
 
+fn diarize_system_stem_with_full_audio_fallback(
+    system_stem: &Path,
+    audio_path: &Path,
+    config: &Config,
+    resolved_engine: &str,
+    mut run_engine: impl FnMut(&Path, &Config, &str) -> Option<DiarizationResult>,
+) -> Option<DiarizationResult> {
+    if let Some(result) = run_engine(system_stem, config, resolved_engine) {
+        return Some(result);
+    }
+
+    tracing::warn!(
+        system_stem = %system_stem.display(),
+        audio = %audio_path.display(),
+        "system-stem-only diarization failed, falling back to full-audio ML diarization"
+    );
+    run_engine(audio_path, config, resolved_engine)
+}
+
 /// Run speaker diarization on an audio file.
 /// Returns None if diarization is disabled or models are not available.
 ///
@@ -964,7 +983,13 @@ pub fn diarize(audio_path: &Path, config: &Config) -> Option<DiarizationResult> 
             }
             SourceAwareDiarizationPlan::SystemStemOnly(system_stem) => {
                 if let Some(resolved_engine) = resolved_engine {
-                    return run_diarization_engine(&system_stem, config, resolved_engine);
+                    return diarize_system_stem_with_full_audio_fallback(
+                        &system_stem,
+                        audio_path,
+                        config,
+                        resolved_engine,
+                        run_diarization_engine,
+                    );
                 }
             }
         }
@@ -2502,6 +2527,46 @@ mod tests {
             plan,
             Some(SourceAwareDiarizationPlan::SystemStemOnly(system))
         );
+    }
+
+    #[test]
+    fn system_stem_only_falls_back_to_full_audio_when_engine_fails() {
+        let config = Config::default();
+        let system_stem = Path::new("/tmp/call.system.wav");
+        let audio = Path::new("/tmp/call.mov");
+        let full_audio_result = DiarizationResult {
+            segments: vec![SpeakerSegment {
+                speaker: "SPEAKER_0".into(),
+                start: 0.0,
+                end: 1.0,
+            }],
+            num_speakers: 1,
+            from_stems: false,
+            source_aware: false,
+            speaker_embeddings: std::collections::HashMap::new(),
+        };
+        let mut attempted_paths = Vec::new();
+
+        let result = diarize_system_stem_with_full_audio_fallback(
+            system_stem,
+            audio,
+            &config,
+            "test-engine",
+            |path, _config, _engine| {
+                attempted_paths.push(path.to_path_buf());
+                if path == audio {
+                    Some(full_audio_result.clone())
+                } else {
+                    None
+                }
+            },
+        );
+
+        assert_eq!(
+            attempted_paths,
+            vec![system_stem.to_path_buf(), audio.to_path_buf()]
+        );
+        assert_eq!(result.unwrap().segments[0].speaker, "SPEAKER_0");
     }
 
     #[test]

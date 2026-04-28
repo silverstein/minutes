@@ -903,34 +903,46 @@ pub fn trim_trailing_noise(lines: &[String]) -> Vec<String> {
         // treating them as noise would make clean_transcript non-idempotent.
     }
 
-    // Walk backward from the end, counting trailing noise/filler lines and
-    // tracking how many were always-noise vs filler.
-    let mut trim_from = lines.len();
+    // Trim always-noise at any count, but do not let that decision pull a
+    // preceding one-word closing ("Yeah.", "Okay.") into the removed suffix.
+    let mut noise_trim_from = lines.len();
     let mut always_noise_count = 0usize;
     for i in (0..lines.len()).rev() {
         let text = text_part(&lines[i]);
         if is_always_noise(text) {
-            trim_from = i;
+            noise_trim_from = i;
             always_noise_count += 1;
-        } else if is_filler(text) {
-            trim_from = i;
         } else {
             break;
         }
     }
 
+    let mut filler_trim_from = noise_trim_from;
+    let mut filler_count = 0usize;
+    for i in (0..noise_trim_from).rev() {
+        let text = text_part(&lines[i]);
+        if is_filler(text) {
+            filler_trim_from = i;
+            filler_count += 1;
+        } else {
+            break;
+        }
+    }
+
+    let trim_from = if filler_count >= 5 {
+        filler_trim_from
+    } else if always_noise_count > 0 {
+        noise_trim_from
+    } else {
+        lines.len()
+    };
     let trimmed_count = lines.len() - trim_from;
 
-    // Trim if EITHER:
-    //   - any always-noise marker is in the trailing block (those are never
-    //     legitimate transcript content, regardless of count), OR
-    //   - the trailing filler block is 5+ lines (protects "Thanks." closings)
-    let should_trim = always_noise_count > 0 || trimmed_count >= 5;
-
-    if should_trim {
+    if trimmed_count > 0 {
         tracing::info!(
             trimmed = trimmed_count,
             always_noise = always_noise_count,
+            filler = filler_count,
             "removed trailing noise from transcript"
         );
         let mut result: Vec<String> = lines[..trim_from].to_vec();
@@ -1203,6 +1215,23 @@ mod tests {
         let lines: Vec<String> = vec!["[0:00] That wraps it".into(), "[0:05] yeah.".into()];
         let result = trim_trailing_noise(&lines);
         assert_eq!(result, lines, "single-filler closing must survive");
+    }
+
+    #[test]
+    fn trim_keeps_short_filler_before_trailing_noise() {
+        // A real one-word closing should not be swept away just because the
+        // recorder captured an unambiguous noise marker after it.
+        let lines: Vec<String> = vec![
+            "[0:00] That wraps it".into(),
+            "[0:05] yeah.".into(),
+            "[0:10] [music]".into(),
+        ];
+        let result = trim_trailing_noise(&lines);
+        assert_eq!(result.len(), 3);
+        assert!(result[0].contains("That wraps it"));
+        assert!(result[1].contains("yeah."));
+        assert!(result[2].contains("1 lines of trailing noise removed"));
+        assert!(!result.iter().any(|line| line.contains("[music]")));
     }
 
     #[test]

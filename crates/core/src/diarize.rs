@@ -206,37 +206,72 @@ fn preprocess_audio(audio_path: &Path) -> (std::path::PathBuf, Option<std::path:
 }
 
 /// Paths to per-source audio stems from a multi-source call capture.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StemPaths {
     pub voice: std::path::PathBuf,
     pub system: std::path::PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SourceAwareDiarizationPlan {
+    FullStems(StemPaths),
+    SystemStemOnly(std::path::PathBuf),
+}
+
+fn stem_has_audio(path: &Path) -> bool {
+    std::fs::metadata(path)
+        .map(|m| m.len() > 44) // WAV header is 44 bytes; must have actual data
+        .unwrap_or(false)
+}
+
+fn discover_stem_plan(audio_path: &Path) -> Option<SourceAwareDiarizationPlan> {
+    let stem = audio_path.file_stem()?.to_str()?;
+    let dir = audio_path.parent()?;
+    let voice = dir.join(format!("{}.voice.wav", stem));
+    let system = dir.join(format!("{}.system.wav", stem));
+
+    let voice_ok = stem_has_audio(&voice);
+    let system_ok = stem_has_audio(&system);
+
+    match (voice_ok, system_ok) {
+        (true, true) => {
+            tracing::info!(
+                voice = %voice.display(),
+                system = %system.display(),
+                "discovered per-source audio stems"
+            );
+            Some(SourceAwareDiarizationPlan::FullStems(StemPaths {
+                voice,
+                system,
+            }))
+        }
+        (false, true) => {
+            tracing::warn!(
+                system = %system.display(),
+                voice = %voice.display(),
+                "voice stem missing or empty; falling back to system-stem-only diarization"
+            );
+            Some(SourceAwareDiarizationPlan::SystemStemOnly(system))
+        }
+        (true, false) => {
+            tracing::warn!(
+                voice = %voice.display(),
+                system = %system.display(),
+                "system stem missing or empty; skipping source-aware diarization"
+            );
+            None
+        }
+        (false, false) => None,
+    }
 }
 
 /// Discover stem files alongside an audio file.
 /// The native call helper writes `{basename}.voice.wav` and `{basename}.system.wav`
 /// next to the main recording. Returns Some only if both files exist and are non-empty.
 pub fn discover_stems(audio_path: &Path) -> Option<StemPaths> {
-    let stem = audio_path.file_stem()?.to_str()?;
-    let dir = audio_path.parent()?;
-    let voice = dir.join(format!("{}.voice.wav", stem));
-    let system = dir.join(format!("{}.system.wav", stem));
-
-    let voice_ok = std::fs::metadata(&voice)
-        .map(|m| m.len() > 44) // WAV header is 44 bytes; must have actual data
-        .unwrap_or(false);
-    let system_ok = std::fs::metadata(&system)
-        .map(|m| m.len() > 44)
-        .unwrap_or(false);
-
-    if voice_ok && system_ok {
-        tracing::info!(
-            voice = %voice.display(),
-            system = %system.display(),
-            "discovered per-source audio stems"
-        );
-        Some(StemPaths { voice, system })
-    } else {
-        None
+    match discover_stem_plan(audio_path) {
+        Some(SourceAwareDiarizationPlan::FullStems(stems)) => Some(stems),
+        _ => None,
     }
 }
 
@@ -905,12 +940,34 @@ pub fn diarize(audio_path: &Path, config: &Config) -> Option<DiarizationResult> 
     // Check for per-source stems alongside the audio file.
     // If stems exist, prefer source-aware attribution and opportunistically
     // refine remote/system windows with ML diarization.
-    if let Some(stems) = discover_stems(audio_path) {
-        if let Some(result) = diarize_from_source_aware_stems(&stems, config, resolved_engine) {
-            return Some(result);
+    if let Some(plan) = discover_stem_plan(audio_path) {
+        match plan {
+            SourceAwareDiarizationPlan::FullStems(stems) => {
+                if let Some(result) =
+                    diarize_from_source_aware_stems(&stems, config, resolved_engine)
+                {
+                    return Some(result);
+                }
+                if let Some(resolved_engine) = resolved_engine {
+                    tracing::warn!(
+                        system_stem = %stems.system.display(),
+                        "source-aware stem diarization failed, falling back to system-stem ML diarization"
+                    );
+                    if let Some(result) =
+                        run_diarization_engine(&stems.system, config, resolved_engine)
+                    {
+                        return Some(result);
+                    }
+                }
+                // Stem attribution failed, fall through to full-audio ML diarization
+                tracing::warn!("source-aware stem diarization failed, falling back to ML engine");
+            }
+            SourceAwareDiarizationPlan::SystemStemOnly(system_stem) => {
+                if let Some(resolved_engine) = resolved_engine {
+                    return run_diarization_engine(&system_stem, config, resolved_engine);
+                }
+            }
         }
-        // Stem attribution failed, fall through to ML diarization
-        tracing::warn!("source-aware stem diarization failed, falling back to ML engine");
     }
 
     let resolved_engine = resolved_engine?;
@@ -2410,6 +2467,53 @@ mod tests {
         let mut config = Config::default();
         config.diarization.model_path = dir.path().join("missing-models");
         assert!(!models_installed(&config));
+    }
+
+    #[test]
+    fn discover_stem_plan_prefers_full_stems_when_both_are_present() {
+        let dir = tempfile::tempdir().unwrap();
+        let audio = dir.path().join("call.mov");
+        let voice = dir.path().join("call.voice.wav");
+        let system = dir.path().join("call.system.wav");
+        std::fs::write(&audio, b"mov").unwrap();
+        std::fs::write(&voice, vec![0_u8; 45]).unwrap();
+        std::fs::write(&system, vec![0_u8; 45]).unwrap();
+
+        let plan = discover_stem_plan(&audio);
+        assert_eq!(
+            plan,
+            Some(SourceAwareDiarizationPlan::FullStems(StemPaths {
+                voice,
+                system,
+            }))
+        );
+    }
+
+    #[test]
+    fn discover_stem_plan_uses_system_only_when_voice_stem_is_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let audio = dir.path().join("call.mov");
+        let system = dir.path().join("call.system.wav");
+        std::fs::write(&audio, b"mov").unwrap();
+        std::fs::write(&system, vec![0_u8; 45]).unwrap();
+
+        let plan = discover_stem_plan(&audio);
+        assert_eq!(
+            plan,
+            Some(SourceAwareDiarizationPlan::SystemStemOnly(system))
+        );
+    }
+
+    #[test]
+    fn discover_stem_plan_rejects_voice_only_partial_stems() {
+        let dir = tempfile::tempdir().unwrap();
+        let audio = dir.path().join("call.mov");
+        let voice = dir.path().join("call.voice.wav");
+        std::fs::write(&audio, b"mov").unwrap();
+        std::fs::write(&voice, vec![0_u8; 45]).unwrap();
+
+        let plan = discover_stem_plan(&audio);
+        assert_eq!(plan, None);
     }
 
     #[test]

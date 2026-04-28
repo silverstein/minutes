@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::path::Path;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 use tauri::{Emitter, Manager};
@@ -77,6 +77,30 @@ pub struct AppState {
     /// `true` while a call-end auto-stop countdown is running. Keeps repeat
     /// call-end transitions from spawning parallel countdown threads.
     pub call_end_countdown_active: Arc<AtomicBool>,
+    /// Terminal reason for the most recent countdown lifecycle. Kept separate
+    /// from the cancel bit so the detector can tell an explicit user cancel
+    /// from an internal reset or teardown path.
+    pub call_end_countdown_terminal_state: Arc<AtomicU8>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum CallEndCountdownTerminalState {
+    None = 0,
+    UserCancelled = 1,
+    RecordingStopped = 2,
+    AutoStopFired = 3,
+}
+
+impl CallEndCountdownTerminalState {
+    pub fn from_u8(value: u8) -> Self {
+        match value {
+            1 => Self::UserCancelled,
+            2 => Self::RecordingStopped,
+            3 => Self::AutoStopFired,
+            _ => Self::None,
+        }
+    }
 }
 
 type ParakeetStatusView = minutes_core::transcription_coordinator::ParakeetBackendStatus;
@@ -4375,7 +4399,7 @@ pub fn cmd_start_recording(
         .store(from_call_detect, Ordering::Relaxed);
     // Starting a fresh recording always cancels any in-flight countdown so
     // the UI doesn't auto-stop a session the user has already moved past.
-    cancel_call_end_countdown(&state);
+    reset_call_end_countdown(&state);
 
     launch_recording(
         app,
@@ -4390,10 +4414,29 @@ pub fn cmd_start_recording(
     )
 }
 
-/// Clear countdown state — both the active flag and (as a no-op safety net)
-/// the cancel flag. Used when a new recording starts, when the countdown
-/// elapses, and when the user cancels via "Keep recording".
-pub fn cancel_call_end_countdown(state: &AppState) {
+/// Reset countdown lifecycle state for a fresh recording/session boundary.
+/// Used when a new recording starts so stale terminal markers from an older
+/// call cannot masquerade as an explicit cancel on the next call end.
+pub fn reset_call_end_countdown(state: &AppState) {
+    state
+        .call_end_countdown_terminal_state
+        .store(CallEndCountdownTerminalState::None as u8, Ordering::Relaxed);
+    state
+        .call_end_countdown_cancel
+        .store(true, Ordering::Relaxed);
+    state
+        .call_end_countdown_active
+        .store(false, Ordering::Relaxed);
+}
+
+/// Explicit user cancellation of a call-end countdown via "Keep recording"
+/// or "Stop now". This is a real terminal state and should not be re-armed
+/// by the detector for the already-ended call session.
+pub fn cancel_call_end_countdown_by_user(state: &AppState) {
+    state.call_end_countdown_terminal_state.store(
+        CallEndCountdownTerminalState::UserCancelled as u8,
+        Ordering::Relaxed,
+    );
     state
         .call_end_countdown_cancel
         .store(true, Ordering::Relaxed);
@@ -4407,7 +4450,7 @@ pub fn cmd_cancel_call_end_countdown(
     app: tauri::AppHandle,
     state: tauri::State<AppState>,
 ) -> Result<(), String> {
-    cancel_call_end_countdown(&state);
+    cancel_call_end_countdown_by_user(&state);
     // Tell the UI to hide the banner immediately; the countdown thread will
     // observe the cancel flag on its next tick and exit without stopping.
     app.emit("call:end-countdown:cancelled", ()).ok();

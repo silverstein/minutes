@@ -3,7 +3,7 @@
 use minutes_core::Config;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::{
     menu::{Menu, MenuItem, SubmenuBuilder},
@@ -835,9 +835,13 @@ fn main() {
     let recording_started_by_call_detect = Arc::new(AtomicBool::new(false));
     let call_end_countdown_cancel = Arc::new(AtomicBool::new(false));
     let call_end_countdown_active = Arc::new(AtomicBool::new(false));
+    let call_end_countdown_terminal_state = Arc::new(AtomicU8::new(
+        commands::CallEndCountdownTerminalState::None as u8,
+    ));
     let started_by_call_detect_for_detector = recording_started_by_call_detect.clone();
     let countdown_cancel_for_detector = call_end_countdown_cancel.clone();
     let countdown_active_for_detector = call_end_countdown_active.clone();
+    let countdown_terminal_state_for_detector = call_end_countdown_terminal_state.clone();
     let stop_for_detector = stop_flag.clone();
 
     tauri::Builder::default()
@@ -1084,6 +1088,7 @@ fn main() {
             recording_started_by_call_detect: recording_started_by_call_detect.clone(),
             call_end_countdown_cancel: call_end_countdown_cancel.clone(),
             call_end_countdown_active: call_end_countdown_active.clone(),
+            call_end_countdown_terminal_state: call_end_countdown_terminal_state.clone(),
         })
         .manage(Arc::new(Mutex::new(
             shortcut_manager::ShortcutManager::new(),
@@ -1670,6 +1675,7 @@ fn main() {
                         recording_started_by_call_detect: started_by_call_detect_for_detector,
                         countdown_cancel: countdown_cancel_for_detector,
                         countdown_active: countdown_active_for_detector,
+                        countdown_terminal_state: countdown_terminal_state_for_detector,
                         stop_flag: stop_for_detector,
                     },
                 );

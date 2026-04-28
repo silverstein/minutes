@@ -9,7 +9,7 @@
 //! alternative implementations behind `cfg(target_os)` gates.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -90,6 +90,7 @@ pub struct CallEndAutoStopHandles {
     pub recording_started_by_call_detect: Arc<AtomicBool>,
     pub countdown_cancel: Arc<AtomicBool>,
     pub countdown_active: Arc<AtomicBool>,
+    pub countdown_terminal_state: Arc<AtomicU8>,
     pub stop_flag: Arc<AtomicBool>,
 }
 
@@ -147,14 +148,14 @@ fn decide_no_call_action(
     stop_when_call_ends: bool,
     countdown_active: bool,
     call_end_fired: bool,
-    countdown_cancelled: bool,
+    terminal_state: crate::commands::CallEndCountdownTerminalState,
 ) -> NoCallDecision {
     if countdown_active {
         return NoCallDecision::DeferToCountdown;
     }
     if is_recording && started_by_call_detect && stop_when_call_ends {
         if call_end_fired {
-            if countdown_cancelled {
+            if terminal_state != crate::commands::CallEndCountdownTerminalState::None {
                 NoCallDecision::ClearIfStale
             } else {
                 NoCallDecision::RearmCountdown
@@ -425,15 +426,17 @@ impl CallDetector {
                             .as_ref()
                             .map(|(_, _, already_fired)| *already_fired)
                             .unwrap_or(false);
-                        let countdown_cancelled =
-                            auto_stop.countdown_cancel.load(Ordering::Relaxed);
+                        let terminal_state =
+                            crate::commands::CallEndCountdownTerminalState::from_u8(
+                                auto_stop.countdown_terminal_state.load(Ordering::Relaxed),
+                            );
                         match decide_no_call_action(
                             is_recording,
                             started_by_call_detect,
                             config.stop_when_call_ends,
                             countdown_active,
                             call_end_fired,
-                            countdown_cancelled,
+                            terminal_state,
                         ) {
                             NoCallDecision::DeferToCountdown => {}
                             NoCallDecision::ArmCountdown => {
@@ -515,6 +518,10 @@ impl CallDetector {
         {
             return;
         }
+        auto_stop.countdown_terminal_state.store(
+            crate::commands::CallEndCountdownTerminalState::None as u8,
+            Ordering::Relaxed,
+        );
         auto_stop.countdown_cancel.store(false, Ordering::Relaxed);
 
         let secs = countdown_secs.max(1);
@@ -546,10 +553,12 @@ impl CallDetector {
         let app_for_thread = app.clone();
         let cancel = auto_stop.countdown_cancel.clone();
         let active = auto_stop.countdown_active.clone();
+        let terminal_state = auto_stop.countdown_terminal_state.clone();
         let started_by = auto_stop.recording_started_by_call_detect.clone();
         let stop_flag = auto_stop.stop_flag.clone();
         let recording_flag = recording.clone();
         let display_for_thread = display_name.to_string();
+        let process_for_thread = process_name.to_string();
 
         std::thread::spawn(move || {
             // Poll every 250ms so cancellation and external stops are snappy
@@ -561,9 +570,21 @@ impl CallDetector {
                 std::thread::sleep(tick);
 
                 if cancel.load(Ordering::Relaxed) {
+                    let reason = crate::commands::CallEndCountdownTerminalState::from_u8(
+                        terminal_state.load(Ordering::Relaxed),
+                    );
                     eprintln!(
-                        "[call-detect] auto-stop cancelled for {}",
-                        display_for_thread
+                        "[call-detect] auto-stop cancelled for {} ({:?})",
+                        display_for_thread, reason
+                    );
+                    log_call_detect_event(
+                        "info",
+                        "call_end_countdown_cancelled",
+                        Some(&display_for_thread),
+                        Some(&process_for_thread),
+                        serde_json::json!({
+                            "reason": format!("{reason:?}").to_lowercase(),
+                        }),
                     );
                     active.store(false, Ordering::Relaxed);
                     app_for_thread.emit("call:end-countdown:cancelled", ()).ok();
@@ -572,6 +593,10 @@ impl CallDetector {
 
                 if !recording_flag.load(Ordering::Relaxed) {
                     eprintln!("[call-detect] auto-stop aborted — recording already stopped");
+                    terminal_state.store(
+                        crate::commands::CallEndCountdownTerminalState::RecordingStopped as u8,
+                        Ordering::Relaxed,
+                    );
                     cancel.store(true, Ordering::Relaxed);
                     active.store(false, Ordering::Relaxed);
                     app_for_thread.emit("call:end-countdown:cancelled", ()).ok();
@@ -595,6 +620,10 @@ impl CallDetector {
                     );
                     stop_flag.store(true, Ordering::Relaxed);
                     started_by.store(false, Ordering::Relaxed);
+                    terminal_state.store(
+                        crate::commands::CallEndCountdownTerminalState::AutoStopFired as u8,
+                        Ordering::Relaxed,
+                    );
                     cancel.store(true, Ordering::Relaxed);
                     active.store(false, Ordering::Relaxed);
                     app_for_thread.emit("call:end-countdown:fired", ()).ok();
@@ -1599,13 +1628,27 @@ mod tests {
         // Happy path: recording + call-detect + stop_when_call_ends, no
         // countdown yet → arm one.
         assert_eq!(
-            decide_no_call_action(true, true, true, false, false, false),
+            decide_no_call_action(
+                true,
+                true,
+                true,
+                false,
+                false,
+                crate::commands::CallEndCountdownTerminalState::None,
+            ),
             NoCallDecision::ArmCountdown
         );
 
         // Countdown now active. Same inputs → defer, don't re-arm.
         assert_eq!(
-            decide_no_call_action(true, true, true, true, true, false),
+            decide_no_call_action(
+                true,
+                true,
+                true,
+                true,
+                true,
+                crate::commands::CallEndCountdownTerminalState::None,
+            ),
             NoCallDecision::DeferToCountdown
         );
 
@@ -1615,14 +1658,28 @@ mod tests {
         // After the fix it must defer, leaving the countdown thread to
         // observe `!recording_flag` and shut itself down cleanly.
         assert_eq!(
-            decide_no_call_action(false, true, true, true, true, false),
+            decide_no_call_action(
+                false,
+                true,
+                true,
+                true,
+                true,
+                crate::commands::CallEndCountdownTerminalState::None,
+            ),
             NoCallDecision::DeferToCountdown
         );
 
         // Countdown active AND started_by flipped false (e.g. stray
         // cmd_start_recording) — same invariant: defer, don't wipe state.
         assert_eq!(
-            decide_no_call_action(true, false, true, true, true, false),
+            decide_no_call_action(
+                true,
+                false,
+                true,
+                true,
+                true,
+                crate::commands::CallEndCountdownTerminalState::None,
+            ),
             NoCallDecision::DeferToCountdown
         );
 
@@ -1631,29 +1688,90 @@ mod tests {
         // emitted call_end_auto_stop_fired. Re-arm rather than logging
         // `cleared` and leaving the recording running forever.
         assert_eq!(
-            decide_no_call_action(true, true, true, false, true, false),
+            decide_no_call_action(
+                true,
+                true,
+                true,
+                false,
+                true,
+                crate::commands::CallEndCountdownTerminalState::None,
+            ),
             NoCallDecision::RearmCountdown
         );
 
-        // Explicit cancellation ("Keep recording" / "Stop now") and terminal
-        // countdown completion are real terminal transitions. Do not re-arm
-        // after the countdown is intentionally done.
+        // Explicit cancellation ("Keep recording" / "Stop now") and true
+        // terminal countdown completion are real terminal transitions. Do not
+        // re-arm after the countdown is intentionally done.
         assert_eq!(
-            decide_no_call_action(true, true, true, false, true, true),
+            decide_no_call_action(
+                true,
+                true,
+                true,
+                false,
+                true,
+                crate::commands::CallEndCountdownTerminalState::UserCancelled,
+            ),
             NoCallDecision::ClearIfStale
+        );
+        assert_eq!(
+            decide_no_call_action(
+                true,
+                true,
+                true,
+                false,
+                true,
+                crate::commands::CallEndCountdownTerminalState::AutoStopFired,
+            ),
+            NoCallDecision::ClearIfStale
+        );
+
+        // Regression for the reopened v0.14.1 report: if the generic cancel
+        // bit flipped but no terminal state was recorded, treat it as an
+        // orphaned countdown and re-arm instead of clearing the call session.
+        assert_eq!(
+            decide_no_call_action(
+                true,
+                true,
+                true,
+                false,
+                true,
+                crate::commands::CallEndCountdownTerminalState::None,
+            ),
+            NoCallDecision::RearmCountdown
         );
 
         // No countdown + no recording in scope → free to clear stale state.
         assert_eq!(
-            decide_no_call_action(false, false, true, false, false, false),
+            decide_no_call_action(
+                false,
+                false,
+                true,
+                false,
+                false,
+                crate::commands::CallEndCountdownTerminalState::None,
+            ),
             NoCallDecision::ClearIfStale
         );
         assert_eq!(
-            decide_no_call_action(true, false, true, false, false, false),
+            decide_no_call_action(
+                true,
+                false,
+                true,
+                false,
+                false,
+                crate::commands::CallEndCountdownTerminalState::None,
+            ),
             NoCallDecision::ClearIfStale
         );
         assert_eq!(
-            decide_no_call_action(true, true, false, false, false, false),
+            decide_no_call_action(
+                true,
+                true,
+                false,
+                false,
+                false,
+                crate::commands::CallEndCountdownTerminalState::None,
+            ),
             NoCallDecision::ClearIfStale
         );
     }

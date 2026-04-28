@@ -35,6 +35,7 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 tauri-plugin-pty = "0.1"
 tauri-plugin-autostart = "2"
 tauri-plugin-updater = "2"
+tauri-plugin-window-state = "2"
 walkdir = { workspace = true }
 ureq = { workspace = true }
 window-vibrancy = "0.7"

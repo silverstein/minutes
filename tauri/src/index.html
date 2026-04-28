@@ -624,19 +624,19 @@
       align-items: center;
       gap: 10px;
       min-width: 0;
+      flex-shrink: 0;
+    }
+
+    .brand-mark {
+      width: 22px;
+      height: 22px;
+      border-radius: 5px;
+      flex-shrink: 0;
+      display: block;
     }
 
     .brand-copy {
       min-width: 0;
-    }
-
-    .brand-label {
-      font-size: 18px;
-      font-family: var(--font-display);
-      font-weight: 400;
-      letter-spacing: -0.3px;
-      color: var(--text);
-      line-height: 1;
     }
 
     .brand-sub {
@@ -647,6 +647,9 @@
       display: flex;
       align-items: center;
       gap: 8px;
+      flex-wrap: wrap;
+      row-gap: 6px;
+      justify-content: flex-end;
       -webkit-app-region: no-drag;
     }
 
@@ -1025,6 +1028,16 @@
       display: grid;
       gap: 8px;
       margin-top: 12px;
+    }
+
+    /* When per-job cards are rendering, hide the singular row to avoid duplicating
+       the same job across two surfaces. The cards carry title + stage + elapsed
+       + actions, so the row is redundant once cards exist. */
+    .processing-bar.has-jobs .processing-row {
+      display: none;
+    }
+    .processing-bar.has-jobs .processing-jobs {
+      margin-top: 0;
     }
 
     .processing-job {
@@ -3733,8 +3746,8 @@
     <!-- Header -->
     <div class="header">
       <div class="brand">
+        <img class="brand-mark" src="icons/brand-mark.png" alt="Minutes" width="22" height="22" />
         <div class="brand-copy">
-          <div class="brand-label">Minutes</div>
           <div class="brand-sub">Conversation memory for humans and agents</div>
         </div>
       </div>
@@ -3795,10 +3808,10 @@
           <div class="processing-title" id="processing-title">Processing recording</div>
           <div class="processing-stage" id="processing-stage">Preparing transcript...</div>
           <div class="processing-elapsed" id="processing-elapsed"></div>
-          <div class="processing-summary" id="processing-summary"></div>
         </div>
       </div>
       <div class="processing-jobs" id="processing-jobs"></div>
+      <div class="processing-summary" id="processing-summary"></div>
     </div>
 
     <!-- Output notice -->
@@ -3811,9 +3824,6 @@
           <div class="output-notice-path" id="output-notice-path"></div>
           <div class="output-notice-actions">
             <button class="btn btn-secondary btn-sm" id="btn-open-output">Open</button>
-            <button class="btn btn-secondary btn-sm" id="btn-draft-output">Create Draft</button>
-            <button class="btn btn-secondary btn-sm" id="btn-open-output-folder">Show in Folder</button>
-            <button class="btn btn-secondary btn-sm" id="btn-dismiss-output">Dismiss</button>
           </div>
         </div>
       </div>
@@ -5027,7 +5037,6 @@
     const recordButton = document.getElementById('btn-record');
     const liveButton = document.getElementById('btn-live');
     const quickThoughtButton = document.getElementById('btn-quick-thought');
-    const openOutputFolderButton = document.getElementById('btn-open-output-folder');
     const aboutTrayCopy = document.getElementById('about-tray-copy');
     const updateBanner = document.getElementById('update-banner');
     const updateBannerTitle = document.getElementById('update-banner-title');
@@ -5139,8 +5148,6 @@
         ...desktopCapabilities,
         ...caps,
       };
-
-      openOutputFolderButton.textContent = desktopCapabilities.folderRevealLabel || 'Show in Folder';
 
       if (recoverySubtitle) {
         recoverySubtitle.textContent =
@@ -5430,9 +5437,11 @@
 
       if (!processingJobs.length) {
         processingSummary.textContent = '';
+        processingBar.classList.remove('has-jobs');
         return;
       }
 
+      processingBar.classList.add('has-jobs');
       processingSummary.textContent =
         processingJobs.length > 1
           ? `${processingJobs.length} recordings are cooking in the background.`
@@ -5851,19 +5860,34 @@
       if (pollInterval) { clearInterval(pollInterval); pollInterval = null; }
     }
 
+    let outputNoticeAutoDismissTimer = null;
+
+    function clearOutputNoticeAutoDismiss() {
+      if (outputNoticeAutoDismissTimer) {
+        clearTimeout(outputNoticeAutoDismissTimer);
+        outputNoticeAutoDismissTimer = null;
+      }
+    }
+
+    async function dismissOutputNotice() {
+      clearOutputNoticeAutoDismiss();
+      try { await invoke('cmd_clear_latest_output'); } catch (_) { /* best effort */ }
+      updateOutputNotice(null);
+    }
+
     function updateOutputNotice(notice) {
       latestOutput = notice || null;
-      const draftButton = document.getElementById('btn-draft-output');
       if (!notice) {
+        clearOutputNoticeAutoDismiss();
         outputNotice.classList.remove('active', 'capture');
-        if (draftButton) draftButton.style.display = 'none';
         lastOutputKey = null;
         return;
       }
 
       const isCapture = notice.kind === 'preserved-capture';
       const nextKey = `${notice.kind}:${notice.path}`;
-      if (nextKey !== lastOutputKey) {
+      const isNewNotice = nextKey !== lastOutputKey;
+      if (isNewNotice) {
         playCue(isCapture ? 'error' : 'complete');
         lastOutputKey = nextKey;
       }
@@ -5874,11 +5898,19 @@
       outputNoticeDetail.textContent = notice.detail || '';
       outputNoticePath.textContent = notice.path || '';
       document.getElementById('btn-open-output').textContent = isCapture ? 'Open Capture' : 'Open Meeting';
-      if (draftButton) {
-        draftButton.style.display = notice.kind === 'saved' ? '' : 'none';
-      }
       if (notice.kind === 'saved') {
         markActivationNudgeShown('saved-artifact-draft');
+      }
+
+      // Schedule auto-dismiss once per distinct notice. Backend clear is essential —
+      // status polling at commands.rs re-pushes status.latestOutput on every tick,
+      // so a DOM-only dismiss gets resurrected on the next poll.
+      // Captures (preserved/error) need attention, don't auto-dismiss them.
+      if (isNewNotice && !isCapture) {
+        clearOutputNoticeAutoDismiss();
+        outputNoticeAutoDismissTimer = setTimeout(() => {
+          dismissOutputNotice();
+        }, 12_000);
       }
     }
 
@@ -6329,34 +6361,16 @@
 
     document.getElementById('btn-open-output').addEventListener('click', async () => {
       if (!latestOutput?.path) return;
+      // Opening implies the user is acting on the notice — clear it (backend +
+      // DOM) so the next status poll doesn't bring it back. Without the backend
+      // clear, status polling resurrects the notice on its next tick.
+      const path = latestOutput.path;
+      clearOutputNoticeAutoDismiss();
+      try { await invoke('cmd_clear_latest_output'); } catch (_) { /* best effort */ }
       try {
-        await openMeetingDetail(latestOutput.path);
+        await openMeetingDetail(path);
       } catch (e) {
         console.error('Open output:', e);
-      }
-    });
-
-    document.getElementById('btn-draft-output').addEventListener('click', async () => {
-      if (!latestOutput?.path) return;
-      await createArtifactFromMeetingPath(latestOutput.path, 'debrief-memo');
-    });
-
-    document.getElementById('btn-open-output-folder').addEventListener('click', async () => {
-      if (!latestOutput?.path) return;
-      try {
-        const folder = parentPath(latestOutput.path);
-        await invoke('cmd_open_file', { path: folder });
-      } catch (e) {
-        console.error('Open folder:', e);
-      }
-    });
-
-    document.getElementById('btn-dismiss-output').addEventListener('click', async () => {
-      try {
-        await invoke('cmd_clear_latest_output');
-        updateOutputNotice(null);
-      } catch (e) {
-        console.error('Dismiss output:', e);
       }
     });
 
@@ -9237,7 +9251,6 @@
         recallLoading.classList.remove('active');
       }
       recallTerminalContainer.classList.toggle('hidden', phase === 'weekly');
-      recallTerminalContainer.classList.toggle('dimmed', phase === 'listening');
       recallNote.classList.toggle('active', phase === 'listening');
       persistRecallWorkspaceState({ recallPhase: phase });
     }
@@ -10170,14 +10183,18 @@
         if (isRecording && !prevRecording) {
           setRecallPhase('listening', null);
           quickNote.classList.remove('active');
-        } else if (!isRecording && prevRecording && !isProcessing) {
+        } else if (!isRecording && prevRecording) {
+          // Stop recording → leave the "Listening" pulse immediately. The agent
+          // can already discuss what was said from the in-memory transcript while
+          // the summary finishes; staying on 'listening' through the entire
+          // processing window misrepresents what's happening.
           setRecallPhase('debrief', null);
         } else if (!isRecording && !isProcessing && recallPhase === 'listening') {
           setRecallPhase('recall', null);
         }
       }
 
-      if (!isRecording && prevRecording && !isProcessing) {
+      if (!isRecording && prevRecording) {
         if (!recallExpanded) {
           autoExpandRecall('debrief', null);
         }

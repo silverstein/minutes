@@ -114,7 +114,6 @@ fn show_main_window(app: &tauri::AppHandle) {
         .min_inner_size(420.0, 520.0)
         .transparent(true)
         .content_protected(Config::load().privacy.hide_from_screen_share)
-        .center()
         .focused(true)
         .build()
     {
@@ -1041,6 +1040,14 @@ fn main() {
             None,
         ))
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(
+            tauri_plugin_window_state::Builder::default()
+                .with_filename("window-state.json")
+                .skip_initial_state("note")
+                .skip_initial_state("meeting-prompt")
+                .skip_initial_state("dictation-overlay")
+                .build(),
+        )
         .manage(commands::AppState {
             recording: recording.clone(),
             starting: starting.clone(),

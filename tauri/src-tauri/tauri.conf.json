@@ -23,7 +23,15 @@
       "icons/icon.icns",
       "icons/icon.ico",
       "icons/app-icon.png"
-    ]
+    ],
+    "macOS": {
+      "dmg": {
+        "background": "dmg-background.png",
+        "windowSize": { "width": 660, "height": 400 },
+        "appPosition": { "x": 180, "y": 200 },
+        "applicationFolderPosition": { "x": 480, "y": 200 }
+      }
+    }
   },
   "plugins": {
     "shell": {

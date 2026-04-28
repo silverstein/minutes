@@ -3824,6 +3824,7 @@
           <div class="output-notice-path" id="output-notice-path"></div>
           <div class="output-notice-actions">
             <button class="btn btn-secondary btn-sm" id="btn-open-output">Open</button>
+            <button class="btn btn-secondary btn-sm" id="btn-dismiss-output" hidden>Dismiss</button>
           </div>
         </div>
       </div>
@@ -5885,28 +5886,36 @@
       }
 
       const isCapture = notice.kind === 'preserved-capture';
+      const isSaved = notice.kind === 'saved';
       const nextKey = `${notice.kind}:${notice.path}`;
       const isNewNotice = nextKey !== lastOutputKey;
       if (isNewNotice) {
-        playCue(isCapture ? 'error' : 'complete');
+        playCue(isSaved ? 'complete' : 'error');
         lastOutputKey = nextKey;
       }
       outputNotice.classList.toggle('capture', isCapture);
       outputNotice.classList.add('active');
-      outputNoticeIcon.textContent = isCapture ? '!' : '✓';
-      outputNoticeTitle.textContent = notice.title || (isCapture ? 'Capture preserved' : 'Saved meeting');
+      outputNoticeIcon.textContent = isSaved ? '✓' : '!';
+      outputNoticeTitle.textContent = notice.title || (isCapture ? 'Capture preserved' : isSaved ? 'Saved meeting' : 'Needs attention');
       outputNoticeDetail.textContent = notice.detail || '';
       outputNoticePath.textContent = notice.path || '';
-      document.getElementById('btn-open-output').textContent = isCapture ? 'Open Capture' : 'Open Meeting';
-      if (notice.kind === 'saved') {
+      document.getElementById('btn-open-output').textContent = isCapture ? 'Open Capture' : isSaved ? 'Open Meeting' : 'Open';
+      // Only saved notices auto-dismiss + can rely on click-to-dismiss; everything else
+      // (preserved-capture, error, stale-recording, watch-failed, working-copy) needs the
+      // user to acknowledge it explicitly, so show a Dismiss button for those cases.
+      const dismissBtn = document.getElementById('btn-dismiss-output');
+      if (dismissBtn) dismissBtn.hidden = isSaved;
+      if (isSaved) {
         markActivationNudgeShown('saved-artifact-draft');
       }
 
-      // Schedule auto-dismiss once per distinct notice. Backend clear is essential —
-      // status polling at commands.rs re-pushes status.latestOutput on every tick,
-      // so a DOM-only dismiss gets resurrected on the next poll.
-      // Captures (preserved/error) need attention, don't auto-dismiss them.
-      if (isNewNotice && !isCapture) {
+      // Schedule auto-dismiss once per distinct notice, only for the happy "saved"
+      // case. Other kinds (preserved-capture, error, stale-recording, watch-failed,
+      // working-copy) all signal something the user needs to acknowledge, so they
+      // stay until clicked.
+      // Backend clear is essential — status polling at commands.rs re-pushes
+      // status.latestOutput on every tick, so a DOM-only dismiss gets resurrected.
+      if (isNewNotice && isSaved) {
         clearOutputNoticeAutoDismiss();
         outputNoticeAutoDismissTimer = setTimeout(() => {
           dismissOutputNotice();
@@ -6361,17 +6370,25 @@
 
     document.getElementById('btn-open-output').addEventListener('click', async () => {
       if (!latestOutput?.path) return;
-      // Opening implies the user is acting on the notice — clear it (backend +
-      // DOM) so the next status poll doesn't bring it back. Without the backend
-      // clear, status polling resurrects the notice on its next tick.
+      // Opening implies the user is acting on the notice. Clear backend AND DOM
+      // immediately. Without the backend clear, status polling at commands.rs
+      // resurrects the notice on its next tick. Without updateOutputNotice(null),
+      // the toast lingers visibly between the click and the next poll.
       const path = latestOutput.path;
       clearOutputNoticeAutoDismiss();
       try { await invoke('cmd_clear_latest_output'); } catch (_) { /* best effort */ }
+      updateOutputNotice(null);
       try {
         await openMeetingDetail(path);
       } catch (e) {
         console.error('Open output:', e);
       }
+    });
+
+    document.getElementById('btn-dismiss-output').addEventListener('click', async () => {
+      // Visible only for non-saved notices (preserved-capture, error, etc.) where
+      // auto-dismiss would hide attention-needed information.
+      await dismissOutputNotice();
     });
 
     document.getElementById('btn-create-artifact').addEventListener('click', async () => {

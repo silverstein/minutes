@@ -1,3 +1,66 @@
+/* ─── Fonts ─────────────────────────────────────────────────────────────────
+   Bundled WOFF2s match the Tauri app and landing site. The MCP UI runs inside
+   Claude Desktop's webview where @font-face works the same as any browser.
+   `font-display: swap` keeps first paint fast — system fallback shows until
+   the brand fonts (~215KB total, base64-inlined by vite-plugin-singlefile)
+   finish decoding. */
+
+@font-face {
+  font-family: 'Instrument Serif';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('../fonts/InstrumentSerif-Regular.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'Instrument Serif';
+  font-style: italic;
+  font-weight: 400;
+  font-display: swap;
+  src: url('../fonts/InstrumentSerif-Italic.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'Geist';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('../fonts/Geist-Regular.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'Geist';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url('../fonts/Geist-Medium.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'Geist';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url('../fonts/Geist-SemiBold.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'Geist Mono';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('../fonts/GeistMono-Regular.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'Geist Mono';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url('../fonts/GeistMono-Medium.woff2') format('woff2');
+}
+
 /* ─── Reset & Base ──────────────────────────────────────────────────────── */
 
 *,
@@ -8,52 +71,74 @@
   padding: 0;
 }
 
+/* Tokens — dark by default. Bg stays at the legacy #1a1a1a so the dashboard
+   blends with Claude Desktop's host chrome (issue #201's "don't fight host
+   bg" constraint). Text + accents come from Cathryn's brand: cream, coral
+   for CTAs, green for active states. */
 :root {
   --bg-primary: #1a1a1a;
-  --bg-secondary: #242424;
-  --bg-tertiary: #2e2e2e;
-  --bg-hover: #363636;
-  --text-primary: #e4e4e4;
-  --text-secondary: #a0a0a0;
-  --text-muted: #6b6b6b;
-  --border-color: #333;
-  --accent: #4da8d9;
-  --accent-dim: #3890b8;
-  --badge-meeting: #4da8d9;
-  --badge-memo: #9b85c4;
-  --action-color: #d4a03c;
-  --action-overdue: #e5534b;
-  --decision-color: #46c072;
-  --conflict-color: #e5534b;
-  --stale-color: #d4a03c;
-  --commit-color: #8b7cf6;
-  --clear-color: #46c072;
+  --bg-secondary: #1f1f1d;
+  --bg-tertiary: #262624;
+  --bg-hover: #2e2e2b;
+  --text-primary: #e8e4da;
+  --text-secondary: #9a9489;
+  --text-muted: #6b6760;
+  --border-color: rgba(232, 228, 218, 0.08);
+  --border-mid: rgba(232, 228, 218, 0.14);
+
+  /* Two-accent system. Coral for "press me" CTAs (links, hover, primary
+     buttons), green for "this is on" active states (active filter, focus). */
+  --accent: #c96b4e;
+  --accent-hover: #b85a3e;
+  --accent-soft: rgba(201, 107, 78, 0.12);
+  --accent-active: #30d158;
+  --accent-active-soft: rgba(48, 209, 88, 0.14);
+
+  /* Categorical colors — same semantics as the legacy palette, repainted
+     with brand hues. */
+  --badge-meeting: #c96b4e;
+  --badge-memo: #bf5af2;
+  --action-color: #d4832a;
+  --action-overdue: #ff453a;
+  --decision-color: #30d158;
+  --conflict-color: #ff453a;
+  --stale-color: #d4832a;
+  --commit-color: #bf5af2;
+  --clear-color: #30d158;
+
   --radius: 6px;
   --radius-lg: 10px;
-  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-  --font-mono: "SF Mono", "Fira Code", "Cascadia Code", monospace;
+  --font-sans: 'Geist', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --font-display: 'Instrument Serif', ui-serif, "Iowan Old Style", Georgia, serif;
+  --font-mono: 'Geist Mono', "SF Mono", "Fira Code", "Cascadia Code", monospace;
 }
 
 [data-theme="light"] {
-  --bg-primary: #ffffff;
-  --bg-secondary: #f5f5f5;
-  --bg-tertiary: #ececec;
-  --bg-hover: #e2e2e2;
-  --text-primary: #1a1a1a;
-  --text-secondary: #555;
-  --text-muted: #999;
-  --border-color: #ddd;
-  --accent: #3a8bb8;
-  --accent-dim: #2f7da8;
-  --badge-meeting: #3a8bb8;
-  --badge-memo: #7e6ba8;
-  --action-color: #b88a28;
-  --action-overdue: #d04440;
-  --decision-color: #2ea35c;
-  --conflict-color: #d04440;
-  --stale-color: #b88a28;
-  --commit-color: #5f4ec0;
-  --clear-color: #2ea35c;
+  --bg-primary: #f8f4ed;
+  --bg-secondary: #efebe2;
+  --bg-tertiary: #e8e2d8;
+  --bg-hover: #dfd9cd;
+  --text-primary: #1a1916;
+  --text-secondary: #8c8880;
+  --text-muted: #bdb9b0;
+  --border-color: rgba(0, 0, 0, 0.07);
+  --border-mid: rgba(0, 0, 0, 0.13);
+
+  --accent: #c96b4e;
+  --accent-hover: #b85a3e;
+  --accent-soft: rgba(201, 107, 78, 0.10);
+  --accent-active: #2e7d46;
+  --accent-active-soft: rgba(46, 125, 70, 0.12);
+
+  --badge-meeting: #c96b4e;
+  --badge-memo: #8b5cf6;
+  --action-color: #b8731e;
+  --action-overdue: #c0392b;
+  --decision-color: #2e7d46;
+  --conflict-color: #c0392b;
+  --stale-color: #b8731e;
+  --commit-color: #8b5cf6;
+  --clear-color: #2e7d46;
 }
 
 html, body {
@@ -70,6 +155,58 @@ html, body {
   min-height: 100%;
   display: flex;
   flex-direction: column;
+}
+
+/* ─── Brand Header ──────────────────────────────────────────────────────────
+   Italic M with a small recording dot, matching Cathryn's app icon. CSS-only
+   (no image asset) so it stays crisp at any zoom and inherits theme colors.
+   Lives at the top of the dashboard view per issue #201. */
+
+.app-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 16px 8px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.brand-mark {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-start;
+  width: 26px;
+  height: 22px;
+  flex-shrink: 0;
+}
+
+.brand-mark-letter {
+  font-family: var(--font-display);
+  font-style: italic;
+  font-weight: 400;
+  font-size: 20px;
+  line-height: 1;
+  color: var(--text-primary);
+  letter-spacing: -0.02em;
+  margin-right: auto;
+}
+
+.brand-mark-dot {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--action-overdue);
+}
+
+.brand-name {
+  font-family: var(--font-display);
+  font-size: 16px;
+  font-weight: 400;
+  color: var(--text-primary);
+  letter-spacing: -0.01em;
 }
 
 /* ─── Loading ───────────────────────────────────────────────────────────── */
@@ -157,10 +294,11 @@ html, body {
 }
 
 .stat-label {
-  font-size: 12px;
+  font-family: var(--font-mono);
+  font-size: 10px;
   color: var(--text-secondary);
   text-transform: uppercase;
-  letter-spacing: 0.04em;
+  letter-spacing: 0.06em;
 }
 
 /* ─── Dashboard ─────────────────────────────────────────────────────────── */
@@ -231,19 +369,20 @@ html, body {
   display: inline-block;
   padding: 1px 6px;
   border-radius: 3px;
+  font-family: var(--font-mono);
   font-size: 10px;
-  font-weight: 600;
+  font-weight: 500;
   text-transform: uppercase;
-  letter-spacing: 0.04em;
+  letter-spacing: 0.05em;
 }
 
 .badge-meeting {
-  background: color-mix(in srgb, var(--badge-meeting) 20%, transparent);
+  background: color-mix(in srgb, var(--badge-meeting) 18%, transparent);
   color: var(--badge-meeting);
 }
 
 .badge-memo {
-  background: color-mix(in srgb, var(--badge-memo) 20%, transparent);
+  background: color-mix(in srgb, var(--badge-memo) 18%, transparent);
   color: var(--badge-memo);
 }
 
@@ -268,10 +407,11 @@ html, body {
 }
 
 .sidebar-title {
-  font-size: 12px;
-  font-weight: 600;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 500;
   text-transform: uppercase;
-  letter-spacing: 0.05em;
+  letter-spacing: 0.06em;
   color: var(--text-secondary);
   margin-bottom: 10px;
 }
@@ -351,11 +491,12 @@ html, body {
   border-radius: var(--radius);
   cursor: pointer;
   font-family: inherit;
-  transition: background 0.15s;
+  transition: background 0.15s, border-color 0.15s;
 }
 
 .back-btn:hover {
   background: var(--bg-hover);
+  border-color: var(--border-mid);
 }
 
 /* ─── Detail View ───────────────────────────────────────────────────────── */
@@ -366,8 +507,10 @@ html, body {
 }
 
 .detail-header h1 {
-  font-size: 18px;
-  font-weight: 600;
+  font-family: var(--font-display);
+  font-size: 22px;
+  font-weight: 400;
+  letter-spacing: -0.01em;
   margin-bottom: 8px;
 }
 
@@ -409,10 +552,11 @@ html, body {
 .tag {
   display: inline-block;
   padding: 1px 8px;
-  background: color-mix(in srgb, var(--accent) 15%, transparent);
+  background: var(--accent-soft);
   color: var(--accent);
-  border-radius: 10px;
-  font-size: 11px;
+  border-radius: 999px;
+  font-family: var(--font-mono);
+  font-size: 10px;
 }
 
 .detail-body {
@@ -463,7 +607,7 @@ html, body {
 }
 
 .detail-content blockquote {
-  border-left: 3px solid var(--accent-dim);
+  border-left: 3px solid var(--accent);
   padding-left: 12px;
   color: var(--text-secondary);
   margin: 8px 0;
@@ -483,6 +627,8 @@ html, body {
   border-radius: var(--radius);
   overflow-x: auto;
   margin: 8px 0;
+  font-family: var(--font-mono);
+  font-size: 12px;
 }
 
 .detail-content pre code {
@@ -508,10 +654,11 @@ html, body {
 }
 
 .panel h3 {
-  font-size: 12px;
-  font-weight: 600;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 500;
   text-transform: uppercase;
-  letter-spacing: 0.05em;
+  letter-spacing: 0.06em;
   color: var(--text-secondary);
   margin-bottom: 8px;
 }
@@ -524,8 +671,10 @@ html, body {
 }
 
 .person-header h1 {
-  font-size: 18px;
-  font-weight: 600;
+  font-family: var(--font-display);
+  font-size: 22px;
+  font-weight: 400;
+  letter-spacing: -0.01em;
 }
 
 .person-header .person-stats {
@@ -542,10 +691,11 @@ html, body {
 }
 
 .person-section h3 {
-  font-size: 12px;
-  font-weight: 600;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 500;
   text-transform: uppercase;
-  letter-spacing: 0.05em;
+  letter-spacing: 0.06em;
   color: var(--text-secondary);
   margin-bottom: 8px;
 }
@@ -600,8 +750,10 @@ html, body {
 }
 
 .report-header h1 {
-  font-size: 18px;
-  font-weight: 600;
+  font-family: var(--font-display);
+  font-size: 22px;
+  font-weight: 400;
+  letter-spacing: -0.01em;
 }
 
 .report-body {
@@ -612,10 +764,11 @@ html, body {
 }
 
 .report-section h3 {
-  font-size: 12px;
-  font-weight: 600;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 500;
   text-transform: uppercase;
-  letter-spacing: 0.05em;
+  letter-spacing: 0.06em;
   color: var(--text-secondary);
   margin-bottom: 8px;
 }
@@ -651,11 +804,12 @@ html, body {
 }
 
 #rec-label {
-  font-weight: 600;
-  font-size: 12px;
+  font-family: var(--font-mono);
+  font-weight: 500;
+  font-size: 11px;
   color: var(--action-overdue);
   text-transform: uppercase;
-  letter-spacing: 0.05em;
+  letter-spacing: 0.06em;
 }
 
 .rec-elapsed {
@@ -667,16 +821,16 @@ html, body {
 .rec-stop-btn {
   margin-left: auto;
   padding: 4px 12px;
-  font-size: 11px;
-  font-weight: 600;
-  font-family: inherit;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 500;
   color: white;
   background: var(--action-overdue);
   border: none;
   border-radius: var(--radius);
   cursor: pointer;
   text-transform: uppercase;
-  letter-spacing: 0.04em;
+  letter-spacing: 0.05em;
   transition: opacity 0.15s;
 }
 
@@ -708,7 +862,7 @@ html, body {
 }
 
 #filter-input:focus {
-  border-color: var(--accent);
+  border-color: var(--accent-active);
 }
 
 #filter-input::placeholder {
@@ -720,6 +874,8 @@ html, body {
   gap: 2px;
 }
 
+/* Filter buttons are nav, not status labels — sentence case + sans, matching
+   the legacy interaction pattern. Active state uses brand green per issue. */
 .filter-btn {
   padding: 4px 10px;
   font-size: 11px;
@@ -736,13 +892,13 @@ html, body {
 .filter-btn:not(:first-child) { border-left: none; }
 
 .filter-btn.active {
-  background: var(--accent);
-  color: white;
-  border-color: var(--accent);
+  background: var(--accent-active);
+  color: var(--bg-primary);
+  border-color: var(--accent-active);
 }
 
 .filter-btn.active + .filter-btn {
-  border-left-color: var(--accent);
+  border-left-color: var(--accent-active);
 }
 
 /* ─── Detail Toolbar ────────────────────────────────────────────────────── */
@@ -765,6 +921,8 @@ html, body {
   gap: 6px;
 }
 
+/* Toolbar buttons are CTAs, not labels — sentence case, sans, no
+   uppercase. Matches the legacy "Send to Claude" / "Fullscreen" rendering. */
 .toolbar-btn {
   padding: 5px 12px;
   font-size: 11px;
@@ -784,11 +942,12 @@ html, body {
 
 #context-btn {
   color: var(--accent);
-  border-color: var(--accent-dim);
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--border-color));
 }
 
 #context-btn:hover {
-  background: color-mix(in srgb, var(--accent) 15%, var(--bg-tertiary));
+  background: var(--accent-soft);
+  color: var(--accent-hover);
 }
 
 /* ─── Clickable Attendees ───────────────────────────────────────────────── */
@@ -832,8 +991,10 @@ html, body {
 }
 .people-header h2 {
   margin: 0 0 8px;
-  font-size: 18px;
-  font-weight: 600;
+  font-family: var(--font-display);
+  font-size: 22px;
+  font-weight: 400;
+  letter-spacing: -0.01em;
 }
 .people-grid {
   display: grid;
@@ -850,7 +1011,7 @@ html, body {
 }
 .person-card:hover {
   border-color: var(--accent);
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.18);
 }
 .person-card.losing-touch {
   border-left: 3px solid var(--stale-color);
@@ -891,6 +1052,7 @@ html, body {
 }
 .person-card-score {
   font-size: 11px;
+  font-family: var(--font-mono);
   color: var(--text-muted);
   margin-top: 4px;
 }

@@ -2,10 +2,10 @@ use chrono::{DateTime, Local};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use std::fs::{self, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::config::Config;
 use crate::markdown::ContentType;
@@ -16,14 +16,18 @@ use crate::markdown::ContentType;
 // Agents can tail/poll this file to react to new meetings.
 // Non-fatal: pipeline never fails if event logging fails.
 // Rotates to events.{date}.jsonl when file exceeds 10MB.
+// Latest committed seq is cached in events.seq. Missing/corrupt sidecars
+// fall back to a full legacy scan once; normal appends only read the sidecar
+// and the bounded active log tail to recover cleanly from crash windows.
 //
 // Meeting insights (decisions, commitments, approvals, etc.) are
 // emitted as MeetingInsight events after pipeline processing.
 // External systems subscribe via MCP notifications or poll the log.
 // ──────────────────────────────────────────────────────────────
 
-const MAX_EVENT_FILE_BYTES: u64 = 10 * 1024 * 1024; // 10MB
 pub const EVENT_SCHEMA_VERSION: u32 = 1;
+const MAX_EVENT_FILE_BYTES: u64 = 10 * 1024 * 1024; // 10MB
+const EVENT_SEQ_TAIL_CHUNK_BYTES: u64 = 64 * 1024;
 
 fn default_event_schema_version() -> u32 {
     EVENT_SCHEMA_VERSION
@@ -205,6 +209,14 @@ fn events_lock_path() -> PathBuf {
     Config::minutes_dir().join("events.lock")
 }
 
+fn event_seq_path() -> PathBuf {
+    Config::minutes_dir().join("events.seq")
+}
+
+fn event_seq_tmp_path() -> PathBuf {
+    Config::minutes_dir().join("events.seq.tmp")
+}
+
 fn event_log_paths() -> std::io::Result<Vec<PathBuf>> {
     let dir = Config::minutes_dir();
     if !dir.exists() {
@@ -286,6 +298,11 @@ pub fn append_event(event: MinutesEvent) {
 fn append_event_inner(envelope: &EventEnvelope) -> std::io::Result<EventEnvelope> {
     let mut envelope = envelope.clone();
     with_event_log_lock(|| {
+        if envelope.seq == 0 {
+            envelope.seq = next_event_seq_inner()?;
+        }
+        envelope.v = EVENT_SCHEMA_VERSION;
+
         rotate_if_needed()?;
 
         let path = events_path();
@@ -302,14 +319,18 @@ fn append_event_inner(envelope: &EventEnvelope) -> std::io::Result<EventEnvelope
             fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
         }
 
-        if envelope.seq == 0 {
-            envelope.seq = next_event_seq_inner()?;
-        }
-        envelope.v = EVENT_SCHEMA_VERSION;
-
         let line =
             serde_json::to_string(&envelope).map_err(|e| std::io::Error::other(e.to_string()))?;
         writeln!(file, "{}", line)?;
+        file.flush()?;
+
+        if let Err(error) = write_event_seq_sidecar_at_least_inner(envelope.seq) {
+            tracing::warn!(
+                error = %error,
+                seq = envelope.seq,
+                "failed to update event seq sidecar"
+            );
+        }
         Ok(())
     })?;
     Ok(envelope)
@@ -385,6 +406,20 @@ fn read_events_since_seq_inner(
 }
 
 fn latest_event_seq_inner() -> std::io::Result<u64> {
+    if let Some(seq) = read_event_seq_sidecar_inner()? {
+        let active_log_seq =
+            latest_event_seq_from_active_log_tail_inner(&events_path())?.unwrap_or(0);
+        return Ok(seq.max(active_log_seq));
+    }
+
+    latest_event_seq_from_logs_inner()
+}
+
+fn next_event_seq_inner() -> std::io::Result<u64> {
+    Ok(latest_event_seq_inner()?.saturating_add(1))
+}
+
+fn latest_event_seq_from_logs_inner() -> std::io::Result<u64> {
     Ok(read_all_event_envelopes_inner()?
         .into_iter()
         .map(|envelope| envelope.seq)
@@ -392,8 +427,110 @@ fn latest_event_seq_inner() -> std::io::Result<u64> {
         .unwrap_or(0))
 }
 
-fn next_event_seq_inner() -> std::io::Result<u64> {
-    Ok(latest_event_seq_inner()?.saturating_add(1))
+fn read_event_seq_sidecar_inner() -> std::io::Result<Option<u64>> {
+    let path = event_seq_path();
+    match fs::read_to_string(&path) {
+        Ok(raw) => match raw.trim().parse::<u64>() {
+            Ok(seq) => Ok(Some(seq)),
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    path = %path.display(),
+                    "ignoring invalid event seq sidecar"
+                );
+                Ok(None)
+            }
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+fn write_event_seq_sidecar_inner(seq: u64) -> std::io::Result<()> {
+    let path = event_seq_path();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    let tmp_path = event_seq_tmp_path();
+    {
+        let mut file = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(&tmp_path)?;
+
+        #[cfg(unix)]
+        fs::set_permissions(&tmp_path, fs::Permissions::from_mode(0o600))?;
+
+        writeln!(file, "{seq}")?;
+        file.flush()?;
+    }
+
+    fs::rename(&tmp_path, &path)?;
+
+    #[cfg(unix)]
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+
+    Ok(())
+}
+
+fn write_event_seq_sidecar_at_least_inner(seq: u64) -> std::io::Result<()> {
+    let existing_seq = read_event_seq_sidecar_inner()?.unwrap_or(0);
+    let active_log_seq = latest_event_seq_from_active_log_tail_inner(&events_path())?.unwrap_or(0);
+    write_event_seq_sidecar_inner(seq.max(existing_seq).max(active_log_seq))
+}
+
+fn latest_event_seq_from_active_log_tail_inner(path: &Path) -> std::io::Result<Option<u64>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+
+    let mut file = fs::File::open(path)?;
+    let mut end = file.metadata()?.len();
+    let mut buffer = Vec::new();
+
+    while end > 0 {
+        let read_len = end.min(EVENT_SEQ_TAIL_CHUNK_BYTES) as usize;
+        let start = end - read_len as u64;
+        file.seek(SeekFrom::Start(start))?;
+
+        let mut chunk = vec![0; read_len];
+        file.read_exact(&mut chunk)?;
+        chunk.extend_from_slice(&buffer);
+        buffer = chunk;
+
+        let lines = if start == 0 {
+            buffer.as_slice()
+        } else if let Some(newline_index) = buffer.iter().position(|byte| *byte == b'\n') {
+            &buffer[newline_index + 1..]
+        } else {
+            end = start;
+            continue;
+        };
+
+        for line in lines.split(|byte| *byte == b'\n').rev() {
+            if line.iter().all(u8::is_ascii_whitespace) {
+                continue;
+            }
+
+            match serde_json::from_slice::<EventEnvelope>(line) {
+                Ok(envelope) if envelope.seq != 0 => return Ok(Some(envelope.seq)),
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::debug!(
+                        error = %error,
+                        path = %path.display(),
+                        "skipping malformed event line while reading latest seq"
+                    );
+                }
+            }
+        }
+
+        end = start;
+    }
+
+    Ok(None)
 }
 
 fn read_all_event_envelopes_inner() -> std::io::Result<Vec<EventEnvelope>> {
@@ -834,6 +971,28 @@ mod tests {
         result
     }
 
+    fn note_envelope(seq: u64, text: &str) -> EventEnvelope {
+        EventEnvelope {
+            v: EVENT_SCHEMA_VERSION,
+            seq,
+            timestamp: Local::now(),
+            event: MinutesEvent::NoteAdded {
+                meeting_path: format!("/tmp/{text}.md"),
+                text: text.into(),
+            },
+        }
+    }
+
+    fn legacy_note_line(text: &str, timestamp: DateTime<Local>) -> String {
+        serde_json::json!({
+            "timestamp": timestamp,
+            "event_type": "NoteAdded",
+            "meeting_path": format!("/tmp/{text}.md"),
+            "text": text,
+        })
+        .to_string()
+    }
+
     #[test]
     fn append_and_read_events() {
         with_temp_home(|_| {
@@ -863,6 +1022,157 @@ mod tests {
                 }
                 _ => panic!("expected RecordingCompleted"),
             }
+        });
+    }
+
+    #[test]
+    fn append_initializes_seq_sidecar_from_legacy_logs() {
+        with_temp_home(|_| {
+            let older_timestamp = Local::now() - chrono::Duration::minutes(10);
+            let newer_timestamp = Local::now();
+            let rotated_path = rotated_events_path_for(older_timestamp);
+            fs::create_dir_all(rotated_path.parent().unwrap()).unwrap();
+            fs::write(
+                &rotated_path,
+                format!("{}\n", legacy_note_line("older", older_timestamp)),
+            )
+            .unwrap();
+            fs::write(
+                events_path(),
+                format!("{}\n", legacy_note_line("newer", newer_timestamp)),
+            )
+            .unwrap();
+
+            let written = append_event_inner(&note_envelope(0, "appended")).unwrap();
+
+            assert_eq!(written.seq, 3);
+            assert_eq!(read_event_seq_sidecar_inner().unwrap(), Some(3));
+
+            let events = read_events_inner(None, None).unwrap();
+            assert_eq!(events.len(), 3);
+            assert_eq!(events[0].seq, 1);
+            assert_eq!(events[1].seq, 2);
+            assert_eq!(events[2].seq, 3);
+        });
+    }
+
+    #[test]
+    fn append_uses_existing_seq_sidecar_as_migration_boundary() {
+        with_temp_home(|_| {
+            write_event_seq_sidecar_inner(50).unwrap();
+
+            let rotated_path = rotated_events_path_for(Local::now() - chrono::Duration::minutes(5));
+            fs::create_dir_all(rotated_path.parent().unwrap()).unwrap();
+            fs::write(
+                &rotated_path,
+                format!(
+                    "{}\n",
+                    serde_json::to_string(&note_envelope(900, "rotated")).unwrap()
+                ),
+            )
+            .unwrap();
+
+            let written = append_event_inner(&note_envelope(0, "from-sidecar")).unwrap();
+
+            assert_eq!(written.seq, 51);
+            assert_eq!(read_event_seq_sidecar_inner().unwrap(), Some(51));
+        });
+    }
+
+    #[test]
+    fn append_recovers_when_seq_sidecar_lags_active_log() {
+        with_temp_home(|_| {
+            write_event_seq_sidecar_inner(1).unwrap();
+            fs::create_dir_all(events_path().parent().unwrap()).unwrap();
+            fs::write(
+                events_path(),
+                format!(
+                    "{}\n",
+                    serde_json::to_string(&note_envelope(5, "written")).unwrap()
+                ),
+            )
+            .unwrap();
+
+            let written = append_event_inner(&note_envelope(0, "after-crash")).unwrap();
+
+            assert_eq!(written.seq, 6);
+            assert_eq!(read_event_seq_sidecar_inner().unwrap(), Some(6));
+        });
+    }
+
+    #[test]
+    fn append_recovers_from_malformed_active_log_tail() {
+        with_temp_home(|_| {
+            write_event_seq_sidecar_inner(1).unwrap();
+            fs::create_dir_all(events_path().parent().unwrap()).unwrap();
+            fs::write(
+                events_path(),
+                format!(
+                    "{}\n{{bad json\n",
+                    serde_json::to_string(&note_envelope(5, "written")).unwrap()
+                ),
+            )
+            .unwrap();
+
+            let written = append_event_inner(&note_envelope(0, "after-partial-write")).unwrap();
+
+            assert_eq!(written.seq, 6);
+            assert_eq!(read_event_seq_sidecar_inner().unwrap(), Some(6));
+        });
+    }
+
+    #[test]
+    fn append_recovers_when_active_log_tail_is_legacy() {
+        with_temp_home(|_| {
+            write_event_seq_sidecar_inner(1).unwrap();
+            fs::create_dir_all(events_path().parent().unwrap()).unwrap();
+            fs::write(
+                events_path(),
+                format!(
+                    "{}\n{}\n",
+                    serde_json::to_string(&note_envelope(5, "written")).unwrap(),
+                    legacy_note_line("legacy-tail", Local::now())
+                ),
+            )
+            .unwrap();
+
+            let written = append_event_inner(&note_envelope(0, "after-legacy-tail")).unwrap();
+
+            assert_eq!(written.seq, 6);
+            assert_eq!(read_event_seq_sidecar_inner().unwrap(), Some(6));
+        });
+    }
+
+    #[test]
+    fn append_never_regresses_existing_seq_sidecar() {
+        with_temp_home(|_| {
+            write_event_seq_sidecar_inner(50).unwrap();
+
+            let written = append_event_inner(&note_envelope(5, "explicit-low-seq")).unwrap();
+
+            assert_eq!(written.seq, 5);
+            assert_eq!(read_event_seq_sidecar_inner().unwrap(), Some(50));
+        });
+    }
+
+    #[test]
+    fn append_recovers_from_invalid_seq_sidecar_by_scanning_logs() {
+        with_temp_home(|_| {
+            fs::create_dir_all(event_seq_path().parent().unwrap()).unwrap();
+            fs::write(event_seq_path(), "not-a-seq\n").unwrap();
+            fs::write(
+                events_path(),
+                format!(
+                    "{}\n",
+                    serde_json::to_string(&note_envelope(7, "existing")).unwrap()
+                ),
+            )
+            .unwrap();
+
+            let written = append_event_inner(&note_envelope(0, "after-invalid-sidecar")).unwrap();
+
+            assert_eq!(written.seq, 8);
+            assert_eq!(read_event_seq_sidecar_inner().unwrap(), Some(8));
         });
     }
 

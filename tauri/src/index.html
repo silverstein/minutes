@@ -628,15 +628,17 @@
     }
 
     /* Brand mark: italic M from Cathryn's app icon, with a small recording dot
-       upper-right. CSS-rendered (no image asset) so the chrome around it serves
-       as the container — no warm-dark square that vanishes against dark mode.
-       The red dot is semantic per DESIGN.md (recording state). */
+       in the upper-right corner. CSS-rendered (no image asset) so the chrome
+       around it serves as the container — no warm-dark square that vanishes
+       against dark mode. The red dot is semantic per DESIGN.md (recording state).
+       Container is intentionally larger than the M's bounding box so the dot has
+       clear breathing room and reads as a corner badge, not part of the letter. */
     .brand-mark {
       position: relative;
       display: inline-flex;
       align-items: center;
       justify-content: center;
-      width: 24px;
+      width: 28px;
       height: 24px;
       flex-shrink: 0;
     }
@@ -644,14 +646,17 @@
       font-family: var(--font-display);
       font-style: italic;
       font-weight: 400;
-      font-size: 22px;
+      font-size: 20px;
       line-height: 1;
       color: var(--text);
       letter-spacing: -0.02em;
+      /* Anchor the M to the left of the wider container so the corner above
+         and to the right is clear space for the dot. */
+      margin-right: auto;
     }
     .brand-mark-dot {
       position: absolute;
-      top: 1px;
+      top: 0;
       right: 0;
       width: 5px;
       height: 5px;

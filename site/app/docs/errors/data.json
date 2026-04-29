@@ -1,7 +1,7 @@
 {
   "generatedAt": "2026-04-29",
-  "visibleCount": 50,
-  "hiddenCount": 15,
+  "visibleCount": 55,
+  "hiddenCount": 16,
   "groups": [
     {
       "enumName": "CaptureError",
@@ -603,6 +603,67 @@
       ]
     },
     {
+      "enumName": "TemplateError",
+      "count": 5,
+      "entries": [
+        {
+          "id": "templateerror-notfound",
+          "enumName": "TemplateError",
+          "variant": "NotFound",
+          "cfg": null,
+          "message": "template not found: {0}",
+          "sourceFile": "crates/core/src/error.rs",
+          "hidden": false,
+          "anchorId": "error-templateerror-notfound",
+          "docsUrl": "https://useminutes.app/docs/errors#error-templateerror-notfound"
+        },
+        {
+          "id": "templateerror-invalid",
+          "enumName": "TemplateError",
+          "variant": "Invalid",
+          "cfg": null,
+          "message": "invalid template at {path}: {message}",
+          "sourceFile": "crates/core/src/error.rs",
+          "hidden": false,
+          "anchorId": "error-templateerror-invalid",
+          "docsUrl": "https://useminutes.app/docs/errors#error-templateerror-invalid"
+        },
+        {
+          "id": "templateerror-unsupportedfield",
+          "enumName": "TemplateError",
+          "variant": "UnsupportedField",
+          "cfg": null,
+          "message": "template at {path} uses field '{field}' not supported by this Minutes version (introduced in a later phase). Upgrade Minutes or remove the field.",
+          "sourceFile": "crates/core/src/error.rs",
+          "hidden": false,
+          "anchorId": "error-templateerror-unsupportedfield",
+          "docsUrl": "https://useminutes.app/docs/errors#error-templateerror-unsupportedfield"
+        },
+        {
+          "id": "templateerror-invalidslug",
+          "enumName": "TemplateError",
+          "variant": "InvalidSlug",
+          "cfg": null,
+          "message": "template at {path} has invalid slug '{slug}': must be lowercase alphanumeric with hyphens (e.g. 'standup', '1-on-1')",
+          "sourceFile": "crates/core/src/error.rs",
+          "hidden": false,
+          "anchorId": "error-templateerror-invalidslug",
+          "docsUrl": "https://useminutes.app/docs/errors#error-templateerror-invalidslug"
+        },
+        {
+          "id": "templateerror-invalidversion",
+          "enumName": "TemplateError",
+          "variant": "InvalidVersion",
+          "cfg": null,
+          "message": "template at {path} has invalid version '{version}': must be semver (e.g. '1.0.0')",
+          "sourceFile": "crates/core/src/error.rs",
+          "hidden": false,
+          "anchorId": "error-templateerror-invalidversion",
+          "docsUrl": "https://useminutes.app/docs/errors#error-templateerror-invalidversion"
+        }
+      ]
+    },
+    {
       "enumName": "GraphError",
       "count": 1,
       "entries": [
@@ -663,6 +724,11 @@
     },
     {
       "enumName": "DictationError",
+      "variant": "Io",
+      "sourceFile": "crates/core/src/error.rs"
+    },
+    {
+      "enumName": "TemplateError",
       "variant": "Io",
       "sourceFile": "crates/core/src/error.rs"
     },

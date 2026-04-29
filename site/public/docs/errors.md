@@ -6,8 +6,8 @@
 
 This is the generated public catalog of stable Minutes core errors. It intentionally favors actionable, user-facing errors over generic wrapper variants.
 
-- Visible actionable errors: 50
-- Hidden low-signal wrappers: 15
+- Visible actionable errors: 55
+- Hidden low-signal wrappers: 16
 
 # CaptureError
 
@@ -628,6 +628,68 @@ Exact message:
 Source: `crates/core/src/error.rs`
 
 Reference URL: https://useminutes.app/docs/errors#error-livetranscripterror-noactivesession
+
+# TemplateError
+
+<a id="error-templateerror-notfound"></a>
+
+## `TemplateError::NotFound`
+
+Exact message:
+
+> template not found: {0}
+
+Source: `crates/core/src/error.rs`
+
+Reference URL: https://useminutes.app/docs/errors#error-templateerror-notfound
+
+<a id="error-templateerror-invalid"></a>
+
+## `TemplateError::Invalid`
+
+Exact message:
+
+> invalid template at {path}: {message}
+
+Source: `crates/core/src/error.rs`
+
+Reference URL: https://useminutes.app/docs/errors#error-templateerror-invalid
+
+<a id="error-templateerror-unsupportedfield"></a>
+
+## `TemplateError::UnsupportedField`
+
+Exact message:
+
+> template at {path} uses field '{field}' not supported by this Minutes version (introduced in a later phase). Upgrade Minutes or remove the field.
+
+Source: `crates/core/src/error.rs`
+
+Reference URL: https://useminutes.app/docs/errors#error-templateerror-unsupportedfield
+
+<a id="error-templateerror-invalidslug"></a>
+
+## `TemplateError::InvalidSlug`
+
+Exact message:
+
+> template at {path} has invalid slug '{slug}': must be lowercase alphanumeric with hyphens (e.g. 'standup', '1-on-1')
+
+Source: `crates/core/src/error.rs`
+
+Reference URL: https://useminutes.app/docs/errors#error-templateerror-invalidslug
+
+<a id="error-templateerror-invalidversion"></a>
+
+## `TemplateError::InvalidVersion`
+
+Exact message:
+
+> template at {path} has invalid version '{version}': must be semver (e.g. '1.0.0')
+
+Source: `crates/core/src/error.rs`
+
+Reference URL: https://useminutes.app/docs/errors#error-templateerror-invalidversion
 
 # GraphError
 

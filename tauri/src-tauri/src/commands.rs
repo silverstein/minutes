@@ -4932,21 +4932,18 @@ fn compute_lifecycle_badges(
     badges
 }
 
+/// Tauri command that powers the in-app search bar.
+///
+/// Returns `Result<Vec<SearchResult>, String>` so failures (corrupted index,
+/// disk-full, etc.) surface as JS Promise rejections that the frontend's
+/// `catch` block handles by rendering an error banner. Previously the command
+/// swallowed every error as `[]`, which made real failures look like "no
+/// matches" and was a debugging footgun.
 #[tauri::command]
-pub fn cmd_search(query: String) -> serde_json::Value {
+pub fn cmd_search(query: String) -> Result<Vec<minutes_core::search::SearchResult>, String> {
     let config = Config::load();
-    let filters = minutes_core::search::SearchFilters {
-        content_type: None,
-        since: None,
-        attendee: None,
-        intent_kind: None,
-        owner: None,
-        recorded_by: None,
-    };
-    match minutes_core::search::search(&query, &config, &filters) {
-        Ok(results) => serde_json::to_value(&results).unwrap_or(serde_json::json!([])),
-        Err(_) => serde_json::json!([]),
-    }
+    let filters = minutes_core::search::SearchFilters::default();
+    minutes_core::search::search(&query, &config, &filters).map_err(|e| e.to_string())
 }
 
 #[tauri::command]

@@ -1295,6 +1295,18 @@
       color: var(--text-secondary);
     }
 
+    /* Surfaces backend errors that previously got swallowed as empty
+       results. Hidden by default; populated by setSearchError(). */
+    .search-error {
+      margin-top: 6px;
+      padding: 6px 10px;
+      border-radius: 6px;
+      background: var(--red-tint, rgba(255, 69, 58, 0.12));
+      color: var(--red, #FF453A);
+      font-size: 11px;
+      line-height: 1.4;
+    }
+
     .search-icon {
       position: relative;
     }
@@ -3908,6 +3920,7 @@
     <!-- Search -->
     <div class="search-wrap search-icon">
       <input class="search-box" type="text" placeholder="Search recordings..." id="search-input" />
+      <div class="search-error" id="search-error" hidden></div>
     </div>
 
     <!-- Upcoming meeting suggestion -->
@@ -7150,10 +7163,12 @@
       if (activeSearchQuery) {
         try {
           const results = await invoke('cmd_search', { query: activeSearchQuery });
+          setSearchError(null);
           renderMeetings(results);
           await refreshOpenMeetingDetail();
         } catch (e) {
           console.error('Search refresh:', e);
+          setSearchError(e);
         }
         return;
       }
@@ -7189,11 +7204,36 @@
         try {
           const results = await invoke('cmd_search', { query });
           if (reqId !== searchRequestId) return; // stale response, newer one in flight
+          setSearchError(null);
           renderMeetings(results);
           await refreshOpenMeetingDetail();
-        } catch (e) { console.error('Search:', e); }
+        } catch (e) {
+          if (reqId !== searchRequestId) return;
+          console.error('Search:', e);
+          setSearchError(e);
+        }
       }, 80);
     });
+
+    // ── Search error banner ──
+    // cmd_search now returns Result<Vec<SearchResult>, String> on the Rust side,
+    // which Tauri auto-rejects the JS Promise with on Err. Any sanitizer issue,
+    // disk problem, or schema-corruption-beyond-rebuild surfaces here instead of
+    // silently mapping to "no matches".
+    function setSearchError(err) {
+      const el = document.getElementById('search-error');
+      if (!el) return;
+      if (!err) {
+        el.hidden = true;
+        el.textContent = '';
+        return;
+      }
+      const msg = typeof err === 'string'
+        ? err
+        : (err && err.message) ? err.message : 'Search failed.';
+      el.textContent = `Search error: ${msg}`;
+      el.hidden = false;
+    }
 
     // ── Onboarding ──
     async function checkSetup() {

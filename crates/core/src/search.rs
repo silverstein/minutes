@@ -531,6 +531,11 @@ pub fn search(
 /// Search with explicit sync mode. Lets the CLI expose `--sync` / `--no-sync`
 /// flags for piped/scripted use cases without making every other caller think
 /// about freshness.
+///
+/// Logs sync stats (indexed/updated/removed/duration_ms) at INFO level when
+/// any work was done. Empty/no-op syncs stay silent. The duration_ms field is
+/// the canary for the watcher coalescer decision: if p95 starts approaching
+/// the 80ms UI debounce we know the corpus has outgrown the per-file scan.
 pub fn search_with_mode(
     query: &str,
     config: &Config,
@@ -542,7 +547,17 @@ pub fn search_with_mode(
         return Err(SearchError::DirNotFound(dir.display().to_string()));
     }
     let index = crate::search_index::SearchIndex::open(config)?;
-    index.sync(config, mode)?;
+    let stats = index.sync(config, mode)?;
+    if stats.indexed + stats.updated + stats.removed + stats.errored > 0 {
+        tracing::info!(
+            indexed = stats.indexed,
+            updated = stats.updated,
+            removed = stats.removed,
+            errored = stats.errored,
+            duration_ms = stats.duration_ms,
+            "search index sync"
+        );
+    }
     Ok(index.search(query, filters, None)?)
 }
 

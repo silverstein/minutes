@@ -413,6 +413,18 @@ enum Commands {
         /// Output format: text (human-readable) or json (one JSON object per line)
         #[arg(long, default_value = "text", value_parser = ["text", "json"])]
         format: String,
+
+        /// Force a full re-walk + reindex before searching. Catches edge cases
+        /// where mtime alone misses a content change (e.g., editor wrote with
+        /// the same mtime). Slower; default Auto is usually enough.
+        #[arg(long, conflicts_with = "no_sync")]
+        sync: bool,
+
+        /// Skip filesystem sync entirely; query the index as-is. Useful for
+        /// piped or scripted CLI calls where freshness doesn't matter and
+        /// every millisecond counts.
+        #[arg(long, conflicts_with = "sync")]
+        no_sync: bool,
     },
 
     /// Show open action items across all meetings
@@ -492,6 +504,14 @@ enum Commands {
         /// Filter by type: meeting or memo
         #[arg(short = 't', long)]
         content_type: Option<String>,
+
+        /// Force a full re-walk + reindex before listing.
+        #[arg(long, conflicts_with = "no_sync")]
+        sync: bool,
+
+        /// Skip filesystem sync entirely; query the index as-is.
+        #[arg(long, conflicts_with = "sync")]
+        no_sync: bool,
     },
 
     /// Export meetings as CSV (to stdout or file)
@@ -1216,6 +1236,8 @@ fn main() -> Result<()> {
             intent_kind,
             owner,
             format,
+            sync,
+            no_sync,
         } => cmd_search(
             &query,
             content_type,
@@ -1225,6 +1247,7 @@ fn main() -> Result<()> {
             intent_kind,
             owner,
             &format,
+            resolve_sync_mode(sync, no_sync),
             &config,
         ),
         Commands::Actions { assignee } => cmd_actions(assignee.as_deref(), &config),
@@ -1248,7 +1271,14 @@ fn main() -> Result<()> {
         Commands::List {
             limit,
             content_type,
-        } => cmd_list(limit, content_type, &config),
+            sync,
+            no_sync,
+        } => cmd_list(
+            limit,
+            content_type,
+            resolve_sync_mode(sync, no_sync),
+            &config,
+        ),
         Commands::Export {
             content_type,
             output,
@@ -2296,6 +2326,21 @@ fn owner_display(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Resolve `--sync` / `--no-sync` clap flags into a `SyncMode`. Both flags
+/// have `conflicts_with` so clap rejects passing both; the unset case falls
+/// through to `Auto` (per-file mtime+size scan), which is the right default
+/// for a CLI invocation that wants fresh data without forcing a full rebuild.
+fn resolve_sync_mode(sync: bool, no_sync: bool) -> minutes_core::search_index::SyncMode {
+    if sync {
+        minutes_core::search_index::SyncMode::Force
+    } else if no_sync {
+        minutes_core::search_index::SyncMode::Skip
+    } else {
+        minutes_core::search_index::SyncMode::Auto
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn cmd_search(
     query: &str,
     content_type: Option<String>,
@@ -2305,6 +2350,7 @@ fn cmd_search(
     intent_kind: Option<String>,
     owner: Option<String>,
     format: &str,
+    sync_mode: minutes_core::search_index::SyncMode,
     config: &Config,
 ) -> Result<()> {
     let json_mode = format == "json";
@@ -2362,7 +2408,7 @@ fn cmd_search(
         return Ok(());
     }
 
-    let results = minutes_core::search::search(query, config, &filters)?;
+    let results = minutes_core::search::search_with_mode(query, config, &filters, sync_mode)?;
     let limited: Vec<_> = results.into_iter().take(limit).collect();
 
     if limited.is_empty() {
@@ -2421,7 +2467,12 @@ fn cmd_actions(assignee: Option<&str>, config: &Config) -> Result<()> {
     Ok(())
 }
 
-fn cmd_list(limit: usize, content_type: Option<String>, config: &Config) -> Result<()> {
+fn cmd_list(
+    limit: usize,
+    content_type: Option<String>,
+    sync_mode: minutes_core::search_index::SyncMode,
+    config: &Config,
+) -> Result<()> {
     // List delegates to search with an empty query — DRY, no duplicated file walking
     cmd_search(
         "",
@@ -2432,6 +2483,7 @@ fn cmd_list(limit: usize, content_type: Option<String>, config: &Config) -> Resu
         None,
         None,
         "text",
+        sync_mode,
         config,
     )
 }

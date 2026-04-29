@@ -3219,12 +3219,17 @@
       flex-wrap: wrap;
     }
 
-    /* ── Call detected banner ── */
+    /* ── Call detected banner ──
+       Single-row notification (matches macOS-native call notification pattern):
+       icon + title + Record CTA + corner ✕. Previously had a subtitle, an
+       instructional paragraph, and two readiness chips that never updated past
+       "waiting" — all dropped because they bloated the card to 6+ lines and
+       carried no actionable info. */
     .call-detected {
       display: none;
-      align-items: flex-start;
+      align-items: center;
       gap: 10px;
-      padding: 12px 16px;
+      padding: 10px 12px 10px 16px;
       background: var(--green-tint-soft);
       border-bottom: 1px solid var(--green-border);
     }
@@ -3238,36 +3243,36 @@
       flex-shrink: 0;
     }
 
-    .call-detected-info {
-      flex: 1;
-      min-width: 0;
-    }
-
     .call-detected-title {
       font-size: 13px;
       font-weight: 600;
       color: var(--text);
+      flex: 1;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }
 
-    .call-detected-subtitle {
-      font-size: 11px;
-      color: var(--green);
-      font-weight: 600;
-      margin-top: 2px;
-    }
-
-    .call-detected-detail {
-      font-size: 11px;
+    .call-detected-close {
+      flex-shrink: 0;
+      width: 22px;
+      height: 22px;
+      border: none;
+      background: transparent;
       color: var(--text-secondary);
-      margin-top: 6px;
-      line-height: 1.35;
+      font-size: 16px;
+      line-height: 1;
+      cursor: pointer;
+      border-radius: 4px;
+      padding: 0;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
     }
-
-    .call-detected-health {
-      display: flex;
-      gap: 8px;
-      flex-wrap: wrap;
-      margin-top: 8px;
+    .call-detected-close:hover {
+      background: var(--surface-fill-hover);
+      color: var(--text);
     }
 
     /* ── Call ended countdown banner ── */
@@ -3613,9 +3618,8 @@
     .call-detected-actions {
       display: flex;
       align-items: center;
-      gap: 8px;
+      gap: 6px;
       flex-shrink: 0;
-      margin-left: 8px;
     }
 
     .ui-hidden {
@@ -3936,19 +3940,10 @@
     <!-- Call detected banner -->
     <div class="call-detected" id="call-detected-banner">
       <div class="call-detected-icon">📞</div>
-      <div class="call-detected-info">
-        <div class="call-detected-title" id="call-detected-title">Call detected</div>
-        <div class="call-detected-subtitle" id="call-detected-subtitle">Ready to record this call</div>
-        <div class="call-detected-detail" id="call-detected-detail">Minutes will stay ready while this call is active.
-        </div>
-        <div class="call-detected-health">
-          <span class="call-health-chip" id="call-health-mic">Mic waiting</span>
-          <span class="call-health-chip" id="call-health-audio">Call audio waiting</span>
-        </div>
-      </div>
+      <div class="call-detected-title" id="call-detected-title">Call detected</div>
       <div class="call-detected-actions">
         <button class="btn btn-primary btn-sm" id="btn-record-call">Record</button>
-        <button class="btn btn-secondary btn-sm" id="btn-dismiss-call">Dismiss</button>
+        <button class="call-detected-close" id="btn-dismiss-call" aria-label="Dismiss call notification" title="Dismiss">×</button>
       </div>
     </div>
 
@@ -9632,12 +9627,11 @@
     // ── Call detection banner ──
     const callBanner = document.getElementById('call-detected-banner');
     const callTitle = document.getElementById('call-detected-title');
-    const callSubtitle = document.getElementById('call-detected-subtitle');
-    const callDetail = document.getElementById('call-detected-detail');
-    const callHealthMic = document.getElementById('call-health-mic');
-    const callHealthAudio = document.getElementById('call-health-audio');
     let activeCallSession = null;
 
+    // Used by the recording-bar health chips (line ~5806). The call-detected
+    // banner used to call this too with stale "waiting" placeholders, but
+    // those were dropped in the single-row redesign.
     function setCallHealthChip(node, text, live) {
       if (!node) return;
       node.textContent = text;
@@ -9651,10 +9645,6 @@
         dismissed: false,
       };
       callTitle.textContent = `${app_name} call detected`;
-      callSubtitle.textContent = 'Ready to record this call';
-      callDetail.textContent = 'Minutes will stay ready while this call is active until you start recording or dismiss this session.';
-      setCallHealthChip(callHealthMic, 'Mic waiting', false);
-      setCallHealthChip(callHealthAudio, 'Call audio waiting', false);
       callBanner.classList.add('active');
 
       // Only steal focus on first detection, not periodic reminders

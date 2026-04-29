@@ -99,6 +99,9 @@ pub enum SearchError {
 
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
+
+    #[error("search index error: {0}")]
+    Index(String),
 }
 
 #[derive(Debug, Error)]

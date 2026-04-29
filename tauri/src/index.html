@@ -7165,11 +7165,17 @@
     }
 
     // ── Search ──
+    // Debounce 80ms feels instant to a typer once the FTS5 index is in place,
+    // but lets a fast-typing burst coalesce into a single query. The req-id
+    // guard prevents an older slow IPC from clobbering the newer fast one's
+    // results when responses arrive out of order.
     let searchTimeout;
+    let searchRequestId = 0;
     searchInput.addEventListener('input', (e) => {
       clearTimeout(searchTimeout);
       const query = e.target.value.trim();
       activeSearchQuery = query;
+      const reqId = ++searchRequestId;
       if (!query) {
         scheduleMeetingsRefresh(0);
         return;
@@ -7177,10 +7183,11 @@
       searchTimeout = setTimeout(async () => {
         try {
           const results = await invoke('cmd_search', { query });
+          if (reqId !== searchRequestId) return; // stale response, newer one in flight
           renderMeetings(results);
           await refreshOpenMeetingDetail();
         } catch (e) { console.error('Search:', e); }
-      }, 250);
+      }, 80);
     });
 
     // ── Onboarding ──

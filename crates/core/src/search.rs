@@ -302,6 +302,7 @@ pub struct CrossMeetingResearch {
     pub related_topics: Vec<TopicSummary>,
 }
 
+#[derive(Default)]
 pub struct SearchFilters {
     pub content_type: Option<String>,
     pub since: Option<String>,
@@ -524,28 +525,25 @@ pub fn search(
     config: &Config,
     filters: &SearchFilters,
 ) -> Result<Vec<SearchResult>, SearchError> {
+    search_with_mode(query, config, filters, crate::search_index::SyncMode::Auto)
+}
+
+/// Search with explicit sync mode. Lets the CLI expose `--sync` / `--no-sync`
+/// flags for piped/scripted use cases without making every other caller think
+/// about freshness.
+pub fn search_with_mode(
+    query: &str,
+    config: &Config,
+    filters: &SearchFilters,
+    mode: crate::search_index::SyncMode,
+) -> Result<Vec<SearchResult>, SearchError> {
     let dir = &config.output_dir;
     if !dir.exists() {
         return Err(SearchError::DirNotFound(dir.display().to_string()));
     }
-
-    let query_lower = query.to_lowercase();
-    let mut results = Vec::new();
-
-    for entry in walk_meeting_files(dir) {
-        let path = entry.path();
-        match process_file(path, &query_lower, filters) {
-            Ok(Some(result)) => results.push(result),
-            Ok(None) => {} // No match
-            Err(e) => {
-                tracing::warn!(path = %path.display(), error = %e, "skipping file in search");
-            }
-        }
-    }
-
-    // Sort by date descending (newest first)
-    results.sort_by(|a, b| b.date.cmp(&a.date));
-    Ok(results)
+    let index = crate::search_index::SearchIndex::open(config)?;
+    index.sync(config, mode)?;
+    Ok(index.search(query, filters, None)?)
 }
 
 /// Search structured intents across all markdown files in the meetings directory.
@@ -941,6 +939,12 @@ pub fn person_profile(config: &Config, person: &str) -> Result<PersonProfile, Se
     })
 }
 
+// Legacy walk-and-grep helper. The `search()` public API now delegates to the
+// FTS5 index, but `cross_meeting_research`, `person_profile`, and
+// `find_open_actions` (deferred to follow-up PRs) still walk files. They'll be
+// migrated in their own PRs; meanwhile this stays so the helpers don't need
+// to be reinvented later.
+#[allow(dead_code)]
 fn process_file(
     path: &Path,
     query: &str,
@@ -1195,6 +1199,7 @@ pub struct ActionResult {
 }
 
 /// Extract a snippet around the first match of the query.
+#[allow(dead_code)]
 fn extract_snippet(body: &str, query: &str) -> String {
     // Find the query in the body case-insensitively.
     // We search the original body to avoid byte-offset mismatch from to_lowercase().

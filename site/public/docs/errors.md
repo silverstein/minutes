@@ -2,11 +2,11 @@
 
 > Generated file. Do not edit by hand.
 > Source: crates/core thiserror definitions
-> Last generated: 2026-04-27
+> Last generated: 2026-04-29
 
 This is the generated public catalog of stable Minutes core errors. It intentionally favors actionable, user-facing errors over generic wrapper variants.
 
-- Visible actionable errors: 49
+- Visible actionable errors: 50
 - Hidden low-signal wrappers: 15
 
 # CaptureError
@@ -286,6 +286,18 @@ Exact message:
 Source: `crates/core/src/error.rs`
 
 Reference URL: https://useminutes.app/docs/errors#error-searcherror-frontmatterparseerror
+
+<a id="error-searcherror-index"></a>
+
+## `SearchError::Index`
+
+Exact message:
+
+> search index error: {0}
+
+Source: `crates/core/src/error.rs`
+
+Reference URL: https://useminutes.app/docs/errors#error-searcherror-index
 
 # ConfigError
 

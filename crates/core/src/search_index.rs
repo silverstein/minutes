@@ -810,4 +810,3 @@ mod tests {
         assert!(snip.contains("pricing"));
     }
 }
-

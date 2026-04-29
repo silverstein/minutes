@@ -1,6 +1,6 @@
 {
-  "generatedAt": "2026-04-27",
-  "visibleCount": 49,
+  "generatedAt": "2026-04-29",
+  "visibleCount": 50,
   "hiddenCount": 15,
   "groups": [
     {
@@ -243,7 +243,7 @@
     },
     {
       "enumName": "SearchError",
-      "count": 2,
+      "count": 3,
       "entries": [
         {
           "id": "searcherror-dirnotfound",
@@ -266,6 +266,17 @@
           "hidden": false,
           "anchorId": "error-searcherror-frontmatterparseerror",
           "docsUrl": "https://useminutes.app/docs/errors#error-searcherror-frontmatterparseerror"
+        },
+        {
+          "id": "searcherror-index",
+          "enumName": "SearchError",
+          "variant": "Index",
+          "cfg": null,
+          "message": "search index error: {0}",
+          "sourceFile": "crates/core/src/error.rs",
+          "hidden": false,
+          "anchorId": "error-searcherror-index",
+          "docsUrl": "https://useminutes.app/docs/errors#error-searcherror-index"
         }
       ]
     },

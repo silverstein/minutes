@@ -2,7 +2,7 @@
 
 > Generated file. Do not edit by hand.
 > Source: manifest.json + crates/mcp/src/index.ts + site/lib/skills-catalog.json
-> Last generated: 2026-04-27
+> Last generated: 2026-04-29
 
 Minutes is an open-source meeting corpus you own. Record, transcribe, search, and query every meeting and voice memo on your own disk. No cloud, no vendor to outlive. Output is structured markdown in `~/meetings/` that Claude Desktop, Claude Code, Codex, Gemini CLI, Cursor, OpenCode, Pi, and any MCP-compatible client read from the same folder, without a proprietary SDK or API key. Ten years from now, `grep` still works on your corpus.
 

@@ -627,12 +627,36 @@
       flex-shrink: 0;
     }
 
+    /* Brand mark: italic M from Cathryn's app icon, with a small recording dot
+       upper-right. CSS-rendered (no image asset) so the chrome around it serves
+       as the container — no warm-dark square that vanishes against dark mode.
+       The red dot is semantic per DESIGN.md (recording state). */
     .brand-mark {
-      width: 22px;
-      height: 22px;
-      border-radius: 5px;
+      position: relative;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 24px;
+      height: 24px;
       flex-shrink: 0;
-      display: block;
+    }
+    .brand-mark-letter {
+      font-family: var(--font-display);
+      font-style: italic;
+      font-weight: 400;
+      font-size: 22px;
+      line-height: 1;
+      color: var(--text);
+      letter-spacing: -0.02em;
+    }
+    .brand-mark-dot {
+      position: absolute;
+      top: 1px;
+      right: 0;
+      width: 5px;
+      height: 5px;
+      border-radius: 50%;
+      background: var(--red, #FF453A);
     }
 
     .brand-copy {
@@ -3390,15 +3414,50 @@
       display: block;
     }
 
+    /* Dev-only collapsible. The summary is a small pill so it doesn't dominate
+       the banner. State-test buttons live behind this disclosure so the banner
+       still feels like a banner, not a developer console, when an end user sees
+       it for a real update. */
     .update-banner-debug {
       display: none;
-      gap: 6px;
-      flex-wrap: wrap;
-      margin-top: 8px;
+      margin-top: 10px;
     }
 
     .update-banner-debug.active {
+      display: block;
+    }
+
+    .update-banner-debug-summary {
+      cursor: pointer;
+      font-size: 10px;
+      font-family: var(--font-mono);
+      letter-spacing: 0.3px;
+      text-transform: uppercase;
+      color: var(--text-tertiary);
+      list-style: none;
+      user-select: none;
+      padding: 2px 6px;
+      display: inline-block;
+      border-radius: 4px;
+    }
+    .update-banner-debug-summary::-webkit-details-marker { display: none; }
+    .update-banner-debug-summary::before {
+      content: '▸ ';
+      display: inline-block;
+      transition: transform 120ms ease;
+    }
+    .update-banner-debug[open] .update-banner-debug-summary::before {
+      content: '▾ ';
+    }
+    .update-banner-debug-summary:hover {
+      color: var(--text-secondary);
+    }
+
+    .update-banner-debug-row {
       display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+      margin-top: 6px;
     }
 
     .update-banner.error-state .update-banner-title {
@@ -3746,7 +3805,10 @@
     <!-- Header -->
     <div class="header">
       <div class="brand">
-        <img class="brand-mark" src="icons/brand-mark.png" alt="Minutes" width="22" height="22" />
+        <span class="brand-mark" role="img" aria-label="Minutes">
+          <span class="brand-mark-letter" aria-hidden="true">M</span>
+          <span class="brand-mark-dot" aria-hidden="true"></span>
+        </span>
         <div class="brand-copy">
           <div class="brand-sub">Conversation memory for humans and agents</div>
         </div>
@@ -3840,7 +3902,7 @@
 
     <!-- Search -->
     <div class="search-wrap search-icon">
-      <input class="search-box" type="text" placeholder="Search meetings, memos, and dictations..." id="search-input" />
+      <input class="search-box" type="text" placeholder="Search recordings..." id="search-input" />
     </div>
 
     <!-- Upcoming meeting suggestion -->
@@ -3907,14 +3969,18 @@
           <div class="update-banner-progress-fill" id="update-banner-progress-fill"></div>
         </div>
         <div class="update-banner-error" id="update-banner-error"></div>
-        <div class="update-banner-debug" id="update-banner-debug">
-          <button class="btn btn-secondary btn-sm" data-update-debug="checking">Checking</button>
-          <button class="btn btn-secondary btn-sm" data-update-debug="downloading">Downloading</button>
-          <button class="btn btn-secondary btn-sm" data-update-debug="verifying">Verifying</button>
-          <button class="btn btn-secondary btn-sm" data-update-debug="installing">Installing</button>
-          <button class="btn btn-secondary btn-sm" data-update-debug="ready">Ready</button>
-          <button class="btn btn-secondary btn-sm" data-update-debug="error">Error</button>
-        </div>
+        <details class="update-banner-debug" id="update-banner-debug">
+          <summary class="update-banner-debug-summary">Dev tools</summary>
+          <div class="update-banner-debug-row">
+            <button class="btn btn-secondary btn-sm" id="btn-update-debug-launch">Trigger banner</button>
+            <button class="btn btn-secondary btn-sm" data-update-debug="checking">Checking</button>
+            <button class="btn btn-secondary btn-sm" data-update-debug="downloading">Downloading</button>
+            <button class="btn btn-secondary btn-sm" data-update-debug="verifying">Verifying</button>
+            <button class="btn btn-secondary btn-sm" data-update-debug="installing">Installing</button>
+            <button class="btn btn-secondary btn-sm" data-update-debug="ready">Ready</button>
+            <button class="btn btn-secondary btn-sm" data-update-debug="error">Error</button>
+          </div>
+        </details>
       </div>
     </div>
 
@@ -3998,7 +4064,6 @@
             title="Start live transcription — ask your agent in Recall for coaching"
             aria-label="Start live transcription">Live</button>
           <button class="btn btn-secondary" id="btn-quick-thought">Quick Thought</button>
-          <button class="btn btn-secondary" id="btn-update-debug-launch" hidden>Update Debug</button>
           <button class="btn btn-secondary" id="btn-assistant" aria-expanded="false">Recall <span class="recall-nudge"
               id="recall-nudge" aria-label="Recall has new content"></span></button>
         </div>
@@ -9838,8 +9903,19 @@
     try {
       const stored = localStorage.getItem('minutes-pending-update');
       if (stored) {
-        const { version, body, downloadBytes } = JSON.parse(stored);
-        window.__TAURI__.app.getVersion().then(currentVersion => {
+        // Dev builds disable auto-update (see main.rs). Clear any stale
+        // pending-update from a previous session so it doesn't resurrect
+        // a banner against a now-newer dev build.
+        Promise.all([
+          window.__TAURI__.app.getName?.() ?? Promise.resolve(''),
+          window.__TAURI__.app.getVersion(),
+        ]).then(([name, currentVersion]) => {
+          const isDev = typeof name === 'string' && name.includes('Dev');
+          if (isDev) {
+            localStorage.removeItem('minutes-pending-update');
+            return;
+          }
+          const { version, body, downloadBytes } = JSON.parse(stored);
           if (version && version !== currentVersion) {
             showUpdateBanner(version, body, downloadBytes);
           } else {
@@ -9910,8 +9986,9 @@
 
     window.__TAURI__.app.getName?.().then((name) => {
       updaterDebugEnabled = typeof name === 'string' && name.includes('Dev');
+      // Parent <details class="update-banner-debug"> is gated by .active —
+      // the launch button now lives inside that disclosure and inherits visibility.
       if (updateBannerDebug) updateBannerDebug.classList.toggle('active', updaterDebugEnabled);
-      if (updateDebugLaunchButton) updateDebugLaunchButton.hidden = !updaterDebugEnabled;
     }).catch(() => { });
 
     document.querySelectorAll('[data-update-debug]').forEach((button) => {

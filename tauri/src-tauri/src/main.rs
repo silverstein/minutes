@@ -109,7 +109,10 @@ fn show_main_window(app: &tauri::AppHandle) {
         return;
     }
     if let Ok(win) = WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
-        .title("Minutes")
+        // Empty title hides the centered "Minutes" text in the macOS title bar.
+        // The in-app brand mark (italic M + recording dot) carries the identity now,
+        // so the title text was double-branding the same window.
+        .title("")
         .inner_size(520.0, 700.0)
         .min_inner_size(420.0, 520.0)
         .transparent(true)
@@ -1142,12 +1145,18 @@ fn main() {
                 }
             }
 
-            if !(allow_debug_update_state && debug_update_state.is_some()) {
+            if !allow_debug_update_state {
                 // Auto-update: check on launch, then every 6 hours.
                 // Check-only (no download). Download starts only when the user
                 // accepts the update from the desktop banner.
                 // Defers notification if recording/live/dictation is active.
                 // Between checks, polls every 30s to surface deferred updates once sessions end.
+                //
+                // Dev builds (bundle id ending in .dev) skip the auto-update thread entirely:
+                // a dev app shouldn't replace itself with a release-channel build, and the
+                // auto-check was surfacing release banners (and hardcoded debug versions
+                // resurrected from localStorage) that obscured the real UI. Manual "Check
+                // for Updates" from the tray/app menu still works for end-to-end testing.
                 let update_handle = app.handle().clone();
                 std::thread::spawn(move || {
                     const CHECK_INTERVAL_SECS: u64 = 6 * 60 * 60;

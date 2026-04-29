@@ -1,4 +1,11 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
-  <rect width="32" height="32" rx="7" fill="#000"/>
-  <text x="16" y="23" text-anchor="middle" font-family="ui-monospace, SF Mono, Menlo, monospace" font-size="22" font-weight="600" fill="#ededed">m</text>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="Minutes">
+  <!-- Cathryn's app-icon design at favicon scale: warm-dark rounded square,
+       cream italic M, red recording dot upper-right. Serif italic falls back
+       gracefully without Instrument Serif because browsers don't load custom
+       fonts for favicons. -->
+  <rect width="32" height="32" rx="7" fill="#0D0D0B"/>
+  <text x="16" y="24" text-anchor="middle"
+        font-family="'Instrument Serif', 'Iowan Old Style', Georgia, serif"
+        font-size="24" font-style="italic" font-weight="400" fill="#E8E4DA">M</text>
+  <circle cx="25" cy="7" r="2.5" fill="#FF453A"/>
 </svg>

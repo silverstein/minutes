@@ -2,7 +2,7 @@
 """Generate the Minutes macOS/Windows app icon source.
 
 Design: warm-dark rounded square (`#0D0D0B`, the dark-mode `--bg`) with a
-cream italic 'M' set in Instrument Serif (`#E8E4DA`, the dark-mode `--text`)
+cream italic 'm' set in Instrument Serif (`#E8E4DA`, the dark-mode `--text`)
 and a small recording dot in the upper-right corner using the dark-mode
 `--red` (`#FF453A`). Per DESIGN.md the red is reserved for recording state,
 so its use here is semantic — the icon literally tells you the app records.
@@ -29,7 +29,13 @@ RED       = (255, 69, 58)       # #FF453A — dark-mode --red, recording state
 
 SIZE = 1024
 RADIUS = 230  # macOS Big Sur+ icon corner radius (~22% of side)
-M_FONT_SIZE = 720
+# Lowercase italic 'm' has roughly half the cap-height as uppercase 'M', so we
+# bump the font size to keep the glyph visually substantial in the icon body.
+M_FONT_SIZE = 980
+# Italic lowercase 'm' has no descender, so true bbox-centering leaves more
+# breathing room below than above. Nudge the optical center up so the glyph
+# sits visually balanced between the top edge and the baseline.
+M_CY_OFFSET = -50
 DOT_DIAMETER = 84
 DOT_CX = SIZE - 168
 DOT_CY = 168
@@ -59,10 +65,10 @@ def main() -> None:
         fill=(*RED, 255),
     )
 
-    # Centered italic "M" in Instrument Serif, anchor "mm" for true optical
+    # Centered italic "m" in Instrument Serif, anchor "mm" for true optical
     # centering of the glyph bounding box.
     font = ImageFont.truetype(str(ITALIC_TTF), size=M_FONT_SIZE)
-    draw.text((SIZE // 2, SIZE // 2), "M",
+    draw.text((SIZE // 2, SIZE // 2 + M_CY_OFFSET), "m",
               font=font, fill=(*CREAM, 255), anchor="mm")
 
     OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)

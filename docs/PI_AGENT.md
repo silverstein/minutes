@@ -5,9 +5,28 @@ Minutes supports Mario Zechner's `pi` coding agent as an opt-in local agent CLI.
 ## What is wired
 
 - Desktop settings now recognize `pi` as a well-known `agent_command`.
+- Desktop Recall can launch `assistant.agent = "pi"` as an interactive Pi session.
 - `engine = "agent"` can run `pi` for summarization.
 - Agent routing evals can be run with `--agent pi`.
 - Pi can use the existing `.agents/skills/minutes/` skill mirror; Pi's package manager auto-discovers ancestor `.agents/skills` directories, so a separate `.pi/skills` tree would duplicate the same skill names.
+
+## Recall assistant config
+
+```toml
+[assistant]
+agent = "pi"
+agent_args = []
+```
+
+For the interactive Recall panel, Minutes launches `pi` in the assistant
+workspace and passes `agent_args` through unchanged, after dropping only
+approval-bypass flags that belong to other agents.
+
+Pi owns provider auth and model selection. Use Pi's interactive `/login` and
+`/model` flows, or explicit Pi flags such as `--model <provider/model>`, to
+choose the model. If a GitHub Copilot model such as `github-copilot/gpt-5.4`
+fails with "Personal Access Tokens are not supported for this endpoint", refresh
+Pi's GitHub Copilot login with `/login`; do not paste a GitHub PAT into Minutes.
 
 ## Summarization config
 

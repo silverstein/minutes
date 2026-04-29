@@ -14,7 +14,7 @@ const comparisonRows = [
   {
     label: "Best for",
     competitor: "Polished AI notepad, sharing, and team-friendly meeting notes",
-    minutes: "Local conversation memory, agent workflows, and inspectable output",
+    minutes: "Local conversation infrastructure, agent workflows, and inspectable output",
   },
   {
     label: "Pricing",
@@ -33,8 +33,8 @@ const comparisonRows = [
   },
   {
     label: "MCP support",
-    competitor: "Yes, with plan and data-scope caveats",
-    minutes: "Yes, with generated public MCP docs",
+    competitor: "Yes, attached to a hosted notes product",
+    minutes: "Yes, over local files, CLI workflows, and generated public docs",
   },
   {
     label: "CLI workflow",
@@ -69,7 +69,7 @@ export default function GranolaVsMinutesPage() {
       competitorName="Granola"
       competitorLabel="Granola AI"
       markdownHref="/compare/granola-vs-minutes.md"
-      heroSummary="Granola and Minutes are both good, but they solve different problems. Granola is a better fit if you want a polished AI note-taking product with stronger collaboration and integration ergonomics. Minutes is a better fit if you want local conversation memory, inspectable markdown, and a workflow your agents can use across MCP, CLI, desktop, and plugin surfaces."
+      heroSummary="Granola and Minutes are both good, but they solve different problems. Granola is a better fit if you want a polished AI note-taking product with stronger collaboration and integration ergonomics. Minutes is a better fit if you want local conversation infrastructure, inspectable markdown, and a workflow your agents can use across MCP, CLI, desktop, and plugin surfaces."
       quickVerdictCompetitor="your top priority is a polished AI notepad, collaboration, and a product built around reading, editing, and sharing notes inside the app."
       quickVerdictMinutes="your top priority is local processing, inspectable files, and a memory layer that Claude, Codex, and other MCP clients can query later."
       comparisonRows={comparisonRows as any}
@@ -80,11 +80,11 @@ export default function GranolaVsMinutesPage() {
       ]}
       minutesWins={[
         "Minutes is local-first and file-native. The durable output is structured markdown you can inspect, sync, grep, and use outside the app.",
-        "Minutes is stronger if your real goal is giving Claude, Codex, or another MCP client durable memory across meetings instead of just a better note view.",
+        "Minutes is stronger if your real goal is giving Claude, Codex, or another MCP client durable local conversation memory instead of just a better note view.",
         "Minutes has a broader operator/developer surface: MCP server, desktop app, CLI, SDK, and Claude Code plugin rather than one primary app experience.",
       ]}
       workflowSection={[
-        "Granola now has official MCP support, so the comparison is no longer 'Granola for humans, Minutes for MCP.' The more honest distinction is what the MCP layer is serving. Granola's MCP offering is attached to a hosted AI notes product and has plan and data-scope caveats. Minutes is built around a broader operator and developer workflow: local processing, inspectable markdown, a public MCP reference, a CLI, a desktop app, and a Claude Code plugin.",
+        "Granola now has official MCP support, so the comparison is no longer 'Granola for humans, Minutes for MCP.' The more honest distinction is what the MCP layer is serving. Granola's MCP offering is attached to a hosted AI notes product. Minutes is built around a broader operator and developer workflow: local processing, inspectable markdown, a public MCP reference, a CLI, a desktop app, live transcript reads, and a Claude Code plugin.",
         "If your question is 'can my assistant access some meeting notes?', both can be relevant. If your question is 'can my assistant use my meetings as durable local memory across tools and workflows?', that is where Minutes is more purpose-built.",
       ]}
       chooseSection={[

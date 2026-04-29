@@ -73,6 +73,15 @@ pub enum TranscriptSource {
     RecordingSidecar,
 }
 
+impl TranscriptSource {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Standalone => "standalone",
+            Self::RecordingSidecar => "recording-sidecar",
+        }
+    }
+}
+
 pub const PARAKEET_SCOPE_DOC_REF: &str = "docs/PARAKEET.md#scope";
 /// Shown at session start when the user configured `engine = "parakeet"` but the
 /// binary was built without the `parakeet` Cargo feature. The engine choice is
@@ -246,6 +255,7 @@ pub struct SessionStatus {
 /// Manages writing the JSONL and optional WAV file during a live session.
 struct LiveTranscriptWriter {
     session_id: Option<String>,
+    source: TranscriptSource,
     jsonl_writer: BufWriter<File>,
     wav_writer: Option<hound::WavWriter<BufWriter<File>>>,
     line_count: usize,
@@ -287,7 +297,11 @@ const SIDECAR_HEALTH_STALE_AFTER_SECS: i64 = 3;
 const SIDECAR_STARTUP_TIMEOUT_SECS: i64 = 10;
 
 impl LiveTranscriptWriter {
-    fn new(config: &Config, session_id: Option<String>) -> Result<Self, MinutesError> {
+    fn new(
+        config: &Config,
+        session_id: Option<String>,
+        source: TranscriptSource,
+    ) -> Result<Self, MinutesError> {
         let jsonl_path = pid::live_transcript_jsonl_path();
         if let Some(parent) = jsonl_path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -326,6 +340,7 @@ impl LiveTranscriptWriter {
         let start_wall = Local::now();
         let writer = Self {
             session_id,
+            source,
             jsonl_writer,
             wav_writer,
             line_count: 0,
@@ -416,6 +431,16 @@ impl LiveTranscriptWriter {
         }
         // Update sidecar after each successful write
         self.write_status(LiveStatusState::Healthy, line.duration_ms, None);
+        crate::events::append_event(crate::events::MinutesEvent::LiveUtteranceFinal {
+            session_id: self.session_id.clone(),
+            source: self.source.as_str().to_string(),
+            transcript_path: self.jsonl_path.display().to_string(),
+            line: line.line,
+            text: line.text.clone(),
+            speaker: line.speaker.clone(),
+            offset_ms: line.offset_ms,
+            duration_ms: line.duration_ms,
+        });
         true
     }
 
@@ -628,8 +653,14 @@ fn run_inner(
     };
 
     // Only now create the writer (which truncates the JSONL and WAV files)
-    let mut writer = LiveTranscriptWriter::new(config, context_session_id)?;
+    let mut writer =
+        LiveTranscriptWriter::new(config, context_session_id, TranscriptSource::Standalone)?;
     writer.mark_healthy();
+    crate::events::append_event(crate::events::recording_started_event(
+        writer.session_id.clone(),
+        "live",
+        ["audio.capture", "live.utterance.final"],
+    ));
 
     let mut vad = Vad::new();
     let mut streaming = StreamingWhisper::new(config.transcription.language.clone());
@@ -952,7 +983,8 @@ fn run_inner(
                 }
             } else if let Ok(whisper_ctx) = ensure_live_whisper_ctx(&mut whisper_ctx, config) {
                 if let Some(_sr) = streaming.feed(&chunk.samples, whisper_ctx) {
-                    // Partial result available — could emit event in the future
+                    // Intentionally not emitted in event-bus v0. Partial
+                    // revisions are high-volume and need a gated v1 contract.
                 }
             }
 
@@ -1815,7 +1847,8 @@ fn run_sidecar_inner_mpsc(
 
     let mut sidecar_config = config.clone();
     sidecar_config.live_transcript.save_wav = false;
-    let mut writer = LiveTranscriptWriter::new(&sidecar_config, None)?;
+    let mut writer =
+        LiveTranscriptWriter::new(&sidecar_config, None, TranscriptSource::RecordingSidecar)?;
     writer.mark_healthy();
 
     let mut vad = RecordingSidecarVad::new(config);
@@ -1950,7 +1983,8 @@ fn run_sidecar_inner_mpsc(
                     parakeet_utterance_samples.extend_from_slice(&samples);
                 }
             } else if let Some(_sr) = streaming.feed(&samples, &whisper_ctx) {
-                // Partial result — could emit event in future
+                // Intentionally not emitted in event-bus v0. Partial
+                // revisions are high-volume and need a gated v1 contract.
             }
 
             if utterance_samples >= max_utterance_samples {
@@ -2461,6 +2495,48 @@ mod tests {
         };
         // The writer checks text.trim().is_empty() before writing
         assert!(line.text.trim().is_empty());
+    }
+
+    #[test]
+    fn write_utterance_emits_live_utterance_event() {
+        with_temp_home(|| {
+            let config = Config::default();
+            let mut writer = LiveTranscriptWriter::new(
+                &config,
+                Some("session-1".into()),
+                TranscriptSource::Standalone,
+            )
+            .unwrap();
+
+            assert!(writer.write_utterance("hello from live mode", 1.25));
+
+            let events = crate::events::read_events_since_seq(0, None);
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0].seq, 1);
+            let json = serde_json::to_string(&events[0]).unwrap();
+            assert!(json.contains("\"event_type\":\"live.utterance.final\""));
+            match &events[0].event {
+                crate::events::MinutesEvent::LiveUtteranceFinal {
+                    session_id,
+                    source,
+                    transcript_path,
+                    line,
+                    text,
+                    speaker,
+                    offset_ms: _,
+                    duration_ms,
+                } => {
+                    assert_eq!(session_id.as_deref(), Some("session-1"));
+                    assert_eq!(source, "standalone");
+                    assert!(transcript_path.ends_with("live-transcript.jsonl"));
+                    assert_eq!(*line, 1);
+                    assert_eq!(text, "hello from live mode");
+                    assert!(speaker.is_none());
+                    assert_eq!(*duration_ms, 1250);
+                }
+                other => panic!("expected LiveUtteranceFinal, got {other:?}"),
+            }
+        });
     }
 
     #[cfg(feature = "whisper")]

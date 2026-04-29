@@ -118,17 +118,17 @@ For preview releases, add `--prerelease` and use a `-alpha.N` / `-beta.N` / `-rc
 
 ## Phase 6.5: Build and upload the .mcpb bundle
 
-The `minutes.mcpb` Claude Desktop marketplace bundle is NOT built by any release workflow. It is built locally with `mcpb pack` and uploaded by hand. Forgetting this step means the Claude Desktop marketplace surface is missing from the release, which will block users who install Minutes through that channel.
+The `minutes.mcpb` Claude Desktop marketplace bundle is NOT built by any release workflow. It is built locally with `scripts/pack_mcpb.sh` and uploaded by hand. Forgetting this step means the Claude Desktop marketplace surface is missing from the release, which will block users who install Minutes through that channel.
 
 ```bash
 # From the repo root, after Phase 4 has completed (MCP and SDK already published).
 (cd crates/mcp && npm run build)   # ensures dist/ and dist-ui/ are fresh
-mcpb pack                            # writes minutes.mcpb at repo root
+./scripts/pack_mcpb.sh minutes.mcpb  # writes minutes.mcpb at repo root
 ./scripts/check_mcpb_bundle.sh minutes.mcpb
 gh release upload vX.Y.Z minutes.mcpb --repo silverstein/minutes
 ```
 
-`mcpb pack` writes the bundle to `minutes.mcpb` at the repo root, internally versioned to whatever is in `manifest.json` (so make sure that file was bumped in Phase 3). The release page convention is the unversioned filename `minutes.mcpb`, matching v0.10.2 and earlier.
+`scripts/pack_mcpb.sh` stages the repo, copies the Claude-specific `manifest.mcpb.json` to `manifest.json` inside that staging directory, and then runs `mcpb pack`. The root `manifest.json` remains the broader MCP/agent manifest used by generated docs; the installed Claude Desktop bundle uses `manifest.mcpb.json` as its listing copy. The release page convention is the unversioned filename `minutes.mcpb`, matching v0.10.2 and earlier.
 
 The bundle check is not optional. We have already shipped a broken extension once where `.mcpbignore` excluded `crates/mcp/node_modules/yaml/dist/schema/yaml-1.1/*`, which let the server answer `initialize` and then crash immediately in Claude Desktop with `Cannot find module '../schema/yaml-1.1/merge.js'`.
 
@@ -234,11 +234,11 @@ If you ever decide to revive crates.io publishing, you will need to:
 
 Until then, treat crates.io as not part of the release surface.
 
-### 9.4 `manifest.mcpb.json` (vestigial)
+### 9.4 `manifest.mcpb.json`
 
-This file at the repo root duplicates `manifest.json` and is not referenced by any workflow, script, or `Cargo.toml`. Search the repo: only `docs/COWORK-RESEARCH.md` mentions it.
+This file is the Claude Desktop MCPB listing manifest. The MCPB CLI only reads a file named `manifest.json`, so `scripts/pack_mcpb.sh` stages the repo and copies `manifest.mcpb.json` to `manifest.json` inside the staged bundle before running `mcpb pack`.
 
-For now, bump its `version` field in lockstep with `manifest.json` so it does not become misleading. Eventually, delete this file in a separate cleanup PR after confirming no Claude Desktop install path looks for it by name.
+Keep its `version`, tools, resources, prompts, and runtime fields in lockstep with the root `manifest.json`. Its prose can be Claude-specific: this is the install dialog users see when they open `minutes.mcpb` in Claude Desktop.
 
 ### 9.5 Final post-release verification
 
@@ -445,5 +445,5 @@ The `gh run list` check is the belt-and-braces verification that the tag namespa
 - No Homebrew tap bump
 - No macOS DMG / Windows NSIS build
 - No `manifest.json` bump (that's the MCP server manifest, not the plugin)
-- No `manifest.mcpb.json` bump (that's vestigial per Phase 9.4 of the binary flow)
+- No `manifest.mcpb.json` bump unless the plugin-only release also changes Claude Desktop MCPB listing copy
 - No asset parity check (no assets to compare)

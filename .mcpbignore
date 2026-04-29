@@ -3,6 +3,14 @@ target/
 Minutes.app
 *.mcpb
 
+# Repo-local development environments and alternate agent surfaces. These are
+# useful in the source tree, but the Claude Desktop MCPB should only contain
+# the runtime extension.
+.cargo/
+.claude-plugin/
+.devcontainer/
+.opencode/
+
 # Tauri app source (not needed for MCP extension)
 tauri/
 
@@ -34,9 +42,13 @@ crates/mcp/vite.config.mjs
 crates/mcp/vitest.config.ts
 
 # Dev dependencies not needed in MCPB bundle
+crates/mcp/node_modules/.bin/
+crates/mcp/node_modules/.package-lock.json
 crates/mcp/node_modules/vite/
 crates/mcp/node_modules/vite-plugin-singlefile/
 # NOTE: @modelcontextprotocol/ext-apps is a RUNTIME dep (registerAppTool) — do NOT exclude
+crates/mcp/node_modules/@vitest/
+crates/mcp/node_modules/vitest/
 crates/mcp/node_modules/typescript/
 crates/mcp/node_modules/tsx/
 crates/mcp/node_modules/@types/
@@ -45,6 +57,40 @@ crates/mcp/node_modules/rollup/
 crates/mcp/node_modules/@rollup/
 crates/mcp/node_modules/postcss/
 crates/mcp/node_modules/esbuild/
+crates/mcp/node_modules/@jridgewell/
+crates/mcp/node_modules/@standard-schema/
+crates/mcp/node_modules/assertion-error/
+crates/mcp/node_modules/braces/
+crates/mcp/node_modules/chai/
+crates/mcp/node_modules/convert-source-map/
+crates/mcp/node_modules/es-module-lexer/
+crates/mcp/node_modules/estree-walker/
+crates/mcp/node_modules/expect-type/
+crates/mcp/node_modules/fdir/
+crates/mcp/node_modules/fill-range/
+crates/mcp/node_modules/fsevents/
+crates/mcp/node_modules/get-tsconfig/
+crates/mcp/node_modules/is-number/
+crates/mcp/node_modules/magic-string/
+crates/mcp/node_modules/micromatch/
+crates/mcp/node_modules/nanoid/
+crates/mcp/node_modules/obug/
+crates/mcp/node_modules/pathe/
+crates/mcp/node_modules/picocolors/
+crates/mcp/node_modules/picomatch/
+crates/mcp/node_modules/resolve-pkg-maps/
+crates/mcp/node_modules/siginfo/
+crates/mcp/node_modules/source-map-js/
+crates/mcp/node_modules/stackback/
+crates/mcp/node_modules/std-env/
+crates/mcp/node_modules/tinybench/
+crates/mcp/node_modules/tinyexec/
+crates/mcp/node_modules/tinyglobby/
+crates/mcp/node_modules/tinyrainbow/
+crates/mcp/node_modules/to-regex-range/
+crates/mcp/node_modules/undici-types/
+crates/mcp/node_modules/vite-node/
+crates/mcp/node_modules/why-is-node-running/
 
 # Tests and integration tests
 tests/
@@ -56,10 +102,13 @@ crates/mcp/test/
 
 # Rust helper sources not needed by the packaged Node extension
 crates/whisper-guard/
+crates/assets/
 
 # Docs and dev files
 docs/
 scripts/
+examples/
+tooling/
 CLAUDE.md
 PLAN.md
 PLAN.md*
@@ -67,11 +116,9 @@ BUILD-STATUS.md
 *.md
 !README.md
 
-# SDK source/config is not needed at runtime
-crates/sdk/src/
-crates/sdk/test/
-crates/sdk/tsconfig.json
-crates/sdk/vitest.config.ts
+# SDK package source/config is not needed at runtime. The published
+# minutes-sdk dependency is bundled separately under crates/mcp/node_modules/.
+crates/sdk/
 
 # Issue tracker database
 .beads/
@@ -87,6 +134,9 @@ integrations/
 
 # Launchd plist (dev convenience, not needed in extension)
 *.plist
+
+# Misc repo metadata not needed by Claude Desktop at runtime
+nudge.json
 
 # Repo-root schema docs (not runtime package schema directories)
 /schema/

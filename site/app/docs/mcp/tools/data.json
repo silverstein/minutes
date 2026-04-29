@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-04-25",
+  "generatedAt": "2026-04-29",
   "installCommand": "npx minutes-mcp",
   "documentationUrl": "https://useminutes.app/for-agents",
   "supportUrl": "https://github.com/silverstein/minutes/discussions",
@@ -248,6 +248,14 @@
       "group": "Status",
       "anchorId": "resource-recent-events",
       "docsUrl": "https://useminutes.app/docs/mcp/tools#resource-recent-events"
+    },
+    {
+      "name": "agent_annotations",
+      "uri": "minutes://events/agent-annotations",
+      "description": "Recent append-only agent.annotation events, separate from human meeting markdown",
+      "group": "Status",
+      "anchorId": "resource-agent-annotations",
+      "docsUrl": "https://useminutes.app/docs/mcp/tools#resource-agent-annotations"
     },
     {
       "name": "recent-ideas",

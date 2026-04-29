@@ -1,10 +1,10 @@
 {
   "manifest_version": "0.3",
   "name": "minutes",
-  "display_name": "Minutes — Meeting Memory for AI",
-  "description": "Conversation memory for AI: record, transcribe, search, and query every meeting and voice memo locally. Minutes 0.14.1 fixes call-end auto-stop and 1:1 source-aware diarization regressions.",
-  "long_description": "Minutes is conversation memory for AI. Record, transcribe, search, and query every meeting and voice memo, all processed locally on your machine. Works with Claude Desktop, Claude Code, Codex, Gemini CLI, and more.\n\n29 tools • 7 resources • Interactive MCP App dashboard • Prompt templates\n\n**What's fixed in v0.14.1:**\n• Call-aware auto-stop countdowns no longer regress into a cleared state before the terminal stop path owns the recording.\n• Source-aware diarization now handles 1:1 open-speaker calls by allowing the system stem to contribute one meaningful remote speaker.\n• The MCP bundle and npm packages are version-aligned with the 0.14.1 patch release.\n\n**Setup:** `npx minutes-mcp` gets you search, browsing, and the dashboard right away. For recording and transcription, Minutes can auto-install the CLI on first use, or you can install it yourself with `brew install silverstein/tap/minutes` or `cargo install minutes-cli`, then run `minutes setup --model tiny`, `minutes setup --parakeet`, or `minutes setup --demo`.\n\n**What Minutes already gives you:**\n• Start/stop live meeting recordings\n• Process audio files (WAV, M4A, MP3, OGG), Looms, and ScreenPal recordings\n• Local transcription with Whisper or Parakeet. Nothing leaves your machine.\n• Speaker diarization, native, no Python required\n• Dictation mode for clipboard and daily notes\n• Live transcript reads for mid-meeting AI coaching\n• Desktop-context rewind and activity summaries around recordings and live sessions\n• Full-text search across every meeting and memo\n• Decisions, commitments, questions, and relationship context across meetings\n• An interactive MCP App dashboard inside Claude conversations\n\n**Privacy:** all audio processing happens locally via whisper.cpp or parakeet.cpp plus pyannote-rs. No audio or transcripts are sent anywhere.",
-  "version": "0.14.1",
+  "display_name": "Minutes - Meeting Workspace for Claude",
+  "description": "Give Claude a local workspace for your meetings and voice memos: search transcripts, inspect decisions and commitments, prep for calls, record and process audio, confirm speakers, and open the dashboard from your meetings folder.",
+  "long_description": "Minutes connects Claude Desktop to the meeting corpus on your computer. It reads structured Markdown in `~/meetings/`, exposes MCP tools for recall, prep, research, recording, transcription, speaker correction, and follow-through, and keeps the source of truth as files on disk that any MCP client can read.\n\nSearch, recording, context, and dashboard tools • Interactive MCP App dashboard • Prompt templates\n\n**What Claude can do:**\n• Search and retrieve meeting transcripts, voice memos, decisions, commitments, questions, and people context.\n• Prepare for upcoming calls, research topics across your history, and build person briefings from your own corpus.\n• Start and stop recordings, add timestamped notes, process audio files, and read live transcripts when configured.\n• Confirm speaker identities once and reuse those overlays across desktop, CLI, SDK, and MCP surfaces.\n• Use desktop-context rewind and activity summaries around recordings and live sessions.\n• Open an interactive MCP App dashboard inside Claude conversations.\n\n**Setup:** `npx minutes-mcp` gets search, browsing, and the dashboard running right away. For recording and local transcription, Minutes can auto-install the CLI on first use, or you can install it with `brew install silverstein/tap/minutes` or `cargo install minutes-cli`, then run `minutes setup --model tiny`, `minutes setup --parakeet`, or `minutes setup --demo`.\n\n**Privacy:** your meeting files stay on your disk. Local transcription runs on your computer when configured. Summarization is opt-in; when enabled, transcript text is sent only to the endpoint you choose. Audio stays local.\n",
+  "version": "0.15.0",
   "author": {
     "name": "Mat Silverstein",
     "url": "https://github.com/silverstein"
@@ -23,6 +23,7 @@
     "transcription",
     "voice-memo",
     "whisper",
+    "parakeet",
     "memory",
     "search",
     "action-items",
@@ -65,6 +66,18 @@
     {
       "name": "get_meeting",
       "description": "Get full transcript of a specific meeting"
+    },
+    {
+      "name": "activity_summary",
+      "description": "Summarize meeting-adjacent desktop context for a linked artifact, context session, or time window"
+    },
+    {
+      "name": "search_context",
+      "description": "Search desktop-context events across app focus and captured window titles, including opted-in browser titles"
+    },
+    {
+      "name": "get_moment",
+      "description": "Show the local desktop-context rewind around a linked artifact, session, or timestamp"
     },
     {
       "name": "process_audio",
@@ -133,6 +146,14 @@
     {
       "name": "open_dashboard",
       "description": "Open the Meeting Intelligence Dashboard in the browser — visual overview of conversation memory"
+    },
+    {
+      "name": "ingest_meeting",
+      "description": "Extract facts from a meeting and update the knowledge base (person profiles, log, index)"
+    },
+    {
+      "name": "knowledge_status",
+      "description": "Show the current state of the knowledge base — configuration, adapter, people count, log entries"
     }
   ],
   "prompts": [

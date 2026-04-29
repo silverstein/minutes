@@ -37,6 +37,11 @@ if [[ ! -f "$tmp/crates/mcp/dist/index.js" ]]; then
 fi
 
 initialize='{"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{"extensions":{"io.modelcontextprotocol/ui":{"mimeTypes":["text/html;profile=mcp-app"]}}},"clientInfo":{"name":"ci-smoke","version":"0"}},"jsonrpc":"2.0","id":0}'
+initialized='{"method":"notifications/initialized","params":{},"jsonrpc":"2.0"}'
+tools_list='{"method":"tools/list","params":{},"jsonrpc":"2.0","id":1}'
+resources_list='{"method":"resources/list","params":{},"jsonrpc":"2.0","id":2}'
+read_dashboard='{"method":"resources/read","params":{"uri":"ui://minutes/dashboard"},"jsonrpc":"2.0","id":3}'
+read_status='{"method":"resources/read","params":{"uri":"minutes://status"},"jsonrpc":"2.0","id":4}'
 
 out="$tmp/out.txt"
 err="$tmp/err.txt"
@@ -54,78 +59,16 @@ for candidate in timeout gtimeout; do
 done
 
 if [[ -n "$timeout_cmd" ]]; then
-  printf '%s\n' "$initialize" | \
+  printf '%s\n' "$initialize" "$initialized" "$tools_list" "$resources_list" "$read_dashboard" "$read_status" | \
     "$timeout_cmd" 15 node "$tmp/crates/mcp/dist/index.js" >"$out" 2>"$err" || rc=$?
 else
   # No timeout binary available. Fall back to running without one — node
   # exits on stdin EOF so a healthy server still returns quickly.
-  printf '%s\n' "$initialize" | \
+  printf '%s\n' "$initialize" "$initialized" "$tools_list" "$resources_list" "$read_dashboard" "$read_status" | \
     node "$tmp/crates/mcp/dist/index.js" >"$out" 2>"$err" || rc=$?
 fi
 
 rc="${rc:-0}"
 
-python3 - "$out" "$err" "$rc" <<'PY'
-import json
-import sys
-
-out_path, err_path, rc = sys.argv[1], sys.argv[2], sys.argv[3]
-
-with open(out_path) as f:
-    stdout = f.read()
-with open(err_path) as f:
-    stderr = f.read()
-
-response = None
-for line in stdout.splitlines():
-    line = line.strip()
-    if not line:
-        continue
-    try:
-        msg = json.loads(line)
-    except json.JSONDecodeError:
-        continue
-    if msg.get("id") == 0 and "result" in msg:
-        response = msg
-        break
-
-if response is None:
-    print("No initialize response on stdout.", file=sys.stderr)
-    print(f"--- stdout ({len(stdout)} bytes) ---", file=sys.stderr)
-    print(stdout, file=sys.stderr)
-    print(f"--- stderr ({len(stderr)} bytes) ---", file=sys.stderr)
-    print(stderr, file=sys.stderr)
-    print(f"--- exit code: {rc} ---", file=sys.stderr)
-    sys.exit(1)
-
-result = response["result"]
-proto = result.get("protocolVersion")
-if proto != "2025-11-25":
-    print(
-        f"Expected protocolVersion=2025-11-25, got {proto!r}",
-        file=sys.stderr,
-    )
-    sys.exit(1)
-
-caps = result.get("capabilities", {})
-if "tools" not in caps or "resources" not in caps:
-    print(
-        f"Expected tools+resources capabilities, got keys {sorted(caps)}",
-        file=sys.stderr,
-    )
-    sys.exit(1)
-
-ext_ui = caps.get("extensions", {}).get("io.modelcontextprotocol/ui")
-if ext_ui is None:
-    print(
-        "Expected extensions.io.modelcontextprotocol/ui capability.",
-        file=sys.stderr,
-    )
-    sys.exit(1)
-
-server_info = result.get("serverInfo", {})
-print(
-    f"MCPB handshake OK: server={server_info.get('name')}@"
-    f"{server_info.get('version')} protocol={proto}"
-)
-PY
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+python3 "$script_dir/smoke_mcpb_handshake.py" "$out" "$err" "$rc"

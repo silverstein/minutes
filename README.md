@@ -9,6 +9,8 @@ Agents have run logs. Humans have conversations. **minutes** captures the human 
 
 Record a meeting. Capture a voice memo on a walk. Ask Claude *"what did I promise Sarah?"* — and get an answer. Your AI remembers every conversation you've had.
 
+Minutes is not just a meeting-notes app. It is local conversation infrastructure for agents: audio capture, transcripts, decisions, commitments, people, and provenance exposed through plain files, CLI commands, MCP tools, and live transcript streams.
+
 > **Own every conversation you've ever had.** Cloud meeting tools rent your own conversations back to you. Minutes writes every meeting to `~/meetings/` as plain markdown, which every AI you use (Claude Code, Codex, Gemini CLI, Cursor, OpenCode, Pi) reads directly. No SDK. No API key. No vendor to outlive. Ten years from now, `grep` still works on your corpus. &nbsp;[**For agents →**](https://useminutes.app/for-agents) &nbsp;·&nbsp; [**Frontmatter schema →**](docs/frontmatter-schema.md)
 
 <p align="center">
@@ -486,6 +488,7 @@ Then use commands like:
 Minutes works with Mario Zechner's `pi` coding agent in two places:
 
 - `engine = "agent"` can call `pi` directly for local meeting summarization.
+- The desktop Recall panel can launch Pi when `[assistant].agent = "pi"`.
 - Pi auto-discovers this repo's existing `.agents/skills/minutes/` skill pack, so there is no separate `.pi/skills` tree to keep in sync.
 
 Install Pi, log in or configure a provider, then set:
@@ -497,6 +500,8 @@ agent_command = "pi"
 ```
 
 Minutes invokes Pi in non-interactive, no-tools mode with a private prompt file. Configure provider/model defaults in Pi itself; Minutes does not currently forward extra `[summarization]` CLI flags. That keeps summarization opt-in and prevents the agent from writing to the repo while it is turning a transcript into notes.
+
+For the interactive Recall panel, Minutes launches Pi directly and passes `[assistant].agent_args` through. Pi still owns provider auth and model selection: use Pi's `/login` and `/model` flows first. If a GitHub Copilot model reports that personal access tokens are unsupported, refresh the Pi Copilot login instead of adding a GitHub PAT to Minutes.
 
 This is separate from Inflection's Pi chatbot/model. Inflection's Pi models are optimized for warmth and emotional intelligence, but the Inflection API terms say not to send regulated personal data. Meeting transcripts often contain personal data, so Minutes does not route transcripts to Inflection by default.
 
@@ -1129,13 +1134,14 @@ Single `minutes-core` library shared by CLI, MCP server, and Tauri app. Zero cod
 
 ### Building your own agent on Minutes
 
-Minutes is designed as infrastructure for AI agents. The MCP server is the primary integration surface:
+Minutes is designed as infrastructure for AI agents. Files are the durable substrate; MCP is the active interface; live transcript JSONL and the local event log are the real-time paths. The MCP server is the primary integration surface today:
 
 - **Read meetings**: `list_meetings`, `search_meetings`, `get_meeting` return structured JSON
 - **Track people**: `get_person_profile` builds cross-meeting profiles with topics, open commitments
 - **Monitor consistency**: `consistency_report` flags conflicting decisions and stale commitments
 - **Record + process**: `start_recording`, `stop_recording`, `process_audio` for pipeline control
 - **Live coaching**: `start_live_transcript`, `read_live_transcript` for real-time mid-meeting access
+- **Local event stream**: `minutes events --follow --since-seq N` tails newline-delimited events, including finalized live utterances, for agents that want a durable cursor
 - **Voice profiles**: `list_voices`, `confirm_speaker` for speaker identification workflows
 - **Resources**: Stable URIs (`minutes://meetings/recent`, `minutes://actions/open`) for agent context injection
 

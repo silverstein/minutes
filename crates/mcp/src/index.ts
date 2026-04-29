@@ -40,6 +40,12 @@ import { crashTrace, CRASH_LOG_PATH } from "./crashTracer.js";
 import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import {
+  ErrorCode,
+  McpError,
+  SubscribeRequestSchema,
+  UnsubscribeRequestSchema,
+} from "@modelcontextprotocol/sdk/types.js";
+import {
   registerAppTool,
   registerAppResource,
   RESOURCE_MIME_TYPE,
@@ -400,6 +406,7 @@ if (CLI_CAPABILITIES.kind === "report") {
 } else {
   crashTrace("cli-capabilities-unsupported");
 }
+const LIVE_EVENTS_SUPPORTED = hasFeature(CLI_CAPABILITIES, "events_since_seq");
 
 // ── MCP server version ────────────────────────────────────────
 // Kept for capabilities handshake and user-facing log messages.
@@ -407,7 +414,7 @@ if (CLI_CAPABILITIES.kind === "report") {
 // `./version.ts` (see issue #183). Hosted `.mcpb` bundles will run
 // against CLIs with different minor/patch numbers within the same
 // major; that is explicitly supported.
-const MCP_SERVER_VERSION = "0.14.1";
+const MCP_SERVER_VERSION = "0.15.0";
 
 export function parseKnowledgeConfig(configContent: string): KnowledgeConfigStatus | null {
   const knowledgeMatch = configContent.match(/\[knowledge\][\s\S]*?(?=\n\[|$)/);
@@ -795,6 +802,119 @@ function augmentedEnv(extra?: Record<string, string>): Record<string, string | u
   return { ...process.env, PATH: augmentedPath, ...extra };
 }
 
+export const LIVE_EVENTS_RESOURCE_URI = "minutes://events/live";
+export const LIVE_EVENTS_URI_TEMPLATE = "minutes://events/live{?since_seq,limit}";
+const LIVE_EVENTS_DEFAULT_RECENT_LIMIT = 20;
+const LIVE_EVENTS_DEFAULT_CURSOR_LIMIT = 100;
+const LIVE_EVENTS_POLL_INTERVAL_MS = Math.max(
+  250,
+  Number.parseInt(process.env.MINUTES_MCP_EVENT_POLL_MS || "1000", 10) || 1000
+);
+
+type JsonObject = Record<string, unknown>;
+
+export type LiveEventsResourceOptions = {
+  uri: string;
+  sinceSeq: number | null;
+  limit: number;
+};
+
+export type LiveEventsResourcePayload = {
+  v: 1;
+  resource: typeof LIVE_EVENTS_RESOURCE_URI;
+  mode: "recent" | "since_seq";
+  since_seq: number | null;
+  limit: number;
+  latest_seq: number;
+  events: unknown[];
+  reconnect: {
+    cursor: number;
+    read_uri: string;
+  };
+};
+
+export function parseLiveEventsResourceUri(rawUri: string): LiveEventsResourceOptions | null {
+  let url: URL;
+  try {
+    url = new URL(rawUri);
+  } catch {
+    return null;
+  }
+
+  if (url.protocol !== "minutes:" || url.hostname !== "events" || url.pathname !== "/live") {
+    return null;
+  }
+
+  const sinceSeqRaw = url.searchParams.get("since_seq");
+  const limitRaw = url.searchParams.get("limit");
+  const sinceSeq = parseOptionalNonNegativeInteger(sinceSeqRaw);
+  const limit = parseOptionalPositiveInteger(
+    limitRaw,
+    sinceSeq === null ? LIVE_EVENTS_DEFAULT_RECENT_LIMIT : LIVE_EVENTS_DEFAULT_CURSOR_LIMIT
+  );
+
+  if (sinceSeqRaw !== null && sinceSeq === null) {
+    throw new McpError(ErrorCode.InvalidParams, "since_seq must be a non-negative integer");
+  }
+  if (limitRaw !== null && limit === null) {
+    throw new McpError(ErrorCode.InvalidParams, "limit must be a positive integer");
+  }
+
+  return {
+    uri: url.href,
+    sinceSeq,
+    limit: limit ?? LIVE_EVENTS_DEFAULT_CURSOR_LIMIT,
+  };
+}
+
+function parseOptionalNonNegativeInteger(raw: string | null): number | null {
+  if (raw === null) return null;
+  if (!/^\d+$/.test(raw)) return null;
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isSafeInteger(parsed) ? parsed : null;
+}
+
+function parseOptionalPositiveInteger(raw: string | null, fallback: number): number | null {
+  if (raw === null) return fallback;
+  if (!/^\d+$/.test(raw)) return null;
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) return null;
+  return Math.min(parsed, 1000);
+}
+
+function eventSeq(event: unknown): number {
+  if (!event || typeof event !== "object") return 0;
+  const seq = (event as JsonObject).seq;
+  return typeof seq === "number" && Number.isSafeInteger(seq) && seq >= 0 ? seq : 0;
+}
+
+function maxEventSeq(events: unknown[], floor: number = 0): number {
+  return events.reduce<number>((max, event) => Math.max(max, eventSeq(event)), floor);
+}
+
+export function buildLiveEventsResourcePayload(
+  options: LiveEventsResourceOptions,
+  events: unknown[],
+  latestSeq: number
+): LiveEventsResourcePayload {
+  const deliveredCursorFloor = options.sinceSeq ?? latestSeq;
+  const cursor = maxEventSeq(events, deliveredCursorFloor);
+  const latestKnownSeq = maxEventSeq(events, latestSeq);
+  return {
+    v: 1,
+    resource: LIVE_EVENTS_RESOURCE_URI,
+    mode: options.sinceSeq === null ? "recent" : "since_seq",
+    since_seq: options.sinceSeq,
+    limit: options.limit,
+    latest_seq: latestKnownSeq,
+    events,
+    reconnect: {
+      cursor,
+      read_uri: `${LIVE_EVENTS_RESOURCE_URI}?since_seq=${cursor}`,
+    },
+  };
+}
+
 // ── Helper: run minutes CLI command (uses execFile, not exec) ──
 
 async function runMinutes(
@@ -823,6 +943,216 @@ function parseJsonOutput(stdout: string): any {
   } catch {
     return { raw: stdout };
   }
+}
+
+async function readEventsFromCli(args: string[]): Promise<unknown[]> {
+  if (!(await isCliAvailable())) {
+    return [];
+  }
+  const { stdout } = await runMinutes(args, 10000);
+  const parsed = parseJsonOutput(stdout);
+  return Array.isArray(parsed) ? parsed : [];
+}
+
+async function readRecentEventsFromCli(limit: number): Promise<unknown[]> {
+  return readEventsFromCli(["events", "--limit", String(limit)]);
+}
+
+async function readAgentAnnotationsFromCli(limit: number): Promise<any[]> {
+  const events = await readEventsFromCli([
+    "events",
+    "--event-type",
+    "agent.annotation",
+    "--limit",
+    String(limit),
+  ]);
+  return events.filter((event: any) => event?.event_type === "agent.annotation");
+}
+
+async function readEventsSinceSeqFromCli(sinceSeq: number, limit: number): Promise<unknown[]> {
+  return readEventsFromCli(["events", "--since-seq", String(sinceSeq), "--limit", String(limit)]);
+}
+
+function parseStructuredCliError(message: string): any | null {
+  const trimmed = message.trim();
+  const start = trimmed.indexOf("{");
+  const end = trimmed.lastIndexOf("}");
+  if (start === -1 || end === -1 || end < start) {
+    return null;
+  }
+  try {
+    return JSON.parse(trimmed.slice(start, end + 1));
+  } catch {
+    return null;
+  }
+}
+
+async function latestEventSeqFromCli(): Promise<number> {
+  const events = await readRecentEventsFromCli(1);
+  return maxEventSeq(events);
+}
+
+async function readLiveEventsResource(uri: URL): Promise<{
+  contents: Array<{ uri: string; mimeType: string; text: string }>;
+}> {
+  const options = parseLiveEventsResourceUri(uri.href);
+  if (!options) {
+    throw new McpError(ErrorCode.InvalidParams, `Unsupported live events resource: ${uri.href}`);
+  }
+
+  if (!(await isCliAvailable())) {
+    const unavailable = {
+      v: 1,
+      resource: LIVE_EVENTS_RESOURCE_URI,
+      mode: options.sinceSeq === null ? "recent" : "since_seq",
+      since_seq: options.sinceSeq,
+      limit: options.limit,
+      latest_seq: options.sinceSeq ?? 0,
+      events: [],
+      reconnect: {
+        cursor: options.sinceSeq ?? 0,
+        read_uri: `${LIVE_EVENTS_RESOURCE_URI}?since_seq=${options.sinceSeq ?? 0}`,
+      },
+      unavailable: "Minutes CLI is not installed; live event reads require the local CLI.",
+    };
+    return {
+      contents: [{
+        uri: uri.href,
+        mimeType: "application/json",
+        text: JSON.stringify(unavailable, null, 2),
+      }],
+    };
+  }
+
+  const events = options.sinceSeq === null
+    ? await readRecentEventsFromCli(options.limit)
+    : await readEventsSinceSeqFromCli(options.sinceSeq, options.limit);
+  const latestSeq = options.sinceSeq === null ? maxEventSeq(events) : await latestEventSeqFromCli();
+  const payload = buildLiveEventsResourcePayload(options, events, latestSeq);
+
+  return {
+    contents: [{
+      uri: uri.href,
+      mimeType: "application/json",
+      text: JSON.stringify(payload, null, 2),
+    }],
+  };
+}
+
+export type LiveEventsSubscriptionOptions = {
+  pollIntervalMs?: number;
+  latestEventSeq?: () => Promise<number>;
+  readEventsSinceSeq?: (sinceSeq: number, limit: number) => Promise<unknown[]>;
+  sendResourceUpdated?: (uri: string) => Promise<void>;
+  onError?: (error: unknown) => void;
+};
+
+export type LiveEventsSubscriptionController = {
+  stop: () => void;
+  subscriptionCount: () => number;
+};
+
+export function registerLiveEventsSubscriptionHandlers(
+  mcpServer: McpServer,
+  options: LiveEventsSubscriptionOptions = {}
+): LiveEventsSubscriptionController {
+  const subscriptions = new Set<string>();
+  const pollIntervalMs = options.pollIntervalMs ?? LIVE_EVENTS_POLL_INTERVAL_MS;
+  const loadLatestSeq = options.latestEventSeq ?? latestEventSeqFromCli;
+  const loadEventsSinceSeq = options.readEventsSinceSeq ?? readEventsSinceSeqFromCli;
+  const sendResourceUpdated = options.sendResourceUpdated ??
+    ((uri: string) => mcpServer.server.sendResourceUpdated({ uri }));
+  const onError = options.onError ?? ((error: unknown) => {
+    console.error(`[Minutes] live event subscription failed: ${error instanceof Error ? error.message : String(error)}`);
+  });
+
+  let cursor = 0;
+  let pollTimer: NodeJS.Timeout | null = null;
+  let pollInFlight = false;
+
+  mcpServer.server.registerCapabilities({
+    resources: { subscribe: true },
+  });
+
+  async function ensurePollerStarted(): Promise<void> {
+    if (pollTimer) return;
+    try {
+      cursor = await loadLatestSeq();
+    } catch (error) {
+      onError(error);
+      cursor = 0;
+    }
+
+    pollTimer = setInterval(() => {
+      void pollOnce();
+    }, pollIntervalMs);
+    pollTimer.unref?.();
+  }
+
+  function stopPollerIfIdle(): void {
+    if (subscriptions.size > 0 || !pollTimer) return;
+    clearInterval(pollTimer);
+    pollTimer = null;
+    pollInFlight = false;
+  }
+
+  async function pollOnce(): Promise<void> {
+    if (pollInFlight || subscriptions.size === 0) return;
+    pollInFlight = true;
+    try {
+      const events = await loadEventsSinceSeq(cursor, LIVE_EVENTS_DEFAULT_CURSOR_LIMIT);
+      const nextCursor = maxEventSeq(events, cursor);
+      if (nextCursor > cursor) {
+        cursor = nextCursor;
+        await Promise.all([...subscriptions].map(async (uri) => {
+          try {
+            await sendResourceUpdated(uri);
+          } catch (error) {
+            onError(error);
+          }
+        }));
+      }
+    } catch (error) {
+      onError(error);
+    } finally {
+      pollInFlight = false;
+    }
+  }
+
+  function normalizeSubscriptionUri(rawUri: string): string {
+    const parsed = parseLiveEventsResourceUri(rawUri);
+    if (!parsed) {
+      throw new McpError(
+        ErrorCode.InvalidParams,
+        `Only ${LIVE_EVENTS_RESOURCE_URI} subscriptions are supported`
+      );
+    }
+    return parsed.sinceSeq === null && parsed.limit === LIVE_EVENTS_DEFAULT_RECENT_LIMIT
+      ? LIVE_EVENTS_RESOURCE_URI
+      : parsed.uri;
+  }
+
+  mcpServer.server.setRequestHandler(SubscribeRequestSchema, async (request) => {
+    const uri = normalizeSubscriptionUri(request.params.uri);
+    subscriptions.add(uri);
+    await ensurePollerStarted();
+    return {};
+  });
+
+  mcpServer.server.setRequestHandler(UnsubscribeRequestSchema, async (request) => {
+    const uri = normalizeSubscriptionUri(request.params.uri);
+    subscriptions.delete(uri);
+    stopPollerIfIdle();
+    return {};
+  });
+
+  return {
+    stop: () => {
+      subscriptions.clear();
+      stopPollerIfIdle();
+    },
+    subscriptionCount: () => subscriptions.size,
+  };
 }
 
 // ── MCP Server ──────────────────────────────────────────────
@@ -2328,6 +2658,45 @@ server.resource(
 );
 
 server.resource(
+  "agent_annotations",
+  "minutes://events/agent-annotations",
+  { description: "Recent append-only agent.annotation events, separate from human meeting markdown" },
+  async () => {
+    if (!(await isCliAvailable())) {
+      return { contents: [{ uri: "minutes://events/agent-annotations", mimeType: "application/json", text: "[]" }] };
+    }
+    const { stdout } = await runMinutes(["events", "--event-type", "agent.annotation", "--limit", "50"]);
+    return { contents: [{ uri: "minutes://events/agent-annotations", mimeType: "application/json", text: stdout }] };
+  }
+);
+
+if (LIVE_EVENTS_SUPPORTED) {
+  server.resource(
+    "live_events",
+    LIVE_EVENTS_RESOURCE_URI,
+    {
+      description:
+        "Subscribable live event stream. Subscribe to receive notifications/resources/updated, then read this resource or minutes://events/live?since_seq=N to resume from a durable event cursor.",
+    },
+    async (uri) => readLiveEventsResource(uri)
+  );
+
+  server.resource(
+    "live_events_since_seq",
+    new ResourceTemplate(LIVE_EVENTS_URI_TEMPLATE, { list: undefined }),
+    {
+      description:
+        "Read live event stream entries after a stable event sequence cursor. Example: minutes://events/live?since_seq=4826&limit=100",
+    },
+    async (uri) => readLiveEventsResource(uri)
+  );
+
+  registerLiveEventsSubscriptionHandlers(server);
+} else {
+  crashTrace("live-events-resource-disabled", { reason: "missing events_since_seq CLI capability" });
+}
+
+server.resource(
   "meeting",
   new ResourceTemplate("minutes://meetings/{slug}", { list: undefined }),
   { description: "Get a specific meeting by its filename slug" },
@@ -2571,6 +2940,114 @@ registerTool(
         isError: true,
       };
     }
+  }
+);
+
+// ── Tool: add_agent_annotation ─────────────────────────────
+
+registerTool(
+  "add_agent_annotation",
+  "Append attributed agent commentary as an agent.annotation event. This never edits meeting markdown/frontmatter and is rejected unless the agent_id is allowed in ~/.minutes/agents.allow.",
+  {
+    agent_id: z.string().describe("Stable agent identifier listed in ~/.minutes/agents.allow"),
+    tools: z.array(z.string()).optional().default([]).describe("Tool or model names used to produce the annotation"),
+    subkind: z.string().optional().default("commentary").describe("Annotation subtype, e.g. coaching, correction, risk, summary"),
+    meeting_id: z.string().optional().describe("Target meeting identifier, if known"),
+    meeting_path: z.string().optional().describe("Target meeting markdown path, if known"),
+    span_start_ms: z.number().optional().describe("Start offset of the target span in milliseconds"),
+    span_end_ms: z.number().optional().describe("End offset of the target span in milliseconds"),
+    body: z.string().describe("Annotation body"),
+    citations: z.array(z.string()).optional().default([]).describe("Source citations or event references"),
+    confidence: z.enum(["low", "medium", "high", "tentative", "inferred", "strong", "explicit"]).optional().default("medium"),
+    provenance: z.any().optional().describe("JSON-serializable provenance object"),
+  },
+  { title: "Add Agent Annotation", readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+  async ({
+    agent_id,
+    tools,
+    subkind,
+    meeting_id,
+    meeting_path,
+    span_start_ms,
+    span_end_ms,
+    body,
+    citations,
+    confidence,
+    provenance,
+  }) => {
+    if (!(await isCliAvailable())) {
+      return { content: [{ type: "text" as const, text: CLI_INSTALL_MSG }], isError: true };
+    }
+
+    const args = [
+      "agent-annotate",
+      "--agent-id",
+      agent_id,
+      "--subkind",
+      subkind,
+      "--body",
+      body,
+      "--confidence",
+      confidence,
+      "--provenance",
+      JSON.stringify(provenance ?? { via: "minutes-mcp", tool: "add_agent_annotation" }),
+    ];
+    for (const tool of tools ?? []) args.push("--tool", tool);
+    for (const citation of citations ?? []) args.push("--citation", citation);
+    if (meeting_id) args.push("--meeting-id", meeting_id);
+    if (meeting_path) args.push("--meeting-path", meeting_path);
+    if (span_start_ms !== undefined || span_end_ms !== undefined) {
+      if (span_start_ms !== undefined) args.push("--span-start-ms", String(span_start_ms));
+      if (span_end_ms !== undefined) args.push("--span-end-ms", String(span_end_ms));
+    }
+
+    try {
+      const { stdout } = await runMinutes(args, 10000);
+      const event = parseJsonOutput(stdout);
+      return {
+        content: [{ type: "text" as const, text: `Appended agent.annotation seq ${event?.seq ?? "unknown"}.` }],
+        structuredContent: { event },
+      };
+    } catch (error: any) {
+      const message = error?.message || String(error);
+      const structured = parseStructuredCliError(message);
+      return {
+        content: [{ type: "text" as const, text: structured?.message || `Failed to append agent.annotation: ${message}` }],
+        structuredContent: structured ? { error: structured } : undefined,
+        isError: true,
+      };
+    }
+  }
+);
+
+// ── Tool: get_agent_annotations ────────────────────────────
+
+registerTool(
+  "get_agent_annotations",
+  "Read append-only agent.annotation events separately from human-authored meeting markdown/frontmatter.",
+  {
+    limit: z.number().optional().default(50).describe("Maximum number of annotations"),
+    agent_id: z.string().optional().describe("Filter by agent id"),
+    meeting_id: z.string().optional().describe("Filter by target meeting id"),
+    meeting_path: z.string().optional().describe("Filter by target meeting path"),
+  },
+  { title: "Get Agent Annotations", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  async ({ limit, agent_id, meeting_id, meeting_path }) => {
+    if (!(await isCliAvailable())) {
+      return { content: [{ type: "text" as const, text: CLI_INSTALL_MSG }], isError: true };
+    }
+
+    const annotations = (await readAgentAnnotationsFromCli(limit)).filter((event: any) => {
+      if (agent_id && event?.agent?.id !== agent_id) return false;
+      if (meeting_id && event?.target?.meeting_id !== meeting_id) return false;
+      if (meeting_path && event?.target?.meeting_path !== meeting_path) return false;
+      return true;
+    });
+
+    return {
+      content: [{ type: "text" as const, text: JSON.stringify(annotations, null, 2) }],
+      structuredContent: { annotations },
+    };
   }
 );
 

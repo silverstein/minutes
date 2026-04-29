@@ -574,10 +574,15 @@ fn dispatch_action(
 
         // ── Search / research ────────────────────────────────────
         ActionId::SearchTranscripts { query } => {
-            // Empty query => list-style results; let core decide. Match the
-            // existing cmd_search behavior (unwraps SearchError to empty).
+            // Empty query => list-style results; let core decide. cmd_search
+            // now returns Result so frontend invocations can surface errors;
+            // the palette dispatch path keeps the historical "errors collapse
+            // to empty" behavior so a flaky index doesn't break the palette.
             let q = query.unwrap_or_default();
-            let results = cmd_search(q);
+            let results = match cmd_search(q) {
+                Ok(v) => serde_json::to_value(&v).unwrap_or(serde_json::json!([])),
+                Err(_) => serde_json::json!([]),
+            };
             Ok(ActionResponse::SearchResults { results })
         }
         ActionId::ResearchTopic { query } => {

@@ -1,6 +1,6 @@
 {
   "name": "minutes",
-  "version": "0.9.0",
+  "version": "0.10.0",
   "description": "Conversation memory for AI assistants — record, transcribe, search meetings and voice memos. 19 skills + 1 agent + 2 hooks.",
   "author": {
     "name": "Mat Silverstein"

@@ -223,7 +223,7 @@ function categorizeTool(name) {
 function categorizeResource(name) {
   const groups = {
     Dashboard: new Set(["Minutes Dashboard"]),
-    Status: new Set(["recording_status", "recent_events"]),
+    Status: new Set(["recording_status", "recent_events", "agent_annotations"]),
     Meetings: new Set(["recent_meetings", "meeting"]),
     Memory: new Set(["open_actions", "recent-ideas"]),
   };

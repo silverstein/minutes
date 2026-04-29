@@ -1,11 +1,11 @@
 use chrono::{DateTime, Local};
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use std::fs::{self, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
-use std::time::SystemTime;
+use std::path::{Path, PathBuf};
 
 use crate::config::Config;
 use crate::markdown::ContentType;
@@ -16,13 +16,22 @@ use crate::markdown::ContentType;
 // Agents can tail/poll this file to react to new meetings.
 // Non-fatal: pipeline never fails if event logging fails.
 // Rotates to events.{date}.jsonl when file exceeds 10MB.
+// Latest committed seq is cached in events.seq. Missing/corrupt sidecars
+// fall back to a full legacy scan once; normal appends only read the sidecar
+// and the bounded active log tail to recover cleanly from crash windows.
 //
 // Meeting insights (decisions, commitments, approvals, etc.) are
 // emitted as MeetingInsight events after pipeline processing.
 // External systems subscribe via MCP notifications or poll the log.
 // ──────────────────────────────────────────────────────────────
 
+pub const EVENT_SCHEMA_VERSION: u32 = 1;
 const MAX_EVENT_FILE_BYTES: u64 = 10 * 1024 * 1024; // 10MB
+const EVENT_SEQ_TAIL_CHUNK_BYTES: u64 = 64 * 1024;
+
+fn default_event_schema_version() -> u32 {
+    EVENT_SCHEMA_VERSION
+}
 
 // ── Confidence model ──────────────────────────────────────────
 // Mirrors the speaker attribution confidence system (L0–L3).
@@ -90,16 +99,175 @@ pub struct MeetingInsight {
     pub source_meeting: String,
 }
 
+pub const AGENT_ANNOTATION_EVENT_TYPE: &str = "agent.annotation";
+
+/// Agent identity attached to an append-only annotation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentAnnotationAgent {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<String>,
+}
+
+/// Optional source span the annotation comments on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentAnnotationSpan {
+    pub start_ms: u64,
+    pub end_ms: u64,
+}
+
+/// Meeting or transcript target for an agent annotation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentAnnotationTarget {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub meeting_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub meeting_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub span: Option<AgentAnnotationSpan>,
+}
+
+/// Request for a gated agent.annotation append.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentAnnotationRequest {
+    pub agent: AgentAnnotationAgent,
+    pub subkind: String,
+    pub target: AgentAnnotationTarget,
+    pub body: String,
+    #[serde(default)]
+    pub citations: Vec<String>,
+    pub confidence: String,
+    #[serde(default)]
+    pub provenance: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AgentAnnotationErrorBody {
+    pub ok: bool,
+    pub error: String,
+    pub message: String,
+    pub agent_id: String,
+    pub event_type: String,
+    pub allowlist_path: String,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum AgentAnnotationError {
+    #[error("{reason}")]
+    InvalidPayload {
+        reason: String,
+        agent_id: String,
+        allowlist_path: PathBuf,
+    },
+    #[error("agent '{agent_id}' is not allowlisted for {event_type}")]
+    NotAllowlisted {
+        agent_id: String,
+        event_type: String,
+        allowlist_path: PathBuf,
+    },
+    #[error("failed to read agent allowlist at {allowlist_path}: {source}")]
+    AllowlistRead {
+        agent_id: String,
+        allowlist_path: PathBuf,
+        source: std::io::Error,
+    },
+    #[error("failed to append agent annotation event: {source}")]
+    Append {
+        agent_id: String,
+        allowlist_path: PathBuf,
+        source: std::io::Error,
+    },
+}
+
+impl AgentAnnotationError {
+    pub fn to_body(&self) -> AgentAnnotationErrorBody {
+        match self {
+            Self::InvalidPayload {
+                reason,
+                agent_id,
+                allowlist_path,
+            } => AgentAnnotationErrorBody {
+                ok: false,
+                error: "invalid_payload".into(),
+                message: reason.clone(),
+                agent_id: agent_id.clone(),
+                event_type: AGENT_ANNOTATION_EVENT_TYPE.into(),
+                allowlist_path: allowlist_path.display().to_string(),
+            },
+            Self::NotAllowlisted {
+                agent_id,
+                event_type,
+                allowlist_path,
+            } => AgentAnnotationErrorBody {
+                ok: false,
+                error: "agent_not_allowlisted".into(),
+                message: format!("agent '{agent_id}' is not allowlisted for {event_type}"),
+                agent_id: agent_id.clone(),
+                event_type: event_type.clone(),
+                allowlist_path: allowlist_path.display().to_string(),
+            },
+            Self::AllowlistRead {
+                agent_id,
+                allowlist_path,
+                source,
+            } => AgentAnnotationErrorBody {
+                ok: false,
+                error: "allowlist_read_failed".into(),
+                message: source.to_string(),
+                agent_id: agent_id.clone(),
+                event_type: AGENT_ANNOTATION_EVENT_TYPE.into(),
+                allowlist_path: allowlist_path.display().to_string(),
+            },
+            Self::Append {
+                agent_id,
+                allowlist_path,
+                source,
+            } => AgentAnnotationErrorBody {
+                ok: false,
+                error: "append_failed".into(),
+                message: source.to_string(),
+                agent_id: agent_id.clone(),
+                event_type: AGENT_ANNOTATION_EVENT_TYPE.into(),
+                allowlist_path: allowlist_path.display().to_string(),
+            },
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EventEnvelope {
+    #[serde(default = "default_event_schema_version")]
+    pub v: u32,
+    #[serde(default)]
+    pub seq: u64,
     pub timestamp: DateTime<Local>,
     #[serde(flatten)]
     pub event: MinutesEvent,
 }
 
+impl EventEnvelope {
+    pub fn new(event: MinutesEvent) -> Self {
+        Self {
+            v: EVENT_SCHEMA_VERSION,
+            seq: 0,
+            timestamp: Local::now(),
+            event,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "event_type")]
 pub enum MinutesEvent {
+    #[serde(rename = "recording.started")]
+    RecordingStarted {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+        source: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        capabilities: Vec<String>,
+    },
+    #[serde(rename = "recording.completed", alias = "RecordingCompleted")]
     RecordingCompleted {
         path: String,
         title: String,
@@ -143,6 +311,7 @@ pub enum MinutesEvent {
     },
     /// Structured insight extracted from a meeting (decision, commitment, etc.).
     /// Subscribable by external systems via MCP notifications.
+    #[serde(rename = "meeting.insight.detected", alias = "MeetingInsightExtracted")]
     MeetingInsightExtracted {
         insight: MeetingInsight,
         meeting_title: String,
@@ -163,10 +332,51 @@ pub enum MinutesEvent {
     MicUnmuted {
         source: String,
     },
+    /// Finalized utterance from standalone live transcript or recording sidecar.
+    #[serde(rename = "live.utterance.final", alias = "LiveUtteranceFinal")]
+    LiveUtteranceFinal {
+        session_id: Option<String>,
+        source: String,
+        transcript_path: String,
+        line: usize,
+        text: String,
+        speaker: Option<String>,
+        offset_ms: u64,
+        duration_ms: u64,
+    },
+    /// Append-only agent commentary. This never mutates human-authored notes.
+    #[serde(rename = "agent.annotation")]
+    AgentAnnotation {
+        agent: AgentAnnotationAgent,
+        subkind: String,
+        target: AgentAnnotationTarget,
+        body: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        citations: Vec<String>,
+        confidence: String,
+        #[serde(default)]
+        provenance: serde_json::Value,
+    },
 }
 
 fn events_path() -> PathBuf {
     Config::minutes_dir().join("events.jsonl")
+}
+
+fn events_lock_path() -> PathBuf {
+    Config::minutes_dir().join("events.lock")
+}
+
+fn event_seq_path() -> PathBuf {
+    Config::minutes_dir().join("events.seq")
+}
+
+fn event_seq_tmp_path() -> PathBuf {
+    Config::minutes_dir().join("events.seq.tmp")
+}
+
+pub fn agents_allowlist_path() -> PathBuf {
+    Config::minutes_dir().join("agents.allow")
 }
 
 fn event_log_paths() -> std::io::Result<Vec<PathBuf>> {
@@ -188,12 +398,35 @@ fn event_log_paths() -> std::io::Result<Vec<PathBuf>> {
         })
         .collect::<Vec<_>>();
 
-    paths.sort_by_key(|path| {
-        path.metadata()
-            .and_then(|metadata| metadata.modified())
-            .unwrap_or(SystemTime::UNIX_EPOCH)
-    });
+    paths.sort_by_key(|path| path.file_name().map(|name| name.to_os_string()));
     Ok(paths)
+}
+
+fn with_event_log_lock<T>(f: impl FnOnce() -> std::io::Result<T>) -> std::io::Result<T> {
+    let path = events_lock_path();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    let creating = !path.exists();
+    let file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)?;
+
+    #[cfg(unix)]
+    if creating {
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+    }
+
+    file.lock_exclusive()?;
+    let result = f();
+    if let Err(error) = file.unlock() {
+        tracing::warn!(error = %error, "failed to unlock event log");
+    }
+    result
 }
 
 fn rotated_events_path_for(now: DateTime<Local>) -> PathBuf {
@@ -217,36 +450,195 @@ fn rotated_events_path_for(now: DateTime<Local>) -> PathBuf {
 
 /// Append one event as a JSON line to ~/.minutes/events.jsonl.
 pub fn append_event(event: MinutesEvent) {
-    let envelope = EventEnvelope {
-        timestamp: Local::now(),
-        event,
-    };
+    let envelope = EventEnvelope::new(event);
 
     if let Err(e) = append_event_inner(&envelope) {
         tracing::warn!(error = %e, "failed to append event");
     }
 }
 
-fn append_event_inner(envelope: &EventEnvelope) -> std::io::Result<()> {
-    rotate_if_needed()?;
+pub fn append_agent_annotation(
+    request: AgentAnnotationRequest,
+) -> Result<EventEnvelope, AgentAnnotationError> {
+    let allowlist_path = agents_allowlist_path();
+    validate_agent_annotation_request(&request, &allowlist_path)?;
 
-    let path = events_path();
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
+    match is_agent_event_allowlisted(
+        &request.agent.id,
+        AGENT_ANNOTATION_EVENT_TYPE,
+        &allowlist_path,
+    ) {
+        Ok(true) => {}
+        Ok(false) => {
+            return Err(AgentAnnotationError::NotAllowlisted {
+                agent_id: request.agent.id.clone(),
+                event_type: AGENT_ANNOTATION_EVENT_TYPE.into(),
+                allowlist_path,
+            });
+        }
+        Err(source) => {
+            return Err(AgentAnnotationError::AllowlistRead {
+                agent_id: request.agent.id.clone(),
+                allowlist_path,
+                source,
+            });
+        }
     }
 
-    let creating = !path.exists();
-    let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
+    let agent_id = request.agent.id.clone();
+    let envelope = EventEnvelope::new(MinutesEvent::AgentAnnotation {
+        agent: request.agent,
+        subkind: request.subkind,
+        target: request.target,
+        body: request.body,
+        citations: request.citations,
+        confidence: request.confidence,
+        provenance: request.provenance,
+    });
 
-    // Set 0600 on newly created files (sensitive meeting data)
-    #[cfg(unix)]
-    if creating {
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+    append_event_inner(&envelope).map_err(|source| AgentAnnotationError::Append {
+        agent_id,
+        allowlist_path,
+        source,
+    })
+}
+
+fn validate_agent_annotation_request(
+    request: &AgentAnnotationRequest,
+    allowlist_path: &Path,
+) -> Result<(), AgentAnnotationError> {
+    let invalid = |reason: &str| AgentAnnotationError::InvalidPayload {
+        reason: reason.into(),
+        agent_id: request.agent.id.clone(),
+        allowlist_path: allowlist_path.to_path_buf(),
+    };
+
+    let agent_id = request.agent.id.trim();
+    if agent_id.is_empty() {
+        return Err(invalid("agent_id is required"));
     }
-
-    let line = serde_json::to_string(envelope).map_err(|e| std::io::Error::other(e.to_string()))?;
-    writeln!(file, "{}", line)?;
+    if agent_id
+        .chars()
+        .any(|ch| ch == ':' || ch == ',' || ch.is_control())
+    {
+        return Err(invalid(
+            "agent_id must not contain control characters, ':' or ','",
+        ));
+    }
+    if request.subkind.trim().is_empty() {
+        return Err(invalid("subkind is required"));
+    }
+    if request.body.trim().is_empty() {
+        return Err(invalid("body is required"));
+    }
+    if !matches!(
+        request.confidence.as_str(),
+        "low" | "medium" | "high" | "tentative" | "inferred" | "strong" | "explicit"
+    ) {
+        return Err(invalid(
+            "confidence must be one of low, medium, high, tentative, inferred, strong, explicit",
+        ));
+    }
+    if let Some(span) = &request.target.span {
+        if span.end_ms < span.start_ms {
+            return Err(invalid("target span end_ms must be >= start_ms"));
+        }
+    }
     Ok(())
+}
+
+fn is_agent_event_allowlisted(
+    agent_id: &str,
+    event_type: &str,
+    allowlist_path: &Path,
+) -> std::io::Result<bool> {
+    if !allowlist_path.exists() {
+        return Ok(false);
+    }
+
+    let allowlist = fs::read_to_string(allowlist_path)?;
+    Ok(parse_agents_allowlist_allows(
+        &allowlist, agent_id, event_type,
+    ))
+}
+
+fn parse_agents_allowlist_allows(input: &str, agent_id: &str, event_type: &str) -> bool {
+    input.lines().any(|line| {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            return false;
+        }
+
+        let Some((candidate, scopes)) = parse_agents_allowlist_line(line) else {
+            return false;
+        };
+        if candidate != agent_id {
+            return false;
+        }
+
+        scopes.is_empty() || scopes.contains(&event_type)
+    })
+}
+
+fn parse_agents_allowlist_line(line: &str) -> Option<(&str, Vec<&str>)> {
+    let mut parts = line.splitn(2, ':');
+    let agent_id = parts.next()?.trim();
+    if agent_id.is_empty() {
+        return None;
+    }
+
+    let scopes = parts
+        .next()
+        .map(|raw| {
+            raw.split(',')
+                .map(str::trim)
+                .filter(|scope| !scope.is_empty())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    Some((agent_id, scopes))
+}
+
+fn append_event_inner(envelope: &EventEnvelope) -> std::io::Result<EventEnvelope> {
+    let mut envelope = envelope.clone();
+    with_event_log_lock(|| {
+        if envelope.seq == 0 {
+            envelope.seq = next_event_seq_inner()?;
+        }
+        envelope.v = EVENT_SCHEMA_VERSION;
+
+        rotate_if_needed()?;
+
+        let path = events_path();
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+
+        let creating = !path.exists();
+        let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
+
+        // Set 0600 on newly created files (sensitive meeting data)
+        #[cfg(unix)]
+        if creating {
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+        }
+
+        let line =
+            serde_json::to_string(&envelope).map_err(|e| std::io::Error::other(e.to_string()))?;
+        writeln!(file, "{}", line)?;
+        file.flush()?;
+
+        if let Err(error) = write_event_seq_sidecar_at_least_inner(envelope.seq) {
+            tracing::warn!(
+                error = %error,
+                seq = envelope.seq,
+                "failed to update event seq sidecar"
+            );
+        }
+        Ok(())
+    })?;
+    Ok(envelope)
 }
 
 /// Read events from the log, optionally filtered by time and limited.
@@ -260,16 +652,200 @@ pub fn read_events(since: Option<DateTime<Local>>, limit: Option<usize>) -> Vec<
     }
 }
 
+/// Read events after a stable event sequence cursor.
+pub fn read_events_since_seq(since_seq: u64, limit: Option<usize>) -> Vec<EventEnvelope> {
+    match read_events_since_seq_inner(since_seq, limit) {
+        Ok(events) => events,
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to read events since seq");
+            vec![]
+        }
+    }
+}
+
+/// Return the latest stable event sequence cursor.
+pub fn latest_event_seq() -> u64 {
+    match latest_event_seq_inner() {
+        Ok(seq) => seq,
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to read latest event seq");
+            0
+        }
+    }
+}
+
 fn read_events_inner(
     since: Option<DateTime<Local>>,
     limit: Option<usize>,
 ) -> std::io::Result<Vec<EventEnvelope>> {
+    let mut events = read_all_event_envelopes_inner()?;
+
+    if let Some(ref since_dt) = since {
+        events.retain(|envelope| envelope.timestamp >= *since_dt);
+    }
+
+    events.sort_by_key(|envelope| envelope.seq);
+
+    if let Some(limit) = limit {
+        let skip = events.len().saturating_sub(limit);
+        events = events.into_iter().skip(skip).collect();
+    }
+
+    Ok(events)
+}
+
+fn read_events_since_seq_inner(
+    since_seq: u64,
+    limit: Option<usize>,
+) -> std::io::Result<Vec<EventEnvelope>> {
+    let mut events = read_all_event_envelopes_inner()?;
+
+    events.retain(|envelope| envelope.seq > since_seq);
+    events.sort_by_key(|envelope| envelope.seq);
+
+    if let Some(limit) = limit {
+        events.truncate(limit);
+    }
+
+    Ok(events)
+}
+
+fn latest_event_seq_inner() -> std::io::Result<u64> {
+    if let Some(seq) = read_event_seq_sidecar_inner()? {
+        let active_log_seq =
+            latest_event_seq_from_active_log_tail_inner(&events_path())?.unwrap_or(0);
+        return Ok(seq.max(active_log_seq));
+    }
+
+    latest_event_seq_from_logs_inner()
+}
+
+fn next_event_seq_inner() -> std::io::Result<u64> {
+    Ok(latest_event_seq_inner()?.saturating_add(1))
+}
+
+fn latest_event_seq_from_logs_inner() -> std::io::Result<u64> {
+    Ok(read_all_event_envelopes_inner()?
+        .into_iter()
+        .map(|envelope| envelope.seq)
+        .max()
+        .unwrap_or(0))
+}
+
+fn read_event_seq_sidecar_inner() -> std::io::Result<Option<u64>> {
+    let path = event_seq_path();
+    match fs::read_to_string(&path) {
+        Ok(raw) => match raw.trim().parse::<u64>() {
+            Ok(seq) => Ok(Some(seq)),
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    path = %path.display(),
+                    "ignoring invalid event seq sidecar"
+                );
+                Ok(None)
+            }
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+fn write_event_seq_sidecar_inner(seq: u64) -> std::io::Result<()> {
+    let path = event_seq_path();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    let tmp_path = event_seq_tmp_path();
+    {
+        let mut file = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(&tmp_path)?;
+
+        #[cfg(unix)]
+        fs::set_permissions(&tmp_path, fs::Permissions::from_mode(0o600))?;
+
+        writeln!(file, "{seq}")?;
+        file.flush()?;
+    }
+
+    fs::rename(&tmp_path, &path)?;
+
+    #[cfg(unix)]
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+
+    Ok(())
+}
+
+fn write_event_seq_sidecar_at_least_inner(seq: u64) -> std::io::Result<()> {
+    let existing_seq = read_event_seq_sidecar_inner()?.unwrap_or(0);
+    let active_log_seq = latest_event_seq_from_active_log_tail_inner(&events_path())?.unwrap_or(0);
+    write_event_seq_sidecar_inner(seq.max(existing_seq).max(active_log_seq))
+}
+
+fn latest_event_seq_from_active_log_tail_inner(path: &Path) -> std::io::Result<Option<u64>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+
+    let mut file = fs::File::open(path)?;
+    let mut end = file.metadata()?.len();
+    let mut buffer = Vec::new();
+
+    while end > 0 {
+        let read_len = end.min(EVENT_SEQ_TAIL_CHUNK_BYTES) as usize;
+        let start = end - read_len as u64;
+        file.seek(SeekFrom::Start(start))?;
+
+        let mut chunk = vec![0; read_len];
+        file.read_exact(&mut chunk)?;
+        chunk.extend_from_slice(&buffer);
+        buffer = chunk;
+
+        let lines = if start == 0 {
+            buffer.as_slice()
+        } else if let Some(newline_index) = buffer.iter().position(|byte| *byte == b'\n') {
+            &buffer[newline_index + 1..]
+        } else {
+            end = start;
+            continue;
+        };
+
+        for line in lines.split(|byte| *byte == b'\n').rev() {
+            if line.iter().all(u8::is_ascii_whitespace) {
+                continue;
+            }
+
+            match serde_json::from_slice::<EventEnvelope>(line) {
+                Ok(envelope) if envelope.seq != 0 => return Ok(Some(envelope.seq)),
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::debug!(
+                        error = %error,
+                        path = %path.display(),
+                        "skipping malformed event line while reading latest seq"
+                    );
+                }
+            }
+        }
+
+        end = start;
+    }
+
+    Ok(None)
+}
+
+fn read_all_event_envelopes_inner() -> std::io::Result<Vec<EventEnvelope>> {
     let paths = event_log_paths()?;
     if paths.is_empty() {
         return Ok(vec![]);
     }
 
     let mut events: Vec<EventEnvelope> = Vec::new();
+    let mut synthetic_seq: u64 = 0;
 
     for path in paths {
         let file = fs::File::open(&path)?;
@@ -281,11 +857,10 @@ fn read_events_inner(
                 continue;
             }
             match serde_json::from_str::<EventEnvelope>(&line) {
-                Ok(envelope) => {
-                    if let Some(ref since_dt) = since {
-                        if envelope.timestamp < *since_dt {
-                            continue;
-                        }
+                Ok(mut envelope) => {
+                    synthetic_seq = synthetic_seq.saturating_add(1);
+                    if envelope.seq == 0 {
+                        envelope.seq = synthetic_seq;
                     }
                     events.push(envelope);
                 }
@@ -294,13 +869,6 @@ fn read_events_inner(
                 }
             }
         }
-    }
-
-    events.sort_by_key(|envelope| envelope.timestamp);
-
-    if let Some(limit) = limit {
-        let skip = events.len().saturating_sub(limit);
-        events = events.into_iter().skip(skip).collect();
     }
 
     Ok(events)
@@ -682,6 +1250,18 @@ pub fn recording_completed_event(
     }
 }
 
+pub fn recording_started_event(
+    session_id: Option<String>,
+    source: impl Into<String>,
+    capabilities: impl IntoIterator<Item = impl Into<String>>,
+) -> MinutesEvent {
+    MinutesEvent::RecordingStarted {
+        session_id,
+        source: source.into(),
+        capabilities: capabilities.into_iter().map(Into::into).collect(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -708,10 +1288,158 @@ mod tests {
         result
     }
 
+    fn note_envelope(seq: u64, text: &str) -> EventEnvelope {
+        EventEnvelope {
+            v: EVENT_SCHEMA_VERSION,
+            seq,
+            timestamp: Local::now(),
+            event: MinutesEvent::NoteAdded {
+                meeting_path: format!("/tmp/{text}.md"),
+                text: text.into(),
+            },
+        }
+    }
+
+    fn annotation_request(agent_id: &str) -> AgentAnnotationRequest {
+        AgentAnnotationRequest {
+            agent: AgentAnnotationAgent {
+                id: agent_id.into(),
+                tools: vec!["codex".into()],
+            },
+            subkind: "coaching".into(),
+            target: AgentAnnotationTarget {
+                meeting_id: Some("meeting-1".into()),
+                meeting_path: Some("/tmp/meeting.md".into()),
+                span: Some(AgentAnnotationSpan {
+                    start_ms: 1000,
+                    end_ms: 2500,
+                }),
+            },
+            body: "Ask for the action owner before moving on.".into(),
+            citations: vec!["events:42".into()],
+            confidence: "medium".into(),
+            provenance: serde_json::json!({
+                "model": "gpt-test",
+                "prompt_hash": "abc123"
+            }),
+        }
+    }
+
+    fn legacy_note_line(text: &str, timestamp: DateTime<Local>) -> String {
+        serde_json::json!({
+            "timestamp": timestamp,
+            "event_type": "NoteAdded",
+            "meeting_path": format!("/tmp/{text}.md"),
+            "text": text,
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn agent_annotation_appends_when_agent_is_allowlisted() {
+        with_temp_home(|_| {
+            fs::create_dir_all(agents_allowlist_path().parent().unwrap()).unwrap();
+            fs::write(agents_allowlist_path(), "codex\n").unwrap();
+
+            let written = append_agent_annotation(annotation_request("codex")).unwrap();
+            let value = serde_json::to_value(&written).unwrap();
+
+            assert_eq!(written.seq, 1);
+            assert_eq!(value["event_type"], AGENT_ANNOTATION_EVENT_TYPE);
+            assert_eq!(value["agent"]["id"], "codex");
+            assert_eq!(value["agent"]["tools"][0], "codex");
+            assert_eq!(value["subkind"], "coaching");
+            assert_eq!(value["target"]["meeting_id"], "meeting-1");
+            assert_eq!(value["body"], "Ask for the action owner before moving on.");
+            assert_eq!(value["citations"][0], "events:42");
+            assert_eq!(value["provenance"]["prompt_hash"], "abc123");
+        });
+    }
+
+    #[test]
+    fn agent_annotation_respects_event_type_scoped_allowlist() {
+        with_temp_home(|_| {
+            fs::create_dir_all(agents_allowlist_path().parent().unwrap()).unwrap();
+            fs::write(
+                agents_allowlist_path(),
+                "codex: meeting.insight.detected\nscoped: agent.annotation\n",
+            )
+            .unwrap();
+
+            let denied = append_agent_annotation(annotation_request("codex")).unwrap_err();
+            assert_eq!(denied.to_body().error, "agent_not_allowlisted");
+
+            let written = append_agent_annotation(annotation_request("scoped")).unwrap();
+            assert_eq!(written.seq, 1);
+        });
+    }
+
+    #[test]
+    fn agent_annotation_rejects_non_allowlisted_agents_with_structured_error() {
+        with_temp_home(|_| {
+            let error = append_agent_annotation(annotation_request("codex")).unwrap_err();
+            let body = error.to_body();
+
+            assert!(!body.ok);
+            assert_eq!(body.error, "agent_not_allowlisted");
+            assert_eq!(body.agent_id, "codex");
+            assert_eq!(body.event_type, AGENT_ANNOTATION_EVENT_TYPE);
+            let allowlist_path = PathBuf::from(&body.allowlist_path);
+            assert_eq!(
+                allowlist_path.file_name().and_then(|name| name.to_str()),
+                Some("agents.allow")
+            );
+            assert_eq!(
+                allowlist_path
+                    .parent()
+                    .and_then(|parent| parent.file_name())
+                    .and_then(|name| name.to_str()),
+                Some(".minutes")
+            );
+            assert!(read_events_inner(None, None).unwrap().is_empty());
+        });
+    }
+
+    #[test]
+    fn agent_annotation_rejects_malformed_payload() {
+        with_temp_home(|_| {
+            fs::create_dir_all(agents_allowlist_path().parent().unwrap()).unwrap();
+            fs::write(agents_allowlist_path(), "codex\n").unwrap();
+            let mut request = annotation_request("codex");
+            request.body.clear();
+
+            let error = append_agent_annotation(request).unwrap_err().to_body();
+
+            assert_eq!(error.error, "invalid_payload");
+            assert_eq!(error.message, "body is required");
+            assert!(read_events_inner(None, None).unwrap().is_empty());
+        });
+    }
+
+    #[test]
+    fn agent_annotation_never_mutates_meeting_markdown() {
+        with_temp_home(|dir| {
+            fs::create_dir_all(agents_allowlist_path().parent().unwrap()).unwrap();
+            fs::write(agents_allowlist_path(), "codex: agent.annotation\n").unwrap();
+
+            let meeting_path = dir.path().join("meeting.md");
+            let original = "---\ntitle: Human Note\n---\n\nHuman transcript.\n";
+            fs::write(&meeting_path, original).unwrap();
+
+            let mut request = annotation_request("codex");
+            request.target.meeting_path = Some(meeting_path.display().to_string());
+            append_agent_annotation(request).unwrap();
+
+            assert_eq!(fs::read_to_string(&meeting_path).unwrap(), original);
+        });
+    }
+
     #[test]
     fn append_and_read_events() {
         with_temp_home(|_| {
             let envelope = EventEnvelope {
+                v: EVENT_SCHEMA_VERSION,
+                seq: 0,
                 timestamp: Local::now(),
                 event: MinutesEvent::RecordingCompleted {
                     path: "/tmp/test.md".into(),
@@ -722,10 +1450,13 @@ mod tests {
                 },
             };
 
-            append_event_inner(&envelope).unwrap();
+            let written = append_event_inner(&envelope).unwrap();
+            assert_eq!(written.v, EVENT_SCHEMA_VERSION);
+            assert_eq!(written.seq, 1);
 
             let events = read_events_inner(None, None).unwrap();
             assert_eq!(events.len(), 1);
+            assert_eq!(events[0].seq, 1);
             match &events[0].event {
                 MinutesEvent::RecordingCompleted { title, .. } => {
                     assert_eq!(title, "Test Meeting");
@@ -736,8 +1467,161 @@ mod tests {
     }
 
     #[test]
+    fn append_initializes_seq_sidecar_from_legacy_logs() {
+        with_temp_home(|_| {
+            let older_timestamp = Local::now() - chrono::Duration::minutes(10);
+            let newer_timestamp = Local::now();
+            let rotated_path = rotated_events_path_for(older_timestamp);
+            fs::create_dir_all(rotated_path.parent().unwrap()).unwrap();
+            fs::write(
+                &rotated_path,
+                format!("{}\n", legacy_note_line("older", older_timestamp)),
+            )
+            .unwrap();
+            fs::write(
+                events_path(),
+                format!("{}\n", legacy_note_line("newer", newer_timestamp)),
+            )
+            .unwrap();
+
+            let written = append_event_inner(&note_envelope(0, "appended")).unwrap();
+
+            assert_eq!(written.seq, 3);
+            assert_eq!(read_event_seq_sidecar_inner().unwrap(), Some(3));
+
+            let events = read_events_inner(None, None).unwrap();
+            assert_eq!(events.len(), 3);
+            assert_eq!(events[0].seq, 1);
+            assert_eq!(events[1].seq, 2);
+            assert_eq!(events[2].seq, 3);
+        });
+    }
+
+    #[test]
+    fn append_uses_existing_seq_sidecar_as_migration_boundary() {
+        with_temp_home(|_| {
+            write_event_seq_sidecar_inner(50).unwrap();
+
+            let rotated_path = rotated_events_path_for(Local::now() - chrono::Duration::minutes(5));
+            fs::create_dir_all(rotated_path.parent().unwrap()).unwrap();
+            fs::write(
+                &rotated_path,
+                format!(
+                    "{}\n",
+                    serde_json::to_string(&note_envelope(900, "rotated")).unwrap()
+                ),
+            )
+            .unwrap();
+
+            let written = append_event_inner(&note_envelope(0, "from-sidecar")).unwrap();
+
+            assert_eq!(written.seq, 51);
+            assert_eq!(read_event_seq_sidecar_inner().unwrap(), Some(51));
+        });
+    }
+
+    #[test]
+    fn append_recovers_when_seq_sidecar_lags_active_log() {
+        with_temp_home(|_| {
+            write_event_seq_sidecar_inner(1).unwrap();
+            fs::create_dir_all(events_path().parent().unwrap()).unwrap();
+            fs::write(
+                events_path(),
+                format!(
+                    "{}\n",
+                    serde_json::to_string(&note_envelope(5, "written")).unwrap()
+                ),
+            )
+            .unwrap();
+
+            let written = append_event_inner(&note_envelope(0, "after-crash")).unwrap();
+
+            assert_eq!(written.seq, 6);
+            assert_eq!(read_event_seq_sidecar_inner().unwrap(), Some(6));
+        });
+    }
+
+    #[test]
+    fn append_recovers_from_malformed_active_log_tail() {
+        with_temp_home(|_| {
+            write_event_seq_sidecar_inner(1).unwrap();
+            fs::create_dir_all(events_path().parent().unwrap()).unwrap();
+            fs::write(
+                events_path(),
+                format!(
+                    "{}\n{{bad json\n",
+                    serde_json::to_string(&note_envelope(5, "written")).unwrap()
+                ),
+            )
+            .unwrap();
+
+            let written = append_event_inner(&note_envelope(0, "after-partial-write")).unwrap();
+
+            assert_eq!(written.seq, 6);
+            assert_eq!(read_event_seq_sidecar_inner().unwrap(), Some(6));
+        });
+    }
+
+    #[test]
+    fn append_recovers_when_active_log_tail_is_legacy() {
+        with_temp_home(|_| {
+            write_event_seq_sidecar_inner(1).unwrap();
+            fs::create_dir_all(events_path().parent().unwrap()).unwrap();
+            fs::write(
+                events_path(),
+                format!(
+                    "{}\n{}\n",
+                    serde_json::to_string(&note_envelope(5, "written")).unwrap(),
+                    legacy_note_line("legacy-tail", Local::now())
+                ),
+            )
+            .unwrap();
+
+            let written = append_event_inner(&note_envelope(0, "after-legacy-tail")).unwrap();
+
+            assert_eq!(written.seq, 6);
+            assert_eq!(read_event_seq_sidecar_inner().unwrap(), Some(6));
+        });
+    }
+
+    #[test]
+    fn append_never_regresses_existing_seq_sidecar() {
+        with_temp_home(|_| {
+            write_event_seq_sidecar_inner(50).unwrap();
+
+            let written = append_event_inner(&note_envelope(5, "explicit-low-seq")).unwrap();
+
+            assert_eq!(written.seq, 5);
+            assert_eq!(read_event_seq_sidecar_inner().unwrap(), Some(50));
+        });
+    }
+
+    #[test]
+    fn append_recovers_from_invalid_seq_sidecar_by_scanning_logs() {
+        with_temp_home(|_| {
+            fs::create_dir_all(event_seq_path().parent().unwrap()).unwrap();
+            fs::write(event_seq_path(), "not-a-seq\n").unwrap();
+            fs::write(
+                events_path(),
+                format!(
+                    "{}\n",
+                    serde_json::to_string(&note_envelope(7, "existing")).unwrap()
+                ),
+            )
+            .unwrap();
+
+            let written = append_event_inner(&note_envelope(0, "after-invalid-sidecar")).unwrap();
+
+            assert_eq!(written.seq, 8);
+            assert_eq!(read_event_seq_sidecar_inner().unwrap(), Some(8));
+        });
+    }
+
+    #[test]
     fn event_envelope_serializes_with_tag() {
         let envelope = EventEnvelope {
+            v: EVENT_SCHEMA_VERSION,
+            seq: 42,
             timestamp: Local::now(),
             event: MinutesEvent::NoteAdded {
                 meeting_path: "/tmp/test.md".into(),
@@ -746,8 +1630,225 @@ mod tests {
         };
 
         let json = serde_json::to_string(&envelope).unwrap();
+        assert!(json.contains("\"v\":1"));
+        assert!(json.contains("\"seq\":42"));
         assert!(json.contains("\"event_type\":\"NoteAdded\""));
         assert!(json.contains("\"text\":\"Important point\""));
+    }
+
+    #[test]
+    fn recording_started_serializes_with_v0_dotted_name() {
+        let envelope = EventEnvelope {
+            v: EVENT_SCHEMA_VERSION,
+            seq: 3,
+            timestamp: Local::now(),
+            event: recording_started_event(
+                Some("session-1".into()),
+                "capture",
+                ["audio.capture", "live.utterance.final"],
+            ),
+        };
+
+        let value = serde_json::to_value(&envelope).unwrap();
+        assert_eq!(value["event_type"], "recording.started");
+        assert_eq!(value["session_id"], "session-1");
+        assert_eq!(value["source"], "capture");
+        assert_eq!(value["capabilities"][0], "audio.capture");
+        assert_eq!(value["capabilities"][1], "live.utterance.final");
+    }
+
+    #[test]
+    fn recording_completed_serializes_dotted_and_reads_legacy_name() {
+        let envelope = EventEnvelope {
+            v: EVENT_SCHEMA_VERSION,
+            seq: 4,
+            timestamp: Local::now(),
+            event: MinutesEvent::RecordingCompleted {
+                path: "/tmp/test.md".into(),
+                title: "Test Meeting".into(),
+                word_count: 100,
+                content_type: "meeting".into(),
+                duration: "5m".into(),
+            },
+        };
+
+        let value = serde_json::to_value(&envelope).unwrap();
+        assert_eq!(value["event_type"], "recording.completed");
+
+        let legacy_json = serde_json::json!({
+            "v": EVENT_SCHEMA_VERSION,
+            "seq": 4,
+            "timestamp": Local::now(),
+            "event_type": "RecordingCompleted",
+            "path": "/tmp/test.md",
+            "title": "Test Meeting",
+            "word_count": 100,
+            "content_type": "meeting",
+            "duration": "5m"
+        })
+        .to_string();
+        let parsed: EventEnvelope = serde_json::from_str(&legacy_json).unwrap();
+        match parsed.event {
+            MinutesEvent::RecordingCompleted { title, .. } => {
+                assert_eq!(title, "Test Meeting");
+            }
+            other => panic!("expected RecordingCompleted, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn event_envelope_v0_wire_contract_is_flattened() {
+        let envelope = EventEnvelope {
+            v: EVENT_SCHEMA_VERSION,
+            seq: 42,
+            timestamp: Local::now(),
+            event: MinutesEvent::LiveUtteranceFinal {
+                session_id: Some("session-1".into()),
+                source: "standalone".into(),
+                transcript_path: "/tmp/live-transcript.jsonl".into(),
+                line: 7,
+                text: "ship the contract before adding more events".into(),
+                speaker: Some("Mat".into()),
+                offset_ms: 1_250,
+                duration_ms: 900,
+            },
+        };
+
+        let value = serde_json::to_value(&envelope).unwrap();
+        assert_eq!(value["v"], EVENT_SCHEMA_VERSION);
+        assert_eq!(value["seq"], 42);
+        assert!(value.get("timestamp").is_some());
+        assert_eq!(value["event_type"], "live.utterance.final");
+        assert_eq!(value["text"], "ship the contract before adding more events");
+        assert!(value.get("event").is_none());
+        assert!(value.get("kind").is_none());
+        assert!(value.get("ts").is_none());
+    }
+
+    #[test]
+    fn event_envelope_deserializes_legacy_lines_without_version_or_seq() {
+        let json = serde_json::json!({
+            "timestamp": Local::now(),
+            "event_type": "NoteAdded",
+            "meeting_path": "/tmp/test.md",
+            "text": "legacy"
+        })
+        .to_string();
+
+        let parsed: EventEnvelope = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.v, EVENT_SCHEMA_VERSION);
+        assert_eq!(parsed.seq, 0);
+        match parsed.event {
+            MinutesEvent::NoteAdded { text, .. } => assert_eq!(text, "legacy"),
+            _ => panic!("expected NoteAdded"),
+        }
+    }
+
+    #[test]
+    fn event_envelope_deserializes_dotted_v0_aliases_for_legacy_variants() {
+        let recording_json = serde_json::json!({
+            "v": EVENT_SCHEMA_VERSION,
+            "seq": 9,
+            "timestamp": Local::now(),
+            "event_type": "recording.completed",
+            "path": "/meetings/demo.md",
+            "title": "Demo",
+            "word_count": 123,
+            "content_type": "meeting",
+            "duration": "5m"
+        })
+        .to_string();
+
+        let recording: EventEnvelope = serde_json::from_str(&recording_json).unwrap();
+        match recording.event {
+            MinutesEvent::RecordingCompleted { title, .. } => assert_eq!(title, "Demo"),
+            other => panic!("expected RecordingCompleted, got {other:?}"),
+        }
+
+        let insight_json = serde_json::json!({
+            "v": EVENT_SCHEMA_VERSION,
+            "seq": 10,
+            "timestamp": Local::now(),
+            "event_type": "meeting.insight.detected",
+            "insight": {
+                "kind": "decision",
+                "content": "Use the flat event envelope for v0",
+                "confidence": "explicit",
+                "source_meeting": "/meetings/demo.md"
+            },
+            "meeting_title": "Demo"
+        })
+        .to_string();
+
+        let insight: EventEnvelope = serde_json::from_str(&insight_json).unwrap();
+        match insight.event {
+            MinutesEvent::MeetingInsightExtracted {
+                insight,
+                meeting_title,
+            } => {
+                assert_eq!(meeting_title, "Demo");
+                assert_eq!(insight.kind, InsightKind::Decision);
+                assert_eq!(insight.confidence, InsightConfidence::Explicit);
+            }
+            other => panic!("expected MeetingInsightExtracted, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn meeting_insight_detected_serializes_dotted_and_reads_legacy_name() {
+        let envelope = EventEnvelope {
+            v: EVENT_SCHEMA_VERSION,
+            seq: 11,
+            timestamp: Local::now(),
+            event: MinutesEvent::MeetingInsightExtracted {
+                insight: MeetingInsight {
+                    kind: InsightKind::Commitment,
+                    content: "Send pricing doc".into(),
+                    confidence: InsightConfidence::Strong,
+                    participants: vec!["Sarah".into()],
+                    owner: Some("Sarah".into()),
+                    deadline: Some("Friday".into()),
+                    topic: None,
+                    source_meeting: "/meetings/test.md".into(),
+                },
+                meeting_title: "Pricing Review".into(),
+            },
+        };
+
+        let value = serde_json::to_value(&envelope).unwrap();
+        assert_eq!(value["event_type"], "meeting.insight.detected");
+        assert_eq!(value["insight"]["kind"], "commitment");
+        assert_eq!(value["insight"]["confidence"], "strong");
+
+        let legacy_json = serde_json::json!({
+            "v": EVENT_SCHEMA_VERSION,
+            "seq": 11,
+            "timestamp": Local::now(),
+            "event_type": "MeetingInsightExtracted",
+            "insight": {
+                "kind": "commitment",
+                "content": "Send pricing doc",
+                "confidence": "strong",
+                "participants": ["Sarah"],
+                "owner": "Sarah",
+                "deadline": "Friday",
+                "source_meeting": "/meetings/test.md"
+            },
+            "meeting_title": "Pricing Review"
+        })
+        .to_string();
+        let parsed: EventEnvelope = serde_json::from_str(&legacy_json).unwrap();
+        match parsed.event {
+            MinutesEvent::MeetingInsightExtracted {
+                insight,
+                meeting_title,
+            } => {
+                assert_eq!(meeting_title, "Pricing Review");
+                assert_eq!(insight.kind, InsightKind::Commitment);
+                assert_eq!(insight.owner.as_deref(), Some("Sarah"));
+            }
+            other => panic!("expected MeetingInsightExtracted, got {other:?}"),
+        }
     }
 
     #[test]
@@ -763,6 +1864,8 @@ mod tests {
     fn read_events_includes_rotated_logs() {
         with_temp_home(|_| {
             let older = EventEnvelope {
+                v: EVENT_SCHEMA_VERSION,
+                seq: 0,
                 timestamp: Local::now() - chrono::Duration::minutes(10),
                 event: MinutesEvent::NoteAdded {
                     meeting_path: "/tmp/older.md".into(),
@@ -770,6 +1873,8 @@ mod tests {
                 },
             };
             let newer = EventEnvelope {
+                v: EVENT_SCHEMA_VERSION,
+                seq: 0,
                 timestamp: Local::now(),
                 event: MinutesEvent::NoteAdded {
                     meeting_path: "/tmp/newer.md".into(),
@@ -792,6 +1897,8 @@ mod tests {
 
             let events = read_events_inner(None, None).unwrap();
             assert_eq!(events.len(), 2);
+            assert_eq!(events[0].seq, 1);
+            assert_eq!(events[1].seq, 2);
             match &events[0].event {
                 MinutesEvent::NoteAdded { text, .. } => assert_eq!(text, "older"),
                 _ => panic!("expected older NoteAdded"),
@@ -800,6 +1907,56 @@ mod tests {
                 MinutesEvent::NoteAdded { text, .. } => assert_eq!(text, "newer"),
                 _ => panic!("expected newer NoteAdded"),
             }
+        });
+    }
+
+    #[test]
+    fn read_events_since_seq_filters_and_orders_by_cursor() {
+        with_temp_home(|_| {
+            let first = EventEnvelope {
+                v: EVENT_SCHEMA_VERSION,
+                seq: 0,
+                timestamp: Local::now() - chrono::Duration::minutes(5),
+                event: MinutesEvent::NoteAdded {
+                    meeting_path: "/tmp/first.md".into(),
+                    text: "first".into(),
+                },
+            };
+            let second = EventEnvelope {
+                v: EVENT_SCHEMA_VERSION,
+                seq: 0,
+                timestamp: Local::now(),
+                event: MinutesEvent::NoteAdded {
+                    meeting_path: "/tmp/second.md".into(),
+                    text: "second".into(),
+                },
+            };
+            let third = EventEnvelope {
+                v: EVENT_SCHEMA_VERSION,
+                seq: 0,
+                timestamp: Local::now() + chrono::Duration::minutes(5),
+                event: MinutesEvent::NoteAdded {
+                    meeting_path: "/tmp/third.md".into(),
+                    text: "third".into(),
+                },
+            };
+
+            append_event_inner(&first).unwrap();
+            append_event_inner(&second).unwrap();
+            append_event_inner(&third).unwrap();
+
+            let events = read_events_since_seq_inner(1, None).unwrap();
+            assert_eq!(events.len(), 2);
+            assert_eq!(events[0].seq, 2);
+            assert_eq!(events[1].seq, 3);
+            match &events[0].event {
+                MinutesEvent::NoteAdded { text, .. } => assert_eq!(text, "second"),
+                _ => panic!("expected NoteAdded"),
+            }
+
+            let limited = read_events_since_seq_inner(1, Some(1)).unwrap();
+            assert_eq!(limited.len(), 1);
+            assert_eq!(limited[0].seq, 2);
         });
     }
 
@@ -848,6 +2005,8 @@ mod tests {
     #[test]
     fn insight_event_serializes_with_tag() {
         let envelope = EventEnvelope {
+            v: EVENT_SCHEMA_VERSION,
+            seq: 0,
             timestamp: Local::now(),
             event: MinutesEvent::MeetingInsightExtracted {
                 insight: MeetingInsight {
@@ -865,7 +2024,7 @@ mod tests {
         };
 
         let json = serde_json::to_string(&envelope).unwrap();
-        assert!(json.contains("\"event_type\":\"MeetingInsightExtracted\""));
+        assert!(json.contains("\"event_type\":\"meeting.insight.detected\""));
         assert!(json.contains("\"kind\":\"commitment\""));
         assert!(json.contains("\"confidence\":\"strong\""));
 

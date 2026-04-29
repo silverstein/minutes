@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::path::Path;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 use tauri::{Emitter, Manager};
@@ -77,6 +77,30 @@ pub struct AppState {
     /// `true` while a call-end auto-stop countdown is running. Keeps repeat
     /// call-end transitions from spawning parallel countdown threads.
     pub call_end_countdown_active: Arc<AtomicBool>,
+    /// Terminal reason for the most recent countdown lifecycle. Kept separate
+    /// from the cancel bit so the detector can tell an explicit user cancel
+    /// from an internal reset or teardown path.
+    pub call_end_countdown_terminal_state: Arc<AtomicU8>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum CallEndCountdownTerminalState {
+    None = 0,
+    UserCancelled = 1,
+    RecordingStopped = 2,
+    AutoStopFired = 3,
+}
+
+impl CallEndCountdownTerminalState {
+    pub fn from_u8(value: u8) -> Self {
+        match value {
+            1 => Self::UserCancelled,
+            2 => Self::RecordingStopped,
+            3 => Self::AutoStopFired,
+            _ => Self::None,
+        }
+    }
 }
 
 type ParakeetStatusView = minutes_core::transcription_coordinator::ParakeetBackendStatus;
@@ -2062,6 +2086,15 @@ fn start_native_call_recording(
         .ok();
     crate::update_tray_state(app_handle, true);
     minutes_core::notes::save_recording_start().ok();
+    minutes_core::events::append_event(minutes_core::events::recording_started_event(
+        context_session_id.clone(),
+        "capture",
+        [
+            "native-call.capture".to_string(),
+            "screen-capture-kit".to_string(),
+            format!("mode.{}", mode.noun().replace(' ', "-")),
+        ],
+    ));
 
     eprintln!(
         "[minutes] Native call capture started: {}",
@@ -3667,6 +3700,15 @@ pub fn start_recording(
     if let Some(language) = language_override {
         config.transcription.language = Some(language);
     }
+    // Re-validate the pinned input device at recording start so a
+    // mid-session disconnect (Bluetooth headset turning off, USB device
+    // unplugged) transparently falls back to the system default. Issue
+    // #189: without this, preflight surfaces "device not found" and
+    // some users press Cmd+Q out of frustration, which can trip a
+    // separate destructor-during-exit() abort. In-memory only;
+    // startup-side persistence stays in main.rs so users keep their
+    // pin for when the device reconnects on a future launch.
+    minutes_core::capture::auto_heal_missing_recording_device(&mut config);
     let preflight = match minutes_core::capture::preflight_recording_with_native_call_capture(
         mode,
         requested_intent,
@@ -3811,7 +3853,20 @@ pub fn start_recording(
     });
 
     let mut clear_processing_on_exit = true;
-    match minutes_core::capture::record_to_wav(&wav_path, stop_flag, &config) {
+    match minutes_core::capture::record_to_wav_with_lifecycle(
+        &wav_path,
+        stop_flag,
+        &config,
+        Some(minutes_core::capture::RecordingStartedContext {
+            session_id: context_session_id.clone(),
+            source: "capture".into(),
+            capabilities: vec![
+                "audio.capture".into(),
+                "live.utterance.final".into(),
+                format!("mode.{}", mode.noun().replace(' ', "-")),
+            ],
+        }),
+    ) {
         Ok(()) => {
             recording.store(false, Ordering::Relaxed);
             let should_discard = discard_short_hotkey_capture
@@ -4368,7 +4423,7 @@ pub fn cmd_start_recording(
         .store(from_call_detect, Ordering::Relaxed);
     // Starting a fresh recording always cancels any in-flight countdown so
     // the UI doesn't auto-stop a session the user has already moved past.
-    cancel_call_end_countdown(&state);
+    reset_call_end_countdown(&state);
 
     launch_recording(
         app,
@@ -4383,10 +4438,29 @@ pub fn cmd_start_recording(
     )
 }
 
-/// Clear countdown state — both the active flag and (as a no-op safety net)
-/// the cancel flag. Used when a new recording starts, when the countdown
-/// elapses, and when the user cancels via "Keep recording".
-pub fn cancel_call_end_countdown(state: &AppState) {
+/// Reset countdown lifecycle state for a fresh recording/session boundary.
+/// Used when a new recording starts so stale terminal markers from an older
+/// call cannot masquerade as an explicit cancel on the next call end.
+pub fn reset_call_end_countdown(state: &AppState) {
+    state
+        .call_end_countdown_terminal_state
+        .store(CallEndCountdownTerminalState::None as u8, Ordering::Relaxed);
+    state
+        .call_end_countdown_cancel
+        .store(true, Ordering::Relaxed);
+    state
+        .call_end_countdown_active
+        .store(false, Ordering::Relaxed);
+}
+
+/// Explicit user cancellation of a call-end countdown via "Keep recording"
+/// or "Stop now". This is a real terminal state and should not be re-armed
+/// by the detector for the already-ended call session.
+pub fn cancel_call_end_countdown_by_user(state: &AppState) {
+    state.call_end_countdown_terminal_state.store(
+        CallEndCountdownTerminalState::UserCancelled as u8,
+        Ordering::Relaxed,
+    );
     state
         .call_end_countdown_cancel
         .store(true, Ordering::Relaxed);
@@ -4400,7 +4474,7 @@ pub fn cmd_cancel_call_end_countdown(
     app: tauri::AppHandle,
     state: tauri::State<AppState>,
 ) -> Result<(), String> {
-    cancel_call_end_countdown(&state);
+    cancel_call_end_countdown_by_user(&state);
     // Tell the UI to hide the banner immediately; the countdown thread will
     // observe the cancel flag on its next tick and exit without stopping.
     app.emit("call:end-countdown:cancelled", ()).ok();
@@ -4882,21 +4956,18 @@ fn compute_lifecycle_badges(
     badges
 }
 
+/// Tauri command that powers the in-app search bar.
+///
+/// Returns `Result<Vec<SearchResult>, String>` so failures (corrupted index,
+/// disk-full, etc.) surface as JS Promise rejections that the frontend's
+/// `catch` block handles by rendering an error banner. Previously the command
+/// swallowed every error as `[]`, which made real failures look like "no
+/// matches" and was a debugging footgun.
 #[tauri::command]
-pub fn cmd_search(query: String) -> serde_json::Value {
+pub fn cmd_search(query: String) -> Result<Vec<minutes_core::search::SearchResult>, String> {
     let config = Config::load();
-    let filters = minutes_core::search::SearchFilters {
-        content_type: None,
-        since: None,
-        attendee: None,
-        intent_kind: None,
-        owner: None,
-        recorded_by: None,
-    };
-    match minutes_core::search::search(&query, &config, &filters) {
-        Ok(results) => serde_json::to_value(&results).unwrap_or(serde_json::json!([])),
-        Err(_) => serde_json::json!([]),
-    }
+    let filters = minutes_core::search::SearchFilters::default();
+    minutes_core::search::search(&query, &config, &filters).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -8587,7 +8658,10 @@ impl Drop for LiveActiveGuard {
 fn run_live_session(app: tauri::AppHandle, active: Arc<AtomicBool>, stop_flag: Arc<AtomicBool>) {
     let _guard = LiveActiveGuard(active);
 
-    let config = Config::load();
+    let mut config = Config::load();
+    // Re-validate the pinned input device for mid-session disconnects
+    // (#189). In-memory only; startup-side persistence is in main.rs.
+    minutes_core::capture::auto_heal_missing_recording_device(&mut config);
 
     if let Ok(workspace) = crate::context::create_workspace(&config) {
         update_assistant_live_context(&workspace, true);
@@ -9332,7 +9406,11 @@ fn start_dictation_session(
     let dictation_active = Arc::clone(&state.dictation_active);
 
     std::thread::spawn(move || {
-        let config = Config::load();
+        let mut config = Config::load();
+        // Re-validate the pinned input device for mid-session
+        // disconnects (#189). In-memory only; startup-side persistence
+        // is in main.rs.
+        minutes_core::capture::auto_heal_missing_recording_device(&mut config);
         let app_for_events = app_clone.clone();
         let app_for_results = app_clone.clone();
 

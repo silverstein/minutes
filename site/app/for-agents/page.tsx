@@ -6,9 +6,9 @@ import { MINUTES_MCP_TOOL_COUNT } from "@/lib/release";
 import skillsCatalog from "@/lib/skills-catalog.json";
 
 export const metadata: Metadata = {
-  title: "Minutes — the audio layer for agent memory",
+  title: "Minutes — local conversation infrastructure for agents",
   description:
-    "The open-source audio layer for agent memory. Minutes captures meetings locally and writes structured markdown to ~/meetings/. Claude Code, Codex, Gemini CLI, Cursor, OpenCode, and Pi all read from the same folder. No cloud, no SDK, no API key.",
+    "Open-source conversation infrastructure for agents. Minutes captures audio locally and exposes structured meeting memory through plain files, MCP tools, CLI commands, and live transcript streams. No cloud lock-in, no SDK, no API key.",
   alternates: { canonical: "/for-agents" },
 };
 
@@ -247,17 +247,18 @@ export default function ForAgentsPage() {
           Open-source. MCP-native.
         </p>
         <h1 className="mt-4 font-serif text-[42px] leading-[0.98] tracking-[-0.045em] text-[var(--text)] sm:text-[56px]">
-          The meeting corpus your agents{" "}
-          <span className="italic text-[var(--accent)]">read as files</span>.
+          Local conversation memory your agents{" "}
+          <span className="italic text-[var(--accent)]">can actually use</span>.
         </h1>
         <p className="mt-5 text-[17px] leading-8 text-[var(--text-secondary)]">
-          Cloud meeting tools hold your conversations in their database behind
-          their API. Minutes writes every meeting and voice memo to structured
-          markdown in{" "}
+          Most meeting tools optimize for notes inside their app. Minutes
+          turns meetings, calls, and voice memos into local source material:
+          structured markdown under{" "}
           <code className="font-mono text-[15px] text-[var(--text)]">~/meetings/</code>
-          {" "}on your own disk. Claude Code, Codex, Gemini CLI, Cursor, OpenCode, Pi,
-          and any MCP-compatible client read from the same folder. No SDK. No
-          API key. Your corpus survives tools, vendors, and hype cycles.
+          {" "}with MCP tools, CLI commands, and live transcript JSONL. Claude
+          Code, Codex, Gemini CLI, Cursor, OpenCode, Pi, and any MCP-compatible
+          client work from the same corpus. Your memory survives tools, vendors,
+          and hype cycles.
         </p>
         <p className="mt-4 text-[15px] leading-7 text-[var(--text-secondary)]">
           This page is the integration reference. MCP config, tool surface,
@@ -356,7 +357,8 @@ export default function ForAgentsPage() {
               Granola, Fireflies, Otter
             </div>
             <div className="text-[var(--text)]">
-              Cloud database. Closed API. Data lives in their app.
+              Hosted note workspace. API or MCP access where offered. Data
+              lives in their product.
             </div>
             <div className="font-mono text-[var(--text-secondary)]">
               Agent-memory SDKs
@@ -366,8 +368,8 @@ export default function ForAgentsPage() {
             </div>
             <div className="font-mono text-[var(--accent)]">Minutes</div>
             <div className="text-[var(--text)]">
-              Local capture. Markdown on your disk. Any agent reads from{" "}
-              <code className="font-mono text-[13px]">~/meetings/</code>. MIT.
+              Local capture. Markdown on your disk. CLI, MCP, and live
+              transcript reads over the same corpus. MIT.
             </div>
           </div>
           <p className="mt-5 text-[13px] leading-6 text-[var(--text-secondary)]">
@@ -571,8 +573,9 @@ export default function ForAgentsPage() {
         <div className="space-y-4 text-[15px] leading-7 text-[var(--text-secondary)]">
           <p>
             Minutes records meetings and voice memos, transcribes them locally
-            with whisper.cpp, and saves structured markdown. Speakers are identified
-            with pyannote-rs. No audio leaves the machine.
+            with whisper.cpp or Parakeet, and saves structured markdown. Speakers
+            are identified with pyannote-rs. No audio leaves the machine unless
+            you explicitly choose a cloud summarization backend.
           </p>
           <p>
             Output goes to{" "}
@@ -583,8 +586,9 @@ export default function ForAgentsPage() {
           </p>
           <p>
             The MCP server ({MINUTES_MCP_TOOL_COUNT} tools, 7 resources, 6
-            prompt templates) is the main agent interface. Any MCP-compatible
-            client can search, record, and query through it.
+            prompt templates) is the main active agent interface. Any
+            MCP-compatible client can search, record, query structured insights,
+            and read live transcript deltas through it.
           </p>
         </div>
       </section>
@@ -772,7 +776,7 @@ export default function ForAgentsPage() {
         <div className="space-y-3 text-[15px] leading-7 text-[var(--text-secondary)]">
           <p>
             Minutes does not join video calls, capture screen shares, or act as a
-            meeting bot. It records from the local microphone or processes audio
+            meeting bot. It records from local audio sources or processes audio
             files after the fact.
           </p>
           <p>

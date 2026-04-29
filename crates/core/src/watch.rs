@@ -300,6 +300,17 @@ fn determine_content_type(path: &Path, config: &Config) -> ContentType {
 
 /// Process a single file through the pipeline.
 fn process_candidate(candidate: &WatchCandidate, config: &Config) -> Result<(), WatchError> {
+    crate::events::append_event(crate::events::recording_started_event(
+        None,
+        "watch",
+        [
+            "file.ingest".to_string(),
+            format!(
+                "content_type.{}",
+                content_type_label(candidate.content_type)
+            ),
+        ],
+    ));
     match pipeline::process_with_sidecar(
         &candidate.path,
         candidate.content_type,
@@ -355,6 +366,14 @@ fn process_candidate(candidate: &WatchCandidate, config: &Config) -> Result<(), 
                 e
             ))))
         }
+    }
+}
+
+fn content_type_label(content_type: ContentType) -> &'static str {
+    match content_type {
+        ContentType::Meeting => "meeting",
+        ContentType::Memo => "memo",
+        ContentType::Dictation => "dictation",
     }
 }
 

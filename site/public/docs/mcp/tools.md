@@ -3,9 +3,9 @@
 > Generated file. Do not edit by hand.
 > Source: manifest.json + crates/mcp/src/index.ts
 > Regenerate: node scripts/generate_llms_txt.mjs
-> Last generated: 2026-04-25
+> Last generated: 2026-04-29
 
-Minutes exposes 29 tools, 7 resources, and 6 prompt templates through the MCP server.
+Minutes exposes 29 tools, 8 resources, and 6 prompt templates through the MCP server.
 
 ## Install
 
@@ -317,6 +317,14 @@ Reference URL: https://useminutes.app/docs/mcp/tools#resource-recording-status
 Recent pipeline events (recordings, processing, notes)
 
 Reference URL: https://useminutes.app/docs/mcp/tools#resource-recent-events
+
+<a id="resource-agent-annotations"></a>
+
+#### `minutes://events/agent-annotations`
+
+Recent append-only agent.annotation events, separate from human meeting markdown
+
+Reference URL: https://useminutes.app/docs/mcp/tools#resource-agent-annotations
 
 ### Memory
 

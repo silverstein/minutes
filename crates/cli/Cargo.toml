@@ -26,7 +26,7 @@ metal = ["minutes-core/metal"]
 vulkan = ["minutes-core/vulkan"]
 
 [dependencies]
-minutes-core = { path = "../core", version = "0.14.1", features = ["streaming"] }
+minutes-core = { path = "../core", version = "0.15.0", features = ["streaming"] }
 clap = { workspace = true }
 ctrlc = { workspace = true }
 anyhow = { workspace = true }

@@ -3130,6 +3130,7 @@ dependencies = [
  "tauri-plugin-pty",
  "tauri-plugin-shell",
  "tauri-plugin-updater",
+ "tauri-plugin-window-state",
  "tempfile",
  "tracing",
  "ureq",
@@ -3140,7 +3141,7 @@ dependencies = [
 
 [[package]]
 name = "minutes-cli"
-version = "0.14.1"
+version = "0.15.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3166,7 +3167,7 @@ dependencies = [
 
 [[package]]
 name = "minutes-core"
-version = "0.14.1"
+version = "0.15.0"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -3204,7 +3205,7 @@ dependencies = [
 
 [[package]]
 name = "minutes-reader"
-version = "0.14.1"
+version = "0.15.0"
 dependencies = [
  "chrono",
  "schemars 1.2.1",
@@ -6233,6 +6234,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "tauri-plugin-window-state"
+version = "2.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "73736611e14142408d15353e21e3cca2f12a3cfb523ad0ce85999b6d2ef1a704"
+dependencies = [
+ "bitflags 2.11.0",
+ "log",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-plugin",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "tauri-runtime"
 version = "2.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7359,8 +7375,9 @@ dependencies = [
 
 [[package]]
 name = "whisper-guard"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
+ "serde",
  "tracing",
  "whisper-rs",
 ]

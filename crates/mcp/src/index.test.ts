@@ -1,9 +1,21 @@
 import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { ResourceUpdatedNotificationSchema } from "@modelcontextprotocol/sdk/types.js";
 import { describe, expect, it } from "vitest";
 
-import { MEETING_INSIGHT_KINDS, parseKnowledgeConfig, shouldRunMainEntry } from "./index.js";
+import {
+  buildLiveEventsResourcePayload,
+  LIVE_EVENTS_RESOURCE_URI,
+  MEETING_INSIGHT_KINDS,
+  parseKnowledgeConfig,
+  parseLiveEventsResourceUri,
+  registerLiveEventsSubscriptionHandlers,
+  shouldRunMainEntry,
+} from "./index.js";
 
 describe("meeting insight contract", () => {
   it("exports only the insight kinds the pipeline emits today", () => {
@@ -81,3 +93,111 @@ describe("shouldRunMainEntry", () => {
     ).toBe(false);
   });
 });
+
+describe("live event MCP resource", () => {
+  it("parses the base resource and cursor read URIs", () => {
+    expect(parseLiveEventsResourceUri("minutes://events/live")).toMatchObject({
+      uri: "minutes://events/live",
+      sinceSeq: null,
+      limit: 20,
+    });
+    expect(parseLiveEventsResourceUri("minutes://events/live?since_seq=42&limit=7")).toMatchObject({
+      uri: "minutes://events/live?since_seq=42&limit=7",
+      sinceSeq: 42,
+      limit: 7,
+    });
+    expect(parseLiveEventsResourceUri("minutes://events/recent")).toBeNull();
+  });
+
+  it("builds a reconnect cursor from the highest delivered sequence", () => {
+    const payload = buildLiveEventsResourcePayload(
+      { uri: "minutes://events/live?since_seq=10", sinceSeq: 10, limit: 100 },
+      [{ seq: 11 }, { seq: 14 }],
+      12
+    );
+
+    expect(payload.latest_seq).toBe(14);
+    expect(payload.reconnect).toEqual({
+      cursor: 14,
+      read_uri: "minutes://events/live?since_seq=14",
+    });
+  });
+
+  it("keeps the reconnect cursor on the delivered page boundary", () => {
+    const payload = buildLiveEventsResourcePayload(
+      { uri: "minutes://events/live?since_seq=10&limit=1", sinceSeq: 10, limit: 1 },
+      [{ seq: 11 }],
+      14
+    );
+
+    expect(payload.latest_seq).toBe(14);
+    expect(payload.reconnect).toEqual({
+      cursor: 11,
+      read_uri: "minutes://events/live?since_seq=11",
+    });
+  });
+
+  it("does not move a future reconnect cursor backward", () => {
+    const payload = buildLiveEventsResourcePayload(
+      { uri: "minutes://events/live?since_seq=99", sinceSeq: 99, limit: 100 },
+      [],
+      14
+    );
+
+    expect(payload.latest_seq).toBe(14);
+    expect(payload.reconnect).toEqual({
+      cursor: 99,
+      read_uri: "minutes://events/live?since_seq=99",
+    });
+  });
+
+  it("sends resource updated notifications over an MCP client subscription", async () => {
+    const mcpServer = new McpServer({ name: "minutes-test", version: "0.0.0" });
+    const updates: string[] = [];
+    let readCursor = 4;
+    const controller = registerLiveEventsSubscriptionHandlers(mcpServer, {
+      pollIntervalMs: 5,
+      latestEventSeq: async () => 4,
+      readEventsSinceSeq: async (sinceSeq) => {
+        if (sinceSeq >= readCursor) {
+          readCursor = 9;
+          return [{ seq: 9, event_type: "live.utterance.final" }];
+        }
+        return [];
+      },
+    });
+
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "test-client", version: "0.0.0" }, { capabilities: {} });
+    client.setNotificationHandler(ResourceUpdatedNotificationSchema, (notification) => {
+      updates.push(notification.params.uri);
+    });
+
+    try {
+      await Promise.all([
+        mcpServer.connect(serverTransport),
+        client.connect(clientTransport),
+      ]);
+      await client.subscribeResource({ uri: LIVE_EVENTS_RESOURCE_URI });
+
+      await waitFor(() => updates.length > 0);
+      expect(updates).toEqual([LIVE_EVENTS_RESOURCE_URI]);
+
+      await client.unsubscribeResource({ uri: LIVE_EVENTS_RESOURCE_URI });
+      expect(controller.subscriptionCount()).toBe(0);
+    } finally {
+      controller.stop();
+      await client.close();
+      await mcpServer.close();
+    }
+  });
+});
+
+async function waitFor(predicate: () => boolean): Promise<void> {
+  const deadline = Date.now() + 1000;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error("timed out waiting for condition");
+}

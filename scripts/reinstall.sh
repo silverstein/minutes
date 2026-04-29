@@ -6,7 +6,7 @@ set -e
 
 EXT_DIR="$HOME/Library/Application Support/Claude/Claude Extensions/local.mcpb.mat-silverstein.minutes"
 MCPB_FILE="minutes.mcpb"
-LOG_FILE="$HOME/Library/Logs/Claude/mcp-server-Minutes — Meeting Memory for AI.log"
+LOG_FILE="$HOME/Library/Logs/Claude/mcp-server-Minutes - Meeting Workspace for Claude.log"
 
 echo "=== Minutes Extension Reinstall ==="
 echo ""
@@ -17,7 +17,7 @@ echo "[1/4] Building MCP server..."
 
 # Step 2: Pack MCPB
 echo "[2/4] Packing MCPB..."
-mcpb pack 2>&1 | tail -1
+./scripts/pack_mcpb.sh "$MCPB_FILE" 2>&1 | tail -1
 
 # Step 3: Remove old extension
 if [ -d "$EXT_DIR" ]; then

@@ -31,6 +31,13 @@ function escapeAttr(s: string): string {
 // ─── State ────────────────────────────────────────────────────────────────────
 
 let cachedDashboardData: any = null;
+// Snapshot of the most recent NON-search dashboard payload, kept separately
+// so the filter input can restore the full list on clear without rerouting
+// through the host.
+let originalDashboardData: any = null;
+let pendingSearchFromUI = false;
+let searchDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+let lastSearchQuery: string | null = null;
 let currentDetailData: { content: string; path: string; title: string } | null = null;
 let activeFilter: "all" | "meeting" | "memo" = "all";
 let recordingPollTimer: ReturnType<typeof setInterval> | null = null;
@@ -230,25 +237,68 @@ document.addEventListener("click", async (e) => {
   }
 });
 
-// ─── Feature: Client-side Filter ─────────────────────────────────────────────
+// ─── Feature: Filtering ──────────────────────────────────────────────────────
+// Type toggles (Meetings/Memos) stay client-side: they hide cards in the
+// already-rendered list.
+//
+// Text input fires a debounced server-side `search_meetings` call, which goes
+// through the CLI's FTS5 index (title + body) so transcript matches surface
+// the same way they do in the Tauri app. Falls back to reader.searchMeetings
+// (also title + body) when the CLI is not installed.
 
-function applyFilter() {
-  const query = ($("filter-input") as HTMLInputElement).value.toLowerCase();
+function applyTypeFilter() {
   document.querySelectorAll(".meeting-card").forEach((card) => {
     const el = card as HTMLElement;
-    const title = el.querySelector(".meeting-title")?.textContent?.toLowerCase() || "";
-    const date = el.querySelector(".meeting-date")?.textContent?.toLowerCase() || "";
     const type = el.querySelector(".badge")?.textContent?.toLowerCase() || "";
-
-    const matchesQuery = !query || title.includes(query) || date.includes(query);
     const matchesType = activeFilter === "all" || type === activeFilter;
-
-    el.style.display = matchesQuery && matchesType ? "" : "none";
+    el.style.display = matchesType ? "" : "none";
   });
 }
 
-// Filter input
-$("filter-input").addEventListener("input", applyFilter);
+async function runFilterSearch() {
+  const query = ($("filter-input") as HTMLInputElement).value.trim();
+  if (query === lastSearchQuery) return;
+  lastSearchQuery = query;
+
+  // Empty query → restore the original dashboard view.
+  if (!query) {
+    if (originalDashboardData) {
+      pendingSearchFromUI = true;
+      try {
+        renderDashboard(originalDashboardData);
+      } finally {
+        pendingSearchFromUI = false;
+      }
+    }
+    return;
+  }
+
+  pendingSearchFromUI = true;
+  try {
+    const result = await app.callServerTool({
+      name: "search_meetings",
+      arguments: { query, limit: 50 },
+    });
+    handleToolResult(result);
+    // Re-apply the active type toggle to the new list.
+    applyTypeFilter();
+  } catch (e: any) {
+    console.error("[Minutes] search_meetings failed", e);
+  } finally {
+    pendingSearchFromUI = false;
+  }
+}
+
+// Filter input — debounce text changes; clear is instant.
+$("filter-input").addEventListener("input", () => {
+  if (searchDebounceTimer) clearTimeout(searchDebounceTimer);
+  const raw = ($("filter-input") as HTMLInputElement).value;
+  if (!raw.trim()) {
+    runFilterSearch();
+    return;
+  }
+  searchDebounceTimer = setTimeout(runFilterSearch, 300);
+});
 
 // Type toggles
 document.querySelectorAll(".filter-btn").forEach((btn) => {
@@ -273,8 +323,18 @@ document.querySelectorAll(".filter-btn").forEach((btn) => {
     document.querySelectorAll(".filter-btn").forEach((b) => b.classList.remove("active"));
     btn.classList.add("active");
     activeFilter = filter as any;
-    applyFilter();
+    applyTypeFilter();
   });
+});
+
+// Brand link → open useminutes.app in the user's real browser via the
+// ext-apps SDK. Falls through silently if the host doesn't expose openLink.
+$("brand-link").addEventListener("click", async () => {
+  try {
+    await app.openLink({ url: "https://useminutes.app" });
+  } catch (e: any) {
+    console.error("[Minutes] openLink failed", e);
+  }
 });
 
 // ─── Feature: Context Injection ──────────────────────────────────────────────
@@ -305,6 +365,12 @@ function renderDashboard(data: any) {
   const meetings: any[] = data.meetings || [];
   const actions: any[] = data.actions || [];
   cachedDashboardData = data;
+  // Preserve the most recent NON-search dashboard payload so the filter
+  // input can restore it on clear. UI-initiated searches set
+  // `pendingSearchFromUI` to skip this assignment.
+  if (!pendingSearchFromUI) {
+    originalDashboardData = data;
+  }
 
   // Stats
   const memoCount = meetings.filter((m) => m.content_type === "memo").length;
@@ -377,12 +443,20 @@ function renderDashboard(data: any) {
     setInner(sidebarEl, "");
   }
 
-  // Reset filter UI
-  ($("filter-input") as HTMLInputElement).value = "";
-  activeFilter = "all";
-  document.querySelectorAll(".filter-btn").forEach((b) => {
-    b.classList.toggle("active", (b as HTMLElement).dataset.filter === "all");
-  });
+  // Reset filter UI — only on non-search renders. UI-initiated searches keep
+  // the typed query and active type toggle so the user can refine without
+  // losing input.
+  if (!pendingSearchFromUI) {
+    ($("filter-input") as HTMLInputElement).value = "";
+    lastSearchQuery = null;
+    activeFilter = "all";
+    document.querySelectorAll(".filter-btn").forEach((b) => {
+      b.classList.toggle("active", (b as HTMLElement).dataset.filter === "all");
+    });
+  } else {
+    // Preserve the user's active type toggle on the freshly rendered list.
+    applyTypeFilter();
+  }
 
   showView("dashboard");
 
@@ -822,6 +896,11 @@ function handleToolResult(result: CallToolResult) {
   switch (view) {
     case "dashboard":
       renderDashboard(data);
+      break;
+    case "search":
+      // No-CLI fallback path returns { results, view: "search" }.
+      // Normalize to dashboard shape so the filter UI behaves the same.
+      renderDashboard({ meetings: data.results || [], actions: [] });
       break;
     case "detail":
       renderDetail(data);

@@ -36,7 +36,7 @@ echo "=== Building Tauri app ==="
 # The calendar-events Swift helper is compiled and staged into
 # tauri/src-tauri/resources/ by tauri/src-tauri/build.rs, and Tauri bundles it
 # into Minutes.app/Contents/Resources/ automatically via tauri.conf.json.
-TAURI_BUILD_ARGS=(cargo tauri build --features "$MINUTES_BUILD_FEATURES" --bundles app)
+TAURI_BUILD_ARGS=(cargo tauri build --features "$MINUTES_BUILD_FEATURES" --bundles app,dmg)
 if [[ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" ]]; then
     echo "  No TAURI_SIGNING_PRIVATE_KEY configured; building updater artifacts with --no-sign."
     TAURI_BUILD_ARGS+=(--no-sign)

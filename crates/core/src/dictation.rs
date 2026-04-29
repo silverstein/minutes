@@ -245,6 +245,11 @@ where
         let device_override = config.recording.device.as_deref();
         let mut stream = AudioStream::start(device_override)?;
         tracing::info!(device = %stream.device_name, "dictation audio stream started");
+        crate::events::append_event(crate::events::recording_started_event(
+            None,
+            "dictation",
+            ["audio.capture", "dictation"],
+        ));
 
         // Device change monitor for auto-reconnection. Pinned when the user
         // supplied an explicit device override.

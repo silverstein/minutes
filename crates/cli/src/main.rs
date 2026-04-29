@@ -16,7 +16,9 @@ use serde::Serialize;
 
 mod dashboard;
 mod demo_data;
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 /// Bundled native Silero VAD weights for parakeet.cpp's `--vad` path.
 const PARAKEET_NATIVE_VAD_WEIGHTS: &[u8] =
@@ -416,6 +418,18 @@ enum Commands {
         /// Output format: text (human-readable) or json (one JSON object per line)
         #[arg(long, default_value = "text", value_parser = ["text", "json"])]
         format: String,
+
+        /// Force a full re-walk + reindex before searching. Catches edge cases
+        /// where mtime alone misses a content change (e.g., editor wrote with
+        /// the same mtime). Slower; default Auto is usually enough.
+        #[arg(long, conflicts_with = "no_sync")]
+        sync: bool,
+
+        /// Skip filesystem sync entirely; query the index as-is. Useful for
+        /// piped or scripted CLI calls where freshness doesn't matter and
+        /// every millisecond counts.
+        #[arg(long, conflicts_with = "sync")]
+        no_sync: bool,
     },
 
     /// Show open action items across all meetings
@@ -495,6 +509,14 @@ enum Commands {
         /// Filter by type: meeting or memo
         #[arg(short = 't', long)]
         content_type: Option<String>,
+
+        /// Force a full re-walk + reindex before listing.
+        #[arg(long, conflicts_with = "no_sync")]
+        sync: bool,
+
+        /// Skip filesystem sync entirely; query the index as-is.
+        #[arg(long, conflicts_with = "sync")]
+        no_sync: bool,
     },
 
     /// Export meetings as CSV (to stdout or file)
@@ -721,9 +743,68 @@ enum Commands {
         #[arg(short, long, default_value = "50")]
         limit: usize,
 
+        /// Only events with this event_type
+        #[arg(long)]
+        event_type: Option<String>,
+
         /// Only events since this date (ISO format)
         #[arg(long)]
         since: Option<String>,
+
+        /// Stream events as newline-delimited JSON and keep waiting for new events
+        #[arg(long)]
+        follow: bool,
+
+        /// Start after this event sequence cursor
+        #[arg(long)]
+        since_seq: Option<u64>,
+    },
+
+    /// Append an allowlisted agent.annotation event without mutating meeting markdown
+    AgentAnnotate {
+        /// Stable agent identifier from ~/.minutes/agents.allow
+        #[arg(long)]
+        agent_id: String,
+
+        /// Tool or model names used to produce the annotation
+        #[arg(long = "tool")]
+        tools: Vec<String>,
+
+        /// Annotation subtype, e.g. coaching, correction, risk, summary
+        #[arg(long, default_value = "commentary")]
+        subkind: String,
+
+        /// Target meeting identifier, if known
+        #[arg(long)]
+        meeting_id: Option<String>,
+
+        /// Target meeting markdown path, if known
+        #[arg(long)]
+        meeting_path: Option<String>,
+
+        /// Start offset of the target span in milliseconds
+        #[arg(long)]
+        span_start_ms: Option<u64>,
+
+        /// End offset of the target span in milliseconds
+        #[arg(long)]
+        span_end_ms: Option<u64>,
+
+        /// Annotation body
+        #[arg(long)]
+        body: String,
+
+        /// Citation or source reference; may be repeated
+        #[arg(long = "citation")]
+        citations: Vec<String>,
+
+        /// Confidence label
+        #[arg(long, default_value = "medium")]
+        confidence: String,
+
+        /// JSON object describing provenance
+        #[arg(long)]
+        provenance: Option<String>,
     },
 
     /// Query structured meeting insights (decisions, commitments, questions)
@@ -1247,6 +1328,8 @@ fn main() -> Result<()> {
             intent_kind,
             owner,
             format,
+            sync,
+            no_sync,
         } => cmd_search(
             &query,
             content_type,
@@ -1256,6 +1339,7 @@ fn main() -> Result<()> {
             intent_kind,
             owner,
             &format,
+            resolve_sync_mode(sync, no_sync),
             &config,
         ),
         Commands::Actions { assignee } => cmd_actions(assignee.as_deref(), &config),
@@ -1279,7 +1363,14 @@ fn main() -> Result<()> {
         Commands::List {
             limit,
             content_type,
-        } => cmd_list(limit, content_type, &config),
+            sync,
+            no_sync,
+        } => cmd_list(
+            limit,
+            content_type,
+            resolve_sync_mode(sync, no_sync),
+            &config,
+        ),
         Commands::Export {
             content_type,
             output,
@@ -1418,7 +1509,38 @@ fn main() -> Result<()> {
             json,
             compact_json,
         } => cmd_get(&slug, json, compact_json, &config),
-        Commands::Events { limit, since } => cmd_events(limit, since, &config),
+        Commands::Events {
+            limit,
+            event_type,
+            since,
+            follow,
+            since_seq,
+        } => cmd_events(limit, event_type, since, follow, since_seq, &config),
+        Commands::AgentAnnotate {
+            agent_id,
+            tools,
+            subkind,
+            meeting_id,
+            meeting_path,
+            span_start_ms,
+            span_end_ms,
+            body,
+            citations,
+            confidence,
+            provenance,
+        } => cmd_agent_annotate(
+            agent_id,
+            tools,
+            subkind,
+            meeting_id,
+            meeting_path,
+            span_start_ms,
+            span_end_ms,
+            body,
+            citations,
+            confidence,
+            provenance,
+        ),
         Commands::Insights {
             kind,
             confidence,
@@ -1758,8 +1880,22 @@ fn cmd_record(
 
     // Record audio from default input device
     let wav_path = minutes_core::pid::current_wav_path();
-    minutes_core::capture::record_to_wav(&wav_path, stop_flag, config)
-        .map_err(|e| anyhow::anyhow!("{}", e))?;
+    minutes_core::capture::record_to_wav_with_lifecycle(
+        &wav_path,
+        stop_flag,
+        config,
+        Some(minutes_core::capture::RecordingStartedContext {
+            session_id: context_session_id.clone(),
+            source: "capture".into(),
+            capabilities: vec![
+                "audio.capture".into(),
+                "live.utterance.final".into(),
+                format!("mode.{}", capture_mode.noun().replace(' ', "-")),
+                format!("intent.{}", preflight.intent.as_str()),
+            ],
+        }),
+    )
+    .map_err(|e| anyhow::anyhow!("{}", e))?;
     let recording_finished_at = Local::now();
     let user_notes = minutes_core::notes::read_notes();
     let pre_context = minutes_core::notes::read_context();
@@ -2340,6 +2476,21 @@ fn owner_display(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Resolve `--sync` / `--no-sync` clap flags into a `SyncMode`. Both flags
+/// have `conflicts_with` so clap rejects passing both; the unset case falls
+/// through to `Auto` (per-file mtime+size scan), which is the right default
+/// for a CLI invocation that wants fresh data without forcing a full rebuild.
+fn resolve_sync_mode(sync: bool, no_sync: bool) -> minutes_core::search_index::SyncMode {
+    if sync {
+        minutes_core::search_index::SyncMode::Force
+    } else if no_sync {
+        minutes_core::search_index::SyncMode::Skip
+    } else {
+        minutes_core::search_index::SyncMode::Auto
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn cmd_search(
     query: &str,
     content_type: Option<String>,
@@ -2349,6 +2500,7 @@ fn cmd_search(
     intent_kind: Option<String>,
     owner: Option<String>,
     format: &str,
+    sync_mode: minutes_core::search_index::SyncMode,
     config: &Config,
 ) -> Result<()> {
     let json_mode = format == "json";
@@ -2406,7 +2558,7 @@ fn cmd_search(
         return Ok(());
     }
 
-    let results = minutes_core::search::search(query, config, &filters)?;
+    let results = minutes_core::search::search_with_mode(query, config, &filters, sync_mode)?;
     let limited: Vec<_> = results.into_iter().take(limit).collect();
 
     if limited.is_empty() {
@@ -2465,7 +2617,12 @@ fn cmd_actions(assignee: Option<&str>, config: &Config) -> Result<()> {
     Ok(())
 }
 
-fn cmd_list(limit: usize, content_type: Option<String>, config: &Config) -> Result<()> {
+fn cmd_list(
+    limit: usize,
+    content_type: Option<String>,
+    sync_mode: minutes_core::search_index::SyncMode,
+    config: &Config,
+) -> Result<()> {
     // List delegates to search with an empty query — DRY, no duplicated file walking
     cmd_search(
         "",
@@ -2476,6 +2633,7 @@ fn cmd_list(limit: usize, content_type: Option<String>, config: &Config) -> Resu
         None,
         None,
         "text",
+        sync_mode,
         config,
     )
 }
@@ -3738,6 +3896,7 @@ fn build_capability_report() -> CapabilityReport {
     features.insert("add_note".into(), true);
     features.insert("confirm_speaker".into(), true);
     features.insert("consistency_report".into(), true);
+    features.insert("events_since_seq".into(), true);
     features.insert("get_meeting".into(), true);
     features.insert("get_meeting_insights".into(), true);
     features.insert("get_person_profile".into(), true);
@@ -5788,17 +5947,232 @@ fn cmd_get(slug_or_path: &str, json: bool, compact_json: bool, config: &Config) 
     Ok(())
 }
 
-fn cmd_events(limit: usize, since: Option<String>, _config: &Config) -> Result<()> {
-    let since_dt = since.as_deref().and_then(|s| {
-        chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d")
-            .ok()
-            .and_then(|d| d.and_hms_opt(0, 0, 0))
-            .and_then(|ndt| chrono::Local.from_local_datetime(&ndt).single())
-    });
+fn cmd_events(
+    limit: usize,
+    event_type: Option<String>,
+    since: Option<String>,
+    follow: bool,
+    since_seq: Option<u64>,
+    _config: &Config,
+) -> Result<()> {
+    if since.is_some() && since_seq.is_some() {
+        anyhow::bail!("use either --since or --since-seq, not both");
+    }
 
-    let events = minutes_core::events::read_events(since_dt, Some(limit));
+    if follow {
+        return cmd_events_follow(limit, event_type, since, since_seq);
+    }
+
+    let since_dt = parse_events_since(since.as_deref())?;
+
+    let mut events = if let Some(seq) = since_seq {
+        minutes_core::events::read_events_since_seq(
+            seq,
+            if event_type.is_some() {
+                None
+            } else {
+                Some(limit)
+            },
+        )
+    } else {
+        minutes_core::events::read_events(
+            since_dt,
+            if event_type.is_some() {
+                None
+            } else {
+                Some(limit)
+            },
+        )
+    };
+    filter_events_by_type(&mut events, event_type.as_deref());
+    apply_events_limit(&mut events, limit, since_seq.is_some());
     let json = serde_json::to_string_pretty(&events)?;
     println!("{}", json);
+    Ok(())
+}
+
+fn cmd_events_follow(
+    limit: usize,
+    event_type: Option<String>,
+    since: Option<String>,
+    since_seq: Option<u64>,
+) -> Result<()> {
+    let since_dt = parse_events_since(since.as_deref())?;
+    let mut cursor = since_seq.unwrap_or(0);
+
+    let mut initial_events = if let Some(seq) = since_seq {
+        minutes_core::events::read_events_since_seq(seq, None)
+    } else {
+        minutes_core::events::read_events(
+            since_dt,
+            if event_type.is_some() {
+                None
+            } else {
+                Some(limit)
+            },
+        )
+    };
+    filter_events_by_type(&mut initial_events, event_type.as_deref());
+    apply_events_limit(&mut initial_events, limit, since_seq.is_some());
+
+    for event in &initial_events {
+        cursor = cursor.max(event.seq);
+        print_event_jsonl(event)?;
+    }
+
+    if since_seq.is_none() && initial_events.is_empty() {
+        cursor = minutes_core::events::latest_event_seq();
+    }
+
+    loop {
+        std::thread::sleep(Duration::from_millis(500));
+        for event in minutes_core::events::read_events_since_seq(cursor, None) {
+            cursor = cursor.max(event.seq);
+            if event_matches_type(&event, event_type.as_deref()) {
+                print_event_jsonl(&event)?;
+            }
+        }
+    }
+}
+
+fn filter_events_by_type(
+    events: &mut Vec<minutes_core::events::EventEnvelope>,
+    event_type: Option<&str>,
+) {
+    if let Some(event_type) = event_type {
+        events.retain(|event| event_matches_type(event, Some(event_type)));
+    }
+}
+
+fn apply_events_limit(
+    events: &mut Vec<minutes_core::events::EventEnvelope>,
+    limit: usize,
+    since_seq_mode: bool,
+) {
+    if events.len() <= limit {
+        return;
+    }
+    if since_seq_mode {
+        events.truncate(limit);
+    } else {
+        let skip = events.len().saturating_sub(limit);
+        events.drain(0..skip);
+    }
+}
+
+fn event_matches_type(
+    event: &minutes_core::events::EventEnvelope,
+    event_type: Option<&str>,
+) -> bool {
+    let Some(event_type) = event_type else {
+        return true;
+    };
+
+    serde_json::to_value(event)
+        .ok()
+        .and_then(|value| value.get("event_type").cloned())
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .map(|actual| actual == event_type)
+        .unwrap_or(false)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn cmd_agent_annotate(
+    agent_id: String,
+    tools: Vec<String>,
+    subkind: String,
+    meeting_id: Option<String>,
+    meeting_path: Option<String>,
+    span_start_ms: Option<u64>,
+    span_end_ms: Option<u64>,
+    body: String,
+    citations: Vec<String>,
+    confidence: String,
+    provenance: Option<String>,
+) -> Result<()> {
+    use minutes_core::events::{
+        append_agent_annotation, AgentAnnotationAgent, AgentAnnotationRequest, AgentAnnotationSpan,
+        AgentAnnotationTarget,
+    };
+
+    let span = match (span_start_ms, span_end_ms) {
+        (Some(start_ms), Some(end_ms)) => Some(AgentAnnotationSpan { start_ms, end_ms }),
+        (None, None) => None,
+        _ => {
+            let error = serde_json::json!({
+                "ok": false,
+                "error": "invalid_payload",
+                "message": "--span-start-ms and --span-end-ms must be provided together",
+                "agent_id": agent_id,
+                "event_type": minutes_core::events::AGENT_ANNOTATION_EVENT_TYPE,
+                "allowlist_path": minutes_core::events::agents_allowlist_path().display().to_string()
+            });
+            eprintln!("{}", serde_json::to_string_pretty(&error)?);
+            std::process::exit(2);
+        }
+    };
+
+    let provenance = provenance
+        .as_deref()
+        .map(serde_json::from_str)
+        .transpose()
+        .map_err(|error| anyhow::anyhow!("invalid --provenance JSON: {error}"))?
+        .unwrap_or_else(|| serde_json::json!({}));
+
+    let request = AgentAnnotationRequest {
+        agent: AgentAnnotationAgent {
+            id: agent_id,
+            tools,
+        },
+        subkind,
+        target: AgentAnnotationTarget {
+            meeting_id,
+            meeting_path,
+            span,
+        },
+        body,
+        citations,
+        confidence,
+        provenance,
+    };
+
+    match append_agent_annotation(request) {
+        Ok(envelope) => {
+            println!("{}", serde_json::to_string_pretty(&envelope)?);
+            Ok(())
+        }
+        Err(error) => {
+            eprintln!("{}", serde_json::to_string_pretty(&error.to_body())?);
+            std::process::exit(2);
+        }
+    }
+}
+
+fn parse_events_since(raw: Option<&str>) -> Result<Option<chrono::DateTime<Local>>> {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+
+    if let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(raw) {
+        return Ok(Some(parsed.with_timezone(&Local)));
+    }
+
+    if let Ok(date) = chrono::NaiveDate::parse_from_str(raw, "%Y-%m-%d") {
+        return Ok(date
+            .and_hms_opt(0, 0, 0)
+            .and_then(|ndt| chrono::Local.from_local_datetime(&ndt).single()));
+    }
+
+    Err(anyhow::anyhow!(
+        "invalid --since value '{}' (expected YYYY-MM-DD or RFC3339)",
+        raw
+    ))
+}
+
+fn print_event_jsonl(event: &minutes_core::events::EventEnvelope) -> Result<()> {
+    let mut stdout = std::io::stdout().lock();
+    writeln!(stdout, "{}", serde_json::to_string(event)?)?;
+    stdout.flush()?;
     Ok(())
 }
 

@@ -9,7 +9,7 @@
 //! alternative implementations behind `cfg(target_os)` gates.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -90,6 +90,7 @@ pub struct CallEndAutoStopHandles {
     pub recording_started_by_call_detect: Arc<AtomicBool>,
     pub countdown_cancel: Arc<AtomicBool>,
     pub countdown_active: Arc<AtomicBool>,
+    pub countdown_terminal_state: Arc<AtomicU8>,
     pub stop_flag: Arc<AtomicBool>,
 }
 
@@ -110,6 +111,7 @@ enum DetectionTransition {
     Noop,
 }
 
+#[derive(Debug, PartialEq, Eq)]
 enum DetectActiveCallResult {
     Detected {
         display_name: String,
@@ -147,14 +149,14 @@ fn decide_no_call_action(
     stop_when_call_ends: bool,
     countdown_active: bool,
     call_end_fired: bool,
-    countdown_cancelled: bool,
+    terminal_state: crate::commands::CallEndCountdownTerminalState,
 ) -> NoCallDecision {
     if countdown_active {
         return NoCallDecision::DeferToCountdown;
     }
     if is_recording && started_by_call_detect && stop_when_call_ends {
         if call_end_fired {
-            if countdown_cancelled {
+            if terminal_state != crate::commands::CallEndCountdownTerminalState::None {
                 NoCallDecision::ClearIfStale
             } else {
                 NoCallDecision::RearmCountdown
@@ -213,6 +215,23 @@ fn sticky_alive(sticky: &Mutex<Option<Instant>>) -> bool {
         }
         None => false,
     }
+}
+
+fn is_low_confidence_native_call_app(app: &str) -> bool {
+    matches!(app.to_ascii_lowercase().as_str(), "slack")
+}
+
+fn native_app_matches_running_process(config_app: &str, running: &[String]) -> bool {
+    let config_lower = config_app.to_lowercase();
+    running.iter().any(|p| {
+        let p_lower = p.to_lowercase();
+        // Exact match (most common) or the config name is a prefix/suffix of
+        // the binary name (e.g. "zoom.us" matches "zoom.us"), but NOT a mere
+        // substring of a longer daemon name.
+        p_lower == config_lower
+            || p_lower.starts_with(&format!("{}.", config_lower))
+            || p_lower.starts_with(&format!("{} ", config_lower))
+    })
 }
 
 enum BrowserMeetProbe {
@@ -425,15 +444,17 @@ impl CallDetector {
                             .as_ref()
                             .map(|(_, _, already_fired)| *already_fired)
                             .unwrap_or(false);
-                        let countdown_cancelled =
-                            auto_stop.countdown_cancel.load(Ordering::Relaxed);
+                        let terminal_state =
+                            crate::commands::CallEndCountdownTerminalState::from_u8(
+                                auto_stop.countdown_terminal_state.load(Ordering::Relaxed),
+                            );
                         match decide_no_call_action(
                             is_recording,
                             started_by_call_detect,
                             config.stop_when_call_ends,
                             countdown_active,
                             call_end_fired,
-                            countdown_cancelled,
+                            terminal_state,
                         ) {
                             NoCallDecision::DeferToCountdown => {}
                             NoCallDecision::ArmCountdown => {
@@ -515,6 +536,10 @@ impl CallDetector {
         {
             return;
         }
+        auto_stop.countdown_terminal_state.store(
+            crate::commands::CallEndCountdownTerminalState::None as u8,
+            Ordering::Relaxed,
+        );
         auto_stop.countdown_cancel.store(false, Ordering::Relaxed);
 
         let secs = countdown_secs.max(1);
@@ -546,10 +571,12 @@ impl CallDetector {
         let app_for_thread = app.clone();
         let cancel = auto_stop.countdown_cancel.clone();
         let active = auto_stop.countdown_active.clone();
+        let terminal_state = auto_stop.countdown_terminal_state.clone();
         let started_by = auto_stop.recording_started_by_call_detect.clone();
         let stop_flag = auto_stop.stop_flag.clone();
         let recording_flag = recording.clone();
         let display_for_thread = display_name.to_string();
+        let process_for_thread = process_name.to_string();
 
         std::thread::spawn(move || {
             // Poll every 250ms so cancellation and external stops are snappy
@@ -561,9 +588,21 @@ impl CallDetector {
                 std::thread::sleep(tick);
 
                 if cancel.load(Ordering::Relaxed) {
+                    let reason = crate::commands::CallEndCountdownTerminalState::from_u8(
+                        terminal_state.load(Ordering::Relaxed),
+                    );
                     eprintln!(
-                        "[call-detect] auto-stop cancelled for {}",
-                        display_for_thread
+                        "[call-detect] auto-stop cancelled for {} ({:?})",
+                        display_for_thread, reason
+                    );
+                    log_call_detect_event(
+                        "info",
+                        "call_end_countdown_cancelled",
+                        Some(&display_for_thread),
+                        Some(&process_for_thread),
+                        serde_json::json!({
+                            "reason": format!("{reason:?}").to_lowercase(),
+                        }),
                     );
                     active.store(false, Ordering::Relaxed);
                     app_for_thread.emit("call:end-countdown:cancelled", ()).ok();
@@ -572,6 +611,10 @@ impl CallDetector {
 
                 if !recording_flag.load(Ordering::Relaxed) {
                     eprintln!("[call-detect] auto-stop aborted — recording already stopped");
+                    terminal_state.store(
+                        crate::commands::CallEndCountdownTerminalState::RecordingStopped as u8,
+                        Ordering::Relaxed,
+                    );
                     cancel.store(true, Ordering::Relaxed);
                     active.store(false, Ordering::Relaxed);
                     app_for_thread.emit("call:end-countdown:cancelled", ()).ok();
@@ -595,6 +638,10 @@ impl CallDetector {
                     );
                     stop_flag.store(true, Ordering::Relaxed);
                     started_by.store(false, Ordering::Relaxed);
+                    terminal_state.store(
+                        crate::commands::CallEndCountdownTerminalState::AutoStopFired as u8,
+                        Ordering::Relaxed,
+                    );
                     cancel.store(true, Ordering::Relaxed);
                     active.store(false, Ordering::Relaxed);
                     app_for_thread.emit("call:end-countdown:fired", ()).ok();
@@ -604,11 +651,12 @@ impl CallDetector {
         });
     }
 
-    fn note_mic_state(&self, mic_live: bool) {
+    fn note_mic_state(&self, mic_live: bool) -> bool {
         let mut last = self.last_mic_live.lock().unwrap();
         if last.is_some() && *last == Some(mic_live) {
-            return;
+            return false;
         }
+        let just_activated = *last == Some(false) && mic_live;
         *last = Some(mic_live);
         log_call_detect_event(
             "info",
@@ -621,13 +669,42 @@ impl CallDetector {
             None,
             serde_json::json!({ "mic_live": mic_live }),
         );
+        just_activated
     }
 
     /// Check if any configured call app is active.
     fn detect_active_call(&self, config: &CallDetectionConfig) -> DetectActiveCallResult {
         let mic_live = is_mic_in_use();
-        self.note_mic_state(mic_live);
+        let mic_just_activated = self.note_mic_state(mic_live);
 
+        let running = running_process_names();
+        self.detect_active_call_from_snapshot(
+            config,
+            mic_live,
+            &running,
+            mic_just_activated,
+            |detector, running, has_google_meet, has_teams_web| {
+                if has_google_meet || has_teams_web {
+                    detector.schedule_next_browser_probe();
+                    Some(detector.detect_browser_meeting(running, has_google_meet, has_teams_web))
+                } else {
+                    None
+                }
+            },
+        )
+    }
+
+    fn detect_active_call_from_snapshot<F>(
+        &self,
+        config: &CallDetectionConfig,
+        mic_live: bool,
+        running: &[String],
+        force_browser_probe: bool,
+        mut browser_probe: F,
+    ) -> DetectActiveCallResult
+    where
+        F: FnMut(&Self, &[String], bool, bool) -> Option<BrowserMeetProbe>,
+    {
         let has_google_meet = config.apps.iter().any(|app| app == "google-meet");
         let has_teams_web = config.apps.iter().any(|app| app == "teams-web");
         let native_apps: Vec<&String> = config
@@ -635,7 +712,6 @@ impl CallDetector {
             .iter()
             .filter(|app| app.as_str() != "google-meet" && app.as_str() != "teams-web")
             .collect();
-        let running = running_process_names();
 
         if has_google_meet && mic_live && sticky_alive(&self.recent_google_meet_until) {
             return detected_for(MeetingProvider::GoogleMeet);
@@ -649,21 +725,22 @@ impl CallDetector {
             return DetectActiveCallResult::None;
         }
 
+        let mut high_confidence_native_apps = Vec::new();
+        let mut low_confidence_native_apps = Vec::new();
         for config_app in native_apps {
-            let config_lower = config_app.to_lowercase();
+            if is_low_confidence_native_call_app(config_app) {
+                low_confidence_native_apps.push(config_app);
+            } else {
+                high_confidence_native_apps.push(config_app);
+            }
+        }
+
+        for config_app in high_confidence_native_apps {
             // Match the actual app binary name, not background daemons.
             // e.g. "FaceTime" should match the "FaceTime" binary, NOT
             // "com.apple.FaceTime.FTConversationService" (a system daemon
             // that runs permanently and caused false positives).
-            if running.iter().any(|p| {
-                let p_lower = p.to_lowercase();
-                // Exact match (most common) or the config name is a
-                // prefix/suffix of the binary name (e.g. "zoom.us" matches
-                // "zoom.us"), but NOT a mere substring of a longer daemon name.
-                p_lower == config_lower
-                    || p_lower.starts_with(&format!("{}.", config_lower))
-                    || p_lower.starts_with(&format!("{} ", config_lower))
-            }) {
+            if native_app_matches_running_process(config_app, running) {
                 let display = display_name_for(config_app);
                 return DetectActiveCallResult::Detected {
                     display_name: display,
@@ -672,23 +749,34 @@ impl CallDetector {
             }
         }
 
-        if (has_google_meet || has_teams_web) && self.browser_probe_due() {
-            self.schedule_next_browser_probe();
-            match self.detect_browser_meeting(&running, has_google_meet, has_teams_web) {
-                BrowserMeetProbe::Detected { provider } => {
-                    let sticky = match provider {
-                        MeetingProvider::GoogleMeet => &self.recent_google_meet_until,
-                        MeetingProvider::TeamsWeb => &self.recent_teams_web_until,
-                    };
-                    remember_sticky(sticky, provider.sticky_duration());
-                    return detected_for(provider);
+        if (has_google_meet || has_teams_web) && (force_browser_probe || self.browser_probe_due()) {
+            if let Some(probe) = browser_probe(self, running, has_google_meet, has_teams_web) {
+                match probe {
+                    BrowserMeetProbe::Detected { provider } => {
+                        let sticky = match provider {
+                            MeetingProvider::GoogleMeet => &self.recent_google_meet_until,
+                            MeetingProvider::TeamsWeb => &self.recent_teams_web_until,
+                        };
+                        remember_sticky(sticky, provider.sticky_duration());
+                        return detected_for(provider);
+                    }
+                    BrowserMeetProbe::PermissionDenied { browser_app } => {
+                        return DetectActiveCallResult::PermissionWarning { browser_app };
+                    }
+                    BrowserMeetProbe::Error
+                    | BrowserMeetProbe::NoBrowserProcesses
+                    | BrowserMeetProbe::NoMatch => {}
                 }
-                BrowserMeetProbe::PermissionDenied { browser_app } => {
-                    return DetectActiveCallResult::PermissionWarning { browser_app };
-                }
-                BrowserMeetProbe::Error
-                | BrowserMeetProbe::NoBrowserProcesses
-                | BrowserMeetProbe::NoMatch => {}
+            }
+        }
+
+        for config_app in low_confidence_native_apps {
+            if native_app_matches_running_process(config_app, running) {
+                let display = display_name_for(config_app);
+                return DetectActiveCallResult::Detected {
+                    display_name: display,
+                    process_name: config_app.clone(),
+                };
             }
         }
 
@@ -1468,6 +1556,113 @@ mod tests {
     }
 
     #[test]
+    fn first_google_meet_detection_beats_always_running_slack() {
+        let detector = CallDetector::new(test_call_detection_config(vec![
+            "Slack".into(),
+            "google-meet".into(),
+        ]));
+        let config = detector.current_config();
+        let running = vec!["Slack".into(), "Google Chrome".into()];
+
+        let result = detector.detect_active_call_from_snapshot(
+            &config,
+            true,
+            &running,
+            false,
+            |_detector, _running, want_meet, want_teams| {
+                assert!(want_meet);
+                assert!(!want_teams);
+                Some(BrowserMeetProbe::Detected {
+                    provider: MeetingProvider::GoogleMeet,
+                })
+            },
+        );
+
+        assert_eq!(result, detected_for(MeetingProvider::GoogleMeet));
+    }
+
+    #[test]
+    fn high_confidence_native_app_still_beats_browser_probe() {
+        let detector = CallDetector::new(test_call_detection_config(vec![
+            "zoom.us".into(),
+            "google-meet".into(),
+        ]));
+        let config = detector.current_config();
+        let running = vec!["zoom.us".into(), "Google Chrome".into()];
+
+        let result = detector.detect_active_call_from_snapshot(
+            &config,
+            true,
+            &running,
+            false,
+            |_detector, _running, _want_meet, _want_teams| {
+                panic!("Zoom should be detected before browser probing")
+            },
+        );
+
+        assert_eq!(
+            result,
+            DetectActiveCallResult::Detected {
+                display_name: "Zoom".into(),
+                process_name: "zoom.us".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn low_confidence_native_app_falls_back_after_browser_no_match() {
+        let detector = CallDetector::new(test_call_detection_config(vec![
+            "Slack".into(),
+            "google-meet".into(),
+        ]));
+        let config = detector.current_config();
+        let running = vec!["Slack".into(), "Google Chrome".into()];
+
+        let result = detector.detect_active_call_from_snapshot(
+            &config,
+            true,
+            &running,
+            false,
+            |_detector, _running, _want_meet, _want_teams| Some(BrowserMeetProbe::NoMatch),
+        );
+
+        assert_eq!(
+            result,
+            DetectActiveCallResult::Detected {
+                display_name: "Slack".into(),
+                process_name: "Slack".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn mic_activation_forces_browser_probe_before_slack_even_when_rate_limited() {
+        let detector = CallDetector::new(test_call_detection_config(vec![
+            "Slack".into(),
+            "google-meet".into(),
+        ]));
+        detector.schedule_next_browser_probe();
+        let config = detector.current_config();
+        let running = vec!["Slack".into(), "Google Chrome".into()];
+
+        let result = detector.detect_active_call_from_snapshot(
+            &config,
+            true,
+            &running,
+            true,
+            |_detector, _running, want_meet, want_teams| {
+                assert!(want_meet);
+                assert!(!want_teams);
+                Some(BrowserMeetProbe::Detected {
+                    provider: MeetingProvider::GoogleMeet,
+                })
+            },
+        );
+
+        assert_eq!(result, detected_for(MeetingProvider::GoogleMeet));
+    }
+
+    #[test]
     fn arc_exact_match_does_not_fire_on_system_processes() {
         let detector = CallDetector::new(test_call_detection_config(vec!["google-meet".into()]));
         // These macOS system processes contain "arc" as a substring but must
@@ -1599,13 +1794,27 @@ mod tests {
         // Happy path: recording + call-detect + stop_when_call_ends, no
         // countdown yet → arm one.
         assert_eq!(
-            decide_no_call_action(true, true, true, false, false, false),
+            decide_no_call_action(
+                true,
+                true,
+                true,
+                false,
+                false,
+                crate::commands::CallEndCountdownTerminalState::None,
+            ),
             NoCallDecision::ArmCountdown
         );
 
         // Countdown now active. Same inputs → defer, don't re-arm.
         assert_eq!(
-            decide_no_call_action(true, true, true, true, true, false),
+            decide_no_call_action(
+                true,
+                true,
+                true,
+                true,
+                true,
+                crate::commands::CallEndCountdownTerminalState::None,
+            ),
             NoCallDecision::DeferToCountdown
         );
 
@@ -1615,14 +1824,28 @@ mod tests {
         // After the fix it must defer, leaving the countdown thread to
         // observe `!recording_flag` and shut itself down cleanly.
         assert_eq!(
-            decide_no_call_action(false, true, true, true, true, false),
+            decide_no_call_action(
+                false,
+                true,
+                true,
+                true,
+                true,
+                crate::commands::CallEndCountdownTerminalState::None,
+            ),
             NoCallDecision::DeferToCountdown
         );
 
         // Countdown active AND started_by flipped false (e.g. stray
         // cmd_start_recording) — same invariant: defer, don't wipe state.
         assert_eq!(
-            decide_no_call_action(true, false, true, true, true, false),
+            decide_no_call_action(
+                true,
+                false,
+                true,
+                true,
+                true,
+                crate::commands::CallEndCountdownTerminalState::None,
+            ),
             NoCallDecision::DeferToCountdown
         );
 
@@ -1631,29 +1854,90 @@ mod tests {
         // emitted call_end_auto_stop_fired. Re-arm rather than logging
         // `cleared` and leaving the recording running forever.
         assert_eq!(
-            decide_no_call_action(true, true, true, false, true, false),
+            decide_no_call_action(
+                true,
+                true,
+                true,
+                false,
+                true,
+                crate::commands::CallEndCountdownTerminalState::None,
+            ),
             NoCallDecision::RearmCountdown
         );
 
-        // Explicit cancellation ("Keep recording" / "Stop now") and terminal
-        // countdown completion are real terminal transitions. Do not re-arm
-        // after the countdown is intentionally done.
+        // Explicit cancellation ("Keep recording" / "Stop now") and true
+        // terminal countdown completion are real terminal transitions. Do not
+        // re-arm after the countdown is intentionally done.
         assert_eq!(
-            decide_no_call_action(true, true, true, false, true, true),
+            decide_no_call_action(
+                true,
+                true,
+                true,
+                false,
+                true,
+                crate::commands::CallEndCountdownTerminalState::UserCancelled,
+            ),
             NoCallDecision::ClearIfStale
+        );
+        assert_eq!(
+            decide_no_call_action(
+                true,
+                true,
+                true,
+                false,
+                true,
+                crate::commands::CallEndCountdownTerminalState::AutoStopFired,
+            ),
+            NoCallDecision::ClearIfStale
+        );
+
+        // Regression for the reopened v0.14.1 report: if the generic cancel
+        // bit flipped but no terminal state was recorded, treat it as an
+        // orphaned countdown and re-arm instead of clearing the call session.
+        assert_eq!(
+            decide_no_call_action(
+                true,
+                true,
+                true,
+                false,
+                true,
+                crate::commands::CallEndCountdownTerminalState::None,
+            ),
+            NoCallDecision::RearmCountdown
         );
 
         // No countdown + no recording in scope → free to clear stale state.
         assert_eq!(
-            decide_no_call_action(false, false, true, false, false, false),
+            decide_no_call_action(
+                false,
+                false,
+                true,
+                false,
+                false,
+                crate::commands::CallEndCountdownTerminalState::None,
+            ),
             NoCallDecision::ClearIfStale
         );
         assert_eq!(
-            decide_no_call_action(true, false, true, false, false, false),
+            decide_no_call_action(
+                true,
+                false,
+                true,
+                false,
+                false,
+                crate::commands::CallEndCountdownTerminalState::None,
+            ),
             NoCallDecision::ClearIfStale
         );
         assert_eq!(
-            decide_no_call_action(true, true, false, false, false, false),
+            decide_no_call_action(
+                true,
+                true,
+                false,
+                false,
+                false,
+                crate::commands::CallEndCountdownTerminalState::None,
+            ),
             NoCallDecision::ClearIfStale
         );
     }

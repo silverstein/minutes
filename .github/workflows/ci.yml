@@ -288,7 +288,7 @@ jobs:
         run: npm install -g @anthropic-ai/mcpb
 
       - name: Pack MCPB bundle
-        run: mcpb pack . minutes.mcpb
+        run: ./scripts/pack_mcpb.sh minutes.mcpb
 
       - name: Static bundle check
         run: ./scripts/check_mcpb_bundle.sh minutes.mcpb

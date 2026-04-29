@@ -3,7 +3,7 @@
 use minutes_core::Config;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::{
     menu::{Menu, MenuItem, SubmenuBuilder},
@@ -109,12 +109,14 @@ fn show_main_window(app: &tauri::AppHandle) {
         return;
     }
     if let Ok(win) = WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
-        .title("Minutes")
+        // Empty title hides the centered "Minutes" text in the macOS title bar.
+        // The in-app brand mark (italic m + recording dot) carries the identity now,
+        // so the title text was double-branding the same window.
+        .title("")
         .inner_size(520.0, 700.0)
         .min_inner_size(420.0, 520.0)
         .transparent(true)
         .content_protected(Config::load().privacy.hide_from_screen_share)
-        .center()
         .focused(true)
         .build()
     {
@@ -190,7 +192,7 @@ pub fn update_tray_state_with_mode(app: &tauri::AppHandle, is_active: bool, is_l
         } else if is_active {
             include_bytes!("../icons/icon-recording.png")
         } else {
-            include_bytes!("../icons/icon.png")
+            include_bytes!("../icons/icon-tray.png")
         };
         if let Ok(icon) = tauri::image::Image::from_bytes(icon_bytes) {
             tray.set_icon(Some(icon)).ok();
@@ -788,7 +790,21 @@ fn main() {
 
     // Load with first-run and upgrade migrations so palette defaults
     // stay enabled across upgrades and fresh installs.
-    let startup_config_snapshot = minutes_core::config::Config::load_with_migrations();
+    let mut startup_config_snapshot = minutes_core::config::Config::load_with_migrations();
+    // Auto-heal a stale `recording.device` pin: when the configured
+    // input device (USB mixer, Bluetooth headset, virtual loopback) is
+    // unplugged before launch, clear it and fall back to the system
+    // default. Historically this caused a deterministic crash on
+    // record start because the missing-device error reached call sites
+    // that aborted the process.
+    if minutes_core::capture::auto_heal_missing_recording_device(&mut startup_config_snapshot) {
+        if let Err(e) = startup_config_snapshot.save() {
+            tracing::warn!(
+                "failed to persist auto-healed recording.device clear: {}",
+                e
+            );
+        }
+    }
     let _ = secret_store::hydrate_openai_compatible_api_key_env();
     let recording = Arc::new(AtomicBool::new(false));
     let starting = Arc::new(AtomicBool::new(false));
@@ -821,9 +837,13 @@ fn main() {
     let recording_started_by_call_detect = Arc::new(AtomicBool::new(false));
     let call_end_countdown_cancel = Arc::new(AtomicBool::new(false));
     let call_end_countdown_active = Arc::new(AtomicBool::new(false));
+    let call_end_countdown_terminal_state = Arc::new(AtomicU8::new(
+        commands::CallEndCountdownTerminalState::None as u8,
+    ));
     let started_by_call_detect_for_detector = recording_started_by_call_detect.clone();
     let countdown_cancel_for_detector = call_end_countdown_cancel.clone();
     let countdown_active_for_detector = call_end_countdown_active.clone();
+    let countdown_terminal_state_for_detector = call_end_countdown_terminal_state.clone();
     let stop_for_detector = stop_flag.clone();
 
     tauri::Builder::default()
@@ -1023,6 +1043,14 @@ fn main() {
             None,
         ))
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(
+            tauri_plugin_window_state::Builder::default()
+                .with_filename("window-state.json")
+                .skip_initial_state("note")
+                .skip_initial_state("meeting-prompt")
+                .skip_initial_state("dictation-overlay")
+                .build(),
+        )
         .manage(commands::AppState {
             recording: recording.clone(),
             starting: starting.clone(),
@@ -1070,6 +1098,7 @@ fn main() {
             recording_started_by_call_detect: recording_started_by_call_detect.clone(),
             call_end_countdown_cancel: call_end_countdown_cancel.clone(),
             call_end_countdown_active: call_end_countdown_active.clone(),
+            call_end_countdown_terminal_state: call_end_countdown_terminal_state.clone(),
         })
         .manage(Arc::new(Mutex::new(
             shortcut_manager::ShortcutManager::new(),
@@ -1116,12 +1145,18 @@ fn main() {
                 }
             }
 
-            if !(allow_debug_update_state && debug_update_state.is_some()) {
+            if !allow_debug_update_state {
                 // Auto-update: check on launch, then every 6 hours.
                 // Check-only (no download). Download starts only when the user
                 // accepts the update from the desktop banner.
                 // Defers notification if recording/live/dictation is active.
                 // Between checks, polls every 30s to surface deferred updates once sessions end.
+                //
+                // Dev builds (bundle id ending in .dev) skip the auto-update thread entirely:
+                // a dev app shouldn't replace itself with a release-channel build, and the
+                // auto-check was surfacing release banners (and hardcoded debug versions
+                // resurrected from localStorage) that obscured the real UI. Manual "Check
+                // for Updates" from the tray/app menu still works for end-to-end testing.
                 let update_handle = app.handle().clone();
                 std::thread::spawn(move || {
                     const CHECK_INTERVAL_SECS: u64 = 6 * 60 * 60;
@@ -1371,7 +1406,7 @@ fn main() {
             }
             menu.append_items(&[&sep2, &screen_share_item, &check_update_item, &quit_item])?;
 
-            let icon = tauri::image::Image::from_bytes(include_bytes!("../icons/icon.png"))
+            let icon = tauri::image::Image::from_bytes(include_bytes!("../icons/icon-tray.png"))
                 .expect("load tray icon");
 
             let _tray = TrayIconBuilder::with_id("minutes-tray")
@@ -1656,6 +1691,7 @@ fn main() {
                         recording_started_by_call_detect: started_by_call_detect_for_detector,
                         countdown_cancel: countdown_cancel_for_detector,
                         countdown_active: countdown_active_for_detector,
+                        countdown_terminal_state: countdown_terminal_state_for_detector,
                         stop_flag: stop_for_detector,
                     },
                 );

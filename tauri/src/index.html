@@ -624,19 +624,48 @@
       align-items: center;
       gap: 10px;
       min-width: 0;
+      flex-shrink: 0;
+    }
+
+    /* Brand mark: italic m from Cathryn's app icon, with a small recording dot
+       in the upper-right corner. CSS-rendered (no image asset) so the chrome
+       around it serves as the container — no warm-dark square that vanishes
+       against dark mode. The red dot is semantic per DESIGN.md (recording state).
+       Container is intentionally larger than the m's bounding box so the dot has
+       clear breathing room and reads as a corner badge, not part of the letter. */
+    .brand-mark {
+      position: relative;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 32px;
+      height: 24px;
+      flex-shrink: 0;
+    }
+    .brand-mark-letter {
+      font-family: var(--font-display);
+      font-style: italic;
+      font-weight: 400;
+      font-size: 28px;
+      line-height: 1;
+      color: var(--text);
+      letter-spacing: 0;
+      /* Anchor the m to the left of the wider container so the corner above
+         and to the right is clear space for the dot. */
+      margin-right: auto;
+    }
+    .brand-mark-dot {
+      position: absolute;
+      top: 0;
+      right: 0;
+      width: 5px;
+      height: 5px;
+      border-radius: 50%;
+      background: var(--red, #FF453A);
     }
 
     .brand-copy {
       min-width: 0;
-    }
-
-    .brand-label {
-      font-size: 18px;
-      font-family: var(--font-display);
-      font-weight: 400;
-      letter-spacing: -0.3px;
-      color: var(--text);
-      line-height: 1;
     }
 
     .brand-sub {
@@ -647,6 +676,9 @@
       display: flex;
       align-items: center;
       gap: 8px;
+      flex-wrap: wrap;
+      row-gap: 6px;
+      justify-content: flex-end;
       -webkit-app-region: no-drag;
     }
 
@@ -1027,6 +1059,16 @@
       margin-top: 12px;
     }
 
+    /* When per-job cards are rendering, hide the singular row to avoid duplicating
+       the same job across two surfaces. The cards carry title + stage + elapsed
+       + actions, so the row is redundant once cards exist. */
+    .processing-bar.has-jobs .processing-row {
+      display: none;
+    }
+    .processing-bar.has-jobs .processing-jobs {
+      margin-top: 0;
+    }
+
     .processing-job {
       border-radius: var(--radius);
       padding: 10px 12px;
@@ -1251,6 +1293,18 @@
 
     .search-box::placeholder {
       color: var(--text-secondary);
+    }
+
+    /* Surfaces backend errors that previously got swallowed as empty
+       results. Hidden by default; populated by setSearchError(). */
+    .search-error {
+      margin-top: 6px;
+      padding: 6px 10px;
+      border-radius: 6px;
+      background: var(--red-tint, rgba(255, 69, 58, 0.12));
+      color: var(--red, #FF453A);
+      font-size: 11px;
+      line-height: 1.4;
     }
 
     .search-icon {
@@ -3165,12 +3219,17 @@
       flex-wrap: wrap;
     }
 
-    /* ── Call detected banner ── */
+    /* ── Call detected banner ──
+       Single-row notification (matches macOS-native call notification pattern):
+       icon + title + Record CTA + corner ✕. Previously had a subtitle, an
+       instructional paragraph, and two readiness chips that never updated past
+       "waiting" — all dropped because they bloated the card to 6+ lines and
+       carried no actionable info. */
     .call-detected {
       display: none;
-      align-items: flex-start;
+      align-items: center;
       gap: 10px;
-      padding: 12px 16px;
+      padding: 10px 12px 10px 16px;
       background: var(--green-tint-soft);
       border-bottom: 1px solid var(--green-border);
     }
@@ -3184,36 +3243,36 @@
       flex-shrink: 0;
     }
 
-    .call-detected-info {
-      flex: 1;
-      min-width: 0;
-    }
-
     .call-detected-title {
       font-size: 13px;
       font-weight: 600;
       color: var(--text);
+      flex: 1;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }
 
-    .call-detected-subtitle {
-      font-size: 11px;
-      color: var(--green);
-      font-weight: 600;
-      margin-top: 2px;
-    }
-
-    .call-detected-detail {
-      font-size: 11px;
+    .call-detected-close {
+      flex-shrink: 0;
+      width: 22px;
+      height: 22px;
+      border: none;
+      background: transparent;
       color: var(--text-secondary);
-      margin-top: 6px;
-      line-height: 1.35;
+      font-size: 16px;
+      line-height: 1;
+      cursor: pointer;
+      border-radius: 4px;
+      padding: 0;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
     }
-
-    .call-detected-health {
-      display: flex;
-      gap: 8px;
-      flex-wrap: wrap;
-      margin-top: 8px;
+    .call-detected-close:hover {
+      background: var(--surface-fill-hover);
+      color: var(--text);
     }
 
     /* ── Call ended countdown banner ── */
@@ -3377,15 +3436,50 @@
       display: block;
     }
 
+    /* Dev-only collapsible. The summary is a small pill so it doesn't dominate
+       the banner. State-test buttons live behind this disclosure so the banner
+       still feels like a banner, not a developer console, when an end user sees
+       it for a real update. */
     .update-banner-debug {
       display: none;
-      gap: 6px;
-      flex-wrap: wrap;
-      margin-top: 8px;
+      margin-top: 10px;
     }
 
     .update-banner-debug.active {
+      display: block;
+    }
+
+    .update-banner-debug-summary {
+      cursor: pointer;
+      font-size: 10px;
+      font-family: var(--font-mono);
+      letter-spacing: 0.3px;
+      text-transform: uppercase;
+      color: var(--text-tertiary);
+      list-style: none;
+      user-select: none;
+      padding: 2px 6px;
+      display: inline-block;
+      border-radius: 4px;
+    }
+    .update-banner-debug-summary::-webkit-details-marker { display: none; }
+    .update-banner-debug-summary::before {
+      content: '▸ ';
+      display: inline-block;
+      transition: transform 120ms ease;
+    }
+    .update-banner-debug[open] .update-banner-debug-summary::before {
+      content: '▾ ';
+    }
+    .update-banner-debug-summary:hover {
+      color: var(--text-secondary);
+    }
+
+    .update-banner-debug-row {
       display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+      margin-top: 6px;
     }
 
     .update-banner.error-state .update-banner-title {
@@ -3524,9 +3618,8 @@
     .call-detected-actions {
       display: flex;
       align-items: center;
-      gap: 8px;
+      gap: 6px;
       flex-shrink: 0;
-      margin-left: 8px;
     }
 
     .ui-hidden {
@@ -3733,8 +3826,11 @@
     <!-- Header -->
     <div class="header">
       <div class="brand">
+        <span class="brand-mark" role="img" aria-label="Minutes">
+          <span class="brand-mark-letter" aria-hidden="true">m</span>
+          <span class="brand-mark-dot" aria-hidden="true"></span>
+        </span>
         <div class="brand-copy">
-          <div class="brand-label">Minutes</div>
           <div class="brand-sub">Conversation memory for humans and agents</div>
         </div>
       </div>
@@ -3795,10 +3891,10 @@
           <div class="processing-title" id="processing-title">Processing recording</div>
           <div class="processing-stage" id="processing-stage">Preparing transcript...</div>
           <div class="processing-elapsed" id="processing-elapsed"></div>
-          <div class="processing-summary" id="processing-summary"></div>
         </div>
       </div>
       <div class="processing-jobs" id="processing-jobs"></div>
+      <div class="processing-summary" id="processing-summary"></div>
     </div>
 
     <!-- Output notice -->
@@ -3811,9 +3907,7 @@
           <div class="output-notice-path" id="output-notice-path"></div>
           <div class="output-notice-actions">
             <button class="btn btn-secondary btn-sm" id="btn-open-output">Open</button>
-            <button class="btn btn-secondary btn-sm" id="btn-draft-output">Create Draft</button>
-            <button class="btn btn-secondary btn-sm" id="btn-open-output-folder">Show in Folder</button>
-            <button class="btn btn-secondary btn-sm" id="btn-dismiss-output">Dismiss</button>
+            <button class="btn btn-secondary btn-sm" id="btn-dismiss-output" hidden>Dismiss</button>
           </div>
         </div>
       </div>
@@ -3829,7 +3923,8 @@
 
     <!-- Search -->
     <div class="search-wrap search-icon">
-      <input class="search-box" type="text" placeholder="Search meetings, memos, and dictations..." id="search-input" />
+      <input class="search-box" type="text" placeholder="Search recordings..." id="search-input" />
+      <div class="search-error" id="search-error" hidden></div>
     </div>
 
     <!-- Upcoming meeting suggestion -->
@@ -3845,19 +3940,10 @@
     <!-- Call detected banner -->
     <div class="call-detected" id="call-detected-banner">
       <div class="call-detected-icon">📞</div>
-      <div class="call-detected-info">
-        <div class="call-detected-title" id="call-detected-title">Call detected</div>
-        <div class="call-detected-subtitle" id="call-detected-subtitle">Ready to record this call</div>
-        <div class="call-detected-detail" id="call-detected-detail">Minutes will stay ready while this call is active.
-        </div>
-        <div class="call-detected-health">
-          <span class="call-health-chip" id="call-health-mic">Mic waiting</span>
-          <span class="call-health-chip" id="call-health-audio">Call audio waiting</span>
-        </div>
-      </div>
+      <div class="call-detected-title" id="call-detected-title">Call detected</div>
       <div class="call-detected-actions">
         <button class="btn btn-primary btn-sm" id="btn-record-call">Record</button>
-        <button class="btn btn-secondary btn-sm" id="btn-dismiss-call">Dismiss</button>
+        <button class="call-detected-close" id="btn-dismiss-call" aria-label="Dismiss call notification" title="Dismiss">×</button>
       </div>
     </div>
 
@@ -3896,14 +3982,18 @@
           <div class="update-banner-progress-fill" id="update-banner-progress-fill"></div>
         </div>
         <div class="update-banner-error" id="update-banner-error"></div>
-        <div class="update-banner-debug" id="update-banner-debug">
-          <button class="btn btn-secondary btn-sm" data-update-debug="checking">Checking</button>
-          <button class="btn btn-secondary btn-sm" data-update-debug="downloading">Downloading</button>
-          <button class="btn btn-secondary btn-sm" data-update-debug="verifying">Verifying</button>
-          <button class="btn btn-secondary btn-sm" data-update-debug="installing">Installing</button>
-          <button class="btn btn-secondary btn-sm" data-update-debug="ready">Ready</button>
-          <button class="btn btn-secondary btn-sm" data-update-debug="error">Error</button>
-        </div>
+        <details class="update-banner-debug" id="update-banner-debug">
+          <summary class="update-banner-debug-summary">Dev tools</summary>
+          <div class="update-banner-debug-row">
+            <button class="btn btn-secondary btn-sm" id="btn-update-debug-launch">Trigger banner</button>
+            <button class="btn btn-secondary btn-sm" data-update-debug="checking">Checking</button>
+            <button class="btn btn-secondary btn-sm" data-update-debug="downloading">Downloading</button>
+            <button class="btn btn-secondary btn-sm" data-update-debug="verifying">Verifying</button>
+            <button class="btn btn-secondary btn-sm" data-update-debug="installing">Installing</button>
+            <button class="btn btn-secondary btn-sm" data-update-debug="ready">Ready</button>
+            <button class="btn btn-secondary btn-sm" data-update-debug="error">Error</button>
+          </div>
+        </details>
       </div>
     </div>
 
@@ -3987,7 +4077,6 @@
             title="Start live transcription — ask your agent in Recall for coaching"
             aria-label="Start live transcription">Live</button>
           <button class="btn btn-secondary" id="btn-quick-thought">Quick Thought</button>
-          <button class="btn btn-secondary" id="btn-update-debug-launch" hidden>Update Debug</button>
           <button class="btn btn-secondary" id="btn-assistant" aria-expanded="false">Recall <span class="recall-nudge"
               id="recall-nudge" aria-label="Recall has new content"></span></button>
         </div>
@@ -5027,7 +5116,6 @@
     const recordButton = document.getElementById('btn-record');
     const liveButton = document.getElementById('btn-live');
     const quickThoughtButton = document.getElementById('btn-quick-thought');
-    const openOutputFolderButton = document.getElementById('btn-open-output-folder');
     const aboutTrayCopy = document.getElementById('about-tray-copy');
     const updateBanner = document.getElementById('update-banner');
     const updateBannerTitle = document.getElementById('update-banner-title');
@@ -5139,8 +5227,6 @@
         ...desktopCapabilities,
         ...caps,
       };
-
-      openOutputFolderButton.textContent = desktopCapabilities.folderRevealLabel || 'Show in Folder';
 
       if (recoverySubtitle) {
         recoverySubtitle.textContent =
@@ -5430,9 +5516,11 @@
 
       if (!processingJobs.length) {
         processingSummary.textContent = '';
+        processingBar.classList.remove('has-jobs');
         return;
       }
 
+      processingBar.classList.add('has-jobs');
       processingSummary.textContent =
         processingJobs.length > 1
           ? `${processingJobs.length} recordings are cooking in the background.`
@@ -5851,34 +5939,65 @@
       if (pollInterval) { clearInterval(pollInterval); pollInterval = null; }
     }
 
+    let outputNoticeAutoDismissTimer = null;
+
+    function clearOutputNoticeAutoDismiss() {
+      if (outputNoticeAutoDismissTimer) {
+        clearTimeout(outputNoticeAutoDismissTimer);
+        outputNoticeAutoDismissTimer = null;
+      }
+    }
+
+    async function dismissOutputNotice() {
+      clearOutputNoticeAutoDismiss();
+      try { await invoke('cmd_clear_latest_output'); } catch (_) { /* best effort */ }
+      updateOutputNotice(null);
+    }
+
     function updateOutputNotice(notice) {
       latestOutput = notice || null;
-      const draftButton = document.getElementById('btn-draft-output');
       if (!notice) {
+        clearOutputNoticeAutoDismiss();
         outputNotice.classList.remove('active', 'capture');
-        if (draftButton) draftButton.style.display = 'none';
         lastOutputKey = null;
         return;
       }
 
       const isCapture = notice.kind === 'preserved-capture';
+      const isSaved = notice.kind === 'saved';
       const nextKey = `${notice.kind}:${notice.path}`;
-      if (nextKey !== lastOutputKey) {
-        playCue(isCapture ? 'error' : 'complete');
+      const isNewNotice = nextKey !== lastOutputKey;
+      if (isNewNotice) {
+        playCue(isSaved ? 'complete' : 'error');
         lastOutputKey = nextKey;
       }
       outputNotice.classList.toggle('capture', isCapture);
       outputNotice.classList.add('active');
-      outputNoticeIcon.textContent = isCapture ? '!' : '✓';
-      outputNoticeTitle.textContent = notice.title || (isCapture ? 'Capture preserved' : 'Saved meeting');
+      outputNoticeIcon.textContent = isSaved ? '✓' : '!';
+      outputNoticeTitle.textContent = notice.title || (isCapture ? 'Capture preserved' : isSaved ? 'Saved meeting' : 'Needs attention');
       outputNoticeDetail.textContent = notice.detail || '';
       outputNoticePath.textContent = notice.path || '';
-      document.getElementById('btn-open-output').textContent = isCapture ? 'Open Capture' : 'Open Meeting';
-      if (draftButton) {
-        draftButton.style.display = notice.kind === 'saved' ? '' : 'none';
-      }
-      if (notice.kind === 'saved') {
+      document.getElementById('btn-open-output').textContent = isCapture ? 'Open Capture' : isSaved ? 'Open Meeting' : 'Open';
+      // Only saved notices auto-dismiss + can rely on click-to-dismiss; everything else
+      // (preserved-capture, error, stale-recording, watch-failed, working-copy) needs the
+      // user to acknowledge it explicitly, so show a Dismiss button for those cases.
+      const dismissBtn = document.getElementById('btn-dismiss-output');
+      if (dismissBtn) dismissBtn.hidden = isSaved;
+      if (isSaved) {
         markActivationNudgeShown('saved-artifact-draft');
+      }
+
+      // Schedule auto-dismiss once per distinct notice, only for the happy "saved"
+      // case. Other kinds (preserved-capture, error, stale-recording, watch-failed,
+      // working-copy) all signal something the user needs to acknowledge, so they
+      // stay until clicked.
+      // Backend clear is essential — status polling at commands.rs re-pushes
+      // status.latestOutput on every tick, so a DOM-only dismiss gets resurrected.
+      if (isNewNotice && isSaved) {
+        clearOutputNoticeAutoDismiss();
+        outputNoticeAutoDismissTimer = setTimeout(() => {
+          dismissOutputNotice();
+        }, 12_000);
       }
     }
 
@@ -6329,35 +6448,25 @@
 
     document.getElementById('btn-open-output').addEventListener('click', async () => {
       if (!latestOutput?.path) return;
+      // Opening implies the user is acting on the notice. Clear backend AND DOM
+      // immediately. Without the backend clear, status polling at commands.rs
+      // resurrects the notice on its next tick. Without updateOutputNotice(null),
+      // the toast lingers visibly between the click and the next poll.
+      const path = latestOutput.path;
+      clearOutputNoticeAutoDismiss();
+      try { await invoke('cmd_clear_latest_output'); } catch (_) { /* best effort */ }
+      updateOutputNotice(null);
       try {
-        await openMeetingDetail(latestOutput.path);
+        await openMeetingDetail(path);
       } catch (e) {
         console.error('Open output:', e);
       }
     });
 
-    document.getElementById('btn-draft-output').addEventListener('click', async () => {
-      if (!latestOutput?.path) return;
-      await createArtifactFromMeetingPath(latestOutput.path, 'debrief-memo');
-    });
-
-    document.getElementById('btn-open-output-folder').addEventListener('click', async () => {
-      if (!latestOutput?.path) return;
-      try {
-        const folder = parentPath(latestOutput.path);
-        await invoke('cmd_open_file', { path: folder });
-      } catch (e) {
-        console.error('Open folder:', e);
-      }
-    });
-
     document.getElementById('btn-dismiss-output').addEventListener('click', async () => {
-      try {
-        await invoke('cmd_clear_latest_output');
-        updateOutputNotice(null);
-      } catch (e) {
-        console.error('Dismiss output:', e);
-      }
+      // Visible only for non-saved notices (preserved-capture, error, etc.) where
+      // auto-dismiss would hide attention-needed information.
+      await dismissOutputNotice();
     });
 
     document.getElementById('btn-create-artifact').addEventListener('click', async () => {
@@ -7049,10 +7158,12 @@
       if (activeSearchQuery) {
         try {
           const results = await invoke('cmd_search', { query: activeSearchQuery });
+          setSearchError(null);
           renderMeetings(results);
           await refreshOpenMeetingDetail();
         } catch (e) {
           console.error('Search refresh:', e);
+          setSearchError(e);
         }
         return;
       }
@@ -7069,11 +7180,17 @@
     }
 
     // ── Search ──
+    // Debounce 80ms feels instant to a typer once the FTS5 index is in place,
+    // but lets a fast-typing burst coalesce into a single query. The req-id
+    // guard prevents an older slow IPC from clobbering the newer fast one's
+    // results when responses arrive out of order.
     let searchTimeout;
+    let searchRequestId = 0;
     searchInput.addEventListener('input', (e) => {
       clearTimeout(searchTimeout);
       const query = e.target.value.trim();
       activeSearchQuery = query;
+      const reqId = ++searchRequestId;
       if (!query) {
         scheduleMeetingsRefresh(0);
         return;
@@ -7081,11 +7198,37 @@
       searchTimeout = setTimeout(async () => {
         try {
           const results = await invoke('cmd_search', { query });
+          if (reqId !== searchRequestId) return; // stale response, newer one in flight
+          setSearchError(null);
           renderMeetings(results);
           await refreshOpenMeetingDetail();
-        } catch (e) { console.error('Search:', e); }
-      }, 250);
+        } catch (e) {
+          if (reqId !== searchRequestId) return;
+          console.error('Search:', e);
+          setSearchError(e);
+        }
+      }, 80);
     });
+
+    // ── Search error banner ──
+    // cmd_search now returns Result<Vec<SearchResult>, String> on the Rust side,
+    // which Tauri auto-rejects the JS Promise with on Err. Any sanitizer issue,
+    // disk problem, or schema-corruption-beyond-rebuild surfaces here instead of
+    // silently mapping to "no matches".
+    function setSearchError(err) {
+      const el = document.getElementById('search-error');
+      if (!el) return;
+      if (!err) {
+        el.hidden = true;
+        el.textContent = '';
+        return;
+      }
+      const msg = typeof err === 'string'
+        ? err
+        : (err && err.message) ? err.message : 'Search failed.';
+      el.textContent = `Search error: ${msg}`;
+      el.hidden = false;
+    }
 
     // ── Onboarding ──
     async function checkSetup() {
@@ -7646,7 +7789,7 @@
       if (agent === 'claude') return 'e.g. --model sonnet';
       if (agent === 'codex') return 'e.g. --model gpt-5-codex';
       if (agent === 'opencode') return 'e.g. --model openai/gpt-5.4';
-      if (agent === 'pi') return 'e.g. --provider openai --model gpt-4o-mini';
+      if (agent === 'pi') return 'optional; leave blank to use Pi /model';
       if (agent === 'gemini') return 'e.g. --model gemini-2.5-pro';
       return 'e.g. --model <provider/model>';
     }
@@ -7689,7 +7832,7 @@
       } else if (agent === 'opencode') {
         argsHelp.textContent = 'OpenCode works best with provider/model flags like --model openai/gpt-5.4.';
       } else if (agent === 'pi') {
-        argsHelp.textContent = 'Pi works best with provider/model flags like --provider openai --model gpt-4o-mini.';
+        argsHelp.textContent = 'Pi uses its own /login and /model settings. If GitHub Copilot reports that personal access tokens are unsupported, refresh Pi auth with /login instead of adding a PAT here.';
       } else if (agent === 'codex') {
         argsHelp.textContent = 'Codex uses --dangerously-bypass-approvals-and-sandbox for full auto-approval.';
       } else if (agent === 'claude') {
@@ -9237,7 +9380,6 @@
         recallLoading.classList.remove('active');
       }
       recallTerminalContainer.classList.toggle('hidden', phase === 'weekly');
-      recallTerminalContainer.classList.toggle('dimmed', phase === 'listening');
       recallNote.classList.toggle('active', phase === 'listening');
       persistRecallWorkspaceState({ recallPhase: phase });
     }
@@ -9485,12 +9627,11 @@
     // ── Call detection banner ──
     const callBanner = document.getElementById('call-detected-banner');
     const callTitle = document.getElementById('call-detected-title');
-    const callSubtitle = document.getElementById('call-detected-subtitle');
-    const callDetail = document.getElementById('call-detected-detail');
-    const callHealthMic = document.getElementById('call-health-mic');
-    const callHealthAudio = document.getElementById('call-health-audio');
     let activeCallSession = null;
 
+    // Used by the recording-bar health chips (line ~5806). The call-detected
+    // banner used to call this too with stale "waiting" placeholders, but
+    // those were dropped in the single-row redesign.
     function setCallHealthChip(node, text, live) {
       if (!node) return;
       node.textContent = text;
@@ -9504,10 +9645,6 @@
         dismissed: false,
       };
       callTitle.textContent = `${app_name} call detected`;
-      callSubtitle.textContent = 'Ready to record this call';
-      callDetail.textContent = 'Minutes will stay ready while this call is active until you start recording or dismiss this session.';
-      setCallHealthChip(callHealthMic, 'Mic waiting', false);
-      setCallHealthChip(callHealthAudio, 'Call audio waiting', false);
       callBanner.classList.add('active');
 
       // Only steal focus on first detection, not periodic reminders
@@ -9808,8 +9945,19 @@
     try {
       const stored = localStorage.getItem('minutes-pending-update');
       if (stored) {
-        const { version, body, downloadBytes } = JSON.parse(stored);
-        window.__TAURI__.app.getVersion().then(currentVersion => {
+        // Dev builds disable auto-update (see main.rs). Clear any stale
+        // pending-update from a previous session so it doesn't resurrect
+        // a banner against a now-newer dev build.
+        Promise.all([
+          window.__TAURI__.app.getName?.() ?? Promise.resolve(''),
+          window.__TAURI__.app.getVersion(),
+        ]).then(([name, currentVersion]) => {
+          const isDev = typeof name === 'string' && name.includes('Dev');
+          if (isDev) {
+            localStorage.removeItem('minutes-pending-update');
+            return;
+          }
+          const { version, body, downloadBytes } = JSON.parse(stored);
           if (version && version !== currentVersion) {
             showUpdateBanner(version, body, downloadBytes);
           } else {
@@ -9880,8 +10028,9 @@
 
     window.__TAURI__.app.getName?.().then((name) => {
       updaterDebugEnabled = typeof name === 'string' && name.includes('Dev');
+      // Parent <details class="update-banner-debug"> is gated by .active —
+      // the launch button now lives inside that disclosure and inherits visibility.
       if (updateBannerDebug) updateBannerDebug.classList.toggle('active', updaterDebugEnabled);
-      if (updateDebugLaunchButton) updateDebugLaunchButton.hidden = !updaterDebugEnabled;
     }).catch(() => { });
 
     document.querySelectorAll('[data-update-debug]').forEach((button) => {
@@ -10170,14 +10319,18 @@
         if (isRecording && !prevRecording) {
           setRecallPhase('listening', null);
           quickNote.classList.remove('active');
-        } else if (!isRecording && prevRecording && !isProcessing) {
+        } else if (!isRecording && prevRecording) {
+          // Stop recording → leave the "Listening" pulse immediately. The agent
+          // can already discuss what was said from the in-memory transcript while
+          // the summary finishes; staying on 'listening' through the entire
+          // processing window misrepresents what's happening.
           setRecallPhase('debrief', null);
         } else if (!isRecording && !isProcessing && recallPhase === 'listening') {
           setRecallPhase('recall', null);
         }
       }
 
-      if (!isRecording && prevRecording && !isProcessing) {
+      if (!isRecording && prevRecording) {
         if (!recallExpanded) {
           autoExpandRecall('debrief', null);
         }

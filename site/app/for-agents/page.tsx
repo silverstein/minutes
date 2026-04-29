@@ -253,12 +253,12 @@ export default function ForAgentsPage() {
         <p className="mt-5 text-[17px] leading-8 text-[var(--text-secondary)]">
           Most meeting tools optimize for notes inside their app. Minutes
           turns meetings, calls, and voice memos into local source material:
-          structured markdown in{" "}
+          structured markdown under{" "}
           <code className="font-mono text-[15px] text-[var(--text)]">~/meetings/</code>
-          , MCP tools, CLI commands, and live transcript JSONL. Claude Code,
-          Codex, Gemini CLI, Cursor, OpenCode, Pi, and any MCP-compatible client
-          work from the same corpus. Your memory survives tools, vendors, and
-          hype cycles.
+          {" "}with MCP tools, CLI commands, and live transcript JSONL. Claude
+          Code, Codex, Gemini CLI, Cursor, OpenCode, Pi, and any MCP-compatible
+          client work from the same corpus. Your memory survives tools, vendors,
+          and hype cycles.
         </p>
         <p className="mt-4 text-[15px] leading-7 text-[var(--text-secondary)]">
           This page is the integration reference. MCP config, tool surface,

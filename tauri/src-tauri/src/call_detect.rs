@@ -111,6 +111,7 @@ enum DetectionTransition {
     Noop,
 }
 
+#[derive(Debug, PartialEq, Eq)]
 enum DetectActiveCallResult {
     Detected {
         display_name: String,
@@ -214,6 +215,23 @@ fn sticky_alive(sticky: &Mutex<Option<Instant>>) -> bool {
         }
         None => false,
     }
+}
+
+fn is_low_confidence_native_call_app(app: &str) -> bool {
+    matches!(app.to_ascii_lowercase().as_str(), "slack")
+}
+
+fn native_app_matches_running_process(config_app: &str, running: &[String]) -> bool {
+    let config_lower = config_app.to_lowercase();
+    running.iter().any(|p| {
+        let p_lower = p.to_lowercase();
+        // Exact match (most common) or the config name is a prefix/suffix of
+        // the binary name (e.g. "zoom.us" matches "zoom.us"), but NOT a mere
+        // substring of a longer daemon name.
+        p_lower == config_lower
+            || p_lower.starts_with(&format!("{}.", config_lower))
+            || p_lower.starts_with(&format!("{} ", config_lower))
+    })
 }
 
 enum BrowserMeetProbe {
@@ -657,6 +675,32 @@ impl CallDetector {
         let mic_live = is_mic_in_use();
         self.note_mic_state(mic_live);
 
+        let running = running_process_names();
+        self.detect_active_call_from_snapshot(
+            config,
+            mic_live,
+            &running,
+            |detector, running, has_google_meet, has_teams_web| {
+                if (has_google_meet || has_teams_web) && detector.browser_probe_due() {
+                    detector.schedule_next_browser_probe();
+                    Some(detector.detect_browser_meeting(running, has_google_meet, has_teams_web))
+                } else {
+                    None
+                }
+            },
+        )
+    }
+
+    fn detect_active_call_from_snapshot<F>(
+        &self,
+        config: &CallDetectionConfig,
+        mic_live: bool,
+        running: &[String],
+        mut browser_probe: F,
+    ) -> DetectActiveCallResult
+    where
+        F: FnMut(&Self, &[String], bool, bool) -> Option<BrowserMeetProbe>,
+    {
         let has_google_meet = config.apps.iter().any(|app| app == "google-meet");
         let has_teams_web = config.apps.iter().any(|app| app == "teams-web");
         let native_apps: Vec<&String> = config
@@ -664,7 +708,6 @@ impl CallDetector {
             .iter()
             .filter(|app| app.as_str() != "google-meet" && app.as_str() != "teams-web")
             .collect();
-        let running = running_process_names();
 
         if has_google_meet && mic_live && sticky_alive(&self.recent_google_meet_until) {
             return detected_for(MeetingProvider::GoogleMeet);
@@ -678,21 +721,22 @@ impl CallDetector {
             return DetectActiveCallResult::None;
         }
 
+        let mut high_confidence_native_apps = Vec::new();
+        let mut low_confidence_native_apps = Vec::new();
         for config_app in native_apps {
-            let config_lower = config_app.to_lowercase();
+            if is_low_confidence_native_call_app(config_app) {
+                low_confidence_native_apps.push(config_app);
+            } else {
+                high_confidence_native_apps.push(config_app);
+            }
+        }
+
+        for config_app in high_confidence_native_apps {
             // Match the actual app binary name, not background daemons.
             // e.g. "FaceTime" should match the "FaceTime" binary, NOT
             // "com.apple.FaceTime.FTConversationService" (a system daemon
             // that runs permanently and caused false positives).
-            if running.iter().any(|p| {
-                let p_lower = p.to_lowercase();
-                // Exact match (most common) or the config name is a
-                // prefix/suffix of the binary name (e.g. "zoom.us" matches
-                // "zoom.us"), but NOT a mere substring of a longer daemon name.
-                p_lower == config_lower
-                    || p_lower.starts_with(&format!("{}.", config_lower))
-                    || p_lower.starts_with(&format!("{} ", config_lower))
-            }) {
+            if native_app_matches_running_process(config_app, running) {
                 let display = display_name_for(config_app);
                 return DetectActiveCallResult::Detected {
                     display_name: display,
@@ -701,9 +745,8 @@ impl CallDetector {
             }
         }
 
-        if (has_google_meet || has_teams_web) && self.browser_probe_due() {
-            self.schedule_next_browser_probe();
-            match self.detect_browser_meeting(&running, has_google_meet, has_teams_web) {
+        if let Some(probe) = browser_probe(self, running, has_google_meet, has_teams_web) {
+            match probe {
                 BrowserMeetProbe::Detected { provider } => {
                     let sticky = match provider {
                         MeetingProvider::GoogleMeet => &self.recent_google_meet_until,
@@ -718,6 +761,16 @@ impl CallDetector {
                 BrowserMeetProbe::Error
                 | BrowserMeetProbe::NoBrowserProcesses
                 | BrowserMeetProbe::NoMatch => {}
+            }
+        }
+
+        for config_app in low_confidence_native_apps {
+            if native_app_matches_running_process(config_app, running) {
+                let display = display_name_for(config_app);
+                return DetectActiveCallResult::Detected {
+                    display_name: display,
+                    process_name: config_app.clone(),
+                };
             }
         }
 
@@ -1494,6 +1547,83 @@ mod tests {
         }
 
         assert_eq!(detected.as_deref(), Some("zoom.us"));
+    }
+
+    #[test]
+    fn first_google_meet_detection_beats_always_running_slack() {
+        let detector = CallDetector::new(test_call_detection_config(vec![
+            "Slack".into(),
+            "google-meet".into(),
+        ]));
+        let config = detector.current_config();
+        let running = vec!["Slack".into(), "Google Chrome".into()];
+
+        let result = detector.detect_active_call_from_snapshot(
+            &config,
+            true,
+            &running,
+            |_detector, _running, want_meet, want_teams| {
+                assert!(want_meet);
+                assert!(!want_teams);
+                Some(BrowserMeetProbe::Detected {
+                    provider: MeetingProvider::GoogleMeet,
+                })
+            },
+        );
+
+        assert_eq!(result, detected_for(MeetingProvider::GoogleMeet));
+    }
+
+    #[test]
+    fn high_confidence_native_app_still_beats_browser_probe() {
+        let detector = CallDetector::new(test_call_detection_config(vec![
+            "zoom.us".into(),
+            "google-meet".into(),
+        ]));
+        let config = detector.current_config();
+        let running = vec!["zoom.us".into(), "Google Chrome".into()];
+
+        let result = detector.detect_active_call_from_snapshot(
+            &config,
+            true,
+            &running,
+            |_detector, _running, _want_meet, _want_teams| {
+                panic!("Zoom should be detected before browser probing")
+            },
+        );
+
+        assert_eq!(
+            result,
+            DetectActiveCallResult::Detected {
+                display_name: "Zoom".into(),
+                process_name: "zoom.us".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn low_confidence_native_app_falls_back_after_browser_no_match() {
+        let detector = CallDetector::new(test_call_detection_config(vec![
+            "Slack".into(),
+            "google-meet".into(),
+        ]));
+        let config = detector.current_config();
+        let running = vec!["Slack".into(), "Google Chrome".into()];
+
+        let result = detector.detect_active_call_from_snapshot(
+            &config,
+            true,
+            &running,
+            |_detector, _running, _want_meet, _want_teams| Some(BrowserMeetProbe::NoMatch),
+        );
+
+        assert_eq!(
+            result,
+            DetectActiveCallResult::Detected {
+                display_name: "Slack".into(),
+                process_name: "Slack".into(),
+            }
+        );
     }
 
     #[test]

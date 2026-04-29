@@ -37,6 +37,11 @@ if [[ ! -f "$tmp/crates/mcp/dist/index.js" ]]; then
 fi
 
 initialize='{"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{"extensions":{"io.modelcontextprotocol/ui":{"mimeTypes":["text/html;profile=mcp-app"]}}},"clientInfo":{"name":"ci-smoke","version":"0"}},"jsonrpc":"2.0","id":0}'
+initialized='{"method":"notifications/initialized","params":{},"jsonrpc":"2.0"}'
+tools_list='{"method":"tools/list","params":{},"jsonrpc":"2.0","id":1}'
+resources_list='{"method":"resources/list","params":{},"jsonrpc":"2.0","id":2}'
+read_dashboard='{"method":"resources/read","params":{"uri":"ui://minutes/dashboard"},"jsonrpc":"2.0","id":3}'
+read_status='{"method":"resources/read","params":{"uri":"minutes://status"},"jsonrpc":"2.0","id":4}'
 
 out="$tmp/out.txt"
 err="$tmp/err.txt"
@@ -54,12 +59,12 @@ for candidate in timeout gtimeout; do
 done
 
 if [[ -n "$timeout_cmd" ]]; then
-  printf '%s\n' "$initialize" | \
+  printf '%s\n' "$initialize" "$initialized" "$tools_list" "$resources_list" "$read_dashboard" "$read_status" | \
     "$timeout_cmd" 15 node "$tmp/crates/mcp/dist/index.js" >"$out" 2>"$err" || rc=$?
 else
   # No timeout binary available. Fall back to running without one — node
   # exits on stdin EOF so a healthy server still returns quickly.
-  printf '%s\n' "$initialize" | \
+  printf '%s\n' "$initialize" "$initialized" "$tools_list" "$resources_list" "$read_dashboard" "$read_status" | \
     node "$tmp/crates/mcp/dist/index.js" >"$out" 2>"$err" || rc=$?
 fi
 

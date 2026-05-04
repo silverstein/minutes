@@ -216,16 +216,22 @@ fn resolve_minutes_in_user_shell() -> Vec<PathBuf> {
         UserShell::Other => &["-lc", "which -a minutes 2>/dev/null"],
     };
 
+    // `which -a` returns one entry per directory on PATH, so users with
+    // duplicate PATH entries (common: ~/.local/bin appears in both .zshrc
+    // and .zprofile) get the same path twice. Dedup while preserving order;
+    // the first hit on PATH is the one that actually wins.
     let lines: Vec<PathBuf> = std::process::Command::new(&shell)
         .args(args)
         .output()
         .ok()
         .map(|o| {
+            let mut seen = std::collections::HashSet::new();
             String::from_utf8_lossy(&o.stdout)
                 .lines()
                 .map(|l| l.trim().to_string())
                 .filter(|l| !l.is_empty())
                 .map(PathBuf::from)
+                .filter(|p| seen.insert(p.clone()))
                 .collect()
         })
         .unwrap_or_default();
@@ -337,11 +343,26 @@ fn read_plist_string(plist_path: &Path, key: &str) -> Option<String> {
     }
 }
 
+/// `true` when the path looks like a build artifact (Cargo/Tauri output) rather
+/// than a user-visible install. Spotlight indexes these because they're real
+/// `.app` bundles, but linking the CLI to a build tree means the CLI breaks
+/// the moment the developer runs `cargo clean`. Maintainers iterating on the
+/// app generate fresh build artifacts on every rebuild — those don't belong in
+/// the picker.
+fn is_build_artifact_path(p: &Path) -> bool {
+    let s = p.to_string_lossy();
+    s.contains("/target/release/")
+        || s.contains("/target/debug/")
+        || s.contains("/target/aarch64-")
+        || s.contains("/target/x86_64-")
+}
+
 fn discover_minutes_bundles() -> Vec<Value> {
     let query = format!(
         "kMDItemCFBundleIdentifier == '{}' || kMDItemCFBundleIdentifier == '{}'",
         PROD_BUNDLE_ID, DEV_BUNDLE_ID
     );
+    let running_root = current_bundle_root().unwrap_or_default();
     let mut paths: Vec<PathBuf> = std::process::Command::new("/usr/bin/mdfind")
         .arg(&query)
         .output()
@@ -352,6 +373,10 @@ fn discover_minutes_bundles() -> Vec<Value> {
                 .map(|l| l.trim().to_string())
                 .filter(|l| !l.is_empty())
                 .map(PathBuf::from)
+                // Exception: keep the running bundle even if it's a build
+                // artifact — the user can see it in the picker and pick it
+                // intentionally if they're iterating on the app itself.
+                .filter(|p| *p == running_root || !is_build_artifact_path(p))
                 .collect()
         })
         .unwrap_or_default();
@@ -368,8 +393,6 @@ fn discover_minutes_bundles() -> Vec<Value> {
         }
     }
 
-    let running_root = current_bundle_root().unwrap_or_default();
-
     paths
         .into_iter()
         .filter_map(|p| {
@@ -377,11 +400,18 @@ fn discover_minutes_bundles() -> Vec<Value> {
             let bundle_id = read_plist_string(&info_plist, "CFBundleIdentifier")?;
             let version = read_plist_string(&info_plist, "CFBundleShortVersionString")
                 .unwrap_or_else(|| "?".into());
+            // Per-bundle ad-hoc check so the confirmation overlay can warn
+            // about the bundle the user actually picked, not just the running
+            // app — the user may pick a different bundle in the multi-bundle
+            // picker, and signing status varies (e.g., dev app is properly
+            // signed, but a freshly-built target/release bundle is ad-hoc).
+            let adhoc = is_adhoc_signed(&p);
             Some(serde_json::json!({
                 "path": p,
                 "bundle_id": bundle_id,
                 "version": version,
                 "is_running": p == running_root,
+                "adhoc_signed": adhoc,
             }))
         })
         .collect()
@@ -391,6 +421,17 @@ fn discover_minutes_bundles() -> Vec<Value> {
 // Codesign detection (ad-hoc vs identity)
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// Returns `true` if the bundle is ad-hoc signed (no Team ID). Detection by
+/// `TeamIdentifier=` line in `codesign -dv` output:
+///   - real Developer-ID-signed bundle: `TeamIdentifier=ABCDE12345`
+///   - ad-hoc signed bundle (`codesign -s -`): `TeamIdentifier=not set`
+///   - unsigned (rare on Apple Silicon): the line may be absent entirely
+///
+/// Earlier versions of this check looked for `Authority=` lines, but those
+/// only appear with `-dvv` or higher verbosity — at `-dv` level they're
+/// absent on properly-signed bundles too, which made every bundle look
+/// ad-hoc. The `TeamIdentifier=not set` literal is what `codesign` actually
+/// prints for ad-hoc, and it IS in `-dv` output.
 fn is_adhoc_signed(bundle_root: &Path) -> bool {
     let out = match std::process::Command::new("/usr/bin/codesign")
         .args(["-dv"])
@@ -406,9 +447,19 @@ fn is_adhoc_signed(bundle_root: &Path) -> bool {
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
-    !combined
-        .lines()
-        .any(|l| l.trim_start().starts_with("Authority="))
+    let mut team_id_seen = false;
+    for line in combined.lines() {
+        let trimmed = line.trim_start();
+        if let Some(rest) = trimmed.strip_prefix("TeamIdentifier=") {
+            team_id_seen = true;
+            if rest.trim() == "not set" {
+                return true;
+            }
+        }
+    }
+    // No TeamIdentifier line at all → unsigned or weird; treat conservatively
+    // as ad-hoc so the warning surfaces.
+    !team_id_seen
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -947,6 +998,25 @@ mod tests {
     fn corrupted_state_falls_back_to_default() {
         let parsed: CliSetupState = serde_json::from_str("{not valid json").unwrap_or_default();
         assert_eq!(parsed.snooze_until_ms, 0);
+    }
+
+    #[test]
+    fn build_artifact_paths_filtered() {
+        assert!(is_build_artifact_path(Path::new(
+            "/Users/x/Sites/minutes/target/release/bundle/macos/Minutes.app"
+        )));
+        assert!(is_build_artifact_path(Path::new(
+            "/repo/target/debug/bundle/Minutes.app"
+        )));
+        assert!(is_build_artifact_path(Path::new(
+            "/repo/target/aarch64-apple-darwin/release/bundle/Minutes.app"
+        )));
+        assert!(!is_build_artifact_path(Path::new(
+            "/Applications/Minutes.app"
+        )));
+        assert!(!is_build_artifact_path(Path::new(
+            "/Users/x/Applications/Minutes Dev.app"
+        )));
     }
 
     #[test]

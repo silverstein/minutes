@@ -11074,7 +11074,12 @@
           'The CLI on your terminal will run the dev binary. Use this for QA only — uninstall before testing the production setup flow.',
         ]));
       }
-      if (state.adhoc_signed) {
+      // Prefer per-bundle adhoc flag (the bundle the user actually picked) over
+      // the running-app default — they can diverge when a developer iterates on
+      // the app and the multi-bundle picker offers both an installed signed
+      // bundle and a fresh ad-hoc target/release build.
+      const bundleIsAdhoc = bundle.adhoc_signed === undefined ? state.adhoc_signed : bundle.adhoc_signed;
+      if (bundleIsAdhoc) {
         nodes.push(el('div', { class: 'cli-setup-warning' }, [
           el('strong', { text: 'Ad-hoc signed. ' }),
           'Microphone permission for the CLI may not behave correctly without a Developer ID signature. Release builds from the official DMG sign cleanly.',

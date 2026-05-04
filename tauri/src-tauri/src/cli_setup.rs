@@ -524,7 +524,7 @@ fn prune_bak_files(dir: &Path, keep: usize) -> std::io::Result<()> {
             }
         })
         .collect();
-    bak.sort_by(|a, b| b.1.cmp(&a.1));
+    bak.sort_by_key(|b| std::cmp::Reverse(b.1));
     for (p, _) in bak.into_iter().skip(keep) {
         std::fs::remove_file(p).ok();
     }

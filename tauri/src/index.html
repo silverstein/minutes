@@ -3757,6 +3757,221 @@
     }
 
     /* ── What's New modal ── */
+    /* ── CLI setup card (About) + section (What's New) + setup overlay ── */
+    .about-cli-card {
+      padding: 12px 14px 12px;
+      border-radius: 14px;
+      background: var(--surface-fill);
+      border: 1px solid var(--border);
+      margin-bottom: 14px;
+    }
+
+    .about-cli-row {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 6px;
+    }
+
+    .about-cli-title {
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.5px;
+      text-transform: uppercase;
+      color: var(--text-tertiary);
+    }
+
+    .about-cli-status {
+      font-family: var(--font-mono);
+      font-size: 12px;
+      color: var(--text-secondary);
+    }
+
+    .about-cli-status.ok { color: var(--accent, var(--text)); }
+    .about-cli-status.stale { color: #c96b4e; }
+    .about-cli-status.warn { color: #c96b4e; }
+
+    .about-cli-detail {
+      font-size: 12px;
+      color: var(--text-tertiary);
+      line-height: 1.5;
+      margin-bottom: 8px;
+    }
+
+    .about-cli-detail code {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 1px 5px;
+    }
+
+    .about-cli-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .about-cli-actions:empty { display: none; }
+    .about-cli-detail:empty { display: none; margin-bottom: 0; }
+
+    .whats-new-cli-section {
+      padding: 14px 16px;
+      border-top: 1px solid var(--border);
+      background: var(--surface-fill);
+    }
+
+    .whats-new-cli-title {
+      font-size: 13px;
+      font-weight: 600;
+      margin-bottom: 6px;
+      color: var(--text);
+    }
+
+    .whats-new-cli-body {
+      font-size: 12px;
+      color: var(--text-secondary);
+      line-height: 1.5;
+      margin-bottom: 10px;
+    }
+
+    .whats-new-cli-body code {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 1px 5px;
+    }
+
+    .whats-new-cli-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .cli-setup-scrim {
+      position: fixed;
+      inset: 0;
+      background: var(--modal-scrim);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+      z-index: 200;
+    }
+
+    .cli-setup-scrim.active { display: flex; }
+
+    .cli-setup-modal {
+      width: min(560px, 100%);
+      max-height: calc(100vh - 40px);
+      overflow-y: auto;
+      background: var(--bg-elevated);
+      border: 1px solid var(--border-mid);
+      border-radius: 18px;
+      box-shadow: 0 24px 60px var(--shadow-stronger);
+      padding: 20px;
+      color: var(--text);
+    }
+
+    .cli-setup-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 14px;
+    }
+
+    .cli-setup-header h2 {
+      font-size: 18px;
+      font-family: var(--font-display);
+      font-weight: 400;
+      letter-spacing: -0.3px;
+    }
+
+    .cli-setup-body {
+      font-size: 13px;
+      color: var(--text-secondary);
+      line-height: 1.55;
+      margin-bottom: 14px;
+    }
+
+    .cli-setup-body p { margin: 0 0 10px; }
+    .cli-setup-body p:last-child { margin-bottom: 0; }
+
+    .cli-setup-body code,
+    .cli-setup-snippet {
+      font-family: var(--font-mono);
+      font-size: 12px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 8px 10px;
+      display: block;
+      white-space: pre-wrap;
+      word-break: break-all;
+      margin: 6px 0;
+      color: var(--text);
+    }
+
+    .cli-setup-bundle {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 12px;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      cursor: pointer;
+      margin-bottom: 6px;
+    }
+
+    .cli-setup-bundle.selected {
+      border-color: var(--accent, var(--text));
+      background: var(--surface-fill);
+    }
+
+    .cli-setup-bundle-meta {
+      flex: 1;
+      min-width: 0;
+    }
+
+    .cli-setup-bundle-path {
+      font-family: var(--font-mono);
+      font-size: 12px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .cli-setup-bundle-tag {
+      font-size: 11px;
+      color: var(--text-tertiary);
+      margin-top: 2px;
+    }
+
+    .cli-setup-warning {
+      padding: 10px 12px;
+      border-radius: 10px;
+      background: rgba(201, 107, 78, 0.1);
+      border: 1px solid rgba(201, 107, 78, 0.3);
+      color: #c96b4e;
+      font-size: 12px;
+      line-height: 1.5;
+      margin-bottom: 10px;
+    }
+
+    .cli-setup-footer {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      justify-content: flex-end;
+    }
+
     .whats-new-scrim {
       display: none;
       position: fixed;
@@ -4251,6 +4466,18 @@
       </div>
     </div>
 
+    <!-- CLI setup overlay (translocation, multi-bundle picker, dev warning, success) -->
+    <div class="cli-setup-scrim" id="cli-setup-scrim">
+      <div class="cli-setup-modal">
+        <div class="cli-setup-header">
+          <h2 id="cli-setup-title">Set up CLI</h2>
+          <button class="btn btn-secondary btn-sm" id="btn-cli-setup-close" aria-label="Close">Close</button>
+        </div>
+        <div class="cli-setup-body" id="cli-setup-body"></div>
+        <div class="cli-setup-footer" id="cli-setup-footer"></div>
+      </div>
+    </div>
+
     <!-- What's New modal (shown once after an update) -->
     <div class="whats-new-scrim" id="whats-new-scrim">
       <div class="whats-new-modal">
@@ -4259,6 +4486,11 @@
           <div class="whats-new-version" id="whats-new-version"></div>
         </div>
         <div class="whats-new-body" id="whats-new-body"></div>
+        <div class="whats-new-cli-section" id="whats-new-cli-section" hidden>
+          <div class="whats-new-cli-title">Update the CLI to match</div>
+          <div class="whats-new-cli-body" id="whats-new-cli-body"></div>
+          <div class="whats-new-cli-actions" id="whats-new-cli-actions"></div>
+        </div>
         <div class="whats-new-footer">
           <button class="btn btn-secondary btn-sm" id="btn-whats-new-release">View on GitHub</button>
           <button class="btn btn-primary btn-sm" id="btn-whats-new-dismiss">Got it</button>
@@ -4520,6 +4752,14 @@
           <div class="about-item-body">Built to work well with Claude Desktop, Claude Code, Cowork, Codex, and other
             tool-calling assistants.</div>
         </div>
+      </div>
+      <div class="about-cli-card" id="about-cli-card" hidden>
+        <div class="about-cli-row">
+          <div class="about-cli-title">Command-line tool</div>
+          <div class="about-cli-status" id="about-cli-status"></div>
+        </div>
+        <div class="about-cli-detail" id="about-cli-detail"></div>
+        <div class="about-cli-actions" id="about-cli-actions"></div>
       </div>
       <div class="about-footer" id="about-tray-copy">
         Minutes is open source, markdown-backed, and designed so the artifact remains valuable even outside this app.
@@ -10452,6 +10692,509 @@
     });
 
     maybeShowWhatsNewAfterUpdate();
+
+    // ══════════════════════════════════════════════════════════════
+    // ── Bundled CLI setup ──
+    // ──
+    // Backend: cli_setup module in tauri/src-tauri/src/cli_setup.rs.
+    // Surfaces:
+    //   1. Persistent CLI card in the About modal (every install_method).
+    //   2. CLI section appended below the What's New body (post-update only,
+    //      when in_sync=false or install_method="none").
+    //   3. cli-setup-scrim modal for confirmation, multi-bundle picker,
+    //      translocation guard, and success feedback.
+    //
+    // All dynamic content goes through createElement/textContent rather than
+    // innerHTML; the only HTML built up directly is static structure (defined
+    // here in this file), which is trusted.
+    // ══════════════════════════════════════════════════════════════
+    const aboutCliCard = document.getElementById('about-cli-card');
+    const aboutCliStatus = document.getElementById('about-cli-status');
+    const aboutCliDetail = document.getElementById('about-cli-detail');
+    const aboutCliActions = document.getElementById('about-cli-actions');
+    const whatsNewCliSection = document.getElementById('whats-new-cli-section');
+    const whatsNewCliBody = document.getElementById('whats-new-cli-body');
+    const whatsNewCliActions = document.getElementById('whats-new-cli-actions');
+    const cliSetupScrim = document.getElementById('cli-setup-scrim');
+    const cliSetupTitle = document.getElementById('cli-setup-title');
+    const cliSetupBody = document.getElementById('cli-setup-body');
+    const cliSetupFooter = document.getElementById('cli-setup-footer');
+    const cliSetupCloseBtn = document.getElementById('btn-cli-setup-close');
+
+    function el(tag, props = {}, children = []) {
+      const node = document.createElement(tag);
+      for (const [k, v] of Object.entries(props)) {
+        if (k === 'class') node.className = v;
+        else if (k === 'text') node.textContent = v;
+        else if (k === 'on') {
+          for (const [ev, handler] of Object.entries(v)) node.addEventListener(ev, handler);
+        } else if (k === 'style') Object.assign(node.style, v);
+        else if (k === 'attrs') {
+          for (const [an, av] of Object.entries(v)) node.setAttribute(an, av);
+        } else if (k === 'hidden') node.hidden = !!v;
+        else node[k] = v;
+      }
+      for (const child of [].concat(children)) {
+        if (child == null) continue;
+        if (typeof child === 'string') node.appendChild(document.createTextNode(child));
+        else node.appendChild(child);
+      }
+      return node;
+    }
+
+    function clearChildren(node) {
+      while (node.firstChild) node.removeChild(node.firstChild);
+    }
+
+    function setBody(node, ...elements) {
+      clearChildren(node);
+      for (const e of elements) if (e) node.appendChild(e);
+    }
+
+    function code(text) { return el('code', { text }); }
+    function pre(text) { return el('pre', { class: 'cli-setup-snippet', text }); }
+
+    function openCliSetupOverlay() {
+      cliSetupScrim?.classList.add('active');
+    }
+    function closeCliSetupOverlay() {
+      cliSetupScrim?.classList.remove('active');
+    }
+    cliSetupCloseBtn?.addEventListener('click', closeCliSetupOverlay);
+    cliSetupScrim?.addEventListener('click', (e) => {
+      if (e.target === cliSetupScrim) closeCliSetupOverlay();
+    });
+
+    async function fetchCliInstallState() {
+      try { return await invoke('cmd_cli_install_state'); }
+      catch (e) { console.error('[cli-setup] cmd_cli_install_state', e); return null; }
+    }
+
+    function showAboutCliFlash(text) {
+      if (!aboutCliStatus) return;
+      const original = aboutCliStatus.textContent;
+      const cls = aboutCliStatus.className;
+      aboutCliStatus.textContent = text;
+      aboutCliStatus.className = 'about-cli-status ok';
+      setTimeout(() => {
+        aboutCliStatus.textContent = original;
+        aboutCliStatus.className = cls;
+      }, 1500);
+    }
+
+    let lastCliState = null;
+
+    async function refreshCliStatus(force = false) {
+      const state = force
+        ? await invoke('cmd_cli_recheck').catch(() => null)
+        : await fetchCliInstallState();
+      if (!state) return;
+      lastCliState = state;
+      renderAboutCliCard(state);
+      renderWhatsNewCliSection(state);
+    }
+
+    function describeMethod(state) {
+      const methodCopy = {
+        none: 'No CLI on PATH',
+        bundled: 'Bundled with this app',
+        cargo: 'Managed by cargo',
+        brew: 'Managed by Homebrew',
+        other: 'Custom install',
+        conflict: 'Multiple binaries on PATH',
+        unknown: 'Detection in progress…',
+      };
+      const appV = state.app_version || '';
+      const cliV = state.path_version || '';
+      const inSync = state.in_sync;
+      const method = state.install_method || 'unknown';
+      const actions = [];
+      let statusText = methodCopy[method] || method;
+      let statusClass = '';
+      let detailNodes = [];
+
+      if (state.translocated) {
+        return {
+          statusText: 'App is in App Translocation',
+          statusClass: 'warn',
+          detailNodes: [el('p', {}, ['Move ', code('Minutes.app'), ' to your ', code('/Applications'), ' folder, then reopen and try again.'])],
+          actions: [{ label: 'Show fix command', kind: 'secondary', onClick: () => openTranslocationOverlay(state) }],
+        };
+      }
+
+      if (method === 'none') {
+        statusText = `App v${appV} · CLI not installed`;
+        statusClass = 'stale';
+        actions.push({ label: 'Set up CLI', kind: 'primary', onClick: () => beginCliSetup(state) });
+      } else if (method === 'bundled') {
+        if (inSync) {
+          statusText = `CLI v${cliV} · in sync`;
+          statusClass = 'ok';
+        } else {
+          statusText = `CLI v${cliV || '?'} · app v${appV}`;
+          statusClass = 'stale';
+          detailNodes.push(el('p', { text: 'The bundled link points at a different version. Repair it to match this app.' }));
+          actions.push({ label: 'Repair CLI link', kind: 'primary', onClick: () => beginCliSetup(state) });
+        }
+      } else if (method === 'cargo') {
+        if (inSync) {
+          statusText = `CLI v${cliV} · cargo (in sync)`;
+          statusClass = 'ok';
+        } else {
+          const cmd = 'cargo install minutes-cli';
+          statusText = `CLI v${cliV} · app v${appV}`;
+          statusClass = 'stale';
+          detailNodes.push(el('p', {}, ['You installed via ', code('cargo install'), '. Update it yourself with:']));
+          detailNodes.push(pre(cmd));
+          actions.push({
+            label: 'Copy command',
+            kind: 'secondary',
+            onClick: () => navigator.clipboard.writeText(cmd).then(() => showAboutCliFlash('Copied')),
+          });
+        }
+      } else if (method === 'brew') {
+        if (inSync) {
+          statusText = `CLI v${cliV} · brew (in sync)`;
+          statusClass = 'ok';
+        } else {
+          const cmd = 'brew upgrade silverstein/tap/minutes';
+          statusText = `CLI v${cliV} · app v${appV}`;
+          statusClass = 'stale';
+          detailNodes.push(el('p', { text: 'You installed via Homebrew. Update it yourself with:' }));
+          detailNodes.push(pre(cmd));
+          actions.push({
+            label: 'Copy command',
+            kind: 'secondary',
+            onClick: () => navigator.clipboard.writeText(cmd).then(() => showAboutCliFlash('Copied')),
+          });
+        }
+      } else if (method === 'other') {
+        if (inSync) {
+          statusText = `CLI v${cliV} · in sync`;
+          statusClass = 'ok';
+        } else {
+          statusText = `CLI v${cliV} · app v${appV}`;
+          statusClass = 'stale';
+          detailNodes.push(el('p', {}, [
+            'The ', code('minutes'), ' on your PATH is not managed by this app. Reinstall or update it however you originally installed.',
+          ]));
+        }
+      } else if (method === 'conflict') {
+        statusText = `${state.path_candidates?.length || '?'} binaries on PATH`;
+        statusClass = 'warn';
+        detailNodes.push(el('p', {}, ['Multiple ', code('minutes'), ' binaries are on your PATH. The first wins; the others are shadowed.']));
+        const list = el('p');
+        const cands = state.path_candidates || [];
+        cands.forEach((p, i) => {
+          if (i > 0) list.appendChild(el('br'));
+          list.appendChild(code(p));
+        });
+        detailNodes.push(list);
+        actions.push({ label: 'Set up bundled CLI', kind: 'primary', onClick: () => beginCliSetup(state) });
+      } else {
+        statusText = 'CLI status unknown';
+        detailNodes.push(el('p', { text: 'Detection timed out. Re-check after a moment.' }));
+        actions.push({ label: 'Re-check', kind: 'secondary', onClick: () => refreshCliStatus(true) });
+      }
+
+      return { statusText, statusClass, detailNodes, actions };
+    }
+
+    function renderActions(container, actions, includeRecheck) {
+      clearChildren(container);
+      for (const action of actions) {
+        const btn = el('button', {
+          class: `btn btn-${action.kind === 'primary' ? 'primary' : 'secondary'} btn-sm`,
+          text: action.label,
+          on: { click: () => action.onClick() },
+        });
+        container.appendChild(btn);
+      }
+      if (includeRecheck) {
+        container.appendChild(el('button', {
+          class: 'btn btn-secondary btn-sm',
+          text: 'Re-check',
+          on: { click: () => refreshCliStatus(true) },
+        }));
+      }
+    }
+
+    function renderAboutCliCard(state) {
+      if (!aboutCliCard || !aboutCliStatus || !aboutCliDetail || !aboutCliActions) return;
+      aboutCliCard.hidden = false;
+      const { statusText, statusClass, detailNodes, actions } = describeMethod(state);
+      aboutCliStatus.textContent = statusText;
+      aboutCliStatus.className = `about-cli-status ${statusClass || ''}`.trim();
+      setBody(aboutCliDetail, ...detailNodes);
+      renderActions(aboutCliActions, actions, true);
+    }
+
+    function renderWhatsNewCliSection(state) {
+      if (!whatsNewCliSection || !whatsNewCliBody || !whatsNewCliActions) return;
+      const method = state.install_method;
+      const shouldShow = !state.in_sync || method === 'none' || method === 'conflict';
+      if (!shouldShow || state.snoozed) {
+        whatsNewCliSection.hidden = true;
+        return;
+      }
+      whatsNewCliSection.hidden = false;
+      const { statusText, detailNodes, actions } = describeMethod(state);
+      setBody(whatsNewCliBody, el('p', {}, [el('strong', { text: statusText })]), ...detailNodes);
+      renderActions(whatsNewCliActions, [
+        ...actions,
+        {
+          label: "I'll do it myself",
+          kind: 'secondary',
+          onClick: async () => {
+            try {
+              await invoke('cmd_cli_snooze', { request: { days: 7 } });
+              whatsNewCliSection.hidden = true;
+            } catch (e) {
+              console.error('[cli-setup] snooze', e);
+            }
+          },
+        },
+      ], false);
+    }
+
+    function openTranslocationOverlay(state) {
+      cliSetupTitle.textContent = 'Move app out of quarantine';
+      const cmd = `xattr -dr com.apple.quarantine "${state.bundle_root || '/Applications/Minutes.app'}"`;
+      setBody(cliSetupBody,
+        el('p', { text: "Minutes is running from a temporary App Translocation location. Setup can't write a stable symlink against it." }),
+        el('p', {}, ['Move ', code('Minutes.app'), ' to your ', code('/Applications'), ' folder, or run this in Terminal to clear the quarantine flag:']),
+        pre(cmd),
+        el('p', {}, ['Then reopen Minutes from ', code('/Applications'), ' and try again.']),
+      );
+      const copyBtn = el('button', { class: 'btn btn-primary btn-sm', text: 'Copy command' });
+      copyBtn.addEventListener('click', async () => {
+        await navigator.clipboard.writeText(cmd);
+        copyBtn.textContent = 'Copied';
+        setTimeout(() => (copyBtn.textContent = 'Copy command'), 1200);
+      });
+      const tryFixBtn = el('button', {
+        class: 'btn btn-secondary btn-sm',
+        text: 'Try to clear automatically',
+      });
+      tryFixBtn.addEventListener('click', async () => {
+        try {
+          await invoke('cmd_cli_clear_quarantine');
+          setBody(cliSetupBody, el('p', {}, [
+            'Cleared. Quit Minutes from the menu bar and reopen it from ',
+            code('/Applications'), ' to take effect.',
+          ]));
+        } catch (e) {
+          setBody(cliSetupBody,
+            el('p', { text: "Couldn't clear automatically. Copy the command below and run it in Terminal:" }),
+            pre(String(e)),
+          );
+        }
+      });
+      setBody(cliSetupFooter, tryFixBtn, copyBtn);
+      openCliSetupOverlay();
+    }
+
+    function pickDefaultBundle(known) {
+      if (!known || known.length === 0) return null;
+      const prod = known.find((b) => b.bundle_id === 'com.useminutes.desktop');
+      if (prod) return prod;
+      const running = known.find((b) => b.is_running);
+      if (running) return running;
+      return known[0];
+    }
+
+    async function beginCliSetup(state) {
+      if (state.translocated) {
+        openTranslocationOverlay(state);
+        return;
+      }
+      const known = state.known_bundles || [];
+      if (known.length > 1) {
+        showBundlePicker(state, known, pickDefaultBundle(known));
+      } else {
+        const single = known[0] || { path: state.bundle_root, bundle_id: state.bundle_id, version: state.app_version };
+        showSetupConfirmation(state, single);
+      }
+    }
+
+    function showBundlePicker(state, known, selected) {
+      cliSetupTitle.textContent = 'Choose a Minutes bundle';
+      const intro = el('p', { text: 'Multiple Minutes installs were found. Pick which one the CLI should point at. Updates to the selected bundle will keep the CLI in sync automatically.' });
+      const list = el('div');
+      let chosenPath = selected?.path;
+
+      const renderList = () => {
+        clearChildren(list);
+        for (const b of known) {
+          const meta = el('div', { class: 'cli-setup-bundle-meta' }, [
+            el('div', { class: 'cli-setup-bundle-path', text: b.path }),
+            el('div', { class: 'cli-setup-bundle-tag', text: `v${b.version} · ${b.bundle_id}${b.is_running ? ' · running' : ''}` }),
+          ]);
+          const row = el('div', {
+            class: 'cli-setup-bundle' + (b.path === chosenPath ? ' selected' : ''),
+            on: {
+              click: () => {
+                chosenPath = b.path;
+                renderList();
+              },
+            },
+          }, [meta]);
+          list.appendChild(row);
+        }
+      };
+      renderList();
+      setBody(cliSetupBody, intro, list);
+
+      const cancel = el('button', {
+        class: 'btn btn-secondary btn-sm',
+        text: 'Cancel',
+        on: { click: closeCliSetupOverlay },
+      });
+      const next = el('button', {
+        class: 'btn btn-primary btn-sm',
+        text: 'Continue',
+        on: {
+          click: () => {
+            const picked = known.find((b) => b.path === chosenPath) || known[0];
+            showSetupConfirmation(state, picked);
+          },
+        },
+      });
+      setBody(cliSetupFooter, cancel, next);
+      openCliSetupOverlay();
+    }
+
+    function showSetupConfirmation(state, bundle) {
+      cliSetupTitle.textContent = 'Set up CLI';
+      const isDev = bundle.bundle_id === 'com.useminutes.desktop.dev';
+      const nodes = [];
+      if (isDev) {
+        nodes.push(el('div', { class: 'cli-setup-warning' }, [
+          el('strong', { text: 'Dev build. ' }),
+          'The CLI on your terminal will run the dev binary. Use this for QA only — uninstall before testing the production setup flow.',
+        ]));
+      }
+      if (state.adhoc_signed) {
+        nodes.push(el('div', { class: 'cli-setup-warning' }, [
+          el('strong', { text: 'Ad-hoc signed. ' }),
+          'Microphone permission for the CLI may not behave correctly without a Developer ID signature. Release builds from the official DMG sign cleanly.',
+        ]));
+      }
+      nodes.push(el('p', { text: 'Setup will:' }));
+      nodes.push(el('ul', {}, [
+        el('li', {}, ['Create ', code('~/.local/bin/minutes'), ' as a symlink into ', code(bundle.path), '.']),
+        el('li', {}, ['Add ', code('~/.local/bin'), ' to your ', code(state.shell || 'shell'), ' PATH if not already on it.']),
+      ]));
+      nodes.push(el('p', { text: 'Future Minutes app updates will automatically update the CLI through the symlink — no extra step.' }));
+      nodes.push(el('p', { style: { color: 'var(--text-tertiary)', fontSize: '12px' } }, [
+        'The first time you run ', code('minutes record'), ' from a terminal, macOS will ask for microphone access. This is a separate grant from the desktop app — that\'s normal. Click ',
+        el('em', { text: 'Allow' }), '.',
+      ]));
+      setBody(cliSetupBody, ...nodes);
+
+      const cancel = el('button', {
+        class: 'btn btn-secondary btn-sm',
+        text: 'Cancel',
+        on: { click: closeCliSetupOverlay },
+      });
+      const go = el('button', {
+        class: 'btn btn-primary btn-sm',
+        text: isDev ? 'Set up Dev CLI anyway' : 'Set up CLI',
+      });
+      go.addEventListener('click', async () => {
+        go.disabled = true;
+        go.textContent = 'Setting up…';
+        try {
+          const response = await invoke('cmd_cli_setup_run', { request: { bundle_root: bundle.path } });
+          showSetupSuccess(response);
+          await refreshCliStatus(true);
+        } catch (e) {
+          setBody(cliSetupBody,
+            el('p', { text: 'Setup failed:' }),
+            pre(String(e)),
+          );
+          const close = el('button', {
+            class: 'btn btn-secondary btn-sm',
+            text: 'Close',
+            on: { click: closeCliSetupOverlay },
+          });
+          setBody(cliSetupFooter, close);
+        }
+      });
+      setBody(cliSetupFooter, cancel, go);
+      openCliSetupOverlay();
+    }
+
+    function showSetupSuccess(response) {
+      cliSetupTitle.textContent = 'CLI ready';
+      const sym = response.symlink || {};
+      const pathInfo = response.path || {};
+      const lines = [];
+      if (sym.already_correct) {
+        lines.push(el('p', {}, [
+          'Symlink was already correct: ',
+          code(sym.link), ' → ', code(sym.target), '.',
+        ]));
+      } else {
+        lines.push(el('p', {}, [
+          'Linked ', code(sym.link), ' → ', code(sym.target), '.',
+        ]));
+      }
+      if (sym.created_local_bin) {
+        lines.push(el('p', {}, [
+          'Created ', code('~/.local/bin'),
+          '. Other dev tools (pipx, npm, etc.) may also use this directory — that\'s fine.',
+        ]));
+      }
+      if (sym.backup) {
+        lines.push(el('p', {}, ['Backed up the previous file to ', code(sym.backup), '.']));
+      }
+      if (pathInfo.action === 'appended') {
+        const filesNode = el('span');
+        (pathInfo.files_touched || []).forEach((f, i) => {
+          if (i > 0) filesNode.appendChild(document.createTextNode(', '));
+          filesNode.appendChild(code(f));
+        });
+        lines.push(el('p', {}, [
+          'Added ', code('~/.local/bin'), ' to your ', code(pathInfo.shell), ' PATH (', filesNode, '). Open a new terminal to pick it up.',
+        ]));
+      } else if (pathInfo.action === 'fish-add-path') {
+        lines.push(el('p', {}, [
+          'Added ', code('~/.local/bin'), ' to your fish universal PATH. Open a new fish session to pick it up.',
+        ]));
+      } else if (pathInfo.action === 'manual' && pathInfo.manual_snippet) {
+        lines.push(el('p', { text: 'Add this to your shell config and restart your terminal:' }));
+        lines.push(pre(pathInfo.manual_snippet));
+      } else if (pathInfo.action === 'skipped') {
+        lines.push(el('p', {}, [code('~/.local/bin'), ' is already on your PATH — no shell config changes needed.']));
+      }
+      lines.push(el('p', {}, ['Open a new terminal and run ', code('minutes --version'), ' to confirm.']));
+      lines.push(el('p', { style: { color: 'var(--text-tertiary)', fontSize: '12px' } }, [
+        'First terminal ', code('minutes record'), ' will trigger a one-time macOS microphone permission prompt — separate from the app\'s grant. Click ',
+        el('em', { text: 'Allow' }), '.',
+      ]));
+      setBody(cliSetupBody, ...lines);
+      const close = el('button', {
+        class: 'btn btn-primary btn-sm',
+        text: 'Done',
+        on: { click: closeCliSetupOverlay },
+      });
+      setBody(cliSetupFooter, close);
+    }
+
+    // Refresh CLI status when the About modal opens.
+    const _origOpenAbout = openAbout;
+    openAbout = function () {
+      _origOpenAbout();
+      refreshCliStatus(false);
+    };
+
+    // Refresh the What's New CLI section each time the modal renders.
+    const _origShowWhatsNew = showWhatsNewModal;
+    showWhatsNewModal = function (result, options) {
+      _origShowWhatsNew(result, options);
+      refreshCliStatus(false);
+    };
 
     // ── Listen for live transcript events (T6: immediate UI feedback) ──
     currentWindow.listen('live-transcript:started', () => {

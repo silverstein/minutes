@@ -32,6 +32,13 @@ if ! cargo build --release -p minutes-cli --features "$MINUTES_BUILD_FEATURES" 2
 fi
 rm -f "$_build_tmp"
 
+echo "=== Staging CLI as Tauri sidecar ==="
+# v1: aarch64-only sidecars. x86_64 cross-compile is a v2 follow-up. The Tauri
+# sidecar convention requires an arch-suffixed filename.
+HOST_TARGET="$(rustc -Vv | awk '/host:/ {print $2}')"
+mkdir -p tauri/src-tauri/bin
+cp -f target/release/minutes "tauri/src-tauri/bin/minutes-${HOST_TARGET}"
+
 echo "=== Building Tauri app ==="
 # The calendar-events Swift helper is compiled and staged into
 # tauri/src-tauri/resources/ by tauri/src-tauri/build.rs, and Tauri bundles it
@@ -42,6 +49,33 @@ if [[ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" ]]; then
     TAURI_BUILD_ARGS+=(--no-sign)
 fi
 "${TAURI_BUILD_ARGS[@]}"
+
+echo "=== Re-signing bundled CLI sidecar with its own entitlements ==="
+# The CLI sidecar needs `com.apple.security.device.audio-input` so `minutes record`
+# from a terminal hits the macOS TCC mic prompt instead of silently failing. The
+# outer `cargo tauri build` (with `--deep` under the hood) clobbers any nested
+# entitlements, so we explicitly re-sign the sidecar AFTER the bundle is built.
+#
+# Ad-hoc signing fallback for OSS contributors: TCC entitlements are largely
+# ignored without a Team ID, so contributor builds will still see the TCC denial
+# on first terminal `minutes record`. The setup UI surfaces this when the
+# running bundle is ad-hoc-signed (detected via codesign -dv).
+SIGN_ID="${APPLE_SIGNING_IDENTITY:-${MINUTES_DEV_SIGNING_IDENTITY:--}}"
+APP_BUNDLE="target/release/bundle/macos/Minutes.app"
+# Tauri's bundler strips the target-triple suffix from externalBin names when
+# copying into the .app — the on-disk filename is `minutes`, not
+# `minutes-${HOST_TARGET}`. Both the package input ($HOST_TARGET file in
+# tauri/src-tauri/bin/) and the bundled output (plain `minutes`) are required.
+SIDECAR="${APP_BUNDLE}/Contents/MacOS/minutes"
+if [[ -f "$SIDECAR" ]]; then
+    codesign --force --options runtime \
+        --entitlements tauri/src-tauri/minutes-cli.entitlements \
+        --sign "$SIGN_ID" \
+        "$SIDECAR"
+    echo "  Signed sidecar with identity: $SIGN_ID"
+else
+    echo "  WARNING: expected sidecar not found at $SIDECAR — skipping re-sign."
+fi
 
 APP_VERSION="$(python3 - <<'PY'
 import json

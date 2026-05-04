@@ -5,8 +5,77 @@ use std::process::Command;
 fn main() {
     compile_system_audio_helper();
     compile_calendar_helper();
+    stage_minutes_cli_sidecar();
     stage_assistant_skill_bundle();
     tauri_build::build()
+}
+
+/// Ensure `bin/minutes-<target>` exists so Tauri's `externalBin` resolution
+/// succeeds during plain `cargo check` / `cargo clippy` runs that don't go
+/// through `scripts/build.sh`.
+///
+/// If the release CLI has been built (`target/release/minutes`), copy it. If
+/// not, write a non-empty placeholder. The placeholder is enough to satisfy
+/// Tauri's existence check at compile time; the real bundling step
+/// (`cargo tauri build --bundles app`) is preceded by `scripts/build.sh`'s
+/// CLI build + copy, which overwrites this with the actual binary.
+fn stage_minutes_cli_sidecar() {
+    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    if target_os != "macos" {
+        return;
+    }
+
+    let manifest_dir = PathBuf::from(
+        std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR should be set"),
+    );
+    let target = std::env::var("TARGET").unwrap_or_else(|_| "unknown-target".into());
+    let bin_dir = manifest_dir.join("bin");
+    let staged = bin_dir.join(format!("minutes-{}", target));
+
+    println!("cargo:rerun-if-changed={}", staged.display());
+
+    if staged.exists() {
+        return;
+    }
+
+    fs::create_dir_all(&bin_dir).expect("failed to create sidecar bin dir");
+
+    // Prefer the built release CLI when present (developer ran
+    // `cargo build --release -p minutes-cli` first).
+    let repo_root = manifest_dir.join("../..");
+    let candidate_paths = [
+        repo_root
+            .join("target")
+            .join(&target)
+            .join("release/minutes"),
+        repo_root.join("target/release/minutes"),
+    ];
+    for candidate in candidate_paths.iter() {
+        if candidate.exists() {
+            fs::copy(candidate, &staged).expect("failed to copy CLI sidecar");
+            return;
+        }
+    }
+
+    // Placeholder — `cargo tauri build` will overwrite this from `scripts/build.sh`.
+    println!(
+        "cargo:warning=No minutes CLI release binary found; writing placeholder sidecar at {}. Run `cargo build --release -p minutes-cli` (or `scripts/build.sh`) before `cargo tauri build`.",
+        staged.display()
+    );
+    fs::write(
+        &staged,
+        b"#!/bin/sh\necho 'minutes CLI placeholder' >&2\nexit 1\n",
+    )
+    .expect("failed to write placeholder sidecar");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perm = fs::metadata(&staged)
+            .expect("metadata for placeholder sidecar")
+            .permissions();
+        perm.set_mode(0o755);
+        fs::set_permissions(&staged, perm).expect("chmod placeholder sidecar");
+    }
 }
 
 fn compile_system_audio_helper() {

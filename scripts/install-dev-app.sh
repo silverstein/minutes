@@ -61,6 +61,11 @@ fi
 echo "=== Building CLI (release) ==="
 run_with_ort_retry cargo build --release -p minutes-cli --features "$MINUTES_BUILD_FEATURES"
 
+echo "=== Staging CLI as Tauri sidecar ==="
+HOST_TARGET="$(rustc -Vv | awk '/host:/ {print $2}')"
+mkdir -p tauri/src-tauri/bin
+cp -f target/release/minutes "tauri/src-tauri/bin/minutes-${HOST_TARGET}"
+
 echo "=== Building ${DEV_PRODUCT_NAME}.app ==="
 # The calendar-events Swift helper is compiled and staged into
 # tauri/src-tauri/resources/ by tauri/src-tauri/build.rs, and Tauri bundles it
@@ -85,6 +90,30 @@ else
   echo "Using ad-hoc signing so the app remains runnable for contributors."
   echo "TCC-sensitive features may still require re-granting permissions after rebuilds."
   codesign --force --deep --sign - "$BUILD_APP"
+fi
+
+echo "=== Re-signing bundled CLI sidecar with its own entitlements ==="
+# Outer --deep sign above clobbers nested entitlements; re-sign the CLI sidecar
+# afterwards with mic input entitlement so `minutes record` from a terminal
+# triggers TCC instead of failing silently. Ad-hoc-signed sidecars don't get
+# entitlements honored — that's documented in §1a of the plan.
+# Tauri's bundler strips the target-triple from externalBin names, so the
+# sidecar lands at `Contents/MacOS/minutes` (not `minutes-${HOST_TARGET}`).
+SIDECAR_RESIGN="${BUILD_APP}/Contents/MacOS/minutes"
+if [[ -f "$SIDECAR_RESIGN" ]]; then
+  if [[ "$SIGN_MODE" == "identity" ]]; then
+    codesign --force --options runtime --timestamp \
+      --entitlements tauri/src-tauri/minutes-cli.entitlements \
+      --sign "$SIGNING_IDENTITY" \
+      "$SIDECAR_RESIGN"
+  else
+    codesign --force --options runtime \
+      --entitlements tauri/src-tauri/minutes-cli.entitlements \
+      --sign - \
+      "$SIDECAR_RESIGN"
+  fi
+else
+  echo "  WARNING: sidecar not found at $SIDECAR_RESIGN — skipping re-sign."
 fi
 
 echo "=== Installing ${DEV_PRODUCT_NAME}.app to ${INSTALL_DIR} ==="

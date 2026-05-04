@@ -3,7 +3,8 @@
     "externalBin": [
       "bin/mic_check",
       "bin/system_audio_record",
-      "bin/calendar-events"
+      "bin/calendar-events",
+      "bin/minutes"
     ],
     "resources": [
       "resources/assistant-skill-bundle/**/*"

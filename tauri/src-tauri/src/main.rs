@@ -19,6 +19,8 @@ static PARAKEET_FEATURE_SENTINEL: &[u8] = b"transcribe_parakeet parakeet_helper\
 
 mod call_capture;
 mod call_detect;
+#[cfg(target_os = "macos")]
+mod cli_setup;
 mod commands;
 mod context;
 mod palette_dispatch;
@@ -2010,6 +2012,16 @@ fn main() {
             commands::cmd_install_update,
             commands::cmd_cancel_update_install,
             commands::cmd_debug_simulate_update,
+            #[cfg(target_os = "macos")]
+            cli_setup::cmd_cli_install_state,
+            #[cfg(target_os = "macos")]
+            cli_setup::cmd_cli_setup_run,
+            #[cfg(target_os = "macos")]
+            cli_setup::cmd_cli_snooze,
+            #[cfg(target_os = "macos")]
+            cli_setup::cmd_cli_recheck,
+            #[cfg(target_os = "macos")]
+            cli_setup::cmd_cli_clear_quarantine,
             commands::cmd_check_whats_new,
             commands::cmd_get_whats_new,
             commands::cmd_dismiss_whats_new,

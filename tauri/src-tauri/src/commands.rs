@@ -10751,6 +10751,12 @@ pub async fn cmd_install_update(app: tauri::AppHandle) -> Result<serde_json::Val
     if state.dictation_active.load(Ordering::Relaxed) {
         return Err("Cannot update during dictation. Stop it first.".into());
     }
+    // §7: catch CLI-driven recordings the app didn't start. The flock-backed
+    // PID files are the canonical source of truth for cross-process exclusion.
+    #[cfg(target_os = "macos")]
+    if crate::cli_setup::cli_recording_active() {
+        return Err("A CLI recording is active. Stop it (`minutes stop`) before updating.".into());
+    }
 
     if state
         .update_install_running

@@ -1,0 +1,34 @@
+# Pinned Rust toolchain for reproducible local + CI builds.
+#
+# Why pinned:
+#   PR #206 shipped through CI failure on a clippy lint that fires on
+#   Rust 1.95 but not 1.94. Local development ran 1.94 (Homebrew), CI
+#   ran 1.95. Bumping CI separately from local drift causes recurring
+#   clippy/rustfmt mismatches (commits 4954de2, 21cd699 are the same
+#   pattern, both cargo-clippy fix-only commits).
+#
+# Bumping:
+#   1. Edit `channel` below to the new patch.
+#   2. `cargo clippy --all --no-default-features -- -D warnings` and
+#      `cargo fmt --all -- --check` locally; fix any new lints.
+#   3. CI runs the same toolchain via rustup proxy. No workflow change
+#      needed. The `dtolnay/rust-toolchain@stable` action installs
+#      latest stable as the system default, but rustup proxies cargo
+#      and respects this file's pin when invoked from the repo.
+#
+# Local requirement:
+#   This file is honored only when cargo runs through the rustup
+#   proxy. Verify with `command -v cargo` matching `rustup which
+#   cargo` (typically `~/.cargo/bin/cargo`, but `CARGO_HOME`
+#   relocates it). If your `which cargo` resolves to
+#   `/opt/homebrew/bin/cargo` or another non-rustup path, the pin
+#   is silently ignored. `scripts/build.sh` and
+#   `scripts/install-dev-app.sh` detect via `rustup which cargo`
+#   and prepend the resolved bin dir to PATH to guard against
+#   this; for interactive `cargo` use, ensure rustup's bin dir
+#   precedes /opt/homebrew/bin in your shell PATH.
+
+[toolchain]
+channel = "1.95.0"
+components = ["clippy", "rustfmt"]
+profile = "minimal"

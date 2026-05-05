@@ -12,6 +12,37 @@ export CXXFLAGS="-I$(xcrun --show-sdk-path)/usr/include/c++/v1"
 export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-11.0}"
 MINUTES_BUILD_FEATURES="${MINUTES_BUILD_FEATURES:-parakeet,metal}"
 
+# Ensure cargo runs through rustup so rust-toolchain.toml is honored.
+# Without this, a system Homebrew rustc (e.g. /opt/homebrew/bin/cargo)
+# silently ignores the pin and produces local-vs-CI drift on clippy lints
+# that fire only on the pinned version. PR #206's CI failure was exactly
+# this: Rust 1.95 lint fired on CI, Homebrew's 1.94 ignored it locally.
+#
+# Detection uses `rustup which cargo` rather than a hardcoded path so
+# CARGO_HOME / non-default rustup install locations work too.
+RUSTUP_CARGO=""
+if command -v rustup >/dev/null 2>&1; then
+    RUSTUP_CARGO="$(rustup which cargo 2>/dev/null || true)"
+fi
+if [[ -n "$RUSTUP_CARGO" ]]; then
+    RUSTUP_CARGO_DIR="$(dirname "$RUSTUP_CARGO")"
+    export PATH="$RUSTUP_CARGO_DIR:$PATH"
+fi
+ACTIVE_CARGO="$(command -v cargo || true)"
+if [[ -z "$ACTIVE_CARGO" ]]; then
+    echo "Error: no cargo on PATH. Install rustup from https://rustup.rs and re-run."
+    exit 1
+fi
+if [[ -n "$RUSTUP_CARGO" && "$ACTIVE_CARGO" != "$RUSTUP_CARGO" ]]; then
+    echo "Warning: cargo at $ACTIVE_CARGO is not the rustup-managed cargo ($RUSTUP_CARGO)."
+    echo "         rust-toolchain.toml may be silently ignored, causing local-vs-CI clippy drift."
+    echo "         Fix: prepend rustup's bin dir to PATH in your shell, or 'brew uninstall rust' if installed via Homebrew."
+fi
+if [[ -z "$RUSTUP_CARGO" ]]; then
+    echo "Note: rustup not found; using cargo at $ACTIVE_CARGO directly."
+    echo "      rust-toolchain.toml requires rustup to be honored — install from https://rustup.rs for full reproducibility."
+fi
+
 # Code signing + notarization are optional for local source builds.
 # Maintainers can export APPLE_SIGNING_IDENTITY / APPLE_API_* when they want
 # cargo-tauri to produce a signed + notarized bundle.

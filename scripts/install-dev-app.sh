@@ -8,6 +8,25 @@ export CXXFLAGS="${CXXFLAGS:-"-I$(xcrun --show-sdk-path)/usr/include/c++/v1"}"
 export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-11.0}"
 MINUTES_BUILD_FEATURES="${MINUTES_BUILD_FEATURES:-parakeet,metal}"
 
+# Match scripts/build.sh: route cargo through rustup so rust-toolchain.toml
+# is honored and we don't drift from CI's clippy/rustfmt versions. Uses
+# `rustup which cargo` so CARGO_HOME / non-default rustup paths still work.
+RUSTUP_CARGO=""
+if command -v rustup >/dev/null 2>&1; then
+    RUSTUP_CARGO="$(rustup which cargo 2>/dev/null || true)"
+fi
+if [[ -n "$RUSTUP_CARGO" ]]; then
+    export PATH="$(dirname "$RUSTUP_CARGO"):$PATH"
+fi
+ACTIVE_CARGO="$(command -v cargo || true)"
+if [[ -z "$ACTIVE_CARGO" ]]; then
+    echo "Error: no cargo on PATH. Install rustup from https://rustup.rs and re-run."
+    exit 1
+fi
+if [[ -n "$RUSTUP_CARGO" && "$ACTIVE_CARGO" != "$RUSTUP_CARGO" ]]; then
+    echo "Warning: cargo at $ACTIVE_CARGO is not the rustup-managed cargo ($RUSTUP_CARGO); rust-toolchain.toml may be ignored."
+fi
+
 DEV_CONFIG="tauri/src-tauri/tauri.dev.conf.json"
 DEV_PRODUCT_NAME="Minutes Dev"
 BUILD_APP="target/release/bundle/macos/${DEV_PRODUCT_NAME}.app"

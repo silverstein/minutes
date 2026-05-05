@@ -100,6 +100,16 @@ Why:
 - ad-hoc local rebuilds of `/Applications/Minutes.app` can trigger repeated or misleading permission prompts
 - the signed dev app is the stable local identity for permission-sensitive testing
 
+## Pre-Commit Discipline
+
+The full pre-commit checklist is the canonical surface in `CLAUDE.md`'s **Pre-Commit Checklist** section. It covers MCP manifest sync, MCPB bundle guards, cargo fmt/clippy/test, Unix-only-API gating, feature-stub parity, site release constants, skill compiler outputs, and the new toolchain + UI items below. **Read it before any commit that touches Rust, MCP server, frontend, or release surfaces** — the table is the single source of truth and is kept up to date as failure modes get caught.
+
+Two items added after PR #206 that bear repeating here because they bit hard:
+
+1. **Rust toolchain pin (`rust-toolchain.toml`).** The repo pins rustc/clippy/rustfmt to a specific version. CI uses `dtolnay/rust-toolchain@stable` for the system default, but rustup's cargo proxy reads the pin file when invoked from inside the repo and routes through the pinned toolchain. **The pin is honored locally only when cargo runs through the rustup proxy** — verify with `command -v cargo` matching `rustup which cargo` (typically `~/.cargo/bin/cargo`, but `CARGO_HOME` overrides relocate it). If `which cargo` resolves to `/opt/homebrew/bin/cargo` or another non-rustup path, the pin is silently ignored and your local clippy/rustfmt drift from CI's. Two prior commits (`4954de2`, `21cd699`) are clippy-fix-only commits that landed because of exactly this drift. Fix once: prepend rustup's bin dir to your shell PATH (`export PATH="$(dirname "$(rustup which cargo)"):$PATH"` in your shell rc, or just `~/.cargo/bin` if you haven't overridden `CARGO_HOME`), or `brew uninstall rust`. The build scripts (`scripts/build.sh`, `scripts/install-dev-app.sh`) detect it via `rustup which cargo` themselves so script-driven builds are immune; only interactive `cargo` invocations need the shell PATH fix.
+
+2. **UI render verification.** Any change to `tauri/src/index.html`, any new Tauri `cmd_*` exposed to the frontend, or any modal/overlay/panel layout shift requires building the dev app via `./scripts/install-dev-app.sh` and click-testing the affected surface in `~/Applications/Minutes Dev.app` before commit. Type checks and Rust unit tests do not catch UI render bugs. PR #206 surfaced four such bugs (path candidate dedup, build-artifact bundles polluting the picker, default selection, ad-hoc detection logic) only via click-testing — none would have failed any test or CI job.
+
 ## Independent-cadence crate: `whisper-guard`
 
 `crates/whisper-guard/` is published to crates.io on its own cadence — separate from the main Minutes release.

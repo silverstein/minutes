@@ -59,6 +59,71 @@ pub struct Frontmatter {
     pub visibility: Option<Visibility>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub speaker_map: Vec<SpeakerAttribution>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recording_health: Option<RecordingHealth>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct RecordingHealth {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub voice_stem_active_ratio: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_stem_active_ratio: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_dominant_ratio: Option<f32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capture_warnings: Vec<CaptureWarning>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diarization_path: Option<DiarizationPath>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum DiarizationPath {
+    StemEnergy,
+    Ml,
+    MlBleedDegraded,
+    None,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct CaptureWarning {
+    pub kind: FailureKind,
+    pub source: CaptureSource,
+    pub message: String,
+    pub diagnostic_confidence: DiagnosticConfidence,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum FailureKind {
+    Silent,
+    Sparse,
+    Missing,
+    BackendUnavailable,
+    StreamError,
+    SourceStarved,
+    UnsupportedFormat,
+    MisconfiguredRoute,
+    PermissionDenied,
+    RouteUnavailable,
+    Other { code: String },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum CaptureSource {
+    Voice,
+    System,
+    Both,
+    Backend,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum DiagnosticConfidence {
+    High,
+    Inferred,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -76,6 +141,10 @@ pub enum AttributionSource {
     Llm,
     Enrollment,
     Manual,
+    #[serde(rename = "ml-bleed-degraded")]
+    MlBleedDegraded,
+    #[serde(rename = "stem-recovery")]
+    StemRecovery,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

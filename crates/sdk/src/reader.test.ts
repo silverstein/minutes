@@ -5,6 +5,7 @@ import { tmpdir } from "os";
 import {
   splitFrontmatter,
   parseFrontmatter,
+  parseAttributionSource,
   listMeetings,
   searchMeetings,
   getMeeting,
@@ -424,14 +425,52 @@ SPEAKER_0: hello
     expect(result?.frontmatter.speaker_map).toBeUndefined();
   });
 
-  it("falls back to safe defaults for unknown confidence/source values", () => {
+  it("falls back to safe defaults for unknown confidence and rejects unknown sources", () => {
     const sketchy = MEETING_WITH_SPEAKERS.replace(
       /confidence: medium/,
       "confidence: bogus"
     ).replace(/source: llm/, "source: aliens");
     const result = parseFrontmatter(sketchy, "/t/m.md");
-    expect(result?.frontmatter.speaker_map?.[0].confidence).toBe("medium");
-    expect(result?.frontmatter.speaker_map?.[0].source).toBe("llm");
+    expect(result).toBeNull();
+  });
+
+  it("parses new attribution sources explicitly", () => {
+    expect(parseAttributionSource("ml-bleed-degraded")).toBe("ml-bleed-degraded");
+    expect(parseAttributionSource("stem-recovery")).toBe("stem-recovery");
+    expect(() => parseAttributionSource("aliens")).toThrow(/unknown speaker attribution source/);
+  });
+
+  it("preserves recording_health enum fields", () => {
+    const content = MEETING_WITH_SPEAKERS.replace(
+      "speaker_map:",
+      `recording_health:
+  voice_stem_active_ratio: 0.31
+  system_stem_active_ratio: 0
+  system_dominant_ratio: 0.12
+  capture_warnings:
+    - kind: silent
+      source: system
+      message: System audio was silent during capture.
+      diagnostic_confidence: inferred
+  diarization_path: ml-bleed-degraded
+speaker_map:`
+    );
+    const result = parseFrontmatter(content, "/t/m.md");
+
+    expect(result?.frontmatter.recording_health).toEqual({
+      voice_stem_active_ratio: 0.31,
+      system_stem_active_ratio: 0,
+      system_dominant_ratio: 0.12,
+      capture_warnings: [
+        {
+          kind: "silent",
+          source: "system",
+          message: "System audio was silent during capture.",
+          diagnostic_confidence: "inferred",
+        },
+      ],
+      diarization_path: "ml-bleed-degraded",
+    });
   });
 });
 

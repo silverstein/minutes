@@ -71,6 +71,7 @@ windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Storage
 [dev-dependencies]
 hound = { workspace = true }
 dirs = { workspace = true }
+insta = { version = "1", features = ["json"] }
 
 [[test]]
 name = "integration"

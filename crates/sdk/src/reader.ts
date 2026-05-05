@@ -43,7 +43,46 @@ export interface SpeakerAttribution {
   speaker_label: string;
   name: string;
   confidence: "high" | "medium" | "low";
-  source: "deterministic" | "llm" | "enrollment" | "manual";
+  source: AttributionSource;
+}
+
+export type AttributionSource =
+  | "deterministic"
+  | "llm"
+  | "enrollment"
+  | "manual"
+  | "ml-bleed-degraded"
+  | "stem-recovery";
+
+export type DiagnosticConfidence = "high" | "inferred";
+export type CaptureSource = "voice" | "system" | "both" | "backend";
+export type DiarizationPath = "stem-energy" | "ml" | "ml-bleed-degraded" | "none";
+export type FailureKind =
+  | "silent"
+  | "sparse"
+  | "missing"
+  | "backend-unavailable"
+  | "stream-error"
+  | "source-starved"
+  | "unsupported-format"
+  | "misconfigured-route"
+  | "permission-denied"
+  | "route-unavailable"
+  | { other: { code: string } };
+
+export interface CaptureWarning {
+  kind: FailureKind;
+  source: CaptureSource;
+  message: string;
+  diagnostic_confidence: DiagnosticConfidence;
+}
+
+export interface RecordingHealth {
+  voice_stem_active_ratio?: number;
+  system_stem_active_ratio?: number;
+  system_dominant_ratio?: number;
+  capture_warnings: CaptureWarning[];
+  diarization_path?: DiarizationPath;
 }
 
 /**
@@ -80,6 +119,7 @@ export interface Frontmatter {
   decisions: Decision[];
   intents: Intent[];
   speaker_map?: SpeakerAttribution[];
+  recording_health?: RecordingHealth;
 }
 
 export interface MeetingFile {
@@ -106,6 +146,94 @@ function parseRawAttendees(raw?: string): string[] {
   }
 
   return attendees;
+}
+
+export function parseAttributionSource(raw: string): AttributionSource {
+  if (
+    raw === "deterministic" ||
+    raw === "llm" ||
+    raw === "enrollment" ||
+    raw === "manual" ||
+    raw === "ml-bleed-degraded" ||
+    raw === "stem-recovery"
+  ) {
+    return raw;
+  }
+
+  throw new Error(`unknown speaker attribution source: ${raw}`);
+}
+
+function parseDiagnosticConfidence(raw: unknown): DiagnosticConfidence {
+  if (raw === "high" || raw === "inferred") return raw;
+  throw new Error(`unknown diagnostic confidence: ${String(raw)}`);
+}
+
+function parseCaptureSource(raw: unknown): CaptureSource {
+  if (raw === "voice" || raw === "system" || raw === "both" || raw === "backend") {
+    return raw;
+  }
+  throw new Error(`unknown capture source: ${String(raw)}`);
+}
+
+function parseDiarizationPath(raw: unknown): DiarizationPath {
+  if (raw === "stem-energy" || raw === "ml" || raw === "ml-bleed-degraded" || raw === "none") {
+    return raw;
+  }
+  throw new Error(`unknown diarization path: ${String(raw)}`);
+}
+
+function parseFailureKind(raw: unknown): FailureKind {
+  if (
+    raw === "silent" ||
+    raw === "sparse" ||
+    raw === "missing" ||
+    raw === "backend-unavailable" ||
+    raw === "stream-error" ||
+    raw === "source-starved" ||
+    raw === "unsupported-format" ||
+    raw === "misconfigured-route" ||
+    raw === "permission-denied" ||
+    raw === "route-unavailable"
+  ) {
+    return raw;
+  }
+
+  if (
+    raw &&
+    typeof raw === "object" &&
+    "other" in raw &&
+    (raw as any).other &&
+    typeof (raw as any).other === "object"
+  ) {
+    return { other: { code: String((raw as any).other.code || "") } };
+  }
+
+  throw new Error(`unknown capture failure kind: ${String(raw)}`);
+}
+
+function optionalNumber(raw: unknown): number | undefined {
+  return typeof raw === "number" && Number.isFinite(raw) ? raw : undefined;
+}
+
+function parseRecordingHealth(raw: any): RecordingHealth | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+
+  return {
+    voice_stem_active_ratio: optionalNumber(raw.voice_stem_active_ratio),
+    system_stem_active_ratio: optionalNumber(raw.system_stem_active_ratio),
+    system_dominant_ratio: optionalNumber(raw.system_dominant_ratio),
+    capture_warnings: Array.isArray(raw.capture_warnings)
+      ? raw.capture_warnings.map((warning: any) => ({
+          kind: parseFailureKind(warning?.kind),
+          source: parseCaptureSource(warning?.source),
+          message: String(warning?.message || ""),
+          diagnostic_confidence: parseDiagnosticConfidence(warning?.diagnostic_confidence),
+        }))
+      : [],
+    diarization_path: raw.diarization_path
+      ? parseDiarizationPath(raw.diarization_path)
+      : undefined,
+  };
 }
 
 // ── Parsing ──────────────────────────────────────────────────
@@ -198,14 +326,10 @@ export function parseFrontmatter(
               s.confidence === "low"
               ? s.confidence
               : "medium") as "high" | "medium" | "low",
-            source: (s.source === "deterministic" ||
-              s.source === "llm" ||
-              s.source === "enrollment" ||
-              s.source === "manual"
-              ? s.source
-              : "llm") as "deterministic" | "llm" | "enrollment" | "manual",
+            source: parseAttributionSource(String(s.source || "")),
           }))
         : undefined,
+      recording_health: parseRecordingHealth(parsed.recording_health),
     };
 
     return { frontmatter: fm, body, path: filePath };
@@ -509,12 +633,7 @@ export async function getMeetingWithOverlays(
             attr.confidence === "low"
             ? attr.confidence
             : "medium") as "high" | "medium" | "low",
-          source: (attr.source === "deterministic" ||
-            attr.source === "llm" ||
-            attr.source === "enrollment" ||
-            attr.source === "manual"
-            ? attr.source
-            : "llm") as "deterministic" | "llm" | "enrollment" | "manual",
+          source: parseAttributionSource(String(attr.source || "")),
         })),
       },
     };

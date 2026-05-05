@@ -1,0 +1,491 @@
+---
+source: crates/core/src/markdown.rs
+expression: schema
+---
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Frontmatter",
+  "description": "Frontmatter for a meeting/memo markdown file.",
+  "type": "object",
+  "properties": {
+    "action_items": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ActionItem"
+      }
+    },
+    "attendees": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "attendees_raw": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "calendar_event": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "captured_at": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "date-time"
+    },
+    "context": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "date": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "decisions": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Decision"
+      }
+    },
+    "device": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "duration": {
+      "type": "string"
+    },
+    "entities": {
+      "$ref": "#/$defs/EntityLinks"
+    },
+    "intents": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Intent"
+      }
+    },
+    "people": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "recorded_by": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "recording_health": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/RecordingHealth"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "source": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "speaker_map": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/SpeakerAttribution"
+      }
+    },
+    "status": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/OutputStatus"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "tags": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "template": {
+      "description": "Slug of the template applied to this recording, if any.\nRecorded so a Phase 2 reprocessor knows which template produced the\nsummary. `None` means no template was passed (legacy / default flow).",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "title": {
+      "type": "string"
+    },
+    "type": {
+      "$ref": "#/$defs/ContentType"
+    },
+    "visibility": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Visibility"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "required": [
+    "title",
+    "type",
+    "date",
+    "duration"
+  ],
+  "$defs": {
+    "ActionItem": {
+      "description": "A structured action item extracted from a meeting.\nQueryable via MCP tools: filter by assignee, status, due date.",
+      "type": "object",
+      "properties": {
+        "assignee": {
+          "type": "string"
+        },
+        "due": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "type": "string"
+        },
+        "task": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "assignee",
+        "task",
+        "status"
+      ]
+    },
+    "AttributionSource": {
+      "description": "How the attribution was determined.",
+      "type": "string",
+      "enum": [
+        "deterministic",
+        "llm",
+        "enrollment",
+        "manual",
+        "ml-bleed-degraded",
+        "stem-recovery"
+      ]
+    },
+    "CaptureSource": {
+      "type": "string",
+      "enum": [
+        "voice",
+        "system",
+        "both",
+        "backend"
+      ]
+    },
+    "CaptureWarning": {
+      "type": "object",
+      "properties": {
+        "diagnostic_confidence": {
+          "$ref": "#/$defs/DiagnosticConfidence"
+        },
+        "kind": {
+          "$ref": "#/$defs/FailureKind"
+        },
+        "message": {
+          "type": "string"
+        },
+        "source": {
+          "$ref": "#/$defs/CaptureSource"
+        }
+      },
+      "required": [
+        "kind",
+        "source",
+        "message",
+        "diagnostic_confidence"
+      ]
+    },
+    "Confidence": {
+      "description": "How confident we are that a speaker label maps to a real person.",
+      "type": "string",
+      "enum": [
+        "high",
+        "medium",
+        "low"
+      ]
+    },
+    "ContentType": {
+      "description": "Content types for output files.",
+      "type": "string",
+      "enum": [
+        "meeting",
+        "memo",
+        "dictation"
+      ]
+    },
+    "Decision": {
+      "description": "A structured decision extracted from a meeting.\nQueryable via MCP tools: search across all meetings for decision history.\n\nFrontmatter v2 fields (optional, backward compatible):\n- `authority`: \"high\" | \"medium\" | \"low\" — the decision's weight. A CEO\n  commitment is high; a drive-by aside is low. Consumers can use this to\n  rank conflicting decisions or surface the authoritative one.\n- `supersedes`: free-text reference to the earlier decision this one\n  replaces. When set, the consistency report treats the topic conflict as\n  a documented supersession rather than an unresolved contradiction.",
+      "type": "object",
+      "properties": {
+        "authority": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "supersedes": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "text": {
+          "type": "string"
+        },
+        "topic": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "text"
+      ]
+    },
+    "DiagnosticConfidence": {
+      "type": "string",
+      "enum": [
+        "high",
+        "inferred"
+      ]
+    },
+    "DiarizationPath": {
+      "type": "string",
+      "enum": [
+        "stem-energy",
+        "ml",
+        "ml-bleed-degraded",
+        "none"
+      ]
+    },
+    "EntityLinks": {
+      "type": "object",
+      "properties": {
+        "people": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/EntityRef"
+          }
+        },
+        "projects": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/EntityRef"
+          }
+        }
+      }
+    },
+    "EntityRef": {
+      "type": "object",
+      "properties": {
+        "aliases": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "label": {
+          "type": "string"
+        },
+        "slug": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "slug",
+        "label"
+      ]
+    },
+    "FailureKind": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "silent",
+            "sparse",
+            "missing",
+            "backend-unavailable",
+            "stream-error",
+            "source-starved",
+            "unsupported-format",
+            "misconfigured-route",
+            "permission-denied",
+            "route-unavailable"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "other": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "code"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "other"
+          ]
+        }
+      ]
+    },
+    "Intent": {
+      "type": "object",
+      "properties": {
+        "by_date": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kind": {
+          "$ref": "#/$defs/IntentKind"
+        },
+        "status": {
+          "type": "string"
+        },
+        "what": {
+          "type": "string"
+        },
+        "who": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "kind",
+        "what",
+        "status"
+      ]
+    },
+    "IntentKind": {
+      "type": "string",
+      "enum": [
+        "action-item",
+        "decision",
+        "open-question",
+        "commitment"
+      ]
+    },
+    "OutputStatus": {
+      "description": "Output status markers.",
+      "type": "string",
+      "enum": [
+        "complete",
+        "no-speech",
+        "transcript-only"
+      ]
+    },
+    "RecordingHealth": {
+      "type": "object",
+      "properties": {
+        "capture_warnings": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CaptureWarning"
+          }
+        },
+        "diarization_path": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DiarizationPath"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "system_dominant_ratio": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "float"
+        },
+        "system_stem_active_ratio": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "float"
+        },
+        "voice_stem_active_ratio": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "float"
+        }
+      }
+    },
+    "SpeakerAttribution": {
+      "description": "A mapping from an anonymous speaker label to a real person.",
+      "type": "object",
+      "properties": {
+        "confidence": {
+          "$ref": "#/$defs/Confidence"
+        },
+        "name": {
+          "type": "string"
+        },
+        "source": {
+          "$ref": "#/$defs/AttributionSource"
+        },
+        "speaker_label": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "speaker_label",
+        "name",
+        "confidence",
+        "source"
+      ]
+    },
+    "Visibility": {
+      "type": "string",
+      "enum": [
+        "private",
+        "team"
+      ]
+    }
+  }
+}

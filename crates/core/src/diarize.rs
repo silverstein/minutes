@@ -28,6 +28,12 @@ pub struct SpeakerSegment {
 pub struct DiarizationResult {
     pub segments: Vec<SpeakerSegment>,
     pub num_speakers: usize,
+    /// Fraction of active stem-energy windows where the system stem dominated.
+    pub system_dominant_ratio: f32,
+    /// Fraction of active stem-energy windows where the voice stem dominated.
+    pub voice_dominant_ratio: f32,
+    /// Structured capture degradation evidence, populated by later recovery PRs.
+    pub degraded_capture: Option<DegradedCapture>,
     /// Whether transcript attribution should use the wider stem-timing tolerance.
     pub from_stems: bool,
     /// Whether the result came from source-aware capture and still has a stable
@@ -36,6 +42,56 @@ pub struct DiarizationResult {
     /// Per-speaker averaged embeddings (for Level 3 confirmed learning).
     /// Empty when using the Python subprocess engine.
     pub speaker_embeddings: std::collections::HashMap<String, Vec<f32>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct DegradedCapture {
+    pub failure_kind: FailureKind,
+    pub capture_backend: String,
+    pub capture_source: CaptureSource,
+    pub voice_active_ratio: Option<f32>,
+    pub system_active_ratio: Option<f32>,
+    pub observed_signal: ObservedSignal,
+    pub diagnostic_confidence: DiagnosticConfidence,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum FailureKind {
+    Silent,
+    Sparse,
+    Missing,
+    BackendUnavailable,
+    StreamError,
+    SourceStarved,
+    UnsupportedFormat,
+    MisconfiguredRoute,
+    PermissionDenied,
+    RouteUnavailable,
+    Other { code: String },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum CaptureSource {
+    Voice,
+    System,
+    Both,
+    Backend,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ObservedSignal {
+    pub frames_captured: usize,
+    pub max_rms: f32,
+    pub avg_rms: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum DiagnosticConfidence {
+    High,
+    Inferred,
 }
 
 type EnergyWindow = (f64, f32);
@@ -60,6 +116,10 @@ pub enum AttributionSource {
     Llm,
     Enrollment,
     Manual,
+    #[serde(rename = "ml-bleed-degraded")]
+    MlBleedDegraded,
+    #[serde(rename = "stem-recovery")]
+    StemRecovery,
 }
 
 /// A mapping from an anonymous speaker label to a real person.
@@ -438,6 +498,44 @@ fn maybe_relabel_single_call_speaker_to_voice(
     }
 }
 
+fn stem_dominant_ratios(
+    voice_values: &[f32],
+    system_values: &[f32],
+    silence_threshold: f32,
+) -> (f32, f32) {
+    let mut active = 0usize;
+    let mut voice_dominant = 0usize;
+    let mut system_dominant = 0usize;
+
+    for (voice_rms, system_rms) in voice_values.iter().zip(system_values.iter()) {
+        let voice_active = *voice_rms > silence_threshold;
+        let system_active = *system_rms > silence_threshold;
+        if !voice_active && !system_active {
+            continue;
+        }
+
+        active += 1;
+        if voice_active && !system_active {
+            voice_dominant += 1;
+        } else if system_active && !voice_active {
+            system_dominant += 1;
+        } else if voice_rms >= system_rms {
+            voice_dominant += 1;
+        } else {
+            system_dominant += 1;
+        }
+    }
+
+    if active == 0 {
+        return (0.0, 0.0);
+    }
+
+    (
+        system_dominant as f32 / active as f32,
+        voice_dominant as f32 / active as f32,
+    )
+}
+
 fn diarization_from_energy_windows(
     voice_energy: &[(f64, f32)],
     system_energy: &[(f64, f32)],
@@ -469,6 +567,8 @@ fn diarization_from_energy_windows(
             **voice_rms > silence_threshold || **system_rms > silence_threshold
         })
         .count();
+    let (system_dominant_ratio, voice_dominant_ratio) =
+        stem_dominant_ratios(&voice_values, &system_values, silence_threshold);
     let correlation = correlation_coefficient(&voice_values, &system_values);
 
     // When both stems move together for most windows, we're likely seeing the
@@ -501,6 +601,9 @@ fn diarization_from_energy_windows(
         return Some(DiarizationResult {
             segments,
             num_speakers: 1,
+            system_dominant_ratio,
+            voice_dominant_ratio,
+            degraded_capture: None,
             from_stems: true,
             source_aware: true,
             speaker_embeddings: std::collections::HashMap::new(),
@@ -561,6 +664,9 @@ fn diarization_from_energy_windows(
         Some(DiarizationResult {
             segments,
             num_speakers,
+            system_dominant_ratio,
+            voice_dominant_ratio,
+            degraded_capture: None,
             from_stems: true,
             source_aware: true,
             speaker_embeddings: std::collections::HashMap::new(),
@@ -730,6 +836,9 @@ fn remap_diarization_labels(
     DiarizationResult {
         segments,
         num_speakers: label_map.len(),
+        system_dominant_ratio: result.system_dominant_ratio,
+        voice_dominant_ratio: result.voice_dominant_ratio,
+        degraded_capture: result.degraded_capture.clone(),
         from_stems: result.from_stems,
         source_aware: result.source_aware,
         speaker_embeddings,
@@ -804,6 +913,9 @@ fn merge_remote_diarization_into_stem_result(
     DiarizationResult {
         num_speakers: present_labels.len(),
         segments: merged,
+        system_dominant_ratio: stem_result.system_dominant_ratio,
+        voice_dominant_ratio: stem_result.voice_dominant_ratio,
+        degraded_capture: stem_result.degraded_capture.clone(),
         from_stems: false,
         source_aware: true,
         speaker_embeddings,
@@ -1517,6 +1629,9 @@ fn diarize_with_pyannote_rs(
     Ok(DiarizationResult {
         segments,
         num_speakers,
+        system_dominant_ratio: 0.0,
+        voice_dominant_ratio: 0.0,
+        degraded_capture: None,
         from_stems: false,
         source_aware: false,
         speaker_embeddings,
@@ -1841,6 +1956,9 @@ except Exception as e:
     Ok(DiarizationResult {
         segments,
         num_speakers,
+        system_dominant_ratio: 0.0,
+        voice_dominant_ratio: 0.0,
+        degraded_capture: None,
         from_stems: false,
         source_aware: false,
         speaker_embeddings: std::collections::HashMap::new(), // Python path can't extract embeddings
@@ -1989,6 +2107,9 @@ mod tests {
                 },
             ],
             num_speakers: 2,
+            system_dominant_ratio: 0.0,
+            voice_dominant_ratio: 0.0,
+            degraded_capture: None,
             from_stems: false,
             source_aware: false,
             speaker_embeddings: std::collections::HashMap::new(),
@@ -2018,6 +2139,9 @@ mod tests {
                 },
             ],
             num_speakers: 2,
+            system_dominant_ratio: 0.0,
+            voice_dominant_ratio: 0.0,
+            degraded_capture: None,
             from_stems: false,
             source_aware: false,
             speaker_embeddings: std::collections::HashMap::new(),
@@ -2050,6 +2174,9 @@ mod tests {
                 },
             ],
             num_speakers: 2,
+            system_dominant_ratio: 0.75,
+            voice_dominant_ratio: 0.25,
+            degraded_capture: None,
             from_stems: true,
             source_aware: true,
             speaker_embeddings: std::collections::HashMap::new(),
@@ -2181,6 +2308,9 @@ mod tests {
                 },
             ],
             num_speakers: 2,
+            system_dominant_ratio: 0.0,
+            voice_dominant_ratio: 0.0,
+            degraded_capture: None,
             from_stems: false,
             source_aware: false,
             speaker_embeddings: std::collections::HashMap::from([
@@ -2224,6 +2354,9 @@ mod tests {
                 },
             ],
             num_speakers: 2,
+            system_dominant_ratio: 0.3,
+            voice_dominant_ratio: 0.7,
+            degraded_capture: None,
             from_stems: true,
             source_aware: true,
             speaker_embeddings: std::collections::HashMap::new(),
@@ -2252,6 +2385,9 @@ mod tests {
                 },
             ],
             num_speakers: 2,
+            system_dominant_ratio: 0.0,
+            voice_dominant_ratio: 0.0,
+            degraded_capture: None,
             from_stems: false,
             source_aware: false,
             speaker_embeddings: std::collections::HashMap::from([
@@ -2308,6 +2444,9 @@ mod tests {
                 },
             ],
             num_speakers: 3,
+            system_dominant_ratio: 0.7,
+            voice_dominant_ratio: 0.3,
+            degraded_capture: None,
             from_stems: true,
             source_aware: true,
             speaker_embeddings: std::collections::HashMap::new(),
@@ -2319,6 +2458,9 @@ mod tests {
                 end: 2.2,
             }],
             num_speakers: 1,
+            system_dominant_ratio: 0.0,
+            voice_dominant_ratio: 0.0,
+            degraded_capture: None,
             from_stems: false,
             source_aware: false,
             speaker_embeddings: std::collections::HashMap::new(),
@@ -2342,6 +2484,9 @@ mod tests {
                 },
             ],
             num_speakers: 3,
+            system_dominant_ratio: 0.7,
+            voice_dominant_ratio: 0.3,
+            degraded_capture: None,
             from_stems: true,
             source_aware: true,
             speaker_embeddings: std::collections::HashMap::new(),
@@ -2368,6 +2513,9 @@ mod tests {
                 },
             ],
             num_speakers: 2,
+            system_dominant_ratio: 0.6,
+            voice_dominant_ratio: 0.4,
+            degraded_capture: None,
             from_stems: true,
             source_aware: true,
             speaker_embeddings: std::collections::HashMap::new(),
@@ -2379,6 +2527,9 @@ mod tests {
                 end: 5.0,
             }],
             num_speakers: 1,
+            system_dominant_ratio: 0.0,
+            voice_dominant_ratio: 0.0,
+            degraded_capture: None,
             from_stems: false,
             source_aware: false,
             speaker_embeddings: std::collections::HashMap::from([(
@@ -2470,12 +2621,16 @@ mod tests {
             speaker_label: "SPEAKER_2".into(),
             name: "Sarah".into(),
             confidence: Confidence::High,
-            source: AttributionSource::Manual,
+            source: AttributionSource::MlBleedDegraded,
         };
         let yaml = serde_yaml::to_string(&attr).unwrap();
+        assert!(yaml.contains("ml-bleed-degraded"));
         let parsed: SpeakerAttribution = serde_yaml::from_str(&yaml).unwrap();
         assert_eq!(parsed.confidence, Confidence::High);
-        assert_eq!(parsed.source, AttributionSource::Manual);
+        assert_eq!(parsed.source, AttributionSource::MlBleedDegraded);
+
+        let recovered: AttributionSource = serde_yaml::from_str("stem-recovery").unwrap();
+        assert_eq!(recovered, AttributionSource::StemRecovery);
     }
 
     #[test]
@@ -2541,6 +2696,9 @@ mod tests {
                 end: 1.0,
             }],
             num_speakers: 1,
+            system_dominant_ratio: 0.0,
+            voice_dominant_ratio: 0.0,
+            degraded_capture: None,
             from_stems: false,
             source_aware: false,
             speaker_embeddings: std::collections::HashMap::new(),

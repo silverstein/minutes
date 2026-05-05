@@ -10,6 +10,9 @@ import { describe, expect, it } from "vitest";
 import {
   buildLiveEventsResourcePayload,
   LIVE_EVENTS_RESOURCE_URI,
+  meetingDetailPayload,
+  meetingListItem,
+  meetingSearchItem,
   MEETING_INSIGHT_KINDS,
   parseKnowledgeConfig,
   parseLiveEventsResourceUri,
@@ -20,6 +23,62 @@ import {
 describe("meeting insight contract", () => {
   it("exports only the insight kinds the pipeline emits today", () => {
     expect(MEETING_INSIGHT_KINDS).toEqual(["decision", "commitment", "question"]);
+  });
+});
+
+describe("meeting shape contract", () => {
+  const meeting = {
+    path: "/tmp/meeting.md",
+    frontmatter: {
+      date: "2026-05-05T10:00:00-07:00",
+      title: "Capture Health Review",
+      type: "meeting",
+      duration: "12m",
+      recording_health: {
+        capture_warnings: [
+          {
+            kind: "silent",
+            source: "system",
+            message: "System audio was silent.",
+            diagnostic_confidence: "inferred",
+          },
+        ],
+        diarization_path: "ml-bleed-degraded",
+      },
+    },
+  };
+
+  it("omits recording_health from list and search results", () => {
+    expect(meetingListItem(meeting)).toEqual({
+      date: "2026-05-05T10:00:00-07:00",
+      title: "Capture Health Review",
+      content_type: "meeting",
+      path: "/tmp/meeting.md",
+      duration: "12m",
+    });
+    expect(meetingSearchItem(meeting)).toEqual({
+      date: "2026-05-05T10:00:00-07:00",
+      title: "Capture Health Review",
+      content_type: "meeting",
+      path: "/tmp/meeting.md",
+    });
+  });
+
+  it("surfaces recording_health in detail payloads", () => {
+    expect(
+      meetingDetailPayload({
+        path: meeting.path,
+        speaker_map: [],
+        recording_health: meeting.frontmatter.recording_health,
+        overlay_applied: false,
+      })
+    ).toEqual({
+      path: "/tmp/meeting.md",
+      view: "detail",
+      speaker_map: [],
+      recording_health: meeting.frontmatter.recording_health,
+      overlay_applied: false,
+    });
   });
 });
 

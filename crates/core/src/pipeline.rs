@@ -208,6 +208,8 @@ fn attribution_source_label(source: diarize::AttributionSource) -> String {
         diarize::AttributionSource::Llm => "llm".into(),
         diarize::AttributionSource::Enrollment => "enrollment".into(),
         diarize::AttributionSource::Manual => "manual".into(),
+        diarize::AttributionSource::MlBleedDegraded => "ml-bleed-degraded".into(),
+        diarize::AttributionSource::StemRecovery => "stem-recovery".into(),
     }
 }
 
@@ -1005,6 +1007,7 @@ pub fn write_transcript_artifact(
         recorded_by: config.identity.name.clone(),
         visibility: None,
         speaker_map: vec![],
+        recording_health: None,
         template: context.template.as_ref().map(|t| t.slug().to_string()),
         filter_diagnosis: if status == Some(OutputStatus::NoSpeech) {
             Some(filter_stats.diagnosis())
@@ -1815,6 +1818,7 @@ where
         recorded_by: config.identity.name.clone(),
         visibility: None,
         speaker_map,
+        recording_health: None,
         template: template.map(|t| t.slug().to_string()),
         filter_diagnosis: if status == Some(OutputStatus::NoSpeech) {
             Some(filter_stats.diagnosis())
@@ -2276,10 +2280,10 @@ fn title_from_transcript(transcript: &str) -> Option<String> {
     if !alpha_chars.is_empty() {
         let latin_count = alpha_chars
             .iter()
-            .filter(|c| {
+            .filter(|&&c| {
                 c.is_ascii_alphabetic()
-                    || ('\u{00C0}'..='\u{024F}').contains(c) // Latin-1 Supplement + Extended-A/B
-                    || ('\u{1E00}'..='\u{1EFF}').contains(c) // Latin Extended Additional
+                    || ('\u{00C0}'..='\u{024F}').contains(&c) // Latin-1 Supplement + Extended-A/B
+                    || ('\u{1E00}'..='\u{1EFF}').contains(&c) // Latin Extended Additional
             })
             .count();
         let latin_ratio = latin_count as f64 / alpha_chars.len() as f64;
@@ -3809,6 +3813,7 @@ mod tests {
             recorded_by: Some("Mat".into()),
             visibility: None,
             speaker_map: vec![],
+            recording_health: None,
             template: None,
             filter_diagnosis: None,
         };
@@ -5139,6 +5144,7 @@ mod tests {
                 confidence: diarize::Confidence::Medium,
                 source: diarize::AttributionSource::Llm,
             }],
+            recording_health: None,
             template: None,
             filter_diagnosis: None,
         };

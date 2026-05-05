@@ -165,6 +165,66 @@ export type KnowledgeConfigStatus = {
   engine: string;
 };
 
+type MeetingLike = {
+  path: string;
+  frontmatter: {
+    date?: string;
+    title?: string;
+    type?: string;
+    duration?: string;
+    recording_health?: unknown;
+  };
+};
+
+export function meetingListItem(meeting: MeetingLike) {
+  return {
+    date: meeting.frontmatter.date,
+    title: meeting.frontmatter.title,
+    content_type: meeting.frontmatter.type,
+    path: meeting.path,
+    duration: meeting.frontmatter.duration,
+  };
+}
+
+export function meetingSearchItem(meeting: MeetingLike) {
+  return {
+    date: meeting.frontmatter.date,
+    title: meeting.frontmatter.title,
+    content_type: meeting.frontmatter.type,
+    path: meeting.path,
+  };
+}
+
+export function meetingDetailPayload(input: {
+  path: string;
+  speaker_map?: unknown;
+  recording_health?: unknown;
+  overlay_applied?: boolean;
+}) {
+  const payload: {
+    path: string;
+    view: "detail";
+    speaker_map?: unknown;
+    recording_health?: unknown;
+    overlay_applied?: boolean;
+  } = {
+    path: input.path,
+    view: "detail",
+  };
+
+  if (input.speaker_map !== undefined) {
+    payload.speaker_map = input.speaker_map;
+  }
+  if (input.recording_health !== undefined) {
+    payload.recording_health = input.recording_health;
+  }
+  if (input.overlay_applied !== undefined) {
+    payload.overlay_applied = input.overlay_applied;
+  }
+
+  return payload;
+}
+
 function toolDocsUrl(name: string): string {
   return `${MCP_TOOLS_DOCS_BASE_URL}#tool-${name}`;
 }
@@ -1596,13 +1656,7 @@ registerDocsAppTool(
         .map((m) => `${m.frontmatter.date} — ${m.frontmatter.title} [${m.frontmatter.type}]\n  ${m.path}`)
         .join("\n\n");
 
-      const meetingsJson = filtered.map((m) => ({
-        date: m.frontmatter.date,
-        title: m.frontmatter.title,
-        content_type: m.frontmatter.type,
-        path: m.path,
-        duration: m.frontmatter.duration,
-      }));
+      const meetingsJson = filtered.map(meetingListItem);
 
       return {
         content: [{ type: "text" as const, text }],
@@ -1701,12 +1755,7 @@ registerDocsAppTool(
       return {
         content: [{ type: "text" as const, text }],
         structuredContent: {
-          results: filtered.map((m) => ({
-            date: m.frontmatter.date,
-            title: m.frontmatter.title,
-            content_type: m.frontmatter.type,
-            path: m.path,
-          })),
+          results: filtered.map(meetingSearchItem),
           view: "search",
         },
         _meta: { ui: { resourceUri: UI_RESOURCE_URI }, view: "search" },
@@ -2233,12 +2282,11 @@ registerDocsAppTool(
       // disk is never mutated — the CLI just layers ~/.minutes/overlays.db on
       // top of the parsed frontmatter. If the CLI is unavailable or the call
       // fails, degrade gracefully to raw content.
-      let structured: {
-        path: string;
-        view: string;
-        speaker_map?: unknown;
-        overlay_applied?: boolean;
-      } = { path: resolved, view: "detail" };
+      const rawParsed = reader.parseFrontmatter(rawContent, resolved);
+      let structured = meetingDetailPayload({
+        path: resolved,
+        recording_health: (rawParsed?.frontmatter as any)?.recording_health,
+      });
 
       if (await isCliAvailable()) {
         try {
@@ -2246,12 +2294,12 @@ registerDocsAppTool(
           const parsed = parseJsonOutput(stdout);
           if (parsed && typeof parsed === "object" && !parsed.raw) {
             const speakerMap = parsed.frontmatter?.speaker_map;
-            structured = {
+            structured = meetingDetailPayload({
               path: resolved,
-              view: "detail",
               speaker_map: Array.isArray(speakerMap) ? speakerMap : [],
+              recording_health: parsed.frontmatter?.recording_health,
               overlay_applied: Boolean(parsed.overlay_applied),
-            };
+            });
           }
         } catch {
           // Non-fatal: fall through to raw content with no speaker_map enrichment.
@@ -2611,10 +2659,7 @@ server.resource(
   async () => {
     if (!(await isCliAvailable())) {
       const meetings = await reader.listMeetings(MEETINGS_DIR, 20);
-      const json = JSON.stringify(meetings.map((m) => ({
-        date: m.frontmatter.date, title: m.frontmatter.title,
-        content_type: m.frontmatter.type, path: m.path, duration: m.frontmatter.duration,
-      })));
+      const json = JSON.stringify(meetings.map(meetingListItem));
       return { contents: [{ uri: "minutes://meetings/recent", mimeType: "application/json", text: json }] };
     }
     const { stdout } = await runMinutes(["list", "--limit", "20"]);

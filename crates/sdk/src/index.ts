@@ -18,6 +18,13 @@ export {
   type MeetingFile,
   type SpeakerAttribution,
   type SpeakerConfirmation,
+  type AttributionSource,
+  type CaptureSource,
+  type CaptureWarning,
+  type DiagnosticConfidence,
+  type DiarizationPath,
+  type FailureKind,
+  type RecordingHealth,
 
   // Config
   defaultDir,
@@ -25,6 +32,7 @@ export {
   // Parsing
   splitFrontmatter,
   parseFrontmatter,
+  parseAttributionSource,
 
   // Query API
   listMeetings,

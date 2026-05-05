@@ -1054,6 +1054,7 @@ mod tests {
                 recorded_by: None,
                 visibility: None,
                 speaker_map: vec![],
+                recording_health: None,
                 template: None,
                 filter_diagnosis: Some("silence strip removed ALL audio".into()),
             },

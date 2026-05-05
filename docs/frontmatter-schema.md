@@ -53,6 +53,7 @@ schema version bump. Additive fields do not.
 | `recorded_by` | string | User identity slug (matches `people[]` if the user is in the corpus). |
 | `visibility` | enum | `private` (default) or `team`. Informational; Minutes does not enforce ACLs. |
 | `calendar_event` | string | Calendar event id (Google Calendar, Outlook) when matched. |
+| `recording_health` | object | Optional capture/diarization diagnostics. See [Recording health](#recording-health) below. Omitted when no warnings or capture-health metadata are present. |
 
 ### Participants
 
@@ -177,7 +178,7 @@ Each entry has four fields:
 | `speaker_label` | string | ✓ | Diarizer-produced label, e.g. `SPEAKER_0`. |
 | `name` | string | ✓ | The real person this speaker is. Matches a slug in `people[]` when possible. |
 | `confidence` | enum | ✓ | `high` / `medium` / `low`. |
-| `source` | enum | ✓ | `deterministic` / `llm` / `enrollment` / `manual`. Tells consumers how the attribution was derived. |
+| `source` | enum | ✓ | `deterministic` / `llm` / `enrollment` / `manual` / `ml-bleed-degraded` / `stem-recovery`. Tells consumers how the attribution was derived. |
 
 Produced by Minutes' diarization + attribution pipeline. Four confidence
 levels (L0-L3):
@@ -190,11 +191,53 @@ levels (L0-L3):
   `~/.minutes/voices.db`. High when the match is strong.
 - **L3** (user-confirmed): the user explicitly confirmed this attribution.
   Highest trust once set.
+- **Degraded-capture recovery** (`ml-bleed-degraded`): ML diarization over a
+  voice stem after the primary system-audio stem was degraded. Confidence is
+  normally low until a user confirms the attribution.
+- **Stem recovery** (`stem-recovery`): post-hoc rewrite from a recovery flow
+  that revisits stem-derived speaker labels.
 
 High-confidence attributions can be used by renderers and graph projections as
 the speaker's real name. The raw transcript remains valid even when it keeps
 `SPEAKER_N` tokens; later user confirmations are layered through the overlay
 contract below instead of rewriting historical files.
+
+### Recording health
+
+`recording_health` records capture and diarization diagnostics that should be
+visible to tools reading meeting files. It is backend-agnostic: `cpal`,
+Core Audio Process Tap, or future capture backends can all report through the
+same shape. Minutes omits the field entirely when no health metadata exists.
+
+```yaml
+recording_health:
+  voice_stem_active_ratio: 0.31
+  system_stem_active_ratio: 0.00
+  system_dominant_ratio: 0.12
+  capture_warnings:
+    - kind: silent
+      source: system
+      message: System audio was silent during capture.
+      diagnostic_confidence: inferred
+  diarization_path: ml-bleed-degraded
+```
+
+| Field | Type | Notes |
+|---|---|---|
+| `voice_stem_active_ratio` | number | Optional fraction of sampled windows where the voice stem was active. |
+| `system_stem_active_ratio` | number | Optional fraction of sampled windows where the system stem was active. |
+| `system_dominant_ratio` | number | Optional fraction of active stem-energy windows dominated by system audio. |
+| `capture_warnings` | list&lt;CaptureWarning&gt; | Structured capture warnings. Empty lists are omitted. |
+| `diarization_path` | enum | `stem-energy`, `ml`, `ml-bleed-degraded`, or `none`. |
+
+#### CaptureWarning
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `kind` | enum | ✓ | `silent`, `sparse`, `missing`, `backend-unavailable`, `stream-error`, `source-starved`, `unsupported-format`, `misconfigured-route`, `permission-denied`, `route-unavailable`, or `other: { code: string }`. |
+| `source` | enum | ✓ | `voice`, `system`, `both`, or `backend`. |
+| `message` | string | ✓ | Human-readable warning text. Render at the edge; do not parse for logic. |
+| `diagnostic_confidence` | enum | ✓ | `high` for confirmed backend/permission errors, `inferred` for signal-derived diagnoses. |
 
 ### Overlay contract
 

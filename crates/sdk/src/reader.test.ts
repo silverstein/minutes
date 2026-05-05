@@ -425,19 +425,20 @@ SPEAKER_0: hello
     expect(result?.frontmatter.speaker_map).toBeUndefined();
   });
 
-  it("falls back to safe defaults for unknown confidence and rejects unknown sources", () => {
+  it("falls back to safe defaults for unknown confidence/source values", () => {
     const sketchy = MEETING_WITH_SPEAKERS.replace(
       /confidence: medium/,
       "confidence: bogus"
     ).replace(/source: llm/, "source: aliens");
     const result = parseFrontmatter(sketchy, "/t/m.md");
-    expect(result).toBeNull();
+    expect(result?.frontmatter.speaker_map?.[0].confidence).toBe("medium");
+    expect(result?.frontmatter.speaker_map?.[0].source).toBe("llm");
   });
 
   it("parses new attribution sources explicitly", () => {
     expect(parseAttributionSource("ml-bleed-degraded")).toBe("ml-bleed-degraded");
     expect(parseAttributionSource("stem-recovery")).toBe("stem-recovery");
-    expect(() => parseAttributionSource("aliens")).toThrow(/unknown speaker attribution source/);
+    expect(parseAttributionSource("aliens")).toBe("llm");
   });
 
   it("preserves recording_health enum fields", () => {

@@ -160,7 +160,7 @@ export function parseAttributionSource(raw: string): AttributionSource {
     return raw;
   }
 
-  throw new Error(`unknown speaker attribution source: ${raw}`);
+  return "llm";
 }
 
 function parseDiagnosticConfidence(raw: unknown): DiagnosticConfidence {

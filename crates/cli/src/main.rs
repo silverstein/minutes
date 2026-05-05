@@ -3958,9 +3958,16 @@ fn cmd_diagnose(path: &Path, title: Option<&str>, config: &Config) -> Result<()>
 
     // Step 1: Diarization
     eprintln!("--- Diarization ---");
-    let diarize_result = minutes_core::diarize::diarize(path, config);
-    let diarization_embeddings = match &diarize_result {
-        Some(result) => {
+    let diarize_outcome = minutes_core::diarize::diarize_with_context(
+        path,
+        config,
+        minutes_core::diarize::DiarizationContext {
+            purpose: minutes_core::diarize::DiarizationPurpose::Auxiliary,
+            transcript_windows: None,
+        },
+    );
+    let diarization_embeddings = match &diarize_outcome {
+        minutes_core::diarize::DiarizationOutcome::Result(result) => {
             eprintln!("  Speakers: {}", result.num_speakers);
             for seg in &result.segments {
                 eprintln!("  [{} {:.1}s–{:.1}s]", seg.speaker, seg.start, seg.end);
@@ -3971,7 +3978,18 @@ fn cmd_diagnose(path: &Path, title: Option<&str>, config: &Config) -> Result<()>
             }
             result.speaker_embeddings.clone()
         }
-        None => {
+        minutes_core::diarize::DiarizationOutcome::Skipped { reason } => {
+            eprintln!(
+                "  Diarization skipped because capture health was degraded: {:?}",
+                reason.failure_kind
+            );
+            eprintln!(
+                "  Source: {:?}, confidence: {:?}",
+                reason.capture_source, reason.diagnostic_confidence
+            );
+            std::collections::HashMap::new()
+        }
+        minutes_core::diarize::DiarizationOutcome::NotConfigured => {
             eprintln!("  No diarization result (disabled or failed).");
             std::collections::HashMap::new()
         }

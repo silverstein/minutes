@@ -44,6 +44,21 @@ pub struct DiarizationResult {
     pub speaker_embeddings: std::collections::HashMap<String, Vec<f32>>,
 }
 
+impl Default for DiarizationResult {
+    fn default() -> Self {
+        Self {
+            segments: Vec::new(),
+            num_speakers: 0,
+            system_dominant_ratio: 0.0,
+            voice_dominant_ratio: 0.0,
+            degraded_capture: None,
+            from_stems: false,
+            source_aware: false,
+            speaker_embeddings: std::collections::HashMap::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct DegradedCapture {
     pub failure_kind: FailureKind,
@@ -96,6 +111,9 @@ pub enum DiagnosticConfidence {
 
 type EnergyWindow = (f64, f32);
 type StemEnergyWindows = (Vec<EnergyWindow>, Vec<EnergyWindow>);
+const STEM_PROBE_SECS: usize = 5;
+const STEM_PROBE_RMS_FLOOR: f32 = 0.001;
+const PRIMARY_DEGRADED_MIN_DURATION_SECS: f64 = 60.0;
 
 // ── Speaker attribution ──────────────────────────────────────
 
@@ -129,6 +147,40 @@ pub struct SpeakerAttribution {
     pub name: String,
     pub confidence: Confidence,
     pub source: AttributionSource,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiarizationPurpose {
+    PrimaryMeeting,
+    Auxiliary,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct DiarizationContext<'a> {
+    pub purpose: DiarizationPurpose,
+    pub transcript_windows: Option<&'a [TranscriptWindow]>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TranscriptWindow {
+    pub start_secs: f32,
+    pub end_secs: f32,
+}
+
+#[derive(Debug, Clone)]
+pub enum DiarizationOutcome {
+    Result(DiarizationResult),
+    Skipped { reason: DegradedCapture },
+    NotConfigured,
+}
+
+impl DiarizationOutcome {
+    pub fn result_for_auxiliary_use(&self) -> Option<&DiarizationResult> {
+        match self {
+            DiarizationOutcome::Result(result) => Some(result),
+            DiarizationOutcome::Skipped { .. } | DiarizationOutcome::NotConfigured => None,
+        }
+    }
 }
 
 /// Rewrite speaker labels in a transcript for high-confidence attributions only.
@@ -265,6 +317,44 @@ fn preprocess_audio(audio_path: &Path) -> (std::path::PathBuf, Option<std::path:
     }
 }
 
+pub fn audio_duration_secs(audio_path: &Path) -> Result<f64, String> {
+    use symphonia::core::io::MediaSourceStream;
+    use symphonia::core::probe::Hint;
+
+    let file = std::fs::File::open(audio_path)
+        .map_err(|error| format!("failed to open audio {}: {error}", audio_path.display()))?;
+    let mss = MediaSourceStream::new(Box::new(file), Default::default());
+
+    let mut hint = Hint::new();
+    if let Some(ext) = audio_path.extension().and_then(|ext| ext.to_str()) {
+        hint.with_extension(ext);
+    }
+
+    let probed = symphonia::default::get_probe()
+        .format(&hint, mss, &Default::default(), &Default::default())
+        .map_err(|error| format!("failed to probe audio {}: {error}", audio_path.display()))?;
+
+    let track = probed
+        .format
+        .default_track()
+        .ok_or_else(|| format!("audio {} has no default track", audio_path.display()))?;
+    let params = &track.codec_params;
+    let n_frames = params
+        .n_frames
+        .ok_or_else(|| format!("audio {} has no frame count", audio_path.display()))?;
+    let sample_rate = params
+        .sample_rate
+        .ok_or_else(|| format!("audio {} has no sample rate", audio_path.display()))?;
+    if sample_rate == 0 {
+        return Err(format!(
+            "audio {} has zero sample rate",
+            audio_path.display()
+        ));
+    }
+
+    Ok(n_frames as f64 / sample_rate as f64)
+}
+
 /// Paths to per-source audio stems from a multi-source call capture.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StemPaths {
@@ -279,9 +369,93 @@ enum SourceAwareDiarizationPlan {
 }
 
 fn stem_has_audio(path: &Path) -> bool {
-    std::fs::metadata(path)
-        .map(|m| m.len() > 44) // WAV header is 44 bytes; must have actual data
-        .unwrap_or(false)
+    let Ok(reader) = hound::WavReader::open(path) else {
+        return false;
+    };
+    let spec = reader.spec();
+    if spec.sample_rate == 0 || spec.channels == 0 {
+        return false;
+    }
+
+    match spec.sample_format {
+        hound::SampleFormat::Float => probe_stem_samples(
+            reader.into_samples::<f32>(),
+            spec.sample_rate,
+            spec.channels,
+            |sample| sample,
+        ),
+        hound::SampleFormat::Int => {
+            let bits = spec.bits_per_sample.clamp(1, 32);
+            let max_value = (1_i64 << (bits - 1)) as f32;
+            probe_stem_samples(
+                reader.into_samples::<i32>(),
+                spec.sample_rate,
+                spec.channels,
+                move |sample| sample as f32 / max_value,
+            )
+        }
+    }
+}
+
+fn probe_stem_samples<T>(
+    mut samples: impl Iterator<Item = Result<T, hound::Error>>,
+    sample_rate: u32,
+    channels: u16,
+    normalize: impl Fn(T) -> f32,
+) -> bool {
+    let channels = channels as usize;
+    let max_frames = sample_rate as usize * STEM_PROBE_SECS;
+    let max_samples = max_frames * channels;
+    let window_frames = sample_rate as usize;
+    if max_frames == 0 || window_frames == 0 || channels == 0 {
+        return false;
+    }
+
+    let mut samples_read = 0usize;
+    let mut frames_read = 0usize;
+    let mut channel_index = 0usize;
+    let mut frame_sum = 0.0_f32;
+    let mut window_frames_read = 0usize;
+    let mut window_sum_sq = 0.0_f64;
+
+    while samples_read < max_samples && frames_read < max_frames {
+        let Some(sample) = samples.next() else {
+            break;
+        };
+        samples_read += 1;
+        let Ok(sample) = sample else {
+            continue;
+        };
+
+        frame_sum += normalize(sample);
+        channel_index += 1;
+        if channel_index < channels {
+            continue;
+        }
+
+        let mono = frame_sum / channels as f32;
+        window_sum_sq += (mono as f64) * (mono as f64);
+        window_frames_read += 1;
+        frames_read += 1;
+        channel_index = 0;
+        frame_sum = 0.0;
+
+        if window_frames_read >= window_frames {
+            let rms = (window_sum_sq / window_frames_read as f64).sqrt() as f32;
+            if rms > STEM_PROBE_RMS_FLOOR {
+                return true;
+            }
+            window_frames_read = 0;
+            window_sum_sq = 0.0;
+        }
+    }
+
+    if window_frames_read > 0 {
+        let rms = (window_sum_sq / window_frames_read as f64).sqrt() as f32;
+        return rms > STEM_PROBE_RMS_FLOOR;
+    }
+
+    false
 }
 
 fn discover_stem_plan(audio_path: &Path) -> Option<SourceAwareDiarizationPlan> {
@@ -536,6 +710,60 @@ fn stem_dominant_ratios(
     )
 }
 
+fn active_ratio(values: &[f32], silence_threshold: f32) -> Option<f32> {
+    if values.is_empty() {
+        return None;
+    }
+    let active = values
+        .iter()
+        .filter(|&&rms| rms > silence_threshold)
+        .count();
+    Some(active as f32 / values.len() as f32)
+}
+
+fn observed_signal(values: &[f32]) -> ObservedSignal {
+    let frames_captured = values.len();
+    let max_rms = values.iter().copied().fold(0.0_f32, f32::max);
+    let avg_rms = if values.is_empty() {
+        0.0
+    } else {
+        values.iter().sum::<f32>() / values.len() as f32
+    };
+
+    ObservedSignal {
+        frames_captured,
+        max_rms,
+        avg_rms,
+    }
+}
+
+fn stem_degraded_capture_evidence(
+    voice_values: &[f32],
+    system_values: &[f32],
+    silence_threshold: f32,
+    system_dominant_ratio: f32,
+) -> Option<DegradedCapture> {
+    let system_signal = observed_signal(system_values);
+    let system_active_ratio = active_ratio(system_values, silence_threshold);
+    let failure_kind = if system_signal.max_rms <= STEM_PROBE_RMS_FLOOR {
+        FailureKind::Silent
+    } else if system_active_ratio.unwrap_or(0.0) < 0.02 || system_dominant_ratio < 0.02 {
+        FailureKind::Sparse
+    } else {
+        return None;
+    };
+
+    Some(DegradedCapture {
+        failure_kind,
+        capture_backend: "cpal".into(),
+        capture_source: CaptureSource::System,
+        voice_active_ratio: active_ratio(voice_values, silence_threshold),
+        system_active_ratio,
+        observed_signal: system_signal,
+        diagnostic_confidence: DiagnosticConfidence::Inferred,
+    })
+}
+
 fn diarization_from_energy_windows(
     voice_energy: &[(f64, f32)],
     system_energy: &[(f64, f32)],
@@ -569,6 +797,12 @@ fn diarization_from_energy_windows(
         .count();
     let (system_dominant_ratio, voice_dominant_ratio) =
         stem_dominant_ratios(&voice_values, &system_values, silence_threshold);
+    let degraded_capture = stem_degraded_capture_evidence(
+        &voice_values,
+        &system_values,
+        silence_threshold,
+        system_dominant_ratio,
+    );
     let correlation = correlation_coefficient(&voice_values, &system_values);
 
     // When both stems move together for most windows, we're likely seeing the
@@ -603,7 +837,7 @@ fn diarization_from_energy_windows(
             num_speakers: 1,
             system_dominant_ratio,
             voice_dominant_ratio,
-            degraded_capture: None,
+            degraded_capture: degraded_capture.clone(),
             from_stems: true,
             source_aware: true,
             speaker_embeddings: std::collections::HashMap::new(),
@@ -666,7 +900,7 @@ fn diarization_from_energy_windows(
             num_speakers,
             system_dominant_ratio,
             voice_dominant_ratio,
-            degraded_capture: None,
+            degraded_capture,
             from_stems: true,
             source_aware: true,
             speaker_embeddings: std::collections::HashMap::new(),
@@ -1046,6 +1280,133 @@ fn diarize_system_stem_with_full_audio_fallback(
     run_engine(audio_path, config, resolved_engine)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct RemoteSpeechRun {
+    start_secs: f32,
+    end_secs: f32,
+}
+
+impl RemoteSpeechRun {
+    fn duration_secs(self) -> f32 {
+        (self.end_secs - self.start_secs).max(0.0)
+    }
+}
+
+fn system_dominant_runs(segments: &[SpeakerSegment]) -> Vec<RemoteSpeechRun> {
+    let mut sorted = segments.to_vec();
+    sorted.sort_by(|a, b| {
+        a.start
+            .partial_cmp(&b.start)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let mut runs: Vec<RemoteSpeechRun> = Vec::new();
+    for segment in sorted {
+        if segment.speaker == "SPEAKER_0" || segment.end <= segment.start {
+            continue;
+        }
+
+        let start_secs = segment.start as f32;
+        let end_secs = segment.end as f32;
+        if let Some(last) = runs.last_mut() {
+            if start_secs <= last.end_secs + 0.25 {
+                last.end_secs = last.end_secs.max(end_secs);
+                continue;
+            }
+        }
+        runs.push(RemoteSpeechRun {
+            start_secs,
+            end_secs,
+        });
+    }
+
+    runs
+}
+
+fn run_overlaps_any_window(run: RemoteSpeechRun, windows: &[TranscriptWindow]) -> bool {
+    windows.iter().any(|window| {
+        window.end_secs > run.start_secs - 1.0 && window.start_secs < run.end_secs + 1.0
+    })
+}
+
+pub(crate) fn has_sustained_remote_speech(
+    result: &DiarizationResult,
+    transcript_windows: Option<&[TranscriptWindow]>,
+) -> bool {
+    let Some(windows) = transcript_windows else {
+        return false;
+    };
+    if windows.is_empty() {
+        return false;
+    }
+
+    let speech_runs: Vec<_> = system_dominant_runs(&result.segments)
+        .into_iter()
+        .filter(|run| run_overlaps_any_window(*run, windows))
+        .collect();
+    let long_runs = speech_runs
+        .iter()
+        .filter(|run| run.duration_secs() >= 1.5)
+        .count();
+    let total_secs: f32 = speech_runs.iter().map(|run| run.duration_secs()).sum();
+
+    long_runs >= 3 || total_secs >= 30.0
+}
+
+fn fallback_degraded_capture_from_result(result: &DiarizationResult) -> DegradedCapture {
+    DegradedCapture {
+        failure_kind: if result.system_dominant_ratio <= 0.001 {
+            FailureKind::Silent
+        } else {
+            FailureKind::Sparse
+        },
+        capture_backend: "cpal".into(),
+        capture_source: CaptureSource::System,
+        voice_active_ratio: Some(result.voice_dominant_ratio),
+        system_active_ratio: Some(result.system_dominant_ratio),
+        observed_signal: ObservedSignal {
+            frames_captured: result.segments.len(),
+            max_rms: 0.0,
+            avg_rms: 0.0,
+        },
+        diagnostic_confidence: DiagnosticConfidence::Inferred,
+    }
+}
+
+fn dominant_ratio_degraded(result: &DiarizationResult) -> bool {
+    result.from_stems
+        && result.system_dominant_ratio < 0.10
+        && result.voice_dominant_ratio > result.system_dominant_ratio
+}
+
+fn degraded_capture_for_primary_result(
+    audio_path: &Path,
+    result: &DiarizationResult,
+    ctx: DiarizationContext<'_>,
+) -> Option<DegradedCapture> {
+    if ctx.purpose != DiarizationPurpose::PrimaryMeeting || !result.source_aware {
+        return None;
+    }
+
+    let degraded_reason = result.degraded_capture.clone().or_else(|| {
+        dominant_ratio_degraded(result).then(|| fallback_degraded_capture_from_result(result))
+    })?;
+
+    // If the duration probe fails, behave conservatively in the guard path:
+    // primary source-aware diarization that cannot prove it is short is treated
+    // as long enough for the degraded-capture guard.
+    let duration_secs = audio_duration_secs(audio_path).unwrap_or(f64::INFINITY);
+    if duration_secs <= PRIMARY_DEGRADED_MIN_DURATION_SECS {
+        return None;
+    }
+
+    if has_sustained_remote_speech(result, ctx.transcript_windows) {
+        return None;
+    }
+
+    Some(degraded_reason)
+}
+
 /// Run speaker diarization on an audio file.
 /// Returns None if diarization is disabled or models are not available.
 ///
@@ -1059,11 +1420,15 @@ fn diarize_system_stem_with_full_audio_fallback(
 /// - `"pyannote-rs"`: native Rust diarization (requires `minutes setup --diarization`)
 /// - `"pyannote"`: legacy Python subprocess (requires `pip install pyannote.audio`)
 /// - `"none"`: explicitly disabled
-pub fn diarize(audio_path: &Path, config: &Config) -> Option<DiarizationResult> {
+pub fn diarize_with_context(
+    audio_path: &Path,
+    config: &Config,
+    ctx: DiarizationContext<'_>,
+) -> DiarizationOutcome {
     let engine = &config.diarization.engine;
 
     if engine == "none" {
-        return None;
+        return DiarizationOutcome::NotConfigured;
     }
 
     let resolved_engine = resolve_diarization_engine(config);
@@ -1077,7 +1442,18 @@ pub fn diarize(audio_path: &Path, config: &Config) -> Option<DiarizationResult> 
                 if let Some(result) =
                     diarize_from_source_aware_stems(&stems, config, resolved_engine)
                 {
-                    return Some(result);
+                    if let Some(reason) =
+                        degraded_capture_for_primary_result(audio_path, &result, ctx)
+                    {
+                        tracing::warn!(
+                            failure_kind = ?reason.failure_kind,
+                            system_dominant_ratio = result.system_dominant_ratio,
+                            voice_dominant_ratio = result.voice_dominant_ratio,
+                            "source-aware diarization degraded; leaving primary transcript unlabeled"
+                        );
+                        return DiarizationOutcome::Skipped { reason };
+                    }
+                    return DiarizationOutcome::Result(result);
                 }
                 if let Some(resolved_engine) = resolved_engine {
                     tracing::warn!(
@@ -1087,7 +1463,7 @@ pub fn diarize(audio_path: &Path, config: &Config) -> Option<DiarizationResult> 
                     if let Some(result) =
                         run_diarization_engine(&stems.system, config, resolved_engine)
                     {
-                        return Some(result);
+                        return DiarizationOutcome::Result(result);
                     }
                 }
                 // Stem attribution failed, fall through to full-audio ML diarization
@@ -1095,20 +1471,42 @@ pub fn diarize(audio_path: &Path, config: &Config) -> Option<DiarizationResult> 
             }
             SourceAwareDiarizationPlan::SystemStemOnly(system_stem) => {
                 if let Some(resolved_engine) = resolved_engine {
-                    return diarize_system_stem_with_full_audio_fallback(
+                    return match diarize_system_stem_with_full_audio_fallback(
                         &system_stem,
                         audio_path,
                         config,
                         resolved_engine,
                         run_diarization_engine,
-                    );
+                    ) {
+                        Some(result) => DiarizationOutcome::Result(result),
+                        None => DiarizationOutcome::NotConfigured,
+                    };
                 }
             }
         }
     }
 
-    let resolved_engine = resolved_engine?;
-    run_diarization_engine(audio_path, config, resolved_engine)
+    let Some(resolved_engine) = resolved_engine else {
+        return DiarizationOutcome::NotConfigured;
+    };
+    match run_diarization_engine(audio_path, config, resolved_engine) {
+        Some(result) => DiarizationOutcome::Result(result),
+        None => DiarizationOutcome::NotConfigured,
+    }
+}
+
+pub fn diarize(audio_path: &Path, config: &Config) -> Option<DiarizationResult> {
+    match diarize_with_context(
+        audio_path,
+        config,
+        DiarizationContext {
+            purpose: DiarizationPurpose::Auxiliary,
+            transcript_windows: None,
+        },
+    ) {
+        DiarizationOutcome::Result(result) => Some(result),
+        DiarizationOutcome::Skipped { .. } | DiarizationOutcome::NotConfigured => None,
+    }
 }
 
 /// Apply diarization results to a transcript.
@@ -1984,6 +2382,34 @@ fn find_python() -> Result<String, Box<dyn std::error::Error>> {
 mod tests {
     use super::*;
 
+    fn write_i16_wav(
+        path: &Path,
+        sample_rate: u32,
+        channels: u16,
+        frames: usize,
+        mut sample_for_frame: impl FnMut(usize, u16) -> i16,
+    ) {
+        let spec = hound::WavSpec {
+            channels,
+            sample_rate,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut writer = hound::WavWriter::create(path, spec).unwrap();
+        for frame in 0..frames {
+            for channel in 0..channels {
+                writer
+                    .write_sample(sample_for_frame(frame, channel))
+                    .unwrap();
+            }
+        }
+        writer.finalize().unwrap();
+    }
+
+    fn write_active_wav(path: &Path) {
+        write_i16_wav(path, 1_000, 1, 1_000, |_, _| 3_000);
+    }
+
     #[test]
     fn parse_timestamp_minutes_seconds() {
         assert_eq!(parse_timestamp("0:00"), Some(0.0));
@@ -2000,6 +2426,89 @@ mod tests {
     fn parse_timestamp_invalid() {
         assert_eq!(parse_timestamp("abc"), None);
         assert_eq!(parse_timestamp(""), None);
+    }
+
+    #[test]
+    fn stem_has_audio_rejects_large_zero_wav() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("zero.wav");
+        write_i16_wav(&path, 1_000, 2, 12_000, |_, _| 0);
+
+        assert!(!stem_has_audio(&path));
+    }
+
+    #[test]
+    fn stem_has_audio_accepts_sparse_nonzero_within_probe_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sparse.wav");
+        write_i16_wav(&path, 1_000, 1, 12_000, |frame, _| {
+            if (500..1_500).contains(&frame) {
+                3_000
+            } else {
+                0
+            }
+        });
+
+        assert!(stem_has_audio(&path));
+    }
+
+    #[test]
+    fn stem_has_audio_is_frame_bounded_across_rates_and_channels() {
+        for (sample_rate, channels) in [(1_000, 1), (1_000, 2), (4_410, 1), (4_410, 2)] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir
+                .path()
+                .join(format!("bounded-{sample_rate}-{channels}.wav"));
+            let max_frames = sample_rate as usize * STEM_PROBE_SECS;
+            write_i16_wav(&path, sample_rate, channels, max_frames + 2, |frame, _| {
+                if frame > max_frames {
+                    12_000
+                } else {
+                    0
+                }
+            });
+
+            assert!(
+                !stem_has_audio(&path),
+                "probe should not scan past {max_frames} frames for {sample_rate} Hz/{channels} ch"
+            );
+        }
+    }
+
+    #[test]
+    fn stem_has_audio_boundary_includes_exact_max_frame_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("boundary.wav");
+        let sample_rate = 1_000;
+        let max_frames = sample_rate as usize * STEM_PROBE_SECS;
+        write_i16_wav(&path, sample_rate, 1, max_frames, |frame, _| {
+            if frame + 1 == max_frames {
+                32_000
+            } else {
+                0
+            }
+        });
+
+        assert!(stem_has_audio(&path));
+    }
+
+    #[test]
+    fn audio_duration_secs_reads_wav_duration() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("duration.wav");
+        write_i16_wav(&path, 8_000, 1, 12_000, |_, _| 0);
+
+        let duration = audio_duration_secs(&path).unwrap();
+        assert!((duration - 1.5).abs() < 0.01, "duration={duration}");
+    }
+
+    #[test]
+    fn audio_duration_secs_errors_on_malformed_audio() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("malformed.wav");
+        std::fs::write(&path, b"not a wav").unwrap();
+
+        assert!(audio_duration_secs(&path).is_err());
     }
 
     #[test]
@@ -2259,6 +2768,122 @@ mod tests {
         assert_eq!(result.segments.len(), 2);
         assert_eq!(result.segments[0].speaker, "SPEAKER_0");
         assert_eq!(result.segments[1].speaker, "SPEAKER_1");
+    }
+
+    #[test]
+    fn has_sustained_remote_speech_requires_transcript_aligned_runs() {
+        let result = DiarizationResult {
+            segments: vec![
+                SpeakerSegment {
+                    speaker: "SPEAKER_1".into(),
+                    start: 2.0,
+                    end: 4.0,
+                },
+                SpeakerSegment {
+                    speaker: "SPEAKER_1".into(),
+                    start: 12.0,
+                    end: 14.0,
+                },
+                SpeakerSegment {
+                    speaker: "SPEAKER_1".into(),
+                    start: 22.0,
+                    end: 24.0,
+                },
+            ],
+            num_speakers: 2,
+            system_dominant_ratio: 0.75,
+            voice_dominant_ratio: 0.25,
+            degraded_capture: None,
+            from_stems: true,
+            source_aware: true,
+            speaker_embeddings: std::collections::HashMap::new(),
+        };
+        let windows = vec![
+            TranscriptWindow {
+                start_secs: 1.0,
+                end_secs: 5.0,
+            },
+            TranscriptWindow {
+                start_secs: 11.0,
+                end_secs: 15.0,
+            },
+            TranscriptWindow {
+                start_secs: 21.0,
+                end_secs: 25.0,
+            },
+        ];
+
+        assert!(has_sustained_remote_speech(&result, Some(&windows)));
+        assert!(!has_sustained_remote_speech(&result, None));
+        assert!(!has_sustained_remote_speech(&result, Some(&[])));
+    }
+
+    #[test]
+    fn has_sustained_remote_speech_filters_chimes_before_thresholds() {
+        let result = DiarizationResult {
+            segments: vec![
+                SpeakerSegment {
+                    speaker: "SPEAKER_1".into(),
+                    start: 5.0,
+                    end: 7.0,
+                },
+                SpeakerSegment {
+                    speaker: "SPEAKER_1".into(),
+                    start: 20.0,
+                    end: 22.0,
+                },
+                SpeakerSegment {
+                    speaker: "SPEAKER_1".into(),
+                    start: 40.0,
+                    end: 42.0,
+                },
+                SpeakerSegment {
+                    speaker: "SPEAKER_1".into(),
+                    start: 60.0,
+                    end: 62.0,
+                },
+            ],
+            num_speakers: 2,
+            system_dominant_ratio: 0.8,
+            voice_dominant_ratio: 0.2,
+            degraded_capture: None,
+            from_stems: true,
+            source_aware: true,
+            speaker_embeddings: std::collections::HashMap::new(),
+        };
+        let one_overlapping_window = vec![TranscriptWindow {
+            start_secs: 5.5,
+            end_secs: 6.5,
+        }];
+
+        assert!(!has_sustained_remote_speech(
+            &result,
+            Some(&one_overlapping_window)
+        ));
+    }
+
+    #[test]
+    fn has_sustained_remote_speech_accepts_long_transcript_aligned_remote_audio() {
+        let result = DiarizationResult {
+            segments: vec![SpeakerSegment {
+                speaker: "SPEAKER_1".into(),
+                start: 10.0,
+                end: 42.0,
+            }],
+            num_speakers: 2,
+            system_dominant_ratio: 0.9,
+            voice_dominant_ratio: 0.1,
+            degraded_capture: None,
+            from_stems: true,
+            source_aware: true,
+            speaker_embeddings: std::collections::HashMap::new(),
+        };
+        let windows = vec![TranscriptWindow {
+            start_secs: 12.0,
+            end_secs: 20.0,
+        }];
+
+        assert!(has_sustained_remote_speech(&result, Some(&windows)));
     }
 
     #[test]
@@ -2656,8 +3281,8 @@ mod tests {
         let voice = dir.path().join("call.voice.wav");
         let system = dir.path().join("call.system.wav");
         std::fs::write(&audio, b"mov").unwrap();
-        std::fs::write(&voice, vec![0_u8; 45]).unwrap();
-        std::fs::write(&system, vec![0_u8; 45]).unwrap();
+        write_active_wav(&voice);
+        write_active_wav(&system);
 
         let plan = discover_stem_plan(&audio);
         assert_eq!(
@@ -2675,7 +3300,7 @@ mod tests {
         let audio = dir.path().join("call.mov");
         let system = dir.path().join("call.system.wav");
         std::fs::write(&audio, b"mov").unwrap();
-        std::fs::write(&system, vec![0_u8; 45]).unwrap();
+        write_active_wav(&system);
 
         let plan = discover_stem_plan(&audio);
         assert_eq!(
@@ -2733,10 +3358,63 @@ mod tests {
         let audio = dir.path().join("call.mov");
         let voice = dir.path().join("call.voice.wav");
         std::fs::write(&audio, b"mov").unwrap();
-        std::fs::write(&voice, vec![0_u8; 45]).unwrap();
+        write_active_wav(&voice);
 
         let plan = discover_stem_plan(&audio);
         assert_eq!(plan, None);
+    }
+
+    #[test]
+    fn primary_degraded_stem_result_skips_without_unknown_spam_and_sets_health() {
+        let dir = tempfile::tempdir().unwrap();
+        let audio = dir.path().join("call.wav");
+        let voice = dir.path().join("call.voice.wav");
+        let system = dir.path().join("call.system.wav");
+        let sample_rate = 1_000;
+        let frames = 61_000;
+        write_i16_wav(&audio, sample_rate, 1, frames, |_, _| 0);
+        write_i16_wav(&voice, sample_rate, 1, frames, |_, _| 3_000);
+        write_i16_wav(&system, sample_rate, 1, frames, |frame, _| {
+            if frame < sample_rate as usize {
+                3_000
+            } else {
+                0
+            }
+        });
+
+        let config = Config::default();
+        let transcript = "[0:00] First line\n[0:10] Second line\n";
+        let windows = vec![
+            TranscriptWindow {
+                start_secs: 0.0,
+                end_secs: 8.0,
+            },
+            TranscriptWindow {
+                start_secs: 10.0,
+                end_secs: 18.0,
+            },
+        ];
+        let outcome = diarize_with_context(
+            &audio,
+            &config,
+            DiarizationContext {
+                purpose: DiarizationPurpose::PrimaryMeeting,
+                transcript_windows: Some(&windows),
+            },
+        );
+
+        let DiarizationOutcome::Skipped { reason } = outcome else {
+            panic!("expected degraded primary capture to skip");
+        };
+        assert_eq!(reason.capture_source, CaptureSource::System);
+        let health: crate::markdown::RecordingHealth = reason.into();
+        assert_eq!(health.capture_warnings.len(), 1);
+        assert_eq!(
+            health.diarization_path,
+            Some(crate::markdown::DiarizationPath::None)
+        );
+        assert!(!transcript.contains("[UNKNOWN"));
+        assert!(!transcript.contains("[SPEAKER_0"));
     }
 
     #[test]

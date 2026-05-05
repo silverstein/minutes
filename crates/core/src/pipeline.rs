@@ -1062,33 +1062,59 @@ where
     let mut diarization_from_stems = false;
     let mut diarization_embeddings: std::collections::HashMap<String, Vec<f32>> =
         std::collections::HashMap::new();
+    let mut recording_health: Option<markdown::RecordingHealth> = None;
     if config.diarization.engine != "none" && artifact.frontmatter.r#type == ContentType::Meeting {
         on_progress(PipelineStage::Diarizing);
         let diarize_start = std::time::Instant::now();
-        if let Some(result) = diarize::diarize(audio_path, config) {
-            let diarize_ms = diarize_start.elapsed().as_millis() as u64;
-            diarization_num_speakers = result.num_speakers;
-            diarization_from_stems = result.source_aware;
-            diarization_embeddings = result.speaker_embeddings.clone();
-            logging::log_step(
-                "diarize",
-                &audio_path.display().to_string(),
-                diarize_ms,
-                serde_json::json!({
-                    "speakers": result.num_speakers,
-                    "segments": result.segments.len(),
-                    "first_segment_start": result.segments.first().map(|s| s.start),
-                    "last_segment_end": result.segments.last().map(|s| s.end),
-                }),
-            );
-            transcript = diarize::apply_speakers(&transcript, &result);
-        } else {
-            logging::log_step(
-                "diarize",
-                &audio_path.display().to_string(),
-                diarize_start.elapsed().as_millis() as u64,
-                serde_json::json!({"skipped": true}),
-            );
+        let transcript_windows = build_transcript_windows(
+            &transcript,
+            diarize::audio_duration_secs(audio_path).unwrap_or(f64::INFINITY),
+        );
+        let ctx = diarize::DiarizationContext {
+            purpose: diarize::DiarizationPurpose::PrimaryMeeting,
+            transcript_windows: Some(&transcript_windows),
+        };
+        match diarize::diarize_with_context(audio_path, config, ctx) {
+            diarize::DiarizationOutcome::Result(result) => {
+                let diarize_ms = diarize_start.elapsed().as_millis() as u64;
+                diarization_num_speakers = result.num_speakers;
+                diarization_from_stems = result.source_aware;
+                diarization_embeddings = result.speaker_embeddings.clone();
+                logging::log_step(
+                    "diarize",
+                    &audio_path.display().to_string(),
+                    diarize_ms,
+                    serde_json::json!({
+                        "speakers": result.num_speakers,
+                        "segments": result.segments.len(),
+                        "first_segment_start": result.segments.first().map(|s| s.start),
+                        "last_segment_end": result.segments.last().map(|s| s.end),
+                    }),
+                );
+                transcript = diarize::apply_speakers(&transcript, &result);
+            }
+            diarize::DiarizationOutcome::Skipped { reason } => {
+                let diarize_ms = diarize_start.elapsed().as_millis() as u64;
+                logging::log_step(
+                    "diarize",
+                    &audio_path.display().to_string(),
+                    diarize_ms,
+                    serde_json::json!({
+                        "skipped": true,
+                        "reason": "degraded_capture",
+                        "failure_kind": format!("{:?}", reason.failure_kind),
+                    }),
+                );
+                recording_health = Some(reason.into());
+            }
+            diarize::DiarizationOutcome::NotConfigured => {
+                logging::log_step(
+                    "diarize",
+                    &audio_path.display().to_string(),
+                    diarize_start.elapsed().as_millis() as u64,
+                    serde_json::json!({"skipped": true}),
+                );
+            }
         }
     }
 
@@ -1295,6 +1321,7 @@ where
     frontmatter.decisions = structured_decisions;
     frontmatter.intents = structured_intents;
     frontmatter.speaker_map = speaker_map;
+    frontmatter.recording_health = recording_health.or(frontmatter.recording_health);
 
     on_progress(PipelineStage::Saving);
     let mut result = markdown::rewrite_with_retry_path(
@@ -1524,17 +1551,31 @@ where
     let mut diarization_from_stems = false;
     let mut diarization_embeddings: std::collections::HashMap<String, Vec<f32>> =
         std::collections::HashMap::new();
+    let mut recording_health: Option<markdown::RecordingHealth> = None;
     let transcript = if config.diarization.engine != "none" && content_type == ContentType::Meeting
     {
         on_progress(PipelineStage::Diarizing);
         tracing::info!(step = "diarize", "running speaker diarization");
-        if let Some(result) = diarize::diarize(audio_path, config) {
-            diarization_num_speakers = result.num_speakers;
-            diarization_from_stems = result.source_aware;
-            diarization_embeddings = result.speaker_embeddings.clone();
-            diarize::apply_speakers(&transcript, &result)
-        } else {
-            transcript
+        let transcript_windows = build_transcript_windows(
+            &transcript,
+            diarize::audio_duration_secs(audio_path).unwrap_or(f64::INFINITY),
+        );
+        let ctx = diarize::DiarizationContext {
+            purpose: diarize::DiarizationPurpose::PrimaryMeeting,
+            transcript_windows: Some(&transcript_windows),
+        };
+        match diarize::diarize_with_context(audio_path, config, ctx) {
+            diarize::DiarizationOutcome::Result(result) => {
+                diarization_num_speakers = result.num_speakers;
+                diarization_from_stems = result.source_aware;
+                diarization_embeddings = result.speaker_embeddings.clone();
+                diarize::apply_speakers(&transcript, &result)
+            }
+            diarize::DiarizationOutcome::Skipped { reason } => {
+                recording_health = Some(reason.into());
+                transcript
+            }
+            diarize::DiarizationOutcome::NotConfigured => transcript,
         }
     } else {
         transcript
@@ -1818,7 +1859,7 @@ where
         recorded_by: config.identity.name.clone(),
         visibility: None,
         speaker_map,
-        recording_health: None,
+        recording_health,
         template: template.map(|t| t.slug().to_string()),
         filter_diagnosis: if status == Some(OutputStatus::NoSpeech) {
             Some(filter_stats.diagnosis())
@@ -1932,7 +1973,7 @@ where
 /// Estimate audio duration from file size (rough approximation).
 /// 16kHz mono 16-bit WAV ≈ 32KB/sec.
 fn estimate_duration(audio_path: &Path) -> String {
-    if let Some(duration_secs) = probe_audio_duration_secs(audio_path) {
+    if let Ok(duration_secs) = diarize::audio_duration_secs(audio_path) {
         return format_duration_secs(duration_secs);
     }
 
@@ -1944,33 +1985,6 @@ fn estimate_duration(audio_path: &Path) -> String {
     format_duration_secs(secs as f64)
 }
 
-fn probe_audio_duration_secs(audio_path: &Path) -> Option<f64> {
-    use symphonia::core::io::MediaSourceStream;
-    use symphonia::core::probe::Hint;
-
-    let file = std::fs::File::open(audio_path).ok()?;
-    let mss = MediaSourceStream::new(Box::new(file), Default::default());
-
-    let mut hint = Hint::new();
-    if let Some(ext) = audio_path.extension().and_then(|e| e.to_str()) {
-        hint.with_extension(ext);
-    }
-
-    let probed = symphonia::default::get_probe()
-        .format(&hint, mss, &Default::default(), &Default::default())
-        .ok()?;
-
-    let track = probed.format.default_track()?;
-    let params = &track.codec_params;
-    let n_frames = params.n_frames?;
-    let sample_rate = params.sample_rate?;
-    if sample_rate == 0 {
-        return None;
-    }
-
-    Some(n_frames as f64 / sample_rate as f64)
-}
-
 fn format_duration_secs(duration_secs: f64) -> String {
     let secs = duration_secs.round().max(0.0) as u64;
     let mins = secs / 60;
@@ -1980,6 +1994,56 @@ fn format_duration_secs(duration_secs: f64) -> String {
     } else {
         format!("{}s", remaining_secs)
     }
+}
+
+fn parse_transcript_line_start_secs(line: &str) -> Option<f32> {
+    let rest = line.strip_prefix('[')?;
+    let bracket_end = rest.find(']')?;
+    let timestamp = &rest[..bracket_end];
+    let parts: Vec<&str> = timestamp.split(':').collect();
+    let secs = match parts.as_slice() {
+        [minutes, seconds] => minutes.parse::<u64>().ok()? * 60 + seconds.parse::<u64>().ok()?,
+        [hours, minutes, seconds] => {
+            hours.parse::<u64>().ok()? * 3600
+                + minutes.parse::<u64>().ok()? * 60
+                + seconds.parse::<u64>().ok()?
+        }
+        _ => return None,
+    };
+    Some(secs as f32)
+}
+
+fn parse_transcript_line_starts(transcript: &str) -> Vec<f32> {
+    transcript
+        .lines()
+        .filter_map(parse_transcript_line_start_secs)
+        .collect()
+}
+
+fn build_transcript_windows(
+    transcript: &str,
+    audio_duration_secs: f64,
+) -> Vec<diarize::TranscriptWindow> {
+    let starts = parse_transcript_line_starts(transcript);
+    let duration = audio_duration_secs as f32;
+    let mut windows = Vec::new();
+
+    for (index, start) in starts.iter().copied().enumerate() {
+        let next_start = starts.get(index + 1).copied().unwrap_or(f32::INFINITY);
+        let natural_end = start + 8.0;
+        let mut end = next_start.min(natural_end);
+        if duration.is_finite() {
+            end = end.min(duration);
+        }
+        if end > start {
+            windows.push(diarize::TranscriptWindow {
+                start_secs: start,
+                end_secs: end,
+            });
+        }
+    }
+
+    windows
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3994,6 +4058,41 @@ mod tests {
         assert_eq!(format_duration_secs(4313.6), "71m 54s");
         assert_eq!(format_duration_secs(59.6), "1m 0s");
         assert_eq!(format_duration_secs(0.4), "0s");
+    }
+
+    #[test]
+    fn parse_transcript_line_starts_reads_minutes_and_hours() {
+        let transcript = "[0:05] Intro\n[12:34] Update\n[1:02:03] Long call\nnot timestamped";
+
+        assert_eq!(
+            parse_transcript_line_starts(transcript),
+            vec![5.0, 754.0, 3723.0]
+        );
+    }
+
+    #[test]
+    fn build_transcript_windows_synthesizes_end_times() {
+        let transcript = "[0:00] One\n[0:03] Two\n[0:20] Three\n";
+
+        let windows = build_transcript_windows(transcript, 24.0);
+
+        assert_eq!(
+            windows,
+            vec![
+                diarize::TranscriptWindow {
+                    start_secs: 0.0,
+                    end_secs: 3.0,
+                },
+                diarize::TranscriptWindow {
+                    start_secs: 3.0,
+                    end_secs: 11.0,
+                },
+                diarize::TranscriptWindow {
+                    start_secs: 20.0,
+                    end_secs: 24.0,
+                },
+            ]
+        );
     }
 
     #[test]

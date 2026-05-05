@@ -63,6 +63,33 @@ pub struct CaptureWarning {
     pub diagnostic_confidence: crate::diarize::DiagnosticConfidence,
 }
 
+impl From<crate::diarize::DegradedCapture> for RecordingHealth {
+    fn from(reason: crate::diarize::DegradedCapture) -> Self {
+        let message = match &reason.failure_kind {
+            crate::diarize::FailureKind::Silent => {
+                "System audio was silent during capture; transcript was left unlabeled.".to_string()
+            }
+            crate::diarize::FailureKind::Sparse => {
+                "System audio did not contain sustained transcript-aligned remote speech; transcript was left unlabeled.".to_string()
+            }
+            _ => "Capture health degraded diarization; transcript was left unlabeled.".to_string(),
+        };
+
+        RecordingHealth {
+            voice_stem_active_ratio: reason.voice_active_ratio,
+            system_stem_active_ratio: reason.system_active_ratio,
+            system_dominant_ratio: None,
+            capture_warnings: vec![CaptureWarning {
+                kind: reason.failure_kind,
+                source: reason.capture_source,
+                message,
+                diagnostic_confidence: reason.diagnostic_confidence,
+            }],
+            diarization_path: Some(DiarizationPath::None),
+        }
+    }
+}
+
 /// Frontmatter for a meeting/memo markdown file.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct Frontmatter {

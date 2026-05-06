@@ -34,6 +34,7 @@ pub mod screen;
 pub mod search;
 pub mod search_index;
 pub mod summarize;
+pub mod system_audio_backend;
 pub mod template;
 pub mod transcribe;
 pub mod transcription_coordinator;

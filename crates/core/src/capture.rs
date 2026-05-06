@@ -947,6 +947,8 @@ fn record_to_wav_dual_source(
     plan: DualCapturePlan,
     started_context: Option<RecordingStartedContext>,
 ) -> Result<(), CaptureError> {
+    use crate::system_audio_backend::SystemAudioBackend;
+
     crate::pid::check_and_clear_sentinel();
     // Refresh the in-process mic-mute flag from the sentinel. The CLI
     // `--mute-mic` flag writes the sentinel before getting here, and the
@@ -960,14 +962,21 @@ fn record_to_wav_dual_source(
     let (live_tx, sidecar_handle) = start_live_sidecar(config, &stop_flag);
 
     let mut voice_stream = Some(AudioStream::start(plan.voice_override.as_deref())?);
-    let mut system_stream = Some(AudioStream::start(Some(&plan.call_override))?);
+    let (system_tx, system_backend_rx) = crossbeam_channel::bounded(64);
+    let mut system_backend =
+        crate::system_audio_backend::CpalSystemAudioBackend::new(plan.call_override.clone());
+    let mut system_stream = Some(system_backend.start(system_tx.clone())?);
+    let system_device_name = system_stream
+        .as_ref()
+        .and_then(|stream| stream.route().device_name)
+        .unwrap_or_else(|| plan.call_device_name.clone());
     // Call side is always a pinned override; voice side is pinned iff the caller
     // supplied an explicit override. Pinned sides skip default-device-change polling.
     let voice_pinned = plan.voice_override.is_some();
     let mut device_monitor = crate::device_monitor::MultiDeviceMonitor::with_pinned(
         &voice_stream.as_ref().expect("voice stream").device_name,
         voice_pinned,
-        &system_stream.as_ref().expect("system stream").device_name,
+        &system_device_name,
         true,
     );
 
@@ -977,11 +986,11 @@ fn record_to_wav_dual_source(
     );
     eprintln!(
         "[minutes] Using system audio device: {}",
-        system_stream.as_ref().expect("system stream").device_name
+        system_device_name
     );
     tracing::info!(
         voice = %voice_stream.as_ref().expect("voice stream").device_name,
-        system = %system_stream.as_ref().expect("system stream").device_name,
+        system = %system_device_name,
         "using dual-source audio input devices"
     );
     emit_recording_started(started_context);
@@ -1079,7 +1088,7 @@ fn record_to_wav_dual_source(
             .is_some_and(crate::streaming::AudioStream::has_error)
             || system_stream
                 .as_ref()
-                .is_some_and(crate::streaming::AudioStream::has_error)
+                .is_some_and(|stream| stream.has_error())
             || device_monitor.check_changes().is_some()
         {
             tracing::warn!("dual-source stream issue detected — attempting restart");
@@ -1088,17 +1097,21 @@ fn record_to_wav_dual_source(
 
             match (
                 AudioStream::start(plan.voice_override.as_deref()),
-                AudioStream::start(Some(&plan.call_override)),
+                system_backend.start(system_tx.clone()),
             ) {
                 (Ok(new_voice), Ok(new_system)) => {
+                    let new_system_name = new_system
+                        .route()
+                        .device_name
+                        .unwrap_or_else(|| plan.call_device_name.clone());
                     eprintln!(
                         "[minutes] Dual-source capture reconnected: {} + {}",
-                        new_voice.device_name, new_system.device_name
+                        new_voice.device_name, new_system_name
                     );
                     device_monitor = crate::device_monitor::MultiDeviceMonitor::with_pinned(
                         &new_voice.device_name,
                         voice_pinned,
-                        &new_system.device_name,
+                        &new_system_name,
                         true,
                     );
                     slot_base = max_voice_slot
@@ -1129,9 +1142,8 @@ fn record_to_wav_dual_source(
             .clone();
         let system_rx = system_stream
             .as_ref()
-            .expect("system stream should stay active")
-            .receiver
-            .clone();
+            .map(|_| system_backend_rx.clone())
+            .expect("system stream should stay active");
 
         // Drain all available chunks from both channels before flushing.
         // The old code used select! to grab ONE chunk per iteration, which

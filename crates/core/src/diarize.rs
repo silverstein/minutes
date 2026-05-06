@@ -1577,6 +1577,17 @@ fn degraded_voice_stem_ml_fallback_with_runner(
     }
 
     let mut result = run_engine(voice_stem, config, resolved_engine)?;
+    if result.num_speakers < 2 {
+        tracing::warn!(
+            failure_kind = ?reason.failure_kind,
+            voice_stem = %voice_stem.display(),
+            speakers = result.num_speakers,
+            segments = result.segments.len(),
+            "source-aware diarization degraded; voice-stem ML fallback did not recover multiple speakers"
+        );
+        return None;
+    }
+
     result.degraded_capture = Some(reason.clone());
     result.from_stems = false;
     result.source_aware = false;
@@ -3736,7 +3747,7 @@ mod tests {
     }
 
     #[test]
-    fn degraded_voice_stem_ml_fallback_marks_result_backend_agnostic_and_degraded() {
+    fn degraded_voice_stem_ml_fallback_marks_multi_speaker_result_backend_agnostic_and_degraded() {
         let dir = tempfile::tempdir().unwrap();
         let audio = dir.path().join("call.wav");
         let voice = dir.path().join("call.voice.wav");
@@ -3796,6 +3807,54 @@ mod tests {
         assert!(!recovered.source_aware);
         assert_eq!(recovered.num_speakers, 2);
         assert_eq!(recovered.degraded_capture, Some(reason));
+    }
+
+    #[test]
+    fn degraded_voice_stem_ml_fallback_rejects_single_speaker_result() {
+        let dir = tempfile::tempdir().unwrap();
+        let audio = dir.path().join("call.wav");
+        let voice = dir.path().join("call.voice.wav");
+        let system = dir.path().join("call.system.wav");
+        let sample_rate = 1_000;
+        let frames = 121_000;
+        write_i16_wav(&audio, sample_rate, 1, frames, |_, _| 0);
+        write_i16_wav(&voice, sample_rate, 1, frames, |_, _| 3_000);
+        write_i16_wav(&system, sample_rate, 1, frames, |_, _| 0);
+
+        let reason = silent_system_stem_degraded_capture(&system);
+        let config = Config::default();
+        let mut attempted = false;
+        let recovered = degraded_voice_stem_ml_fallback_with_runner(
+            &audio,
+            &voice,
+            &config,
+            Some("test-engine"),
+            &reason,
+            DiarizationContext {
+                purpose: DiarizationPurpose::PrimaryMeeting,
+                transcript_windows: None,
+            },
+            |_path, _config, _engine| {
+                attempted = true;
+                Some(DiarizationResult {
+                    segments: vec![SpeakerSegment {
+                        speaker: "SPEAKER_0".into(),
+                        start: 0.0,
+                        end: 20.0,
+                    }],
+                    num_speakers: 1,
+                    system_dominant_ratio: 0.0,
+                    voice_dominant_ratio: 0.0,
+                    degraded_capture: None,
+                    from_stems: true,
+                    source_aware: true,
+                    speaker_embeddings: std::collections::HashMap::new(),
+                })
+            },
+        );
+
+        assert!(attempted);
+        assert!(recovered.is_none());
     }
 
     #[test]

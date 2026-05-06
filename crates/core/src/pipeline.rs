@@ -274,6 +274,35 @@ fn degraded_ml_recording_health(reason: diarize::DegradedCapture) -> markdown::R
     )
 }
 
+fn merge_recording_health(
+    primary: Option<markdown::RecordingHealth>,
+    existing: Option<markdown::RecordingHealth>,
+) -> Option<markdown::RecordingHealth> {
+    match (primary, existing) {
+        (Some(mut primary), Some(existing)) => {
+            primary.voice_stem_active_ratio = primary
+                .voice_stem_active_ratio
+                .or(existing.voice_stem_active_ratio);
+            primary.system_stem_active_ratio = primary
+                .system_stem_active_ratio
+                .or(existing.system_stem_active_ratio);
+            primary.system_dominant_ratio = primary
+                .system_dominant_ratio
+                .or(existing.system_dominant_ratio);
+            if primary.diarization_path.is_none() {
+                primary.diarization_path = existing.diarization_path;
+            }
+            let mut warnings = existing.capture_warnings;
+            warnings.extend(primary.capture_warnings);
+            primary.capture_warnings = warnings;
+            Some(primary)
+        }
+        (Some(primary), None) => Some(primary),
+        (None, Some(existing)) => Some(existing),
+        (None, None) => None,
+    }
+}
+
 fn mark_degraded_ml_attributions(speaker_map: &mut [diarize::SpeakerAttribution]) {
     for attribution in speaker_map {
         attribution.confidence = diarize::Confidence::Low;
@@ -757,6 +786,7 @@ pub struct BackgroundPipelineContext {
     pub calendar_event: Option<crate::calendar::CalendarEvent>,
     pub recorded_at: Option<DateTime<Local>>,
     pub requested_title: Option<String>,
+    pub recording_health: Option<crate::markdown::RecordingHealth>,
     /// Optional template applied to summarization. Recorded in frontmatter
     /// so Phase 2 reprocessing knows which template produced this file.
     pub template: Option<crate::template::Template>,
@@ -1068,7 +1098,7 @@ pub fn write_transcript_artifact(
         recorded_by: config.identity.name.clone(),
         visibility: None,
         speaker_map: vec![],
-        recording_health: None,
+        recording_health: context.recording_health.clone(),
         template: context.template.as_ref().map(|t| t.slug().to_string()),
         filter_diagnosis: if status == Some(OutputStatus::NoSpeech) {
             Some(filter_stats.diagnosis())
@@ -1391,7 +1421,8 @@ where
     frontmatter.decisions = structured_decisions;
     frontmatter.intents = structured_intents;
     frontmatter.speaker_map = speaker_map;
-    frontmatter.recording_health = recording_health.or(frontmatter.recording_health);
+    frontmatter.recording_health =
+        merge_recording_health(recording_health, frontmatter.recording_health);
 
     on_progress(PipelineStage::Saving);
     let mut result = markdown::rewrite_with_retry_path(

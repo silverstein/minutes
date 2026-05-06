@@ -496,6 +496,27 @@ fn resolve_capture_plan(config: &Config) -> Result<CapturePlan, CaptureError> {
     resolve_capture_plan_with_host(host, config)
 }
 
+pub fn resolve_system_audio_probe_device(config: &Config) -> Result<Option<String>, String> {
+    let Some(call_override) = config
+        .recording
+        .sources
+        .as_ref()
+        .and_then(|sources| sources.call.as_deref())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(None);
+    };
+
+    if call_override.eq_ignore_ascii_case("auto") {
+        detect_loopback_device()
+            .map(Some)
+            .ok_or_else(|| MISSING_DUAL_SOURCE_LOOPBACK_MESSAGE.to_string())
+    } else {
+        Ok(Some(call_override.to_string()))
+    }
+}
+
 fn resolve_capture_plan_with_host(
     host: &cpal::Host,
     config: &Config,

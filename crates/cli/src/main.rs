@@ -214,6 +214,11 @@ enum Commands {
         #[arg(long)]
         allow_degraded: bool,
 
+        /// Skip the system-audio readiness probe for this run. Requires a
+        /// reason, which is written into recording_health.
+        #[arg(long, value_name = "REASON")]
+        skip_audio_probe: Option<String>,
+
         /// Transcription language (e.g. "en", "ur", "es"). Overrides config.toml setting.
         #[arg(short, long)]
         language: Option<String>,
@@ -1220,6 +1225,7 @@ fn main() -> Result<()> {
             mode,
             intent,
             allow_degraded,
+            skip_audio_probe,
             language,
             device,
             source,
@@ -1285,6 +1291,7 @@ fn main() -> Result<()> {
                     &mode,
                     effective_intent,
                     allow_degraded,
+                    skip_audio_probe.as_deref(),
                     template,
                     &config,
                 )
@@ -1830,12 +1837,78 @@ fn cmd_preflight_record(
     Ok(())
 }
 
+fn check_meeting_system_audio_probe(
+    capture_mode: CaptureMode,
+    skip_audio_probe: Option<&str>,
+    config: &Config,
+) -> Result<Option<minutes_core::markdown::RecordingHealth>> {
+    if capture_mode != CaptureMode::Meeting {
+        return Ok(None);
+    }
+
+    if minutes_core::capture::resolve_system_audio_probe_device(config)
+        .map_err(|error| anyhow::anyhow!("{}", error))?
+        .is_none()
+    {
+        if skip_audio_probe.is_some() {
+            anyhow::bail!("--skip-audio-probe was provided, but no system-audio source is configured for this recording");
+        }
+        return Ok(None);
+    }
+
+    if let Some(reason) = skip_audio_probe {
+        let reason = reason.trim();
+        if reason.is_empty() {
+            anyhow::bail!("--skip-audio-probe requires a non-empty reason");
+        }
+        eprintln!(
+            "[minutes] System-audio readiness probe skipped for this recording: {}",
+            reason
+        );
+        return Ok(Some(
+            minutes_core::health::recording_health_for_skipped_system_audio_probe(reason),
+        ));
+    }
+
+    match minutes_core::health::probe_system_audio_capture(config)
+        .map_err(|error| anyhow::anyhow!("{}", error))?
+    {
+        None => Ok(None),
+        Some((route, result)) if result.failure_kind.is_none() => {
+            if let Some(device) = route.device_name.as_deref() {
+                eprintln!(
+                    "[minutes] System-audio readiness probe passed on '{}'.",
+                    device
+                );
+            }
+            Ok(None)
+        }
+        Some((route, result)) => {
+            let health = minutes_core::health::recording_health_for_system_audio_probe_failure(
+                Some(&route),
+                &result,
+            );
+            let detail = health
+                .capture_warnings
+                .first()
+                .map(|warning| warning.message.as_str())
+                .unwrap_or("System-audio readiness probe failed.");
+            anyhow::bail!(
+                "{} Use --skip-audio-probe \"<reason>\" for this run only if you intentionally want to record despite this degraded system-audio signal.",
+                detail
+            );
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn cmd_record(
     title: Option<String>,
     context: Option<String>,
     mode: &str,
     intent: &str,
     allow_degraded: bool,
+    skip_audio_probe: Option<&str>,
     template_slug: Option<String>,
     config: &Config,
 ) -> Result<()> {
@@ -1857,6 +1930,9 @@ fn cmd_record(
     for warning in &preflight.warnings {
         eprintln!("[minutes] {}", warning);
     }
+
+    let startup_recording_health =
+        check_meeting_system_audio_probe(capture_mode, skip_audio_probe, config)?;
 
     // Check for conflicting live transcript session
     let lt_pid = minutes_core::pid::live_transcript_pid_path();
@@ -1961,7 +2037,7 @@ fn cmd_record(
     // The pipeline already falls back to events_overlapping_now() during background processing.
     let calendar_event = None;
     let queued = (|| -> Result<(minutes_core::jobs::ProcessingJob, String)> {
-        let job = minutes_core::jobs::queue_live_capture(
+        let job = minutes_core::jobs::queue_live_capture_with_recording_health(
             capture_mode,
             title.clone(),
             &wav_path,
@@ -1972,6 +2048,7 @@ fn cmd_record(
             context_session_id.clone(),
             calendar_event,
             template_slug.clone(),
+            startup_recording_health.clone(),
         )?;
 
         let queued_result = serde_json::to_string_pretty(&serde_json::json!({

@@ -1313,9 +1313,14 @@ registerTool(
       .default(false)
       .describe("Allow a mic-only capture to continue even if Minutes detects a call but no system-audio route is configured."),
     language: z.string().optional().describe("Transcription language code (e.g. 'en', 'ur', 'es', 'zh'). Overrides config.toml setting."),
+    skip_audio_probe_reason: z
+      .string()
+      .min(1)
+      .optional()
+      .describe("Per-call reason to skip the system-audio readiness probe. This is not persisted and is written into recording_health."),
   },
   { title: "Start Recording", readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
-  async ({ title, mode, intent, allow_degraded, language }) => {
+  async ({ title, mode, intent, allow_degraded, language, skip_audio_probe_reason }) => {
     if (!(await isCliAvailable())) {
       return { content: [{ type: "text" as const, text: CLI_INSTALL_MSG }] };
     }
@@ -1342,6 +1347,17 @@ registerTool(
     // For non-extension mode, still delegate call recordings to the desktop app
     // (it has system audio capture that the CLI can't do).
     if (isExtensionRuntime || preflight.intent === "call") {
+      if (skip_audio_probe_reason) {
+        return {
+          content: [{
+            type: "text" as const,
+            text: "skip_audio_probe_reason cannot be honored for desktop-delegated recordings yet. Start the recording from the CLI with --skip-audio-probe \"<reason>\" if you intentionally want to bypass the system-audio readiness probe.",
+          }],
+          structuredContent: { preflight },
+          isError: true,
+        };
+      }
+
       let response: DesktopControlResponse | null;
       try {
         response = await delegateRecordingToDesktop({
@@ -1435,6 +1451,7 @@ registerTool(
     if (title) args.push("--title", title);
     if (intent) args.push("--intent", intent);
     if (allow_degraded) args.push("--allow-degraded");
+    if (skip_audio_probe_reason) args.push("--skip-audio-probe", skip_audio_probe_reason);
     if (language) args.push("--language", language);
 
     const child = spawn(MINUTES_BIN, args, {

@@ -81,6 +81,8 @@ pub struct ProcessingJob {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub template_slug: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recording_health: Option<crate::markdown::RecordingHealth>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub word_count: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
@@ -108,6 +110,35 @@ pub fn queue_live_capture(
     calendar_event: Option<CalendarEvent>,
     template_slug: Option<String>,
 ) -> std::io::Result<ProcessingJob> {
+    queue_live_capture_with_recording_health(
+        mode,
+        title,
+        current_wav,
+        user_notes,
+        pre_context,
+        recording_started_at,
+        recording_finished_at,
+        context_session_id,
+        calendar_event,
+        template_slug,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn queue_live_capture_with_recording_health(
+    mode: CaptureMode,
+    title: Option<String>,
+    current_wav: &Path,
+    user_notes: Option<String>,
+    pre_context: Option<String>,
+    recording_started_at: Option<DateTime<Local>>,
+    recording_finished_at: Option<DateTime<Local>>,
+    context_session_id: Option<String>,
+    calendar_event: Option<CalendarEvent>,
+    template_slug: Option<String>,
+    recording_health: Option<crate::markdown::RecordingHealth>,
+) -> std::io::Result<ProcessingJob> {
     let job_id = next_job_id();
     let old_screen_dir = crate::screen::screens_dir_for(current_wav);
     let audio_path = move_capture_into_job(&job_id, current_wav)?;
@@ -131,6 +162,7 @@ pub fn queue_live_capture(
         pre_context,
         calendar_event,
         template_slug,
+        recording_health,
         word_count: None,
         error: None,
         owner_pid: None,
@@ -289,6 +321,7 @@ pub fn enqueue_capture_job(
         pre_context,
         calendar_event,
         template_slug,
+        recording_health: None,
         word_count: None,
         error: None,
         owner_pid: None,
@@ -684,6 +717,7 @@ fn job_context(job: &ProcessingJob) -> BackgroundPipelineContext {
         calendar_event: job.calendar_event.clone(),
         recorded_at: job.recording_started_at.or(job.recording_finished_at),
         requested_title: job.title.clone(),
+        recording_health: job.recording_health.clone(),
         template,
     }
 }
@@ -982,6 +1016,38 @@ mod tests {
     }
 
     #[test]
+    fn queue_live_capture_persists_recording_health() {
+        with_temp_home(|_| {
+            let current_wav = pid::current_wav_path();
+            if let Some(parent) = current_wav.parent() {
+                fs::create_dir_all(parent).unwrap();
+            }
+            fs::write(&current_wav, b"fake-wav").unwrap();
+            let health = crate::health::recording_health_for_skipped_system_audio_probe(
+                "operator accepted mic-only call",
+            );
+
+            let job = queue_live_capture_with_recording_health(
+                CaptureMode::Meeting,
+                Some("Probe skipped".into()),
+                &current_wav,
+                None,
+                None,
+                Some(Local::now()),
+                Some(Local::now()),
+                None,
+                None,
+                None,
+                Some(health.clone()),
+            )
+            .unwrap();
+
+            let loaded = load_job(&job.id).unwrap();
+            assert_eq!(loaded.recording_health, Some(health));
+        });
+    }
+
+    #[test]
     fn preserve_audio_alongside_output_moves_stems_too() {
         with_temp_home(|tmp| {
             let jobs_root = jobs_dir();
@@ -1016,6 +1082,7 @@ mod tests {
                 pre_context: None,
                 calendar_event: None,
                 template_slug: None,
+                recording_health: None,
                 word_count: None,
                 error: None,
                 owner_pid: None,
@@ -1102,6 +1169,7 @@ mod tests {
                 pre_context: None,
                 calendar_event: None,
                 template_slug: None,
+                recording_health: None,
                 word_count: None,
                 error: None,
                 owner_pid: Some(99_999_999),
@@ -1139,6 +1207,7 @@ mod tests {
                 pre_context: None,
                 calendar_event: None,
                 template_slug: None,
+                recording_health: None,
                 word_count: Some(42),
                 error: Some("boom".into()),
                 owner_pid: None,
@@ -1180,6 +1249,7 @@ mod tests {
                 pre_context: None,
                 calendar_event: None,
                 template_slug: None,
+                recording_health: None,
                 word_count: Some(42),
                 error: None,
                 owner_pid: None,
@@ -1218,6 +1288,7 @@ mod tests {
                 pre_context: None,
                 calendar_event: None,
                 template_slug: None,
+                recording_health: None,
                 word_count: None,
                 error: None,
                 owner_pid: None,
@@ -1241,6 +1312,7 @@ mod tests {
                 pre_context: None,
                 calendar_event: None,
                 template_slug: None,
+                recording_health: None,
                 word_count: None,
                 error: None,
                 owner_pid: None,

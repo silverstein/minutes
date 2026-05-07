@@ -6279,7 +6279,11 @@
     }
 
     // ── Status polling ──
+    let statusCheckInFlight = false;
+
     async function checkStatus() {
+      if (statusCheckInFlight) return;
+      statusCheckInFlight = true;
       try {
         const status = await invoke('cmd_status');
         const wasRecording = isRecording;
@@ -6456,12 +6460,14 @@
         }
       } catch (e) {
         console.error('Status:', e);
+      } finally {
+        statusCheckInFlight = false;
       }
     }
 
     function startFastPoll() {
       stopFastPoll();
-      pollInterval = setInterval(checkStatus, 150);
+      pollInterval = setInterval(checkStatus, 1000);
     }
 
     function stopFastPoll() {

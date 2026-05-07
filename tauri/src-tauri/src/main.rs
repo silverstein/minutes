@@ -1924,6 +1924,7 @@ fn main() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            commands::cmd_capture_status,
             commands::cmd_status,
             commands::cmd_processing_jobs,
             commands::cmd_list_meetings,

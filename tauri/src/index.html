@@ -6285,7 +6285,7 @@
       if (statusCheckInFlight) return;
       statusCheckInFlight = true;
       try {
-        const status = await invoke('cmd_status');
+        const status = await invoke('cmd_capture_status');
         const wasRecording = isRecording;
         const wasProcessing = isProcessing;
         activationState = status.activation || activationState;

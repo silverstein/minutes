@@ -5032,8 +5032,7 @@ pub fn cmd_mic_mute_state() -> bool {
     minutes_core::streaming::is_mic_muted()
 }
 
-#[tauri::command]
-pub fn cmd_status(state: tauri::State<AppState>) -> serde_json::Value {
+fn status_value(state: &AppState, include_readiness: bool) -> serde_json::Value {
     let recording = state.recording.load(Ordering::Relaxed);
     let shared_processing = minutes_core::pid::read_processing_status();
     let active_jobs = minutes_core::jobs::active_jobs();
@@ -5075,38 +5074,7 @@ pub fn cmd_status(state: tauri::State<AppState>) -> serde_json::Value {
         .ok()
         .map(|guard| guard.clone())
         .unwrap_or_default();
-    let config = Config::load();
-    let batch_readiness = batch_transcription_readiness_view(&config);
-    let live_readiness = standalone_live_readiness_view(&config);
-    mark_model_ready_for_surface(&config, &batch_readiness, &state.activation_progress);
-    mark_model_ready_for_surface(&config, &live_readiness, &state.activation_progress);
-    let activation_progress = state
-        .activation_progress
-        .lock()
-        .ok()
-        .map(|progress| progress.clone())
-        .unwrap_or_default();
-    let has_saved_artifact = activation_progress.first_artifact_saved_at.is_some();
     let recording_active = recording || (status.recording && !processing);
-    let batch_setup = transcription_surface_setup_view(
-        &config,
-        "batch",
-        &batch_readiness,
-        &activation_progress,
-        has_saved_artifact,
-        recording_active,
-        processing,
-    );
-    let standalone_live_setup = transcription_surface_setup_view(
-        &config,
-        "standalone-live",
-        &live_readiness,
-        &activation_progress,
-        has_saved_artifact,
-        recording_active,
-        processing,
-    );
-    let primary_setup = primary_setup_surface(&batch_setup, &standalone_live_setup);
 
     // Get elapsed time if recording
     let elapsed = if recording_active {
@@ -5139,7 +5107,7 @@ pub fn cmd_status(state: tauri::State<AppState>) -> serde_json::Value {
         0
     };
 
-    serde_json::json!({
+    let mut value = serde_json::json!({
         "recording": recording || (status.recording && !processing),
         "processing": processing,
         "recordingMode": status.recording_mode,
@@ -5151,19 +5119,81 @@ pub fn cmd_status(state: tauri::State<AppState>) -> serde_json::Value {
         "processingJobs": processing_jobs,
         "updateState": update_state,
         "latestOutput": latest_output,
-        "activation": primary_setup.activation.clone(),
-        "batch_transcription": batch_readiness,
-        "standalone_live": live_readiness,
-        "transcriptionSetup": {
-            "needsSetup": batch_setup.needs_setup || standalone_live_setup.needs_setup,
-            "batch": batch_setup,
-            "standaloneLive": standalone_live_setup,
-        },
         "callCaptureHealth": call_capture_health,
         "pid": status.pid,
         "elapsed": elapsed,
         "audioLevel": audio_level,
-    })
+    });
+
+    if include_readiness {
+        let config = Config::load();
+        let batch_readiness = batch_transcription_readiness_view(&config);
+        let live_readiness = standalone_live_readiness_view(&config);
+        mark_model_ready_for_surface(&config, &batch_readiness, &state.activation_progress);
+        mark_model_ready_for_surface(&config, &live_readiness, &state.activation_progress);
+        let activation_progress = state
+            .activation_progress
+            .lock()
+            .ok()
+            .map(|progress| progress.clone())
+            .unwrap_or_default();
+        let has_saved_artifact = activation_progress.first_artifact_saved_at.is_some();
+        let batch_setup = transcription_surface_setup_view(
+            &config,
+            "batch",
+            &batch_readiness,
+            &activation_progress,
+            has_saved_artifact,
+            recording_active,
+            processing,
+        );
+        let standalone_live_setup = transcription_surface_setup_view(
+            &config,
+            "standalone-live",
+            &live_readiness,
+            &activation_progress,
+            has_saved_artifact,
+            recording_active,
+            processing,
+        );
+        let primary_setup = primary_setup_surface(&batch_setup, &standalone_live_setup);
+
+        if let Some(object) = value.as_object_mut() {
+            object.insert(
+                "activation".into(),
+                serde_json::to_value(primary_setup.activation.clone())
+                    .unwrap_or(serde_json::Value::Null),
+            );
+            object.insert(
+                "batch_transcription".into(),
+                serde_json::to_value(batch_readiness).unwrap_or(serde_json::Value::Null),
+            );
+            object.insert(
+                "standalone_live".into(),
+                serde_json::to_value(live_readiness).unwrap_or(serde_json::Value::Null),
+            );
+            object.insert(
+                "transcriptionSetup".into(),
+                serde_json::json!({
+                    "needsSetup": batch_setup.needs_setup || standalone_live_setup.needs_setup,
+                    "batch": batch_setup,
+                    "standaloneLive": standalone_live_setup,
+                }),
+            );
+        }
+    }
+
+    value
+}
+
+#[tauri::command]
+pub fn cmd_capture_status(state: tauri::State<AppState>) -> serde_json::Value {
+    status_value(&state, false)
+}
+
+#[tauri::command]
+pub fn cmd_status(state: tauri::State<AppState>) -> serde_json::Value {
+    status_value(&state, true)
 }
 
 #[tauri::command]
@@ -7603,6 +7633,91 @@ mod tests {
         result
     }
 
+    fn test_app_state() -> AppState {
+        AppState {
+            recording: Arc::new(AtomicBool::new(false)),
+            starting: Arc::new(AtomicBool::new(false)),
+            stop_flag: Arc::new(AtomicBool::new(false)),
+            processing: Arc::new(AtomicBool::new(false)),
+            processing_stage: Arc::new(Mutex::new(None)),
+            latest_output: Arc::new(Mutex::new(None)),
+            activation_progress: Arc::new(Mutex::new(ActivationProgress::default())),
+            call_capture_health: Arc::new(Mutex::new(None)),
+            completion_notifications_enabled: Arc::new(AtomicBool::new(false)),
+            screen_share_hidden: Arc::new(AtomicBool::new(false)),
+            global_hotkey_enabled: Arc::new(AtomicBool::new(false)),
+            global_hotkey_shortcut: Arc::new(Mutex::new("CmdOrCtrl+Shift+M".into())),
+            hotkey_runtime: Arc::new(Mutex::new(HotkeyRuntime::default())),
+            discard_short_hotkey_capture: Arc::new(AtomicBool::new(false)),
+            pty_manager: Arc::new(Mutex::new(crate::pty::PtyManager::default())),
+            dictation_active: Arc::new(AtomicBool::new(false)),
+            dictation_stop_flag: Arc::new(AtomicBool::new(false)),
+            dictation_focus_guard: Arc::new(Mutex::new(None)),
+            pending_dictation_target: Arc::new(Mutex::new(None)),
+            dictation_shortcut_enabled: Arc::new(AtomicBool::new(false)),
+            dictation_shortcut: Arc::new(Mutex::new("CmdOrCtrl+Shift+Space".into())),
+            live_transcript_active: Arc::new(AtomicBool::new(false)),
+            live_transcript_stop_flag: Arc::new(AtomicBool::new(false)),
+            live_shortcut_enabled: Arc::new(AtomicBool::new(false)),
+            live_shortcut: Arc::new(Mutex::new("CmdOrCtrl+Shift+L".into())),
+            pending_update: Arc::new(Mutex::new(None)),
+            update_install_running: Arc::new(AtomicBool::new(false)),
+            update_install_cancel: Arc::new(AtomicBool::new(false)),
+            update_install_state: Arc::new(Mutex::new(UpdateUiState::default())),
+            palette_shortcut_enabled: Arc::new(AtomicBool::new(false)),
+            palette_shortcut: Arc::new(Mutex::new("CmdOrCtrl+Shift+K".into())),
+            palette_lifecycle: Arc::new(Mutex::new(PaletteLifecycle::default())),
+            palette_reopen_pending: Arc::new(AtomicBool::new(false)),
+            pending_meeting_prompts: Arc::new(Mutex::new(HashMap::new())),
+            recording_started_by_call_detect: Arc::new(AtomicBool::new(false)),
+            call_end_countdown_cancel: Arc::new(AtomicBool::new(false)),
+            call_end_countdown_active: Arc::new(AtomicBool::new(false)),
+            call_end_countdown_terminal_state: Arc::new(AtomicU8::new(0)),
+        }
+    }
+
+    #[test]
+    fn capture_status_keeps_hot_poll_payload_lean() {
+        with_temp_home(|_| {
+            let state = test_app_state();
+            let capture = status_value(&state, false);
+            let full = status_value(&state, true);
+
+            for key in [
+                "recording",
+                "processing",
+                "recordingMode",
+                "processingStage",
+                "processingStageLabel",
+                "processingTitle",
+                "processingJobId",
+                "processingJobCount",
+                "processingJobs",
+                "updateState",
+                "latestOutput",
+                "callCaptureHealth",
+                "pid",
+                "elapsed",
+                "audioLevel",
+            ] {
+                assert!(capture.get(key).is_some(), "capture status missing {key}");
+            }
+
+            for key in [
+                "activation",
+                "batch_transcription",
+                "standalone_live",
+                "transcriptionSetup",
+            ] {
+                assert!(
+                    capture.get(key).is_none(),
+                    "capture status should not include slow readiness key {key}"
+                );
+                assert!(full.get(key).is_some(), "full status missing {key}");
+            }
+        });
+    }
+
     #[test]
     fn permission_restart_safety_allows_idle_restart() {
         let safety = permission_restart_safety_from_snapshot(PermissionRestartSnapshot::default());
@@ -9425,32 +9540,33 @@ mod tests {
 
     #[test]
     fn scan_recovery_items_finds_failed_capture_and_watch_file() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let watch_dir = dir.path().join("watch");
-        let failed_dir = watch_dir.join("failed");
-        let output_dir = dir.path().join("meetings");
-        let failed_captures = output_dir.join("failed-captures");
-        std::fs::create_dir_all(&failed_dir).unwrap();
-        std::fs::create_dir_all(&failed_captures).unwrap();
+        with_temp_home(|home| {
+            let watch_dir = home.join("watch");
+            let failed_dir = watch_dir.join("failed");
+            let output_dir = home.join("meetings");
+            let failed_captures = output_dir.join("failed-captures");
+            std::fs::create_dir_all(&failed_dir).unwrap();
+            std::fs::create_dir_all(&failed_captures).unwrap();
 
-        let failed_watch = failed_dir.join("idea.m4a");
-        let failed_capture = failed_captures.join("capture.wav");
-        std::fs::write(&failed_watch, "watch").unwrap();
-        std::fs::write(&failed_capture, "capture").unwrap();
+            let failed_watch = failed_dir.join("idea.m4a");
+            let failed_capture = failed_captures.join("capture.wav");
+            std::fs::write(&failed_watch, "watch").unwrap();
+            std::fs::write(&failed_capture, "capture").unwrap();
 
-        let config = Config {
-            output_dir: output_dir.clone(),
-            watch: minutes_core::config::WatchConfig {
-                paths: vec![watch_dir],
-                ..Config::default().watch
-            },
-            ..Config::default()
-        };
+            let config = Config {
+                output_dir: output_dir.clone(),
+                watch: minutes_core::config::WatchConfig {
+                    paths: vec![watch_dir],
+                    ..Config::default().watch
+                },
+                ..Config::default()
+            };
 
-        let items = scan_recovery_items(&config);
-        assert_eq!(items.len(), 2);
-        assert!(items.iter().any(|item| item.kind == "watch-failed"));
-        assert!(items.iter().any(|item| item.kind == "preserved-capture"));
+            let items = scan_recovery_items(&config);
+            assert_eq!(items.len(), 2);
+            assert!(items.iter().any(|item| item.kind == "watch-failed"));
+            assert!(items.iter().any(|item| item.kind == "preserved-capture"));
+        });
     }
 
     #[test]

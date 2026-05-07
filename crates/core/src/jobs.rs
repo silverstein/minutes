@@ -64,6 +64,8 @@ pub struct ProcessingJob {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finished_at: Option<DateTime<Local>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notice_dismissed_at: Option<DateTime<Local>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recording_started_at: Option<DateTime<Local>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recording_finished_at: Option<DateTime<Local>>,
@@ -155,6 +157,7 @@ pub fn queue_live_capture_with_recording_health(
         created_at: Local::now(),
         started_at: None,
         finished_at: None,
+        notice_dismissed_at: None,
         recording_started_at,
         recording_finished_at,
         context_session_id,
@@ -314,6 +317,7 @@ pub fn enqueue_capture_job(
         created_at: Local::now(),
         started_at: None,
         finished_at: None,
+        notice_dismissed_at: None,
         recording_started_at,
         recording_finished_at,
         context_session_id,
@@ -540,6 +544,7 @@ pub fn requeue_job(job_id: &str) -> std::io::Result<Option<ProcessingJob>> {
         job.stage = JobState::Queued.default_stage();
         job.started_at = None;
         job.finished_at = None;
+        job.notice_dismissed_at = None;
         job.error = None;
         job.owner_pid = None;
     })?
@@ -553,6 +558,14 @@ pub fn requeue_job(job_id: &str) -> std::io::Result<Option<ProcessingJob>> {
 
     sync_processing_status();
     Ok(Some(requeued))
+}
+
+pub fn dismiss_job_notice(job_id: &str) -> std::io::Result<Option<ProcessingJob>> {
+    update_job_state(job_id, |job| {
+        if matches!(job.state, JobState::Failed | JobState::NeedsReview) {
+            job.notice_dismissed_at = Some(Local::now());
+        }
+    })
 }
 
 pub fn processing_summary() -> Option<ProcessingJob> {
@@ -1075,6 +1088,7 @@ mod tests {
                 created_at: Local::now(),
                 started_at: None,
                 finished_at: None,
+                notice_dismissed_at: None,
                 recording_started_at: None,
                 recording_finished_at: None,
                 context_session_id: None,
@@ -1162,6 +1176,7 @@ mod tests {
                 created_at: Local::now(),
                 started_at: Some(Local::now()),
                 finished_at: None,
+                notice_dismissed_at: None,
                 recording_started_at: None,
                 recording_finished_at: None,
                 context_session_id: None,
@@ -1200,6 +1215,7 @@ mod tests {
                 created_at: Local::now(),
                 started_at: Some(Local::now()),
                 finished_at: Some(Local::now()),
+                notice_dismissed_at: None,
                 recording_started_at: None,
                 recording_finished_at: None,
                 context_session_id: None,
@@ -1225,6 +1241,49 @@ mod tests {
     }
 
     #[test]
+    fn dismiss_job_notice_marks_retryable_job_and_requeue_clears_it() {
+        with_temp_home(|dir| {
+            let audio_path = dir.path().join("fake.wav");
+            fs::write(&audio_path, b"fake-wav").unwrap();
+
+            let job = ProcessingJob {
+                id: "job-dismissed".into(),
+                mode: CaptureMode::Meeting,
+                content_type: ContentType::Meeting,
+                title: Some("dismiss me".into()),
+                audio_path: audio_path.display().to_string(),
+                output_path: None,
+                state: JobState::Failed,
+                stage: Some("Processing failed".into()),
+                created_at: Local::now(),
+                started_at: Some(Local::now()),
+                finished_at: Some(Local::now()),
+                notice_dismissed_at: None,
+                recording_started_at: None,
+                recording_finished_at: None,
+                context_session_id: None,
+                user_notes: None,
+                pre_context: None,
+                calendar_event: None,
+                template_slug: None,
+                recording_health: None,
+                word_count: None,
+                error: Some("boom".into()),
+                owner_pid: None,
+            };
+            write_job(&job).unwrap();
+
+            let dismissed = dismiss_job_notice(&job.id).unwrap().unwrap();
+            assert!(dismissed.notice_dismissed_at.is_some());
+
+            let requeued = requeue_job(&job.id).unwrap().unwrap();
+            assert_eq!(requeued.state, JobState::Queued);
+            assert_eq!(requeued.notice_dismissed_at, None);
+            assert_eq!(requeued.error, None);
+        });
+    }
+
+    #[test]
     fn requeue_job_rejects_non_retryable_state() {
         with_temp_home(|dir| {
             let audio_path = dir.path().join("fake.wav");
@@ -1242,6 +1301,7 @@ mod tests {
                 created_at: Local::now(),
                 started_at: Some(Local::now()),
                 finished_at: Some(Local::now()),
+                notice_dismissed_at: None,
                 recording_started_at: None,
                 recording_finished_at: None,
                 context_session_id: None,
@@ -1281,6 +1341,7 @@ mod tests {
                 created_at: Local::now() - chrono::Duration::minutes(5),
                 started_at: Some(Local::now() - chrono::Duration::minutes(4)),
                 finished_at: None,
+                notice_dismissed_at: None,
                 recording_started_at: None,
                 recording_finished_at: None,
                 context_session_id: None,
@@ -1305,6 +1366,7 @@ mod tests {
                 created_at: Local::now(),
                 started_at: None,
                 finished_at: None,
+                notice_dismissed_at: None,
                 recording_started_at: None,
                 recording_finished_at: None,
                 context_session_id: None,

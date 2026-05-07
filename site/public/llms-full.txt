@@ -10,8 +10,9 @@ Minutes is an open-source meeting corpus you own. Record, transcribe, search, an
 
 29 tools • 7 resources • Interactive MCP App dashboard • Prompt templates
 
-**What's new in 0.16.3:**
-• **Desktop recording freeze fix.** The desktop app now serializes status checks and slows the active-recording poll loop so Tauri/WebKit bridge calls cannot pile up while audio capture is running. This reduces CPU pressure, avoids CoreAudio overload symptoms, and keeps the window responsive during recordings.
+**What's new in 0.16.4:**
+• **Persistent recovery notices.** Dismissing an old failed-processing notice now persists across app restarts, so a stale retryable capture no longer reappears every time Minutes opens. Retrying a job still clears that dismissal so a fresh failure can surface again.
+• **Desktop recording freeze fix.** The desktop app serializes status checks and slows the active-recording poll loop so Tauri/WebKit bridge calls cannot pile up while audio capture is running.
 
 **Also new in the 0.16 line:**
 • **Safer call-capture diarization.** Silent or degraded system stems no longer produce noisy `[UNKNOWN]` speaker spam. Minutes preserves the transcript and records structured capture-health metadata when diarization should be skipped.

@@ -262,11 +262,11 @@
 
     html[data-platform="macos"] .window-drag-strip {
       display: block;
-      position: absolute;
+      position: fixed;
       top: 0;
       left: 72px;
       right: 0;
-      height: 28px;
+      height: 32px;
       z-index: 5;
       -webkit-app-region: drag;
     }
@@ -700,41 +700,46 @@
 
     .brand-mark {
       display: block;
+      position: relative;
       width: 34px;
       height: 34px;
       flex-shrink: 0;
+      overflow: hidden;
     }
 
     .brand-mark img {
-      display: block;
+      position: absolute;
+      inset: 0;
       width: 100%;
       height: 100%;
+      object-fit: contain;
+      pointer-events: none;
     }
 
-    .brand-mark-light {
+    .brand-mark img.brand-mark-light {
       display: none;
     }
 
-    .brand-mark-dark {
+    .brand-mark img.brand-mark-dark {
       display: block;
       border-radius: 8px;
     }
 
     @media (prefers-color-scheme: light) {
-      :root:not([data-theme='dark']) .brand-mark-light {
+      :root:not([data-theme='dark']) .brand-mark img.brand-mark-light {
         display: block;
       }
 
-      :root:not([data-theme='dark']) .brand-mark-dark {
+      :root:not([data-theme='dark']) .brand-mark img.brand-mark-dark {
         display: none;
       }
     }
 
-    :root[data-theme='light'] .brand-mark-light {
+    :root[data-theme='light'] .brand-mark img.brand-mark-light {
       display: block;
     }
 
-    :root[data-theme='light'] .brand-mark-dark {
+    :root[data-theme='light'] .brand-mark img.brand-mark-dark {
       display: none;
     }
 

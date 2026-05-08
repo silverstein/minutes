@@ -1818,7 +1818,9 @@
       justify-content: center;
       background: rgba(7, 8, 10, 0.64);
       backdrop-filter: blur(12px);
-      z-index: 90;
+      /* Must sit above .detail-overlay (z-index 120) — the picker is launched
+         from the meeting note overlay and would otherwise render behind it. */
+      z-index: 130;
       padding: 20px;
     }
 
@@ -2289,6 +2291,8 @@
     .detail-scroll {
       overflow-y: auto;
       padding: 0 20px 20px;
+      -webkit-user-select: text;
+      user-select: text;
     }
 
     .detail-bottom-cta {
@@ -11996,6 +12000,12 @@
       rerenderOpenArtifact(markdownText);
       mdViewerEditor.value = kind === 'json' ? formatJsonSource(markdownText) : markdownText;
       mdViewer.classList.add('active');
+      // The detail overlay is a fixed full-screen layer (z-index 120) — leaving it
+      // open would render the draft behind the meeting note. Close it so the
+      // newly-active md-viewer is actually visible.
+      if (detailOverlay.classList.contains('active')) {
+        detailOverlay.classList.remove('active');
+      }
       meetingsScroll.style.display = 'none';
       mdSearchWrap.style.display = 'none';
       footer.style.display = 'none';
@@ -12087,7 +12097,9 @@
           editable: true,
         });
         if (!shown) return;
-        showDetailFeedback(`Created ${draft.templateKind.replaceAll('-', ' ')} draft`, 'success');
+        // The detail overlay is closed by showMdViewer, so showDetailFeedback would
+        // render into a hidden element. The md-viewer opening with the draft contents
+        // is itself the confirmation that the draft was created.
       } catch (e) {
         console.error('Create artifact:', e);
         showDetailFeedback(`Could not create draft: ${e}`, 'error');

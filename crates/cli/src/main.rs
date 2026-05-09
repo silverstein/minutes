@@ -298,6 +298,14 @@ enum Commands {
         model_id: String,
         #[arg(long, default_value_t = false)]
         gpu: bool,
+        /// Run parakeet in fp16 mode. Mirrors the `--fp16` flag forwarded by
+        /// `transcribe::transcribe_with_parakeet` when
+        /// `transcription.parakeet_fp16` is enabled — without this flag the
+        /// helper invocation fails clap parsing every utterance and the
+        /// caller silently falls back to spawning parakeet directly. See
+        /// issue #163.
+        #[arg(long, default_value_t = false)]
+        fp16: bool,
         #[arg(long)]
         vad_path: Option<PathBuf>,
         #[arg(long, default_value_t = 0.5)]
@@ -1317,6 +1325,7 @@ fn main() -> Result<()> {
             vocab_path,
             model_id,
             gpu,
+            fp16,
             vad_path,
             vad_threshold,
         } => cmd_parakeet_helper(
@@ -1326,6 +1335,7 @@ fn main() -> Result<()> {
             &vocab_path,
             &model_id,
             gpu,
+            fp16,
             vad_path.as_deref(),
             vad_threshold,
             &config,
@@ -4132,6 +4142,7 @@ fn cmd_parakeet_helper(
     vocab_path: &Path,
     model_id: &str,
     gpu: bool,
+    fp16: bool,
     vad_path: Option<&Path>,
     vad_threshold: f32,
     config: &Config,
@@ -4141,6 +4152,20 @@ fn cmd_parakeet_helper(
         minutes_core::parakeet::ResolveParakeetBinaryMode::WarnAndFallback,
     )
     .map_err(anyhow::Error::msg)?;
+    // `transcribe::transcribe_with_parakeet` (the only programmatic caller of
+    // this hidden subcommand) only appends `--fp16` when it has decided
+    // fp16=true for this invocation. So the flag is monotonically additive:
+    // present means "force fp16 on for this run"; absent means "inherit
+    // whatever the user's TOML says." Only override the cloned config in
+    // the present-and-true case so manual `minutes parakeet-helper`
+    // invocations keep honoring `transcription.parakeet_fp16` from disk.
+    let config = if fp16 {
+        let mut overridden = config.clone();
+        overridden.transcription.parakeet_fp16 = true;
+        std::borrow::Cow::Owned(overridden)
+    } else {
+        std::borrow::Cow::Borrowed(config)
+    };
     let parsed = minutes_core::transcribe::run_parakeet_cli_structured(
         resolved_binary
             .to_str()
@@ -4152,7 +4177,7 @@ fn cmd_parakeet_helper(
         gpu,
         vad_path,
         vad_threshold,
-        config,
+        &config,
         &minutes_core::transcribe::DecodeHints::default(),
     )?;
     let envelope = parakeet_helper_envelope("minutes parakeet-helper", parsed);
@@ -4169,6 +4194,7 @@ fn cmd_parakeet_helper(
     _vocab_path: &Path,
     _model_id: &str,
     _gpu: bool,
+    _fp16: bool,
     _vad_path: Option<&Path>,
     _vad_threshold: f32,
     _config: &Config,
@@ -6071,6 +6097,49 @@ life (qmd://life/)
         assert_eq!(value["transcript"], "[0:00] hello");
         assert_eq!(value["segments"][0], "hello");
         assert_eq!(value["meta"]["schemaVersion"], 1);
+    }
+
+    /// Regression guard for issue #163: the helper subcommand must accept
+    /// `--fp16` when forwarded by `transcribe::transcribe_with_parakeet`,
+    /// AND must continue to parse without it for manual invocations and for
+    /// the `use_fp16=false` programmatic path. Pre-fix, clap rejected the
+    /// flag on every utterance and silently fell back to spawning parakeet
+    /// directly, ending in a confusing error on Ctrl+C and a session-level
+    /// fallback to whisper.
+    #[test]
+    fn parakeet_helper_clap_accepts_fp16_flag_present_or_absent() {
+        let common = [
+            "minutes",
+            "parakeet-helper",
+            "--binary",
+            "/usr/local/bin/parakeet",
+            "--model-path",
+            "/tmp/model.bin",
+            "--audio-path",
+            "/tmp/audio.wav",
+            "--vocab-path",
+            "/tmp/vocab.txt",
+            "--model-id",
+            "tdt-600m",
+        ];
+
+        // Without --fp16: must parse, fp16 must be false.
+        let parsed_without =
+            Cli::try_parse_from(common).expect("parakeet-helper without --fp16 must parse");
+        match parsed_without.command {
+            Commands::ParakeetHelper { fp16, .. } => assert!(!fp16),
+            _ => panic!("expected ParakeetHelper variant"),
+        }
+
+        // With --fp16: must parse, fp16 must be true.
+        let mut with_fp16: Vec<&str> = common.to_vec();
+        with_fp16.push("--fp16");
+        let parsed_with =
+            Cli::try_parse_from(with_fp16).expect("parakeet-helper --fp16 must parse");
+        match parsed_with.command {
+            Commands::ParakeetHelper { fp16, .. } => assert!(fp16),
+            _ => panic!("expected ParakeetHelper variant"),
+        }
     }
 
     #[test]

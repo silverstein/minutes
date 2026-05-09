@@ -1,0 +1,135 @@
+# Release Checklist
+
+**When shipping a new version, walk through every item in order.**
+
+### 1. Version bump (all 6 must match)
+```bash
+# Bump in: Cargo.toml, crates/cli/Cargo.toml, tauri/src-tauri/tauri.conf.json,
+#          crates/mcp/package.json, crates/sdk/package.json, manifest.json
+# Also bump the version string in crates/mcp/src/index.ts (McpServer({ version }))
+# Also bump the minutes-core dep version in crates/cli/Cargo.toml
+# Verify:
+grep version Cargo.toml tauri/src-tauri/tauri.conf.json crates/mcp/package.json \
+  crates/sdk/package.json manifest.json && grep 'version:' crates/mcp/src/index.ts
+```
+
+**Independent-cadence crates.** `crates/whisper-guard/Cargo.toml` is published to crates.io on its own cadence — it does NOT need to match the main version. Check whether it has unreleased changes before tagging the main release:
+```bash
+PUBLISHED=$(curl -s https://crates.io/api/v1/crates/whisper-guard | jq -r '.crate.max_stable_version')
+LAST_PUBLISH_COMMIT=$(git log --grep="whisper-guard $PUBLISHED" --format="%H" | head -1)
+git log "$LAST_PUBLISH_COMMIT"..HEAD -- crates/whisper-guard/   # any commits → bump + publish in Step 11.5
+```
+
+### 2. Manifest sync
+- Tools in `manifest.json` match tools registered in `crates/mcp/src/index.ts`
+- `long_description` reflects current capabilities
+- `keywords` are current
+
+### 3. MCP runtime deps
+All `import` statements in `crates/mcp/src/index.ts` must have their packages in `dependencies` (not `devDependencies`) in `package.json`. Smoke-test: `node -e "require('./crates/mcp/dist/index.js')"`
+
+### 4. Build everything
+```bash
+cd crates/mcp && npm run build       # MCP server + dashboard UI
+cargo fmt --all -- --check           # Rust formatting
+cargo clippy --all --no-default-features -- -D warnings  # Rust lints
+```
+
+**macOS desktop note:**
+- For local TCC-sensitive dogfooding before release, rebuild the dev app with:
+```bash
+export MINUTES_DEV_SIGNING_IDENTITY="Developer ID Application: Mathieu Silverstein (63TMLKT8HN)"
+./scripts/install-dev-app.sh --no-open
+```
+- Do not treat a raw local `/Applications/Minutes.app` copy as the canonical test surface for permission-sensitive features.
+
+### 5. Write release notes
+Every release shows up in followers' GitHub feeds — this is free awareness. Write notes BEFORE creating the release. No release should ever ship with an empty body.
+- Summarize what shipped and why it matters (not commit messages — outcomes)
+- Include install instructions (cargo install, DMG, npx)
+- Match the voice of past releases (see v0.8.0, v0.8.1 for examples)
+- Save to a temp file: `notes.md`
+
+### 6. Push commits to `main` and wait for CI to go green
+```bash
+git push origin main
+# Watch CI — do NOT tag or publish until the CI workflow succeeds on this commit.
+gh run list --branch main --limit 3
+gh run watch $(gh run list --branch main --limit 1 --json databaseId --jq '.[0].databaseId')
+```
+**Why this step exists**: if you tag first and CI breaks (e.g. a Windows cross-platform build failure), you've already published the version to the public GitHub feed, npm, and brew. Moving a tag after the fact is messy — force-pushing the tag drops the GitHub release to draft, requires re-publishing, and leaves the npm package / brew formula pointing at a different commit than the release tag. Catch the failure *before* any of that happens.
+
+### 7. Create the GitHub release as a DRAFT
+```bash
+gh release create vX.Y.Z -t "vX.Y.Z: Short Title" -F notes.md --target main --draft
+```
+This creates the tag on the remote and triggers the release workflows (`Release CLI Binaries`, `Release macOS`, `Release Windows Desktop`), but does **not** announce the version in subscribers' GitHub feeds and doesn't mark it as "latest". Drafts can be re-published later with a single flag flip.
+
+Do NOT `git tag` locally — the race it causes (CI creating the release before notes exist) is exactly what the checklist avoids.
+
+### 8. Wait for release workflows to pass
+```bash
+gh run list --workflow="Release CLI Binaries" --limit 1
+gh run list --workflow="Release macOS" --limit 1
+gh run list --workflow="Release Windows Desktop" --limit 1
+```
+If any fail, fix on `main`, `git tag -d vX.Y.Z && git push origin :refs/tags/vX.Y.Z`, re-tag at the new commit, and re-run from step 7. (Cheap because the release is still a draft.)
+
+### 9. Publish the draft
+```bash
+gh release edit vX.Y.Z --draft=false
+```
+Now — and only now — does the version show up in followers' feeds and become the "latest" release.
+
+### 10. Build and upload .mcpb
+```bash
+mcpb pack . minutes.mcpb
+gh release upload vX.Y.Z minutes.mcpb --clobber
+```
+
+### 11. Publish npm packages
+```bash
+cd crates/sdk && npm publish --access public --registry https://registry.npmjs.org
+cd crates/mcp && npm publish --access public --registry https://registry.npmjs.org
+```
+**IMPORTANT**: `crates/mcp/package.json` must depend on `"minutes-sdk": "^X.Y.Z"` (npm version), NOT `"file:../sdk"` (local path). Check before publishing. If 2FA blocks publish, use a granular access token with "Bypass 2FA" enabled.
+
+### 11.5. Publish independent-cadence crates (whisper-guard) if bumped
+Skip this step if Step 1 showed no changes to `crates/whisper-guard/` since the last whisper-guard publish.
+```bash
+cd crates/whisper-guard
+cargo publish --dry-run                  # verify packaging cleanly
+cargo publish                            # actual publish
+# Confirm:
+sleep 30 && curl -s https://crates.io/api/v1/crates/whisper-guard | jq '.crate.max_stable_version'
+```
+whisper-guard is a standalone MIT crate consumed outside this repo (currently 277+ downloads). Bump independently of the main release; do NOT couple to the Minutes version. If you skip the publish, the crates.io users miss the fix and you create silent drift between repo state and published artifact.
+
+### 12. Refresh the landing page copy, then redeploy
+Before deploying, make sure the site matches what just shipped:
+
+1. **Regenerate the stat line** (version, tool count, CLI count, test count):
+   ```bash
+   node scripts/sync_site_release_version.mjs
+   ```
+   The `Site Release Link Consistency` CI job runs this with `--check` on every push, so forgetting this step also blocks CI — but running it locally first saves a round-trip and surfaces drift before tagging.
+2. **Hand-update the prose** — the release banner, headline feature blurb, and pipeline description in `site/app/page.tsx`, plus `docs/frontmatter-schema.md`'s "corresponds to" footer if the schema row moved. The sync script handles numbers; it cannot rewrite copy that references last release's headline features.
+3. **Then deploy**:
+   ```bash
+   npx vercel@50.38.2 build --prod
+   npx vercel@50.38.2 deploy --prebuilt --yes --prod --scope evil-genius-laboratory
+   ```
+
+**IMPORTANT**: Run these commands from the repo root, not `site/`. The linked Vercel project uses `rootDirectory=site`, and the Git-connected / remote build path is currently failing after successful Next 16.2.3 builds because Vercel looks for `.next/routes-manifest-deterministic.json`. The prebuilt flow uploads the local `.vercel/output` and avoids that failing server-side post-build step.
+
+**Check before deploying**: `cat .vercel/project.json` should show `"projectName": "useminutes.app"` with `"framework": "nextjs"`. If it's pointing at a different project (e.g. `rx-vip/minutes`), the build produces an empty static tree (no `index.html`, no SSR functions) and the deploy aliases return 404. Fix the link before building.
+
+### 13. Update Homebrew tap formula if CLI changed
+The formula lives at `silverstein/homebrew-tap` → `Formula/minutes.rb`. Update the `tag:` to the new version:
+```bash
+# Fetch current SHA, update via GitHub API
+SHA=$(gh api repos/silverstein/homebrew-tap/contents/Formula/minutes.rb --jq '.sha')
+# Edit Formula/minutes.rb: change tag: "vX.Y.Z" → new version
+# Push via API or clone+commit+push
+```
+Verify: `brew update && brew info silverstein/tap/minutes` should show the new version.

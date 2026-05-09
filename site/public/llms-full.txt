@@ -2,7 +2,7 @@
 
 > Generated file. Do not edit by hand.
 > Source: manifest.json + crates/mcp/src/index.ts + site/lib/skills-catalog.json
-> Last generated: 2026-05-07
+> Last generated: 2026-05-09
 
 ## Product
 
@@ -10,9 +10,12 @@ Minutes is an open-source meeting corpus you own. Record, transcribe, search, an
 
 29 tools • 7 resources • Interactive MCP App dashboard • Prompt templates
 
-**What's new in 0.16.4:**
-• **Persistent recovery notices.** Dismissing an old failed-processing notice now persists across app restarts, so a stale retryable capture no longer reappears every time Minutes opens. Retrying a job still clears that dismissal so a fresh failure can surface again.
-• **Desktop recording freeze fix.** The desktop app serializes status checks and slows the active-recording poll loop so Tauri/WebKit bridge calls cannot pile up while audio capture is running.
+**What's new in 0.16.5:**
+• **Lower CPU during recording.** Three independent fixes on the audio hot path: per-callback heap allocations eliminated, atomic op rate cut from 16,000/s to ~100/s, and a configurable cap on streaming-whisper partial transcription that stops the runaway condition during long monologues.
+• **Status polling no longer scales with meeting count.** Terminal jobs now move to `~/.minutes/jobs/archive/` on completion, and the UI status poll scans the directory once per call instead of three times. Power users with hundreds of accumulated meetings should feel the menu-bar app become noticeably lighter.
+• **Parakeet integration on Apple Silicon now actually uses parakeet.** A clap parse mismatch had been silently rejecting `--fp16` on every utterance, falling back to direct subprocess invocation, and surfacing as "switching to whisper" on Ctrl+C. Fix is on by default; manual `minutes parakeet-helper` invocations continue to honor your TOML.
+• **Whisper VAD chatter no longer floods stderr.** C-level whisper.cpp logs now route through the Rust tracing subscriber where they can be filtered like any other event. The CLI demotes the chatty INFO logs to warn level by default; RUST_LOG still wins.
+• **Loud-on-failure for the parakeet helper path.** Helper subprocess failures now log a single warn on first occurrence per process so this class of regression cannot stay silent again.
 
 **Also new in the 0.16 line:**
 • **Safer call-capture diarization.** Silent or degraded system stems no longer produce noisy `[UNKNOWN]` speaker spam. Minutes preserves the transcript and records structured capture-health metadata when diarization should be skipped.

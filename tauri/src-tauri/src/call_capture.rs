@@ -110,6 +110,25 @@ impl NativeCallCaptureSession {
             })
     }
 
+    /// Send SIGKILL after a timeout, but reap once more first so a helper
+    /// that exited successfully between the loop's last `try_wait` and now
+    /// is reported as a clean stop rather than a kill failure. Without this,
+    /// the helper-exits-during-the-sleep race surfaced a spurious error to
+    /// the caller and stranded the .mov in `failed-captures/` even though
+    /// the child wrote the moov atom before exiting.
+    #[cfg(target_os = "macos")]
+    fn giveup_with_kill(&mut self, kill_reason: String) -> Result<(), String> {
+        if let Ok(Some(status)) = self.child.try_wait() {
+            if status.success() {
+                return Ok(());
+            }
+            return Err(format!("native call helper exited with status {}", status));
+        }
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        Err(kill_reason)
+    }
+
     pub fn stop(&mut self) -> Result<(), String> {
         #[cfg(not(target_os = "macos"))]
         {
@@ -153,8 +172,7 @@ impl NativeCallCaptureSession {
                 }
 
                 if start.elapsed() >= STOP_MAX_FINALIZE {
-                    let _ = self.child.kill();
-                    return Err(format!(
+                    return self.giveup_with_kill(format!(
                         "native call helper did not finalize within {}s (absolute ceiling); SIGKILLed. Per-source stems may still be recoverable in ~/.minutes/native-captures/.",
                         STOP_MAX_FINALIZE.as_secs()
                     ));
@@ -170,8 +188,7 @@ impl NativeCallCaptureSession {
                     .map(|t| t.elapsed())
                     .unwrap_or(Duration::MAX);
                 if since_progress >= STOP_PROGRESS_TIMEOUT {
-                    let _ = self.child.kill();
-                    return Err(format!(
+                    return self.giveup_with_kill(format!(
                         "native call helper went silent for {}s during finalize; SIGKILLed. Per-source stems may still be recoverable in ~/.minutes/native-captures/.",
                         STOP_PROGRESS_TIMEOUT.as_secs()
                     ));

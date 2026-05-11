@@ -9,8 +9,9 @@ use reqwest::header::{ACCEPT, CONTENT_LENGTH};
 use std::cmp::Reverse;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
+use std::fs::OpenOptions;
 use std::hash::{Hash, Hasher};
-use std::io::Write;
+use std::io::{self, Write};
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
@@ -2396,7 +2397,16 @@ fn preserve_failed_capture_path(path: &std::path::Path, config: &Config) -> Opti
     let new_basename = unique_failed_capture_basename(&dir, ext);
     let dest = dir.join(format!("{}.{}", new_basename, ext));
 
-    std::fs::copy(path, &dest).ok()?;
+    // O_CREAT|O_EXCL on dest. If another process or a prior aborted run
+    // raced to the same slot between `unique_failed_capture_basename` and
+    // here, we'd rather preserve the existing artifact than silently
+    // overwrite it (the previous overwrite-and-pray version was a pre-
+    // existing data-loss bug now plugged). On failure, leave the source
+    // intact — caller treats None as "couldn't preserve" and the original
+    // .mov remains on disk for manual recovery.
+    if copy_no_clobber_nofollow(path, &dest).is_err() {
+        return None;
+    }
     std::fs::remove_file(path).ok();
 
     // Native call capture writes lossless per-source PCM stems next to the
@@ -2408,6 +2418,52 @@ fn preserve_failed_capture_path(path: &std::path::Path, config: &Config) -> Opti
     rescue_paired_stems(path, &dir, &new_basename);
 
     Some(dest)
+}
+
+/// Copy `src` to `dest` with two invariants beyond `std::fs::copy`:
+///
+/// 1. **No-clobber on dest** — open with `O_CREAT|O_EXCL` (`create_new` in Rust
+///    std parlance) so a preexisting file at the destination is refused, not
+///    overwritten. Closes the TOCTOU window between basename selection
+///    (`unique_failed_capture_basename`) and the copy. Without this, a race
+///    that landed two preserves on the same name silently destroyed the
+///    earlier artifact.
+///
+/// 2. **No-follow on src** — open with `O_NOFOLLOW` on Unix so a symlink at
+///    the source path is rejected instead of having its target's contents
+///    materialized at `dest`. Closes the TOCTOU window between an earlier
+///    `symlink_metadata()` check and the open. Defense-in-depth: the only
+///    writer to `~/.minutes/native-captures/` is the Swift helper, but the
+///    principled fix is to never deref symlinks during a recovery move.
+///
+/// On a mid-stream copy failure (disk full, EIO, etc.), the partially-written
+/// destination file is removed so the caller's rollback only has to clean up
+/// successful prior copies, not also reason about half-written ones.
+fn copy_no_clobber_nofollow(src: &Path, dest: &Path) -> io::Result<u64> {
+    #[cfg(unix)]
+    let mut src_file = {
+        use std::os::unix::fs::OpenOptionsExt;
+        OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(src)?
+    };
+    #[cfg(not(unix))]
+    let mut src_file = std::fs::File::open(src)?;
+
+    let mut dest_file = OpenOptions::new().write(true).create_new(true).open(dest)?;
+
+    match io::copy(&mut src_file, &mut dest_file) {
+        Ok(n) => Ok(n),
+        Err(error) => {
+            // Drop the half-written destination before returning so the
+            // caller's rollback doesn't have to also reason about an
+            // orphaned truncated file under the chosen basename.
+            drop(dest_file);
+            let _ = std::fs::remove_file(dest);
+            Err(error)
+        }
+    }
 }
 
 /// Pick a basename for a failed-capture artifact that doesn't collide with
@@ -2488,9 +2544,13 @@ fn rescue_paired_stems(original: &std::path::Path, dest_dir: &Path, new_basename
     }
 
     // Phase 2: copy all. On failure, roll back and leave originals.
+    // Uses `copy_no_clobber_nofollow` so each per-stem copy refuses to
+    // overwrite a preexisting destination, refuses to follow a symlink at
+    // the source, and removes its own half-written file on mid-stream
+    // failure. Rollback only has to clean up SUCCESSFUL prior copies.
     let mut copied: Vec<PathBuf> = Vec::new();
     for (src, dest) in &plan {
-        match std::fs::copy(src, dest) {
+        match copy_no_clobber_nofollow(src, dest) {
             Ok(_) => copied.push(dest.clone()),
             Err(_) => {
                 for partial in &copied {
@@ -8404,9 +8464,7 @@ mod tests {
             "voice stem should be rescued next to the .mov with matching basename"
         );
         assert!(
-            dest_dir
-                .join(format!("{}.system.wav", dest_stem))
-                .exists(),
+            dest_dir.join(format!("{}.system.wav", dest_stem)).exists(),
             "system stem should be rescued next to the .mov with matching basename"
         );
     }
@@ -8427,6 +8485,54 @@ mod tests {
 
         assert!(!mov.exists());
         assert!(preserved.exists());
+    }
+
+    /// If a destination slot somehow exists when copy_no_clobber_nofollow
+    /// runs (TOCTOU race past unique_failed_capture_basename, or an
+    /// aborted prior run left a file), we must refuse to overwrite.
+    /// The preexisting artifact stays intact and the new preserve returns
+    /// None so the caller leaves the source on disk for manual recovery.
+    #[test]
+    fn preserve_failed_capture_path_refuses_to_clobber_existing_dest() {
+        let dir = TempDir::new().unwrap();
+        let config = Config {
+            output_dir: dir.path().join("meetings"),
+            ..Config::default()
+        };
+        let failed_dir = config.output_dir.join("failed-captures");
+        std::fs::create_dir_all(&failed_dir).unwrap();
+
+        // Plant a file at EVERY basename slot unique_failed_capture_basename
+        // would pick (primary + 999 fallbacks) — extreme but proves the
+        // copy_no_clobber_nofollow contract: if there's no free slot AND no
+        // basename-generation path leads to a free slot, preserve gives up
+        // rather than overwriting. In practice we expect the basename
+        // picker to find a free slot. This test forces the no-clobber path
+        // to trigger by saturating slots.
+        let ts = chrono::Local::now().format("%Y-%m-%d-%H%M%S").to_string();
+        let primary = format!("{}-capture", ts);
+        std::fs::write(failed_dir.join(format!("{}.mov", primary)), b"prior").unwrap();
+        for n in 2..1000 {
+            let alt = format!("{}-capture-{}", ts, n);
+            std::fs::write(failed_dir.join(format!("{}.mov", alt)), b"prior").unwrap();
+        }
+
+        let mov = dir.path().join("call.mov");
+        std::fs::write(&mov, vec![9_u8; 1024]).unwrap();
+
+        let result = preserve_failed_capture_path(&mov, &config);
+
+        assert!(
+            result.is_none(),
+            "preserve must give up rather than clobber an existing artifact"
+        );
+        assert!(
+            mov.exists(),
+            "source .mov must stay intact when preserve gives up"
+        );
+        // Confirm a planted file is unchanged.
+        let planted = failed_dir.join(format!("{}.mov", primary));
+        assert_eq!(std::fs::read(&planted).unwrap(), b"prior");
     }
 
     /// Same-second failures must not silently overwrite a previously
@@ -8461,7 +8567,10 @@ mod tests {
         let a = std::fs::read(&preserved_a).unwrap();
         let b = std::fs::read(&preserved_b).unwrap();
         assert_eq!(a[0], 1, "preserved A must keep its content");
-        assert_eq!(b[0], 2, "preserved B must keep its content (not overwritten by A)");
+        assert_eq!(
+            b[0], 2,
+            "preserved B must keep its content (not overwritten by A)"
+        );
     }
 
     /// If one stem rescue fails partway through (system stem copy errors),
@@ -8544,7 +8653,10 @@ mod tests {
         rescue_paired_stems(&mov, &failed_dir, "rescued");
 
         // The symlinked voice stem MUST NOT be copied or unlinked.
-        assert!(voice_link.exists(), "symlinked voice stem must be left alone");
+        assert!(
+            voice_link.exists(),
+            "symlinked voice stem must be left alone"
+        );
         assert!(
             outside_secret.exists(),
             "symlink target must not be touched"

@@ -160,11 +160,15 @@ impl NativeCallCaptureSession {
                     ));
                 }
 
+                // Poisoned mutex = stdout reader thread panicked. Treat that
+                // as "no progress possible" and short-circuit to SIGKILL via
+                // the progress-timeout branch. The previous fallback of ZERO
+                // would have kept the loop spinning until the 600s ceiling.
                 let since_progress = self
                     .last_progress
                     .lock()
                     .map(|t| t.elapsed())
-                    .unwrap_or(Duration::ZERO);
+                    .unwrap_or(Duration::MAX);
                 if since_progress >= STOP_PROGRESS_TIMEOUT {
                     let _ = self.child.kill();
                     return Err(format!(

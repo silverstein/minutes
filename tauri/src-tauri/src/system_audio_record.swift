@@ -135,10 +135,12 @@ final class NativeCallRecorder: NSObject, SCRecordingOutputDelegate, SCStreamOut
             exit(1)
         }
 
-        // stopCapture returned successfully; the framework will invoke
-        // recordingOutputDidFinishRecording → exit(0) shortly. Cancel the
-        // heartbeat so the next 1s tick doesn't fire after we're done.
-        heartbeatTask.cancel()
+        // stopCapture() returns when the framework has been told to stop, but
+        // the moov atom may still be in flight: the actual finalize completes
+        // when `recordingOutputDidFinishRecording` fires and calls exit(0).
+        // Keep the heartbeat alive across that window so the Rust parent
+        // doesn't see 30s of silence and SIGKILL us before the .mov is on
+        // disk. The heartbeat Task dies naturally when the process exits.
     }
 
     private func startMonitoring() {

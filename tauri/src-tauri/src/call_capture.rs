@@ -37,7 +37,29 @@ pub struct NativeCallCaptureSession {
     health: Arc<Mutex<CallSourceHealth>>,
     #[allow(dead_code)] // used once pipeline stem attribution is wired up
     stem_paths: Arc<Mutex<Option<StemPaths>>>,
+    /// Bumped by the stdout reader thread whenever the helper emits any line
+    /// (health, stems, or `finalizing` heartbeats during stop). Used by `stop()`
+    /// to distinguish a helper that is genuinely working through finalize from
+    /// one that is hung, instead of relying on a fixed wall-clock timeout. The
+    /// fixed 15s ceiling caused issue #216: long captures' moov-atom finalize
+    /// takes longer than 15s, the helper was SIGKILLed, and the .mov was
+    /// truncated with no `moov` box.
+    last_progress: Arc<Mutex<Instant>>,
 }
+
+/// Absolute ceiling on `stop()` after SIGTERM is sent. The helper has to be
+/// genuinely making progress (see `last_progress`) within this window or it
+/// gets SIGKILLed. Sized for very long captures: a multi-hour recording can
+/// take tens of seconds to write the moov atom, but a 10-minute hang is
+/// indistinguishable from "wedged" and we'd rather surface a recoverable
+/// failure than wait forever.
+const STOP_MAX_FINALIZE: Duration = Duration::from_secs(600);
+
+/// Maximum time without any stdout activity from the helper before we treat
+/// it as hung and SIGKILL. Health events arrive every ~150ms while capturing
+/// and finalizing heartbeats every ~1s during `stream.stopCapture()`, so 30s
+/// of silence is unambiguous.
+const STOP_PROGRESS_TIMEOUT: Duration = Duration::from_secs(30);
 
 fn parse_macos_major_version(version: &str) -> Option<u32> {
     version.trim().split('.').next()?.parse().ok()
@@ -114,19 +136,45 @@ impl NativeCallCaptureSession {
                 ));
             }
 
+            // Bump last_progress to "now" so the stdout-activity check doesn't
+            // mis-fire on a stale timestamp from before SIGTERM (the loop's
+            // grace period restarts from when we asked the helper to stop).
+            if let Ok(mut t) = self.last_progress.lock() {
+                *t = Instant::now();
+            }
+
             let start = Instant::now();
-            while start.elapsed() < Duration::from_secs(15) {
+            loop {
                 if let Some(status) = self.child.try_wait().map_err(|error| error.to_string())? {
                     if status.success() {
                         return Ok(());
                     }
                     return Err(format!("native call helper exited with status {}", status));
                 }
+
+                if start.elapsed() >= STOP_MAX_FINALIZE {
+                    let _ = self.child.kill();
+                    return Err(format!(
+                        "native call helper did not finalize within {}s (absolute ceiling); SIGKILLed. Per-source stems may still be recoverable in ~/.minutes/native-captures/.",
+                        STOP_MAX_FINALIZE.as_secs()
+                    ));
+                }
+
+                let since_progress = self
+                    .last_progress
+                    .lock()
+                    .map(|t| t.elapsed())
+                    .unwrap_or(Duration::ZERO);
+                if since_progress >= STOP_PROGRESS_TIMEOUT {
+                    let _ = self.child.kill();
+                    return Err(format!(
+                        "native call helper went silent for {}s during finalize; SIGKILLed. Per-source stems may still be recoverable in ~/.minutes/native-captures/.",
+                        STOP_PROGRESS_TIMEOUT.as_secs()
+                    ));
+                }
+
                 std::thread::sleep(Duration::from_millis(200));
             }
-
-            let _ = self.child.kill();
-            Err("native call helper did not stop within 15 seconds".into())
         }
     }
 }
@@ -205,8 +253,10 @@ pub fn start_native_call_capture() -> Result<NativeCallCaptureSession, String> {
         .ok_or_else(|| "native call helper did not expose stdout".to_string())?;
     let (tx, rx) = mpsc::channel();
     let stem_paths: Arc<Mutex<Option<StemPaths>>> = Arc::new(Mutex::new(None));
+    let last_progress: Arc<Mutex<Instant>> = Arc::new(Mutex::new(Instant::now()));
     let health_for_thread = Arc::clone(&health);
     let stems_for_thread = Arc::clone(&stem_paths);
+    let progress_for_thread = Arc::clone(&last_progress);
     std::thread::spawn(move || {
         let mut reader = BufReader::new(stdout);
         let mut line = String::new();
@@ -239,6 +289,14 @@ pub fn start_native_call_capture() -> Result<NativeCallCaptureSession, String> {
             let trimmed = line.trim();
             if trimmed.is_empty() {
                 continue;
+            }
+
+            // Any line from the helper counts as "still alive" for the stop()
+            // progress check. This includes `finalizing` heartbeats emitted
+            // every ~1s during stream.stopCapture(), which is what lets long
+            // (multi-hour) captures finalize without being SIGKILLed. See #216.
+            if let Ok(mut t) = progress_for_thread.lock() {
+                *t = Instant::now();
             }
 
             if !ready_sent {
@@ -302,6 +360,7 @@ pub fn start_native_call_capture() -> Result<NativeCallCaptureSession, String> {
             output_path,
             health,
             stem_paths,
+            last_progress,
         }),
         Ok(Ok(line)) => {
             let _ = child.kill();

@@ -2393,15 +2393,53 @@ fn preserve_failed_capture_path(path: &std::path::Path, config: &Config) -> Opti
         .and_then(|value| value.to_str())
         .filter(|value| !value.is_empty())
         .unwrap_or("bin");
-    let dest = dir.join(format!(
-        "{}-capture.{}",
-        chrono::Local::now().format("%Y-%m-%d-%H%M%S"),
-        ext
-    ));
+    let new_basename = format!(
+        "{}-capture",
+        chrono::Local::now().format("%Y-%m-%d-%H%M%S")
+    );
+    let dest = dir.join(format!("{}.{}", new_basename, ext));
 
     std::fs::copy(path, &dest).ok()?;
     std::fs::remove_file(path).ok();
+
+    // Native call capture writes lossless per-source PCM stems next to the
+    // .mov (`<base>.voice.wav` / `<base>.system.wav`). When the .mov is
+    // truncated (issue #216) the stems are the only intact artifact; rescue
+    // them alongside the preserved path with matching new basenames so
+    // `diarize::discover_stems` finds them on retry. Failures here are
+    // best-effort — the .mov is already preserved.
+    rescue_paired_stems(path, &dir, &new_basename);
+
     Some(dest)
+}
+
+/// Move any sibling `<stem>.voice.wav` / `<stem>.system.wav` files (the
+/// per-source PCM stems written by the native call capture helper) into
+/// `dest_dir` with `<new_basename>.voice.wav` / `<new_basename>.system.wav`
+/// names. No-op when the original path has no parent, no file stem, or no
+/// matching stems exist. Best-effort: any I/O error on a single stem is
+/// logged-ignored so the primary preserve path stays unaffected.
+fn rescue_paired_stems(original: &std::path::Path, dest_dir: &Path, new_basename: &str) {
+    let Some(parent) = original.parent() else {
+        return;
+    };
+    let Some(stem) = original.file_stem().and_then(|s| s.to_str()) else {
+        return;
+    };
+
+    for suffix in ["voice", "system"] {
+        let src = parent.join(format!("{}.{}.wav", stem, suffix));
+        let Ok(meta) = src.metadata() else {
+            continue;
+        };
+        if meta.len() == 0 {
+            continue;
+        }
+        let dest = dest_dir.join(format!("{}.{}.wav", new_basename, suffix));
+        if std::fs::copy(&src, &dest).is_ok() {
+            std::fs::remove_file(&src).ok();
+        }
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -8258,6 +8296,102 @@ mod tests {
         assert!(!wav.exists());
         assert!(preserved.exists());
         assert!(preserved.starts_with(config.output_dir.join("failed-captures")));
+    }
+
+    /// Regression for issue #216: when the native call helper's .mov is moved
+    /// to failed-captures because it was truncated, the paired per-source PCM
+    /// stems must travel with it (with matching new basenames) so that
+    /// `diarize::discover_stems` finds them on retry.
+    #[test]
+    fn preserve_failed_capture_path_rescues_paired_stems() {
+        let dir = TempDir::new().unwrap();
+        let config = Config {
+            output_dir: dir.path().join("meetings"),
+            ..Config::default()
+        };
+        let native_captures = dir.path().join("native-captures");
+        std::fs::create_dir_all(&native_captures).unwrap();
+        let mov = native_captures.join("2026-05-11-103342-call.mov");
+        std::fs::write(&mov, vec![1_u8; 1024]).unwrap();
+        let voice_stem = native_captures.join("2026-05-11-103342-call.voice.wav");
+        let system_stem = native_captures.join("2026-05-11-103342-call.system.wav");
+        std::fs::write(&voice_stem, vec![2_u8; 2048]).unwrap();
+        std::fs::write(&system_stem, vec![3_u8; 2048]).unwrap();
+
+        let preserved = preserve_failed_capture_path(&mov, &config).expect("preserve");
+
+        assert!(!mov.exists(), "original .mov should be moved");
+        assert!(!voice_stem.exists(), "voice stem should be moved");
+        assert!(!system_stem.exists(), "system stem should be moved");
+        assert!(preserved.exists());
+        assert_eq!(preserved.extension().and_then(|e| e.to_str()), Some("mov"));
+
+        // discover_stems looks for `<basename>.voice.wav` next to the audio.
+        // Verify the rescued stems use the SAME new basename as the .mov.
+        let dest_stem = preserved
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap()
+            .to_string();
+        let dest_dir = preserved.parent().unwrap();
+        assert!(
+            dest_dir.join(format!("{}.voice.wav", dest_stem)).exists(),
+            "voice stem should be rescued next to the .mov with matching basename"
+        );
+        assert!(
+            dest_dir
+                .join(format!("{}.system.wav", dest_stem))
+                .exists(),
+            "system stem should be rescued next to the .mov with matching basename"
+        );
+    }
+
+    /// When the .mov has no paired stems (e.g. legacy capture path), preserve
+    /// must still move the .mov successfully — stem rescue is best-effort.
+    #[test]
+    fn preserve_failed_capture_path_works_without_paired_stems() {
+        let dir = TempDir::new().unwrap();
+        let config = Config {
+            output_dir: dir.path().join("meetings"),
+            ..Config::default()
+        };
+        let mov = dir.path().join("2026-05-11-103342-call.mov");
+        std::fs::write(&mov, vec![1_u8; 1024]).unwrap();
+
+        let preserved = preserve_failed_capture_path(&mov, &config).expect("preserve");
+
+        assert!(!mov.exists());
+        assert!(preserved.exists());
+    }
+
+    /// Empty paired stems (zero-length placeholder files) should not be moved
+    /// alongside; only stems with actual data count as rescuable.
+    #[test]
+    fn preserve_failed_capture_path_skips_empty_paired_stems() {
+        let dir = TempDir::new().unwrap();
+        let config = Config {
+            output_dir: dir.path().join("meetings"),
+            ..Config::default()
+        };
+        let native_captures = dir.path().join("native-captures");
+        std::fs::create_dir_all(&native_captures).unwrap();
+        let mov = native_captures.join("2026-05-11-103342-call.mov");
+        std::fs::write(&mov, vec![1_u8; 1024]).unwrap();
+        let voice_stem = native_captures.join("2026-05-11-103342-call.voice.wav");
+        let system_stem = native_captures.join("2026-05-11-103342-call.system.wav");
+        std::fs::write(&voice_stem, Vec::<u8>::new()).unwrap();
+        std::fs::write(&system_stem, Vec::<u8>::new()).unwrap();
+
+        let preserved = preserve_failed_capture_path(&mov, &config).expect("preserve");
+        let dest_stem = preserved.file_stem().and_then(|s| s.to_str()).unwrap();
+        let dest_dir = preserved.parent().unwrap();
+
+        // Zero-length stems should be left alone — moving them would just
+        // create misleading "stems exist" signals for discover_stems.
+        assert!(voice_stem.exists());
+        assert!(system_stem.exists());
+        assert!(!dest_dir.join(format!("{}.voice.wav", dest_stem)).exists());
+        assert!(!dest_dir.join(format!("{}.system.wav", dest_stem)).exists());
     }
 
     #[test]

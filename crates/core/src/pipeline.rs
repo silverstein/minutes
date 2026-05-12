@@ -533,6 +533,85 @@ fn expected_voice_stem_path(audio_path: &Path) -> Option<std::path::PathBuf> {
     Some(dir.join(format!("{}.voice.wav", stem)))
 }
 
+/// Workaround for the .mov dual-track decode bug.
+///
+/// macOS SCRecordingOutput writes a `.mov` with two audio tracks (system + mic)
+/// plus pristine `.voice.wav` and `.system.wav` stems beside it. Decoding the
+/// `.mov` for transcription produces audio at 2x real duration, causing whisper
+/// to receive garbled samples and emit gibberish.
+///
+/// When stems are present, mix them into a 16kHz mono PCM wav via ffmpeg and
+/// hand that to the transcriber instead. Returns the temp file path on success;
+/// caller must remove it after use. Falls back silently (returns None) on any
+/// error so the original `.mov` decode path stays as a safety net.
+fn prepare_transcription_input(audio_path: &Path) -> Option<std::path::PathBuf> {
+    let ext = audio_path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|s| s.to_lowercase());
+    if ext.as_deref() != Some("mov") {
+        return None;
+    }
+    let stem = audio_path.file_stem()?.to_str()?;
+    let dir = audio_path.parent()?;
+    let voice = dir.join(format!("{}.voice.wav", stem));
+    let system = dir.join(format!("{}.system.wav", stem));
+    if !voice.exists() || !system.exists() {
+        return None;
+    }
+
+    let tmp = std::env::temp_dir().join(format!(
+        "minutes-stem-mix-{}-{}.wav",
+        std::process::id(),
+        stem
+    ));
+    #[cfg(unix)]
+    {
+        if let Ok(f) = std::fs::File::create(&tmp) {
+            drop(f);
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600)).ok();
+        }
+    }
+
+    let status = std::process::Command::new("ffmpeg")
+        .args([
+            "-y",
+            "-i",
+            system.to_str()?,
+            "-i",
+            voice.to_str()?,
+            "-filter_complex",
+            "[0:a][1:a]amix=inputs=2:duration=longest:normalize=0",
+            "-ac",
+            "1",
+            "-ar",
+            "16000",
+            "-c:a",
+            "pcm_s16le",
+            tmp.to_str()?,
+        ])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .ok()?;
+    if !status.success() {
+        let _ = std::fs::remove_file(&tmp);
+        tracing::warn!(
+            audio = %audio_path.display(),
+            "stem mix via ffmpeg failed; falling back to .mov decode"
+        );
+        return None;
+    }
+    tracing::info!(
+        audio = %audio_path.display(),
+        mixed = %tmp.display(),
+        "using mixed stems instead of .mov for transcription (workaround for dual-track 2x bug)"
+    );
+    Some(tmp)
+}
+
 fn log_attribution_decision(
     audio_path: &Path,
     output_path: &Path,
@@ -1820,14 +1899,21 @@ where
 
     // Step 1: Transcribe (always)
     on_progress(PipelineStage::Transcribing);
-    tracing::info!(step = "transcribe", file = %audio_path.display(), "transcribing audio");
+    // Workaround: if this is a native-call .mov with stems beside it, transcribe
+    // a freshly-mixed PCM from the stems to avoid the .mov dual-track 2x bug.
+    let mixed_stem_path = prepare_transcription_input(audio_path);
+    let transcribe_input = mixed_stem_path.as_deref().unwrap_or(audio_path);
+    tracing::info!(step = "transcribe", file = %transcribe_input.display(), "transcribing audio");
     let step_start = std::time::Instant::now();
     let result = crate::transcription_coordinator::transcribe_path_for_content_with_hints(
-        audio_path,
+        transcribe_input,
         content_type,
         config,
         decode_hints,
     )?;
+    if let Some(path) = mixed_stem_path.as_ref() {
+        let _ = std::fs::remove_file(path);
+    }
     let transcribe_ms = step_start.elapsed().as_millis() as u64;
     let transcript = if content_type == ContentType::Meeting {
         normalize_transcript_for_self_name_participant(

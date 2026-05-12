@@ -533,6 +533,33 @@ fn expected_voice_stem_path(audio_path: &Path) -> Option<std::path::PathBuf> {
     Some(dir.join(format!("{}.voice.wav", stem)))
 }
 
+/// RAII handle for a stem-mix temp file. Dropping the value unlinks the
+/// file from /tmp, including on early Err returns from the transcription
+/// coordinator. Belt-and-suspenders against future call-site refactors
+/// that might forget the manual cleanup (#235 review item #1).
+///
+/// The temp file contains raw meeting audio, so leaking it on error is
+/// a privacy issue, not just a cleanliness one. The Drop impl deliberately
+/// swallows the unlink error (the file may already be gone if the OS or
+/// a test harness cleaned it up); leaving a partial file behind is the
+/// only failure mode worth thinking about and `Drop` cannot recover from
+/// it any better than the existing best-effort logic did.
+struct MixedStemTempFile {
+    path: std::path::PathBuf,
+}
+
+impl MixedStemTempFile {
+    fn as_path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for MixedStemTempFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
 /// Workaround for the .mov dual-track decode bug.
 ///
 /// macOS SCRecordingOutput writes a `.mov` with two audio tracks (system + mic)
@@ -541,10 +568,15 @@ fn expected_voice_stem_path(audio_path: &Path) -> Option<std::path::PathBuf> {
 /// to receive garbled samples and emit gibberish.
 ///
 /// When stems are present, mix them into a 16kHz mono PCM wav via ffmpeg and
-/// hand that to the transcriber instead. Returns the temp file path on success;
-/// caller must remove it after use. Falls back silently (returns None) on any
-/// error so the original `.mov` decode path stays as a safety net.
-fn prepare_transcription_input(audio_path: &Path) -> Option<std::path::PathBuf> {
+/// hand that to the transcriber instead. Returns a `MixedStemTempFile` whose
+/// `Drop` impl removes the temp file automatically, so the caller cannot
+/// leak raw meeting audio on a transcription error. Falls back silently
+/// (returns None) on any error so the original `.mov` decode path stays as
+/// a safety net — note that on macOS 26 native captures this fallback hides
+/// the dual-track bug itself, which is the structural concern jmh1313 is
+/// addressing in the v2 of this PR by switching to a typed hard-error
+/// return for the should-have-but-couldn't case.
+fn prepare_transcription_input(audio_path: &Path) -> Option<MixedStemTempFile> {
     let ext = audio_path
         .extension()
         .and_then(|e| e.to_str())
@@ -560,9 +592,20 @@ fn prepare_transcription_input(audio_path: &Path) -> Option<std::path::PathBuf> 
         return None;
     }
 
+    // Tempfile name includes pid + nanosecond timestamp + stem so two
+    // concurrent invocations on the same recording cannot land on the
+    // same path (Tauri's recovery path can spawn a worker thread for a
+    // recording whose `processing` flag is mid-CAS, which would otherwise
+    // collide here). Falls back to pid+stem alone if SystemTime is
+    // unavailable.
+    let unique_suffix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
     let tmp = std::env::temp_dir().join(format!(
-        "minutes-stem-mix-{}-{}.wav",
+        "minutes-stem-mix-{}-{}-{}.wav",
         std::process::id(),
+        unique_suffix,
         stem
     ));
     #[cfg(unix)]
@@ -574,6 +617,15 @@ fn prepare_transcription_input(audio_path: &Path) -> Option<std::path::PathBuf> 
         }
     }
 
+    // ffmpeg amix defaults: `duration=longest` is the framework default
+    // (specifying it explicitly was redundant); `normalize=1` is the
+    // default and prevents combined-amplitude clipping when one stem is
+    // significantly louder than the other. System audio is usually
+    // hotter than mic, so `normalize=0` could bake clipping into the
+    // PCM before whisper sees it (jmh1313 confirmed the original PR's
+    // recordings had stems at -0.0 and -0.1 dB peak, which would have
+    // clipped on normalize=0). Default normalization is the safer
+    // choice unless we add explicit weights with measured levels.
     let status = std::process::Command::new("ffmpeg")
         .args([
             "-y",
@@ -582,7 +634,7 @@ fn prepare_transcription_input(audio_path: &Path) -> Option<std::path::PathBuf> 
             "-i",
             voice.to_str()?,
             "-filter_complex",
-            "[0:a][1:a]amix=inputs=2:duration=longest:normalize=0",
+            "[0:a][1:a]amix=inputs=2",
             "-ac",
             "1",
             "-ar",
@@ -609,7 +661,7 @@ fn prepare_transcription_input(audio_path: &Path) -> Option<std::path::PathBuf> 
         mixed = %tmp.display(),
         "using mixed stems instead of .mov for transcription (workaround for dual-track 2x bug)"
     );
-    Some(tmp)
+    Some(MixedStemTempFile { path: tmp })
 }
 
 fn log_attribution_decision(
@@ -1901,8 +1953,16 @@ where
     on_progress(PipelineStage::Transcribing);
     // Workaround: if this is a native-call .mov with stems beside it, transcribe
     // a freshly-mixed PCM from the stems to avoid the .mov dual-track 2x bug.
+    // `mixed_stem_path` is held in this scope so its Drop impl removes the
+    // temp file when this function returns, including on Err propagation
+    // from the transcription coordinator (#235 review item #1: meeting
+    // audio in /tmp is a privacy issue and the previous manual cleanup
+    // was skipped by the `?` early-return).
     let mixed_stem_path = prepare_transcription_input(audio_path);
-    let transcribe_input = mixed_stem_path.as_deref().unwrap_or(audio_path);
+    let transcribe_input = mixed_stem_path
+        .as_ref()
+        .map(|f| f.as_path())
+        .unwrap_or(audio_path);
     tracing::info!(step = "transcribe", file = %transcribe_input.display(), "transcribing audio");
     let step_start = std::time::Instant::now();
     let result = crate::transcription_coordinator::transcribe_path_for_content_with_hints(
@@ -1911,9 +1971,7 @@ where
         config,
         decode_hints,
     )?;
-    if let Some(path) = mixed_stem_path.as_ref() {
-        let _ = std::fs::remove_file(path);
-    }
+    drop(mixed_stem_path);
     let transcribe_ms = step_start.elapsed().as_millis() as u64;
     let transcript = if content_type == ContentType::Meeting {
         normalize_transcript_for_self_name_participant(

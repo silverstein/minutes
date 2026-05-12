@@ -189,8 +189,48 @@ fn is_icloud_stub(path: &Path) -> bool {
         .is_some_and(|n| n.starts_with('.') && n.ends_with(".icloud"))
 }
 
-/// Probe audio duration from container metadata using symphonia.
-/// Returns None if the file can't be probed (corrupt, unsupported, etc.).
+/// Check if a file is a probable audio container by running symphonia's probe.
+/// Returns true if symphonia can identify the file as a supported audio
+/// container with at least one track.
+///
+/// Deliberately does NOT require `n_frames` or `sample_rate` in the codec
+/// params, because some encoders produce fully-decodable audio without writing
+/// total-frame metadata in the moov box (notably iPhone Voice Memos exports,
+/// see #231). The downstream decode path validates real decodability and
+/// surfaces a clearer error than this gate would.
+fn is_audio_container(path: &Path) -> bool {
+    use symphonia::core::io::MediaSourceStream;
+    use symphonia::core::probe::Hint;
+
+    let Ok(file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mss = MediaSourceStream::new(Box::new(file), Default::default());
+
+    let mut hint = Hint::new();
+    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+        hint.with_extension(ext);
+    }
+
+    match symphonia::default::get_probe().format(
+        &hint,
+        mss,
+        &Default::default(),
+        &Default::default(),
+    ) {
+        Ok(probed) => probed
+            .format
+            .tracks()
+            .iter()
+            .any(|track| track.codec_params.codec != symphonia::core::codecs::CODEC_TYPE_NULL),
+        Err(_) => false,
+    }
+}
+
+/// Probe audio duration from container metadata using symphonia. Returns None
+/// if the file can't be probed OR if the container does not record total
+/// frame count and sample rate. Used for duration-based content routing
+/// (memo vs meeting); validity gating goes through `is_audio_container`.
 fn audio_duration(path: &Path) -> Option<std::time::Duration> {
     use symphonia::core::io::MediaSourceStream;
     use symphonia::core::probe::Hint;
@@ -691,13 +731,20 @@ fn build_candidate(path: &Path, settle_delay: u64, config: &Config) -> Option<Wa
         return None;
     }
 
-    if audio_duration(path).is_none() {
+    // The audio-container gate is intentionally permissive: it accepts any
+    // file symphonia can probe into a non-null-codec track, regardless of
+    // duration metadata. See #231 (iPhone Voice Memos exports with
+    // `ftyp -> mdat -> moov` and missing total-frame counts were previously
+    // rejected here). TODO(#231): once we have a real Voice Memos fixture
+    // we can add a regression test for the no-n_frames path; today's gate
+    // tests only cover happy path and clear non-audio bytes.
+    if !is_audio_container(path) {
         let is_wav = path
             .extension()
             .and_then(|e| e.to_str())
             .is_some_and(|e| e.eq_ignore_ascii_case("wav"));
         if !is_wav {
-            tracing::warn!(path = %path.display(), "file failed audio probe — not a valid audio container, skipping");
+            tracing::warn!(path = %path.display(), "file failed audio probe, not a valid audio container, skipping");
             return None;
         }
     }
@@ -918,5 +965,34 @@ mod tests {
             .unwrap()
             .to_string_lossy();
         assert_eq!(parent_name, "processed");
+    }
+
+    /// Regression for #231: the audio-probe gate must accept any file whose
+    /// container symphonia recognizes, even when the codec params lack frame
+    /// counts. The previous implementation required `n_frames` and rejected
+    /// otherwise-valid Voice Memos exports.
+    #[test]
+    fn is_audio_container_accepts_real_wav_fixture() {
+        let wav = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("assets")
+            .join("demo.wav");
+        assert!(wav.exists(), "fixture missing: {}", wav.display());
+        assert!(is_audio_container(&wav));
+    }
+
+    #[test]
+    fn is_audio_container_rejects_random_bytes() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("noise.wav");
+        fs::write(&path, b"this is not an audio container").unwrap();
+        assert!(!is_audio_container(&path));
+    }
+
+    #[test]
+    fn is_audio_container_rejects_missing_file() {
+        assert!(!is_audio_container(Path::new(
+            "/definitely/does/not/exist/file.m4a"
+        )));
     }
 }

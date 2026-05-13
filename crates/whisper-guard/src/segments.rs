@@ -23,15 +23,93 @@ fn is_always_noise(text: &str) -> bool {
     t == "[music]" || t == "[blank_audio]" || t == "[silence]" || t == "music"
 }
 
+/// Whisper non-speech tokens that legitimately appear as `(crying)` /
+/// `[laughter]` style annotations. Compared case-insensitively against each
+/// whitespace-separated word inside the parentheses or brackets.
+///
+/// Keeping this an explicit allowlist (rather than "any short parenthetical")
+/// is what stops the all-noise classifier from eating legitimate user
+/// parentheticals like `(see attached)`, `(part 1)`, `(2 of 3)`, or
+/// `(continued)` that whisper would never emit on its own.
+///
+/// Includes a handful of foreign-language whisper-emitted tokens (Polish,
+/// Spanish, German, French) so non-English captures still get the bracketed
+/// form recognized.
+const NOISE_WORDS: &[&str] = &[
+    // English non-speech events whisper labels on near-silent / noisy audio
+    "crying",
+    "laughter",
+    "laughing",
+    "applause",
+    "growling",
+    "music",
+    "sobbing",
+    "cheering",
+    "sighing",
+    "clapping",
+    "coughing",
+    "sneezing",
+    "gasping",
+    "whispering",
+    "mumbling",
+    "humming",
+    "breathing",
+    "silence",
+    "snoring",
+    "yelling",
+    "screaming",
+    // Whisper-specific synthetic tokens (typically bracketed)
+    "blank_audio",
+    // Non-English whisper noise tokens we've seen in real captures
+    "śmiech",    // Polish: laughter
+    "risas",     // Spanish: laughter
+    "musik",     // German: music
+    "musique",   // French: music
+    "musica",    // Italian/Spanish: music
+    "música",    // Spanish/Portuguese: music
+    "muzyka",    // Polish: music
+    "applaus",   // German: applause
+    "aplausos",  // Spanish: applause
+    "applausi",  // Italian: applause
+    "oklaski",   // Polish: applause
+    "ruido",     // Spanish: noise
+    "geräusch",  // German: noise
+    "stille",    // German: silence
+    "silencio",  // Spanish: silence
+    "cisza",     // Polish: silence
+    "rires",     // French: laughter
+    "rire",      // French: laughter (singular form)
+    "gelächter", // German: laughter
+    "weeping",   // English variant of crying
+];
+
+/// Case-insensitive membership check against [`NOISE_WORDS`].
+///
+/// The lookup table is small (under 50 entries) so a linear scan with
+/// `eq_ignore_ascii_case` is fine; the non-ASCII Polish / Spanish forms are
+/// matched verbatim after lowercasing the input. We lowercase here rather
+/// than at insertion so the allowlist stays readable.
+fn is_noise_word(word: &str) -> bool {
+    let lower = word.to_lowercase();
+    NOISE_WORDS.iter().any(|w| *w == lower)
+}
+
 /// Return true if the text (after timestamp) is a short non-speech marker.
 ///
 /// Matches two whisper hallucination shapes:
 /// - bracketed: `[music]`, `[Śmiech]`, `[BLANK_AUDIO]`, `[risas]`, `[Growling]`
-/// - parenthetical: `(crying)`, `(coughing)`, `(applause)`, `(silence)`
+/// - parenthetical: `(crying)`, `(coughing)`, `(applause)`, `(silence)`,
+///   `(soft music)`, `(loud applause)`
 ///
 /// Excludes timestamp-like content `[0:00]` and collapse markers from prior
 /// dedup passes `[...] [repeated ...]`. Word-count (1-4 inner words) and
 /// length (≤40 inner chars) constraints keep this conservative.
+///
+/// **Allowlist gate:** at least one whitespace-separated word inside the
+/// delimiters must match [`NOISE_WORDS`] (case-insensitive). Without this,
+/// short user-authored parentheticals like `(see attached)`, `(part 1)`,
+/// `(2 of 3)`, or `(continued)` would be misclassified as whisper
+/// hallucinations and dropped from the transcript.
 ///
 /// This is the shared classifier used by both [`collapse_noise_markers`] and
 /// the [`is_all_noise`] read-only signal.
@@ -62,7 +140,14 @@ pub fn is_noise_marker(text: &str) -> bool {
     }
     // Must be short (1-4 words, ≤40 chars) - non-speech markers are brief
     let word_count = inner.split_whitespace().count();
-    (1..=4).contains(&word_count) && inner.len() <= 40
+    if !(1..=4).contains(&word_count) || inner.len() > 40 {
+        return false;
+    }
+
+    // Allowlist gate: at least one inner word must be a known whisper
+    // non-speech token. This keeps legitimate user parentheticals like
+    // `(see attached)` or `(part 1)` out of the noise bucket.
+    inner.split_whitespace().any(is_noise_word)
 }
 
 /// Return true iff every non-empty line in `lines` is a noise marker (after
@@ -1551,6 +1636,45 @@ mod tests {
         assert!(!is_noise_marker(
             "(this is way more than four words of content)"
         ));
+    }
+
+    #[test]
+    fn is_noise_marker_rejects_user_authored_parentheticals() {
+        // Real users put short parentheticals in notes for legitimate reasons.
+        // None of these contain a whisper non-speech token, so they must NOT
+        // be classified as noise (codex blocker 1 on PR #246).
+        assert!(!is_noise_marker("(see attached)"));
+        assert!(!is_noise_marker("(part 1)"));
+        assert!(!is_noise_marker("(2 of 3)"));
+        assert!(!is_noise_marker("(continued)"));
+        assert!(!is_noise_marker("(TBD)"));
+        assert!(!is_noise_marker("(draft)"));
+        // Trailing period is normalized but the content is still not noise.
+        assert!(!is_noise_marker("(see attached)."));
+    }
+
+    #[test]
+    fn is_noise_marker_accepts_two_word_noise_forms() {
+        // Two-word parentheticals where one word is on the noise allowlist
+        // (typical whisper emission shape).
+        assert!(is_noise_marker("(soft music)"));
+        assert!(is_noise_marker("(loud applause)"));
+        assert!(is_noise_marker("(gentle music)"));
+        assert!(is_noise_marker("(background music)"));
+        // Same in brackets.
+        assert!(is_noise_marker("[soft music]"));
+        assert!(is_noise_marker("[loud applause]"));
+    }
+
+    #[test]
+    fn is_noise_marker_rejects_user_authored_brackets() {
+        // Brackets that don't contain a noise word should also pass through.
+        // (Less common in user notes than parentheticals, but the allowlist
+        // gate applies uniformly to both shapes.)
+        assert!(!is_noise_marker("[TODO]"));
+        assert!(!is_noise_marker("[draft]"));
+        assert!(!is_noise_marker("[part 1]"));
+        assert!(!is_noise_marker("[see attached]"));
     }
 
     #[test]

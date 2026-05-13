@@ -4350,16 +4350,16 @@ mod tests {
     }
 
     #[test]
-    fn detect_summarization_warnings_write_path_no_speech_stays_quiet() {
-        // Codex review of v2 (PR #249) asked for explicit coverage of the
-        // write_transcript_artifact path's no-speech branch. The site
-        // computes `summarization_attempted = engine != "none"`, which
-        // is correct because the upstream all-noise / NoSpeech gate
-        // returns before reaching the detection call. This test pins
-        // the invariant across every engine value: a NOT-attempted call
-        // with summary = None must produce zero warnings, so no
-        // upstream branch can leak a bogus `summarize_failed` through
-        // the helper into the frontmatter.
+    fn detect_summarization_warnings_stays_silent_for_every_engine_when_not_attempted() {
+        // This is a contract test on the helper itself, not an end-to-end
+        // integration test. Both call sites (write_transcript_artifact and
+        // process_with_progress_and_sidecar) rely on this invariant when
+        // their upstream no-speech / all-noise gate fires: pass
+        // `summarization_attempted = false` and trust the helper to return
+        // zero warnings regardless of the configured engine. If any engine
+        // value leaked a warning here, the upstream short-circuit would be
+        // insufficient and the frontmatter would gain a bogus
+        // `summarize_failed` entry on no-speech recordings.
         for (engine, agent_cmd) in [
             ("agent", "opencode"),
             ("auto", "claude"),

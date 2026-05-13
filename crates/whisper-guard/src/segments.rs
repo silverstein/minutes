@@ -60,6 +60,13 @@ const NOISE_WORDS: &[&str] = &[
     "screaming",
     // Whisper-specific synthetic tokens (typically bracketed)
     "blank_audio",
+    "inaudible",
+    "noise",
+    "crosstalk",
+    "typing",
+    "static",
+    "beep",
+    "ringing",
     // Non-English whisper noise tokens we've seen in real captures
     "śmiech",    // Polish: laughter
     "risas",     // Spanish: laughter
@@ -144,10 +151,17 @@ pub fn is_noise_marker(text: &str) -> bool {
         return false;
     }
 
-    // Allowlist gate: at least one inner word must be a known whisper
-    // non-speech token. This keeps legitimate user parentheticals like
-    // `(see attached)` or `(part 1)` out of the noise bucket.
-    inner.split_whitespace().any(is_noise_word)
+    // Allowlist gate: the LAST whitespace-separated word inside the
+    // delimiters must be a known whisper non-speech token. This dominance
+    // rule keeps legitimate phrasings like `(music director)` or
+    // `(applause sounds great)` from matching just because they happen to
+    // contain a noise word, while still recognizing whisper's compound
+    // emissions like `(soft music)` / `(loud applause)` / `(audience
+    // laughter)` where the noise word terminates the phrase.
+    inner
+        .split_whitespace()
+        .next_back()
+        .is_some_and(is_noise_word)
 }
 
 /// Return true iff every non-empty line in `lines` is a noise marker (after
@@ -1668,13 +1682,55 @@ mod tests {
 
     #[test]
     fn is_noise_marker_rejects_user_authored_brackets() {
-        // Brackets that don't contain a noise word should also pass through.
+        // Brackets that don't end with a noise word should also pass through.
         // (Less common in user notes than parentheticals, but the allowlist
-        // gate applies uniformly to both shapes.)
+        // dominance rule applies uniformly to both shapes.)
         assert!(!is_noise_marker("[TODO]"));
         assert!(!is_noise_marker("[draft]"));
         assert!(!is_noise_marker("[part 1]"));
         assert!(!is_noise_marker("[see attached]"));
+    }
+
+    #[test]
+    fn is_noise_marker_dominance_check_rejects_noise_word_with_content_suffix() {
+        // The noise allowlist used to match if ANY word inside the marker
+        // appeared in the noise list. That meant `(music director)` and
+        // `(applause sounds great)` were classified as noise just because
+        // they contained a noise word somewhere. Per codex review of PR
+        // #246: the last word must be the noise token.
+        assert!(!is_noise_marker("(music director)"));
+        assert!(!is_noise_marker("(applause sounds great)"));
+        assert!(!is_noise_marker("(noise complaint)"));
+        assert!(!is_noise_marker("(typing speed)"));
+        assert!(!is_noise_marker("[crying baby]"));
+        assert!(!is_noise_marker("[laughter therapy]"));
+    }
+
+    #[test]
+    fn is_noise_marker_dominance_check_accepts_modifier_plus_noise_word() {
+        // The complement of the previous test: when the noise word
+        // terminates the phrase (whisper's actual emission shape), the
+        // marker is still classified as noise.
+        assert!(is_noise_marker("(audience laughter)"));
+        assert!(is_noise_marker("(soft music)"));
+        assert!(is_noise_marker("(loud applause)"));
+        assert!(is_noise_marker("(background music)"));
+        assert!(is_noise_marker("[audience laughter]"));
+    }
+
+    #[test]
+    fn is_noise_marker_accepts_expanded_allowlist_tokens() {
+        // Tokens added per codex review of PR #246: real whisper outputs
+        // that were missing from the v1 allowlist.
+        assert!(is_noise_marker("[inaudible]"));
+        assert!(is_noise_marker("[crosstalk]"));
+        assert!(is_noise_marker("[typing]"));
+        assert!(is_noise_marker("[noise]"));
+        assert!(is_noise_marker("[static]"));
+        assert!(is_noise_marker("[beep]"));
+        assert!(is_noise_marker("[ringing]"));
+        assert!(is_noise_marker("(inaudible)"));
+        assert!(is_noise_marker("(crosstalk)"));
     }
 
     #[test]

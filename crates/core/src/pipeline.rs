@@ -36,10 +36,12 @@ const ALL_NOISE_SUPPRESSED_BODY: &str =
 ///    `[music]` / `[Growling]` or parenthetical `(crying)` / `(applause)`)
 ///    according to [`wg_segments::is_all_noise`].
 /// 2. Both stem active ratios in `recording_health` are below
-///    [`SPARSE_STEM_ACTIVE_RATIO`]. If a stem ratio is `None` we treat that
-///    stem as inconclusive and require the other one to be sparse; if both
-///    are `None` (e.g. dictation, no health captured) the gate does NOT
-///    fire - we lack the evidence to override the transcript.
+///    [`SPARSE_STEM_ACTIVE_RATIO`]. **Both ratios must be present**: if
+///    either `voice_stem_active_ratio` or `system_stem_active_ratio` is
+///    `None` (e.g. dictation captures with no system stem, or any recording
+///    where stem-active health was not computed) the gate does NOT fire.
+///    Missing health is treated as insufficient evidence to override the
+///    transcript, not as confirmation that the stem was silent.
 ///
 /// Otherwise returns `None` and the transcript flows through unchanged.
 fn suppress_if_all_noise(

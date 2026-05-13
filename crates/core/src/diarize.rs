@@ -364,13 +364,13 @@ pub struct StemPaths {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum SourceAwareDiarizationPlan {
+pub(crate) enum SourceAwareDiarizationPlan {
     FullStems(StemPaths),
     SystemStemOnly(std::path::PathBuf),
     SilentSystemStem(StemPaths),
 }
 
-fn stem_has_audio(path: &Path) -> bool {
+pub(crate) fn stem_has_audio(path: &Path) -> bool {
     let Ok(reader) = hound::WavReader::open(path) else {
         return false;
     };
@@ -557,7 +557,7 @@ fn probe_stem_observed_signal<T>(
     }
 }
 
-fn discover_stem_plan(audio_path: &Path) -> Option<SourceAwareDiarizationPlan> {
+pub(crate) fn discover_stem_plan(audio_path: &Path) -> Option<SourceAwareDiarizationPlan> {
     let stem = audio_path.file_stem()?.to_str()?;
     let dir = audio_path.parent()?;
     let voice = dir.join(format!("{}.voice.wav", stem));

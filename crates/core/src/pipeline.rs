@@ -560,44 +560,115 @@ impl Drop for MixedStemTempFile {
     }
 }
 
-/// Workaround for the .mov dual-track decode bug.
+/// Prepare the input handed to the transcription coordinator, working around
+/// the macOS 26 SCRecordingOutput dual-track `.mov` 2x decode bug (#234).
 ///
 /// macOS SCRecordingOutput writes a `.mov` with two audio tracks (system + mic)
-/// plus pristine `.voice.wav` and `.system.wav` stems beside it. Decoding the
-/// `.mov` for transcription produces audio at 2x real duration, causing whisper
-/// to receive garbled samples and emit gibberish.
+/// plus pristine `.voice.wav` and `.system.wav` PCM stems beside it. Decoding
+/// the `.mov` for transcription produces audio at 2x real duration, so whisper
+/// receives garbled samples and emits gibberish. When the stems are present and
+/// valid, this helper mixes them into a 16kHz mono PCM via `ffmpeg amix` and
+/// returns a `MixedStemTempFile` for the caller to hand to the transcriber;
+/// the handle's `Drop` impl cleans up the temp file on success, Err, panic, or
+/// any future early-return.
 ///
-/// When stems are present, mix them into a 16kHz mono PCM wav via ffmpeg and
-/// hand that to the transcriber instead. Returns a `MixedStemTempFile` whose
-/// `Drop` impl removes the temp file automatically, so the caller cannot
-/// leak raw meeting audio on a transcription error. Falls back silently
-/// (returns None) on any error so the original `.mov` decode path stays as
-/// a safety net — note that on macOS 26 native captures this fallback hides
-/// the dual-track bug itself, which is the structural concern jmh1313 is
-/// addressing in the v2 of this PR by switching to a typed hard-error
-/// return for the should-have-but-couldn't case.
-fn prepare_transcription_input(audio_path: &Path) -> Option<MixedStemTempFile> {
+/// Return contract:
+/// - `Ok(None)` — input does not need stem-mixing. Either it is not a `.mov`,
+///   or it is a `.mov` with no sibling stems at all (treated as an ordinary
+///   non-native-call container; the caller hands the original path to the
+///   transcriber and accepts whatever the decoder does with it).
+/// - `Ok(Some(handle))` — input is a native-call `.mov` and stems mixed cleanly.
+/// - `Err(MinutesError::Transcribe(NativeCaptureStemMixUnavailable))` — input is
+///   a native-call `.mov` (one or both stems present, indicating a SCRecording-
+///   Output capture) but the mix cannot be produced. This is the "should-have-
+///   mixed-but-couldn't" case from PR #235 review item #4: silent fallback to
+///   the broken `.mov` decode would re-enter exactly the bug this helper exists
+///   to prevent, so the caller is forced to propagate.
+///
+/// Path handling: the `.mov` is canonicalized before stem lookup so a symlinked
+/// recording resolves to its target before sibling lookup (#237 touched the
+/// same area in the diarization path). Stem discovery, including the empty-stem
+/// check via `stem_has_audio`, reuses [`crate::diarize::discover_stem_plan`] so
+/// a single source of truth governs which side files count as "stems present".
+fn prepare_transcription_input(
+    audio_path: &Path,
+) -> Result<Option<MixedStemTempFile>, MinutesError> {
+    // Only `.mov` containers can hit the 2x decode bug. Everything else is
+    // either a clean PCM wav (Jake's manual reprocess flow), a single-stream
+    // m4a/mp3/ogg (voice memos), or a format that does not exercise the
+    // SCRecordingOutput dual-track path.
     let ext = audio_path
         .extension()
         .and_then(|e| e.to_str())
         .map(|s| s.to_lowercase());
     if ext.as_deref() != Some("mov") {
-        return None;
-    }
-    let stem = audio_path.file_stem()?.to_str()?;
-    let dir = audio_path.parent()?;
-    let voice = dir.join(format!("{}.voice.wav", stem));
-    let system = dir.join(format!("{}.system.wav", stem));
-    if !voice.exists() || !system.exists() {
-        return None;
+        return Ok(None);
     }
 
+    // Canonicalize so a symlinked `.mov` resolves to its target before stem
+    // lookup. Stems live next to the canonical file, not the symlink. Falls
+    // back to the original path if canonicalize fails (symlink to a target
+    // we cannot stat, permission denied, etc.); the stem discovery on the
+    // next line will return None for any path it cannot read alongside.
+    let canonical = audio_path
+        .canonicalize()
+        .unwrap_or_else(|_| audio_path.to_path_buf());
+
+    // Stem discovery reuses the diarization helper so transcription and
+    // diarization agree on what "stems present" means, including the
+    // zero-byte-stem check via `stem_has_audio` that catches partial-crash
+    // wavs (.exists() alone accepts them; `stem_has_audio` requires a valid
+    // hound-readable header with non-zero sample/channel counts).
+    let plan = crate::diarize::discover_stem_plan(&canonical);
+
+    let stems = match plan {
+        Some(crate::diarize::SourceAwareDiarizationPlan::FullStems(paths)) => paths,
+        Some(crate::diarize::SourceAwareDiarizationPlan::SystemStemOnly(system)) => {
+            return Err(
+                crate::error::TranscribeError::NativeCaptureStemMixUnavailable {
+                    reason: format!(
+                        "voice stem missing or empty for {} (system stem present at {}). \
+                     Cannot mix to PCM; recording is unrecoverable without the mic side.",
+                        canonical.display(),
+                        system.display()
+                    ),
+                }
+                .into(),
+            );
+        }
+        Some(crate::diarize::SourceAwareDiarizationPlan::SilentSystemStem(paths)) => {
+            return Err(
+                crate::error::TranscribeError::NativeCaptureStemMixUnavailable {
+                    reason: format!(
+                        "system stem at {} is empty (voice stem present at {}). \
+                     Partial-crash signature; mix would substitute silence for the far-side audio.",
+                        paths.system.display(),
+                        paths.voice.display()
+                    ),
+                }
+                .into(),
+            );
+        }
+        None => {
+            // No stems at all. Could be a non-native-call `.mov` (screen
+            // recording, downloaded file) or a native-call capture whose
+            // stems were cleaned up; we cannot distinguish. Conservative:
+            // treat as ordinary `.mov` and let the existing decoder handle
+            // it. Hard-erroring on every stemless `.mov` would break
+            // legitimate non-native-call use cases.
+            return Ok(None);
+        }
+    };
+
     // Tempfile name includes pid + nanosecond timestamp + stem so two
-    // concurrent invocations on the same recording cannot land on the
-    // same path (Tauri's recovery path can spawn a worker thread for a
-    // recording whose `processing` flag is mid-CAS, which would otherwise
-    // collide here). Falls back to pid+stem alone if SystemTime is
-    // unavailable.
+    // concurrent invocations on the same recording cannot land on the same
+    // path (Tauri's recovery path can spawn a worker thread for a recording
+    // whose `processing` flag is mid-CAS, which would otherwise collide
+    // here). Falls back to pid+stem alone if SystemTime is unavailable.
+    let stem_name = canonical
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("unknown");
     let unique_suffix = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
@@ -606,7 +677,7 @@ fn prepare_transcription_input(audio_path: &Path) -> Option<MixedStemTempFile> {
         "minutes-stem-mix-{}-{}-{}.wav",
         std::process::id(),
         unique_suffix,
-        stem
+        stem_name
     ));
     #[cfg(unix)]
     {
@@ -626,13 +697,35 @@ fn prepare_transcription_input(audio_path: &Path) -> Option<MixedStemTempFile> {
     // recordings had stems at -0.0 and -0.1 dB peak, which would have
     // clipped on normalize=0). Default normalization is the safer
     // choice unless we add explicit weights with measured levels.
-    let status = std::process::Command::new("ffmpeg")
+    let system_str = stems.system.to_str().ok_or_else(|| {
+        crate::error::TranscribeError::NativeCaptureStemMixUnavailable {
+            reason: format!(
+                "system stem path is not valid UTF-8: {}",
+                stems.system.display()
+            ),
+        }
+    })?;
+    let voice_str = stems.voice.to_str().ok_or_else(|| {
+        crate::error::TranscribeError::NativeCaptureStemMixUnavailable {
+            reason: format!(
+                "voice stem path is not valid UTF-8: {}",
+                stems.voice.display()
+            ),
+        }
+    })?;
+    let tmp_str = tmp.to_str().ok_or_else(|| {
+        crate::error::TranscribeError::NativeCaptureStemMixUnavailable {
+            reason: format!("temp mix path is not valid UTF-8: {}", tmp.display()),
+        }
+    })?;
+
+    let output = std::process::Command::new("ffmpeg")
         .args([
             "-y",
             "-i",
-            system.to_str()?,
+            system_str,
             "-i",
-            voice.to_str()?,
+            voice_str,
             "-filter_complex",
             "[0:a][1:a]amix=inputs=2",
             "-ac",
@@ -641,27 +734,49 @@ fn prepare_transcription_input(audio_path: &Path) -> Option<MixedStemTempFile> {
             "16000",
             "-c:a",
             "pcm_s16le",
-            tmp.to_str()?,
+            tmp_str,
         ])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .ok()?;
-    if !status.success() {
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .map_err(|e| {
+            let _ = std::fs::remove_file(&tmp);
+            crate::error::TranscribeError::NativeCaptureStemMixUnavailable {
+                reason: format!(
+                    "ffmpeg could not be invoked for stem mix of {}: {}. Install ffmpeg (brew install ffmpeg).",
+                    canonical.display(),
+                    e
+                ),
+            }
+        })?;
+    if !output.status.success() {
         let _ = std::fs::remove_file(&tmp);
-        tracing::warn!(
-            audio = %audio_path.display(),
-            "stem mix via ffmpeg failed; falling back to .mov decode"
+        let stderr_tail = String::from_utf8_lossy(&output.stderr);
+        let last_line = stderr_tail
+            .lines()
+            .last()
+            .unwrap_or("(no stderr)")
+            .to_string();
+        return Err(
+            crate::error::TranscribeError::NativeCaptureStemMixUnavailable {
+                reason: format!(
+                    "ffmpeg amix failed for {} (voice={}, system={}): {}",
+                    canonical.display(),
+                    stems.voice.display(),
+                    stems.system.display(),
+                    last_line
+                ),
+            }
+            .into(),
         );
-        return None;
     }
     tracing::info!(
-        audio = %audio_path.display(),
+        audio = %canonical.display(),
         mixed = %tmp.display(),
         "using mixed stems instead of .mov for transcription (workaround for dual-track 2x bug)"
     );
-    Some(MixedStemTempFile { path: tmp })
+    Ok(Some(MixedStemTempFile { path: tmp }))
 }
 
 fn log_attribution_decision(
@@ -1255,13 +1370,25 @@ pub fn transcribe_to_artifact(
         load_vocabulary_for_decode_hints().as_ref(),
     );
 
+    // Apply the same stem-mix workaround as `process_with_progress_and_sidecar`
+    // so background-job and `minutes process` callers (which reach the
+    // pipeline via `transcribe_to_artifact` and bypass the foreground
+    // entry point) are not exposed to the macOS 26 dual-track `.mov` 2x
+    // bug. The MixedStemTempFile handle's Drop impl cleans up the temp PCM
+    // on success, on Err propagation, or on panic. #235 review item #6.
+    let mixed_stem_path = prepare_transcription_input(audio_path)?;
+    let transcribe_input = mixed_stem_path
+        .as_ref()
+        .map(|f| f.as_path())
+        .unwrap_or(audio_path);
     let step_start = std::time::Instant::now();
     let result = crate::transcription_coordinator::transcribe_path_for_content_with_hints(
-        audio_path,
+        transcribe_input,
         content_type,
         config,
         decode_hints,
     )?;
+    drop(mixed_stem_path);
     let transcript = if content_type == ContentType::Meeting {
         normalize_transcript_for_self_name_participant(&result.text, &attendees, &config.identity)
     } else {
@@ -1957,8 +2084,11 @@ where
     // temp file when this function returns, including on Err propagation
     // from the transcription coordinator (#235 review item #1: meeting
     // audio in /tmp is a privacy issue and the previous manual cleanup
-    // was skipped by the `?` early-return).
-    let mixed_stem_path = prepare_transcription_input(audio_path);
+    // was skipped by the `?` early-return). The `?` here propagates the
+    // typed `NativeCaptureStemMixUnavailable` error (#235 review item #4)
+    // up to the pipeline boundary so the UI surfaces the real failure
+    // instead of silently transcribing the broken `.mov`.
+    let mixed_stem_path = prepare_transcription_input(audio_path)?;
     let transcribe_input = mixed_stem_path
         .as_ref()
         .map(|f| f.as_path())
@@ -6274,5 +6404,204 @@ mod tests {
                 report.failure_messages.join("\n")
             );
         }
+    }
+}
+
+/// Tests for `prepare_transcription_input`: the helper that decides whether
+/// the input `.mov` needs stem-mixing before transcription (#234 fix, #235 v2
+/// review items #3 stem-lookup correctness, #4 typed error, #6 shared between
+/// `process_with_progress_and_sidecar` and `transcribe_to_artifact`).
+#[cfg(test)]
+mod prepare_transcription_input_tests {
+    use super::*;
+    use std::fs;
+
+    /// Write a 1-second audible-tone WAV at 16kHz mono s16. We need a non-
+    /// silent signal because `stem_has_audio` (via `discover_stem_plan`)
+    /// probes RMS and rejects anything below 0.001, which pure silence
+    /// fails. A 440 Hz sine at amplitude 5000 (s16) gives an RMS of
+    /// ~0.108 normalized, well above the floor.
+    fn write_audible_wav(path: &std::path::Path) {
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: 16_000,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut writer = hound::WavWriter::create(path, spec).unwrap();
+        let two_pi_over_period = 2.0 * std::f32::consts::PI * 440.0 / 16_000.0;
+        for n in 0..16_000 {
+            let sample = (5000.0 * (n as f32 * two_pi_over_period).sin()) as i16;
+            writer.write_sample(sample).unwrap();
+        }
+        writer.finalize().unwrap();
+    }
+
+    /// Build the `<name>.mov` + `<name>.voice.wav` + `<name>.system.wav`
+    /// trio that a native-call capture produces. The `.mov` itself is a
+    /// 1-byte stub because `prepare_transcription_input` sniffs only the
+    /// extension and the sibling stems, never the `.mov` content.
+    fn fake_native_call_capture(name: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mov = dir.path().join(format!("{}.mov", name));
+        let voice = dir.path().join(format!("{}.voice.wav", name));
+        let system = dir.path().join(format!("{}.system.wav", name));
+        fs::write(&mov, b"x").unwrap();
+        write_audible_wav(&voice);
+        write_audible_wav(&system);
+        (dir, mov)
+    }
+
+    fn ffmpeg_available() -> bool {
+        std::process::Command::new("ffmpeg")
+            .arg("-version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+
+    #[test]
+    fn returns_ok_none_for_non_mov_input() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let wav = dir.path().join("voice-memo.wav");
+        write_audible_wav(&wav);
+        let result = prepare_transcription_input(&wav).expect("non-.mov should not error");
+        assert!(
+            result.is_none(),
+            ".wav input must return Ok(None) so the caller uses it as-is"
+        );
+    }
+
+    #[test]
+    fn returns_ok_none_for_mov_with_no_stems() {
+        // Plain `.mov` with no sibling stems: could be a screen recording,
+        // downloaded file, or a native-call capture whose stems were
+        // cleaned up. We cannot distinguish, so we let it through to the
+        // existing decoder rather than hard-erroring on every stemless
+        // `.mov` (which would break legitimate non-native-call use cases).
+        let dir = tempfile::TempDir::new().unwrap();
+        let mov = dir.path().join("screen-recording.mov");
+        fs::write(&mov, b"x").unwrap();
+        let result = prepare_transcription_input(&mov).expect("stemless .mov should not error");
+        assert!(
+            result.is_none(),
+            "stemless .mov must return Ok(None); hard-erroring would break non-native-call .mov use"
+        );
+    }
+
+    #[test]
+    fn mixes_stems_when_both_present_and_valid() {
+        if !ffmpeg_available() {
+            eprintln!("skipping: ffmpeg not on PATH");
+            return;
+        }
+        let (_dir, mov) = fake_native_call_capture("call-clean");
+        let result = prepare_transcription_input(&mov)
+            .expect("mix must succeed when both stems are valid PCM");
+        let handle = result.expect("must return Some on the happy path");
+        let mixed_path = handle.as_path().to_path_buf();
+        assert!(mixed_path.exists(), "mixed PCM file must exist on disk");
+
+        // Verify the file is a valid WAV (RIFF header + WAVE format tag).
+        let header = fs::read(&mixed_path).unwrap();
+        assert!(
+            header.len() >= 12,
+            "wav header is too short: {} bytes",
+            header.len()
+        );
+        assert_eq!(&header[0..4], b"RIFF", "wav must start with RIFF magic");
+        assert_eq!(&header[8..12], b"WAVE", "wav must declare WAVE format");
+
+        // Drop must clean up the temp file.
+        drop(handle);
+        assert!(
+            !mixed_path.exists(),
+            "MixedStemTempFile Drop impl must remove the temp file"
+        );
+    }
+
+    #[test]
+    fn errors_when_voice_stem_missing() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mov = dir.path().join("partial-voice.mov");
+        let system = dir.path().join("partial-voice.system.wav");
+        fs::write(&mov, b"x").unwrap();
+        write_audible_wav(&system);
+        // voice.wav deliberately not created — simulates a partial-crash
+        // where the system side survived but the mic side did not.
+
+        let result = prepare_transcription_input(&mov);
+        match result {
+            Err(MinutesError::Transcribe(
+                crate::error::TranscribeError::NativeCaptureStemMixUnavailable { reason },
+            )) => {
+                assert!(
+                    reason.to_lowercase().contains("voice stem"),
+                    "error reason must mention the missing voice stem; got: {}",
+                    reason
+                );
+            }
+            other => panic!(
+                "expected NativeCaptureStemMixUnavailable, got: {:?}",
+                other.map(|opt| opt.is_some())
+            ),
+        }
+    }
+
+    #[test]
+    fn errors_when_system_stem_is_zero_byte_partial_crash() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mov = dir.path().join("partial-system.mov");
+        let voice = dir.path().join("partial-system.voice.wav");
+        let system = dir.path().join("partial-system.system.wav");
+        fs::write(&mov, b"x").unwrap();
+        write_audible_wav(&voice);
+        // Zero-byte system stem: simulates a partial-crash where the file
+        // got created but never finalized. `.exists()` would accept this;
+        // `stem_has_audio` (which discover_stem_plan invokes) catches it.
+        fs::write(&system, b"").unwrap();
+
+        let result = prepare_transcription_input(&mov);
+        assert!(
+            matches!(
+                result,
+                Err(MinutesError::Transcribe(
+                    crate::error::TranscribeError::NativeCaptureStemMixUnavailable { .. }
+                ))
+            ),
+            "zero-byte system stem must hard-error, not silently fall through to the .mov"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn canonicalizes_symlinked_mov_to_find_stems() {
+        if !ffmpeg_available() {
+            eprintln!("skipping: ffmpeg not on PATH");
+            return;
+        }
+        // The .mov plus its stems live in one tempdir; the symlink lives
+        // in another. discover_stem_plan called on the un-canonicalized
+        // symlink path would look for stems in the wrong directory and
+        // return None, which would map to Ok(None) and bypass the fix.
+        // Canonicalize must run before stem lookup.
+        let (target_dir, target_mov) = fake_native_call_capture("real-call");
+        let link_dir = tempfile::TempDir::new().unwrap();
+        let link = link_dir.path().join("aliased.mov");
+        std::os::unix::fs::symlink(&target_mov, &link)
+            .expect("symlink creation must succeed on unix");
+
+        let result = prepare_transcription_input(&link)
+            .expect("symlink resolution must succeed and stems must be found");
+        let handle = result
+            .expect("symlinked .mov must resolve to canonical target and mix the stems there");
+        assert!(handle.as_path().exists(), "mixed PCM must exist post-mix");
+
+        // Drop the handle before the tempdirs so cleanup is observable.
+        drop(handle);
+        drop(target_dir);
+        drop(link_dir);
     }
 }

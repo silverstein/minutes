@@ -132,11 +132,30 @@ const KNOWN_HALLUCINATION_PHRASES: &[&str] = &[
     "translated by the amara.org community",
     "the amara.org community",
     "amara.org community",
-    // Generic transcription-service hallucinations
+    // Generic transcription-service hallucinations (bare forms; for prefix
+    // matches with trailing content like `Transcripted by: www.amara.org`
+    // see [`HALLUCINATION_LINE_PREFIXES`])
     "captions by the cyclope",
-    "captions by",
+];
+
+/// Hallucination phrases that whisper emits with trailing content, e.g.
+/// `Transcripted by: www.transcription-exe-project.com` or
+/// `Subtitles by the Amara.org community`. Matched as a **starts-with**
+/// prefix against the normalized line text rather than exact-match, so
+/// they catch both the bare form and the variants with trailing URLs,
+/// service names, or fillers.
+///
+/// Conservative bar: only credit-attribution prefixes that a real meeting
+/// participant is virtually guaranteed not to utter as the start of a
+/// sentence. Niche edge cases (e.g. someone reading a meeting transcript
+/// out loud that contains a `Transcribed by` credit line) accept this as
+/// noise rather than complicate the detector.
+const HALLUCINATION_LINE_PREFIXES: &[&str] = &[
     "transcripted by",
     "transcribed by",
+    "captions by",
+    "subtitles by",
+    "translated by",
 ];
 
 /// Check if a line is just a URL or domain reference, common in Whisper
@@ -169,6 +188,12 @@ fn is_known_hallucination(text: &str) -> bool {
         return false;
     }
     if KNOWN_HALLUCINATION_PHRASES.contains(&normalized) {
+        return true;
+    }
+    if HALLUCINATION_LINE_PREFIXES
+        .iter()
+        .any(|p| normalized.starts_with(p))
+    {
         return true;
     }
     is_url_line(normalized)
@@ -1908,13 +1933,34 @@ mod tests {
 
     #[test]
     fn is_known_hallucination_matches_url_lines() {
-        // Whisper sometimes emits a bare URL line like
-        // `Transcripted by: www.transcription-exe-project.com`. Lines that
-        // START with a URL token are dropped; lines that just mention a URL
-        // mid-sentence are NOT.
+        // Bare-URL lines (no leading label) are dropped via is_url_line.
         assert!(is_known_hallucination("www.transcription-exe-project.com"));
         assert!(is_known_hallucination("https://amara.org"));
         assert!(is_known_hallucination("http://example.com"));
+    }
+
+    #[test]
+    fn is_known_hallucination_matches_attribution_prefixes() {
+        // Whisper emits attribution-style hallucinations with varied
+        // trailing content (URLs, service names, additional filler).
+        // Codex review of PR #247 v1 flagged that `is_url_line` alone
+        // could not catch `Transcripted by: www.amara.org` because the
+        // first token is "Transcripted", not the URL. The prefix list
+        // catches the full family.
+        assert!(is_known_hallucination(
+            "Transcripted by: www.transcription-exe-project.com"
+        ));
+        assert!(is_known_hallucination(
+            "Transcribed by the Amara.org community"
+        ));
+        assert!(is_known_hallucination("Subtitles by the cyclope team"));
+        assert!(is_known_hallucination("Translated by community volunteers"));
+        assert!(is_known_hallucination(
+            "Captions by the Acme transcription service"
+        ));
+        // Bare prefix without trailing content also matches.
+        assert!(is_known_hallucination("Transcribed by"));
+        assert!(is_known_hallucination("Subtitles by"));
     }
 
     #[test]

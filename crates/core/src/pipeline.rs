@@ -133,34 +133,50 @@ fn detect_summarization_warnings(
     engine: &str,
     agent_command: &str,
     agent_timeout_secs: u64,
+    summarization_attempted: bool,
 ) -> Vec<ProcessingWarning> {
     let mut warnings = Vec::new();
     if engine == "none" {
         return warnings;
     }
+    // If summarization was deliberately not attempted (e.g. no-speech path
+    // or all-noise suppression), an absent summary is expected behavior,
+    // not a degradation. Without this guard the helper would emit a bogus
+    // `summarize_failed` warning on every no-speech recording.
+    if !summarization_attempted {
+        return warnings;
+    }
     if summary.is_none() {
-        // We only know the engine is configured and we got nothing back.
-        // The specific reason (timeout vs error) lives in the audio.log
-        // entries today; this is a coarser signal at the file level so
-        // users see something is missing without grepping logs.
-        let (reason, timeout_secs, message) = if engine == "agent" || engine == "auto" {
-            (
+        // We know the engine ran and produced nothing. The specific reason
+        // (timeout vs error vs network failure) lives in audio.log; this is
+        // a coarser file-level signal so users see something is missing
+        // without grepping logs. Follow-up: plumb the precise reason
+        // through summarize::run_summarization's return type.
+        let (reason, timeout_secs, message) = match engine {
+            "agent" => (
                 "summarize_failed".to_string(),
                 Some(agent_timeout_secs),
                 Some(format!(
                     "Summarization via agent `{}` produced no output (timeout budget {}s, or agent error); see audio.log for the precise reason.",
                     agent_command, agent_timeout_secs
                 )),
-            )
-        } else {
-            (
+            ),
+            "auto" => (
+                "summarize_failed".to_string(),
+                Some(agent_timeout_secs),
+                Some(format!(
+                    "Summarization with `engine = \"auto\"` produced no output (auto-detect picks the first available agent CLI then runs under the {}s budget); see audio.log for which agent was selected and the precise failure.",
+                    agent_timeout_secs
+                )),
+            ),
+            other => (
                 "summarize_failed".to_string(),
                 None,
                 Some(format!(
                     "Summarization via engine `{}` produced no output; see audio.log for the precise reason.",
-                    engine
+                    other
                 )),
-            )
+            ),
         };
         warnings.push(ProcessingWarning {
             step: "summarize".to_string(),
@@ -1601,11 +1617,16 @@ where
     );
 
     let mut frontmatter = artifact.frontmatter.clone();
+    // write_transcript_artifact calls summarize unconditionally whenever
+    // engine != "none" (no all-noise gate at this site), so attempted-ness
+    // collapses to the same condition.
+    let summarization_attempted = config.summarization.engine != "none";
     let summarization_warnings = detect_summarization_warnings(
         summary.as_deref(),
         &config.summarization.engine,
         &config.summarization.agent_command,
         config.summarization.agent_timeout_secs,
+        summarization_attempted,
     );
     frontmatter.status = if !summarization_warnings.is_empty() {
         Some(OutputStatus::Degraded)
@@ -2184,11 +2205,19 @@ where
     // itself is honest about what's missing. The initial `status` set
     // above didn't yet know whether summarization would succeed; this
     // is the corrective pass.
+    //
+    // Summarization was *attempted* only when both the all-noise gate
+    // did NOT fire (forced_no_speech_diagnosis is None) AND engine is
+    // not "none". Without the all-noise guard, an empty summary on a
+    // no-speech recording would falsely look like a summarize failure.
+    let summarization_attempted =
+        forced_no_speech_diagnosis.is_none() && config.summarization.engine != "none";
     let summarization_warnings = detect_summarization_warnings(
         summary.as_deref(),
         &config.summarization.engine,
         &config.summarization.agent_command,
         config.summarization.agent_timeout_secs,
+        summarization_attempted,
     );
     let status = if !summarization_warnings.is_empty() && status == Some(OutputStatus::Complete) {
         Some(OutputStatus::Degraded)
@@ -4299,23 +4328,32 @@ mod tests {
     fn detect_summarization_warnings_returns_empty_when_engine_none() {
         // When summarization is disabled by config, an absent summary is
         // expected behavior, not a degradation.
-        let warnings = detect_summarization_warnings(None, "none", "claude", 300);
+        let warnings = detect_summarization_warnings(None, "none", "claude", 300, false);
         assert!(warnings.is_empty());
     }
 
     #[test]
     fn detect_summarization_warnings_returns_empty_when_summary_present() {
         let summary = "Some real summary content";
-        let warnings = detect_summarization_warnings(Some(summary), "agent", "opencode", 300);
+        let warnings = detect_summarization_warnings(Some(summary), "agent", "opencode", 300, true);
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn detect_summarization_warnings_returns_empty_when_not_attempted() {
+        // Codex review of v1 (PR #249) caught this: when the no-speech /
+        // all-noise gate prevents summarization from running, summary is
+        // None but that is expected, not a degradation. The helper must
+        // not emit a bogus `summarize_failed` warning in that case.
+        let warnings = detect_summarization_warnings(None, "agent", "opencode", 300, false);
         assert!(warnings.is_empty());
     }
 
     #[test]
     fn detect_summarization_warnings_flags_agent_failure_with_timeout_context() {
-        // The #243 failure shape: engine = "agent", summary is None.
-        // Emit a warning that includes the agent_command and timeout_secs
-        // so the user knows where to look and which knob to raise.
-        let warnings = detect_summarization_warnings(None, "agent", "opencode", 300);
+        // The #243 failure shape: engine = "agent", summary is None,
+        // summarization was actually attempted.
+        let warnings = detect_summarization_warnings(None, "agent", "opencode", 300, true);
         assert_eq!(warnings.len(), 1);
         assert_eq!(warnings[0].step, "summarize");
         assert_eq!(warnings[0].reason, "summarize_failed");
@@ -4326,11 +4364,27 @@ mod tests {
     }
 
     #[test]
+    fn detect_summarization_warnings_auto_engine_message_explains_indirection() {
+        // Codex review of v1 (PR #249) caught this: when engine = "auto",
+        // the warning previously printed `agent_command` even though auto
+        // detects a CLI at runtime. The message must surface the auto
+        // indirection and tell the user to check audio.log for which
+        // agent was selected.
+        let warnings = detect_summarization_warnings(None, "auto", "claude", 600, true);
+        assert_eq!(warnings.len(), 1);
+        let msg = warnings[0].message.as_ref().unwrap();
+        assert!(msg.contains("auto"));
+        assert!(msg.contains("600s"));
+        assert!(msg.contains("audio.log"));
+        assert_eq!(warnings[0].timeout_secs, Some(600));
+    }
+
+    #[test]
     fn detect_summarization_warnings_flags_non_agent_engine_without_timeout() {
         // Non-agent engines (claude, ollama, mistral, etc.) don't have a
         // single agent_timeout_secs knob, so the warning carries no
         // timeout_secs field but still flags the degradation.
-        let warnings = detect_summarization_warnings(None, "claude", "claude", 300);
+        let warnings = detect_summarization_warnings(None, "claude", "claude", 300, true);
         assert_eq!(warnings.len(), 1);
         assert_eq!(warnings[0].step, "summarize");
         assert_eq!(warnings[0].timeout_secs, None);

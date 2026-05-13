@@ -9693,6 +9693,7 @@ mod tests {
             template: None,
             filter_diagnosis: None,
             recording_health: None,
+            processing_warnings: Vec::new(),
         };
         let sections = vec![MeetingSection {
             heading: "Summary".into(),
@@ -9750,6 +9751,7 @@ mod tests {
             template: None,
             filter_diagnosis: None,
             recording_health: None,
+            processing_warnings: Vec::new(),
         };
         let sections = vec![MeetingSection {
             heading: "Summary".into(),
@@ -9798,6 +9800,7 @@ mod tests {
             template: None,
             filter_diagnosis: None,
             recording_health: None,
+            processing_warnings: Vec::new(),
         };
         let sections = vec![MeetingSection {
             heading: "Summary".into(),

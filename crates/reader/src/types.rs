@@ -21,6 +21,21 @@ pub enum OutputStatus {
     Complete,
     NoSpeech,
     TranscriptOnly,
+    /// Transcription ran but one or more post-transcript steps fell back
+    /// to empty output. Details in `processing_warnings`. See issue #243.
+    Degraded,
+}
+
+/// A non-fatal failure of a post-transcript pipeline step. Mirrors the
+/// core crate's `markdown::ProcessingWarning`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ProcessingWarning {
+    pub step: String,
+    pub reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -33,6 +48,9 @@ pub struct Frontmatter {
     pub source: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<OutputStatus>,
+    /// Per-step failure context when `status: degraded` applies (#243).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub processing_warnings: Vec<ProcessingWarning>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

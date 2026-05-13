@@ -154,6 +154,7 @@ const HALLUCINATION_LINE_PREFIXES: &[&str] = &[
     "transcripted by",
     "transcribed by",
     "captions by",
+    "captioned by",
     "subtitles by",
     "translated by",
 ];
@@ -596,16 +597,19 @@ pub fn clean_segments_with_options(
 
     // Pipeline ordering rationale (matters for correctness):
     //
-    //   1. dedup_consecutive (already ran above) - skips always-noise tokens
+    //   1. strip_known_hallucinations (already ran above) - drop known
+    //      whisper training-data leaks BEFORE dedup gets a chance to
+    //      collapse them into `[...] [repeated audio removed]` annotations.
+    //   2. dedup_consecutive (already ran above) - skips always-noise tokens
     //      so they flow downstream as a run for the noise-aware passes.
-    //   2. dedup_interleaved (already ran above).
-    //   3. strip_foreign_script (already ran above).
-    //   4. strip_trailing_commands ← here. Runs BEFORE trim so that any
+    //   3. dedup_interleaved (already ran above).
+    //   4. strip_foreign_script (already ran above).
+    //   5. strip_trailing_commands ← here. Runs BEFORE trim so that any
     //      always-noise markers hidden behind a trailing voice command
     //      (e.g. "…content [music] [music] Stop recording.") are exposed.
-    //   5. trim_trailing_noise ← here. Catches all-noise tails at any count
+    //   6. trim_trailing_noise ← here. Catches all-noise tails at any count
     //      (always-noise tokens) and 5+ filler runs (`yeah.`, `okay.`, `you`).
-    //   6. collapse_noise_markers ← runs LAST, so middle-of-transcript noise
+    //   7. collapse_noise_markers ← runs LAST, so middle-of-transcript noise
     //      runs that survived trim get collapsed cleanly. If this ran earlier
     //      it would convert trailing `[music]` runs into `[music] + annotation`
     //      and trim would be blocked from cleaning them up.
@@ -1950,6 +1954,8 @@ mod tests {
         assert!(is_known_hallucination(
             "Transcripted by: www.transcription-exe-project.com"
         ));
+        assert!(is_known_hallucination("Transcripted by: www.amara.org"));
+        assert!(is_known_hallucination("Captioned by Acme Captions"));
         assert!(is_known_hallucination(
             "Transcribed by the Amara.org community"
         ));

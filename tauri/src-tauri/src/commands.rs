@@ -6452,6 +6452,7 @@ pub fn cmd_get_meeting_detail(path: String) -> Result<MeetingDetail, String> {
             minutes_core::markdown::OutputStatus::Complete => "complete",
             minutes_core::markdown::OutputStatus::NoSpeech => "no-speech",
             minutes_core::markdown::OutputStatus::TranscriptOnly => "transcript-only",
+            minutes_core::markdown::OutputStatus::Degraded => "degraded",
         }
         .to_string()
     });

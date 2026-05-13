@@ -234,6 +234,7 @@ mod tests {
             visibility: None,
             speaker_map: vec![],
             recording_health: None,
+            processing_warnings: Vec::new(),
             template: None,
             filter_diagnosis: None,
         }

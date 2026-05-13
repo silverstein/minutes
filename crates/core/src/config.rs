@@ -232,6 +232,12 @@ pub struct DiarizationConfig {
 pub struct SummarizationConfig {
     pub engine: String,
     pub agent_command: String,
+    /// Timeout for the `engine = "agent"` subprocess call (in seconds).
+    /// For long transcripts on local LLM agents (e.g. opencode running
+    /// against a 60k+ char input), the default 300s can be too short.
+    /// Issue #243: when this budget is exceeded the pipeline emits a
+    /// `processing_warnings` entry and promotes status to `degraded`.
+    pub agent_timeout_secs: u64,
     pub chunk_max_tokens: usize,
     pub ollama_url: String,
     pub ollama_model: String,
@@ -815,6 +821,7 @@ impl Default for SummarizationConfig {
         Self {
             engine: "none".into(),
             agent_command: "claude".into(),
+            agent_timeout_secs: 300,
             chunk_max_tokens: 4000,
             ollama_url: "http://localhost:11434".into(),
             ollama_model: "llama3.2".into(),

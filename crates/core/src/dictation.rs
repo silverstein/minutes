@@ -1108,6 +1108,7 @@ fn write_dictation_file(text: &str, duration_secs: f64, config: &Config) -> Opti
         duration: duration_str,
         source: Some("dictation".into()),
         status: Some(OutputStatus::Complete),
+        processing_warnings: Vec::new(),
         tags: vec![],
         attendees: vec![],
         attendees_raw: None,

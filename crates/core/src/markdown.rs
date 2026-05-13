@@ -30,6 +30,30 @@ pub enum OutputStatus {
     Complete,
     NoSpeech,
     TranscriptOnly,
+    /// Transcription completed but one or more summarization-side steps
+    /// fell back to empty output (e.g. agent timeout, empty summary).
+    /// Per-step failures are recorded in [`Frontmatter::processing_warnings`].
+    Degraded,
+}
+
+/// A non-fatal failure of a post-transcript pipeline step.
+///
+/// When any step degrades, the meeting's [`OutputStatus`] is promoted to
+/// [`OutputStatus::Degraded`] and the failure context is appended here so
+/// the markdown is honest about what is missing. Files are then greppable
+/// for "what needs re-running" (`status: degraded` in frontmatter).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ProcessingWarning {
+    /// The pipeline step that produced the warning.
+    pub step: String,
+    /// Machine-readable failure reason (e.g. `agent_timeout`, `empty_output`).
+    pub reason: String,
+    /// For timeout reasons, the budget that was exceeded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<u64>,
+    /// Optional human-readable detail.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -126,6 +150,11 @@ pub struct Frontmatter {
     pub source: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<OutputStatus>,
+    /// Per-step failure context when [`OutputStatus::Degraded`] applies.
+    /// Skipped from serialization when empty so successful runs do not
+    /// emit extra frontmatter noise. See issue #243.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub processing_warnings: Vec<ProcessingWarning>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -879,6 +908,7 @@ mod tests {
             visibility: None,
             speaker_map: vec![],
             recording_health: None,
+            processing_warnings: Vec::new(),
             template: None,
             filter_diagnosis: None,
         }

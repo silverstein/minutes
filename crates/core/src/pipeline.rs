@@ -2,7 +2,9 @@ use crate::config::{Config, IdentityConfig};
 use crate::diarize;
 use crate::error::MinutesError;
 use crate::logging;
-use crate::markdown::{self, ContentType, Frontmatter, OutputStatus, WriteResult};
+use crate::markdown::{
+    self, ContentType, Frontmatter, OutputStatus, ProcessingWarning, WriteResult,
+};
 use crate::notes;
 use crate::summarize;
 use chrono::{DateTime, Local};
@@ -103,6 +105,71 @@ fn should_suppress_transcript(
         body: ALL_NOISE_SUPPRESSED_BODY.to_string(),
         diagnosis,
     })
+}
+
+/// Detect post-transcript pipeline degradation and produce one
+/// [`ProcessingWarning`] per failed step. See issue #243.
+///
+/// Returns an empty `Vec` when nothing degraded. Callers should promote
+/// [`OutputStatus::Complete`] to [`OutputStatus::Degraded`] when the
+/// result is non-empty and store the warnings on
+/// [`Frontmatter::processing_warnings`] so the file itself is honest
+/// about which sections are missing or fell back to defaults.
+///
+/// Today this detects the most user-visible failure mode: the
+/// summarization engine returned `None` despite being configured to run
+/// (typically an agent-CLI timeout or unexpected error). Follow-up
+/// PRs can plumb richer per-step warnings through the LLM call sites
+/// to populate the `reason`, `timeout_secs`, and `message` fields with
+/// precise context.
+///
+/// **Single source of truth** for the suppression rule shared by both
+/// `write_transcript_artifact` and `process_with_progress_and_sidecar`.
+/// Keeping the detection here (rather than at each call site) prevents
+/// the two paths from drifting and emitting different status values
+/// for the same underlying failure.
+fn detect_summarization_warnings(
+    summary: Option<&str>,
+    engine: &str,
+    agent_command: &str,
+    agent_timeout_secs: u64,
+) -> Vec<ProcessingWarning> {
+    let mut warnings = Vec::new();
+    if engine == "none" {
+        return warnings;
+    }
+    if summary.is_none() {
+        // We only know the engine is configured and we got nothing back.
+        // The specific reason (timeout vs error) lives in the audio.log
+        // entries today; this is a coarser signal at the file level so
+        // users see something is missing without grepping logs.
+        let (reason, timeout_secs, message) = if engine == "agent" || engine == "auto" {
+            (
+                "summarize_failed".to_string(),
+                Some(agent_timeout_secs),
+                Some(format!(
+                    "Summarization via agent `{}` produced no output (timeout budget {}s, or agent error); see audio.log for the precise reason.",
+                    agent_command, agent_timeout_secs
+                )),
+            )
+        } else {
+            (
+                "summarize_failed".to_string(),
+                None,
+                Some(format!(
+                    "Summarization via engine `{}` produced no output; see audio.log for the precise reason.",
+                    engine
+                )),
+            )
+        };
+        warnings.push(ProcessingWarning {
+            step: "summarize".to_string(),
+            reason,
+            timeout_secs,
+            message,
+        });
+    }
+    warnings
 }
 
 /// Result of Level 2 voice enrollment matching.
@@ -1215,6 +1282,7 @@ pub fn write_transcript_artifact(
         visibility: None,
         speaker_map: vec![],
         recording_health: context.recording_health.clone(),
+        processing_warnings: Vec::new(),
         template: context.template.as_ref().map(|t| t.slug().to_string()),
         filter_diagnosis: if status == Some(OutputStatus::NoSpeech) {
             // Prefer the all-noise-suppression diagnosis when it fired; it
@@ -1533,11 +1601,20 @@ where
     );
 
     let mut frontmatter = artifact.frontmatter.clone();
-    frontmatter.status = if config.summarization.engine != "none" {
+    let summarization_warnings = detect_summarization_warnings(
+        summary.as_deref(),
+        &config.summarization.engine,
+        &config.summarization.agent_command,
+        config.summarization.agent_timeout_secs,
+    );
+    frontmatter.status = if !summarization_warnings.is_empty() {
+        Some(OutputStatus::Degraded)
+    } else if config.summarization.engine != "none" {
         Some(OutputStatus::Complete)
     } else {
         Some(OutputStatus::TranscriptOnly)
     };
+    frontmatter.processing_warnings = summarization_warnings;
     frontmatter.attendees = attendees;
     frontmatter.people = people;
     frontmatter.entities = entities;
@@ -2102,6 +2179,23 @@ where
         &structured_intents,
     );
 
+    // Issue #243: detect post-transcript degradation (e.g. summarization
+    // failed or timed out) and promote status to `Degraded` so the file
+    // itself is honest about what's missing. The initial `status` set
+    // above didn't yet know whether summarization would succeed; this
+    // is the corrective pass.
+    let summarization_warnings = detect_summarization_warnings(
+        summary.as_deref(),
+        &config.summarization.engine,
+        &config.summarization.agent_command,
+        config.summarization.agent_timeout_secs,
+    );
+    let status = if !summarization_warnings.is_empty() && status == Some(OutputStatus::Complete) {
+        Some(OutputStatus::Degraded)
+    } else {
+        status
+    };
+
     let mut frontmatter = Frontmatter {
         title: auto_title,
         r#type: content_type,
@@ -2109,6 +2203,7 @@ where
         duration,
         source,
         status,
+        processing_warnings: summarization_warnings,
         tags,
         attendees,
         attendees_raw: None,
@@ -4198,6 +4293,54 @@ mod tests {
         assert!(should_suppress_transcript(transcript, Some(&health)).is_none());
     }
 
+    // ── Summarization-degradation detection (issue #243) ──
+
+    #[test]
+    fn detect_summarization_warnings_returns_empty_when_engine_none() {
+        // When summarization is disabled by config, an absent summary is
+        // expected behavior, not a degradation.
+        let warnings = detect_summarization_warnings(None, "none", "claude", 300);
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn detect_summarization_warnings_returns_empty_when_summary_present() {
+        let summary = "Some real summary content";
+        let warnings = detect_summarization_warnings(Some(summary), "agent", "opencode", 300);
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn detect_summarization_warnings_flags_agent_failure_with_timeout_context() {
+        // The #243 failure shape: engine = "agent", summary is None.
+        // Emit a warning that includes the agent_command and timeout_secs
+        // so the user knows where to look and which knob to raise.
+        let warnings = detect_summarization_warnings(None, "agent", "opencode", 300);
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].step, "summarize");
+        assert_eq!(warnings[0].reason, "summarize_failed");
+        assert_eq!(warnings[0].timeout_secs, Some(300));
+        let msg = warnings[0].message.as_ref().expect("message set");
+        assert!(msg.contains("opencode"));
+        assert!(msg.contains("300s"));
+    }
+
+    #[test]
+    fn detect_summarization_warnings_flags_non_agent_engine_without_timeout() {
+        // Non-agent engines (claude, ollama, mistral, etc.) don't have a
+        // single agent_timeout_secs knob, so the warning carries no
+        // timeout_secs field but still flags the degradation.
+        let warnings = detect_summarization_warnings(None, "claude", "claude", 300);
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].step, "summarize");
+        assert_eq!(warnings[0].timeout_secs, None);
+        assert!(warnings[0]
+            .message
+            .as_ref()
+            .unwrap()
+            .contains("engine `claude`"));
+    }
+
     /// Simulates the branch logic the `process` path applies after
     /// diarization: if `should_suppress_transcript` fires, the transcript
     /// body, status, and forced filter_diagnosis are all updated together.
@@ -4331,6 +4474,7 @@ mod tests {
             visibility: None,
             speaker_map: vec![],
             recording_health: None,
+            processing_warnings: Vec::new(),
             template: None,
             filter_diagnosis: None,
         };
@@ -5755,6 +5899,7 @@ mod tests {
                 source: diarize::AttributionSource::Llm,
             }],
             recording_health: None,
+            processing_warnings: Vec::new(),
             template: None,
             filter_diagnosis: None,
         };

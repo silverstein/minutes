@@ -8,6 +8,102 @@ use crate::summarize;
 use chrono::{DateTime, Local};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
+use whisper_guard::segments as wg_segments;
+
+/// Stem active-ratio threshold below which a capture source is considered
+/// "sparse" (almost no audible energy).
+///
+/// Keep in sync with the silence detector in `diarize::active_ratio` callers
+/// (see `diarize.rs` around line 861, where the same `0.02` value classifies
+/// a stem as `FailureKind::Sparse`). Pulled into a named constant so the
+/// suppression gate below can read it without re-deriving the number.
+const SPARSE_STEM_ACTIVE_RATIO: f32 = 0.02;
+
+/// Body text we render in place of the transcript when the all-noise
+/// suppression gate fires. Kept short and pointed - the surrounding markdown
+/// already shows the diagnosis and `minutes process` retry hint, so this
+/// just labels the gap.
+const ALL_NOISE_SUPPRESSED_BODY: &str =
+    "*No audible content was captured. See capture diagnostics.*";
+
+/// Decide whether the transcript body should be suppressed because it is
+/// almost certainly fabricated.
+///
+/// Returns `Some(diagnosis)` (a short human-readable string to store in
+/// `Frontmatter::filter_diagnosis`) when **both** of these are true:
+///
+/// 1. Every non-empty line in `transcript` is a noise marker (bracketed
+///    `[music]` / `[Growling]` or parenthetical `(crying)` / `(applause)`)
+///    according to [`wg_segments::is_all_noise`].
+/// 2. Both stem active ratios in `recording_health` are below
+///    [`SPARSE_STEM_ACTIVE_RATIO`]. **Both ratios must be present**: if
+///    either `voice_stem_active_ratio` or `system_stem_active_ratio` is
+///    `None` (e.g. dictation captures with no system stem, or any recording
+///    where stem-active health was not computed) the gate does NOT fire.
+///    Missing health is treated as insufficient evidence to override the
+///    transcript, not as confirmation that the stem was silent.
+///
+/// Otherwise returns `None` and the transcript flows through unchanged.
+fn suppress_if_all_noise(
+    transcript: &str,
+    recording_health: Option<&markdown::RecordingHealth>,
+) -> Option<String> {
+    let lines: Vec<String> = transcript.lines().map(str::to_string).collect();
+    if !wg_segments::is_all_noise(&lines) {
+        return None;
+    }
+
+    let health = recording_health?;
+    let voice = health.voice_stem_active_ratio?;
+    let system = health.system_stem_active_ratio?;
+    if voice >= SPARSE_STEM_ACTIVE_RATIO || system >= SPARSE_STEM_ACTIVE_RATIO {
+        return None;
+    }
+
+    Some(format!(
+        "all-noise transcript on sparse stems (voice active {:.3}, system active {:.3}, threshold {:.2}); whisper produced only non-speech markers - body suppressed",
+        voice, system, SPARSE_STEM_ACTIVE_RATIO
+    ))
+}
+
+/// Outcome of the shared suppression decision used by BOTH the
+/// `write_transcript_artifact` background-recording path and the
+/// `minutes process <wav>` reprocess path.
+///
+/// Returning a strongly typed struct (rather than a tuple) keeps the two call
+/// sites mechanically identical and makes drift obvious in code review: if a
+/// new field is added here the compiler forces an update at every call site.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SuppressionOutcome {
+    /// Replacement body to write in place of the hallucinated transcript.
+    body: String,
+    /// Human-readable explanation, stored in `Frontmatter::filter_diagnosis`.
+    diagnosis: String,
+}
+
+/// Shared decision: should the transcript body be suppressed because it is
+/// almost certainly fabricated noise on near-silent audio?
+///
+/// This is the **single source of truth** for the suppression rule. Both
+/// `write_transcript_artifact` (background recording finalizer) and
+/// `process_with_progress_and_sidecar` (`minutes process <wav>` reprocess
+/// path) call this helper so users see identical behavior regardless of
+/// which entry point produced the artifact - the codex review on PR #246
+/// flagged this drift as blocker #2.
+///
+/// Returns `Some(outcome)` when [`suppress_if_all_noise`] confirms the
+/// transcript is all noise markers AND both stems are sparse; `None`
+/// otherwise.
+fn should_suppress_transcript(
+    transcript: &str,
+    recording_health: Option<&markdown::RecordingHealth>,
+) -> Option<SuppressionOutcome> {
+    let diagnosis = suppress_if_all_noise(transcript, recording_health)?;
+    Some(SuppressionOutcome {
+        body: ALL_NOISE_SUPPRESSED_BODY.to_string(),
+        diagnosis,
+    })
+}
 
 /// Result of Level 2 voice enrollment matching.
 struct VoiceMatchResult {
@@ -1003,6 +1099,25 @@ pub fn write_transcript_artifact(
     } else {
         transcript
     };
+
+    // Suppression gate (issue #241): if the cleaned transcript is nothing but
+    // hallucinated non-speech markers AND both capture stems were sparse, the
+    // body is almost certainly fabricated on near-silent audio. Replace it
+    // with a clear diagnostic message and promote `status: NoSpeech` for
+    // greppability. The original noisy text is dropped - the source WAV is
+    // preserved on disk and `minutes process` is the canonical retry path,
+    // so there is no need to round-trip the hallucinated lines through the
+    // markdown output.
+    //
+    // Decision routed through `should_suppress_transcript` so this path and
+    // `process_with_progress_and_sidecar` share the exact same gate (codex
+    // blocker #2 on PR #246).
+    let (transcript, forced_no_speech_diagnosis) =
+        match should_suppress_transcript(&transcript, context.recording_health.as_ref()) {
+            Some(outcome) => (outcome.body, Some(outcome.diagnosis)),
+            None => (transcript, None),
+        };
+
     let word_count = transcript.split_whitespace().count();
     logging::log_step(
         "transcribe",
@@ -1011,11 +1126,12 @@ pub fn write_transcript_artifact(
         serde_json::json!({"words": word_count, "mode": "background", "diagnosis": filter_stats.diagnosis()}),
     );
 
-    let status = if word_count < config.transcription.min_words {
-        Some(OutputStatus::NoSpeech)
-    } else {
-        Some(OutputStatus::TranscriptOnly)
-    };
+    let status =
+        if forced_no_speech_diagnosis.is_some() || word_count < config.transcription.min_words {
+            Some(OutputStatus::NoSpeech)
+        } else {
+            Some(OutputStatus::TranscriptOnly)
+        };
 
     let auto_title = title.map(String::from).unwrap_or_else(|| {
         if status == Some(OutputStatus::NoSpeech) {
@@ -1101,7 +1217,15 @@ pub fn write_transcript_artifact(
         recording_health: context.recording_health.clone(),
         template: context.template.as_ref().map(|t| t.slug().to_string()),
         filter_diagnosis: if status == Some(OutputStatus::NoSpeech) {
-            Some(filter_stats.diagnosis())
+            // Prefer the all-noise-suppression diagnosis when it fired; it
+            // describes a different failure mode (whisper produced only
+            // non-speech markers on sparse stems) than the standard
+            // min_words / no_speech filter path.
+            Some(
+                forced_no_speech_diagnosis
+                    .clone()
+                    .unwrap_or_else(|| filter_stats.diagnosis()),
+            )
         } else {
             None
         },
@@ -1633,7 +1757,7 @@ where
     );
 
     // Check minimum word threshold
-    let status = if word_count < config.transcription.min_words {
+    let mut status = if word_count < config.transcription.min_words {
         tracing::warn!(
             words = word_count,
             min = config.transcription.min_words,
@@ -1691,6 +1815,31 @@ where
         transcript
     };
 
+    // Suppression gate (issue #241): if the diarized transcript is nothing
+    // but hallucinated non-speech markers AND both capture stems were sparse,
+    // replace the body with a diagnostic message and force `status: NoSpeech`.
+    // Routed through `should_suppress_transcript` so this path and
+    // `write_transcript_artifact` share the exact same gate (codex blocker
+    // #2 on PR #246) - users see identical behavior regardless of which
+    // entry point produced the artifact. The original noisy text is dropped
+    // - the source WAV is preserved and `minutes process` is the canonical
+    // retry path.
+    let (transcript, forced_no_speech_diagnosis) =
+        match should_suppress_transcript(&transcript, recording_health.as_ref()) {
+            Some(outcome) => {
+                tracing::warn!(
+                    step = "transcribe",
+                    diagnosis = %outcome.diagnosis,
+                    "all-noise suppression fired on process path — replacing transcript body"
+                );
+                // Force NoSpeech status: we know the body is fabricated even
+                // if the original `word_count` cleared `min_words`.
+                status = Some(OutputStatus::NoSpeech);
+                (outcome.body, Some(outcome.diagnosis))
+            }
+            None => (transcript, None),
+        };
+
     // Step 3: Summarize (optional — depends on config.summarization.engine)
     // Pass user notes to the summarizer as high-priority context
     // Step 3: Summarize + extract structured intent
@@ -1715,7 +1864,12 @@ where
     let summary_model = summarize::summarization_model_hint(config, !screen_files.is_empty());
 
     let mut raw_summary: Option<summarize::Summary> = None;
-    let summary: Option<String> = if config.summarization.engine != "none" {
+    // Skip summarization when the all-noise gate replaced the transcript body:
+    // the LLM has nothing to summarize, and we'd just burn tokens / surface
+    // a hallucinated summary on top of a hallucinated transcript.
+    let summary: Option<String> = if forced_no_speech_diagnosis.is_some() {
+        None
+    } else if config.summarization.engine != "none" {
         on_progress(PipelineStage::Summarizing);
         tracing::info!(step = "summarize", "generating summary");
 
@@ -1973,7 +2127,17 @@ where
         recording_health,
         template: template.map(|t| t.slug().to_string()),
         filter_diagnosis: if status == Some(OutputStatus::NoSpeech) {
-            Some(filter_stats.diagnosis())
+            // Prefer the all-noise-suppression diagnosis when it fired; it
+            // describes a different failure mode (whisper produced only
+            // non-speech markers on sparse stems) than the standard
+            // min_words / no_speech filter path. Identical preference order
+            // to `write_transcript_artifact` so both entry points produce
+            // matching frontmatter.
+            Some(
+                forced_no_speech_diagnosis
+                    .clone()
+                    .unwrap_or_else(|| filter_stats.diagnosis()),
+            )
         } else {
             None
         },
@@ -3943,6 +4107,184 @@ pub fn run_post_record_hook(config: &Config, transcript_path: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sparse_health(voice: f32, system: f32) -> markdown::RecordingHealth {
+        markdown::RecordingHealth {
+            voice_stem_active_ratio: Some(voice),
+            system_stem_active_ratio: Some(system),
+            system_dominant_ratio: None,
+            capture_warnings: vec![],
+            diarization_path: None,
+        }
+    }
+
+    #[test]
+    fn suppress_if_all_noise_fires_on_all_noise_with_sparse_stems() {
+        // The exact failure case from issue #241.
+        let transcript = "[0:07] (crying)\n[1:52] [Growling]\n";
+        let health = sparse_health(0.005, 0.001);
+        let diagnosis = suppress_if_all_noise(transcript, Some(&health));
+        assert!(diagnosis.is_some(), "expected suppression diagnosis");
+        let msg = diagnosis.unwrap();
+        assert!(msg.contains("all-noise"), "msg: {}", msg);
+        assert!(msg.contains("threshold"), "msg: {}", msg);
+    }
+
+    #[test]
+    fn suppress_if_all_noise_holds_off_when_stems_have_signal() {
+        // Stems are above the sparse threshold - we lack the corroborating
+        // capture-side evidence, so let the transcript through even if it
+        // looks all-noise. Better to surface the suspicious lines than to
+        // hide real (if brief) capture.
+        let transcript = "[0:07] (crying)\n[1:52] [Growling]\n";
+        let health = sparse_health(0.5, 0.4);
+        assert!(suppress_if_all_noise(transcript, Some(&health)).is_none());
+    }
+
+    #[test]
+    fn suppress_if_all_noise_holds_off_when_only_one_stem_is_sparse() {
+        // Asymmetric capture (one side silent, one side active) is a
+        // different failure mode - we trust the active side and don't
+        // suppress here.
+        let transcript = "[0:07] (crying)\n[1:52] [Growling]\n";
+        let health = sparse_health(0.001, 0.5);
+        assert!(suppress_if_all_noise(transcript, Some(&health)).is_none());
+    }
+
+    #[test]
+    fn suppress_if_all_noise_holds_off_with_real_content() {
+        // Real speech, even with a noise marker mixed in, is left alone.
+        let transcript = "[0:00] Hello world\n[0:05] (crying)\n[0:10] Goodbye\n";
+        let health = sparse_health(0.001, 0.001);
+        assert!(suppress_if_all_noise(transcript, Some(&health)).is_none());
+    }
+
+    #[test]
+    fn suppress_if_all_noise_holds_off_without_health() {
+        // No recording_health (e.g. dictation, or a test fixture) means we
+        // can't confirm the stems were sparse. Be conservative.
+        let transcript = "[0:07] (crying)\n[1:52] [Growling]\n";
+        assert!(suppress_if_all_noise(transcript, None).is_none());
+    }
+
+    #[test]
+    fn suppress_if_all_noise_holds_off_with_partial_health() {
+        // Only one stem ratio captured - inconclusive, don't suppress.
+        let mut health = sparse_health(0.001, 0.001);
+        health.system_stem_active_ratio = None;
+        let transcript = "[0:07] (crying)\n[1:52] [Growling]\n";
+        assert!(suppress_if_all_noise(transcript, Some(&health)).is_none());
+    }
+
+    #[test]
+    fn should_suppress_transcript_wraps_decision_in_outcome() {
+        // The shared helper returns the same body+diagnosis used by BOTH
+        // `write_transcript_artifact` and the `process` path. This is the
+        // single source of truth that closes codex blocker #2 - both call
+        // sites must produce identical suppression output.
+        let transcript = "[0:07] (crying)\n[1:52] [Growling]\n";
+        let health = sparse_health(0.005, 0.001);
+        let outcome = should_suppress_transcript(transcript, Some(&health))
+            .expect("expected suppression outcome");
+        assert_eq!(outcome.body, ALL_NOISE_SUPPRESSED_BODY);
+        assert!(outcome.diagnosis.contains("all-noise"));
+        assert!(outcome.diagnosis.contains("threshold"));
+    }
+
+    #[test]
+    fn should_suppress_transcript_returns_none_with_real_content() {
+        let transcript = "[0:00] Hello world\n[0:05] Goodbye\n";
+        let health = sparse_health(0.001, 0.001);
+        assert!(should_suppress_transcript(transcript, Some(&health)).is_none());
+    }
+
+    /// Simulates the branch logic the `process` path applies after
+    /// diarization: if `should_suppress_transcript` fires, the transcript
+    /// body, status, and forced filter_diagnosis are all updated together.
+    /// This mirrors lines around 1790 of `process_with_progress_and_sidecar`.
+    /// We can't run the full pipeline in a unit test (whisper model, audio
+    /// file, calendar lookup), but we CAN assert the decision-and-apply
+    /// logic produces exactly the same observable state as the
+    /// `write_transcript_artifact` path for the same input.
+    fn apply_suppression_on_process_path(
+        transcript: String,
+        recording_health: Option<&markdown::RecordingHealth>,
+        initial_status: Option<OutputStatus>,
+    ) -> (String, Option<OutputStatus>, Option<String>) {
+        let mut status = initial_status;
+        let (transcript, forced) = match should_suppress_transcript(&transcript, recording_health) {
+            Some(outcome) => {
+                status = Some(OutputStatus::NoSpeech);
+                (outcome.body, Some(outcome.diagnosis))
+            }
+            None => (transcript, None),
+        };
+        (transcript, status, forced)
+    }
+
+    #[test]
+    fn process_path_suppresses_all_noise_with_sparse_stems() {
+        // Acceptance criterion 4 (issue #241): the `minutes process <wav>`
+        // path must show the "no audible content" message and a NoSpeech
+        // status, not the raw hallucinated lines.
+        let transcript = "[0:07] (crying)\n[1:52] [Growling]\n".to_string();
+        let health = sparse_health(0.005, 0.001);
+        let (body, status, forced) = apply_suppression_on_process_path(
+            transcript,
+            Some(&health),
+            // Start from `Complete` to prove the gate downgrades the status
+            // even when word_count cleared min_words.
+            Some(OutputStatus::Complete),
+        );
+        assert_eq!(body, ALL_NOISE_SUPPRESSED_BODY);
+        assert!(
+            body.contains("No audible content"),
+            "body should surface the diagnostic message, got: {}",
+            body
+        );
+        // The raw hallucinated lines must NOT appear in the rendered body.
+        assert!(
+            !body.contains("(crying)"),
+            "raw hallucination leaked: {}",
+            body
+        );
+        assert!(
+            !body.contains("[Growling]"),
+            "raw hallucination leaked: {}",
+            body
+        );
+        assert_eq!(status, Some(OutputStatus::NoSpeech));
+        let diag = forced.expect("expected forced filter_diagnosis");
+        assert!(diag.contains("all-noise"));
+        assert!(diag.contains("body suppressed"));
+    }
+
+    #[test]
+    fn process_path_leaves_real_content_alone() {
+        // Real (if brief) speech must flow through both paths unchanged.
+        let transcript = "[0:00] Hello world\n[0:05] Goodbye\n".to_string();
+        let health = sparse_health(0.001, 0.001);
+        let initial = Some(OutputStatus::Complete);
+        let (body, status, forced) =
+            apply_suppression_on_process_path(transcript.clone(), Some(&health), initial);
+        assert_eq!(body, transcript, "real content was clobbered");
+        assert_eq!(status, initial, "status was downgraded without cause");
+        assert!(forced.is_none(), "forced diagnosis set without suppression");
+    }
+
+    #[test]
+    fn process_path_holds_off_without_recording_health() {
+        // No diarization / no health captured (e.g. config.diarization.engine
+        // = "none") must NOT suppress, even on an all-noise transcript: we
+        // lack the corroborating evidence to override.
+        let transcript = "[0:07] (crying)\n[1:52] [Growling]\n".to_string();
+        let initial = Some(OutputStatus::TranscriptOnly);
+        let (body, status, forced) =
+            apply_suppression_on_process_path(transcript.clone(), None, initial);
+        assert_eq!(body, transcript);
+        assert_eq!(status, initial);
+        assert!(forced.is_none());
+    }
 
     fn sample_summary() -> summarize::Summary {
         summarize::Summary {

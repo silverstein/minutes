@@ -23,6 +23,73 @@ fn is_always_noise(text: &str) -> bool {
     t == "[music]" || t == "[blank_audio]" || t == "[silence]" || t == "music"
 }
 
+/// Return true if the text (after timestamp) is a short non-speech marker.
+///
+/// Matches two whisper hallucination shapes:
+/// - bracketed: `[music]`, `[Śmiech]`, `[BLANK_AUDIO]`, `[risas]`, `[Growling]`
+/// - parenthetical: `(crying)`, `(coughing)`, `(applause)`, `(silence)`
+///
+/// Excludes timestamp-like content `[0:00]` and collapse markers from prior
+/// dedup passes `[...] [repeated ...]`. Word-count (1-4 inner words) and
+/// length (≤40 inner chars) constraints keep this conservative.
+///
+/// This is the shared classifier used by both [`collapse_noise_markers`] and
+/// the [`is_all_noise`] read-only signal.
+pub fn is_noise_marker(text: &str) -> bool {
+    let t = text.trim();
+    if t.is_empty() {
+        return false;
+    }
+    // Collapse markers from prior passes are not noise
+    if t.starts_with("[...]") {
+        return false;
+    }
+    // Optionally strip a single trailing '.' (whisper sometimes adds one)
+    let t = t.strip_suffix('.').unwrap_or(t);
+
+    // Accept either bracketed `[...]` or parenthetical `(...)` shape; both
+    // collapse to the same inner substring after the outer delimiters.
+    let matched =
+        (t.starts_with('[') && t.ends_with(']')) || (t.starts_with('(') && t.ends_with(')'));
+    if !matched {
+        return false;
+    }
+    let inner = &t[1..t.len() - 1];
+
+    // Reject timestamp-like patterns (digits and colons only)
+    if inner.chars().all(|c| c.is_ascii_digit() || c == ':') {
+        return false;
+    }
+    // Must be short (1-4 words, ≤40 chars) - non-speech markers are brief
+    let word_count = inner.split_whitespace().count();
+    (1..=4).contains(&word_count) && inner.len() <= 40
+}
+
+/// Return true iff every non-empty line in `lines` is a noise marker (after
+/// stripping any leading `[h:mm:ss]`-style timestamp).
+///
+/// Empty lines are ignored. An input with zero non-empty lines returns `false`
+/// (there's nothing to call "all noise").
+///
+/// This is a read-only signal: it does not alter `lines`. Callers (notably
+/// `minutes-core`) use it together with separate capture-health signals (e.g.
+/// silent / sparse stems) to decide whether to suppress a transcript body that
+/// is almost certainly fabricated.
+pub fn is_all_noise(lines: &[String]) -> bool {
+    let mut saw_any = false;
+    for line in lines {
+        let text = text_part(line).trim();
+        if text.is_empty() {
+            continue;
+        }
+        saw_any = true;
+        if !is_noise_marker(text) {
+            return false;
+        }
+    }
+    saw_any
+}
+
 /// Statistics from transcript cleaning.
 ///
 /// Each `after_*` field records the segment count *after* that pass ran. If a pass
@@ -51,6 +118,21 @@ pub struct CleanStats {
     /// To get the cleaner "input minus output" count, suppress the annotations
     /// via [`CleanOptions::keep_dedup_annotations`] = `false`.
     pub lines_removed: usize,
+    /// `true` iff every non-empty line in the cleaned output is a noise
+    /// marker (bracketed `[music]` / `[Growling]` or parenthetical
+    /// `(crying)` / `(applause)`), and there is at least one such line.
+    ///
+    /// This is a **read-only signal** computed after the cleanup passes run.
+    /// It does not change the cleanup output itself; downstream callers can
+    /// use it (together with separate capture-health signals like sparse or
+    /// silent stems) to decide whether to suppress a transcript body that is
+    /// almost certainly fabricated on near-silent audio.
+    ///
+    /// Examples:
+    /// - `["[0:07] (crying)", "[1:52] [Growling]"]` → `true`
+    /// - `["[0:00] Hello world", "[0:03] [laughter]"]` → `false`
+    /// - `[]` → `false` (nothing to call all-noise)
+    pub all_noise: bool,
 }
 
 impl CleanStats {
@@ -325,6 +407,9 @@ pub fn clean_segments_with_options(
         // runs last (per the pipeline-order rationale above), so
         // `after_noise_markers` is the final segment count.
         lines_removed: original_count.saturating_sub(after_noise),
+        // Read-only signal: every non-empty surviving line is a noise marker.
+        // Cleanup output is unchanged - downstream callers decide what to do.
+        all_noise: is_all_noise(&lines),
     };
 
     (lines, stats)
@@ -635,34 +720,8 @@ pub fn collapse_noise_markers(lines: &[String]) -> Vec<String> {
         return lines.to_vec();
     }
 
-    /// Return true if the text (after timestamp) is a bracketed non-speech marker.
-    ///
-    /// Matches patterns like `[music]`, `[Śmiech]`, `[BLANK_AUDIO]`, `[risas]`.
-    /// Excludes timestamp-like content `[0:00]` and collapse markers from prior
-    /// dedup passes `[...] [repeated ...]`.
-    fn is_noise_marker(text: &str) -> bool {
-        let t = text.trim();
-        if t.is_empty() {
-            return false;
-        }
-        // Collapse markers from prior passes are not noise
-        if t.starts_with("[...]") {
-            return false;
-        }
-        // Must start with '[' and end with ']' (optionally with trailing '.')
-        let t = t.strip_suffix('.').unwrap_or(t);
-        if !(t.starts_with('[') && t.ends_with(']')) {
-            return false;
-        }
-        let inner = &t[1..t.len() - 1];
-        // Reject timestamp-like patterns (digits and colons only)
-        if inner.chars().all(|c| c.is_ascii_digit() || c == ':') {
-            return false;
-        }
-        // Must be short (1-4 words, ≤40 chars) - non-speech markers are brief
-        let word_count = inner.split_whitespace().count();
-        (1..=4).contains(&word_count) && inner.len() <= 40
-    }
+    // Classifier lives at module scope (`is_noise_marker`) so the `all_noise`
+    // signal in `CleanStats` can reuse it without duplicating the rules.
 
     let markers: Vec<bool> = lines
         .iter()
@@ -1455,6 +1514,106 @@ mod tests {
         let lines = vec!["[0:00] [music]".into(), "[0:03] [laughter]".into()];
         let result = collapse_noise_markers(&lines);
         assert_eq!(result, lines);
+    }
+
+    #[test]
+    fn is_noise_marker_matches_parenthetical_form() {
+        // Whisper hallucinates parenthetical non-speech tokens on near-silent
+        // audio just as readily as bracketed ones. Both shapes count.
+        assert!(is_noise_marker("(crying)"));
+        assert!(is_noise_marker("(coughing)"));
+        assert!(is_noise_marker("(applause)"));
+        assert!(is_noise_marker("(silence)"));
+        // Trailing period (whisper sometimes adds one) is tolerated.
+        assert!(is_noise_marker("(crying)."));
+    }
+
+    #[test]
+    fn is_noise_marker_matches_bracketed_form() {
+        assert!(is_noise_marker("[music]"));
+        assert!(is_noise_marker("[Growling]"));
+        assert!(is_noise_marker("[BLANK_AUDIO]"));
+        assert!(is_noise_marker("[Śmiech]"));
+        assert!(is_noise_marker("[laughter]."));
+    }
+
+    #[test]
+    fn is_noise_marker_rejects_non_markers() {
+        assert!(!is_noise_marker(""));
+        assert!(!is_noise_marker("Hello world"));
+        assert!(!is_noise_marker("[0:00]"));
+        // Collapse marker from a prior pass is not noise.
+        assert!(!is_noise_marker("[...] [repeated audio removed - 3]"));
+        // Mismatched delimiters are not a marker.
+        assert!(!is_noise_marker("(crying]"));
+        assert!(!is_noise_marker("[crying)"));
+        // Too long / too many words.
+        assert!(!is_noise_marker(
+            "(this is way more than four words of content)"
+        ));
+    }
+
+    #[test]
+    fn is_all_noise_true_for_pure_noise_transcript() {
+        // The exact 1-2 line failure case from issue #241.
+        let lines = vec!["[0:07] (crying)".into(), "[1:52] [Growling]".into()];
+        assert!(is_all_noise(&lines));
+    }
+
+    #[test]
+    fn is_all_noise_true_for_single_noise_line() {
+        let lines = vec!["[0:00] [music]".into()];
+        assert!(is_all_noise(&lines));
+    }
+
+    #[test]
+    fn is_all_noise_false_when_any_line_is_speech() {
+        let lines = vec![
+            "[0:00] Hello world".into(),
+            "[0:05] [laughter]".into(),
+            "[0:10] (crying)".into(),
+        ];
+        assert!(!is_all_noise(&lines));
+    }
+
+    #[test]
+    fn is_all_noise_false_on_empty_input() {
+        // No surviving lines → nothing to call "all noise".
+        let lines: Vec<String> = Vec::new();
+        assert!(!is_all_noise(&lines));
+    }
+
+    #[test]
+    fn is_all_noise_ignores_blank_lines() {
+        let lines = vec![
+            "".into(),
+            "[0:07] (crying)".into(),
+            "   ".into(),
+            "[1:52] [Growling]".into(),
+        ];
+        assert!(is_all_noise(&lines));
+    }
+
+    #[test]
+    fn clean_stats_all_noise_true_for_short_noise_only_input() {
+        // Two lines is below the collapse-pass threshold, so the noise lines
+        // survive cleanup unchanged. The all_noise signal must still fire.
+        let input = vec!["[0:07] (crying)".into(), "[1:52] [Growling]".into()];
+        let (cleaned, stats) = clean_segments(&input);
+        // Cleanup is read-only here: short runs are preserved.
+        assert_eq!(cleaned, input);
+        assert!(stats.all_noise, "stats: {:?}", stats);
+    }
+
+    #[test]
+    fn clean_stats_all_noise_false_with_real_content() {
+        let input = vec![
+            "[0:00] Hello world".into(),
+            "[0:05] (crying)".into(),
+            "[0:10] Goodbye".into(),
+        ];
+        let (_, stats) = clean_segments(&input);
+        assert!(!stats.all_noise, "stats: {:?}", stats);
     }
 
     #[test]

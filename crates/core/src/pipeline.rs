@@ -8,6 +8,61 @@ use crate::summarize;
 use chrono::{DateTime, Local};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
+use whisper_guard::segments as wg_segments;
+
+/// Stem active-ratio threshold below which a capture source is considered
+/// "sparse" (almost no audible energy).
+///
+/// Keep in sync with the silence detector in `diarize::active_ratio` callers
+/// (see `diarize.rs` around line 861, where the same `0.02` value classifies
+/// a stem as `FailureKind::Sparse`). Pulled into a named constant so the
+/// suppression gate below can read it without re-deriving the number.
+const SPARSE_STEM_ACTIVE_RATIO: f32 = 0.02;
+
+/// Body text we render in place of the transcript when the all-noise
+/// suppression gate fires. Kept short and pointed - the surrounding markdown
+/// already shows the diagnosis and `minutes process` retry hint, so this
+/// just labels the gap.
+const ALL_NOISE_SUPPRESSED_BODY: &str =
+    "*No audible content was captured. See capture diagnostics.*";
+
+/// Decide whether the transcript body should be suppressed because it is
+/// almost certainly fabricated.
+///
+/// Returns `Some(diagnosis)` (a short human-readable string to store in
+/// `Frontmatter::filter_diagnosis`) when **both** of these are true:
+///
+/// 1. Every non-empty line in `transcript` is a noise marker (bracketed
+///    `[music]` / `[Growling]` or parenthetical `(crying)` / `(applause)`)
+///    according to [`wg_segments::is_all_noise`].
+/// 2. Both stem active ratios in `recording_health` are below
+///    [`SPARSE_STEM_ACTIVE_RATIO`]. If a stem ratio is `None` we treat that
+///    stem as inconclusive and require the other one to be sparse; if both
+///    are `None` (e.g. dictation, no health captured) the gate does NOT
+///    fire - we lack the evidence to override the transcript.
+///
+/// Otherwise returns `None` and the transcript flows through unchanged.
+fn suppress_if_all_noise(
+    transcript: &str,
+    recording_health: Option<&markdown::RecordingHealth>,
+) -> Option<String> {
+    let lines: Vec<String> = transcript.lines().map(str::to_string).collect();
+    if !wg_segments::is_all_noise(&lines) {
+        return None;
+    }
+
+    let health = recording_health?;
+    let voice = health.voice_stem_active_ratio?;
+    let system = health.system_stem_active_ratio?;
+    if voice >= SPARSE_STEM_ACTIVE_RATIO || system >= SPARSE_STEM_ACTIVE_RATIO {
+        return None;
+    }
+
+    Some(format!(
+        "all-noise transcript on sparse stems (voice active {:.3}, system active {:.3}, threshold {:.2}); whisper produced only non-speech markers - body suppressed",
+        voice, system, SPARSE_STEM_ACTIVE_RATIO
+    ))
+}
 
 /// Result of Level 2 voice enrollment matching.
 struct VoiceMatchResult {
@@ -1003,6 +1058,22 @@ pub fn write_transcript_artifact(
     } else {
         transcript
     };
+
+    // Suppression gate (issue #241): if the cleaned transcript is nothing but
+    // hallucinated non-speech markers AND both capture stems were sparse, the
+    // body is almost certainly fabricated on near-silent audio. Replace it
+    // with a clear diagnostic message and promote `status: NoSpeech` for
+    // greppability. The original noisy text is dropped - the source WAV is
+    // preserved on disk and `minutes process` is the canonical retry path,
+    // so there is no need to round-trip the hallucinated lines through the
+    // markdown output.
+    let all_noise_suppression =
+        suppress_if_all_noise(&transcript, context.recording_health.as_ref());
+    let (transcript, forced_no_speech_diagnosis) = match all_noise_suppression {
+        Some(diagnosis) => (ALL_NOISE_SUPPRESSED_BODY.to_string(), Some(diagnosis)),
+        None => (transcript, None),
+    };
+
     let word_count = transcript.split_whitespace().count();
     logging::log_step(
         "transcribe",
@@ -1011,11 +1082,12 @@ pub fn write_transcript_artifact(
         serde_json::json!({"words": word_count, "mode": "background", "diagnosis": filter_stats.diagnosis()}),
     );
 
-    let status = if word_count < config.transcription.min_words {
-        Some(OutputStatus::NoSpeech)
-    } else {
-        Some(OutputStatus::TranscriptOnly)
-    };
+    let status =
+        if forced_no_speech_diagnosis.is_some() || word_count < config.transcription.min_words {
+            Some(OutputStatus::NoSpeech)
+        } else {
+            Some(OutputStatus::TranscriptOnly)
+        };
 
     let auto_title = title.map(String::from).unwrap_or_else(|| {
         if status == Some(OutputStatus::NoSpeech) {
@@ -1101,7 +1173,15 @@ pub fn write_transcript_artifact(
         recording_health: context.recording_health.clone(),
         template: context.template.as_ref().map(|t| t.slug().to_string()),
         filter_diagnosis: if status == Some(OutputStatus::NoSpeech) {
-            Some(filter_stats.diagnosis())
+            // Prefer the all-noise-suppression diagnosis when it fired; it
+            // describes a different failure mode (whisper produced only
+            // non-speech markers on sparse stems) than the standard
+            // min_words / no_speech filter path.
+            Some(
+                forced_no_speech_diagnosis
+                    .clone()
+                    .unwrap_or_else(|| filter_stats.diagnosis()),
+            )
         } else {
             None
         },
@@ -3943,6 +4023,74 @@ pub fn run_post_record_hook(config: &Config, transcript_path: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sparse_health(voice: f32, system: f32) -> markdown::RecordingHealth {
+        markdown::RecordingHealth {
+            voice_stem_active_ratio: Some(voice),
+            system_stem_active_ratio: Some(system),
+            system_dominant_ratio: None,
+            capture_warnings: vec![],
+            diarization_path: None,
+        }
+    }
+
+    #[test]
+    fn suppress_if_all_noise_fires_on_all_noise_with_sparse_stems() {
+        // The exact failure case from issue #241.
+        let transcript = "[0:07] (crying)\n[1:52] [Growling]\n";
+        let health = sparse_health(0.005, 0.001);
+        let diagnosis = suppress_if_all_noise(transcript, Some(&health));
+        assert!(diagnosis.is_some(), "expected suppression diagnosis");
+        let msg = diagnosis.unwrap();
+        assert!(msg.contains("all-noise"), "msg: {}", msg);
+        assert!(msg.contains("threshold"), "msg: {}", msg);
+    }
+
+    #[test]
+    fn suppress_if_all_noise_holds_off_when_stems_have_signal() {
+        // Stems are above the sparse threshold - we lack the corroborating
+        // capture-side evidence, so let the transcript through even if it
+        // looks all-noise. Better to surface the suspicious lines than to
+        // hide real (if brief) capture.
+        let transcript = "[0:07] (crying)\n[1:52] [Growling]\n";
+        let health = sparse_health(0.5, 0.4);
+        assert!(suppress_if_all_noise(transcript, Some(&health)).is_none());
+    }
+
+    #[test]
+    fn suppress_if_all_noise_holds_off_when_only_one_stem_is_sparse() {
+        // Asymmetric capture (one side silent, one side active) is a
+        // different failure mode - we trust the active side and don't
+        // suppress here.
+        let transcript = "[0:07] (crying)\n[1:52] [Growling]\n";
+        let health = sparse_health(0.001, 0.5);
+        assert!(suppress_if_all_noise(transcript, Some(&health)).is_none());
+    }
+
+    #[test]
+    fn suppress_if_all_noise_holds_off_with_real_content() {
+        // Real speech, even with a noise marker mixed in, is left alone.
+        let transcript = "[0:00] Hello world\n[0:05] (crying)\n[0:10] Goodbye\n";
+        let health = sparse_health(0.001, 0.001);
+        assert!(suppress_if_all_noise(transcript, Some(&health)).is_none());
+    }
+
+    #[test]
+    fn suppress_if_all_noise_holds_off_without_health() {
+        // No recording_health (e.g. dictation, or a test fixture) means we
+        // can't confirm the stems were sparse. Be conservative.
+        let transcript = "[0:07] (crying)\n[1:52] [Growling]\n";
+        assert!(suppress_if_all_noise(transcript, None).is_none());
+    }
+
+    #[test]
+    fn suppress_if_all_noise_holds_off_with_partial_health() {
+        // Only one stem ratio captured - inconclusive, don't suppress.
+        let mut health = sparse_health(0.001, 0.001);
+        health.system_stem_active_ratio = None;
+        let transcript = "[0:07] (crying)\n[1:52] [Growling]\n";
+        assert!(suppress_if_all_noise(transcript, Some(&health)).is_none());
+    }
 
     fn sample_summary() -> summarize::Summary {
         summarize::Summary {

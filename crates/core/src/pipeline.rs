@@ -650,9 +650,41 @@ fn prepare_transcription_input(
             );
         }
         None => {
-            // No stems at all. Could be a non-native-call `.mov` (screen
-            // recording, downloaded file) or a native-call capture whose
-            // stems were cleaned up; we cannot distinguish. Conservative:
+            // `discover_stem_plan` returns None for two semantically different
+            // cases: (a) neither stem present (ordinary non-native-call `.mov`
+            // or a native capture whose stems were cleaned up) and (b) voice
+            // stem present and audible but system stem file is entirely
+            // absent from disk (`(true, false) && !system.exists()` branch of
+            // discover_stem_plan at `diarize.rs:600-606`). Case (b) is a
+            // native capture where the system side was lost during recording,
+            // and falling through to the broken `.mov` decoder reproduces the
+            // exact 2x-duration bug this helper exists to prevent. Codex
+            // review of PR #235 v2 caught this.
+            //
+            // Distinguish by independently checking for a usable sibling
+            // voice stem. If one exists, surface the same typed error as
+            // the other should-have-mixed-but-couldn't branches.
+            if let Some(parent) = canonical.parent() {
+                if let Some(stem_name) = canonical.file_stem().and_then(|s| s.to_str()) {
+                    let voice = parent.join(format!("{}.voice.wav", stem_name));
+                    if voice.exists() && crate::diarize::stem_has_audio(&voice) {
+                        return Err(
+                            crate::error::TranscribeError::NativeCaptureStemMixUnavailable {
+                                reason: format!(
+                                    "voice stem present at {} but system stem is missing from disk. \
+                                     Partial-crash signature; mix would substitute silence for the \
+                                     far-side audio.",
+                                    voice.display()
+                                ),
+                            }
+                            .into(),
+                        );
+                    }
+                }
+            }
+            // No usable stems at all. Could be a non-native-call `.mov`
+            // (screen recording, downloaded file) or a native-call capture
+            // whose stems were cleaned up; we cannot distinguish. Conservative:
             // treat as ordinary `.mov` and let the existing decoder handle
             // it. Hard-erroring on every stemless `.mov` would break
             // legitimate non-native-call use cases.
@@ -6540,6 +6572,47 @@ mod prepare_transcription_input_tests {
                 assert!(
                     reason.to_lowercase().contains("voice stem"),
                     "error reason must mention the missing voice stem; got: {}",
+                    reason
+                );
+            }
+            other => panic!(
+                "expected NativeCaptureStemMixUnavailable, got: {:?}",
+                other.map(|opt| opt.is_some())
+            ),
+        }
+    }
+
+    #[test]
+    fn errors_when_voice_present_and_system_stem_file_absent() {
+        // Codex review of PR #235 v2 caught this: `discover_stem_plan`
+        // returns None for both the "no stems at all" case AND the
+        // "voice ok, system absent from disk" case. The second case is
+        // a partial-crash native capture where the system stem was lost
+        // during recording, and falling through to the broken `.mov`
+        // decoder reproduces the exact 2x bug this helper prevents.
+        //
+        // The fix distinguishes the two None cases by independently
+        // checking for a usable sibling voice stem in
+        // `prepare_transcription_input`. This test pins that contract.
+        let dir = tempfile::TempDir::new().unwrap();
+        let mov = dir.path().join("partial-system-missing.mov");
+        let voice = dir.path().join("partial-system-missing.voice.wav");
+        fs::write(&mov, b"x").unwrap();
+        write_audible_wav(&voice);
+        // system.wav deliberately not created (not even zero-byte; the
+        // file doesn't exist on disk at all). This is the case that
+        // returned None from discover_stem_plan and would have silently
+        // fallen through to the broken `.mov` decode without this fix.
+
+        let result = prepare_transcription_input(&mov);
+        match result {
+            Err(MinutesError::Transcribe(
+                crate::error::TranscribeError::NativeCaptureStemMixUnavailable { reason },
+            )) => {
+                assert!(
+                    reason.to_lowercase().contains("system stem")
+                        && reason.to_lowercase().contains("missing"),
+                    "error reason must call out the missing system stem; got: {}",
                     reason
                 );
             }

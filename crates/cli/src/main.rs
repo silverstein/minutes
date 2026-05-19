@@ -881,10 +881,9 @@ enum Commands {
         action: ContextAction,
     },
 
-    /// Import meetings from another app (e.g., Granola)
+    /// Import meetings from another app, or recover-process an audio file
     Import {
-        /// Source app: granola
-        #[arg(value_parser = ["granola"])]
+        /// Source app (granola), or an audio file path to process as a meeting
         from: String,
 
         /// Directory containing exported meetings (default: ~/.granola-archivist/output/)
@@ -6436,6 +6435,37 @@ life (qmd://life/)
     }
 
     #[test]
+    fn import_accepts_audio_path_for_recovery_alias() {
+        let parsed = Cli::try_parse_from([
+            "minutes",
+            "import",
+            "/Users/test/.minutes/native-captures/2026-05-19-120148-call.voice.wav",
+        ])
+        .expect("import must accept audio paths so it can route to process");
+
+        match parsed.command {
+            Commands::Import { from, dir, dry_run } => {
+                assert_eq!(
+                    from,
+                    "/Users/test/.minutes/native-captures/2026-05-19-120148-call.voice.wav"
+                );
+                assert!(dir.is_none());
+                assert!(!dry_run);
+            }
+            _ => panic!("expected Import variant"),
+        }
+    }
+
+    #[test]
+    fn looks_like_audio_path_matches_supported_process_formats() {
+        assert!(looks_like_audio_path("call.voice.wav"));
+        assert!(looks_like_audio_path("meeting.MOV"));
+        assert!(looks_like_audio_path("/tmp/memo.m4a"));
+        assert!(!looks_like_audio_path("granola"));
+        assert!(!looks_like_audio_path("notes.md"));
+    }
+
+    #[test]
     fn render_decode_hints_plaintext_summary_surfaces_allowed_failures() {
         let output = render_decode_hints_plaintext_summary(
             &sample_decode_hint_eval_report_with_allowed_failures(),
@@ -7522,10 +7552,53 @@ fn cmd_context_get_moment(
 // ── Import ──────────────────────────────────────────────────
 
 fn cmd_import(from: &str, dir: Option<&Path>, dry_run: bool, config: &Config) -> Result<()> {
+    if dir.is_none() && looks_like_audio_path(from) {
+        let path = Path::new(from);
+        if dry_run {
+            eprintln!(
+                "Would process audio file as a meeting: minutes process \"{}\" --type meeting",
+                path.display()
+            );
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "status": "dry-run",
+                    "file": path.display().to_string(),
+                    "content_type": "meeting",
+                    "command": format!("minutes process \"{}\" --type meeting", path.display()),
+                }))?
+            );
+            return Ok(());
+        }
+
+        eprintln!(
+            "Processing audio file via import compatibility path. Preferred command: minutes process \"{}\" --type meeting",
+            path.display()
+        );
+        return cmd_process(path, "meeting", None, None, config);
+    }
+
     match from {
         "granola" => import_granola(dir, dry_run, config),
-        other => anyhow::bail!("Unknown import source: {}. Supported: granola", other),
+        other => anyhow::bail!(
+            "Unknown import source: {}. Supported source: granola. To process an audio file, run: minutes process \"{}\" --type meeting",
+            other,
+            other
+        ),
     }
+}
+
+fn looks_like_audio_path(value: &str) -> bool {
+    Path::new(value)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| {
+            matches!(
+                ext.to_ascii_lowercase().as_str(),
+                "wav" | "m4a" | "mp3" | "ogg" | "webm" | "mp4" | "mov" | "aac"
+            )
+        })
+        .unwrap_or(false)
 }
 
 fn import_granola(dir: Option<&Path>, dry_run: bool, config: &Config) -> Result<()> {

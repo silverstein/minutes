@@ -2420,6 +2420,167 @@ fn preserve_failed_capture_path(path: &std::path::Path, config: &Config) -> Opti
     Some(dest)
 }
 
+#[derive(Debug, Clone)]
+struct NativeCallProcessingInput {
+    path: PathBuf,
+    recovery_warning: Option<String>,
+}
+
+fn file_has_bytes(path: &Path) -> bool {
+    path.metadata().is_ok_and(|metadata| metadata.len() > 0)
+}
+
+fn viable_native_call_stem(path: &Path) -> bool {
+    path.metadata()
+        .is_ok_and(|metadata| metadata.len() >= min_viable_stem_bytes(path))
+}
+
+fn native_call_recovery_health(
+    message: impl Into<String>,
+    source: minutes_core::diarize::CaptureSource,
+) -> minutes_core::markdown::RecordingHealth {
+    minutes_core::markdown::RecordingHealth {
+        voice_stem_active_ratio: None,
+        system_stem_active_ratio: None,
+        system_dominant_ratio: None,
+        capture_warnings: vec![minutes_core::markdown::CaptureWarning {
+            kind: minutes_core::diarize::FailureKind::Other {
+                code: "native-call-stem-recovery".into(),
+            },
+            source,
+            message: message.into(),
+            diagnostic_confidence: minutes_core::diarize::DiagnosticConfidence::Inferred,
+        }],
+        diarization_path: Some(minutes_core::markdown::DiarizationPath::None),
+    }
+}
+
+fn native_call_processing_input(output_path: &Path) -> io::Result<NativeCallProcessingInput> {
+    let primary_has_bytes = file_has_bytes(output_path);
+    let stems = minutes_core::capture::stem_paths_for(output_path);
+    let voice = stems.as_ref().map(|stems| stems.voice.as_path());
+    let system = stems.as_ref().map(|stems| stems.system.as_path());
+    let voice_viable = voice.is_some_and(viable_native_call_stem);
+    let system_viable = system.is_some_and(viable_native_call_stem);
+
+    if voice_viable && system_viable {
+        if !primary_has_bytes {
+            // `prepare_transcription_input` only needs the .mov path as the
+            // stem-discovery anchor; tests already use a one-byte .mov stub.
+            // If ScreenCaptureKit failed to materialize the container but the
+            // PCM stems are good, create that anchor instead of stranding both
+            // stems in native-captures.
+            std::fs::write(output_path, b"minutes native-call stem anchor")?;
+            return Ok(NativeCallProcessingInput {
+                path: output_path.to_path_buf(),
+                recovery_warning: Some(
+                    "Native call capture did not produce a usable .mov container; processing recovered PCM stems instead.".into(),
+                ),
+            });
+        }
+
+        return Ok(NativeCallProcessingInput {
+            path: output_path.to_path_buf(),
+            recovery_warning: None,
+        });
+    }
+
+    if voice_viable {
+        let voice = voice.expect("voice path present when viable");
+        return Ok(NativeCallProcessingInput {
+            path: voice.to_path_buf(),
+            recovery_warning: Some(
+                "Native call capture did not produce a usable system-audio stem; processing the local microphone stem only.".into(),
+            ),
+        });
+    }
+
+    if system_viable {
+        let system = system.expect("system path present when viable");
+        return Ok(NativeCallProcessingInput {
+            path: system.to_path_buf(),
+            recovery_warning: Some(
+                "Native call capture did not produce a usable microphone stem; processing the system-audio stem only.".into(),
+            ),
+        });
+    }
+
+    if primary_has_bytes {
+        return Ok(NativeCallProcessingInput {
+            path: output_path.to_path_buf(),
+            recovery_warning: None,
+        });
+    }
+
+    Err(io::Error::new(
+        io::ErrorKind::NotFound,
+        format!(
+            "native call capture did not produce a usable .mov or PCM stem under {}",
+            output_path
+                .parent()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| "<unknown>".into())
+        ),
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn queue_native_call_capture_for_processing(
+    mode: CaptureMode,
+    requested_title: Option<String>,
+    output_path: &Path,
+    user_notes: Option<String>,
+    pre_context: Option<String>,
+    recording_started_at: chrono::DateTime<chrono::Local>,
+    recording_finished_at: chrono::DateTime<chrono::Local>,
+    context_session_id: Option<String>,
+    calendar_event: Option<minutes_core::calendar::CalendarEvent>,
+    extra_warning: Option<String>,
+) -> Result<minutes_core::jobs::ProcessingJob, String> {
+    let input = native_call_processing_input(output_path).map_err(|error| {
+        format!("failed to prepare native call capture for processing: {error}")
+    })?;
+    let warning = match (extra_warning, input.recovery_warning) {
+        (Some(extra), Some(recovery)) => Some(format!("{extra} {recovery}")),
+        (Some(extra), None) => Some(extra),
+        (None, Some(recovery)) => Some(recovery),
+        (None, None) => None,
+    };
+    let source = if input
+        .path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.ends_with(".system.wav"))
+    {
+        minutes_core::diarize::CaptureSource::System
+    } else if input
+        .path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.ends_with(".voice.wav"))
+    {
+        minutes_core::diarize::CaptureSource::Voice
+    } else {
+        minutes_core::diarize::CaptureSource::Both
+    };
+    let recording_health = warning.map(|message| native_call_recovery_health(message, source));
+
+    minutes_core::jobs::queue_live_capture_with_recording_health(
+        mode,
+        requested_title,
+        &input.path,
+        user_notes,
+        pre_context,
+        Some(recording_started_at),
+        Some(recording_finished_at),
+        context_session_id,
+        calendar_event,
+        None,
+        recording_health,
+    )
+    .map_err(|error| error.to_string())
+}
+
 /// Copy `src` to `dest` with two invariants beyond `std::fs::copy`:
 ///
 /// 1. **No-clobber on dest** — open with `O_CREAT|O_EXCL` (`create_new` in Rust
@@ -2754,32 +2915,181 @@ fn start_native_call_recording(
         }
         if let Some(status) = session.try_wait()? {
             if !status.success() {
+                let recording_finished_at = chrono::Local::now();
+                let user_notes = minutes_core::notes::read_notes();
+                let pre_context = minutes_core::notes::read_context();
+                match queue_native_call_capture_for_processing(
+                    mode,
+                    requested_title.clone(),
+                    &output_path,
+                    user_notes,
+                    pre_context,
+                    recording_started_at,
+                    recording_finished_at,
+                    context_session_id.clone(),
+                    None,
+                    Some("Native call capture helper exited before normal stop.".into()),
+                ) {
+                    Ok(job) => {
+                        processing.store(true, Ordering::Relaxed);
+                        set_processing_stage(processing_stage, job.stage.as_deref());
+                        minutes_core::pid::set_processing_status(
+                            job.stage.as_deref(),
+                            Some(mode),
+                            job.title.as_deref(),
+                            Some(&job.id),
+                            minutes_core::jobs::active_job_count(),
+                        )
+                        .ok();
+                        minutes_core::pid::remove().ok();
+                        minutes_core::pid::clear_recording_metadata().ok();
+                        minutes_core::notes::cleanup();
+                        recording.store(false, Ordering::Relaxed);
+                        starting.store(false, Ordering::Relaxed);
+                        if let Ok(mut health) = call_capture_health.lock() {
+                            *health = Some(session.source_health());
+                        }
+                        spawn_processing_worker(
+                            app_handle.clone(),
+                            processing.clone(),
+                            processing_stage.clone(),
+                            latest_output.clone(),
+                            activation_progress.clone(),
+                            completion_notifications_enabled.clone(),
+                        );
+                        sync_processing_indicator(processing, processing_stage);
+                    }
+                    Err(queue_error) => {
+                        let preserved = preserve_failed_capture_path(&output_path, config);
+                        if let Some(session_id) = context_session_id.as_deref() {
+                            minutes_core::context_store::mark_capture_session_failed(
+                                session_id,
+                                Some(recording_finished_at),
+                                &format!(
+                                    "native call capture exited early; recovery queue failed: {}",
+                                    queue_error
+                                ),
+                                preserved.as_deref(),
+                            )
+                            .ok();
+                        }
+                        minutes_core::pid::remove().ok();
+                        minutes_core::pid::clear_recording_metadata().ok();
+                        minutes_core::notes::cleanup();
+                        recording.store(false, Ordering::Relaxed);
+                        starting.store(false, Ordering::Relaxed);
+                        if let Ok(mut health) = call_capture_health.lock() {
+                            *health = None;
+                        }
+                        if let Some(saved) = preserved {
+                            let notice = OutputNotice {
+                                kind: "preserved-capture".into(),
+                                title: "Native call capture failed".into(),
+                                path: saved.display().to_string(),
+                                detail: format!(
+                                    "ScreenCaptureKit capture ended early. Recovery queue failed: {queue_error}"
+                                ),
+                                job_id: None,
+                            };
+                            set_latest_output(latest_output, Some(notice.clone()));
+                            maybe_show_completion_notification(
+                                app_handle,
+                                completion_notifications_enabled,
+                                &notice,
+                            );
+                        }
+                    }
+                }
+                reset_hotkey_capture_state(hotkey_runtime, discard_short_hotkey_capture);
+                return Ok(());
+            }
+            break;
+        }
+    }
+
+    if let Err(error) = session.stop() {
+        let recording_finished_at = chrono::Local::now();
+        let user_notes = minutes_core::notes::read_notes();
+        let pre_context = minutes_core::notes::read_context();
+        let queue_result = queue_native_call_capture_for_processing(
+            mode,
+            requested_title.clone(),
+            &output_path,
+            user_notes,
+            pre_context,
+            recording_started_at,
+            recording_finished_at,
+            context_session_id.clone(),
+            None,
+            Some(format!(
+                "Native call capture finalization reported an error: {error}."
+            )),
+        );
+
+        match queue_result {
+            Ok(job) => {
+                processing.store(true, Ordering::Relaxed);
+                set_processing_stage(processing_stage, job.stage.as_deref());
+                minutes_core::pid::set_processing_status(
+                    job.stage.as_deref(),
+                    Some(mode),
+                    job.title.as_deref(),
+                    Some(&job.id),
+                    minutes_core::jobs::active_job_count(),
+                )
+                .ok();
+                minutes_core::pid::remove().ok();
+                minutes_core::pid::clear_recording_metadata().ok();
+                minutes_core::notes::cleanup();
+                starting.store(false, Ordering::Relaxed);
+                recording.store(false, Ordering::Relaxed);
+                if let Ok(mut health) = call_capture_health.lock() {
+                    *health = Some(session.source_health());
+                }
+                spawn_processing_worker(
+                    app_handle.clone(),
+                    processing.clone(),
+                    processing_stage.clone(),
+                    latest_output.clone(),
+                    activation_progress.clone(),
+                    completion_notifications_enabled.clone(),
+                );
+                sync_processing_indicator(processing, processing_stage);
+                reset_hotkey_capture_state(hotkey_runtime, discard_short_hotkey_capture);
+                return Ok(());
+            }
+            Err(queue_error) => {
                 let preserved = preserve_failed_capture_path(&output_path, config);
                 if let Some(session_id) = context_session_id.as_deref() {
                     minutes_core::context_store::mark_capture_session_failed(
                         session_id,
-                        Some(chrono::Local::now()),
-                        "native call capture exited early",
+                        Some(recording_finished_at),
+                        &format!(
+                            "stopping native call capture failed: {}; recovery queue failed: {}",
+                            error, queue_error
+                        ),
                         preserved.as_deref(),
                     )
                     .ok();
                 }
+                minutes_core::notes::cleanup();
                 minutes_core::pid::remove().ok();
                 minutes_core::pid::clear_recording_metadata().ok();
-                minutes_core::notes::cleanup();
-                recording.store(false, Ordering::Relaxed);
+                processing.store(false, Ordering::Relaxed);
+                set_processing_stage(processing_stage, None);
                 starting.store(false, Ordering::Relaxed);
+                recording.store(false, Ordering::Relaxed);
                 if let Ok(mut health) = call_capture_health.lock() {
                     *health = None;
                 }
                 if let Some(saved) = preserved {
                     let notice = OutputNotice {
                         kind: "preserved-capture".into(),
-                        title: "Native call capture failed".into(),
+                        title: "Native call capture preserved".into(),
                         path: saved.display().to_string(),
-                        detail:
-                            "ScreenCaptureKit capture ended early, but the raw output was preserved."
-                                .into(),
+                        detail: format!(
+                            "Stopping native call capture failed: {error}. Recovery queue failed: {queue_error}"
+                        ),
                         job_id: None,
                     };
                     set_latest_output(latest_output, Some(notice.clone()));
@@ -2792,48 +3102,7 @@ fn start_native_call_recording(
                 reset_hotkey_capture_state(hotkey_runtime, discard_short_hotkey_capture);
                 return Ok(());
             }
-            break;
         }
-    }
-
-    if let Err(error) = session.stop() {
-        let preserved = preserve_failed_capture_path(&output_path, config);
-        if let Some(session_id) = context_session_id.as_deref() {
-            minutes_core::context_store::mark_capture_session_failed(
-                session_id,
-                Some(chrono::Local::now()),
-                &format!("stopping native call capture failed: {}", error),
-                preserved.as_deref(),
-            )
-            .ok();
-        }
-        minutes_core::notes::cleanup();
-        minutes_core::pid::remove().ok();
-        minutes_core::pid::clear_recording_metadata().ok();
-        processing.store(false, Ordering::Relaxed);
-        set_processing_stage(processing_stage, None);
-        starting.store(false, Ordering::Relaxed);
-        recording.store(false, Ordering::Relaxed);
-        if let Ok(mut health) = call_capture_health.lock() {
-            *health = None;
-        }
-        if let Some(saved) = preserved {
-            let notice = OutputNotice {
-                kind: "preserved-capture".into(),
-                title: "Native call capture preserved".into(),
-                path: saved.display().to_string(),
-                detail: format!("Stopping native call capture failed: {}", error),
-                job_id: None,
-            };
-            set_latest_output(latest_output, Some(notice.clone()));
-            maybe_show_completion_notification(
-                app_handle,
-                completion_notifications_enabled,
-                &notice,
-            );
-        }
-        reset_hotkey_capture_state(hotkey_runtime, discard_short_hotkey_capture);
-        return Ok(());
     }
 
     recording.store(false, Ordering::Relaxed);
@@ -2873,14 +3142,14 @@ fn start_native_call_recording(
     // The pipeline already falls back to events_overlapping_now() during background processing.
     let calendar_event = None;
 
-    match minutes_core::jobs::enqueue_capture_job(
+    match queue_native_call_capture_for_processing(
         mode,
         requested_title,
-        output_path.clone(),
+        &output_path,
         user_notes,
         pre_context,
-        Some(recording_started_at),
-        Some(recording_finished_at),
+        recording_started_at,
+        recording_finished_at,
         context_session_id.clone(),
         calendar_event,
         None,
@@ -8910,6 +9179,51 @@ mod tests {
         if pad > 0 {
             file.write_all(&vec![0u8; pad]).expect("pad");
         }
+    }
+
+    #[test]
+    fn native_call_processing_input_uses_voice_stem_when_system_missing() {
+        let dir = TempDir::new().unwrap();
+        let mov = dir.path().join("2026-05-19-120148-call.mov");
+        std::fs::write(&mov, b"mov").unwrap();
+        let voice = dir.path().join("2026-05-19-120148-call.voice.wav");
+        write_test_wav(&voice, 48_000, 200_000);
+
+        let input = native_call_processing_input(&mov).expect("processing input");
+
+        assert_eq!(input.path, voice);
+        assert!(
+            input
+                .recovery_warning
+                .as_deref()
+                .is_some_and(|warning| warning.contains("system-audio stem")),
+            "warning should explain the missing system side"
+        );
+    }
+
+    #[test]
+    fn native_call_processing_input_creates_mov_anchor_for_paired_stems() {
+        let dir = TempDir::new().unwrap();
+        let mov = dir.path().join("2026-05-19-120148-call.mov");
+        let voice = dir.path().join("2026-05-19-120148-call.voice.wav");
+        let system = dir.path().join("2026-05-19-120148-call.system.wav");
+        write_test_wav(&voice, 48_000, 200_000);
+        write_test_wav(&system, 48_000, 200_000);
+
+        let input = native_call_processing_input(&mov).expect("processing input");
+
+        assert_eq!(input.path, mov);
+        assert!(
+            input.path.exists(),
+            "missing .mov should be recreated as a stem anchor"
+        );
+        assert!(
+            input
+                .recovery_warning
+                .as_deref()
+                .is_some_and(|warning| warning.contains("recovered PCM stems")),
+            "warning should explain stem-anchor recovery"
+        );
     }
 
     /// Malformed WAV files (non-`fmt `-first chunk, zero byte_rate, or

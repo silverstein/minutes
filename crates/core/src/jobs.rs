@@ -267,6 +267,15 @@ pub fn job_capture_path(job_id: &str) -> PathBuf {
     jobs_dir().join(format!("{}.wav", job_id))
 }
 
+fn job_capture_path_for_source(job_id: &str, source: &Path) -> PathBuf {
+    let ext = source
+        .extension()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty())
+        .unwrap_or("wav");
+    jobs_dir().join(format!("{}.{}", job_id, ext))
+}
+
 pub fn create_worker_guard() -> Result<PidGuard, crate::error::PidError> {
     pid::create_pid_guard(&worker_pid_path())
 }
@@ -276,7 +285,7 @@ pub fn current_worker_pid() -> Option<u32> {
 }
 
 pub fn move_capture_into_job(job_id: &str, current_wav: &Path) -> std::io::Result<PathBuf> {
-    let dest = job_capture_path(job_id);
+    let dest = job_capture_path_for_source(job_id, current_wav);
     if let Some(parent) = dest.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -1475,6 +1484,48 @@ mod tests {
             let job_audio = PathBuf::from(&job.audio_path);
             let moved_stems = crate::capture::stem_paths_for(&job_audio).unwrap();
             assert!(job_audio.exists());
+            assert!(moved_stems.voice.exists());
+            assert!(moved_stems.system.exists());
+            assert!(!stems.voice.exists());
+            assert!(!stems.system.exists());
+        });
+    }
+
+    #[test]
+    fn queue_live_capture_preserves_native_mov_extension_and_stems() {
+        with_temp_home(|tmp| {
+            let native_dir = tmp.path().join(".minutes/native-captures");
+            fs::create_dir_all(&native_dir).unwrap();
+            let current_mov = native_dir.join("2026-05-19-120148-call.mov");
+            fs::write(&current_mov, b"mov-placeholder").unwrap();
+
+            let stems = crate::capture::stem_paths_for(&current_mov).unwrap();
+            fs::write(&stems.voice, b"voice").unwrap();
+            fs::write(&stems.system, b"system").unwrap();
+
+            let job = queue_live_capture(
+                CaptureMode::Meeting,
+                Some("Native call".into()),
+                &current_mov,
+                None,
+                None,
+                Some(Local::now()),
+                Some(Local::now()),
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+            let job_audio = PathBuf::from(&job.audio_path);
+            assert_eq!(
+                job_audio.extension().and_then(|ext| ext.to_str()),
+                Some("mov")
+            );
+            assert!(job_audio.exists());
+            assert!(!current_mov.exists());
+
+            let moved_stems = crate::capture::stem_paths_for(&job_audio).unwrap();
             assert!(moved_stems.voice.exists());
             assert!(moved_stems.system.exists());
             assert!(!stems.voice.exists());

@@ -167,10 +167,27 @@ sync
 sleep 2
 
 echo "Detaching DMG..."
-if ! hdiutil detach "$MOUNT_DIR" -quiet; then
-  echo "Initial DMG detach failed; retrying with force after Finder settles..." >&2
-  sleep 2
-  hdiutil detach "$MOUNT_DIR" -force -quiet
+osascript -e 'tell application "Finder" to quit' >/dev/null 2>&1 || true
+
+DETACHED=0
+for attempt in 1 2 3 4 5; do
+  if hdiutil detach "$MOUNT_DIR" -quiet; then
+    DETACHED=1
+    break
+  fi
+
+  echo "DMG detach attempt ${attempt} failed; retrying with force after Finder settles..." >&2
+  diskutil unmount force "$MOUNT_DIR" >/dev/null 2>&1 || true
+  if hdiutil detach "$MOUNT_DIR" -force -quiet; then
+    DETACHED=1
+    break
+  fi
+  sleep "$((attempt * 2))"
+done
+
+if [[ "$DETACHED" -ne 1 ]]; then
+  echo "Failed to detach DMG mount after retries: $MOUNT_DIR" >&2
+  exit 1
 fi
 
 echo "Compressing final DMG..."

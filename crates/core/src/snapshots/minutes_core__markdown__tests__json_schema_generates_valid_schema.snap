@@ -62,7 +62,8 @@ expression: schema
       ]
     },
     "duration": {
-      "type": "string"
+      "type": "string",
+      "default": "0s"
     },
     "entities": {
       "$ref": "#/$defs/EntityLinks"
@@ -157,8 +158,7 @@ expression: schema
   "required": [
     "title",
     "type",
-    "date",
-    "duration"
+    "date"
   ],
   "$defs": {
     "ActionItem": {

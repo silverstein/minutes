@@ -1,8 +1,9 @@
 use crate::config::Config;
 use crate::error::MarkdownError;
-use chrono::{DateTime, Local};
+use chrono::{DateTime, Local, LocalResult, NaiveDate, NaiveDateTime, TimeZone};
 use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use serde::de::{self, Visitor};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -144,7 +145,9 @@ impl RecordingHealth {
 pub struct Frontmatter {
     pub title: String,
     pub r#type: ContentType,
+    #[serde(deserialize_with = "deserialize_local_datetime")]
     pub date: DateTime<Local>,
+    #[serde(default = "default_duration")]
     pub duration: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
@@ -170,6 +173,7 @@ pub struct Frontmatter {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub device: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, deserialize_with = "deserialize_optional_local_datetime")]
     pub captured_at: Option<DateTime<Local>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context: Option<String>,
@@ -196,6 +200,95 @@ pub struct Frontmatter {
     /// Not serialized to YAML — only used for the NoSpeech hint in rendered markdown.
     #[serde(skip)]
     pub filter_diagnosis: Option<String>,
+}
+
+fn default_duration() -> String {
+    "0s".into()
+}
+
+fn deserialize_local_datetime<'de, D>(deserializer: D) -> Result<DateTime<Local>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserializer.deserialize_any(LocalDateTimeVisitor)
+}
+
+fn deserialize_optional_local_datetime<'de, D>(
+    deserializer: D,
+) -> Result<Option<DateTime<Local>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<String>::deserialize(deserializer)?;
+    value
+        .as_deref()
+        .map(parse_frontmatter_local_datetime)
+        .transpose()
+        .map_err(de::Error::custom)
+}
+
+struct LocalDateTimeVisitor;
+
+impl Visitor<'_> for LocalDateTimeVisitor {
+    type Value = DateTime<Local>;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("an RFC3339 timestamp, local timestamp, or YYYY-MM-DD date")
+    }
+
+    fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        parse_frontmatter_local_datetime(value).map_err(E::custom)
+    }
+
+    fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        self.visit_str(&value)
+    }
+}
+
+fn parse_frontmatter_local_datetime(raw: &str) -> Result<DateTime<Local>, String> {
+    let value = raw.trim();
+    if value.is_empty() {
+        return Err("empty date".into());
+    }
+
+    if let Ok(parsed) = DateTime::parse_from_rfc3339(value) {
+        return Ok(parsed.with_timezone(&Local));
+    }
+
+    for format in [
+        "%Y-%m-%dT%H:%M:%S%.f",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%d %H:%M:%S%.f",
+        "%Y-%m-%d %H:%M:%S",
+    ] {
+        if let Ok(naive) = NaiveDateTime::parse_from_str(value, format) {
+            return local_datetime_from_naive(naive);
+        }
+    }
+
+    if let Ok(date) = NaiveDate::parse_from_str(value, "%Y-%m-%d") {
+        if let Some(naive) = date.and_hms_opt(0, 0, 0) {
+            return local_datetime_from_naive(naive);
+        }
+    }
+
+    Err(format!(
+        "invalid date `{}` (expected YYYY-MM-DD, local timestamp, or RFC3339 timestamp)",
+        value
+    ))
+}
+
+fn local_datetime_from_naive(naive: NaiveDateTime) -> Result<DateTime<Local>, String> {
+    match Local.from_local_datetime(&naive) {
+        LocalResult::Single(dt) | LocalResult::Ambiguous(dt, _) => Ok(dt),
+        LocalResult::None => Err(format!("local datetime `{}` does not exist", naive)),
+    }
 }
 
 impl Frontmatter {
@@ -912,6 +1005,46 @@ mod tests {
             template: None,
             filter_diagnosis: None,
         }
+    }
+
+    #[test]
+    fn frontmatter_accepts_manual_date_only_values() {
+        use chrono::Datelike;
+
+        let input = "title: Test\ntype: meeting\ndate: 2024-05-14\n";
+        let parsed: Frontmatter = serde_yaml::from_str(input).unwrap();
+
+        assert_eq!(parsed.date.year(), 2024);
+        assert_eq!(parsed.date.month(), 5);
+        assert_eq!(parsed.date.day(), 14);
+        assert_eq!(parsed.duration, "0s");
+    }
+
+    #[test]
+    fn frontmatter_accepts_local_timestamps_without_offset() {
+        use chrono::{Datelike, Timelike};
+
+        let input = "title: Test\ntype: meeting\ndate: \"2026-05-14T10:30:45\"\n";
+        let parsed: Frontmatter = serde_yaml::from_str(input).unwrap();
+
+        assert_eq!(parsed.date.year(), 2026);
+        assert_eq!(parsed.date.month(), 5);
+        assert_eq!(parsed.date.day(), 14);
+        assert_eq!(parsed.date.hour(), 10);
+        assert_eq!(parsed.date.minute(), 30);
+        assert_eq!(parsed.date.second(), 45);
+    }
+
+    #[test]
+    fn frontmatter_keeps_rfc3339_dates_working() {
+        let input = "title: Test\ntype: meeting\ndate: 2026-03-17T12:00:00-07:00\nduration: 5m\n";
+        let parsed: Frontmatter = serde_yaml::from_str(input).unwrap();
+
+        assert_eq!(
+            parsed.date.with_timezone(&chrono::Utc).to_rfc3339(),
+            "2026-03-17T19:00:00+00:00"
+        );
+        assert_eq!(parsed.duration, "5m");
     }
 
     #[test]

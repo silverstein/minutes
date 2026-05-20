@@ -891,9 +891,13 @@ minutes setup --diarization
 # DMG and tagged CLI release binaries include the feature; the Homebrew Formula
 # CLI (`brew install silverstein/tap/minutes`) and bare `cargo install minutes-cli`
 # do not. See docs/PARAKEET.md for the source-build walkthrough.
-minutes setup --parakeet                          # Multilingual v3 (tdt-600m, ~1.2GB)
-minutes setup --parakeet --parakeet-model tdt-ctc-110m  # English-only compact model (~220MB)
-# Also installs native Silero VAD weights for the parakeet.cpp --vad path
+#
+# Note: `minutes setup --parakeet` installs the bundled Silero VAD weights
+# (~1.2 MB) and prints a manual recipe for downloading + converting the
+# tdt-600m .nemo from HuggingFace (the resulting safetensors file is ~2.3 GB).
+# The `.nemo` download and `convert_nemo.py` step are still manual in v0.18.0.
+minutes setup --parakeet                          # Multilingual v3 setup (tdt-600m)
+minutes setup --parakeet --parakeet-model tdt-ctc-110m  # English-only compact (tdt-ctc-110m)
 
 # Enroll your voice for automatic speaker identification
 minutes enroll              # Records 10s of your voice

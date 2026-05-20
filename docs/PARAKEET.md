@@ -73,30 +73,60 @@ feature, so this only matters for unusual build configurations.
 ## Fastest Path on Apple Silicon
 
 If you want the shortest path from "I have a Mac" to "Minutes is using
-Parakeet locally on Metal," do this. Each step is a separate command — do
-not paste TOML into the shell; step 4 writes a file.
+Parakeet locally on Metal," do this. Steps 1–3 are shell commands; step 4
+is a manual download + conversion (the CLI prints these instructions but
+does not run them in v0.18.0); step 5 writes a config file — do not paste
+the TOML block into the shell.
 
 Prerequisites first (see [Prerequisites](#prerequisites) for details):
 - Full Xcode installed (Command Line Tools alone is not enough — Metal needs
   the full Xcode shader compiler)
-- CMake 3.x. CMake 4.x trips both an atomics check and a new
-  `install(EXPORT)` strictness rule in parakeet.cpp's `axiom` submodule
-  (`target "axiom" ... requires target "hwy" that is not in any export set`).
-  Easiest fix: `brew install cmake@3` and prepend it on `PATH` for the
-  parakeet.cpp build. See [Troubleshooting](#troubleshooting).
+- CMake 3.31.x. CMake 4.x trips an atomics check in parakeet.cpp's bundled
+  Google Highway dependency on Apple Silicon. Homebrew no longer ships
+  `cmake@3`, so grab the official Kitware universal tarball:
+
+  ```bash
+  mkdir -p ~/.local/opt && cd ~/.local/opt
+  curl -L -O https://github.com/Kitware/CMake/releases/download/v3.31.12/cmake-3.31.12-macos-universal.tar.gz
+  tar xf cmake-3.31.12-macos-universal.tar.gz
+  export PATH="$HOME/.local/opt/cmake-3.31.12-macos-universal/CMake.app/Contents/bin:$PATH"
+  cmake --version    # expect 3.31.12
+  ```
+
+  Only export this `PATH` in the build shell — your system CMake stays
+  untouched everywhere else. The separate `install(EXPORT) ... AxiomTargets`
+  error is handled by build flags rather than CMake version; see step 1
+  below and [Troubleshooting](#troubleshooting).
 
 ```bash
 # 1. Build and install parakeet.cpp — clone OUTSIDE the Minutes repo
 mkdir -p ~/src && cd ~/src
 git clone --recursive https://github.com/Frikallo/parakeet.cpp
 cd parakeet.cpp
-make build
+
+# Configure with the maintainer's two opt-out flags (AXIOM_INSTALL=OFF,
+# PARAKEET_INSTALL=OFF). They short-circuit the install(EXPORT) export-set
+# strictness error and work on any CMake version. PARAKEET_BUILD_SERVER_EXAMPLE
+# turns on the warm-sidecar binary that live mode reuses across utterances.
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
+  -DAXIOM_INSTALL=OFF \
+  -DPARAKEET_INSTALL=OFF \
+  -DPARAKEET_BUILD_SERVER_EXAMPLE=ON \
+  -DAXIOM_BUILD_TESTS=OFF \
+  -DAXIOM_BUILD_EXAMPLES=OFF
+cmake --build build -j
+
+# Install both binaries. Locations differ by generator: Ninja puts them in
+# build/bin/, Unix Makefiles (the default when ninja isn't installed) puts
+# parakeet in build/ and example-server in build/examples/server/. The find
+# expression handles either layout.
 mkdir -p ~/.local/bin
-cp build/bin/parakeet ~/.local/bin/
-# Also copy the warm-sidecar binary. Without this, live mode (minutes live
-# and the recording sidecar) falls back to spawning a fresh subprocess for
-# every utterance — visibly slow because the model has to reload each time.
-cp build/bin/example-server ~/.local/bin/
+find build -type f -perm -u+x \( -name parakeet -o -name example-server \) \
+  -exec cp {} ~/.local/bin/ \;
+ls -lh ~/.local/bin/parakeet ~/.local/bin/example-server
+
+# Sanity check: both binaries should link Metal, MPS, MPSGraph, and Accelerate.
+otool -L ~/.local/bin/parakeet | grep -E 'Metal|Accelerate'
 
 # 2. Build the Minutes CLI WITH the parakeet feature, then install it
 cd <path/to/your/minutes/checkout>     # e.g. ~/Sites/minutes
@@ -106,11 +136,56 @@ cp target/release/minutes ~/.local/bin/minutes
 # Make sure ~/.local/bin is on PATH (add to ~/.zshrc if it isn't):
 #   export PATH="$HOME/.local/bin:$PATH"
 
-# 3. Download the multilingual model + Silero VAD weights
+# 3. Install Silero VAD weights + sanity-check the parakeet binary on PATH.
+#    `minutes setup --parakeet` only installs the bundled VAD weights and
+#    resolves your parakeet binary location. It does NOT download or convert
+#    the .nemo model — that's step 4. The brew formula CLI (whisper-only)
+#    can run this command; it prints a feature-flag warning but the setup
+#    itself completes correctly.
 minutes setup --parakeet
 ```
 
-4. Edit `~/.config/minutes/config.toml` so it contains the following.
+4. Download and convert the multilingual `tdt-600m` model. This is the
+   manual step the CLI prints instructions for. The `.nemo` file is publicly
+   curl-able from HuggingFace — no `huggingface_hub` dependency needed — and
+   conversion needs a small Python venv with `torch`, `safetensors`,
+   `packaging`, and `numpy`. (`packaging` is a transitive dep `safetensors`
+   doesn't pull on its own; without it `convert_nemo.py` crashes at import
+   time.)
+
+```bash
+# 4a. Python venv for the conversion script (uv is fastest; python -m venv
+#     works too)
+uv venv ~/.local/venvs/parakeet-convert --python 3.13
+uv pip install --python ~/.local/venvs/parakeet-convert/bin/python \
+  torch safetensors packaging numpy
+source ~/.local/venvs/parakeet-convert/bin/activate
+
+# 4b. Download the .nemo (2.4 GB). HF transparently redirects to the xet-hub
+#     CDN; no auth required.
+mkdir -p /tmp/parakeet-dl && cd /tmp/parakeet-dl
+curl -L -O https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3/resolve/main/parakeet-tdt-0.6b-v3.nemo
+
+# 4c. Convert to safetensors (2.3 GB output, 627M params)
+mkdir -p ~/.minutes/models/parakeet/tdt-600m
+python ~/src/parakeet.cpp/scripts/convert_nemo.py \
+  parakeet-tdt-0.6b-v3.nemo \
+  -o ~/.minutes/models/parakeet/tdt-600m/tdt-600m.safetensors \
+  --model 600m-tdt
+
+# 4d. Extract the SentencePiece tokenizer.vocab. macOS BSD tar has no
+#     --wildcards flag; list the archive, then extract by the literal
+#     UUID-prefixed filename. (GNU tar users can keep their --wildcards form.)
+tar tf parakeet-tdt-0.6b-v3.nemo | grep tokenizer.vocab
+#   -> something like 8f3c5b6e-..._tokenizer.vocab
+tar xf parakeet-tdt-0.6b-v3.nemo <paste-the-uuid-filename-from-above>
+cp *_tokenizer.vocab ~/.minutes/models/parakeet/tdt-600m/tdt-600m.tokenizer.vocab
+
+# 4e. Free the 2.4 GB download (the safetensors file is what runtime needs)
+rm -rf /tmp/parakeet-dl
+```
+
+5. Edit `~/.config/minutes/config.toml` so it contains the following.
    The block goes **inside the file**, not into the shell:
 
 ```toml
@@ -122,6 +197,7 @@ parakeet_vocab = "tdt-600m.tokenizer.vocab"
 # Reuse the warm example-server socket for live mode instead of spawning
 # a fresh subprocess per utterance. Requires step 1's example-server copy.
 parakeet_sidecar_enabled = true
+parakeet_fp16 = true
 ```
 
 That gives you the validated multilingual path:
@@ -179,6 +255,17 @@ sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
 
 # 4. Download the Metal Toolchain
 xcodebuild -downloadComponent MetalToolchain
+```
+
+You'll also need CMake 3.31.x for the parakeet.cpp build (Homebrew has dropped
+the `cmake@3` formula). Use Kitware's official universal tarball:
+
+```bash
+mkdir -p ~/.local/opt && cd ~/.local/opt
+curl -L -O https://github.com/Kitware/CMake/releases/download/v3.31.12/cmake-3.31.12-macos-universal.tar.gz
+tar xf cmake-3.31.12-macos-universal.tar.gz
+# Use only when building parakeet.cpp; don't add to your shell profile.
+export PATH="$HOME/.local/opt/cmake-3.31.12-macos-universal/CMake.app/Contents/bin:$PATH"
 ```
 
 ### Linux / Windows (parakeet.cpp, CPU only)
@@ -270,52 +357,130 @@ if you want to help land one.
 
 ## Build parakeet.cpp
 
+No upstream binary releases exist as of 2026-05-15, so the build is mandatory.
+There are no Homebrew, MacPorts, or precompiled GitHub Release artifacts to
+fall back on.
+
 ```bash
 # Clone with submodules
 git clone --recursive https://github.com/Frikallo/parakeet.cpp
 cd parakeet.cpp
 
-# Build (macOS with Metal)
-make build
+# Configure. The four AXIOM/PARAKEET flags below are the load-bearing ones:
+#   AXIOM_INSTALL=OFF + PARAKEET_INSTALL=OFF
+#     Disable the install(EXPORT "AxiomTargets") rule that breaks on any
+#     modern CMake. The parakeet.cpp maintainer added these as the supported
+#     escape hatch (see CMakeLists.txt:96-100).
+#   PARAKEET_BUILD_SERVER_EXAMPLE=ON
+#     Builds example-server, the warm sidecar binary live mode talks to.
+#     Off by default; without it live transcription respawns per utterance.
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
+  -DAXIOM_INSTALL=OFF \
+  -DPARAKEET_INSTALL=OFF \
+  -DPARAKEET_BUILD_SERVER_EXAMPLE=ON \
+  -DAXIOM_BUILD_TESTS=OFF \
+  -DAXIOM_BUILD_EXAMPLES=OFF
+cmake --build build -j
 
-# If CMake 4.x fails with "Neither lock free instructions nor -latomic found",
-# patch third_party/axiom/third_party/highway/cmake/FindAtomics.cmake:
-# Replace the check_cxx_source_compiles block with an Apple arm64 short-circuit.
-# See: https://github.com/google/highway/issues/XXXX
+# Binary layout depends on the generator CMake picked. Ninja:
+#   build/bin/parakeet
+#   build/bin/example-server
+# Unix Makefiles (default when Ninja isn't installed):
+#   build/parakeet
+#   build/examples/server/example-server
+# This find handles either:
+mkdir -p ~/.local/bin
+find build -type f -perm -u+x \( -name parakeet -o -name example-server \) \
+  -exec cp {} ~/.local/bin/ \;
 
-# Install the binaries
-cp build/bin/parakeet ~/.local/bin/
-# Warm-sidecar binary: required for live mode to reuse a single loaded
-# model across utterances instead of spawning a fresh subprocess each time.
-cp build/bin/example-server ~/.local/bin/
+# Verify Metal + Accelerate linkage on Apple Silicon
+otool -L ~/.local/bin/parakeet | grep -E 'Metal|Accelerate'
 ```
+
+If `cmake --build` fails with `Neither lock free instructions nor -latomic
+found`, you're on CMake 4.x — install CMake 3.31.x and reconfigure. See
+[Troubleshooting](#cmake-4x-atomics-error-build).
 
 ## Install Models
 
 Parakeet models are distributed as `.nemo` files on HuggingFace and must be
-converted to safetensors format.
+converted to safetensors format. There is currently one model-install path:
+manual download + conversion. `minutes setup --parakeet` is a helper that
+installs the native Silero VAD weights and prints the manual recipe — it
+does not download or convert the `.nemo` itself.
+
+### Step 1 — Silero VAD weights + binary resolution (one command)
 
 ```bash
-# Install Python dependencies
-pip install safetensors torch torchaudio huggingface_hub
+minutes setup --parakeet                                      # Multilingual v3 (tdt-600m)
+# or:
+minutes setup --parakeet --parakeet-model tdt-ctc-110m         # English-only compact
+```
 
-# Option A: Use Minutes setup (recommended)
-minutes setup --parakeet                           # Multilingual v3 (tdt-600m, ~1.2 GB)
-minutes setup --parakeet --parakeet-model tdt-ctc-110m # English-only compact model (~220 MB)
-# Installs native Silero VAD weights automatically
+This installs `~/.minutes/models/parakeet/silero_vad_v5.safetensors` (1.2 MB)
+and prints a `parakeet` binary resolution line. It runs to completion on a
+whisper-only CLI (e.g. the Homebrew Formula build) — you'll see a feature-flag
+warning, but the VAD weights and binary check still complete.
 
-# Option B: Manual download and conversion
-hf download nvidia/parakeet-tdt-0.6b-v3 parakeet-tdt-0.6b-v3.nemo --local-dir .
-cd parakeet.cpp
+### Step 2 — Python environment for the conversion script
+
+`convert_nemo.py` needs PyTorch and `safetensors`. `safetensors` has a
+transitive `packaging` dependency it does not auto-pull, and torch emits a
+warning on first tensor op without `numpy` — install both explicitly.
+`torchaudio` and `huggingface_hub` are **not** required and add hundreds of
+MB.
+
+```bash
+# uv is fastest; `python -m venv` + `pip install` works equivalently
+uv venv ~/.local/venvs/parakeet-convert --python 3.13
+uv pip install --python ~/.local/venvs/parakeet-convert/bin/python \
+  torch safetensors packaging numpy
+source ~/.local/venvs/parakeet-convert/bin/activate
+```
+
+### Step 3 — Download the .nemo
+
+HuggingFace transparently redirects this public URL to its xet-hub CDN; no
+auth and no `huggingface_hub` Python package required.
+
+```bash
+mkdir -p /tmp/parakeet-dl && cd /tmp/parakeet-dl
+curl -L -O https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3/resolve/main/parakeet-tdt-0.6b-v3.nemo
+# For the English-only compact model, swap the repo:
+#   https://huggingface.co/nvidia/parakeet-tdt_ctc-110m/resolve/main/parakeet-tdt_ctc-110m.nemo
+```
+
+### Step 4 — Convert to safetensors
+
+```bash
 mkdir -p ~/.minutes/models/parakeet/tdt-600m
-python scripts/convert_nemo.py parakeet-tdt-0.6b-v3.nemo -o ~/.minutes/models/parakeet/tdt-600m/tdt-600m.safetensors --model 600m-tdt
+python ~/src/parakeet.cpp/scripts/convert_nemo.py \
+  parakeet-tdt-0.6b-v3.nemo \
+  -o ~/.minutes/models/parakeet/tdt-600m/tdt-600m.safetensors \
+  --model 600m-tdt
+# Output is ~2.3 GB, 627M params, 723 tensors.
+```
 
-# Also convert Silero VAD weights manually only if you are not using `minutes setup`
-python scripts/convert_silero_vad.py -o ~/.minutes/models/parakeet/silero_vad_v5.safetensors
+### Step 5 — Extract the SentencePiece tokenizer.vocab
 
-# Extract the SentencePiece tokenizer vocab and store it with a model-specific name
-tar xf parakeet-tdt-0.6b-v3.nemo --wildcards --no-anchored '*tokenizer.vocab'
+macOS BSD `tar` does **not** support GNU's `--wildcards` / `--no-anchored`
+flags. The vocab inside the `.nemo` is named `<UUID>_tokenizer.vocab`, so
+list the archive, grab the literal filename, and extract that.
+
+```bash
+tar tf parakeet-tdt-0.6b-v3.nemo | grep tokenizer.vocab
+# e.g.   ./8f3c5b6e-1d2a-4f7c-9a3b-de1a2b3c4d5e_tokenizer.vocab
+tar xf parakeet-tdt-0.6b-v3.nemo ./8f3c5b6e-..._tokenizer.vocab   # use your UUID
 cp *_tokenizer.vocab ~/.minutes/models/parakeet/tdt-600m/tdt-600m.tokenizer.vocab
+```
+
+GNU-tar users (Linux, or `gtar` from Homebrew on macOS) can still use the
+original form: `tar xf *.nemo --wildcards --no-anchored '*tokenizer.vocab'`.
+
+### Step 6 — Reclaim disk
+
+```bash
+rm -rf /tmp/parakeet-dl    # the .nemo is no longer needed
 ```
 
 `parakeet.cpp` expects the SentencePiece `tokenizer.vocab` file, not the
@@ -409,13 +574,39 @@ Run `minutes setup --parakeet` to install the recommended Parakeet model plus
 native VAD weights, or follow the manual download steps above.
 
 ### CMake 4.x atomics error (build)
-Google Highway's `FindAtomics.cmake` is incompatible with CMake 4.x on Apple Silicon.
-The atomics check fails because it forces `CMAKE_CXX_STANDARD 11` which conflicts with
-the project's C++20. Workaround: patch the check to short-circuit on `APPLE AND arm64`.
 
-### CMake 4.x axiom export-set error (build)
+Google Highway's `FindAtomics.cmake` is incompatible with CMake 4.x on Apple
+Silicon. The atomics check fails because it forces `CMAKE_CXX_STANDARD 11`
+which conflicts with the project's C++20:
 
-On CMake 4.x you may also see:
+```
+Neither lock free instructions nor -latomic found.
+```
+
+Build with CMake 3.31.x. Homebrew dropped the `cmake@3` formula, so install
+the Kitware universal tarball into a local opt dir and prepend it on `PATH`
+only for the parakeet.cpp build shell:
+
+```bash
+mkdir -p ~/.local/opt && cd ~/.local/opt
+curl -L -O https://github.com/Kitware/CMake/releases/download/v3.31.12/cmake-3.31.12-macos-universal.tar.gz
+tar xf cmake-3.31.12-macos-universal.tar.gz
+export PATH="$HOME/.local/opt/cmake-3.31.12-macos-universal/CMake.app/Contents/bin:$PATH"
+cmake --version    # confirm 3.31.x is now first
+
+cd ~/src/parakeet.cpp
+rm -rf build
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
+  -DAXIOM_INSTALL=OFF -DPARAKEET_INSTALL=OFF \
+  -DPARAKEET_BUILD_SERVER_EXAMPLE=ON \
+  -DAXIOM_BUILD_TESTS=OFF -DAXIOM_BUILD_EXAMPLES=OFF
+cmake --build build -j
+```
+
+Only the parakeet.cpp build needs CMake 3.x; CMake 4.x can stay on the
+system `PATH` for everything else.
+
+### axiom install(EXPORT) export-set error (build)
 
 ```
 CMake Error in third_party/axiom/CMakeLists.txt:
@@ -423,21 +614,23 @@ CMake Error in third_party/axiom/CMakeLists.txt:
   target "hwy" that is not in any export set.
 ```
 
-CMake 4.x tightened `install(EXPORT)` rules; parakeet.cpp's `axiom` submodule
-exports `axiom` but does not export its `hwy` dependency, which the new rule
-rejects. Easiest workaround is to build with CMake 3.x:
+This fires on any modern CMake (3.x and 4.x), not just CMake 4. The
+parakeet.cpp `axiom` submodule exports `axiom` but does not export its
+`hwy` transitive, and CMake's `install(EXPORT)` rule rejects that.
+
+The parakeet.cpp maintainer added two opt-out flags at `CMakeLists.txt:96-100`
+specifically for this case. Pass them at configure time:
 
 ```bash
-brew install cmake@3
-export PATH="$(brew --prefix cmake@3)/bin:$PATH"
-cmake --version    # confirm 3.x is now first
-cd ~/src/parakeet.cpp
-rm -rf build
-make build
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
+  -DAXIOM_INSTALL=OFF \
+  -DPARAKEET_INSTALL=OFF \
+  ...
 ```
 
-Only the parakeet.cpp build needs CMake 3.x; you can leave CMake 4.x on
-`PATH` for the rest of your system once parakeet is built.
+You only lose the ability to `make install` parakeet.cpp into a system
+prefix, which the Minutes workflow doesn't use anyway (we copy the
+binaries out of `build/` into `~/.local/bin/` manually).
 
 ### Metal shader compiler not found (build)
 Requires full Xcode (not just Command Line Tools):

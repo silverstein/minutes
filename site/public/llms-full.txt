@@ -10,7 +10,11 @@ Minutes is an open-source meeting corpus you own. Record, transcribe, search, an
 
 29 tools • 7 resources • Interactive MCP App dashboard • Prompt templates
 
-**What's new in 0.18.1:**
+**What's new in 0.18.2:**
+• **Manual meeting ingest accepts normal YAML dates.** `minutes ingest` now accepts hand-authored frontmatter like `date: 2024-05-14` and local timestamps without an offset, while keeping existing RFC3339 timestamps working.
+• **Manual files no longer need a synthetic duration.** Ingested markdown that omits `duration` now defaults to `0s`, which is enough for knowledge-base extraction and avoids a second confusing validation failure.
+
+**Also new in 0.18.1:**
 • **Native-call recovery no longer strands usable audio.** If macOS native capture leaves recoverable `.voice.wav` / `.system.wav` stems but the primary `.mov` is missing, empty, or incomplete, Minutes now queues a processable recovery input instead of leaving the capture under `~/.minutes/native-captures`.
 • **Recovered native captures stay native.** Successful jobs preserve the source `.mov` artifact beside the meeting markdown rather than renaming it to `.wav`, so future reprocessing can rediscover and mix the sibling native-call stems correctly.
 • **Manual recovery is less confusing.** `minutes import <audio-file>` now accepts ordinary audio paths as a recovery alias for meeting processing, while `minutes process <path> --type meeting` remains supported.
@@ -21,7 +25,7 @@ Minutes is an open-source meeting corpus you own. Record, transcribe, search, an
 • **Dual-AAC native-call .mov files transcribe correctly.** macOS call captures with separate voice/system AAC tracks are mixed before transcription instead of producing doubled-duration garble.
 • **Summarization timeouts degrade explicitly.** Meetings with transcript output but failed summary generation now show structured degraded status instead of pretending the meeting is complete.
 
-**Known follow-ups:** call-end auto-stop reliability (#129) and multi-party remote-speaker diarization quality (#169) remain open. This release focuses on native-capture recovery and should not be read as a fix for those separate field reports.
+**Known follow-ups:** call-end auto-stop reliability (#129) and multi-party remote-speaker diarization quality (#169) remain open. This release focuses on manual ingest/frontmatter compatibility. Native-capture recovery remains covered by 0.18.1; call-end auto-stop reliability and multi-party remote-speaker diarization are still separate field reports.
 
 **Setup:** `npx minutes-mcp` gets you search, browsing, and the dashboard right away. For recording and transcription, Minutes can auto-install the CLI on first use, or you can install it yourself with `brew install silverstein/tap/minutes` or `cargo install minutes-cli`, then run `minutes setup --model tiny`, `minutes setup --parakeet`, or `minutes setup --demo`.
 

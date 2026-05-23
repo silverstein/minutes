@@ -3517,6 +3517,51 @@ fn set_recording_error_notice(
     set_latest_output(latest_output, Some(output_error_notice(title, detail)));
 }
 
+fn validate_recording_launch_state(state: &AppState) -> Result<(), String> {
+    if recording_active(&state.recording) || state.starting.load(Ordering::Relaxed) {
+        return Err("Already recording".into());
+    }
+    if state.live_transcript_active.load(Ordering::Relaxed) {
+        return Err("Live transcript in progress — stop it first".into());
+    }
+    // Check both the in-process atomic and the cross-process PID file,
+    // mirroring the live transcript path. `cmd_install_update` and the
+    // palette dispatcher already treat the dictation PID as authoritative
+    // for "another Minutes is dictating", so this gate stays consistent.
+    if state.dictation_active.load(Ordering::Relaxed) || dictation_pid_active() {
+        return Err("Dictation in progress — stop it first".into());
+    }
+    Ok(())
+}
+
+fn reject_recording_launch(state: &AppState, error: String) -> String {
+    set_recording_start_error(&state.latest_output, error.clone());
+    error
+}
+
+fn reserve_recording_launch(state: &AppState) -> Result<(), String> {
+    validate_recording_launch_state(state)?;
+    state
+        .starting
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::Relaxed)
+        .map(|_| ())
+        .map_err(|_| "Already recording".into())
+}
+
+fn prepare_cmd_recording_launch(state: &AppState, from_call_detect: bool) -> Result<(), String> {
+    reserve_recording_launch(state)?;
+    // Session-level flag that scopes the stop_when_call_ends auto-stop only
+    // to recordings started via the call detection banner. Manual starts
+    // never get auto-stopped, even when the config flag is on.
+    state
+        .recording_started_by_call_detect
+        .store(from_call_detect, Ordering::Relaxed);
+    // Starting a fresh recording always cancels any in-flight countdown so
+    // the UI doesn't auto-stop a session the user has already moved past.
+    reset_call_end_countdown(state);
+    Ok(())
+}
+
 fn sync_processing_indicator(
     processing: &Arc<AtomicBool>,
     processing_stage: &Arc<Mutex<Option<String>>>,
@@ -5192,21 +5237,35 @@ pub fn launch_recording(
     hotkey_runtime: Option<Arc<Mutex<HotkeyRuntime>>>,
     discard_short_hotkey_capture: Option<Arc<AtomicBool>>,
 ) -> Result<(), String> {
-    if recording_active(&state.recording) || state.starting.load(Ordering::Relaxed) {
-        return Err("Already recording".into());
-    }
-    if state.live_transcript_active.load(Ordering::Relaxed) {
-        return Err("Live transcript in progress — stop it first".into());
-    }
-    // Check both the in-process atomic and the cross-process PID file,
-    // mirroring the live transcript path. `cmd_install_update` and the
-    // palette dispatcher already treat the dictation PID as authoritative
-    // for "another Minutes is dictating", so this gate stays consistent.
-    if state.dictation_active.load(Ordering::Relaxed) || dictation_pid_active() {
-        return Err("Dictation in progress — stop it first".into());
-    }
+    reserve_recording_launch(state).map_err(|error| reject_recording_launch(state, error))?;
 
-    state.starting.store(true, Ordering::Relaxed);
+    spawn_reserved_recording(
+        app,
+        state,
+        mode,
+        requested_intent,
+        allow_degraded,
+        requested_title,
+        language_override,
+        hotkey_runtime,
+        discard_short_hotkey_capture,
+    );
+
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_reserved_recording(
+    app: tauri::AppHandle,
+    state: &AppState,
+    mode: CaptureMode,
+    requested_intent: Option<RecordingIntent>,
+    allow_degraded: bool,
+    requested_title: Option<String>,
+    language_override: Option<String>,
+    hotkey_runtime: Option<Arc<Mutex<HotkeyRuntime>>>,
+    discard_short_hotkey_capture: Option<Arc<AtomicBool>>,
+) {
     let rec = state.recording.clone();
     let starting = state.starting.clone();
     let stop = state.stop_flag.clone();
@@ -5246,8 +5305,6 @@ pub fn launch_recording(
         );
         crate::sync_tray_state(&app_done);
     });
-
-    Ok(())
 }
 
 pub fn handle_desktop_control_request(
@@ -5569,30 +5626,14 @@ pub fn cmd_start_recording(
         }),
     );
 
-    // Early-out BEFORE mutating any call-detect session atomics: if another
-    // recording is already in flight, launch_recording will reject this call
-    // anyway, and we must not leave mangled state behind. Previously a
-    // rejected start would still flip `recording_started_by_call_detect` and
-    // cancel an in-flight auto-stop countdown — which is exactly the state
-    // athal7 hit in issue #129: the auto-stop countdown got silently killed
-    // mid-call by a start request that never actually became a recording.
-    if recording_active(&state.recording) || state.starting.load(Ordering::Relaxed) {
-        let error = "Already recording";
-        set_recording_start_error(&state.latest_output, error);
-        return Err(error.into());
-    }
+    // Reserve the start BEFORE mutating any call-detect session atomics.
+    // Otherwise a rejected call-detect start (live transcript/dictation already
+    // active, stale starting flag, etc.) can cancel auto-stop state for a
+    // recording that never actually launched.
+    prepare_cmd_recording_launch(&state, from_call_detect)
+        .map_err(|error| reject_recording_launch(&state, error))?;
 
-    // Session-level flag that scopes the stop_when_call_ends auto-stop only
-    // to recordings started via the call detection banner. Manual starts
-    // never get auto-stopped, even when the config flag is on.
-    state
-        .recording_started_by_call_detect
-        .store(from_call_detect, Ordering::Relaxed);
-    // Starting a fresh recording always cancels any in-flight countdown so
-    // the UI doesn't auto-stop a session the user has already moved past.
-    reset_call_end_countdown(&state);
-
-    match launch_recording(
+    spawn_reserved_recording(
         app,
         &state,
         capture_mode,
@@ -5602,13 +5643,8 @@ pub fn cmd_start_recording(
         language,
         None,
         None,
-    ) {
-        Ok(()) => Ok(()),
-        Err(error) => {
-            set_recording_start_error(&state.latest_output, error.clone());
-            Err(error)
-        }
-    }
+    );
+    Ok(())
 }
 
 /// Reset countdown lifecycle state for a fresh recording/session boundary.
@@ -9901,6 +9937,95 @@ mod tests {
         assert_eq!(notice.title, "Recording not started");
         assert_eq!(notice.path, "");
         assert_eq!(notice.detail, "ScreenCaptureKit tap unavailable");
+    }
+
+    #[test]
+    fn rejected_call_detect_start_does_not_mutate_auto_stop_state() {
+        with_temp_home(|_| {
+            let state = test_app_state();
+            state.live_transcript_active.store(true, Ordering::Relaxed);
+            state
+                .call_end_countdown_active
+                .store(true, Ordering::Relaxed);
+            state
+                .call_end_countdown_cancel
+                .store(false, Ordering::Relaxed);
+            state.call_end_countdown_terminal_state.store(
+                CallEndCountdownTerminalState::UserCancelled as u8,
+                Ordering::Relaxed,
+            );
+
+            let result = prepare_cmd_recording_launch(&state, true);
+
+            assert_eq!(
+                result.unwrap_err(),
+                "Live transcript in progress — stop it first"
+            );
+            assert!(!state.starting.load(Ordering::Relaxed));
+            assert!(!state
+                .recording_started_by_call_detect
+                .load(Ordering::Relaxed));
+            assert!(state.call_end_countdown_active.load(Ordering::Relaxed));
+            assert!(!state.call_end_countdown_cancel.load(Ordering::Relaxed));
+            assert_eq!(
+                CallEndCountdownTerminalState::from_u8(
+                    state
+                        .call_end_countdown_terminal_state
+                        .load(Ordering::Relaxed)
+                ),
+                CallEndCountdownTerminalState::UserCancelled
+            );
+        });
+    }
+
+    #[test]
+    fn call_detect_start_mutates_auto_stop_state_only_after_reservation() {
+        with_temp_home(|_| {
+            let state = test_app_state();
+            state
+                .call_end_countdown_active
+                .store(true, Ordering::Relaxed);
+            state
+                .call_end_countdown_cancel
+                .store(false, Ordering::Relaxed);
+            state.call_end_countdown_terminal_state.store(
+                CallEndCountdownTerminalState::UserCancelled as u8,
+                Ordering::Relaxed,
+            );
+
+            prepare_cmd_recording_launch(&state, true).unwrap();
+
+            assert!(state.starting.load(Ordering::Relaxed));
+            assert!(state
+                .recording_started_by_call_detect
+                .load(Ordering::Relaxed));
+            assert!(!state.call_end_countdown_active.load(Ordering::Relaxed));
+            assert!(state.call_end_countdown_cancel.load(Ordering::Relaxed));
+            assert_eq!(
+                CallEndCountdownTerminalState::from_u8(
+                    state
+                        .call_end_countdown_terminal_state
+                        .load(Ordering::Relaxed)
+                ),
+                CallEndCountdownTerminalState::None
+            );
+
+            state.starting.store(false, Ordering::Relaxed);
+        });
+    }
+
+    #[test]
+    fn rejected_recording_launch_sets_visible_error_notice() {
+        let state = test_app_state();
+
+        let error = reject_recording_launch(&state, "Dictation in progress — stop it first".into());
+
+        assert_eq!(error, "Dictation in progress — stop it first");
+        let notice = state.latest_output.lock().unwrap().clone().unwrap();
+        assert_eq!(notice.kind, "error");
+        assert_eq!(notice.title, "Recording not started");
+        assert_eq!(notice.path, "");
+        assert_eq!(notice.detail, "Dictation in progress — stop it first");
     }
 
     #[test]

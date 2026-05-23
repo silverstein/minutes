@@ -6596,7 +6596,8 @@
 
       const isCapture = notice.kind === 'preserved-capture';
       const isSaved = notice.kind === 'saved';
-      const nextKey = `${notice.kind}:${notice.path}:${notice.jobId || ''}`;
+      const noticeIdentity = notice.path || notice.detail || notice.title || '';
+      const nextKey = `${notice.kind}:${noticeIdentity}:${notice.jobId || ''}`;
       const isNewNotice = nextKey !== lastOutputKey;
       if (isNewNotice) {
         playCue(isSaved ? 'complete' : 'error');

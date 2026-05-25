@@ -195,23 +195,75 @@ export function meetingSearchItem(meeting: MeetingLike) {
   };
 }
 
+/**
+ * Pull the text of a top-level markdown section (e.g. `## Summary`) out of a
+ * meeting body, stopping at the next `## ` heading. Returns undefined when the
+ * section is absent or empty. Used to surface the synthesized summary in
+ * get_meeting's structuredContent without re-parsing the whole transcript.
+ */
+export function extractMarkdownSection(
+  body: string | undefined,
+  heading: string
+): string | undefined {
+  if (!body) return undefined;
+  const lines = body.split(/\r?\n/);
+  const start = lines.findIndex((line) => line.trim() === `## ${heading}`);
+  if (start === -1) return undefined;
+
+  const collected: string[] = [];
+  for (let i = start + 1; i < lines.length; i++) {
+    if (/^##\s/.test(lines[i])) break;
+    collected.push(lines[i]);
+  }
+
+  const text = collected.join("\n").trim();
+  return text.length > 0 ? text : undefined;
+}
+
 export function meetingDetailPayload(input: {
   path: string;
   speaker_map?: unknown;
   recording_health?: unknown;
   overlay_applied?: boolean;
+  title?: unknown;
+  summary?: string;
+  action_items?: unknown;
+  decisions?: unknown;
+  intents?: unknown;
+  body?: string;
 }) {
   const payload: {
     path: string;
     view: "detail";
+    title?: unknown;
+    summary?: string;
+    action_items?: unknown;
+    decisions?: unknown;
+    intents?: unknown;
     speaker_map?: unknown;
     recording_health?: unknown;
     overlay_applied?: boolean;
+    body?: string;
   } = {
     path: input.path,
     view: "detail",
   };
 
+  if (input.title !== undefined) {
+    payload.title = input.title;
+  }
+  if (input.summary !== undefined) {
+    payload.summary = input.summary;
+  }
+  if (input.action_items !== undefined) {
+    payload.action_items = input.action_items;
+  }
+  if (input.decisions !== undefined) {
+    payload.decisions = input.decisions;
+  }
+  if (input.intents !== undefined) {
+    payload.intents = input.intents;
+  }
   if (input.speaker_map !== undefined) {
     payload.speaker_map = input.speaker_map;
   }
@@ -220,6 +272,9 @@ export function meetingDetailPayload(input: {
   }
   if (input.overlay_applied !== undefined) {
     payload.overlay_applied = input.overlay_applied;
+  }
+  if (input.body !== undefined) {
+    payload.body = input.body;
   }
 
   return payload;
@@ -2299,10 +2354,22 @@ registerDocsAppTool(
       // disk is never mutated — the CLI just layers ~/.minutes/overlays.db on
       // top of the parsed frontmatter. If the CLI is unavailable or the call
       // fails, degrade gracefully to raw content.
+      //
+      // structuredContent mirrors what is on disk: the transcript body plus the
+      // synthesized fields (summary, action_items, decisions, intents). The raw
+      // markdown still rides along in content[0].text, but structured-content
+      // consumers and MCP-App hosts that surface structuredContent over the text
+      // block must not be left with an envelope only (issue #255).
       const rawParsed = reader.parseFrontmatter(rawContent, resolved);
       let structured = meetingDetailPayload({
         path: resolved,
         recording_health: (rawParsed?.frontmatter as any)?.recording_health,
+        title: (rawParsed?.frontmatter as any)?.title,
+        summary: extractMarkdownSection(rawParsed?.body, "Summary"),
+        action_items: (rawParsed?.frontmatter as any)?.action_items ?? [],
+        decisions: (rawParsed?.frontmatter as any)?.decisions ?? [],
+        intents: (rawParsed?.frontmatter as any)?.intents ?? [],
+        body: rawParsed?.body ?? rawContent,
       });
 
       if (await isCliAvailable()) {
@@ -2311,11 +2378,24 @@ registerDocsAppTool(
           const parsed = parseJsonOutput(stdout);
           if (parsed && typeof parsed === "object" && !parsed.raw) {
             const speakerMap = parsed.frontmatter?.speaker_map;
+            const body = typeof parsed.body === "string" ? parsed.body : rawParsed?.body;
             structured = meetingDetailPayload({
               path: resolved,
               speaker_map: Array.isArray(speakerMap) ? speakerMap : [],
               recording_health: parsed.frontmatter?.recording_health,
               overlay_applied: Boolean(parsed.overlay_applied),
+              title: parsed.frontmatter?.title,
+              summary: extractMarkdownSection(body, "Summary"),
+              action_items: Array.isArray(parsed.frontmatter?.action_items)
+                ? parsed.frontmatter.action_items
+                : [],
+              decisions: Array.isArray(parsed.frontmatter?.decisions)
+                ? parsed.frontmatter.decisions
+                : [],
+              intents: Array.isArray(parsed.frontmatter?.intents)
+                ? parsed.frontmatter.intents
+                : [],
+              body: body ?? rawContent,
             });
           }
         } catch {

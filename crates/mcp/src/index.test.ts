@@ -9,6 +9,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   buildLiveEventsResourcePayload,
+  extractMarkdownSection,
   LIVE_EVENTS_RESOURCE_URI,
   meetingDetailPayload,
   meetingListItem,
@@ -79,6 +80,74 @@ describe("meeting shape contract", () => {
       recording_health: meeting.frontmatter.recording_health,
       overlay_applied: false,
     });
+  });
+
+  it("surfaces the transcript body and synthesis fields in detail payloads (issue #255)", () => {
+    const actionItems = [{ assignee: "Mat", task: "Ship fix", status: "open" }];
+    const decisions = [{ text: "Enrich structuredContent" }];
+    const intents = [{ kind: "commitment", what: "Reply to contributor", status: "open" }];
+
+    const payload = meetingDetailPayload({
+      path: meeting.path,
+      speaker_map: [],
+      overlay_applied: false,
+      title: "Native Call",
+      summary: "We agreed to fix get_meeting.",
+      action_items: actionItems,
+      decisions,
+      intents,
+      body: "## Summary\n\nWe agreed to fix get_meeting.\n\n## Transcript\n\n[00:00] Hello.",
+    });
+
+    expect(payload).toMatchObject({
+      path: "/tmp/meeting.md",
+      view: "detail",
+      title: "Native Call",
+      summary: "We agreed to fix get_meeting.",
+      action_items: actionItems,
+      decisions,
+      intents,
+    });
+    expect(payload.body).toContain("## Transcript");
+  });
+
+  it("omits synthesis fields entirely when not provided", () => {
+    expect(meetingDetailPayload({ path: meeting.path })).toEqual({
+      path: "/tmp/meeting.md",
+      view: "detail",
+    });
+  });
+});
+
+describe("extractMarkdownSection", () => {
+  const body = [
+    "## Summary",
+    "",
+    "First synthesized line.",
+    "Second synthesized line.",
+    "",
+    "## Decisions",
+    "",
+    "- Ship the fix.",
+    "",
+    "## Transcript",
+    "",
+    "[00:00] Hello.",
+  ].join("\n");
+
+  it("returns a section's text up to the next heading", () => {
+    expect(extractMarkdownSection(body, "Summary")).toBe(
+      "First synthesized line.\nSecond synthesized line."
+    );
+  });
+
+  it("returns undefined for an absent section", () => {
+    expect(extractMarkdownSection(body, "Commitments")).toBeUndefined();
+  });
+
+  it("returns undefined for empty or missing input", () => {
+    expect(extractMarkdownSection(undefined, "Summary")).toBeUndefined();
+    expect(extractMarkdownSection("## Summary\n\n", "Summary")).toBeUndefined();
   });
 });
 

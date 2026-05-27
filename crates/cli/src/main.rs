@@ -1986,9 +1986,12 @@ fn cmd_record(
     let startup_recording_health =
         check_meeting_system_audio_probe(capture_mode, skip_audio_probe, config)?;
 
-    // Check for conflicting live transcript session
+    // Check for conflicting live transcript session. `inspect_pid_file` so a
+    // standalone session holding the PID under a mandatory Windows lock is seen —
+    // otherwise a recording could start alongside it and clobber the shared
+    // `live-transcript.jsonl`. See #258.
     let lt_pid = minutes_core::pid::live_transcript_pid_path();
-    if let Ok(Some(_)) = minutes_core::pid::check_pid_file(&lt_pid) {
+    if minutes_core::pid::inspect_pid_file(&lt_pid).is_active() {
         anyhow::bail!("live transcript in progress — run `minutes stop` first");
     }
 
@@ -2161,7 +2164,7 @@ fn cmd_record(
 }
 
 fn spawn_queue_worker() -> Result<()> {
-    if minutes_core::jobs::current_worker_pid().is_some() {
+    if minutes_core::jobs::worker_active() {
         return Ok(());
     }
 
@@ -2279,40 +2282,43 @@ fn cmd_stop(config: &Config) -> Result<()> {
             Ok(())
         }
         Ok(None) => {
-            // No batch recording — check for live transcript session
+            // No batch recording — check for live transcript session.
+            // `inspect_pid_file` so a session holding the PID under a mandatory
+            // Windows lock is detected (the PID is unreadable there, but the stop
+            // sentinel — polled inline by the live loop — stops it on any
+            // platform). See #258.
             let lt_pid_path = minutes_core::pid::live_transcript_pid_path();
-            match minutes_core::pid::check_pid_file(&lt_pid_path) {
-                Ok(Some(pid)) => {
-                    eprintln!("Stopping live transcript (PID {})...", pid);
-                    minutes_core::pid::write_stop_sentinel()
-                        .map_err(|e| anyhow::anyhow!("failed to write stop sentinel: {}", e))?;
-                    #[cfg(unix)]
-                    {
-                        let rc = unsafe { libc::kill(pid as i32, libc::SIGTERM) };
-                        if rc != 0 {
-                            tracing::warn!("SIGTERM failed for live transcript PID {}", pid);
-                        }
-                    }
-                    // Poll for PID removal
-                    let start = std::time::Instant::now();
-                    eprint!("Finalizing live transcript");
-                    while lt_pid_path.exists()
-                        && start.elapsed() < std::time::Duration::from_secs(30)
-                    {
-                        std::thread::sleep(std::time::Duration::from_millis(500));
-                        eprint!(".");
-                    }
-                    eprintln!();
-                    if lt_pid_path.exists() {
-                        anyhow::bail!("live transcript process did not stop within 30 seconds");
-                    }
-                    eprintln!("Live transcript stopped.");
-                    Ok(())
+            let lt_state = minutes_core::pid::inspect_pid_file(&lt_pid_path);
+            if lt_state.is_active() {
+                match lt_state.pid() {
+                    Some(pid) => eprintln!("Stopping live transcript (PID {})...", pid),
+                    None => eprintln!("Stopping live transcript..."),
                 }
-                _ => {
-                    eprintln!("No recording or live transcript in progress.");
-                    Ok(())
+                minutes_core::pid::write_stop_sentinel()
+                    .map_err(|e| anyhow::anyhow!("failed to write stop sentinel: {}", e))?;
+                #[cfg(unix)]
+                if let Some(pid) = lt_state.pid() {
+                    let rc = unsafe { libc::kill(pid as i32, libc::SIGTERM) };
+                    if rc != 0 {
+                        tracing::warn!("SIGTERM failed for live transcript PID {}", pid);
+                    }
                 }
+                // Poll for PID removal
+                let start = std::time::Instant::now();
+                eprint!("Finalizing live transcript");
+                while lt_pid_path.exists() && start.elapsed() < std::time::Duration::from_secs(30) {
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                    eprint!(".");
+                }
+                eprintln!();
+                if lt_pid_path.exists() {
+                    anyhow::bail!("live transcript process did not stop within 30 seconds");
+                }
+                eprintln!("Live transcript stopped.");
+                Ok(())
+            } else {
+                eprintln!("No recording or live transcript in progress.");
+                Ok(())
             }
         }
         Err(e) => Err(anyhow::anyhow!("{}", e)),

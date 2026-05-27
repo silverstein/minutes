@@ -502,12 +502,11 @@ pub fn write_assistant_context(workspace: &Path, config: &Config) -> Result<(), 
     let assistant_md = generate_assistant_context(config)?;
 
     // Preserve live transcript markers only if a session is actually active (V3).
-    // Don't trust stale markers in the file — verify via PID.
+    // Don't trust stale markers in the file — verify via PID. `inspect_pid_file`
+    // so a session holding the PID under a mandatory Windows lock isn't misread as
+    // inactive (which would strip the live markers mid-session). See #258.
     let lt_pid = minutes_core::pid::live_transcript_pid_path();
-    let live_actually_active = minutes_core::pid::check_pid_file(&lt_pid)
-        .ok()
-        .flatten()
-        .is_some();
+    let live_actually_active = minutes_core::pid::inspect_pid_file(&lt_pid).is_active();
 
     let content = if live_actually_active {
         let marker_start = "<!-- LIVE_TRANSCRIPT_START -->";

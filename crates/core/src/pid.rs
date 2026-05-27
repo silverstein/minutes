@@ -251,6 +251,106 @@ pub fn check_pid_file(path: &Path) -> Result<Option<u32>, PidError> {
     }
 }
 
+/// Outcome of inspecting a PID file that may be held under an exclusive lock.
+///
+/// [`check_pid_file`] reads the PID bytes to decide liveness, which is defeated
+/// on Windows by the very lock that proves liveness: `fs2` locks are *mandatory*
+/// there (`LockFileEx` with `LOCKFILE_EXCLUSIVE_LOCK`), so a read from any other
+/// handle of a file held by [`create_pid_guard`] fails with `ERROR_LOCK_VIOLATION`
+/// and `check_pid_file` collapses a live session to `None`. A held mandatory lock,
+/// however, *proves* the owner is alive — Windows releases file locks when the
+/// owning process exits — so the lock violation is positive liveness evidence
+/// even though the PID value itself is unreadable. On Unix `fs2` uses advisory
+/// `flock`, so the read succeeds and this distinction never arises.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PidFileState {
+    /// PID file present, readable, and the process is alive.
+    Active(u32),
+    /// PID file present but unreadable because the owner holds an exclusive lock
+    /// (Windows mandatory lock). The owner is alive; the PID value is unknown.
+    LockedAlive,
+    /// PID file absent, stale (dead PID — cleaned up), or unreadable for any
+    /// reason other than a lock/sharing violation.
+    Inactive,
+}
+
+impl PidFileState {
+    /// True when a live process holds the PID file, whether the PID was readable
+    /// (`Active`) or the file was locked by its live owner (`LockedAlive`).
+    pub fn is_active(self) -> bool {
+        matches!(self, PidFileState::Active(_) | PidFileState::LockedAlive)
+    }
+
+    /// The owning PID when it could be read. `None` for `LockedAlive` (the lock
+    /// proves liveness but hides the value) and `Inactive`.
+    pub fn pid(self) -> Option<u32> {
+        match self {
+            PidFileState::Active(pid) => Some(pid),
+            _ => None,
+        }
+    }
+}
+
+/// Inspect a PID file, distinguishing a live-but-locked owner (Windows mandatory
+/// lock) from a genuinely absent or stale file. Use this instead of
+/// [`check_pid_file`] for any reader of a PID file held under a persistent
+/// [`create_pid_guard`] lock (e.g. the live-transcript or worker PID), so the
+/// reader is not fooled by Windows file locking. Stale PID files (dead PID) are
+/// cleaned up automatically, mirroring [`check_pid_file`].
+pub fn inspect_pid_file(path: &Path) -> PidFileState {
+    if !path.exists() {
+        return PidFileState::Inactive;
+    }
+
+    match fs::read_to_string(path) {
+        Ok(contents) => match contents.trim().parse::<u32>() {
+            Ok(pid) if is_process_alive(pid) => PidFileState::Active(pid),
+            Ok(pid) => {
+                tracing::warn!(
+                    "stale PID file found at {} (PID {pid} is dead). Cleaning up.",
+                    path.display()
+                );
+                fs::remove_file(path).ok();
+                PidFileState::Inactive
+            }
+            // Present but unparseable (empty/corrupt): treat as not active rather
+            // than guessing a PID.
+            Err(_) => PidFileState::Inactive,
+        },
+        // The read failed. On Windows a mandatory-lock violation means the owner
+        // is alive and holding the lock; any other error is treated conservatively
+        // as inactive (we never claim a live owner without positive evidence).
+        Err(err) if is_lock_violation(&err) => PidFileState::LockedAlive,
+        Err(_) => PidFileState::Inactive,
+    }
+}
+
+/// Whether an I/O error is a Windows byte-range lock violation
+/// (`ERROR_LOCK_VIOLATION` = 33) — the precise way a read of a region held under
+/// `LockFileEx` surfaces. `create_pid_guard` opens the file with shared read
+/// access, so our reader's open succeeds and only the `ReadFile` over the locked
+/// range fails with 33; that is positive proof a live owner holds the lock.
+///
+/// We deliberately do NOT treat `ERROR_SHARING_VIOLATION` (32) as a live owner:
+/// it signals an unrelated incompatible-share opener (antivirus, indexer, backup)
+/// rather than the PID owner's lock, and since this gates start/stop/update
+/// decisions, treating it as "alive" could falsely block recording or stall
+/// `minutes stop`. A bare sharing violation degrades to the safe `Inactive`
+/// default instead. On non-Windows targets `fs2` locks are advisory and reads
+/// never fail this way, so this is always `false`.
+fn is_lock_violation(err: &std::io::Error) -> bool {
+    #[cfg(windows)]
+    {
+        // ERROR_LOCK_VIOLATION
+        err.raw_os_error() == Some(33)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = err;
+        false
+    }
+}
+
 fn read_locked_pid(file: &mut fs::File) -> Result<Option<u32>, PidError> {
     file.seek(SeekFrom::Start(0))?;
 
@@ -848,5 +948,72 @@ mod tests {
 
         remove_pid_file(&pid_path).unwrap();
         assert!(!pid_path.exists());
+    }
+
+    #[test]
+    fn inspect_pid_file_absent_is_inactive() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let path = tempdir.path().join("live-transcript.pid");
+        assert_eq!(inspect_pid_file(&path), PidFileState::Inactive);
+        assert!(!inspect_pid_file(&path).is_active());
+        assert_eq!(inspect_pid_file(&path).pid(), None);
+    }
+
+    #[test]
+    fn inspect_pid_file_live_self_is_active() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let path = tempdir.path().join("live-transcript.pid");
+        std::fs::write(&path, std::process::id().to_string()).unwrap();
+
+        let state = inspect_pid_file(&path);
+        assert!(state.is_active());
+        assert_eq!(state, PidFileState::Active(std::process::id()));
+        assert_eq!(state.pid(), Some(std::process::id()));
+    }
+
+    #[test]
+    fn inspect_pid_file_stale_dead_pid_is_inactive_and_cleaned() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let path = tempdir.path().join("live-transcript.pid");
+        // A high PID that almost certainly isn't a live process (matches the
+        // value used by is_process_alive_returns_false_for_dead_pid). PID 0 is
+        // unusable here: `kill(0, 0)` targets the caller's process group.
+        std::fs::write(&path, "99999999").unwrap();
+
+        assert_eq!(inspect_pid_file(&path), PidFileState::Inactive);
+        assert!(!path.exists(), "stale PID file should be cleaned up");
+    }
+
+    #[test]
+    fn inspect_pid_file_corrupt_is_inactive() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let path = tempdir.path().join("live-transcript.pid");
+        std::fs::write(&path, "not-a-pid").unwrap();
+        assert_eq!(inspect_pid_file(&path), PidFileState::Inactive);
+    }
+
+    /// The fix for #258: a PID file held under a live `create_pid_guard` lock must
+    /// report active. On Unix the read succeeds (`Active`); on Windows the read
+    /// hits the mandatory lock (`LockedAlive`). Either way `is_active()` is true —
+    /// that is the platform-independent invariant the live-transcript readers rely
+    /// on.
+    #[test]
+    fn inspect_pid_file_reports_active_while_guard_is_held() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let path = tempdir.path().join("live-transcript.pid");
+
+        let guard = create_pid_guard(&path).unwrap();
+        let state = inspect_pid_file(&path);
+        assert!(
+            state.is_active(),
+            "a held guard must read as active, got {state:?}"
+        );
+        #[cfg(windows)]
+        assert_eq!(state, PidFileState::LockedAlive);
+        #[cfg(not(windows))]
+        assert_eq!(state, PidFileState::Active(std::process::id()));
+
+        drop(guard);
+        assert_eq!(inspect_pid_file(&path), PidFileState::Inactive);
     }
 }

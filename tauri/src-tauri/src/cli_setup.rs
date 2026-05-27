@@ -716,9 +716,10 @@ pub fn cli_recording_active() -> bool {
         pid::dictation_pid_path(),
         pid::live_transcript_pid_path(),
     ];
-    paths
-        .iter()
-        .any(|p| matches!(pid::check_pid_file(p), Ok(Some(_))))
+    // `inspect_pid_file` so the live-transcript PID — held under a mandatory
+    // Windows lock — isn't misread as inactive, which would let an update install
+    // mid-session. See #258.
+    paths.iter().any(|p| pid::inspect_pid_file(p).is_active())
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

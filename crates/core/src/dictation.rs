@@ -231,9 +231,10 @@ where
         return Err(DictationError::RecordingActive.into());
     }
 
-    // Check for conflicts: live transcript must not be active
+    // Check for conflicts: live transcript must not be active. `inspect_pid_file`
+    // so a session holding the PID under a mandatory Windows lock is detected. #258.
     let lt_pid = pid::live_transcript_pid_path();
-    if let Ok(Some(_)) = pid::check_pid_file(&lt_pid) {
+    if pid::inspect_pid_file(&lt_pid).is_active() {
         return Err(DictationError::LiveTranscriptActive.into());
     }
 

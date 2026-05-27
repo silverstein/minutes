@@ -1992,9 +1992,12 @@ fn run_sidecar_inner_mpsc(
     stop_flag: Arc<AtomicBool>,
     config: &Config,
 ) -> Result<(), MinutesError> {
-    // Guard: don't clobber a standalone live transcript session's JSONL
+    // Guard: don't clobber a standalone live transcript session's JSONL.
+    // `inspect_pid_file` (not `check_pid_file`) so a standalone session holding
+    // the PID file under a mandatory Windows lock is detected — otherwise the
+    // sidecar would write the same `live-transcript.jsonl` concurrently. See #258.
     let lt_pid = pid::live_transcript_pid_path();
-    if let Ok(Some(_)) = pid::check_pid_file(&lt_pid) {
+    if pid::inspect_pid_file(&lt_pid).is_active() {
         tracing::info!("standalone live transcript active — skipping recording sidecar");
         return Ok(());
     }
@@ -2346,26 +2349,35 @@ pub fn read_since_duration(duration_ms: u64) -> Result<Vec<TranscriptLine>, Minu
 /// Detects both standalone live transcript sessions (via live-transcript.pid)
 /// and recording sidecar sessions (recording active + sidecar status file exists).
 pub fn session_status() -> SessionStatus {
-    // Check standalone live transcript PID
+    // Standalone live-transcript PID. Use `inspect_pid_file` rather than
+    // `check_pid_file` so a session that holds the PID file under a mandatory
+    // Windows lock is still detected as active: the in-app reader and the lock
+    // holder are the same process, and a plain read of the locked file fails on
+    // Windows. See `pid::PidFileState` and issue #258.
     let lt_pid = pid::live_transcript_pid_path();
-    let lt_process_pid = pid::check_pid_file(&lt_pid).ok().flatten();
+    let lt_pid_state = pid::inspect_pid_file(&lt_pid);
 
     let recording_pid = pid::check_recording().ok().flatten();
     let status_path = pid::live_transcript_status_path();
     let jsonl_path = pid::live_transcript_jsonl_path();
 
-    derive_session_status(lt_process_pid, recording_pid, &status_path, &jsonl_path)
+    derive_session_status(lt_pid_state, recording_pid, &status_path, &jsonl_path)
 }
 
 fn derive_session_status(
-    lt_process_pid: Option<u32>,
+    lt_pid_state: pid::PidFileState,
     recording_pid: Option<u32>,
     status_path: &Path,
     jsonl_path: &Path,
 ) -> SessionStatus {
     let live_status = read_live_status(status_path);
     let now = Local::now();
-    let standalone_active = lt_process_pid.is_some();
+    // A held PID file (readable on Unix, or lock-detected on Windows) proves the
+    // standalone session is alive. Liveness is NOT gated on heartbeat freshness:
+    // the heartbeat is written inline by the live loop, so a long utterance or
+    // model load can stall it past the staleness window while the session is
+    // perfectly healthy — gating on it would re-introduce the #258 flicker.
+    let standalone_active = lt_pid_state.is_active();
 
     let (sidecar_active, diagnostic) = if recording_pid.is_some() {
         evaluate_recording_sidecar_status(live_status.as_ref(), now)
@@ -2375,7 +2387,9 @@ fn derive_session_status(
 
     let active = standalone_active || sidecar_active;
     let pid = if standalone_active {
-        lt_process_pid
+        // `None` when the session is alive but the PID is unreadable (Windows
+        // locked file) — we report active without fabricating a PID.
+        lt_pid_state.pid()
     } else if sidecar_active {
         recording_pid
     } else {
@@ -3591,7 +3605,7 @@ mod tests {
     fn sidecar_missing_status_is_inactive_with_diagnostic() {
         let dir = tempdir().unwrap();
         let status = derive_session_status(
-            None,
+            pid::PidFileState::Inactive,
             Some(std::process::id()),
             &dir.path().join("live-status.json"),
             &dir.path().join("live.jsonl"),
@@ -3615,7 +3629,7 @@ mod tests {
         std::fs::write(&status_path, serde_json::to_string(&status).unwrap()).unwrap();
 
         let status = derive_session_status(
-            None,
+            pid::PidFileState::Inactive,
             Some(std::process::id()),
             &status_path,
             &dir.path().join("live.jsonl"),
@@ -3638,7 +3652,7 @@ mod tests {
         std::fs::write(&status_path, serde_json::to_string(&status).unwrap()).unwrap();
 
         let status = derive_session_status(
-            None,
+            pid::PidFileState::Inactive,
             Some(std::process::id()),
             &status_path,
             &dir.path().join("live.jsonl"),
@@ -3836,7 +3850,7 @@ mod tests {
         std::fs::write(&status_path, serde_json::to_string(&status).unwrap()).unwrap();
 
         let status = derive_session_status(
-            None,
+            pid::PidFileState::Inactive,
             Some(std::process::id()),
             &status_path,
             &dir.path().join("live.jsonl"),
@@ -3859,7 +3873,7 @@ mod tests {
         std::fs::write(&status_path, serde_json::to_string(&status).unwrap()).unwrap();
 
         let status = derive_session_status(
-            None,
+            pid::PidFileState::Inactive,
             Some(std::process::id()),
             &status_path,
             &dir.path().join("live.jsonl"),
@@ -3880,7 +3894,7 @@ mod tests {
         std::fs::write(&status_path, serde_json::to_string(&status).unwrap()).unwrap();
 
         let status = derive_session_status(
-            None,
+            pid::PidFileState::Inactive,
             Some(std::process::id()),
             &status_path,
             &dir.path().join("live.jsonl"),
@@ -3901,8 +3915,12 @@ mod tests {
         let status = live_status_with_state(LiveStatusState::Failed);
         std::fs::write(&status_path, serde_json::to_string(&status).unwrap()).unwrap();
 
-        let status =
-            derive_session_status(None, None, &status_path, &dir.path().join("live.jsonl"));
+        let status = derive_session_status(
+            pid::PidFileState::Inactive,
+            None,
+            &status_path,
+            &dir.path().join("live.jsonl"),
+        );
 
         assert!(!status.active);
         assert_eq!(status.line_count, 0);
@@ -3920,7 +3938,7 @@ mod tests {
         std::fs::write(&status_path, serde_json::to_string(&healthy).unwrap()).unwrap();
 
         let healthy_status = derive_session_status(
-            None,
+            pid::PidFileState::Inactive,
             Some(std::process::id()),
             &status_path,
             &dir.path().join("live.jsonl"),
@@ -3940,7 +3958,7 @@ mod tests {
         std::fs::write(&status_path, serde_json::to_string(&failed).unwrap()).unwrap();
 
         let failed_status = derive_session_status(
-            None,
+            pid::PidFileState::Inactive,
             Some(std::process::id()),
             &status_path,
             &dir.path().join("live.jsonl"),
@@ -3956,5 +3974,112 @@ mod tests {
         assert!(healthy_status.active);
         assert!(!failed_status.active);
         assert_eq!(failed_status.diagnostic.as_deref(), Some("sidecar failed"));
+    }
+
+    /// #258: a standalone session whose PID file is held under a Windows mandatory
+    /// lock (`LockedAlive`, PID unreadable) must report active with real stats and
+    /// `source = Standalone`. The PID is `None` (we don't fabricate it) and no
+    /// "sidecar …" diagnostic leaks onto the standalone path.
+    #[cfg(all(feature = "whisper", feature = "streaming"))]
+    #[test]
+    fn standalone_locked_alive_reports_active_with_stats() {
+        let dir = tempdir().unwrap();
+        let status_path = dir.path().join("live-status.json");
+        let status = live_status_with_state(LiveStatusState::Healthy);
+        std::fs::write(&status_path, serde_json::to_string(&status).unwrap()).unwrap();
+
+        let result = derive_session_status(
+            pid::PidFileState::LockedAlive,
+            None,
+            &status_path,
+            &dir.path().join("live.jsonl"),
+        );
+
+        assert!(result.active);
+        assert_eq!(result.source, Some(TranscriptSource::Standalone));
+        assert_eq!(
+            result.pid, None,
+            "locked PID is unreadable, must not be faked"
+        );
+        assert_eq!(result.line_count, 3);
+        assert_eq!(
+            result.diagnostic, None,
+            "no sidecar diagnostic on standalone"
+        );
+    }
+
+    /// Regression guard for the heartbeat-flicker hazard: standalone liveness comes
+    /// from the held lock, NOT the heartbeat. A `LockedAlive` session with a *stale*
+    /// healthy heartbeat (loop busy on a long utterance) must still report active
+    /// and keep reporting its last-known stats rather than dropping back to 0/0.
+    #[cfg(all(feature = "whisper", feature = "streaming"))]
+    #[test]
+    fn standalone_locked_alive_stays_active_with_stale_heartbeat() {
+        let dir = tempdir().unwrap();
+        let status_path = dir.path().join("live-status.json");
+        let mut status = live_status_with_state(LiveStatusState::Healthy);
+        status.updated_at =
+            Local::now() - ChronoDuration::seconds(SIDECAR_HEALTH_STALE_AFTER_SECS + 5);
+        std::fs::write(&status_path, serde_json::to_string(&status).unwrap()).unwrap();
+
+        let result = derive_session_status(
+            pid::PidFileState::LockedAlive,
+            None,
+            &status_path,
+            &dir.path().join("live.jsonl"),
+        );
+
+        assert!(
+            result.active,
+            "lock proves liveness independent of heartbeat"
+        );
+        assert_eq!(result.source, Some(TranscriptSource::Standalone));
+        assert_eq!(result.line_count, 3);
+    }
+
+    /// The readable-PID standalone path (Unix, or Windows when not self-locked)
+    /// reports the real PID alongside `source = Standalone`.
+    #[cfg(all(feature = "whisper", feature = "streaming"))]
+    #[test]
+    fn standalone_active_pid_reports_pid_and_source() {
+        let dir = tempdir().unwrap();
+        let status_path = dir.path().join("live-status.json");
+        let status = live_status_with_state(LiveStatusState::Healthy);
+        std::fs::write(&status_path, serde_json::to_string(&status).unwrap()).unwrap();
+
+        let result = derive_session_status(
+            pid::PidFileState::Active(4321),
+            None,
+            &status_path,
+            &dir.path().join("live.jsonl"),
+        );
+
+        assert!(result.active);
+        assert_eq!(result.source, Some(TranscriptSource::Standalone));
+        assert_eq!(result.pid, Some(4321));
+        assert_eq!(result.line_count, 3);
+    }
+
+    /// An inactive standalone PID with no recording reports nothing — unchanged
+    /// behavior, guarding against the fallback over-triggering.
+    #[cfg(all(feature = "whisper", feature = "streaming"))]
+    #[test]
+    fn standalone_inactive_with_no_recording_is_idle() {
+        let dir = tempdir().unwrap();
+        let status_path = dir.path().join("live-status.json");
+        let status = live_status_with_state(LiveStatusState::Healthy);
+        std::fs::write(&status_path, serde_json::to_string(&status).unwrap()).unwrap();
+
+        let result = derive_session_status(
+            pid::PidFileState::Inactive,
+            None,
+            &status_path,
+            &dir.path().join("live.jsonl"),
+        );
+
+        assert!(!result.active);
+        assert_eq!(result.source, None);
+        assert_eq!(result.line_count, 0);
+        assert_eq!(result.duration_secs, 0.0);
     }
 }

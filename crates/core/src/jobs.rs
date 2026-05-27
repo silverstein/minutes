@@ -280,8 +280,19 @@ pub fn create_worker_guard() -> Result<PidGuard, crate::error::PidError> {
     pid::create_pid_guard(&worker_pid_path())
 }
 
+/// The worker PID when readable. NOTE: this cannot detect a `LockedAlive` worker
+/// on Windows (the lock makes the PID unreadable). For a presence check, prefer
+/// [`worker_active`], which is correct on every platform.
 pub fn current_worker_pid() -> Option<u32> {
     pid::check_pid_file(&worker_pid_path()).ok().flatten()
+}
+
+/// Whether a background worker is currently running. Uses `inspect_pid_file` so a
+/// worker holding its PID file under a mandatory Windows lock is still detected —
+/// `current_worker_pid` would read the locked file as absent and let a duplicate
+/// worker spawn. See #258 and `pid::PidFileState`.
+pub fn worker_active() -> bool {
+    pid::inspect_pid_file(&worker_pid_path()).is_active()
 }
 
 pub fn move_capture_into_job(job_id: &str, current_wav: &Path) -> std::io::Result<PathBuf> {

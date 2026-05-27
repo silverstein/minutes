@@ -3724,7 +3724,7 @@ pub fn spawn_processing_worker(
     completion_notifications_enabled: Arc<AtomicBool>,
 ) {
     std::thread::spawn(move || {
-        if minutes_core::jobs::current_worker_pid().is_some() {
+        if minutes_core::jobs::worker_active() {
             sync_processing_indicator(&processing, &processing_stage);
             return;
         }
@@ -11664,14 +11664,20 @@ pub fn cmd_stop_live_transcript(state: tauri::State<AppState>) -> Result<(), Str
             .store(true, Ordering::Relaxed);
         return Ok(());
     }
-    // Check for external live transcript (started from CLI)
+    // Check for external live transcript (started from CLI). `inspect_pid_file`
+    // so a session holding the PID under a mandatory Windows lock is detected; the
+    // stop sentinel (polled inline by the live loop) stops it on any platform, and
+    // the Unix SIGTERM is sent only when the PID is readable. See #258.
     let lt_pid = minutes_core::pid::live_transcript_pid_path();
-    if let Ok(Some(pid)) = minutes_core::pid::check_pid_file(&lt_pid) {
+    let lt_state = minutes_core::pid::inspect_pid_file(&lt_pid);
+    if lt_state.is_active() {
         minutes_core::pid::write_stop_sentinel()
             .map_err(|e| format!("failed to write stop sentinel: {}", e))?;
         #[cfg(unix)]
-        unsafe {
-            libc::kill(pid as i32, libc::SIGTERM);
+        if let Some(pid) = lt_state.pid() {
+            unsafe {
+                libc::kill(pid as i32, libc::SIGTERM);
+            }
         }
         return Ok(());
     }

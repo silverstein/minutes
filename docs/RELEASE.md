@@ -2,15 +2,26 @@
 
 **When shipping a new version, walk through every item in order.**
 
-### 1. Version bump (all 6 must match)
+### 1. Version bump (every source must match)
 ```bash
 # Bump in: Cargo.toml, crates/cli/Cargo.toml, tauri/src-tauri/tauri.conf.json,
 #          crates/mcp/package.json, crates/sdk/package.json, manifest.json
-# Also bump the version string in crates/mcp/src/index.ts (McpServer({ version }))
-# Also bump the minutes-core dep version in crates/cli/Cargo.toml
-# Verify:
+# Also: manifest.mcpb.json  (Claude listing copy; its runtime `version` MUST equal
+#       manifest.json. Only display_name/description/long_description may differ.
+#       The MCP Server CI job's bundle guard fails on version drift here.)
+# Also: crates/mcp/src/index.ts  (const MCP_SERVER_VERSION = "X.Y.Z")
+# Also: the minutes-core dep version in crates/cli/Cargo.toml
+# Also: crates/sdk/package-lock.json AND crates/mcp/package-lock.json
+#       (the package's own "version" field appears twice: at the top and under
+#       packages[""]. `npm version` syncs these; a hand-edited package.json does not.)
+# Then regenerate derived files (pre-push hooks + CI enforce these):
+#   node scripts/sync_site_release_version.mjs   # site/lib/release.ts
+#   node scripts/generate_llms_txt.mjs           # site/public/llms.txt + llms-full.txt
+#   cargo check                                  # refreshes Cargo.lock workspace versions
+# Verify the primary sources:
 grep version Cargo.toml tauri/src-tauri/tauri.conf.json crates/mcp/package.json \
-  crates/sdk/package.json manifest.json && grep 'version:' crates/mcp/src/index.ts
+  crates/sdk/package.json manifest.json manifest.mcpb.json && \
+  grep MCP_SERVER_VERSION crates/mcp/src/index.ts
 ```
 
 **Independent-cadence crates.** `crates/whisper-guard/Cargo.toml` is published to crates.io on its own cadence — it does NOT need to match the main version. Check whether it has unreleased changes before tagging the main release:
@@ -63,27 +74,28 @@ gh run watch $(gh run list --branch main --limit 1 --json databaseId --jq '.[0].
 ```bash
 gh release create vX.Y.Z -t "vX.Y.Z: Short Title" -F notes.md --target main --draft
 ```
-This creates the tag on the remote and triggers the release workflows (`Release CLI Binaries`, `Release macOS`, `Release Windows Desktop`), but does **not** announce the version in subscribers' GitHub feeds and doesn't mark it as "latest". Drafts can be re-published later with a single flag flip.
+This stages the release with its notes, but does **not** create the git tag yet: GitHub creates the tag only when a draft is published. The three release workflows (`Release CLI Binaries`, `Release macOS`, `Release Windows Desktop`) trigger on `push: tags`, so they do NOT run while the release is a draft. The draft also does not announce in subscribers' feeds or mark "latest".
 
-Do NOT `git tag` locally — the race it causes (CI creating the release before notes exist) is exactly what the checklist avoids.
+Do NOT `git tag` locally. The safety here is step 6: it already confirmed `main` CI is green on the exact commit `--target` points to, so publishing cannot announce a commit that failed CI.
 
-### 8. Wait for release workflows to pass
+### 8. Publish the release (creates the tag and triggers the binary workflows)
+```bash
+gh release edit vX.Y.Z --draft=false
+```
+Publishing creates the `vX.Y.Z` tag at the target commit, which fires the three release workflows. `Release macOS` verifies the release exists before uploading, so the release must be published first (you cannot build the binaries against a draft with these triggers). This is also the moment the version shows up in followers' feeds and becomes "latest".
+
+### 9. Wait for the release workflows to upload assets
 ```bash
 gh run list --workflow="Release CLI Binaries" --limit 1
 gh run list --workflow="Release macOS" --limit 1
 gh run list --workflow="Release Windows Desktop" --limit 1
 ```
-If any fail, fix on `main`, `git tag -d vX.Y.Z && git push origin :refs/tags/vX.Y.Z`, re-tag at the new commit, and re-run from step 7. (Cheap because the release is still a draft.)
-
-### 9. Publish the draft
-```bash
-gh release edit vX.Y.Z --draft=false
-```
-Now — and only now — does the version show up in followers' feeds and become the "latest" release.
+They attach the CLI binaries, DMG, Windows installers, updater files (`latest.json`, `Minutes.app.tar.gz`), and `SHA256SUMS.txt`. If one fails, fix on `main`, delete the tag and release (`gh release delete vX.Y.Z --cleanup-tag --yes`), and re-run from step 7 at the new commit. Because main CI was green before the tag, failures here are usually packaging or signing, not code.
 
 ### 10. Build and upload .mcpb
 ```bash
-mcpb pack . minutes.mcpb
+./scripts/pack_mcpb.sh   # use this, not `mcpb pack .`; it swaps manifest.mcpb.json's Claude listing into the bundle
+./scripts/check_mcpb_bundle.sh minutes.mcpb   # same guard CI runs; catches manifest drift before upload
 gh release upload vX.Y.Z minutes.mcpb --clobber
 ```
 

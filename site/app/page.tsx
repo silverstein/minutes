@@ -304,11 +304,10 @@ export default function Home() {
         </p>
 
         <p className="mx-auto mt-4 max-w-[620px] text-[14px] leading-6 text-[var(--text-secondary)]">
-          v{MINUTES_RELEASE_VERSION} repairs native-call recovery on macOS:
-          usable voice/system stems are queued instead of stranded, recovered{" "}
-          <code className="font-mono text-[12px]">.mov</code> captures stay
-          reprocessable beside the meeting markdown, and cleanup now understands
-          native sidecars without double-counting shared stems.
+          v{MINUTES_RELEASE_VERSION} fixes Windows live transcript: a healthy
+          session no longer freezes the in-app timer and line count at 0:00, and
+          a concurrent recording can no longer clobber the live transcript file.
+          macOS and Linux were never affected.
         </p>
 
         <div className="mt-12">

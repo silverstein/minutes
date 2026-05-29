@@ -10,6 +10,9 @@ Minutes is an open-source meeting corpus you own. Record, transcribe, search, an
 
 31 tools • 7 resources • Interactive MCP App dashboard • Prompt templates
 
+**What's new in 0.18.4:**
+• **Windows: the app no longer hangs on quit.** Quitting on Windows (tray Quit, window close, any exit path) could leave the process alive indefinitely: window hidden, tray icon lingering, a Not Responding overlay, with Task Manager the only way out. An unconditional join on the assistant PTY reader thread blocked shutdown because Windows ConPTY never delivers EOF when the child is killed. The join is now bounded and then detached, so quit always completes within a moment. macOS and Linux were never affected. Thanks to Quinn (@mquinn614) for the precise diagnosis and the fix.
+
 **What's new in 0.18.3:**
 • **Windows live transcript no longer reports a frozen session.** On Windows, a live transcript session holds its PID file under a mandatory OS lock, which made status reads fail and report the session as inactive, so the in-app Live timer and line count froze at 0:00 and a concurrent recording could clobber the shared transcript file. Minutes now treats a held lock as proof the session is alive. macOS and Linux were never affected. Thanks to Quinn (@mquinn614) for the report and diagnosis.
 • **Richer MCP `get_meeting` output.** Structured meeting content returned over MCP is more complete.

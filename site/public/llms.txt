@@ -11,7 +11,7 @@ Minutes is an open-source meeting corpus you own. Record, transcribe, search, an
 - License: MIT
 - Languages: Rust (core engine), TypeScript (MCP server)
 - Platforms: darwin, win32, linux
-- Version: 0.18.3
+- Version: 0.18.4
 - Source: https://github.com/silverstein/minutes
 - Website: https://useminutes.app
 - Privacy: https://useminutes.app/privacy

@@ -262,8 +262,7 @@ impl PtyManager {
                 // drop the handle. The reader holds no lock the rest of the
                 // app needs and dies with the process on exit, so detaching is
                 // safe and shutdown can never wedge on it.
-                let deadline =
-                    std::time::Instant::now() + std::time::Duration::from_millis(300);
+                let deadline = std::time::Instant::now() + std::time::Duration::from_millis(300);
                 while !handle.is_finished() && std::time::Instant::now() < deadline {
                     std::thread::sleep(std::time::Duration::from_millis(5));
                 }

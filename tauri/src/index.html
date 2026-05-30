@@ -10360,6 +10360,14 @@
               }
             });
           }
+        } else if (/not found on PATH|not found in PATH|not found in common install/i.test(msg)) {
+          // The assistant needs an external agent CLI (Claude Code by
+          // default). It's OPTIONAL — the rest of the app works without it —
+          // so degrade with a calm note instead of a scary "Could not start"
+          // error for users who don't have an agent installed.
+          console.info('Recall: assistant agent not installed (optional):', msg);
+          recallLoading.querySelector('span').textContent =
+            'AI assistant is optional; install Claude Code to enable it.';
         } else {
           console.error('Recall spawn:', e);
           recallLoading.querySelector('span').textContent = 'Could not start: ' + msg;
@@ -12421,6 +12429,18 @@
 
     // Restore panel state from previous session
     (async () => {
+      // The assistant auto-open below spawns the agent CLI (Claude Code by
+      // default). It's optional — skip the auto-open entirely when no agent
+      // is installed so a fresh install gets a clean main window instead of
+      // an auto-expanded panel it can't use. The assistant is still reachable
+      // manually (it shows the calm "optional" note then).
+      try {
+        const agents = await invoke('cmd_list_agents');
+        if (Array.isArray(agents) && agents.length === 0) {
+          return;
+        }
+      } catch (_) { /* if the check fails, fall through to normal restore */ }
+
       try {
         recallWorkspaceState = await invoke('cmd_get_recall_workspace_state');
       } catch (e) {

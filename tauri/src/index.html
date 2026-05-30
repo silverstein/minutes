@@ -12429,17 +12429,26 @@
 
     // Restore panel state from previous session
     (async () => {
-      // The assistant auto-open below spawns the agent CLI (Claude Code by
-      // default). It's optional — skip the auto-open entirely when no agent
-      // is installed so a fresh install gets a clean main window instead of
-      // an auto-expanded panel it can't use. The assistant is still reachable
-      // manually (it shows the calm "optional" note then).
+      // The assistant auto-open below spawns the *configured* agent CLI
+      // (settings.assistant.agent, default "claude"). It's optional — when
+      // that agent isn't installed, skip ONLY the auto-open so the panel
+      // doesn't pop up and immediately fail to spawn. Everything else in the
+      // restore (recallRatio, last open document, last open meeting) is
+      // untouched. The assistant is still reachable manually, where it shows
+      // the calm "optional" note.
+      //
+      // NOTE: gate on the *configured* agent specifically — cmd_list_agents
+      // also enumerates shells (bash/zsh) that exist on every machine, so a
+      // bare "any agent installed?" check would never report unavailable.
+      let assistantAvailable = true;
       try {
-        const agents = await invoke('cmd_list_agents');
-        if (Array.isArray(agents) && agents.length === 0) {
-          return;
-        }
-      } catch (_) { /* if the check fails, fall through to normal restore */ }
+        const [agents, settings] = await Promise.all([
+          invoke('cmd_list_agents'),
+          invoke('cmd_get_settings'),
+        ]);
+        const configured = settings?.assistant?.agent || 'claude';
+        assistantAvailable = Array.isArray(agents) && agents.some(a => a.name === configured);
+      } catch (_) { /* on any error, assume available and fall through */ }
 
       try {
         recallWorkspaceState = await invoke('cmd_get_recall_workspace_state');
@@ -12448,7 +12457,7 @@
         recallWorkspaceState = null;
       }
       if (!recallWorkspaceState) {
-        if (localStorage.getItem('minutes.recallExpanded') === 'true') {
+        if (assistantAvailable && localStorage.getItem('minutes.recallExpanded') === 'true') {
           setTimeout(() => openRecall('assistant'), 500);
         }
         return;
@@ -12462,7 +12471,7 @@
         }
       }
 
-      if (recallWorkspaceState.recallExpanded) {
+      if (assistantAvailable && recallWorkspaceState.recallExpanded) {
         setTimeout(async () => {
           await openRecall('assistant');
           if (recallWorkspaceState.recallPhase) {

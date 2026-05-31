@@ -7447,6 +7447,74 @@ fn context_switch_prompt(command: &str, mode: &str, title: &str) -> String {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct AgentResolveError {
+    pub name: String,
+    pub unusable_candidates: Vec<PathBuf>,
+}
+
+impl AgentResolveError {
+    fn user_message(&self) -> String {
+        let install_hint = if self.name == "claude" {
+            " Reinstall Claude Code, or choose another assistant in Settings."
+        } else {
+            " Reinstall that assistant CLI, or choose another assistant in Settings."
+        };
+
+        if let Some(path) = self.unusable_candidates.first() {
+            format!(
+                "Recall needs '{}', but the installed copy cannot be run.{} Minutes found the broken copy at {}.",
+                self.name,
+                install_hint,
+                path.display()
+            )
+        } else {
+            let install_hint = if self.name == "claude" {
+                " Install Claude Code, or choose another assistant in Settings."
+            } else {
+                " Install it, or choose another assistant in Settings."
+            };
+            format!(
+                "'{}' was not found on PATH or in common install locations.{} Settings file: {}",
+                self.name,
+                install_hint,
+                user_config_path_for_display(),
+            )
+        }
+    }
+}
+
+fn is_usable_agent_binary(path: &Path) -> bool {
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & 0o111 != 0
+    }
+
+    #[cfg(windows)]
+    {
+        true
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        true
+    }
+}
+
+fn remember_unusable_candidate(candidates: &mut Vec<PathBuf>, path: PathBuf) {
+    if !candidates.iter().any(|existing| existing == &path) {
+        candidates.push(path);
+    }
+}
+
 /// Resolve an agent name or path to an executable.
 ///
 /// Accepts either:
@@ -7457,11 +7525,16 @@ fn context_switch_prompt(command: &str, mode: &str, title: &str) -> String {
 ///
 /// This is intentionally open: users can set `assistant.agent` to any binary
 /// they want, including wrapper scripts or custom agent CLIs.
-pub fn find_agent_binary(name: &str) -> Option<PathBuf> {
+pub fn resolve_agent_binary(name: &str) -> Result<PathBuf, AgentResolveError> {
+    let mut unusable_candidates = Vec::new();
+
     // If it's an absolute path, check it directly
     let as_path = PathBuf::from(name);
     if as_path.is_absolute() && as_path.exists() {
-        return Some(as_path);
+        if is_usable_agent_binary(&as_path) {
+            return Ok(as_path);
+        }
+        remember_unusable_candidate(&mut unusable_candidates, as_path);
     }
 
     // PATH lookup (cross-platform). On Windows this respects PATHEXT and
@@ -7469,7 +7542,10 @@ pub fn find_agent_binary(name: &str) -> Option<PathBuf> {
     // launched from Finder/Explorer often have a minimal PATH, so the
     // fallback below catches common install dirs that aren't on PATH.
     if let Ok(path) = which::which(name) {
-        return Some(path);
+        if is_usable_agent_binary(&path) {
+            return Ok(path);
+        }
+        remember_unusable_candidate(&mut unusable_candidates, path);
     }
 
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp"));
@@ -7511,11 +7587,21 @@ pub fn find_agent_binary(name: &str) -> Option<PathBuf> {
                 candidate.set_extension(ext);
             }
             if candidate.exists() {
-                return Some(candidate);
+                if is_usable_agent_binary(&candidate) {
+                    return Ok(candidate);
+                }
+                remember_unusable_candidate(&mut unusable_candidates, candidate);
             }
         }
     }
-    None
+    Err(AgentResolveError {
+        name: name.into(),
+        unusable_candidates,
+    })
+}
+
+pub fn find_agent_binary(name: &str) -> Option<PathBuf> {
+    resolve_agent_binary(name).ok()
 }
 
 /// Platform-correct path to the user's config file, used in error messages.
@@ -7552,20 +7638,7 @@ pub fn spawn_terminal(
         }
     } else {
         let agent_name = agent_override.unwrap_or(&config.assistant.agent);
-        let agent_bin = find_agent_binary(agent_name).ok_or_else(|| {
-            let install_hint = if agent_name == "claude" {
-                " Install Claude Code with `npm i -g @anthropic-ai/claude-code`."
-            } else {
-                ""
-            };
-            format!(
-                "'{}' not found on PATH or in common install dirs.{} \
-                 Then set the agent in {} under [assistant].",
-                agent_name,
-                install_hint,
-                user_config_path_for_display(),
-            )
-        })?;
+        let agent_bin = resolve_agent_binary(agent_name).map_err(|err| err.user_message())?;
 
         let agent_args = filtered_agent_args(agent_name, &config.assistant.agent_args);
 
@@ -8591,6 +8664,39 @@ mod tests {
         assert_eq!(
             filtered_agent_args("opencode", &args),
             vec!["--model".to_string(), "gpt-5-codex".to_string()]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn agent_binary_resolver_rejects_non_executable_absolute_path() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = TempDir::new().unwrap();
+        let broken = dir.path().join("claude");
+        fs::write(&broken, "").unwrap();
+        fs::set_permissions(&broken, fs::Permissions::from_mode(0o644)).unwrap();
+
+        let err = resolve_agent_binary(broken.to_str().unwrap()).unwrap_err();
+        assert_eq!(err.unusable_candidates, vec![broken.clone()]);
+        assert!(err.user_message().contains("installed copy cannot be run"));
+        assert!(err.user_message().contains("choose another assistant"));
+        assert!(find_agent_binary(broken.to_str().unwrap()).is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn agent_binary_resolver_accepts_executable_absolute_path() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = TempDir::new().unwrap();
+        let executable = dir.path().join("custom-agent");
+        fs::write(&executable, "#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert_eq!(
+            resolve_agent_binary(executable.to_str().unwrap()).unwrap(),
+            executable
         );
     }
 

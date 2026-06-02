@@ -4038,6 +4038,26 @@ fn recovery_title(path: &std::path::Path, fallback: &str) -> String {
         .unwrap_or_else(|| fallback.to_string())
 }
 
+/// A dual-source capture writes `<name>.voice.wav` / `<name>.system.wav`
+/// sidecars next to the primary `<name>.wav`. Those stems are processed as part
+/// of the primary, never on their own, so they must not appear as independent
+/// recovery items when their primary is present: otherwise "Retry all" would
+/// enqueue them as standalone jobs that race (and break) the primary's job. An
+/// orphaned stem with no primary still surfaces so the user can see it.
+fn is_dual_source_stem_with_primary(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+    let Some(dir) = path.parent() else {
+        return false;
+    };
+    [".voice.wav", ".system.wav"].iter().any(|suffix| {
+        name.strip_suffix(suffix)
+            .map(|base| dir.join(format!("{}.wav", base)).exists())
+            .unwrap_or(false)
+    })
+}
+
 fn scan_recovery_items(config: &Config) -> Vec<RecoveryItem> {
     let mut found: Vec<(SystemTime, RecoveryItem)> = Vec::new();
 
@@ -4063,7 +4083,10 @@ fn scan_recovery_items(config: &Config) -> Vec<RecoveryItem> {
     if let Ok(entries) = std::fs::read_dir(&failed_captures) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.is_file() && !is_hidden_or_system_file(&path) {
+            if path.is_file()
+                && !is_hidden_or_system_file(&path)
+                && !is_dual_source_stem_with_primary(&path)
+            {
                 let modified = entry
                     .metadata()
                     .ok()
@@ -4091,7 +4114,10 @@ fn scan_recovery_items(config: &Config) -> Vec<RecoveryItem> {
         if let Ok(entries) = std::fs::read_dir(&failed_dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                if path.is_file() && !is_hidden_or_system_file(&path) {
+                if path.is_file()
+                    && !is_hidden_or_system_file(&path)
+                    && !is_dual_source_stem_with_primary(&path)
+                {
                     let modified = entry
                         .metadata()
                         .ok()
@@ -4113,8 +4139,22 @@ fn scan_recovery_items(config: &Config) -> Vec<RecoveryItem> {
         }
     }
 
+    // Hide items that already have an active (queued or processing) job, so a
+    // retried item disappears from the list without us moving its file out of
+    // the recovery folder. A failed job is terminal (not active), so a failed
+    // retry correctly re-surfaces the file here; a successful one is moved out
+    // by the worker (`preserve_audio_alongside_output`) and is gone regardless.
+    let active_paths: std::collections::HashSet<PathBuf> = minutes_core::jobs::active_jobs()
+        .into_iter()
+        .map(|job| PathBuf::from(job.audio_path))
+        .collect();
+
     found.sort_by_key(|(modified, _)| Reverse(*modified));
-    found.into_iter().map(|(_, item)| item).collect()
+    found
+        .into_iter()
+        .map(|(_, item)| item)
+        .filter(|item| !active_paths.contains(&PathBuf::from(&item.path)))
+        .collect()
 }
 
 /// Handles that `start_recording` clears at the end of a session. Keeps the
@@ -5990,73 +6030,6 @@ fn recovery_retry_mode(retry_type: &str) -> Result<CaptureMode, String> {
     }
 }
 
-fn recovery_queue_path(path: &Path, index: usize) -> PathBuf {
-    let ext = path
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .unwrap_or("wav");
-    let timestamp = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map(|duration| duration.as_millis())
-        .unwrap_or_default();
-    minutes_core::jobs::jobs_dir().join(format!(
-        "recovery-{}-{}-{}.{}",
-        timestamp,
-        std::process::id(),
-        index,
-        ext
-    ))
-}
-
-fn move_recovery_file(src: &Path, dest: &Path) -> std::io::Result<()> {
-    if let Some(parent) = dest.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    match std::fs::rename(src, dest) {
-        Ok(()) => Ok(()),
-        Err(rename_error) => {
-            if let Err(copy_error) = std::fs::copy(src, dest) {
-                return Err(std::io::Error::new(
-                    copy_error.kind(),
-                    format!(
-                        "rename failed: {}; copy fallback failed: {}",
-                        rename_error, copy_error
-                    ),
-                ));
-            }
-            std::fs::remove_file(src)
-        }
-    }
-}
-
-fn move_recovery_stems(src_audio: &Path, dest_audio: &Path) -> std::io::Result<()> {
-    let Some(src_stems) = minutes_core::capture::stem_paths_for(src_audio) else {
-        return Ok(());
-    };
-    let Some(dest_stems) = minutes_core::capture::stem_paths_for(dest_audio) else {
-        return Ok(());
-    };
-
-    if src_stems.voice.exists() {
-        move_recovery_file(&src_stems.voice, &dest_stems.voice)?;
-    }
-    if src_stems.system.exists() {
-        move_recovery_file(&src_stems.system, &dest_stems.system)?;
-    }
-    Ok(())
-}
-
-fn move_recovery_capture_for_queue(src: &Path, index: usize) -> std::io::Result<PathBuf> {
-    let dest = recovery_queue_path(src, index);
-    move_recovery_file(src, &dest)?;
-    if let Err(error) = move_recovery_stems(src, &dest) {
-        move_recovery_file(&dest, src).ok();
-        move_recovery_stems(&dest, src).ok();
-        return Err(error);
-    }
-    Ok(dest)
-}
-
 #[tauri::command]
 pub fn cmd_retry_all_recovery(
     app: tauri::AppHandle,
@@ -6072,7 +6045,7 @@ pub fn cmd_retry_all_recovery(
     let mut first_job = None;
     let mut failed = Vec::new();
 
-    for (index, item) in items.into_iter().enumerate() {
+    for item in items {
         let audio_path = PathBuf::from(&item.path);
         if !audio_path.exists() {
             failed.push(RecoveryRetryFailure {
@@ -6093,28 +6066,16 @@ pub fn cmd_retry_all_recovery(
             }
         };
 
-        let queued_audio_path = match move_recovery_capture_for_queue(&audio_path, index) {
-            Ok(path) => path,
-            Err(error) => {
-                failed.push(RecoveryRetryFailure {
-                    path: item.path,
-                    error: error.to_string(),
-                });
-                continue;
-            }
-        };
-
+        // Queue the recovery file IN PLACE. The worker processes it where it
+        // lives; on success `preserve_audio_alongside_output` moves it out of
+        // the recovery folder, and on failure the worker leaves it there so it
+        // stays recoverable. Moving the file into the jobs dir first could
+        // strand it (invisible to recovery scanning) if the app died mid-queue
+        // or the job later failed, since a failed job never returns the file.
+        // `scan_recovery_items` hides items that already have an active job, so
+        // queued items still leave the list without the risky move.
         match minutes_core::jobs::enqueue_capture_job(
-            mode,
-            None,
-            queued_audio_path.clone(),
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
+            mode, None, audio_path, None, None, None, None, None, None, None,
         ) {
             Ok(job) => {
                 if first_job.is_none() {
@@ -6123,8 +6084,6 @@ pub fn cmd_retry_all_recovery(
                 queued += 1;
             }
             Err(error) => {
-                move_recovery_file(&queued_audio_path, &audio_path).ok();
-                move_recovery_stems(&queued_audio_path, &audio_path).ok();
                 failed.push(RecoveryRetryFailure {
                     path: item.path,
                     error: error.to_string(),
@@ -6169,6 +6128,16 @@ pub fn cmd_retry_recovery(
     let audio_path = PathBuf::from(&path);
     if !audio_path.exists() {
         return Err(format!("Recovery item not found: {}", path));
+    }
+
+    // Don't run the pipeline in place on a file that "Retry all" already
+    // queued: a stale single-retry click on the same item would otherwise
+    // double-process it (or race the queued job's in-place source).
+    if minutes_core::jobs::active_jobs()
+        .iter()
+        .any(|job| PathBuf::from(&job.audio_path) == audio_path)
+    {
+        return Err("This recovery item is already queued for processing.".into());
     }
 
     let ct = match recovery_retry_mode(content_type.as_str())? {
@@ -9351,23 +9320,6 @@ mod tests {
         assert_eq!(items.len(), 2);
         assert!(items.iter().any(|item| item.kind == "watch-failed"));
         assert!(items.iter().any(|item| item.kind == "preserved-capture"));
-    }
-
-    #[test]
-    fn move_recovery_capture_for_queue_preserves_extension_and_removes_source() {
-        with_temp_home(|home| {
-            let failed_dir = home.join("watch").join("failed");
-            std::fs::create_dir_all(&failed_dir).unwrap();
-            let source = failed_dir.join("voice-note.m4a");
-            std::fs::write(&source, "audio").unwrap();
-
-            let queued = move_recovery_capture_for_queue(&source, 0).unwrap();
-
-            assert!(!source.exists());
-            assert_eq!(queued.extension().and_then(|ext| ext.to_str()), Some("m4a"));
-            assert!(queued.starts_with(minutes_core::jobs::jobs_dir()));
-            assert_eq!(std::fs::read_to_string(&queued).unwrap(), "audio");
-        });
     }
 
     #[test]

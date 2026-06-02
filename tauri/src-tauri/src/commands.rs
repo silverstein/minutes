@@ -6909,7 +6909,7 @@ pub fn cmd_retry_recovery(
     // double-process it (or race the queued job's in-place source).
     if minutes_core::jobs::active_jobs()
         .iter()
-        .any(|job| PathBuf::from(&job.audio_path) == audio_path)
+        .any(|job| Path::new(&job.audio_path) == audio_path.as_path())
     {
         return Err("This recovery item is already queued for processing.".into());
     }

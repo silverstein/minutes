@@ -6002,6 +6002,61 @@
       return m > 0 ? `${m}:${String(s).padStart(2, '0')} elapsed` : `${s}s elapsed`;
     }
 
+    function processingJobCounts(jobs) {
+      const list = Array.isArray(jobs) ? jobs : [];
+      return {
+        active: list.filter((job) => job.state !== 'queued').length,
+        queued: list.filter((job) => job.state === 'queued').length,
+        total: list.length,
+      };
+    }
+
+    function processingJobSummaryText(jobs) {
+      const counts = processingJobCounts(jobs);
+      if (!counts.total) return '';
+      const parts = [];
+      if (counts.active) parts.push(`${counts.active} running`);
+      if (counts.queued) parts.push(`${counts.queued} waiting`);
+      return `${parts.join(' · ')}. Jobs run one at a time and continue in the background.`;
+    }
+
+    function queuedJobPosition(job, jobs) {
+      const queued = (Array.isArray(jobs) ? jobs : []).filter((candidate) => candidate.state === 'queued');
+      const index = queued.findIndex((candidate) => candidate.id === job.id);
+      return index >= 0 ? { index: index + 1, total: queued.length } : null;
+    }
+
+    function processingJobDetail(job, jobs) {
+      const counts = processingJobCounts(jobs);
+      const summary = counts.total ? `${counts.active} running · ${counts.queued} waiting` : '';
+      const withSummary = (text) => summary ? `${text} · ${summary}` : text;
+      if (job.error) return job.error;
+      if (job.state === 'queued') {
+        const position = queuedJobPosition(job, jobs);
+        if (position) return withSummary(`Waiting in queue (${position.index} of ${position.total})`);
+        return 'Waiting in queue.';
+      }
+      if (job.state === 'transcribing') {
+        return withSummary(job.stage || 'Transcribing meeting');
+      }
+      if (job.state === 'transcript-only') {
+        return withSummary('Transcript is ready. The richer summary is still running.');
+      }
+      if (job.state === 'complete') return 'Finished processing.';
+      if (job.state === 'needs-review') return 'Transcript needs review. Raw capture was preserved for retry.';
+      return withSummary(job.stage || 'Processing in the background.');
+    }
+
+    function processingJobMeta(job) {
+      const mode = job.mode === 'quick-thought' ? 'Quick thought' : 'Meeting';
+      if (job.state === 'queued') {
+        const elapsed = formatIsoElapsed(job.createdAt);
+        return elapsed ? `${mode} · waiting ${elapsed}` : `${mode} · waiting`;
+      }
+      const elapsed = formatIsoElapsed(job.startedAt || job.createdAt);
+      return elapsed ? `${mode} · running ${elapsed}` : mode;
+    }
+
     function processingStateLabel(job) {
       switch (job.state) {
         case 'queued': return 'Queued';
@@ -6039,10 +6094,7 @@
       }
 
       processingBar.classList.add('has-jobs');
-      processingSummary.textContent =
-        processingJobs.length > 1
-          ? `${processingJobs.length} recordings are cooking in the background.`
-          : 'You can keep recording while this finishes.';
+      processingSummary.textContent = processingJobSummaryText(processingJobs);
 
       for (const job of processingJobs) {
         const card = document.createElement('div');
@@ -6064,17 +6116,11 @@
 
         const detail = document.createElement('div');
         detail.className = 'processing-job-detail';
-        detail.textContent =
-          job.stage
-          || (job.state === 'transcript-only'
-            ? 'Transcript is ready. The richer summary is still running.'
-            : 'Waiting for background processing.');
+        detail.textContent = processingJobDetail(job, processingJobs);
 
         const meta = document.createElement('div');
         meta.className = 'processing-job-meta';
-        const elapsed = formatIsoElapsed(job.startedAt || job.createdAt);
-        const mode = job.mode === 'quick-thought' ? 'Quick thought' : 'Meeting';
-        meta.textContent = elapsed ? `${mode} · ${elapsed}` : mode;
+        meta.textContent = processingJobMeta(job);
 
         card.appendChild(top);
         card.appendChild(detail);
@@ -6176,15 +6222,7 @@
 
           const detail = document.createElement('div');
           detail.className = 'recovery-item-detail';
-          detail.textContent = job.error
-            || job.stage
-            || (job.state === 'complete'
-              ? 'Finished processing.'
-              : job.state === 'needs-review'
-                ? 'Transcript needs review. Raw capture was preserved for retry.'
-                : job.state === 'transcript-only'
-                  ? 'Transcript is ready while enrichment continues.'
-                  : 'Queued for background processing.');
+          detail.textContent = processingJobDetail(job, jobs);
 
           const path = document.createElement('div');
           path.className = 'recovery-item-path';
@@ -6194,7 +6232,11 @@
           meta.className = 'recovery-item-detail';
           meta.style.marginTop = '6px';
           const stamp = formatJobTimestamp(job.finishedAt || job.startedAt || job.createdAt);
-          meta.textContent = `${job.mode === 'quick-thought' ? 'Quick thought' : 'Meeting'}${stamp ? ` · ${stamp}` : ''}${job.wordCount != null ? ` · ${job.wordCount} words` : ''}`;
+          const mode = job.mode === 'quick-thought' ? 'Quick thought' : 'Meeting';
+          const elapsed = ['queued', 'transcribing', 'transcript-only', 'diarizing', 'summarizing', 'saving'].includes(job.state)
+            ? processingJobMeta(job)
+            : mode;
+          meta.textContent = `${elapsed}${stamp ? ` · ${stamp}` : ''}${job.wordCount != null ? ` · ${job.wordCount} words` : ''}`;
 
           const actions = document.createElement('div');
           actions.className = 'recovery-actions';

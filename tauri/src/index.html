@@ -10360,6 +10360,14 @@
               }
             });
           }
+        } else if (/not found on PATH|not found in PATH|not found in common install/i.test(msg)) {
+          // The assistant needs an external agent CLI (Claude Code by
+          // default). It's OPTIONAL — the rest of the app works without it —
+          // so degrade with a calm note instead of a scary "Could not start"
+          // error for users who don't have an agent installed.
+          console.info('Recall: assistant agent not installed (optional):', msg);
+          recallLoading.querySelector('span').textContent =
+            'AI assistant is optional; install Claude Code to enable it.';
         } else {
           console.error('Recall spawn:', e);
           recallLoading.querySelector('span').textContent = 'Could not start: ' + msg;
@@ -12421,6 +12429,27 @@
 
     // Restore panel state from previous session
     (async () => {
+      // The assistant auto-open below spawns the *configured* agent CLI
+      // (settings.assistant.agent, default "claude"). It's optional — when
+      // that agent isn't installed, skip ONLY the auto-open so the panel
+      // doesn't pop up and immediately fail to spawn. Everything else in the
+      // restore (recallRatio, last open document, last open meeting) is
+      // untouched. The assistant is still reachable manually, where it shows
+      // the calm "optional" note.
+      //
+      // NOTE: gate on the *configured* agent specifically — cmd_list_agents
+      // also enumerates shells (bash/zsh) that exist on every machine, so a
+      // bare "any agent installed?" check would never report unavailable.
+      let assistantAvailable = true;
+      try {
+        const [agents, settings] = await Promise.all([
+          invoke('cmd_list_agents'),
+          invoke('cmd_get_settings'),
+        ]);
+        const configured = settings?.assistant?.agent || 'claude';
+        assistantAvailable = Array.isArray(agents) && agents.some(a => a.name === configured);
+      } catch (_) { /* on any error, assume available and fall through */ }
+
       try {
         recallWorkspaceState = await invoke('cmd_get_recall_workspace_state');
       } catch (e) {
@@ -12428,7 +12457,7 @@
         recallWorkspaceState = null;
       }
       if (!recallWorkspaceState) {
-        if (localStorage.getItem('minutes.recallExpanded') === 'true') {
+        if (assistantAvailable && localStorage.getItem('minutes.recallExpanded') === 'true') {
           setTimeout(() => openRecall('assistant'), 500);
         }
         return;
@@ -12442,7 +12471,7 @@
         }
       }
 
-      if (recallWorkspaceState.recallExpanded) {
+      if (assistantAvailable && recallWorkspaceState.recallExpanded) {
         setTimeout(async () => {
           await openRecall('assistant');
           if (recallWorkspaceState.recallPhase) {

@@ -46,6 +46,22 @@ pub enum TranscribeError {
     #[error("failed to load whisper model: {0}")]
     ModelLoadError(String),
 
+    #[error(
+        "whisper model at {path} looks truncated: file is {actual_mb:.0} MB but the {model_name} model should be at least {expected_min_mb:.0} MB. \
+         A previous download was probably interrupted. Fix: rm \"{path}\" && minutes setup --model {model_name}"
+    )]
+    ModelTruncated {
+        /// Display path of the on-disk model file.
+        path: String,
+        /// Model name as passed to `minutes setup` (e.g. `medium`, `large-v3`).
+        model_name: String,
+        /// Observed size of the file on disk, in MB.
+        actual_mb: f64,
+        /// Conservative lower bound from `expected_whisper_model_size_bytes`,
+        /// in MB. Anything below this is treated as truncated.
+        expected_min_mb: f64,
+    },
+
     #[error("audio file is empty or has zero duration")]
     EmptyAudio,
 
@@ -66,6 +82,14 @@ pub enum TranscribeError {
 
     #[error("parakeet transcription failed: {0}")]
     ParakeetFailed(String),
+
+    #[error(
+        "native call capture cannot be transcribed: {reason}. \
+         The .mov produced by macOS SCRecordingOutput decodes to ~2x source duration on this \
+         container shape; transcription requires the sibling .voice.wav and .system.wav PCM \
+         stems to be mixed via ffmpeg first."
+    )]
+    NativeCaptureStemMixUnavailable { reason: String },
 
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),

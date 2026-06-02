@@ -1,6 +1,26 @@
 #!/bin/sh
-# Pre-push hook: run the same clippy check CI uses.
-# Prevents the recurring "unused import" / "unused variable" CI failures.
+# Pre-push hook: catch the same drift CI surfaces, before the push lands.
+#
+# Three checks, all fast, none gated by staged diff (pre-push runs after
+# commits are made — there is nothing staged to diff). The earlier version
+# of this hook gated the agent-docs check on `git diff --cached` which
+# meant it never fired at push time; the v0.16.5 release flow tripped over
+# that twice in one session, once for site/lib/release.ts drift and once
+# for llms.txt drift. Removing the gate is cheaper than getting it right.
+
+# Run rustfmt --check first. Cheap (no compile), fail-fast, and historically
+# the gap that bit us: 2026-05-10's silero_smoothing.rs + silero_vad.rs from
+# the VAD refactor pushed three trivial rustfmt drifts (auto-fixed in 9f80407)
+# that clippy didn't catch but CI's `Format check` job did. The hook used to
+# run only clippy + drift checks; without this line, any fmt drift sails
+# through to CI red.
+echo "Running cargo fmt --check..."
+cargo fmt --all -- --check 2>&1
+if [ $? -ne 0 ]; then
+    echo ""
+    echo "Format drift — run: cargo fmt --all"
+    exit 1
+fi
 
 echo "Running clippy (--no-default-features -D warnings)..."
 cargo clippy --all --no-default-features -- -D warnings 2>&1
@@ -10,13 +30,27 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
-# Agent-surface generated docs check for skill/plugin changes.
-if git diff --name-only --cached 2>/dev/null | grep -qE 'plugins/minutes/(skills|hooks|agents|packs)/|agents/skills/minutes/|tooling/skills/|site/lib/skills-catalog\.json|scripts/generate_llms_txt\.mjs'; then
+# site/lib/release.ts is generated from manifest.json + test counts. Drift
+# fails CI's `Site Release Link Consistency` job. Cheap to re-check.
+if [ -f scripts/sync_site_release_version.mjs ]; then
+    echo "Running site release constants check..."
+    node scripts/sync_site_release_version.mjs --check 2>&1
+    if [ $? -ne 0 ]; then
+        echo ""
+        echo "site/lib/release.ts is stale. Run: node scripts/sync_site_release_version.mjs"
+        exit 1
+    fi
+fi
+
+# llms.txt + the docs/* JSON outputs are generated from the skill catalog
+# and manifest. Drift fails CI's `Agent Docs (llms.txt) Consistency` and
+# `Agents Skill Sync` jobs.
+if [ -f scripts/generate_llms_txt.mjs ]; then
     echo "Running agent docs consistency check..."
     node scripts/generate_llms_txt.mjs --check 2>&1
     if [ $? -ne 0 ]; then
         echo ""
-        echo "Agent docs are stale — regenerate before pushing."
+        echo "Agent docs are stale. Run: node scripts/generate_llms_txt.mjs"
         exit 1
     fi
 fi

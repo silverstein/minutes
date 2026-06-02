@@ -1021,12 +1021,17 @@ fn summarize_with_agent_impl(
     template: Option<&Template>,
     agent_cmd: String,
 ) -> Result<Summary, Box<dyn std::error::Error>> {
+    // Honor the user-configurable timeout. The default (300s) lives in
+    // `SummarizationConfig::default()`. Long transcripts on local agent
+    // CLIs (e.g. opencode against a 60k+ char meeting) regularly need
+    // more than five minutes; users can raise this in `config.toml`.
+    // See issue #243.
     summarize_with_agent_impl_timeout(
         transcript,
         config,
         template,
         agent_cmd,
-        std::time::Duration::from_secs(300),
+        std::time::Duration::from_secs(config.summarization.agent_timeout_secs),
     )
 }
 

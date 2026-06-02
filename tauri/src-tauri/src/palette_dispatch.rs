@@ -222,11 +222,11 @@ pub(crate) fn backend_flags(state: &AppState) -> StateFlags {
     }
 
     let live_in_app = state.live_transcript_active.load(Ordering::Relaxed);
+    // `inspect_pid_file` so a CLI-started session holding the PID under a mandatory
+    // Windows lock still sets the LIVE_TRANSCRIPT flag. See #258.
     let standalone_live_pid =
-        minutes_core::pid::check_pid_file(&minutes_core::pid::live_transcript_pid_path())
-            .ok()
-            .flatten()
-            .is_some();
+        minutes_core::pid::inspect_pid_file(&minutes_core::pid::live_transcript_pid_path())
+            .is_active();
     if live_in_app || standalone_live_pid {
         f = f.union(StateFlags::LIVE_TRANSCRIPT);
     }

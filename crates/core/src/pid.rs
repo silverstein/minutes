@@ -251,6 +251,106 @@ pub fn check_pid_file(path: &Path) -> Result<Option<u32>, PidError> {
     }
 }
 
+/// Outcome of inspecting a PID file that may be held under an exclusive lock.
+///
+/// [`check_pid_file`] reads the PID bytes to decide liveness, which is defeated
+/// on Windows by the very lock that proves liveness: `fs2` locks are *mandatory*
+/// there (`LockFileEx` with `LOCKFILE_EXCLUSIVE_LOCK`), so a read from any other
+/// handle of a file held by [`create_pid_guard`] fails with `ERROR_LOCK_VIOLATION`
+/// and `check_pid_file` collapses a live session to `None`. A held mandatory lock,
+/// however, *proves* the owner is alive — Windows releases file locks when the
+/// owning process exits — so the lock violation is positive liveness evidence
+/// even though the PID value itself is unreadable. On Unix `fs2` uses advisory
+/// `flock`, so the read succeeds and this distinction never arises.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PidFileState {
+    /// PID file present, readable, and the process is alive.
+    Active(u32),
+    /// PID file present but unreadable because the owner holds an exclusive lock
+    /// (Windows mandatory lock). The owner is alive; the PID value is unknown.
+    LockedAlive,
+    /// PID file absent, stale (dead PID — cleaned up), or unreadable for any
+    /// reason other than a lock/sharing violation.
+    Inactive,
+}
+
+impl PidFileState {
+    /// True when a live process holds the PID file, whether the PID was readable
+    /// (`Active`) or the file was locked by its live owner (`LockedAlive`).
+    pub fn is_active(self) -> bool {
+        matches!(self, PidFileState::Active(_) | PidFileState::LockedAlive)
+    }
+
+    /// The owning PID when it could be read. `None` for `LockedAlive` (the lock
+    /// proves liveness but hides the value) and `Inactive`.
+    pub fn pid(self) -> Option<u32> {
+        match self {
+            PidFileState::Active(pid) => Some(pid),
+            _ => None,
+        }
+    }
+}
+
+/// Inspect a PID file, distinguishing a live-but-locked owner (Windows mandatory
+/// lock) from a genuinely absent or stale file. Use this instead of
+/// [`check_pid_file`] for any reader of a PID file held under a persistent
+/// [`create_pid_guard`] lock (e.g. the live-transcript or worker PID), so the
+/// reader is not fooled by Windows file locking. Stale PID files (dead PID) are
+/// cleaned up automatically, mirroring [`check_pid_file`].
+pub fn inspect_pid_file(path: &Path) -> PidFileState {
+    if !path.exists() {
+        return PidFileState::Inactive;
+    }
+
+    match fs::read_to_string(path) {
+        Ok(contents) => match contents.trim().parse::<u32>() {
+            Ok(pid) if is_process_alive(pid) => PidFileState::Active(pid),
+            Ok(pid) => {
+                tracing::warn!(
+                    "stale PID file found at {} (PID {pid} is dead). Cleaning up.",
+                    path.display()
+                );
+                fs::remove_file(path).ok();
+                PidFileState::Inactive
+            }
+            // Present but unparseable (empty/corrupt): treat as not active rather
+            // than guessing a PID.
+            Err(_) => PidFileState::Inactive,
+        },
+        // The read failed. On Windows a mandatory-lock violation means the owner
+        // is alive and holding the lock; any other error is treated conservatively
+        // as inactive (we never claim a live owner without positive evidence).
+        Err(err) if is_lock_violation(&err) => PidFileState::LockedAlive,
+        Err(_) => PidFileState::Inactive,
+    }
+}
+
+/// Whether an I/O error is a Windows byte-range lock violation
+/// (`ERROR_LOCK_VIOLATION` = 33) — the precise way a read of a region held under
+/// `LockFileEx` surfaces. `create_pid_guard` opens the file with shared read
+/// access, so our reader's open succeeds and only the `ReadFile` over the locked
+/// range fails with 33; that is positive proof a live owner holds the lock.
+///
+/// We deliberately do NOT treat `ERROR_SHARING_VIOLATION` (32) as a live owner:
+/// it signals an unrelated incompatible-share opener (antivirus, indexer, backup)
+/// rather than the PID owner's lock, and since this gates start/stop/update
+/// decisions, treating it as "alive" could falsely block recording or stall
+/// `minutes stop`. A bare sharing violation degrades to the safe `Inactive`
+/// default instead. On non-Windows targets `fs2` locks are advisory and reads
+/// never fail this way, so this is always `false`.
+fn is_lock_violation(err: &std::io::Error) -> bool {
+    #[cfg(windows)]
+    {
+        // ERROR_LOCK_VIOLATION
+        err.raw_os_error() == Some(33)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = err;
+        false
+    }
+}
+
 fn read_locked_pid(file: &mut fs::File) -> Result<Option<u32>, PidError> {
     file.seek(SeekFrom::Start(0))?;
 
@@ -567,9 +667,34 @@ pub struct RecordingStatus {
     pub wav_path: Option<String>,
 }
 
-/// Get current recording status.
+/// Get current recording status. Convenience wrapper that fetches its own
+/// active-jobs snapshot. Hot-path callers that already have the snapshot
+/// should call [`status_with_active_jobs`] instead — each `active_jobs()`
+/// call walks `~/.minutes/jobs/` from disk, and a single status build
+/// otherwise scans the dir up to three times.
 pub fn status() -> RecordingStatus {
-    let jobs_summary = crate::jobs::processing_summary();
+    let active_jobs = crate::jobs::active_jobs();
+    status_with_active_jobs(&active_jobs)
+}
+
+/// Build a `RecordingStatus` from a pre-fetched `active_jobs` snapshot.
+///
+/// `status_value` in the Tauri commands layer polls at 1 Hz during a
+/// recording. Each invocation needs to see the current set of in-flight
+/// jobs once for its own JSON payload, and historically also passed
+/// through `status()` which fetched the same set twice more (via
+/// `processing_summary` and `active_job_count`). Threading the snapshot
+/// through collapses three full directory walks into one — the user's
+/// jobs/ directory grows without bound as meetings accumulate, so this
+/// is meaningful for power users with hundreds of past meetings.
+///
+/// Ordering precondition: `active_jobs` must be in the order produced by
+/// [`crate::jobs::active_jobs`] — active < queued < terminal, then
+/// `created_at` descending. The first element is taken as the in-flight
+/// summary; an unsorted slice will surface the wrong job.
+pub fn status_with_active_jobs(active_jobs: &[crate::jobs::ProcessingJob]) -> RecordingStatus {
+    let jobs_summary = active_jobs.first().cloned();
+    let job_count = active_jobs.len();
     let processing = jobs_summary
         .as_ref()
         .map(|job| ProcessingStatus {
@@ -582,7 +707,7 @@ pub fn status() -> RecordingStatus {
                 .clone()
                 .or_else(|| job.output_path.as_ref().map(|path| path.to_string())),
             job_id: Some(job.id.clone()),
-            job_count: crate::jobs::active_job_count(),
+            job_count,
         })
         .unwrap_or_else(read_processing_status);
     match check_recording() {
@@ -678,6 +803,100 @@ mod tests {
     }
 
     #[test]
+    fn status_with_active_jobs_uses_slice_as_source_of_truth() {
+        // Locks in the perf-fix contract: status_with_active_jobs reads job
+        // count and summary fields off the passed-in slice instead of going
+        // back to disk. Important — this is what removes 2 of the 3 directory
+        // walks per UI status poll.
+        let _guard = crate::test_home_env_lock();
+        let job = crate::jobs::ProcessingJob {
+            id: "job-status-check".into(),
+            mode: CaptureMode::Meeting,
+            content_type: crate::markdown::ContentType::Meeting,
+            title: Some("Status check job".into()),
+            audio_path: "/tmp/status.wav".into(),
+            output_path: None,
+            state: crate::jobs::JobState::Transcribing,
+            stage: Some("Transcribing meeting".into()),
+            created_at: chrono::Local::now(),
+            started_at: Some(chrono::Local::now()),
+            finished_at: None,
+            notice_dismissed_at: None,
+            recording_started_at: None,
+            recording_finished_at: None,
+            context_session_id: None,
+            user_notes: None,
+            pre_context: None,
+            calendar_event: None,
+            template_slug: None,
+            recording_health: None,
+            word_count: None,
+            error: None,
+            owner_pid: Some(4242),
+            retry_count: 0,
+        };
+        let jobs = vec![job];
+        let status = status_with_active_jobs(&jobs);
+        assert!(status.processing);
+        assert_eq!(
+            status.processing_job_id.as_deref(),
+            Some("job-status-check")
+        );
+        assert_eq!(status.processing_job_count, 1);
+        assert_eq!(status.processing_title.as_deref(), Some("Status check job"));
+        assert_eq!(
+            status.processing_stage.as_deref(),
+            Some("Transcribing meeting")
+        );
+
+        let empty: Vec<crate::jobs::ProcessingJob> = Vec::new();
+        let empty_status = status_with_active_jobs(&empty);
+        assert_eq!(empty_status.processing_job_count, 0);
+        assert_eq!(empty_status.processing_job_id, None);
+    }
+
+    #[test]
+    fn status_with_active_jobs_takes_first_element_as_summary() {
+        // Locks in that the function trusts caller-provided ordering.
+        // active_jobs() returns active < queued < terminal then created_at
+        // desc; the active in-flight job must surface as the summary.
+        let _guard = crate::test_home_env_lock();
+        let mk = |id: &str, state: crate::jobs::JobState, title: &str| crate::jobs::ProcessingJob {
+            id: id.into(),
+            mode: CaptureMode::Meeting,
+            content_type: crate::markdown::ContentType::Meeting,
+            title: Some(title.into()),
+            audio_path: format!("/tmp/{id}.wav"),
+            output_path: None,
+            state,
+            stage: state.default_stage(),
+            created_at: chrono::Local::now(),
+            started_at: None,
+            finished_at: None,
+            notice_dismissed_at: None,
+            recording_started_at: None,
+            recording_finished_at: None,
+            context_session_id: None,
+            user_notes: None,
+            pre_context: None,
+            calendar_event: None,
+            template_slug: None,
+            recording_health: None,
+            word_count: None,
+            error: None,
+            owner_pid: None,
+            retry_count: 0,
+        };
+        let active = mk("job-a", crate::jobs::JobState::Transcribing, "Active job");
+        let queued = mk("job-q", crate::jobs::JobState::Queued, "Queued job");
+        let jobs = vec![active, queued];
+        let status = status_with_active_jobs(&jobs);
+        assert_eq!(status.processing_job_id.as_deref(), Some("job-a"));
+        assert_eq!(status.processing_title.as_deref(), Some("Active job"));
+        assert_eq!(status.processing_job_count, 2);
+    }
+
+    #[test]
     fn sentinel_lifecycle() {
         let _guard = crate::test_home_env_lock();
         // Ensure clean state
@@ -729,5 +948,72 @@ mod tests {
 
         remove_pid_file(&pid_path).unwrap();
         assert!(!pid_path.exists());
+    }
+
+    #[test]
+    fn inspect_pid_file_absent_is_inactive() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let path = tempdir.path().join("live-transcript.pid");
+        assert_eq!(inspect_pid_file(&path), PidFileState::Inactive);
+        assert!(!inspect_pid_file(&path).is_active());
+        assert_eq!(inspect_pid_file(&path).pid(), None);
+    }
+
+    #[test]
+    fn inspect_pid_file_live_self_is_active() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let path = tempdir.path().join("live-transcript.pid");
+        std::fs::write(&path, std::process::id().to_string()).unwrap();
+
+        let state = inspect_pid_file(&path);
+        assert!(state.is_active());
+        assert_eq!(state, PidFileState::Active(std::process::id()));
+        assert_eq!(state.pid(), Some(std::process::id()));
+    }
+
+    #[test]
+    fn inspect_pid_file_stale_dead_pid_is_inactive_and_cleaned() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let path = tempdir.path().join("live-transcript.pid");
+        // A high PID that almost certainly isn't a live process (matches the
+        // value used by is_process_alive_returns_false_for_dead_pid). PID 0 is
+        // unusable here: `kill(0, 0)` targets the caller's process group.
+        std::fs::write(&path, "99999999").unwrap();
+
+        assert_eq!(inspect_pid_file(&path), PidFileState::Inactive);
+        assert!(!path.exists(), "stale PID file should be cleaned up");
+    }
+
+    #[test]
+    fn inspect_pid_file_corrupt_is_inactive() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let path = tempdir.path().join("live-transcript.pid");
+        std::fs::write(&path, "not-a-pid").unwrap();
+        assert_eq!(inspect_pid_file(&path), PidFileState::Inactive);
+    }
+
+    /// The fix for #258: a PID file held under a live `create_pid_guard` lock must
+    /// report active. On Unix the read succeeds (`Active`); on Windows the read
+    /// hits the mandatory lock (`LockedAlive`). Either way `is_active()` is true —
+    /// that is the platform-independent invariant the live-transcript readers rely
+    /// on.
+    #[test]
+    fn inspect_pid_file_reports_active_while_guard_is_held() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let path = tempdir.path().join("live-transcript.pid");
+
+        let guard = create_pid_guard(&path).unwrap();
+        let state = inspect_pid_file(&path);
+        assert!(
+            state.is_active(),
+            "a held guard must read as active, got {state:?}"
+        );
+        #[cfg(windows)]
+        assert_eq!(state, PidFileState::LockedAlive);
+        #[cfg(not(windows))]
+        assert_eq!(state, PidFileState::Active(std::process::id()));
+
+        drop(guard);
+        assert_eq!(inspect_pid_file(&path), PidFileState::Inactive);
     }
 }

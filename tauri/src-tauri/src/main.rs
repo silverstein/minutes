@@ -269,6 +269,19 @@ fn show_main_window(app: &tauri::AppHandle) {
             use window_vibrancy::{apply_vibrancy, NSVisualEffectMaterial};
             apply_vibrancy(&win, NSVisualEffectMaterial::Sidebar, None, None).ok();
         }
+        // Re-seed the tray appearance from the fresh window's theme. In
+        // normal flow CloseRequested hides instead of destroys (see
+        // on_window_event for "main"), so this branch is rare — but if
+        // the main window was ever destroyed and the system appearance
+        // flipped while it was absent, `ThemeChanged` never fired and the
+        // cached state is stale. Reseed + repaint here is idempotent
+        // when the cache is already correct (codex diff-review P2).
+        if let Some(state) = app.try_state::<TrayAppearanceState>() {
+            if let Ok(theme) = win.theme() {
+                state.set(TrayAppearance::from_theme(theme));
+                sync_tray_appearance(app);
+            }
+        }
     }
 }
 
@@ -324,44 +337,284 @@ pub fn show_terminal_window(app: &tauri::AppHandle, session_id: &str, title: &st
     }
 }
 
-/// Update tray to reflect recording state
-pub fn update_tray_state(app: &tauri::AppHandle, is_recording: bool) {
-    update_tray_state_with_mode(app, is_recording, false);
+/// Cloned references to the tray's recording-related menu items, registered
+/// via `app.manage()` after menu construction so any recording-state change
+/// (regardless of source — tray click, main window, hotkey, CLI, call-detect,
+/// palette) can flip the menu items' enabled state through the central
+/// `sync_tray_state` function.
+///
+/// Without this, items built with `MenuItem::with_id(..., enabled, ...)` are
+/// frozen in their startup state because `enabled` is only consulted at
+/// construction time. Issue #223 surfaced this: stop was always grayed out
+/// when recordings started from outside the tray.
+///
+/// Tauri 2's `MenuItem<R>` is `Send + Sync` (it's `Arc<MenuItemInner<R>>`
+/// internally with explicit unsafe impls; all setter operations marshal back
+/// to the main thread), so no extra wrapping is needed.
+pub struct TrayMenuHandles {
+    pub record: tauri::menu::MenuItem<tauri::Wry>,
+    pub quick_thought: tauri::menu::MenuItem<tauri::Wry>,
+    pub stop: tauri::menu::MenuItem<tauri::Wry>,
 }
 
-pub fn update_tray_state_with_mode(app: &tauri::AppHandle, is_active: bool, is_live: bool) {
-    if let Some(tray) = app.tray_by_id("minutes-tray") {
-        let icon_bytes: &[u8] = if is_live {
-            include_bytes!("../icons/icon-live.png")
-        } else if is_active {
-            include_bytes!("../icons/icon-recording.png")
-        } else {
-            include_bytes!("../icons/icon-tray.png")
-        };
-        if let Ok(icon) = tauri::image::Image::from_bytes(icon_bytes) {
-            tray.set_icon(Some(icon)).ok();
-            tray.set_icon_as_template(!is_active).ok();
+/// The active "recording-class" activity that the tray reflects. Each
+/// acquisition path (`launch_recording`, `try_acquire_live`,
+/// `try_acquire_dictation`) gates against the other two — but those gates
+/// are check-then-CAS across separate atomics, so under concurrent starts
+/// the cross-mode race window can briefly leave two flags set. The core
+/// layer still serializes the actual capture session via PID + flock
+/// (see `minutes_core::pid` and the run-start checks in `dictation::run` /
+/// `live_transcript::run`), so the underlying audio stream is exclusive
+/// even when the in-app atomics drift. The losing session's flag clears
+/// when its `run` fails and its RAII guard drops, re-syncing the tray.
+///
+/// `derive_tray_activity` defines a deterministic priority order
+/// (Recording > Live > Dictation > Idle) so the tray renders coherently
+/// during the brief drift window. Properly closing the cross-mode race
+/// needs a single serialized lifecycle primitive (e.g. an `AtomicU8` mode
+/// CAS or a mutex around mode reservation) — out of scope here, tracked
+/// for follow-up.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum TrayActivity {
+    Idle,
+    Recording,
+    Live,
+    Dictation,
+}
+
+/// Inferred macOS menu-bar appearance. Honestly a proxy: we read the app's
+/// `NSApplication.effectiveAppearance` via Tauri's `Window::theme()` API,
+/// which is the system Aqua/DarkAqua choice — NOT the status item's actual
+/// rendering background (which can drift in translucent / wallpaper-tinted
+/// menu bar configurations). It's a good-enough heuristic for the common
+/// case (status items track system appearance on stock macOS), which beats
+/// the current state of a low-contrast icon on every dark menu bar.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum TrayAppearance {
+    Light,
+    Dark,
+}
+
+impl TrayAppearance {
+    fn from_theme(theme: tauri::Theme) -> Self {
+        // Tauri's Theme has Light/Dark/_NonExhaustive. Default to Light for
+        // any future variant — matches current asset's design target.
+        match theme {
+            tauri::Theme::Dark => Self::Dark,
+            _ => Self::Light,
         }
-        let tooltip = if is_live {
-            "Minutes — Live Transcribing..."
-        } else if is_active {
-            "Minutes — Recording..."
-        } else {
-            "Minutes"
-        };
-        tray.set_tooltip(Some(tooltip)).ok();
+    }
+}
+
+/// Last-known menu-bar appearance, seeded from `Window::theme()` and
+/// updated by the `WindowEvent::ThemeChanged` listener. Stored as a
+/// managed `AtomicU8` so tray syncs from any thread read a current value
+/// without locking. Light = 0, Dark = 1.
+pub struct TrayAppearanceState(pub Arc<AtomicU8>);
+
+impl TrayAppearanceState {
+    pub fn new(initial: TrayAppearance) -> Self {
+        Self(Arc::new(AtomicU8::new(match initial {
+            TrayAppearance::Light => 0,
+            TrayAppearance::Dark => 1,
+        })))
     }
 
-    // Notify the palette overlay that recording / live state changed
-    // so it can re-fetch its visible command list. Dictation transitions
-    // emit `palette:refresh` separately from `commands.rs`.
-    let _ = app.emit(
-        "palette:refresh",
-        serde_json::json!({
-            "source": if is_live { "live-transcript" } else { "recording" },
-            "active": is_active,
-        }),
-    );
+    pub fn get(&self) -> TrayAppearance {
+        match self.0.load(Ordering::Relaxed) {
+            1 => TrayAppearance::Dark,
+            _ => TrayAppearance::Light,
+        }
+    }
+
+    pub fn set(&self, appearance: TrayAppearance) {
+        self.0.store(
+            match appearance {
+                TrayAppearance::Light => 0,
+                TrayAppearance::Dark => 1,
+            },
+            Ordering::Relaxed,
+        );
+    }
+}
+
+fn current_tray_appearance(app: &tauri::AppHandle) -> TrayAppearance {
+    app.try_state::<TrayAppearanceState>()
+        .map(|s| s.get())
+        .unwrap_or(TrayAppearance::Light)
+}
+
+impl TrayActivity {
+    fn is_active(self) -> bool {
+        !matches!(self, Self::Idle)
+    }
+
+    fn icon_bytes(self, appearance: TrayAppearance) -> &'static [u8] {
+        match (self, appearance) {
+            (Self::Idle, _) => include_bytes!("../icons/icon-tray.png"),
+            (Self::Recording | Self::Dictation, TrayAppearance::Light) => {
+                include_bytes!("../icons/icon-recording.png")
+            }
+            (Self::Recording | Self::Dictation, TrayAppearance::Dark) => {
+                include_bytes!("../icons/icon-recording-dark.png")
+            }
+            (Self::Live, TrayAppearance::Light) => include_bytes!("../icons/icon-live.png"),
+            (Self::Live, TrayAppearance::Dark) => include_bytes!("../icons/icon-live-dark.png"),
+        }
+    }
+
+    fn tooltip(self) -> &'static str {
+        match self {
+            Self::Idle => "Minutes",
+            Self::Recording => "Minutes — Recording...",
+            Self::Live => "Minutes — Live Transcribing...",
+            Self::Dictation => "Minutes — Dictating...",
+        }
+    }
+
+    fn stop_label(self) -> &'static str {
+        match self {
+            // Idle reuses the construction-time label at main.rs ~1535 so
+            // the menu reads "Stop Recording" by default before any session.
+            Self::Idle | Self::Recording => "Stop Recording",
+            Self::Live => "Stop Live Transcript",
+            Self::Dictation => "Stop Dictation",
+        }
+    }
+
+    fn palette_source(self) -> &'static str {
+        match self {
+            Self::Idle => "idle",
+            Self::Recording => "recording",
+            Self::Live => "live-transcript",
+            Self::Dictation => "dictation",
+        }
+    }
+}
+
+/// Snapshot of the lifecycle flags used to derive `TrayActivity`. Capturing
+/// once per sync keeps derivation deterministic if a flag flips between
+/// reads, and makes the derivation testable as a pure function.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct TrayStateSnapshot {
+    pub recording: bool,
+    pub live: bool,
+    pub dictation: bool,
+}
+
+/// Derive the tray activity from a state snapshot. Pure function; tested in
+/// the module's `#[cfg(test)]` block. Priority is Recording > Live >
+/// Dictation > Idle so an external CLI recording (surfaced through
+/// `recording_active` PID check) keeps the tray rendering as recording even
+/// if an in-app dictation flag is somehow also set.
+pub fn derive_tray_activity(snapshot: TrayStateSnapshot) -> TrayActivity {
+    if snapshot.recording {
+        TrayActivity::Recording
+    } else if snapshot.live {
+        TrayActivity::Live
+    } else if snapshot.dictation {
+        TrayActivity::Dictation
+    } else {
+        TrayActivity::Idle
+    }
+}
+
+fn snapshot_tray_state(app: &tauri::AppHandle) -> TrayStateSnapshot {
+    match app.try_state::<commands::AppState>() {
+        Some(state) => TrayStateSnapshot {
+            // Use the PID-aware helper so external/CLI recordings keep the
+            // tray showing Recording at app launch (codex plan-review catch).
+            recording: commands::recording_active(&state.recording),
+            live: state.live_transcript_active.load(Ordering::Relaxed),
+            dictation: state.dictation_active.load(Ordering::Relaxed),
+        },
+        None => TrayStateSnapshot {
+            recording: false,
+            live: false,
+            dictation: false,
+        },
+    }
+}
+
+/// Apply the tray rendering for `activity` against the last-known menu-bar
+/// appearance. `emit_palette_refresh` separates lifecycle transitions
+/// (which must wake the palette so its visible command list re-fetches)
+/// from appearance-only repaints (which would otherwise spam the palette
+/// with no-op refreshes — codex plan-review #4).
+fn apply_tray_activity(app: &tauri::AppHandle, activity: TrayActivity, emit_palette_refresh: bool) {
+    let appearance = current_tray_appearance(app);
+    if let Some(tray) = app.tray_by_id("minutes-tray") {
+        if let Ok(icon) = tauri::image::Image::from_bytes(activity.icon_bytes(appearance)) {
+            tray.set_icon(Some(icon)).ok();
+            // Active-state icons (recording/live/dictation) render with
+            // template tinting OFF so their colored dot is visible; idle
+            // uses the template so the M adopts the menu-bar tint.
+            tray.set_icon_as_template(!activity.is_active()).ok();
+        }
+        tray.set_tooltip(Some(activity.tooltip())).ok();
+    }
+
+    // Sync tray menu item enabled state with the lifecycle. Tray callback
+    // handlers used to do this on their own immediate paths, but any
+    // non-tray-initiated recording (main window, hotkey, CLI, call-detect,
+    // palette) bypassed those callbacks and left the menu stuck in its
+    // construction-time state. Centralizing here fixes #223 (and the
+    // dictation follow-on) and removes a class of race between tray
+    // callback post-async-work cleanup and external state updates.
+    //
+    // No-op + warn if the handles aren't registered (programmer error caught
+    // at the first recording state transition — quieter than panic, louder
+    // than silent regression).
+    match app.try_state::<TrayMenuHandles>() {
+        Some(handles) => {
+            handles.record.set_enabled(!activity.is_active()).ok();
+            handles
+                .quick_thought
+                .set_enabled(!activity.is_active())
+                .ok();
+            handles.stop.set_enabled(activity.is_active()).ok();
+            handles.stop.set_text(activity.stop_label()).ok();
+        }
+        None => {
+            tracing::warn!(
+                "TrayMenuHandles not registered; tray record/stop menu items will not \
+                 reflect recording state changes from non-tray sources"
+            );
+        }
+    }
+
+    if emit_palette_refresh {
+        // Notify the palette overlay that lifecycle state changed so it
+        // can re-fetch its visible command list. The source string lets
+        // the palette distinguish recording / live / dictation transitions.
+        let _ = app.emit(
+            "palette:refresh",
+            serde_json::json!({
+                "source": activity.palette_source(),
+                "active": activity.is_active(),
+            }),
+        );
+    }
+}
+
+/// Re-sync the tray (icon, tooltip, menu enabled/labels, palette refresh)
+/// from the current AppState lifecycle flags. Callers must mutate
+/// recording / live / dictation flags BEFORE invoking this — the function
+/// reads, it does not write.
+pub fn sync_tray_state(app: &tauri::AppHandle) {
+    let snapshot = snapshot_tray_state(app);
+    let activity = derive_tray_activity(snapshot);
+    apply_tray_activity(app, activity, true);
+}
+
+/// Re-paint the tray for an appearance change (system Light/Dark toggle)
+/// without re-emitting `palette:refresh`. The lifecycle activity is
+/// unchanged; only the icon variant differs. Called from the
+/// `WindowEvent::ThemeChanged` listener.
+pub fn sync_tray_appearance(app: &tauri::AppHandle) {
+    let snapshot = snapshot_tray_state(app);
+    let activity = derive_tray_activity(snapshot);
+    apply_tray_activity(app, activity, false);
 }
 
 // ── Auto-updater ────────────────────────────────────────────
@@ -927,18 +1180,55 @@ fn spawn_meetings_refresh_watcher(app: &tauri::AppHandle, output_dir: std::path:
 }
 
 fn main() {
+    // Route whisper.cpp + ggml C-level logs through Rust `tracing` so they
+    // do not leak to raw stderr. The Tauri menu-bar app records audio in
+    // process and runs the same VAD path the CLI does, so the
+    // `whisper_vad_detect_speech` flood happens here too without this hook
+    // (issue #163). Install BEFORE the early-exit checks below: the
+    // process-queue worker (`maybe_run_process_queue_worker`) reaches
+    // `pipeline::transcribe_to_artifact` and spins up whisper contexts of
+    // its own, so the worker subprocess needs the same routing or it
+    // floods stderr while a recording is processing. The Tauri app
+    // currently has no `tracing_subscriber` installed; tracing events
+    // with no subscriber are dropped, which is the silencing behavior we
+    // want for the chatty C INFO logs. If a future change wires a
+    // subscriber into this process, set `whisper_rs=warn` and `ggml=warn`
+    // in the filter or the flood returns.
+    minutes_core::install_whisper_logging_hooks();
+
     #[cfg(target_os = "macos")]
     if let Some(code) = maybe_run_hotkey_diagnostic() {
         std::process::exit(code);
     }
 
     if let Some(code) = maybe_run_process_queue_worker() {
-        std::process::exit(code);
+        // Worker subprocess exit: skip C++ static teardown on macOS.
+        //
+        // Letting `main` return (or calling `std::process::exit`) runs
+        // `atexit` handlers and C++ static destructors via
+        // `__cxa_finalize_ranges`. whisper.cpp / ggml / parakeet helpers
+        // register global C++ state whose destructors can call `abort()`
+        // on partially-initialized contexts (issue #229: a transcription
+        // spawn failure left a context in a bad state, then the normal
+        // exit path crashed the worker via SIGABRT inside
+        // `__cxa_finalize_ranges`). `_exit` skips that teardown
+        // entirely; we drain the sidecar manager explicitly above and
+        // rely on the OS to reclaim the rest.
+        minutes_core::parakeet_sidecar::shutdown_global_parakeet_sidecar();
+        exit_process_without_destructors(code);
     }
 
     // Load with first-run and upgrade migrations so palette defaults
     // stay enabled across upgrades and fresh installs.
     let mut startup_config_snapshot = minutes_core::config::Config::load_with_migrations();
+    // Apply the same directory/privacy bootstrap the CLI uses before the
+    // desktop app creates logs, scratch audio, or other runtime state.
+    if let Err(e) = startup_config_snapshot.ensure_dirs() {
+        tracing::warn!(
+            "failed to ensure Minutes directories on desktop startup: {}",
+            e
+        );
+    }
     // Auto-heal a stale `recording.device` pin: when the configured
     // input device (USB mixer, Bluetooth headset, virtual loopback) is
     // unplugged before launch, clear it and fall back to the system
@@ -1571,17 +1861,26 @@ fn main() {
                             show_main_window(app);
                         }
                         "record" => {
-                            if commands::recording_active(&recording) {
+                            let app_state = app.state::<commands::AppState>();
+                            // Guard double-click: a fast second click before
+                            // recording_active flips spawns a redundant
+                            // wrapper that resets transitional text. The
+                            // `state.starting` flag covers the window
+                            // between launch_recording acquiring the slot
+                            // (commands.rs:4576-4583) and the recording flag
+                            // actually flipping (codex diff-review attack G).
+                            if commands::recording_active(&recording)
+                                || app_state.starting.load(Ordering::Relaxed)
+                            {
                                 return;
                             }
+                            // Transitional text only — enabled-state flips
+                            // flow through sync_tray_state so they cannot
+                            // race against external (non-tray) state changes
+                            // (issue #223 / codex race-condition catch).
                             rec_item.set_text("Starting...").ok();
-                            rec_item.set_enabled(false).ok();
-                            quick_item.set_enabled(false).ok();
-                            stp_item.set_enabled(true).ok();
                             let app_handle = app.clone();
-                            let app_done = app.clone();
                             let ri = rec_item.clone();
-                            let si = stp_item.clone();
                             std::thread::spawn(move || {
                                 let app_for_launch = app_handle.clone();
                                 let state = app_handle.state::<commands::AppState>();
@@ -1596,26 +1895,31 @@ fn main() {
                                     None,
                                     None,
                                 );
+                                // Reset transitional text only. Do NOT call
+                                // sync_tray_state here — `launch_recording`
+                                // is non-blocking; it spawns the actual
+                                // recorder thread which fires its own
+                                // sync_tray_state calls through the
+                                // recording lifecycle. Calling sync here
+                                // would race against the inner recorder's
+                                // sync and could leave the menu showing
+                                // record-enabled mid-recording (codex
+                                // diff-review attack #1).
                                 ri.set_text("Start Recording").ok();
-                                ri.set_enabled(true).ok();
-                                quick_item.set_enabled(true).ok();
-                                si.set_enabled(false).ok();
-                                update_tray_state(&app_done, false);
                             });
                         }
                         "quick-thought" => {
-                            if commands::recording_active(&recording) {
+                            let app_state = app.state::<commands::AppState>();
+                            if commands::recording_active(&recording)
+                                || app_state.starting.load(Ordering::Relaxed)
+                            {
                                 return;
                             }
-                            rec_item.set_enabled(false).ok();
+                            // Transitional text only; see "record" arm for full rationale.
                             quick_item.set_text("Starting Quick Thought…").ok();
-                            quick_item.set_enabled(false).ok();
-                            stp_item.set_enabled(true).ok();
                             let app_handle = app.clone();
-                            let app_done = app.clone();
                             let ri = rec_item.clone();
                             let qi = quick_item.clone();
-                            let si = stp_item.clone();
                             std::thread::spawn(move || {
                                 let app_for_launch = app_handle.clone();
                                 let state = app_handle.state::<commands::AppState>();
@@ -1631,33 +1935,78 @@ fn main() {
                                     None,
                                 );
                                 ri.set_text("Start Recording").ok();
-                                ri.set_enabled(true).ok();
                                 qi.set_text("Quick Thought").ok();
-                                qi.set_enabled(true).ok();
-                                si.set_enabled(false).ok();
-                                update_tray_state(&app_done, false);
                             });
                         }
-                        "stop" if commands::request_stop(&recording, &stop).is_ok() => {
+                        "stop" => {
+                            // The Stop menu item is enabled whenever ANY
+                            // recording-class state is active: recording
+                            // proper, live transcript, OR dictation. Route to
+                            // the active flow. Each has a distinct stop path:
+                            //   - recording → `commands::request_stop`
+                            //   - live      → `commands::cmd_stop_live_transcript`
+                            //   - dictation → `commands::cmd_stop_dictation`
+                            // Priority order matches `derive_tray_activity`
+                            // (Recording > Live > Dictation) so behavior is
+                            // deterministic if two flags are somehow both
+                            // true.
+                            let state = app.state::<commands::AppState>();
+                            let recording_was_active = commands::recording_active(&recording);
+                            let live_active = state.live_transcript_active.load(Ordering::Relaxed);
+                            let dictation_was_active =
+                                state.dictation_active.load(Ordering::Relaxed);
+
+                            let stop_ok = if recording_was_active {
+                                commands::request_stop(&recording, &stop).is_ok()
+                            } else if live_active {
+                                commands::cmd_stop_live_transcript(state).is_ok()
+                            } else if dictation_was_active {
+                                commands::cmd_stop_dictation(state).is_ok()
+                            } else {
+                                false
+                            };
+                            if !stop_ok {
+                                // Nothing active to stop, or stop failed; bail.
+                                return;
+                            }
+
+                            // Transitional text only; see comment in "record"
+                            // arm. Disabling stop immediately to prevent
+                            // double-click is intentional and stays here
+                            // (transient UX affordance, separate from
+                            // steady-state sync). The steady-state sync that
+                            // re-renders the idle label fires when the
+                            // active session's RAII guard drops and triggers
+                            // `sync_tray_state` (Live/DictationActiveGuard).
                             rec_item.set_text("Stopping...").ok();
-                            rec_item.set_enabled(false).ok();
                             quick_item.set_text("Quick Thought").ok();
-                            quick_item.set_enabled(false).ok();
                             stp_item.set_enabled(false).ok();
                             let app_done = app.clone();
                             let ri = rec_item.clone();
                             let qi = quick_item.clone();
-                            let si = stp_item.clone();
                             std::thread::spawn(move || {
-                                if commands::wait_for_recording_shutdown(
-                                    std::time::Duration::from_secs(120),
-                                ) {
+                                if recording_was_active {
+                                    if commands::wait_for_recording_shutdown(
+                                        std::time::Duration::from_secs(120),
+                                    ) {
+                                        ri.set_text("Start Recording").ok();
+                                        qi.set_text("Quick Thought").ok();
+                                        sync_tray_state(&app_done);
+                                    }
+                                } else {
+                                    // Live transcript / dictation paths:
+                                    // both stop calls just flip a flag; the
+                                    // session's own guard (LiveActiveGuard /
+                                    // DictationActiveGuard) calls
+                                    // sync_tray_state when it tears down.
+                                    // Just reset transitional text here; do
+                                    // NOT call sync_tray_state ourselves
+                                    // (would race against the still-true
+                                    // flag and re-enable Stop — codex attack
+                                    // #1 generalized to all flag-based stop
+                                    // paths).
                                     ri.set_text("Start Recording").ok();
-                                    ri.set_enabled(true).ok();
                                     qi.set_text("Quick Thought").ok();
-                                    qi.set_enabled(true).ok();
-                                    si.set_enabled(false).ok();
-                                    update_tray_state(&app_done, false);
                                 }
                             });
                         }
@@ -1765,19 +2114,20 @@ fn main() {
                         "quit" => {
                             request_clean_exit(app, 0);
                         }
-                        // Calendar event items — start recording on click
+                        // Calendar event items — start recording on click.
+                        // Mirrors the "record" arm exactly; enabled-state flips
+                        // flow through sync_tray_state, not local set_enabled
+                        // calls (issue #223 / codex diff-review attack #8).
                         "cal-0" | "cal-1" | "cal-2" => {
-                            if commands::recording_active(&recording) {
+                            let app_state = app.state::<commands::AppState>();
+                            if commands::recording_active(&recording)
+                                || app_state.starting.load(Ordering::Relaxed)
+                            {
                                 return;
                             }
                             rec_item.set_text("Starting...").ok();
-                            rec_item.set_enabled(false).ok();
-                            quick_item.set_enabled(false).ok();
-                            stp_item.set_enabled(true).ok();
                             let app_handle = app.clone();
-                            let app_done = app.clone();
                             let ri = rec_item.clone();
-                            let si = stp_item.clone();
                             std::thread::spawn(move || {
                                 let app_for_launch = app_handle.clone();
                                 let state = app_handle.state::<commands::AppState>();
@@ -1793,10 +2143,6 @@ fn main() {
                                     None,
                                 );
                                 ri.set_text("Start Recording").ok();
-                                ri.set_enabled(true).ok();
-                                quick_item.set_enabled(true).ok();
-                                si.set_enabled(false).ok();
-                                update_tray_state(&app_done, false);
                             });
                         }
                         _ => {}
@@ -1804,7 +2150,36 @@ fn main() {
                 })
                 .build(app)?;
 
-            update_tray_state(app.handle(), initial_recording);
+            // Register tray menu handles BEFORE the initial state sync below
+            // (and before any commands.rs entry-point can fire sync_tray_state).
+            // Issue #223: without these handles wired up, the record / stop
+            // menu items are frozen in their construction-time enabled state.
+            app.manage(TrayMenuHandles {
+                record: record_item.clone(),
+                quick_thought: quick_thought_item.clone(),
+                stop: stop_item.clone(),
+            });
+
+            // Seed the appearance state from the main window's theme. The
+            // main window is built earlier in setup() via `show_main_window`,
+            // so `.theme()` returns the current system Aqua/DarkAqua choice
+            // here. If the query errors, default to Light — the active-state
+            // icons were originally designed for light menu bars (commit
+            // 2c9d26d). After this seed the `WindowEvent::ThemeChanged`
+            // listener in the run loop keeps the state updated and triggers
+            // `sync_tray_appearance` so the icon variant tracks the system.
+            let initial_appearance = app
+                .get_webview_window("main")
+                .and_then(|w| w.theme().ok())
+                .map(TrayAppearance::from_theme)
+                .unwrap_or(TrayAppearance::Light);
+            app.manage(TrayAppearanceState::new(initial_appearance));
+
+            // `sync_tray_state` reads the PID-aware `recording_active`
+            // helper and the in-app live/dictation flags, so an external
+            // CLI recording active at app launch keeps the tray rendering
+            // as recording (and the menu items reflecting it).
+            sync_tray_state(app.handle());
 
             // Start call detection background loop
             if commands::supports_call_detection() {
@@ -1920,10 +2295,31 @@ fn main() {
                         commands::close_palette_window(&app_handle);
                     }
                 }
+                // Track macOS system appearance changes via the main
+                // window's ThemeChanged event. Tao registers an
+                // `AppleInterfaceThemeChangedNotification` observer on
+                // the window delegate and fires this whenever the cached
+                // theme flips. The event fires on hidden windows too
+                // (no visibility check in the upstream observer), so
+                // the menu-bar-only state still gets the update after
+                // the user closes the main window. Filter to "main" so
+                // we only sync once per system flip (the secondary
+                // windows would otherwise re-fire the same event).
+                tauri::WindowEvent::ThemeChanged(theme) if window.label() == "main" => {
+                    let app_handle = window.app_handle().clone();
+                    if let Some(state) = app_handle.try_state::<TrayAppearanceState>() {
+                        state.set(TrayAppearance::from_theme(*theme));
+                    }
+                    // Re-paint the tray icon for the new appearance; do
+                    // NOT emit `palette:refresh` (codex plan-review #4 —
+                    // appearance changes are not lifecycle transitions).
+                    sync_tray_appearance(&app_handle);
+                }
                 _ => {}
             }
         })
         .invoke_handler(tauri::generate_handler![
+            commands::cmd_capture_status,
             commands::cmd_status,
             commands::cmd_processing_jobs,
             commands::cmd_list_meetings,
@@ -2052,4 +2448,152 @@ fn main() {
             tauri::RunEvent::Exit => cleanup_before_process_exit(app),
             _ => {}
         });
+}
+
+#[cfg(test)]
+mod tray_activity_tests {
+    use super::{derive_tray_activity, TrayActivity, TrayAppearance, TrayStateSnapshot};
+
+    fn snap(recording: bool, live: bool, dictation: bool) -> TrayStateSnapshot {
+        TrayStateSnapshot {
+            recording,
+            live,
+            dictation,
+        }
+    }
+
+    #[test]
+    fn idle_when_all_flags_false() {
+        assert_eq!(
+            derive_tray_activity(snap(false, false, false)),
+            TrayActivity::Idle
+        );
+    }
+
+    #[test]
+    fn recording_takes_priority_over_live_and_dictation() {
+        // Recording > Live > Dictation. The acquisition gates are
+        // check-then-CAS across separate atomics, so concurrent starts
+        // can land in a transient double-true state until the loser's
+        // session fails at the PID/flock layer in core and its RAII
+        // guard re-syncs the tray. `recording_active` can also be true
+        // from an external CLI PID independent of the in-app flags. In
+        // any drift scenario the tray must render deterministically.
+        assert_eq!(
+            derive_tray_activity(snap(true, true, true)),
+            TrayActivity::Recording
+        );
+        assert_eq!(
+            derive_tray_activity(snap(true, false, true)),
+            TrayActivity::Recording
+        );
+        assert_eq!(
+            derive_tray_activity(snap(true, true, false)),
+            TrayActivity::Recording
+        );
+    }
+
+    #[test]
+    fn live_beats_dictation_when_recording_is_false() {
+        assert_eq!(
+            derive_tray_activity(snap(false, true, true)),
+            TrayActivity::Live
+        );
+        assert_eq!(
+            derive_tray_activity(snap(false, true, false)),
+            TrayActivity::Live
+        );
+    }
+
+    #[test]
+    fn dictation_when_only_dictation_set() {
+        assert_eq!(
+            derive_tray_activity(snap(false, false, true)),
+            TrayActivity::Dictation
+        );
+    }
+
+    #[test]
+    fn is_active_only_for_non_idle() {
+        assert!(!TrayActivity::Idle.is_active());
+        assert!(TrayActivity::Recording.is_active());
+        assert!(TrayActivity::Live.is_active());
+        assert!(TrayActivity::Dictation.is_active());
+    }
+
+    #[test]
+    fn stop_label_per_activity() {
+        // Idle keeps the construction-time label so the menu reads "Stop
+        // Recording" before any session starts; the active states each
+        // disambiguate which flow Stop will target.
+        assert_eq!(TrayActivity::Idle.stop_label(), "Stop Recording");
+        assert_eq!(TrayActivity::Recording.stop_label(), "Stop Recording");
+        assert_eq!(TrayActivity::Live.stop_label(), "Stop Live Transcript");
+        assert_eq!(TrayActivity::Dictation.stop_label(), "Stop Dictation");
+    }
+
+    #[test]
+    fn palette_source_per_activity() {
+        assert_eq!(TrayActivity::Idle.palette_source(), "idle");
+        assert_eq!(TrayActivity::Recording.palette_source(), "recording");
+        assert_eq!(TrayActivity::Live.palette_source(), "live-transcript");
+        assert_eq!(TrayActivity::Dictation.palette_source(), "dictation");
+    }
+
+    #[test]
+    fn icon_bytes_pick_appearance_variant() {
+        // Idle uses the templated tray icon regardless of appearance.
+        let idle_light = TrayActivity::Idle.icon_bytes(TrayAppearance::Light);
+        let idle_dark = TrayActivity::Idle.icon_bytes(TrayAppearance::Dark);
+        assert_eq!(idle_light, idle_dark);
+
+        // Active states must pick distinct bytes per appearance so the
+        // M is legible on both light and dark menu bars. Compare slice
+        // contents (not pointer identity) so the test fails if a future
+        // refactor inadvertently routes both arms to the same PNG.
+        let rec_light = TrayActivity::Recording.icon_bytes(TrayAppearance::Light);
+        let rec_dark = TrayActivity::Recording.icon_bytes(TrayAppearance::Dark);
+        assert_ne!(rec_light, rec_dark);
+
+        let live_light = TrayActivity::Live.icon_bytes(TrayAppearance::Light);
+        let live_dark = TrayActivity::Live.icon_bytes(TrayAppearance::Dark);
+        assert_ne!(live_light, live_dark);
+
+        // Dictation reuses the recording asset (no dedicated dictation
+        // icon — out of scope for this commit). Same bytes per appearance
+        // as recording, distinct across appearance variants.
+        let dict_light = TrayActivity::Dictation.icon_bytes(TrayAppearance::Light);
+        let dict_dark = TrayActivity::Dictation.icon_bytes(TrayAppearance::Dark);
+        assert_eq!(dict_light, rec_light);
+        assert_eq!(dict_dark, rec_dark);
+        assert_ne!(dict_light, dict_dark);
+
+        // All assets are valid PNGs (magic bytes 89 50 4E 47 0D 0A 1A 0A).
+        // If a future asset substitution swaps in the wrong format this
+        // catches it before runtime.
+        for bytes in [
+            idle_light, rec_light, rec_dark, live_light, live_dark, dict_light, dict_dark,
+        ] {
+            assert!(
+                bytes.starts_with(b"\x89PNG\r\n\x1a\n"),
+                "tray icon asset is not a valid PNG"
+            );
+        }
+    }
+
+    #[test]
+    fn appearance_from_theme_maps_dark_only_to_dark() {
+        // Tauri Theme is non-exhaustive (Light / Dark / future). Anything
+        // other than Dark resolves to Light — the active-state assets
+        // were originally designed for light menu bars (commit 2c9d26d),
+        // so a future variant defaults to the lower-risk choice.
+        assert_eq!(
+            TrayAppearance::from_theme(tauri::Theme::Light),
+            TrayAppearance::Light
+        );
+        assert_eq!(
+            TrayAppearance::from_theme(tauri::Theme::Dark),
+            TrayAppearance::Dark
+        );
+    }
 }

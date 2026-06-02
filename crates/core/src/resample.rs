@@ -66,6 +66,11 @@ where
             let ch = channels as usize;
             let mut resample_pos: f64 = 0.0;
             let mut input_samples: Vec<f32> = Vec::new();
+            // Hoisted out of the callback to avoid heap alloc/free on every cpal
+            // tick (~100×/sec). `clear()` keeps the capacity. The callback below
+            // owns this buffer exclusively and consumes `on_samples(&resampled)`
+            // synchronously, so no slice escapes the call.
+            let mut resampled: Vec<f32> = Vec::new();
             let stop_clone = Arc::clone(stop_flag);
             let err_flag_clone = Arc::clone(err_flag);
 
@@ -83,8 +88,8 @@ where
                             input_samples.push(mono);
                         }
 
-                        // Decimate to 16kHz
-                        let mut resampled = Vec::new();
+                        // Decimate to 16kHz — reuse the hoisted buffer.
+                        resampled.clear();
                         while resample_pos < input_samples.len() as f64 {
                             let idx = resample_pos as usize;
                             if idx < input_samples.len() {
@@ -119,6 +124,9 @@ where
             let ch = channels as usize;
             let mut resample_pos: f64 = 0.0;
             let mut input_samples: Vec<f32> = Vec::new();
+            // Hoisted — see F32 branch comment above. Separate buffer per branch
+            // (only one branch ever runs for a given stream).
+            let mut resampled: Vec<f32> = Vec::new();
             let stop_clone = Arc::clone(stop_flag);
             let err_flag_clone = Arc::clone(err_flag);
 
@@ -137,8 +145,8 @@ where
                             input_samples.push(mono);
                         }
 
-                        // Decimate to 16kHz
-                        let mut resampled = Vec::new();
+                        // Decimate to 16kHz — reuse the hoisted buffer.
+                        resampled.clear();
                         while resample_pos < input_samples.len() as f64 {
                             let idx = resample_pos as usize;
                             if idx < input_samples.len() {

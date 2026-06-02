@@ -2,7 +2,7 @@
 
 ## Agent: `claude` &middot; run 20260420-101437
 
-Fixture: `/Users/silverbook/Sites/minutes/tests/eval/fixtures/meetings` &middot; 20 questions
+Fixture: `/Users/you/Sites/minutes/tests/eval/fixtures/meetings` &middot; 20 questions
 
 ### `q01` &middot; relationship_ownership
 

@@ -9,9 +9,9 @@ This document is the handoff point for the next Codex session.
 > - **PR [#96](https://github.com/silverstein/minutes/pull/96) is MERGED** — squashed onto `origin/main` as `4191dfe fix(call-capture): harden native Meet detection and attribution (#96)`.
 > - **PR [#94](https://github.com/silverstein/minutes/pull/94) is CLOSED as superseded** — its three threads (call capture, dark theme #95, palette slice 2 #92) all landed via separate clean PRs; verified no unique content was lost.
 > - **Branches `fix/call-capture-mainline` and `fix/call-capture-hardening` are DELETED** (both local and remote).
-> - **Worktree `/Users/silverbook/Sites/minutes-mainline-call-capture` is REMOVED.**
+> - **Worktree `/Users/you/Sites/minutes-mainline-call-capture` is REMOVED.**
 >
-> **For the next session**: work in `/Users/silverbook/Sites/minutes` on branch `main`. That is now the only worktree, and `main` is in sync with `origin/main`. The previously-"dirty" workspace was cleaned up yesterday — untracked files notwithstanding, the tracked tree is pristine on main.
+> **For the next session**: work in `/Users/you/Sites/minutes` on branch `main`. That is now the only worktree, and `main` is in sync with `origin/main`. The previously-"dirty" workspace was cleaned up yesterday — untracked files notwithstanding, the tracked tree is pristine on main.
 >
 > **The "Source Of Truth" section below is historical and no longer accurate.** Skip to [What Was Landed On `fix/call-capture-mainline`](#what-was-landed-on-fixcall-capture-mainline) for context on what shipped, or jump straight to [What Still Needs To Be Done](#what-still-needs-to-be-done) and [Suggested Next Session Plan](#suggested-next-session-plan) — those instructions are still fully valid, just rooted in the new path.
 
@@ -20,7 +20,7 @@ This document is the handoff point for the next Codex session.
 > **⚠️ Stale — see Post-Merge Status Update above.**
 
 - Clean branch: `fix/call-capture-mainline`
-- Clean worktree: `/Users/silverbook/Sites/minutes-mainline-call-capture`
+- Clean worktree: `/Users/you/Sites/minutes-mainline-call-capture`
 - PR to review / merge: [#96](https://github.com/silverstein/minutes/pull/96)
 
 Do **not** use the older `fix/call-capture-hardening` worktree as the main
@@ -207,7 +207,7 @@ Dogfood repeatedly confused generic mic/room path with native call path.
 
 ## Suggested Next Session Plan
 
-1. Work only in `/Users/silverbook/Sites/minutes-mainline-call-capture`
+1. Work only in `/Users/you/Sites/minutes-mainline-call-capture`
 2. Stay on branch `fix/call-capture-mainline`
 3. Add attribution instrumentation
 4. Rebuild / reinstall `Minutes Dev.app`

@@ -1,7 +1,7 @@
 # Windows Desktop Releases
 
 This repository ships a dedicated GitHub Actions workflow at
-[.github/workflows/release-windows-desktop.yml](/Users/silverbook/Sites/minutes/.github/workflows/release-windows-desktop.yml)
+[.github/workflows/release-windows-desktop.yml](/.github/workflows/release-windows-desktop.yml)
 to build Windows desktop artifacts for the Tauri app.
 
 The current goal is pragmatic: produce a runnable installer-first release path
@@ -112,11 +112,11 @@ cargo tauri build --ci --bundles nsis --no-sign
 ## Notes
 
 - The Windows-specific installer defaults live in
-  [tauri.windows.conf.json](/Users/silverbook/Sites/minutes/tauri/src-tauri/tauri.windows.conf.json).
+  [tauri.windows.conf.json](/tauri/src-tauri/tauri.windows.conf.json).
 - macOS app identity / TCC-sensitive development guidance lives in
-  [docs/DESKTOP-DEVELOPMENT.md](/Users/silverbook/Sites/minutes/docs/DESKTOP-DEVELOPMENT.md).
+  [docs/DESKTOP-DEVELOPMENT.md](/docs/DESKTOP-DEVELOPMENT.md).
 - The macOS-only bundle settings remain in
-  [tauri.macos.conf.json](/Users/silverbook/Sites/minutes/tauri/src-tauri/tauri.macos.conf.json)
+  [tauri.macos.conf.json](/tauri/src-tauri/tauri.macos.conf.json)
   so the shared config stays cross-platform.
 - Channel and rollback rules live in
-  [docs/RELEASE-CHANNELS.md](/Users/silverbook/Sites/minutes/docs/RELEASE-CHANNELS.md).
+  [docs/RELEASE-CHANNELS.md](/docs/RELEASE-CHANNELS.md).

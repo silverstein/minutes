@@ -9,8 +9,9 @@ use reqwest::header::{ACCEPT, CONTENT_LENGTH};
 use std::cmp::Reverse;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
+use std::fs::OpenOptions;
 use std::hash::{Hash, Hasher};
-use std::io::Write;
+use std::io::{self, Write};
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
@@ -1922,6 +1923,7 @@ pub struct ProcessingJobView {
     pub mode: String,
     pub state: String,
     pub stage: Option<String>,
+    pub stage_label: Option<String>,
     pub output_path: Option<String>,
     pub audio_path: String,
     pub error: Option<String>,
@@ -2018,11 +2020,13 @@ fn processing_job_title_fallback(mode: CaptureMode) -> &'static str {
 }
 
 fn processing_job_view(job: minutes_core::jobs::ProcessingJob) -> ProcessingJobView {
-    let fallback_title = processing_job_title_fallback(job.mode);
+    let mode = job.mode;
+    let fallback_title = processing_job_title_fallback(mode);
+    let stage_label = pipeline_stage_label(job.stage.as_deref(), Some(mode)).map(String::from);
     ProcessingJobView {
         id: job.id,
         title: job.title.unwrap_or_else(|| fallback_title.into()),
-        mode: match job.mode {
+        mode: match mode {
             CaptureMode::Meeting => "meeting".into(),
             CaptureMode::QuickThought => "quick-thought".into(),
             CaptureMode::Dictation => "dictation".into(),
@@ -2040,6 +2044,7 @@ fn processing_job_view(job: minutes_core::jobs::ProcessingJob) -> ProcessingJobV
             minutes_core::jobs::JobState::Failed => "failed".into(),
         },
         stage: job.stage,
+        stage_label,
         output_path: job.output_path,
         audio_path: job.audio_path,
         error: job.error,
@@ -2408,15 +2413,438 @@ fn preserve_failed_capture_path(path: &std::path::Path, config: &Config) -> Opti
         .and_then(|value| value.to_str())
         .filter(|value| !value.is_empty())
         .unwrap_or("bin");
-    let dest = dir.join(format!(
-        "{}-capture.{}",
-        chrono::Local::now().format("%Y-%m-%d-%H%M%S"),
-        ext
-    ));
+    let new_basename = unique_failed_capture_basename(&dir, ext);
+    let dest = dir.join(format!("{}.{}", new_basename, ext));
 
-    std::fs::copy(path, &dest).ok()?;
+    // O_CREAT|O_EXCL on dest. If another process or a prior aborted run
+    // raced to the same slot between `unique_failed_capture_basename` and
+    // here, we'd rather preserve the existing artifact than silently
+    // overwrite it (the previous overwrite-and-pray version was a pre-
+    // existing data-loss bug now plugged). On failure, leave the source
+    // intact — caller treats None as "couldn't preserve" and the original
+    // .mov remains on disk for manual recovery.
+    if copy_no_clobber_nofollow(path, &dest).is_err() {
+        return None;
+    }
     std::fs::remove_file(path).ok();
+
+    // Native call capture writes lossless per-source PCM stems next to the
+    // .mov (`<base>.voice.wav` / `<base>.system.wav`). When the .mov is
+    // truncated (issue #216) the stems are the only intact artifact; rescue
+    // them alongside the preserved path with matching new basenames so
+    // `diarize::discover_stems` finds them on retry. Failures here are
+    // best-effort — the .mov is already preserved.
+    rescue_paired_stems(path, &dir, &new_basename);
+
     Some(dest)
+}
+
+#[derive(Debug, Clone)]
+struct NativeCallProcessingInput {
+    path: PathBuf,
+    recovery_warning: Option<String>,
+}
+
+fn file_has_bytes(path: &Path) -> bool {
+    path.metadata().is_ok_and(|metadata| metadata.len() > 0)
+}
+
+fn viable_native_call_stem(path: &Path) -> bool {
+    path.metadata()
+        .is_ok_and(|metadata| metadata.len() >= min_viable_stem_bytes(path))
+}
+
+fn native_call_recovery_health(
+    message: impl Into<String>,
+    source: minutes_core::diarize::CaptureSource,
+) -> minutes_core::markdown::RecordingHealth {
+    minutes_core::markdown::RecordingHealth {
+        voice_stem_active_ratio: None,
+        system_stem_active_ratio: None,
+        system_dominant_ratio: None,
+        capture_warnings: vec![minutes_core::markdown::CaptureWarning {
+            kind: minutes_core::diarize::FailureKind::Other {
+                code: "native-call-stem-recovery".into(),
+            },
+            source,
+            message: message.into(),
+            diagnostic_confidence: minutes_core::diarize::DiagnosticConfidence::Inferred,
+        }],
+        diarization_path: Some(minutes_core::markdown::DiarizationPath::None),
+    }
+}
+
+fn native_call_processing_input(output_path: &Path) -> io::Result<NativeCallProcessingInput> {
+    let primary_has_bytes = file_has_bytes(output_path);
+    let stems = minutes_core::capture::stem_paths_for(output_path);
+    let voice = stems.as_ref().map(|stems| stems.voice.as_path());
+    let system = stems.as_ref().map(|stems| stems.system.as_path());
+    let voice_viable = voice.is_some_and(viable_native_call_stem);
+    let system_viable = system.is_some_and(viable_native_call_stem);
+
+    if voice_viable && system_viable {
+        if !primary_has_bytes {
+            // `prepare_transcription_input` only needs the .mov path as the
+            // stem-discovery anchor; tests already use a one-byte .mov stub.
+            // If ScreenCaptureKit failed to materialize the container but the
+            // PCM stems are good, create that anchor instead of stranding both
+            // stems in native-captures.
+            std::fs::write(output_path, b"minutes native-call stem anchor")?;
+            return Ok(NativeCallProcessingInput {
+                path: output_path.to_path_buf(),
+                recovery_warning: Some(
+                    "Native call capture did not produce a usable .mov container; processing recovered PCM stems instead.".into(),
+                ),
+            });
+        }
+
+        return Ok(NativeCallProcessingInput {
+            path: output_path.to_path_buf(),
+            recovery_warning: None,
+        });
+    }
+
+    if voice_viable {
+        let voice = voice.expect("voice path present when viable");
+        return Ok(NativeCallProcessingInput {
+            path: voice.to_path_buf(),
+            recovery_warning: Some(
+                "Native call capture did not produce a usable system-audio stem; processing the local microphone stem only.".into(),
+            ),
+        });
+    }
+
+    if system_viable {
+        let system = system.expect("system path present when viable");
+        return Ok(NativeCallProcessingInput {
+            path: system.to_path_buf(),
+            recovery_warning: Some(
+                "Native call capture did not produce a usable microphone stem; processing the system-audio stem only.".into(),
+            ),
+        });
+    }
+
+    if primary_has_bytes {
+        return Ok(NativeCallProcessingInput {
+            path: output_path.to_path_buf(),
+            recovery_warning: None,
+        });
+    }
+
+    Err(io::Error::new(
+        io::ErrorKind::NotFound,
+        format!(
+            "native call capture did not produce a usable .mov or PCM stem under {}",
+            output_path
+                .parent()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| "<unknown>".into())
+        ),
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn queue_native_call_capture_for_processing(
+    mode: CaptureMode,
+    requested_title: Option<String>,
+    output_path: &Path,
+    user_notes: Option<String>,
+    pre_context: Option<String>,
+    recording_started_at: chrono::DateTime<chrono::Local>,
+    recording_finished_at: chrono::DateTime<chrono::Local>,
+    context_session_id: Option<String>,
+    calendar_event: Option<minutes_core::calendar::CalendarEvent>,
+    extra_warning: Option<String>,
+) -> Result<minutes_core::jobs::ProcessingJob, String> {
+    let input = native_call_processing_input(output_path).map_err(|error| {
+        format!("failed to prepare native call capture for processing: {error}")
+    })?;
+    let warning = match (extra_warning, input.recovery_warning) {
+        (Some(extra), Some(recovery)) => Some(format!("{extra} {recovery}")),
+        (Some(extra), None) => Some(extra),
+        (None, Some(recovery)) => Some(recovery),
+        (None, None) => None,
+    };
+    let source = if input
+        .path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.ends_with(".system.wav"))
+    {
+        minutes_core::diarize::CaptureSource::System
+    } else if input
+        .path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.ends_with(".voice.wav"))
+    {
+        minutes_core::diarize::CaptureSource::Voice
+    } else {
+        minutes_core::diarize::CaptureSource::Both
+    };
+    let recording_health = warning.map(|message| native_call_recovery_health(message, source));
+
+    minutes_core::jobs::queue_live_capture_with_recording_health(
+        mode,
+        requested_title,
+        &input.path,
+        user_notes,
+        pre_context,
+        Some(recording_started_at),
+        Some(recording_finished_at),
+        context_session_id,
+        calendar_event,
+        None,
+        recording_health,
+    )
+    .map_err(|error| error.to_string())
+}
+
+/// Copy `src` to `dest` with two invariants beyond `std::fs::copy`:
+///
+/// 1. **No-clobber on dest** — open with `O_CREAT|O_EXCL` (`create_new` in Rust
+///    std parlance) so a preexisting file at the destination is refused, not
+///    overwritten. Closes the TOCTOU window between basename selection
+///    (`unique_failed_capture_basename`) and the copy. Without this, a race
+///    that landed two preserves on the same name silently destroyed the
+///    earlier artifact.
+///
+/// 2. **No-follow on src** — open with `O_NOFOLLOW` on Unix so a symlink at
+///    the source path is rejected instead of having its target's contents
+///    materialized at `dest`. Closes the TOCTOU window between an earlier
+///    `symlink_metadata()` check and the open. Defense-in-depth: the only
+///    writer to `~/.minutes/native-captures/` is the Swift helper, but the
+///    principled fix is to never deref symlinks during a recovery move.
+///
+/// On a mid-stream copy failure (disk full, EIO, etc.), the partially-written
+/// destination file is removed so the caller's rollback only has to clean up
+/// successful prior copies, not also reason about half-written ones.
+fn copy_no_clobber_nofollow(src: &Path, dest: &Path) -> io::Result<u64> {
+    #[cfg(unix)]
+    let mut src_file = {
+        use std::os::unix::fs::OpenOptionsExt;
+        OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(src)?
+    };
+    #[cfg(not(unix))]
+    let mut src_file = std::fs::File::open(src)?;
+
+    let mut dest_file = OpenOptions::new().write(true).create_new(true).open(dest)?;
+
+    match io::copy(&mut src_file, &mut dest_file) {
+        Ok(n) => Ok(n),
+        Err(error) => {
+            // Drop the half-written destination before returning so the
+            // caller's rollback doesn't have to also reason about an
+            // orphaned truncated file under the chosen basename.
+            drop(dest_file);
+            let _ = std::fs::remove_file(dest);
+            Err(error)
+        }
+    }
+}
+
+/// Pick a basename for a failed-capture artifact that doesn't collide with
+/// anything already present. Default precision is one second, which is fine
+/// in practice (a single recording produces one preserved artifact), but
+/// two failures landing in the same wall-clock second would silently
+/// overwrite each other (`fs::copy` overwrites). Append `-2`, `-3`, ... if
+/// any of the candidate slots — primary ext, `.voice.wav`, `.system.wav` —
+/// already exist for the chosen basename.
+fn unique_failed_capture_basename(dir: &Path, ext: &str) -> String {
+    let ts = chrono::Local::now().format("%Y-%m-%d-%H%M%S").to_string();
+    let primary = format!("{}-capture", ts);
+    if basename_is_free(dir, &primary, ext) {
+        return primary;
+    }
+    for n in 2..1000 {
+        let candidate = format!("{}-capture-{}", ts, n);
+        if basename_is_free(dir, &candidate, ext) {
+            return candidate;
+        }
+    }
+    // Pathological: 999 collisions in one second. Fall back to the primary
+    // name — fs::copy will overwrite, but at this point something is very
+    // wrong upstream and silent failure is no worse than crashing the
+    // recording-stop path.
+    primary
+}
+
+fn basename_is_free(dir: &Path, basename: &str, ext: &str) -> bool {
+    !dir.join(format!("{}.{}", basename, ext)).exists()
+        && !dir.join(format!("{}.voice.wav", basename)).exists()
+        && !dir.join(format!("{}.system.wav", basename)).exists()
+}
+
+/// Audio duration (seconds) below which a stem is treated as an abort-at-start
+/// fragment and skipped by rescue (#236). Read from the file's WAV header
+/// `byte_rate` field so the threshold scales to whatever sample rate the
+/// SCStream buffer produced rather than assuming 48 kHz.
+const MIN_VIABLE_STEM_DURATION_SECS: f64 = 0.5;
+
+/// Fallback `byte_rate` when the WAV header cannot be parsed (corrupt header,
+/// truncated to less than 32 bytes, non-RIFF). 48 kHz float32 mono is what
+/// SCStream produces in practice and what AVAudioFile defaults to in the
+/// Swift helper. Used so a malformed-but-real-sized stem still gets a chance
+/// to rescue against a reasonable threshold rather than always passing.
+const FALLBACK_WAV_BYTE_RATE: u32 = 192_000;
+
+/// Read the `byte_rate` field (bytes/sec of audio data) from a WAV header.
+/// Returns None for non-RIFF files, files whose first chunk is not `fmt `
+/// (e.g. BWF with leading JUNK/bext, RF64), headers shorter than 32 bytes,
+/// any I/O error, or a header that decodes byte_rate as 0 (malformed).
+///
+/// Byte rate is at offset 28 of a standard RIFF/WAVE/PCM header (little
+/// endian u32). For float WAVs this is `sample_rate * channels *
+/// (bits_per_sample / 8)`. Reading from the header rather than recomputing
+/// from sample_rate + format avoids assuming what the producer wrote.
+///
+/// We validate three layers before trusting offset 28:
+/// 1. `RIFF` at 0..4 and `WAVE` at 8..12 — file is a RIFF/WAVE container.
+/// 2. `fmt ` at 12..16 — the first chunk is the format chunk, not a
+///    pre-format JUNK/bext chunk that would shift fmt elsewhere. Files
+///    with non-standard chunk ordering fall back to the conservative
+///    48 kHz default rather than silently using garbage at offset 28.
+/// 3. `byte_rate > 0` — guards against malformed-but-RIFF-magic files
+///    where the field is zero. A zero rate would set the size threshold
+///    to zero and let every stem pass, defeating the abort-at-start
+///    filter.
+fn read_wav_byte_rate(path: &Path) -> Option<u32> {
+    use std::io::Read;
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut header = [0u8; 32];
+    file.read_exact(&mut header).ok()?;
+    if &header[0..4] != b"RIFF" || &header[8..12] != b"WAVE" {
+        return None;
+    }
+    if &header[12..16] != b"fmt " {
+        return None;
+    }
+    let byte_rate = u32::from_le_bytes([header[28], header[29], header[30], header[31]]);
+    if byte_rate == 0 {
+        return None;
+    }
+    Some(byte_rate)
+}
+
+/// Compute the minimum viable file size (bytes) for a stem at the given path
+/// based on its WAV header's `byte_rate` field. Falls back to a 48 kHz
+/// float32 mono rate when the header is unreadable so a malformed-but-real
+/// stem still gets a fair threshold rather than always passing.
+fn min_viable_stem_bytes(path: &Path) -> u64 {
+    let byte_rate = read_wav_byte_rate(path).unwrap_or(FALLBACK_WAV_BYTE_RATE);
+    ((byte_rate as f64) * MIN_VIABLE_STEM_DURATION_SECS) as u64
+}
+
+/// Move any sibling `<stem>.voice.wav` / `<stem>.system.wav` files (the
+/// per-source PCM stems written by the native call capture helper) into
+/// `dest_dir` with `<new_basename>.voice.wav` / `<new_basename>.system.wav`
+/// names. No-op when the original path has no parent, no file stem, or no
+/// matching stems exist.
+///
+/// Two-phase: copy every stem first; only after all copies succeed remove
+/// the originals. If any copy fails, roll back partial copies and leave the
+/// originals in place. This avoids the failure mode where voice copies
+/// succeed and system fails (disk full, permission denied), since
+/// `diarize::discover_stem_plan` rejects a `(voice=present, system=missing)`
+/// pair (`SystemStemOnly` requires system to be the surviving one), so a
+/// partial rescue would silently delete the only intact stem.
+fn rescue_paired_stems(original: &std::path::Path, dest_dir: &Path, new_basename: &str) {
+    let Some(parent) = original.parent() else {
+        return;
+    };
+    let Some(stem) = original.file_stem().and_then(|s| s.to_str()) else {
+        return;
+    };
+
+    // Phase 1: enumerate stems that exist and carry data. The suffix tag
+    // travels alongside each plan entry so the asymmetry check below can
+    // identify which side is missing without re-parsing path names.
+    let mut plan: Vec<(PathBuf, (PathBuf, &str))> = Vec::new();
+    for suffix in ["voice", "system"] {
+        let src = parent.join(format!("{}.{}.wav", stem, suffix));
+        // Use symlink_metadata so a sibling that is a symlink (pointing at
+        // arbitrary content on disk) is not silently followed and copied
+        // as if it were a real stem.
+        let Ok(meta) = src.symlink_metadata() else {
+            continue;
+        };
+        if !meta.file_type().is_file() {
+            continue;
+        }
+        // Abort-at-start captures (issue #236) leave tiny orphan stems
+        // (sjunnesson reported 19 KB and 38 KB pairs, ~0.1-0.2 s of
+        // audio) next to 1.9 KB .mov stubs. The old `meta.len() == 0`
+        // gate let these through, producing `failed-captures/` entries
+        // the user can do nothing useful with. Skip stems below ~0.5 s
+        // of audio. Threshold is derived per-file from the WAV header's
+        // `byte_rate` field so it scales to whatever sample rate the
+        // SCStream buffer actually produced (codex review caught the
+        // earlier hard-coded 48 kHz assumption).
+        let min_bytes = min_viable_stem_bytes(&src);
+        if meta.len() < min_bytes {
+            tracing::warn!(
+                path = %src.display(),
+                size_bytes = meta.len(),
+                threshold_bytes = min_bytes,
+                "rescue_paired_stems: skipping sub-threshold stem (abort-at-start fragment)"
+            );
+            continue;
+        }
+        let dest = dest_dir.join(format!("{}.{}.wav", new_basename, suffix));
+        plan.push((src, (dest, suffix)));
+    }
+
+    // Discovery requires either both stems or system-only; voice-only is
+    // explicitly rejected by `diarize::discover_stem_plan`. If voice made
+    // it into the plan but system did not (absent, non-file, symlink, or
+    // sub-threshold), drop voice too so we never produce a voice-only
+    // rescue artifact. Codex review #236 caught the asymmetric-skip gap
+    // introduced by the per-stem size filter — without this guard, a
+    // sub-threshold system stem + healthy voice stem would silently
+    // rescue voice alone and discover_stem_plan would reject it.
+    let has_voice = plan.iter().any(|(_, (_, suffix))| *suffix == "voice");
+    let has_system = plan.iter().any(|(_, (_, suffix))| *suffix == "system");
+    if has_voice && !has_system {
+        tracing::warn!(
+            new_basename = new_basename,
+            "rescue_paired_stems: dropping voice-only plan (system stem missing or sub-threshold); discover_stem_plan rejects voice-only"
+        );
+        return;
+    }
+
+    // Discard the suffix tag now that the asymmetry check has used it;
+    // downstream phases only need the (src, dest) path pair.
+    let plan: Vec<(PathBuf, PathBuf)> = plan.into_iter().map(|(s, (d, _))| (s, d)).collect();
+
+    if plan.is_empty() {
+        return;
+    }
+
+    // Phase 2: copy all. On failure, roll back and leave originals.
+    // Uses `copy_no_clobber_nofollow` so each per-stem copy refuses to
+    // overwrite a preexisting destination, refuses to follow a symlink at
+    // the source, and removes its own half-written file on mid-stream
+    // failure. Rollback only has to clean up SUCCESSFUL prior copies.
+    let mut copied: Vec<PathBuf> = Vec::new();
+    for (src, dest) in &plan {
+        match copy_no_clobber_nofollow(src, dest) {
+            Ok(_) => copied.push(dest.clone()),
+            Err(_) => {
+                for partial in &copied {
+                    let _ = std::fs::remove_file(partial);
+                }
+                return;
+            }
+        }
+    }
+
+    // Phase 3: all copies succeeded; remove originals.
+    for (src, _) in &plan {
+        let _ = std::fs::remove_file(src);
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -2465,7 +2893,7 @@ fn start_native_call_recording(
     }
     minutes_core::pid::write_recording_metadata_with_context(mode, context_session_id.as_deref())
         .ok();
-    crate::update_tray_state(app_handle, true);
+    crate::sync_tray_state(app_handle);
     minutes_core::notes::save_recording_start().ok();
     minutes_core::events::append_event(minutes_core::events::recording_started_event(
         context_session_id.clone(),
@@ -2506,40 +2934,98 @@ fn start_native_call_recording(
         }
         if let Some(status) = session.try_wait()? {
             if !status.success() {
-                let preserved = preserve_failed_capture_path(&output_path, config);
-                if let Some(session_id) = context_session_id.as_deref() {
-                    minutes_core::context_store::mark_capture_session_failed(
-                        session_id,
-                        Some(chrono::Local::now()),
-                        "native call capture exited early",
-                        preserved.as_deref(),
-                    )
-                    .ok();
-                }
-                minutes_core::pid::remove().ok();
-                minutes_core::pid::clear_recording_metadata().ok();
-                minutes_core::notes::cleanup();
-                recording.store(false, Ordering::Relaxed);
-                starting.store(false, Ordering::Relaxed);
-                if let Ok(mut health) = call_capture_health.lock() {
-                    *health = None;
-                }
-                if let Some(saved) = preserved {
-                    let notice = OutputNotice {
-                        kind: "preserved-capture".into(),
-                        title: "Native call capture failed".into(),
-                        path: saved.display().to_string(),
-                        detail:
-                            "ScreenCaptureKit capture ended early, but the raw output was preserved."
-                                .into(),
-                        job_id: None,
-                    };
-                    set_latest_output(latest_output, Some(notice.clone()));
-                    maybe_show_completion_notification(
-                        app_handle,
-                        completion_notifications_enabled,
-                        &notice,
-                    );
+                let recording_finished_at = chrono::Local::now();
+                let user_notes = minutes_core::notes::read_notes();
+                let pre_context = minutes_core::notes::read_context();
+                match queue_native_call_capture_for_processing(
+                    mode,
+                    requested_title.clone(),
+                    &output_path,
+                    user_notes,
+                    pre_context,
+                    recording_started_at,
+                    recording_finished_at,
+                    context_session_id.clone(),
+                    None,
+                    Some("Native call capture helper exited before normal stop.".into()),
+                ) {
+                    Ok(job) => {
+                        processing.store(true, Ordering::Relaxed);
+                        set_processing_stage(processing_stage, job.stage.as_deref());
+                        minutes_core::pid::set_processing_status(
+                            job.stage.as_deref(),
+                            Some(mode),
+                            job.title.as_deref(),
+                            Some(&job.id),
+                            minutes_core::jobs::active_job_count(),
+                        )
+                        .ok();
+                        minutes_core::pid::remove().ok();
+                        minutes_core::pid::clear_recording_metadata().ok();
+                        minutes_core::notes::cleanup();
+                        recording.store(false, Ordering::Relaxed);
+                        starting.store(false, Ordering::Relaxed);
+                        if let Ok(mut health) = call_capture_health.lock() {
+                            *health = Some(session.source_health());
+                        }
+                        spawn_processing_worker(
+                            app_handle.clone(),
+                            processing.clone(),
+                            processing_stage.clone(),
+                            latest_output.clone(),
+                            activation_progress.clone(),
+                            completion_notifications_enabled.clone(),
+                        );
+                        sync_processing_indicator(processing, processing_stage);
+                    }
+                    Err(queue_error) => {
+                        let preserved = preserve_failed_capture_path(&output_path, config);
+                        if let Some(session_id) = context_session_id.as_deref() {
+                            minutes_core::context_store::mark_capture_session_failed(
+                                session_id,
+                                Some(recording_finished_at),
+                                &format!(
+                                    "native call capture exited early; recovery queue failed: {}",
+                                    queue_error
+                                ),
+                                preserved.as_deref(),
+                            )
+                            .ok();
+                        }
+                        minutes_core::pid::remove().ok();
+                        minutes_core::pid::clear_recording_metadata().ok();
+                        minutes_core::notes::cleanup();
+                        recording.store(false, Ordering::Relaxed);
+                        starting.store(false, Ordering::Relaxed);
+                        if let Ok(mut health) = call_capture_health.lock() {
+                            *health = None;
+                        }
+                        if let Some(saved) = preserved {
+                            let notice = OutputNotice {
+                                kind: "preserved-capture".into(),
+                                title: "Native call capture failed".into(),
+                                path: saved.display().to_string(),
+                                detail: format!(
+                                    "ScreenCaptureKit capture ended early. Recovery queue failed: {queue_error}"
+                                ),
+                                job_id: None,
+                            };
+                            set_latest_output(latest_output, Some(notice.clone()));
+                            maybe_show_completion_notification(
+                                app_handle,
+                                completion_notifications_enabled,
+                                &notice,
+                            );
+                        } else {
+                            set_recording_error_notice(
+                                latest_output,
+                                "Native call capture failed",
+                                format!(
+                                    "ScreenCaptureKit capture ended early. Recovery queue failed: {queue_error}"
+                                ),
+                            );
+                        }
+                    }
                 }
                 reset_hotkey_capture_state(hotkey_runtime, discard_short_hotkey_capture);
                 return Ok(());
@@ -2549,43 +3035,109 @@ fn start_native_call_recording(
     }
 
     if let Err(error) = session.stop() {
-        let preserved = preserve_failed_capture_path(&output_path, config);
-        if let Some(session_id) = context_session_id.as_deref() {
-            minutes_core::context_store::mark_capture_session_failed(
-                session_id,
-                Some(chrono::Local::now()),
-                &format!("stopping native call capture failed: {}", error),
-                preserved.as_deref(),
-            )
-            .ok();
+        let recording_finished_at = chrono::Local::now();
+        let user_notes = minutes_core::notes::read_notes();
+        let pre_context = minutes_core::notes::read_context();
+        let queue_result = queue_native_call_capture_for_processing(
+            mode,
+            requested_title.clone(),
+            &output_path,
+            user_notes,
+            pre_context,
+            recording_started_at,
+            recording_finished_at,
+            context_session_id.clone(),
+            None,
+            Some(format!(
+                "Native call capture finalization reported an error: {error}."
+            )),
+        );
+
+        match queue_result {
+            Ok(job) => {
+                processing.store(true, Ordering::Relaxed);
+                set_processing_stage(processing_stage, job.stage.as_deref());
+                minutes_core::pid::set_processing_status(
+                    job.stage.as_deref(),
+                    Some(mode),
+                    job.title.as_deref(),
+                    Some(&job.id),
+                    minutes_core::jobs::active_job_count(),
+                )
+                .ok();
+                minutes_core::pid::remove().ok();
+                minutes_core::pid::clear_recording_metadata().ok();
+                minutes_core::notes::cleanup();
+                starting.store(false, Ordering::Relaxed);
+                recording.store(false, Ordering::Relaxed);
+                if let Ok(mut health) = call_capture_health.lock() {
+                    *health = Some(session.source_health());
+                }
+                spawn_processing_worker(
+                    app_handle.clone(),
+                    processing.clone(),
+                    processing_stage.clone(),
+                    latest_output.clone(),
+                    activation_progress.clone(),
+                    completion_notifications_enabled.clone(),
+                );
+                sync_processing_indicator(processing, processing_stage);
+                reset_hotkey_capture_state(hotkey_runtime, discard_short_hotkey_capture);
+                return Ok(());
+            }
+            Err(queue_error) => {
+                let preserved = preserve_failed_capture_path(&output_path, config);
+                if let Some(session_id) = context_session_id.as_deref() {
+                    minutes_core::context_store::mark_capture_session_failed(
+                        session_id,
+                        Some(recording_finished_at),
+                        &format!(
+                            "stopping native call capture failed: {}; recovery queue failed: {}",
+                            error, queue_error
+                        ),
+                        preserved.as_deref(),
+                    )
+                    .ok();
+                }
+                minutes_core::notes::cleanup();
+                minutes_core::pid::remove().ok();
+                minutes_core::pid::clear_recording_metadata().ok();
+                processing.store(false, Ordering::Relaxed);
+                set_processing_stage(processing_stage, None);
+                starting.store(false, Ordering::Relaxed);
+                recording.store(false, Ordering::Relaxed);
+                if let Ok(mut health) = call_capture_health.lock() {
+                    *health = None;
+                }
+                if let Some(saved) = preserved {
+                    let notice = OutputNotice {
+                        kind: "preserved-capture".into(),
+                        title: "Native call capture preserved".into(),
+                        path: saved.display().to_string(),
+                        detail: format!(
+                            "Stopping native call capture failed: {error}. Recovery queue failed: {queue_error}"
+                        ),
+                        job_id: None,
+                    };
+                    set_latest_output(latest_output, Some(notice.clone()));
+                    maybe_show_completion_notification(
+                        app_handle,
+                        completion_notifications_enabled,
+                        &notice,
+                    );
+                } else {
+                    set_recording_error_notice(
+                        latest_output,
+                        "Native call capture failed",
+                        format!(
+                            "Stopping native call capture failed: {error}. Recovery queue failed: {queue_error}"
+                        ),
+                    );
+                }
+                reset_hotkey_capture_state(hotkey_runtime, discard_short_hotkey_capture);
+                return Ok(());
+            }
         }
-        minutes_core::notes::cleanup();
-        minutes_core::pid::remove().ok();
-        minutes_core::pid::clear_recording_metadata().ok();
-        processing.store(false, Ordering::Relaxed);
-        set_processing_stage(processing_stage, None);
-        starting.store(false, Ordering::Relaxed);
-        recording.store(false, Ordering::Relaxed);
-        if let Ok(mut health) = call_capture_health.lock() {
-            *health = None;
-        }
-        if let Some(saved) = preserved {
-            let notice = OutputNotice {
-                kind: "preserved-capture".into(),
-                title: "Native call capture preserved".into(),
-                path: saved.display().to_string(),
-                detail: format!("Stopping native call capture failed: {}", error),
-                job_id: None,
-            };
-            set_latest_output(latest_output, Some(notice.clone()));
-            maybe_show_completion_notification(
-                app_handle,
-                completion_notifications_enabled,
-                &notice,
-            );
-        }
-        reset_hotkey_capture_state(hotkey_runtime, discard_short_hotkey_capture);
-        return Ok(());
     }
 
     recording.store(false, Ordering::Relaxed);
@@ -2625,14 +3177,14 @@ fn start_native_call_recording(
     // The pipeline already falls back to events_overlapping_now() during background processing.
     let calendar_event = None;
 
-    match minutes_core::jobs::enqueue_capture_job(
+    match queue_native_call_capture_for_processing(
         mode,
         requested_title,
-        output_path.clone(),
+        &output_path,
         user_notes,
         pre_context,
-        Some(recording_started_at),
-        Some(recording_finished_at),
+        recording_started_at,
+        recording_finished_at,
         context_session_id.clone(),
         calendar_event,
         None,
@@ -2699,6 +3251,15 @@ fn start_native_call_recording(
                     app_handle,
                     completion_notifications_enabled,
                     &notice,
+                );
+            } else {
+                set_recording_error_notice(
+                    latest_output,
+                    "Processing not started",
+                    format!(
+                        "Failed to queue native call capture for processing: {}",
+                        error
+                    ),
                 );
             }
             starting.store(false, Ordering::Relaxed);
@@ -2938,6 +3499,84 @@ fn set_latest_output(
     }
 }
 
+fn output_error_notice(title: impl Into<String>, detail: impl Into<String>) -> OutputNotice {
+    OutputNotice {
+        kind: "error".into(),
+        title: title.into(),
+        path: String::new(),
+        detail: detail.into(),
+        job_id: None,
+    }
+}
+
+fn recording_start_error_notice(detail: impl Into<String>) -> OutputNotice {
+    output_error_notice("Recording not started", detail)
+}
+
+fn set_recording_start_error(
+    latest_output: &Arc<Mutex<Option<OutputNotice>>>,
+    detail: impl Into<String>,
+) {
+    let detail = detail.into();
+    minutes_core::logging::log_error("desktop_recording_start", "", &detail);
+    set_latest_output(latest_output, Some(recording_start_error_notice(detail)));
+}
+
+fn set_recording_error_notice(
+    latest_output: &Arc<Mutex<Option<OutputNotice>>>,
+    title: impl Into<String>,
+    detail: impl Into<String>,
+) {
+    let detail = detail.into();
+    minutes_core::logging::log_error("desktop_recording", "", &detail);
+    set_latest_output(latest_output, Some(output_error_notice(title, detail)));
+}
+
+fn validate_recording_launch_state(state: &AppState) -> Result<(), String> {
+    if recording_active(&state.recording) || state.starting.load(Ordering::Relaxed) {
+        return Err("Already recording".into());
+    }
+    if state.live_transcript_active.load(Ordering::Relaxed) {
+        return Err("Live transcript in progress — stop it first".into());
+    }
+    // Check both the in-process atomic and the cross-process PID file,
+    // mirroring the live transcript path. `cmd_install_update` and the
+    // palette dispatcher already treat the dictation PID as authoritative
+    // for "another Minutes is dictating", so this gate stays consistent.
+    if state.dictation_active.load(Ordering::Relaxed) || dictation_pid_active() {
+        return Err("Dictation in progress — stop it first".into());
+    }
+    Ok(())
+}
+
+fn reject_recording_launch(state: &AppState, error: String) -> String {
+    set_recording_start_error(&state.latest_output, error.clone());
+    error
+}
+
+fn reserve_recording_launch(state: &AppState) -> Result<(), String> {
+    validate_recording_launch_state(state)?;
+    state
+        .starting
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::Relaxed)
+        .map(|_| ())
+        .map_err(|_| "Already recording".into())
+}
+
+fn prepare_cmd_recording_launch(state: &AppState, from_call_detect: bool) -> Result<(), String> {
+    reserve_recording_launch(state)?;
+    // Session-level flag that scopes the stop_when_call_ends auto-stop only
+    // to recordings started via the call detection banner. Manual starts
+    // never get auto-stopped, even when the config flag is on.
+    state
+        .recording_started_by_call_detect
+        .store(from_call_detect, Ordering::Relaxed);
+    // Starting a fresh recording always cancels any in-flight countdown so
+    // the UI doesn't auto-stop a session the user has already moved past.
+    reset_call_end_countdown(state);
+    Ok(())
+}
+
 fn sync_processing_indicator(
     processing: &Arc<AtomicBool>,
     processing_stage: &Arc<Mutex<Option<String>>>,
@@ -3015,14 +3654,26 @@ fn startup_retryable_output_notice_from_job(
     Some(notice)
 }
 
+const STARTUP_RETRYABLE_NOTICE_WINDOW_DAYS: i64 = 3;
+
+fn startup_retryable_notice_is_recent(job: &minutes_core::jobs::ProcessingJob) -> bool {
+    let reference_time = job.finished_at.as_ref().unwrap_or(&job.created_at);
+    *reference_time
+        >= chrono::Local::now() - chrono::Duration::days(STARTUP_RETRYABLE_NOTICE_WINDOW_DAYS)
+}
+
 fn latest_retryable_output_notice() -> Option<OutputNotice> {
-    let mut jobs = minutes_core::jobs::list_jobs()
+    // Include archive: retry-cap demotions in `list_jobs()` move Failed
+    // jobs across the active/archive boundary (issue #229), so a
+    // `list_jobs()`-only scan would silently miss them on startup.
+    let mut jobs = minutes_core::jobs::display_jobs(None, true)
         .into_iter()
         .filter(|job| {
             matches!(
                 job.state,
                 minutes_core::jobs::JobState::Failed | minutes_core::jobs::JobState::NeedsReview
-            )
+            ) && job.notice_dismissed_at.is_none()
+                && startup_retryable_notice_is_recent(job)
         })
         .collect::<Vec<_>>();
 
@@ -3035,6 +3686,37 @@ fn latest_retryable_output_notice() -> Option<OutputNotice> {
     jobs.into_iter()
         .next()
         .and_then(|job| startup_retryable_output_notice_from_job(&job))
+}
+
+fn job_id_from_notice(notice: &OutputNotice) -> Option<String> {
+    if let Some(job_id) = notice.job_id.as_ref().filter(|id| !id.is_empty()) {
+        return Some(job_id.clone());
+    }
+
+    let path = Path::new(&notice.path);
+    let stem = path.file_stem().and_then(|stem| stem.to_str())?;
+    if !stem.starts_with("job-") {
+        return None;
+    }
+
+    let job = minutes_core::jobs::load_job(stem)?;
+    let notice_path = path.to_string_lossy();
+    let matches_job_path =
+        job.audio_path == notice_path || job.output_path.as_deref() == Some(notice_path.as_ref());
+    matches_job_path.then_some(job.id)
+}
+
+fn persist_output_notice_dismissal(notice: &OutputNotice) {
+    let Some(job_id) = job_id_from_notice(notice) else {
+        return;
+    };
+
+    if let Err(error) = minutes_core::jobs::dismiss_job_notice(&job_id) {
+        eprintln!(
+            "[minutes] failed to persist dismissed processing notice for {}: {}",
+            job_id, error
+        );
+    }
 }
 
 pub fn seed_latest_retryable_output(latest_output: &Arc<Mutex<Option<OutputNotice>>>) {
@@ -3057,7 +3739,7 @@ pub fn spawn_processing_worker(
     completion_notifications_enabled: Arc<AtomicBool>,
 ) {
     std::thread::spawn(move || {
-        if minutes_core::jobs::current_worker_pid().is_some() {
+        if minutes_core::jobs::worker_active() {
             sync_processing_indicator(&processing, &processing_stage);
             return;
         }
@@ -3091,10 +3773,17 @@ pub fn spawn_processing_worker(
         }
 
         sync_processing_indicator(&processing, &processing_stage);
-        if let Some(job) = minutes_core::jobs::display_jobs(Some(1), true)
-            .into_iter()
-            .find(|job| job.state.is_terminal())
-        {
+        // The previous `display_jobs(Some(1), true).find(is_terminal)` had
+        // two bugs: (a) the truncation hid the just-completed notification
+        // whenever an active job existed, because the sort puts active <
+        // terminal and `.find()` never reached the terminal record, and
+        // (b) within the terminal bucket the sort was by `created_at` desc
+        // rather than `finished_at`, so a long-running reprocess finishing
+        // an old job would show the wrong notification. `latest_terminal_job`
+        // scans only the archive dir (no active-dir disk work) and sorts by
+        // `finished_at` with `created_at` as the fallback for older
+        // records. Runs once per worker exit, not on the hot status poll.
+        if let Some(job) = minutes_core::jobs::latest_terminal_job() {
             if let Some(notice) = output_notice_from_job(&job) {
                 set_latest_output(&latest_output, Some(notice.clone()));
                 if notice.kind == "saved" {
@@ -4251,6 +4940,7 @@ pub fn start_recording(
         Ok(preflight) => preflight,
         Err(error) => {
             eprintln!("Recording preflight failed: {}", error);
+            set_recording_start_error(&latest_output, error.clone());
             show_user_notification(&app_handle, "Recording blocked", &error);
             starting.store(false, Ordering::Relaxed);
             recording.store(false, Ordering::Relaxed);
@@ -4269,6 +4959,7 @@ pub fn start_recording(
     if let Some(reason) = &preflight.blocking_reason {
         if !(preflight.intent == RecordingIntent::Call && native_call_capture_available) {
             eprintln!("Recording preflight blocked: {}", reason);
+            set_recording_start_error(&latest_output, reason.clone());
             show_user_notification(&app_handle, "Recording blocked", reason);
             starting.store(false, Ordering::Relaxed);
             recording.store(false, Ordering::Relaxed);
@@ -4307,7 +4998,16 @@ pub fn start_recording(
             }
             Err(error) => {
                 eprintln!("Native call recording unavailable, falling back: {}", error);
+                minutes_core::logging::log_error(
+                    "desktop_native_call_start",
+                    "",
+                    &format!("native call recording unavailable, falling back: {error}"),
+                );
                 if let Some(reason) = &preflight.blocking_reason {
+                    set_recording_start_error(
+                        &latest_output,
+                        format!("{reason}\n\nNative call capture failed: {error}"),
+                    );
                     show_user_notification(
                         &app_handle,
                         "Recording blocked",
@@ -4330,6 +5030,7 @@ pub fn start_recording(
 
     if let Err(e) = minutes_core::pid::create() {
         eprintln!("Failed to create PID: {}", e);
+        set_recording_start_error(&latest_output, format!("Could not start recording: {}", e));
         show_user_notification(
             &app_handle,
             "Recording",
@@ -4356,7 +5057,7 @@ pub fn start_recording(
     );
     minutes_core::pid::write_recording_metadata_with_context(mode, context_session_id.as_deref())
         .ok();
-    crate::update_tray_state(&app_handle, true);
+    crate::sync_tray_state(&app_handle);
 
     minutes_core::notes::save_recording_start().ok();
     eprintln!("{} started...", mode.noun());
@@ -4493,6 +5194,11 @@ pub fn start_recording(
                             );
                         } else {
                             eprintln!("Queue error: {}", e);
+                            set_recording_error_notice(
+                                &latest_output,
+                                "Processing not started",
+                                format!("Recording finished, but queueing processing failed: {e}"),
+                            );
                         }
                     }
                 }
@@ -4545,6 +5251,11 @@ pub fn start_recording(
                 );
             } else {
                 eprintln!("Capture error: {}", e);
+                set_recording_error_notice(
+                    &latest_output,
+                    "Recording failed",
+                    format!("Recording failed before processing: {e}"),
+                );
             }
         }
     }
@@ -4584,14 +5295,35 @@ pub fn launch_recording(
     hotkey_runtime: Option<Arc<Mutex<HotkeyRuntime>>>,
     discard_short_hotkey_capture: Option<Arc<AtomicBool>>,
 ) -> Result<(), String> {
-    if recording_active(&state.recording) || state.starting.load(Ordering::Relaxed) {
-        return Err("Already recording".into());
-    }
-    if state.live_transcript_active.load(Ordering::Relaxed) {
-        return Err("Live transcript in progress — stop it first".into());
-    }
+    reserve_recording_launch(state).map_err(|error| reject_recording_launch(state, error))?;
 
-    state.starting.store(true, Ordering::Relaxed);
+    spawn_reserved_recording(
+        app,
+        state,
+        mode,
+        requested_intent,
+        allow_degraded,
+        requested_title,
+        language_override,
+        hotkey_runtime,
+        discard_short_hotkey_capture,
+    );
+
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_reserved_recording(
+    app: tauri::AppHandle,
+    state: &AppState,
+    mode: CaptureMode,
+    requested_intent: Option<RecordingIntent>,
+    allow_degraded: bool,
+    requested_title: Option<String>,
+    language_override: Option<String>,
+    hotkey_runtime: Option<Arc<Mutex<HotkeyRuntime>>>,
+    discard_short_hotkey_capture: Option<Arc<AtomicBool>>,
+) {
     let rec = state.recording.clone();
     let starting = state.starting.clone();
     let stop = state.stop_flag.clone();
@@ -4629,10 +5361,8 @@ pub fn launch_recording(
             requested_title,
             language_override,
         );
-        crate::update_tray_state(&app_done, false);
+        crate::sync_tray_state(&app_done);
     });
-
-    Ok(())
 }
 
 pub fn handle_desktop_control_request(
@@ -4940,29 +5670,28 @@ pub fn cmd_start_recording(
     } else {
         requested_intent
     };
+    minutes_core::logging::log_step(
+        "desktop_recording_start",
+        "",
+        0,
+        serde_json::json!({
+            "action": "requested",
+            "mode": format!("{capture_mode:?}"),
+            "intent": requested_intent.map(|intent| format!("{intent:?}")),
+            "source": source,
+            "recording_active": recording_active(&state.recording),
+            "starting": state.starting.load(Ordering::Relaxed),
+        }),
+    );
 
-    // Early-out BEFORE mutating any call-detect session atomics: if another
-    // recording is already in flight, launch_recording will reject this call
-    // anyway, and we must not leave mangled state behind. Previously a
-    // rejected start would still flip `recording_started_by_call_detect` and
-    // cancel an in-flight auto-stop countdown — which is exactly the state
-    // athal7 hit in issue #129: the auto-stop countdown got silently killed
-    // mid-call by a start request that never actually became a recording.
-    if recording_active(&state.recording) || state.starting.load(Ordering::Relaxed) {
-        return Err("Already recording".into());
-    }
+    // Reserve the start BEFORE mutating any call-detect session atomics.
+    // Otherwise a rejected call-detect start (live transcript/dictation already
+    // active, stale starting flag, etc.) can cancel auto-stop state for a
+    // recording that never actually launched.
+    prepare_cmd_recording_launch(&state, from_call_detect)
+        .map_err(|error| reject_recording_launch(&state, error))?;
 
-    // Session-level flag that scopes the stop_when_call_ends auto-stop only
-    // to recordings started via the call detection banner. Manual starts
-    // never get auto-stopped, even when the config flag is on.
-    state
-        .recording_started_by_call_detect
-        .store(from_call_detect, Ordering::Relaxed);
-    // Starting a fresh recording always cancels any in-flight countdown so
-    // the UI doesn't auto-stop a session the user has already moved past.
-    reset_call_end_countdown(&state);
-
-    launch_recording(
+    spawn_reserved_recording(
         app,
         &state,
         capture_mode,
@@ -4972,7 +5701,8 @@ pub fn cmd_start_recording(
         language,
         None,
         None,
-    )
+    );
+    Ok(())
 }
 
 /// Reset countdown lifecycle state for a fresh recording/session boundary.
@@ -5050,10 +5780,14 @@ pub fn cmd_mic_mute_state() -> bool {
     minutes_core::streaming::is_mic_muted()
 }
 
-#[tauri::command]
-pub fn cmd_status(state: tauri::State<AppState>) -> serde_json::Value {
+fn status_value(state: &AppState, include_readiness: bool) -> serde_json::Value {
     let recording = state.recording.load(Ordering::Relaxed);
+    let starting = state.starting.load(Ordering::Relaxed);
     let shared_processing = minutes_core::pid::read_processing_status();
+    // Scan ~/.minutes/jobs/ once per status call — `pid::status_with_active_jobs`
+    // reuses this snapshot instead of triggering two more directory walks
+    // (processing_summary + active_job_count) inside pid::status. This
+    // matters at 1 Hz UI poll cadence when terminal jobs accumulate.
     let active_jobs = minutes_core::jobs::active_jobs();
     if active_jobs.is_empty() && !shared_processing.processing {
         state.processing.store(false, Ordering::Relaxed);
@@ -5062,7 +5796,7 @@ pub fn cmd_status(state: tauri::State<AppState>) -> serde_json::Value {
     let processing = state.processing.load(Ordering::Relaxed)
         || shared_processing.processing
         || !active_jobs.is_empty();
-    let status = minutes_core::pid::status();
+    let status = minutes_core::pid::status_with_active_jobs(&active_jobs);
     let local_processing_stage = state
         .processing_stage
         .lock()
@@ -5093,38 +5827,7 @@ pub fn cmd_status(state: tauri::State<AppState>) -> serde_json::Value {
         .ok()
         .map(|guard| guard.clone())
         .unwrap_or_default();
-    let config = Config::load();
-    let batch_readiness = batch_transcription_readiness_view(&config);
-    let live_readiness = standalone_live_readiness_view(&config);
-    mark_model_ready_for_surface(&config, &batch_readiness, &state.activation_progress);
-    mark_model_ready_for_surface(&config, &live_readiness, &state.activation_progress);
-    let activation_progress = state
-        .activation_progress
-        .lock()
-        .ok()
-        .map(|progress| progress.clone())
-        .unwrap_or_default();
-    let has_saved_artifact = activation_progress.first_artifact_saved_at.is_some();
     let recording_active = recording || (status.recording && !processing);
-    let batch_setup = transcription_surface_setup_view(
-        &config,
-        "batch",
-        &batch_readiness,
-        &activation_progress,
-        has_saved_artifact,
-        recording_active,
-        processing,
-    );
-    let standalone_live_setup = transcription_surface_setup_view(
-        &config,
-        "standalone-live",
-        &live_readiness,
-        &activation_progress,
-        has_saved_artifact,
-        recording_active,
-        processing,
-    );
-    let primary_setup = primary_setup_surface(&batch_setup, &standalone_live_setup);
 
     // Get elapsed time if recording
     let elapsed = if recording_active {
@@ -5157,8 +5860,9 @@ pub fn cmd_status(state: tauri::State<AppState>) -> serde_json::Value {
         0
     };
 
-    serde_json::json!({
+    let mut value = serde_json::json!({
         "recording": recording || (status.recording && !processing),
+        "starting": starting,
         "processing": processing,
         "recordingMode": status.recording_mode,
         "processingStage": processing_stage,
@@ -5169,19 +5873,81 @@ pub fn cmd_status(state: tauri::State<AppState>) -> serde_json::Value {
         "processingJobs": processing_jobs,
         "updateState": update_state,
         "latestOutput": latest_output,
-        "activation": primary_setup.activation.clone(),
-        "batch_transcription": batch_readiness,
-        "standalone_live": live_readiness,
-        "transcriptionSetup": {
-            "needsSetup": batch_setup.needs_setup || standalone_live_setup.needs_setup,
-            "batch": batch_setup,
-            "standaloneLive": standalone_live_setup,
-        },
         "callCaptureHealth": call_capture_health,
         "pid": status.pid,
         "elapsed": elapsed,
         "audioLevel": audio_level,
-    })
+    });
+
+    if include_readiness {
+        let config = Config::load();
+        let batch_readiness = batch_transcription_readiness_view(&config);
+        let live_readiness = standalone_live_readiness_view(&config);
+        mark_model_ready_for_surface(&config, &batch_readiness, &state.activation_progress);
+        mark_model_ready_for_surface(&config, &live_readiness, &state.activation_progress);
+        let activation_progress = state
+            .activation_progress
+            .lock()
+            .ok()
+            .map(|progress| progress.clone())
+            .unwrap_or_default();
+        let has_saved_artifact = activation_progress.first_artifact_saved_at.is_some();
+        let batch_setup = transcription_surface_setup_view(
+            &config,
+            "batch",
+            &batch_readiness,
+            &activation_progress,
+            has_saved_artifact,
+            recording_active,
+            processing,
+        );
+        let standalone_live_setup = transcription_surface_setup_view(
+            &config,
+            "standalone-live",
+            &live_readiness,
+            &activation_progress,
+            has_saved_artifact,
+            recording_active,
+            processing,
+        );
+        let primary_setup = primary_setup_surface(&batch_setup, &standalone_live_setup);
+
+        if let Some(object) = value.as_object_mut() {
+            object.insert(
+                "activation".into(),
+                serde_json::to_value(primary_setup.activation.clone())
+                    .unwrap_or(serde_json::Value::Null),
+            );
+            object.insert(
+                "batch_transcription".into(),
+                serde_json::to_value(batch_readiness).unwrap_or(serde_json::Value::Null),
+            );
+            object.insert(
+                "standalone_live".into(),
+                serde_json::to_value(live_readiness).unwrap_or(serde_json::Value::Null),
+            );
+            object.insert(
+                "transcriptionSetup".into(),
+                serde_json::json!({
+                    "needsSetup": batch_setup.needs_setup || standalone_live_setup.needs_setup,
+                    "batch": batch_setup,
+                    "standaloneLive": standalone_live_setup,
+                }),
+            );
+        }
+    }
+
+    value
+}
+
+#[tauri::command]
+pub fn cmd_capture_status(state: tauri::State<AppState>) -> serde_json::Value {
+    status_value(&state, false)
+}
+
+#[tauri::command]
+pub fn cmd_status(state: tauri::State<AppState>) -> serde_json::Value {
+    status_value(&state, true)
 }
 
 #[tauri::command]
@@ -5833,6 +6599,14 @@ pub fn cmd_clear_open_artifact(state: tauri::State<AppState>) -> Result<(), Stri
 
 #[tauri::command]
 pub fn cmd_clear_latest_output(state: tauri::State<AppState>) {
+    let dismissed_notice = state
+        .latest_output
+        .lock()
+        .ok()
+        .and_then(|current| current.clone());
+    if let Some(notice) = dismissed_notice.as_ref() {
+        persist_output_notice_dismissal(notice);
+    }
     set_latest_output(&state.latest_output, None);
 }
 
@@ -6256,6 +7030,7 @@ pub fn cmd_get_meeting_detail(path: String) -> Result<MeetingDetail, String> {
             minutes_core::markdown::OutputStatus::Complete => "complete",
             minutes_core::markdown::OutputStatus::NoSpeech => "no-speech",
             minutes_core::markdown::OutputStatus::TranscriptOnly => "transcript-only",
+            minutes_core::markdown::OutputStatus::Degraded => "degraded",
         }
         .to_string()
     });
@@ -6838,6 +7613,74 @@ fn context_switch_prompt(command: &str, mode: &str, title: &str) -> String {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct AgentResolveError {
+    pub name: String,
+    pub unusable_candidates: Vec<PathBuf>,
+}
+
+impl AgentResolveError {
+    fn user_message(&self) -> String {
+        let install_hint = if self.name == "claude" {
+            " Reinstall Claude Code, or choose another assistant in Settings."
+        } else {
+            " Reinstall that assistant CLI, or choose another assistant in Settings."
+        };
+
+        if let Some(path) = self.unusable_candidates.first() {
+            format!(
+                "Recall needs '{}', but the installed copy cannot be run.{} Minutes found the broken copy at {}.",
+                self.name,
+                install_hint,
+                path.display()
+            )
+        } else {
+            let install_hint = if self.name == "claude" {
+                " Install Claude Code, or choose another assistant in Settings."
+            } else {
+                " Install it, or choose another assistant in Settings."
+            };
+            format!(
+                "'{}' was not found on PATH or in common install locations.{} Settings file: {}",
+                self.name,
+                install_hint,
+                user_config_path_for_display(),
+            )
+        }
+    }
+}
+
+fn is_usable_agent_binary(path: &Path) -> bool {
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & 0o111 != 0
+    }
+
+    #[cfg(windows)]
+    {
+        true
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        true
+    }
+}
+
+fn remember_unusable_candidate(candidates: &mut Vec<PathBuf>, path: PathBuf) {
+    if !candidates.iter().any(|existing| existing == &path) {
+        candidates.push(path);
+    }
+}
+
 /// Resolve an agent name or path to an executable.
 ///
 /// Accepts either:
@@ -6848,11 +7691,16 @@ fn context_switch_prompt(command: &str, mode: &str, title: &str) -> String {
 ///
 /// This is intentionally open: users can set `assistant.agent` to any binary
 /// they want, including wrapper scripts or custom agent CLIs.
-pub fn find_agent_binary(name: &str) -> Option<PathBuf> {
+pub fn resolve_agent_binary(name: &str) -> Result<PathBuf, AgentResolveError> {
+    let mut unusable_candidates = Vec::new();
+
     // If it's an absolute path, check it directly
     let as_path = PathBuf::from(name);
     if as_path.is_absolute() && as_path.exists() {
-        return Some(as_path);
+        if is_usable_agent_binary(&as_path) {
+            return Ok(as_path);
+        }
+        remember_unusable_candidate(&mut unusable_candidates, as_path);
     }
 
     // PATH lookup (cross-platform). On Windows this respects PATHEXT and
@@ -6860,7 +7708,10 @@ pub fn find_agent_binary(name: &str) -> Option<PathBuf> {
     // launched from Finder/Explorer often have a minimal PATH, so the
     // fallback below catches common install dirs that aren't on PATH.
     if let Ok(path) = which::which(name) {
-        return Some(path);
+        if is_usable_agent_binary(&path) {
+            return Ok(path);
+        }
+        remember_unusable_candidate(&mut unusable_candidates, path);
     }
 
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp"));
@@ -6902,11 +7753,21 @@ pub fn find_agent_binary(name: &str) -> Option<PathBuf> {
                 candidate.set_extension(ext);
             }
             if candidate.exists() {
-                return Some(candidate);
+                if is_usable_agent_binary(&candidate) {
+                    return Ok(candidate);
+                }
+                remember_unusable_candidate(&mut unusable_candidates, candidate);
             }
         }
     }
-    None
+    Err(AgentResolveError {
+        name: name.into(),
+        unusable_candidates,
+    })
+}
+
+pub fn find_agent_binary(name: &str) -> Option<PathBuf> {
+    resolve_agent_binary(name).ok()
 }
 
 /// Platform-correct path to the user's config file, used in error messages.
@@ -6943,20 +7804,7 @@ pub fn spawn_terminal(
         }
     } else {
         let agent_name = agent_override.unwrap_or(&config.assistant.agent);
-        let agent_bin = find_agent_binary(agent_name).ok_or_else(|| {
-            let install_hint = if agent_name == "claude" {
-                " Install Claude Code with `npm i -g @anthropic-ai/claude-code`."
-            } else {
-                ""
-            };
-            format!(
-                "'{}' not found on PATH or in common install dirs.{} \
-                 Then set the agent in {} under [assistant].",
-                agent_name,
-                install_hint,
-                user_config_path_for_display(),
-            )
-        })?;
+        let agent_bin = resolve_agent_binary(agent_name).map_err(|err| err.user_message())?;
 
         let agent_args = filtered_agent_args(agent_name, &config.assistant.agent_args);
 
@@ -7336,13 +8184,13 @@ pub async fn cmd_warm_parakeet() -> Result<serde_json::Value, String> {
         .map_err(|error| format!("warmup task failed: {}", error))?
         .map_err(|error| error.to_string())?;
 
-        return Ok(serde_json::json!({
+        Ok(serde_json::json!({
             "status": "ok",
             "backend_id": stats.backend_id,
             "model": stats.model,
             "elapsed_ms": stats.elapsed_ms,
             "used_gpu": stats.used_gpu,
-        }));
+        }))
     }
     #[cfg(not(feature = "parakeet"))]
     {
@@ -7675,6 +8523,7 @@ pub fn cmd_open_meeting_url(app: tauri::AppHandle, url: String) -> Result<(), St
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
     use std::path::Path;
     use std::sync::{Mutex, MutexGuard, OnceLock};
     use tempfile::TempDir;
@@ -7718,6 +8567,92 @@ mod tests {
 
         std::fs::remove_dir_all(&dir).ok();
         result
+    }
+
+    fn test_app_state() -> AppState {
+        AppState {
+            recording: Arc::new(AtomicBool::new(false)),
+            starting: Arc::new(AtomicBool::new(false)),
+            stop_flag: Arc::new(AtomicBool::new(false)),
+            processing: Arc::new(AtomicBool::new(false)),
+            processing_stage: Arc::new(Mutex::new(None)),
+            latest_output: Arc::new(Mutex::new(None)),
+            activation_progress: Arc::new(Mutex::new(ActivationProgress::default())),
+            call_capture_health: Arc::new(Mutex::new(None)),
+            completion_notifications_enabled: Arc::new(AtomicBool::new(false)),
+            screen_share_hidden: Arc::new(AtomicBool::new(false)),
+            global_hotkey_enabled: Arc::new(AtomicBool::new(false)),
+            global_hotkey_shortcut: Arc::new(Mutex::new("CmdOrCtrl+Shift+M".into())),
+            hotkey_runtime: Arc::new(Mutex::new(HotkeyRuntime::default())),
+            discard_short_hotkey_capture: Arc::new(AtomicBool::new(false)),
+            pty_manager: Arc::new(Mutex::new(crate::pty::PtyManager::default())),
+            dictation_active: Arc::new(AtomicBool::new(false)),
+            dictation_stop_flag: Arc::new(AtomicBool::new(false)),
+            dictation_focus_guard: Arc::new(Mutex::new(None)),
+            pending_dictation_target: Arc::new(Mutex::new(None)),
+            dictation_shortcut_enabled: Arc::new(AtomicBool::new(false)),
+            dictation_shortcut: Arc::new(Mutex::new("CmdOrCtrl+Shift+Space".into())),
+            live_transcript_active: Arc::new(AtomicBool::new(false)),
+            live_transcript_stop_flag: Arc::new(AtomicBool::new(false)),
+            live_shortcut_enabled: Arc::new(AtomicBool::new(false)),
+            live_shortcut: Arc::new(Mutex::new("CmdOrCtrl+Shift+L".into())),
+            pending_update: Arc::new(Mutex::new(None)),
+            update_install_running: Arc::new(AtomicBool::new(false)),
+            update_install_cancel: Arc::new(AtomicBool::new(false)),
+            update_install_state: Arc::new(Mutex::new(UpdateUiState::default())),
+            palette_shortcut_enabled: Arc::new(AtomicBool::new(false)),
+            palette_shortcut: Arc::new(Mutex::new("CmdOrCtrl+Shift+K".into())),
+            palette_lifecycle: Arc::new(Mutex::new(PaletteLifecycle::default())),
+            palette_reopen_pending: Arc::new(AtomicBool::new(false)),
+            pending_meeting_prompts: Arc::new(Mutex::new(HashMap::new())),
+            recording_started_by_call_detect: Arc::new(AtomicBool::new(false)),
+            call_end_countdown_cancel: Arc::new(AtomicBool::new(false)),
+            call_end_countdown_active: Arc::new(AtomicBool::new(false)),
+            call_end_countdown_terminal_state: Arc::new(AtomicU8::new(0)),
+        }
+    }
+
+    #[test]
+    fn capture_status_keeps_hot_poll_payload_lean() {
+        with_temp_home(|_| {
+            let state = test_app_state();
+            let capture = status_value(&state, false);
+            let full = status_value(&state, true);
+
+            for key in [
+                "recording",
+                "starting",
+                "processing",
+                "recordingMode",
+                "processingStage",
+                "processingStageLabel",
+                "processingTitle",
+                "processingJobId",
+                "processingJobCount",
+                "processingJobs",
+                "updateState",
+                "latestOutput",
+                "callCaptureHealth",
+                "pid",
+                "elapsed",
+                "audioLevel",
+            ] {
+                assert!(capture.get(key).is_some(), "capture status missing {key}");
+            }
+
+            for key in [
+                "activation",
+                "batch_transcription",
+                "standalone_live",
+                "transcriptionSetup",
+            ] {
+                assert!(
+                    capture.get(key).is_none(),
+                    "capture status should not include slow readiness key {key}"
+                );
+                assert!(full.get(key).is_some(), "full status missing {key}");
+            }
+        });
     }
 
     #[test]
@@ -7895,6 +8830,39 @@ mod tests {
         assert_eq!(
             filtered_agent_args("opencode", &args),
             vec!["--model".to_string(), "gpt-5-codex".to_string()]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn agent_binary_resolver_rejects_non_executable_absolute_path() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = TempDir::new().unwrap();
+        let broken = dir.path().join("claude");
+        fs::write(&broken, "").unwrap();
+        fs::set_permissions(&broken, fs::Permissions::from_mode(0o644)).unwrap();
+
+        let err = resolve_agent_binary(broken.to_str().unwrap()).unwrap_err();
+        assert_eq!(err.unusable_candidates, vec![broken.clone()]);
+        assert!(err.user_message().contains("installed copy cannot be run"));
+        assert!(err.user_message().contains("choose another assistant"));
+        assert!(find_agent_binary(broken.to_str().unwrap()).is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn agent_binary_resolver_accepts_executable_absolute_path() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = TempDir::new().unwrap();
+        let executable = dir.path().join("custom-agent");
+        fs::write(&executable, "#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert_eq!(
+            resolve_agent_binary(executable.to_str().unwrap()).unwrap(),
+            executable
         );
     }
 
@@ -8244,6 +9212,602 @@ mod tests {
         assert!(preserved.starts_with(config.output_dir.join("failed-captures")));
     }
 
+    /// Regression for issue #216: when the native call helper's .mov is moved
+    /// to failed-captures because it was truncated, the paired per-source PCM
+    /// stems must travel with it (with matching new basenames) so that
+    /// `diarize::discover_stems` finds them on retry.
+    #[test]
+    fn preserve_failed_capture_path_rescues_paired_stems() {
+        let dir = TempDir::new().unwrap();
+        let config = Config {
+            output_dir: dir.path().join("meetings"),
+            ..Config::default()
+        };
+        let native_captures = dir.path().join("native-captures");
+        std::fs::create_dir_all(&native_captures).unwrap();
+        let mov = native_captures.join("2026-05-11-103342-call.mov");
+        std::fs::write(&mov, vec![1_u8; 1024]).unwrap();
+        let voice_stem = native_captures.join("2026-05-11-103342-call.voice.wav");
+        let system_stem = native_captures.join("2026-05-11-103342-call.system.wav");
+        // Stems must be above MIN_VIABLE_STEM_BYTES to be rescued (#236).
+        // Use 200 KB which represents ~1 s of audio, well above the cutoff.
+        std::fs::write(&voice_stem, vec![2_u8; 200_000]).unwrap();
+        std::fs::write(&system_stem, vec![3_u8; 200_000]).unwrap();
+
+        let preserved = preserve_failed_capture_path(&mov, &config).expect("preserve");
+
+        assert!(!mov.exists(), "original .mov should be moved");
+        assert!(!voice_stem.exists(), "voice stem should be moved");
+        assert!(!system_stem.exists(), "system stem should be moved");
+        assert!(preserved.exists());
+        assert_eq!(preserved.extension().and_then(|e| e.to_str()), Some("mov"));
+
+        // discover_stems looks for `<basename>.voice.wav` next to the audio.
+        // Verify the rescued stems use the SAME new basename as the .mov.
+        let dest_stem = preserved
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap()
+            .to_string();
+        let dest_dir = preserved.parent().unwrap();
+        assert!(
+            dest_dir.join(format!("{}.voice.wav", dest_stem)).exists(),
+            "voice stem should be rescued next to the .mov with matching basename"
+        );
+        assert!(
+            dest_dir.join(format!("{}.system.wav", dest_stem)).exists(),
+            "system stem should be rescued next to the .mov with matching basename"
+        );
+    }
+
+    /// When the .mov has no paired stems (e.g. legacy capture path), preserve
+    /// must still move the .mov successfully — stem rescue is best-effort.
+    #[test]
+    fn preserve_failed_capture_path_works_without_paired_stems() {
+        let dir = TempDir::new().unwrap();
+        let config = Config {
+            output_dir: dir.path().join("meetings"),
+            ..Config::default()
+        };
+        let mov = dir.path().join("2026-05-11-103342-call.mov");
+        std::fs::write(&mov, vec![1_u8; 1024]).unwrap();
+
+        let preserved = preserve_failed_capture_path(&mov, &config).expect("preserve");
+
+        assert!(!mov.exists());
+        assert!(preserved.exists());
+    }
+
+    /// If a destination slot somehow exists when copy_no_clobber_nofollow
+    /// runs (TOCTOU race past unique_failed_capture_basename, or an
+    /// aborted prior run left a file), we must refuse to overwrite.
+    /// The preexisting artifact stays intact and the new preserve returns
+    /// None so the caller leaves the source on disk for manual recovery.
+    #[test]
+    fn preserve_failed_capture_path_refuses_to_clobber_existing_dest() {
+        let dir = TempDir::new().unwrap();
+        let config = Config {
+            output_dir: dir.path().join("meetings"),
+            ..Config::default()
+        };
+        let failed_dir = config.output_dir.join("failed-captures");
+        std::fs::create_dir_all(&failed_dir).unwrap();
+
+        // Plant a file at EVERY basename slot unique_failed_capture_basename
+        // would pick (primary + 999 fallbacks) — extreme but proves the
+        // copy_no_clobber_nofollow contract: if there's no free slot AND no
+        // basename-generation path leads to a free slot, preserve gives up
+        // rather than overwriting. In practice we expect the basename
+        // picker to find a free slot. This test forces the no-clobber path
+        // to trigger by saturating slots.
+        let ts = chrono::Local::now().format("%Y-%m-%d-%H%M%S").to_string();
+        let primary = format!("{}-capture", ts);
+        std::fs::write(failed_dir.join(format!("{}.mov", primary)), b"prior").unwrap();
+        for n in 2..1000 {
+            let alt = format!("{}-capture-{}", ts, n);
+            std::fs::write(failed_dir.join(format!("{}.mov", alt)), b"prior").unwrap();
+        }
+
+        let mov = dir.path().join("call.mov");
+        std::fs::write(&mov, vec![9_u8; 1024]).unwrap();
+
+        let result = preserve_failed_capture_path(&mov, &config);
+
+        assert!(
+            result.is_none(),
+            "preserve must give up rather than clobber an existing artifact"
+        );
+        assert!(
+            mov.exists(),
+            "source .mov must stay intact when preserve gives up"
+        );
+        // Confirm a planted file is unchanged.
+        let planted = failed_dir.join(format!("{}.mov", primary));
+        assert_eq!(std::fs::read(&planted).unwrap(), b"prior");
+    }
+
+    /// Same-second failures must not silently overwrite a previously
+    /// preserved capture. `unique_failed_capture_basename` should pick a
+    /// distinct name when the timestamped primary is already taken.
+    #[test]
+    fn preserve_failed_capture_path_avoids_same_second_collision() {
+        let dir = TempDir::new().unwrap();
+        let config = Config {
+            output_dir: dir.path().join("meetings"),
+            ..Config::default()
+        };
+        let native_captures = dir.path().join("native-captures");
+        std::fs::create_dir_all(&native_captures).unwrap();
+
+        let mov_a = native_captures.join("first-call.mov");
+        std::fs::write(&mov_a, vec![1_u8; 1024]).unwrap();
+        let preserved_a = preserve_failed_capture_path(&mov_a, &config).expect("preserve a");
+
+        let mov_b = native_captures.join("second-call.mov");
+        std::fs::write(&mov_b, vec![2_u8; 1024]).unwrap();
+        let preserved_b = preserve_failed_capture_path(&mov_b, &config).expect("preserve b");
+
+        assert_ne!(
+            preserved_a, preserved_b,
+            "two preserves in the same second must not produce the same path"
+        );
+        assert!(preserved_a.exists(), "first preserved file must survive");
+        assert!(preserved_b.exists(), "second preserved file must exist");
+
+        // Content sanity: A was 1s, B was 2s; both should be intact.
+        let a = std::fs::read(&preserved_a).unwrap();
+        let b = std::fs::read(&preserved_b).unwrap();
+        assert_eq!(a[0], 1, "preserved A must keep its content");
+        assert_eq!(
+            b[0], 2,
+            "preserved B must keep its content (not overwritten by A)"
+        );
+    }
+
+    /// If one stem rescue fails partway through (system stem copy errors),
+    /// the function must roll back the partial copy of the voice stem AND
+    /// leave the originals in place. The opposite — deleting voice while
+    /// leaving system orphaned — produces a `(voice=missing, system=present)`
+    /// pair that `discover_stem_plan` rejects unless system exists, which
+    /// silently breaks recovery.
+    #[test]
+    #[cfg(unix)]
+    fn rescue_paired_stems_rolls_back_partial_copy() {
+        let dir = TempDir::new().unwrap();
+        let failed_dir = dir.path().join("failed-captures");
+        std::fs::create_dir_all(&failed_dir).unwrap();
+        let native_captures = dir.path().join("native-captures");
+        std::fs::create_dir_all(&native_captures).unwrap();
+
+        let mov = native_captures.join("call.mov");
+        std::fs::write(&mov, vec![1_u8; 1024]).unwrap();
+        let voice_stem = native_captures.join("call.voice.wav");
+        let system_stem = native_captures.join("call.system.wav");
+        // Use 200 KB stems to clear MIN_VIABLE_STEM_BYTES (#236).
+        std::fs::write(&voice_stem, vec![2_u8; 200_000]).unwrap();
+        std::fs::write(&system_stem, vec![3_u8; 200_000]).unwrap();
+
+        // Force the second copy (system) to fail by pre-creating its
+        // destination as a directory, which `fs::copy` cannot overwrite.
+        // Phase order in `rescue_paired_stems` walks ["voice", "system"], so
+        // voice copies successfully and then system fails and we roll back.
+        let probe_basename = "rescue-rollback-probe";
+        let system_dest_blocker = failed_dir.join(format!("{}.system.wav", probe_basename));
+        std::fs::create_dir(&system_dest_blocker).expect("create blocker dir");
+
+        rescue_paired_stems(&mov, &failed_dir, probe_basename);
+
+        // Originals must still be on disk: nothing was committed.
+        assert!(
+            voice_stem.exists(),
+            "voice original must remain when rescue rolls back"
+        );
+        assert!(
+            system_stem.exists(),
+            "system original must remain when rescue rolls back"
+        );
+        // The voice copy that succeeded in phase 2 must have been removed.
+        let voice_partial = failed_dir.join(format!("{}.voice.wav", probe_basename));
+        assert!(
+            !voice_partial.exists(),
+            "partial voice copy must be rolled back (was at {})",
+            voice_partial.display()
+        );
+    }
+
+    /// Symlink stems are not real audio data. Following them via
+    /// `metadata()` would let an attacker (or a misconfigured environment)
+    /// trick rescue into copying arbitrary file contents into
+    /// `failed-captures/` and unlinking the symlink target's path entry.
+    /// Use `symlink_metadata` and skip non-regular entries.
+    #[test]
+    #[cfg(unix)]
+    fn rescue_paired_stems_skips_symlink_siblings() {
+        let dir = TempDir::new().unwrap();
+        let native_captures = dir.path().join("native-captures");
+        std::fs::create_dir_all(&native_captures).unwrap();
+        let failed_dir = dir.path().join("failed-captures");
+        std::fs::create_dir_all(&failed_dir).unwrap();
+
+        let mov = native_captures.join("call.mov");
+        std::fs::write(&mov, vec![1_u8; 1024]).unwrap();
+
+        // Symlink the voice stem to an arbitrary file outside native-captures.
+        let outside_secret = dir.path().join("outside-secret.txt");
+        std::fs::write(&outside_secret, b"sensitive contents").unwrap();
+        let voice_link = native_captures.join("call.voice.wav");
+        std::os::unix::fs::symlink(&outside_secret, &voice_link).unwrap();
+
+        // Real system stem above MIN_VIABLE_STEM_BYTES so the function has
+        // something to attempt (#236).
+        let system_stem = native_captures.join("call.system.wav");
+        std::fs::write(&system_stem, vec![3_u8; 200_000]).unwrap();
+
+        rescue_paired_stems(&mov, &failed_dir, "rescued");
+
+        // The symlinked voice stem MUST NOT be copied or unlinked.
+        assert!(
+            voice_link.exists(),
+            "symlinked voice stem must be left alone"
+        );
+        assert!(
+            outside_secret.exists(),
+            "symlink target must not be touched"
+        );
+        let voice_dest = failed_dir.join("rescued.voice.wav");
+        assert!(
+            !voice_dest.exists(),
+            "symlinked voice must NOT be materialized in failed-captures"
+        );
+
+        // The real system stem should still rescue successfully (single-stem
+        // is a valid plan for diarize::discover_stem_plan).
+        let system_dest = failed_dir.join("rescued.system.wav");
+        assert!(
+            system_dest.exists(),
+            "real system stem should rescue independently"
+        );
+        assert!(
+            !system_stem.exists(),
+            "system original should be moved on successful rescue"
+        );
+    }
+
+    /// Empty paired stems (zero-length placeholder files) should not be moved
+    /// alongside; only stems with actual data count as rescuable.
+    #[test]
+    fn preserve_failed_capture_path_skips_empty_paired_stems() {
+        let dir = TempDir::new().unwrap();
+        let config = Config {
+            output_dir: dir.path().join("meetings"),
+            ..Config::default()
+        };
+        let native_captures = dir.path().join("native-captures");
+        std::fs::create_dir_all(&native_captures).unwrap();
+        let mov = native_captures.join("2026-05-11-103342-call.mov");
+        std::fs::write(&mov, vec![1_u8; 1024]).unwrap();
+        let voice_stem = native_captures.join("2026-05-11-103342-call.voice.wav");
+        let system_stem = native_captures.join("2026-05-11-103342-call.system.wav");
+        std::fs::write(&voice_stem, Vec::<u8>::new()).unwrap();
+        std::fs::write(&system_stem, Vec::<u8>::new()).unwrap();
+
+        let preserved = preserve_failed_capture_path(&mov, &config).expect("preserve");
+        let dest_stem = preserved.file_stem().and_then(|s| s.to_str()).unwrap();
+        let dest_dir = preserved.parent().unwrap();
+
+        // Zero-length stems should be left alone — moving them would just
+        // create misleading "stems exist" signals for discover_stems.
+        assert!(voice_stem.exists());
+        assert!(system_stem.exists());
+        assert!(!dest_dir.join(format!("{}.voice.wav", dest_stem)).exists());
+        assert!(!dest_dir.join(format!("{}.system.wav", dest_stem)).exists());
+    }
+
+    /// Abort-at-start native captures (#236) leave tiny orphan stems
+    /// (sjunnesson observed 19 KB and 38 KB pairs) next to ~1.9 KB .mov
+    /// stubs. Rescue must skip stems below MIN_VIABLE_STEM_BYTES so the
+    /// user does not get useless `failed-captures/` entries with 0.1-0.2 s
+    /// of garbage audio. The .mov itself still preserves.
+    #[test]
+    fn preserve_failed_capture_path_skips_subthreshold_paired_stems() {
+        let dir = TempDir::new().unwrap();
+        let config = Config {
+            output_dir: dir.path().join("meetings"),
+            ..Config::default()
+        };
+        let native_captures = dir.path().join("native-captures");
+        std::fs::create_dir_all(&native_captures).unwrap();
+
+        let mov = native_captures.join("2026-04-07-130235-capture.mov");
+        std::fs::write(&mov, vec![1_u8; 1908]).unwrap();
+        let voice_stem = native_captures.join("2026-04-07-130235-capture.voice.wav");
+        let system_stem = native_captures.join("2026-04-07-130235-capture.system.wav");
+        // Realistic abort-at-start sizes from sjunnesson's report on #236.
+        std::fs::write(&voice_stem, vec![2_u8; 38_656]).unwrap();
+        std::fs::write(&system_stem, vec![3_u8; 19_456]).unwrap();
+
+        let preserved = preserve_failed_capture_path(&mov, &config).expect("preserve");
+        let dest_stem = preserved.file_stem().and_then(|s| s.to_str()).unwrap();
+        let dest_dir = preserved.parent().unwrap();
+
+        // The .mov itself still preserves (it's the only failure signal).
+        assert!(preserved.exists(), "the .mov stub must still be preserved");
+
+        // Sub-threshold stems must stay in native-captures untouched, and
+        // must NOT appear in failed-captures.
+        assert!(
+            voice_stem.exists(),
+            "sub-threshold voice stem original must stay in place"
+        );
+        assert!(
+            system_stem.exists(),
+            "sub-threshold system stem original must stay in place"
+        );
+        assert!(
+            !dest_dir.join(format!("{}.voice.wav", dest_stem)).exists(),
+            "sub-threshold voice stem must NOT be moved to failed-captures"
+        );
+        assert!(
+            !dest_dir.join(format!("{}.system.wav", dest_stem)).exists(),
+            "sub-threshold system stem must NOT be moved to failed-captures"
+        );
+    }
+
+    /// Helper: write a minimal RIFF/WAVE/fmt header carrying the given
+    /// sample rate (float32 mono), then pad with zeros to the requested
+    /// total file size. The rescue code only reads RIFF/WAVE/`fmt `
+    /// markers plus `byte_rate` at offset 28, so the rest of the file
+    /// does not need to be a valid PCM payload.
+    ///
+    /// Note: AVAudioFile on macOS may write WAVE_FORMAT_EXTENSIBLE
+    /// (`0xFFFE`) for float32 mono in some cases, but byte_rate sits at
+    /// the same absolute offset 28 either way. The chunk layout is
+    /// chunk_id 4 plus chunk_size 4 plus format 2 plus channels 2 plus
+    /// sample_rate 4, totaling 16 bytes after the RIFF header. This
+    /// fixture uses tag `3` (IEEE float) for readability; the threshold
+    /// logic is identical for both tags.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_lossless)]
+    fn write_test_wav(path: &Path, sample_rate: u32, total_bytes: usize) {
+        use std::io::Write;
+        let channels: u16 = 1;
+        let bits_per_sample: u16 = 32;
+        let byte_rate: u32 = sample_rate * (channels as u32) * ((bits_per_sample / 8) as u32);
+        let block_align: u16 = channels * (bits_per_sample / 8);
+
+        let mut header = Vec::with_capacity(44);
+        header.extend_from_slice(b"RIFF");
+        header.extend_from_slice(&[0; 4]); // file size minus 8 (placeholder)
+        header.extend_from_slice(b"WAVE");
+        header.extend_from_slice(b"fmt ");
+        header.extend_from_slice(&16u32.to_le_bytes());
+        header.extend_from_slice(&3u16.to_le_bytes()); // float
+        header.extend_from_slice(&channels.to_le_bytes());
+        header.extend_from_slice(&sample_rate.to_le_bytes());
+        header.extend_from_slice(&byte_rate.to_le_bytes());
+        header.extend_from_slice(&block_align.to_le_bytes());
+        header.extend_from_slice(&bits_per_sample.to_le_bytes());
+        header.extend_from_slice(b"data");
+        header.extend_from_slice(&[0; 4]); // data chunk size (placeholder)
+
+        let mut file = std::fs::File::create(path).expect("create wav");
+        file.write_all(&header).expect("write header");
+        let pad = total_bytes.saturating_sub(header.len());
+        if pad > 0 {
+            file.write_all(&vec![0u8; pad]).expect("pad");
+        }
+    }
+
+    #[test]
+    fn native_call_processing_input_uses_voice_stem_when_system_missing() {
+        let dir = TempDir::new().unwrap();
+        let mov = dir.path().join("2026-05-19-120148-call.mov");
+        std::fs::write(&mov, b"mov").unwrap();
+        let voice = dir.path().join("2026-05-19-120148-call.voice.wav");
+        write_test_wav(&voice, 48_000, 200_000);
+
+        let input = native_call_processing_input(&mov).expect("processing input");
+
+        assert_eq!(input.path, voice);
+        assert!(
+            input
+                .recovery_warning
+                .as_deref()
+                .is_some_and(|warning| warning.contains("system-audio stem")),
+            "warning should explain the missing system side"
+        );
+    }
+
+    #[test]
+    fn native_call_processing_input_creates_mov_anchor_for_paired_stems() {
+        let dir = TempDir::new().unwrap();
+        let mov = dir.path().join("2026-05-19-120148-call.mov");
+        let voice = dir.path().join("2026-05-19-120148-call.voice.wav");
+        let system = dir.path().join("2026-05-19-120148-call.system.wav");
+        write_test_wav(&voice, 48_000, 200_000);
+        write_test_wav(&system, 48_000, 200_000);
+
+        let input = native_call_processing_input(&mov).expect("processing input");
+
+        assert_eq!(input.path, mov);
+        assert!(
+            input.path.exists(),
+            "missing .mov should be recreated as a stem anchor"
+        );
+        assert!(
+            input
+                .recovery_warning
+                .as_deref()
+                .is_some_and(|warning| warning.contains("recovered PCM stems")),
+            "warning should explain stem-anchor recovery"
+        );
+    }
+
+    /// Malformed WAV files (non-`fmt `-first chunk, zero byte_rate, or
+    /// outright unreadable header) must fall back to the 48 kHz default
+    /// threshold rather than letting every stem pass with a 0-byte cutoff
+    /// or silently using garbage from offset 28. Codex round 2 review
+    /// flagged both gaps; this test locks the fallback behavior in.
+    #[test]
+    fn read_wav_byte_rate_rejects_malformed_headers() {
+        let dir = TempDir::new().unwrap();
+
+        // Not a RIFF file at all.
+        let plain = dir.path().join("not-a-wav.wav");
+        std::fs::write(&plain, b"this is not wav content").unwrap();
+        assert!(read_wav_byte_rate(&plain).is_none());
+
+        // RIFF/WAVE but first chunk is JUNK, not `fmt ` (BWF-style).
+        let bwf = dir.path().join("bwf.wav");
+        let mut buf = Vec::with_capacity(32);
+        buf.extend_from_slice(b"RIFF");
+        buf.extend_from_slice(&[0; 4]);
+        buf.extend_from_slice(b"WAVE");
+        buf.extend_from_slice(b"JUNK");
+        buf.extend_from_slice(&[0; 16]);
+        std::fs::write(&bwf, &buf).unwrap();
+        assert!(read_wav_byte_rate(&bwf).is_none());
+
+        // RIFF/WAVE/fmt with explicit byte_rate = 0.
+        let zero_rate = dir.path().join("zero-rate.wav");
+        let mut buf = Vec::with_capacity(32);
+        buf.extend_from_slice(b"RIFF");
+        buf.extend_from_slice(&[0; 4]);
+        buf.extend_from_slice(b"WAVE");
+        buf.extend_from_slice(b"fmt ");
+        buf.extend_from_slice(&16u32.to_le_bytes());
+        buf.extend_from_slice(&3u16.to_le_bytes());
+        buf.extend_from_slice(&1u16.to_le_bytes());
+        buf.extend_from_slice(&48_000u32.to_le_bytes());
+        buf.extend_from_slice(&0u32.to_le_bytes());
+        std::fs::write(&zero_rate, &buf).unwrap();
+        assert!(read_wav_byte_rate(&zero_rate).is_none());
+
+        // Well-formed header — should return the byte_rate we wrote.
+        let good = dir.path().join("good.wav");
+        write_test_wav(&good, 48_000, 200_000);
+        assert_eq!(read_wav_byte_rate(&good), Some(192_000));
+    }
+
+    /// At 16 kHz float32 mono, byte_rate is 64_000. A 0.5 s threshold is
+    /// 32_000 bytes. A 40_000-byte stem at 16 kHz must rescue (above
+    /// threshold for that rate), even though it falls below the 96 KB
+    /// number that would apply at 48 kHz. Verifies the threshold scales
+    /// per-file from the WAV header rather than assuming 48 kHz.
+    #[test]
+    fn rescue_paired_stems_threshold_scales_with_wav_byte_rate() {
+        let dir = TempDir::new().unwrap();
+        let failed_dir = dir.path().join("failed-captures");
+        std::fs::create_dir_all(&failed_dir).unwrap();
+        let native_captures = dir.path().join("native-captures");
+        std::fs::create_dir_all(&native_captures).unwrap();
+
+        let mov = native_captures.join("call.mov");
+        std::fs::write(&mov, vec![1_u8; 1024]).unwrap();
+        // 40_000 bytes at 16 kHz float32 mono = ~0.625 s of audio.
+        // Above the 0.5 s threshold for that sample rate (32_000 byte_rate
+        // * 0.5 = 32_000 byte minimum), below the 96_000 bytes that would
+        // apply if we hardcoded 48 kHz.
+        write_test_wav(&native_captures.join("call.voice.wav"), 16_000, 40_000);
+        write_test_wav(&native_captures.join("call.system.wav"), 16_000, 40_000);
+
+        rescue_paired_stems(&mov, &failed_dir, "rescued");
+
+        assert!(
+            failed_dir.join("rescued.voice.wav").exists(),
+            "16 kHz stem above 0.5 s should rescue"
+        );
+        assert!(
+            failed_dir.join("rescued.system.wav").exists(),
+            "16 kHz stem above 0.5 s should rescue"
+        );
+    }
+
+    /// Discovery rejects voice-only stem plans (`SystemStemOnly` is valid,
+    /// `VoiceStemOnly` is not). If voice clears the threshold but system
+    /// is sub-threshold, the rescue must drop voice too rather than
+    /// produce a voice-only artifact that diarize cannot consume. Codex
+    /// review on #236 caught this asymmetric-skip gap.
+    #[test]
+    fn rescue_paired_stems_drops_voice_when_system_subthreshold() {
+        let dir = TempDir::new().unwrap();
+        let failed_dir = dir.path().join("failed-captures");
+        std::fs::create_dir_all(&failed_dir).unwrap();
+        let native_captures = dir.path().join("native-captures");
+        std::fs::create_dir_all(&native_captures).unwrap();
+
+        let mov = native_captures.join("call.mov");
+        std::fs::write(&mov, vec![1_u8; 1024]).unwrap();
+
+        // Voice is healthy 1 s at 48 kHz, system is sub-threshold 0.1 s.
+        let voice_stem = native_captures.join("call.voice.wav");
+        let system_stem = native_captures.join("call.system.wav");
+        write_test_wav(&voice_stem, 48_000, 200_000);
+        write_test_wav(&system_stem, 48_000, 20_000);
+
+        rescue_paired_stems(&mov, &failed_dir, "rescued");
+
+        // Voice must NOT have moved alone (would be a VoiceStemOnly plan,
+        // which discover_stem_plan rejects).
+        assert!(
+            voice_stem.exists(),
+            "voice original must stay in place when system is sub-threshold"
+        );
+        assert!(
+            !failed_dir.join("rescued.voice.wav").exists(),
+            "voice must NOT rescue alone (would be invalid voice-only plan)"
+        );
+        // System sub-threshold stays in place too (skipped earlier).
+        assert!(
+            system_stem.exists(),
+            "system sub-threshold stem must stay in place"
+        );
+        assert!(
+            !failed_dir.join("rescued.system.wav").exists(),
+            "system sub-threshold must not rescue"
+        );
+    }
+
+    /// Inverse of the above: when voice is sub-threshold and system is
+    /// healthy, system alone IS a valid plan (`SystemStemOnly`) and must
+    /// still rescue. Verifies the asymmetric guard is one-directional.
+    #[test]
+    fn rescue_paired_stems_keeps_system_when_voice_subthreshold() {
+        let dir = TempDir::new().unwrap();
+        let failed_dir = dir.path().join("failed-captures");
+        std::fs::create_dir_all(&failed_dir).unwrap();
+        let native_captures = dir.path().join("native-captures");
+        std::fs::create_dir_all(&native_captures).unwrap();
+
+        let mov = native_captures.join("call.mov");
+        std::fs::write(&mov, vec![1_u8; 1024]).unwrap();
+
+        let voice_stem = native_captures.join("call.voice.wav");
+        let system_stem = native_captures.join("call.system.wav");
+        write_test_wav(&voice_stem, 48_000, 20_000);
+        write_test_wav(&system_stem, 48_000, 200_000);
+
+        rescue_paired_stems(&mov, &failed_dir, "rescued");
+
+        // System rescues alone (valid SystemStemOnly).
+        assert!(
+            !system_stem.exists(),
+            "healthy system stem must be moved on successful rescue"
+        );
+        assert!(
+            failed_dir.join("rescued.system.wav").exists(),
+            "healthy system stem must rescue when voice is sub-threshold"
+        );
+        // Voice sub-threshold stays in place.
+        assert!(
+            voice_stem.exists(),
+            "voice sub-threshold stem must stay in place"
+        );
+        assert!(
+            !failed_dir.join("rescued.voice.wav").exists(),
+            "voice sub-threshold must not rescue"
+        );
+    }
+
     #[test]
     fn desktop_context_limited_matches_platform_behavior() {
         let mut config = Config::default();
@@ -8546,6 +10110,45 @@ mod tests {
     }
 
     #[test]
+    fn processing_job_view_includes_user_facing_stage_label() {
+        let job = minutes_core::jobs::ProcessingJob {
+            id: "job-summary".into(),
+            title: Some("Design review".into()),
+            mode: CaptureMode::Meeting,
+            content_type: ContentType::Meeting,
+            state: minutes_core::jobs::JobState::Summarizing,
+            stage: Some("summarizing".into()),
+            output_path: Some("/tmp/design-review.md".into()),
+            audio_path: "/tmp/design-review.wav".into(),
+            error: None,
+            created_at: chrono::Local::now(),
+            started_at: Some(chrono::Local::now()),
+            finished_at: None,
+            notice_dismissed_at: None,
+            recording_started_at: None,
+            recording_finished_at: None,
+            context_session_id: None,
+            user_notes: None,
+            pre_context: None,
+            calendar_event: None,
+            template_slug: None,
+            word_count: None,
+            owner_pid: None,
+            retry_count: 0,
+            recording_health: None,
+        };
+
+        let view = processing_job_view(job);
+
+        assert_eq!(view.state, "summarizing");
+        assert_eq!(view.stage.as_deref(), Some("summarizing"));
+        assert_eq!(
+            view.stage_label.as_deref(),
+            Some("Generating meeting summary")
+        );
+    }
+
+    #[test]
     fn parse_optional_string_setting_preserves_auto_detect_state() {
         assert_eq!(parse_optional_string_setting(""), None);
         assert_eq!(parse_optional_string_setting("   "), None);
@@ -8596,6 +10199,105 @@ mod tests {
 
         set_call_detection_sentinel(&mut config, "google-meet", false);
         assert!(!call_detection_has_sentinel(&config, "google-meet"));
+    }
+
+    #[test]
+    fn recording_start_error_notice_has_no_openable_path() {
+        let notice = recording_start_error_notice("ScreenCaptureKit tap unavailable");
+
+        assert_eq!(notice.kind, "error");
+        assert_eq!(notice.title, "Recording not started");
+        assert_eq!(notice.path, "");
+        assert_eq!(notice.detail, "ScreenCaptureKit tap unavailable");
+    }
+
+    #[test]
+    fn rejected_call_detect_start_does_not_mutate_auto_stop_state() {
+        with_temp_home(|_| {
+            let state = test_app_state();
+            state.live_transcript_active.store(true, Ordering::Relaxed);
+            state
+                .call_end_countdown_active
+                .store(true, Ordering::Relaxed);
+            state
+                .call_end_countdown_cancel
+                .store(false, Ordering::Relaxed);
+            state.call_end_countdown_terminal_state.store(
+                CallEndCountdownTerminalState::UserCancelled as u8,
+                Ordering::Relaxed,
+            );
+
+            let result = prepare_cmd_recording_launch(&state, true);
+
+            assert_eq!(
+                result.unwrap_err(),
+                "Live transcript in progress — stop it first"
+            );
+            assert!(!state.starting.load(Ordering::Relaxed));
+            assert!(!state
+                .recording_started_by_call_detect
+                .load(Ordering::Relaxed));
+            assert!(state.call_end_countdown_active.load(Ordering::Relaxed));
+            assert!(!state.call_end_countdown_cancel.load(Ordering::Relaxed));
+            assert_eq!(
+                CallEndCountdownTerminalState::from_u8(
+                    state
+                        .call_end_countdown_terminal_state
+                        .load(Ordering::Relaxed)
+                ),
+                CallEndCountdownTerminalState::UserCancelled
+            );
+        });
+    }
+
+    #[test]
+    fn call_detect_start_mutates_auto_stop_state_only_after_reservation() {
+        with_temp_home(|_| {
+            let state = test_app_state();
+            state
+                .call_end_countdown_active
+                .store(true, Ordering::Relaxed);
+            state
+                .call_end_countdown_cancel
+                .store(false, Ordering::Relaxed);
+            state.call_end_countdown_terminal_state.store(
+                CallEndCountdownTerminalState::UserCancelled as u8,
+                Ordering::Relaxed,
+            );
+
+            prepare_cmd_recording_launch(&state, true).unwrap();
+
+            assert!(state.starting.load(Ordering::Relaxed));
+            assert!(state
+                .recording_started_by_call_detect
+                .load(Ordering::Relaxed));
+            assert!(!state.call_end_countdown_active.load(Ordering::Relaxed));
+            assert!(state.call_end_countdown_cancel.load(Ordering::Relaxed));
+            assert_eq!(
+                CallEndCountdownTerminalState::from_u8(
+                    state
+                        .call_end_countdown_terminal_state
+                        .load(Ordering::Relaxed)
+                ),
+                CallEndCountdownTerminalState::None
+            );
+
+            state.starting.store(false, Ordering::Relaxed);
+        });
+    }
+
+    #[test]
+    fn rejected_recording_launch_sets_visible_error_notice() {
+        let state = test_app_state();
+
+        let error = reject_recording_launch(&state, "Dictation in progress — stop it first".into());
+
+        assert_eq!(error, "Dictation in progress — stop it first");
+        let notice = state.latest_output.lock().unwrap().clone().unwrap();
+        assert_eq!(notice.kind, "error");
+        assert_eq!(notice.title, "Recording not started");
+        assert_eq!(notice.path, "");
+        assert_eq!(notice.detail, "Dictation in progress — stop it first");
     }
 
     #[test]
@@ -8859,6 +10561,7 @@ mod tests {
             template: None,
             filter_diagnosis: None,
             recording_health: None,
+            processing_warnings: Vec::new(),
         };
         let sections = vec![MeetingSection {
             heading: "Summary".into(),
@@ -8916,6 +10619,7 @@ mod tests {
             template: None,
             filter_diagnosis: None,
             recording_health: None,
+            processing_warnings: Vec::new(),
         };
         let sections = vec![MeetingSection {
             heading: "Summary".into(),
@@ -8964,6 +10668,7 @@ mod tests {
             template: None,
             filter_diagnosis: None,
             recording_health: None,
+            processing_warnings: Vec::new(),
         };
         let sections = vec![MeetingSection {
             heading: "Summary".into(),
@@ -9217,6 +10922,7 @@ mod tests {
             created_at: chrono::Local::now(),
             started_at: None,
             finished_at: Some(chrono::Local::now()),
+            notice_dismissed_at: None,
             recording_started_at: None,
             recording_finished_at: None,
             context_session_id: None,
@@ -9226,6 +10932,8 @@ mod tests {
             template_slug: None,
             word_count: Some(0),
             owner_pid: None,
+            retry_count: 0,
+            recording_health: None,
         };
 
         let notice = output_notice_from_job(&job).expect("needs-review notice");
@@ -9249,6 +10957,7 @@ mod tests {
             created_at: chrono::Local::now(),
             started_at: None,
             finished_at: Some(chrono::Local::now()),
+            notice_dismissed_at: None,
             recording_started_at: None,
             recording_finished_at: None,
             context_session_id: None,
@@ -9258,6 +10967,8 @@ mod tests {
             template_slug: None,
             word_count: Some(0),
             owner_pid: None,
+            retry_count: 0,
+            recording_health: None,
         };
 
         let live_notice = output_notice_from_job(&job).expect("live failed notice");
@@ -9272,6 +10983,256 @@ mod tests {
             "Previous processing failed. Raw capture is preserved and can be retried."
         );
         assert!(!startup_notice.detail.contains("parakeet"));
+    }
+
+    #[test]
+    fn latest_retryable_notice_skips_dismissed_jobs_after_restart() {
+        with_temp_home(|_| {
+            let now = chrono::Local::now();
+            let dismissed_job = minutes_core::jobs::ProcessingJob {
+                id: "job-dismissed".into(),
+                title: Some("Already handled".into()),
+                mode: CaptureMode::Meeting,
+                content_type: ContentType::Meeting,
+                state: minutes_core::jobs::JobState::Failed,
+                stage: minutes_core::jobs::JobState::Failed.default_stage(),
+                output_path: None,
+                audio_path: "/tmp/dismissed.wav".into(),
+                error: Some("old failure".into()),
+                created_at: now - chrono::Duration::minutes(1),
+                started_at: None,
+                finished_at: Some(now),
+                notice_dismissed_at: Some(now),
+                recording_started_at: None,
+                recording_finished_at: None,
+                context_session_id: None,
+                user_notes: None,
+                pre_context: None,
+                calendar_event: None,
+                template_slug: None,
+                word_count: Some(0),
+                owner_pid: None,
+                retry_count: 0,
+                recording_health: None,
+            };
+
+            minutes_core::jobs::write_job(&dismissed_job).unwrap();
+            assert!(
+                latest_retryable_output_notice().is_none(),
+                "dismissed startup notices should stay hidden after restart"
+            );
+        });
+    }
+
+    #[test]
+    fn latest_retryable_notice_falls_back_to_older_undismissed_job() {
+        with_temp_home(|_| {
+            let now = chrono::Local::now();
+            let dismissed_job = minutes_core::jobs::ProcessingJob {
+                id: "job-new-dismissed".into(),
+                title: Some("New dismissed".into()),
+                mode: CaptureMode::Meeting,
+                content_type: ContentType::Meeting,
+                state: minutes_core::jobs::JobState::Failed,
+                stage: minutes_core::jobs::JobState::Failed.default_stage(),
+                output_path: None,
+                audio_path: "/tmp/new-dismissed.wav".into(),
+                error: Some("new failure".into()),
+                created_at: now - chrono::Duration::minutes(1),
+                started_at: None,
+                finished_at: Some(now),
+                notice_dismissed_at: Some(now),
+                recording_started_at: None,
+                recording_finished_at: None,
+                context_session_id: None,
+                user_notes: None,
+                pre_context: None,
+                calendar_event: None,
+                template_slug: None,
+                word_count: Some(0),
+                owner_pid: None,
+                retry_count: 0,
+                recording_health: None,
+            };
+            let older_job = minutes_core::jobs::ProcessingJob {
+                id: "job-old-visible".into(),
+                title: Some("Still retryable".into()),
+                mode: CaptureMode::Meeting,
+                content_type: ContentType::Meeting,
+                state: minutes_core::jobs::JobState::Failed,
+                stage: minutes_core::jobs::JobState::Failed.default_stage(),
+                output_path: None,
+                audio_path: "/tmp/old-visible.wav".into(),
+                error: Some("older failure".into()),
+                created_at: now - chrono::Duration::minutes(10),
+                started_at: None,
+                finished_at: Some(now - chrono::Duration::minutes(9)),
+                notice_dismissed_at: None,
+                recording_started_at: None,
+                recording_finished_at: None,
+                context_session_id: None,
+                user_notes: None,
+                pre_context: None,
+                calendar_event: None,
+                template_slug: None,
+                word_count: Some(0),
+                owner_pid: None,
+                retry_count: 0,
+                recording_health: None,
+            };
+
+            minutes_core::jobs::write_job(&dismissed_job).unwrap();
+            minutes_core::jobs::write_job(&older_job).unwrap();
+
+            let notice = latest_retryable_output_notice().expect("older retryable notice");
+            assert_eq!(notice.job_id.as_deref(), Some("job-old-visible"));
+            assert_eq!(notice.path, "/tmp/old-visible.wav");
+        });
+    }
+
+    #[test]
+    fn latest_retryable_notice_ignores_stale_historical_failures() {
+        with_temp_home(|_| {
+            let old = chrono::Local::now() - chrono::Duration::days(10);
+            let job = minutes_core::jobs::ProcessingJob {
+                id: "job-old-undismissed".into(),
+                title: Some("Old undismissed".into()),
+                mode: CaptureMode::Meeting,
+                content_type: ContentType::Meeting,
+                state: minutes_core::jobs::JobState::Failed,
+                stage: minutes_core::jobs::JobState::Failed.default_stage(),
+                output_path: None,
+                audio_path: "/tmp/old-undismissed.wav".into(),
+                error: Some("historical failure".into()),
+                created_at: old,
+                started_at: None,
+                finished_at: Some(old),
+                notice_dismissed_at: None,
+                recording_started_at: None,
+                recording_finished_at: None,
+                context_session_id: None,
+                user_notes: None,
+                pre_context: None,
+                calendar_event: None,
+                template_slug: None,
+                word_count: Some(0),
+                owner_pid: None,
+                retry_count: 0,
+                recording_health: None,
+            };
+            minutes_core::jobs::write_job(&job).unwrap();
+
+            assert!(
+                latest_retryable_output_notice().is_none(),
+                "old pre-marker failed jobs should stay in recovery/history, not nag on every startup"
+            );
+        });
+    }
+
+    #[test]
+    fn dismiss_notice_resolves_job_from_audio_path_without_job_id() {
+        with_temp_home(|dir| {
+            let now = chrono::Local::now();
+            let audio_path = dir.join("job-path-fallback.wav");
+            fs::write(&audio_path, b"fake-wav").unwrap();
+            let job = minutes_core::jobs::ProcessingJob {
+                id: "job-path-fallback".into(),
+                title: Some("Path fallback".into()),
+                mode: CaptureMode::Meeting,
+                content_type: ContentType::Meeting,
+                state: minutes_core::jobs::JobState::Failed,
+                stage: minutes_core::jobs::JobState::Failed.default_stage(),
+                output_path: None,
+                audio_path: audio_path.display().to_string(),
+                error: Some("old failure".into()),
+                created_at: now,
+                started_at: None,
+                finished_at: Some(now),
+                notice_dismissed_at: None,
+                recording_started_at: None,
+                recording_finished_at: None,
+                context_session_id: None,
+                user_notes: None,
+                pre_context: None,
+                calendar_event: None,
+                template_slug: None,
+                word_count: Some(0),
+                owner_pid: None,
+                retry_count: 0,
+                recording_health: None,
+            };
+            minutes_core::jobs::write_job(&job).unwrap();
+
+            let notice = OutputNotice {
+                kind: "preserved-capture".into(),
+                title: "Processing failed".into(),
+                path: audio_path.display().to_string(),
+                detail: "Previous processing failed".into(),
+                job_id: None,
+            };
+
+            assert_eq!(
+                job_id_from_notice(&notice).as_deref(),
+                Some("job-path-fallback")
+            );
+            persist_output_notice_dismissal(&notice);
+
+            let dismissed = minutes_core::jobs::load_job("job-path-fallback").unwrap();
+            assert!(dismissed.notice_dismissed_at.is_some());
+            assert!(
+                latest_retryable_output_notice().is_none(),
+                "path-only dismissed notices should not reappear after restart"
+            );
+        });
+    }
+
+    #[test]
+    fn stale_retry_notice_does_not_mark_queued_job_dismissed() {
+        with_temp_home(|dir| {
+            let now = chrono::Local::now();
+            let audio_path = dir.join("job-retry-ordering.wav");
+            fs::write(&audio_path, b"fake-wav").unwrap();
+            let job = minutes_core::jobs::ProcessingJob {
+                id: "job-retry-ordering".into(),
+                title: Some("Retry ordering".into()),
+                mode: CaptureMode::Meeting,
+                content_type: ContentType::Meeting,
+                state: minutes_core::jobs::JobState::Failed,
+                stage: minutes_core::jobs::JobState::Failed.default_stage(),
+                output_path: None,
+                audio_path: audio_path.display().to_string(),
+                error: Some("old failure".into()),
+                created_at: now,
+                started_at: None,
+                finished_at: Some(now),
+                notice_dismissed_at: None,
+                recording_started_at: None,
+                recording_finished_at: None,
+                context_session_id: None,
+                user_notes: None,
+                pre_context: None,
+                calendar_event: None,
+                template_slug: None,
+                word_count: Some(0),
+                owner_pid: None,
+                retry_count: 0,
+                recording_health: None,
+            };
+            minutes_core::jobs::write_job(&job).unwrap();
+            let stale_notice = output_notice_from_job(&job).unwrap();
+
+            let requeued = minutes_core::jobs::requeue_job(&job.id).unwrap().unwrap();
+            assert_eq!(requeued.state, minutes_core::jobs::JobState::Queued);
+
+            persist_output_notice_dismissal(&stale_notice);
+
+            let loaded = minutes_core::jobs::load_job(&job.id).unwrap();
+            assert_eq!(loaded.state, minutes_core::jobs::JobState::Queued);
+            assert!(
+                loaded.notice_dismissed_at.is_none(),
+                "retry start should hide the old notice locally, not persist a dismissal"
+            );
+        });
     }
 
     #[test]
@@ -9294,32 +11255,33 @@ mod tests {
 
     #[test]
     fn scan_recovery_items_finds_failed_capture_and_watch_file() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let watch_dir = dir.path().join("watch");
-        let failed_dir = watch_dir.join("failed");
-        let output_dir = dir.path().join("meetings");
-        let failed_captures = output_dir.join("failed-captures");
-        std::fs::create_dir_all(&failed_dir).unwrap();
-        std::fs::create_dir_all(&failed_captures).unwrap();
+        with_temp_home(|home| {
+            let watch_dir = home.join("watch");
+            let failed_dir = watch_dir.join("failed");
+            let output_dir = home.join("meetings");
+            let failed_captures = output_dir.join("failed-captures");
+            std::fs::create_dir_all(&failed_dir).unwrap();
+            std::fs::create_dir_all(&failed_captures).unwrap();
 
-        let failed_watch = failed_dir.join("idea.m4a");
-        let failed_capture = failed_captures.join("capture.wav");
-        std::fs::write(&failed_watch, "watch").unwrap();
-        std::fs::write(&failed_capture, "capture").unwrap();
+            let failed_watch = failed_dir.join("idea.m4a");
+            let failed_capture = failed_captures.join("capture.wav");
+            std::fs::write(&failed_watch, "watch").unwrap();
+            std::fs::write(&failed_capture, "capture").unwrap();
 
-        let config = Config {
-            output_dir: output_dir.clone(),
-            watch: minutes_core::config::WatchConfig {
-                paths: vec![watch_dir],
-                ..Config::default().watch
-            },
-            ..Config::default()
-        };
+            let config = Config {
+                output_dir: output_dir.clone(),
+                watch: minutes_core::config::WatchConfig {
+                    paths: vec![watch_dir],
+                    ..Config::default().watch
+                },
+                ..Config::default()
+            };
 
-        let items = scan_recovery_items(&config);
-        assert_eq!(items.len(), 2);
-        assert!(items.iter().any(|item| item.kind == "watch-failed"));
-        assert!(items.iter().any(|item| item.kind == "preserved-capture"));
+            let items = scan_recovery_items(&config);
+            assert_eq!(items.len(), 2);
+            assert!(items.iter().any(|item| item.kind == "watch-failed"));
+            assert!(items.iter().any(|item| item.kind == "preserved-capture"));
+        });
     }
 
     #[test]
@@ -9784,18 +11746,29 @@ fn show_dictation_overlay(app: &tauri::AppHandle) {
 
 // ── Live transcript commands ─────────────────────────────────
 
-/// RAII guard that resets the live_transcript_active flag on drop (even on panic).
-struct LiveActiveGuard(Arc<AtomicBool>);
+/// RAII guard that resets the live_transcript_active flag on drop (even on
+/// panic) and then re-syncs the tray. The tray sync MUST run after the flag
+/// flips back to false or `sync_tray_state` would still derive `Live` and
+/// leave the menu reflecting an inactive session. Owning the `AppHandle`
+/// here keeps the ordering correct in one place.
+struct LiveActiveGuard {
+    active: Arc<AtomicBool>,
+    app: tauri::AppHandle,
+}
 impl Drop for LiveActiveGuard {
     fn drop(&mut self) {
-        self.0.store(false, Ordering::SeqCst);
+        self.active.store(false, Ordering::SeqCst);
+        crate::sync_tray_state(&self.app);
     }
 }
 
 /// Shared live transcript session runner. Spawned on a background thread by both
 /// cmd_start_live_transcript and handle_live_shortcut_event.
 fn run_live_session(app: tauri::AppHandle, active: Arc<AtomicBool>, stop_flag: Arc<AtomicBool>) {
-    let _guard = LiveActiveGuard(active);
+    let _guard = LiveActiveGuard {
+        active,
+        app: app.clone(),
+    };
 
     let mut config = Config::load();
     // Re-validate the pinned input device for mid-session disconnects
@@ -9826,7 +11799,9 @@ fn run_live_session(app: tauri::AppHandle, active: Arc<AtomicBool>, stop_flag: A
         }
     });
 
-    crate::update_tray_state_with_mode(&app, true, true);
+    // The live flag was set by `try_acquire_live` before run_live_session
+    // was spawned; sync the tray to reflect the just-started session.
+    crate::sync_tray_state(&app);
 
     let result = minutes_core::live_transcript::run(
         stop_flag.clone(),
@@ -9866,10 +11841,53 @@ fn run_live_session(app: tauri::AppHandle, active: Arc<AtomicBool>, stop_flag: A
         }
     }
 
-    crate::update_tray_state(&app, false);
+    // Tray sync fires from `LiveActiveGuard`'s Drop once this function
+    // returns and the guard sets `live_transcript_active` to false. Calling
+    // sync_tray_state here would still see the flag as true and re-render
+    // the menu in Live mode.
 }
 
 /// Try to acquire the live transcript state. Returns Err with a message on conflict.
+/// RAII guard that resets the dictation_active flag on drop (even on panic)
+/// and re-syncs the tray. Same shape as `LiveActiveGuard` — owning the
+/// `AppHandle` keeps the flag-flip-then-sync ordering correct in one place.
+struct DictationActiveGuard {
+    active: Arc<AtomicBool>,
+    app: tauri::AppHandle,
+}
+impl Drop for DictationActiveGuard {
+    fn drop(&mut self) {
+        self.active.store(false, Ordering::SeqCst);
+        crate::sync_tray_state(&self.app);
+    }
+}
+
+/// Try to acquire the dictation state. Mirrors `try_acquire_live`: gates
+/// against recording / live / dictation, uses `compare_exchange` to close
+/// the load→store TOCTOU window in the old code (`load` at the top of
+/// `start_dictation_session`, `store` after overlay setup), and rolls back
+/// the flag on subsequent failure cases.
+fn try_acquire_dictation(state: &AppState) -> Result<(), String> {
+    if recording_active(&state.recording) {
+        return Err("Recording in progress — stop recording before dictating".into());
+    }
+    if state.live_transcript_active.load(Ordering::Relaxed) {
+        return Err("Live transcript in progress — stop it before dictating".into());
+    }
+    if state
+        .dictation_active
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return Err("Dictation is already in progress.".into());
+    }
+    if dictation_pid_active() {
+        state.dictation_active.store(false, Ordering::SeqCst);
+        return Err("Dictation is running in another Minutes process.".into());
+    }
+    Ok(())
+}
+
 fn try_acquire_live(state: &AppState) -> Result<(), String> {
     if state
         .live_transcript_active
@@ -9918,14 +11936,20 @@ pub fn cmd_stop_live_transcript(state: tauri::State<AppState>) -> Result<(), Str
             .store(true, Ordering::Relaxed);
         return Ok(());
     }
-    // Check for external live transcript (started from CLI)
+    // Check for external live transcript (started from CLI). `inspect_pid_file`
+    // so a session holding the PID under a mandatory Windows lock is detected; the
+    // stop sentinel (polled inline by the live loop) stops it on any platform, and
+    // the Unix SIGTERM is sent only when the PID is readable. See #258.
     let lt_pid = minutes_core::pid::live_transcript_pid_path();
-    if let Ok(Some(pid)) = minutes_core::pid::check_pid_file(&lt_pid) {
+    let lt_state = minutes_core::pid::inspect_pid_file(&lt_pid);
+    if lt_state.is_active() {
         minutes_core::pid::write_stop_sentinel()
             .map_err(|e| format!("failed to write stop sentinel: {}", e))?;
         #[cfg(unix)]
-        unsafe {
-            libc::kill(pid as i32, libc::SIGTERM);
+        if let Some(pid) = lt_state.pid() {
+            unsafe {
+                libc::kill(pid as i32, libc::SIGTERM);
+            }
         }
         return Ok(());
     }
@@ -10643,13 +12667,19 @@ fn start_dictation_session(
 ) -> Result<String, String> {
     let state = app.state::<AppState>();
 
-    if state.recording.load(Ordering::Relaxed) {
-        return Err("Recording in progress — stop recording before dictating".into());
-    }
-
-    if state.dictation_active.load(Ordering::Relaxed) || dictation_pid_active() {
-        return Err("Dictation is already in progress.".into());
-    }
+    // Acquire BEFORE any side effects (overlay, focus capture, emits). The
+    // previous load→store gap could let two starts race past the load and
+    // both fall into overlay setup. `try_acquire_dictation` uses
+    // compare_exchange and also gates against recording / live transcript.
+    try_acquire_dictation(&state)?;
+    // From here on, any early exit must drop `tray_guard` so the flag
+    // resets and the tray re-syncs. The guard is moved into the spawned
+    // thread once we get there; if any panic happens between here and the
+    // spawn it'll drop on the local stack and clean up.
+    let tray_guard = DictationActiveGuard {
+        active: Arc::clone(&state.dictation_active),
+        app: app.clone(),
+    };
 
     let dictation_target_context = take_pending_dictation_target(&state)
         .or_else(crate::text_insertion::capture_active_target_context);
@@ -10680,16 +12710,21 @@ fn start_dictation_session(
     app.emit("dictation:state", "loading").ok();
 
     state.dictation_stop_flag.store(false, Ordering::Relaxed);
-    state.dictation_active.store(true, Ordering::Relaxed);
+    // dictation_active is already true from try_acquire_dictation; sync the
+    // tray so the menu reflects the just-started session.
+    crate::sync_tray_state(app);
 
     let _ = capture_style;
 
     let app_clone = app.clone();
     let stop_flag = Arc::clone(&state.dictation_stop_flag);
-    let dictation_active = Arc::clone(&state.dictation_active);
     let final_output_emitted = Arc::new(AtomicBool::new(false));
     let dictation_target_context_for_thread = dictation_target_context.clone();
     std::thread::spawn(move || {
+        // Move the tray guard into the thread. When this closure exits
+        // (normal return, error, or panic) the guard drops, which stores
+        // `dictation_active = false` and re-syncs the tray (idle).
+        let _tray_guard = tray_guard;
         let mut config = Config::load();
         // Re-validate the pinned input device for mid-session
         // disconnects (#189). In-memory only; startup-side persistence
@@ -10805,7 +12840,8 @@ fn start_dictation_session(
             },
         );
 
-        dictation_active.store(false, Ordering::Relaxed);
+        // dictation_active is flipped to false (and the tray re-syncs)
+        // when `_tray_guard` drops on closure exit. See `DictationActiveGuard`.
         match result {
             Ok(()) => {
                 // Session ended normally (silence timeout or yield).

@@ -1,6 +1,6 @@
 {
-  "generatedAt": "2026-05-04",
-  "visibleCount": 55,
+  "generatedAt": "2026-06-02",
+  "visibleCount": 56,
   "hiddenCount": 16,
   "groups": [
     {
@@ -88,7 +88,7 @@
     },
     {
       "enumName": "TranscribeError",
-      "count": 9,
+      "count": 10,
       "entries": [
         {
           "id": "transcribeerror-modelnotfound",
@@ -111,6 +111,17 @@
           "hidden": false,
           "anchorId": "error-transcribeerror-modelloaderror",
           "docsUrl": "https://useminutes.app/docs/errors#error-transcribeerror-modelloaderror"
+        },
+        {
+          "id": "transcribeerror-modeltruncated",
+          "enumName": "TranscribeError",
+          "variant": "ModelTruncated",
+          "cfg": null,
+          "message": "{path}\" && minutes setup --model {model_name}",
+          "sourceFile": "crates/core/src/error.rs",
+          "hidden": false,
+          "anchorId": "error-transcribeerror-modeltruncated",
+          "docsUrl": "https://useminutes.app/docs/errors#error-transcribeerror-modeltruncated"
         },
         {
           "id": "transcribeerror-emptyaudio",

@@ -4,7 +4,7 @@ This guide is specifically for the macOS desktop app identity and TCC-sensitive
 development workflow.
 
 If you are looking for Windows desktop packaging or release behavior, use
-[docs/RELEASE-WINDOWS.md](/Users/silverbook/Sites/minutes/docs/RELEASE-WINDOWS.md)
+[docs/RELEASE-WINDOWS.md](/docs/RELEASE-WINDOWS.md)
 instead.
 
 This project has two distinct desktop app identities on macOS:

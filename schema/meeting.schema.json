@@ -78,6 +78,12 @@
         }
       ]
     },
+    "processing_warnings": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ProcessingWarning"
+      }
+    },
     "tags": {
       "type": "array",
       "items": {
@@ -244,8 +250,39 @@
       "enum": [
         "complete",
         "no-speech",
-        "transcript-only"
+        "transcript-only",
+        "degraded"
       ]
+    },
+    "ProcessingWarning": {
+      "description": "A non-fatal failure of a post-transcript pipeline step.",
+      "type": "object",
+      "required": [
+        "step",
+        "reason"
+      ],
+      "properties": {
+        "step": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "timeout_secs": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "message": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
     },
     "Visibility": {
       "type": "string",

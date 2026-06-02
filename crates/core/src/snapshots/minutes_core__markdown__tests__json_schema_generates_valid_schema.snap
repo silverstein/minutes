@@ -62,7 +62,8 @@ expression: schema
       ]
     },
     "duration": {
-      "type": "string"
+      "type": "string",
+      "default": "0s"
     },
     "entities": {
       "$ref": "#/$defs/EntityLinks"
@@ -77,6 +78,13 @@ expression: schema
       "type": "array",
       "items": {
         "type": "string"
+      }
+    },
+    "processing_warnings": {
+      "description": "Per-step failure context when [`OutputStatus::Degraded`] applies.\nSkipped from serialization when empty so successful runs do not\nemit extra frontmatter noise. See issue #243.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ProcessingWarning"
       }
     },
     "recorded_by": {
@@ -150,8 +158,7 @@ expression: schema
   "required": [
     "title",
     "type",
-    "date",
-    "duration"
+    "date"
   ],
   "$defs": {
     "ActionItem": {
@@ -407,11 +414,54 @@ expression: schema
     },
     "OutputStatus": {
       "description": "Output status markers.",
-      "type": "string",
-      "enum": [
-        "complete",
-        "no-speech",
-        "transcript-only"
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "complete",
+            "no-speech",
+            "transcript-only"
+          ]
+        },
+        {
+          "description": "Transcription completed but one or more summarization-side steps\nfell back to empty output (e.g. agent timeout, empty summary).\nPer-step failures are recorded in [`Frontmatter::processing_warnings`].",
+          "type": "string",
+          "const": "degraded"
+        }
+      ]
+    },
+    "ProcessingWarning": {
+      "description": "A non-fatal failure of a post-transcript pipeline step.\n\nWhen any step degrades, the meeting's [`OutputStatus`] is promoted to\n[`OutputStatus::Degraded`] and the failure context is appended here so\nthe markdown is honest about what is missing. Files are then greppable\nfor \"what needs re-running\" (`status: degraded` in frontmatter).",
+      "type": "object",
+      "properties": {
+        "message": {
+          "description": "Optional human-readable detail.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reason": {
+          "description": "Machine-readable failure reason (e.g. `agent_timeout`, `empty_output`).",
+          "type": "string"
+        },
+        "step": {
+          "description": "The pipeline step that produced the warning.",
+          "type": "string"
+        },
+        "timeout_secs": {
+          "description": "For timeout reasons, the budget that was exceeded.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "step",
+        "reason"
       ]
     },
     "RecordingHealth": {

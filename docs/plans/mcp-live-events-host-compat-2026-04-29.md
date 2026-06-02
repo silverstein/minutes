@@ -10,7 +10,7 @@ CLI MCP server configurations on this machine.
 Both configured hosts point at the repo-local server:
 
 ```text
-node /Users/silverbook/Sites/minutes/crates/mcp/dist/index.js
+node /Users/you/Sites/minutes/crates/mcp/dist/index.js
 ```
 
 Host-config smoke results:
@@ -42,7 +42,7 @@ Output from 2026-04-29:
       "status": "passed",
       "command": "node",
       "args": [
-        "/Users/silverbook/Sites/minutes/crates/mcp/dist/index.js"
+        "/Users/you/Sites/minutes/crates/mcp/dist/index.js"
       ],
       "subscribed_uri": "minutes://events/live",
       "notification_uri": "minutes://events/live",
@@ -55,7 +55,7 @@ Output from 2026-04-29:
       "status": "passed",
       "command": "node",
       "args": [
-        "/Users/silverbook/Sites/minutes/crates/mcp/dist/index.js"
+        "/Users/you/Sites/minutes/crates/mcp/dist/index.js"
       ],
       "subscribed_uri": "minutes://events/live",
       "notification_uri": "minutes://events/live",

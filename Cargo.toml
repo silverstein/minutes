@@ -3,7 +3,7 @@ members = ["crates/core", "crates/cli", "crates/reader", "crates/whisper-guard",
 resolver = "2"
 
 [workspace.package]
-version = "0.16.1"
+version = "0.18.5"
 edition = "2021"
 license = "MIT"
 authors = ["Mat Silverstein"]
@@ -23,11 +23,16 @@ serde_yaml = "0.9"
 toml = "0.8"
 
 # Audio
-cpal = { git = "https://github.com/RustAudio/cpal.git", rev = "8b152c39ea432a14b4e65625e20857884e41d277", features = ["pipewire"] }
+cpal = { git = "https://github.com/RustAudio/cpal.git", rev = "33e05ec94b5670c6f02080acf3fd6d8ac21e37cd", default-features = false, features = ["pipewire", "realtime"] }
 hound = "3.5"
 
 # Transcription
-whisper-rs = "0.16"
+# `tracing_backend` routes whisper.cpp + ggml C-level logs through the Rust
+# tracing subscriber so we can filter them like any other event. Without this,
+# the C `whisper_vad_detect_speech` line floods the user's terminal during a
+# recording (issue #163). Pair with `whisper_rs::install_logging_hooks()` at
+# process startup.
+whisper-rs = { version = "0.16", features = ["tracing_backend"] }
 
 # File watching
 notify = "7"

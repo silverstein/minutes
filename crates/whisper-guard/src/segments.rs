@@ -23,6 +23,282 @@ fn is_always_noise(text: &str) -> bool {
     t == "[music]" || t == "[blank_audio]" || t == "[silence]" || t == "music"
 }
 
+/// Whisper non-speech tokens that legitimately appear as `(crying)` /
+/// `[laughter]` style annotations. Compared case-insensitively against each
+/// whitespace-separated word inside the parentheses or brackets.
+///
+/// Keeping this an explicit allowlist (rather than "any short parenthetical")
+/// is what stops the all-noise classifier from eating legitimate user
+/// parentheticals like `(see attached)`, `(part 1)`, `(2 of 3)`, or
+/// `(continued)` that whisper would never emit on its own.
+///
+/// Includes a handful of foreign-language whisper-emitted tokens (Polish,
+/// Spanish, German, French) so non-English captures still get the bracketed
+/// form recognized.
+const NOISE_WORDS: &[&str] = &[
+    // English non-speech events whisper labels on near-silent / noisy audio
+    "crying",
+    "laughter",
+    "laughing",
+    "applause",
+    "growling",
+    "music",
+    "sobbing",
+    "cheering",
+    "sighing",
+    "clapping",
+    "coughing",
+    "sneezing",
+    "gasping",
+    "whispering",
+    "mumbling",
+    "humming",
+    "breathing",
+    "silence",
+    "snoring",
+    "yelling",
+    "screaming",
+    // Whisper-specific synthetic tokens (typically bracketed)
+    "blank_audio",
+    "inaudible",
+    "noise",
+    "crosstalk",
+    "typing",
+    "static",
+    "beep",
+    "ringing",
+    // Non-English whisper noise tokens we've seen in real captures
+    "śmiech",    // Polish: laughter
+    "risas",     // Spanish: laughter
+    "musik",     // German: music
+    "musique",   // French: music
+    "musica",    // Italian/Spanish: music
+    "música",    // Spanish/Portuguese: music
+    "muzyka",    // Polish: music
+    "applaus",   // German: applause
+    "aplausos",  // Spanish: applause
+    "applausi",  // Italian: applause
+    "oklaski",   // Polish: applause
+    "ruido",     // Spanish: noise
+    "geräusch",  // German: noise
+    "stille",    // German: silence
+    "silencio",  // Spanish: silence
+    "cisza",     // Polish: silence
+    "rires",     // French: laughter
+    "rire",      // French: laughter (singular form)
+    "gelächter", // German: laughter
+    "weeping",   // English variant of crying
+];
+
+/// High-confidence Whisper hallucination signatures.
+///
+/// Whisper, fed long stretches of near-silent audio, emits stable
+/// "training-data leak" phrases from YouTube subtitles, Amara.org community
+/// credits, and similar sources. These survive `dedup_interleaved` because
+/// each occurrence is a different exact string (sometimes pluralized,
+/// punctuated, or wrapped in different filler), and they survive
+/// `collapse_noise_markers` because they are not bracketed/parenthetical
+/// tokens. They look like normal sentences but are confidently identifiable
+/// from a small list of recurring surface forms.
+///
+/// Phrases are normalized lowercase, with trailing punctuation stripped,
+/// and matched exactly against the line's text content (after stripping any
+/// `[h:mm:ss]` timestamp + optional speaker prefix). Substring matching
+/// would risk false positives in real speech (e.g. "thank you for watching
+/// the demo carefully" should NOT be dropped just because it contains
+/// "thank you for watching").
+///
+/// Conservative bar: a phrase is added here only when it is virtually
+/// impossible for a real human speaker to utter it as a complete sentence
+/// in a meeting transcript. URL-style hallucinations are handled separately
+/// in [`is_url_line`].
+const KNOWN_HALLUCINATION_PHRASES: &[&str] = &[
+    // YouTube subtitle openers/closers
+    "thank you for watching",
+    "thanks for watching",
+    "thank you for watching!",
+    "thank you so much for watching",
+    "please subscribe to our channel",
+    "please subscribe",
+    "please like and subscribe",
+    "like and subscribe",
+    "smash that like button",
+    "don't forget to subscribe",
+    "see you in the next video",
+    "see you next time",
+    // Amara.org community subtitle hallucinations
+    "subtitles by the amara.org community",
+    "transcribed by the amara.org community",
+    "translated by the amara.org community",
+    "the amara.org community",
+    "amara.org community",
+    // Generic transcription-service hallucinations (bare forms; for prefix
+    // matches with trailing content like `Transcripted by: www.amara.org`
+    // see [`HALLUCINATION_LINE_PREFIXES`])
+    "captions by the cyclope",
+];
+
+/// Hallucination phrases that whisper emits with trailing content, e.g.
+/// `Transcripted by: www.transcription-exe-project.com` or
+/// `Subtitles by the Amara.org community`. Matched as a **starts-with**
+/// prefix against the normalized line text rather than exact-match, so
+/// they catch both the bare form and the variants with trailing URLs,
+/// service names, or fillers.
+///
+/// Conservative bar: only credit-attribution prefixes that a real meeting
+/// participant is virtually guaranteed not to utter as the start of a
+/// sentence. Niche edge cases (e.g. someone reading a meeting transcript
+/// out loud that contains a `Transcribed by` credit line) accept this as
+/// noise rather than complicate the detector.
+const HALLUCINATION_LINE_PREFIXES: &[&str] = &[
+    "transcripted by",
+    "transcribed by",
+    "captions by",
+    "captioned by",
+    "subtitles by",
+    "translated by",
+];
+
+/// Check if a line is just a URL or domain reference, common in Whisper
+/// long-tail hallucinations like `Transcripted by: www.transcription-...`.
+///
+/// Conservative match: requires the line content to start with `www.` or
+/// `http://` / `https://`, with at most one trailing word of context. Drops
+/// pure URL hallucinations without affecting real speech that happens to
+/// mention a URL inline.
+fn is_url_line(text: &str) -> bool {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    // Require URL-ish prefix on the first whitespace-separated token.
+    let first = trimmed.split_whitespace().next().unwrap_or("");
+    first.starts_with("www.") || first.starts_with("http://") || first.starts_with("https://")
+}
+
+/// Test whether a transcript line's content matches a known Whisper
+/// hallucination phrase (after timestamp/speaker prefix stripping and case
+/// normalization). Used by [`strip_known_hallucinations`].
+fn is_known_hallucination(text: &str) -> bool {
+    let lowered = text.to_lowercase();
+    let normalized = lowered
+        .trim()
+        .trim_end_matches(['.', '!', '?', ',', ';', ':'])
+        .trim();
+    if normalized.is_empty() {
+        return false;
+    }
+    if KNOWN_HALLUCINATION_PHRASES.contains(&normalized) {
+        return true;
+    }
+    if HALLUCINATION_LINE_PREFIXES
+        .iter()
+        .any(|p| normalized.starts_with(p))
+    {
+        return true;
+    }
+    is_url_line(normalized)
+}
+
+/// Case-insensitive membership check against [`NOISE_WORDS`].
+///
+/// The lookup table is small (under 50 entries) so a linear scan with
+/// `eq_ignore_ascii_case` is fine; the non-ASCII Polish / Spanish forms are
+/// matched verbatim after lowercasing the input. We lowercase here rather
+/// than at insertion so the allowlist stays readable.
+fn is_noise_word(word: &str) -> bool {
+    let lower = word.to_lowercase();
+    NOISE_WORDS.iter().any(|w| *w == lower)
+}
+
+/// Return true if the text (after timestamp) is a short non-speech marker.
+///
+/// Matches two whisper hallucination shapes:
+/// - bracketed: `[music]`, `[Śmiech]`, `[BLANK_AUDIO]`, `[risas]`, `[Growling]`
+/// - parenthetical: `(crying)`, `(coughing)`, `(applause)`, `(silence)`,
+///   `(soft music)`, `(loud applause)`
+///
+/// Excludes timestamp-like content `[0:00]` and collapse markers from prior
+/// dedup passes `[...] [repeated ...]`. Word-count (1-4 inner words) and
+/// length (≤40 inner chars) constraints keep this conservative.
+///
+/// **Allowlist gate:** at least one whitespace-separated word inside the
+/// delimiters must match [`NOISE_WORDS`] (case-insensitive). Without this,
+/// short user-authored parentheticals like `(see attached)`, `(part 1)`,
+/// `(2 of 3)`, or `(continued)` would be misclassified as whisper
+/// hallucinations and dropped from the transcript.
+///
+/// This is the shared classifier used by both [`collapse_noise_markers`] and
+/// the [`is_all_noise`] read-only signal.
+pub fn is_noise_marker(text: &str) -> bool {
+    let t = text.trim();
+    if t.is_empty() {
+        return false;
+    }
+    // Collapse markers from prior passes are not noise
+    if t.starts_with("[...]") {
+        return false;
+    }
+    // Optionally strip a single trailing '.' (whisper sometimes adds one)
+    let t = t.strip_suffix('.').unwrap_or(t);
+
+    // Accept either bracketed `[...]` or parenthetical `(...)` shape; both
+    // collapse to the same inner substring after the outer delimiters.
+    let matched =
+        (t.starts_with('[') && t.ends_with(']')) || (t.starts_with('(') && t.ends_with(')'));
+    if !matched {
+        return false;
+    }
+    let inner = &t[1..t.len() - 1];
+
+    // Reject timestamp-like patterns (digits and colons only)
+    if inner.chars().all(|c| c.is_ascii_digit() || c == ':') {
+        return false;
+    }
+    // Must be short (1-4 words, ≤40 chars) - non-speech markers are brief
+    let word_count = inner.split_whitespace().count();
+    if !(1..=4).contains(&word_count) || inner.len() > 40 {
+        return false;
+    }
+
+    // Allowlist gate: the LAST whitespace-separated word inside the
+    // delimiters must be a known whisper non-speech token. This dominance
+    // rule keeps legitimate phrasings like `(music director)` or
+    // `(applause sounds great)` from matching just because they happen to
+    // contain a noise word, while still recognizing whisper's compound
+    // emissions like `(soft music)` / `(loud applause)` / `(audience
+    // laughter)` where the noise word terminates the phrase.
+    inner
+        .split_whitespace()
+        .next_back()
+        .is_some_and(is_noise_word)
+}
+
+/// Return true iff every non-empty line in `lines` is a noise marker (after
+/// stripping any leading `[h:mm:ss]`-style timestamp).
+///
+/// Empty lines are ignored. An input with zero non-empty lines returns `false`
+/// (there's nothing to call "all noise").
+///
+/// This is a read-only signal: it does not alter `lines`. Callers (notably
+/// `minutes-core`) use it together with separate capture-health signals (e.g.
+/// silent / sparse stems) to decide whether to suppress a transcript body that
+/// is almost certainly fabricated.
+pub fn is_all_noise(lines: &[String]) -> bool {
+    let mut saw_any = false;
+    for line in lines {
+        let text = text_part(line).trim();
+        if text.is_empty() {
+            continue;
+        }
+        saw_any = true;
+        if !is_noise_marker(text) {
+            return false;
+        }
+    }
+    saw_any
+}
+
 /// Statistics from transcript cleaning.
 ///
 /// Each `after_*` field records the segment count *after* that pass ran. If a pass
@@ -41,6 +317,11 @@ pub struct CleanStats {
     pub after_noise_markers: usize,
     pub after_trailing_trim: usize,
     pub after_command_strip: usize,
+    /// Segment count after [`strip_known_hallucinations`] ran. If the pass
+    /// is disabled in [`CleanOptions`], this carries the count from the
+    /// previous (enabled) pass. Tracks the long-tail-of-silence Whisper
+    /// hallucination removal (#242).
+    pub after_hallucination_strip: usize,
     /// **Net** segment count delta (`original_lines - after_noise_markers`,
     /// where `after_noise_markers` is the final output count post-pipeline),
     /// not the raw count of input lines that were dropped.
@@ -51,6 +332,21 @@ pub struct CleanStats {
     /// To get the cleaner "input minus output" count, suppress the annotations
     /// via [`CleanOptions::keep_dedup_annotations`] = `false`.
     pub lines_removed: usize,
+    /// `true` iff every non-empty line in the cleaned output is a noise
+    /// marker (bracketed `[music]` / `[Growling]` or parenthetical
+    /// `(crying)` / `(applause)`), and there is at least one such line.
+    ///
+    /// This is a **read-only signal** computed after the cleanup passes run.
+    /// It does not change the cleanup output itself; downstream callers can
+    /// use it (together with separate capture-health signals like sparse or
+    /// silent stems) to decide whether to suppress a transcript body that is
+    /// almost certainly fabricated on near-silent audio.
+    ///
+    /// Examples:
+    /// - `["[0:07] (crying)", "[1:52] [Growling]"]` → `true`
+    /// - `["[0:00] Hello world", "[0:03] [laughter]"]` → `false`
+    /// - `[]` → `false` (nothing to call all-noise)
+    pub all_noise: bool,
 }
 
 impl CleanStats {
@@ -85,18 +381,22 @@ impl CleanStats {
 ///
 /// Passes always run in this order (fixed; the order matters for correctness):
 ///
-/// 1. `dedup_consecutive` - collapse runs of repeated real-content segments.
+/// 1. `strip_known_hallucinations` - drop lines matching known whisper
+///    training-data leak phrases (YouTube/Amara/etc.) BEFORE dedup gets a
+///    chance to turn them into `[...] [repeated audio removed]` annotations.
+///    See [`strip_known_hallucinations`] for the conservative matching rule.
+/// 2. `dedup_consecutive` - collapse runs of repeated real-content segments.
 ///    Always-noise tokens (`[music]`, `[blank_audio]`, `[silence]`, `music`) are
 ///    skipped here so the noise-aware passes downstream can handle them.
-/// 2. `dedup_interleaved` - collapse A/B/A/B hallucination patterns
-/// 3. `strip_foreign_script` - drop segments in unrelated writing systems
-/// 4. `strip_trailing_commands` - strip `stop recording`-style voice commands.
+/// 3. `dedup_interleaved` - collapse A/B/A/B hallucination patterns
+/// 4. `strip_foreign_script` - drop segments in unrelated writing systems
+/// 5. `strip_trailing_commands` - strip `stop recording`-style voice commands.
 ///    Runs BEFORE trim so noise markers hidden behind a trailing command get
 ///    exposed to the trim pass.
-/// 5. `trim_trailing_noise` - trim noise markers off the end. Always-noise
+/// 6. `trim_trailing_noise` - trim noise markers off the end. Always-noise
 ///    tokens get trimmed at any count; filler words (`yeah.`, `okay.`, `you`)
 ///    need a 5+ run to trigger.
-/// 6. `collapse_noise_markers` - collapse middle-of-transcript `[music]`/
+/// 7. `collapse_noise_markers` - collapse middle-of-transcript `[music]`/
 ///    `[Śmiech]`/etc. runs. Runs LAST so trim has first crack at trailing
 ///    noise; whatever survives in the middle gets collapsed cleanly.
 ///
@@ -132,6 +432,11 @@ pub struct CleanOptions {
     pub collapse_noise_markers: bool,
     pub trim_trailing_noise: bool,
     pub strip_trailing_commands: bool,
+    /// Drop lines matching known whisper hallucination phrases
+    /// (YouTube/Amara/transcription-service training-data leaks). See
+    /// [`strip_known_hallucinations`] for the full rationale and conservative
+    /// matching rule. Catches the long-tail-of-silence failure mode (#242).
+    pub strip_known_hallucinations: bool,
     /// Keep the `[...] [repeated audio removed - N identical segments collapsed]`
     /// annotation lines that the consecutive-dedup pass inserts.
     ///
@@ -153,6 +458,7 @@ impl Default for CleanOptions {
             collapse_noise_markers: true,
             trim_trailing_noise: true,
             strip_trailing_commands: true,
+            strip_known_hallucinations: true,
             keep_dedup_annotations: true,
         }
     }
@@ -180,6 +486,7 @@ impl CleanOptions {
             collapse_noise_markers: false,
             trim_trailing_noise: false,
             strip_trailing_commands: false,
+            strip_known_hallucinations: false,
             keep_dedup_annotations: true,
         }
     }
@@ -259,6 +566,17 @@ pub fn clean_segments_with_options(
     let original_count = segments.len();
     let mut lines: Vec<String> = segments.to_vec();
 
+    // Run BEFORE dedup_consecutive so repeated hallucination phrases are
+    // dropped on identity rather than collapsed into a `[...] [repeated
+    // audio removed]` annotation (which would mark hallucination noise as
+    // worth-noting summarized content). The dedup_interleaved pass below
+    // still handles other repetition shapes; this pass only catches the
+    // exact-match training-data leak surface forms.
+    if opts.strip_known_hallucinations {
+        lines = strip_known_hallucinations(&lines);
+    }
+    let after_hallucination = lines.len();
+
     if opts.dedup_consecutive {
         lines = dedup_segments(&lines);
         if !opts.keep_dedup_annotations {
@@ -279,16 +597,19 @@ pub fn clean_segments_with_options(
 
     // Pipeline ordering rationale (matters for correctness):
     //
-    //   1. dedup_consecutive (already ran above) - skips always-noise tokens
+    //   1. strip_known_hallucinations (already ran above) - drop known
+    //      whisper training-data leaks BEFORE dedup gets a chance to
+    //      collapse them into `[...] [repeated audio removed]` annotations.
+    //   2. dedup_consecutive (already ran above) - skips always-noise tokens
     //      so they flow downstream as a run for the noise-aware passes.
-    //   2. dedup_interleaved (already ran above).
-    //   3. strip_foreign_script (already ran above).
-    //   4. strip_trailing_commands ← here. Runs BEFORE trim so that any
+    //   3. dedup_interleaved (already ran above).
+    //   4. strip_foreign_script (already ran above).
+    //   5. strip_trailing_commands ← here. Runs BEFORE trim so that any
     //      always-noise markers hidden behind a trailing voice command
     //      (e.g. "…content [music] [music] Stop recording.") are exposed.
-    //   5. trim_trailing_noise ← here. Catches all-noise tails at any count
+    //   6. trim_trailing_noise ← here. Catches all-noise tails at any count
     //      (always-noise tokens) and 5+ filler runs (`yeah.`, `okay.`, `you`).
-    //   6. collapse_noise_markers ← runs LAST, so middle-of-transcript noise
+    //   7. collapse_noise_markers ← runs LAST, so middle-of-transcript noise
     //      runs that survived trim get collapsed cleanly. If this ran earlier
     //      it would convert trailing `[music]` runs into `[music] + annotation`
     //      and trim would be blocked from cleaning them up.
@@ -321,10 +642,14 @@ pub fn clean_segments_with_options(
         after_noise_markers: after_noise,
         after_trailing_trim: after_trim,
         after_command_strip: after_command,
+        after_hallucination_strip: after_hallucination,
         // Net change from input to final output. `collapse_noise_markers`
         // runs last (per the pipeline-order rationale above), so
         // `after_noise_markers` is the final segment count.
         lines_removed: original_count.saturating_sub(after_noise),
+        // Read-only signal: every non-empty surviving line is a noise marker.
+        // Cleanup output is unchanged - downstream callers decide what to do.
+        all_noise: is_all_noise(&lines),
     };
 
     (lines, stats)
@@ -635,34 +960,8 @@ pub fn collapse_noise_markers(lines: &[String]) -> Vec<String> {
         return lines.to_vec();
     }
 
-    /// Return true if the text (after timestamp) is a bracketed non-speech marker.
-    ///
-    /// Matches patterns like `[music]`, `[Śmiech]`, `[BLANK_AUDIO]`, `[risas]`.
-    /// Excludes timestamp-like content `[0:00]` and collapse markers from prior
-    /// dedup passes `[...] [repeated ...]`.
-    fn is_noise_marker(text: &str) -> bool {
-        let t = text.trim();
-        if t.is_empty() {
-            return false;
-        }
-        // Collapse markers from prior passes are not noise
-        if t.starts_with("[...]") {
-            return false;
-        }
-        // Must start with '[' and end with ']' (optionally with trailing '.')
-        let t = t.strip_suffix('.').unwrap_or(t);
-        if !(t.starts_with('[') && t.ends_with(']')) {
-            return false;
-        }
-        let inner = &t[1..t.len() - 1];
-        // Reject timestamp-like patterns (digits and colons only)
-        if inner.chars().all(|c| c.is_ascii_digit() || c == ':') {
-            return false;
-        }
-        // Must be short (1-4 words, ≤40 chars) - non-speech markers are brief
-        let word_count = inner.split_whitespace().count();
-        (1..=4).contains(&word_count) && inner.len() <= 40
-    }
+    // Classifier lives at module scope (`is_noise_marker`) so the `all_noise`
+    // signal in `CleanStats` can reuse it without duplicating the rules.
 
     let markers: Vec<bool> = lines
         .iter()
@@ -829,6 +1128,39 @@ pub fn strip_foreign_script(lines: &[String]) -> Vec<String> {
         );
     }
 
+    result
+}
+
+/// Drop transcript lines whose content matches a known Whisper hallucination
+/// phrase ([`is_known_hallucination`]).
+///
+/// Catches the long-tail-of-silence failure mode (issue #242): on extended
+/// near-silent audio, Whisper emits stable training-data leaks like
+/// `Thank you for watching!`, `Subtitles by the Amara.org community`, and
+/// `Transcripted by: www.transcription-...` URLs. These survive
+/// `dedup_interleaved` (each line is a different exact string) and
+/// `collapse_noise_markers` (they are not bracketed/parenthetical tokens).
+///
+/// Conservative: exact-match against the line's text content after
+/// stripping the `[h:mm:ss]` timestamp and lowercasing. A line that
+/// contains the phrase mid-sentence (e.g. `"thank you for watching the
+/// demo carefully"`) is kept.
+pub fn strip_known_hallucinations(lines: &[String]) -> Vec<String> {
+    let mut result = Vec::with_capacity(lines.len());
+    let mut removed = 0usize;
+    for line in lines {
+        if is_known_hallucination(text_part(line)) {
+            removed += 1;
+        } else {
+            result.push(line.clone());
+        }
+    }
+    if removed > 0 {
+        tracing::info!(
+            removed = removed,
+            "removed known whisper-hallucination phrases"
+        );
+    }
     result
 }
 
@@ -1455,6 +1787,339 @@ mod tests {
         let lines = vec!["[0:00] [music]".into(), "[0:03] [laughter]".into()];
         let result = collapse_noise_markers(&lines);
         assert_eq!(result, lines);
+    }
+
+    #[test]
+    fn is_noise_marker_matches_parenthetical_form() {
+        // Whisper hallucinates parenthetical non-speech tokens on near-silent
+        // audio just as readily as bracketed ones. Both shapes count.
+        assert!(is_noise_marker("(crying)"));
+        assert!(is_noise_marker("(coughing)"));
+        assert!(is_noise_marker("(applause)"));
+        assert!(is_noise_marker("(silence)"));
+        // Trailing period (whisper sometimes adds one) is tolerated.
+        assert!(is_noise_marker("(crying)."));
+    }
+
+    #[test]
+    fn is_noise_marker_matches_bracketed_form() {
+        assert!(is_noise_marker("[music]"));
+        assert!(is_noise_marker("[Growling]"));
+        assert!(is_noise_marker("[BLANK_AUDIO]"));
+        assert!(is_noise_marker("[Śmiech]"));
+        assert!(is_noise_marker("[laughter]."));
+    }
+
+    #[test]
+    fn is_noise_marker_rejects_non_markers() {
+        assert!(!is_noise_marker(""));
+        assert!(!is_noise_marker("Hello world"));
+        assert!(!is_noise_marker("[0:00]"));
+        // Collapse marker from a prior pass is not noise.
+        assert!(!is_noise_marker("[...] [repeated audio removed - 3]"));
+        // Mismatched delimiters are not a marker.
+        assert!(!is_noise_marker("(crying]"));
+        assert!(!is_noise_marker("[crying)"));
+        // Too long / too many words.
+        assert!(!is_noise_marker(
+            "(this is way more than four words of content)"
+        ));
+    }
+
+    #[test]
+    fn is_noise_marker_rejects_user_authored_parentheticals() {
+        // Real users put short parentheticals in notes for legitimate reasons.
+        // None of these contain a whisper non-speech token, so they must NOT
+        // be classified as noise (codex blocker 1 on PR #246).
+        assert!(!is_noise_marker("(see attached)"));
+        assert!(!is_noise_marker("(part 1)"));
+        assert!(!is_noise_marker("(2 of 3)"));
+        assert!(!is_noise_marker("(continued)"));
+        assert!(!is_noise_marker("(TBD)"));
+        assert!(!is_noise_marker("(draft)"));
+        // Trailing period is normalized but the content is still not noise.
+        assert!(!is_noise_marker("(see attached)."));
+    }
+
+    #[test]
+    fn is_noise_marker_accepts_two_word_noise_forms() {
+        // Two-word parentheticals where one word is on the noise allowlist
+        // (typical whisper emission shape).
+        assert!(is_noise_marker("(soft music)"));
+        assert!(is_noise_marker("(loud applause)"));
+        assert!(is_noise_marker("(gentle music)"));
+        assert!(is_noise_marker("(background music)"));
+        // Same in brackets.
+        assert!(is_noise_marker("[soft music]"));
+        assert!(is_noise_marker("[loud applause]"));
+    }
+
+    #[test]
+    fn is_noise_marker_rejects_user_authored_brackets() {
+        // Brackets that don't end with a noise word should also pass through.
+        // (Less common in user notes than parentheticals, but the allowlist
+        // dominance rule applies uniformly to both shapes.)
+        assert!(!is_noise_marker("[TODO]"));
+        assert!(!is_noise_marker("[draft]"));
+        assert!(!is_noise_marker("[part 1]"));
+        assert!(!is_noise_marker("[see attached]"));
+    }
+
+    #[test]
+    fn is_noise_marker_dominance_check_rejects_noise_word_with_content_suffix() {
+        // The noise allowlist used to match if ANY word inside the marker
+        // appeared in the noise list. That meant `(music director)` and
+        // `(applause sounds great)` were classified as noise just because
+        // they contained a noise word somewhere. Per codex review of PR
+        // #246: the last word must be the noise token.
+        assert!(!is_noise_marker("(music director)"));
+        assert!(!is_noise_marker("(applause sounds great)"));
+        assert!(!is_noise_marker("(noise complaint)"));
+        assert!(!is_noise_marker("(typing speed)"));
+        assert!(!is_noise_marker("[crying baby]"));
+        assert!(!is_noise_marker("[laughter therapy]"));
+    }
+
+    #[test]
+    fn is_noise_marker_dominance_check_accepts_modifier_plus_noise_word() {
+        // The complement of the previous test: when the noise word
+        // terminates the phrase (whisper's actual emission shape), the
+        // marker is still classified as noise.
+        assert!(is_noise_marker("(audience laughter)"));
+        assert!(is_noise_marker("(soft music)"));
+        assert!(is_noise_marker("(loud applause)"));
+        assert!(is_noise_marker("(background music)"));
+        assert!(is_noise_marker("[audience laughter]"));
+    }
+
+    #[test]
+    fn is_noise_marker_accepts_expanded_allowlist_tokens() {
+        // Tokens added per codex review of PR #246: real whisper outputs
+        // that were missing from the v1 allowlist.
+        assert!(is_noise_marker("[inaudible]"));
+        assert!(is_noise_marker("[crosstalk]"));
+        assert!(is_noise_marker("[typing]"));
+        assert!(is_noise_marker("[noise]"));
+        assert!(is_noise_marker("[static]"));
+        assert!(is_noise_marker("[beep]"));
+        assert!(is_noise_marker("[ringing]"));
+        assert!(is_noise_marker("(inaudible)"));
+        assert!(is_noise_marker("(crosstalk)"));
+    }
+
+    // ── Known-hallucination phrase detection (issue #242) ────────────
+
+    #[test]
+    fn is_known_hallucination_matches_youtube_phrases() {
+        // High-confidence YouTube subtitle leak signatures.
+        assert!(is_known_hallucination("Thank you for watching!"));
+        assert!(is_known_hallucination("Thank you for watching."));
+        assert!(is_known_hallucination("Thank you for watching"));
+        assert!(is_known_hallucination("THANK YOU FOR WATCHING"));
+        assert!(is_known_hallucination("Please subscribe to our channel."));
+        assert!(is_known_hallucination("Please subscribe to our channel!"));
+        assert!(is_known_hallucination("Like and subscribe"));
+        assert!(is_known_hallucination("Don't forget to subscribe."));
+    }
+
+    #[test]
+    fn is_known_hallucination_matches_amara_phrases() {
+        // Amara.org community subtitle hallucinations.
+        assert!(is_known_hallucination(
+            "Subtitles by the Amara.org community"
+        ));
+        assert!(is_known_hallucination(
+            "Transcribed by the Amara.org community"
+        ));
+        assert!(is_known_hallucination("the Amara.org community"));
+        assert!(is_known_hallucination("Amara.org community"));
+    }
+
+    #[test]
+    fn is_known_hallucination_matches_url_lines() {
+        // Bare-URL lines (no leading label) are dropped via is_url_line.
+        assert!(is_known_hallucination("www.transcription-exe-project.com"));
+        assert!(is_known_hallucination("https://amara.org"));
+        assert!(is_known_hallucination("http://example.com"));
+    }
+
+    #[test]
+    fn is_known_hallucination_matches_attribution_prefixes() {
+        // Whisper emits attribution-style hallucinations with varied
+        // trailing content (URLs, service names, additional filler).
+        // Codex review of PR #247 v1 flagged that `is_url_line` alone
+        // could not catch `Transcripted by: www.amara.org` because the
+        // first token is "Transcripted", not the URL. The prefix list
+        // catches the full family.
+        assert!(is_known_hallucination(
+            "Transcripted by: www.transcription-exe-project.com"
+        ));
+        assert!(is_known_hallucination("Transcripted by: www.amara.org"));
+        assert!(is_known_hallucination("Captioned by Acme Captions"));
+        assert!(is_known_hallucination(
+            "Transcribed by the Amara.org community"
+        ));
+        assert!(is_known_hallucination("Subtitles by the cyclope team"));
+        assert!(is_known_hallucination("Translated by community volunteers"));
+        assert!(is_known_hallucination(
+            "Captions by the Acme transcription service"
+        ));
+        // Bare prefix without trailing content also matches.
+        assert!(is_known_hallucination("Transcribed by"));
+        assert!(is_known_hallucination("Subtitles by"));
+    }
+
+    #[test]
+    fn is_known_hallucination_rejects_real_speech_containing_phrase() {
+        // Real human speech that contains a hallucination phrase as a
+        // substring must NOT be classified as hallucination. Substring
+        // matching would have produced unacceptable false positives.
+        assert!(!is_known_hallucination(
+            "Thank you for watching the demo carefully"
+        ));
+        assert!(!is_known_hallucination(
+            "I would like to subscribe to that newsletter"
+        ));
+        assert!(!is_known_hallucination(
+            "The Amara.org community has done great work, but our use case differs"
+        ));
+        assert!(!is_known_hallucination(
+            "Check out www.example.com for the docs we discussed"
+        ));
+    }
+
+    #[test]
+    fn is_known_hallucination_rejects_normal_content() {
+        assert!(!is_known_hallucination("Hello world"));
+        assert!(!is_known_hallucination("Let's review the action items"));
+        assert!(!is_known_hallucination("Thanks for joining the call"));
+        assert!(!is_known_hallucination(""));
+    }
+
+    #[test]
+    fn strip_known_hallucinations_drops_matching_lines() {
+        // Mixed real content + Whisper training-data leaks. The leak lines
+        // are dropped; real content is preserved verbatim including order.
+        let lines: Vec<String> = vec![
+            "[0:00] Real meeting content".into(),
+            "[35:00] Thank you for watching!".into(),
+            "[35:30] More real content here".into(),
+            "[36:00] Subtitles by the Amara.org community".into(),
+            "[36:30] www.transcription-exe-project.com".into(),
+            "[37:00] Closing remarks from the team".into(),
+        ];
+        let result = strip_known_hallucinations(&lines);
+        assert_eq!(result.len(), 3);
+        assert!(result[0].contains("Real meeting content"));
+        assert!(result[1].contains("More real content here"));
+        assert!(result[2].contains("Closing remarks"));
+    }
+
+    #[test]
+    fn strip_known_hallucinations_preserves_normal_transcript() {
+        let lines: Vec<String> = vec![
+            "[0:00] Hello everyone".into(),
+            "[0:05] Let's get started".into(),
+            "[0:10] We have three things to cover today".into(),
+        ];
+        let result = strip_known_hallucinations(&lines);
+        assert_eq!(result, lines);
+    }
+
+    #[test]
+    fn clean_segments_strips_long_tail_hallucinations() {
+        // The #242 failure shape: real content followed by hallucinated
+        // tail with YouTube/Amara surface forms. After cleanup the tail
+        // is gone, real content survives, and the post-hallucination-strip
+        // count reflects the drop.
+        let segments: Vec<String> = vec![
+            "Real meeting content one".into(),
+            "Real meeting content two".into(),
+            "Thank you for watching!".into(),
+            "Please subscribe to our channel".into(),
+            "Subtitles by the Amara.org community".into(),
+            "www.transcription-exe-project.com".into(),
+            "Thank you for watching".into(),
+        ];
+        let (cleaned, stats) = clean_segments(&segments);
+        // All 5 known-hallucination signature lines stripped.
+        assert_eq!(stats.after_hallucination_strip, 2);
+        assert!(cleaned.iter().all(|s| s.contains("Real meeting content")));
+    }
+
+    #[test]
+    fn is_url_line_only_matches_url_prefix() {
+        assert!(is_url_line("www.example.com"));
+        assert!(is_url_line("https://amara.org"));
+        assert!(is_url_line("http://example.com"));
+        assert!(is_url_line("www.example.com path"));
+        // Trailing punctuation or extra content is OK on first-token URL.
+        assert!(!is_url_line("Check out www.example.com"));
+        assert!(!is_url_line(""));
+        assert!(!is_url_line("Hello"));
+    }
+
+    #[test]
+    fn is_all_noise_true_for_pure_noise_transcript() {
+        // The exact 1-2 line failure case from issue #241.
+        let lines = vec!["[0:07] (crying)".into(), "[1:52] [Growling]".into()];
+        assert!(is_all_noise(&lines));
+    }
+
+    #[test]
+    fn is_all_noise_true_for_single_noise_line() {
+        let lines = vec!["[0:00] [music]".into()];
+        assert!(is_all_noise(&lines));
+    }
+
+    #[test]
+    fn is_all_noise_false_when_any_line_is_speech() {
+        let lines = vec![
+            "[0:00] Hello world".into(),
+            "[0:05] [laughter]".into(),
+            "[0:10] (crying)".into(),
+        ];
+        assert!(!is_all_noise(&lines));
+    }
+
+    #[test]
+    fn is_all_noise_false_on_empty_input() {
+        // No surviving lines → nothing to call "all noise".
+        let lines: Vec<String> = Vec::new();
+        assert!(!is_all_noise(&lines));
+    }
+
+    #[test]
+    fn is_all_noise_ignores_blank_lines() {
+        let lines = vec![
+            "".into(),
+            "[0:07] (crying)".into(),
+            "   ".into(),
+            "[1:52] [Growling]".into(),
+        ];
+        assert!(is_all_noise(&lines));
+    }
+
+    #[test]
+    fn clean_stats_all_noise_true_for_short_noise_only_input() {
+        // Two lines is below the collapse-pass threshold, so the noise lines
+        // survive cleanup unchanged. The all_noise signal must still fire.
+        let input = vec!["[0:07] (crying)".into(), "[1:52] [Growling]".into()];
+        let (cleaned, stats) = clean_segments(&input);
+        // Cleanup is read-only here: short runs are preserved.
+        assert_eq!(cleaned, input);
+        assert!(stats.all_noise, "stats: {:?}", stats);
+    }
+
+    #[test]
+    fn clean_stats_all_noise_false_with_real_content() {
+        let input = vec![
+            "[0:00] Hello world".into(),
+            "[0:05] (crying)".into(),
+            "[0:10] Goodbye".into(),
+        ];
+        let (_, stats) = clean_segments(&input);
+        assert!(!stats.all_noise, "stats: {:?}", stats);
     }
 
     #[test]

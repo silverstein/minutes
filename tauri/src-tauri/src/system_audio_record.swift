@@ -24,6 +24,13 @@ final class NativeCallRecorder: NSObject, SCRecordingOutputDelegate, SCStreamOut
     private var voiceStemURL: URL?
     private var systemStemURL: URL?
 
+    // Finalize start timestamp, set when stop() begins. Read by
+    // recordingOutputDidFinishRecording to emit the final
+    // `finalize_complete` event with elapsed_ms so we can characterize
+    // the stopCapture-to-finalize curve on long captures (issue #236
+    // follow-on to #216).
+    private var finalizeStart: Date?
+
     init(outputURL: URL) {
         self.outputURL = outputURL
     }
@@ -91,6 +98,30 @@ final class NativeCallRecorder: NSObject, SCRecordingOutputDelegate, SCStreamOut
     }
 
     func stop() async {
+        // Spin up the finalize heartbeat BEFORE the sampleQueue.sync block so
+        // the Rust parent sees stdout activity throughout the entire stop
+        // sequence. Long captures (1h+) take tens of seconds to write the
+        // moov atom inside `stream.stopCapture()`; without this signal, the
+        // parent would SIGKILL the helper before the .mov is finalized.
+        // See issue #216.
+        let finalizeStart = Date()
+        self.finalizeStart = finalizeStart
+        let heartbeatTask = Task { [finalizeStart] in
+            while !Task.isCancelled {
+                let elapsedMs = Int(Date().timeIntervalSince(finalizeStart) * 1000)
+                let payload: [String: Any] = [
+                    "event": "finalizing",
+                    "elapsed_ms": elapsedMs,
+                ]
+                if let data = try? JSONSerialization.data(withJSONObject: payload),
+                   let json = String(data: data, encoding: .utf8) {
+                    print(json)
+                    fflush(stdout)
+                }
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+            }
+        }
+
         // Flush and close stem files on the sample queue to serialize
         // with any in-flight writeStemSamples calls. Without this,
         // nil'ing on the main thread races with writes on sampleQueue.
@@ -100,15 +131,41 @@ final class NativeCallRecorder: NSObject, SCRecordingOutputDelegate, SCStreamOut
         }
 
         guard let stream else {
+            heartbeatTask.cancel()
             exit(0)
         }
 
         do {
             try await stream.stopCapture()
         } catch {
+            heartbeatTask.cancel()
             fputs("stopCapture failed: \(error)\n", stderr)
             exit(1)
         }
+
+        // Emit elapsed timing on successful stopCapture return. This is the
+        // ScreenCaptureKit-side stop time; the .mov finalize (moov atom
+        // write) keeps running until recordingOutputDidFinishRecording fires
+        // and emits `finalize_complete` with its own elapsed_ms. Pair the two
+        // to characterize the duration-to-finalize curve on long captures
+        // (#216 / #236).
+        let stopReturnedMs = Int(Date().timeIntervalSince(finalizeStart) * 1000)
+        let stopPayload: [String: Any] = [
+            "event": "stopCapture_returned",
+            "elapsed_ms": stopReturnedMs,
+        ]
+        if let data = try? JSONSerialization.data(withJSONObject: stopPayload),
+           let json = String(data: data, encoding: .utf8) {
+            print(json)
+            fflush(stdout)
+        }
+
+        // stopCapture() returns when the framework has been told to stop, but
+        // the moov atom may still be in flight: the actual finalize completes
+        // when `recordingOutputDidFinishRecording` fires and calls exit(0).
+        // Keep the heartbeat alive across that window so the Rust parent
+        // doesn't see 30s of silence and SIGKILL us before the .mov is on
+        // disk. The heartbeat Task dies naturally when the process exits.
     }
 
     private func startMonitoring() {
@@ -320,6 +377,21 @@ final class NativeCallRecorder: NSObject, SCRecordingOutputDelegate, SCStreamOut
     }
 
     func recordingOutputDidFinishRecording(_ recordingOutput: SCRecordingOutput) {
+        // Emit elapsed time from the start of stop() to actual .mov finalize.
+        // Pair with `stopCapture_returned` to size the moov-write tail (#216
+        // / #236).
+        if let start = finalizeStart {
+            let elapsedMs = Int(Date().timeIntervalSince(start) * 1000)
+            let payload: [String: Any] = [
+                "event": "finalize_complete",
+                "elapsed_ms": elapsedMs,
+            ]
+            if let data = try? JSONSerialization.data(withJSONObject: payload),
+               let json = String(data: data, encoding: .utf8) {
+                print(json)
+                fflush(stdout)
+            }
+        }
         exit(0)
     }
 

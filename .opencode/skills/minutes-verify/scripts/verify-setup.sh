@@ -102,6 +102,24 @@ else
   check "Config" "$WARN" "not configured — using defaults (this is fine)"
 fi
 
+# 8. Spotlight privacy markers (macOS only)
+if [ "$(uname)" = "Darwin" ]; then
+  missing_markers=()
+  for dir in "$HOME/.minutes" "$HOME/meetings"; do
+    if [ -d "$dir" ] && [ ! -e "$dir/.metadata_never_index" ]; then
+      missing_markers+=("$dir")
+    fi
+  done
+
+  if [ "${#missing_markers[@]}" -eq 0 ]; then
+    check "Spotlight privacy" "$PASS" "metadata exclusion markers present"
+  else
+    check "Spotlight privacy" "$WARN" "missing .metadata_never_index in: ${missing_markers[*]}; open Minutes or run minutes setup"
+  fi
+else
+  check "Spotlight privacy" "$WARN" "skipped (non-macOS)"
+fi
+
 echo ""
 if [ "$errors" -eq 0 ]; then
   echo "All checks passed. Minutes is ready to use."

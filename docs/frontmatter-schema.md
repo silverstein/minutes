@@ -441,6 +441,6 @@ Questions, feature requests, or interop issues belong in
 
 ---
 
-_Last updated: 2026-04-23 — corresponds to Minutes v0.14.0. Schema is
+_Last updated: 2026-05-07 — corresponds to Minutes v0.16.3. Schema is
 unchanged since v0.13.2 frontmatter v2 additions (`authority`, `supersedes`
 on `Decision`)._

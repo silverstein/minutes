@@ -96,7 +96,7 @@ Native hotkey sanity check:
 ./scripts/diagnose-desktop-hotkey.sh "$HOME/Applications/Minutes Dev.app"
 ```
 
-See [docs/DESKTOP-DEVELOPMENT.md](/Users/silverbook/Sites/minutes/docs/DESKTOP-DEVELOPMENT.md) for the full workflow.
+See [docs/DESKTOP-DEVELOPMENT.md](/docs/DESKTOP-DEVELOPMENT.md) for the full workflow.
 
 For dictation shortcut work:
 
@@ -118,177 +118,19 @@ certificate or local notarization credentials.
 
 ## Pre-Commit Checklist
 
-**Run this mental checklist before every commit from this repo.** Not every item applies to every commit — check which areas your changes touch and verify those.
+**Full table lives in [docs/PRE-COMMIT.md](docs/PRE-COMMIT.md).** Read it before any commit that touches Rust, the MCP server, the frontend, or release surfaces — it covers manifest sync, MCPB bundle guards, fmt/clippy/test, Unix-only-API gating, feature-stub parity, site release constants, skill compiler outputs, the toolchain pin, and UI render verification.
 
-**CI parity note.** CI runs on `ubuntu-latest`, `macos-latest`, and `windows-latest`, and it builds `minutes-core` with `--features parakeet` on all three. The Pre-Commit Checklist is designed to catch CI failures *before* pushing. The common traps that don't surface on a local macOS build:
-- `cfg(unix)`-gated code paths: macOS has `unix=true`, so unix-only imports/methods appear to work locally even when they'd break on Windows. Any `use std::os::unix::...`, `PermissionsExt::set_mode`, `UnixStream`, or similar must be inside `#[cfg(unix)]`.
-- `cfg(all(feature = "parakeet", unix))` stubs: when a module has both a real unix impl and a non-unix stub, any struct or function the caller accesses must exist in *both* variants with compatible shape. Callers that do `result.some_field` need `some_field` on the stub too.
-- Generated/sync'd files: `site/lib/release.ts` is generated from `manifest.json` by `scripts/sync_site_release_version.mjs`. Version bumps in `manifest.json` require running that script — CI's `Site Release Link Consistency` job will fail otherwise.
-- Rust toolchain pin: `rust-toolchain.toml` at repo root pins the rustc/clippy/rustfmt version (currently `1.95.0`). CI's `dtolnay/rust-toolchain@stable` action installs latest stable as the system default, but rustup's cargo proxy reads the pin file and routes invocations through the pinned toolchain. **Locally this works only if cargo runs through the rustup proxy** — verify with `command -v cargo` matching `rustup which cargo` (typically `~/.cargo/bin/cargo`; `CARGO_HOME` overrides relocate it). If you have Homebrew rust installed and `which cargo` resolves to `/opt/homebrew/bin/cargo`, the pin is ignored and you'll hit the same lints CI does — the exact failure mode that caused PR #206's tag delay (commits 4954de2, 21cd699 are both clippy-fix-only commits from this drift). Fix: prepend rustup's bin dir to PATH in your shell (`export PATH="$(dirname "$(rustup which cargo)"):$PATH"` in your shell rc), or `brew uninstall rust`. The build scripts (`scripts/build.sh`, `scripts/install-dev-app.sh`) detect via `rustup which cargo` so script-driven builds are immune; only interactive `cargo` calls need the shell PATH fix.
-
-| Area | When to check | How to verify |
-|------|---------------|---------------|
-| **Manifest tools sync** | Any new/renamed/removed MCP tool | Compare `manifest.json` tools array against `server.tool()` and `registerAppTool()` calls in `crates/mcp/src/index.ts` |
-| **Manifest description** | New user-facing features | Read `long_description` in `manifest.json` — does it mention the new capability? |
-| **Manifest version** | Version bumps | `manifest.json` version must match all other version sources |
-| **MCP server rebuild** | Any change to `crates/mcp/src/` or `crates/mcp/ui/` | `cd crates/mcp && npm run build` |
-| **MCPB bundle guard** | Any change to `.mcpbignore`, `crates/mcp/**`, `crates/sdk/**`, `manifest.json`, or anything else that affects what lands in the packed extension | `mcpb pack . minutes.mcpb && ./scripts/check_mcpb_bundle.sh minutes.mcpb && ./scripts/smoke_mcpb_handshake.sh minutes.mcpb`. The `MCP Server` CI job runs this on every push since issue #149; running it locally first saves a round-trip. |
-| **Toolchain matches the pin** | Any Rust change (precondition for fmt/clippy/test) | `command -v cargo` should print the same path as `rustup which cargo` (rustup proxy), and `cargo --version` should match the `channel` in `rust-toolchain.toml`. If cargo resolves to `/opt/homebrew/bin/cargo` or another non-rustup path, the pin is ignored — your local clippy/rustfmt versions silently drift from CI. Fix once: prepend rustup's bin dir to PATH in your shell config (typically `~/.cargo/bin`, or `dirname "$(rustup which cargo)"` if `CARGO_HOME` is overridden), or `brew uninstall rust`. |
-| **cargo fmt** | Any Rust change | `cargo fmt --all -- --check` |
-| **cargo clippy** | Any Rust change | `cargo clippy --all --no-default-features -- -D warnings` |
-| **cargo test** | Any Rust change | `cargo test -p minutes-core --no-default-features --lib` — CI runs the full suite; the local no-default-features run catches most regressions without needing the whisper model. |
-| **UI render verification** | Any change to `tauri/src/index.html`, any new Tauri `cmd_*` exposed to the frontend, or any modal/overlay/panel layout shift | Build the dev app with `./scripts/install-dev-app.sh` and click-test the affected surface in `~/Applications/Minutes Dev.app`. Type checks and Rust unit tests don't catch UI render bugs — PR #206 surfaced 4 such bugs only via click-testing (path candidates duplicated, build-artifact bundles polluting the picker, default selection wrong, ad-hoc detection always returning true). None of the four would have failed any test or CI job. If the UI change is non-trivial, also run the gstack `/qa` skill against the running dev app. |
-| **Unix-only APIs behind cfg** | Any new `use std::os::unix::*`, `PermissionsExt`, `UnixStream`, `set_mode(0o...)`, or similar | Wrap the import AND every call site in `#[cfg(unix)]`. Also gate any test that shells out to a POSIX script or uses chmod semantics. CI's `Test (windows-latest)` fails otherwise; `cargo check --no-default-features` on macOS won't catch this because `cfg(unix)` is true locally. |
-| **Feature-gated stub struct parity** | Any change to `parakeet_sidecar.rs` or similar file with an `imp` + `imp_stub` split | When the unix imp exposes a struct with fields that callers read (`result.transcript`, `result.elapsed_ms`, etc.), the stub struct in the `not(unix)` branch must declare the same fields (even though the stub function always returns `Err` and the match arm is unreachable at runtime). Without this, Windows + `--features parakeet` fails with E0609 "no field" errors. |
-| **Site release constants** | Any bump to `manifest.json` version | `node scripts/sync_site_release_version.mjs` regenerates `site/lib/release.ts` to match. CI's `Site Release Link Consistency` job fails otherwise. Treat this like the other version-sync sites in the Release Checklist. |
-| **SDK rebuild** | Any change to `crates/sdk/src/` | `cd crates/sdk && npm run build` |
-| **Mutual exclusion** | Any change to recording/dictation/live transcript start paths | Verify all three modes check each other's PID/state: `live_transcript::run` checks recording+dictation PIDs, `cmd_record`/`capture::record_to_wav` checks live PID, `dictation::run` checks live PID, Tauri `cmd_start_*` checks `live_transcript_active`+`recording`+`dictation_active` |
-| **Tauri command duplication** | Changes to live transcript start/stop logic | Both `cmd_start_live_transcript` and `handle_live_shortcut_event` must use the shared `try_acquire_live` + `run_live_session` functions. Do NOT duplicate logic. |
-| **Desktop app identity** | Any Tauri packaging, dogfooding, Screen Recording, Input Monitoring, Accessibility, call capture, hotkey, or repeated-permission work | Use `./scripts/install-dev-app.sh`, not `rm -rf /Applications/Minutes.app && cp ...`. If a local signing identity exists, export `MINUTES_DEV_SIGNING_IDENTITY` first. Test `~/Applications/Minutes Dev.app`, not `/Applications/Minutes.app`. |
-| **README accuracy** | New/removed tools, features, crates, or CLI commands | Tool/resource counts, crate list in Architecture, feature sections, and CLI examples in README.md must reflect the current state. Check: tool count matches `manifest.json`, crate list matches `ls crates/*/`, module count matches `ls crates/core/src/*.rs` |
-| **Website accuracy** | New/removed tools, CLI commands, features, version bumps, or skill changes | The hero stat line (version, MCP tool count, CLI command count, test count) is **generated** from `site/lib/release.ts` — run `node scripts/sync_site_release_version.mjs` after any change that affects those counts (the `Site Release Link Consistency` CI job fails if it drifts, and the script now also scans `manifest.json`, `crates/cli/src/main.rs`, and Rust + TS test files). Hand-written copy in `site/app/page.tsx` (release banner, feature descriptions, pipeline blurb) must still be updated manually — the script cannot reason about prose. The `/for-agents` skill catalog (rendered from `site/lib/skills-catalog.json`) is **generated** — never hand-edit that file or the skill cards in `site/app/for-agents/page.tsx`; run the skill compiler instead (see **Skill compiler outputs sync**). Redeploy the landing page with the prebuilt Vercel flow from the repo root: `npx vercel@50.38.2 build --prod && npx vercel@50.38.2 deploy --prebuilt --yes --prod --scope evil-genius-laboratory` |
-| **npm dep versions** | Version bumps | `crates/mcp/package.json` `minutes-sdk` dep must reference a version that's actually published on npm. Check with `npm view minutes-sdk versions --json` |
-| **Release notes drafted** | Version bumps / releases | Every release is a visibility moment in followers' GitHub feeds. Draft compelling release notes BEFORE creating the release. No empty releases — ever. See Release Checklist step 5. |
-| **Release warranted?** | New/removed MCP tools, new CLI commands, user-facing features | Manifest changes (new tools, updated description) don't reach Claude Desktop users until a release is cut and `.mcpb` is uploaded. If the change is user-visible, plan a release. |
-| **marketplace.json plugin version bumped** | Any change to `.claude/plugins/minutes/` that should reach users | `.claude-plugin/marketplace.json` → `plugins[0].version` is the **single field Claude Code reads** to decide what "latest" means for plugin-only releases. Bumping `plugin.json` alone is not enough — if `marketplace.json` still advertises the old version, `/plugin update minutes@minutes` reports "already at latest" and users silently miss everything shipped. Keep all three version surfaces in lockstep: `marketplace.json` `plugins[0].version`, `.claude/plugins/minutes/plugin.json`, `.claude/plugins/minutes/.claude-plugin/plugin.json`. |
-| **Plugin release upgrade snippet in notes** | Any plugin-only release (push-to-main, no tag) | Plugin releases don't auto-deliver to existing users. Every release-note body must include the two-command refresh sequence: `/plugin marketplace update minutes` then `/plugin update minutes@minutes`, then restart Claude Code. Without this, pre-release adopters stay silently stuck on the version they installed originally — their local marketplace mirror is a git clone that only pulls when explicitly asked. See `notes-release-plugin-v0.8.0.md` for the template. |
-| **Skill compiler outputs sync** | Any change to `tooling/skills/sources/`, `.claude/plugins/minutes/skills/`, or `.claude/plugins/minutes/hooks/lib/`; any new, renamed, or removed skill | The compiler in `tooling/skills/` writes **four** targets from canonical sources: `.claude/plugins/minutes/skills/` (plugin, now includes per-skill `scripts/` and `references/` assets — Claude host's `assetPolicy` is `copy` mode), `.agents/skills/minutes/` (Codex/Gemini/AGENTS-aware), `.opencode/skills/` + `.opencode/commands/` (OpenCode), and `site/lib/skills-catalog.json` (consumed by `/for-agents`, its JSON-LD, and the llms.txt generator). Rebuild with `cd tooling/skills && npm run build && npm run compile`, then verify with `npm run test && npm run check && npm run compile:dry`. `check` fails if any of the four outputs is stale. Runtime helpers must stay byte-identical across `.claude/plugins/minutes/hooks/lib/`, `.agents/skills/minutes/_runtime/hooks/lib/`, and `.opencode/skills/_runtime/hooks/lib/`. **After the skill compiler, also regenerate llms.txt** because the skill catalog feeds it: `npm --prefix site run generate:llms` to write, `npm --prefix site run check:llms` to verify — this is now enforced in CI. **New skills require three site-facing frontmatter fields** under `metadata`: `site_category`, `site_example`, `site_best_for` — the compiler throws with a clear error on any missing field. |
+Two traps that bite hardest (the rest are in the doc):
+- **Toolchain pin.** `command -v cargo` must match `rustup which cargo`. If Homebrew rust shadows the rustup proxy, `rust-toolchain.toml` is silently ignored and your local clippy/rustfmt drift from CI's. Fix once: prepend rustup's bin dir to PATH or `brew uninstall rust`.
+- **UI render verification.** Type checks and Rust unit tests don't catch UI render bugs. Any change to `tauri/src/index.html`, any new Tauri `cmd_*`, or any modal/overlay shift requires building the dev app and click-testing in `~/Applications/Minutes Dev.app`.
 
 ## Release Checklist
 
-**When shipping a new version, walk through every item in order.**
-
-### 1. Version bump (all 6 must match)
-```bash
-# Bump in: Cargo.toml, crates/cli/Cargo.toml, tauri/src-tauri/tauri.conf.json,
-#          crates/mcp/package.json, crates/sdk/package.json, manifest.json
-# Also bump the version string in crates/mcp/src/index.ts (McpServer({ version }))
-# Also bump the minutes-core dep version in crates/cli/Cargo.toml
-# Verify:
-grep version Cargo.toml tauri/src-tauri/tauri.conf.json crates/mcp/package.json \
-  crates/sdk/package.json manifest.json && grep 'version:' crates/mcp/src/index.ts
-```
-
-**Independent-cadence crates.** `crates/whisper-guard/Cargo.toml` is published to crates.io on its own cadence — it does NOT need to match the main version. Check whether it has unreleased changes before tagging the main release:
-```bash
-PUBLISHED=$(curl -s https://crates.io/api/v1/crates/whisper-guard | jq -r '.crate.max_stable_version')
-LAST_PUBLISH_COMMIT=$(git log --grep="whisper-guard $PUBLISHED" --format="%H" | head -1)
-git log "$LAST_PUBLISH_COMMIT"..HEAD -- crates/whisper-guard/   # any commits → bump + publish in Step 11.5
-```
-
-### 2. Manifest sync
-- Tools in `manifest.json` match tools registered in `crates/mcp/src/index.ts`
-- `long_description` reflects current capabilities
-- `keywords` are current
-
-### 3. MCP runtime deps
-All `import` statements in `crates/mcp/src/index.ts` must have their packages in `dependencies` (not `devDependencies`) in `package.json`. Smoke-test: `node -e "require('./crates/mcp/dist/index.js')"`
-
-### 4. Build everything
-```bash
-cd crates/mcp && npm run build       # MCP server + dashboard UI
-cargo fmt --all -- --check           # Rust formatting
-cargo clippy --all --no-default-features -- -D warnings  # Rust lints
-```
-
-**macOS desktop note:**
-- For local TCC-sensitive dogfooding before release, rebuild the dev app with:
-```bash
-export MINUTES_DEV_SIGNING_IDENTITY="Developer ID Application: Mathieu Silverstein (63TMLKT8HN)"
-./scripts/install-dev-app.sh --no-open
-```
-- Do not treat a raw local `/Applications/Minutes.app` copy as the canonical test surface for permission-sensitive features.
-
-### 5. Write release notes
-Every release shows up in followers' GitHub feeds — this is free awareness. Write notes BEFORE creating the release. No release should ever ship with an empty body.
-- Summarize what shipped and why it matters (not commit messages — outcomes)
-- Include install instructions (cargo install, DMG, npx)
-- Match the voice of past releases (see v0.8.0, v0.8.1 for examples)
-- Save to a temp file: `notes.md`
-
-### 6. Push commits to `main` and wait for CI to go green
-```bash
-git push origin main
-# Watch CI — do NOT tag or publish until the CI workflow succeeds on this commit.
-gh run list --branch main --limit 3
-gh run watch $(gh run list --branch main --limit 1 --json databaseId --jq '.[0].databaseId')
-```
-**Why this step exists**: if you tag first and CI breaks (e.g. a Windows cross-platform build failure), you've already published the version to the public GitHub feed, npm, and brew. Moving a tag after the fact is messy — force-pushing the tag drops the GitHub release to draft, requires re-publishing, and leaves the npm package / brew formula pointing at a different commit than the release tag. Catch the failure *before* any of that happens.
-
-### 7. Create the GitHub release as a DRAFT
-```bash
-gh release create vX.Y.Z -t "vX.Y.Z: Short Title" -F notes.md --target main --draft
-```
-This creates the tag on the remote and triggers the release workflows (`Release CLI Binaries`, `Release macOS`, `Release Windows Desktop`), but does **not** announce the version in subscribers' GitHub feeds and doesn't mark it as "latest". Drafts can be re-published later with a single flag flip.
-
-Do NOT `git tag` locally — the race it causes (CI creating the release before notes exist) is exactly what the checklist avoids.
-
-### 8. Wait for release workflows to pass
-```bash
-gh run list --workflow="Release CLI Binaries" --limit 1
-gh run list --workflow="Release macOS" --limit 1
-gh run list --workflow="Release Windows Desktop" --limit 1
-```
-If any fail, fix on `main`, `git tag -d vX.Y.Z && git push origin :refs/tags/vX.Y.Z`, re-tag at the new commit, and re-run from step 7. (Cheap because the release is still a draft.)
-
-### 9. Publish the draft
-```bash
-gh release edit vX.Y.Z --draft=false
-```
-Now — and only now — does the version show up in followers' feeds and become the "latest" release.
-
-### 10. Build and upload .mcpb
-```bash
-mcpb pack . minutes.mcpb
-gh release upload vX.Y.Z minutes.mcpb --clobber
-```
-
-### 11. Publish npm packages
-```bash
-cd crates/sdk && npm publish --access public --registry https://registry.npmjs.org
-cd crates/mcp && npm publish --access public --registry https://registry.npmjs.org
-```
-**IMPORTANT**: `crates/mcp/package.json` must depend on `"minutes-sdk": "^X.Y.Z"` (npm version), NOT `"file:../sdk"` (local path). Check before publishing. If 2FA blocks publish, use a granular access token with "Bypass 2FA" enabled.
-
-### 11.5. Publish independent-cadence crates (whisper-guard) if bumped
-Skip this step if Step 1 showed no changes to `crates/whisper-guard/` since the last whisper-guard publish.
-```bash
-cd crates/whisper-guard
-cargo publish --dry-run                  # verify packaging cleanly
-cargo publish                            # actual publish
-# Confirm:
-sleep 30 && curl -s https://crates.io/api/v1/crates/whisper-guard | jq '.crate.max_stable_version'
-```
-whisper-guard is a standalone MIT crate consumed outside this repo (currently 277+ downloads). Bump independently of the main release; do NOT couple to the Minutes version. If you skip the publish, the crates.io users miss the fix and you create silent drift between repo state and published artifact.
-
-### 12. Refresh the landing page copy, then redeploy
-Before deploying, make sure the site matches what just shipped:
-
-1. **Regenerate the stat line** (version, tool count, CLI count, test count):
-   ```bash
-   node scripts/sync_site_release_version.mjs
-   ```
-   The `Site Release Link Consistency` CI job runs this with `--check` on every push, so forgetting this step also blocks CI — but running it locally first saves a round-trip and surfaces drift before tagging.
-2. **Hand-update the prose** — the release banner, headline feature blurb, and pipeline description in `site/app/page.tsx`, plus `docs/frontmatter-schema.md`'s "corresponds to" footer if the schema row moved. The sync script handles numbers; it cannot rewrite copy that references last release's headline features.
-3. **Then deploy**:
-   ```bash
-   npx vercel@50.38.2 build --prod
-   npx vercel@50.38.2 deploy --prebuilt --yes --prod --scope evil-genius-laboratory
-   ```
-
-**IMPORTANT**: Run these commands from the repo root, not `site/`. The linked Vercel project uses `rootDirectory=site`, and the Git-connected / remote build path is currently failing after successful Next 16.2.3 builds because Vercel looks for `.next/routes-manifest-deterministic.json`. The prebuilt flow uploads the local `.vercel/output` and avoids that failing server-side post-build step.
-
-**Check before deploying**: `cat .vercel/project.json` should show `"projectName": "useminutes.app"` with `"framework": "nextjs"`. If it's pointing at a different project (e.g. `rx-vip/minutes`), the build produces an empty static tree (no `index.html`, no SSR functions) and the deploy aliases return 404. Fix the link before building.
-
-### 13. Update Homebrew tap formula if CLI changed
-The formula lives at `silverstein/homebrew-tap` → `Formula/minutes.rb`. Update the `tag:` to the new version:
-```bash
-# Fetch current SHA, update via GitHub API
-SHA=$(gh api repos/silverstein/homebrew-tap/contents/Formula/minutes.rb --jq '.sha')
-# Edit Formula/minutes.rb: change tag: "vX.Y.Z" → new version
-# Push via API or clone+commit+push
-```
-Verify: `brew update && brew info silverstein/tap/minutes` should show the new version.
+**Full procedure lives in [docs/RELEASE.md](docs/RELEASE.md).** Walk through every step in order when shipping. Highlights:
+- All 6 version sources must match (`Cargo.toml`, `crates/cli/Cargo.toml`, `tauri/src-tauri/tauri.conf.json`, `crates/mcp/package.json`, `crates/sdk/package.json`, `manifest.json`) plus the version string in `crates/mcp/src/index.ts`.
+- `crates/whisper-guard/` ships on its own cadence — bump + publish independently if it changed since last whisper-guard publish.
+- Push to `main` and wait for CI green **before** tagging. Create the GitHub release as a `--draft`, wait for release workflows, then `--draft=false`. Never `git tag` locally.
+- After tagging: upload `.mcpb`, publish npm packages (sdk first, then mcp — and `crates/mcp/package.json` must depend on the npm version of `minutes-sdk`, not `file:../sdk`), redeploy site via prebuilt Vercel flow from repo root, update Homebrew tap if CLI changed.
 
 ## Design System
 
@@ -379,7 +221,7 @@ minutes/
 │   ├── cli/                   # CLI binary — 45 commands
 │   ├── reader/                # Lightweight read-only meeting parser (no audio deps)
 │   ├── assets/                # Bundled assets (demo.wav)
-│   └── mcp/                   # MCP server — 29 tools + 7 resources + MCP App dashboard
+│   └── mcp/                   # MCP server — 31 tools + 7 resources + MCP App dashboard
 │       └── ui/                # Interactive dashboard (vanilla TS, builds to single-file HTML)
 ├── site/                      # Landing page (Next.js + Remotion demo player)
 ├── tauri/                     # Tauri v2 menu bar app + singleton AI Assistant
@@ -462,7 +304,7 @@ node test/mcp_tools_test.mjs                        # 8 MCP integration tests
 
 ## Claude Ecosystem Integration
 
-- **MCP Server**: 29 tools + 7 resources for Claude Desktop / Cowork / Dispatch (`npx minutes-mcp` for zero-install)
+- **MCP Server**: 31 tools + 7 resources for Claude Desktop / Cowork / Dispatch (`npx minutes-mcp` for zero-install)
 - **Claude Code Plugin**: 18 skills (7 capture + 1 search + 4 lifecycle + 2 coaching + 3 knowledge + 1 intelligence) + meeting-analyst agent + SessionStart + PostToolUse hooks
 - **Interactive meeting lifecycle**: `/minutes-brief` → `/minutes-prep` → record → `/minutes-tag` → `/minutes-debrief` → `/minutes-mirror` → `/minutes-weekly` with skill chaining via `.brief.md` / `.prep.md` files; `/minutes-graph` for cross-meeting entity queries
 - **Conversational summarization**: Claude reads transcripts via MCP, no API key needed

@@ -4,6 +4,8 @@
 <dict>
     <key>NSMicrophoneUsageDescription</key>
     <string>Minutes needs microphone access to record meetings, voice memos, and your side of call audio.</string>
+    <key>NSAudioCaptureUsageDescription</key>
+    <string>Minutes needs system audio access to capture the other side of calls without requiring a virtual loopback device.</string>
     <key>NSScreenCaptureUsageDescription</key>
     <string>Minutes uses screen and system-audio capture for call recording and can optionally capture screenshots for visual context during recordings.</string>
     <key>NSCalendarsFullAccessUsageDescription</key>

@@ -21,6 +21,10 @@ metal = ["whisper-rs/metal"]
 vulkan = ["whisper-rs/vulkan"]
 streaming = ["dep:crossbeam-channel"]
 denoise = ["dep:nnnoiseless"]
+# Streaming Silero VAD via ort. Implies streaming because every consumer
+# (recording sidecar) needs streaming audio. ort + ndarray are already
+# pulled in by `diarize`; cargo unifies them when both features are on.
+vad-ort = ["streaming", "dep:ort", "dep:ndarray"]
 
 [dependencies]
 serde = { workspace = true }
@@ -45,7 +49,7 @@ crossbeam-channel = { workspace = true, optional = true }
 pyannote-rs = { workspace = true, optional = true }
 ort = { workspace = true, optional = true }
 ndarray = { workspace = true, optional = true }
-whisper-guard = { path = "../whisper-guard", version = "0.2.1" }
+whisper-guard = { path = "../whisper-guard", version = "0.3.0" }
 nnnoiseless = { workspace = true, optional = true }
 base64 = "0.22"
 rusqlite = { workspace = true }
@@ -55,6 +59,7 @@ tempfile = "3"
 libc = "0.2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
+cidre = { version = "0.15.0", default-features = false, features = ["at", "av", "cat", "cf", "cm", "core_audio", "macos_14_4", "ns"] }
 objc2 = "0.6.4"
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSRunningApplication", "NSWorkspace", "libc"] }
 objc2-av-foundation = { version = "0.3.2", default-features = false, features = ["AVCaptureDevice", "AVMediaFormat"] }

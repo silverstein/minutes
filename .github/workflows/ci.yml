@@ -222,6 +222,15 @@ jobs:
             target
           key: ${{ runner.os }}-desktop-${{ hashFiles('**/Cargo.lock') }}
 
+      - name: Clean stale Windows native build cache
+        shell: bash
+        run: |
+          rm -rf \
+            target/debug/build/whisper-rs-sys-* \
+            target/release/build/whisper-rs-sys-* \
+            target/debug/build/knf-rs-sys-* \
+            target/release/build/knf-rs-sys-*
+
       - name: Cache ONNX Runtime binaries
         uses: actions/cache@v4
         with:

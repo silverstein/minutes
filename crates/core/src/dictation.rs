@@ -231,9 +231,10 @@ where
         return Err(DictationError::RecordingActive.into());
     }
 
-    // Check for conflicts: live transcript must not be active
+    // Check for conflicts: live transcript must not be active. `inspect_pid_file`
+    // so a session holding the PID under a mandatory Windows lock is detected. #258.
     let lt_pid = pid::live_transcript_pid_path();
-    if let Ok(Some(_)) = pid::check_pid_file(&lt_pid) {
+    if pid::inspect_pid_file(&lt_pid).is_active() {
         return Err(DictationError::LiveTranscriptActive.into());
     }
 
@@ -347,7 +348,10 @@ where
         };
 
         let mut vad = Vad::new();
-        let mut streaming = StreamingWhisper::new(config.transcription.language.clone());
+        let mut streaming = StreamingWhisper::with_partial_max_secs(
+            config.transcription.language.clone(),
+            config.transcription.partial_max_secs,
+        );
         let final_backend = dictation_final_backend(config);
         let mut final_utterance_samples: Vec<f32> = Vec::new();
         let mut accumulated_results: Vec<DictationResult> = Vec::new();
@@ -655,15 +659,15 @@ fn parakeet_dictation_ready(config: &Config) -> bool {
 
 #[cfg(feature = "whisper")]
 fn finalize_dictation_transcription(
-    config: &Config,
-    final_backend: DictationFinalBackend,
-    final_utterance_samples: &[f32],
+    _config: &Config,
+    _final_backend: DictationFinalBackend,
+    _final_utterance_samples: &[f32],
     streaming: &mut StreamingWhisper,
     whisper_ctx: &whisper_rs::WhisperContext,
 ) -> Option<StreamingResult> {
     #[cfg(target_os = "macos")]
-    if final_backend == DictationFinalBackend::AppleSpeech {
-        match transcribe_utterance_with_apple_speech(final_utterance_samples, config) {
+    if _final_backend == DictationFinalBackend::AppleSpeech {
+        match transcribe_utterance_with_apple_speech(_final_utterance_samples, _config) {
             Ok(Some(result)) => return Some(result),
             Ok(None) => {}
             Err(error) => {
@@ -676,8 +680,8 @@ fn finalize_dictation_transcription(
     }
 
     #[cfg(feature = "parakeet")]
-    if final_backend == DictationFinalBackend::Parakeet {
-        match transcribe_utterance_with_parakeet(final_utterance_samples, config) {
+    if _final_backend == DictationFinalBackend::Parakeet {
+        match transcribe_utterance_with_parakeet(_final_utterance_samples, _config) {
             Ok(Some(result)) => return Some(result),
             Ok(None) => {}
             Err(error) => {
@@ -1105,6 +1109,7 @@ fn write_dictation_file(text: &str, duration_secs: f64, config: &Config) -> Opti
         duration: duration_str,
         source: Some("dictation".into()),
         status: Some(OutputStatus::Complete),
+        processing_warnings: Vec::new(),
         tags: vec![],
         attendees: vec![],
         attendees_raw: None,

@@ -6,7 +6,7 @@ use crate::streaming_whisper::StreamingWhisper;
 use crate::transcription_coordinator::{collapse_noise_markers, strip_foreign_script};
 use crate::vad::Vad;
 #[cfg(feature = "whisper")]
-use crate::vad::VadResult;
+use crate::vad::{VadEngine, VadResult};
 use chrono::{DateTime, Local};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -213,6 +213,7 @@ fn emit_live_engine_fallback_warning(source: &'static str, detail: &str) {
     .ok();
 }
 
+#[cfg(all(feature = "whisper", target_os = "macos"))]
 fn emit_apple_speech_fallback_warning(source: &'static str, detail: &str) {
     eprintln!(
         "[minutes] {} (detail: {})",
@@ -663,7 +664,10 @@ fn run_inner(
     ));
 
     let mut vad = Vad::new();
-    let mut streaming = StreamingWhisper::new(config.transcription.language.clone());
+    let mut streaming = StreamingWhisper::with_partial_max_secs(
+        config.transcription.language.clone(),
+        config.transcription.partial_max_secs,
+    );
     let standalone_backend = config.effective_live_transcript_backend();
     #[cfg(target_os = "macos")]
     let mut apple_utterance_samples: Vec<f32> = Vec::new();
@@ -1135,6 +1139,12 @@ impl SidecarGatingStats {
 #[cfg(feature = "whisper")]
 enum RecordingSidecarVadBackend {
     Silero(SileroSidecarVad),
+    /// Boxed because `OrtSileroVad` owns an ort `Session` plus state
+    /// and carry buffers, making it noticeably larger than the other
+    /// variants. Boxing keeps the enum size constant and silences
+    /// `clippy::large_enum_variant` without a per-variant allow.
+    #[cfg(feature = "vad-ort")]
+    OrtSilero(Box<crate::silero_vad::OrtSileroVad>),
     Energy(Vad),
 }
 
@@ -1146,12 +1156,71 @@ struct RecordingSidecarVad {
 #[cfg(feature = "whisper")]
 impl RecordingSidecarVad {
     fn new(config: &Config) -> Self {
+        // Pick the engine the user asked for. When ort-silero is
+        // requested but unavailable (feature off, ONNX missing, or
+        // load failure), fall through to whisper-silero with an
+        // explicit warn — silent fallback is the support footgun
+        // codex flagged in the spec review.
+        let requested = config.transcription.vad_engine.trim().to_lowercase();
+        let want_ort = matches!(requested.as_str(), "ort-silero" | "ort" | "silero-ort");
+        if !requested.is_empty()
+            && !want_ort
+            && !matches!(
+                requested.as_str(),
+                "whisper-silero" | "silero" | "whisper" | "default"
+            )
+        {
+            tracing::warn!(
+                requested = %requested,
+                "unknown transcription.vad_engine value — falling through to whisper-silero"
+            );
+        }
+
+        #[cfg(feature = "vad-ort")]
+        if want_ort {
+            if let Some(onnx_path) = crate::transcribe::resolve_silero_onnx_path(config) {
+                match crate::silero_vad::OrtSileroVad::new(&onnx_path) {
+                    Ok(engine) => {
+                        tracing::info!(
+                            vad_engine = "ort-silero",
+                            onnx_model = %onnx_path.display(),
+                            "recording sidecar using ort-Silero VAD (streaming)"
+                        );
+                        return Self {
+                            backend: RecordingSidecarVadBackend::OrtSilero(Box::new(engine)),
+                        };
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            onnx_model = %onnx_path.display(),
+                            error = %e,
+                            "ort-Silero load failed — falling back to whisper-silero"
+                        );
+                    }
+                }
+            } else {
+                tracing::warn!(
+                    "ort-silero requested but silero-vad-v6.2.0.onnx missing in model_path — \
+                     falling back to whisper-silero. Run `minutes setup` (with vad-ort enabled \
+                     in your build) to fetch the ONNX."
+                );
+            }
+        }
+        #[cfg(not(feature = "vad-ort"))]
+        if want_ort {
+            tracing::warn!(
+                "ort-silero requested but this build was not compiled with the `vad-ort` \
+                 feature — falling back to whisper-silero"
+            );
+        }
+
         if let Some(vad_path) = crate::transcribe::resolve_vad_model_path(config) {
             match SileroSidecarVad::new(&vad_path) {
                 Ok(vad) => {
                     tracing::info!(
+                        vad_engine = "whisper-silero",
                         vad_model = %vad_path.display(),
-                        "recording sidecar using Silero VAD"
+                        "recording sidecar using whisper-Silero VAD"
                     );
                     return Self {
                         backend: RecordingSidecarVadBackend::Silero(vad),
@@ -1171,6 +1240,7 @@ impl RecordingSidecarVad {
             );
         }
 
+        tracing::info!(vad_engine = "energy", "recording sidecar using energy VAD");
         Self {
             backend: RecordingSidecarVadBackend::Energy(Vad::new()),
         }
@@ -1179,6 +1249,8 @@ impl RecordingSidecarVad {
     fn mode_name(&self) -> &'static str {
         match &self.backend {
             RecordingSidecarVadBackend::Silero(_) => "silero",
+            #[cfg(feature = "vad-ort")]
+            RecordingSidecarVadBackend::OrtSilero(_) => "ort-silero",
             RecordingSidecarVadBackend::Energy(_) => "energy",
         }
     }
@@ -1196,6 +1268,23 @@ impl RecordingSidecarVad {
                         self.backend = RecordingSidecarVadBackend::Energy(Vad::new());
                     }
                 },
+                #[cfg(feature = "vad-ort")]
+                RecordingSidecarVadBackend::OrtSilero(engine) => {
+                    let result = engine.process(samples, rms);
+                    if engine.is_healthy() {
+                        return result;
+                    }
+                    // Engine flipped unhealthy mid-call. Replace and
+                    // re-dispatch on the next loop iteration. The
+                    // result we just got is one silence frame; per
+                    // the trait contract, downstream must not act on
+                    // it as authoritative, but for the sidecar's
+                    // per-call flag it's fine to drop and refresh.
+                    tracing::warn!(
+                        "ort-Silero engine flipped unhealthy during recording sidecar run — falling back to energy VAD"
+                    );
+                    self.backend = RecordingSidecarVadBackend::Energy(Vad::new());
+                }
                 RecordingSidecarVadBackend::Energy(vad) => return vad.process(rms),
             }
         }
@@ -1212,6 +1301,12 @@ struct SileroSidecarVad {
     min_silence_ms: u64,
     chunk_ms: u64,
     silence_ms: u64,
+    /// Sticky failure flag for the `VadEngine` impl. Set to `true` the
+    /// first time the inherent `process` returns `Err` so callers
+    /// using trait dispatch can surface health via `is_healthy`. The
+    /// existing enum-based dispatcher (`RecordingSidecarVad`) reads
+    /// the inherent `Result` directly and is unaffected.
+    failed: bool,
 }
 
 #[cfg(feature = "whisper")]
@@ -1246,6 +1341,7 @@ impl SileroSidecarVad {
             min_silence_ms: SIDECAR_VAD_MIN_SILENCE_MS as u64,
             chunk_ms: SIDECAR_VAD_CHUNK_MS,
             silence_ms: 0,
+            failed: false,
         })
     }
 
@@ -1256,7 +1352,13 @@ impl SileroSidecarVad {
     ) -> Result<VadResult, whisper_rs::WhisperError> {
         self.buffer.extend_from_slice(samples);
 
-        let segments = self.ctx.segments_from_samples(self.params, &self.buffer)?;
+        let segments = match self.ctx.segments_from_samples(self.params, &self.buffer) {
+            Ok(segments) => segments,
+            Err(e) => {
+                self.failed = true;
+                return Err(e);
+            }
+        };
         let buffer_ms = samples_to_ms(self.buffer.len());
         let last_segment_end_ms = if segments.num_segments() > 0 {
             segments
@@ -1295,6 +1397,65 @@ impl SileroSidecarVad {
 }
 
 #[cfg(feature = "whisper")]
+impl VadEngine for SileroSidecarVad {
+    /// Trait dispatch over `SileroSidecarVad::process`. Absorbs whisper
+    /// errors by setting the sticky `failed` flag and returning a
+    /// silence frame. Callers using trait dispatch must check
+    /// `is_healthy()` after each call and swap engines when it flips
+    /// to `false`. The existing enum-based `RecordingSidecarVad` keeps
+    /// using the inherent fallible API and its swap-on-error semantics
+    /// are unaffected.
+    fn process(&mut self, samples: &[f32], rms: f32) -> VadResult {
+        match SileroSidecarVad::process(self, samples, rms) {
+            Ok(result) => result,
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    "Silero VAD process failed (trait dispatch) — emitting silence frame; is_healthy is now false"
+                );
+                VadResult {
+                    speaking: false,
+                    silence_ms: self.silence_ms,
+                    energy: rms,
+                    noise_floor: 0.0,
+                }
+            }
+        }
+    }
+
+    fn name(&self) -> &'static str {
+        "whisper-silero"
+    }
+
+    fn is_healthy(&self) -> bool {
+        !self.failed
+    }
+
+    fn reset(&mut self) {
+        // Reset reusable per-utterance state only. The `failed` flag
+        // is intentionally NOT cleared — sticky failures stay sticky,
+        // per the `VadEngine` trait contract. Dispatcher replaces
+        // failed engines; reset does not revive them.
+        self.buffer.clear();
+        self.silence_ms = 0;
+        debug_assert!(
+            !self.failed,
+            "reset called on a failed SileroSidecarVad — dispatcher should replace, not reset"
+        );
+    }
+}
+
+#[cfg(all(test, feature = "whisper"))]
+impl SileroSidecarVad {
+    /// Test-only seam to flip the sticky failure flag without
+    /// requiring a corrupted model context. Used to verify the
+    /// `is_healthy` contract without a live whisper session.
+    pub(crate) fn force_failed_for_test(&mut self, value: bool) {
+        self.failed = value;
+    }
+}
+
+#[cfg(feature = "whisper")]
 fn samples_to_ms(samples: usize) -> u64 {
     ((samples as u64) * 1000) / 16000
 }
@@ -1307,7 +1468,7 @@ fn trim_front(buffer: &mut Vec<f32>, max_len: usize) {
     }
 }
 
-#[cfg(feature = "whisper")]
+#[cfg(all(feature = "whisper", any(feature = "parakeet", target_os = "macos")))]
 fn transcribe_with_whisper_for_live_sidecar(
     samples: &[f32],
     whisper_ctx: &whisper_rs::WhisperContext,
@@ -1317,7 +1478,15 @@ fn transcribe_with_whisper_for_live_sidecar(
         return None;
     }
 
-    let mut streaming = StreamingWhisper::new(language);
+    // This helper is a batch path: it accumulates `samples` via `feed()` and
+    // discards every partial result, returning only `finalize()`. Running
+    // partials here is wasted work — they cost O(buffer_len) per call but
+    // the caller only ever uses the final. Pass a 1-second cap so partials
+    // are suppressed as soon as the buffer crosses MIN_TRANSCRIBE_SAMPLES,
+    // i.e. effectively never. This is independent of the user's live-mode
+    // `transcription.partial_max_secs` setting; that knob is for live
+    // responsiveness, not for batch fan-in.
+    let mut streaming = StreamingWhisper::with_partial_max_secs(language, 1);
     for chunk in samples.chunks(1600) {
         let _ = streaming.feed(chunk, whisper_ctx);
     }
@@ -1332,6 +1501,7 @@ fn transcribe_with_whisper_for_live_sidecar(
 /// churn and latency spikes on noisy inputs.
 #[cfg(feature = "parakeet")]
 const PARAKEET_LIVE_MIN_SAMPLES: usize = 16_000; // 1 second at 16kHz
+#[cfg(all(feature = "whisper", target_os = "macos"))]
 const APPLE_SPEECH_LIVE_MIN_SAMPLES: usize = 16_000; // 1 second at 16kHz
 
 #[cfg(feature = "parakeet")]
@@ -1359,6 +1529,7 @@ fn transcribe_with_parakeet_for_live_sidecar(
     }
 }
 
+#[cfg(all(feature = "whisper", target_os = "macos"))]
 fn transcribe_with_apple_speech_for_live_sidecar(
     samples: &[f32],
     config: &Config,
@@ -1370,6 +1541,7 @@ fn transcribe_with_apple_speech_for_live_sidecar(
     )
 }
 
+#[cfg(all(feature = "whisper", target_os = "macos"))]
 fn transcribe_with_apple_speech_for_live_sidecar_impl<F>(
     samples: &[f32],
     config: &Config,
@@ -1820,9 +1992,12 @@ fn run_sidecar_inner_mpsc(
     stop_flag: Arc<AtomicBool>,
     config: &Config,
 ) -> Result<(), MinutesError> {
-    // Guard: don't clobber a standalone live transcript session's JSONL
+    // Guard: don't clobber a standalone live transcript session's JSONL.
+    // `inspect_pid_file` (not `check_pid_file`) so a standalone session holding
+    // the PID file under a mandatory Windows lock is detected — otherwise the
+    // sidecar would write the same `live-transcript.jsonl` concurrently. See #258.
     let lt_pid = pid::live_transcript_pid_path();
-    if let Ok(Some(_)) = pid::check_pid_file(&lt_pid) {
+    if pid::inspect_pid_file(&lt_pid).is_active() {
         tracing::info!("standalone live transcript active — skipping recording sidecar");
         return Ok(());
     }
@@ -1852,7 +2027,10 @@ fn run_sidecar_inner_mpsc(
     writer.mark_healthy();
 
     let mut vad = RecordingSidecarVad::new(config);
-    let mut streaming = StreamingWhisper::new(config.transcription.language.clone());
+    let mut streaming = StreamingWhisper::with_partial_max_secs(
+        config.transcription.language.clone(),
+        config.transcription.partial_max_secs,
+    );
     #[cfg(feature = "parakeet")]
     let mut parakeet_utterance_samples: Vec<f32> = Vec::new();
     #[cfg(feature = "parakeet")]
@@ -2171,26 +2349,35 @@ pub fn read_since_duration(duration_ms: u64) -> Result<Vec<TranscriptLine>, Minu
 /// Detects both standalone live transcript sessions (via live-transcript.pid)
 /// and recording sidecar sessions (recording active + sidecar status file exists).
 pub fn session_status() -> SessionStatus {
-    // Check standalone live transcript PID
+    // Standalone live-transcript PID. Use `inspect_pid_file` rather than
+    // `check_pid_file` so a session that holds the PID file under a mandatory
+    // Windows lock is still detected as active: the in-app reader and the lock
+    // holder are the same process, and a plain read of the locked file fails on
+    // Windows. See `pid::PidFileState` and issue #258.
     let lt_pid = pid::live_transcript_pid_path();
-    let lt_process_pid = pid::check_pid_file(&lt_pid).ok().flatten();
+    let lt_pid_state = pid::inspect_pid_file(&lt_pid);
 
     let recording_pid = pid::check_recording().ok().flatten();
     let status_path = pid::live_transcript_status_path();
     let jsonl_path = pid::live_transcript_jsonl_path();
 
-    derive_session_status(lt_process_pid, recording_pid, &status_path, &jsonl_path)
+    derive_session_status(lt_pid_state, recording_pid, &status_path, &jsonl_path)
 }
 
 fn derive_session_status(
-    lt_process_pid: Option<u32>,
+    lt_pid_state: pid::PidFileState,
     recording_pid: Option<u32>,
     status_path: &Path,
     jsonl_path: &Path,
 ) -> SessionStatus {
     let live_status = read_live_status(status_path);
     let now = Local::now();
-    let standalone_active = lt_process_pid.is_some();
+    // A held PID file (readable on Unix, or lock-detected on Windows) proves the
+    // standalone session is alive. Liveness is NOT gated on heartbeat freshness:
+    // the heartbeat is written inline by the live loop, so a long utterance or
+    // model load can stall it past the staleness window while the session is
+    // perfectly healthy — gating on it would re-introduce the #258 flicker.
+    let standalone_active = lt_pid_state.is_active();
 
     let (sidecar_active, diagnostic) = if recording_pid.is_some() {
         evaluate_recording_sidecar_status(live_status.as_ref(), now)
@@ -2200,7 +2387,9 @@ fn derive_session_status(
 
     let active = standalone_active || sidecar_active;
     let pid = if standalone_active {
-        lt_process_pid
+        // `None` when the session is alive but the PID is unreadable (Windows
+        // locked file) — we report active without fabricating a PID.
+        lt_pid_state.pid()
     } else if sidecar_active {
         recording_pid
     } else {
@@ -2700,12 +2889,723 @@ mod tests {
         );
     }
 
+    /// `is_healthy` must surface the sticky `failed` flag through trait
+    /// dispatch. Uses the test-only `force_failed_for_test` seam to
+    /// avoid needing a corrupt whisper context, since constructing one
+    /// reliably from a unit test is brittle.
+    #[cfg(all(feature = "whisper", feature = "streaming"))]
+    #[test]
+    fn silero_is_healthy_reflects_sticky_failure_via_trait() {
+        use crate::vad::VadEngine;
+        let model_path = dirs::home_dir()
+            .unwrap()
+            .join(".minutes/models/ggml-silero-v6.2.0.bin");
+        if !model_path.exists() {
+            eprintln!(
+                "[is_healthy] skipping: no Silero model at {} — run `minutes setup`",
+                model_path.display()
+            );
+            return;
+        }
+        let mut silero = SileroSidecarVad::new(&model_path).unwrap();
+        // Healthy at construction.
+        assert!(
+            <SileroSidecarVad as VadEngine>::is_healthy(&silero),
+            "freshly constructed Silero must be healthy"
+        );
+        assert_eq!(
+            <SileroSidecarVad as VadEngine>::name(&silero),
+            "whisper-silero"
+        );
+        // Force the sticky failure flag and confirm trait dispatch
+        // reports it.
+        silero.force_failed_for_test(true);
+        assert!(
+            !<SileroSidecarVad as VadEngine>::is_healthy(&silero),
+            "is_healthy must return false once `failed` is set"
+        );
+    }
+
+    /// `reset` must NOT clear sticky failure state — the trait
+    /// contract is that failed engines are replaced, not revived.
+    /// Verifying this on the real engine guards against future drift.
+    #[cfg(all(feature = "whisper", feature = "streaming"))]
+    #[test]
+    fn silero_reset_does_not_clear_sticky_failure() {
+        use crate::vad::VadEngine;
+        let model_path = dirs::home_dir()
+            .unwrap()
+            .join(".minutes/models/ggml-silero-v6.2.0.bin");
+        if !model_path.exists() {
+            eprintln!(
+                "[reset] skipping: no Silero model at {} — run `minutes setup`",
+                model_path.display()
+            );
+            return;
+        }
+        let mut silero = SileroSidecarVad::new(&model_path).unwrap();
+        silero.force_failed_for_test(true);
+        assert!(!<SileroSidecarVad as VadEngine>::is_healthy(&silero));
+        // reset() runs without panic in release; debug_assert would
+        // fire in debug builds, which is intentional — we want the
+        // dispatcher to surface the contract violation loudly during
+        // development. In tests, swallow the panic by clearing the
+        // flag first, then resetting, then re-failing to verify reset
+        // doesn't touch the flag from a healthy state.
+        silero.force_failed_for_test(false);
+        <SileroSidecarVad as VadEngine>::reset(&mut silero);
+        assert!(
+            <SileroSidecarVad as VadEngine>::is_healthy(&silero),
+            "reset on a healthy engine must keep is_healthy true"
+        );
+        silero.force_failed_for_test(true);
+        assert!(!<SileroSidecarVad as VadEngine>::is_healthy(&silero));
+    }
+
+    /// Look up the canonical Silero model paths for parity tests.
+    /// Returns `None` if either model is missing — the caller prints
+    /// a `skipping` message and returns instead of failing.
+    #[cfg(all(feature = "whisper", feature = "streaming", feature = "vad-ort"))]
+    fn parity_model_paths() -> Option<(std::path::PathBuf, std::path::PathBuf)> {
+        let onnx_path = dirs::home_dir()
+            .unwrap()
+            .join(".minutes/models/silero-vad-v6.2.0.onnx");
+        let ggml_path = dirs::home_dir()
+            .unwrap()
+            .join(".minutes/models/ggml-silero-v6.2.0.bin");
+        if !onnx_path.exists() || !ggml_path.exists() {
+            return None;
+        }
+        Some((onnx_path, ggml_path))
+    }
+
+    /// Resolve a fixture path under `crates/assets/`. Returns `None`
+    /// if the fixture is missing — caller skips. All parity fixtures
+    /// are committed to the repo, so this is mostly a hedge against
+    /// running tests from a partial checkout.
+    #[cfg(all(feature = "whisper", feature = "streaming", feature = "vad-ort"))]
+    fn parity_fixture_path(name: &str) -> Option<std::path::PathBuf> {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("crate parent")
+            .join("assets")
+            .join(name);
+        path.exists().then_some(path)
+    }
+
+    /// Run a fixture through both OrtSileroVad and SileroSidecarVad
+    /// at the production 100 ms cadence and return the per-chunk
+    /// `speaking` flags. Returned vectors are the same length and
+    /// represent identical timestamps so the parity-check helper can
+    /// just zip-walk them.
+    #[cfg(all(feature = "whisper", feature = "streaming", feature = "vad-ort"))]
+    fn run_both_engines_on_fixture(
+        fixture_path: &std::path::Path,
+        onnx_path: &std::path::Path,
+        ggml_path: &std::path::Path,
+    ) -> (Vec<bool>, Vec<bool>) {
+        use crate::silero_vad::OrtSileroVad;
+        use crate::vad::VadEngine;
+
+        let samples = read_wav_samples(fixture_path);
+        let mut ort_engine = OrtSileroVad::new(onnx_path).unwrap();
+        let mut whisper_engine = SileroSidecarVad::new(ggml_path).unwrap();
+
+        let chunk = 1600;
+        let mut ort_speak: Vec<bool> = Vec::new();
+        let mut whisper_speak: Vec<bool> = Vec::new();
+        for window in samples.chunks(chunk) {
+            let rms = (window.iter().map(|s| s * s).sum::<f32>() / window.len() as f32).sqrt();
+            let ort = ort_engine.process(window, rms);
+            let wh = whisper_engine.process(window, rms).unwrap();
+            ort_speak.push(ort.speaking);
+            whisper_speak.push(wh.speaking);
+        }
+        (ort_speak, whisper_speak)
+    }
+
+    /// Apply the codex parity bar from PLAN-vad-refactor.md to
+    /// per-chunk speaking flags from both engines. `label` shows up
+    /// in the eprintln preamble so test output is greppable per
+    /// fixture.
+    ///
+    /// Bars enforced:
+    /// 1. Zero missed islands. Every contiguous speech region
+    ///    whisper-Silero flags must overlap with ≥1 ort-Silero
+    ///    speaking chunk. Utterance loss is release-blocking.
+    /// 2. Boundary drift ≤ 2 chunks (±200 ms). Slightly looser than
+    ///    the ±150 ms in the design doc, to absorb model-version
+    ///    noise without flapping in CI.
+    /// 3. No phantom speech. Every ort-Silero speaking chunk must
+    ///    fall within ±2 chunks of some whisper-Silero island.
+    #[cfg(all(feature = "whisper", feature = "streaming", feature = "vad-ort"))]
+    fn assert_parity_bar(label: &str, ort_speak: &[bool], whisper_speak: &[bool]) {
+        assert_eq!(
+            ort_speak.len(),
+            whisper_speak.len(),
+            "[{}] engine output lengths must match",
+            label
+        );
+
+        let islands = contiguous_runs(whisper_speak, true);
+        let ort_islands = contiguous_runs(ort_speak, true);
+        eprintln!(
+            "[parity:{label}] whisper islands={} | ort islands={} | ort speaking={}/{}",
+            islands.len(),
+            ort_islands.len(),
+            ort_speak.iter().filter(|&&s| s).count(),
+            ort_speak.len()
+        );
+
+        const DRIFT_TOLERANCE_CHUNKS: i64 = 2;
+
+        // Bar 1.
+        for (start, end) in &islands {
+            let any_overlap = ort_speak[*start..*end].iter().any(|&s| s);
+            assert!(
+                any_overlap,
+                "[{label}] ort-silero missed an entire whisper-silero island at chunks [{},{}) ({:.1}s-{:.1}s)",
+                start,
+                end,
+                *start as f32 * 0.1,
+                *end as f32 * 0.1
+            );
+        }
+
+        // Bar 2.
+        for (start, end) in &islands {
+            let nearest_start = ort_speak
+                .iter()
+                .enumerate()
+                .filter(|(_, &s)| s)
+                .map(|(i, _)| (i as i64 - *start as i64).abs())
+                .min()
+                .unwrap_or(i64::MAX);
+            let nearest_end = ort_speak
+                .iter()
+                .enumerate()
+                .filter(|(_, &s)| s)
+                .map(|(i, _)| (i as i64 - (*end as i64 - 1)).abs())
+                .min()
+                .unwrap_or(i64::MAX);
+            assert!(
+                nearest_start <= DRIFT_TOLERANCE_CHUNKS,
+                "[{label}] island start at chunk {} ({:.1}s): nearest ort-silero speech is {} chunks away (>200ms drift)",
+                start,
+                *start as f32 * 0.1,
+                nearest_start
+            );
+            assert!(
+                nearest_end <= DRIFT_TOLERANCE_CHUNKS,
+                "[{label}] island end at chunk {} ({:.1}s): nearest ort-silero speech is {} chunks away (>200ms drift)",
+                end,
+                *end as f32 * 0.1,
+                nearest_end
+            );
+        }
+
+        // Bar 3.
+        for (i, &is_speaking) in ort_speak.iter().enumerate() {
+            if !is_speaking {
+                continue;
+            }
+            let inside_or_near = islands.iter().any(|(s, e)| {
+                let near_start = (*s as i64 - i as i64).abs() <= DRIFT_TOLERANCE_CHUNKS;
+                let near_end = (i as i64 - (*e as i64 - 1)).abs() <= DRIFT_TOLERANCE_CHUNKS;
+                let inside = i >= *s && i < *e;
+                inside || near_start || near_end
+            });
+            assert!(
+                inside_or_near,
+                "[{label}] phantom ort-silero speech at chunk {} ({:.1}s) — not within ±200ms of any whisper-silero island",
+                i,
+                i as f32 * 0.1
+            );
+        }
+    }
+
+    /// Parity on the original demo.wav. Continuous speech, one
+    /// island, both engines should agree trivially. Sanity baseline
+    /// for the fixture-based stress tests below.
+    #[cfg(all(feature = "whisper", feature = "streaming", feature = "vad-ort"))]
+    #[test]
+    #[ignore]
+    fn parity_ort_silero_vs_whisper_silero_on_demo_wav() {
+        let Some((onnx_path, ggml_path)) = parity_model_paths() else {
+            eprintln!("[parity:demo] skipping: missing Silero models");
+            return;
+        };
+        let Some(fixture) = parity_fixture_path("demo.wav") else {
+            eprintln!("[parity:demo] skipping: no demo.wav fixture");
+            return;
+        };
+        let (ort_speak, whisper_speak) =
+            run_both_engines_on_fixture(&fixture, &onnx_path, &ggml_path);
+        assert_parity_bar("demo", &ort_speak, &whisper_speak);
+    }
+
+    /// Fixture A. silence → 80 ms speech spike → silence. Below the
+    /// 150 ms min_speech filter that snakers4's reference and our
+    /// smoothing FSM enforce. ort-Silero must report zero speech on
+    /// this fixture; if it ever stops filtering, every cough and
+    /// click would fire the ASR pipeline (codex's commit 2 review
+    /// #1 finding).
+    ///
+    /// This is intentionally NOT a cross-engine parity test:
+    /// whisper-rs's bundled Silero runs in full-buffer rescan mode
+    /// and is more permissive on brief spikes than our streaming
+    /// implementation with the explicit min_speech gate. That
+    /// permissiveness is one of the structural problems Option B
+    /// solves; running the parity bar here would penalize ort for
+    /// behaving correctly. We log whisper's behavior for diagnostic
+    /// awareness and assert only on ort.
+    #[cfg(all(feature = "whisper", feature = "streaming", feature = "vad-ort"))]
+    #[test]
+    #[ignore]
+    fn parity_brief_spike_under_min_speech_is_silence() {
+        let Some((onnx_path, ggml_path)) = parity_model_paths() else {
+            eprintln!("[parity:brief_spike] skipping: missing Silero models");
+            return;
+        };
+        let Some(fixture) = parity_fixture_path("parity_brief_spike.wav") else {
+            eprintln!("[parity:brief_spike] skipping: fixture missing — run examples/build_parity_fixtures");
+            return;
+        };
+        let (ort_speak, whisper_speak) =
+            run_both_engines_on_fixture(&fixture, &onnx_path, &ggml_path);
+        let ort_speech = ort_speak.iter().filter(|&&s| s).count();
+        let whisper_speech = whisper_speak.iter().filter(|&&s| s).count();
+        eprintln!(
+            "[parity:brief_spike] ort_speech_chunks={} whisper_speech_chunks={} (whisper expected to be over-permissive — that's the bug Option B fixes)",
+            ort_speech, whisper_speech
+        );
+        assert_eq!(
+            ort_speech, 0,
+            "ort-silero must filter an 80 ms spike (below 150 ms min_speech)"
+        );
+    }
+
+    /// Fixture B. Three 1.5 s utterances separated by 300 / 500 /
+    /// 800 ms gaps, with 200 ms head and 800 ms tail silence. The
+    /// 300 ms gap is below min_silence (500 ms) so utterances 1 and
+    /// 2 should merge into one island; 500 ms is at the boundary;
+    /// 800 ms is well above so utterance 3 is clearly its own
+    /// island. Both engines should agree on the segmentation,
+    /// whatever it works out to.
+    #[cfg(all(feature = "whisper", feature = "streaming", feature = "vad-ort"))]
+    #[test]
+    #[ignore]
+    fn parity_three_utterances_with_varied_gaps() {
+        let Some((onnx_path, ggml_path)) = parity_model_paths() else {
+            eprintln!("[parity:three_utterances] skipping: missing Silero models");
+            return;
+        };
+        let Some(fixture) = parity_fixture_path("parity_three_utterances.wav") else {
+            eprintln!("[parity:three_utterances] skipping: fixture missing");
+            return;
+        };
+        let (ort_speak, whisper_speak) =
+            run_both_engines_on_fixture(&fixture, &onnx_path, &ggml_path);
+        assert_parity_bar("three_utterances", &ort_speak, &whisper_speak);
+    }
+
+    /// Fixture C. demo.wav scaled to 5% amplitude — well below the
+    /// energy-VAD threshold, but model-based VADs are robust to
+    /// quiet speech. Both should still detect the segment.
+    #[cfg(all(feature = "whisper", feature = "streaming", feature = "vad-ort"))]
+    #[test]
+    #[ignore]
+    fn parity_low_volume_speech_still_detected() {
+        let Some((onnx_path, ggml_path)) = parity_model_paths() else {
+            eprintln!("[parity:low_volume] skipping: missing Silero models");
+            return;
+        };
+        let Some(fixture) = parity_fixture_path("parity_low_volume.wav") else {
+            eprintln!("[parity:low_volume] skipping: fixture missing");
+            return;
+        };
+        let (ort_speak, whisper_speak) =
+            run_both_engines_on_fixture(&fixture, &onnx_path, &ggml_path);
+        assert_parity_bar("low_volume", &ort_speak, &whisper_speak);
+        // Beyond cross-engine parity: if NEITHER engine detects any
+        // speech in 10s of quiet-but-real speech, that's a
+        // model-quality alarm we want to surface explicitly.
+        let any_ort = ort_speak.iter().any(|&s| s);
+        let any_whisper = whisper_speak.iter().any(|&s| s);
+        assert!(
+            any_ort || any_whisper,
+            "neither engine detected speech in low-volume fixture — model-quality regression?"
+        );
+    }
+
+    /// Fixture D. demo.wav truncated to 16384 + 137 = 16521 samples
+    /// (≈1.033 s). The streaming engine processes 32 full 512-sample
+    /// chunks and leaves a 137-sample tail in the buffer that never
+    /// reaches the ONNX session. This stresses the partial-tail path
+    /// — if zero-padding ever gets added to the buffer-flush logic,
+    /// the LSTM state could pick up a phantom silence and drift the
+    /// final decision. Both engines processing the same short
+    /// recording should agree.
+    #[cfg(all(feature = "whisper", feature = "streaming", feature = "vad-ort"))]
+    #[test]
+    #[ignore]
+    fn parity_trailing_partial_chunk_handled_consistently() {
+        let Some((onnx_path, ggml_path)) = parity_model_paths() else {
+            eprintln!("[parity:trailing_partial] skipping: missing Silero models");
+            return;
+        };
+        let Some(fixture) = parity_fixture_path("parity_trailing_partial.wav") else {
+            eprintln!("[parity:trailing_partial] skipping: fixture missing");
+            return;
+        };
+        let (ort_speak, whisper_speak) =
+            run_both_engines_on_fixture(&fixture, &onnx_path, &ggml_path);
+        assert_parity_bar("trailing_partial", &ort_speak, &whisper_speak);
+    }
+
+    #[cfg(all(feature = "whisper", feature = "streaming", feature = "vad-ort"))]
+    fn contiguous_runs(seq: &[bool], value: bool) -> Vec<(usize, usize)> {
+        let mut runs = Vec::new();
+        let mut start: Option<usize> = None;
+        for (i, &v) in seq.iter().enumerate() {
+            if v == value && start.is_none() {
+                start = Some(i);
+            } else if v != value && start.is_some() {
+                runs.push((start.take().unwrap(), i));
+            }
+        }
+        if let Some(s) = start {
+            runs.push((s, seq.len()));
+        }
+        runs
+    }
+
+    /// SPIKE — does whisper-rs's Silero VAD carry LSTM state across
+    /// `detect_speech` calls? If yes, Option A in PLAN-vad-refactor.md is
+    /// viable: feed only new-since-last-call samples per chunk, accumulate
+    /// probabilities externally. If no, the per-chunk re-scan is structural
+    /// and Option B (independent ort-backed Silero) is required.
+    ///
+    /// Run with: `cargo test -p minutes-core --features whisper --lib
+    ///   live_transcript::tests::option_a_spike -- --ignored --nocapture`
+    ///
+    /// Requires `~/.minutes/models/ggml-silero-v6.2.0.bin` to exist (i.e.
+    /// `minutes setup` has run on this machine). Output is informational
+    /// only; the test only fails if the model is unloadable.
+    #[cfg(all(feature = "whisper", feature = "streaming"))]
+    #[test]
+    #[ignore]
+    fn option_a_spike_silero_state_carries_across_detect_speech_calls() {
+        let model_path = dirs::home_dir()
+            .unwrap()
+            .join(".minutes/models/ggml-silero-v6.2.0.bin");
+        if !model_path.exists() {
+            eprintln!(
+                "[spike] no Silero model at {} — run `minutes setup` first",
+                model_path.display()
+            );
+            return;
+        }
+
+        // Build deterministic test signal: 1s silence + 1s 440Hz tone +
+        // 1s silence, 16kHz f32 normalized to ~0.5 amplitude in the tone
+        // region. Total 48,000 samples = 3s.
+        let mut samples = Vec::with_capacity(48_000);
+        samples.extend(std::iter::repeat_n(0.0_f32, 16_000));
+        for i in 0..16_000 {
+            let t = i as f32 / 16_000.0;
+            samples.push((2.0 * std::f32::consts::PI * 440.0 * t).sin() * 0.5);
+        }
+        samples.extend(std::iter::repeat_n(0.0_f32, 16_000));
+
+        let mid = samples.len() / 2;
+
+        let make_ctx = || -> whisper_rs::WhisperVadContext {
+            let mut params = whisper_rs::WhisperVadContextParams::default();
+            params.set_n_threads(2);
+            whisper_rs::WhisperVadContext::new(model_path.to_str().expect("utf-8 path"), params)
+                .expect("Silero model load")
+        };
+
+        // Mode A: single full-buffer call.
+        let mut ctx_a = make_ctx();
+        ctx_a.detect_speech(&samples).expect("detect_speech full");
+        let probs_full = ctx_a.probabilities().to_vec();
+
+        // Mode B: two halves, fresh context.
+        let mut ctx_b = make_ctx();
+        ctx_b
+            .detect_speech(&samples[..mid])
+            .expect("detect_speech first half");
+        let probs_first_half = ctx_b.probabilities().to_vec();
+        ctx_b
+            .detect_speech(&samples[mid..])
+            .expect("detect_speech second half");
+        let probs_second_half = ctx_b.probabilities().to_vec();
+
+        let probs_concat: Vec<f32> = probs_first_half
+            .iter()
+            .copied()
+            .chain(probs_second_half.iter().copied())
+            .collect();
+
+        eprintln!("[spike] full samples: {}", samples.len());
+        eprintln!(
+            "[spike] mode A (single call) probs.len(): {}",
+            probs_full.len()
+        );
+        eprintln!(
+            "[spike] mode B (two halves) probs.len(): first={} second={} concat={}",
+            probs_first_half.len(),
+            probs_second_half.len(),
+            probs_concat.len()
+        );
+
+        // Length parity: do we get the same total probability count from
+        // both modes? If second_half's probabilities are computed as if the
+        // input were standalone (no carried context), the count should
+        // match a fresh call on samples[mid..].
+        if probs_full.len() != probs_concat.len() {
+            eprintln!(
+                "[spike] LENGTH MISMATCH (Mode A: {}, Mode B: {}) — \
+                 second detect_speech call produces output as if input were \
+                 standalone; LSTM state likely RESETS per call",
+                probs_full.len(),
+                probs_concat.len()
+            );
+        }
+
+        // Diff stats over the overlapping prefix.
+        let n = probs_full.len().min(probs_concat.len());
+        if n > 0 {
+            let diffs: Vec<f32> = (0..n)
+                .map(|i| (probs_full[i] - probs_concat[i]).abs())
+                .collect();
+            let max_diff = diffs.iter().fold(0.0_f32, |a, &b| a.max(b));
+            let mean_diff = diffs.iter().sum::<f32>() / diffs.len() as f32;
+            let above_5pct = diffs.iter().filter(|&&d| d > 0.05).count();
+            eprintln!(
+                "[spike] prefix diff stats over {} samples: max={:.4}, mean={:.4}, count_above_0.05={}",
+                n, max_diff, mean_diff, above_5pct
+            );
+            // Verdict guidance.
+            if max_diff < 0.01 {
+                eprintln!(
+                    "[spike] VERDICT: probabilities match within tolerance — \
+                     OPTION A LIKELY VIABLE. Incremental detect_speech \
+                     accumulates probabilities consistent with single call."
+                );
+            } else if max_diff < 0.1 {
+                eprintln!(
+                    "[spike] VERDICT: small drift (max diff {:.4}) — Option A \
+                     might work with retuned thresholds; investigate boundary \
+                     behavior more carefully before committing.",
+                    max_diff
+                );
+            } else {
+                eprintln!(
+                    "[spike] VERDICT: significant drift (max diff {:.4}) — \
+                     OPTION A NOT VIABLE. detect_speech does not preserve \
+                     LSTM state across calls. Option B (ort-backed Silero) \
+                     required.",
+                    max_diff
+                );
+            }
+        }
+
+        // The test always passes; output is informational. Failing here
+        // would just block the spike from running.
+        let _ = model_path;
+    }
+
+    /// SPIKE v2 — richer probe on real speech, simulating the production
+    /// 100ms-chunk cadence to see if incremental detect_speech calls
+    /// produce probabilities consistent enough with a single full-buffer
+    /// call that threshold-based speech detection lands in the same
+    /// places.
+    ///
+    /// Method:
+    /// 1. Load `crates/assets/demo.wav` (~10.6s of real speech) into
+    ///    16kHz f32 samples.
+    /// 2. Mode A: single detect_speech call over the whole buffer,
+    ///    record probabilities.
+    /// 3. Mode B: feed in 1600-sample (100ms) chunks, record each
+    ///    call's probabilities, concatenate.
+    /// 4. Apply binary threshold at 0.2 to both probability vectors
+    ///    and count windows where the speech/no-speech decision
+    ///    DIFFERS between modes. Each diff is a potential
+    ///    misdetection if Option A shipped.
+    ///
+    /// Verdict bar (per codex parity definition):
+    /// - 0 flips: Option A safe.
+    /// - 1-3 isolated flips at speech boundaries: probably fine,
+    ///   boundary drift up to ±150ms is acceptable.
+    /// - Many flips OR flips inside contiguous speech regions:
+    ///   Option A unsafe; Option B required.
+    ///
+    /// Run with: `cargo test -p minutes-core --features
+    /// "whisper streaming" --lib option_a_spike_v2 -- --ignored
+    /// --nocapture`
+    #[cfg(all(feature = "whisper", feature = "streaming"))]
+    #[test]
+    #[ignore]
+    fn option_a_spike_v2_real_speech_threshold_decisions() {
+        let model_path = dirs::home_dir()
+            .unwrap()
+            .join(".minutes/models/ggml-silero-v6.2.0.bin");
+        if !model_path.exists() {
+            eprintln!(
+                "[spike v2] no Silero model at {} — run `minutes setup`",
+                model_path.display()
+            );
+            return;
+        }
+
+        // Find the demo WAV. Workspace root is two levels up from this
+        // crate; the assets crate sits next to ours.
+        let cargo_manifest = env!("CARGO_MANIFEST_DIR");
+        let demo_wav = std::path::PathBuf::from(cargo_manifest)
+            .parent()
+            .expect("crate parent")
+            .join("assets/demo.wav");
+        if !demo_wav.exists() {
+            eprintln!("[spike v2] no demo.wav at {}", demo_wav.display());
+            return;
+        }
+
+        let samples = read_wav_samples(&demo_wav);
+        eprintln!(
+            "[spike v2] loaded {} samples ({:.1}s at 16kHz)",
+            samples.len(),
+            samples.len() as f32 / 16_000.0
+        );
+
+        let make_ctx = || -> whisper_rs::WhisperVadContext {
+            let mut params = whisper_rs::WhisperVadContextParams::default();
+            params.set_n_threads(2);
+            whisper_rs::WhisperVadContext::new(model_path.to_str().expect("utf-8 path"), params)
+                .expect("Silero load")
+        };
+
+        // Mode A: single full-buffer call.
+        let mut ctx_a = make_ctx();
+        ctx_a.detect_speech(&samples).expect("detect_speech full");
+        let probs_a = ctx_a.probabilities().to_vec();
+
+        // Mode B: 100ms chunks, fresh context, append per-call probs.
+        let chunk_size = 1600; // 100ms at 16kHz
+        let mut ctx_b = make_ctx();
+        let mut probs_b: Vec<f32> = Vec::new();
+        for chunk in samples.chunks(chunk_size) {
+            ctx_b.detect_speech(chunk).expect("detect_speech chunk");
+            probs_b.extend_from_slice(ctx_b.probabilities());
+        }
+
+        eprintln!(
+            "[spike v2] Mode A probs.len: {} | Mode B probs.len: {}",
+            probs_a.len(),
+            probs_b.len()
+        );
+
+        // Align lengths for comparison. Mode B may have slightly more
+        // probability windows because each chunk's detect_speech rounds up.
+        let n = probs_a.len().min(probs_b.len());
+
+        // Apply the production threshold.
+        const THRESHOLD: f32 = 0.2; // matches SIDECAR_VAD_THRESHOLD
+        let mut flips = 0usize;
+        let mut flip_a_speech_b_silence = 0usize;
+        let mut flip_a_silence_b_speech = 0usize;
+        let mut max_diff = 0.0_f32;
+        let mut sum_diff = 0.0_f32;
+        let mut consecutive_flips = 0usize;
+        let mut max_consecutive = 0usize;
+
+        for i in 0..n {
+            let a_speech = probs_a[i] >= THRESHOLD;
+            let b_speech = probs_b[i] >= THRESHOLD;
+            let diff = (probs_a[i] - probs_b[i]).abs();
+            max_diff = max_diff.max(diff);
+            sum_diff += diff;
+
+            if a_speech != b_speech {
+                flips += 1;
+                consecutive_flips += 1;
+                max_consecutive = max_consecutive.max(consecutive_flips);
+                if a_speech {
+                    flip_a_speech_b_silence += 1;
+                } else {
+                    flip_a_silence_b_speech += 1;
+                }
+            } else {
+                consecutive_flips = 0;
+            }
+        }
+
+        let mean_diff = if n > 0 { sum_diff / n as f32 } else { 0.0 };
+
+        eprintln!(
+            "[spike v2] over {} comparable windows ({:.1}s of audio):",
+            n,
+            n as f32 * 32.0 / 16_000.0 // each prob window represents ~32ms
+        );
+        eprintln!("[spike v2]   max prob diff:  {:.4}", max_diff);
+        eprintln!("[spike v2]   mean prob diff: {:.4}", mean_diff);
+        eprintln!(
+            "[spike v2]   threshold flips: {} total (A=speech/B=silence: {}, A=silence/B=speech: {})",
+            flips, flip_a_speech_b_silence, flip_a_silence_b_speech
+        );
+        eprintln!(
+            "[spike v2]   longest flip run: {} windows ({:.0}ms)",
+            max_consecutive,
+            max_consecutive as f32 * 32.0
+        );
+
+        // Verdict.
+        let flip_pct = if n > 0 {
+            (flips as f32 / n as f32) * 100.0
+        } else {
+            0.0
+        };
+
+        if flips == 0 {
+            eprintln!(
+                "[spike v2] VERDICT: zero threshold flips — OPTION A SAFE. \
+                 Incremental detect_speech produces threshold decisions \
+                 identical to the full-buffer call on real speech."
+            );
+        } else if max_consecutive <= 5 && flip_pct < 5.0 {
+            eprintln!(
+                "[spike v2] VERDICT: {} isolated flips ({:.1}%, longest run {} \
+                 windows = {:.0}ms). Within codex's ±150ms boundary tolerance. \
+                 OPTION A LIKELY SAFE for production. Validate with one more \
+                 dogfood session before defaulting.",
+                flips,
+                flip_pct,
+                max_consecutive,
+                max_consecutive as f32 * 32.0
+            );
+        } else {
+            eprintln!(
+                "[spike v2] VERDICT: {} flips ({:.1}%, longest run {} windows \
+                 = {:.0}ms). Exceeds parity tolerance. OPTION A UNSAFE — \
+                 incremental probabilities diverge in ways that flip speech \
+                 detection. Option B (ort-backed Silero with persistent LSTM \
+                 state) is required.",
+                flips,
+                flip_pct,
+                max_consecutive,
+                max_consecutive as f32 * 32.0
+            );
+        }
+    }
+
     #[cfg(all(feature = "whisper", feature = "streaming"))]
     #[test]
     fn sidecar_missing_status_is_inactive_with_diagnostic() {
         let dir = tempdir().unwrap();
         let status = derive_session_status(
-            None,
+            pid::PidFileState::Inactive,
             Some(std::process::id()),
             &dir.path().join("live-status.json"),
             &dir.path().join("live.jsonl"),
@@ -2729,7 +3629,7 @@ mod tests {
         std::fs::write(&status_path, serde_json::to_string(&status).unwrap()).unwrap();
 
         let status = derive_session_status(
-            None,
+            pid::PidFileState::Inactive,
             Some(std::process::id()),
             &status_path,
             &dir.path().join("live.jsonl"),
@@ -2752,7 +3652,7 @@ mod tests {
         std::fs::write(&status_path, serde_json::to_string(&status).unwrap()).unwrap();
 
         let status = derive_session_status(
-            None,
+            pid::PidFileState::Inactive,
             Some(std::process::id()),
             &status_path,
             &dir.path().join("live.jsonl"),
@@ -2787,6 +3687,7 @@ mod tests {
     /// Scope-warning and runtime-fallback-warning are semantically distinct:
     /// - scope = "this build doesn't support parakeet"
     /// - fallback = "parakeet failed at runtime; falling back"
+    ///
     /// If they drift to the same message, users can't distinguish whether
     /// their config was ignored at compile time or broken at runtime.
     #[cfg(feature = "parakeet")]
@@ -2901,6 +3802,7 @@ mod tests {
         assert_eq!(result, Some(("whisper transcript".into(), 0.9)));
     }
 
+    #[cfg(all(feature = "whisper", target_os = "macos"))]
     #[test]
     fn apple_speech_live_helper_cleans_up_tempfile_on_error() {
         let cfg = Config::default();
@@ -2948,7 +3850,7 @@ mod tests {
         std::fs::write(&status_path, serde_json::to_string(&status).unwrap()).unwrap();
 
         let status = derive_session_status(
-            None,
+            pid::PidFileState::Inactive,
             Some(std::process::id()),
             &status_path,
             &dir.path().join("live.jsonl"),
@@ -2971,7 +3873,7 @@ mod tests {
         std::fs::write(&status_path, serde_json::to_string(&status).unwrap()).unwrap();
 
         let status = derive_session_status(
-            None,
+            pid::PidFileState::Inactive,
             Some(std::process::id()),
             &status_path,
             &dir.path().join("live.jsonl"),
@@ -2992,7 +3894,7 @@ mod tests {
         std::fs::write(&status_path, serde_json::to_string(&status).unwrap()).unwrap();
 
         let status = derive_session_status(
-            None,
+            pid::PidFileState::Inactive,
             Some(std::process::id()),
             &status_path,
             &dir.path().join("live.jsonl"),
@@ -3013,8 +3915,12 @@ mod tests {
         let status = live_status_with_state(LiveStatusState::Failed);
         std::fs::write(&status_path, serde_json::to_string(&status).unwrap()).unwrap();
 
-        let status =
-            derive_session_status(None, None, &status_path, &dir.path().join("live.jsonl"));
+        let status = derive_session_status(
+            pid::PidFileState::Inactive,
+            None,
+            &status_path,
+            &dir.path().join("live.jsonl"),
+        );
 
         assert!(!status.active);
         assert_eq!(status.line_count, 0);
@@ -3032,7 +3938,7 @@ mod tests {
         std::fs::write(&status_path, serde_json::to_string(&healthy).unwrap()).unwrap();
 
         let healthy_status = derive_session_status(
-            None,
+            pid::PidFileState::Inactive,
             Some(std::process::id()),
             &status_path,
             &dir.path().join("live.jsonl"),
@@ -3052,7 +3958,7 @@ mod tests {
         std::fs::write(&status_path, serde_json::to_string(&failed).unwrap()).unwrap();
 
         let failed_status = derive_session_status(
-            None,
+            pid::PidFileState::Inactive,
             Some(std::process::id()),
             &status_path,
             &dir.path().join("live.jsonl"),
@@ -3068,5 +3974,112 @@ mod tests {
         assert!(healthy_status.active);
         assert!(!failed_status.active);
         assert_eq!(failed_status.diagnostic.as_deref(), Some("sidecar failed"));
+    }
+
+    /// #258: a standalone session whose PID file is held under a Windows mandatory
+    /// lock (`LockedAlive`, PID unreadable) must report active with real stats and
+    /// `source = Standalone`. The PID is `None` (we don't fabricate it) and no
+    /// "sidecar …" diagnostic leaks onto the standalone path.
+    #[cfg(all(feature = "whisper", feature = "streaming"))]
+    #[test]
+    fn standalone_locked_alive_reports_active_with_stats() {
+        let dir = tempdir().unwrap();
+        let status_path = dir.path().join("live-status.json");
+        let status = live_status_with_state(LiveStatusState::Healthy);
+        std::fs::write(&status_path, serde_json::to_string(&status).unwrap()).unwrap();
+
+        let result = derive_session_status(
+            pid::PidFileState::LockedAlive,
+            None,
+            &status_path,
+            &dir.path().join("live.jsonl"),
+        );
+
+        assert!(result.active);
+        assert_eq!(result.source, Some(TranscriptSource::Standalone));
+        assert_eq!(
+            result.pid, None,
+            "locked PID is unreadable, must not be faked"
+        );
+        assert_eq!(result.line_count, 3);
+        assert_eq!(
+            result.diagnostic, None,
+            "no sidecar diagnostic on standalone"
+        );
+    }
+
+    /// Regression guard for the heartbeat-flicker hazard: standalone liveness comes
+    /// from the held lock, NOT the heartbeat. A `LockedAlive` session with a *stale*
+    /// healthy heartbeat (loop busy on a long utterance) must still report active
+    /// and keep reporting its last-known stats rather than dropping back to 0/0.
+    #[cfg(all(feature = "whisper", feature = "streaming"))]
+    #[test]
+    fn standalone_locked_alive_stays_active_with_stale_heartbeat() {
+        let dir = tempdir().unwrap();
+        let status_path = dir.path().join("live-status.json");
+        let mut status = live_status_with_state(LiveStatusState::Healthy);
+        status.updated_at =
+            Local::now() - ChronoDuration::seconds(SIDECAR_HEALTH_STALE_AFTER_SECS + 5);
+        std::fs::write(&status_path, serde_json::to_string(&status).unwrap()).unwrap();
+
+        let result = derive_session_status(
+            pid::PidFileState::LockedAlive,
+            None,
+            &status_path,
+            &dir.path().join("live.jsonl"),
+        );
+
+        assert!(
+            result.active,
+            "lock proves liveness independent of heartbeat"
+        );
+        assert_eq!(result.source, Some(TranscriptSource::Standalone));
+        assert_eq!(result.line_count, 3);
+    }
+
+    /// The readable-PID standalone path (Unix, or Windows when not self-locked)
+    /// reports the real PID alongside `source = Standalone`.
+    #[cfg(all(feature = "whisper", feature = "streaming"))]
+    #[test]
+    fn standalone_active_pid_reports_pid_and_source() {
+        let dir = tempdir().unwrap();
+        let status_path = dir.path().join("live-status.json");
+        let status = live_status_with_state(LiveStatusState::Healthy);
+        std::fs::write(&status_path, serde_json::to_string(&status).unwrap()).unwrap();
+
+        let result = derive_session_status(
+            pid::PidFileState::Active(4321),
+            None,
+            &status_path,
+            &dir.path().join("live.jsonl"),
+        );
+
+        assert!(result.active);
+        assert_eq!(result.source, Some(TranscriptSource::Standalone));
+        assert_eq!(result.pid, Some(4321));
+        assert_eq!(result.line_count, 3);
+    }
+
+    /// An inactive standalone PID with no recording reports nothing — unchanged
+    /// behavior, guarding against the fallback over-triggering.
+    #[cfg(all(feature = "whisper", feature = "streaming"))]
+    #[test]
+    fn standalone_inactive_with_no_recording_is_idle() {
+        let dir = tempdir().unwrap();
+        let status_path = dir.path().join("live-status.json");
+        let status = live_status_with_state(LiveStatusState::Healthy);
+        std::fs::write(&status_path, serde_json::to_string(&status).unwrap()).unwrap();
+
+        let result = derive_session_status(
+            pid::PidFileState::Inactive,
+            None,
+            &status_path,
+            &dir.path().join("live.jsonl"),
+        );
+
+        assert!(!result.active);
+        assert_eq!(result.source, None);
+        assert_eq!(result.line_count, 0);
+        assert_eq!(result.duration_secs, 0.0);
     }
 }

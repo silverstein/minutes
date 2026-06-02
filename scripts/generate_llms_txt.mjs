@@ -34,6 +34,7 @@ const toolGroupOrder = [
   "Notes and processing",
   "Voice and speaker ID",
   "Integration",
+  "Agent Event Bus",
 ];
 
 function extractQuotedValue(input) {
@@ -212,6 +213,7 @@ function categorizeTool(name) {
     "Notes and processing": new Set(["add_note", "process_audio", "open_dashboard"]),
     "Voice and speaker ID": new Set(["list_voices", "confirm_speaker"]),
     Integration: new Set(["qmd_collection_status", "register_qmd_collection"]),
+    "Agent Event Bus": new Set(["add_agent_annotation", "get_agent_annotations"]),
   };
 
   for (const [group, names] of Object.entries(groups)) {

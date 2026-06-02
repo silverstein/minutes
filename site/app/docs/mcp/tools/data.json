@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-05-04",
+  "generatedAt": "2026-06-02",
   "installCommand": "npx minutes-mcp",
   "documentationUrl": "https://useminutes.app/for-agents",
   "supportUrl": "https://github.com/silverstein/minutes/discussions",
@@ -206,6 +206,20 @@
       "group": "Insights",
       "anchorId": "tool-knowledge-status",
       "docsUrl": "https://useminutes.app/docs/mcp/tools#tool-knowledge-status"
+    },
+    {
+      "name": "add_agent_annotation",
+      "description": "Append attributed agent commentary as an agent.annotation event, never editing meeting markdown or frontmatter (allowlist-gated by ~/.minutes/agents.allow)",
+      "group": "Agent Event Bus",
+      "anchorId": "tool-add-agent-annotation",
+      "docsUrl": "https://useminutes.app/docs/mcp/tools#tool-add-agent-annotation"
+    },
+    {
+      "name": "get_agent_annotations",
+      "description": "Read append-only agent.annotation events separately from human-authored meeting markdown and frontmatter",
+      "group": "Agent Event Bus",
+      "anchorId": "tool-get-agent-annotations",
+      "docsUrl": "https://useminutes.app/docs/mcp/tools#tool-get-agent-annotations"
     }
   ],
   "resources": [

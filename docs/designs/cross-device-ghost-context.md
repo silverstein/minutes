@@ -70,7 +70,7 @@ markdown.rs (with device/source frontmatter)
 
 ## Design Doc
 
-Full implementation details: `~/.gstack/projects/silverstein-minutes/silverbook-main-design-20260324-092635.md`
+Full implementation details: `~/.gstack/projects/silverstein-minutes/<hostname>-main-design-20260324-092635.md`
 
 ## Review Status
 

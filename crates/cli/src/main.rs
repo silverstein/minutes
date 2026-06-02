@@ -214,6 +214,11 @@ enum Commands {
         #[arg(long)]
         allow_degraded: bool,
 
+        /// Skip the system-audio readiness probe for this run. Requires a
+        /// reason, which is written into recording_health.
+        #[arg(long, value_name = "REASON")]
+        skip_audio_probe: Option<String>,
+
         /// Transcription language (e.g. "en", "ur", "es"). Overrides config.toml setting.
         #[arg(short, long)]
         language: Option<String>,
@@ -293,6 +298,14 @@ enum Commands {
         model_id: String,
         #[arg(long, default_value_t = false)]
         gpu: bool,
+        /// Run parakeet in fp16 mode. Mirrors the `--fp16` flag forwarded by
+        /// `transcribe::transcribe_with_parakeet` when
+        /// `transcription.parakeet_fp16` is enabled — without this flag the
+        /// helper invocation fails clap parsing every utterance and the
+        /// caller silently falls back to spawning parakeet directly. See
+        /// issue #163.
+        #[arg(long, default_value_t = false)]
+        fp16: bool,
         #[arg(long)]
         vad_path: Option<PathBuf>,
         #[arg(long, default_value_t = 0.5)]
@@ -381,6 +394,28 @@ enum Commands {
 
     /// Show effective Minutes paths from the loaded config
     Paths {
+        /// Output raw JSON instead of formatted text
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Show raw-audio storage and retention policy
+    Storage {
+        /// Output raw JSON instead of formatted text
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Preview or apply raw-audio cleanup
+    Cleanup {
+        /// Delete cleanup candidates. Without this flag, cleanup is preview-only.
+        #[arg(long)]
+        apply: bool,
+
+        /// Override successful-audio retention window for this run (for example: 14d, 30d)
+        #[arg(long, value_name = "DURATION")]
+        older_than: Option<String>,
+
         /// Output raw JSON instead of formatted text
         #[arg(long)]
         json: bool,
@@ -846,10 +881,9 @@ enum Commands {
         action: ContextAction,
     },
 
-    /// Import meetings from another app (e.g., Granola)
+    /// Import meetings from another app, or recover-process an audio file
     Import {
-        /// Source app: granola
-        #[arg(value_parser = ["granola"])]
+        /// Source app (granola), or an audio file path to process as a meeting
         from: String,
 
         /// Directory containing exported meetings (default: ~/.granola-archivist/output/)
@@ -1200,12 +1234,27 @@ enum ContextAction {
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    // Initialize logging
-    let log_level = if cli.verbose { "debug" } else { "info" };
+    // Initialize logging.
+    //
+    // Default filter: app code at INFO (or DEBUG with --verbose), but the
+    // whisper.cpp + ggml C-level loggers at WARN. The C loggers are chatty
+    // by default — `whisper_vad_detect_speech: detect speech (X.XXs duration)`
+    // fires roughly once per 100ms during a recording (issue #163). Demoting
+    // them to warn keeps real errors visible without flooding the terminal.
+    // RUST_LOG, when set, overrides this default entirely.
+    let app_level = if cli.verbose { "debug" } else { "info" };
+    let default_filter = format!("{app_level},whisper_rs=warn,ggml=warn");
+    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(default_filter));
     tracing_subscriber::fmt()
-        .with_env_filter(log_level)
+        .with_env_filter(env_filter)
         .with_target(false)
+        .with_writer(std::io::stderr)
         .init();
+    // Route whisper.cpp + ggml stderr through the tracing subscriber we just
+    // installed. Safe to call multiple times; only the first call has effect.
+    // Without this, the C-level logs leak to raw stderr and bypass the filter.
+    minutes_core::install_whisper_logging_hooks();
 
     let mut config = Config::load();
     install_parakeet_panic_hook();
@@ -1220,6 +1269,7 @@ fn main() -> Result<()> {
             mode,
             intent,
             allow_degraded,
+            skip_audio_probe,
             language,
             device,
             source,
@@ -1285,6 +1335,7 @@ fn main() -> Result<()> {
                     &mode,
                     effective_intent,
                     allow_degraded,
+                    skip_audio_probe.as_deref(),
                     template,
                     &config,
                 )
@@ -1310,6 +1361,7 @@ fn main() -> Result<()> {
             vocab_path,
             model_id,
             gpu,
+            fp16,
             vad_path,
             vad_threshold,
         } => cmd_parakeet_helper(
@@ -1319,6 +1371,7 @@ fn main() -> Result<()> {
             &vocab_path,
             &model_id,
             gpu,
+            fp16,
             vad_path.as_deref(),
             vad_threshold,
             &config,
@@ -1352,6 +1405,12 @@ fn main() -> Result<()> {
         Commands::Status => cmd_status(),
         Commands::Jobs { all, json, limit } => cmd_jobs(all, json, limit),
         Commands::Paths { json } => cmd_paths(json, &config),
+        Commands::Storage { json } => cmd_storage(json, &config),
+        Commands::Cleanup {
+            apply,
+            older_than,
+            json,
+        } => cmd_cleanup(apply, older_than.as_deref(), json, &config),
         Commands::Autoresearch { action } => match action {
             AutoresearchAction::Run {
                 corpus,
@@ -1830,12 +1889,78 @@ fn cmd_preflight_record(
     Ok(())
 }
 
+fn check_meeting_system_audio_probe(
+    capture_mode: CaptureMode,
+    skip_audio_probe: Option<&str>,
+    config: &Config,
+) -> Result<Option<minutes_core::markdown::RecordingHealth>> {
+    if capture_mode != CaptureMode::Meeting {
+        return Ok(None);
+    }
+
+    if minutes_core::capture::resolve_system_audio_probe_device(config)
+        .map_err(|error| anyhow::anyhow!("{}", error))?
+        .is_none()
+    {
+        if skip_audio_probe.is_some() {
+            anyhow::bail!("--skip-audio-probe was provided, but no system-audio source is configured for this recording");
+        }
+        return Ok(None);
+    }
+
+    if let Some(reason) = skip_audio_probe {
+        let reason = reason.trim();
+        if reason.is_empty() {
+            anyhow::bail!("--skip-audio-probe requires a non-empty reason");
+        }
+        eprintln!(
+            "[minutes] System-audio readiness probe skipped for this recording: {}",
+            reason
+        );
+        return Ok(Some(
+            minutes_core::health::recording_health_for_skipped_system_audio_probe(reason),
+        ));
+    }
+
+    match minutes_core::health::probe_system_audio_capture(config)
+        .map_err(|error| anyhow::anyhow!("{}", error))?
+    {
+        None => Ok(None),
+        Some((route, result)) if result.failure_kind.is_none() => {
+            if let Some(device) = route.device_name.as_deref() {
+                eprintln!(
+                    "[minutes] System-audio readiness probe passed on '{}'.",
+                    device
+                );
+            }
+            Ok(None)
+        }
+        Some((route, result)) => {
+            let health = minutes_core::health::recording_health_for_system_audio_probe_failure(
+                Some(&route),
+                &result,
+            );
+            let detail = health
+                .capture_warnings
+                .first()
+                .map(|warning| warning.message.as_str())
+                .unwrap_or("System-audio readiness probe failed.");
+            anyhow::bail!(
+                "{} Use --skip-audio-probe \"<reason>\" for this run only if you intentionally want to record despite this degraded system-audio signal.",
+                detail
+            );
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn cmd_record(
     title: Option<String>,
     context: Option<String>,
     mode: &str,
     intent: &str,
     allow_degraded: bool,
+    skip_audio_probe: Option<&str>,
     template_slug: Option<String>,
     config: &Config,
 ) -> Result<()> {
@@ -1858,9 +1983,15 @@ fn cmd_record(
         eprintln!("[minutes] {}", warning);
     }
 
-    // Check for conflicting live transcript session
+    let startup_recording_health =
+        check_meeting_system_audio_probe(capture_mode, skip_audio_probe, config)?;
+
+    // Check for conflicting live transcript session. `inspect_pid_file` so a
+    // standalone session holding the PID under a mandatory Windows lock is seen —
+    // otherwise a recording could start alongside it and clobber the shared
+    // `live-transcript.jsonl`. See #258.
     let lt_pid = minutes_core::pid::live_transcript_pid_path();
-    if let Ok(Some(_)) = minutes_core::pid::check_pid_file(&lt_pid) {
+    if minutes_core::pid::inspect_pid_file(&lt_pid).is_active() {
         anyhow::bail!("live transcript in progress — run `minutes stop` first");
     }
 
@@ -1961,7 +2092,7 @@ fn cmd_record(
     // The pipeline already falls back to events_overlapping_now() during background processing.
     let calendar_event = None;
     let queued = (|| -> Result<(minutes_core::jobs::ProcessingJob, String)> {
-        let job = minutes_core::jobs::queue_live_capture(
+        let job = minutes_core::jobs::queue_live_capture_with_recording_health(
             capture_mode,
             title.clone(),
             &wav_path,
@@ -1972,6 +2103,7 @@ fn cmd_record(
             context_session_id.clone(),
             calendar_event,
             template_slug.clone(),
+            startup_recording_health.clone(),
         )?;
 
         let queued_result = serde_json::to_string_pretty(&serde_json::json!({
@@ -2032,7 +2164,7 @@ fn cmd_record(
 }
 
 fn spawn_queue_worker() -> Result<()> {
-    if minutes_core::jobs::current_worker_pid().is_some() {
+    if minutes_core::jobs::worker_active() {
         return Ok(());
     }
 
@@ -2150,40 +2282,43 @@ fn cmd_stop(config: &Config) -> Result<()> {
             Ok(())
         }
         Ok(None) => {
-            // No batch recording — check for live transcript session
+            // No batch recording — check for live transcript session.
+            // `inspect_pid_file` so a session holding the PID under a mandatory
+            // Windows lock is detected (the PID is unreadable there, but the stop
+            // sentinel — polled inline by the live loop — stops it on any
+            // platform). See #258.
             let lt_pid_path = minutes_core::pid::live_transcript_pid_path();
-            match minutes_core::pid::check_pid_file(&lt_pid_path) {
-                Ok(Some(pid)) => {
-                    eprintln!("Stopping live transcript (PID {})...", pid);
-                    minutes_core::pid::write_stop_sentinel()
-                        .map_err(|e| anyhow::anyhow!("failed to write stop sentinel: {}", e))?;
-                    #[cfg(unix)]
-                    {
-                        let rc = unsafe { libc::kill(pid as i32, libc::SIGTERM) };
-                        if rc != 0 {
-                            tracing::warn!("SIGTERM failed for live transcript PID {}", pid);
-                        }
-                    }
-                    // Poll for PID removal
-                    let start = std::time::Instant::now();
-                    eprint!("Finalizing live transcript");
-                    while lt_pid_path.exists()
-                        && start.elapsed() < std::time::Duration::from_secs(30)
-                    {
-                        std::thread::sleep(std::time::Duration::from_millis(500));
-                        eprint!(".");
-                    }
-                    eprintln!();
-                    if lt_pid_path.exists() {
-                        anyhow::bail!("live transcript process did not stop within 30 seconds");
-                    }
-                    eprintln!("Live transcript stopped.");
-                    Ok(())
+            let lt_state = minutes_core::pid::inspect_pid_file(&lt_pid_path);
+            if lt_state.is_active() {
+                match lt_state.pid() {
+                    Some(pid) => eprintln!("Stopping live transcript (PID {})...", pid),
+                    None => eprintln!("Stopping live transcript..."),
                 }
-                _ => {
-                    eprintln!("No recording or live transcript in progress.");
-                    Ok(())
+                minutes_core::pid::write_stop_sentinel()
+                    .map_err(|e| anyhow::anyhow!("failed to write stop sentinel: {}", e))?;
+                #[cfg(unix)]
+                if let Some(pid) = lt_state.pid() {
+                    let rc = unsafe { libc::kill(pid as i32, libc::SIGTERM) };
+                    if rc != 0 {
+                        tracing::warn!("SIGTERM failed for live transcript PID {}", pid);
+                    }
                 }
+                // Poll for PID removal
+                let start = std::time::Instant::now();
+                eprint!("Finalizing live transcript");
+                while lt_pid_path.exists() && start.elapsed() < std::time::Duration::from_secs(30) {
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                    eprint!(".");
+                }
+                eprintln!();
+                if lt_pid_path.exists() {
+                    anyhow::bail!("live transcript process did not stop within 30 seconds");
+                }
+                eprintln!("Live transcript stopped.");
+                Ok(())
+            } else {
+                eprintln!("No recording or live transcript in progress.");
+                Ok(())
             }
         }
         Err(e) => Err(anyhow::anyhow!("{}", e)),
@@ -2522,6 +2657,140 @@ fn cmd_paths(json: bool, config: &Config) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[derive(Serialize)]
+struct CleanupError {
+    path: PathBuf,
+    error: String,
+}
+
+#[derive(Serialize)]
+struct CleanupReport {
+    plan: minutes_core::retention::RetentionPlan,
+    applied: bool,
+    removed: Vec<PathBuf>,
+    errors: Vec<CleanupError>,
+}
+
+fn cmd_storage(json: bool, config: &Config) -> Result<()> {
+    let plan = minutes_core::retention::preview_audio_retention(config, Local::now());
+    if json {
+        let envelope = json_envelope("minutes storage", plan);
+        println!("{}", serde_json::to_string_pretty(&envelope)?);
+    } else {
+        print_storage_summary(&plan, config);
+    }
+    Ok(())
+}
+
+fn cmd_cleanup(apply: bool, older_than: Option<&str>, json: bool, config: &Config) -> Result<()> {
+    let mut effective_config = config.clone();
+    if let Some(value) = older_than {
+        effective_config.retention.successful_audio_days = parse_retention_days(value)?;
+    }
+
+    let plan = minutes_core::retention::preview_audio_retention(&effective_config, Local::now());
+    let mut report = CleanupReport {
+        plan,
+        applied: apply,
+        removed: Vec::new(),
+        errors: Vec::new(),
+    };
+
+    if apply {
+        for item in
+            report.plan.items.iter().filter(|item| {
+                item.action == minutes_core::retention::RetentionAction::DeleteCandidate
+            })
+        {
+            match std::fs::remove_file(&item.path) {
+                Ok(()) => report.removed.push(item.path.clone()),
+                Err(error) => report.errors.push(CleanupError {
+                    path: item.path.clone(),
+                    error: error.to_string(),
+                }),
+            }
+        }
+    }
+
+    if json {
+        let envelope = json_envelope("minutes cleanup", report);
+        println!("{}", serde_json::to_string_pretty(&envelope)?);
+    } else {
+        print_cleanup_summary(&report, &effective_config);
+    }
+    Ok(())
+}
+
+fn print_storage_summary(plan: &minutes_core::retention::RetentionPlan, config: &Config) {
+    println!("Minutes storage");
+    println!("  output_dir: {}", plan.output_dir.display());
+    println!(
+        "  raw audio: {} across {} file(s)",
+        format_bytes(plan.totals.raw_audio_bytes),
+        plan.totals.raw_audio_files
+    );
+    println!(
+        "  cleanup candidates: {} across {} file(s)",
+        format_bytes(plan.totals.delete_candidate_bytes),
+        plan.totals.delete_candidate_files
+    );
+    println!(
+        "  policy: successful audio {}d, failed/needs-review audio {}d, pinned audio kept",
+        config.retention.successful_audio_days, config.retention.failed_audio_days
+    );
+}
+
+fn print_cleanup_summary(report: &CleanupReport, config: &Config) {
+    if report.applied {
+        println!("Minutes cleanup applied");
+        println!("  removed: {} file(s)", report.removed.len());
+        if !report.errors.is_empty() {
+            println!("  errors: {} file(s)", report.errors.len());
+        }
+    } else {
+        println!("Minutes cleanup preview");
+        println!("  no files deleted; pass --apply to remove candidates");
+    }
+    println!(
+        "  candidates: {} across {} file(s)",
+        format_bytes(report.plan.totals.delete_candidate_bytes),
+        report.plan.totals.delete_candidate_files
+    );
+    println!(
+        "  policy: successful audio {}d, failed/needs-review audio {}d",
+        config.retention.successful_audio_days, config.retention.failed_audio_days
+    );
+}
+
+fn parse_retention_days(value: &str) -> Result<u32> {
+    let trimmed = value.trim().to_ascii_lowercase();
+    let digits = trimmed
+        .strip_suffix("days")
+        .or_else(|| trimmed.strip_suffix("day"))
+        .or_else(|| trimmed.strip_suffix('d'))
+        .unwrap_or(&trimmed)
+        .trim();
+    let days = digits
+        .parse::<u32>()
+        .map_err(|_| anyhow::anyhow!("invalid duration '{}'; use values like 14d or 30d", value))?;
+    Ok(days)
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const UNITS: &[&str] = &["B", "KB", "MB", "GB", "TB"];
+    let mut value = bytes as f64;
+    let mut unit = 0usize;
+    while value >= 1024.0 && unit + 1 < UNITS.len() {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{} {}", bytes, UNITS[unit])
+    } else {
+        format!("{:.1} {}", value, UNITS[unit])
+    }
 }
 
 fn owner_display(
@@ -4055,6 +4324,7 @@ fn cmd_parakeet_helper(
     vocab_path: &Path,
     model_id: &str,
     gpu: bool,
+    fp16: bool,
     vad_path: Option<&Path>,
     vad_threshold: f32,
     config: &Config,
@@ -4064,6 +4334,20 @@ fn cmd_parakeet_helper(
         minutes_core::parakeet::ResolveParakeetBinaryMode::WarnAndFallback,
     )
     .map_err(anyhow::Error::msg)?;
+    // `transcribe::transcribe_with_parakeet` (the only programmatic caller of
+    // this hidden subcommand) only appends `--fp16` when it has decided
+    // fp16=true for this invocation. So the flag is monotonically additive:
+    // present means "force fp16 on for this run"; absent means "inherit
+    // whatever the user's TOML says." Only override the cloned config in
+    // the present-and-true case so manual `minutes parakeet-helper`
+    // invocations keep honoring `transcription.parakeet_fp16` from disk.
+    let config = if fp16 {
+        let mut overridden = config.clone();
+        overridden.transcription.parakeet_fp16 = true;
+        std::borrow::Cow::Owned(overridden)
+    } else {
+        std::borrow::Cow::Borrowed(config)
+    };
     let parsed = minutes_core::transcribe::run_parakeet_cli_structured(
         resolved_binary
             .to_str()
@@ -4075,7 +4359,7 @@ fn cmd_parakeet_helper(
         gpu,
         vad_path,
         vad_threshold,
-        config,
+        &config,
         &minutes_core::transcribe::DecodeHints::default(),
     )?;
     let envelope = parakeet_helper_envelope("minutes parakeet-helper", parsed);
@@ -4092,6 +4376,7 @@ fn cmd_parakeet_helper(
     _vocab_path: &Path,
     _model_id: &str,
     _gpu: bool,
+    _fp16: bool,
     _vad_path: Option<&Path>,
     _vad_threshold: f32,
     _config: &Config,
@@ -4749,14 +5034,46 @@ fn cmd_setup(model: &str, list: bool, diarization: bool) -> Result<()> {
     std::fs::create_dir_all(model_dir)?;
 
     let dest = model_dir.join(format!("ggml-{}.bin", model));
-    if dest.exists() {
-        let size = std::fs::metadata(&dest)?.len();
-        eprintln!(
-            "Model already downloaded: {} ({:.0} MB)",
-            dest.display(),
-            size as f64 / 1_048_576.0
-        );
+    let expected_min_bytes = minutes_core::transcribe::expected_whisper_model_size_bytes(model);
+    let mb = |bytes: u64| bytes as f64 / 1_048_576.0;
+
+    // Helper: treat an existing file as truncated if it's smaller than the
+    // expected minimum for this model (issue #229 root cause: a partial
+    // download was reported as "already downloaded" and whisper-rs aborted
+    // parsing the truncated GGML header). Returns Ok(true) when the
+    // existing file should be kept, Ok(false) when it was removed and a
+    // re-download is needed.
+    let keep_existing = if dest.exists() {
+        let actual = std::fs::metadata(&dest)?.len();
+        match expected_min_bytes {
+            Some(min_bytes) if actual < min_bytes => {
+                eprintln!(
+                    "Model file at {} is {:.0} MB but the {} model should be at least {:.0} MB.",
+                    dest.display(),
+                    mb(actual),
+                    model,
+                    mb(min_bytes),
+                );
+                eprintln!(
+                    "Looks truncated, probably an interrupted download. Removing and refetching."
+                );
+                std::fs::remove_file(&dest)?;
+                false
+            }
+            _ => {
+                eprintln!(
+                    "Model already downloaded: {} ({:.0} MB)",
+                    dest.display(),
+                    mb(actual),
+                );
+                true
+            }
+        }
     } else {
+        false
+    };
+
+    if !keep_existing {
         let url = format!(
             "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-{}.bin",
             model
@@ -4764,6 +5081,23 @@ fn cmd_setup(model: &str, list: bool, diarization: bool) -> Result<()> {
 
         eprintln!("Downloading whisper model: {} ...", model);
         download_file(&url, &dest)?;
+
+        // Validate the freshly downloaded file too. A partial download
+        // that ends in a successful HTTP close (rare but possible) would
+        // otherwise slip through silently.
+        if let Some(min_bytes) = expected_min_bytes {
+            let actual = std::fs::metadata(&dest)?.len();
+            if actual < min_bytes {
+                let _ = std::fs::remove_file(&dest);
+                anyhow::bail!(
+                    "downloaded model is {:.0} MB but expected at least {:.0} MB for {}; the file was truncated and has been removed. Try running `minutes setup --model {}` again on a stable connection.",
+                    mb(actual),
+                    mb(min_bytes),
+                    model,
+                    model,
+                );
+            }
+        }
 
         // Update config hint
         eprintln!("\nTo use this model, add to ~/.config/minutes/config.toml:");
@@ -4783,6 +5117,35 @@ fn cmd_setup(model: &str, list: bool, diarization: bool) -> Result<()> {
                  but may produce loops on non-English audio.",
                 e
             );
+        }
+    }
+
+    // Streaming Silero ONNX (used by the OrtSileroVad engine). Only
+    // downloaded when this build was compiled with the `vad-ort`
+    // feature, since builds without it cannot use the file.
+    //
+    // Naming note: the file is `silero-vad-v6.2.0.onnx` to mirror the
+    // existing ggml file naming convention used by ggml-org's whisper
+    // mirror. The actual upstream artifact is from the snakers4
+    // `v6.0` git tag — that's the most recent upstream release that
+    // ships the ONNX. Keep the URL pinned to a tag, never to a
+    // mutable branch, so the schema this code was written against
+    // (input [1,576], state [2,1,128], sr i64 scalar, output [1,1])
+    // stays stable.
+    #[cfg(feature = "vad-ort")]
+    {
+        let onnx_dest = model_dir.join("silero-vad-v6.2.0.onnx");
+        if !onnx_dest.exists() {
+            let onnx_url = "https://github.com/snakers4/silero-vad/raw/v6.0/src/silero_vad/data/silero_vad.onnx";
+            eprintln!("Downloading Silero VAD ONNX from snakers4 v6.0 tag (~2.3 MB) ...");
+            if let Err(e) = download_file(onnx_url, &onnx_dest) {
+                eprintln!(
+                    "Warning: Silero ONNX download failed ({}). The streaming VAD engine \
+                     will not be available; recordings will continue using whisper-rs's \
+                     bundled Silero.",
+                    e
+                );
+            }
         }
     }
 
@@ -5036,6 +5399,45 @@ fn cmd_setup_parakeet(model: &str) -> Result<()> {
     eprintln!("  engine = \"parakeet\"");
     eprintln!("  parakeet_model = \"{}\"", model);
     eprintln!("  parakeet_vocab = \"{}\"", dest_vocab_name);
+    // Print parakeet_binary too. Users who installed parakeet.cpp from
+    // source typically land at ~/.local/bin/parakeet, which is reachable
+    // from a Terminal-launched CLI but NOT from a Finder/Spotlight/Dock-
+    // launched desktop app (different PATH). Spelling the binary out in
+    // the config footer prevents the "minutes works in terminal, app
+    // says binary-not-found" class of issue.
+    eprintln!(
+        "  parakeet_binary = \"<absolute path to parakeet, e.g. /Users/you/.local/bin/parakeet>\""
+    );
+
+    // Feature-flag visibility check. If this binary was compiled without
+    // `--features parakeet`, every config key above is silently inert at
+    // runtime and the engine falls back to whisper. The setup command
+    // itself runs to completion because download + binary resolution don't
+    // require the feature, so without this warning a user can follow every
+    // step successfully and still wonder why parakeet isn't transcribing.
+    //
+    // Tagged release artifacts (the DMG and the per-platform CLI binaries
+    // built by .github/workflows/release-{macos,cli}.yml) ship WITH the
+    // feature. The paths that don't are the Homebrew Formula CLI
+    // (`brew install silverstein/tap/minutes`, which runs bare
+    // `cargo install --path crates/cli`) and any source `cargo install`
+    // without `--features parakeet`.
+    //
+    // Confirmed reachable: this function is not feature-gated, so the
+    // warning fires correctly on a whisper-only binary.
+    if !cfg!(feature = "parakeet") {
+        eprintln!();
+        eprintln!("WARNING: this minutes binary was compiled WITHOUT the parakeet feature.");
+        eprintln!("The model and helper binary above are installed, but the runtime will fall");
+        eprintln!("back to whisper regardless of the config keys you just set. To actually use");
+        eprintln!("parakeet, rebuild the CLI with the feature enabled, e.g.:");
+        eprintln!();
+        eprintln!("  cargo install --path crates/cli --features parakeet --root ~/.cargo --force");
+        eprintln!();
+        eprintln!("The downloadable DMG and tagged CLI release binaries do include parakeet.");
+        eprintln!("The Homebrew Formula CLI (`brew install silverstein/tap/minutes`) and bare");
+        eprintln!("`cargo install minutes-cli` runs are the install paths that omit it.");
+    }
 
     Ok(())
 }
@@ -5856,11 +6258,13 @@ mod tests {
                         wer: 0.12,
                         focus_hits: vec!["mat".into()],
                         forbidden_hits: vec![],
+                        text: String::new(),
                     },
                     candidate: DecodeHintEvalTranscriptMetrics {
                         wer: 0.09,
                         focus_hits: vec!["mat".into(), "leadernet".into()],
                         forbidden_hits: vec![],
+                        text: String::new(),
                     },
                     delta_wer: -0.03,
                     max_wer_regression: Some(0.03),
@@ -5879,11 +6283,13 @@ mod tests {
                         wer: 0.10,
                         focus_hits: vec!["pdf toolkit".into()],
                         forbidden_hits: vec![],
+                        text: String::new(),
                     },
                     candidate: DecodeHintEvalTranscriptMetrics {
                         wer: 0.10,
                         focus_hits: vec!["pdf toolkit".into()],
                         forbidden_hits: vec![],
+                        text: String::new(),
                     },
                     delta_wer: 0.0,
                     max_wer_regression: Some(0.02),
@@ -5923,11 +6329,13 @@ mod tests {
                     wer: 0.12,
                     focus_hits: vec![],
                     forbidden_hits: vec![],
+                    text: String::new(),
                 },
                 candidate: DecodeHintEvalTranscriptMetrics {
                     wer: 0.15,
                     focus_hits: vec![],
                     forbidden_hits: vec!["matt mullenweg".into()],
+                    text: String::new(),
                 },
                 delta_wer: 0.03,
                 max_wer_regression: Some(0.02),
@@ -5990,6 +6398,80 @@ life (qmd://life/)
         assert_eq!(value["meta"]["schemaVersion"], 1);
     }
 
+    /// Regression guard for issue #163: the helper subcommand must accept
+    /// `--fp16` when forwarded by `transcribe::transcribe_with_parakeet`,
+    /// AND must continue to parse without it for manual invocations and for
+    /// the `use_fp16=false` programmatic path. Pre-fix, clap rejected the
+    /// flag on every utterance and silently fell back to spawning parakeet
+    /// directly, ending in a confusing error on Ctrl+C and a session-level
+    /// fallback to whisper.
+    #[test]
+    fn parakeet_helper_clap_accepts_fp16_flag_present_or_absent() {
+        let common = [
+            "minutes",
+            "parakeet-helper",
+            "--binary",
+            "/usr/local/bin/parakeet",
+            "--model-path",
+            "/tmp/model.bin",
+            "--audio-path",
+            "/tmp/audio.wav",
+            "--vocab-path",
+            "/tmp/vocab.txt",
+            "--model-id",
+            "tdt-600m",
+        ];
+
+        // Without --fp16: must parse, fp16 must be false.
+        let parsed_without =
+            Cli::try_parse_from(common).expect("parakeet-helper without --fp16 must parse");
+        match parsed_without.command {
+            Commands::ParakeetHelper { fp16, .. } => assert!(!fp16),
+            _ => panic!("expected ParakeetHelper variant"),
+        }
+
+        // With --fp16: must parse, fp16 must be true.
+        let mut with_fp16: Vec<&str> = common.to_vec();
+        with_fp16.push("--fp16");
+        let parsed_with =
+            Cli::try_parse_from(with_fp16).expect("parakeet-helper --fp16 must parse");
+        match parsed_with.command {
+            Commands::ParakeetHelper { fp16, .. } => assert!(fp16),
+            _ => panic!("expected ParakeetHelper variant"),
+        }
+    }
+
+    #[test]
+    fn import_accepts_audio_path_for_recovery_alias() {
+        let parsed = Cli::try_parse_from([
+            "minutes",
+            "import",
+            "/Users/test/.minutes/native-captures/2026-05-19-120148-call.voice.wav",
+        ])
+        .expect("import must accept audio paths so it can route to process");
+
+        match parsed.command {
+            Commands::Import { from, dir, dry_run } => {
+                assert_eq!(
+                    from,
+                    "/Users/test/.minutes/native-captures/2026-05-19-120148-call.voice.wav"
+                );
+                assert!(dir.is_none());
+                assert!(!dry_run);
+            }
+            _ => panic!("expected Import variant"),
+        }
+    }
+
+    #[test]
+    fn looks_like_audio_path_matches_supported_process_formats() {
+        assert!(looks_like_audio_path("call.voice.wav"));
+        assert!(looks_like_audio_path("meeting.MOV"));
+        assert!(looks_like_audio_path("/tmp/memo.m4a"));
+        assert!(!looks_like_audio_path("granola"));
+        assert!(!looks_like_audio_path("notes.md"));
+    }
+
     #[test]
     fn render_decode_hints_plaintext_summary_surfaces_allowed_failures() {
         let output = render_decode_hints_plaintext_summary(
@@ -6023,14 +6505,14 @@ life (qmd://life/)
     #[test]
     fn parse_qmd_collection_path_reads_show_output() {
         let output = r#"Collection: minutes
-  Path:     /Users/silverbook/meetings
+  Path:     /Users/you/meetings
   Pattern:  **/*.md
   Include:  yes (default)
 "#;
 
         assert_eq!(
             parse_qmd_collection_path(output),
-            Some(PathBuf::from("/Users/silverbook/meetings"))
+            Some(PathBuf::from("/Users/you/meetings"))
         );
     }
 
@@ -6258,6 +6740,53 @@ life (qmd://life/)
                 !meetings.join("archive/2026-04-01-force.md").exists(),
                 "nothing in archive for force delete"
             );
+        });
+    }
+
+    #[test]
+    fn parse_retention_days_accepts_day_suffixes() {
+        assert_eq!(parse_retention_days("30").unwrap(), 30);
+        assert_eq!(parse_retention_days("14d").unwrap(), 14);
+        assert_eq!(parse_retention_days("7 days").unwrap(), 7);
+    }
+
+    #[test]
+    fn cmd_cleanup_apply_removes_only_expired_audio_candidates() {
+        with_temp_home(|dir| {
+            let meetings = dir.join("meetings");
+            std::fs::create_dir_all(&meetings).unwrap();
+            let old_md = meetings.join("old.md");
+            std::fs::write(
+                &old_md,
+                "---\ntitle: Old\ntype: meeting\ndate: 2026-04-01T09:00:00-07:00\nduration: 5m\n---\n\nOld",
+            )
+            .unwrap();
+            let old_wav = meetings.join("old.wav");
+            std::fs::write(&old_wav, b"old audio").unwrap();
+
+            let pinned_md = meetings.join("pinned.md");
+            std::fs::write(
+                &pinned_md,
+                "---\ntitle: Pinned\ntype: meeting\ndate: 2026-04-01T09:00:00-07:00\nduration: 5m\naudio_retention: pinned\n---\n\nPinned",
+            )
+            .unwrap();
+            let pinned_wav = meetings.join("pinned.wav");
+            std::fs::write(&pinned_wav, b"pinned audio").unwrap();
+
+            let config = Config {
+                output_dir: meetings.clone(),
+                ..Config::default()
+            };
+
+            cmd_cleanup(true, Some("0d"), true, &config).unwrap();
+
+            assert!(old_md.exists(), "cleanup must not delete markdown");
+            assert!(
+                !old_wav.exists(),
+                "expired unpinned audio should be removed"
+            );
+            assert!(pinned_md.exists(), "pinned markdown remains");
+            assert!(pinned_wav.exists(), "pinned audio should be kept");
         });
     }
 
@@ -7030,10 +7559,53 @@ fn cmd_context_get_moment(
 // ── Import ──────────────────────────────────────────────────
 
 fn cmd_import(from: &str, dir: Option<&Path>, dry_run: bool, config: &Config) -> Result<()> {
+    if dir.is_none() && looks_like_audio_path(from) {
+        let path = Path::new(from);
+        if dry_run {
+            eprintln!(
+                "Would process audio file as a meeting: minutes process \"{}\" --type meeting",
+                path.display()
+            );
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "status": "dry-run",
+                    "file": path.display().to_string(),
+                    "content_type": "meeting",
+                    "command": format!("minutes process \"{}\" --type meeting", path.display()),
+                }))?
+            );
+            return Ok(());
+        }
+
+        eprintln!(
+            "Processing audio file via import compatibility path. Preferred command: minutes process \"{}\" --type meeting",
+            path.display()
+        );
+        return cmd_process(path, "meeting", None, None, config);
+    }
+
     match from {
         "granola" => import_granola(dir, dry_run, config),
-        other => anyhow::bail!("Unknown import source: {}. Supported: granola", other),
+        other => anyhow::bail!(
+            "Unknown import source: {}. Supported source: granola. To process an audio file, run: minutes process \"{}\" --type meeting",
+            other,
+            other
+        ),
     }
+}
+
+fn looks_like_audio_path(value: &str) -> bool {
+    Path::new(value)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| {
+            matches!(
+                ext.to_ascii_lowercase().as_str(),
+                "wav" | "m4a" | "mp3" | "ogg" | "webm" | "mp4" | "mov" | "aac"
+            )
+        })
+        .unwrap_or(false)
 }
 
 fn import_granola(dir: Option<&Path>, dry_run: bool, config: &Config) -> Result<()> {
@@ -7624,6 +8196,7 @@ fn cmd_demo(config: &Config) -> Result<()> {
     }
 }
 
+#[cfg(feature = "whisper")]
 fn cmd_dictate(stdout: bool, note_only: bool, config: &Config) -> Result<()> {
     use std::sync::atomic::AtomicBool;
     use std::sync::Arc;
@@ -7741,6 +8314,13 @@ fn cmd_dictate(stdout: bool, note_only: bool, config: &Config) -> Result<()> {
     )?;
 
     Ok(())
+}
+
+#[cfg(not(feature = "whisper"))]
+fn cmd_dictate(_stdout: bool, _note_only: bool, _config: &Config) -> Result<()> {
+    Err(anyhow::anyhow!(
+        "`minutes dictate` requires the `whisper` feature. Reinstall without `--no-default-features` to use local dictation."
+    ))
 }
 
 fn cmd_enroll(file: Option<&Path>, duration: u64, config: &Config) -> Result<()> {
@@ -8188,6 +8768,7 @@ fn cmd_confirm(
     Ok(())
 }
 
+#[cfg(feature = "whisper")]
 fn cmd_live(config: &Config) -> Result<()> {
     use std::sync::atomic::AtomicBool;
     use std::sync::Arc;
@@ -8255,6 +8836,14 @@ fn cmd_live(config: &Config) -> Result<()> {
     }
 }
 
+#[cfg(not(feature = "whisper"))]
+fn cmd_live(_config: &Config) -> Result<()> {
+    Err(anyhow::anyhow!(
+        "`minutes live` requires the `whisper` feature. Reinstall without `--no-default-features` to use live transcription."
+    ))
+}
+
+#[cfg(feature = "whisper")]
 fn cmd_transcript(since: Option<&str>, status: bool, format: &str) -> Result<()> {
     if status {
         let s = minutes_core::live_transcript::session_status();
@@ -8335,4 +8924,11 @@ fn cmd_transcript(since: Option<&str>, status: bool, format: &str) -> Result<()>
     }
 
     Ok(())
+}
+
+#[cfg(not(feature = "whisper"))]
+fn cmd_transcript(_since: Option<&str>, _status: bool, _format: &str) -> Result<()> {
+    Err(anyhow::anyhow!(
+        "`minutes transcript` requires the `whisper` feature. Reinstall without `--no-default-features` to read live transcripts."
+    ))
 }

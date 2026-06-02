@@ -253,6 +253,22 @@
       overflow: hidden;
       background: var(--bg);
       border-right: none;
+      position: relative;
+    }
+
+    .window-drag-strip {
+      display: none;
+    }
+
+    html[data-platform="macos"] .window-drag-strip {
+      display: block;
+      position: fixed;
+      top: 0;
+      left: 72px;
+      right: 0;
+      height: 32px;
+      z-index: 5;
+      -webkit-app-region: drag;
     }
 
     /* ── Drag handle between panes ── */
@@ -684,41 +700,46 @@
 
     .brand-mark {
       display: block;
+      position: relative;
       width: 34px;
       height: 34px;
       flex-shrink: 0;
+      overflow: hidden;
     }
 
     .brand-mark img {
-      display: block;
+      position: absolute;
+      inset: 0;
       width: 100%;
       height: 100%;
+      object-fit: contain;
+      pointer-events: none;
     }
 
-    .brand-mark-light {
+    .brand-mark img.brand-mark-light {
       display: none;
     }
 
-    .brand-mark-dark {
+    .brand-mark img.brand-mark-dark {
       display: block;
       border-radius: 8px;
     }
 
     @media (prefers-color-scheme: light) {
-      :root:not([data-theme='dark']) .brand-mark-light {
+      :root:not([data-theme='dark']) .brand-mark img.brand-mark-light {
         display: block;
       }
 
-      :root:not([data-theme='dark']) .brand-mark-dark {
+      :root:not([data-theme='dark']) .brand-mark img.brand-mark-dark {
         display: none;
       }
     }
 
-    :root[data-theme='light'] .brand-mark-light {
+    :root[data-theme='light'] .brand-mark img.brand-mark-light {
       display: block;
     }
 
-    :root[data-theme='light'] .brand-mark-dark {
+    :root[data-theme='light'] .brand-mark img.brand-mark-dark {
       display: none;
     }
 
@@ -801,12 +822,31 @@
     .status-pill.processing {
       font-size: 11px;
       padding: 3px 10px;
+      max-width: 96px;
       width: auto;
       height: auto;
       border-radius: 12px;
       opacity: 1;
       background: var(--green-tint);
       color: var(--green);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .status-pill.starting {
+      font-size: 11px;
+      padding: 3px 10px;
+      max-width: 96px;
+      width: auto;
+      height: auto;
+      border-radius: 12px;
+      opacity: 1;
+      background: var(--accent-tint);
+      color: var(--accent);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }
 
     .status-pill.live {
@@ -821,6 +861,7 @@
     }
 
     html[data-platform="macos"] .header .status-pill.recording,
+    html[data-platform="macos"] .header .status-pill.starting,
     html[data-platform="macos"] .header .status-pill.processing,
     html[data-platform="macos"] .header .status-pill.live {
       font-size: 0;
@@ -1797,7 +1838,9 @@
       justify-content: center;
       background: rgba(7, 8, 10, 0.64);
       backdrop-filter: blur(12px);
-      z-index: 90;
+      /* Must sit above .detail-overlay (z-index 120) — the picker is launched
+         from the meeting note overlay and would otherwise render behind it. */
+      z-index: 130;
       padding: 20px;
     }
 
@@ -2268,6 +2311,8 @@
     .detail-scroll {
       overflow-y: auto;
       padding: 0 20px 20px;
+      -webkit-user-select: text;
+      user-select: text;
     }
 
     .detail-bottom-cta {
@@ -4300,14 +4345,15 @@
 <body>
   <div class="app-left">
     <!-- Header -->
-    <div class="header">
-      <div class="brand">
-        <span class="brand-mark" role="img" aria-label="Minutes">
-          <img class="brand-mark-light" src="assets/app-mark-light.png" alt="" aria-hidden="true">
-          <img class="brand-mark-dark" src="assets/app-icon.png" alt="" aria-hidden="true">
+    <div class="window-drag-strip" data-tauri-drag-region aria-hidden="true"></div>
+    <div class="header" data-tauri-drag-region>
+      <div class="brand" data-tauri-drag-region>
+        <span class="brand-mark" role="img" aria-label="Minutes" data-tauri-drag-region>
+          <img class="brand-mark-light" src="assets/app-mark-light.png" alt="" aria-hidden="true" data-tauri-drag-region>
+          <img class="brand-mark-dark" src="assets/app-icon.png" alt="" aria-hidden="true" data-tauri-drag-region>
         </span>
-        <div class="brand-copy">
-          <div class="brand-sub">Conversation memory for humans and agents</div>
+        <div class="brand-copy" data-tauri-drag-region>
+          <div class="brand-sub" data-tauri-drag-region>Conversation memory for humans and agents</div>
         </div>
       </div>
       <div class="header-actions">
@@ -4585,11 +4631,11 @@
 
   <!-- ── Recall panel (right side, embedded terminal) ── -->
   <div class="recall-panel" id="recall-panel">
-    <div class="recall-header">
-      <div class="recall-header-info">
-        <div class="recall-phase-dot" id="recall-dot" aria-label="Phase: Recall"></div>
-        <span class="recall-phase-label" id="recall-phase-label">Recall</span>
-        <span class="recall-context-label" id="recall-context-label"></span>
+    <div class="recall-header" data-tauri-drag-region>
+      <div class="recall-header-info" data-tauri-drag-region>
+        <div class="recall-phase-dot" id="recall-dot" aria-label="Phase: Recall" data-tauri-drag-region></div>
+        <span class="recall-phase-label" id="recall-phase-label" data-tauri-drag-region>Recall</span>
+        <span class="recall-context-label" id="recall-context-label" data-tauri-drag-region></span>
       </div>
       <div class="recall-header-actions">
         <button class="btn btn-secondary btn-sm" id="btn-recall-weekly">Weekly</button>
@@ -5651,6 +5697,7 @@
     const updateDebugLaunchButton = document.getElementById('btn-update-debug-launch');
 
     let isRecording = false;
+    let isStarting = false;
     let isProcessing = false;
     let isLiveTranscript = false;
     let currentMeetingPath = null;
@@ -5679,6 +5726,7 @@
     let processingStartTime = null;
     let processingTimerInterval = null;
     let updaterDebugEnabled = false;
+    let lastUpdateNotesBody = null;
     let updateState = {
       available: false,
       version: null,
@@ -5821,12 +5869,12 @@
       const watchStatus = root.querySelector('#step-watch-artifact-status');
 
       if (!activation.hasModel && activation.nextAction === 'setup-parakeet') {
-        if (modelStatus) modelStatus.textContent = 'Needs setup';
+        setText(modelStatus, 'Needs setup');
       }
 
       if (activation.hasModel || milestones.modelReadyAt) {
         modelStep?.classList.add('done');
-        if (modelStatus) modelStatus.textContent = 'Done';
+        setText(modelStatus, 'Done');
         modelBody?.classList.add('ui-hidden');
         artifactStep?.classList.remove('disabled');
       }
@@ -5839,12 +5887,10 @@
         artifactStep?.classList.add('done');
         watchStep?.classList.remove('disabled');
         watchStep?.classList.add('done');
-        if (watchStatus) watchStatus.textContent = 'Saved';
+        setText(watchStatus, 'Saved');
       } else if (activation.phase === 'processing-first-artifact' || activation.phase === 'recording-first-artifact') {
         watchStep?.classList.remove('disabled');
-        if (watchStatus) {
-          watchStatus.textContent = activation.phase === 'processing-first-artifact' ? 'Processing...' : 'Recording...';
-        }
+        setText(watchStatus, activation.phase === 'processing-first-artifact' ? 'Processing...' : 'Recording...');
       }
     }
 
@@ -6083,12 +6129,57 @@
       }
     }
 
+    function primaryProcessingJob(status) {
+      const jobs = Array.isArray(status?.processingJobs) ? status.processingJobs : [];
+      return jobs[0] || null;
+    }
+
+    function processingStageText(job, fallbackStage) {
+      if (job?.stageLabel) return job.stageLabel;
+      if (job?.state === 'transcript-only') return 'Transcript is ready. Summary and cleanup are still running.';
+      return fallbackStage || job?.stage || 'Waiting for background processing.';
+    }
+
+    function processingStatusTitle(status, mode) {
+      const job = primaryProcessingJob(status);
+      switch (job?.state) {
+        case 'transcribing':
+          return mode === 'quick-thought' ? 'Transcribing quick thought' : 'Transcribing recording';
+        case 'transcript-only':
+          return 'Transcript ready, summarizing';
+        case 'diarizing':
+          return 'Separating speakers';
+        case 'summarizing':
+          return mode === 'quick-thought' ? 'Generating memo summary' : 'Generating meeting summary';
+        case 'saving':
+          return mode === 'quick-thought' ? 'Saving quick thought' : 'Saving recording';
+        default:
+          return status.processingTitle
+            ? `Processing ${status.processingTitle}`
+            : currentProcessingTitle(mode);
+      }
+    }
+
+    function processingPillLabel(job) {
+      switch (job?.state) {
+        case 'queued': return 'queued';
+        case 'transcribing': return 'transcribing';
+        case 'transcript-only': return 'transcript';
+        case 'diarizing': return 'analyzing';
+        case 'summarizing': return 'summary';
+        case 'saving': return 'saving';
+        case 'needs-review': return 'review';
+        case 'failed': return 'failed';
+        default: return 'processing';
+      }
+    }
+
     function renderProcessingJobs(jobs) {
       processingJobs = Array.isArray(jobs) ? jobs : [];
-      processingJobsEl.replaceChildren();
+      clearChildren(processingJobsEl);
 
       if (!processingJobs.length) {
-        processingSummary.textContent = '';
+        setText(processingSummary, '');
         processingBar.classList.remove('has-jobs');
         return;
       }
@@ -6150,7 +6241,7 @@
     }
 
     function updateJobsChip(activeCount) {
-      jobsCount.textContent = String(activeCount || 0);
+      setText(jobsCount, String(activeCount || 0));
       jobsButton.classList.toggle('active', (activeCount || 0) > 0);
     }
 
@@ -6311,10 +6402,15 @@
     }
 
     // ── Status polling ──
+    let statusCheckInFlight = false;
+
     async function checkStatus() {
+      if (statusCheckInFlight) return;
+      statusCheckInFlight = true;
       try {
-        const status = await invoke('cmd_status');
+        const status = await invoke('cmd_capture_status');
         const wasRecording = isRecording;
+        const wasStarting = isStarting;
         const wasProcessing = isProcessing;
         activationState = status.activation || activationState;
         const onboardingRoot = meetingsScroll.querySelector('.onboarding-content');
@@ -6323,6 +6419,7 @@
         }
         const mode = status.recordingMode || 'meeting';
         isRecording = status.recording;
+        isStarting = !!status.starting;
         isProcessing = !!status.processing;
         updateJobsChip(status.processingJobCount || 0);
         renderProcessingJobs(status.processingJobs || []);
@@ -6344,7 +6441,27 @@
           renderUpdateBanner();
         }
 
-        if (isRecording) {
+        if (isStarting && !isRecording) {
+          statusPill.className = 'status-pill starting';
+          statusPill.textContent = 'starting';
+          recordingBar.classList.remove('active');
+          processingBar.classList.add('active');
+          processingBar.classList.remove('has-jobs');
+          processingTitle.textContent = activeCallSession && !activeCallSession.dismissed
+            ? 'Starting call recording'
+            : currentProcessingTitle(mode).replace('Processing', 'Starting');
+          processingStage.textContent = activeCallSession && !activeCallSession.dismissed
+            ? 'Connecting to microphone and system audio...'
+            : 'Checking microphone and recording state...';
+          processingElapsed.textContent = '';
+          liveBar.classList.remove('active');
+          isLiveTranscript = false;
+          callBanner.classList.remove('active');
+          setFooterCaptureMode(true, 'starting');
+          if (!wasStarting && !wasRecording && !wasProcessing) {
+            startFastPoll();
+          }
+        } else if (isRecording) {
           statusPill.className = 'status-pill recording';
           const queueCount = status.processingJobCount || 0;
           const callHealth = status.callCaptureHealth;
@@ -6381,7 +6498,7 @@
           document.getElementById('btn-stop').disabled = !!stopRequested;
 
           // Speed up polling when recording starts
-          if (!wasRecording && !wasProcessing) {
+          if (!wasRecording && !wasStarting && !wasProcessing) {
             startFastPoll();
             playCue('start');
           }
@@ -6389,17 +6506,19 @@
           stopRequested = false;
           document.getElementById('btn-stop').disabled = false;
           statusPill.className = 'status-pill processing';
-          statusPill.textContent = 'processing';
-          processingTitle.textContent = status.processingTitle
-            ? `Processing ${status.processingTitle}`
-            : currentProcessingTitle(mode);
+          const job = primaryProcessingJob(status);
+          statusPill.textContent = processingPillLabel(job);
+          processingTitle.textContent = processingStatusTitle(status, mode);
           recordingBar.classList.remove('active');
           processingBar.classList.add('active');
           liveBar.classList.remove('active'); // T4
           isLiveTranscript = false;
           callBanner.classList.remove('active');
           setFooterCaptureMode(false);
-          processingStage.textContent = status.processingStage || 'Preparing transcript...';
+          processingStage.textContent =
+            status.processingStageLabel
+            || (job ? processingStageText(job, status.processingStage) : status.processingStage)
+            || 'Preparing transcript...';
 
           // Start elapsed timer when processing begins
           if (!wasProcessing) {
@@ -6416,7 +6535,7 @@
             }, 1000);
           }
 
-          if (!wasRecording && !wasProcessing) {
+          if (!wasRecording && !wasStarting && !wasProcessing) {
             startFastPoll();
           }
           if (wasRecording) {
@@ -6451,16 +6570,16 @@
 
           if (!isLiveTranscript) {
             stopRequested = false;
-            document.getElementById('btn-stop').disabled = false;
-            statusPill.className = 'status-pill';
-            statusPill.textContent = 'idle';
-            recordingLabel.textContent = 'Recording';
+            setDisabled(document.getElementById('btn-stop'), false);
+            setClassName(statusPill, 'status-pill');
+            setText(statusPill, 'idle');
+            setText(recordingLabel, 'Recording');
             recordingSourceHealth.classList.remove('active');
-            processingTitle.textContent = 'Processing recording';
+            setText(processingTitle, 'Processing recording');
             recordingBar.classList.remove('active');
             processingBar.classList.remove('active');
-            processingSummary.textContent = '';
-            processingJobsEl.replaceChildren();
+            setText(processingSummary, '');
+            clearChildren(processingJobsEl);
             quickNote.classList.remove('active');
             setFooterCaptureMode(false);
 
@@ -6471,10 +6590,10 @@
             // Clear processing elapsed timer
             if (processingTimerInterval) { clearInterval(processingTimerInterval); processingTimerInterval = null; }
             processingStartTime = null;
-            processingElapsed.textContent = '';
+            setText(processingElapsed, '');
 
             // Slow down polling when recording/processing/live stops (T5)
-            if (wasRecording || wasProcessing || wasLive) {
+            if (wasRecording || wasStarting || wasProcessing || wasLive) {
               stopFastPoll();
               loadMeetings(); // Refresh list
               if (jobsOverlay.classList.contains('active')) loadProcessingJobsCenter();
@@ -6488,12 +6607,14 @@
         }
       } catch (e) {
         console.error('Status:', e);
+      } finally {
+        statusCheckInFlight = false;
       }
     }
 
     function startFastPoll() {
       stopFastPoll();
-      pollInterval = setInterval(checkStatus, 150);
+      pollInterval = setInterval(checkStatus, 1000);
     }
 
     function stopFastPoll() {
@@ -6523,37 +6644,42 @@
         lastOutputKey = null;
         const retryBtn = document.getElementById('btn-retry-output');
         if (retryBtn) {
-          retryBtn.hidden = true;
-          retryBtn.dataset.jobId = '';
+          setHidden(retryBtn, true);
+          setDataset(retryBtn, 'jobId', '');
         }
+        const openBtn = document.getElementById('btn-open-output');
+        setHidden(openBtn, false);
         return;
       }
 
       const isCapture = notice.kind === 'preserved-capture';
       const isSaved = notice.kind === 'saved';
-      const nextKey = `${notice.kind}:${notice.path}:${notice.jobId || ''}`;
+      const noticeIdentity = notice.path || notice.detail || notice.title || '';
+      const nextKey = `${notice.kind}:${noticeIdentity}:${notice.jobId || ''}`;
       const isNewNotice = nextKey !== lastOutputKey;
       if (isNewNotice) {
         playCue(isSaved ? 'complete' : 'error');
         lastOutputKey = nextKey;
       }
-      outputNotice.classList.toggle('capture', isCapture);
-      outputNotice.classList.add('active');
-      outputNoticeIcon.textContent = isSaved ? '✓' : '!';
-      outputNoticeTitle.textContent = notice.title || (isCapture ? 'Capture preserved' : isSaved ? 'Saved meeting' : 'Needs attention');
-      outputNoticeDetail.textContent = notice.detail || '';
-      outputNoticePath.textContent = notice.path || '';
-      document.getElementById('btn-open-output').textContent = isCapture ? 'Open Capture' : isSaved ? 'Open Meeting' : 'Open';
+      setClassActive(outputNotice, 'capture', isCapture);
+      setClassActive(outputNotice, 'active', true);
+      setText(outputNoticeIcon, isSaved ? '✓' : '!');
+      setText(outputNoticeTitle, notice.title || (isCapture ? 'Capture preserved' : isSaved ? 'Saved meeting' : 'Needs attention'));
+      setText(outputNoticeDetail, notice.detail || '');
+      setText(outputNoticePath, notice.path || '');
+      const openOutputBtn = document.getElementById('btn-open-output');
+      setText(openOutputBtn, isCapture ? 'Open Capture' : isSaved ? 'Open Meeting' : 'Open');
+      setHidden(openOutputBtn, !notice.path);
       // Only saved notices auto-dismiss + can rely on click-to-dismiss; everything else
       // (preserved-capture, error, stale-recording, watch-failed, working-copy) needs the
       // user to acknowledge it explicitly, so show a Dismiss button for those cases.
       const dismissBtn = document.getElementById('btn-dismiss-output');
-      if (dismissBtn) dismissBtn.hidden = isSaved;
+      setHidden(dismissBtn, isSaved);
       const retryBtn = document.getElementById('btn-retry-output');
       if (retryBtn) {
         const showRetry = !!notice.jobId && notice.kind === 'preserved-capture';
-        retryBtn.hidden = !showRetry;
-        retryBtn.dataset.jobId = notice.jobId || '';
+        setHidden(retryBtn, !showRetry);
+        setDataset(retryBtn, 'jobId', notice.jobId || '');
       }
       if (isSaved) {
         markActivationNudgeShown('saved-artifact-draft');
@@ -6597,23 +6723,25 @@
       if (active) {
         footer.classList.remove('footer-hidden');
       }
-      footer.classList.toggle('capture-mode', active);
+      setClassActive(footer, 'capture-mode', active);
 
-      recordButton.disabled = active;
-      liveButton.disabled = active;
-      quickThoughtButton.disabled = active;
+      setDisabled(recordButton, active);
+      setDisabled(liveButton, active);
+      setDisabled(quickThoughtButton, active);
 
       if (active) {
         const tooltip = reason === 'live'
           ? 'Live transcript is already running. Use the live bar to stop it.'
-          : 'Finish the current recording before starting another capture.';
-        recordButton.title = tooltip;
-        liveButton.title = tooltip;
-        quickThoughtButton.title = tooltip;
+          : reason === 'starting'
+            ? 'Recording is starting. Wait for the recorder to finish connecting.'
+            : 'Finish the current recording before starting another capture.';
+        setTitle(recordButton, tooltip);
+        setTitle(liveButton, tooltip);
+        setTitle(quickThoughtButton, tooltip);
       } else {
-        recordButton.title = '';
-        liveButton.title = 'Start live transcription — ask your agent in Recall for coaching';
-        quickThoughtButton.title = '';
+        setTitle(recordButton, '');
+        setTitle(liveButton, 'Start live transcription — ask your agent in Recall for coaching');
+        setTitle(quickThoughtButton, '');
       }
     }
 
@@ -6913,7 +7041,16 @@
             openSettings.textContent = 'System Settings';
             openSettings.addEventListener('click', (event) => {
               event.stopPropagation();
-              window.__TAURI__.shell.open(item.settingsUrl);
+              // Route through the Rust `cmd_open_file` -> `open_target` ->
+              // `app.shell().open(...)` instead of `window.__TAURI__.shell.open()`
+              // because the JS shell plugin's `allow-open` permission validates
+              // URLs against a default regex that only matches http(s)/mailto/tel.
+              // The settingsUrl values from `macos_permissions.rs` use the
+              // `x-apple.systempreferences:` scheme, which the JS validator
+              // rejects silently. Issue #226.
+              invoke('cmd_open_file', { path: item.settingsUrl }).catch((err) => {
+                console.error('Open System Settings:', err);
+              });
             });
             actions.appendChild(openSettings);
           }
@@ -7124,19 +7261,39 @@
       return args ? invoke('cmd_start_recording', args) : invoke('cmd_start_recording');
     }
 
+    function showRecordingStartError(error) {
+      const detail = typeof error === 'string'
+        ? error
+        : (error?.message || String(error || 'Recording could not be started.'));
+      updateOutputNotice({
+        kind: 'error',
+        title: 'Recording not started',
+        detail,
+        path: '',
+      });
+    }
+
     document.getElementById('btn-record').addEventListener('click', async () => {
       try {
+        setFooterCaptureMode(true, 'starting');
+        startFastPoll();
         await startDesktopRecordingFromUi();
       } catch (e) {
         console.error('Record:', e);
+        showRecordingStartError(e);
+        setFooterCaptureMode(false);
       }
     });
 
     quickThoughtButton.addEventListener('click', async () => {
       try {
+        setFooterCaptureMode(true, 'starting');
+        startFastPoll();
         await invoke('cmd_start_recording', { mode: 'quick-thought' });
       } catch (e) {
         console.error('Quick thought:', e);
+        showRecordingStartError(e);
+        setFooterCaptureMode(false);
       }
     });
 
@@ -7262,7 +7419,12 @@
       retryBtn.textContent = 'Retrying';
       try {
         await invoke('cmd_retry_processing_job', { jobId });
-        await dismissOutputNotice();
+        // Retry changes the job back to queued before work starts. Do not call
+        // the backend dismiss command here: that races with the queued state and
+        // either no-ops or marks the wrong lifecycle event. Hide this stale notice
+        // locally; if the retry fails again, the worker will surface a fresh one.
+        clearOutputNoticeAutoDismiss();
+        updateOutputNotice(null);
         if (typeof loadProcessingJobsCenter === 'function') await loadProcessingJobsCenter();
         if (typeof startFastPoll === 'function') startFastPoll();
       } catch (err) {
@@ -8120,6 +8282,29 @@
             fill.style.width = '100%';
             text.textContent = result;
 
+            // Persist the chosen model to ALL whisper-backed surfaces:
+            // transcription (batch + recording pipeline) AND dictation.
+            // live_transcript.model defaults to empty which falls back to
+            // dictation.model per the comment in config.rs, so updating
+            // dictation propagates transitively.
+            //
+            // Before this, cmd_download_model only put the file on disk;
+            // a user picking "tiny" in onboarding would still have
+            // transcription.model="small" (default) and dictation.model=
+            // "base" (default) and Minutes would try to use models that
+            // were not downloaded. allaire surfaced the dictation half
+            // of this in the v0.17.0 ship feedback.
+            try {
+              await invoke('cmd_set_setting', { section: 'transcription', key: 'model', value: model });
+            } catch (settingErr) {
+              console.warn('onboarding: failed to persist transcription.model:', settingErr);
+            }
+            try {
+              await invoke('cmd_set_setting', { section: 'dictation', key: 'model', value: model });
+            } catch (settingErr) {
+              console.warn('onboarding: failed to persist dictation.model:', settingErr);
+            }
+
             root.querySelector('#step-model').classList.add('done');
             root.querySelector('#step-model-status').textContent = 'Done';
             root.querySelector('#step-model-body').classList.add('ui-hidden');
@@ -8163,9 +8348,13 @@
 
       root.querySelector('#btn-start-first-recording').addEventListener('click', async () => {
         try {
+          setFooterCaptureMode(true, 'starting');
+          startFastPoll();
           await invoke('cmd_start_recording');
         } catch (e) {
           console.error('First recording:', e);
+          showRecordingStartError(e);
+          setFooterCaptureMode(false);
         }
       });
     }
@@ -8266,8 +8455,14 @@
 
           document.getElementById('btn-record-upcoming').onclick = async () => {
             try {
+              setFooterCaptureMode(true, 'starting');
+              startFastPoll();
               await startDesktopRecordingFromUi();
-            } catch (e) { console.error('Record:', e); }
+            } catch (e) {
+              console.error('Record:', e);
+              showRecordingStartError(e);
+              setFooterCaptureMode(false);
+            }
           };
         } else {
           upcoming.classList.remove('active');
@@ -10283,6 +10478,14 @@
               }
             });
           }
+        } else if (/not found on PATH|not found in PATH|not found in common install/i.test(msg)) {
+          // The assistant needs an external agent CLI (Claude Code by
+          // default). It's OPTIONAL — the rest of the app works without it —
+          // so degrade with a calm note instead of a scary "Could not start"
+          // error for users who don't have an agent installed.
+          console.info('Recall: assistant agent not installed (optional):', msg);
+          recallLoading.querySelector('span').textContent =
+            'AI assistant is optional; install Claude Code to enable it.';
         } else {
           console.error('Recall spawn:', e);
           recallLoading.querySelector('span').textContent = 'Could not start: ' + msg;
@@ -10333,12 +10536,16 @@
 
     document.getElementById('btn-record-call').addEventListener('click', async () => {
       try {
+        setFooterCaptureMode(true, 'starting');
+        startFastPoll();
         // Mark the session as call-detection-initiated so stop_when_call_ends
         // knows this recording is eligible for the auto-stop prompt when the
         // call app exits. Manual `minutes record` / hotkey starts never set this.
         await invoke('cmd_start_recording', { intent: 'call', source: 'call_detect' });
       } catch (e) {
         console.error('Call recording:', e);
+        showRecordingStartError(e);
+        setFooterCaptureMode(false);
       }
     });
 
@@ -10467,19 +10674,19 @@
 
     function setButtonVisibility(button, visible, disabled = false) {
       if (!button) return;
-      button.hidden = !visible;
-      button.disabled = disabled;
+      setHidden(button, !visible);
+      setDisabled(button, disabled);
     }
 
     function renderUpdateBanner() {
       if (!updateBanner) return;
       const showBanner = updateState.available || ['checking', 'downloading', 'verifying', 'installing', 'ready', 'error'].includes(updateState.phase);
-      updateBanner.classList.toggle('active', showBanner);
+      setClassActive(updateBanner, 'active', showBanner);
       if (!showBanner) return;
 
-      updateBanner.classList.toggle('error-state', updateState.phase === 'error');
+      setClassActive(updateBanner, 'error-state', updateState.phase === 'error');
       const activeSpinner = ['checking', 'downloading', 'verifying', 'installing'].includes(updateState.phase);
-      updateBannerSpinner?.classList.toggle('active', activeSpinner);
+      setClassActive(updateBannerSpinner, 'active', activeSpinner);
 
       let title = 'Update available';
       let sub = updatePreambleText();
@@ -10536,39 +10743,43 @@
           break;
       }
 
-      if (updateBannerTitle) updateBannerTitle.textContent = title;
-      if (updateBannerSub) updateBannerSub.textContent = sub;
+      setText(updateBannerTitle, title);
+      setText(updateBannerSub, sub);
       if (updateBannerMeta) {
-        updateBannerMeta.textContent = meta;
-        updateBannerMeta.classList.toggle('active', showMeta);
+        setText(updateBannerMeta, meta);
+        setClassActive(updateBannerMeta, 'active', showMeta);
       }
-      if (updateBannerProgress) updateBannerProgress.classList.toggle('active', showProgress);
+      setClassActive(updateBannerProgress, 'active', showProgress);
       if (updateBannerProgressFill) {
-        updateBannerProgressFill.style.width = `${Math.max(0, Math.min(100, progressRatio * 100))}%`;
+        setStyleWidth(updateBannerProgressFill, `${Math.max(0, Math.min(100, progressRatio * 100))}%`);
       }
       if (updateBannerError) {
-        updateBannerError.textContent = updateState.phase === 'error' ? updateState.errorMessage || 'Update failed.' : '';
-        updateBannerError.classList.toggle('active', updateState.phase === 'error');
+        setText(updateBannerError, updateState.phase === 'error' ? updateState.errorMessage || 'Update failed.' : '');
+        setClassActive(updateBannerError, 'active', updateState.phase === 'error');
       }
       const showNotes = updateState.phase === 'available' && Boolean(updateState.body);
-      if (updateBannerNotes) updateBannerNotes.classList.toggle('active', showNotes);
+      setClassActive(updateBannerNotes, 'active', showNotes);
       if (showNotes && updateBannerNotesBody) {
-        renderMarkdownToElement(updateBannerNotesBody, updateState.body);
-        updateBannerNotesBody.querySelectorAll('a').forEach((a) => {
-          a.addEventListener('click', (e) => {
-            e.preventDefault();
-            window.__TAURI__.shell.open(a.href);
+        if (lastUpdateNotesBody !== updateState.body) {
+          renderMarkdownToElement(updateBannerNotesBody, updateState.body);
+          updateBannerNotesBody.querySelectorAll('a').forEach((a) => {
+            a.addEventListener('click', (e) => {
+              e.preventDefault();
+              window.__TAURI__.shell.open(a.href);
+            });
           });
-        });
+          lastUpdateNotesBody = updateState.body;
+        }
       } else if (updateBannerNotesBody) {
-        updateBannerNotesBody.textContent = '';
+        setText(updateBannerNotesBody, '');
+        lastUpdateNotesBody = null;
       }
 
       setButtonVisibility(startUpdateButton, updateState.phase === 'available');
       setButtonVisibility(retryUpdateButton, updateState.phase === 'error' && updateState.recoverable);
       setButtonVisibility(cancelUpdateButton, ['checking', 'downloading', 'verifying', 'installing'].includes(updateState.phase), !updateState.canCancel);
       setButtonVisibility(dismissUpdateButton, updateState.phase === 'available' || updateState.phase === 'error');
-      if (dismissUpdateButton) dismissUpdateButton.textContent = updateState.phase === 'error' ? 'Cancel' : 'Later';
+      setText(dismissUpdateButton, updateState.phase === 'error' ? 'Cancel' : 'Later');
     }
 
     function resetUpdateState() {
@@ -10898,6 +11109,38 @@
 
     function clearChildren(node) {
       while (node.firstChild) node.removeChild(node.firstChild);
+    }
+
+    // Idempotent DOM writes — skip when the value is unchanged. The status poll
+    // (checkStatus) reasserts identical idle text every 2s forever; on the main
+    // window (transparent + NSVisualEffectMaterial::Sidebar vibrancy) every text
+    // mutation forces WindowServer to re-blend the whole window, so unguarded
+    // no-op writes peg WindowServer while the app sits idle. These let an
+    // unchanged idle tick produce zero DOM churn. clearChildren() above is
+    // already idempotent (no-ops when the node is empty).
+    function setText(el, value) {
+      if (el && el.textContent !== value) el.textContent = value;
+    }
+    function setClassName(el, value) {
+      if (el && el.className !== value) el.className = value;
+    }
+    function setClassActive(el, name, active) {
+      if (el && el.classList.contains(name) !== active) el.classList.toggle(name, active);
+    }
+    function setDisabled(el, value) {
+      if (el && el.disabled !== value) el.disabled = value;
+    }
+    function setHidden(el, value) {
+      if (el && el.hidden !== value) el.hidden = value;
+    }
+    function setTitle(el, value) {
+      if (el && el.title !== value) el.title = value;
+    }
+    function setDataset(el, name, value) {
+      if (el && el.dataset[name] !== value) el.dataset[name] = value;
+    }
+    function setStyleWidth(el, value) {
+      if (el && el.style.width !== value) el.style.width = value;
     }
 
     function setBody(node, ...elements) {
@@ -12077,6 +12320,12 @@
       rerenderOpenArtifact(markdownText);
       mdViewerEditor.value = kind === 'json' ? formatJsonSource(markdownText) : markdownText;
       mdViewer.classList.add('active');
+      // The detail overlay is a fixed full-screen layer (z-index 120) — leaving it
+      // open would render the draft behind the meeting note. Close it so the
+      // newly-active md-viewer is actually visible.
+      if (detailOverlay.classList.contains('active')) {
+        detailOverlay.classList.remove('active');
+      }
       meetingsScroll.style.display = 'none';
       mdSearchWrap.style.display = 'none';
       footer.style.display = 'none';
@@ -12168,7 +12417,9 @@
           editable: true,
         });
         if (!shown) return;
-        showDetailFeedback(`Created ${draft.templateKind.replaceAll('-', ' ')} draft`, 'success');
+        // The detail overlay is closed by showMdViewer, so showDetailFeedback would
+        // render into a hidden element. The md-viewer opening with the draft contents
+        // is itself the confirmation that the draft was created.
       } catch (e) {
         console.error('Create artifact:', e);
         showDetailFeedback(`Could not create draft: ${e}`, 'error');
@@ -12332,6 +12583,27 @@
 
     // Restore panel state from previous session
     (async () => {
+      // The assistant auto-open below spawns the *configured* agent CLI
+      // (settings.assistant.agent, default "claude"). It's optional — when
+      // that agent isn't installed, skip ONLY the auto-open so the panel
+      // doesn't pop up and immediately fail to spawn. Everything else in the
+      // restore (recallRatio, last open document, last open meeting) is
+      // untouched. The assistant is still reachable manually, where it shows
+      // the calm "optional" note.
+      //
+      // NOTE: gate on the *configured* agent specifically — cmd_list_agents
+      // also enumerates shells (bash/zsh) that exist on every machine, so a
+      // bare "any agent installed?" check would never report unavailable.
+      let assistantAvailable = true;
+      try {
+        const [agents, settings] = await Promise.all([
+          invoke('cmd_list_agents'),
+          invoke('cmd_get_settings'),
+        ]);
+        const configured = settings?.assistant?.agent || 'claude';
+        assistantAvailable = Array.isArray(agents) && agents.some(a => a.name === configured);
+      } catch (_) { /* on any error, assume available and fall through */ }
+
       try {
         recallWorkspaceState = await invoke('cmd_get_recall_workspace_state');
       } catch (e) {
@@ -12339,7 +12611,7 @@
         recallWorkspaceState = null;
       }
       if (!recallWorkspaceState) {
-        if (localStorage.getItem('minutes.recallExpanded') === 'true') {
+        if (assistantAvailable && localStorage.getItem('minutes.recallExpanded') === 'true') {
           setTimeout(() => openRecall('assistant'), 500);
         }
         return;
@@ -12353,7 +12625,7 @@
         }
       }
 
-      if (recallWorkspaceState.recallExpanded) {
+      if (assistantAvailable && recallWorkspaceState.recallExpanded) {
         setTimeout(async () => {
           await openRecall('assistant');
           if (recallWorkspaceState.recallPhase) {

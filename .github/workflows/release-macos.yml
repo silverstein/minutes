@@ -114,6 +114,13 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
         run: cargo tauri build --features parakeet,metal --bundles app
 
+      - name: Refresh release helper scripts for manual reruns
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          git fetch origin main
+          git show origin/main:scripts/create-branded-dmg.sh > scripts/create-branded-dmg.sh
+          chmod +x scripts/create-branded-dmg.sh
+
       - name: Create DMG
         run: |
           VERSION="${RELEASE_TAG#v}"

@@ -36,6 +36,7 @@ pub struct Config {
     pub voice: VoiceConfig,
     pub live_transcript: LiveTranscriptConfig,
     pub recording: RecordingConfig,
+    pub retention: RetentionConfig,
     pub hooks: HooksConfig,
     pub knowledge: KnowledgeConfig,
     pub palette: PaletteConfig,
@@ -109,9 +110,47 @@ pub struct TranscriptionConfig {
     pub model_path: PathBuf,
     pub min_words: usize,
     pub language: Option<String>,
-    /// Silero VAD model name (resolved under model_path, e.g. "silero-v6.2.0" → ggml-silero-v6.2.0.bin).
+    /// Silero VAD model name (resolved under model_path, e.g. "silero-v6.2.0" -> ggml-silero-v6.2.0.bin).
     /// Set to empty string to disable VAD (falls back to energy-based silence stripping).
     pub vad_model: String,
+    /// VAD engine for the recording sidecar.
+    ///
+    /// **`"ort-silero"` (default, known-risk experimental, not
+    /// recommended as a general default)**. A 20-WAV stratified
+    /// screen of internal meeting audio truncated to 5 min each
+    /// found 6/20 samples had at least one substantive regression
+    /// vs whisper-silero. The Wilson 95% CI on the per-WAV rate is
+    /// [15%, 52%], with a 30% point estimate. Per-utterance the
+    /// rate is approximately 1.4% as secondary context. Regression
+    /// types observed: named-entity loss (`"Claude"` -> `"cloth"`,
+    /// real participant names redacted from this comment ->
+    /// nonsense words), nonword hallucination at chunk boundaries,
+    /// and content-word loss in the first ~30s of recordings.
+    ///
+    /// Mechanism: streaming Silero via ort, O(new_audio) per call.
+    /// Requires the `vad-ort` build feature AND
+    /// `silero-vad-v6.2.0.onnx` in `model_path`. About 2x faster
+    /// than whisper-silero on the recording sidecar's hot path
+    /// (median 2.16x on the same 20-WAV screen). Recommended only
+    /// for users who explicitly accept the regression tradeoff.
+    /// FSM tuning (candidates: max-chunk cap or chunk-boundary
+    /// smoothing) is needed before promotion to the general
+    /// default; see `PLAN-vad-refactor.md` and the harness at
+    /// `crates/core/examples/dogfood_vad_engines.rs`.
+    ///
+    /// **`"whisper-silero"`**: whisper-rs's bundled Silero,
+    /// full-buffer rescan per 100ms call. Slower; did not show the
+    /// longer-chunk regression class in the 20-WAV screen. Set this
+    /// in `~/.config/minutes/config.toml` to opt out of ort-silero
+    /// on a per-process basis.
+    ///
+    /// **Fallback chain**: when `"ort-silero"` is requested but the
+    /// `vad-ort` feature is off OR the ONNX is missing, the
+    /// dispatcher logs a warning and falls through to
+    /// `"whisper-silero"`. Unknown values log and fall through to
+    /// `"whisper-silero"` as well. Energy is the dispatcher's
+    /// emergency fallback; not a user-selectable engine here.
+    pub vad_engine: String,
     /// Enable noise reduction via nnnoiseless (RNNoise) before transcription.
     /// Requires the `denoise` feature flag. Default: true.
     pub noise_reduction: bool,
@@ -144,6 +183,21 @@ pub struct TranscriptionConfig {
     /// If left at the default generic name, Minutes still prefers model-specific
     /// tokenizer files such as `tdt-ctc-110m.tokenizer.vocab` when they exist.
     pub parakeet_vocab: String,
+    /// Cap (in seconds) on streaming-whisper partial transcriptions.
+    ///
+    /// Streaming whisper re-transcribes the entire accumulated utterance every
+    /// 2s for full-context partials. Cost is O(buffer_len) per partial, so a
+    /// long uninterrupted monologue will eventually take longer to transcribe
+    /// than the partial interval and saturate the CPU. When the accumulated
+    /// buffer exceeds this many seconds, partial passes are skipped — the
+    /// utterance still finalizes correctly via VAD/silence detection or the
+    /// caller's own utterance cap (`dictation.max_utterance_secs` or
+    /// `live_transcript.max_utterance_secs`); the live transcript just stops
+    /// refreshing during the long stretch.
+    ///
+    /// Default 30s matches the design note in `streaming_whisper.rs`. Raise
+    /// for long-form dictation; lower if you still see CPU pressure.
+    pub partial_max_secs: u32,
 }
 
 pub const VALID_PARAKEET_MODELS: &[&str] = &["tdt-ctc-110m", "tdt-600m"];
@@ -178,6 +232,12 @@ pub struct DiarizationConfig {
 pub struct SummarizationConfig {
     pub engine: String,
     pub agent_command: String,
+    /// Timeout for the `engine = "agent"` subprocess call (in seconds).
+    /// For long transcripts on local LLM agents (e.g. opencode running
+    /// against a 60k+ char input), the default 300s can be too short.
+    /// Issue #243: when this budget is exceeded the pipeline emits a
+    /// `processing_warnings` entry and promotes status to `degraded`.
+    pub agent_timeout_secs: u64,
     pub chunk_max_tokens: usize,
     pub ollama_url: String,
     pub ollama_model: String,
@@ -248,6 +308,31 @@ pub struct PrivacyConfig {
     pub hide_from_screen_share: bool,
 }
 
+/// Retention policy for raw audio artifacts.
+///
+/// Product stance: markdown transcripts and structured memory are the durable
+/// library. Raw audio is a temporary recovery/reprocessing layer unless a user
+/// explicitly pins it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RetentionConfig {
+    /// Keep successful recording audio for this many days by default.
+    pub successful_audio_days: u32,
+    /// Keep failed/needs-review audio longer so the user can recover it.
+    pub failed_audio_days: u32,
+    /// Honor `audio_retention: pinned` in meeting frontmatter.
+    pub keep_pinned_audio: bool,
+    /// Whether future cleanup runners may apply the policy automatically.
+    ///
+    /// The current implementation only previews cleanup candidates; destructive
+    /// apply paths must opt in explicitly.
+    pub auto_cleanup: bool,
+    /// Whether startup is allowed to trigger automatic cleanup.
+    pub cleanup_on_startup: bool,
+    /// Surface a storage warning when raw audio exceeds this many GiB.
+    pub warn_above_gb: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AssistantConfig {
@@ -271,6 +356,19 @@ impl Default for PrivacyConfig {
     fn default() -> Self {
         Self {
             hide_from_screen_share: true,
+        }
+    }
+}
+
+impl Default for RetentionConfig {
+    fn default() -> Self {
+        Self {
+            successful_audio_days: 30,
+            failed_audio_days: 90,
+            keep_pinned_audio: true,
+            auto_cleanup: false,
+            cleanup_on_startup: false,
+            warn_above_gb: 2,
         }
     }
 }
@@ -449,6 +547,9 @@ pub struct RecordingConfig {
     /// Allow Minutes to start a call capture even when the selected input
     /// looks like a plain microphone rather than a system-audio route.
     pub allow_degraded_call_capture: bool,
+    /// System-audio capture backend. "cpal" keeps the current loopback-device
+    /// path. "core-audio-tap" opts into Apple's macOS Process Tap backend.
+    pub capture_backend: String,
     /// Multi-source capture: explicit voice + call device names.
     /// When set, `device` is ignored. CLI `--source` flags override this.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -476,6 +577,7 @@ impl Default for RecordingConfig {
             device: None,
             auto_call_intent: false,
             allow_degraded_call_capture: false,
+            capture_backend: "cpal".into(),
             sources: None,
         }
     }
@@ -670,6 +772,7 @@ impl Default for Config {
             voice: VoiceConfig::default(),
             live_transcript: LiveTranscriptConfig::default(),
             recording: RecordingConfig::default(),
+            retention: RetentionConfig::default(),
             hooks: HooksConfig::default(),
             knowledge: KnowledgeConfig::default(),
             palette: PaletteConfig::default(),
@@ -686,6 +789,7 @@ impl Default for TranscriptionConfig {
             min_words: 3,
             language: None,
             vad_model: "silero-v6.2.0".into(),
+            vad_engine: "ort-silero".into(),
             noise_reduction: true,
             parakeet_binary: "parakeet".into(),
             parakeet_model: "tdt-600m".into(),
@@ -695,6 +799,7 @@ impl Default for TranscriptionConfig {
             parakeet_sidecar_enabled: false,
             parakeet_fp16_blacklist_reset: false,
             parakeet_vocab: "tdt-600m.tokenizer.vocab".into(),
+            partial_max_secs: 30,
         }
     }
 }
@@ -716,6 +821,7 @@ impl Default for SummarizationConfig {
         Self {
             engine: "none".into(),
             agent_command: "claude".into(),
+            agent_timeout_secs: 300,
             chunk_max_tokens: 4000,
             ollama_url: "http://localhost:11434".into(),
             ollama_model: "llama3.2".into(),
@@ -1206,6 +1312,14 @@ mod tests {
         );
         assert_eq!(config.transcription.model, "small");
         assert_eq!(config.transcription.min_words, 3);
+        // The recording sidecar's default VAD engine is the streaming
+        // ort-Silero impl. The dispatcher falls through to whisper-Silero
+        // when the `vad-ort` build feature is off or the ONNX is missing,
+        // so users on older builds see no behavior change. Pinning the
+        // string here means a future refactor cannot silently revert
+        // the default without a failing test.
+        assert_eq!(config.transcription.vad_engine, "ort-silero");
+        assert_eq!(config.transcription.vad_model, "silero-v6.2.0");
         assert_eq!(config.transcription.parakeet_binary, "parakeet");
         assert_eq!(config.transcription.parakeet_model, "tdt-600m");
         assert_eq!(config.transcription.parakeet_boost_limit, 0);
@@ -1227,6 +1341,7 @@ mod tests {
         assert!(!config.watch.extensions.is_empty());
         assert!(!config.recording.auto_call_intent);
         assert!(!config.recording.allow_degraded_call_capture);
+        assert_eq!(config.recording.capture_backend, "cpal");
     }
 
     #[test]

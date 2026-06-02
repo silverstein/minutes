@@ -44,6 +44,11 @@ const PARTIAL_INTERVAL_SAMPLES: usize = 16000 * 2; // Every 2 seconds
 /// Minimum audio length to attempt transcription (avoid noise-only runs).
 const MIN_TRANSCRIBE_SAMPLES: usize = 16000; // 1 second
 
+/// Default cap for partial transcription cost. See `StreamingWhisper::new` for
+/// the full reasoning — past this many seconds of accumulated audio, partial
+/// passes are skipped (the utterance still finalizes correctly).
+pub const DEFAULT_PARTIAL_MAX_SECS: u32 = 30;
+
 /// Result from a streaming transcription pass.
 #[derive(Debug, Clone)]
 pub struct StreamingResult {
@@ -70,11 +75,31 @@ pub struct StreamingWhisper {
     language: Option<String>,
     /// Whether we've created a state before (suppress init noise on subsequent calls).
     has_created_state: bool,
+    /// Cap on partial-transcription buffer length, in samples at 16kHz. Past
+    /// this length, partials are skipped (final still runs at end of utterance).
+    partial_max_samples: usize,
 }
 
 impl StreamingWhisper {
-    /// Create a new streaming transcriber.
+    /// Create a new streaming transcriber with the default partial cap (30s).
     pub fn new(language: Option<String>) -> Self {
+        Self::with_partial_max_secs(language, DEFAULT_PARTIAL_MAX_SECS)
+    }
+
+    /// Create a new streaming transcriber with a custom partial-cap limit
+    /// (in seconds). Past this many seconds of accumulated audio the partial
+    /// `state.full(...)` pass is skipped on each `feed()` call. The utterance
+    /// still finalizes correctly via `finalize()` when the caller (typically
+    /// VAD/silence detection in `live_transcript.rs`) decides the utterance
+    /// is over.
+    ///
+    /// Why this matters: partial cost is O(buffer_len). At ~200ms per 10s of
+    /// audio on Apple Silicon with the base model, a 60s buffer takes ~1.2s
+    /// per partial — slower than the 2s partial interval, so partials queue
+    /// up and fall further behind. 30s keeps each partial well under the
+    /// interval and stops the runaway.
+    pub fn with_partial_max_secs(language: Option<String>, partial_max_secs: u32) -> Self {
+        let partial_max_samples = (partial_max_secs as usize).saturating_mul(16000);
         Self {
             audio_buffer: Vec::with_capacity(16000 * 30), // pre-alloc 30s
             samples_since_partial: 0,
@@ -82,14 +107,31 @@ impl StreamingWhisper {
             n_threads: num_cpus(),
             language,
             has_created_state: false,
+            partial_max_samples,
         }
     }
 
     /// Feed audio samples. Returns a partial result if enough audio has
     /// accumulated since the last transcription.
+    ///
+    /// Once `audio_buffer` exceeds `partial_max_samples`, partials are skipped
+    /// to avoid CPU runaway (cost grows with buffer length). The utterance
+    /// still terminates correctly via `finalize()` when the caller detects
+    /// silence or hits its own utterance cap. From the user's perspective,
+    /// the live transcript stops refreshing during very long uninterrupted
+    /// speech, then catches up at finalize.
     pub fn feed(&mut self, samples: &[f32], ctx: &WhisperContext) -> Option<StreamingResult> {
         self.audio_buffer.extend_from_slice(samples);
         self.samples_since_partial += samples.len();
+
+        // Skip partial passes once the buffer is long enough that
+        // `state.full()` would dominate the partial interval.
+        if self.partial_max_samples > 0 && self.audio_buffer.len() > self.partial_max_samples {
+            // Reset the counter so we don't fire a partial the instant we drop
+            // back under the cap (which we won't until reset()).
+            self.samples_since_partial = 0;
+            return None;
+        }
 
         // Only transcribe if enough new audio AND enough total audio
         if self.samples_since_partial >= PARTIAL_INTERVAL_SAMPLES
@@ -260,5 +302,24 @@ mod tests {
         assert_eq!(sw.samples_since_partial, 0);
         assert!(sw.last_partial.is_empty());
         assert_eq!(sw.duration_secs(), 0.0);
+    }
+
+    #[test]
+    fn partial_max_samples_is_set_from_secs() {
+        let sw = StreamingWhisper::with_partial_max_secs(None, 45);
+        assert_eq!(sw.partial_max_samples, 45 * 16000);
+
+        let sw_default = StreamingWhisper::new(None);
+        assert_eq!(
+            sw_default.partial_max_samples,
+            DEFAULT_PARTIAL_MAX_SECS as usize * 16000
+        );
+    }
+
+    #[test]
+    fn zero_partial_max_disables_cap() {
+        let sw = StreamingWhisper::with_partial_max_secs(None, 0);
+        assert_eq!(sw.partial_max_samples, 0);
+        // The feed() check `partial_max_samples > 0` short-circuits the cap.
     }
 }

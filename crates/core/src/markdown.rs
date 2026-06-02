@@ -1,8 +1,9 @@
 use crate::config::Config;
 use crate::error::MarkdownError;
-use chrono::{DateTime, Local};
+use chrono::{DateTime, Local, LocalResult, NaiveDate, NaiveDateTime, TimeZone};
 use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use serde::de::{self, Visitor};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -30,6 +31,30 @@ pub enum OutputStatus {
     Complete,
     NoSpeech,
     TranscriptOnly,
+    /// Transcription completed but one or more summarization-side steps
+    /// fell back to empty output (e.g. agent timeout, empty summary).
+    /// Per-step failures are recorded in [`Frontmatter::processing_warnings`].
+    Degraded,
+}
+
+/// A non-fatal failure of a post-transcript pipeline step.
+///
+/// When any step degrades, the meeting's [`OutputStatus`] is promoted to
+/// [`OutputStatus::Degraded`] and the failure context is appended here so
+/// the markdown is honest about what is missing. Files are then greppable
+/// for "what needs re-running" (`status: degraded` in frontmatter).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ProcessingWarning {
+    /// The pipeline step that produced the warning.
+    pub step: String,
+    /// Machine-readable failure reason (e.g. `agent_timeout`, `empty_output`).
+    pub reason: String,
+    /// For timeout reasons, the budget that was exceeded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<u64>,
+    /// Optional human-readable detail.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -120,12 +145,19 @@ impl RecordingHealth {
 pub struct Frontmatter {
     pub title: String,
     pub r#type: ContentType,
+    #[serde(deserialize_with = "deserialize_local_datetime")]
     pub date: DateTime<Local>,
+    #[serde(default = "default_duration")]
     pub duration: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<OutputStatus>,
+    /// Per-step failure context when [`OutputStatus::Degraded`] applies.
+    /// Skipped from serialization when empty so successful runs do not
+    /// emit extra frontmatter noise. See issue #243.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub processing_warnings: Vec<ProcessingWarning>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -141,6 +173,7 @@ pub struct Frontmatter {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub device: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, deserialize_with = "deserialize_optional_local_datetime")]
     pub captured_at: Option<DateTime<Local>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context: Option<String>,
@@ -167,6 +200,95 @@ pub struct Frontmatter {
     /// Not serialized to YAML — only used for the NoSpeech hint in rendered markdown.
     #[serde(skip)]
     pub filter_diagnosis: Option<String>,
+}
+
+fn default_duration() -> String {
+    "0s".into()
+}
+
+fn deserialize_local_datetime<'de, D>(deserializer: D) -> Result<DateTime<Local>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserializer.deserialize_any(LocalDateTimeVisitor)
+}
+
+fn deserialize_optional_local_datetime<'de, D>(
+    deserializer: D,
+) -> Result<Option<DateTime<Local>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<String>::deserialize(deserializer)?;
+    value
+        .as_deref()
+        .map(parse_frontmatter_local_datetime)
+        .transpose()
+        .map_err(de::Error::custom)
+}
+
+struct LocalDateTimeVisitor;
+
+impl Visitor<'_> for LocalDateTimeVisitor {
+    type Value = DateTime<Local>;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("an RFC3339 timestamp, local timestamp, or YYYY-MM-DD date")
+    }
+
+    fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        parse_frontmatter_local_datetime(value).map_err(E::custom)
+    }
+
+    fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        self.visit_str(&value)
+    }
+}
+
+fn parse_frontmatter_local_datetime(raw: &str) -> Result<DateTime<Local>, String> {
+    let value = raw.trim();
+    if value.is_empty() {
+        return Err("empty date".into());
+    }
+
+    if let Ok(parsed) = DateTime::parse_from_rfc3339(value) {
+        return Ok(parsed.with_timezone(&Local));
+    }
+
+    for format in [
+        "%Y-%m-%dT%H:%M:%S%.f",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%d %H:%M:%S%.f",
+        "%Y-%m-%d %H:%M:%S",
+    ] {
+        if let Ok(naive) = NaiveDateTime::parse_from_str(value, format) {
+            return local_datetime_from_naive(naive);
+        }
+    }
+
+    if let Ok(date) = NaiveDate::parse_from_str(value, "%Y-%m-%d") {
+        if let Some(naive) = date.and_hms_opt(0, 0, 0) {
+            return local_datetime_from_naive(naive);
+        }
+    }
+
+    Err(format!(
+        "invalid date `{}` (expected YYYY-MM-DD, local timestamp, or RFC3339 timestamp)",
+        value
+    ))
+}
+
+fn local_datetime_from_naive(naive: NaiveDateTime) -> Result<DateTime<Local>, String> {
+    match Local.from_local_datetime(&naive) {
+        LocalResult::Single(dt) | LocalResult::Ambiguous(dt, _) => Ok(dt),
+        LocalResult::None => Err(format!("local datetime `{}` does not exist", naive)),
+    }
 }
 
 impl Frontmatter {
@@ -879,9 +1001,50 @@ mod tests {
             visibility: None,
             speaker_map: vec![],
             recording_health: None,
+            processing_warnings: Vec::new(),
             template: None,
             filter_diagnosis: None,
         }
+    }
+
+    #[test]
+    fn frontmatter_accepts_manual_date_only_values() {
+        use chrono::Datelike;
+
+        let input = "title: Test\ntype: meeting\ndate: 2024-05-14\n";
+        let parsed: Frontmatter = serde_yaml::from_str(input).unwrap();
+
+        assert_eq!(parsed.date.year(), 2024);
+        assert_eq!(parsed.date.month(), 5);
+        assert_eq!(parsed.date.day(), 14);
+        assert_eq!(parsed.duration, "0s");
+    }
+
+    #[test]
+    fn frontmatter_accepts_local_timestamps_without_offset() {
+        use chrono::{Datelike, Timelike};
+
+        let input = "title: Test\ntype: meeting\ndate: \"2026-05-14T10:30:45\"\n";
+        let parsed: Frontmatter = serde_yaml::from_str(input).unwrap();
+
+        assert_eq!(parsed.date.year(), 2026);
+        assert_eq!(parsed.date.month(), 5);
+        assert_eq!(parsed.date.day(), 14);
+        assert_eq!(parsed.date.hour(), 10);
+        assert_eq!(parsed.date.minute(), 30);
+        assert_eq!(parsed.date.second(), 45);
+    }
+
+    #[test]
+    fn frontmatter_keeps_rfc3339_dates_working() {
+        let input = "title: Test\ntype: meeting\ndate: 2026-03-17T12:00:00-07:00\nduration: 5m\n";
+        let parsed: Frontmatter = serde_yaml::from_str(input).unwrap();
+
+        assert_eq!(
+            parsed.date.with_timezone(&chrono::Utc).to_rfc3339(),
+            "2026-03-17T19:00:00+00:00"
+        );
+        assert_eq!(parsed.duration, "5m");
     }
 
     #[test]
@@ -1024,6 +1187,56 @@ mod tests {
 
         assert_eq!(reparsed.recording_health, frontmatter.recording_health);
         assert_eq!(split_frontmatter(&output).1.as_bytes(), body.as_bytes());
+    }
+
+    #[test]
+    fn processing_warnings_roundtrip_through_yaml() {
+        // Issue #243: degraded status + processing_warnings must serialize
+        // to YAML and round-trip back through deserialization without loss.
+        // Codex review of PR #249 v1 flagged missing end-to-end coverage.
+        let input = "---\ntitle: Failed Summary Meeting\ntype: meeting\ndate: 2026-04-01T10:00:00-07:00\nduration: 45m\nstatus: degraded\nprocessing_warnings:\n  - step: summarize\n    reason: summarize_failed\n    timeout_secs: 300\n    message: Summarization via agent `opencode` produced no output.\n---\n\n## Transcript\n\nHello.\n";
+        let (fm, body) = split_frontmatter(input);
+        let frontmatter: Frontmatter = serde_yaml::from_str(fm).unwrap();
+
+        assert_eq!(frontmatter.status, Some(OutputStatus::Degraded));
+        assert_eq!(frontmatter.processing_warnings.len(), 1);
+        let w = &frontmatter.processing_warnings[0];
+        assert_eq!(w.step, "summarize");
+        assert_eq!(w.reason, "summarize_failed");
+        assert_eq!(w.timeout_secs, Some(300));
+        assert!(w.message.as_ref().unwrap().contains("opencode"));
+
+        // Round-trip the structure through serde -> string -> serde and
+        // assert the deserialized form is identical.
+        let yaml = serde_yaml::to_string(&frontmatter).unwrap();
+        let output = format!("---\n{}---\n{}", yaml, body);
+        let (reparsed_fm, reparsed_body) = split_frontmatter(&output);
+        let reparsed: Frontmatter = serde_yaml::from_str(reparsed_fm).unwrap();
+        assert_eq!(reparsed.status, frontmatter.status);
+        assert_eq!(
+            reparsed.processing_warnings,
+            frontmatter.processing_warnings
+        );
+        assert_eq!(reparsed_body.as_bytes(), body.as_bytes());
+
+        // Verify the serialized YAML actually contains the kebab-case
+        // discriminant and the array (rather than skipping due to empty).
+        assert!(yaml.contains("status: degraded"));
+        assert!(yaml.contains("processing_warnings:"));
+        assert!(yaml.contains("step: summarize"));
+    }
+
+    #[test]
+    fn processing_warnings_omitted_when_empty() {
+        // Empty processing_warnings must not appear in the serialized
+        // YAML so successful runs don't pick up extra frontmatter noise.
+        let input = "---\ntitle: Normal Meeting\ntype: meeting\ndate: 2026-04-01T10:00:00-07:00\nduration: 5m\nstatus: complete\n---\n\n## Transcript\n\nHello.\n";
+        let (fm, _) = split_frontmatter(input);
+        let frontmatter: Frontmatter = serde_yaml::from_str(fm).unwrap();
+        assert!(frontmatter.processing_warnings.is_empty());
+
+        let yaml = serde_yaml::to_string(&frontmatter).unwrap();
+        assert!(!yaml.contains("processing_warnings"));
     }
 
     #[test]

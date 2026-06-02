@@ -1,7 +1,7 @@
 # Reproducible Release Notes
 
 Minutes now has a repeatable release-note generator at
-[scripts/release_notes.sh](/Users/silverbook/Sites/minutes/scripts/release_notes.sh).
+[scripts/release_notes.sh](/scripts/release_notes.sh).
 
 The goal is not fully automatic prose. The goal is a reproducible draft that
 always includes:
@@ -13,7 +13,7 @@ always includes:
 - `Known issues`
 
 That keeps every release aligned with
-[docs/RELEASE-CHANNELS.md](/Users/silverbook/Sites/minutes/docs/RELEASE-CHANNELS.md).
+[docs/RELEASE-CHANNELS.md](/docs/RELEASE-CHANNELS.md).
 
 ## How it works
 

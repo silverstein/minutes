@@ -9,7 +9,7 @@ Target meeting:
 - Job: `job-20260414144147744-79241-0`
 - Meeting audio recorded at `2026-04-14T14:20:35-07:00`
 - Production observation from `~/.minutes/logs/minutes.log`: `141,418 ms` transcribe step
-- Current job JSON points to `/Users/silverbook/meetings/2026-04-14-untitled-recording-mat.wav`
+- Current job JSON points to `/Users/you/meetings/2026-04-14-untitled-recording-mat.wav`
 
 Note: the handoff memo referenced `~/.minutes/jobs/job-20260414144147744-79241-0.wav`, but that file was not present during this investigation. The job JSON for the same job ID pointed to the meeting WAV under `~/meetings/`, and that artifact was used for all reruns.
 
@@ -25,8 +25,8 @@ cargo build --release -p minutes-cli --features parakeet
 Isolation strategy:
 
 - Each run used a fresh temporary `HOME` and `XDG_CONFIG_HOME`.
-- The temp config pointed `model_path` at the real local Parakeet assets under `/Users/silverbook/.minutes/models`.
-- The temp config set `engine = "parakeet"` and used the installed `/Users/silverbook/.local/bin/parakeet`.
+- The temp config pointed `model_path` at the real local Parakeet assets under `/Users/you/.minutes/models`.
+- The temp config set `engine = "parakeet"` and used the installed `/Users/you/.local/bin/parakeet`.
 - `diarization.engine = "none"` and `summarization.engine = "none"` to keep the run focused on raw transcription while still exercising the real `minutes process` path and structured logging.
 - The `transcribe` timing was read from each run's isolated `$HOME/.minutes/logs/minutes.log`.
 
@@ -92,7 +92,7 @@ Summary:
 
 The separate `parakeet-cpp-server` worktree already had a built Unix-socket `example-server` binary at:
 
-- `/Users/silverbook/Sites/parakeet-cpp-server/build/examples/server/example-server`
+- `/Users/you/Sites/parakeet-cpp-server/build/examples/server/example-server`
 
 The installed CLI binary and the server worktree binary were both Metal-capable:
 

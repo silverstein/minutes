@@ -3,9 +3,9 @@
 > Generated file. Do not edit by hand.
 > Source: manifest.json + crates/mcp/src/index.ts
 > Regenerate: node scripts/generate_llms_txt.mjs
-> Last generated: 2026-05-04
+> Last generated: 2026-06-02
 
-Minutes exposes 29 tools, 8 resources, and 6 prompt templates through the MCP server.
+Minutes exposes 31 tools, 8 resources, and 6 prompt templates through the MCP server.
 
 ## Install
 
@@ -269,6 +269,24 @@ Reference URL: https://useminutes.app/docs/mcp/tools#tool-qmd-collection-status
 Register the Minutes output directory as a QMD collection
 
 Reference URL: https://useminutes.app/docs/mcp/tools#tool-register-qmd-collection
+
+### Agent Event Bus
+
+<a id="tool-add-agent-annotation"></a>
+
+#### `add_agent_annotation`
+
+Append attributed agent commentary as an agent.annotation event, never editing meeting markdown or frontmatter (allowlist-gated by ~/.minutes/agents.allow)
+
+Reference URL: https://useminutes.app/docs/mcp/tools#tool-add-agent-annotation
+
+<a id="tool-get-agent-annotations"></a>
+
+#### `get_agent_annotations`
+
+Read append-only agent.annotation events separately from human-authored meeting markdown and frontmatter
+
+Reference URL: https://useminutes.app/docs/mcp/tools#tool-get-agent-annotations
 
 ## Resources
 

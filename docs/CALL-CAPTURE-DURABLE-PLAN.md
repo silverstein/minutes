@@ -199,7 +199,7 @@ The CLI remains valuable, but it should not be the primary owner of "just work" 
 
 ### 3. Route MCP call recordings through the desktop app when available
 
-Today MCP starts capture by spawning the CLI detached from [crates/mcp/src/index.ts](/Users/silverbook/Sites/minutes/crates/mcp/src/index.ts#L521).
+Today MCP starts capture by spawning the CLI detached from [crates/mcp/src/index.ts](/crates/mcp/src/index.ts#L521).
 
 That is fine for mic capture. It is the wrong long-term owner for native call capture.
 

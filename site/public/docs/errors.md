@@ -2,11 +2,11 @@
 
 > Generated file. Do not edit by hand.
 > Source: crates/core thiserror definitions
-> Last generated: 2026-05-04
+> Last generated: 2026-06-02
 
 This is the generated public catalog of stable Minutes core errors. It intentionally favors actionable, user-facing errors over generic wrapper variants.
 
-- Visible actionable errors: 55
+- Visible actionable errors: 56
 - Hidden low-signal wrappers: 16
 
 # CaptureError
@@ -126,6 +126,18 @@ Exact message:
 Source: `crates/core/src/error.rs`
 
 Reference URL: https://useminutes.app/docs/errors#error-transcribeerror-modelloaderror
+
+<a id="error-transcribeerror-modeltruncated"></a>
+
+## `TranscribeError::ModelTruncated`
+
+Exact message:
+
+> {path}" && minutes setup --model {model_name}
+
+Source: `crates/core/src/error.rs`
+
+Reference URL: https://useminutes.app/docs/errors#error-transcribeerror-modeltruncated
 
 <a id="error-transcribeerror-emptyaudio"></a>
 

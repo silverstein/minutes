@@ -410,12 +410,12 @@ pub fn warmup_active_backend(config: &Config) -> Result<BackendWarmupResult, Tra
 
         let stats = transcribe::warmup_parakeet(config)?;
         mark_backend_warm("parakeet", &stats.model);
-        return Ok(BackendWarmupResult {
+        Ok(BackendWarmupResult {
             backend_id: "parakeet".into(),
             model: stats.model,
             elapsed_ms: stats.elapsed_ms,
             used_gpu: stats.used_gpu,
-        });
+        })
     }
 
     #[cfg(not(feature = "parakeet"))]
@@ -424,31 +424,8 @@ pub fn warmup_active_backend(config: &Config) -> Result<BackendWarmupResult, Tra
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::parakeet_warmup_selected;
-    use crate::Config;
-
-    #[test]
-    fn parakeet_warmup_selection_includes_live_backend() {
-        let mut config = Config::default();
-        config.transcription.engine = "whisper".into();
-        config.live_transcript.backend = "parakeet".into();
-
-        assert!(parakeet_warmup_selected(&config));
-    }
-
-    #[test]
-    fn parakeet_warmup_selection_skips_non_parakeet_backends() {
-        let mut config = Config::default();
-        config.transcription.engine = "whisper".into();
-        config.live_transcript.backend = "apple-speech".into();
-
-        assert!(!parakeet_warmup_selected(&config));
-    }
-}
-
 #[cfg(feature = "parakeet")]
+#[allow(clippy::too_many_arguments)]
 pub fn benchmark_parakeet(
     helper_binary: &Path,
     binary: &str,
@@ -532,4 +509,28 @@ pub fn benchmark_parakeet(
             .map(|v| v.len())
             .unwrap_or(0),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parakeet_warmup_selected;
+    use crate::Config;
+
+    #[test]
+    fn parakeet_warmup_selection_includes_live_backend() {
+        let mut config = Config::default();
+        config.transcription.engine = "whisper".into();
+        config.live_transcript.backend = "parakeet".into();
+
+        assert!(parakeet_warmup_selected(&config));
+    }
+
+    #[test]
+    fn parakeet_warmup_selection_skips_non_parakeet_backends() {
+        let mut config = Config::default();
+        config.transcription.engine = "whisper".into();
+        config.live_transcript.backend = "apple-speech".into();
+
+        assert!(!parakeet_warmup_selected(&config));
+    }
 }

@@ -73,25 +73,55 @@ feature, so this only matters for unusual build configurations.
 ## Fastest Path on Apple Silicon
 
 If you want the shortest path from "I have a Mac" to "Minutes is using
-Parakeet locally on Metal," do this:
+Parakeet locally on Metal," do this. Each step is a separate command — do
+not paste TOML into the shell; step 4 writes a file.
+
+Prerequisites first (see [Prerequisites](#prerequisites) for details):
+- Full Xcode installed (Command Line Tools alone is not enough — Metal needs
+  the full Xcode shader compiler)
+- CMake 3.x. CMake 4.x trips both an atomics check and a new
+  `install(EXPORT)` strictness rule in parakeet.cpp's `axiom` submodule
+  (`target "axiom" ... requires target "hwy" that is not in any export set`).
+  Easiest fix: `brew install cmake@3` and prepend it on `PATH` for the
+  parakeet.cpp build. See [Troubleshooting](#troubleshooting).
 
 ```bash
-# 1. Build and install parakeet.cpp
+# 1. Build and install parakeet.cpp — clone OUTSIDE the Minutes repo
+mkdir -p ~/src && cd ~/src
 git clone --recursive https://github.com/Frikallo/parakeet.cpp
 cd parakeet.cpp
 make build
+mkdir -p ~/.local/bin
 cp build/bin/parakeet ~/.local/bin/
+# Also copy the warm-sidecar binary. Without this, live mode (minutes live
+# and the recording sidecar) falls back to spawning a fresh subprocess for
+# every utterance — visibly slow because the model has to reload each time.
+cp build/bin/example-server ~/.local/bin/
 
-# 2. Install the multilingual model through Minutes
-cd /Users/silverbook/Sites/minutes
+# 2. Build the Minutes CLI WITH the parakeet feature, then install it
+cd <path/to/your/minutes/checkout>     # e.g. ~/Sites/minutes
+cargo build --release -p minutes-cli --features parakeet
+mkdir -p ~/.local/bin
+cp target/release/minutes ~/.local/bin/minutes
+# Make sure ~/.local/bin is on PATH (add to ~/.zshrc if it isn't):
+#   export PATH="$HOME/.local/bin:$PATH"
+
+# 3. Download the multilingual model + Silero VAD weights
 minutes setup --parakeet
+```
 
-# 3. Edit ~/.config/minutes/config.toml
+4. Edit `~/.config/minutes/config.toml` so it contains the following.
+   The block goes **inside the file**, not into the shell:
+
+```toml
 [transcription]
 engine = "parakeet"
 parakeet_model = "tdt-600m"
-parakeet_binary = "/Users/you/.local/bin/parakeet"
+parakeet_binary = "/Users/<you>/.local/bin/parakeet"
 parakeet_vocab = "tdt-600m.tokenizer.vocab"
+# Reuse the warm example-server socket for live mode instead of spawning
+# a fresh subprocess per utterance. Requires step 1's example-server copy.
+parakeet_sidecar_enabled = true
 ```
 
 That gives you the validated multilingual path:
@@ -99,15 +129,9 @@ That gives you the validated multilingual path:
 - local `parakeet.cpp`
 - local Metal GPU acceleration on Apple Silicon
 
-If you want the smaller English-only model instead:
-
-```toml
-[transcription]
-engine = "parakeet"
-parakeet_model = "tdt-ctc-110m"
-parakeet_binary = "/Users/you/.local/bin/parakeet"
-parakeet_vocab = "tdt-ctc-110m.tokenizer.vocab"
-```
+If you want the smaller English-only model instead, set
+`parakeet_model = "tdt-ctc-110m"` and
+`parakeet_vocab = "tdt-ctc-110m.tokenizer.vocab"` in the same file.
 
 Minutes will continue to run locally either way.
 
@@ -259,8 +283,11 @@ make build
 # Replace the check_cxx_source_compiles block with an Apple arm64 short-circuit.
 # See: https://github.com/google/highway/issues/XXXX
 
-# Install the binary
+# Install the binaries
 cp build/bin/parakeet ~/.local/bin/
+# Warm-sidecar binary: required for live mode to reuse a single loaded
+# model across utterances instead of spawning a fresh subprocess each time.
+cp build/bin/example-server ~/.local/bin/
 ```
 
 ## Install Models
@@ -308,6 +335,7 @@ Edit `~/.config/minutes/config.toml`:
 engine = "parakeet"              # "whisper" (default) or "parakeet"
 parakeet_model = "tdt-600m"      # "tdt-ctc-110m" (English) or "tdt-600m" (multilingual v3)
 parakeet_binary = "/Users/you/.local/bin/parakeet"  # Prefer an absolute path for desktop app launches
+parakeet_sidecar_enabled = true  # Reuse warm example-server socket for live mode (requires example-server copied above)
 parakeet_boost_limit = 25        # Experimental: top graph-derived boost phrases (0 disables)
 parakeet_boost_score = 2.0       # Experimental tuning for parakeet.cpp --boost-score
 parakeet_fp16 = true             # Default on macOS Apple Silicon: ~35% faster transcription with lower GPU memory (see docs/designs/parakeet-perf-2026-04-14.md)
@@ -384,6 +412,32 @@ native VAD weights, or follow the manual download steps above.
 Google Highway's `FindAtomics.cmake` is incompatible with CMake 4.x on Apple Silicon.
 The atomics check fails because it forces `CMAKE_CXX_STANDARD 11` which conflicts with
 the project's C++20. Workaround: patch the check to short-circuit on `APPLE AND arm64`.
+
+### CMake 4.x axiom export-set error (build)
+
+On CMake 4.x you may also see:
+
+```
+CMake Error in third_party/axiom/CMakeLists.txt:
+  install(EXPORT "AxiomTargets" ...) includes target "axiom" which requires
+  target "hwy" that is not in any export set.
+```
+
+CMake 4.x tightened `install(EXPORT)` rules; parakeet.cpp's `axiom` submodule
+exports `axiom` but does not export its `hwy` dependency, which the new rule
+rejects. Easiest workaround is to build with CMake 3.x:
+
+```bash
+brew install cmake@3
+export PATH="$(brew --prefix cmake@3)/bin:$PATH"
+cmake --version    # confirm 3.x is now first
+cd ~/src/parakeet.cpp
+rm -rf build
+make build
+```
+
+Only the parakeet.cpp build needs CMake 3.x; you can leave CMake 4.x on
+`PATH` for the rest of your system once parakeet is built.
 
 ### Metal shader compiler not found (build)
 Requires full Xcode (not just Command Line Tools):

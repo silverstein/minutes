@@ -328,6 +328,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "audio_thread_priority"
+version = "0.35.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7b1b4a0adbf971420cca66a75361a1190f34a6762d66361e5cde03dda35d1ed3"
+dependencies = [
+ "cfg-if",
+ "libc",
+ "log",
+ "mach2 0.4.3",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "auto-launch"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -677,6 +690,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "cidre"
+version = "0.15.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0c903ff1729987d29e07295d2c5841993db25ff86cca43bee04505878d3ec1a7"
+dependencies = [
+ "cc",
+ "cidre-macros",
+]
+
+[[package]]
+name = "cidre-macros"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6facfeffa8b9792dc014bb4e65e364d13518b74e06783d56249810a3e48cfad7"
+
+[[package]]
 name = "clang-sys"
 version = "1.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -889,9 +918,9 @@ dependencies = [
 
 [[package]]
 name = "coreaudio-rs"
-version = "0.14.1"
+version = "0.14.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "16dd574a72a021b90c7656c474ea31d11a2f0366a8eff574186e761e0b9e3586"
+checksum = "7d5d7dca3ebcf65a035582c9ad4385371a9d9ee6537474d2a278f4e1e475bb58"
 dependencies = [
  "bitflags 2.11.0",
  "libc",
@@ -904,15 +933,17 @@ dependencies = [
 [[package]]
 name = "cpal"
 version = "0.18.0"
-source = "git+https://github.com/RustAudio/cpal.git?rev=8b152c39ea432a14b4e65625e20857884e41d277#8b152c39ea432a14b4e65625e20857884e41d277"
+source = "git+https://github.com/RustAudio/cpal.git?rev=33e05ec94b5670c6f02080acf3fd6d8ac21e37cd#33e05ec94b5670c6f02080acf3fd6d8ac21e37cd"
 dependencies = [
  "alsa",
+ "audio_thread_priority",
+ "block2",
  "coreaudio-rs",
  "dasp_sample",
  "jni",
  "js-sys",
  "libc",
- "mach2",
+ "mach2 0.6.0",
  "ndk",
  "ndk-context",
  "num-derive",
@@ -925,10 +956,9 @@ dependencies = [
  "objc2-core-foundation",
  "objc2-foundation",
  "pipewire",
- "wasm-bindgen",
- "wasm-bindgen-futures",
  "web-sys",
  "windows",
+ "windows-core 0.61.2",
 ]
 
 [[package]]
@@ -3021,12 +3051,18 @@ dependencies = [
 
 [[package]]
 name = "mach2"
-version = "0.5.0"
+version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6a1b95cd5421ec55b445b5ae102f5ea0e768de1f82bd3001e11f426c269c3aea"
+checksum = "d640282b302c0bb0a2a8e0233ead9035e3bed871f0b7e81fe4a1ec829765db44"
 dependencies = [
  "libc",
 ]
+
+[[package]]
+name = "mach2"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dae608c151f68243f2b000364e1f7b186d9c29845f7d2d85bd31b9ad77ad552b"
 
 [[package]]
 name = "markup5ever"
@@ -3171,7 +3207,7 @@ dependencies = [
 
 [[package]]
 name = "minutes-cli"
-version = "0.16.1"
+version = "0.18.5"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3197,10 +3233,11 @@ dependencies = [
 
 [[package]]
 name = "minutes-core"
-version = "0.16.1"
+version = "0.18.5"
 dependencies = [
  "base64 0.22.1",
  "chrono",
+ "cidre",
  "cpal",
  "crossbeam-channel",
  "dirs 6.0.0",
@@ -3237,7 +3274,7 @@ dependencies = [
 
 [[package]]
 name = "minutes-reader"
-version = "0.16.1"
+version = "0.18.5"
 dependencies = [
  "chrono",
  "schemars 1.2.1",
@@ -3610,6 +3647,7 @@ version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "13a380031deed8e99db00065c45937da434ca987c034e13b87e4441f9e4090be"
 dependencies = [
+ "bitflags 2.11.0",
  "objc2",
  "objc2-foundation",
 ]
@@ -7424,7 +7462,7 @@ dependencies = [
 
 [[package]]
 name = "whisper-guard"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "serde",
  "tracing",
@@ -7438,6 +7476,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2088172d00f936c348d6a72f488dc2660ab3f507263a195df308a3c2383229f6"
 dependencies = [
  "libc",
+ "tracing",
  "whisper-rs-sys",
 ]
 

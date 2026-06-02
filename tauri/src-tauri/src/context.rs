@@ -178,10 +178,35 @@ pub fn create_workspace(config: &Config) -> Result<PathBuf, String> {
     fs::create_dir_all(&workspace).map_err(|e| format!("Failed to create workspace: {}", e))?;
 
     let meetings_link = workspace.join("meetings");
-    if !meetings_link.exists() {
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(&config.output_dir, &meetings_link)
-            .map_err(|e| format!("Failed to symlink meetings dir: {}", e))?;
+    #[cfg(unix)]
+    {
+        // Path::exists() follows symlinks, so a dangling or stale symlink
+        // reports as nonexistent and the unconditional symlink() below
+        // would then fail with EEXIST. Inspect link metadata directly and
+        // replace the link if it is dangling or points away from the
+        // current output_dir (e.g. after the user moved their meetings
+        // directory in config, or after a cross-machine state restore).
+        let needs_create = match fs::symlink_metadata(&meetings_link) {
+            Ok(meta) if meta.file_type().is_symlink() => match fs::read_link(&meetings_link) {
+                Ok(target) if target == config.output_dir => false,
+                _ => {
+                    fs::remove_file(&meetings_link)
+                        .map_err(|e| format!("Failed to remove stale meetings symlink: {}", e))?;
+                    true
+                }
+            },
+            Ok(_) => {
+                return Err(format!(
+                    "{} exists but is not a symlink; refusing to overwrite",
+                    meetings_link.display()
+                ));
+            }
+            Err(_) => true,
+        };
+        if needs_create {
+            std::os::unix::fs::symlink(&config.output_dir, &meetings_link)
+                .map_err(|e| format!("Failed to symlink meetings dir: {}", e))?;
+        }
     }
 
     // Refresh assistant-local skill mirrors from the generated portable
@@ -477,12 +502,11 @@ pub fn write_assistant_context(workspace: &Path, config: &Config) -> Result<(), 
     let assistant_md = generate_assistant_context(config)?;
 
     // Preserve live transcript markers only if a session is actually active (V3).
-    // Don't trust stale markers in the file — verify via PID.
+    // Don't trust stale markers in the file — verify via PID. `inspect_pid_file`
+    // so a session holding the PID under a mandatory Windows lock isn't misread as
+    // inactive (which would strip the live markers mid-session). See #258.
     let lt_pid = minutes_core::pid::live_transcript_pid_path();
-    let live_actually_active = minutes_core::pid::check_pid_file(&lt_pid)
-        .ok()
-        .flatten()
-        .is_some();
+    let live_actually_active = minutes_core::pid::inspect_pid_file(&lt_pid).is_active();
 
     let content = if live_actually_active {
         let marker_start = "<!-- LIVE_TRANSCRIPT_START -->";

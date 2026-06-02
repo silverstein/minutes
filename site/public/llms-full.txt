@@ -2,20 +2,42 @@
 
 > Generated file. Do not edit by hand.
 > Source: manifest.json + crates/mcp/src/index.ts + site/lib/skills-catalog.json
-> Last generated: 2026-05-04
+> Last generated: 2026-06-02
 
 ## Product
 
 Minutes is an open-source meeting corpus you own. Record, transcribe, search, and query every meeting and voice memo on your own disk. No cloud, no vendor to outlive. Output is structured markdown in `~/meetings/` that Claude Desktop, Claude Code, Codex, Gemini CLI, Cursor, OpenCode, Pi, and any MCP-compatible client read from the same folder, without a proprietary SDK or API key. Ten years from now, `grep` still works on your corpus.
 
-29 tools • 7 resources • Interactive MCP App dashboard • Prompt templates
+31 tools • 7 resources • Interactive MCP App dashboard • Prompt templates
 
-**What's new in 0.16.1:**
-• **Local vocabulary.** Add proper nouns, names, and acronyms to `~/.minutes/vocabulary.toml`. Minutes passes them as weighted hints before transcription — names you care about are spelled right the first time. Manage with `minutes vocabulary add/list/suggest`.
-• **Dictation engine upgrades.** Parakeet and Apple Speech are now available as dictation backends alongside Whisper. Linux clipboard insertion via xdotool/xclip. Local recents memory for faster repeat phrases. Six macOS focus-reliability fixes so the target app regains focus cleanly after every dictation.
-• **macOS permission center.** The desktop app surfaces microphone, screen-recording, and accessibility entitlements in a dedicated settings panel, monitors for live permission changes, and opens the relevant System Settings pane on click.
-• **macOS main-window chrome.** Compact header, brand mark aligned with sidebar, window restored on dock-click, clean app quit through the Tauri runtime (no more macOS crash reports).
-• **Windows Recall fix.** The agent finder no longer picks the bare Unix shebang `claude` file over `claude.cmd` on Windows, fixing the os error 193 CreateProcessW crash in Recall (issue #205).
+**What's new in 0.18.5:**
+• **macOS: an idle Minutes no longer slows down your whole Mac.** When Minutes sat idle, usually hidden in the menu bar, its status refresh repainted the translucent main window every couple of seconds even when nothing had changed. On macOS that makes the window server re-blend the entire frosted-glass surface each time, so over a few hours it pegged a CPU core and made scrolling and switching apps stutter across the whole system. Idle refreshes now skip redundant redraws, so a hidden, idle Minutes leaves your Mac alone. Windows and Linux were not affected.
+• **The AI assistant is now optional.** If you do not have an agent CLI installed (Claude Code by default), Minutes no longer auto-opens the assistant panel and then fails to launch it. It degrades quietly, the rest of the app keeps working, and the assistant shows a calm note that it is optional. Thanks to Mike (@mquinn614) for the fix.
+
+**What's new in 0.18.4:**
+• **Windows: the app no longer hangs on quit.** Quitting on Windows (tray Quit, window close, any exit path) could leave the process alive indefinitely: window hidden, tray icon lingering, a Not Responding overlay, with Task Manager the only way out. An unconditional join on the assistant PTY reader thread blocked shutdown because Windows ConPTY never delivers EOF when the child is killed. The join is now bounded and then detached, so quit always completes within a moment. macOS and Linux were never affected. Thanks to Quinn (@mquinn614) for the precise diagnosis and the fix.
+
+**What's new in 0.18.3:**
+• **Windows live transcript no longer reports a frozen session.** On Windows, a live transcript session holds its PID file under a mandatory OS lock, which made status reads fail and report the session as inactive, so the in-app Live timer and line count froze at 0:00 and a concurrent recording could clobber the shared transcript file. Minutes now treats a held lock as proof the session is alive. macOS and Linux were never affected. Thanks to Quinn (@mquinn614) for the report and diagnosis.
+• **Richer MCP `get_meeting` output.** Structured meeting content returned over MCP is more complete.
+• **Clearer desktop recording feedback.** Recording-start failures are now surfaced instead of failing silently, and processing stages read more clearly.
+
+**Also new in 0.18.2:**
+• **Manual meeting ingest accepts normal YAML dates.** `minutes ingest` now accepts hand-authored frontmatter like `date: 2024-05-14` and local timestamps without an offset, while keeping existing RFC3339 timestamps working.
+• **Manual files no longer need a synthetic duration.** Ingested markdown that omits `duration` now defaults to `0s`, which is enough for knowledge-base extraction and avoids a second confusing validation failure.
+
+**Also new in 0.18.1:**
+• **Native-call recovery no longer strands usable audio.** If macOS native capture leaves recoverable `.voice.wav` / `.system.wav` stems but the primary `.mov` is missing, empty, or incomplete, Minutes now queues a processable recovery input instead of leaving the capture under `~/.minutes/native-captures`.
+• **Recovered native captures stay native.** Successful jobs preserve the source `.mov` artifact beside the meeting markdown rather than renaming it to `.wav`, so future reprocessing can rediscover and mix the sibling native-call stems correctly.
+• **Manual recovery is less confusing.** `minutes import <audio-file>` now accepts ordinary audio paths as a recovery alias for meeting processing, while `minutes process <path> --type meeting` remains supported.
+• **Artifact cleanup understands native sidecars.** Delete, archive, and retention logic now include preserved `.mov` artifacts and their native stem sidecars without double-counting shared stems.
+
+**Also new in 0.18.0:**
+• **More honest failed-capture output.** Near-silent recordings and long silent tails are guarded so Minutes does not present hallucinated non-speech markers or unrelated YouTube-style filler as real transcript content.
+• **Dual-AAC native-call .mov files transcribe correctly.** macOS call captures with separate voice/system AAC tracks are mixed before transcription instead of producing doubled-duration garble.
+• **Summarization timeouts degrade explicitly.** Meetings with transcript output but failed summary generation now show structured degraded status instead of pretending the meeting is complete.
+
+**Known follow-ups:** call-end auto-stop reliability (#129) and multi-party remote-speaker diarization quality (#169) remain open. This release focuses on Windows live transcript reliability and MCP output completeness; manual ingest/frontmatter compatibility shipped in 0.18.2 and native-capture recovery in 0.18.1.
 
 **Setup:** `npx minutes-mcp` gets you search, browsing, and the dashboard right away. For recording and transcription, Minutes can auto-install the CLI on first use, or you can install it yourself with `brew install silverstein/tap/minutes` or `cargo install minutes-cli`, then run `minutes setup --model tiny`, `minutes setup --parakeet`, or `minutes setup --demo`.
 
@@ -107,6 +129,8 @@ Minutes is an open-source meeting corpus you own. Record, transcribe, search, an
 - `open_dashboard` — Open the Meeting Intelligence Dashboard in the browser — visual overview of conversation memory Docs: https://useminutes.app/docs/mcp/tools#tool-open-dashboard
 - `ingest_meeting` — Extract facts from a meeting and update the knowledge base (person profiles, log, index) Docs: https://useminutes.app/docs/mcp/tools#tool-ingest-meeting
 - `knowledge_status` — Show the current state of the knowledge base — configuration, adapter, people count, log entries Docs: https://useminutes.app/docs/mcp/tools#tool-knowledge-status
+- `add_agent_annotation` — Append attributed agent commentary as an agent.annotation event, never editing meeting markdown or frontmatter (allowlist-gated by ~/.minutes/agents.allow) Docs: https://useminutes.app/docs/mcp/tools#tool-add-agent-annotation
+- `get_agent_annotations` — Read append-only agent.annotation events separately from human-authored meeting markdown and frontmatter Docs: https://useminutes.app/docs/mcp/tools#tool-get-agent-annotations
 
 ## Resource surface
 

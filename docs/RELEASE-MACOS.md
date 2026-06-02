@@ -1,7 +1,7 @@
 # Signed macOS Releases
 
 This repository ships a dedicated GitHub Actions workflow at
-[.github/workflows/release-macos.yml](/Users/silverbook/Sites/minutes/.github/workflows/release-macos.yml)
+[.github/workflows/release-macos.yml](/.github/workflows/release-macos.yml)
 to build a signed and notarized `Minutes.app` and `.dmg`.
 
 The goal is simple: a non-technical macOS user should be able to install
@@ -115,8 +115,8 @@ first and then run the same commands.
   binaries become a requirement later, track that separately instead of
   complicating this first trusted pipeline.
 - Windows desktop release guidance lives in
-  [docs/RELEASE-WINDOWS.md](/Users/silverbook/Sites/minutes/docs/RELEASE-WINDOWS.md).
+  [docs/RELEASE-WINDOWS.md](/docs/RELEASE-WINDOWS.md).
 - Channel and rollback rules live in
-  [docs/RELEASE-CHANNELS.md](/Users/silverbook/Sites/minutes/docs/RELEASE-CHANNELS.md).
+  [docs/RELEASE-CHANNELS.md](/docs/RELEASE-CHANNELS.md).
 - Reproducible release-note generation lives in
-  [docs/RELEASE-NOTES.md](/Users/silverbook/Sites/minutes/docs/RELEASE-NOTES.md).
+  [docs/RELEASE-NOTES.md](/docs/RELEASE-NOTES.md).

@@ -51,6 +51,13 @@ dist/
 !crates/assets/demo.wav
 !tests/eval/fixtures/audio/apple-speech-dictation.wav
 !tests/eval/fixtures/audio/apple-speech-meeting.wav
+# Exception: parity-test fixtures (deterministic WAVs derived from
+# demo.wav by examples/build_parity_fixtures.rs; committed so
+# reviewers can listen and confirm they match the test descriptions)
+!crates/assets/parity_brief_spike.wav
+!crates/assets/parity_three_utterances.wav
+!crates/assets/parity_low_volume.wav
+!crates/assets/parity_trailing_partial.wav
 
 # Whisper models (large, downloaded locally)
 models/

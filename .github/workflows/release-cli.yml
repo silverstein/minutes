@@ -61,6 +61,16 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
 
+      - name: Clean stale Windows native build cache
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          rm -rf \
+            target/debug/build/whisper-rs-sys-* \
+            target/release/build/whisper-rs-sys-* \
+            target/debug/build/knf-rs-sys-* \
+            target/release/build/knf-rs-sys-*
+
       - name: Build release binary
         run: cargo build --release -p minutes-cli --features ${{ matrix.features }} --target ${{ matrix.target }}
 

@@ -14,7 +14,12 @@
 //! ```
 
 use crate::config::Config;
+use crate::diarize::{CaptureSource, DiagnosticConfidence, FailureKind};
+use crate::markdown::{CaptureWarning, DiarizationPath, RecordingHealth};
+use crate::system_audio_backend::{system_audio_backend_for_config, ProbeResult, RouteDescription};
 use serde::{Deserialize, Serialize};
+
+const SYSTEM_AUDIO_PROBE_SECS: u32 = 5;
 
 /// A single health check result.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -33,11 +38,134 @@ pub fn check_all(config: &Config) -> Vec<HealthItem> {
         ffmpeg_status(),
         diarization_status(config),
         mic_status(),
+        check_system_audio_capture(config),
         calendar_status(config),
         watcher_status(config),
         output_dir_status(config),
         disk_space(config),
     ]
+}
+
+/// Probe the configured system-audio capture route, if any.
+///
+/// A missing route is not itself unhealthy: room meetings and memos are
+/// deliberately mic-only. A configured route that captures no signal is
+/// unhealthy because source-aware diarization depends on this stem.
+pub fn probe_system_audio_capture(
+    config: &Config,
+) -> Result<Option<(RouteDescription, ProbeResult)>, String> {
+    let Some(device_override) = crate::capture::resolve_system_audio_probe_device(config)? else {
+        return Ok(None);
+    };
+
+    let backend = system_audio_backend_for_config(config, device_override)
+        .map_err(|error| error.to_string())?;
+    let route = backend.current_route();
+    backend
+        .probe(SYSTEM_AUDIO_PROBE_SECS)
+        .map(|result| Some((route, result)))
+        .map_err(|error| error.to_string())
+}
+
+pub fn check_system_audio_capture(config: &Config) -> HealthItem {
+    match probe_system_audio_capture(config) {
+        Ok(None) => HealthItem {
+            label: "System audio capture".into(),
+            state: "ready".into(),
+            detail: "No system-audio source configured. Room and memo recordings use microphone capture only.".into(),
+            optional: true,
+        },
+        Ok(Some((route, result))) => health_item_for_system_audio_probe(Some(&route), &result),
+        Err(error) => HealthItem {
+            label: "System audio capture".into(),
+            state: "attention".into(),
+            detail: format!("System-audio probe could not start: {error}"),
+            optional: true,
+        },
+    }
+}
+
+pub fn health_item_for_system_audio_probe(
+    route: Option<&RouteDescription>,
+    result: &ProbeResult,
+) -> HealthItem {
+    let route_label = route
+        .and_then(|route| route.device_name.as_deref())
+        .unwrap_or("configured system-audio route");
+    let observed = &result.observed_signal;
+    let detail = if let Some(kind) = &result.failure_kind {
+        format!(
+            "Probe on '{route_label}' found {:?}: {} frame(s), max RMS {:.4}, avg RMS {:.4}.",
+            kind, observed.frames_captured, observed.max_rms, observed.avg_rms
+        )
+    } else {
+        format!(
+            "Probe on '{route_label}' captured signal: {} frame(s), max RMS {:.4}, avg RMS {:.4}.",
+            observed.frames_captured, observed.max_rms, observed.avg_rms
+        )
+    };
+
+    HealthItem {
+        label: "System audio capture".into(),
+        state: if result.failure_kind.is_none() {
+            "ready"
+        } else {
+            "attention"
+        }
+        .into(),
+        detail,
+        optional: true,
+    }
+}
+
+pub fn recording_health_for_skipped_system_audio_probe(reason: &str) -> RecordingHealth {
+    RecordingHealth {
+        voice_stem_active_ratio: None,
+        system_stem_active_ratio: None,
+        system_dominant_ratio: None,
+        capture_warnings: vec![CaptureWarning {
+            kind: FailureKind::Other {
+                code: "system-audio-probe-skipped".into(),
+            },
+            source: CaptureSource::System,
+            message: format!(
+                "System-audio readiness probe was skipped before recording. Operator reason: {}",
+                reason.trim()
+            ),
+            diagnostic_confidence: DiagnosticConfidence::Inferred,
+        }],
+        diarization_path: Some(DiarizationPath::None),
+    }
+}
+
+pub fn recording_health_for_system_audio_probe_failure(
+    route: Option<&RouteDescription>,
+    result: &ProbeResult,
+) -> RecordingHealth {
+    let kind = result.failure_kind.clone().unwrap_or(FailureKind::Other {
+        code: "probe-failed".into(),
+    });
+    let route_label = route
+        .and_then(|route| route.device_name.as_deref())
+        .unwrap_or("configured system-audio route");
+    RecordingHealth {
+        voice_stem_active_ratio: None,
+        system_stem_active_ratio: None,
+        system_dominant_ratio: None,
+        capture_warnings: vec![CaptureWarning {
+            kind,
+            source: CaptureSource::System,
+            message: format!(
+                "System-audio readiness probe failed before recording on '{}': {} frame(s), max RMS {:.4}, avg RMS {:.4}.",
+                route_label,
+                result.observed_signal.frames_captured,
+                result.observed_signal.max_rms,
+                result.observed_signal.avg_rms
+            ),
+            diagnostic_confidence: result.diagnostic_confidence,
+        }],
+        diarization_path: Some(DiarizationPath::None),
+    }
 }
 
 /// Check if the whisper model is downloaded and ready.
@@ -386,7 +514,7 @@ mod tests {
     fn test_check_all_returns_items() {
         let config = Config::default();
         let items = check_all(&config);
-        assert!(items.len() >= 5, "should have at least 5 health checks");
+        assert!(items.len() >= 6, "should have at least 6 health checks");
         for item in &items {
             assert!(!item.label.is_empty());
             assert!(
@@ -395,6 +523,75 @@ mod tests {
                 item.state
             );
         }
+    }
+
+    #[test]
+    fn system_audio_health_is_ready_when_no_route_configured() {
+        let config = Config::default();
+        let item = check_system_audio_capture(&config);
+
+        assert_eq!(item.label, "System audio capture");
+        assert_eq!(item.state, "ready");
+        assert!(item.optional);
+        assert!(item.detail.contains("No system-audio source configured"));
+    }
+
+    #[test]
+    fn system_audio_health_reports_probe_signal() {
+        let route = RouteDescription {
+            capture_backend: "cpal".into(),
+            device_name: Some("BlackHole 2ch".into()),
+        };
+        let result = ProbeResult {
+            observed_signal: crate::diarize::ObservedSignal {
+                frames_captured: 1_600,
+                max_rms: 0.02,
+                avg_rms: 0.01,
+            },
+            failure_kind: None,
+            diagnostic_confidence: DiagnosticConfidence::High,
+        };
+
+        let item = health_item_for_system_audio_probe(Some(&route), &result);
+
+        assert_eq!(item.state, "ready");
+        assert!(item.detail.contains("BlackHole 2ch"));
+        assert!(item.detail.contains("captured signal"));
+    }
+
+    #[test]
+    fn system_audio_health_reports_silent_probe() {
+        let result = ProbeResult {
+            observed_signal: crate::diarize::ObservedSignal {
+                frames_captured: 1_600,
+                max_rms: 0.0,
+                avg_rms: 0.0,
+            },
+            failure_kind: Some(FailureKind::Silent),
+            diagnostic_confidence: DiagnosticConfidence::Inferred,
+        };
+
+        let item = health_item_for_system_audio_probe(None, &result);
+
+        assert_eq!(item.state, "attention");
+        assert!(item.detail.contains("Silent"));
+        assert!(item.detail.contains("max RMS 0.0000"));
+    }
+
+    #[test]
+    fn skipped_system_audio_probe_health_records_reason() {
+        let health = recording_health_for_skipped_system_audio_probe("hotel Wi-Fi call");
+
+        assert_eq!(health.diarization_path, Some(DiarizationPath::None));
+        assert_eq!(health.capture_warnings.len(), 1);
+        assert_eq!(health.capture_warnings[0].source, CaptureSource::System);
+        assert!(matches!(
+            health.capture_warnings[0].kind,
+            FailureKind::Other { ref code } if code == "system-audio-probe-skipped"
+        ));
+        assert!(health.capture_warnings[0]
+            .message
+            .contains("hotel Wi-Fi call"));
     }
 
     #[test]
@@ -429,6 +626,11 @@ mod tests {
         } else {
             "sh".into()
         };
+        // The default `parakeet_model` is "tdt-600m"; the test was written
+        // when the default was "tdt-ctc-110m" and silently broke when the
+        // default moved. Pin the model explicitly so the install-dir lookup
+        // and the file fixtures agree regardless of future default changes.
+        config.transcription.parakeet_model = "tdt-ctc-110m".into();
 
         let install_dir = crate::parakeet::install_dir(&config, "tdt-ctc-110m");
         std::fs::create_dir_all(&install_dir).unwrap();

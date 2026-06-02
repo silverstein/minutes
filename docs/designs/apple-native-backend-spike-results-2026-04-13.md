@@ -13,7 +13,7 @@ Now that Minutes has a coordinator-shaped transcription runtime, should we immed
 
 Environment:
 - macOS on Apple Silicon
-- local `parakeet` binary: `/Users/silverbook/.local/bin/parakeet`
+- local `parakeet` binary: `/Users/you/.local/bin/parakeet`
 - model: `tdt-600m`
 - tokenizer: `tdt-600m.tokenizer.vocab`
 

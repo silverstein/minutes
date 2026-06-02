@@ -8,6 +8,11 @@ Thanks for your interest in contributing! Minutes is a solo project that welcome
 git clone https://github.com/silverstein/minutes.git
 cd minutes
 
+# One-time: point git at the repo's hooks (clippy + generated-docs drift
+# checks fire on pre-push). Without this, drift in site/lib/release.ts
+# or llms.txt only surfaces in CI after the push lands.
+git config core.hooksPath .beads/hooks
+
 # Rust (core engine + CLI)
 export CXXFLAGS="-I$(xcrun --show-sdk-path)/usr/include/c++/v1"  # macOS 26+
 cargo build

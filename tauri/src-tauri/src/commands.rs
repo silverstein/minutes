@@ -1398,6 +1398,21 @@ pub struct RecoveryItem {
     pub path: String,
     pub detail: String,
     pub retry_type: String,
+    pub modified_at: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecoveryRetryFailure {
+    pub path: String,
+    pub error: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecoveryRetryAllResult {
+    pub queued: usize,
+    pub failed: Vec<RecoveryRetryFailure>,
 }
 
 fn activation_state_path() -> PathBuf {
@@ -4038,6 +4053,7 @@ fn scan_recovery_items(config: &Config) -> Vec<RecoveryItem> {
                     path: current_wav.display().to_string(),
                     detail: "Minutes found an unfinished live capture that never made it through the pipeline.".into(),
                     retry_type: "meeting".into(),
+                    modified_at: system_time_to_rfc3339(modified),
                 },
             ));
         }
@@ -4063,6 +4079,7 @@ fn scan_recovery_items(config: &Config) -> Vec<RecoveryItem> {
                             "A live recording was preserved because capture or processing failed."
                                 .into(),
                         retry_type: "meeting".into(),
+                        modified_at: system_time_to_rfc3339(modified),
                     },
                 ));
             }
@@ -4088,6 +4105,7 @@ fn scan_recovery_items(config: &Config) -> Vec<RecoveryItem> {
                             path: path.display().to_string(),
                             detail: "A watched audio file failed to process and is waiting for manual retry.".into(),
                             retry_type: config.watch.r#type.clone(),
+                            modified_at: system_time_to_rfc3339(modified),
                         },
                     ));
                 }
@@ -5964,6 +5982,180 @@ pub fn cmd_recovery_items() -> serde_json::Value {
     serde_json::to_value(scan_recovery_items(&config)).unwrap_or(serde_json::json!([]))
 }
 
+fn recovery_retry_mode(retry_type: &str) -> Result<CaptureMode, String> {
+    match retry_type {
+        "meeting" => Ok(CaptureMode::Meeting),
+        "memo" => Ok(CaptureMode::QuickThought),
+        other => Err(format!("Unsupported recovery type: {}", other)),
+    }
+}
+
+fn recovery_queue_path(path: &Path, index: usize) -> PathBuf {
+    let ext = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or("wav");
+    let timestamp = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or_default();
+    minutes_core::jobs::jobs_dir().join(format!(
+        "recovery-{}-{}-{}.{}",
+        timestamp,
+        std::process::id(),
+        index,
+        ext
+    ))
+}
+
+fn move_recovery_file(src: &Path, dest: &Path) -> std::io::Result<()> {
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    match std::fs::rename(src, dest) {
+        Ok(()) => Ok(()),
+        Err(rename_error) => {
+            if let Err(copy_error) = std::fs::copy(src, dest) {
+                return Err(std::io::Error::new(
+                    copy_error.kind(),
+                    format!(
+                        "rename failed: {}; copy fallback failed: {}",
+                        rename_error, copy_error
+                    ),
+                ));
+            }
+            std::fs::remove_file(src)
+        }
+    }
+}
+
+fn move_recovery_stems(src_audio: &Path, dest_audio: &Path) -> std::io::Result<()> {
+    let Some(src_stems) = minutes_core::capture::stem_paths_for(src_audio) else {
+        return Ok(());
+    };
+    let Some(dest_stems) = minutes_core::capture::stem_paths_for(dest_audio) else {
+        return Ok(());
+    };
+
+    if src_stems.voice.exists() {
+        move_recovery_file(&src_stems.voice, &dest_stems.voice)?;
+    }
+    if src_stems.system.exists() {
+        move_recovery_file(&src_stems.system, &dest_stems.system)?;
+    }
+    Ok(())
+}
+
+fn move_recovery_capture_for_queue(src: &Path, index: usize) -> std::io::Result<PathBuf> {
+    let dest = recovery_queue_path(src, index);
+    move_recovery_file(src, &dest)?;
+    if let Err(error) = move_recovery_stems(src, &dest) {
+        move_recovery_file(&dest, src).ok();
+        move_recovery_stems(&dest, src).ok();
+        return Err(error);
+    }
+    Ok(dest)
+}
+
+#[tauri::command]
+pub fn cmd_retry_all_recovery(
+    app: tauri::AppHandle,
+    state: tauri::State<AppState>,
+) -> Result<RecoveryRetryAllResult, String> {
+    if recording_active(&state.recording) || state.starting.load(Ordering::Relaxed) {
+        return Err("Finish the current recording before retrying recovery items.".into());
+    }
+
+    let config = Config::load();
+    let items = scan_recovery_items(&config);
+    let mut queued = 0;
+    let mut first_job = None;
+    let mut failed = Vec::new();
+
+    for (index, item) in items.into_iter().enumerate() {
+        let audio_path = PathBuf::from(&item.path);
+        if !audio_path.exists() {
+            failed.push(RecoveryRetryFailure {
+                path: item.path,
+                error: "Recovery item no longer exists.".into(),
+            });
+            continue;
+        }
+
+        let mode = match recovery_retry_mode(&item.retry_type) {
+            Ok(mode) => mode,
+            Err(error) => {
+                failed.push(RecoveryRetryFailure {
+                    path: item.path,
+                    error,
+                });
+                continue;
+            }
+        };
+
+        let queued_audio_path = match move_recovery_capture_for_queue(&audio_path, index) {
+            Ok(path) => path,
+            Err(error) => {
+                failed.push(RecoveryRetryFailure {
+                    path: item.path,
+                    error: error.to_string(),
+                });
+                continue;
+            }
+        };
+
+        match minutes_core::jobs::enqueue_capture_job(
+            mode,
+            None,
+            queued_audio_path.clone(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        ) {
+            Ok(job) => {
+                if first_job.is_none() {
+                    first_job = Some(job.clone());
+                }
+                queued += 1;
+            }
+            Err(error) => {
+                move_recovery_file(&queued_audio_path, &audio_path).ok();
+                move_recovery_stems(&queued_audio_path, &audio_path).ok();
+                failed.push(RecoveryRetryFailure {
+                    path: item.path,
+                    error: error.to_string(),
+                });
+            }
+        }
+    }
+
+    if let Some(job) = first_job {
+        minutes_core::pid::set_processing_status(
+            job.stage.as_deref(),
+            Some(job.mode),
+            job.title.as_deref(),
+            Some(&job.id),
+            minutes_core::jobs::active_job_count(),
+        )
+        .ok();
+        sync_processing_indicator(&state.processing, &state.processing_stage);
+        spawn_processing_worker(
+            app,
+            state.processing.clone(),
+            state.processing_stage.clone(),
+            state.latest_output.clone(),
+            state.activation_progress.clone(),
+            state.completion_notifications_enabled.clone(),
+        );
+    }
+
+    Ok(RecoveryRetryAllResult { queued, failed })
+}
+
 #[tauri::command]
 pub fn cmd_retry_recovery(
     state: tauri::State<AppState>,
@@ -5979,10 +6171,15 @@ pub fn cmd_retry_recovery(
         return Err(format!("Recovery item not found: {}", path));
     }
 
-    let ct = match content_type.as_str() {
-        "meeting" => ContentType::Meeting,
-        "memo" => ContentType::Memo,
-        other => return Err(format!("Unsupported recovery type: {}", other)),
+    let ct = match recovery_retry_mode(content_type.as_str())? {
+        CaptureMode::Meeting => ContentType::Meeting,
+        CaptureMode::QuickThought => ContentType::Memo,
+        other => {
+            return Err(format!(
+                "Unsupported recovery mode for direct retry: {:?}",
+                other
+            ))
+        }
     };
 
     // Run pipeline on a background thread so the UI stays responsive
@@ -9154,6 +9351,23 @@ mod tests {
         assert_eq!(items.len(), 2);
         assert!(items.iter().any(|item| item.kind == "watch-failed"));
         assert!(items.iter().any(|item| item.kind == "preserved-capture"));
+    }
+
+    #[test]
+    fn move_recovery_capture_for_queue_preserves_extension_and_removes_source() {
+        with_temp_home(|home| {
+            let failed_dir = home.join("watch").join("failed");
+            std::fs::create_dir_all(&failed_dir).unwrap();
+            let source = failed_dir.join("voice-note.m4a");
+            std::fs::write(&source, "audio").unwrap();
+
+            let queued = move_recovery_capture_for_queue(&source, 0).unwrap();
+
+            assert!(!source.exists());
+            assert_eq!(queued.extension().and_then(|ext| ext.to_str()), Some("m4a"));
+            assert!(queued.starts_with(minutes_core::jobs::jobs_dir()));
+            assert_eq!(std::fs::read_to_string(&queued).unwrap(), "audio");
+        });
     }
 
     #[test]

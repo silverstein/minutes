@@ -3010,6 +3010,12 @@
       gap: 12px;
     }
 
+    .recovery-header-actions {
+      display: flex;
+      gap: 8px;
+      flex-shrink: 0;
+    }
+
     .recovery-title {
       font-size: 18px;
       font-family: var(--font-display);
@@ -4691,7 +4697,10 @@
           <div class="recovery-sub" id="recovery-subtitle">Retry preserved captures and watched files that failed to
             process, or open them directly in a folder.</div>
         </div>
-        <button class="btn btn-secondary btn-sm" id="btn-recovery-close">Close</button>
+        <div class="recovery-header-actions">
+          <button class="btn btn-secondary btn-sm" id="btn-recovery-retry-all" disabled>Retry all</button>
+          <button class="btn btn-secondary btn-sm" id="btn-recovery-close">Close</button>
+        </div>
       </div>
       <div class="recovery-scroll" id="recovery-scroll">
         <div class="recovery-empty">No recovery items right now.</div>
@@ -5619,6 +5628,7 @@
     const recoveryCount = document.getElementById('recovery-count');
     const recoveryScroll = document.getElementById('recovery-scroll');
     const recoverySubtitle = document.getElementById('recovery-subtitle');
+    const recoveryRetryAllButton = document.getElementById('btn-recovery-retry-all');
     const recordButton = document.getElementById('btn-record');
     const liveButton = document.getElementById('btn-live');
     const quickThoughtButton = document.getElementById('btn-quick-thought');
@@ -5657,6 +5667,7 @@
     let processingJobs = [];
     let readinessItems = [];
     let recoveryItems = [];
+    let retryingAllRecovery = false;
     let jobsHistory = [];
     let notifyOnCompletion = true;
     let playCaptureCues = true;
@@ -6108,6 +6119,7 @@
       return date.toLocaleString([], {
         month: 'short',
         day: 'numeric',
+        year: 'numeric',
         hour: 'numeric',
         minute: '2-digit',
       });
@@ -6643,6 +6655,64 @@
       recoveryOverlay.classList.remove('active');
     }
 
+    function updateRecoveryRetryAllButton() {
+      const count = recoveryItems.length;
+      recoveryRetryAllButton.hidden = count === 0;
+      recoveryRetryAllButton.disabled = retryingAllRecovery || count === 0;
+      recoveryRetryAllButton.textContent = retryingAllRecovery
+        ? 'Retrying...'
+        : count > 1
+          ? `Retry all (${count})`
+          : 'Retry all';
+    }
+
+    async function retryAllRecoveryItems() {
+      if (retryingAllRecovery || !recoveryItems.length) return;
+      retryingAllRecovery = true;
+      updateRecoveryRetryAllButton();
+      let closeAfterSuccess = false;
+      let delayReset = false;
+
+      try {
+        const result = await invoke('cmd_retry_all_recovery');
+        const queuedCount = Number(result?.queued || 0);
+        if (result?.failed?.length) {
+          console.error('Retry all recovery failures:', result.failed);
+        }
+        await loadRecoveryItems();
+        startFastPoll();
+        if (queuedCount > 0) {
+          closeAfterSuccess = true;
+          recoveryRetryAllButton.hidden = false;
+          recoveryRetryAllButton.disabled = true;
+          recoveryRetryAllButton.textContent = `Queued ${queuedCount}`;
+          window.setTimeout(() => {
+            closeRecovery();
+            retryingAllRecovery = false;
+            updateRecoveryRetryAllButton();
+          }, 450);
+        } else {
+          delayReset = true;
+          recoveryRetryAllButton.hidden = false;
+          recoveryRetryAllButton.disabled = true;
+          recoveryRetryAllButton.textContent = 'Nothing queued';
+          window.setTimeout(updateRecoveryRetryAllButton, 1200);
+        }
+      } catch (e) {
+        console.error('Retry all recovery:', e);
+        delayReset = true;
+        recoveryRetryAllButton.hidden = false;
+        recoveryRetryAllButton.disabled = true;
+        recoveryRetryAllButton.textContent = 'Retry failed';
+        window.setTimeout(updateRecoveryRetryAllButton, 1200);
+      } finally {
+        if (!closeAfterSuccess) {
+          retryingAllRecovery = false;
+          if (!delayReset) updateRecoveryRetryAllButton();
+        }
+      }
+    }
+
     function permissionReadinessState(row) {
       if (!row) return 'attention';
       if (row.status === 'unsupported') return 'unsupported';
@@ -6844,6 +6914,7 @@
 
       recoveryCount.textContent = recoveryItems.length;
       recoveryButton.classList.toggle('active', recoveryItems.length > 0);
+      updateRecoveryRetryAllButton();
 
       recoveryScroll.replaceChildren();
       if (!recoveryItems.length) {
@@ -6866,7 +6937,7 @@
 
         const title = document.createElement('div');
         title.className = 'recovery-item-title';
-        title.textContent = item.title || 'Recovery item';
+        title.textContent = formatJobTimestamp(item.modified_at) || item.title || 'Recovery item';
 
         const kind = document.createElement('div');
         kind.className = 'recovery-kind';
@@ -7212,6 +7283,7 @@
     recoveryButton.addEventListener('click', () => {
       recoveryOverlay.classList.add('active');
     });
+    recoveryRetryAllButton.addEventListener('click', retryAllRecoveryItems);
     document.getElementById('btn-recovery-close').addEventListener('click', closeRecovery);
     recoveryOverlay.addEventListener('click', (e) => {
       if (e.target === recoveryOverlay) closeRecovery();

@@ -77,9 +77,14 @@ nnnoiseless = "0.5"
 # Channels (for streaming audio)
 crossbeam-channel = "0.5"
 
-# Speaker diarization (native, no Python) — patched fork fixes i16→f32
-# normalization bug and trailing speech flush in get_segments
-pyannote-rs = { git = "https://github.com/gregoire22enpc/pyannote-rs", rev = "ae9fbc1" }
+# Speaker diarization (native, no Python). Use the crates.io release so the
+# manifest stays `cargo publish`-able. The only known upstream bug (i16→f32
+# normalization + trailing-speech flush in get_segments) lives in a function we
+# deliberately bypass: diarize.rs runs its own ONNX segmentation via `ort` and
+# only consumes pyannote-rs's EmbeddingExtractor, which is byte-identical between
+# 0.3.4 and the old patched fork. See diarize.rs `segment_speech` / `get_segments`
+# comments. (Previously pinned to gregoire22enpc/pyannote-rs@ae9fbc1.)
+pyannote-rs = "0.3.4"
 
 # ONNX Runtime + ndarray (used directly for segmentation model — pyannote-rs
 # has a normalisation bug so we bypass get_segments for the segmentation step)

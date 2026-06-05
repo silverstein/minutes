@@ -7884,8 +7884,13 @@ pub fn cmd_pty_resize(
 
 #[tauri::command]
 pub fn cmd_pty_kill(state: tauri::State<AppState>, session_id: String) -> Result<(), String> {
-    let mut manager = state.pty_manager.lock().map_err(|_| "Lock failed")?;
-    manager.kill_session(&session_id);
+    let session = {
+        let mut manager = state.pty_manager.lock().map_err(|_| "Lock failed")?;
+        manager.take_session(&session_id)
+    };
+    if let Some(session) = session {
+        crate::pty::kill_session(session);
+    }
     Ok(())
 }
 

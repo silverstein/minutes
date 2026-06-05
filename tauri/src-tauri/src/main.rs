@@ -39,11 +39,17 @@ static CLEAN_EXIT_STARTED: AtomicBool = AtomicBool::new(false);
 static MACOS_TERMINATE_APP_HANDLE: OnceLock<tauri::AppHandle> = OnceLock::new();
 
 fn cleanup_before_process_exit(app: &tauri::AppHandle) {
-    if let Some(state) = app.try_state::<commands::AppState>() {
-        if let Ok(mut mgr) = state.pty_manager.lock() {
-            mgr.kill_all();
-        }
-    }
+    let sessions = app
+        .try_state::<commands::AppState>()
+        .and_then(|state| {
+            state
+                .pty_manager
+                .lock()
+                .ok()
+                .map(|mut mgr| mgr.take_all_sessions())
+        })
+        .unwrap_or_default();
+    crate::pty::kill_all(sessions);
     minutes_core::parakeet_sidecar::shutdown_global_parakeet_sidecar();
 }
 

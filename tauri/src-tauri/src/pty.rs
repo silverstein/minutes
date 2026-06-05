@@ -8,6 +8,20 @@ use tauri::Emitter;
 pub const ASSISTANT_SESSION_ID: &str = "assistant";
 const MAX_SESSIONS: usize = 1;
 
+#[cfg(windows)]
+fn terminate_process_tree(process_id: Option<u32>) {
+    let Some(process_id) = process_id else {
+        return;
+    };
+    let process_id = process_id.to_string();
+    let _ = std::process::Command::new("taskkill")
+        .args(["/T", "/F", "/PID", process_id.as_str()])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+}
+
 pub struct PtySession {
     pub master: Box<dyn portable_pty::MasterPty + Send>,
     pub writer: Box<dyn Write + Send>,
@@ -238,53 +252,54 @@ impl PtyManager {
             .map_err(|e| format!("Resize failed: {}", e))
     }
 
-    pub fn kill_session(&mut self, session_id: &str) -> Option<PathBuf> {
-        if let Some(mut session) = self.sessions.remove(session_id) {
-            session.child.kill().ok();
-            if let Some(handle) = session.reader_handle.take() {
-                // The reader thread blocks on `reader.read()` of the PTY
-                // master and only breaks on EOF / error. On Windows ConPTY,
-                // killing the child process does NOT deliver EOF to the
-                // master — the pseudoconsole keeps the pipe open — so the
-                // read never returns and an unconditional `join()` here hangs
-                // forever. Because every quit path runs
-                // `cleanup_before_process_exit` -> `kill_all` -> `kill_session`,
-                // that wedges the whole app on exit (window hides, process
-                // never dies, "Not Responding" — Task Manager required).
-                //
-                // On macOS/Unix killing the child closes the slave PTY, the
-                // master read returns Ok(0), and the thread exits immediately,
-                // so the join is instant there (which is why this only bites
-                // on Windows).
-                //
-                // Bounded wait, then detach: give the reader a brief window to
-                // exit cleanly (it does wherever EOF is delivered), otherwise
-                // drop the handle. The reader holds no lock the rest of the
-                // app needs and dies with the process on exit, so detaching is
-                // safe and shutdown can never wedge on it.
-                let deadline = std::time::Instant::now() + std::time::Duration::from_millis(300);
-                while !handle.is_finished() && std::time::Instant::now() < deadline {
-                    std::thread::sleep(std::time::Duration::from_millis(5));
-                }
-                if handle.is_finished() {
-                    let _ = handle.join();
-                }
-                // else: detach — never block on a ConPTY reader that won't see EOF.
-            }
-            Some(session.context_dir)
-        } else {
-            None
-        }
+    pub fn take_session(&mut self, session_id: &str) -> Option<PtySession> {
+        self.sessions.remove(session_id)
     }
 
-    pub fn kill_all(&mut self) -> Vec<PathBuf> {
-        let ids: Vec<String> = self.sessions.keys().cloned().collect();
-        let mut dirs = Vec::new();
-        for id in ids {
-            if let Some(dir) = self.kill_session(&id) {
-                dirs.push(dir);
-            }
-        }
-        dirs
+    pub fn take_all_sessions(&mut self) -> Vec<PtySession> {
+        self.sessions.drain().map(|(_, session)| session).collect()
     }
+}
+
+pub fn kill_session(mut session: PtySession) -> PathBuf {
+    #[cfg(windows)]
+    let process_id = session.child.process_id();
+    session.child.kill().ok();
+    #[cfg(windows)]
+    terminate_process_tree(process_id);
+    if let Some(handle) = session.reader_handle.take() {
+        // The reader thread blocks on `reader.read()` of the PTY
+        // master and only breaks on EOF / error. On Windows ConPTY,
+        // killing the child process does NOT deliver EOF to the
+        // master — the pseudoconsole keeps the pipe open — so the
+        // read never returns and an unconditional `join()` here hangs
+        // forever. Because every quit path runs
+        // `cleanup_before_process_exit` -> `kill_all` -> `kill_session`,
+        // that wedges the whole app on exit (window hides, process
+        // never dies, "Not Responding" — Task Manager required).
+        //
+        // On macOS/Unix killing the child closes the slave PTY, the
+        // master read returns Ok(0), and the thread exits immediately,
+        // so the join is instant there (which is why this only bites
+        // on Windows).
+        //
+        // Bounded wait, then detach: give the reader a brief window to
+        // exit cleanly (it does wherever EOF is delivered), otherwise
+        // drop the handle. The reader holds no lock the rest of the
+        // app needs and dies with the process on exit, so detaching is
+        // safe and shutdown can never wedge on it.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(300);
+        while !handle.is_finished() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        if handle.is_finished() {
+            let _ = handle.join();
+        }
+        // else: detach — never block on a ConPTY reader that won't see EOF.
+    }
+    session.context_dir
+}
+
+pub fn kill_all(sessions: Vec<PtySession>) -> Vec<PathBuf> {
+    sessions.into_iter().map(kill_session).collect()
 }

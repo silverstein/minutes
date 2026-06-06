@@ -262,11 +262,16 @@ impl PtyManager {
 }
 
 pub fn kill_session(mut session: PtySession) -> PathBuf {
+    // Kill the full process tree FIRST on Windows: `taskkill /T /F` walks the
+    // tree from the live leader PID, so it must run before `child.kill()` reaps
+    // the leader. Otherwise a dead or reused PID could orphan the node / npx
+    // minutes-mcp grandchildren (thanks @mquinn614). `child.kill()` below is the
+    // real kill on Unix and a harmless no-op on Windows.
     #[cfg(windows)]
     let process_id = session.child.process_id();
-    session.child.kill().ok();
     #[cfg(windows)]
     terminate_process_tree(process_id);
+    session.child.kill().ok();
     if let Some(handle) = session.reader_handle.take() {
         // The reader thread blocks on `reader.read()` of the PTY
         // master and only breaks on EOF / error. On Windows ConPTY,

@@ -97,6 +97,12 @@ pub struct ProcessingJob {
     pub user_notes: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pre_context: Option<String>,
+    /// Consent basis captured at record start, if one was provided.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub consent: Option<crate::markdown::ConsentBasis>,
+    /// Exact disclosure text captured at record start, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub consent_notice: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub calendar_event: Option<CalendarEvent>,
     /// Slug of the template selected at record time, if any. Read by the
@@ -167,6 +173,8 @@ pub fn queue_live_capture(
         calendar_event,
         template_slug,
         None,
+        None,
+        None,
     )
 }
 
@@ -182,6 +190,8 @@ pub fn queue_live_capture_with_recording_health(
     context_session_id: Option<String>,
     calendar_event: Option<CalendarEvent>,
     template_slug: Option<String>,
+    consent: Option<crate::markdown::ConsentBasis>,
+    consent_notice: Option<String>,
     recording_health: Option<crate::markdown::RecordingHealth>,
 ) -> std::io::Result<ProcessingJob> {
     let job_id = next_job_id();
@@ -206,6 +216,8 @@ pub fn queue_live_capture_with_recording_health(
         context_session_id,
         user_notes,
         pre_context,
+        consent,
+        consent_notice,
         calendar_event,
         template_slug,
         recording_health,
@@ -407,6 +419,8 @@ pub fn enqueue_capture_job(
         context_session_id,
         user_notes,
         pre_context,
+        consent: None,
+        consent_notice: None,
         calendar_event,
         template_slug,
         recording_health: None,
@@ -1151,6 +1165,8 @@ fn job_context(job: &ProcessingJob) -> BackgroundPipelineContext {
         sidecar: None,
         user_notes: job.user_notes.clone(),
         pre_context: job.pre_context.clone(),
+        consent: job.consent,
+        consent_notice: job.consent_notice.clone(),
         calendar_event: job.calendar_event.clone(),
         recorded_at: job.recording_started_at.or(job.recording_finished_at),
         requested_title: job.title.clone(),
@@ -1576,12 +1592,62 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
+                None,
                 Some(health.clone()),
             )
             .unwrap();
 
             let loaded = load_job(&job.id).unwrap();
             assert_eq!(loaded.recording_health, Some(health));
+        });
+    }
+
+    #[test]
+    fn queue_live_capture_persists_consent_metadata() {
+        with_temp_home(|_| {
+            let current_wav = pid::current_wav_path();
+            if let Some(parent) = current_wav.parent() {
+                fs::create_dir_all(parent).unwrap();
+            }
+            fs::write(&current_wav, b"fake-wav").unwrap();
+
+            let job = queue_live_capture_with_recording_health(
+                CaptureMode::Meeting,
+                Some("Consent metadata".into()),
+                &current_wav,
+                None,
+                None,
+                Some(Local::now()),
+                Some(Local::now()),
+                None,
+                None,
+                None,
+                Some(crate::markdown::ConsentBasis::NoticeInInvite),
+                Some("Shared in the invite.".into()),
+                None,
+            )
+            .unwrap();
+
+            let loaded = load_job(&job.id).unwrap();
+            assert_eq!(
+                loaded.consent,
+                Some(crate::markdown::ConsentBasis::NoticeInInvite)
+            );
+            assert_eq!(
+                loaded.consent_notice.as_deref(),
+                Some("Shared in the invite.")
+            );
+
+            let context = job_context(&loaded);
+            assert_eq!(
+                context.consent,
+                Some(crate::markdown::ConsentBasis::NoticeInInvite)
+            );
+            assert_eq!(
+                context.consent_notice.as_deref(),
+                Some("Shared in the invite.")
+            );
         });
     }
 
@@ -1619,6 +1685,8 @@ mod tests {
                 context_session_id: None,
                 user_notes: None,
                 pre_context: None,
+                consent: None,
+                consent_notice: None,
                 calendar_event: None,
                 template_slug: None,
                 recording_health: None,
@@ -1676,6 +1744,8 @@ mod tests {
                 context_session_id: None,
                 user_notes: None,
                 pre_context: None,
+                consent: None,
+                consent_notice: None,
                 calendar_event: None,
                 template_slug: None,
                 recording_health: None,
@@ -1729,6 +1799,8 @@ mod tests {
                 decisions: vec![],
                 intents: vec![],
                 recorded_by: None,
+                consent: None,
+                consent_notice: None,
                 visibility: None,
                 speaker_map: vec![],
                 recording_health: None,
@@ -1767,6 +1839,8 @@ mod tests {
                 context_session_id: None,
                 user_notes: None,
                 pre_context: None,
+                consent: None,
+                consent_notice: None,
                 calendar_event: None,
                 template_slug: None,
                 recording_health: None,
@@ -1810,6 +1884,8 @@ mod tests {
                 context_session_id: None,
                 user_notes: None,
                 pre_context: None,
+                consent: None,
+                consent_notice: None,
                 calendar_event: None,
                 template_slug: None,
                 recording_health: None,
@@ -1864,6 +1940,8 @@ mod tests {
                 context_session_id: None,
                 user_notes: None,
                 pre_context: None,
+                consent: None,
+                consent_notice: None,
                 calendar_event: None,
                 template_slug: None,
                 recording_health: None,
@@ -1904,6 +1982,8 @@ mod tests {
                 context_session_id: None,
                 user_notes: None,
                 pre_context: None,
+                consent: None,
+                consent_notice: None,
                 calendar_event: None,
                 template_slug: None,
                 recording_health: None,
@@ -1948,6 +2028,8 @@ mod tests {
                 context_session_id: None,
                 user_notes: None,
                 pre_context: None,
+                consent: None,
+                consent_notice: None,
                 calendar_event: None,
                 template_slug: None,
                 recording_health: None,
@@ -1992,6 +2074,8 @@ mod tests {
                 context_session_id: None,
                 user_notes: None,
                 pre_context: None,
+                consent: None,
+                consent_notice: None,
                 calendar_event: None,
                 template_slug: None,
                 recording_health: None,
@@ -2033,6 +2117,8 @@ mod tests {
                 context_session_id: None,
                 user_notes: None,
                 pre_context: None,
+                consent: None,
+                consent_notice: None,
                 calendar_event: None,
                 template_slug: None,
                 recording_health: None,
@@ -2059,6 +2145,8 @@ mod tests {
                 context_session_id: None,
                 user_notes: None,
                 pre_context: None,
+                consent: None,
+                consent_notice: None,
                 calendar_event: None,
                 template_slug: None,
                 recording_health: None,
@@ -2100,6 +2188,8 @@ mod tests {
             context_session_id: None,
             user_notes: None,
             pre_context: None,
+            consent: None,
+            consent_notice: None,
             calendar_event: None,
             template_slug: None,
             recording_health: None,

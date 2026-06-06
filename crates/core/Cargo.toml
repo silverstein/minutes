@@ -78,6 +78,10 @@ hound = { workspace = true }
 dirs = { workspace = true }
 insta = { version = "1", features = ["json"] }
 
+[[example]]
+name = "dogfood_vad_engines"
+required-features = ["streaming", "whisper"]
+
 [[test]]
 name = "integration"
 path = "../../tests/integration/pipeline_test.rs"

@@ -1,5 +1,6 @@
 ---
 source: crates/core/src/markdown.rs
+assertion_line: 1204
 expression: schema
 ---
 {
@@ -38,6 +39,24 @@ expression: schema
         "null"
       ],
       "format": "date-time"
+    },
+    "consent": {
+      "description": "How consent to capture was obtained, if attested.\n\nPrivacy metadata only, not a determination about requirements. See\n[`crate::config::ConsentConfig`].",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ConsentBasis"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "consent_notice": {
+      "description": "The exact disclosure the user gave or used, if any.",
+      "type": [
+        "string",
+        "null"
+      ]
     },
     "context": {
       "type": [
@@ -238,6 +257,17 @@ expression: schema
         "high",
         "medium",
         "low"
+      ]
+    },
+    "ConsentBasis": {
+      "description": "Attested basis for capturing a conversation.\n\nThis is privacy metadata only, not a determination about requirements.",
+      "type": "string",
+      "enum": [
+        "verbal_all_parties",
+        "notice_in_invite",
+        "recorded_disclosed",
+        "na",
+        "unattested"
       ]
     },
     "ContentType": {

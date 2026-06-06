@@ -119,6 +119,37 @@ When `capture_backend = "core-audio-tap"`, set `call = "auto"`. The backend
 captures the default macOS system output via Core Audio Process Tap instead of
 opening a named loopback input device.
 
+### `[consent]` — recording disclosure aid
+
+For meeting recordings, Minutes can show a disclosure reminder, ask for an
+interactive acknowledgement, and write the selected basis into frontmatter.
+Non-interactive callers are never blocked: if `mode = "require"` is used from
+a non-TTY process without `--consent`, Minutes records the basis as
+`unattested` and prints a warning.
+
+| key | default | meaning |
+|---|---|---|
+| `mode` | `"remind"` | `"off"` skips reminder text, `"remind"` prints the script, `"require"` asks for an interactive acknowledgement only when stdin is a TTY |
+| `disclosure_script` | built-in local transcript disclosure | One-line script to read aloud or paste before recording |
+| `default_basis` | unset | Optional basis stamped when no `--consent` flag is provided |
+
+Supported basis values are `verbal_all_parties`, `notice_in_invite`,
+`recorded_disclosed`, `na`, and `unattested`.
+
+```toml
+[consent]
+mode = "remind"
+disclosure_script = "Heads up — I'm using Minutes to transcribe this conversation locally on my device for my own notes. Let me know if you'd prefer I didn't."
+# default_basis = "notice_in_invite"
+```
+
+CLI flags override the config for a single recording:
+
+```bash
+minutes record --consent verbal_all_parties
+minutes record --consent notice_in_invite --consent-notice "Notice was included in the calendar invite."
+```
+
 ### `[retention]` — raw audio policy
 
 Minutes treats markdown transcripts, summaries, graph/search data, and metadata

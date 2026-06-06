@@ -218,7 +218,7 @@ mod tests {
                 },
                 ActionItem {
                     assignee: "Dan".into(),
-                    task: "Review compliance requirements".into(),
+                    task: "Review privacy requirements".into(),
                     due: None,
                     status: "open".into(),
                 },
@@ -231,6 +231,8 @@ mod tests {
             }],
             intents: vec![],
             recorded_by: None,
+            consent: None,
+            consent_notice: None,
             visibility: None,
             speaker_map: vec![],
             recording_health: None,

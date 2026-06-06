@@ -51,6 +51,8 @@ schema version bump. Additive fields do not.
 | `captured_at` | datetime | When capture started, if different from `date`. |
 | `context` | string | Optional free-text notes the user added at record time. |
 | `recorded_by` | string | User identity slug (matches `people[]` if the user is in the corpus). |
+| `consent` | enum | Optional capture basis: `verbal_all_parties`, `notice_in_invite`, `recorded_disclosed`, `na`, or `unattested`. |
+| `consent_notice` | string | Exact disclosure text used for the recording, when provided or configured. |
 | `visibility` | enum | `private` (default) or `team`. Informational; Minutes does not enforce ACLs. |
 | `calendar_event` | string | Calendar event id (Google Calendar, Outlook) when matched. |
 | `recording_health` | object | Optional capture/diarization diagnostics. See [Recording health](#recording-health) below. Omitted when no warnings or capture-health metadata are present. |

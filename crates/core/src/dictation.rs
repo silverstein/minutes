@@ -1123,6 +1123,8 @@ fn write_dictation_file(text: &str, duration_secs: f64, config: &Config) -> Opti
         decisions: vec![],
         intents: vec![],
         recorded_by: config.identity.name.clone(),
+        consent: None,
+        consent_notice: None,
         visibility: None,
         speaker_map: vec![],
         recording_health: None,

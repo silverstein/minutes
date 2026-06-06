@@ -3,7 +3,8 @@ use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use futures_util::StreamExt;
 use minisign_verify::{PublicKey, Signature};
 use minutes_core::capture::RecordingIntent;
-use minutes_core::config::{VALID_LIVE_TRANSCRIPT_BACKENDS, VALID_PARAKEET_MODELS};
+use minutes_core::config::{ConsentMode, VALID_LIVE_TRANSCRIPT_BACKENDS, VALID_PARAKEET_MODELS};
+use minutes_core::markdown::ConsentBasis;
 use minutes_core::{CaptureMode, Config, ContentType};
 use reqwest::header::{ACCEPT, CONTENT_LENGTH};
 use std::cmp::Reverse;
@@ -2583,6 +2584,11 @@ fn queue_native_call_capture_for_processing(
         minutes_core::diarize::CaptureSource::Both
     };
     let recording_health = warning.map(|message| native_call_recovery_health(message, source));
+    let (consent, consent_notice) = if mode == CaptureMode::Meeting {
+        minutes_core::notes::load_consent()
+    } else {
+        (None, None)
+    };
 
     minutes_core::jobs::queue_live_capture_with_recording_health(
         mode,
@@ -2595,6 +2601,8 @@ fn queue_native_call_capture_for_processing(
         context_session_id,
         calendar_event,
         None,
+        consent,
+        consent_notice,
         recording_health,
     )
     .map_err(|error| error.to_string())
@@ -2895,6 +2903,7 @@ fn start_native_call_recording(
         .ok();
     crate::sync_tray_state(app_handle);
     minutes_core::notes::save_recording_start().ok();
+    maybe_save_and_show_recording_consent(app_handle, mode, config);
     minutes_core::events::append_event(minutes_core::events::recording_started_event(
         context_session_id.clone(),
         "capture",
@@ -3376,6 +3385,16 @@ fn parse_optional_string_setting(value: &str) -> Option<String> {
     }
 }
 
+fn parse_optional_consent_basis_setting(value: &str) -> Result<Option<String>, String> {
+    let Some(basis) = parse_optional_string_setting(value) else {
+        return Ok(None);
+    };
+    basis
+        .parse::<ConsentBasis>()
+        .map_err(|error| error.to_string())?;
+    Ok(Some(basis))
+}
+
 /// Parse a comma-separated setting string (e.g. `"foo, bar, baz"`) into a
 /// `Vec<String>`. Trims whitespace around each entry, drops empties, preserves
 /// input order. Case-sensitive — callers that need case-insensitive dedup
@@ -3530,6 +3549,112 @@ fn set_recording_error_notice(
     let detail = detail.into();
     minutes_core::logging::log_error("desktop_recording", "", &detail);
     set_latest_output(latest_output, Some(output_error_notice(title, detail)));
+}
+
+fn consent_mode_as_str(mode: ConsentMode) -> &'static str {
+    match mode {
+        ConsentMode::Off => "off",
+        ConsentMode::Remind => "remind",
+        ConsentMode::Require => "require",
+    }
+}
+
+fn desktop_recording_consent_basis(config: &Config) -> ConsentBasis {
+    config
+        .consent
+        .default_basis
+        .as_deref()
+        .and_then(|basis| match basis.parse::<ConsentBasis>() {
+            Ok(parsed) => Some(parsed),
+            Err(error) => {
+                tracing::warn!(
+                    basis,
+                    error = %error,
+                    "invalid configured consent default_basis; recording as unattested"
+                );
+                None
+            }
+        })
+        .unwrap_or(ConsentBasis::Unattested)
+}
+
+fn show_user_notification_nonmodal(app_handle: &tauri::AppHandle, title: &str, body: &str) {
+    #[cfg(target_os = "macos")]
+    {
+        let identifier = app_handle.config().identifier.as_str();
+        let _ = notify_rust::set_application(identifier);
+
+        let mut notification = notify_rust::Notification::new();
+        notification.summary(title);
+        notification.body(body);
+        notification.auto_icon();
+
+        if notification.show().is_ok() {
+            return;
+        }
+    }
+
+    if app_handle
+        .notification()
+        .builder()
+        .title(title)
+        .body(body)
+        .show()
+        .is_ok()
+    {
+        return;
+    }
+
+    tracing::warn!(title, "non-modal notification unavailable");
+}
+
+fn maybe_save_and_show_recording_consent(
+    app_handle: &tauri::AppHandle,
+    mode: CaptureMode,
+    config: &Config,
+) {
+    minutes_core::notes::clear_consent();
+    if mode != CaptureMode::Meeting {
+        return;
+    }
+
+    let basis = desktop_recording_consent_basis(config);
+    let disclosure = config.consent.disclosure_script.trim();
+    let notice = if config.consent.mode == ConsentMode::Off {
+        None
+    } else {
+        (!disclosure.is_empty()).then_some(disclosure)
+    };
+
+    if let Err(error) = minutes_core::notes::save_consent(Some(basis), notice) {
+        minutes_core::notes::clear_consent();
+        tracing::warn!(error = %error, "failed to save recording consent sidecar");
+    }
+
+    match config.consent.mode {
+        ConsentMode::Off => {}
+        ConsentMode::Remind => {
+            let mut body =
+                "Recording + transcribing locally - audio stays on your device.".to_string();
+            if let Some(disclosure) = notice {
+                body.push('\n');
+                body.push_str(disclosure);
+            }
+            eprintln!("[minutes] {}", body.replace('\n', " "));
+            show_user_notification_nonmodal(app_handle, "Recording disclosure", &body);
+        }
+        ConsentMode::Require => {
+            // TODO(phase 2): blocking require confirmation modal for desktop recordings.
+            let mut body =
+                "Recording + transcribing locally - audio stays on your device.".to_string();
+            if let Some(disclosure) = notice {
+                body.push('\n');
+                body.push_str(disclosure);
+            }
+            eprintln!("[minutes] {}", body.replace('\n', " "));
+            show_user_notification_nonmodal(app_handle, "Recording disclosure", &body);
+        }
+    }
 }
 
 fn validate_recording_launch_state(state: &AppState) -> Result<(), String> {
@@ -5060,6 +5185,7 @@ pub fn start_recording(
     crate::sync_tray_state(&app_handle);
 
     minutes_core::notes::save_recording_start().ok();
+    maybe_save_and_show_recording_consent(&app_handle, mode, &config);
     eprintln!("{} started...", mode.noun());
 
     // Inject live transcript context into the assistant workspace so the Recall
@@ -5119,11 +5245,16 @@ pub fn start_recording(
                 let recording_finished_at = chrono::Local::now();
                 let user_notes = minutes_core::notes::read_notes();
                 let pre_context = minutes_core::notes::read_context();
+                let (consent, consent_notice) = if mode == CaptureMode::Meeting {
+                    minutes_core::notes::load_consent()
+                } else {
+                    (None, None)
+                };
                 // Don't block the stop path with a calendar query (can take 10s if Calendar.app hangs).
                 // The pipeline already falls back to events_overlapping_now() during background processing.
                 let calendar_event = None;
 
-                match minutes_core::jobs::queue_live_capture(
+                match minutes_core::jobs::queue_live_capture_with_recording_health(
                     mode,
                     requested_title.clone(),
                     &wav_path,
@@ -5133,6 +5264,9 @@ pub fn start_recording(
                     Some(recording_finished_at),
                     context_session_id.clone(),
                     calendar_event,
+                    None,
+                    consent,
+                    consent_notice,
                     None,
                 ) {
                     Ok(job) => {
@@ -8061,6 +8195,11 @@ pub fn cmd_get_settings() -> serde_json::Value {
         "privacy": {
             "hide_from_screen_share": config.privacy.hide_from_screen_share,
         },
+        "consent": {
+            "mode": consent_mode_as_str(config.consent.mode),
+            "disclosure_script": config.consent.disclosure_script,
+            "default_basis": config.consent.default_basis,
+        },
         "assistant": {
             "agent": config.assistant.agent,
             "agent_args": config.assistant.agent_args,
@@ -8249,6 +8388,28 @@ pub fn cmd_set_setting(section: String, key: String, value: String) -> Result<St
         ("recording", "device") => {
             config.recording.device =
                 minutes_core::capture::canonicalize_input_device_setting(&value);
+        }
+
+        // Consent
+        ("consent", "mode") => {
+            let mode = match value.as_str() {
+                "off" => ConsentMode::Off,
+                "remind" => ConsentMode::Remind,
+                "require" => ConsentMode::Require,
+                other => {
+                    return Err(format!(
+                        "unknown consent mode '{}'. Valid: off, remind, require",
+                        other
+                    ))
+                }
+            };
+            config.consent.mode = mode;
+        }
+        ("consent", "disclosure_script") => {
+            config.consent.disclosure_script = value.clone();
+        }
+        ("consent", "default_basis") => {
+            config.consent.default_basis = parse_optional_consent_basis_setting(&value)?;
         }
 
         // Diarization

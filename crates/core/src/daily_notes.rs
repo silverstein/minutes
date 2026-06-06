@@ -297,6 +297,8 @@ mod tests {
             decisions: vec![],
             intents: vec![],
             recorded_by: None,
+            consent: None,
+            consent_notice: None,
             visibility: None,
             speaker_map: vec![],
             recording_health: None,

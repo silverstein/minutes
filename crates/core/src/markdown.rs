@@ -8,6 +8,7 @@ use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 
 // ──────────────────────────────────────────────────────────────
 // Meeting/memo markdown output.
@@ -35,6 +36,50 @@ pub enum OutputStatus {
     /// fell back to empty output (e.g. agent timeout, empty summary).
     /// Per-step failures are recorded in [`Frontmatter::processing_warnings`].
     Degraded,
+}
+
+/// Attested basis for capturing a conversation.
+///
+/// This is privacy metadata only, not a determination about requirements.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ConsentBasis {
+    VerbalAllParties,
+    NoticeInInvite,
+    RecordedDisclosed,
+    #[serde(rename = "na")]
+    NotApplicable,
+    Unattested,
+}
+
+impl ConsentBasis {
+    /// Stable serialized string used in frontmatter and CLI flags.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::VerbalAllParties => "verbal_all_parties",
+            Self::NoticeInInvite => "notice_in_invite",
+            Self::RecordedDisclosed => "recorded_disclosed",
+            Self::NotApplicable => "na",
+            Self::Unattested => "unattested",
+        }
+    }
+}
+
+impl FromStr for ConsentBasis {
+    type Err = String;
+
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        match raw.trim() {
+            "verbal_all_parties" => Ok(Self::VerbalAllParties),
+            "notice_in_invite" => Ok(Self::NoticeInInvite),
+            "recorded_disclosed" => Ok(Self::RecordedDisclosed),
+            "na" => Ok(Self::NotApplicable),
+            "unattested" => Ok(Self::Unattested),
+            other => Err(format!(
+                "unknown consent basis: {other}. Use verbal_all_parties, notice_in_invite, recorded_disclosed, na, or unattested."
+            )),
+        }
+    }
 }
 
 /// A non-fatal failure of a post-transcript pipeline step.
@@ -185,6 +230,15 @@ pub struct Frontmatter {
     pub intents: Vec<Intent>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub recorded_by: Option<String>,
+    /// How consent to capture was obtained, if attested.
+    ///
+    /// Privacy metadata only, not a determination about requirements. See
+    /// [`crate::config::ConsentConfig`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub consent: Option<ConsentBasis>,
+    /// The exact disclosure the user gave or used, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub consent_notice: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub visibility: Option<Visibility>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -998,6 +1052,8 @@ mod tests {
             decisions: vec![],
             intents: vec![],
             recorded_by: None,
+            consent: None,
+            consent_notice: None,
             visibility: None,
             speaker_map: vec![],
             recording_health: None,
@@ -1018,6 +1074,43 @@ mod tests {
         assert_eq!(parsed.date.month(), 5);
         assert_eq!(parsed.date.day(), 14);
         assert_eq!(parsed.duration, "0s");
+    }
+
+    #[test]
+    fn consent_basis_serializes_expected_strings() {
+        assert_eq!(
+            serde_yaml::to_string(&ConsentBasis::VerbalAllParties).unwrap(),
+            "verbal_all_parties\n"
+        );
+        assert_eq!(
+            ConsentBasis::RecordedDisclosed.as_str(),
+            "recorded_disclosed"
+        );
+        assert_eq!(
+            "na".parse::<ConsentBasis>().unwrap(),
+            ConsentBasis::NotApplicable
+        );
+        assert!("mystery".parse::<ConsentBasis>().is_err());
+    }
+
+    #[test]
+    fn frontmatter_consent_fields_are_optional_and_serialize_when_present() {
+        let legacy: Frontmatter =
+            serde_yaml::from_str("title: Test\ntype: meeting\ndate: 2026-06-04T10:00:00-07:00\n")
+                .unwrap();
+        assert_eq!(legacy.consent, None);
+        assert_eq!(legacy.consent_notice, None);
+
+        let mut fm = test_frontmatter();
+        let without_consent = serde_yaml::to_string(&fm).unwrap();
+        assert!(!without_consent.contains("consent:"));
+        assert!(!without_consent.contains("consent_notice:"));
+
+        fm.consent = Some(ConsentBasis::NoticeInInvite);
+        fm.consent_notice = Some("Shared in the calendar invite.".into());
+        let with_consent = serde_yaml::to_string(&fm).unwrap();
+        assert!(with_consent.contains("consent: notice_in_invite"));
+        assert!(with_consent.contains("consent_notice: Shared in the calendar invite."));
     }
 
     #[test]

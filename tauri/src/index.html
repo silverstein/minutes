@@ -5337,6 +5337,37 @@
         </div>
         <div class="about-controls">
           <div class="about-controls-group">
+            <div class="about-controls-copy">Recording consent reminder</div>
+            <div class="about-controls-meta">Shows a local-transcription disclosure before recording a meeting. A disclosure aid, not legal advice; make sure everyone present has agreed where required.</div>
+            <select id="settings-consent-mode" class="settings-field">
+              <option value="off">Off</option>
+              <option value="remind">Remind me (default)</option>
+              <option value="require">Require acknowledgment</option>
+            </select>
+          </div>
+        </div>
+        <div class="about-controls">
+          <div class="about-controls-group">
+            <div class="about-controls-copy">Disclosure script</div>
+            <input type="text" id="settings-consent-disclosure" class="settings-field" spellcheck="false">
+          </div>
+        </div>
+        <div class="about-controls">
+          <div class="about-controls-group">
+            <div class="about-controls-copy">Default frontmatter basis</div>
+            <div class="about-controls-meta">Optional value stamped into meeting frontmatter when no per-recording basis is supplied.</div>
+            <select id="settings-consent-default-basis" class="settings-field">
+              <option value="">Unattested unless supplied</option>
+              <option value="verbal_all_parties">Verbal, all parties</option>
+              <option value="notice_in_invite">Notice in invite</option>
+              <option value="recorded_disclosed">Recording disclosed</option>
+              <option value="na">Not applicable</option>
+              <option value="unattested">Unattested</option>
+            </select>
+          </div>
+        </div>
+        <div class="about-controls">
+          <div class="about-controls-group">
             <div class="about-controls-copy">Meeting-adjacent desktop context</div>
             <div class="about-controls-meta" id="settings-desktop-context-status">
               Off. App/window context stays disabled until you turn it on.
@@ -8626,6 +8657,13 @@
           document.getElementById('settings-agent-command-status').textContent = sumAgents.find(a => a.name === currentCmd) ? 'Installed' : 'Custom command';
         } catch (e) { console.error('agent command picker:', e); }
         setSettingsToggle('settings-screen-share', Boolean(s.privacy?.hide_from_screen_share));
+        const consentMode = s.consent?.mode || 'remind';
+        const consentModeSelect = document.getElementById('settings-consent-mode');
+        if (consentModeSelect) consentModeSelect.value = consentMode;
+        const consentDisclosure = document.getElementById('settings-consent-disclosure');
+        if (consentDisclosure) consentDisclosure.value = s.consent?.disclosure_script || '';
+        const consentDefaultBasis = document.getElementById('settings-consent-default-basis');
+        if (consentDefaultBasis) consentDefaultBasis.value = s.consent?.default_basis || '';
         if (s.desktop_context) {
           setSettingsToggle('settings-desktop-context', Boolean(s.desktop_context.enabled));
           setSettingsToggle('settings-desktop-window-titles', s.desktop_context.capture_window_titles !== false);
@@ -9163,6 +9201,27 @@
         ? 'Downloaded: ' + dl.join(', ')
         : dl.length ? 'Downloaded: ' + dl.join(', ') + '  •  "' + e.target.value + '" not yet downloaded' : 'No models downloaded yet.';
       document.getElementById('btn-download-model').classList.toggle('is-hidden', isDownloaded);
+    });
+    document.getElementById('settings-consent-mode')?.addEventListener('change', async (e) => {
+      try {
+        await invoke('cmd_set_setting', { section: 'consent', key: 'mode', value: e.target.value });
+      } catch (err) {
+        console.error('consent mode:', err);
+      }
+    });
+    document.getElementById('settings-consent-disclosure')?.addEventListener('change', async (e) => {
+      try {
+        await invoke('cmd_set_setting', { section: 'consent', key: 'disclosure_script', value: e.target.value });
+      } catch (err) {
+        console.error('consent disclosure:', err);
+      }
+    });
+    document.getElementById('settings-consent-default-basis')?.addEventListener('change', async (e) => {
+      try {
+        await invoke('cmd_set_setting', { section: 'consent', key: 'default_basis', value: e.target.value });
+      } catch (err) {
+        console.error('consent default basis:', err);
+      }
     });
     document.getElementById('btn-download-model').addEventListener('click', async () => {
       const model = document.getElementById('settings-whisper-model').value;

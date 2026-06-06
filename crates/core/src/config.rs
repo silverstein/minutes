@@ -26,6 +26,7 @@ pub struct Config {
     pub watch: WatchConfig,
     pub assistant: AssistantConfig,
     pub privacy: PrivacyConfig,
+    pub consent: ConsentConfig,
     pub screen_context: ScreenContextConfig,
     pub desktop_context: DesktopContextConfig,
     pub calendar: CalendarConfig,
@@ -308,6 +309,35 @@ pub struct PrivacyConfig {
     pub hide_from_screen_share: bool,
 }
 
+/// Consent affordance for meeting capture.
+///
+/// Minutes records full local transcripts; some meeting contexts require
+/// participant notice before capture. This config controls the pre-record
+/// reminder/gate and the disclosure script. It is a privacy aid, not a
+/// determination about requirements.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ConsentConfig {
+    /// off | remind | require. Default `remind`.
+    pub mode: ConsentMode,
+    /// One-line script the user can read aloud or paste before recording.
+    pub disclosure_script: String,
+    /// Optional default basis stamped into frontmatter when the user does not
+    /// pass one, such as a team with notice baked into every calendar invite.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_basis: Option<String>,
+}
+
+/// Pre-record consent prompt behavior.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ConsentMode {
+    Off,
+    #[default]
+    Remind,
+    Require,
+}
+
 /// Retention policy for raw audio artifacts.
 ///
 /// Product stance: markdown transcripts and structured memory are the durable
@@ -356,6 +386,16 @@ impl Default for PrivacyConfig {
     fn default() -> Self {
         Self {
             hide_from_screen_share: true,
+        }
+    }
+}
+
+impl Default for ConsentConfig {
+    fn default() -> Self {
+        Self {
+            mode: ConsentMode::Remind,
+            disclosure_script: "Heads up — I'm using Minutes to transcribe this conversation locally on my device for my own notes. Let me know if you'd prefer I didn't.".into(),
+            default_basis: None,
         }
     }
 }
@@ -762,6 +802,7 @@ impl Default for Config {
             watch: WatchConfig::default(),
             assistant: AssistantConfig::default(),
             privacy: PrivacyConfig::default(),
+            consent: ConsentConfig::default(),
             screen_context: ScreenContextConfig::default(),
             desktop_context: DesktopContextConfig::default(),
             calendar: CalendarConfig::default(),
@@ -1342,6 +1383,40 @@ mod tests {
         assert!(!config.recording.auto_call_intent);
         assert!(!config.recording.allow_degraded_call_capture);
         assert_eq!(config.recording.capture_backend, "cpal");
+        assert_eq!(config.consent.mode, ConsentMode::Remind);
+        assert!(config.consent.default_basis.is_none());
+        assert!(config.consent.disclosure_script.contains("Minutes"));
+    }
+
+    #[test]
+    fn consent_config_deserializes_modes_and_defaults() {
+        let parsed: Config = toml::from_str(
+            r#"
+            [consent]
+            mode = "require"
+            disclosure_script = "Please acknowledge recording."
+            default_basis = "notice_in_invite"
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(parsed.consent.mode, ConsentMode::Require);
+        assert_eq!(
+            parsed.consent.disclosure_script,
+            "Please acknowledge recording."
+        );
+        assert_eq!(
+            parsed.consent.default_basis.as_deref(),
+            Some("notice_in_invite")
+        );
+    }
+
+    #[test]
+    fn missing_consent_config_uses_defaults() {
+        let parsed: Config = toml::from_str("").unwrap();
+
+        assert_eq!(parsed.consent.mode, ConsentMode::Remind);
+        assert!(parsed.consent.default_basis.is_none());
     }
 
     #[test]

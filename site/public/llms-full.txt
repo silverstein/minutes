@@ -2,13 +2,18 @@
 
 > Generated file. Do not edit by hand.
 > Source: manifest.json + crates/mcp/src/index.ts + site/lib/skills-catalog.json
-> Last generated: 2026-06-02
+> Last generated: 2026-06-08
 
 ## Product
 
 Minutes is an open-source meeting corpus you own. Record, transcribe, search, and query every meeting and voice memo on your own disk. No cloud, no vendor to outlive. Output is structured markdown in `~/meetings/` that Claude Desktop, Claude Code, Codex, Gemini CLI, Cursor, OpenCode, Pi, and any MCP-compatible client read from the same folder, without a proprietary SDK or API key. Ten years from now, `grep` still works on your corpus.
 
 31 tools • 7 resources • Interactive MCP App dashboard • Prompt templates
+
+**What's new in 0.18.6:**
+• **USB conference speakerphones no longer lose native call recordings.** A quiet mic stem (a far-field mic plus the device's own echo cancellation) was misread as empty, so the whole call was discarded as unrecoverable. Minutes now scans the full mic stem for audio instead of only the opening seconds, so a call that starts with the far end speaking is captured correctly. Thanks to @jmh1313 for the detailed report.
+• **Codex and Gemini summaries no longer silently degrade.** When summarization ran from outside a git repo (the normal case for the desktop app), Codex and Gemini refused to start in an untrusted directory and the meeting fell back to a degraded summary. Both now bypass the directory-trust check for the read-only summary pass.
+• **Back on crates.io.** minutes-cli and minutes-core are published to crates.io again, so `cargo install minutes-cli` works for Linux and Windows users who do not use Homebrew.
 
 **What's new in 0.18.5:**
 • **macOS: an idle Minutes no longer slows down your whole Mac.** When Minutes sat idle, usually hidden in the menu bar, its status refresh repainted the translucent main window every couple of seconds even when nothing had changed. On macOS that makes the window server re-blend the entire frosted-glass surface each time, so over a few hours it pegged a CPU core and made scrolling and switching apps stutter across the whole system. Idle refreshes now skip redundant redraws, so a hidden, idle Minutes leaves your Mac alone. Windows and Linux were not affected.

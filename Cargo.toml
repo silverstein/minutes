@@ -23,7 +23,7 @@ serde_yaml = "0.9"
 toml = "0.8"
 
 # Audio
-cpal = { git = "https://github.com/RustAudio/cpal.git", rev = "33e05ec94b5670c6f02080acf3fd6d8ac21e37cd", default-features = false, features = ["pipewire", "realtime"] }
+cpal = { version = "0.18.1", default-features = false, features = ["pipewire", "realtime"] }
 hound = "3.5"
 
 # Transcription

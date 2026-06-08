@@ -23,7 +23,12 @@ serde_yaml = "0.9"
 toml = "0.8"
 
 # Audio
-cpal = { git = "https://github.com/RustAudio/cpal.git", rev = "33e05ec94b5670c6f02080acf3fd6d8ac21e37cd", default-features = false, features = ["pipewire", "realtime"] }
+# Pinned to crates.io 0.18.0 (not 0.18.1): the git rev we previously used IS 0.18.0,
+# and 0.18.1 regressed the WASAPI/Windows backend (it fails to compile against
+# windows-core 0.61.x with sealed-trait `IUnknownImpl` errors). 0.18.0 is the
+# version-matched, Windows-good release and still removes the git dependency, which
+# is what unblocks `cargo publish` (#79). Revisit 0.18.x once the Windows fix ships.
+cpal = { version = "=0.18.0", default-features = false, features = ["pipewire", "realtime"] }
 hound = "3.5"
 
 # Transcription

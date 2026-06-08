@@ -932,18 +932,34 @@ fn prepare_agent_invocation(
     }
 
     if matches_agent_binary(agent_cmd, "codex") {
+        // `--skip-git-repo-check`: summarization runs read-only in the meeting /
+        // job directory, which is not a git repo. Without this, Codex refuses to
+        // start ("not inside a trusted directory") and the summary silently
+        // degrades. The sandbox stays `-s read-only`, so the bypass grants no
+        // write access.
         return Ok(AgentInvocation {
             cmd: agent_cmd.to_string(),
-            args: vec!["exec".into(), "-".into(), "-s".into(), "read-only".into()],
+            args: vec![
+                "exec".into(),
+                "-".into(),
+                "-s".into(),
+                "read-only".into(),
+                "--skip-git-repo-check".into(),
+            ],
             stdin_payload: Some(prompt.as_bytes().to_vec()),
             cleanup_path: None,
         });
     }
 
     if matches_agent_binary(agent_cmd, "gemini") {
+        // `--skip-trust`: same class of failure as Codex above. Gemini refuses
+        // to run in a directory it does not trust ("not running in a trusted
+        // directory"), so a summary launched from the non-repo job directory
+        // degrades unless the workspace-trust gate is bypassed for this
+        // non-interactive, read-only run.
         return Ok(AgentInvocation {
             cmd: agent_cmd.to_string(),
-            args: vec!["-p".into(), "-".into()],
+            args: vec!["-p".into(), "-".into(), "--skip-trust".into()],
             stdin_payload: Some(prompt.as_bytes().to_vec()),
             cleanup_path: None,
         });
@@ -2786,6 +2802,38 @@ PARTICIPANTS:
     fn map_speakers_empty_when_no_attendees() {
         let config = Config::default();
         assert!(map_speakers("[SPEAKER_1 0:00] hi", &[], &config, None).is_empty());
+    }
+
+    #[test]
+    fn prepare_agent_invocation_for_codex_skips_git_repo_check() {
+        // Regression: summaries run in a non-repo job dir; without the bypass
+        // Codex refuses to start and the summary degrades.
+        let invocation = prepare_agent_invocation("codex", "sensitive prompt").unwrap();
+        assert_eq!(invocation.cmd, "codex");
+        assert_eq!(
+            invocation.args,
+            vec!["exec", "-", "-s", "read-only", "--skip-git-repo-check"]
+        );
+        assert_eq!(
+            invocation.stdin_payload.as_deref(),
+            Some("sensitive prompt".as_bytes())
+        );
+        assert!(invocation.cleanup_path.is_none());
+    }
+
+    #[test]
+    fn prepare_agent_invocation_for_gemini_skips_workspace_trust() {
+        // Regression (#280-adjacent): Gemini refuses to run in an untrusted
+        // workspace ("not running in a trusted directory"), so the non-repo
+        // job dir degraded summaries until --skip-trust was passed.
+        let invocation = prepare_agent_invocation("gemini", "sensitive prompt").unwrap();
+        assert_eq!(invocation.cmd, "gemini");
+        assert_eq!(invocation.args, vec!["-p", "-", "--skip-trust"]);
+        assert_eq!(
+            invocation.stdin_payload.as_deref(),
+            Some("sensitive prompt".as_bytes())
+        );
+        assert!(invocation.cleanup_path.is_none());
     }
 
     #[test]

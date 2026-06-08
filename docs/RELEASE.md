@@ -117,6 +117,32 @@ sleep 30 && curl -s https://crates.io/api/v1/crates/whisper-guard | jq '.crate.m
 ```
 whisper-guard is a standalone MIT crate consumed outside this repo (currently 277+ downloads). Bump independently of the main release; do NOT couple to the Minutes version. If you skip the publish, the crates.io users miss the fix and you create silent drift between repo state and published artifact.
 
+### 11.6. Publish minutes-core and minutes-cli to crates.io
+
+As of #79 the workspace has no git dependencies (cpal is on crates.io 0.18.1 with `windows-core` pinned to 0.61.2; pyannote-rs is on crates.io 0.3.4), so these crates can be published again. They were last on crates.io at v0.9.4 and now publish at the main release version (currently 0.18.5).
+
+Publish in dependency order, `minutes-core` before `minutes-cli`, because `minutes-cli` depends on the crates.io version of `minutes-core`. whisper-guard (Step 11.5) must already be published at the version `minutes-core` requires.
+
+```bash
+# core first; cli depends on it. dry-run each before the real publish.
+cd crates/core
+cargo publish --dry-run
+cargo publish
+# wait for the index to pick up core so cli can resolve it
+sleep 45 && curl -s https://crates.io/api/v1/crates/minutes-core | jq '.crate.max_stable_version'
+
+cd ../cli
+cargo publish --dry-run
+cargo publish
+sleep 30 && curl -s https://crates.io/api/v1/crates/minutes-cli | jq '.crate.max_stable_version'
+```
+
+Notes:
+- `cargo publish` reads each crate's `version =` dependency fields (not the local `path =`), which already point at the crates.io versions, so no manifest edits are needed.
+- Publishing is irreversible: you can only yank, never replace a version. Always run the `--dry-run` first.
+- This revives `cargo install minutes-cli` for users who do not use Homebrew.
+- If `minutes-core` fails to publish with a missing-dependency error, confirm whisper-guard at the required version is already indexed (Step 11.5).
+
 ### 12. Refresh the landing page copy, then redeploy
 Before deploying, make sure the site matches what just shipped:
 

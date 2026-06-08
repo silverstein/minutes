@@ -2,6 +2,7 @@
 
 [![GitHub stars](https://img.shields.io/github/stars/silverstein/minutes?style=social)](https://github.com/silverstein/minutes)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![crates.io](https://img.shields.io/crates/v/minutes-cli.svg)](https://crates.io/crates/minutes-cli)
 
 **Open-source conversation memory.** &nbsp; [useminutes.app](https://useminutes.app)
 

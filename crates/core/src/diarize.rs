@@ -437,31 +437,31 @@ fn stem_probe_observed_signal(path: &Path) -> ObservedSignal {
 }
 
 fn probe_stem_samples<T>(
-    mut samples: impl Iterator<Item = Result<T, hound::Error>>,
+    samples: impl Iterator<Item = Result<T, hound::Error>>,
     sample_rate: u32,
     channels: u16,
     normalize: impl Fn(T) -> f32,
 ) -> bool {
     let channels = channels as usize;
-    let max_frames = sample_rate as usize * STEM_PROBE_SECS;
-    let max_samples = max_frames * channels;
     let window_frames = sample_rate as usize;
-    if max_frames == 0 || window_frames == 0 || channels == 0 {
+    if window_frames == 0 || channels == 0 {
         return false;
     }
 
-    let mut samples_read = 0usize;
-    let mut frames_read = 0usize;
+    // Scan the WHOLE stem in 1-second RMS windows and return true as soon as
+    // any window clears the floor. This intentionally does not stop after a
+    // fixed opening probe: a far-field / AEC-equipped mic (USB conference
+    // speakerphones, e.g. Jabra Speak2) can open quiet while the far end
+    // speaks first, so a short opening window misreads a stem that has real
+    // speech later as "empty" and discards a fully recoverable recording
+    // (#280). Early-return keeps the common case (signal near the start) fast;
+    // only a genuinely silent stem is read to the end.
     let mut channel_index = 0usize;
     let mut frame_sum = 0.0_f32;
     let mut window_frames_read = 0usize;
     let mut window_sum_sq = 0.0_f64;
 
-    while samples_read < max_samples && frames_read < max_frames {
-        let Some(sample) = samples.next() else {
-            break;
-        };
-        samples_read += 1;
+    for sample in samples {
         let Ok(sample) = sample else {
             continue;
         };
@@ -475,7 +475,6 @@ fn probe_stem_samples<T>(
         let mono = frame_sum / channels as f32;
         window_sum_sq += (mono as f64) * (mono as f64);
         window_frames_read += 1;
-        frames_read += 1;
         channel_index = 0;
         frame_sum = 0.0;
 
@@ -2706,15 +2705,22 @@ mod tests {
     }
 
     #[test]
-    fn stem_has_audio_is_frame_bounded_across_rates_and_channels() {
+    fn stem_has_audio_detects_speech_after_a_quiet_opening() {
+        // #280: a far-field / AEC-equipped mic (USB conference speakerphone)
+        // can open quiet while the far end speaks first, then carry real
+        // speech. The presence check must scan past the opening rather than
+        // giving up after a fixed probe window, otherwise a fully recoverable
+        // recording is discarded as "empty".
         for (sample_rate, channels) in [(1_000, 1), (1_000, 2), (4_410, 1), (4_410, 2)] {
             let dir = tempfile::tempdir().unwrap();
             let path = dir
                 .path()
-                .join(format!("bounded-{sample_rate}-{channels}.wav"));
-            let max_frames = sample_rate as usize * STEM_PROBE_SECS;
-            write_i16_wav(&path, sample_rate, channels, max_frames + 2, |frame, _| {
-                if frame > max_frames {
+                .join(format!("quiet-open-{sample_rate}-{channels}.wav"));
+            // Silent well past the old 5-second opening probe, then speech.
+            let quiet_frames = sample_rate as usize * (STEM_PROBE_SECS + 3);
+            let total_frames = quiet_frames + sample_rate as usize * 2;
+            write_i16_wav(&path, sample_rate, channels, total_frames, |frame, _| {
+                if frame >= quiet_frames {
                     12_000
                 } else {
                     0
@@ -2722,20 +2728,22 @@ mod tests {
             });
 
             assert!(
-                !stem_has_audio(&path),
-                "probe should not scan past {max_frames} frames for {sample_rate} Hz/{channels} ch"
+                stem_has_audio(&path),
+                "speech after a quiet opening must be detected for {sample_rate} Hz/{channels} ch (#280)"
             );
         }
     }
 
     #[test]
-    fn stem_has_audio_boundary_includes_exact_max_frame_window() {
+    fn stem_has_audio_detects_a_single_loud_sample() {
+        // Presence, not sustained level: a lone loud sample clears the
+        // 1-second-window RMS floor and counts as audio.
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("boundary.wav");
+        let path = dir.path().join("single-sample.wav");
         let sample_rate = 1_000;
-        let max_frames = sample_rate as usize * STEM_PROBE_SECS;
-        write_i16_wav(&path, sample_rate, 1, max_frames, |frame, _| {
-            if frame + 1 == max_frames {
+        let frames = sample_rate as usize * 2;
+        write_i16_wav(&path, sample_rate, 1, frames, |frame, _| {
+            if frame + 1 == frames {
                 32_000
             } else {
                 0

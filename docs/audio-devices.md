@@ -8,12 +8,23 @@ Minutes captures audio from whatever input device is set as the system default (
 |----------|-------------|--------------|
 | In-person meeting | Built-in Microphone | None |
 | External USB mic (Blue Yeti, Rode, etc.) | Your mic name | Plug in, select in System Settings > Sound > Input |
-| Zoom / Meet / Teams call | BlackHole 2ch | Install BlackHole + Multi-Output Device (see below) |
+| Zoom / Teams / Meet call (desktop app) | Native call capture | None. Grant Screen Recording + Microphone permission, record from the "Call detected" banner (see below) |
+| Zoom / Meet / Teams call (CLI or manual) | BlackHole 2ch | Install BlackHole + Multi-Output Device (see below) |
 | iPhone voice memo | N/A (file-based) | Configure folder watcher |
 
 ## Capturing system audio (Zoom, Meet, Teams)
 
-macOS doesn't let apps record system audio directly. You need BlackHole, a free virtual audio device.
+**Desktop app (recommended, macOS 15+): you do not need BlackHole.** The desktop app records both your microphone and the call's audio natively using ScreenCaptureKit, with no virtual audio device. To use it:
+
+1. Grant Minutes **Screen Recording** and **Microphone** permission in System Settings > Privacy & Security.
+2. Join your call. Minutes detects Zoom, Microsoft Teams (desktop), and Webex by default and shows a **"Call detected"** banner. Click **Record** on that banner to start native call capture (it writes separate mic and system stems and mixes them).
+3. **Google Meet and Teams-in-browser** are opt-in: enable the experimental Google Meet / Teams-web detection toggles in Settings. Browser detection may also prompt for Automation permission.
+
+Note: a plain recording started without the call banner captures your microphone only. Use the banner's **Record** button (call intent) for both sides of the call.
+
+**CLI or manual fallback (any macOS): BlackHole.** The command-line `minutes record` cannot use native call capture, so to record system audio there you route it through BlackHole, a free virtual audio device. The same applies if you prefer manual routing over the desktop app.
+
+### 1. Install BlackHole
 
 ### 1. Install BlackHole
 
@@ -39,7 +50,7 @@ Either set BlackHole as the system default input in System Settings > Sound > In
 
 ```toml
 # ~/.config/minutes/config.toml
-[capture]
+[recording]
 device = "BlackHole 2ch"
 ```
 

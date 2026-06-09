@@ -23,7 +23,9 @@ serde_yaml = "0.9"
 toml = "0.8"
 
 # Audio
-cpal = { version = "0.18.1", default-features = false, features = ["pipewire", "realtime"] }
+# TEMPORARY (test branch only): validate RustAudio/cpal#1244 (windows/windows-core 0.62 pin)
+# inside a real Tauri 2.x tree on Windows CI before roderickvd merges. Do not merge to main.
+cpal = { git = "https://github.com/RustAudio/cpal.git", rev = "b0059a4e7c4b6e16fd8cae5c2f2a7ed5ed4b1a06", default-features = false, features = ["pipewire", "realtime"] }
 hound = "3.5"
 
 # Transcription

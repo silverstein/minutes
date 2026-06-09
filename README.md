@@ -2,6 +2,7 @@
 
 [![GitHub stars](https://img.shields.io/github/stars/silverstein/minutes?style=social)](https://github.com/silverstein/minutes)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![crates.io](https://img.shields.io/crates/v/minutes-cli.svg)](https://crates.io/crates/minutes-cli)
 
 **Open-source conversation memory.** &nbsp; [useminutes.app](https://useminutes.app)
 
@@ -104,7 +105,7 @@ minutes record --template standup                 # Apply a summary template
 minutes stop                                      # Stop from another terminal
 ```
 
-**Recording calls (Zoom, Meet, Teams, Webex):** macOS does not let apps capture system audio directly, so the default mic-only recording only picks up your own voice. To capture the other side of the call too, install BlackHole and route the call through a Multi-Output Device. Full setup in [`docs/audio-devices.md`](docs/audio-devices.md).
+**Recording calls (Zoom, Meet, Teams, Webex):** the desktop app captures both your mic and the call's audio natively (ScreenCaptureKit, macOS 15+, no extra software). Grant Screen Recording + Microphone permission and start from the "Call detected" banner; Google Meet and Teams-in-browser need their experimental detection toggles enabled. The CLI (`minutes record`) cannot use native capture, so for command-line call recording you route system audio through BlackHole and a Multi-Output Device. Full setup in [`docs/audio-devices.md`](docs/audio-devices.md).
 
 ### Consent disclosure aid
 

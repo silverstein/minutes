@@ -3,7 +3,7 @@ members = ["crates/core", "crates/cli", "crates/reader", "crates/whisper-guard",
 resolver = "2"
 
 [workspace.package]
-version = "0.18.5"
+version = "0.18.6"
 edition = "2021"
 license = "MIT"
 authors = ["Mat Silverstein"]
@@ -23,7 +23,7 @@ serde_yaml = "0.9"
 toml = "0.8"
 
 # Audio
-cpal = { git = "https://github.com/RustAudio/cpal.git", rev = "33e05ec94b5670c6f02080acf3fd6d8ac21e37cd", default-features = false, features = ["pipewire", "realtime"] }
+cpal = { version = "0.18.1", default-features = false, features = ["pipewire", "realtime"] }
 hound = "3.5"
 
 # Transcription

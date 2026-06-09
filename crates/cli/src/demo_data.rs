@@ -7,26 +7,31 @@ use std::time::Duration;
 
 const DEMO_TAG: &str = "minutes-demo-seed";
 const SNOWCRASH_TAG: &str = "snow-crash";
+// These demo fixtures live in `crates/cli/fixtures/demo/` (a copy of the shared
+// set under `crates/mcp/fixtures/demo/`). They MUST stay inside the cli crate:
+// `include_str!` of a path outside the crate root (the old `../../mcp/...`) makes
+// `cargo publish` fail to package them (#280-era publish revival). If the demo
+// content changes, update both copies.
 const MCP_DEMO_FIXTURES: &[(&str, &str)] = &[
     (
         "2026-02-28-pricing-strategy.md",
-        include_str!("../../mcp/fixtures/demo/2026-02-28-pricing-strategy.md"),
+        include_str!("../fixtures/demo/2026-02-28-pricing-strategy.md"),
     ),
     (
         "2026-03-04-northwind-call.md",
-        include_str!("../../mcp/fixtures/demo/2026-03-04-northwind-call.md"),
+        include_str!("../fixtures/demo/2026-03-04-northwind-call.md"),
     ),
     (
         "2026-03-11-eng-standup.md",
-        include_str!("../../mcp/fixtures/demo/2026-03-11-eng-standup.md"),
+        include_str!("../fixtures/demo/2026-03-11-eng-standup.md"),
     ),
     (
         "2026-03-25-pricing-reversal.md",
-        include_str!("../../mcp/fixtures/demo/2026-03-25-pricing-reversal.md"),
+        include_str!("../fixtures/demo/2026-03-25-pricing-reversal.md"),
     ),
     (
         "2026-04-17-prioritization.md",
-        include_str!("../../mcp/fixtures/demo/2026-04-17-prioritization.md"),
+        include_str!("../fixtures/demo/2026-04-17-prioritization.md"),
     ),
 ];
 

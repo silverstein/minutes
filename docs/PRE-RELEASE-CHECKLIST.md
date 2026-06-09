@@ -229,21 +229,16 @@ Anyone running `brew install --cask silverstein/tap/minutes` is silently stuck o
 - `GGML_CCACHE=OFF` — whisper.cpp's CMakeLists has `GGML_CCACHE=ON` by default; if a user has ccache installed (e.g. via Homebrew), `find_program()` locates it at cmake-configure time but the resulting `RULE_LAUNCH_COMPILE` fails at make-time inside Homebrew's sanitized superenv PATH (silverstein/minutes#89). `whisper-rs-sys` forwards any `GGML_*`, `WHISPER_*`, or `CMAKE_*` env var to cmake as `-D<KEY>=<VALUE>`, which is how this disable propagates.
 - Windows desktop release builds must set `GGML_NATIVE=OFF`, keep `GGML_AVX=ON` / `GGML_AVX2=ON`, and force all `GGML_AVX512*` flags `OFF` — otherwise the GitHub Windows runner can enable AVX-512 code paths in ggml/whisper.cpp that crash on normal consumer CPUs with `STATUS_ILLEGAL_INSTRUCTION` (silverstein/minutes#106)
 
-### 9.3 crates.io: not currently published
+### 9.3 crates.io: published again (revived in #79)
 
-`minutes-cli` and `minutes-core` are at v0.9.4 on crates.io and have NOT been published since. Reasons we are not reviving the publish:
+`minutes-core` and `minutes-cli` are published to crates.io again as of #79, which cleared the last git dependencies that had blocked `cargo publish`:
 
-- `minutes-core` has a git dependency on a forked `pyannote-rs`, which `cargo publish` rejects.
-- Reviving requires either feature-stripping or vendoring/replacing the git dep, which is out of scope for a normal release.
-- The crates.io README badge was removed in this same cleanup.
+- `pyannote-rs` moved from the forked git dep to crates.io 0.3.4.
+- `cpal` moved from the git rev pin to crates.io 0.18.1 (with `windows-core` pinned to 0.61.2 in the lockfile; see RustAudio/cpal#1242).
 
-If you ever decide to revive crates.io publishing, you will need to:
+Publishing is a manual release step, consistent with how whisper-guard and the npm packages are published: see **RELEASE.md Step 11.6** (publish `minutes-core`, then `minutes-cli`, in dependency order). The crates.io README badge is restored.
 
-1. Resolve the `pyannote-rs` git dep (vendor or upstream the fork)
-2. Add `cargo publish` steps to `release-cli.yml` after the tag fires
-3. Re-add the README badge
-
-Until then, treat crates.io as not part of the release surface.
+History: the crates sat at v0.9.4 and were unpublishable from ~v0.10 onward because the forked pyannote-rs and the cpal git rev are git dependencies, which `cargo publish` rejects. Both are now crates.io releases, so the next tagged release should republish at the main version (currently 0.18.5).
 
 ### 9.4 `manifest.mcpb.json`
 

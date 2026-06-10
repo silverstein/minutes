@@ -1083,9 +1083,17 @@ fn summarize_with_agent_impl_timeout(
     let invocation = prepare_agent_invocation(&agent_cmd, &prompt)?;
     let cleanup_path = invocation.cleanup_path.clone();
 
+    // AIDEV-NOTE: Use Stdio::null() when no stdin payload is needed (e.g. pi, opencode
+    // which use --file args). Keeping a piped stdin open without writing/closing it causes
+    // agents that read stdin to block indefinitely waiting for EOF.
+    let stdin_stdio = if invocation.stdin_payload.is_some() {
+        std::process::Stdio::piped()
+    } else {
+        std::process::Stdio::null()
+    };
     let mut child = std::process::Command::new(&invocation.cmd)
         .args(&invocation.args)
-        .stdin(std::process::Stdio::piped())
+        .stdin(stdin_stdio)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()

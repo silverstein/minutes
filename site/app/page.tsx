@@ -1,10 +1,15 @@
 import { CopyButton } from "@/components/copy-button";
+import { DemoPlayer } from "@/components/demo-player";
 import { APPLE_SILICON_DOWNLOAD_PATH } from "@/lib/downloads";
 import {
-  MINUTES_CLI_COMMAND_COUNT,
+  GITHUB_CONTRIBUTORS,
+  GITHUB_FORKS,
+  GITHUB_STARS,
+  NPM_MONTHLY_DOWNLOADS,
+} from "@/lib/proof";
+import {
   MINUTES_MCP_TOOL_COUNT,
   MINUTES_RELEASE_VERSION,
-  MINUTES_TEST_COUNT,
   WINDOWS_SETUP_EXE,
 } from "@/lib/release";
 
@@ -113,18 +118,20 @@ const capabilityColumns = [
   },
 ] as const;
 
+// Competitor cells reflect public docs as of June 2026. Refresh quarterly.
 const comparisons = [
-  ["Local transcription", "No", "No", "Yes", "Yes"],
-  ["Open source", "No", "No", "Yes", "MIT"],
-  ["Free", "$18/mo", "Freemium", "Free", "Free"],
-  ["Agent surface", "Hosted MCP/API", "Hosted integrations", "Local app", `Files + ${MINUTES_MCP_TOOL_COUNT} MCP tools`],
-  ["Cross-meeting intelligence", "No", "No", "No", "Yes"],
+  ["Local transcription", "No (cloud)", "No (cloud)", "Yes", "Yes"],
+  ["Open source", "No", "No", "MIT", "MIT"],
+  ["Free", "Freemium", "Freemium", "Free", "Free"],
+  ["Agent surface", "Hosted MCP", "Hosted integrations", "Local app", `Files + ${MINUTES_MCP_TOOL_COUNT} MCP tools`],
+  ["Cross-meeting intelligence", "Cloud chat", "Cloud chat", "No", "Local graph"],
+  ["Consent provenance", "No", "No", "No", "In every file"],
   ["Dictation mode", "No", "No", "No", "Yes"],
   ["Voice memos", "No", "No", "No", "iPhone pipeline"],
   ["People memory", "No", "No", "No", "Yes"],
   ["Data ownership", "Their servers", "Their servers", "Local", "Local"],
-  ["Data format", "Cloud DB", "Cloud DB", "Markdown", "Markdown + YAML"],
-  ["Agent-agnostic", "No", "No", "No", "Yes"],
+  ["Data format", "Cloud DB", "Cloud DB", "Local files", "Markdown + YAML"],
+  ["Agent-agnostic", "No", "No", "Partially", "Yes"],
 ] as const;
 
 function SectionLabel({ n, label }: { n: string; label: string }) {
@@ -235,6 +242,9 @@ export default function Home() {
           <a href="/proof" className="hover:text-[var(--accent)]">
             Proof
           </a>
+          <a href="/writing" className="hover:text-[var(--accent)]">
+            Writing
+          </a>
           <a href="/for-agents" className="hover:text-[var(--accent)]">
             For agents
           </a>
@@ -246,21 +256,23 @@ export default function Home() {
 
       <section className="pb-16 pt-16 text-center sm:pb-20 sm:pt-24">
         <p className="mb-5 font-mono text-[11px] uppercase tracking-[0.18em] text-[var(--accent)]">
-          Open-source. MCP-native.
-        </p>
-        <p className="mx-auto mb-5 max-w-[720px] font-mono text-[12px] uppercase tracking-[0.14em] text-[var(--text-secondary)]">
-          v{MINUTES_RELEASE_VERSION} • {MINUTES_MCP_TOOL_COUNT} MCP tools •{" "}
-          {MINUTES_CLI_COMMAND_COUNT} CLI commands • {MINUTES_TEST_COUNT}+ tests
+          Open source · Local first · MIT
         </p>
         <h1 className="mx-auto max-w-[720px] font-serif text-[40px] leading-[0.98] tracking-[-0.045em] text-[var(--text)] sm:text-[58px]">
-          Every meeting, memo, and voice note,
+          The conversation memory
           <br />
-          <span className="italic text-[var(--accent)]">structured and searchable.</span>
+          <span className="italic text-[var(--accent)]">your agents can actually read.</span>
         </h1>
-        <p className="mx-auto mt-5 max-w-[600px] text-[16px] leading-7 text-[var(--text-secondary)] sm:text-[17px]">
+        <p className="mx-auto mt-5 max-w-[620px] text-[16px] leading-7 text-[var(--text-secondary)] sm:text-[17px]">
           Cloud meeting tools rent your own conversations back to you. Minutes
-          captures meetings and voice memos locally, writes them as structured
-          markdown to your disk, and lets you and every AI you use read the same folder.
+          records meetings, voice memos, and dictation locally, writes structured
+          markdown to your own disk, and gives every AI you use (Claude, Codex,
+          Gemini, anything MCP) the same folder of truth.
+        </p>
+        <p className="mx-auto mt-5 max-w-[720px] font-mono text-[12px] uppercase tracking-[0.14em] text-[var(--text-secondary)]">
+          {GITHUB_STARS} GitHub stars • {GITHUB_FORKS} forks •{" "}
+          {GITHUB_CONTRIBUTORS} contributors • {NPM_MONTHLY_DOWNLOADS} npm
+          installs/mo
         </p>
 
         <div className="mt-8 flex flex-wrap justify-center gap-3">
@@ -303,14 +315,9 @@ export default function Home() {
           Local, open source, free forever.
         </p>
 
-        <p className="mx-auto mt-4 max-w-[620px] text-[14px] leading-6 text-[var(--text-secondary)]">
-          v{MINUTES_RELEASE_VERSION} adds a recording consent layer: every
-          recording stamps its consent basis into the file, an optional
-          disclosure reminder shows before each meeting, and Require mode blocks
-          CLI recording until confirmed. A disclosure aid, not legal advice.
-          Also keeps live transcripts from going silent mid-meeting and fixes
-          summarization hangs for pi and opencode users.
-        </p>
+        <div className="mt-12">
+          <DemoPlayer />
+        </div>
 
         <div className="mt-12">
           <TranscriptCard />
@@ -322,9 +329,27 @@ export default function Home() {
           readable even before an assistant touches them.
         </p>
 
+        <p className="mx-auto mt-12 max-w-[620px] rounded-[5px] border border-[color:var(--border)] bg-[var(--bg-elevated)] px-4 py-3 font-mono text-[12px] leading-5 text-[var(--text-secondary)]">
+          <span className="text-[var(--accent)]">v{MINUTES_RELEASE_VERSION}</span>{" "}
+          adds a recording consent layer and fixes live-transcript reliability.{" "}
+          <a
+            href={`https://github.com/silverstein/minutes/releases/tag/v${MINUTES_RELEASE_VERSION}`}
+            className="text-[var(--text)] underline decoration-[color:var(--border-mid)] underline-offset-2 hover:text-[var(--accent)]"
+          >
+            Release notes
+          </a>
+          {" · "}
+          <a
+            href="https://github.com/silverstein/minutes/releases.atom"
+            className="text-[var(--text)] underline decoration-[color:var(--border-mid)] underline-offset-2 hover:text-[var(--accent)]"
+          >
+            Feed
+          </a>
+        </p>
+
         <div
           id="install"
-          className="mt-14 flex flex-wrap justify-center gap-3"
+          className="mt-12 flex flex-wrap justify-center gap-3"
         >
           <a
             href={APPLE_SILICON_DOWNLOAD_PATH}
@@ -386,6 +411,17 @@ export default function Home() {
             cmd="brew tap silverstein/tap && brew install minutes"
           />
           <CopyButton label="MCP server" cmd="npx minutes-mcp" />
+        </div>
+
+        <div className="mt-8 rounded-[5px] border border-[color:var(--border)] bg-[var(--bg-elevated)] px-4 py-3 text-[13px] leading-6 text-[var(--text-secondary)] sm:hidden">
+          Reading on your phone? Minutes installs on Mac and Windows.{" "}
+          <a
+            href="https://github.com/silverstein/minutes"
+            className="text-[var(--text)] underline decoration-[color:var(--border-mid)] underline-offset-2"
+          >
+            Star the repo
+          </a>{" "}
+          so it is waiting when you are back at your desk.
         </div>
 
         <div className="mt-10 border-t border-[color:var(--border)] pt-8">
@@ -545,7 +581,7 @@ export default function Home() {
                   Otter.ai
                 </th>
                 <th className="p-3 text-left font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--text-secondary)]">
-                  Meetily
+                  Hyprnote
                 </th>
                 <th className="p-3 text-left font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--accent)]">
                   minutes
@@ -581,6 +617,70 @@ export default function Home() {
             </tbody>
           </table>
         </div>
+      </section>
+
+      <section className="border-t border-[color:var(--border)] py-16">
+        <SectionLabel n="06" label="Governance" />
+        <h2 className="font-serif text-[30px] leading-tight tracking-[-0.035em] text-[var(--text)] sm:text-[32px]">
+          Built in, not retrofitted.
+        </h2>
+        <p className="mt-5 max-w-[660px] text-[15px] leading-7 text-[var(--text-secondary)]">
+          Default-on recording is coming to work, and most tools plan to bolt
+          the controls on afterward. Minutes takes the other path: governance
+          lives in the record itself, because the record&apos;s primary reader
+          is now an agent.
+        </p>
+        <div className="mt-8 grid gap-4 md:grid-cols-3">
+          <div className="rounded-[8px] border border-[color:var(--border)] bg-[var(--bg-elevated)] p-5 shadow-[var(--shadow-panel)]">
+            <p className="font-mono text-[11px] uppercase tracking-[0.16em] text-[var(--accent)]">
+              Shipped
+            </p>
+            <p className="mt-3 text-[14px] leading-6 text-[var(--text-secondary)]">
+              Every recording stamps its consent basis into the file&apos;s
+              frontmatter. An optional disclosure reminder shows before each
+              meeting, and Require mode blocks CLI recording until consent is
+              confirmed.
+            </p>
+          </div>
+          <div className="rounded-[8px] border border-[color:var(--border)] bg-[var(--bg-elevated)] p-5 shadow-[var(--shadow-panel)]">
+            <p className="font-mono text-[11px] uppercase tracking-[0.16em] text-[var(--accent)]">
+              Next
+            </p>
+            <p className="mt-3 text-[14px] leading-6 text-[var(--text-secondary)]">
+              Sensitive meetings that never touch the recorder but still produce
+              structured notes, and retention rules the corpus enforces on its
+              own audio.
+            </p>
+          </div>
+          <div className="rounded-[8px] border border-[color:var(--border)] bg-[var(--bg-elevated)] p-5 shadow-[var(--shadow-panel)]">
+            <p className="font-mono text-[11px] uppercase tracking-[0.16em] text-[var(--accent)]">
+              The point
+            </p>
+            <p className="mt-3 text-[14px] leading-6 text-[var(--text-secondary)]">
+              Sensitivity metadata your agents are required to respect: a
+              restricted meeting never appears in search, graph queries, or
+              anything an agent assembles.
+            </p>
+          </div>
+        </div>
+        <p className="mt-6 text-[13px] leading-6 text-[var(--text-secondary)]">
+          A disclosure aid, not legal advice; make sure everyone present has
+          agreed where required. The design is public:{" "}
+          <a
+            href="/writing/governance-built-in-not-retrofitted"
+            className="text-[var(--text)] underline decoration-[color:var(--border-mid)] underline-offset-2 hover:text-[var(--accent)]"
+          >
+            why we built it this way
+          </a>
+          {" and the "}
+          <a
+            href="https://github.com/silverstein/minutes/blob/main/docs/plans/consent-layer-phase2-2026-06-10.md"
+            className="text-[var(--text)] underline decoration-[color:var(--border-mid)] underline-offset-2 hover:text-[var(--accent)]"
+          >
+            phase 2 plan
+          </a>
+          .
+        </p>
       </section>
 
       <footer className="border-t border-[color:var(--border)] py-14 text-center text-[13px] text-[var(--text-secondary)]">

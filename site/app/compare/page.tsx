@@ -29,6 +29,12 @@ const pages = [
     blurb:
       "Best if you want the honest tradeoff between a hosted meeting assistant with integrations and a local-first memory layer for agents.",
   },
+  {
+    title: "Minutes vs Hyprnote",
+    href: "/compare/hyprnote-vs-minutes",
+    blurb:
+      "Best if you are choosing between two open-source local-first tools: a notepad you write in versus a memory layer your agents query.",
+  },
 ] as const;
 
 export default function CompareHubPage() {

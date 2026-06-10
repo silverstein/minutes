@@ -7,6 +7,7 @@ These are buying guides, not teardown posts. The point is simple: some people sh
 - [Minutes vs Granola AI](/compare/granola-vs-minutes)
 - [Minutes vs Otter AI](/compare/otter-vs-minutes)
 - [Minutes vs Fireflies.ai](/compare/fireflies-vs-minutes)
+- [Minutes vs Hyprnote](/compare/hyprnote-vs-minutes)
 
 ## Notes
 

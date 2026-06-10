@@ -1931,9 +1931,17 @@ fn run_title_refinement_via_agent(
 
     let invocation = prepare_agent_invocation(agent_cmd, prompt)?;
     let cleanup_path = invocation.cleanup_path.clone();
+    // Same fix as summarize_with_agent_impl_timeout (#288): file-arg agents
+    // (pi, opencode) have no stdin payload, and an unclosed piped stdin makes
+    // them block until the timeout. Null stdin closes it immediately.
+    let stdin_stdio = if invocation.stdin_payload.is_some() {
+        std::process::Stdio::piped()
+    } else {
+        std::process::Stdio::null()
+    };
     let mut child = std::process::Command::new(&invocation.cmd)
         .args(&invocation.args)
-        .stdin(std::process::Stdio::piped())
+        .stdin(stdin_stdio)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
@@ -2243,9 +2251,17 @@ fn run_speaker_mapping_via_agent(
     let agent_cmd = resolve_agent_path(&agent_cmd);
     let invocation = prepare_agent_invocation(&agent_cmd, prompt)?;
     let cleanup_path = invocation.cleanup_path.clone();
+    // Same fix as summarize_with_agent_impl_timeout (#288): file-arg agents
+    // (pi, opencode) have no stdin payload, and an unclosed piped stdin makes
+    // them block until the timeout. Null stdin closes it immediately.
+    let stdin_stdio = if invocation.stdin_payload.is_some() {
+        std::process::Stdio::piped()
+    } else {
+        std::process::Stdio::null()
+    };
     let mut child = std::process::Command::new(&invocation.cmd)
         .args(&invocation.args)
-        .stdin(std::process::Stdio::piped())
+        .stdin(stdin_stdio)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
@@ -3026,5 +3042,64 @@ EOF
         assert_eq!(summary.decisions, vec!["decision ok"]);
         assert_eq!(summary.action_items, vec!["@mat: verify fix"]);
         assert_eq!(summary.participants, vec!["Mat"]);
+    }
+
+    /// Write a fake `pi` binary (a file-arg agent: `stdin_payload` is None)
+    /// that reads stdin to EOF before answering. With a null stdin it gets
+    /// EOF immediately; with the pre-#288 unclosed pipe it blocks until the
+    /// 120s internal timeout, so a regression shows up as a slow test failure.
+    #[cfg(unix)]
+    fn write_stdin_draining_pi(dir: &Path, reply: &str) -> std::path::PathBuf {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+
+        let script_path = dir.join("pi");
+        fs::write(
+            &script_path,
+            format!("#!/bin/sh\ncat >/dev/null\nprintf '%s' \"{}\"\n", reply),
+        )
+        .unwrap();
+        let mut perms = fs::metadata(&script_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script_path, perms).unwrap();
+        script_path
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn title_refinement_with_file_arg_agent_does_not_block_on_stdin() {
+        let dir = tempfile::tempdir().unwrap();
+        let script_path = write_stdin_draining_pi(dir.path(), "refined title");
+
+        let start = std::time::Instant::now();
+        let result =
+            run_title_refinement_via_agent("refine this title", &script_path.display().to_string())
+                .expect("file-arg agent should not block on an unclosed stdin pipe");
+
+        assert_eq!(result, "refined title");
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(30),
+            "stdin pipe regression: file-arg agent blocked waiting for EOF"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn speaker_mapping_with_file_arg_agent_does_not_block_on_stdin() {
+        let dir = tempfile::tempdir().unwrap();
+        let script_path = write_stdin_draining_pi(dir.path(), "SPEAKER_0: Mat");
+
+        let mut config = Config::default();
+        config.summarization.agent_command = script_path.display().to_string();
+
+        let start = std::time::Instant::now();
+        let result = run_speaker_mapping_via_agent("map these speakers", &config)
+            .expect("file-arg agent should not block on an unclosed stdin pipe");
+
+        assert_eq!(result, "SPEAKER_0: Mat");
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(30),
+            "stdin pipe regression: file-arg agent blocked waiting for EOF"
+        );
     }
 }

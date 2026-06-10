@@ -3799,6 +3799,11 @@ fn latest_retryable_output_notice() -> Option<OutputNotice> {
                 minutes_core::jobs::JobState::Failed | minutes_core::jobs::JobState::NeedsReview
             ) && job.notice_dismissed_at.is_none()
                 && startup_retryable_notice_is_recent(job)
+                // Retry re-processes the raw capture, so a notice promising
+                // "can be retried" is a lie once the wav has been cleaned up
+                // (`remove_capture_artifacts`) — requeue_job would just fail
+                // with "audio file missing".
+                && Path::new(&job.audio_path).exists()
         })
         .collect::<Vec<_>>();
 
@@ -10301,6 +10306,8 @@ mod tests {
             word_count: None,
             owner_pid: None,
             retry_count: 0,
+            consent: None,
+            consent_notice: None,
             recording_health: None,
         };
 
@@ -10726,6 +10733,8 @@ mod tests {
             speaker_map: vec![],
             template: None,
             filter_diagnosis: None,
+            consent: None,
+            consent_notice: None,
             recording_health: None,
             processing_warnings: Vec::new(),
         };
@@ -10784,6 +10793,8 @@ mod tests {
             speaker_map: vec![],
             template: None,
             filter_diagnosis: None,
+            consent: None,
+            consent_notice: None,
             recording_health: None,
             processing_warnings: Vec::new(),
         };
@@ -10833,6 +10844,8 @@ mod tests {
             speaker_map: vec![],
             template: None,
             filter_diagnosis: None,
+            consent: None,
+            consent_notice: None,
             recording_health: None,
             processing_warnings: Vec::new(),
         };
@@ -11099,6 +11112,8 @@ mod tests {
             word_count: Some(0),
             owner_pid: None,
             retry_count: 0,
+            consent: None,
+            consent_notice: None,
             recording_health: None,
         };
 
@@ -11134,6 +11149,8 @@ mod tests {
             word_count: Some(0),
             owner_pid: None,
             retry_count: 0,
+            consent: None,
+            consent_notice: None,
             recording_health: None,
         };
 
@@ -11179,6 +11196,8 @@ mod tests {
                 word_count: Some(0),
                 owner_pid: None,
                 retry_count: 0,
+                consent: None,
+                consent_notice: None,
                 recording_health: None,
             };
 
@@ -11192,8 +11211,10 @@ mod tests {
 
     #[test]
     fn latest_retryable_notice_falls_back_to_older_undismissed_job() {
-        with_temp_home(|_| {
+        with_temp_home(|dir| {
             let now = chrono::Local::now();
+            let older_wav = dir.join("old-visible.wav");
+            std::fs::write(&older_wav, b"riff").unwrap();
             let dismissed_job = minutes_core::jobs::ProcessingJob {
                 id: "job-new-dismissed".into(),
                 title: Some("New dismissed".into()),
@@ -11218,6 +11239,8 @@ mod tests {
                 word_count: Some(0),
                 owner_pid: None,
                 retry_count: 0,
+                consent: None,
+                consent_notice: None,
                 recording_health: None,
             };
             let older_job = minutes_core::jobs::ProcessingJob {
@@ -11228,7 +11251,7 @@ mod tests {
                 state: minutes_core::jobs::JobState::Failed,
                 stage: minutes_core::jobs::JobState::Failed.default_stage(),
                 output_path: None,
-                audio_path: "/tmp/old-visible.wav".into(),
+                audio_path: older_wav.display().to_string(),
                 error: Some("older failure".into()),
                 created_at: now - chrono::Duration::minutes(10),
                 started_at: None,
@@ -11244,6 +11267,8 @@ mod tests {
                 word_count: Some(0),
                 owner_pid: None,
                 retry_count: 0,
+                consent: None,
+                consent_notice: None,
                 recording_health: None,
             };
 
@@ -11252,7 +11277,49 @@ mod tests {
 
             let notice = latest_retryable_output_notice().expect("older retryable notice");
             assert_eq!(notice.job_id.as_deref(), Some("job-old-visible"));
-            assert_eq!(notice.path, "/tmp/old-visible.wav");
+            assert_eq!(notice.path, older_wav.display().to_string());
+        });
+    }
+
+    #[test]
+    fn latest_retryable_notice_skips_jobs_whose_capture_was_deleted() {
+        with_temp_home(|dir| {
+            let now = chrono::Local::now();
+            let missing_wav = dir.join("vanished.wav");
+            let job = minutes_core::jobs::ProcessingJob {
+                id: "job-capture-gone".into(),
+                title: Some("consent-e2e-check".into()),
+                mode: CaptureMode::Meeting,
+                content_type: ContentType::Meeting,
+                state: minutes_core::jobs::JobState::Failed,
+                stage: minutes_core::jobs::JobState::Failed.default_stage(),
+                output_path: None,
+                audio_path: missing_wav.display().to_string(),
+                error: Some("engine 'parakeet' not compiled in".into()),
+                created_at: now - chrono::Duration::minutes(1),
+                started_at: None,
+                finished_at: Some(now),
+                notice_dismissed_at: None,
+                recording_started_at: None,
+                recording_finished_at: None,
+                context_session_id: None,
+                user_notes: None,
+                pre_context: None,
+                calendar_event: None,
+                template_slug: None,
+                word_count: Some(0),
+                owner_pid: None,
+                retry_count: 0,
+                consent: None,
+                consent_notice: None,
+                recording_health: None,
+            };
+            minutes_core::jobs::write_job(&job).unwrap();
+
+            assert!(
+                latest_retryable_output_notice().is_none(),
+                "a notice promising retry must not surface once the raw capture is gone"
+            );
         });
     }
 
@@ -11284,6 +11351,8 @@ mod tests {
                 word_count: Some(0),
                 owner_pid: None,
                 retry_count: 0,
+                consent: None,
+                consent_notice: None,
                 recording_health: None,
             };
             minutes_core::jobs::write_job(&job).unwrap();
@@ -11325,6 +11394,8 @@ mod tests {
                 word_count: Some(0),
                 owner_pid: None,
                 retry_count: 0,
+                consent: None,
+                consent_notice: None,
                 recording_health: None,
             };
             minutes_core::jobs::write_job(&job).unwrap();
@@ -11382,6 +11453,8 @@ mod tests {
                 word_count: Some(0),
                 owner_pid: None,
                 retry_count: 0,
+                consent: None,
+                consent_notice: None,
                 recording_health: None,
             };
             minutes_core::jobs::write_job(&job).unwrap();

@@ -670,6 +670,24 @@ mod tests {
     // (argument-passing contract between Minutes and the EventKit
     // helper) is itself macOS-only anyway, so there's nothing to validate
     // on Windows.
+    /// Exec a just-written script with retries. Writing an executable and
+    /// exec'ing it immediately races with concurrent test forks inheriting
+    /// the short-lived write fd (ETXTBSY); the helper returns None on spawn
+    /// failure, so retry a few times before declaring the run failed.
+    #[cfg(unix)]
+    fn run_helper_with_etxtbsy_retry(
+        helper_path: &std::path::Path,
+        reference: Option<i64>,
+    ) -> Option<Vec<CalendarEvent>> {
+        for _ in 0..10 {
+            if let Some(events) = query_overlap_via_eventkit_with_helper(helper_path, reference) {
+                return Some(events);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        None
+    }
+
     #[cfg(unix)]
     #[test]
     fn query_overlap_via_eventkit_passes_reference_timestamp() {
@@ -685,7 +703,7 @@ mod tests {
         permissions.set_mode(0o755);
         std::fs::set_permissions(&helper_path, permissions).unwrap();
 
-        let events = query_overlap_via_eventkit_with_helper(&helper_path, Some(1_700_000_000))
+        let events = run_helper_with_etxtbsy_retry(&helper_path, Some(1_700_000_000))
             .expect("helper should run");
         assert!(events.is_empty());
 
@@ -711,8 +729,7 @@ mod tests {
         permissions.set_mode(0o755);
         std::fs::set_permissions(&helper_path, permissions).unwrap();
 
-        let events =
-            query_overlap_via_eventkit_with_helper(&helper_path, None).expect("helper should run");
+        let events = run_helper_with_etxtbsy_retry(&helper_path, None).expect("helper should run");
         assert!(events.is_empty());
 
         let args = std::fs::read_to_string(&args_path).unwrap();

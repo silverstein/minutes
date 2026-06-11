@@ -2363,9 +2363,12 @@ mod tests {
     use std::sync::{Mutex, OnceLock};
     use std::thread;
 
-    fn home_env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
+    /// Delegate to the crate-wide HOME-env test lock so summarize tests are
+    /// mutually exclusive with every other module that mutates HOME (a
+    /// private mutex here raced with crate::test_home_env_lock users and
+    /// flaked parallel runs).
+    fn home_env_lock_guard() -> std::sync::MutexGuard<'static, ()> {
+        crate::test_home_env_lock()
     }
 
     fn api_env_lock() -> &'static Mutex<()> {
@@ -2396,7 +2399,7 @@ mod tests {
     }
 
     fn with_temp_home<T>(f: impl FnOnce(&Path) -> T) -> T {
-        let _guard = home_env_lock().lock().unwrap();
+        let _guard = home_env_lock_guard();
         let dir = tempfile::tempdir().unwrap();
         let _home = HomeOverride::set(dir.path());
         f(dir.path())

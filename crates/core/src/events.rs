@@ -292,6 +292,14 @@ pub enum MinutesEvent {
         meeting_path: String,
         text: String,
     },
+    /// User-authored typed marker during a no-capture sensitive meeting.
+    #[serde(rename = "sensitive.marker")]
+    SensitiveMarker {
+        /// Active sensitive session id.
+        session_id: String,
+        /// User-authored marker text.
+        text: String,
+    },
     VaultSynced {
         source_path: String,
         vault_path: String,

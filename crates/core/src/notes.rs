@@ -89,10 +89,16 @@ fn elapsed_timestamp() -> Option<String> {
 /// Add a note to the current recording.
 /// Returns the timestamped note line that was appended.
 pub fn add_note(text: &str) -> Result<String, String> {
+    if crate::sensitive::is_active() {
+        return crate::sensitive::add_marker(text).map_err(|error| error.to_string());
+    }
+
     // Check recording is in progress
     let pid_path = crate::pid::pid_path();
     if !pid_path.exists() {
-        return Err("No recording in progress. Start one with: minutes record".into());
+        return Err(
+            "No recording or sensitive meeting in progress. Start one with: minutes record or minutes sensitive start".into(),
+        );
     }
 
     let timestamp = elapsed_timestamp().unwrap_or_else(|| "?:??".into());

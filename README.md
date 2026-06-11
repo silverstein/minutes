@@ -133,6 +133,22 @@ consent: verbal_all_parties
 consent_notice: Heads up — I'm using Minutes to transcribe this conversation locally on my device for my own notes. Let me know if you'd prefer I didn't.
 ```
 
+### Sensitive meetings
+
+Use a sensitive meeting when you want timed typed markers and a saved meeting
+artifact, but no audio capture.
+
+```bash
+minutes sensitive start --title "Board prep"
+minutes note "Opened with pricing risk"
+minutes sensitive stop
+```
+
+The stop flow writes a normal markdown meeting with `capture: none` and
+`sensitivity: restricted`. In a terminal, Minutes prompts for a short debrief.
+From scripts or other non-interactive callers it saves immediately with
+`debrief: pending` so an assistant can help finish the written summary later.
+
 ### Take notes during meetings
 ```bash
 minutes note "Alex wants monthly billing not annual billing"          # Timestamped, feeds into summary

@@ -382,6 +382,12 @@ enum Commands {
     /// Stop recording and process the audio
     Stop,
 
+    /// Start or stop a no-capture sensitive meeting
+    Sensitive {
+        #[command(subcommand)]
+        action: SensitiveAction,
+    },
+
     /// Keep a recording alive (reset auto-stop timers)
     Extend,
 
@@ -1100,6 +1106,18 @@ enum Commands {
 }
 
 #[derive(Subcommand)]
+enum SensitiveAction {
+    /// Start a no-capture sensitive meeting
+    Start {
+        /// Title for the sensitive meeting artifact
+        #[arg(short, long)]
+        title: Option<String>,
+    },
+    /// Stop the active sensitive meeting and write its artifact
+    Stop,
+}
+
+#[derive(Subcommand)]
 enum VocabularyAction {
     /// List local vocabulary entries
     List {
@@ -1453,6 +1471,7 @@ fn main() -> Result<()> {
         }
         Commands::Note { text, meeting } => cmd_note(&text, meeting.as_deref(), &config),
         Commands::Stop => cmd_stop(&config),
+        Commands::Sensitive { action } => cmd_sensitive(action, &config),
         Commands::Extend => {
             if !minutes_core::pid::status().recording {
                 eprintln!("No active recording to extend.");
@@ -1848,6 +1867,79 @@ fn cmd_note(text: &str, meeting: Option<&Path>, config: &Config) -> Result<()> {
     Ok(())
 }
 
+fn cmd_sensitive(action: SensitiveAction, config: &Config) -> Result<()> {
+    match action {
+        SensitiveAction::Start { title } => {
+            let session = minutes_core::sensitive::start(title.as_deref())
+                .map_err(|error| anyhow::anyhow!("{}", error))?;
+            eprintln!(
+                "Sensitive meeting started: {}. Add markers with `minutes note \"...\"`.",
+                session.title
+            );
+            Ok(())
+        }
+        SensitiveAction::Stop => {
+            let debrief = if std::io::stdin().is_terminal() {
+                Some(prompt_sensitive_debrief()?)
+            } else {
+                None
+            };
+            let result = minutes_core::sensitive::stop(debrief, config)
+                .map_err(|error| anyhow::anyhow!("{}", error))?;
+            eprintln!("Sensitive meeting saved: {}", result.path.display());
+            if result.path.exists() && !std::io::stdin().is_terminal() {
+                eprintln!(
+                    "[minutes] Debrief pending. Run `/minutes-debrief` from your assistant when ready."
+                );
+            }
+            Ok(())
+        }
+    }
+}
+
+fn prompt_sensitive_debrief() -> Result<minutes_core::sensitive::SensitiveDebrief> {
+    eprintln!("Sensitive meeting debrief. Leave a prompt blank to skip it.");
+    let summary = prompt_optional_line("Summary: ")?;
+    let decisions = prompt_repeated_lines("Decision");
+    let action_items = prompt_repeated_lines("Action item");
+    Ok(minutes_core::sensitive::SensitiveDebrief {
+        summary,
+        decisions,
+        action_items,
+    })
+}
+
+fn prompt_optional_line(prompt: &str) -> Result<Option<String>> {
+    eprint!("{}", prompt);
+    std::io::stderr().flush()?;
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input)?;
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(trimmed.to_string()))
+    }
+}
+
+fn prompt_repeated_lines(label: &str) -> Vec<String> {
+    let mut values = Vec::new();
+    loop {
+        eprint!("{} (blank when done): ", label);
+        let _ = std::io::stderr().flush();
+        let mut input = String::new();
+        if std::io::stdin().read_line(&mut input).is_err() {
+            break;
+        }
+        let trimmed = input.trim();
+        if trimmed.is_empty() {
+            break;
+        }
+        values.push(trimmed.to_string());
+    }
+    values
+}
+
 fn capture_mode_from_str(mode: &str) -> Result<CaptureMode> {
     match mode {
         "meeting" => Ok(CaptureMode::Meeting),
@@ -2106,6 +2198,8 @@ fn cmd_record(
     if minutes_core::pid::inspect_pid_file(&lt_pid).is_active() {
         anyhow::bail!("live transcript in progress — run `minutes stop` first");
     }
+    minutes_core::sensitive::ensure_inactive_for_recording()
+        .map_err(|error| anyhow::anyhow!("{}", error))?;
 
     let recording_consent = if capture_mode == CaptureMode::Meeting {
         eprintln!("Recording + transcribing locally — audio stays on your device.");
@@ -6485,6 +6579,34 @@ mod tests {
 
             assert_eq!(basis, Some(ConsentBasis::NoticeInInvite));
             assert_eq!(notice.as_deref(), Some("Included in the invite."));
+        });
+    }
+
+    #[test]
+    fn sensitive_cli_start_stop_non_tty_marks_debrief_pending() {
+        with_temp_home(|home| {
+            let config = Config {
+                output_dir: home.join("meetings"),
+                ..Config::default()
+            };
+            cmd_sensitive(
+                SensitiveAction::Start {
+                    title: Some("Board sync".into()),
+                },
+                &config,
+            )
+            .unwrap();
+            cmd_sensitive(SensitiveAction::Stop, &config).unwrap();
+
+            let meeting = std::fs::read_dir(&config.output_dir)
+                .unwrap()
+                .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+                .find(|path| path.extension().and_then(|ext| ext.to_str()) == Some("md"))
+                .expect("sensitive meeting markdown");
+            let content = std::fs::read_to_string(meeting).unwrap();
+            assert!(content.contains("capture: none"));
+            assert!(content.contains("sensitivity: restricted"));
+            assert!(content.contains("debrief: pending"));
         });
     }
 

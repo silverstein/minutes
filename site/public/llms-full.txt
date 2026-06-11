@@ -10,6 +10,14 @@ Minutes is an open-source meeting corpus you own. Record, transcribe, search, an
 
 31 tools • 7 resources • Interactive MCP App dashboard • Prompt templates
 
+**What's new in 0.18.9:**
+• **Sensitive meetings: a first-class no-capture mode.** Designate a meeting sensitive and Minutes records nothing; you still get a real meeting file built from your typed markers and a guided debrief, marked `capture: none` so future agent-policy layers can respect it. Start and stop from the palette, tray, or `minutes sensitive start/stop`.
+• **Require mode now truly gates desktop recording.** With consent mode set to require, every recording entry point (button, palette, tray, hotkey, automation) shows the same blocking confirmation before capture starts; Cancel leaves nothing behind.
+• **Calendar permission status tells the truth.** macOS can silently downgrade calendar access to Add-Only, which kills meeting reminders while everything claims healthy (it bit us for weeks). Readiness and the tray now report the observed access state with the exact fix path.
+• **In-window Cmd+K.** Plain Cmd+K opens the command palette when the Minutes window has focus; the global binding stays Cmd+Shift+K.
+• **Sensitive meeting cards are useful.** The detail view shows a purposeful no-capture card with a one-click Run debrief that hands the meeting to your assistant.
+• **Fixes.** CLI version parsing respects semver prerelease/build suffixes; repo install docs use rm-then-copy so a rebuilt binary can never invalidate its own signature under a running process; a new Using Minutes user guide is live on the site.
+
 **What's new in 0.18.8:**
 • **Live Parakeet transcription is fast by default.** The warm sidecar that keeps the model resident between utterances now enables itself whenever Parakeet is your engine and the `example-server` binary is present; no hidden setting to discover. Status surfaces report the real state (warm server, or cold per-utterance with the fix linked) instead of a misleading 'Warm: yes'. A legacy `parakeet_sidecar_enabled = false` that earlier versions wrote into every config is recognized as a serializer artifact and treated as auto; forcing the sidecar off is now "off" in config.toml.
 • **`minutes setup --parakeet` checks the live-sidecar binary.** If `example-server` is missing it says so and prints the build recipe, instead of letting live mode silently run slow.

@@ -3049,6 +3049,14 @@
       color: var(--orange);
     }
 
+    .consent-script-label {
+      font-family: var(--font-mono, monospace);
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.14em;
+      color: var(--text-secondary);
+      margin: 0 0 8px;
+    }
     .consent-disclosure {
       margin: 0;
       white-space: pre-wrap;
@@ -4779,15 +4787,16 @@
     <div class="readiness-card" role="dialog" aria-modal="true" aria-labelledby="recording-consent-title">
       <div class="readiness-header">
         <div>
-          <div class="readiness-title" id="recording-consent-title">Start recording</div>
-          <div class="readiness-sub">Review the disclosure before recording begins.</div>
+          <div class="readiness-title" id="recording-consent-title">Before you record</div>
+          <div class="readiness-sub">Require mode is on: make sure everyone gets told this is being recorded, now or as they join.</div>
         </div>
       </div>
       <div class="readiness-scroll">
+        <p class="consent-script-label">Your disclosure script, when the moment comes:</p>
         <p class="consent-disclosure" id="recording-consent-disclosure"></p>
       </div>
       <div class="readiness-actions consent-actions">
-        <button class="btn btn-primary btn-sm" id="recording-consent-confirm">Start recording</button>
+        <button class="btn btn-primary btn-sm" id="recording-consent-confirm">I&apos;ll make sure, start recording</button>
         <button class="btn btn-secondary btn-sm" id="recording-consent-cancel">Cancel</button>
       </div>
     </div>

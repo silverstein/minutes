@@ -317,8 +317,11 @@ pub struct DesktopContextConfig {
     pub capture_browser_context: bool,
     pub allowed_apps: Vec<String>,
     pub denied_apps: Vec<String>,
-    pub allowed_domains: Vec<String>,
-    pub denied_domains: Vec<String>,
+    // Domain allow/deny lists were removed in the #295-era drift sweep: the
+    // fields were parsed and settable but enforced nowhere (browser capture
+    // is window-title-only in v1; URLs and domains are never collected).
+    // Reintroduce together with actual enforcement if browser-context
+    // capture ever graduates.
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -439,8 +442,6 @@ impl Default for DesktopContextConfig {
             capture_browser_context: false,
             allowed_apps: vec![],
             denied_apps: vec![],
-            allowed_domains: vec![],
-            denied_domains: vec![],
         }
     }
 }

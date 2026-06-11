@@ -8478,12 +8478,6 @@ pub fn cmd_set_setting(section: String, key: String, value: String) -> Result<St
         ("desktop_context", "denied_apps") => {
             config.desktop_context.denied_apps = parse_comma_separated_setting(&value);
         }
-        ("desktop_context", "allowed_domains") => {
-            config.desktop_context.allowed_domains = parse_comma_separated_setting(&value);
-        }
-        ("desktop_context", "denied_domains") => {
-            config.desktop_context.denied_domains = parse_comma_separated_setting(&value);
-        }
 
         // Assistant
         ("assistant", "agent") => config.assistant.agent = value.clone(),
@@ -9112,12 +9106,9 @@ mod tests {
         // screen_context.keep_after_summary controls post-summary screenshot
         // retention. Low-traffic; TOML-only is fine.
         ("screen_context", "keep_after_summary"),
-        // Desktop-context domain policy is intentionally deferred until the
-        // browser capture path graduates beyond window-title-only context.
-        ("desktop_context", "allowed_domains"),
-        ("desktop_context", "denied_domains"),
-        // Parakeet sidecar is beta / opt-in. No UI until the sidecar path is
-        // out of beta.
+        // Parakeet sidecar auto-resolves from engine + binary presence since
+        // #295; the arm accepts auto/on/off for power users but the resolved
+        // state (not a toggle) is what Settings displays.
         ("transcription", "parakeet_sidecar_enabled"),
     ];
 

@@ -308,8 +308,6 @@ This section is intentionally narrow:
 | `capture_browser_context` | `false` | Opt in to browser-page title context (URL/domain enrichment remains deferred) |
 | `allowed_apps` | `[]` | Optional allowlist of app or bundle-id fragments |
 | `denied_apps` | `[]` | Optional denylist of app or bundle-id fragments |
-| `allowed_domains` | `[]` | Reserved for future browser URL/domain enrichment policy |
-| `denied_domains` | `[]` | Reserved for future browser URL/domain enrichment policy |
 
 This section is the policy layer for meeting-adjacent desktop context:
 

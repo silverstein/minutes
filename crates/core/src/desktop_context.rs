@@ -921,8 +921,6 @@ mod tests {
             capture_browser_context: false,
             allowed_apps: vec!["arc".into()],
             denied_apps: vec!["1password".into()],
-            allowed_domains: vec![],
-            denied_domains: vec![],
         };
 
         assert!(app_allowed(

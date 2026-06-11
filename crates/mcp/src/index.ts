@@ -530,7 +530,7 @@ const LIVE_EVENTS_SUPPORTED = hasFeature(CLI_CAPABILITIES, "events_since_seq");
 // `./version.ts` (see issue #183). Hosted `.mcpb` bundles will run
 // against CLIs with different minor/patch numbers within the same
 // major; that is explicitly supported.
-const MCP_SERVER_VERSION = "0.18.7";
+const MCP_SERVER_VERSION = "0.18.8";
 
 export function parseKnowledgeConfig(configContent: string): KnowledgeConfigStatus | null {
   const knowledgeMatch = configContent.match(/\[knowledge\][\s\S]*?(?=\n\[|$)/);

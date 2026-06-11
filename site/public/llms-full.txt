@@ -10,6 +10,11 @@ Minutes is an open-source meeting corpus you own. Record, transcribe, search, an
 
 31 tools • 7 resources • Interactive MCP App dashboard • Prompt templates
 
+**What's new in 0.18.8:**
+• **Live Parakeet transcription is fast by default.** The warm sidecar that keeps the model resident between utterances now enables itself whenever Parakeet is your engine and the `example-server` binary is present; no hidden setting to discover. Status surfaces report the real state (warm server, or cold per-utterance with the fix linked) instead of a misleading 'Warm: yes'. A legacy `parakeet_sidecar_enabled = false` that earlier versions wrote into every config is recognized as a serializer artifact and treated as auto; forcing the sidecar off is now "off" in config.toml.
+• **`minutes setup --parakeet` checks the live-sidecar binary.** If `example-server` is missing it says so and prints the build recipe, instead of letting live mode silently run slow.
+• **Dead settings removed.** Desktop-context domain allow/deny lists were accepted by settings and documented but enforced nowhere; they are gone until real enforcement exists.
+
 **What's new in 0.18.7:**
 • **Recording consent, built in.** A new consent layer stamps every recording's consent basis into the meeting frontmatter, with an optional disclosure reminder before each meeting recording and a Require mode that blocks CLI recording until confirmed (the desktop app reminds for now; a blocking confirmation is coming). Configure it in Settings or under `[consent]` in config.toml. It is a disclosure aid, not legal advice: make sure everyone present has agreed where required.
 • **Live transcripts no longer go silent mid-meeting.** A slow or wedged transcription call could starve live mode's audio pipeline, freezing the live transcript while the recording itself stayed healthy. Transcription now runs on a dedicated worker with a bounded queue, the first seconds of a meeting are no longer lost to model loading, and stuck engine calls time out and retry on CPU.

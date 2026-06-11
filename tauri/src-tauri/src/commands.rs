@@ -2875,6 +2875,12 @@ fn start_native_call_recording(
     requested_title: Option<String>,
 ) -> Result<(), String> {
     minutes_core::pid::create().map_err(|error| error.to_string())?;
+    // Re-check sensitive exclusivity with the PID (the atomic anchor) held;
+    // closes the start/start interleaving in both directions (review F3).
+    if let Err(error) = minutes_core::sensitive::ensure_inactive_for_recording() {
+        minutes_core::pid::remove().ok();
+        return Err(error.to_string());
+    }
     let mut session = match call_capture::start_native_call_capture() {
         Ok(session) => session,
         Err(error) => {
@@ -5205,6 +5211,15 @@ pub fn start_recording(
         );
         return;
     }
+    // Re-check sensitive exclusivity with the PID held (review F3).
+    if let Err(error) = minutes_core::sensitive::ensure_inactive_for_recording() {
+        minutes_core::pid::remove().ok();
+        let message = error.to_string();
+        set_recording_start_error(&latest_output, message.clone());
+        show_user_notification(&app_handle, "Recording", &message);
+        starting.store(false, Ordering::Relaxed);
+        return;
+    }
     starting.store(false, Ordering::Relaxed);
     recording.store(true, Ordering::Relaxed);
     stop_flag.store(false, Ordering::Relaxed);
@@ -5453,6 +5468,17 @@ pub fn start_recording(
     );
 }
 
+/// Result of an internal (non-JS) recording launch request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LaunchOutcome {
+    /// The launch was accepted and capture is being reserved/spawned.
+    Started,
+    /// Require mode intercepted the launch: the blocking consent modal was
+    /// shown in the main window and capture starts only after the user
+    /// confirms there (review F1/F2).
+    ConsentRequested,
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn launch_recording(
     app: tauri::AppHandle,
@@ -5464,11 +5490,24 @@ pub fn launch_recording(
     language_override: Option<String>,
     hotkey_runtime: Option<Arc<Mutex<HotkeyRuntime>>>,
     discard_short_hotkey_capture: Option<Arc<AtomicBool>>,
-) -> Result<(), String> {
+) -> Result<LaunchOutcome, String> {
     if mode == CaptureMode::Meeting {
         let config = Config::load();
-        if desktop_recording_consent_required(mode, &config, false).is_some() {
-            return Err("Recording requires confirmation in the Minutes window.".into());
+        if let Some(disclosure) = desktop_recording_consent_required(mode, &config, false) {
+            // Palette, tray, hotkey, and desktop-control starts end in the
+            // same UI, so Require routes them to the same blocking modal as
+            // the in-window button instead of erroring or bypassing
+            // (spec Part A; review F1/F2). The frontend listener stashes the
+            // pending args and re-invokes with consent confirmed.
+            if let Some(window) = app.get_webview_window("main") {
+                window.show().ok();
+                window.set_focus().ok();
+            }
+            let _ = app.emit(
+                "minutes://recording-consent-required",
+                serde_json::json!({ "disclosure": disclosure }),
+            );
+            return Ok(LaunchOutcome::ConsentRequested);
         }
     }
     reserve_recording_launch(state).map_err(|error| reject_recording_launch(state, error))?;
@@ -5485,7 +5524,7 @@ pub fn launch_recording(
         discard_short_hotkey_capture,
     );
 
-    Ok(())
+    Ok(LaunchOutcome::Started)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -5572,7 +5611,15 @@ pub fn handle_desktop_control_request(
                 None,
                 None,
             ) {
-                Ok(()) => {
+                Ok(LaunchOutcome::ConsentRequested) => {
+                    return minutes_core::desktop_control::DesktopControlResponse {
+                        id: request.id,
+                        handled_at: chrono::Local::now(),
+                        accepted: true,
+                        detail: "Require mode: confirmation shown in the Minutes window; recording starts after the user confirms.".into(),
+                    };
+                }
+                Ok(LaunchOutcome::Started) => {
                     let start = Instant::now();
                     while start.elapsed() < Duration::from_secs(12) {
                         if recording_active(&state.recording) {

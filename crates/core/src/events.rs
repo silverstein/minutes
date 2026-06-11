@@ -465,6 +465,17 @@ pub fn append_event(event: MinutesEvent) {
     }
 }
 
+/// Append one event, surfacing failure to the caller.
+///
+/// For paths where the event IS the contract (e.g. sensitive-meeting markers
+/// ride the event bus by spec), best-effort emission is not enough: the
+/// caller must know the append failed so the command can fail loudly instead
+/// of silently diverging from the bus (review F5).
+pub fn append_event_strict(event: MinutesEvent) -> std::io::Result<()> {
+    let envelope = EventEnvelope::new(event);
+    append_event_inner(&envelope).map(|_| ())
+}
+
 pub fn append_agent_annotation(
     request: AgentAnnotationRequest,
 ) -> Result<EventEnvelope, AgentAnnotationError> {

@@ -734,6 +734,9 @@ fn start_slot_session(
                 Some(hotkey_runtime),
                 Some(discard_flag),
             )
+            // QuickThought is not a meeting, so Require never intercepts it;
+            // map the launch outcome back to this fn's unit result.
+            .map(|_| ())
         }
         ShortcutSlot::Dictation => {
             let capture = match style {

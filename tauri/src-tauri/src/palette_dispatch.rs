@@ -43,6 +43,7 @@ use std::path::Path;
 use std::sync::atomic::Ordering;
 
 use serde::Deserialize;
+use tauri::Manager;
 use tauri::{AppHandle, Emitter, State};
 
 use minutes_core::palette::recents::RecentsStore;
@@ -453,8 +454,25 @@ fn dispatch_action(
             }
             // Palette launches with pipeline defaults — users who need flags
             // reach for the CLI or the existing tray menu.
-            cmd_start_recording(app, state, None, None, None, None, None, None, None)?;
-            Ok(ActionResponse::Ok)
+            match cmd_start_recording(app.clone(), state, None, None, None, None, None, None, None)?
+            {
+                crate::commands::StartRecordingOutcome::Started => Ok(ActionResponse::Ok),
+                crate::commands::StartRecordingOutcome::ConsentRequired { disclosure } => {
+                    // Require mode: route the palette start to the same
+                    // blocking modal as the in-window button instead of
+                    // silently reporting success with no recording
+                    // (spec Part A; review F1).
+                    if let Some(window) = app.get_webview_window("main") {
+                        window.show().ok();
+                        window.set_focus().ok();
+                    }
+                    let _ = app.emit(
+                        "minutes://recording-consent-required",
+                        serde_json::json!({ "disclosure": disclosure }),
+                    );
+                    Ok(ActionResponse::Ok)
+                }
+            }
         }
         ActionId::StopRecording => {
             cmd_stop_recording(state)?;

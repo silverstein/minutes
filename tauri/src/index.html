@@ -7396,6 +7396,14 @@
       return startDesktopRecordingWithArgs(recordingStartArgsForCurrentUi());
     }
 
+    // Palette / tray / hotkey / desktop-control starts under Require mode
+    // arrive as a backend event rather than a JS invoke result; show the
+    // same modal (review F1/F2). Confirm restarts with pipeline defaults.
+    window.__TAURI__.event.listen('minutes://recording-consent-required', (event) => {
+      const disclosure = event?.payload?.disclosure || '';
+      showRecordingConsentModal(disclosure, {});
+    });
+
     function showRecordingStartError(error) {
       const detail = typeof error === 'string'
         ? error

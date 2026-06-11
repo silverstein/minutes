@@ -2225,6 +2225,16 @@ fn cmd_record(
     // Check if already recording
     let recording_started_at = Local::now();
     minutes_core::pid::create().map_err(|e| anyhow::anyhow!("{}", e))?;
+    // Re-check sensitive-session exclusivity now that the recording PID (the
+    // atomic flock anchor) is held: a sensitive session may have started in
+    // the window between the early check above and pid::create. With the PID
+    // held, a concurrent sensitive start is blocked by its own recording
+    // check, so this re-check closes the interleaving in both directions
+    // (review F3). On conflict, release the PID and bail.
+    if let Err(error) = minutes_core::sensitive::ensure_inactive_for_recording() {
+        let _ = minutes_core::pid::remove();
+        anyhow::bail!("{}", error);
+    }
     let context_session_id = minutes_core::desktop_context::maybe_start_capture_session(
         &config.desktop_context,
         capture_mode,

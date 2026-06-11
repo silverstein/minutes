@@ -1,5 +1,5 @@
 use crate::config::Config;
-use crate::events::{append_event, MinutesEvent};
+use crate::events::MinutesEvent;
 use crate::markdown::{
     ActionItem, CapturePolicy, ConsentBasis, ContentType, DebriefStatus, Decision, EntityLinks,
     Frontmatter, OutputStatus, Sensitivity, WriteResult,
@@ -38,6 +38,11 @@ pub struct SensitiveSession {
     pub title: String,
     /// Session start timestamp.
     pub started_at: DateTime<Local>,
+    /// PID of the process that started the session. A session whose owner
+    /// is no longer alive is stale (crash leftover) and is recovered rather
+    /// than blocking recording forever (review F4).
+    #[serde(default)]
+    pub owner_pid: u32,
     /// User-authored markers collected during the session.
     #[serde(default)]
     pub markers: Vec<SensitiveMarker>,
@@ -111,11 +116,27 @@ pub fn is_active() -> bool {
 }
 
 /// Read the active sensitive session, if any.
+///
+/// A session whose owning process is dead is a crash leftover: it is logged,
+/// removed, and reported as no-session, so a crashed sensitive session can
+/// never permanently block recording (review F4). Sessions persisted before
+/// `owner_pid` existed (field defaults to 0) are treated as live to stay
+/// conservative.
 pub fn active_session() -> Option<SensitiveSession> {
     let path = session_path();
-    fs::read_to_string(path)
+    let session = fs::read_to_string(&path)
         .ok()
-        .and_then(|raw| serde_json::from_str::<SensitiveSession>(&raw).ok())
+        .and_then(|raw| serde_json::from_str::<SensitiveSession>(&raw).ok())?;
+    if session.owner_pid != 0 && !crate::pid::is_process_alive(session.owner_pid) {
+        tracing::warn!(
+            session_id = %session.id,
+            owner_pid = session.owner_pid,
+            "removing stale sensitive session left by a dead process"
+        );
+        let _ = fs::remove_file(&path);
+        return None;
+    }
+    Some(session)
 }
 
 /// Start a no-capture sensitive meeting session.
@@ -141,6 +162,7 @@ pub fn start(title: Option<&str>) -> Result<SensitiveSession, SensitiveError> {
                 .unwrap_or("Sensitive meeting")
                 .to_string(),
             started_at: now,
+            owner_pid: std::process::id(),
             markers: Vec::new(),
         };
         write_session(&session)?;
@@ -166,12 +188,17 @@ pub fn add_marker(text: &str) -> Result<String, SensitiveError> {
             elapsed_label(session.started_at, marker.timestamp),
             text
         );
-        session.markers.push(marker.clone());
+        // Bus first, fallibly: markers ride the event bus by spec, so a
+        // failed append fails the command rather than silently diverging.
+        // An orphan bus event (if the session write below then failed) is
+        // harmless observability; a session marker missing from the bus is
+        // a contract violation (review F5).
+        crate::events::append_event_strict(MinutesEvent::SensitiveMarker {
+            session_id: session.id.clone(),
+            text: marker.text.clone(),
+        })?;
+        session.markers.push(marker);
         write_session(&session)?;
-        append_event(MinutesEvent::SensitiveMarker {
-            session_id: session.id,
-            text: marker.text,
-        });
         Ok(rendered)
     })
 }

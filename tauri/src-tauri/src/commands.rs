@@ -3559,6 +3559,19 @@ fn consent_mode_as_str(mode: ConsentMode) -> &'static str {
     }
 }
 
+/// Result of a desktop recording start request.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(tag = "status", rename_all = "camelCase")]
+pub enum StartRecordingOutcome {
+    /// Recording launch has been accepted.
+    Started,
+    /// The frontend must show the Require-mode confirmation dialog first.
+    ConsentRequired {
+        /// Disclosure text to show verbatim in the dialog.
+        disclosure: String,
+    },
+}
+
 fn desktop_recording_consent_basis(config: &Config) -> ConsentBasis {
     config
         .consent
@@ -3576,6 +3589,26 @@ fn desktop_recording_consent_basis(config: &Config) -> ConsentBasis {
             }
         })
         .unwrap_or(ConsentBasis::Unattested)
+}
+
+fn desktop_recording_consent_required(
+    mode: CaptureMode,
+    config: &Config,
+    consent_confirmed: bool,
+) -> Option<String> {
+    if mode != CaptureMode::Meeting
+        || config.consent.mode != ConsentMode::Require
+        || consent_confirmed
+    {
+        return None;
+    }
+
+    let disclosure = config.consent.disclosure_script.trim();
+    if disclosure.is_empty() {
+        Some(Config::default().consent.disclosure_script)
+    } else {
+        Some(disclosure.to_string())
+    }
 }
 
 fn show_user_notification_nonmodal(app_handle: &tauri::AppHandle, title: &str, body: &str) {
@@ -3644,15 +3677,12 @@ fn maybe_save_and_show_recording_consent(
             show_user_notification_nonmodal(app_handle, "Recording disclosure", &body);
         }
         ConsentMode::Require => {
-            // TODO(phase 2): blocking require confirmation modal for desktop recordings.
-            let mut body =
-                "Recording + transcribing locally - audio stays on your device.".to_string();
             if let Some(disclosure) = notice {
-                body.push('\n');
-                body.push_str(disclosure);
+                eprintln!(
+                    "[minutes] Recording + transcribing locally - audio stays on your device. {}",
+                    disclosure
+                );
             }
-            eprintln!("[minutes] {}", body.replace('\n', " "));
-            show_user_notification_nonmodal(app_handle, "Recording disclosure", &body);
         }
     }
 }
@@ -3671,6 +3701,7 @@ fn validate_recording_launch_state(state: &AppState) -> Result<(), String> {
     if state.dictation_active.load(Ordering::Relaxed) || dictation_pid_active() {
         return Err("Dictation in progress — stop it first".into());
     }
+    minutes_core::sensitive::ensure_inactive_for_recording().map_err(|error| error.to_string())?;
     Ok(())
 }
 
@@ -5434,6 +5465,12 @@ pub fn launch_recording(
     hotkey_runtime: Option<Arc<Mutex<HotkeyRuntime>>>,
     discard_short_hotkey_capture: Option<Arc<AtomicBool>>,
 ) -> Result<(), String> {
+    if mode == CaptureMode::Meeting {
+        let config = Config::load();
+        if desktop_recording_consent_required(mode, &config, false).is_some() {
+            return Err("Recording requires confirmation in the Minutes window.".into());
+        }
+    }
     reserve_recording_launch(state).map_err(|error| reject_recording_launch(state, error))?;
 
     spawn_reserved_recording(
@@ -5800,7 +5837,8 @@ pub fn cmd_start_recording(
     title: Option<String>,
     language: Option<String>,
     source: Option<String>,
-) -> Result<(), String> {
+    consent_confirmed: Option<bool>,
+) -> Result<StartRecordingOutcome, String> {
     let capture_mode = parse_capture_mode(mode.as_deref())?;
     let requested_intent = parse_recording_intent(intent.as_deref())?;
     let from_call_detect = source.as_deref() == Some("call_detect");
@@ -5823,6 +5861,17 @@ pub fn cmd_start_recording(
         }),
     );
 
+    validate_recording_launch_state(&state)
+        .map_err(|error| reject_recording_launch(&state, error))?;
+    let config = Config::load();
+    if let Some(disclosure) = desktop_recording_consent_required(
+        capture_mode,
+        &config,
+        consent_confirmed.unwrap_or(false),
+    ) {
+        return Ok(StartRecordingOutcome::ConsentRequired { disclosure });
+    }
+
     // Reserve the start BEFORE mutating any call-detect session atomics.
     // Otherwise a rejected call-detect start (live transcript/dictation already
     // active, stale starting flag, etc.) can cancel auto-stop state for a
@@ -5841,7 +5890,7 @@ pub fn cmd_start_recording(
         None,
         None,
     );
-    Ok(())
+    Ok(StartRecordingOutcome::Started)
 }
 
 /// Reset countdown lifecycle state for a fresh recording/session boundary.
@@ -5900,6 +5949,47 @@ pub fn cmd_extend_recording() -> Result<(), String> {
 #[tauri::command]
 pub fn cmd_add_note(text: String) -> Result<String, String> {
     minutes_core::notes::add_note(&text)
+}
+
+/// Start a no-capture sensitive meeting from the desktop app.
+#[tauri::command]
+pub fn cmd_sensitive_start(title: Option<String>) -> Result<serde_json::Value, String> {
+    let session =
+        minutes_core::sensitive::start(title.as_deref()).map_err(|error| error.to_string())?;
+    Ok(serde_json::json!({
+        "id": session.id,
+        "title": session.title,
+        "startedAt": session.started_at.to_rfc3339(),
+    }))
+}
+
+/// Stop the active desktop sensitive meeting and open the assistant debrief flow.
+#[tauri::command]
+pub fn cmd_sensitive_stop(
+    app: tauri::AppHandle,
+    state: tauri::State<AppState>,
+) -> Result<serde_json::Value, String> {
+    let config = Config::load();
+    let result = minutes_core::sensitive::stop(None, &config).map_err(|error| error.to_string())?;
+    let path = result.path.to_string_lossy().to_string();
+    if let Err(error) = spawn_terminal(&app, &state.pty_manager, "meeting", Some(&path), None) {
+        show_user_notification(&app, "Sensitive meeting saved", &error);
+    } else if let Ok(mut manager) = state.pty_manager.lock() {
+        if let Some(command) = manager.session_command(crate::pty::ASSISTANT_SESSION_ID) {
+            let debrief_prompt = "Run /minutes-debrief for CURRENT_MEETING.md.";
+            let input = if is_shell_command(&command) {
+                format!("cat <<'__MINUTES__'\n{debrief_prompt}\n__MINUTES__\n")
+            } else {
+                format!("{debrief_prompt}\n")
+            };
+            let _ = manager.write_input(crate::pty::ASSISTANT_SESSION_ID, input.as_bytes());
+        }
+    }
+    Ok(serde_json::json!({
+        "path": path,
+        "title": result.title,
+        "debrief": "pending",
+    }))
 }
 
 /// Toggle (or force-set) the Minutes-local mic mute for the active
@@ -5967,6 +6057,7 @@ fn status_value(state: &AppState, include_readiness: bool) -> serde_json::Value 
         .map(|guard| guard.clone())
         .unwrap_or_default();
     let recording_active = recording || (status.recording && !processing);
+    let sensitive_session = minutes_core::sensitive::active_session();
 
     // Get elapsed time if recording
     let elapsed = if recording_active {
@@ -5992,6 +6083,14 @@ fn status_value(state: &AppState, include_readiness: bool) -> serde_json::Value 
     } else {
         None
     };
+    let sensitive_elapsed = sensitive_session.as_ref().map(|session| {
+        let now = chrono::Local::now();
+        let e = now
+            .signed_duration_since(session.started_at)
+            .num_seconds()
+            .max(0) as u64;
+        format!("{}:{:02}", e / 60, e % 60)
+    });
 
     let audio_level = if recording_active {
         minutes_core::capture::audio_level()
@@ -6015,6 +6114,14 @@ fn status_value(state: &AppState, include_readiness: bool) -> serde_json::Value 
         "callCaptureHealth": call_capture_health,
         "pid": status.pid,
         "elapsed": elapsed,
+        "sensitive": sensitive_session.as_ref().map(|session| serde_json::json!({
+            "active": true,
+            "id": session.id,
+            "title": session.title,
+            "startedAt": session.started_at.to_rfc3339(),
+            "elapsed": sensitive_elapsed,
+            "markerCount": session.markers.len(),
+        })),
         "audioLevel": audio_level,
     });
 
@@ -10338,6 +10445,26 @@ mod tests {
     }
 
     #[test]
+    fn desktop_require_consent_returns_confirmation_until_confirmed() {
+        let mut config = Config::default();
+        config.consent.mode = ConsentMode::Require;
+        config.consent.disclosure_script = "Please confirm before recording.".into();
+
+        assert_eq!(
+            desktop_recording_consent_required(CaptureMode::Meeting, &config, false).as_deref(),
+            Some("Please confirm before recording.")
+        );
+        assert_eq!(
+            desktop_recording_consent_required(CaptureMode::Meeting, &config, true),
+            None
+        );
+        assert_eq!(
+            desktop_recording_consent_required(CaptureMode::QuickThought, &config, false),
+            None
+        );
+    }
+
+    #[test]
     fn parse_comma_separated_setting_splits_trims_and_drops_empties() {
         assert_eq!(parse_comma_separated_setting(""), Vec::<String>::new());
         assert_eq!(parse_comma_separated_setting("   "), Vec::<String>::new());
@@ -10734,6 +10861,9 @@ mod tests {
             }],
             intents: vec![],
             recorded_by: None,
+            capture: None,
+            sensitivity: None,
+            debrief: None,
             visibility: None,
             speaker_map: vec![],
             template: None,
@@ -10794,6 +10924,9 @@ mod tests {
             }],
             intents: vec![],
             recorded_by: None,
+            capture: None,
+            sensitivity: None,
+            debrief: None,
             visibility: None,
             speaker_map: vec![],
             template: None,
@@ -10845,6 +10978,9 @@ mod tests {
             decisions: vec![],
             intents: vec![],
             recorded_by: None,
+            capture: None,
+            sensitivity: None,
+            debrief: None,
             visibility: None,
             speaker_map: vec![],
             template: None,

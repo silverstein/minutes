@@ -88,6 +88,8 @@ pub enum ActionId {
     StartLiveTranscript,
     StopLiveTranscript,
     ReadLiveTranscript,
+    StartSensitiveMeeting,
+    StopSensitiveMeeting,
 
     // Dictation
     StartDictation,
@@ -143,6 +145,8 @@ impl ActionId {
             ActionId::StartLiveTranscript => "start-live-transcript",
             ActionId::StopLiveTranscript => "stop-live-transcript",
             ActionId::ReadLiveTranscript => "read-live-transcript",
+            ActionId::StartSensitiveMeeting => "start-sensitive-meeting",
+            ActionId::StopSensitiveMeeting => "stop-sensitive-meeting",
             ActionId::StartDictation => "start-dictation",
             ActionId::StopDictation => "stop-dictation",
             ActionId::OpenLatestMeeting => "open-latest-meeting",
@@ -213,7 +217,7 @@ impl Visibility {
         }
     }
 
-    /// Shorthand: only visible when no audio session is active.
+    /// Shorthand: only visible when no long-running session is active.
     pub const fn when_idle() -> Self {
         Self {
             requires: StateFlags::empty(),
@@ -244,6 +248,14 @@ impl Visibility {
             forbids: StateFlags::empty(),
         }
     }
+
+    /// Shorthand: only visible during a sensitive meeting session.
+    pub const fn when_sensitive() -> Self {
+        Self {
+            requires: StateFlags::SENSITIVE,
+            forbids: StateFlags::empty(),
+        }
+    }
 }
 
 /// Bitmask of mutually-observable app states. Kept as a hand-rolled bitflag
@@ -256,10 +268,12 @@ impl StateFlags {
     pub const LIVE_TRANSCRIPT: StateFlags = StateFlags(1 << 1);
     pub const DICTATION: StateFlags = StateFlags(1 << 2);
     pub const MEETING_OPEN: StateFlags = StateFlags(1 << 3);
+    pub const SENSITIVE: StateFlags = StateFlags(1 << 4);
 
-    /// Any long-running audio session.
-    pub const ANY_SESSION: StateFlags =
-        StateFlags(Self::RECORDING.0 | Self::LIVE_TRANSCRIPT.0 | Self::DICTATION.0);
+    /// Any long-running capture or no-capture meeting session.
+    pub const ANY_SESSION: StateFlags = StateFlags(
+        Self::RECORDING.0 | Self::LIVE_TRANSCRIPT.0 | Self::DICTATION.0 | Self::SENSITIVE.0,
+    );
 
     pub const fn empty() -> Self {
         Self(0)
@@ -403,6 +417,24 @@ pub fn commands() -> Vec<Command> {
             keywords: &["read", "view", "show", "live"],
             section: Section::Recording,
             visibility: Visibility::when_live_transcript(),
+            input: InputKind::None,
+        },
+        Command {
+            id: ActionId::StartSensitiveMeeting,
+            title: "Start sensitive meeting",
+            description: "Create a no-capture meeting for typed markers",
+            keywords: &["restricted", "private", "marker", "no-capture"],
+            section: Section::Recording,
+            visibility: Visibility::when_idle(),
+            input: InputKind::None,
+        },
+        Command {
+            id: ActionId::StopSensitiveMeeting,
+            title: "Stop sensitive meeting",
+            description: "Save the no-capture meeting and open Recall",
+            keywords: &["restricted", "private", "finish", "debrief"],
+            section: Section::Recording,
+            visibility: Visibility::when_sensitive(),
             input: InputKind::None,
         },
         // ── Dictation ────────────────────────────────────────────────
@@ -1176,11 +1208,12 @@ mod tests {
     fn registry_has_seed_commands() {
         let all = commands();
         // The launch-cohesion slice adds two meeting-context commands
-        // on top of slice 2: create a debrief draft and confirm a speaker.
+        // on top of slice 2, and consent wave 1 adds the sensitive
+        // start/stop pair.
         assert_eq!(
             all.len(),
-            22,
-            "registry should have exactly 22 commands with backing dispatchers"
+            24,
+            "registry should have exactly 24 commands with backing dispatchers"
         );
     }
 

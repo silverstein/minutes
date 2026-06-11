@@ -1761,6 +1761,9 @@ fn main() {
                 None::<&str>,
             )?;
             let quick_thought_item_ref = quick_thought_item.clone();
+            let sensitive_item =
+                MenuItem::with_id(app, "sensitive", "Sensitive Meeting", true, None::<&str>)?;
+            let sensitive_item_ref = sensitive_item.clone();
             let stop_item = MenuItem::with_id(
                 app,
                 "stop",
@@ -1833,6 +1836,7 @@ fn main() {
                 &sep0,
                 &record_item,
                 &quick_thought_item,
+                &sensitive_item,
                 &stop_item,
                 &mic_mute_item,
                 &sep,
@@ -1858,6 +1862,7 @@ fn main() {
                     let stop = stop_clone.clone();
                     let rec_item = record_item_ref.clone();
                     let quick_item = quick_thought_item_ref.clone();
+                    let sensitive_item_ref = sensitive_item_ref.clone();
                     let stp_item = stop_item_ref.clone();
                     let screen_share_hidden = screen_share_hidden.clone();
                     let screen_share_item_ref = screen_share_item_ref.clone();
@@ -1880,39 +1885,9 @@ fn main() {
                             {
                                 return;
                             }
-                            // Transitional text only — enabled-state flips
-                            // flow through sync_tray_state so they cannot
-                            // race against external (non-tray) state changes
-                            // (issue #223 / codex race-condition catch).
-                            rec_item.set_text("Starting...").ok();
-                            let app_handle = app.clone();
-                            let ri = rec_item.clone();
-                            std::thread::spawn(move || {
-                                let app_for_launch = app_handle.clone();
-                                let state = app_handle.state::<commands::AppState>();
-                                let _ = commands::launch_recording(
-                                    app_for_launch,
-                                    &state,
-                                    minutes_core::CaptureMode::Meeting,
-                                    None,
-                                    false,
-                                    None,
-                                    None,
-                                    None,
-                                    None,
-                                );
-                                // Reset transitional text only. Do NOT call
-                                // sync_tray_state here — `launch_recording`
-                                // is non-blocking; it spawns the actual
-                                // recorder thread which fires its own
-                                // sync_tray_state calls through the
-                                // recording lifecycle. Calling sync here
-                                // would race against the inner recorder's
-                                // sync and could leave the menu showing
-                                // record-enabled mid-recording (codex
-                                // diff-review attack #1).
-                                ri.set_text("Start Recording").ok();
-                            });
+                            show_main_window(app);
+                            app.emit("recording:start-requested", serde_json::json!({}))
+                                .ok();
                         }
                         "quick-thought" => {
                             let app_state = app.state::<commands::AppState>();
@@ -2026,6 +2001,49 @@ fn main() {
                             };
                             mic_mute_item_ref.set_text(label).ok();
                         }
+                        "sensitive" => {
+                            if minutes_core::sensitive::is_active() {
+                                let app_handle = app.clone();
+                                let state = app.state::<commands::AppState>();
+                                match commands::cmd_sensitive_stop(app_handle, state) {
+                                    Ok(result) => {
+                                        sensitive_item_ref.set_text("Sensitive Meeting").ok();
+                                        commands::show_user_notification(
+                                            app,
+                                            "Sensitive meeting saved",
+                                            result
+                                                .get("path")
+                                                .and_then(|value| value.as_str())
+                                                .unwrap_or("Saved."),
+                                        );
+                                    }
+                                    Err(err) => commands::show_user_notification(
+                                        app,
+                                        "Sensitive meeting",
+                                        &err,
+                                    ),
+                                }
+                            } else {
+                                match commands::cmd_sensitive_start(None) {
+                                    Ok(result) => {
+                                        sensitive_item_ref.set_text("Stop Sensitive Meeting").ok();
+                                        commands::show_user_notification(
+                                            app,
+                                            "Sensitive meeting started",
+                                            result
+                                                .get("title")
+                                                .and_then(|value| value.as_str())
+                                                .unwrap_or("Sensitive meeting"),
+                                        );
+                                    }
+                                    Err(err) => commands::show_user_notification(
+                                        app,
+                                        "Sensitive meeting",
+                                        &err,
+                                    ),
+                                }
+                            }
+                        }
                         "note" => {
                             show_note_window(app);
                         }
@@ -2131,25 +2149,9 @@ fn main() {
                             {
                                 return;
                             }
-                            rec_item.set_text("Starting...").ok();
-                            let app_handle = app.clone();
-                            let ri = rec_item.clone();
-                            std::thread::spawn(move || {
-                                let app_for_launch = app_handle.clone();
-                                let state = app_handle.state::<commands::AppState>();
-                                let _ = commands::launch_recording(
-                                    app_for_launch,
-                                    &state,
-                                    minutes_core::CaptureMode::Meeting,
-                                    None,
-                                    false,
-                                    None,
-                                    None,
-                                    None,
-                                    None,
-                                );
-                                ri.set_text("Start Recording").ok();
-                            });
+                            show_main_window(app);
+                            app.emit("recording:start-requested", serde_json::json!({}))
+                                .ok();
                         }
                         _ => {}
                     }
@@ -2331,6 +2333,8 @@ fn main() {
             commands::cmd_list_meetings,
             commands::cmd_search,
             commands::cmd_add_note,
+            commands::cmd_sensitive_start,
+            commands::cmd_sensitive_stop,
             commands::cmd_start_recording,
             commands::cmd_stop_recording,
             commands::cmd_cancel_call_end_countdown,

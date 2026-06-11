@@ -860,10 +860,22 @@
       color: var(--live);
     }
 
+    .status-pill.sensitive {
+      font-size: 11px;
+      padding: 3px 10px;
+      width: auto;
+      height: auto;
+      border-radius: 12px;
+      opacity: 1;
+      background: var(--accent-tint);
+      color: var(--accent);
+    }
+
     html[data-platform="macos"] .header .status-pill.recording,
     html[data-platform="macos"] .header .status-pill.starting,
     html[data-platform="macos"] .header .status-pill.processing,
-    html[data-platform="macos"] .header .status-pill.live {
+    html[data-platform="macos"] .header .status-pill.live,
+    html[data-platform="macos"] .header .status-pill.sensitive {
       font-size: 0;
       padding: 0;
       width: 8px;
@@ -2891,6 +2903,23 @@
       display: flex;
     }
 
+    .consent-overlay {
+      position: fixed;
+      inset: 0;
+      background: var(--modal-scrim);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+      z-index: 130;
+    }
+
+    .consent-overlay.active {
+      display: flex;
+    }
+
     .readiness-card {
       width: min(720px, 100%);
       max-height: calc(100vh - 40px);
@@ -3005,6 +3034,10 @@
       margin-top: 10px;
     }
 
+    .consent-actions {
+      padding: 0 20px 18px;
+    }
+
     .readiness-action-status {
       width: 100%;
       font-size: 11px;
@@ -3014,6 +3047,13 @@
 
     .readiness-action-status.error {
       color: var(--orange);
+    }
+
+    .consent-disclosure {
+      margin: 0;
+      white-space: pre-wrap;
+      color: var(--text);
+      line-height: 1.5;
     }
 
     /* ── Recovery view ── */
@@ -4734,6 +4774,25 @@
     </div>
   </div>
 
+  <!-- Recording consent confirmation -->
+  <div class="consent-overlay" id="recording-consent-overlay">
+    <div class="readiness-card" role="dialog" aria-modal="true" aria-labelledby="recording-consent-title">
+      <div class="readiness-header">
+        <div>
+          <div class="readiness-title" id="recording-consent-title">Start recording</div>
+          <div class="readiness-sub">Review the disclosure before recording begins.</div>
+        </div>
+      </div>
+      <div class="readiness-scroll">
+        <p class="consent-disclosure" id="recording-consent-disclosure"></p>
+      </div>
+      <div class="readiness-actions consent-actions">
+        <button class="btn btn-primary btn-sm" id="recording-consent-confirm">Start recording</button>
+        <button class="btn btn-secondary btn-sm" id="recording-consent-cancel">Cancel</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Recovery -->
   <div class="recovery-overlay" id="recovery-overlay">
     <div class="recovery-card" role="dialog" aria-modal="true" aria-labelledby="recovery-title">
@@ -5338,7 +5397,7 @@
         <div class="about-controls">
           <div class="about-controls-group">
             <div class="about-controls-copy">Recording consent reminder</div>
-            <div class="about-controls-meta">Shows a local-transcription disclosure before recording a meeting. A disclosure aid, not legal advice; make sure everyone present has agreed where required.</div>
+            <div class="about-controls-meta">Shows a local-transcription disclosure before recording a meeting. A disclosure aid, not advice; make sure everyone present has agreed where required.</div>
             <select id="settings-consent-mode" class="settings-field">
               <option value="off">Off</option>
               <option value="remind">Remind me (default)</option>
@@ -5696,6 +5755,10 @@
     const readinessOverlay = document.getElementById('readiness-overlay');
     const readinessButton = document.getElementById('btn-readiness');
     const readinessScroll = document.getElementById('readiness-scroll');
+    const recordingConsentOverlay = document.getElementById('recording-consent-overlay');
+    const recordingConsentDisclosure = document.getElementById('recording-consent-disclosure');
+    const recordingConsentConfirm = document.getElementById('recording-consent-confirm');
+    const recordingConsentCancel = document.getElementById('recording-consent-cancel');
     const jobsButton = document.getElementById('btn-jobs');
     const jobsCount = document.getElementById('jobs-count');
     const jobsOverlay = document.getElementById('jobs-overlay');
@@ -5731,6 +5794,7 @@
     let isStarting = false;
     let isProcessing = false;
     let isLiveTranscript = false;
+    let isSensitiveMeeting = false;
     let currentMeetingPath = null;
     const liveBar = document.getElementById('live-bar');
     // Live bar elements are accessed by ID inline (live-time, live-utterances)
@@ -6452,6 +6516,7 @@
         isRecording = status.recording;
         isStarting = !!status.starting;
         isProcessing = !!status.processing;
+        isSensitiveMeeting = !!(status.sensitive && status.sensitive.active);
         updateJobsChip(status.processingJobCount || 0);
         renderProcessingJobs(status.processingJobs || []);
         updateOutputNotice(status.latestOutput);
@@ -6572,6 +6637,21 @@
           if (wasRecording) {
             playCue('stop');
           }
+        } else if (isSensitiveMeeting) {
+          statusPill.className = 'status-pill sensitive';
+          statusPill.textContent = 'sensitive';
+          recordingBar.classList.add('active');
+          recordingLabel.textContent = status.sensitive.title
+            ? `Sensitive meeting · ${status.sensitive.title}`
+            : 'Sensitive meeting';
+          recordingSourceHealth.classList.remove('active');
+          processingBar.classList.remove('active');
+          liveBar.classList.remove('active');
+          callBanner.classList.remove('active');
+          setFooterCaptureMode(true, 'recording');
+          recordingTime.textContent = status.sensitive.elapsed || '';
+          updateViz(0);
+          startFastPoll();
         } else {
           // Check live transcript status
           let wasLive = isLiveTranscript;
@@ -7287,9 +7367,33 @@
       return undefined;
     }
 
+    let pendingRecordingStartArgs = null;
+
+    function closeRecordingConsentModal() {
+      recordingConsentOverlay.classList.remove('active');
+      pendingRecordingStartArgs = null;
+    }
+
+    function showRecordingConsentModal(disclosure, args) {
+      pendingRecordingStartArgs = args || {};
+      recordingConsentDisclosure.textContent = disclosure || '';
+      recordingConsentOverlay.classList.add('active');
+      recordingConsentConfirm.focus();
+    }
+
+    async function startDesktopRecordingWithArgs(args, consentConfirmed = false) {
+      const payload = { ...(args || {}) };
+      if (consentConfirmed) payload.consentConfirmed = true;
+      const result = await invoke('cmd_start_recording', payload);
+      if (result && result.status === 'consentRequired') {
+        setFooterCaptureMode(false);
+        showRecordingConsentModal(result.disclosure, args);
+      }
+      return result;
+    }
+
     function startDesktopRecordingFromUi() {
-      const args = recordingStartArgsForCurrentUi();
-      return args ? invoke('cmd_start_recording', args) : invoke('cmd_start_recording');
+      return startDesktopRecordingWithArgs(recordingStartArgsForCurrentUi());
     }
 
     function showRecordingStartError(error) {
@@ -7311,6 +7415,44 @@
         await startDesktopRecordingFromUi();
       } catch (e) {
         console.error('Record:', e);
+        showRecordingStartError(e);
+        setFooterCaptureMode(false);
+      }
+    });
+
+    recordingConsentConfirm.addEventListener('click', async () => {
+      const args = pendingRecordingStartArgs || {};
+      closeRecordingConsentModal();
+      try {
+        setFooterCaptureMode(true, 'starting');
+        startFastPoll();
+        await startDesktopRecordingWithArgs(args, true);
+      } catch (e) {
+        console.error('Record confirm:', e);
+        showRecordingStartError(e);
+        setFooterCaptureMode(false);
+      }
+    });
+
+    recordingConsentCancel.addEventListener('click', () => {
+      closeRecordingConsentModal();
+      setFooterCaptureMode(false);
+    });
+
+    recordingConsentOverlay.addEventListener('click', (e) => {
+      if (e.target === recordingConsentOverlay) {
+        closeRecordingConsentModal();
+        setFooterCaptureMode(false);
+      }
+    });
+
+    window.__TAURI__.event.listen('recording:start-requested', async (event) => {
+      try {
+        setFooterCaptureMode(true, 'starting');
+        startFastPoll();
+        await startDesktopRecordingWithArgs(event?.payload || {});
+      } catch (e) {
+        console.error('Record request:', e);
         showRecordingStartError(e);
         setFooterCaptureMode(false);
       }
@@ -7356,11 +7498,15 @@
         statusPill.textContent = 'stopping';
         recordingLabel.textContent = 'Finishing recording…';
         processingBar.classList.add('active');
-        processingTitle.textContent = 'Stopping recording';
-        processingStage.textContent = 'Saving audio and wrapping up…';
+        processingTitle.textContent = isSensitiveMeeting ? 'Stopping sensitive meeting' : 'Stopping recording';
+        processingStage.textContent = isSensitiveMeeting ? 'Saving typed markers…' : 'Saving audio and wrapping up…';
         setFooterCaptureMode(false);
         startFastPoll();
-        await invoke('cmd_stop_recording');
+        if (isSensitiveMeeting) {
+          await invoke('cmd_sensitive_stop');
+        } else {
+          await invoke('cmd_stop_recording');
+        }
       } catch (e) {
         stopRequested = false;
         document.getElementById('btn-stop').disabled = false;
@@ -8381,7 +8527,7 @@
         try {
           setFooterCaptureMode(true, 'starting');
           startFastPoll();
-          await invoke('cmd_start_recording');
+          await startDesktopRecordingWithArgs();
         } catch (e) {
           console.error('First recording:', e);
           showRecordingStartError(e);
@@ -10600,7 +10746,7 @@
         // Mark the session as call-detection-initiated so stop_when_call_ends
         // knows this recording is eligible for the auto-stop prompt when the
         // call app exits. Manual `minutes record` / hotkey starts never set this.
-        await invoke('cmd_start_recording', { intent: 'call', source: 'call_detect' });
+        await startDesktopRecordingWithArgs({ intent: 'call', source: 'call_detect' });
       } catch (e) {
         console.error('Call recording:', e);
         showRecordingStartError(e);

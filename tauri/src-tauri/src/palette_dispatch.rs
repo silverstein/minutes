@@ -51,9 +51,10 @@ use minutes_core::Config;
 
 use crate::commands::{
     cmd_add_note, cmd_create_artifact_from_meeting, cmd_open_meeting_url, cmd_search,
-    cmd_start_dictation, cmd_start_live_transcript, cmd_start_recording, cmd_stop_dictation,
-    cmd_stop_live_transcript, cmd_stop_recording, cmd_upcoming_meetings, copy_to_clipboard,
-    dictation_pid_active, open_target, recording_active, AppState,
+    cmd_sensitive_start, cmd_sensitive_stop, cmd_start_dictation, cmd_start_live_transcript,
+    cmd_start_recording, cmd_stop_dictation, cmd_stop_live_transcript, cmd_stop_recording,
+    cmd_upcoming_meetings, copy_to_clipboard, dictation_pid_active, open_target, recording_active,
+    AppState,
 };
 
 // ─────────────────────────────────────────────────────────────────────
@@ -234,6 +235,9 @@ pub(crate) fn backend_flags(state: &AppState) -> StateFlags {
     let dict_in_app = state.dictation_active.load(Ordering::Relaxed);
     if dict_in_app || dictation_pid_active() {
         f = f.union(StateFlags::DICTATION);
+    }
+    if minutes_core::sensitive::is_active() {
+        f = f.union(StateFlags::SENSITIVE);
     }
 
     f
@@ -449,7 +453,7 @@ fn dispatch_action(
             }
             // Palette launches with pipeline defaults — users who need flags
             // reach for the CLI or the existing tray menu.
-            cmd_start_recording(app, state, None, None, None, None, None, None)?;
+            cmd_start_recording(app, state, None, None, None, None, None, None, None)?;
             Ok(ActionResponse::Ok)
         }
         ActionId::StopRecording => {
@@ -481,6 +485,14 @@ fn dispatch_action(
             let lines = serde_json::to_value(&lines)
                 .map_err(|e| format!("serialize live transcript: {}", e))?;
             Ok(ActionResponse::LiveLines { lines })
+        }
+        ActionId::StartSensitiveMeeting => {
+            cmd_sensitive_start(None)?;
+            Ok(ActionResponse::Ok)
+        }
+        ActionId::StopSensitiveMeeting => {
+            cmd_sensitive_stop(app, state)?;
+            Ok(ActionResponse::Ok)
         }
 
         // ── Dictation ────────────────────────────────────────────

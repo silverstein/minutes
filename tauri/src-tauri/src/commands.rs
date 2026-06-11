@@ -7468,6 +7468,8 @@ pub fn cmd_get_meeting_detail(path: String) -> Result<MeetingDetail, String> {
         debrief: frontmatter.debrief.map(|d| {
             match d {
                 minutes_core::markdown::DebriefStatus::Pending => "pending",
+                minutes_core::markdown::DebriefStatus::Complete => "complete",
+                minutes_core::markdown::DebriefStatus::NotApplicable => "not-applicable",
             }
             .to_string()
         }),

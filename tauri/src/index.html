@@ -8210,7 +8210,12 @@
         statusRow.className = 'detail-action-item';
         const statusText = document.createElement('span');
         statusText.className = 'detail-action-text';
-        statusText.textContent = 'No audio was captured, by design. Markers and the debrief are the record.';
+        const debriefSuffix = detail.debrief === 'complete'
+          ? ' Debrief complete.'
+          : detail.debrief === 'not-applicable'
+            ? ' Debrief marked not applicable.'
+            : '';
+        statusText.textContent = 'No audio was captured, by design. Markers and the debrief are the record.' + debriefSuffix;
         statusRow.appendChild(statusText);
         sensitiveBody.appendChild(statusRow);
         if (detail.debrief === 'pending') {

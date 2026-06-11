@@ -102,10 +102,16 @@ pub enum Sensitivity {
 
 /// Human debrief state for no-capture meeting artifacts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "kebab-case")]
 pub enum DebriefStatus {
     /// The meeting was stopped without an interactive debrief.
     Pending,
+    /// A human supplied the debrief (at stop time or later via the
+    /// assistant flow); the artifact is the finished record.
+    Complete,
+    /// The human marked the debrief unnecessary (test run, accidental
+    /// trigger); nothing further is expected.
+    NotApplicable,
 }
 
 /// A non-fatal failure of a post-transcript pipeline step.

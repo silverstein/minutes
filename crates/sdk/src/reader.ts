@@ -109,7 +109,7 @@ export interface Frontmatter {
   status?: string;
   capture?: "none";
   sensitivity?: "normal" | "restricted";
-  debrief?: "pending";
+  debrief?: "pending" | "complete" | "not-applicable";
   device?: string;
   captured_at?: string;
   tags: string[];
@@ -291,7 +291,11 @@ export function parseFrontmatter(
       sensitivity: parsed.sensitivity === "normal" || parsed.sensitivity === "restricted"
         ? parsed.sensitivity
         : undefined,
-      debrief: parsed.debrief === "pending" ? "pending" : undefined,
+      debrief: parsed.debrief === "pending" ||
+        parsed.debrief === "complete" ||
+        parsed.debrief === "not-applicable"
+        ? parsed.debrief
+        : undefined,
       tags: Array.isArray(parsed.tags) ? parsed.tags.map(String) : [],
       attendees: Array.isArray(parsed.attendees)
         ? parsed.attendees.map(String)

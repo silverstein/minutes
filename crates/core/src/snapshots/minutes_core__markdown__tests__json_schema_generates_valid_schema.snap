@@ -1,6 +1,5 @@
 ---
 source: crates/core/src/markdown.rs
-assertion_line: 1266
 expression: schema
 ---
 {
@@ -329,6 +328,16 @@ expression: schema
           "description": "The meeting was stopped without an interactive debrief.",
           "type": "string",
           "const": "pending"
+        },
+        {
+          "description": "A human supplied the debrief (at stop time or later via the\nassistant flow); the artifact is the finished record.",
+          "type": "string",
+          "const": "complete"
+        },
+        {
+          "description": "The human marked the debrief unnecessary (test run, accidental\ntrigger); nothing further is expected.",
+          "type": "string",
+          "const": "not-applicable"
         }
       ]
     },

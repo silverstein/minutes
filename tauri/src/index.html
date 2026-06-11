@@ -8195,13 +8195,67 @@
         detailScroll.appendChild(artifactsCard);
       }
 
-      if (!detail.sections || detail.sections.length === 0) {
-        const empty = document.createElement('div');
-        empty.className = 'detail-empty';
-        empty.textContent = 'No transcript content available for this recording.';
-        detailScroll.appendChild(empty);
+      if (detail.capture === 'none') {
+        // No-capture sensitive meeting: replace the raw "Audio was not
+        // captured" transcript line with a purposeful status card, including
+        // the debrief affordance the frontmatter promises (minutes-3yub.5).
+        const sensitiveCard = document.createElement('div');
+        sensitiveCard.className = 'detail-context';
+        const sensitiveLabel = document.createElement('div');
+        sensitiveLabel.className = 'detail-context-label';
+        sensitiveLabel.textContent = 'Sensitive Meeting';
+        const sensitiveBody = document.createElement('div');
+        sensitiveBody.className = 'detail-action-list';
+        const statusRow = document.createElement('div');
+        statusRow.className = 'detail-action-item';
+        const statusText = document.createElement('span');
+        statusText.className = 'detail-action-text';
+        statusText.textContent = 'No audio was captured, by design. Markers and the debrief are the record.';
+        statusRow.appendChild(statusText);
+        sensitiveBody.appendChild(statusRow);
+        if (detail.debrief === 'pending') {
+          const debriefRow = document.createElement('div');
+          debriefRow.className = 'detail-action-item';
+          const debriefText = document.createElement('span');
+          debriefText.className = 'detail-action-text';
+          debriefText.textContent = 'Debrief pending: capture decisions and action items while they are fresh.';
+          debriefRow.appendChild(debriefText);
+          const debriefBtn = document.createElement('button');
+          debriefBtn.className = 'btn btn-primary btn-sm';
+          debriefBtn.textContent = 'Run debrief';
+          debriefBtn.addEventListener('click', async () => {
+            try {
+              await invoke('cmd_run_meeting_debrief', { path: detail.path });
+            } catch (e) {
+              showDetailFeedback(`Could not start debrief: ${e}`, 'error');
+            }
+          });
+          debriefRow.appendChild(debriefBtn);
+          sensitiveBody.appendChild(debriefRow);
+        }
+        sensitiveCard.appendChild(sensitiveLabel);
+        sensitiveCard.appendChild(sensitiveBody);
+        detailScroll.appendChild(sensitiveCard);
+      }
+
+      const renderableSections = (detail.sections || []).filter((section) => {
+        // The transcript section of a no-capture meeting is a fixed
+        // placeholder line; the sensitive card above carries that message.
+        if (detail.capture === 'none' && /^transcript$/i.test(section.heading || '')) {
+          return false;
+        }
+        return true;
+      });
+
+      if (!renderableSections || renderableSections.length === 0) {
+        if (detail.capture !== 'none') {
+          const empty = document.createElement('div');
+          empty.className = 'detail-empty';
+          empty.textContent = 'No transcript content available for this recording.';
+          detailScroll.appendChild(empty);
+        }
       } else {
-        for (const section of detail.sections) {
+        for (const section of renderableSections) {
           const sectionEl = document.createElement('section');
           sectionEl.className = 'detail-section';
 
@@ -8684,6 +8738,18 @@
 
     // ⌘, keyboard shortcut
     document.addEventListener('keydown', (e) => { if (e.metaKey && e.key === ',') { e.preventDefault(); openSettings(); } });
+    // Plain Cmd+K opens the palette when the Minutes window has focus
+    // (minutes-s5fb). Skip while typing in inputs; the global Cmd+Shift+K
+    // binding is unchanged.
+    document.addEventListener('keydown', (e) => {
+      if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && e.key === 'k') {
+        const target = e.target;
+        const tag = target && target.tagName ? target.tagName.toLowerCase() : '';
+        if (tag === 'input' || tag === 'textarea' || (target && target.isContentEditable)) return;
+        e.preventDefault();
+        invoke('cmd_toggle_palette').catch(() => {});
+      }
+    });
 
     async function loadSettings() {
       try {

@@ -2358,6 +2358,8 @@ fn main() {
             commands::cmd_add_note,
             commands::cmd_sensitive_start,
             commands::cmd_sensitive_stop,
+            commands::cmd_run_meeting_debrief,
+            commands::cmd_toggle_palette,
             commands::cmd_start_recording,
             commands::cmd_stop_recording,
             commands::cmd_cancel_call_end_countdown,

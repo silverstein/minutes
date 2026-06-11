@@ -1296,6 +1296,13 @@ pub struct MeetingDetail {
     pub adjacent_artifacts: Vec<RecentArtifactView>,
     pub sections: Vec<MeetingSection>,
     pub speaker_map: Vec<SpeakerAttributionView>,
+    /// Capture policy from frontmatter ("none" for sensitive no-capture
+    /// meetings); absent for normal captured meetings.
+    pub capture: Option<String>,
+    /// Sensitivity designation from frontmatter ("restricted"), if any.
+    pub sensitivity: Option<String>,
+    /// Debrief status from frontmatter ("pending"), if any.
+    pub debrief: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -6068,6 +6075,35 @@ pub fn cmd_sensitive_stop(
 /// Toggle (or force-set) the Minutes-local mic mute for the active
 /// dual-source recording. Returns the new muted state. System audio
 /// keeps capturing; only the mic stream is silenced.
+/// Hand an existing meeting to the assistant with a debrief prompt.
+///
+/// Used by the detail view's "Run debrief" action on no-capture sensitive
+/// meetings whose frontmatter says `debrief: pending` (bead minutes-3yub.5);
+/// mirrors the handoff `cmd_sensitive_stop` performs at stop time.
+#[tauri::command]
+pub fn cmd_run_meeting_debrief(
+    app: tauri::AppHandle,
+    state: tauri::State<AppState>,
+    path: String,
+) -> Result<(), String> {
+    let config = Config::load();
+    let meeting_path = std::path::PathBuf::from(&path);
+    minutes_core::notes::validate_meeting_path(&meeting_path, &config.output_dir)?;
+    spawn_terminal(&app, &state.pty_manager, "meeting", Some(&path), None)?;
+    if let Ok(mut manager) = state.pty_manager.lock() {
+        if let Some(command) = manager.session_command(crate::pty::ASSISTANT_SESSION_ID) {
+            let debrief_prompt = "Run /minutes-debrief for CURRENT_MEETING.md.";
+            let input = if is_shell_command(&command) {
+                format!("cat <<'__MINUTES__'\n{debrief_prompt}\n__MINUTES__\n")
+            } else {
+                format!("{debrief_prompt}\n")
+            };
+            let _ = manager.write_input(crate::pty::ASSISTANT_SESSION_ID, input.as_bytes());
+        }
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub fn cmd_toggle_mic_mute(force_state: Option<bool>) -> bool {
     match force_state {
@@ -7387,6 +7423,10 @@ pub fn cmd_get_meeting_detail(path: String) -> Result<MeetingDetail, String> {
 
     let related = build_related_context(&config, &meeting_path, &frontmatter);
 
+    let capture_is_none = matches!(
+        frontmatter.capture,
+        Some(minutes_core::markdown::CapturePolicy::None)
+    );
     Ok(MeetingDetail {
         path,
         title: frontmatter.title,
@@ -7403,9 +7443,34 @@ pub fn cmd_get_meeting_detail(path: String) -> Result<MeetingDetail, String> {
         related_topics: related.related_topics,
         related_meetings: related.related_meetings,
         related_commitments: related.related_commitments,
-        adjacent_artifacts: related.adjacent_artifacts,
+        // Adjacent prep/brief artifacts are navigation noise on a no-capture
+        // sensitive meeting; the card is about its own markers and debrief.
+        adjacent_artifacts: if capture_is_none {
+            Vec::new()
+        } else {
+            related.adjacent_artifacts
+        },
         sections: parse_sections(body),
         speaker_map,
+        capture: frontmatter.capture.map(|c| {
+            match c {
+                minutes_core::markdown::CapturePolicy::None => "none",
+            }
+            .to_string()
+        }),
+        sensitivity: frontmatter.sensitivity.map(|s| {
+            match s {
+                minutes_core::markdown::Sensitivity::Normal => "normal",
+                minutes_core::markdown::Sensitivity::Restricted => "restricted",
+            }
+            .to_string()
+        }),
+        debrief: frontmatter.debrief.map(|d| {
+            match d {
+                minutes_core::markdown::DebriefStatus::Pending => "pending",
+            }
+            .to_string()
+        }),
     })
 }
 
@@ -13937,6 +14002,15 @@ pub fn handle_palette_shortcut_event(
 /// still live and a reopen race could attach to a window that is
 /// about to disappear. `destroy()` skips the close-request event and
 /// removes the window immediately.
+/// In-window accelerator: plain Cmd+K opens the palette when the main
+/// Minutes window already has focus (bead minutes-s5fb). The GLOBAL
+/// binding stays Cmd+Shift+K; a global plain Cmd+K would shadow the
+/// palette key of half the apps on the machine.
+#[tauri::command]
+pub fn cmd_toggle_palette(app: tauri::AppHandle) {
+    toggle_palette_window(&app);
+}
+
 pub fn toggle_palette_window(app: &tauri::AppHandle) {
     let state = app.state::<AppState>();
 

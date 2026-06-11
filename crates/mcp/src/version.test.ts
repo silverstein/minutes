@@ -77,3 +77,45 @@ describe("isCliCompatible", () => {
     expect(result.severity).toBe("info");
   });
 });
+
+describe("parseVersion semver suffixes (#185)", () => {
+  it("captures prerelease", () => {
+    expect(parseVersion("0.14.0-rc1")).toEqual({
+      major: 0, minor: 14, patch: 0, prerelease: "rc1",
+    });
+    expect(parseVersion("0.14.0-rc.2")).toEqual({
+      major: 0, minor: 14, patch: 0, prerelease: "rc.2",
+    });
+  });
+
+  it("captures build metadata", () => {
+    expect(parseVersion("0.14.0+git.abc123")).toEqual({
+      major: 0, minor: 14, patch: 0, build: "git.abc123",
+    });
+  });
+
+  it("captures both prerelease and build", () => {
+    expect(parseVersion("0.14.0-rc1+build.3")).toEqual({
+      major: 0, minor: 14, patch: 0, prerelease: "rc1", build: "build.3",
+    });
+  });
+
+  it("still parses prefixed forms", () => {
+    expect(parseVersion("minutes 0.14.0")).toEqual({ major: 0, minor: 14, patch: 0 });
+    expect(parseVersion("v0.14.0")).toEqual({ major: 0, minor: 14, patch: 0 });
+  });
+});
+
+describe("isCliCompatible prerelease honesty (#185)", () => {
+  it("prerelease vs GA on the same triple is info, not 'up to date'", () => {
+    const result = isCliCompatible("0.14.0-rc1", "0.14.0");
+    expect(result.ok).toBe(true);
+    expect(result.severity).toBe("info");
+    expect(result.message).toContain("prerelease");
+  });
+
+  it("GA vs GA on the same triple stays ok", () => {
+    const result = isCliCompatible("0.14.0", "0.14.0");
+    expect(result.severity).toBe("ok");
+  });
+});

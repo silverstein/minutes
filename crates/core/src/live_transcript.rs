@@ -706,7 +706,7 @@ fn run_inner(
     // Parakeet engine dispatch — mirrors run_sidecar_inner_mpsc. When the user
     // configures `engine = "parakeet"` and the parakeet feature is compiled in,
     // utterance samples are accumulated and routed through the parakeet path
-    // (warm sidecar socket when `parakeet_sidecar_enabled = true`, subprocess
+    // (warm sidecar socket when the effective sidecar decision is on, subprocess
     // otherwise) at VAD-end. On failure the session transparently falls back
     // to whisper for the remainder. See RFC 0002.
     #[cfg(feature = "parakeet")]
@@ -740,9 +740,9 @@ fn run_inner(
     // Warm the parakeet sidecar at session start so the first utterance doesn't
     // pay subprocess-spawn + model-load latency. We only warm the sidecar lane
     // because:
-    //   - `parakeet_sidecar_enabled = true` → warmup leaves a hot example-server
+    //   - sidecar effective-on (auto or explicit) → warmup leaves a hot example-server
     //     child + loaded model, making subsequent utterances fast.
-    //   - `parakeet_sidecar_enabled = false` → warmup would just be a throwaway
+    //   - sidecar effective-off → warmup would just be a throwaway
     //     subprocess on a silent WAV; it wouldn't leave a hot backend behind,
     //     so the first real utterance still pays full spawn/model-load cost.
     //     Skipping the no-op warmup avoids a 4-5s startup stall for nothing.
@@ -753,7 +753,7 @@ fn run_inner(
     // whisper here would be strictly worse than what the per-utterance code
     // already does.
     #[cfg(feature = "parakeet")]
-    if parakeet_live_enabled && config.transcription.parakeet_sidecar_enabled {
+    if parakeet_live_enabled && crate::parakeet_sidecar::sidecar_enabled_effective(config) {
         eprintln!("[minutes] Warming parakeet sidecar... (first-run cold start can take 10-30s)");
         let started = std::time::Instant::now();
         match crate::transcription_coordinator::warmup_active_backend(config) {

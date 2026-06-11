@@ -170,10 +170,28 @@ pub struct TranscriptionConfig {
     /// runtime it can add noticeable cold-start latency because the model is
     /// cast to fp16 on each run.
     pub parakeet_fp16: bool,
-    /// Enable the warm Parakeet example-server sidecar path.
+    /// Warm Parakeet example-server sidecar: `None` (default) = auto.
     ///
-    /// This is beta and remains opt-in until more real-world validation lands.
-    pub parakeet_sidecar_enabled: bool,
+    /// Auto enables the sidecar when parakeet is the selected engine (batch or
+    /// live) AND the `example-server` binary resolves; otherwise the cold
+    /// per-utterance subprocess path is used. Explicit `true`/`false` in
+    /// config.toml overrides auto in either direction (#295). Use
+    /// `parakeet_sidecar::sidecar_enabled_effective()` to read the decision;
+    /// never branch on this raw field.
+    ///
+    /// On-disk forms: absent or `"auto"` = auto; `true`/`"on"` = forced on;
+    /// `"off"` = forced off. A legacy bool `false` is treated as auto, because
+    /// pre-0.18.8 full-struct saves wrote `= false` into every config file
+    /// while the key had no UI — it was a serializer artifact, never intent
+    /// (#295). Deliberate forced-off therefore serializes as the string
+    /// `"off"`, which the legacy serializer could never have written.
+    #[serde(
+        default,
+        deserialize_with = "de_sidecar_tristate",
+        serialize_with = "ser_sidecar_tristate",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub parakeet_sidecar_enabled: Option<bool>,
     /// Clear the persistent parakeet fp16 blacklist before the next sidecar start.
     ///
     /// This is useful after upgrading the parakeet binary to a version that may
@@ -751,6 +769,49 @@ impl Default for CallDetectionConfig {
     }
 }
 
+/// Deserialize the sidecar tri-state: bool `true`/`"on"` => forced on,
+/// `"off"` => forced off, `"auto"` => auto, legacy bool `false` => auto (#295).
+fn de_sidecar_tristate<'de, D>(deserializer: D) -> Result<Option<bool>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Raw {
+        Bool(bool),
+        Text(String),
+    }
+    match Option::<Raw>::deserialize(deserializer)? {
+        None => Ok(None),
+        Some(Raw::Bool(true)) => Ok(Some(true)),
+        // Legacy serializer artifact: every pre-0.18.8 desktop save wrote
+        // `parakeet_sidecar_enabled = false` while the key had no UI.
+        Some(Raw::Bool(false)) => Ok(None),
+        Some(Raw::Text(text)) => match text.trim().to_ascii_lowercase().as_str() {
+            "" | "auto" => Ok(None),
+            "on" | "true" => Ok(Some(true)),
+            "off" | "false" => Ok(Some(false)),
+            other => Err(serde::de::Error::custom(format!(
+                "unknown parakeet_sidecar_enabled '{other}'. Valid: auto, on, off"
+            ))),
+        },
+    }
+}
+
+/// Serialize the sidecar tri-state: forced on as bool `true` (matches docs),
+/// forced off as the string `"off"` so it can never be mistaken for the
+/// legacy serializer artifact. `None` is skipped entirely.
+fn ser_sidecar_tristate<S>(value: &Option<bool>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    match value {
+        Some(true) => serializer.serialize_bool(true),
+        Some(false) => serializer.serialize_str("off"),
+        None => serializer.serialize_none(),
+    }
+}
+
 // ── Defaults ─────────────────────────────────────────────────
 
 fn home_dir() -> PathBuf {
@@ -837,7 +898,7 @@ impl Default for TranscriptionConfig {
             parakeet_boost_limit: 0,
             parakeet_boost_score: 2.0,
             parakeet_fp16: true,
-            parakeet_sidecar_enabled: false,
+            parakeet_sidecar_enabled: None,
             parakeet_fp16_blacklist_reset: false,
             parakeet_vocab: "tdt-600m.tokenizer.vocab".into(),
             partial_max_secs: 30,
@@ -1366,7 +1427,7 @@ mod tests {
         assert_eq!(config.transcription.parakeet_boost_limit, 0);
         assert_eq!(config.transcription.parakeet_boost_score, 2.0);
         assert!(config.transcription.parakeet_fp16);
-        assert!(!config.transcription.parakeet_sidecar_enabled);
+        assert!(config.transcription.parakeet_sidecar_enabled.is_none());
         assert_eq!(
             config.transcription.parakeet_vocab,
             "tdt-600m.tokenizer.vocab"
@@ -1546,7 +1607,7 @@ parakeet_binary = "/usr/local/bin/parakeet"
             config.transcription.parakeet_binary,
             "/usr/local/bin/parakeet"
         );
-        assert!(!config.transcription.parakeet_sidecar_enabled);
+        assert!(config.transcription.parakeet_sidecar_enabled.is_none());
         // Other fields should be defaults
         assert_eq!(config.transcription.model, "small");
         assert_eq!(config.transcription.min_words, 3);
@@ -1624,7 +1685,7 @@ parakeet_sidecar_enabled = true
         .unwrap();
 
         let config = Config::load_from(&config_path);
-        assert!(config.transcription.parakeet_sidecar_enabled);
+        assert_eq!(config.transcription.parakeet_sidecar_enabled, Some(true));
     }
 
     #[test]
@@ -2116,5 +2177,104 @@ language = "fr"
 
         let config = Config::load_from(&config_path);
         assert_eq!(config.summarization.language, "fr");
+    }
+}
+
+#[cfg(test)]
+mod sidecar_tristate_tests {
+    use super::*;
+
+    fn parse(snippet: &str) -> Config {
+        toml::from_str(&format!("[transcription]\n{snippet}\n")).unwrap()
+    }
+
+    #[test]
+    fn absent_key_is_auto() {
+        assert_eq!(
+            parse("engine = \"parakeet\"")
+                .transcription
+                .parakeet_sidecar_enabled,
+            None
+        );
+    }
+
+    #[test]
+    fn legacy_bool_false_is_treated_as_auto() {
+        // Pre-0.18.8 full-struct saves wrote `= false` into every config (#295).
+        assert_eq!(
+            parse("parakeet_sidecar_enabled = false")
+                .transcription
+                .parakeet_sidecar_enabled,
+            None
+        );
+    }
+
+    #[test]
+    fn bool_true_forces_on() {
+        assert_eq!(
+            parse("parakeet_sidecar_enabled = true")
+                .transcription
+                .parakeet_sidecar_enabled,
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn string_off_forces_off_and_roundtrips() {
+        let config = parse("parakeet_sidecar_enabled = \"off\"");
+        assert_eq!(config.transcription.parakeet_sidecar_enabled, Some(false));
+        let out = toml::to_string_pretty(&config).unwrap();
+        assert!(out.contains("parakeet_sidecar_enabled = \"off\""));
+        // And the roundtrip survives a re-parse (deliberate off is durable).
+        let again: Config = toml::from_str(&out).unwrap();
+        assert_eq!(again.transcription.parakeet_sidecar_enabled, Some(false));
+    }
+
+    #[test]
+    fn auto_serializes_to_no_key() {
+        let config = Config::default();
+        let out = toml::to_string_pretty(&config).unwrap();
+        assert!(!out.contains("parakeet_sidecar_enabled"));
+    }
+
+    #[test]
+    fn string_auto_and_on_parse() {
+        assert_eq!(
+            parse("parakeet_sidecar_enabled = \"auto\"")
+                .transcription
+                .parakeet_sidecar_enabled,
+            None
+        );
+        assert_eq!(
+            parse("parakeet_sidecar_enabled = \"on\"")
+                .transcription
+                .parakeet_sidecar_enabled,
+            Some(true)
+        );
+    }
+}
+
+#[cfg(test)]
+mod sidecar_tristate_rejection_tests {
+    use super::*;
+
+    #[test]
+    fn integer_value_is_rejected() {
+        let result = toml::from_str::<Config>("[transcription]\nparakeet_sidecar_enabled = 0\n");
+        assert!(result.is_err(), "integer must not silently coerce");
+    }
+
+    #[test]
+    fn datetime_value_is_rejected() {
+        let result =
+            toml::from_str::<Config>("[transcription]\nparakeet_sidecar_enabled = 2026-06-10\n");
+        assert!(result.is_err(), "datetime must not silently coerce");
+    }
+
+    #[test]
+    fn unknown_string_is_rejected() {
+        let result =
+            toml::from_str::<Config>("[transcription]\nparakeet_sidecar_enabled = \"sometimes\"\n");
+        assert!(result.is_err(), "unknown strings must error, not default");
     }
 }

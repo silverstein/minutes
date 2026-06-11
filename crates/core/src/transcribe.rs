@@ -1738,7 +1738,7 @@ fn transcribe_with_parakeet(
         TranscribeError::ParakeetFailed("resolved parakeet binary path is not valid UTF-8".into())
     })?;
 
-    if config.transcription.parakeet_sidecar_enabled {
+    if crate::parakeet_sidecar::sidecar_enabled_effective(config) {
         match crate::parakeet_sidecar::transcribe_via_global_sidecar(
             config,
             &model_path,

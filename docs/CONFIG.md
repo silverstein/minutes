@@ -29,7 +29,7 @@ So `minutes record --device "MacBook Pro Microphone"` always wins over `[recordi
 | `vad_model` | `"silero-v6.2.0"` | Silero VAD model name; empty string disables |
 | `min_words` | `3` | Drop utterances with fewer than this many words |
 | `parakeet_binary` | `"parakeet"` | PATH lookup or absolute path to the parakeet binary |
-| `parakeet_sidecar_enabled` | `false` | Opt-in warm sidecar path (beta) |
+| `parakeet_sidecar_enabled` | auto | Warm sidecar: auto-enables when parakeet is the engine and `example-server` resolves. `true`/`"on"` forces on, `"off"` forces off. A legacy bool `false` is treated as auto (pre-0.18.8 saves wrote it into every config) (#295) |
 | `parakeet_fp16` | `true` | GPU fp16 inference for lower memory use |
 | `parakeet_boost_limit` / `parakeet_boost_score` | `0` / `2.0` | Knowledge-graph phrase boosting; 0 = off |
 

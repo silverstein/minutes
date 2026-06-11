@@ -28,7 +28,7 @@ Today, `engine = "parakeet"` is wired for these paths:
 - standalone live transcription (`minutes live` and desktop Live Mode) — see RFC 0002
 
 Both live paths route each VAD-gated utterance through the Parakeet path. If
-`parakeet_sidecar_enabled = true`, they reuse the warm `example-server` socket;
+the sidecar is effective (auto-on when `example-server` resolves, or forced with `parakeet_sidecar_enabled = true`), they reuse the warm `example-server` socket;
 otherwise they fall back to the Parakeet subprocess path for each utterance.
 The standalone live path additionally warms the sidecar at session start so the
 first utterance does not pay the subprocess-spawn + model-load cost.
@@ -41,7 +41,7 @@ still configured separately and remains standalone-live-only; this note is just
 about the fallback order behind that path. See [`docs/APPLE_SPEECH.md`](APPLE_SPEECH.md)
 for the current Apple Speech scope and desktop-settings limitation.
 
-Strongly recommended for live use: set `parakeet_sidecar_enabled = true` and
+Strongly recommended for live use: install `example-server` (the sidecar then auto-enables; `parakeet_sidecar_enabled = true` forces it) and
 ensure `example-server` is discoverable (either on `PATH` or via
 `MINUTES_PARAKEET_SERVER_BINARY`). Without the warm sidecar, every live
 utterance incurs full subprocess startup, which makes live mode visibly slow.
@@ -119,9 +119,9 @@ engine = "parakeet"
 parakeet_model = "tdt-600m"
 parakeet_binary = "/Users/<you>/.local/bin/parakeet"
 parakeet_vocab = "tdt-600m.tokenizer.vocab"
-# Reuse the warm example-server socket for live mode instead of spawning
-# a fresh subprocess per utterance. Requires step 1's example-server copy.
-parakeet_sidecar_enabled = true
+# The warm example-server sidecar auto-enables when step 1's example-server
+# copy resolves. No key needed; set parakeet_sidecar_enabled = true/false
+# only to force it on or off.
 ```
 
 That gives you the validated multilingual path:
@@ -335,7 +335,7 @@ Edit `~/.config/minutes/config.toml`:
 engine = "parakeet"              # "whisper" (default) or "parakeet"
 parakeet_model = "tdt-600m"      # "tdt-ctc-110m" (English) or "tdt-600m" (multilingual v3)
 parakeet_binary = "/Users/you/.local/bin/parakeet"  # Prefer an absolute path for desktop app launches
-parakeet_sidecar_enabled = true  # Reuse warm example-server socket for live mode (requires example-server copied above)
+# parakeet_sidecar_enabled auto-enables when example-server (copied above) resolves; set true/false to force
 parakeet_boost_limit = 25        # Experimental: top graph-derived boost phrases (0 disables)
 parakeet_boost_score = 2.0       # Experimental tuning for parakeet.cpp --boost-score
 parakeet_fp16 = true             # Default on macOS Apple Silicon: ~35% faster transcription with lower GPU memory (see docs/designs/parakeet-perf-2026-04-14.md)

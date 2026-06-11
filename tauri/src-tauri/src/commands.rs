@@ -546,10 +546,10 @@ fn batch_transcription_readiness_view(config: &Config) -> SurfaceReadinessView {
                 .clone()
                 .unwrap_or_else(|| "unknown".to_string());
             format!(
-                "Batch and recording transcription use Parakeet. Model: {}. Tokenizer: {}. Warm: {}.",
+                "Batch and recording transcription use Parakeet. Model: {}. Tokenizer: {}. Sidecar: {}.",
                 status.model,
                 tokenizer_label,
-                if status.warm { "yes" } else { "no" }
+                status.sidecar
             )
         } else {
             format!(
@@ -8154,7 +8154,11 @@ pub fn cmd_get_settings() -> serde_json::Value {
             "language": config.transcription.language,
             "parakeet_model": config.transcription.parakeet_model,
             "parakeet_binary": config.transcription.parakeet_binary,
-            "parakeet_sidecar_enabled": config.transcription.parakeet_sidecar_enabled,
+            "parakeet_sidecar_enabled": match config.transcription.parakeet_sidecar_enabled {
+                None => "auto",
+                Some(true) => "true",
+                Some(false) => "false",
+            },
             "parakeet_compiled": cfg!(feature = "parakeet"),
             "parakeet_status": parakeet_status_view(&config),
             "apple_speech_status": apple_speech_status_view(),
@@ -8383,7 +8387,17 @@ pub fn cmd_set_setting(section: String, key: String, value: String) -> Result<St
             config.transcription.parakeet_vocab = format!("{}.tokenizer.vocab", value);
         }
         ("transcription", "parakeet_sidecar_enabled") => {
-            config.transcription.parakeet_sidecar_enabled = value == "true";
+            config.transcription.parakeet_sidecar_enabled = match value.as_str() {
+                "auto" | "" => None,
+                "true" | "on" => Some(true),
+                "false" | "off" => Some(false),
+                other => {
+                    return Err(format!(
+                        "unknown parakeet_sidecar_enabled '{}'. Valid: auto, on, off",
+                        other
+                    ))
+                }
+            };
         }
         ("transcription", "language") => {
             config.transcription.language = parse_optional_string_setting(&value);

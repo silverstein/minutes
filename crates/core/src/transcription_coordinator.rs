@@ -23,7 +23,17 @@ pub struct ParakeetBackendStatus {
     pub backend_id: String,
     pub compiled: bool,
     pub model: String,
+    /// True once the backend has completed at least one transcription this
+    /// process lifetime. NOT "a warm server is resident" — use `sidecar`
+    /// for the user-facing throughput story (#295).
     pub warm: bool,
+    /// Human-readable effective sidecar state: what live throughput will
+    /// actually do, and why.
+    pub sidecar: String,
+    /// Effective sidecar decision (auto-resolved or explicit).
+    pub sidecar_enabled: bool,
+    /// Whether the example-server binary resolves on this machine.
+    pub sidecar_binary_found: bool,
     pub ready: bool,
     pub binary: String,
     pub binary_found: bool,
@@ -239,8 +249,30 @@ pub fn parakeet_setup_command(model: &str) -> String {
     format!("minutes setup --parakeet --parakeet-model {}", model)
 }
 
+/// One honest sentence about what the sidecar will actually do (#295).
+fn sidecar_state_label(config: &Config, effective: bool, binary_found: bool) -> String {
+    let mode = match config.transcription.parakeet_sidecar_enabled {
+        None => "auto",
+        Some(true) => "forced on",
+        Some(false) => "forced off",
+    };
+    if effective && binary_found {
+        format!("warm server ({mode})")
+    } else if effective {
+        format!("{mode}, but example-server is missing; falling back to cold per-utterance runs")
+    } else if binary_found {
+        format!("off ({mode}); cold per-utterance runs")
+    } else {
+        format!(
+            "unavailable ({mode}); cold per-utterance runs. Install example-server to enable (see {})",
+            parakeet_guide_url()
+        )
+    }
+}
+
 pub fn parakeet_backend_status(config: &Config) -> ParakeetBackendStatus {
-    let backend_id = if config.transcription.parakeet_sidecar_enabled {
+    let sidecar_effective = crate::parakeet_sidecar::sidecar_enabled_effective(config);
+    let backend_id = if sidecar_effective {
         "parakeet-sidecar".to_string()
     } else {
         "parakeet".to_string()
@@ -281,10 +313,14 @@ pub fn parakeet_backend_status(config: &Config) -> ParakeetBackendStatus {
     if metadata.is_none() && resolved_model.is_some() && resolved_tokenizer.is_some() {
         issues.push("install metadata is missing; rerun setup to persist provenance".to_string());
     }
-    if config.transcription.parakeet_sidecar_enabled
-        && crate::parakeet_sidecar::resolve_server_binary(&binary).is_none()
-    {
-        issues.push("warm sidecar is enabled but example-server could not be resolved".to_string());
+    // Note: sidecar_enabled_effective above may also have resolved the binary;
+    // status assembly is cold-path (settings/health), so the repeat lookup is
+    // accepted for clarity over threading a resolved path through.
+    let sidecar_binary_found = crate::parakeet_sidecar::resolve_server_binary(&binary).is_some();
+    if config.transcription.parakeet_sidecar_enabled == Some(true) && !sidecar_binary_found {
+        issues.push(
+            "sidecar forced on in config but example-server could not be resolved; live transcription will run the cold per-utterance path".to_string(),
+        );
     }
 
     let tokenizer_label = resolved_tokenizer.as_ref().and_then(|path| {
@@ -298,6 +334,9 @@ pub fn parakeet_backend_status(config: &Config) -> ParakeetBackendStatus {
         compiled,
         model: model.clone(),
         warm: backend_is_warm(&backend_id, &model),
+        sidecar: sidecar_state_label(config, sidecar_effective, sidecar_binary_found),
+        sidecar_enabled: sidecar_effective,
+        sidecar_binary_found,
         ready: compiled
             && VALID_PARAKEET_MODELS.contains(&model.as_str())
             && resolved_binary.is_some()
@@ -326,16 +365,14 @@ pub fn parakeet_health_item(config: &Config) -> HealthItem {
     let detail = if status.ready {
         let metadata_suffix = if let Some(metadata) = status.metadata.as_ref() {
             format!(
-                " Metadata: {} from {}. Warm: {}.",
-                metadata.source_artifact,
-                metadata.source_repo,
-                if status.warm { "yes" } else { "no" }
+                " Metadata: {} from {}. Sidecar: {}.",
+                metadata.source_artifact, metadata.source_repo, status.sidecar
             )
         } else {
             format!(
-                " Metadata missing; rerun `{}` after installing files to persist provenance. Warm: {}.",
+                " Metadata missing; rerun `{}` after installing files to persist provenance. Sidecar: {}.",
                 status.setup_command,
-                if status.warm { "yes" } else { "no" }
+                status.sidecar
             )
         };
         format!(
@@ -387,7 +424,7 @@ pub fn warmup_active_backend(config: &Config) -> Result<BackendWarmupResult, Tra
 
     #[cfg(feature = "parakeet")]
     {
-        if config.transcription.parakeet_sidecar_enabled {
+        if crate::parakeet_sidecar::sidecar_enabled_effective(config) {
             let model_path = transcribe::resolve_parakeet_model_path(config)?;
             let vocab_path = transcribe::resolve_parakeet_vocab_path(config)?;
             let vad_path = transcribe::resolve_parakeet_native_vad_path(config);

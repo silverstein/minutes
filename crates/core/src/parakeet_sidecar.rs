@@ -1619,3 +1619,121 @@ mod imp_stub {
 
 #[cfg(not(all(feature = "parakeet", unix)))]
 pub use imp_stub::*;
+
+/// Effective warm-sidecar decision (#295).
+///
+/// Settings capture intent; this resolves the implementation:
+/// - explicit `parakeet_sidecar_enabled = true|false` in config.toml wins;
+/// - `None` (default) = auto: on when this build has parakeet compiled in,
+///   parakeet is the selected engine for batch or standalone live, and the
+///   `example-server` binary resolves. Everything that branches on the
+///   sidecar must call this, never the raw config field.
+pub fn sidecar_enabled_effective(config: &crate::config::Config) -> bool {
+    match config.transcription.parakeet_sidecar_enabled {
+        Some(explicit) => explicit,
+        None => {
+            cfg!(feature = "parakeet")
+                && (config.transcription.engine == "parakeet"
+                    || config.effective_live_transcript_backend() == "parakeet")
+                && sidecar_binary_resolves_cached(&config.transcription.parakeet_binary)
+        }
+    }
+}
+
+/// Positive-result cache for the auto decision's binary probe.
+///
+/// The effective check runs per utterance on the live hot path; a PATH scan
+/// per utterance is wasteful once the binary is known to exist. Misses are
+/// re-probed (cheap, and it means installing example-server mid-session is
+/// picked up without a restart); a hit is cached for the process lifetime
+/// (binaries do not usually vanish, and if one does the sidecar spawn fails
+/// loudly and falls back per-utterance anyway).
+fn sidecar_binary_resolves_cached(parakeet_binary: &str) -> bool {
+    use std::sync::Mutex;
+    use std::sync::OnceLock;
+    // Keyed by the inputs that influence resolution (config binary name +
+    // env override), so a long-running desktop process that changes either
+    // re-probes instead of serving a stale positive (codex review, #295).
+    static RESOLVED_FOR: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+    let key = format!(
+        "{parakeet_binary}\u{0}{}",
+        std::env::var("MINUTES_PARAKEET_SERVER_BINARY").unwrap_or_default()
+    );
+    let cache = RESOLVED_FOR.get_or_init(|| Mutex::new(None));
+    {
+        let cached = cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if cached.as_deref() == Some(key.as_str()) {
+            return true;
+        }
+    }
+    let found = resolve_server_binary(parakeet_binary).is_some();
+    if found {
+        let mut cached = cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *cached = Some(key);
+    }
+    found
+}
+
+#[cfg(test)]
+mod effective_tests {
+    use super::sidecar_enabled_effective;
+    use crate::config::Config;
+
+    fn parakeet_config() -> Config {
+        let mut config = Config::default();
+        config.transcription.engine = "parakeet".into();
+        config
+    }
+
+    #[test]
+    fn explicit_false_wins_even_with_parakeet_engine() {
+        let mut config = parakeet_config();
+        config.transcription.parakeet_sidecar_enabled = Some(false);
+        assert!(!sidecar_enabled_effective(&config));
+    }
+
+    #[test]
+    fn explicit_true_wins_even_without_binary() {
+        let mut config = Config::default();
+        config.transcription.engine = "whisper".into();
+        config.transcription.parakeet_sidecar_enabled = Some(true);
+        assert!(sidecar_enabled_effective(&config));
+    }
+
+    #[test]
+    fn auto_is_off_when_engine_is_whisper() {
+        let mut config = Config::default();
+        config.transcription.engine = "whisper".into();
+        config.live_transcript.backend = "whisper".into();
+        config.transcription.parakeet_sidecar_enabled = None;
+        assert!(!sidecar_enabled_effective(&config));
+    }
+
+    #[cfg(all(feature = "parakeet", unix))]
+    #[test]
+    fn auto_follows_binary_resolution_for_parakeet_engine() {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut config = parakeet_config();
+        config.transcription.parakeet_sidecar_enabled = None;
+
+        // Point the env override at a real executable -> auto resolves on.
+        let dir = tempfile::tempdir().unwrap();
+        let fake = dir.path().join("example-server");
+        let mut f = std::fs::File::create(&fake).unwrap();
+        writeln!(f, "#!/bin/sh\nexit 0").unwrap();
+        let mut perms = std::fs::metadata(&fake).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&fake, perms).unwrap();
+
+        std::env::set_var("MINUTES_PARAKEET_SERVER_BINARY", &fake);
+        let resolved_on = sidecar_enabled_effective(&config);
+        std::env::remove_var("MINUTES_PARAKEET_SERVER_BINARY");
+        assert!(resolved_on, "auto should enable when binary resolves");
+    }
+}

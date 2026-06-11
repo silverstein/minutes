@@ -5540,6 +5540,27 @@ fn cmd_setup_parakeet(model: &str) -> Result<()> {
         }
     }
 
+    // Verify the warm-sidecar binary (#295). Without it, live transcription
+    // pays a full model load per utterance and will lag badly on real meetings.
+    match minutes_core::parakeet_sidecar::resolve_server_binary("parakeet") {
+        Some(path) => {
+            eprintln!(
+                "Resolved example-server (warm live sidecar): {}",
+                path.display()
+            );
+            eprintln!("Live transcription will auto-use the warm sidecar.");
+        }
+        None => {
+            eprintln!("Note: `example-server` (warm live sidecar) was not found.");
+            eprintln!("Live transcription will fall back to slow cold per-utterance runs.");
+            eprintln!(
+                "To build it, configure parakeet.cpp with -DPARAKEET_BUILD_SERVER_EXAMPLE=ON"
+            );
+            eprintln!("and copy build/**/example-server next to your parakeet binary.");
+            eprintln!("Details: https://github.com/silverstein/minutes/blob/main/docs/PARAKEET.md");
+        }
+    }
+
     eprintln!();
     eprintln!("To use parakeet, add to ~/.config/minutes/config.toml:");
     eprintln!("  [transcription]");

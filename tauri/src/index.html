@@ -5955,7 +5955,7 @@
       if (status.ready) {
         const installedAt = status.metadata?.installedAt ? ` Installed ${new Date(status.metadata.installedAt).toLocaleString()}.` : '';
         const tokenizer = status.tokenizerLabel ? ` Tokenizer: ${status.tokenizerLabel}.` : '';
-        const warm = ` Warm: ${status.warm ? 'yes' : 'no'}.`;
+        const warm = status.sidecar ? ` Sidecar: ${status.sidecar}.` : '';
         return {
           summary: `${status.model} is ready for local transcription.`,
           detail: `Backend: Parakeet. Binary: ${status.binary}.${tokenizer}${warm}${installedAt}`.trim(),

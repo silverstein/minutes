@@ -20,6 +20,24 @@ struct EventOutput: Codable {
     let url: String?
 }
 
+// `--status` prints the current authorization state WITHOUT prompting, so
+// Settings/readiness can be truthful without triggering a permission dialog.
+// States: full-access | write-only | denied | restricted | not-determined
+if CommandLine.arguments.count > 1 && CommandLine.arguments[1] == "--status" {
+    let status = EKEventStore.authorizationStatus(for: .event)
+    let label: String
+    switch status {
+    case .fullAccess: label = "full-access"
+    case .writeOnly: label = "write-only"
+    case .denied: label = "denied"
+    case .restricted: label = "restricted"
+    case .notDetermined: label = "not-determined"
+    @unknown default: label = "unknown"
+    }
+    print("{\"calendar_access\":\"\(label)\"}")
+    exit(0)
+}
+
 let lookaheadMinutes = Int(CommandLine.arguments.count > 1 ? CommandLine.arguments[1] : "240") ?? 240
 let lookbackMinutes = Int(CommandLine.arguments.count > 2 ? CommandLine.arguments[2] : "0") ?? 0
 let referenceEpochSeconds = CommandLine.arguments.count > 3 ? Double(CommandLine.arguments[3]) : nil
@@ -29,9 +47,13 @@ let semaphore = DispatchSemaphore(value: 0)
 let encoder = JSONEncoder()
 encoder.outputFormatting = [] // compact, single-line
 
+var accessDenied = false
 store.requestFullAccessToEvents { granted, error in
     defer { semaphore.signal() }
     guard granted else {
+        // Distinguish denied/write-only from "no events": empty-success here
+        // made dead reminders unreadable from the outside (#300).
+        accessDenied = true
         return
     }
 
@@ -81,3 +103,7 @@ store.requestFullAccessToEvents { granted, error in
 }
 
 semaphore.wait()
+if accessDenied {
+    FileHandle.standardError.write("calendar-events: access not granted (full access required)\n".data(using: .utf8)!)
+    exit(2)
+}

@@ -151,6 +151,72 @@ pub fn extract_meeting_url(text: &str) -> Option<String> {
     None
 }
 
+/// Calendar authorization state as reported by the EventKit helper's
+/// non-prompting `--status` probe (#300).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CalendarAccess {
+    /// Full read access: meeting reminders and suggestions work.
+    FullAccess,
+    /// Write-only / add-only: reads return nothing, reminders are dead.
+    WriteOnly,
+    /// Explicitly denied.
+    Denied,
+    /// Restricted by policy (MDM, parental controls).
+    Restricted,
+    /// Never asked yet: the next feature use will prompt.
+    NotDetermined,
+    /// Helper missing, non-macOS, or unparseable output.
+    Unknown,
+}
+
+impl CalendarAccess {
+    /// True when reads work and reminders can function.
+    pub fn can_read(self) -> bool {
+        matches!(self, CalendarAccess::FullAccess)
+    }
+}
+
+/// Probe calendar authorization WITHOUT prompting (safe from Settings and
+/// readiness surfaces). Uses the helper's `--status` mode; never triggers a
+/// permission dialog (#300).
+pub fn calendar_access_status() -> CalendarAccess {
+    #[cfg(not(target_os = "macos"))]
+    {
+        CalendarAccess::Unknown
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let Some(helper) = find_calendar_helper() else {
+            return CalendarAccess::Unknown;
+        };
+        let mut cmd = Command::new(&helper);
+        cmd.arg("--status");
+        let Some(output) = output_with_timeout(cmd, SUBPROCESS_TIMEOUT) else {
+            return CalendarAccess::Unknown;
+        };
+        if !output.status.success() {
+            return CalendarAccess::Unknown;
+        }
+        parse_calendar_access(&String::from_utf8_lossy(&output.stdout))
+    }
+}
+
+/// Parse the helper's `--status` JSON line into a [`CalendarAccess`].
+fn parse_calendar_access(raw: &str) -> CalendarAccess {
+    let value: serde_json::Value = match serde_json::from_str(raw.trim()) {
+        Ok(value) => value,
+        Err(_) => return CalendarAccess::Unknown,
+    };
+    match value.get("calendar_access").and_then(|v| v.as_str()) {
+        Some("full-access") => CalendarAccess::FullAccess,
+        Some("write-only") => CalendarAccess::WriteOnly,
+        Some("denied") => CalendarAccess::Denied,
+        Some("restricted") => CalendarAccess::Restricted,
+        Some("not-determined") => CalendarAccess::NotDetermined,
+        _ => CalendarAccess::Unknown,
+    }
+}
+
 /// Query upcoming calendar events within the next `lookahead_minutes`.
 /// Returns events sorted by start time (all-day events excluded).
 /// On non-macOS platforms, returns an empty list (calendar integration uses AppleScript/EventKit).
@@ -420,6 +486,13 @@ fn query_via_eventkit(lookahead_minutes: u32) -> Option<Vec<CalendarEvent>> {
     let output = output_with_timeout(cmd, SUBPROCESS_TIMEOUT)?;
 
     if !output.status.success() {
+        if output.status.code() == Some(2) {
+            // Helper signals access-not-granted distinctly so dead reminders
+            // are observable instead of reading as "no events" (#300).
+            tracing::warn!(
+                "calendar read access not granted (write-only or denied); meeting reminders are off"
+            );
+        }
         return None;
     }
 
@@ -734,5 +807,58 @@ mod tests {
 
         let args = std::fs::read_to_string(&args_path).unwrap();
         assert_eq!(args.lines().collect::<Vec<_>>(), ["120", "120"]);
+    }
+}
+
+#[cfg(test)]
+mod calendar_access_tests {
+    use super::*;
+
+    #[test]
+    fn parses_all_status_labels() {
+        assert_eq!(
+            parse_calendar_access("{\"calendar_access\":\"full-access\"}"),
+            CalendarAccess::FullAccess
+        );
+        assert_eq!(
+            parse_calendar_access("{\"calendar_access\":\"write-only\"}"),
+            CalendarAccess::WriteOnly
+        );
+        assert_eq!(
+            parse_calendar_access("{\"calendar_access\":\"denied\"}"),
+            CalendarAccess::Denied
+        );
+        assert_eq!(
+            parse_calendar_access("{\"calendar_access\":\"restricted\"}"),
+            CalendarAccess::Restricted
+        );
+        assert_eq!(
+            parse_calendar_access("{\"calendar_access\":\"not-determined\"}"),
+            CalendarAccess::NotDetermined
+        );
+    }
+
+    #[test]
+    fn garbage_and_unexpected_labels_are_unknown() {
+        assert_eq!(parse_calendar_access("not json"), CalendarAccess::Unknown);
+        assert_eq!(
+            parse_calendar_access("{\"calendar_access\":\"sideways\"}"),
+            CalendarAccess::Unknown
+        );
+        assert_eq!(parse_calendar_access("{}"), CalendarAccess::Unknown);
+    }
+
+    #[test]
+    fn only_full_access_can_read() {
+        assert!(CalendarAccess::FullAccess.can_read());
+        for state in [
+            CalendarAccess::WriteOnly,
+            CalendarAccess::Denied,
+            CalendarAccess::Restricted,
+            CalendarAccess::NotDetermined,
+            CalendarAccess::Unknown,
+        ] {
+            assert!(!state.can_read());
+        }
     }
 }

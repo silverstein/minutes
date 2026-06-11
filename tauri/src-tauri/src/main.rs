@@ -1038,6 +1038,22 @@ fn refresh_calendar_items(
 
     // Query upcoming events
     let all_events = minutes_core::calendar::upcoming_events(CALENDAR_LOOKAHEAD_MINUTES);
+    // When reads are blocked (Add-Only/denied), an empty menu is a lie:
+    // say so, with a clickable line that opens the Calendars privacy pane
+    // (#300).
+    if all_events.is_empty() && !minutes_core::calendar::calendar_access_status().can_read() {
+        if let Ok(item) = MenuItem::with_id(
+            app,
+            "calendar-access-warning",
+            "Calendar access limited — reminders off (click to fix)",
+            true,
+            None::<&str>,
+        ) {
+            if menu.append(&item).is_ok() {
+                state.items.push(item);
+            }
+        }
+    }
     eprintln!(
         "[calendar] queried {} upcoming events ({}min lookahead)",
         all_events.len(),
@@ -1304,6 +1320,13 @@ fn main() {
             "app-show-whats-new" => {
                 show_main_window(app);
                 let _ = app.emit("minutes://show-whats-new", ());
+            }
+            "calendar-access-warning" => {
+                let _ = std::process::Command::new("open")
+                    .arg(
+                        "x-apple.systempreferences:com.apple.preference.security?Privacy_Calendars",
+                    )
+                    .spawn();
             }
             "app-open-settings" => {
                 show_main_window(app);

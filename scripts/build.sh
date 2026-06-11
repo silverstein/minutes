@@ -122,7 +122,12 @@ PY
 echo "=== Signing + Installing CLI ==="
 mkdir -p ~/.local/bin
 codesign -s - -f target/release/minutes 2>/dev/null || true
-cp -f target/release/minutes ~/.local/bin/minutes && echo "  Installed to ~/.local/bin/"
+# rm-then-copy gives the new binary a fresh inode. Copying OVER the existing
+# file invalidates its code signature while any process (e.g. `minutes watch`)
+# is still executing from it, and the kernel then SIGKILLs every new launch
+# of that path (exit 137) until reinstall.
+rm -f ~/.local/bin/minutes
+cp target/release/minutes ~/.local/bin/minutes && echo "  Installed to ~/.local/bin/"
 
 echo ""
 

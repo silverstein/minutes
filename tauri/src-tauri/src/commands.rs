@@ -4657,10 +4657,36 @@ fn calendar_status(config: &Config) -> ReadinessItem {
 
     #[cfg(target_os = "macos")]
     {
+        // Non-prompting probe (#300): readiness must distinguish "no
+        // meetings" from "access insufficient" or reminders die silently.
+        use minutes_core::calendar::CalendarAccess;
+        let access = minutes_core::calendar::calendar_access_status();
+        let (state, detail): (&str, String) = match access {
+            CalendarAccess::FullAccess => (
+                "ready",
+                "Calendar suggestions are enabled with Full Calendar access. Meeting reminders are active.".into(),
+            ),
+            CalendarAccess::WriteOnly => (
+                "attention",
+                "Calendar access is Add-Only, so Minutes cannot read upcoming meetings and reminders are OFF. Fix: System Settings > Privacy & Security > Calendars > Minutes > Full Calendar access.".into(),
+            ),
+            CalendarAccess::Denied | CalendarAccess::Restricted => (
+                "attention",
+                "Calendar access is denied, so meeting reminders are OFF. Fix: System Settings > Privacy & Security > Calendars > Minutes > Full Calendar access.".into(),
+            ),
+            CalendarAccess::NotDetermined => (
+                "attention",
+                "Calendar access has not been requested yet. The first calendar feature use will prompt; grant Full Calendar access to enable meeting reminders.".into(),
+            ),
+            CalendarAccess::Unknown => (
+                "attention",
+                "Calendar access state could not be determined (helper missing?). Meeting reminders may be off.".into(),
+            ),
+        };
         ReadinessItem {
             label: "Calendar suggestions".into(),
-            state: "ready".into(),
-            detail: "Calendar suggestions are enabled. Minutes checks Calendar access only when it needs upcoming-meeting context, not from Settings.".into(),
+            state: state.into(),
+            detail,
             optional: true,
         }
     }

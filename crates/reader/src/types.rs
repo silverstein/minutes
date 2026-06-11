@@ -26,6 +26,32 @@ pub enum OutputStatus {
     Degraded,
 }
 
+/// How a meeting artifact was captured.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum CapturePolicy {
+    /// No audio was captured for this meeting artifact.
+    None,
+}
+
+/// Sensitivity designation for read-only consumers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum Sensitivity {
+    /// Standard meeting artifact.
+    Normal,
+    /// Restricted artifact; agent enforcement is layered by higher-level callers.
+    Restricted,
+}
+
+/// Human debrief state for no-capture meeting artifacts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum DebriefStatus {
+    /// The meeting was stopped without an interactive debrief.
+    Pending,
+}
+
 /// A non-fatal failure of a post-transcript pipeline step. Mirrors the
 /// core crate's `markdown::ProcessingWarning`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -73,6 +99,15 @@ pub struct Frontmatter {
     pub intents: Vec<Intent>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub recorded_by: Option<String>,
+    /// Capture mode for the artifact. Absent means a normal captured meeting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capture: Option<CapturePolicy>,
+    /// Sensitivity designation. Absent means the normal sensitivity policy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sensitivity: Option<Sensitivity>,
+    /// Debrief completion state for no-capture meetings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub debrief: Option<DebriefStatus>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub visibility: Option<Visibility>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

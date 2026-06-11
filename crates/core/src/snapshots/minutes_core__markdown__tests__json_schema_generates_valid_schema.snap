@@ -1,6 +1,6 @@
 ---
 source: crates/core/src/markdown.rs
-assertion_line: 1204
+assertion_line: 1266
 expression: schema
 ---
 {
@@ -31,6 +31,17 @@ expression: schema
       "type": [
         "string",
         "null"
+      ]
+    },
+    "capture": {
+      "description": "Capture mode for the artifact. Absent means a normal captured meeting.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CapturePolicy"
+        },
+        {
+          "type": "null"
+        }
       ]
     },
     "captured_at": {
@@ -67,6 +78,17 @@ expression: schema
     "date": {
       "type": "string",
       "format": "date-time"
+    },
+    "debrief": {
+      "description": "Debrief completion state for no-capture meetings.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/DebriefStatus"
+        },
+        {
+          "type": "null"
+        }
+      ]
     },
     "decisions": {
       "type": "array",
@@ -116,6 +138,17 @@ expression: schema
       "anyOf": [
         {
           "$ref": "#/$defs/RecordingHealth"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "sensitivity": {
+      "description": "Sensitivity designation. Absent means the normal sensitivity policy.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Sensitivity"
         },
         {
           "type": "null"
@@ -218,6 +251,16 @@ expression: schema
         "stem-recovery"
       ]
     },
+    "CapturePolicy": {
+      "description": "How a meeting artifact was captured.",
+      "oneOf": [
+        {
+          "description": "No audio was captured for this meeting artifact.",
+          "type": "string",
+          "const": "none"
+        }
+      ]
+    },
     "CaptureSource": {
       "type": "string",
       "enum": [
@@ -277,6 +320,16 @@ expression: schema
         "meeting",
         "memo",
         "dictation"
+      ]
+    },
+    "DebriefStatus": {
+      "description": "Human debrief state for no-capture meeting artifacts.",
+      "oneOf": [
+        {
+          "description": "The meeting was stopped without an interactive debrief.",
+          "type": "string",
+          "const": "pending"
+        }
       ]
     },
     "Decision": {
@@ -535,6 +588,21 @@ expression: schema
           "format": "float"
         }
       }
+    },
+    "Sensitivity": {
+      "description": "Sensitivity designation for agent-facing policy layers.",
+      "oneOf": [
+        {
+          "description": "Standard meeting artifact.",
+          "type": "string",
+          "const": "normal"
+        },
+        {
+          "description": "Restricted artifact; agent surfaces enforce this in a later wave.",
+          "type": "string",
+          "const": "restricted"
+        }
+      ]
     },
     "SpeakerAttribution": {
       "description": "A mapping from an anonymous speaker label to a real person.",

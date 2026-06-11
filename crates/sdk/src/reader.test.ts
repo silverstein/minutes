@@ -193,6 +193,28 @@ Body text.
     expect(result!.frontmatter.action_items).toEqual([]);
     expect(result!.frontmatter.decisions).toEqual([]);
   });
+
+  it("preserves sensitive no-capture frontmatter", () => {
+    const content = `---
+title: Board Sync
+type: meeting
+date: "2026-06-10T12:00:00-07:00"
+duration: 12m
+capture: none
+sensitivity: restricted
+debrief: pending
+---
+
+## Notes
+
+- [0:01] Marker.
+`;
+    const result = parseFrontmatter(content, "/test/sensitive.md");
+    expect(result).not.toBeNull();
+    expect(result!.frontmatter.capture).toBe("none");
+    expect(result!.frontmatter.sensitivity).toBe("restricted");
+    expect(result!.frontmatter.debrief).toBe("pending");
+  });
 });
 
 // ── listMeetings ─────────────────────────────────────────────

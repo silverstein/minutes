@@ -82,6 +82,32 @@ impl FromStr for ConsentBasis {
     }
 }
 
+/// How a meeting artifact was captured.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum CapturePolicy {
+    /// No audio was captured for this meeting artifact.
+    None,
+}
+
+/// Sensitivity designation for agent-facing policy layers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum Sensitivity {
+    /// Standard meeting artifact.
+    Normal,
+    /// Restricted artifact; agent surfaces enforce this in a later wave.
+    Restricted,
+}
+
+/// Human debrief state for no-capture meeting artifacts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum DebriefStatus {
+    /// The meeting was stopped without an interactive debrief.
+    Pending,
+}
+
 /// A non-fatal failure of a post-transcript pipeline step.
 ///
 /// When any step degrades, the meeting's [`OutputStatus`] is promoted to
@@ -230,6 +256,15 @@ pub struct Frontmatter {
     pub intents: Vec<Intent>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub recorded_by: Option<String>,
+    /// Capture mode for the artifact. Absent means a normal captured meeting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capture: Option<CapturePolicy>,
+    /// Sensitivity designation. Absent means the normal sensitivity policy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sensitivity: Option<Sensitivity>,
+    /// Debrief completion state for no-capture meetings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub debrief: Option<DebriefStatus>,
     /// How consent to capture was obtained, if attested.
     ///
     /// Privacy metadata only, not a determination about requirements. See
@@ -1052,6 +1087,9 @@ mod tests {
             decisions: vec![],
             intents: vec![],
             recorded_by: None,
+            capture: None,
+            sensitivity: None,
+            debrief: None,
             consent: None,
             consent_notice: None,
             visibility: None,
@@ -1111,6 +1149,30 @@ mod tests {
         let with_consent = serde_yaml::to_string(&fm).unwrap();
         assert!(with_consent.contains("consent: notice_in_invite"));
         assert!(with_consent.contains("consent_notice: Shared in the calendar invite."));
+    }
+
+    #[test]
+    fn frontmatter_sensitive_fields_are_optional_and_serialize_when_present() {
+        let legacy: Frontmatter =
+            serde_yaml::from_str("title: Test\ntype: meeting\ndate: 2026-06-10T10:00:00-07:00\n")
+                .unwrap();
+        assert_eq!(legacy.capture, None);
+        assert_eq!(legacy.sensitivity, None);
+        assert_eq!(legacy.debrief, None);
+
+        let mut fm = test_frontmatter();
+        let without_sensitive = serde_yaml::to_string(&fm).unwrap();
+        assert!(!without_sensitive.contains("capture:"));
+        assert!(!without_sensitive.contains("sensitivity:"));
+        assert!(!without_sensitive.contains("debrief:"));
+
+        fm.capture = Some(CapturePolicy::None);
+        fm.sensitivity = Some(Sensitivity::Restricted);
+        fm.debrief = Some(DebriefStatus::Pending);
+        let with_sensitive = serde_yaml::to_string(&fm).unwrap();
+        assert!(with_sensitive.contains("capture: none"));
+        assert!(with_sensitive.contains("sensitivity: restricted"));
+        assert!(with_sensitive.contains("debrief: pending"));
     }
 
     #[test]

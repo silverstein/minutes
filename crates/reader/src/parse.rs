@@ -112,6 +112,31 @@ mod tests {
     }
 
     #[test]
+    fn parse_meeting_preserves_sensitive_fields() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("sensitive.md");
+        std::fs::write(
+            &path,
+            "---\ntitle: Board Sync\ntype: meeting\ndate: 2026-06-10T12:00:00-07:00\nduration: 12m\ncapture: none\nsensitivity: restricted\ndebrief: pending\n---\n\n## Notes\n\n- [0:01] Marker.\n",
+        )
+        .unwrap();
+
+        let meeting = parse_meeting(&path).unwrap();
+        assert_eq!(
+            meeting.frontmatter.capture,
+            Some(crate::types::CapturePolicy::None)
+        );
+        assert_eq!(
+            meeting.frontmatter.sensitivity,
+            Some(crate::types::Sensitivity::Restricted)
+        );
+        assert_eq!(
+            meeting.frontmatter.debrief,
+            Some(crate::types::DebriefStatus::Pending)
+        );
+    }
+
+    #[test]
     fn attribution_source_parses_new_variants() {
         assert_eq!(
             serde_yaml::from_str::<crate::types::AttributionSource>("ml-bleed-degraded").unwrap(),

@@ -51,6 +51,9 @@ schema version bump. Additive fields do not.
 | `captured_at` | datetime | When capture started, if different from `date`. |
 | `context` | string | Optional free-text notes the user added at record time. |
 | `recorded_by` | string | User identity slug (matches `people[]` if the user is in the corpus). |
+| `capture` | enum | Optional capture policy. `none` means the artifact came from a sensitive meeting with no audio capture. Omitted for normal captured artifacts. |
+| `sensitivity` | enum | Optional sensitivity designation. `restricted` means agents should treat the file as user-authored sensitive meeting material. Omitted means `normal`. |
+| `debrief` | enum | Optional debrief state. `pending` means the saved artifact still needs a written debrief. |
 | `consent` | enum | Optional capture basis: `verbal_all_parties`, `notice_in_invite`, `recorded_disclosed`, `na`, or `unattested`. |
 | `consent_notice` | string | Exact disclosure text used for the recording, when provided or configured. |
 | `visibility` | enum | `private` (default) or `team`. Informational; Minutes does not enforce ACLs. |
@@ -309,6 +312,39 @@ speaker_map:
 
 ## Transcript
 [SPEAKER_0 0:00] Let's talk pricing...
+```
+
+### Sensitive meeting example
+
+Sensitive meetings are regular meeting artifacts with an explicit no-capture
+policy. The `capture`, `sensitivity`, and `debrief` fields are written by
+Minutes itself; assistant tools should preserve them and add debrief content
+through normal notes/summary sections rather than inventing these fields for
+other files.
+
+```markdown
+---
+title: Board prep
+type: meeting
+date: 2026-06-10T09:00:00-07:00
+duration: 18m 12s
+source: sensitive
+status: complete
+capture: none
+sensitivity: restricted
+consent: na
+debrief: pending
+---
+
+## Summary
+Audio was not captured for this sensitive meeting.
+
+## Notes
+[0:12] Opened with pricing risk
+[4:05] Follow up on budget owner
+
+## Transcript
+Audio was not captured for this sensitive meeting.
 ```
 
 ---

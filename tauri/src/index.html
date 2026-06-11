@@ -8226,6 +8226,10 @@
           debriefBtn.addEventListener('click', async () => {
             try {
               await invoke('cmd_run_meeting_debrief', { path: detail.path });
+              // The debrief prompt lands in the assistant session BEHIND
+              // this overlay; close it so the handoff is visible instead of
+              // appearing to do nothing (Mat's first-use catch).
+              closeDetailView();
             } catch (e) {
               showDetailFeedback(`Could not start debrief: ${e}`, 'error');
             }

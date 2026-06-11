@@ -445,7 +445,7 @@ export default function Home() {
       <section className="border-t border-[color:var(--border)] py-16">
         <SectionLabel n="01" label="Proof" />
         <h2 className="font-serif text-[30px] leading-tight tracking-[-0.035em] text-[var(--text)] sm:text-[32px]">
-          Start with the evidence, not the pitch.
+          See it work before you believe it.
         </h2>
         <div className="mt-8 grid gap-4 md:grid-cols-3">
           <a
@@ -453,11 +453,11 @@ export default function Home() {
             className="rounded-[8px] border border-[color:var(--border)] bg-[var(--bg-elevated)] p-5 shadow-[var(--shadow-panel)] transition hover:border-[color:var(--border-mid)] hover:bg-[var(--bg-hover)]"
           >
             <p className="font-mono text-[11px] uppercase tracking-[0.16em] text-[var(--accent)]">
-              Runnable demo
+              Try it in two minutes
             </p>
             <p className="mt-3 text-[14px] leading-7 text-[var(--text-secondary)]">
-              One command installs a five-meeting fixture corpus and prints an
-              MCP config pointed at it.
+              One command installs five sample meetings and connects them to
+              your AI. Ask Claude what was decided, without recording anything.
             </p>
           </a>
           <a
@@ -465,11 +465,11 @@ export default function Home() {
             className="rounded-[8px] border border-[color:var(--border)] bg-[var(--bg-elevated)] p-5 shadow-[var(--shadow-panel)] transition hover:border-[color:var(--border-mid)] hover:bg-[var(--bg-hover)]"
           >
             <p className="font-mono text-[11px] uppercase tracking-[0.16em] text-[var(--accent)]">
-              Honest eval
+              How we test it
             </p>
             <p className="mt-3 text-[14px] leading-7 text-[var(--text-secondary)]">
-              v0.1 is a public smoke test with a provisional 20/20 pre-grade,
-              not benchmark evidence.
+              1,148 automated tests and a public eval harness, with the limits
+              stated plainly. Read the receipts before you trust it.
             </p>
           </a>
           <a
@@ -477,11 +477,11 @@ export default function Home() {
             className="rounded-[8px] border border-[color:var(--border)] bg-[var(--bg-elevated)] p-5 shadow-[var(--shadow-panel)] transition hover:border-[color:var(--border-mid)] hover:bg-[var(--bg-hover)]"
           >
             <p className="font-mono text-[11px] uppercase tracking-[0.16em] text-[var(--accent)]">
-              Adapter examples
+              Build on the files
             </p>
             <p className="mt-3 text-[14px] leading-7 text-[var(--text-secondary)]">
-              Mem0 and Graphiti examples show the file contract; v2 hardening is
-              tracked separately.
+              Working Mem0 and Graphiti examples show how other tools read the
+              same markdown. Your data, everyone&apos;s integration.
             </p>
           </a>
         </div>

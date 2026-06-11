@@ -5,7 +5,7 @@ import { MinutesDemo } from "./minutes-demo";
 
 export function DemoPlayer() {
   return (
-    <div className="w-full max-w-[720px] mx-auto rounded-[3px] overflow-hidden border border-white/[0.06] text-left" style={{ maxHeight: "min(55vw, 380px)" }}>
+    <div className="mx-auto w-full max-w-[720px] overflow-hidden rounded-[8px] border border-[color:var(--border)] text-left shadow-[var(--shadow-panel)]" style={{ maxHeight: "min(55vw, 380px)" }}>
       <Player
         component={MinutesDemo}
         durationInFrames={630}

@@ -34,7 +34,7 @@ cargo run --bin minutes -- stop      # Stop and process
 export CXXFLAGS="-I$(xcrun --show-sdk-path)/usr/include/c++/v1"
 cargo build --release -p minutes-cli           # CLI binary
 cargo tauri build --bundles app                # Tauri .app bundle
-cp target/release/minutes ~/.local/bin/minutes # Install CLI
+rm -f ~/.local/bin/minutes && cp target/release/minutes ~/.local/bin/minutes # Install CLI (rm first: in-place cp over a running binary invalidates its signature -> SIGKILL on every launch)
 open target/release/bundle/macos/Minutes.app   # Launch app
 ```
 
@@ -53,7 +53,7 @@ export MINUTES_DEV_SIGNING_IDENTITY="Developer ID Application: Mathieu Silverste
 ```
 
 **IMPORTANT**: After any code change, you must rebuild ALL affected targets:
-- CLI changes: `cargo build --release -p minutes-cli && cp target/release/minutes ~/.local/bin/minutes`
+- CLI changes: `cargo build --release -p minutes-cli && rm -f ~/.local/bin/minutes && cp target/release/minutes ~/.local/bin/minutes` (always rm first; never cp over the live binary)
 - Tauri changes: `cargo tauri build --bundles app` then relaunch the appropriate app bundle
 - TCC-sensitive desktop work (hotkeys, Screen Recording, Input Monitoring, Accessibility): `./scripts/install-dev-app.sh`
 - MCP server changes: `cd crates/mcp && npm run build` (compiles TS server + builds UI, then restart MCP client sessions)

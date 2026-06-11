@@ -102,7 +102,7 @@ cp build/bin/example-server ~/.local/bin/
 cd <path/to/your/minutes/checkout>     # e.g. ~/Sites/minutes
 cargo build --release -p minutes-cli --features parakeet
 mkdir -p ~/.local/bin
-cp target/release/minutes ~/.local/bin/minutes
+rm -f ~/.local/bin/minutes && cp target/release/minutes ~/.local/bin/minutes
 # Make sure ~/.local/bin is on PATH (add to ~/.zshrc if it isn't):
 #   export PATH="$HOME/.local/bin:$PATH"
 

@@ -122,7 +122,7 @@ minutes record --consent notice_in_invite --consent-notice "Notice was included 
 ```toml
 [consent]
 mode = "remind" # off | remind | require
-disclosure_script = "Heads up — I'm using Minutes to transcribe this conversation locally on my device for my own notes. Let me know if you'd prefer I didn't."
+disclosure_script = "Heads up: I'm using Minutes to transcribe this conversation locally on my device for my own notes. Let me know if you'd prefer I didn't."
 # default_basis = "notice_in_invite"
 ```
 
@@ -130,7 +130,7 @@ When present, artifacts include:
 
 ```yaml
 consent: verbal_all_parties
-consent_notice: Heads up — I'm using Minutes to transcribe this conversation locally on my device for my own notes. Let me know if you'd prefer I didn't.
+consent_notice: Heads up: I'm using Minutes to transcribe this conversation locally on my device for my own notes. Let me know if you'd prefer I didn't.
 ```
 
 ### Sensitive meetings

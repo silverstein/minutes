@@ -139,7 +139,7 @@ Supported basis values are `verbal_all_parties`, `notice_in_invite`,
 ```toml
 [consent]
 mode = "remind"
-disclosure_script = "Heads up — I'm using Minutes to transcribe this conversation locally on my device for my own notes. Let me know if you'd prefer I didn't."
+disclosure_script = "Heads up: I'm using Minutes to transcribe this conversation locally on my device for my own notes. Let me know if you'd prefer I didn't."
 # default_basis = "notice_in_invite"
 ```
 

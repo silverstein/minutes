@@ -415,7 +415,7 @@ impl Default for ConsentConfig {
     fn default() -> Self {
         Self {
             mode: ConsentMode::Remind,
-            disclosure_script: "Heads up — I'm using Minutes to transcribe this conversation locally on my device for my own notes. Let me know if you'd prefer I didn't.".into(),
+            disclosure_script: "Heads up: I'm using Minutes to transcribe this conversation locally on my device for my own notes. Let me know if you'd prefer I didn't.".into(),
             default_basis: None,
         }
     }

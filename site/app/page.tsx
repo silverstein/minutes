@@ -413,6 +413,13 @@ export default function Home() {
           <CopyButton label="MCP server" cmd="npx minutes-mcp" />
         </div>
 
+        <p className="mt-3 text-[12px] text-[var(--text-secondary)]">
+          Newer Homebrew distrusts third-party taps by default; if brew warns
+          about silverstein/tap, run{" "}
+          <span className="font-mono text-[var(--text)]">brew trust silverstein/tap</span>{" "}
+          once.
+        </p>
+
         <div className="mt-8 rounded-[5px] border border-[color:var(--border)] bg-[var(--bg-elevated)] px-4 py-3 text-[13px] leading-6 text-[var(--text-secondary)] sm:hidden">
           Reading on your phone? Minutes installs on Mac and Windows.{" "}
           <a

@@ -43,6 +43,10 @@ brew install --cask silverstein/tap/minutes
 # macOS — CLI only
 brew tap silverstein/tap && brew install minutes
 
+# Newer Homebrew versions distrust third-party taps by default; if brew warns
+# "Skipping silverstein/tap because it is not trusted", run once:
+brew trust silverstein/tap
+
 # Any platform — from source (requires Rust + cmake; Windows also needs LLVM)
 cargo install minutes-cli                          # macOS/Linux
 cargo install minutes-cli --no-default-features    # Windows (see install notes below)
@@ -244,8 +248,6 @@ minutes import granola              # Import all meetings to ~/meetings/
 ```
 
 Reads from `~/.granola-archivist/output/`. Meetings are converted to Minutes' markdown format with YAML frontmatter. Duplicates are skipped automatically. All your data stays local — no cloud, no $18/mo.
-
-> **Populating the export directory:** `~/.granola-archivist/output/` has to be filled by a separate Granola export tool first. Recent Granola versions encrypt their local cache, which can break exporters that scrape it — if `minutes import granola` finds nothing, use the API-based [granola-to-minutes](https://github.com/calvindotsg/granola-to-minutes) route below instead (it reads Granola's API and writes straight to `~/meetings/`).
 
 ### Want transcripts and AI summaries?
 

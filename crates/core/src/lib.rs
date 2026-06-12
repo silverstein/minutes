@@ -12,6 +12,7 @@ pub mod diarize;
 pub mod dictation_memory;
 pub mod error;
 pub mod events;
+pub mod ffmpeg;
 pub mod graph;
 pub mod health;
 pub mod jobs;

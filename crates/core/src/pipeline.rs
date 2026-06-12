@@ -751,7 +751,18 @@ fn prepare_transcription_input(
         }
     })?;
 
-    let output = std::process::Command::new("ffmpeg")
+    let ffmpeg = crate::ffmpeg::resolve_ffmpeg().map_err(|error| {
+        let _ = std::fs::remove_file(&tmp);
+        crate::error::TranscribeError::NativeCaptureStemMixUnavailable {
+            reason: format!(
+                "ffmpeg could not be resolved for stem mix of {}: {}",
+                canonical.display(),
+                error
+            ),
+        }
+    })?;
+
+    let output = std::process::Command::new(&ffmpeg)
         .args([
             "-y",
             "-i",
@@ -776,8 +787,9 @@ fn prepare_transcription_input(
             let _ = std::fs::remove_file(&tmp);
             crate::error::TranscribeError::NativeCaptureStemMixUnavailable {
                 reason: format!(
-                    "ffmpeg could not be invoked for stem mix of {}: {}. Install ffmpeg (brew install ffmpeg).",
+                    "ffmpeg could not be invoked for stem mix of {} via {}: {}. Install ffmpeg (brew install ffmpeg) or set MINUTES_FFMPEG.",
                     canonical.display(),
+                    ffmpeg.display(),
                     e
                 ),
             }
@@ -6547,7 +6559,10 @@ mod prepare_transcription_input_tests {
     }
 
     fn ffmpeg_available() -> bool {
-        std::process::Command::new("ffmpeg")
+        let Ok(ffmpeg) = crate::ffmpeg::resolve_ffmpeg() else {
+            return false;
+        };
+        std::process::Command::new(ffmpeg)
             .arg("-version")
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())

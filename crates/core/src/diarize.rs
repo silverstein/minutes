@@ -289,8 +289,15 @@ pub fn models_installed(config: &Config) -> bool {
 /// are often 44.1kHz F32, which the symphonia fallback can struggle with.
 fn preprocess_audio(audio_path: &Path) -> (std::path::PathBuf, Option<std::path::PathBuf>) {
     let temp_path = std::env::temp_dir().join("minutes-diarize-preprocessed.wav");
+    let ffmpeg = match crate::ffmpeg::resolve_ffmpeg() {
+        Ok(path) => path,
+        Err(error) => {
+            tracing::debug!(error = %error, "ffmpeg not available for preprocessing, using original audio");
+            return (audio_path.to_path_buf(), None);
+        }
+    };
 
-    match std::process::Command::new("ffmpeg")
+    match std::process::Command::new(&ffmpeg)
         .args([
             "-y",
             "-i",
@@ -308,7 +315,7 @@ fn preprocess_audio(audio_path: &Path) -> (std::path::PathBuf, Option<std::path:
         .status()
     {
         Ok(status) if status.success() => {
-            tracing::info!("audio preprocessed to 16kHz mono via ffmpeg");
+            tracing::info!(ffmpeg = %ffmpeg.display(), "audio preprocessed to 16kHz mono via ffmpeg");
             (temp_path.clone(), Some(temp_path))
         }
         _ => {

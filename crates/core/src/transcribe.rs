@@ -1041,8 +1041,6 @@ fn load_wav(path: &Path) -> Result<Vec<f32>, TranscribeError> {
 /// Returns an error if ffmpeg is not installed or the conversion fails,
 /// allowing the caller to fall back to symphonia.
 fn decode_with_ffmpeg(path: &Path) -> Result<Vec<f32>, TranscribeError> {
-    use std::process::Command;
-
     let tmp_dir = std::env::temp_dir();
     let tmp_wav = tmp_dir.join(format!("minutes-ffmpeg-{}.wav", std::process::id()));
 
@@ -1057,7 +1055,9 @@ fn decode_with_ffmpeg(path: &Path) -> Result<Vec<f32>, TranscribeError> {
         }
     }
 
-    let output = Command::new("ffmpeg")
+    let ffmpeg = crate::ffmpeg::resolve_ffmpeg()
+        .map_err(|e| TranscribeError::TranscriptionFailed(format!("ffmpeg not available: {e}")))?;
+    let output = std::process::Command::new(&ffmpeg)
         .args([
             "-i",
             path.to_str().unwrap_or(""),
@@ -1075,7 +1075,11 @@ fn decode_with_ffmpeg(path: &Path) -> Result<Vec<f32>, TranscribeError> {
         .stderr(std::process::Stdio::piped())
         .output()
         .map_err(|e| {
-            TranscribeError::TranscriptionFailed(format!("ffmpeg not available: {}", e))
+            TranscribeError::TranscriptionFailed(format!(
+                "ffmpeg not available at {}: {}",
+                ffmpeg.display(),
+                e
+            ))
         })?;
 
     if !output.status.success() {

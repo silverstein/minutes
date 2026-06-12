@@ -1115,7 +1115,13 @@ fn materialize_eval_audio_path(
         .prefix("minutes-decode-hint-eval-")
         .tempdir()?;
     let output = dir.path().join("clip.wav");
-    let ffmpeg = Command::new("ffmpeg")
+    let ffmpeg_path = crate::ffmpeg::resolve_ffmpeg().map_err(|error| {
+        MinutesError::Io(std::io::Error::other(format!(
+            "{} could not resolve ffmpeg for eval clip: {}",
+            case.id, error
+        )))
+    })?;
+    let ffmpeg = Command::new(&ffmpeg_path)
         .arg("-hide_banner")
         .arg("-loglevel")
         .arg("error")
@@ -1142,7 +1148,12 @@ fn materialize_eval_audio_path(
         )))),
         Err(error) => Err(MinutesError::Io(std::io::Error::new(
             error.kind(),
-            format!("{} could not run ffmpeg for eval clip: {}", case.id, error),
+            format!(
+                "{} could not run ffmpeg for eval clip via {}: {}",
+                case.id,
+                ffmpeg_path.display(),
+                error
+            ),
         ))),
     }
 }

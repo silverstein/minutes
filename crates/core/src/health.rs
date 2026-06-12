@@ -238,22 +238,21 @@ pub fn vad_model_status(config: &Config) -> HealthItem {
 
 /// Check if ffmpeg is available for audio decoding.
 pub fn ffmpeg_status() -> HealthItem {
-    let available = std::process::Command::new("ffmpeg")
-        .arg("-version")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok();
+    let resolved = crate::ffmpeg::resolve_ffmpeg();
+    let available = resolved.is_ok();
 
     HealthItem {
         label: "ffmpeg".into(),
         state: if available { "ready" } else { "attention" }.into(),
-        detail: if available {
-            "Installed. Used for high-quality audio decoding of m4a/mp3/ogg files.".into()
-        } else {
-            "Not found. Non-English audio in m4a/mp3/ogg format may produce poor transcriptions. \
-             Install: brew install ffmpeg (macOS) / apt install ffmpeg (Linux)"
-                .into()
+        detail: match resolved {
+            Ok(path) => format!(
+                "Installed at {}. Used for high-quality audio decoding of m4a/mp3/ogg files.",
+                path.display()
+            ),
+            Err(error) => format!(
+                "{} Non-English audio in m4a/mp3/ogg format may produce poor transcriptions.",
+                error
+            ),
         },
         optional: true,
     }

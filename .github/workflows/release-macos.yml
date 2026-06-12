@@ -102,6 +102,12 @@ jobs:
           chmod 600 "$key_path"
           echo "APPLE_API_KEY_PATH=$key_path" >> "$GITHUB_ENV"
 
+      # The bundle ships the CLI as a sidecar (in-app "Set up CLI" symlinks to
+      # it). build.rs stages it from target/release/minutes, so the CLI must be
+      # built first or the bundle ships a placeholder stub (#324).
+      - name: Build release CLI for bundling
+        run: cargo build --release -p minutes-cli --features parakeet,metal
+
       - name: Build signed + notarized bundle (with updater artifacts)
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -112,7 +118,20 @@ jobs:
           APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
+          MINUTES_REQUIRE_REAL_CLI_SIDECAR: "1"
         run: cargo tauri build --features parakeet,metal --bundles app
+
+      - name: Verify bundled CLI sidecar is real
+        run: |
+          sidecar="target/release/bundle/macos/Minutes.app/Contents/MacOS/minutes"
+          test -f "$sidecar" || { echo "ERROR: bundled CLI sidecar missing" >&2; exit 1; }
+          size=$(stat -f%z "$sidecar")
+          echo "bundled CLI sidecar size: $size bytes"
+          if [ "$size" -lt 10000000 ]; then
+            echo "ERROR: bundled CLI sidecar is too small to be the real binary (placeholder? #324)" >&2
+            exit 1
+          fi
+          file "$sidecar" | grep -q "Mach-O" || { echo "ERROR: bundled CLI sidecar is not a Mach-O binary" >&2; exit 1; }
 
       - name: Refresh release helper scripts for manual reruns
         if: github.event_name == 'workflow_dispatch'

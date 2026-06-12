@@ -34,7 +34,7 @@ pub struct FilterStats {
     pub audio_duration_secs: f64,
     /// Samples after silence stripping (0 = all silence)
     pub samples_after_silence_strip: usize,
-    /// Raw segments from whisper/parakeet before any filtering
+    /// Raw ASR segments before any filtering
     pub raw_segments: usize,
     /// Segments skipped by whisper's no_speech_prob > 0.8
     pub skipped_no_speech: usize,
@@ -65,7 +65,7 @@ impl FilterStats {
             parts.push("silence strip removed ALL audio".into());
             return parts.join(", ");
         }
-        parts.push(format!("whisper produced {} segments", self.raw_segments));
+        parts.push(format!("ASR produced {} segments", self.raw_segments));
         if self.raw_segments == 0 {
             return parts.join(", ");
         }
@@ -125,6 +125,75 @@ impl FilterStats {
 pub struct TranscribeResult {
     pub text: String,
     pub stats: FilterStats,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct TimedTranscriptSegment {
+    pub start_secs: f64,
+    pub end_secs: f64,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct TimestampedTranscriptStats {
+    pub raw_segments: usize,
+    pub after_dedup: usize,
+    pub after_interleaved: usize,
+    pub after_script_filter: usize,
+    pub after_noise_markers: usize,
+    pub after_trailing_trim: usize,
+}
+
+pub(crate) fn transcript_from_timed_segments(
+    segments: &[TimedTranscriptSegment],
+    config: &Config,
+) -> Result<(String, TimestampedTranscriptStats), TranscribeError> {
+    let mut lines = Vec::new();
+    for segment in segments {
+        let text = segment.text.trim();
+        if text.is_empty() {
+            continue;
+        }
+        if !segment.start_secs.is_finite()
+            || !segment.end_secs.is_finite()
+            || segment.start_secs < 0.0
+            || segment.end_secs < segment.start_secs
+        {
+            return Err(TranscribeError::TranscriptionFailed(format!(
+                "timestamped transcript segment has invalid bounds: start={}, end={}",
+                segment.start_secs, segment.end_secs
+            )));
+        }
+        let mins = (segment.start_secs / 60.0) as u64;
+        let secs = (segment.start_secs % 60.0) as u64;
+        lines.push(format!("[{}:{:02}] {}", mins, secs, text));
+    }
+    let raw_segments = lines.len();
+
+    if lines.is_empty() {
+        return Err(TranscribeError::EmptyTranscript(
+            config.transcription.min_words,
+        ));
+    }
+
+    let cleanup = run_transcript_cleanup_pipeline(lines);
+    let stats = TimestampedTranscriptStats {
+        raw_segments,
+        after_dedup: cleanup.after(TranscriptCleanupStage::DedupSegments),
+        after_interleaved: cleanup.after(TranscriptCleanupStage::DedupInterleaved),
+        after_script_filter: cleanup.after(TranscriptCleanupStage::StripForeignScript),
+        after_noise_markers: cleanup.after(TranscriptCleanupStage::CollapseNoiseMarkers),
+        after_trailing_trim: cleanup.after(TranscriptCleanupStage::TrimTrailingNoise),
+    };
+
+    let transcript = cleanup.lines.join("\n");
+    if transcript.is_empty() {
+        return Err(TranscribeError::EmptyTranscript(
+            config.transcription.min_words,
+        ));
+    }
+
+    Ok((format!("{}\n", transcript), stats))
 }
 
 /// Meeting-local lexical hints that can safely inform batch decoding.
@@ -295,9 +364,11 @@ fn normalize_decode_hint_candidate(
 // Engines:
 //   - whisper (default): whisper.cpp via whisper-rs, Apple Accelerate on M-series
 //   - parakeet (opt-in): parakeet.cpp via subprocess, Metal on Apple Silicon
+//   - mlx-audio (opt-in): local Python helper, MLX on Apple Silicon
 //
-// Engine is selected via config.transcription.engine ("whisper" or "parakeet").
-// Model must be downloaded first via `minutes setup`.
+// Engine is selected via config.transcription.engine.
+// Whisper and Parakeet models can be downloaded via `minutes setup`; MLX Audio
+// uses the configured Python environment and model cache.
 // ──────────────────────────────────────────────────────────────
 
 /// Transcribe an audio file to text.
@@ -305,6 +376,7 @@ fn normalize_decode_hint_candidate(
 /// Dispatches to the engine configured in `config.transcription.engine`:
 /// - `"whisper"` (default): whisper.cpp via whisper-rs
 /// - `"parakeet"`: parakeet.cpp via subprocess
+/// - `"mlx-audio"`: MLX Audio via a warm local helper process
 /// - `"apple-speech"`: currently live-transcript-only; batch/default paths
 ///   fall back to whisper until the experiment graduates
 ///
@@ -330,6 +402,7 @@ fn transcribe_dispatch(
     match config.transcription.engine.as_str() {
         "whisper" => transcribe_whisper_dispatch(audio_path, config, hints),
         "parakeet" => transcribe_parakeet_dispatch(audio_path, config, hints),
+        "mlx-audio" => crate::mlx_audio::transcribe(audio_path, config),
         "apple-speech" => {
             tracing::warn!(
                 "apple-speech is experimental and live-transcript-only today — falling back to whisper for batch/default transcription"
@@ -912,6 +985,7 @@ fn transcribe_with_whisper(
     stats.final_words = word_count;
 
     tracing::info!(
+        engine = "whisper",
         segments = num_segments,
         words = word_count,
         diagnosis = stats.diagnosis(),
@@ -937,7 +1011,7 @@ fn transcribe_with_whisper(
 /// because symphonia's AAC decoder produces samples that cause whisper to
 /// hallucinate on non-English audio (issue #21). Falls back to symphonia
 /// when ffmpeg is not installed.
-fn load_audio_samples(path: &Path) -> Result<Vec<f32>, TranscribeError> {
+pub(crate) fn load_audio_samples(path: &Path) -> Result<Vec<f32>, TranscribeError> {
     let ext = path
         .extension()
         .and_then(|e| e.to_str())
@@ -2010,6 +2084,7 @@ fn transcribe_result_from_parakeet_parsed(
     let word_count = transcript.split_whitespace().count();
     stats.final_words = word_count;
     tracing::info!(
+        engine = "parakeet",
         words = word_count,
         segments = parsed.segments.len(),
         host_process_first_use,
@@ -2696,41 +2771,26 @@ fn parakeet_transcript_from_segments_with_stats(
     config: &Config,
 ) -> Result<(ParakeetCliTranscript, String, ParakeetFilterStats), TranscribeError> {
     let segments = crate::parakeet::group_word_segments(&segments);
-    let lines: Vec<String> = segments
+    let timed_segments: Vec<TimedTranscriptSegment> = segments
         .iter()
-        .map(|segment| {
-            let mins = (segment.start_secs / 60.0) as u64;
-            let secs = (segment.start_secs % 60.0) as u64;
-            format!("[{}:{:02}] {}", mins, secs, segment.text)
+        .map(|segment| TimedTranscriptSegment {
+            start_secs: segment.start_secs,
+            end_secs: segment.end_secs,
+            text: segment.text.clone(),
         })
         .collect();
-    let raw_segments = lines.len();
-
-    if lines.is_empty() {
-        return Err(TranscribeError::EmptyTranscript(
-            config.transcription.min_words,
-        ));
-    }
-
-    let cleanup = run_transcript_cleanup_pipeline(lines);
+    let (transcript_with_newline, cleanup_stats) =
+        transcript_from_timed_segments(&timed_segments, config)?;
 
     let pstats = ParakeetFilterStats {
-        raw_segments,
-        after_dedup: cleanup.after(TranscriptCleanupStage::DedupSegments),
-        after_interleaved: cleanup.after(TranscriptCleanupStage::DedupInterleaved),
-        after_script_filter: cleanup.after(TranscriptCleanupStage::StripForeignScript),
-        after_noise_markers: cleanup.after(TranscriptCleanupStage::CollapseNoiseMarkers),
-        after_trailing_trim: cleanup.after(TranscriptCleanupStage::TrimTrailingNoise),
+        raw_segments: cleanup_stats.raw_segments,
+        after_dedup: cleanup_stats.after_dedup,
+        after_interleaved: cleanup_stats.after_interleaved,
+        after_script_filter: cleanup_stats.after_script_filter,
+        after_noise_markers: cleanup_stats.after_noise_markers,
+        after_trailing_trim: cleanup_stats.after_trailing_trim,
     };
 
-    let transcript = cleanup.lines.join("\n");
-    if transcript.is_empty() {
-        return Err(TranscribeError::EmptyTranscript(
-            config.transcription.min_words,
-        ));
-    }
-
-    let transcript_with_newline = format!("{}\n", transcript);
     Ok((
         ParakeetCliTranscript {
             raw_output: raw_output.to_string(),
@@ -3799,6 +3859,27 @@ Hello there.
             parsed[1],
             Err(TranscribeError::EmptyTranscript(_))
         ));
+    }
+
+    #[test]
+    fn diagnosis_uses_engine_agnostic_segment_label() {
+        let stats = FilterStats {
+            audio_duration_secs: 30.0,
+            samples_after_silence_strip: 16_000 * 30,
+            raw_segments: 2,
+            after_no_speech_filter: 2,
+            after_dedup: 2,
+            after_interleaved: 2,
+            after_script_filter: 2,
+            after_noise_markers: 2,
+            after_trailing_trim: 2,
+            final_words: 12,
+            ..FilterStats::default()
+        };
+
+        let d = stats.diagnosis();
+        assert!(d.contains("ASR produced 2 segments"), "{d}");
+        assert!(!d.contains("whisper produced"), "{d}");
     }
 
     #[test]

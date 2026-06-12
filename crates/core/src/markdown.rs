@@ -1876,7 +1876,10 @@ mod tests {
 
         let fm = Frontmatter {
             status: Some(OutputStatus::NoSpeech),
-            filter_diagnosis: Some("audio: 5.0s, whisper produced 3 segments, no_speech filter: -3 → 0, final: 0 words".into()),
+            filter_diagnosis: Some(
+                "audio: 5.0s, ASR produced 3 segments, no_speech filter: -3 → 0, final: 0 words"
+                    .into(),
+            ),
             ..test_frontmatter()
         };
 

@@ -104,7 +104,7 @@ impl Default for VoiceConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TranscriptionConfig {
-    /// Transcription engine: "whisper" (default), "parakeet", or
+    /// Transcription engine: "whisper" (default), "parakeet", "mlx-audio", or
     /// "apple-speech" (experimental live-transcript-only path on macOS 26+).
     pub engine: String,
     pub model: String,
@@ -217,9 +217,21 @@ pub struct TranscriptionConfig {
     /// Default 30s matches the design note in `streaming_whisper.rs`. Raise
     /// for long-form dictation; lower if you still see CPU pressure.
     pub partial_max_secs: u32,
+    /// Hugging Face repo id or local path for the MLX Audio STT model.
+    pub mlx_audio_model: String,
+    /// Python executable used to launch the local MLX Audio helper.
+    pub mlx_audio_python: String,
+    /// Keep a warm MLX Audio helper process resident between batch requests.
+    pub mlx_audio_warm: bool,
+    /// Timeout budget for MLX Audio batch transcription requests.
+    pub mlx_audio_timeout_secs: u64,
+    /// Chunk duration passed to MLX Audio models that expose chunk-level
+    /// timestamps, such as Qwen3-ASR.
+    pub mlx_audio_chunk_secs: f64,
 }
 
 pub const VALID_PARAKEET_MODELS: &[&str] = &["tdt-ctc-110m", "tdt-600m"];
+pub const DEFAULT_MLX_AUDIO_MODEL: &str = "mlx-community/Qwen3-ASR-1.7B-8bit";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -903,6 +915,11 @@ impl Default for TranscriptionConfig {
             parakeet_fp16_blacklist_reset: false,
             parakeet_vocab: "tdt-600m.tokenizer.vocab".into(),
             partial_max_secs: 30,
+            mlx_audio_model: DEFAULT_MLX_AUDIO_MODEL.into(),
+            mlx_audio_python: "python3".into(),
+            mlx_audio_warm: true,
+            mlx_audio_timeout_secs: 1800,
+            mlx_audio_chunk_secs: 30.0,
         }
     }
 }
@@ -1433,6 +1450,14 @@ mod tests {
             config.transcription.parakeet_vocab,
             "tdt-600m.tokenizer.vocab"
         );
+        assert_eq!(
+            config.transcription.mlx_audio_model,
+            "mlx-community/Qwen3-ASR-1.7B-8bit"
+        );
+        assert_eq!(config.transcription.mlx_audio_python, "python3");
+        assert!(config.transcription.mlx_audio_warm);
+        assert_eq!(config.transcription.mlx_audio_timeout_secs, 1800);
+        assert_eq!(config.transcription.mlx_audio_chunk_secs, 30.0);
         assert_eq!(config.diarization.engine, "auto");
         assert_eq!(config.summarization.engine, "none");
         assert_eq!(config.search.engine, "builtin");

@@ -21,9 +21,9 @@ So `minutes record --device "MacBook Pro Microphone"` always wins over `[recordi
 
 | key | default | meaning |
 |---|---|---|
-| `engine` | `"whisper"` | `"whisper"` (default) or `"parakeet"` |
-| `model` | `"base"` | Whisper model: `tiny` / `base` / `small` / `medium` / `large-v3` |
-| `parakeet_model` | `"tdt-ctc-110m"` | Parakeet model: `tdt-ctc-110m` or `tdt-600m` |
+| `engine` | `"whisper"` | `"whisper"` (default), `"parakeet"`, `"mlx-audio"`, or experimental `"apple-speech"` for standalone live |
+| `model` | `"small"` | Whisper model: `tiny` / `base` / `small` / `medium` / `large-v3` |
+| `parakeet_model` | `"tdt-600m"` | Parakeet model: `tdt-ctc-110m` or `tdt-600m` |
 | `language` | auto-detect | BCP-47 tag (e.g. `"en"`, `"es"`) to force a specific language |
 | `noise_reduction` | `true` | RNNoise pre-filter (requires `denoise` feature) |
 | `vad_model` | `"silero-v6.2.0"` | Silero VAD model name; empty string disables |
@@ -32,12 +32,22 @@ So `minutes record --device "MacBook Pro Microphone"` always wins over `[recordi
 | `parakeet_sidecar_enabled` | auto | Warm sidecar: auto-enables when parakeet is the engine and `example-server` resolves. `true`/`"on"` forces on, `"off"` forces off. A legacy bool `false` is treated as auto (pre-0.18.8 saves wrote it into every config) (#295) |
 | `parakeet_fp16` | `true` | GPU fp16 inference for lower memory use |
 | `parakeet_boost_limit` / `parakeet_boost_score` | `0` / `2.0` | Knowledge-graph phrase boosting; 0 = off |
+| `mlx_audio_model` | `"mlx-community/Qwen3-ASR-1.7B-8bit"` | Hugging Face repo id or local MLX Audio model path |
+| `mlx_audio_python` | `"python3"` | Python executable used to launch the local MLX Audio helper |
+| `mlx_audio_warm` | `true` | Keep one helper process resident so large MLX models stay loaded between requests |
+| `mlx_audio_timeout_secs` | `1800` | Per-request timeout for MLX Audio transcription; `0` waits indefinitely |
+| `mlx_audio_chunk_secs` | `30.0` | Chunk duration forwarded to timestamp-capable MLX models such as Qwen3-ASR |
+
+For MLX Audio setup and model caveats, see [`docs/MLX_AUDIO.md`](MLX_AUDIO.md).
+
+Saved-audio MLX transcripts require timestamped segments. Live transcript and
+dictation do not use MLX in this phase.
 
 ### `[diarization]` — speaker attribution
 
 | key | default | meaning |
 |---|---|---|
-| `engine` | `"none"` | `"none"` or `"pyannote-rs"` |
+| `engine` | `"auto"` | `"auto"` (uses pyannote-rs if models are installed), `"pyannote-rs"`, `"pyannote"` (legacy Python), or `"none"` |
 | `threshold` | `0.4` | Cosine similarity cutoff; lower merges more aggressively |
 | `embedding_model` | `"cam++"` | `"cam++"` or `"cam++-lm"` (lower EER, lower similarities) |
 

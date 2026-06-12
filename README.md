@@ -187,7 +187,7 @@ Streams local transcription to a JSONL file in real time — any AI agent can re
 minutes dictate                                  # Speak → text appears as you talk
 minutes dictate --stdout                         # Output to stdout instead of clipboard
 ```
-Text streams progressively as you speak (partial results every 2 seconds). By default it accumulates across pauses and writes the combined text to clipboard + daily note when dictation ends. Set `[dictation] accumulate = false` to keep the older per-pause behavior. The default backend is local Whisper; on supported macOS builds, `[dictation] backend = "apple-speech"` tries Apple DictationTranscriber for final utterances, and `[dictation] backend = "parakeet"` tries the installed Parakeet backend for final utterances. Both opt-in paths keep Whisper partials and fallback. Linux clipboard output works through `wl-clipboard` on Wayland or `xclip` / `xsel` on X11; desktop auto-paste only attempts X11 paste automation when `xdotool` is available. Local engines, no cloud.
+Text streams progressively as you speak (partial results every 2 seconds). By default it accumulates across pauses and writes the combined text to clipboard + daily note when dictation ends. Set `[dictation] accumulate = false` to keep the older per-pause behavior. The default backend is local Whisper; on supported macOS builds, `[dictation] backend = "apple-speech"` tries Apple DictationTranscriber for final utterances, and `[dictation] backend = "parakeet"` tries the installed Parakeet backend. Opt-in final backends keep Whisper partials and fallback. Linux clipboard output works through `wl-clipboard` on Wayland or `xclip` / `xsel` on X11; desktop auto-paste only attempts X11 paste automation when `xdotool` is available. Local engines, no cloud.
 
 ### Command palette (desktop app)
 Press `⌘⇧K` from anywhere on macOS to open a keyboard-first palette of every Minutes command. Start a recording, drop a note into the active session, jump to the latest meeting, search transcripts, or rename the meeting open in your assistant — all without leaving the keyboard. Backed by a single typed command registry in `minutes-core`, so visibility follows real backend state: stop-recording only appears while you're recording, mid-recording dictation rows are hidden, and the list re-fetches automatically when state changes.
@@ -922,6 +922,13 @@ minutes setup --parakeet                          # Multilingual v3 (tdt-600m, ~
 minutes setup --parakeet --parakeet-model tdt-ctc-110m  # English-only compact model (~220MB)
 # Also installs native Silero VAD weights for the parakeet.cpp --vad path
 
+# Alternative: use MLX Audio (opt-in, Apple Silicon local models)
+minutes setup --mlx-audio
+minutes setup --mlx-audio --mlx-audio-model mlx-community/Qwen3-ASR-1.7B-8bit
+# Desktop post-recording processing reads the same config. Use Settings >
+# Advanced > Open config to review MLX fields; the Settings dropdown may not
+# list MLX until a later UI PR.
+
 # Enroll your voice for automatic speaker identification
 minutes enroll              # Records 10s of your voice
 minutes voices              # View enrolled profiles
@@ -1075,7 +1082,7 @@ Optional — minutes works out of the box.
 # Or: $XDG_CONFIG_HOME/minutes/config.toml when XDG_CONFIG_HOME is set
 
 [transcription]
-engine = "whisper"        # "whisper" (default), "parakeet" (opt-in, lower WER), or "apple-speech" (experimental)
+engine = "whisper"        # "whisper" (default), "parakeet", "mlx-audio", or "apple-speech" (experimental)
 model = "small"           # whisper: tiny (75MB), base, small (466MB), medium, large-v3 (3.1GB)
 # language = "ur"          # Force transcription language (ISO 639-1 code, e.g. "en", "ur", "es", "zh")
                           # Default: auto-detect. Set this for similar-sounding languages (Urdu/Hindi, etc.)
@@ -1088,6 +1095,10 @@ model = "small"           # whisper: tiny (75MB), base, small (466MB), medium, l
 # parakeet_boost_score = 2.0                     # Experimental tuning for parakeet.cpp --boost-score
 # parakeet_fp16 = true                           # Default on macOS Apple Silicon: ~35% faster transcription with lower GPU memory (see docs/designs/parakeet-perf-2026-04-14.md)
 # parakeet_vocab = "tdt-600m.tokenizer.vocab"      # Safer when multiple Parakeet models are installed
+# mlx_audio_model = "mlx-community/Qwen3-ASR-1.7B-8bit"  # MLX Audio model id/path
+# mlx_audio_python = "/Users/you/.minutes/mlx-audio/bin/python"  # Python with mlx-audio installed
+# mlx_audio_warm = true                          # Keep the model loaded between requests
+# mlx_audio_chunk_secs = 30.0                    # Forwarded to timestamp-capable MLX models
 # vad_model = "silero-v6.2.0"     # Silero VAD model (auto-downloaded by setup). Empty = disable.
                                    # Prevents whisper hallucination loops on non-English/noisy audio.
 
@@ -1197,7 +1208,7 @@ const meetings = await listMeetings("~/meetings", 20);
 const results = await searchMeetings("~/meetings", "pricing");
 ```
 
-**Built with:** Rust, [whisper.cpp](https://github.com/ggerganov/whisper.cpp) (transcription), [pyannote-rs](https://github.com/pyannote/pyannote-rs) (speaker diarization), [Silero VAD](https://github.com/snakers4/silero-vad) (voice activity detection), [symphonia](https://github.com/pdeljanov/Symphonia) (audio decoding), [cpal](https://github.com/RustAudio/cpal) (audio capture), [Tauri v2](https://v2.tauri.app/) (desktop app), [ureq](https://github.com/algesten/ureq) (HTTP). Optional: [ffmpeg](https://ffmpeg.org/) (recommended for non-English audio decoding).
+**Built with:** Rust, [whisper.cpp](https://github.com/ggerganov/whisper.cpp) (transcription), [pyannote-rs](https://github.com/pyannote/pyannote-rs) (speaker diarization), [Silero VAD](https://github.com/snakers4/silero-vad) (voice activity detection), [symphonia](https://github.com/pdeljanov/Symphonia) (audio decoding), [cpal](https://github.com/RustAudio/cpal) (audio capture), [Tauri v2](https://v2.tauri.app/) (desktop app), [ureq](https://github.com/algesten/ureq) (HTTP). Optional: [MLX Audio](https://github.com/Blaizzy/mlx-audio) for local ASR and [ffmpeg](https://ffmpeg.org/) for non-English audio decoding.
 
 ## Star History
 

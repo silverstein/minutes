@@ -63,7 +63,7 @@ fn suppress_if_all_noise(
     }
 
     Some(format!(
-        "all-noise transcript on sparse stems (voice active {:.3}, system active {:.3}, threshold {:.2}); whisper produced only non-speech markers - body suppressed",
+        "all-noise transcript on sparse stems (voice active {:.3}, system active {:.3}, threshold {:.2}); ASR produced only non-speech markers - body suppressed",
         voice, system, SPARSE_STEM_ACTIVE_RATIO
     ))
 }
@@ -1500,7 +1500,12 @@ pub fn write_transcript_artifact(
         "transcribe",
         &audio_path.display().to_string(),
         transcribe_ms,
-        serde_json::json!({"words": word_count, "mode": "background", "diagnosis": filter_stats.diagnosis()}),
+        serde_json::json!({
+            "words": word_count,
+            "mode": "background",
+            "engine": config.transcription.engine,
+            "diagnosis": filter_stats.diagnosis()
+        }),
     );
 
     let status =
@@ -1598,8 +1603,8 @@ pub fn write_transcript_artifact(
         template: context.template.as_ref().map(|t| t.slug().to_string()),
         filter_diagnosis: if status == Some(OutputStatus::NoSpeech) {
             // Prefer the all-noise-suppression diagnosis when it fired; it
-            // describes a different failure mode (whisper produced only
-            // non-speech markers on sparse stems) than the standard
+            // describes a different failure mode (ASR produced only non-speech
+            // markers on sparse stems) than the standard
             // min_words / no_speech filter path.
             Some(
                 forced_no_speech_diagnosis
@@ -2131,7 +2136,12 @@ where
         .as_ref()
         .map(|f| f.as_path())
         .unwrap_or(audio_path);
-    tracing::info!(step = "transcribe", file = %transcribe_input.display(), "transcribing audio");
+    tracing::info!(
+        step = "transcribe",
+        engine = %config.transcription.engine,
+        file = %transcribe_input.display(),
+        "transcribing audio"
+    );
     let step_start = std::time::Instant::now();
     let result = crate::transcription_coordinator::transcribe_path_for_content_with_hints(
         transcribe_input,
@@ -2155,6 +2165,7 @@ where
     let word_count = transcript.split_whitespace().count();
     tracing::info!(
         step = "transcribe",
+        engine = %config.transcription.engine,
         words = word_count,
         diagnosis = filter_stats.diagnosis(),
         "transcription complete"
@@ -2163,7 +2174,11 @@ where
         "transcribe",
         &audio_path.display().to_string(),
         transcribe_ms,
-        serde_json::json!({"words": word_count, "diagnosis": filter_stats.diagnosis()}),
+        serde_json::json!({
+            "words": word_count,
+            "engine": config.transcription.engine,
+            "diagnosis": filter_stats.diagnosis()
+        }),
     );
 
     // Check minimum word threshold
@@ -2566,8 +2581,8 @@ where
         template: template.map(|t| t.slug().to_string()),
         filter_diagnosis: if status == Some(OutputStatus::NoSpeech) {
             // Prefer the all-noise-suppression diagnosis when it fired; it
-            // describes a different failure mode (whisper produced only
-            // non-speech markers on sparse stems) than the standard
+            // describes a different failure mode (ASR produced only non-speech
+            // markers on sparse stems) than the standard
             // min_words / no_speech filter path. Identical preference order
             // to `write_transcript_artifact` so both entry points produce
             // matching frontmatter.

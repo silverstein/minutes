@@ -20,6 +20,7 @@ pub mod knowledge_extract;
 pub mod logging;
 pub mod macos_permissions;
 pub mod markdown;
+pub mod mlx_audio;
 pub mod notes;
 pub mod overlays;
 pub mod palette;

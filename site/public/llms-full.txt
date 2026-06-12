@@ -10,6 +10,13 @@ Minutes is an open-source meeting corpus you own. Record, transcribe, search, an
 
 31 tools • 7 resources • Interactive MCP App dashboard • Prompt templates
 
+**What's new in 0.18.10:**
+• **The desktop app can find ffmpeg now.** Dock-launched macOS apps get a minimal PATH, so every ffmpeg call inside the desktop app silently failed and audio decoding fell back to the slower pure-Rust path. A shared resolver checks the MINUTES_FFMPEG override, then PATH, then standard Homebrew and system locations, and `minutes health` reports which ffmpeg it resolved.
+• **The whisper model loads once per file, not once per silence gap.** Voice-activity detection splits long recordings into chunks and each chunk paid a full model load: a 49-minute meeting loaded the model 227 times. One context now loads per file and is shared across chunks, with per-chunk decode state unchanged.
+• **Dev builds pass Gatekeeper's seal check.** Build scripts now sign inside-out (nested binaries first, then the bundle), so quarantined copies no longer report as "damaged".
+• **Homebrew tap trust, documented.** If brew warns "Skipping silverstein/tap because it is not trusted", run `brew trust silverstein/tap` once; the README and site now say so.
+• **Granola import, clarified.** The README and CLI error message now explain that the export directory must be populated by a separate tool first, and point to the API-based granola-to-minutes route.
+
 **What's new in 0.18.9:**
 • **Sensitive meetings: a first-class no-capture mode.** Designate a meeting sensitive and Minutes records nothing; you still get a real meeting file built from your typed markers and a guided debrief, marked `capture: none` so future agent-policy layers can respect it. Start and stop from the palette, tray, or `minutes sensitive start/stop`.
 • **Require mode now truly gates desktop recording.** With consent mode set to require, every recording entry point (button, palette, tray, hotkey, automation) shows the same blocking confirmation before capture starts; Cancel leaves nothing behind.

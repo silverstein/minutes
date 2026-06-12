@@ -8004,7 +8004,8 @@ fn import_granola(dir: Option<&Path>, dry_run: bool, config: &Config) -> Result<
     if !source_dir.exists() {
         anyhow::bail!(
             "Granola export directory not found: {}\n\
-             Export your Granola meetings first, or specify a directory with --dir",
+             Export your Granola meetings into it first (see \"Switching from Granola?\" in \
+             the README for the granola-cli route), or pass an existing export dir with --dir",
             source_dir.display()
         );
     }

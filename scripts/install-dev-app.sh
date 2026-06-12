@@ -90,50 +90,51 @@ echo "=== Building ${DEV_PRODUCT_NAME}.app ==="
 # tauri/src-tauri/resources/ by tauri/src-tauri/build.rs, and Tauri bundles it
 # into the .app automatically via tauri.conf.json.
 run_with_ort_retry cargo tauri build --bundles app --config "$DEV_CONFIG" --features "$MINUTES_BUILD_FEATURES" --no-sign
+# Inside-out signing (#311): sign every nested executable FIRST (the CLI
+# sidecar with its own entitlements), then the outer bundle WITHOUT --deep.
+# --deep re-signs nested code with the outer entitlements (clobbering the
+# sidecar's), and any post-seal patching of nested code invalidates the
+# bundle seal, so copied/downloaded apps fail Gatekeeper as "damaged".
+SIDECAR_BIN="$BUILD_APP/Contents/MacOS/minutes"
 if [[ "$SIGN_MODE" == "identity" ]]; then
-  echo "=== Pre-signing nested executables with configured identity ==="
+  echo "=== Signing nested executables (inside-out) with configured identity ==="
   while IFS= read -r nested_executable; do
-    codesign --force --options runtime --timestamp \
-      --sign "$SIGNING_IDENTITY" \
-      "$nested_executable"
+    if [[ "$nested_executable" == "$SIDECAR_BIN" ]]; then
+      codesign --force --options runtime --timestamp \
+        --entitlements tauri/src-tauri/minutes-cli.entitlements \
+        --sign "$SIGNING_IDENTITY" \
+        "$nested_executable"
+    else
+      codesign --force --options runtime --timestamp \
+        --sign "$SIGNING_IDENTITY" \
+        "$nested_executable"
+    fi
   done < <(find "$BUILD_APP/Contents/MacOS" -maxdepth 1 -type f \( -perm -100 -o -perm -010 -o -perm -001 \))
 
-  echo "=== Signing ${DEV_PRODUCT_NAME}.app with configured identity ==="
-  codesign --force --deep --options runtime --timestamp \
+  echo "=== Signing ${DEV_PRODUCT_NAME}.app (outer, no --deep) ==="
+  codesign --force --options runtime --timestamp \
     --entitlements tauri/src-tauri/entitlements.plist \
     --sign "$SIGNING_IDENTITY" \
     "$BUILD_APP"
 else
-  echo "=== Signing ${DEV_PRODUCT_NAME}.app ad-hoc ==="
+  echo "=== Signing ${DEV_PRODUCT_NAME}.app ad-hoc (inside-out) ==="
   echo "No MINUTES_DEV_SIGNING_IDENTITY / APPLE_SIGNING_IDENTITY configured."
   echo "Using ad-hoc signing so the app remains runnable for contributors."
   echo "TCC-sensitive features may still require re-granting permissions after rebuilds."
-  codesign --force --deep --sign - "$BUILD_APP"
+  while IFS= read -r nested_executable; do
+    if [[ "$nested_executable" == "$SIDECAR_BIN" ]]; then
+      codesign --force --options runtime \
+        --entitlements tauri/src-tauri/minutes-cli.entitlements \
+        --sign - "$nested_executable"
+    else
+      codesign --force --sign - "$nested_executable"
+    fi
+  done < <(find "$BUILD_APP/Contents/MacOS" -maxdepth 1 -type f \( -perm -100 -o -perm -010 -o -perm -001 \))
+  codesign --force --sign - "$BUILD_APP"
 fi
 
-echo "=== Re-signing bundled CLI sidecar with its own entitlements ==="
-# Outer --deep sign above clobbers nested entitlements; re-sign the CLI sidecar
-# afterwards with mic input entitlement so `minutes record` from a terminal
-# triggers TCC instead of failing silently. Ad-hoc-signed sidecars don't get
-# entitlements honored — that's documented in §1a of the plan.
-# Tauri's bundler strips the target-triple from externalBin names, so the
-# sidecar lands at `Contents/MacOS/minutes` (not `minutes-${HOST_TARGET}`).
-SIDECAR_RESIGN="${BUILD_APP}/Contents/MacOS/minutes"
-if [[ -f "$SIDECAR_RESIGN" ]]; then
-  if [[ "$SIGN_MODE" == "identity" ]]; then
-    codesign --force --options runtime --timestamp \
-      --entitlements tauri/src-tauri/minutes-cli.entitlements \
-      --sign "$SIGNING_IDENTITY" \
-      "$SIDECAR_RESIGN"
-  else
-    codesign --force --options runtime \
-      --entitlements tauri/src-tauri/minutes-cli.entitlements \
-      --sign - \
-      "$SIDECAR_RESIGN"
-  fi
-else
-  echo "  WARNING: sidecar not found at $SIDECAR_RESIGN — skipping re-sign."
-fi
+echo "=== Verifying bundle seal (strict) ==="
+codesign --verify --deep --strict "$BUILD_APP" && echo "  Seal OK"
 
 echo "=== Installing ${DEV_PRODUCT_NAME}.app to ${INSTALL_DIR} ==="
 mkdir -p "$INSTALL_DIR"

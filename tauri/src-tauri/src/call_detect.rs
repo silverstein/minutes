@@ -239,19 +239,6 @@ fn process_name_matches_config_app(config_app: &str, process_name: &str) -> bool
         || process_lower.starts_with(&format!("{} ", config_lower))
 }
 
-fn native_app_matches_running_process(config_app: &str, running: &[String]) -> bool {
-    running
-        .iter()
-        .any(|p| process_name_matches_config_app(config_app, p))
-}
-
-fn zoom_audio_helper_process_name(process_name: &str) -> bool {
-    matches!(
-        process_name,
-        "ZoomHybridConf" | "CptHost" | "caphost" | "aomhost"
-    )
-}
-
 fn native_app_candidate_process_pids(
     config_app: &str,
     processes: &[RunningProcess],
@@ -261,15 +248,6 @@ fn native_app_candidate_process_pids(
         .filter(|process| process_name_matches_config_app(config_app, &process.name))
         .map(|process| process.pid)
         .collect();
-
-    if config_app == "zoom.us" {
-        candidates.extend(
-            processes
-                .iter()
-                .filter(|process| zoom_audio_helper_process_name(&process.name))
-                .map(|process| process.pid),
-        );
-    }
 
     let mut changed = true;
     while changed {
@@ -833,6 +811,7 @@ impl CallDetector {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn detect_active_call_from_snapshot_with_processes<F>(
         &self,
         config: &CallDetectionConfig,
@@ -906,7 +885,7 @@ impl CallDetector {
                 (Some(processes), Some(active_input_pids)) => {
                     native_app_has_active_input(config_app, processes, active_input_pids)
                 }
-                _ => native_app_matches_running_process(config_app, running),
+                _ => false,
             };
             if native_active {
                 let display = display_name_for(config_app);
@@ -922,7 +901,7 @@ impl CallDetector {
                 (Some(processes), Some(active_input_pids)) => {
                     native_app_has_active_input(config_app, processes, active_input_pids)
                 }
-                _ => native_app_matches_running_process(config_app, running),
+                _ => false,
             };
             if native_active {
                 let display = display_name_for(config_app);
@@ -1831,12 +1810,25 @@ mod tests {
             "google-meet".into(),
         ]));
         let config = detector.current_config();
-        let running = vec!["zoom.us".into(), "Google Chrome".into()];
+        let processes = vec![
+            RunningProcess {
+                pid: 100,
+                ppid: 1,
+                name: "zoom.us".into(),
+            },
+            RunningProcess {
+                pid: 200,
+                ppid: 1,
+                name: "Google Chrome".into(),
+            },
+        ];
+        let active_input_pids = HashSet::from([100]);
 
-        let result = detector.detect_active_call_from_snapshot(
+        let result = detector.detect_active_call_from_process_snapshot(
             &config,
             true,
-            &running,
+            &processes,
+            Some(&active_input_pids),
             false,
             |_detector, _running, _want_meet, _want_teams| Some(BrowserMeetProbe::NoMatch),
         );
@@ -1857,12 +1849,25 @@ mod tests {
             "google-meet".into(),
         ]));
         let config = detector.current_config();
-        let running = vec!["Slack".into(), "Google Chrome".into()];
+        let processes = vec![
+            RunningProcess {
+                pid: 100,
+                ppid: 1,
+                name: "Slack".into(),
+            },
+            RunningProcess {
+                pid: 200,
+                ppid: 1,
+                name: "Google Chrome".into(),
+            },
+        ];
+        let active_input_pids = HashSet::from([100]);
 
-        let result = detector.detect_active_call_from_snapshot(
+        let result = detector.detect_active_call_from_process_snapshot(
             &config,
             true,
-            &running,
+            &processes,
+            Some(&active_input_pids),
             false,
             |_detector, _running, _want_meet, _want_teams| Some(BrowserMeetProbe::NoMatch),
         );
@@ -1907,6 +1912,35 @@ mod tests {
     }
 
     #[test]
+    fn idle_zoom_does_not_detect_when_active_input_attribution_is_unavailable() {
+        let detector = CallDetector::new(test_call_detection_config(vec!["zoom.us".into()]));
+        let config = detector.current_config();
+        let processes = vec![
+            RunningProcess {
+                pid: 100,
+                ppid: 1,
+                name: "zoom.us".into(),
+            },
+            RunningProcess {
+                pid: 200,
+                ppid: 1,
+                name: "superwhisper".into(),
+            },
+        ];
+
+        let result = detector.detect_active_call_from_process_snapshot(
+            &config,
+            true,
+            &processes,
+            None,
+            false,
+            |_detector, _running, _want_meet, _want_teams| None,
+        );
+
+        assert_eq!(result, DetectActiveCallResult::None);
+    }
+
+    #[test]
     fn zoom_helper_input_detects_zoom_call() {
         let detector = CallDetector::new(test_call_detection_config(vec!["zoom.us".into()]));
         let config = detector.current_config();
@@ -1940,6 +1974,29 @@ mod tests {
                 process_name: "zoom.us".into(),
             }
         );
+    }
+
+    #[test]
+    fn unrooted_zoom_helper_input_does_not_detect_zoom_call() {
+        let detector = CallDetector::new(test_call_detection_config(vec!["zoom.us".into()]));
+        let config = detector.current_config();
+        let processes = vec![RunningProcess {
+            pid: 110,
+            ppid: 1,
+            name: "ZoomHybridConf".into(),
+        }];
+        let active_input_pids = HashSet::from([110]);
+
+        let result = detector.detect_active_call_from_process_snapshot(
+            &config,
+            true,
+            &processes,
+            Some(&active_input_pids),
+            false,
+            |_detector, _running, _want_meet, _want_teams| None,
+        );
+
+        assert_eq!(result, DetectActiveCallResult::None);
     }
 
     #[test]

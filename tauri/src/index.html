@@ -8692,6 +8692,7 @@
     // ── Upcoming meetings ──
     async function checkUpcoming() {
       const upcoming = document.getElementById('upcoming');
+      if (!(await mainWindowAllowsUiRefresh())) return;
       if (!desktopCapabilities.supportsCalendarIntegration) {
         upcoming.classList.remove('active');
         return;
@@ -10397,6 +10398,33 @@
     const { getCurrentWindow } = window.__TAURI__.window;
     const currentWindow = getCurrentWindow();
 
+    async function mainWindowAllowsUiRefresh() {
+      try {
+        if (typeof currentWindow.isVisible === 'function') {
+          const visible = await currentWindow.isVisible();
+          if (!visible) return false;
+        }
+      } catch (e) {
+        console.error('Main window visibility check:', e);
+        return false;
+      }
+      return true;
+    }
+
+    async function mainWindowAllowsAutoExpand() {
+      if (!(await mainWindowAllowsUiRefresh())) return false;
+      try {
+        if (typeof currentWindow.isFocused === 'function') {
+          const focused = await currentWindow.isFocused();
+          if (!focused) return false;
+        }
+      } catch (e) {
+        console.error('Main window focus check:', e);
+        return false;
+      }
+      return true;
+    }
+
     window.__TAURI__.app.getVersion?.().then((version) => {
       if (aboutVersion) aboutVersion.textContent = `Desktop app v${version}`;
     }).catch(() => { });
@@ -10791,12 +10819,13 @@
     }
 
     // ── Auto-expand triggers ──
-    function autoExpandRecall(mode, context) {
+    async function autoExpandRecall(mode, context) {
       if (userExplicitlyCollapsed) {
         recallNudge.classList.add('active');
         return;
       }
-      openRecall(mode === 'debrief' ? 'assistant' : mode);
+      if (!(await mainWindowAllowsAutoExpand())) return;
+      await openRecall(mode === 'debrief' ? 'assistant' : mode);
       if (mode === 'prep') setRecallPhase('prep', context);
       else if (mode === 'debrief') setRecallPhase('debrief', context);
     }
@@ -12103,7 +12132,7 @@
 
       if (!isRecording && prevRecording) {
         if (!recallExpanded) {
-          autoExpandRecall('debrief', null);
+          autoExpandRecall('debrief', null).catch((e) => console.error('Auto-expand debrief:', e));
         }
       }
 
@@ -12118,7 +12147,7 @@
       const upcomingEl = document.getElementById('upcoming');
       if (upcomingEl && upcomingEl.classList.contains('active') && !recallExpanded && !isRecording) {
         const title = document.getElementById('upcoming-title').textContent;
-        autoExpandRecall('prep', title);
+        autoExpandRecall('prep', title).catch((e) => console.error('Auto-expand prep:', e));
       }
     };
 
@@ -12868,6 +12897,14 @@
     checkSetup();
     checkStatus();
     setInterval(() => { if (!pollInterval) checkStatus(); }, 2000);
+    if (typeof currentWindow.onFocusChanged === 'function') {
+      currentWindow.onFocusChanged((event) => {
+        const focused = typeof event?.payload === 'boolean' ? event.payload : true;
+        if (focused) {
+          checkUpcoming().catch((e) => console.error('Upcoming after focus:', e));
+        }
+      }).catch((e) => console.error('Focus listener:', e));
+    }
     // Defer heavy checks (osascript calendar queries) so the UI is interactive immediately
     setTimeout(() => {
       loadReadinessItems();

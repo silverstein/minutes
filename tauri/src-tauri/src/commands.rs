@@ -9308,6 +9308,34 @@ mod tests {
     }
 
     #[test]
+    fn upcoming_meeting_auto_expand_requires_visible_focused_main_window() {
+        let manifest = env!("CARGO_MANIFEST_DIR"); // .../tauri/src-tauri
+        let index_path = format!("{}/../src/index.html", manifest);
+        let html = std::fs::read_to_string(&index_path).expect("failed to read index.html");
+
+        assert!(
+            html.contains("async function mainWindowAllowsAutoExpand()"),
+            "frontend must centralize the visible/focused gate before auto-expanding Recall"
+        );
+        assert!(
+            html.contains("currentWindow.isVisible()"),
+            "auto-expand must check main window visibility before resizing the WebView"
+        );
+        assert!(
+            html.contains("currentWindow.isFocused()"),
+            "upcoming meeting prep should not resize a backgrounded WebView"
+        );
+        assert!(
+            html.contains("if (!(await mainWindowAllowsAutoExpand())) return;"),
+            "autoExpandRecall must bail before openRecall/expandRecallPanel on hidden background windows"
+        );
+        assert!(
+            html.contains("autoExpandRecall('prep', title).catch"),
+            "upcoming meeting auto-expand should handle async gate failures explicitly"
+        );
+    }
+
+    #[test]
     fn update_assistant_live_context_updates_both_instruction_files() {
         let temp = TempDir::new().unwrap();
         let workspace = temp.path();

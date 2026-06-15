@@ -56,10 +56,25 @@ func uint32Property(
     return value
 }
 
-func anyProcessRunningInput() -> Bool? {
+func pidProperty(on objectID: AudioObjectID) -> pid_t? {
+    var value = pid_t(0)
+    var size = UInt32(MemoryLayout<pid_t>.size)
+    var address = AudioObjectPropertyAddress(
+        mSelector: kAudioProcessPropertyPID,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMain
+    )
+    guard AudioObjectGetPropertyData(objectID, &address, 0, nil, &size, &value) == noErr else {
+        return nil
+    }
+    return value
+}
+
+func activeInputProcessIDs() -> [pid_t]? {
     guard let processes = objectIDs(for: kAudioHardwarePropertyProcessObjectList) else {
         return nil
     }
+    var pids: [pid_t] = []
     var sawReadableProcess = false
     for processID in processes {
         guard let isRunning = uint32Property(kAudioProcessPropertyIsRunningInput, on: processID) else {
@@ -67,10 +82,12 @@ func anyProcessRunningInput() -> Bool? {
         }
         sawReadableProcess = true
         if isRunning > 0 {
-            return true
+            if let pid = pidProperty(on: processID), pid > 0 {
+                pids.append(pid)
+            }
         }
     }
-    return sawReadableProcess ? false : nil
+    return sawReadableProcess ? pids : nil
 }
 
 func inputChannelCount(for deviceID: AudioObjectID) -> UInt32 {
@@ -109,5 +126,15 @@ func anyInputDeviceRunning() -> Bool {
     }
 }
 
-let micActive = anyProcessRunningInput() ?? anyInputDeviceRunning()
+if CommandLine.arguments.contains("--active-input-pids") {
+    guard let pids = activeInputProcessIDs() else {
+        exit(2)
+    }
+    for pid in pids {
+        print(pid)
+    }
+    exit(0)
+}
+
+let micActive = activeInputProcessIDs().map { !$0.isEmpty } ?? anyInputDeviceRunning()
 print(micActive ? "1" : "0")

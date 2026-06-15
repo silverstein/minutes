@@ -8,7 +8,7 @@
 //! `is_mic_in_use`) use CoreAudio and `ps`. Windows/Linux would need
 //! alternative implementations behind `cfg(target_os)` gates.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -221,17 +221,78 @@ fn is_low_confidence_native_call_app(app: &str) -> bool {
     matches!(app.to_ascii_lowercase().as_str(), "slack")
 }
 
-fn native_app_matches_running_process(config_app: &str, running: &[String]) -> bool {
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RunningProcess {
+    pid: u32,
+    ppid: u32,
+    name: String,
+}
+
+fn process_name_matches_config_app(config_app: &str, process_name: &str) -> bool {
     let config_lower = config_app.to_lowercase();
-    running.iter().any(|p| {
-        let p_lower = p.to_lowercase();
-        // Exact match (most common) or the config name is a prefix/suffix of
-        // the binary name (e.g. "zoom.us" matches "zoom.us"), but NOT a mere
-        // substring of a longer daemon name.
-        p_lower == config_lower
-            || p_lower.starts_with(&format!("{}.", config_lower))
-            || p_lower.starts_with(&format!("{} ", config_lower))
-    })
+    let process_lower = process_name.to_lowercase();
+    // Exact match (most common) or the config name is a prefix/suffix of
+    // the binary name (e.g. "zoom.us" matches "zoom.us"), but NOT a mere
+    // substring of a longer daemon name.
+    process_lower == config_lower
+        || process_lower.starts_with(&format!("{}.", config_lower))
+        || process_lower.starts_with(&format!("{} ", config_lower))
+}
+
+fn native_app_matches_running_process(config_app: &str, running: &[String]) -> bool {
+    running
+        .iter()
+        .any(|p| process_name_matches_config_app(config_app, p))
+}
+
+fn zoom_audio_helper_process_name(process_name: &str) -> bool {
+    matches!(
+        process_name,
+        "ZoomHybridConf" | "CptHost" | "caphost" | "aomhost"
+    )
+}
+
+fn native_app_candidate_process_pids(
+    config_app: &str,
+    processes: &[RunningProcess],
+) -> HashSet<u32> {
+    let mut candidates: HashSet<u32> = processes
+        .iter()
+        .filter(|process| process_name_matches_config_app(config_app, &process.name))
+        .map(|process| process.pid)
+        .collect();
+
+    if config_app == "zoom.us" {
+        candidates.extend(
+            processes
+                .iter()
+                .filter(|process| zoom_audio_helper_process_name(&process.name))
+                .map(|process| process.pid),
+        );
+    }
+
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for process in processes {
+            if candidates.contains(&process.ppid) && candidates.insert(process.pid) {
+                changed = true;
+            }
+        }
+    }
+
+    candidates
+}
+
+fn native_app_has_active_input(
+    config_app: &str,
+    processes: &[RunningProcess],
+    active_input_pids: &HashSet<u32>,
+) -> bool {
+    let candidate_pids = native_app_candidate_process_pids(config_app, processes);
+    candidate_pids
+        .iter()
+        .any(|pid| active_input_pids.contains(pid))
 }
 
 enum BrowserMeetProbe {
@@ -700,14 +761,19 @@ impl CallDetector {
 
     /// Check if any configured call app is active.
     fn detect_active_call(&self, config: &CallDetectionConfig) -> DetectActiveCallResult {
-        let mic_live = is_mic_in_use();
+        let processes = running_processes();
+        let active_input_pids = active_input_process_pids();
+        let mic_live = active_input_pids
+            .as_ref()
+            .map(|pids| !pids.is_empty())
+            .unwrap_or_else(is_mic_in_use);
         let mic_just_activated = self.note_mic_state(mic_live);
 
-        let running = running_process_names();
-        self.detect_active_call_from_snapshot(
+        self.detect_active_call_from_process_snapshot(
             config,
             mic_live,
-            &running,
+            &processes,
+            active_input_pids.as_ref(),
             mic_just_activated,
             |detector, running, has_google_meet, has_teams_web| {
                 if has_google_meet || has_teams_web {
@@ -720,11 +786,60 @@ impl CallDetector {
         )
     }
 
+    #[cfg(test)]
     fn detect_active_call_from_snapshot<F>(
         &self,
         config: &CallDetectionConfig,
         mic_live: bool,
         running: &[String],
+        force_browser_probe: bool,
+        browser_probe: F,
+    ) -> DetectActiveCallResult
+    where
+        F: FnMut(&Self, &[String], bool, bool) -> Option<BrowserMeetProbe>,
+    {
+        self.detect_active_call_from_snapshot_with_processes(
+            config,
+            mic_live,
+            running,
+            None,
+            None,
+            force_browser_probe,
+            browser_probe,
+        )
+    }
+
+    fn detect_active_call_from_process_snapshot<F>(
+        &self,
+        config: &CallDetectionConfig,
+        mic_live: bool,
+        processes: &[RunningProcess],
+        active_input_pids: Option<&HashSet<u32>>,
+        force_browser_probe: bool,
+        browser_probe: F,
+    ) -> DetectActiveCallResult
+    where
+        F: FnMut(&Self, &[String], bool, bool) -> Option<BrowserMeetProbe>,
+    {
+        let running = process_names_from_snapshot(processes);
+        self.detect_active_call_from_snapshot_with_processes(
+            config,
+            mic_live,
+            &running,
+            Some(processes),
+            active_input_pids,
+            force_browser_probe,
+            browser_probe,
+        )
+    }
+
+    fn detect_active_call_from_snapshot_with_processes<F>(
+        &self,
+        config: &CallDetectionConfig,
+        mic_live: bool,
+        running: &[String],
+        processes: Option<&[RunningProcess]>,
+        active_input_pids: Option<&HashSet<u32>>,
         force_browser_probe: bool,
         mut browser_probe: F,
     ) -> DetectActiveCallResult
@@ -787,7 +902,13 @@ impl CallDetector {
             // e.g. "FaceTime" should match the "FaceTime" binary, NOT
             // "com.apple.FaceTime.FTConversationService" (a system daemon
             // that runs permanently and caused false positives).
-            if native_app_matches_running_process(config_app, running) {
+            let native_active = match (processes, active_input_pids) {
+                (Some(processes), Some(active_input_pids)) => {
+                    native_app_has_active_input(config_app, processes, active_input_pids)
+                }
+                _ => native_app_matches_running_process(config_app, running),
+            };
+            if native_active {
                 let display = display_name_for(config_app);
                 return DetectActiveCallResult::Detected {
                     display_name: display,
@@ -797,7 +918,13 @@ impl CallDetector {
         }
 
         for config_app in low_confidence_native_apps {
-            if native_app_matches_running_process(config_app, running) {
+            let native_active = match (processes, active_input_pids) {
+                (Some(processes), Some(active_input_pids)) => {
+                    native_app_has_active_input(config_app, processes, active_input_pids)
+                }
+                _ => native_app_matches_running_process(config_app, running),
+            };
+            if native_active {
                 let display = display_name_for(config_app);
                 return DetectActiveCallResult::Detected {
                     display_name: display,
@@ -1293,8 +1420,14 @@ fn looks_like_teams_meeting_url(url: &str) -> bool {
 
 // ── macOS-specific detection ──────────────────────────────────
 
+fn binary_name_from_command(command: &str) -> String {
+    let trimmed = command.trim();
+    trimmed.rsplit('/').next().unwrap_or(trimmed).to_string()
+}
+
 /// Get list of running process names via `ps`. Fast (~2ms), no permissions
 /// needed, no osascript overhead.
+#[cfg(test)]
 fn running_process_names() -> Vec<String> {
     let output = std::process::Command::new("ps")
         .args(["-eo", "comm="])
@@ -1309,6 +1442,28 @@ fn running_process_names() -> Vec<String> {
     }
 }
 
+fn running_processes() -> Vec<RunningProcess> {
+    let output = std::process::Command::new("ps")
+        .args(["-axo", "pid=,ppid=,comm="])
+        .output();
+
+    match output {
+        Ok(out) if out.status.success() => {
+            let text = String::from_utf8_lossy(&out.stdout);
+            process_snapshots_from_ps_output(&text)
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn process_names_from_snapshot(processes: &[RunningProcess]) -> Vec<String> {
+    processes
+        .iter()
+        .map(|process| process.name.clone())
+        .collect()
+}
+
+#[cfg(test)]
 fn process_names_from_ps_output(text: &str) -> Vec<String> {
     text.lines()
         .filter_map(|line| {
@@ -1318,7 +1473,33 @@ fn process_names_from_ps_output(text: &str) -> Vec<String> {
             if trimmed.is_empty() {
                 return None;
             }
-            Some(trimmed.rsplit('/').next().unwrap_or(trimmed).to_string())
+            Some(binary_name_from_command(trimmed))
+        })
+        .collect()
+}
+
+fn split_first_field(text: &str) -> Option<(&str, &str)> {
+    let trimmed = text.trim_start();
+    let end = trimmed.find(char::is_whitespace)?;
+    Some((&trimmed[..end], &trimmed[end..]))
+}
+
+fn process_snapshots_from_ps_output(text: &str) -> Vec<RunningProcess> {
+    text.lines()
+        .filter_map(|line| {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                return None;
+            }
+            let (pid_text, rest) = split_first_field(trimmed)?;
+            let (ppid_text, command) = split_first_field(rest)?;
+            let pid = pid_text.parse().ok()?;
+            let ppid = ppid_text.parse().ok()?;
+            Some(RunningProcess {
+                pid,
+                ppid,
+                name: binary_name_from_command(command),
+            })
         })
         .collect()
 }
@@ -1352,6 +1533,29 @@ fn is_mic_in_use() -> bool {
         Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout).trim() == "1",
         _ => false,
     }
+}
+
+fn active_input_process_pids() -> Option<HashSet<u32>> {
+    let helper = find_mic_check_binary()?;
+    let out = std::process::Command::new(helper)
+        .arg("--active-input-pids")
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut pids = HashSet::new();
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let pid = trimmed.parse().ok()?;
+        pids.insert(pid);
+    }
+    Some(pids)
 }
 
 /// Find the pre-compiled mic_check binary.
@@ -1673,6 +1877,109 @@ mod tests {
     }
 
     #[test]
+    fn idle_zoom_does_not_detect_when_another_app_has_input() {
+        let detector = CallDetector::new(test_call_detection_config(vec!["zoom.us".into()]));
+        let config = detector.current_config();
+        let processes = vec![
+            RunningProcess {
+                pid: 100,
+                ppid: 1,
+                name: "zoom.us".into(),
+            },
+            RunningProcess {
+                pid: 200,
+                ppid: 1,
+                name: "superwhisper".into(),
+            },
+        ];
+        let active_input_pids = HashSet::from([200]);
+
+        let result = detector.detect_active_call_from_process_snapshot(
+            &config,
+            true,
+            &processes,
+            Some(&active_input_pids),
+            false,
+            |_detector, _running, _want_meet, _want_teams| None,
+        );
+
+        assert_eq!(result, DetectActiveCallResult::None);
+    }
+
+    #[test]
+    fn zoom_helper_input_detects_zoom_call() {
+        let detector = CallDetector::new(test_call_detection_config(vec!["zoom.us".into()]));
+        let config = detector.current_config();
+        let processes = vec![
+            RunningProcess {
+                pid: 100,
+                ppid: 1,
+                name: "zoom.us".into(),
+            },
+            RunningProcess {
+                pid: 110,
+                ppid: 100,
+                name: "ZoomHybridConf".into(),
+            },
+        ];
+        let active_input_pids = HashSet::from([110]);
+
+        let result = detector.detect_active_call_from_process_snapshot(
+            &config,
+            true,
+            &processes,
+            Some(&active_input_pids),
+            false,
+            |_detector, _running, _want_meet, _want_teams| None,
+        );
+
+        assert_eq!(
+            result,
+            DetectActiveCallResult::Detected {
+                display_name: "Zoom".into(),
+                process_name: "zoom.us".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn child_process_input_detects_native_call_app() {
+        let detector =
+            CallDetector::new(test_call_detection_config(vec!["Microsoft Teams".into()]));
+        let config = detector.current_config();
+        let processes = vec![
+            RunningProcess {
+                pid: 300,
+                ppid: 1,
+                name: "Microsoft Teams".into(),
+            },
+            RunningProcess {
+                pid: 301,
+                ppid: 300,
+                name: "Microsoft Teams Helper".into(),
+            },
+        ];
+        let active_input_pids = HashSet::from([301]);
+
+        let result = detector.detect_active_call_from_process_snapshot(
+            &config,
+            true,
+            &processes,
+            Some(&active_input_pids),
+            false,
+            |_detector, _running, _want_meet, _want_teams| None,
+        );
+
+        assert_eq!(
+            result,
+            DetectActiveCallResult::Detected {
+                display_name: "Teams".into(),
+                process_name: "Microsoft Teams".into(),
+            }
+        );
+    }
+
+    #[test]
     fn mic_activation_forces_browser_probe_before_slack_even_when_rate_limited() {
         let detector = CallDetector::new(test_call_detection_config(vec![
             "Slack".into(),
@@ -1774,6 +2081,29 @@ mod tests {
     }
 
     #[test]
+    fn process_snapshot_parser_preserves_paths_with_spaces() {
+        let procs = process_snapshots_from_ps_output(
+            "\n  100     1 /Applications/zoom.us.app/Contents/MacOS/zoom.us\n  200   100 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome\n",
+        );
+
+        assert_eq!(
+            procs,
+            vec![
+                RunningProcess {
+                    pid: 100,
+                    ppid: 1,
+                    name: "zoom.us".into(),
+                },
+                RunningProcess {
+                    pid: 200,
+                    ppid: 100,
+                    name: "Google Chrome".into(),
+                },
+            ]
+        );
+    }
+
+    #[test]
     fn process_list_probe_does_not_panic() {
         let _procs = running_process_names();
     }
@@ -1796,6 +2126,14 @@ mod tests {
         assert!(
             swift_source.contains("kAudioProcessPropertyIsRunningInput"),
             "mic_check should prefer process-level input activity over device-global running state"
+        );
+        assert!(
+            swift_source.contains("kAudioProcessPropertyPID"),
+            "mic_check should expose active input PIDs for call-app attribution"
+        );
+        assert!(
+            swift_source.contains("--active-input-pids"),
+            "mic_check should support attributed active-input PID output"
         );
         assert!(
             swift_source.contains("kAudioHardwarePropertyDevices"),

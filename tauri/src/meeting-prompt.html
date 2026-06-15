@@ -314,9 +314,6 @@
 
   <script>
     const invoke = window.__TAURI__?.core?.invoke || (async () => null);
-    const getCurrentWebviewWindow =
-      window.__TAURI__?.webviewWindow?.getCurrentWebviewWindow ||
-      (() => ({ close: () => window.close() }));
 
     // Element refs
     const titleEl = document.getElementById('title');
@@ -331,6 +328,7 @@
     let minutesUntil = 0;
     let meetingUrl = '';
     let hasUrl = false;
+    let closeScheduled = false;
 
     function renderFromState() {
       titleEl.textContent = title || 'Meeting';
@@ -351,8 +349,21 @@
         : 'Minutes can start a local recording now so the transcript, decisions, and action items are captured from the beginning.';
     }
 
+    async function closeWindowNative() {
+      try {
+        await invoke('cmd_close_meeting_prompt');
+      } catch (e) {
+        console.warn('cmd_close_meeting_prompt failed:', e);
+        window.close();
+      }
+    }
+
     function closeWindow() {
-      try { getCurrentWebviewWindow().close(); } catch { window.close(); }
+      if (closeScheduled) return;
+      closeScheduled = true;
+      setTimeout(() => {
+        closeWindowNative();
+      }, 0);
     }
 
     (async () => {
@@ -415,7 +426,7 @@
         toast.classList.add('show');
         setTimeout(() => {
           toast.classList.remove('show');
-          setTimeout(() => getCurrentWebviewWindow().close(), 200);
+          setTimeout(closeWindow, 200);
         }, 600);
       } catch (e) {
         primaryBtn.disabled = false;
@@ -426,7 +437,7 @@
     }
 
     function dismiss() {
-      getCurrentWebviewWindow().close();
+      closeWindow();
     }
 
     primaryBtn.addEventListener('click', startRecording);
@@ -442,7 +453,7 @@
     setTimeout(() => {
       document.body.style.transition = 'opacity 300ms ease-out';
       document.body.style.opacity = '0';
-      setTimeout(() => getCurrentWebviewWindow().close(), 300);
+      setTimeout(closeWindow, 300);
     }, 60000);
   </script>
 </body>

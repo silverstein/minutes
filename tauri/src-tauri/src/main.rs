@@ -932,7 +932,7 @@ fn show_meeting_prompt(app: &tauri::AppHandle, event: &minutes_core::calendar::C
 
     // Close any existing prompt window
     if let Some(win) = app.get_webview_window("meeting-prompt") {
-        win.close().ok();
+        win.destroy().ok();
     }
 
     // Stage the payload keyed by a monotonic token. The overlay reads its
@@ -2436,6 +2436,7 @@ fn main() {
             commands::cmd_vault_unlink,
             commands::cmd_open_meeting_url,
             commands::cmd_get_meeting_prompt,
+            commands::cmd_close_meeting_prompt,
             commands::cmd_start_dictation,
             commands::cmd_stop_dictation,
             commands::cmd_dismiss_dictation_overlay,
@@ -2511,15 +2512,46 @@ mod tray_activity_tests {
 
     #[test]
     fn main_window_uses_opaque_webview_for_hidden_tray_lifecycle() {
-        assert!(
-            !MAIN_WINDOW_TRANSPARENT,
-            "the long-lived main WebView is hidden/shown from the tray; keep it opaque"
-        );
+        const {
+            assert!(
+                !MAIN_WINDOW_TRANSPARENT,
+                "the long-lived main WebView is hidden/shown from the tray; keep it opaque"
+            );
+        }
 
         #[cfg(target_os = "macos")]
+        const {
+            assert!(
+                !super::MAIN_WINDOW_APPLY_VIBRANCY,
+                "macOS vibrancy on the hidden main WebView can crash WebKit during frame updates"
+            );
+        }
+    }
+
+    #[test]
+    fn meeting_prompt_dismiss_uses_native_destroy_path() {
+        let manifest = env!("CARGO_MANIFEST_DIR");
+        let main_rs = std::fs::read_to_string(format!("{}/src/main.rs", manifest))
+            .expect("failed to read main.rs");
+        let prompt_html =
+            std::fs::read_to_string(format!("{}/../src/meeting-prompt.html", manifest))
+                .expect("failed to read meeting-prompt.html");
+
         assert!(
-            !super::MAIN_WINDOW_APPLY_VIBRANCY,
-            "macOS vibrancy on the hidden main WebView can crash WebKit during frame updates"
+            main_rs.contains("commands::cmd_close_meeting_prompt"),
+            "meeting prompt close command must be registered with Tauri"
+        );
+        assert!(
+            main_rs.contains("win.destroy().ok()"),
+            "replacing an existing meeting prompt should destroy, not close, the old WebView"
+        );
+        assert!(
+            prompt_html.contains("cmd_close_meeting_prompt"),
+            "meeting prompt dismiss must route through native destroy"
+        );
+        assert!(
+            !prompt_html.contains("getCurrentWebviewWindow().close()"),
+            "direct JS WebView close can crash WebKit during prompt frame updates"
         );
     }
 

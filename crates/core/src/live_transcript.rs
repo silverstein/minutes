@@ -668,6 +668,14 @@ fn run_inner(
 
     // Start audio stream FIRST — validate mic access before truncating any files
     let device_override = config.recording.device.as_deref();
+    let permission_preflight = crate::capture::preflight_microphone_only();
+    if let Some(reason) = permission_preflight.blocking_reason {
+        return Err(LiveTranscriptError::PermissionBlocked(reason).into());
+    }
+    for warning in permission_preflight.warnings {
+        tracing::warn!(warning = %warning, "live transcript microphone permission preflight warning");
+    }
+
     let mut stream = AudioStream::start(device_override)?;
     tracing::info!(device = %stream.device_name, "live transcript audio stream started");
 

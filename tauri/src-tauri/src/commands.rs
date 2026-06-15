@@ -2,7 +2,9 @@ use crate::call_capture;
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use futures_util::StreamExt;
 use minisign_verify::{PublicKey, Signature};
-use minutes_core::capture::RecordingIntent;
+use minutes_core::capture::{
+    should_bypass_preflight_block_for_native_call_capture, RecordingIntent,
+};
 use minutes_core::config::{ConsentMode, VALID_LIVE_TRANSCRIPT_BACKENDS, VALID_PARAKEET_MODELS};
 use minutes_core::markdown::ConsentBasis;
 use minutes_core::{CaptureMode, Config, ContentType};
@@ -5165,7 +5167,10 @@ pub fn start_recording(
             call_capture::CallCaptureAvailability::Available { .. }
         );
     if let Some(reason) = &preflight.blocking_reason {
-        if !(preflight.intent == RecordingIntent::Call && native_call_capture_available) {
+        if !should_bypass_preflight_block_for_native_call_capture(
+            &preflight,
+            native_call_capture_available,
+        ) {
             eprintln!("Recording preflight blocked: {}", reason);
             set_recording_start_error(&latest_output, reason.clone());
             show_user_notification(&app_handle, "Recording blocked", reason);
@@ -12442,6 +12447,16 @@ pub fn cmd_start_live_transcript(
 ) -> Result<(), String> {
     try_acquire_live(&state)?;
 
+    let permission_preflight = minutes_core::capture::preflight_microphone_only();
+    if let Some(reason) = permission_preflight.blocking_reason {
+        state.live_transcript_active.store(false, Ordering::SeqCst);
+        return Err(reason);
+    }
+    for warning in permission_preflight.warnings {
+        eprintln!("[live-transcript] {}", warning);
+        app.emit("live-transcript:warning", warning.as_str()).ok();
+    }
+
     let active = state.live_transcript_active.clone();
     let stop_flag = state.live_transcript_stop_flag.clone();
     stop_flag.store(false, Ordering::Relaxed);
@@ -13208,6 +13223,15 @@ fn start_dictation_session(
         active: Arc::clone(&state.dictation_active),
         app: app.clone(),
     };
+
+    let permission_preflight = minutes_core::capture::preflight_microphone_only();
+    if let Some(reason) = permission_preflight.blocking_reason {
+        return Err(reason);
+    }
+    for warning in permission_preflight.warnings {
+        eprintln!("[dictation] {}", warning);
+        app.emit("dictation:warning", warning.as_str()).ok();
+    }
 
     let dictation_target_context = take_pending_dictation_target(&state)
         .or_else(crate::text_insertion::capture_active_target_context);

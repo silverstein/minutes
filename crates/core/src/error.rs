@@ -220,6 +220,9 @@ pub enum DictationError {
     #[error("accessibility permission required for auto-paste")]
     AccessibilityDenied,
 
+    #[error("{0}")]
+    PermissionBlocked(String),
+
     #[error("dictation not active")]
     NotActive,
 
@@ -237,6 +240,9 @@ pub enum LiveTranscriptError {
 
     #[error("live transcript already active (PID: {0})")]
     AlreadyActive(u32),
+
+    #[error("{0}")]
+    PermissionBlocked(String),
 
     #[error("no live transcript session active")]
     NoActiveSession,

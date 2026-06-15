@@ -1,5 +1,6 @@
 use crate::config::Config;
 use crate::error::CaptureError;
+use crate::macos_permissions::{microphone_status, screen_recording_status, MacPermissionStatus};
 use crate::pid::CaptureMode;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -377,6 +378,13 @@ pub enum RecordingIntent {
     Call,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CapturePreflightBlockKind {
+    CallRoute,
+    Permission,
+}
+
 #[derive(Debug, Clone)]
 pub struct RecordingStartedContext {
     pub session_id: Option<String>,
@@ -401,7 +409,20 @@ pub struct CapturePreflight {
     pub input_device: String,
     pub system_audio_ready: bool,
     pub allow_degraded: bool,
+    #[serde(default)]
+    pub microphone_permission: MacPermissionStatus,
+    #[serde(default)]
+    pub screen_recording_permission: MacPermissionStatus,
     pub blocking_reason: Option<String>,
+    #[serde(default)]
+    pub blocking_kind: Option<CapturePreflightBlockKind>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PermissionPreflight {
+    pub blocking_reason: Option<String>,
+    pub blocking_kind: Option<CapturePreflightBlockKind>,
     pub warnings: Vec<String>,
 }
 
@@ -667,6 +688,103 @@ fn should_bypass_loopback_preflight_for_native_call_capture(
     }
 
     matches!(error, CaptureError::Io(io_error) if io_error.to_string() == MISSING_DUAL_SOURCE_LOOPBACK_MESSAGE)
+}
+
+const MIC_PERMISSION_BLOCKING_MESSAGE: &str = "Minutes does not have microphone permission, so this recording would capture silence. Grant Microphone access in System Settings > Privacy & Security > Microphone, then start the recording again.";
+const MIC_PERMISSION_DEGRADED_CALL_WARNING: &str = "Minutes does not have microphone permission, so this call recording will miss your side. The other side is still captured.";
+const MIC_PERMISSION_UNCONFIRMED_WARNING: &str = "macOS has not yet confirmed microphone access for Minutes (this happens after an app update or re-sign). If the first few seconds capture silence, approve the macOS prompt or grant Microphone access in System Settings > Privacy & Security > Microphone.";
+const SCREEN_PERMISSION_DENIED_WARNING: &str = "Heads up: Minutes does not have Screen Recording permission, so native call capture may not include system audio. Grant Screen Recording access in System Settings > Privacy & Security > Screen Recording, then start the recording again.";
+const SCREEN_PERMISSION_UNCONFIRMED_WARNING: &str = "macOS has not yet confirmed Screen Recording access for Minutes. Native call capture may need Screen Recording permission; if system audio is missing, approve the macOS prompt or grant Screen Recording access in System Settings > Privacy & Security > Screen Recording.";
+
+pub(crate) fn evaluate_microphone_only_permission_preflight(
+    mic: MacPermissionStatus,
+) -> PermissionPreflight {
+    let mut warnings = Vec::new();
+    let mut blocking_reason = None;
+    let mut blocking_kind = None;
+
+    match mic {
+        MacPermissionStatus::Denied => {
+            blocking_reason = Some(MIC_PERMISSION_BLOCKING_MESSAGE.into());
+            blocking_kind = Some(CapturePreflightBlockKind::Permission);
+        }
+        MacPermissionStatus::NotDetermined | MacPermissionStatus::StaleOrRestartNeeded => {
+            warnings.push(MIC_PERMISSION_UNCONFIRMED_WARNING.into());
+        }
+        MacPermissionStatus::Granted
+        | MacPermissionStatus::NotNeeded
+        | MacPermissionStatus::Unsupported
+        | MacPermissionStatus::Unknown => {}
+    }
+
+    PermissionPreflight {
+        blocking_reason,
+        blocking_kind,
+        warnings,
+    }
+}
+
+pub fn preflight_microphone_only() -> PermissionPreflight {
+    evaluate_microphone_only_permission_preflight(microphone_status())
+}
+
+pub(crate) fn evaluate_permission_preflight(
+    intent: RecordingIntent,
+    mic: MacPermissionStatus,
+    screen: MacPermissionStatus,
+    system_audio_ready: bool,
+) -> PermissionPreflight {
+    let mut warnings = Vec::new();
+    let mut blocking_reason = None;
+    let mut blocking_kind = None;
+    let call_has_recoverable_remote_audio = intent == RecordingIntent::Call && system_audio_ready;
+
+    match mic {
+        MacPermissionStatus::Denied if call_has_recoverable_remote_audio => {
+            warnings.push(MIC_PERMISSION_DEGRADED_CALL_WARNING.into());
+        }
+        MacPermissionStatus::Denied => {
+            blocking_reason = Some(MIC_PERMISSION_BLOCKING_MESSAGE.into());
+            blocking_kind = Some(CapturePreflightBlockKind::Permission);
+        }
+        MacPermissionStatus::NotDetermined | MacPermissionStatus::StaleOrRestartNeeded => {
+            warnings.push(MIC_PERMISSION_UNCONFIRMED_WARNING.into());
+        }
+        MacPermissionStatus::Granted
+        | MacPermissionStatus::NotNeeded
+        | MacPermissionStatus::Unsupported
+        | MacPermissionStatus::Unknown => {}
+    }
+
+    if intent == RecordingIntent::Call && system_audio_ready {
+        match screen {
+            MacPermissionStatus::Denied => {
+                warnings.push(SCREEN_PERMISSION_DENIED_WARNING.into());
+            }
+            MacPermissionStatus::NotDetermined | MacPermissionStatus::StaleOrRestartNeeded => {
+                warnings.push(SCREEN_PERMISSION_UNCONFIRMED_WARNING.into());
+            }
+            MacPermissionStatus::Granted
+            | MacPermissionStatus::NotNeeded
+            | MacPermissionStatus::Unsupported
+            | MacPermissionStatus::Unknown => {}
+        }
+    }
+
+    PermissionPreflight {
+        blocking_reason,
+        blocking_kind,
+        warnings,
+    }
+}
+
+pub fn should_bypass_preflight_block_for_native_call_capture(
+    preflight: &CapturePreflight,
+    native_call_capture_available: bool,
+) -> bool {
+    preflight.intent == RecordingIntent::Call
+        && native_call_capture_available
+        && preflight.blocking_kind == Some(CapturePreflightBlockKind::CallRoute)
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -2224,6 +2342,7 @@ fn evaluate_capture_preflight(
     let allow_degraded = allow_degraded || config.recording.allow_degraded_call_capture;
     let mut warnings = Vec::new();
     let mut blocking_reason = None;
+    let mut blocking_kind = None;
 
     if intent == RecordingIntent::Call {
         if let Some(app_name) = detected_call_app.as_deref() {
@@ -2244,6 +2363,7 @@ fn evaluate_capture_preflight(
                 "Minutes inferred a call capture, but '{}' looks like a microphone input, not a call-audio route. To record both sides, use the desktop app's native call capture path or choose a system-audio device like BlackHole. If you intentionally want mic-only capture, explicitly allow degraded call capture.",
                 input_device
             ));
+            blocking_kind = Some(CapturePreflightBlockKind::CallRoute);
         }
     }
 
@@ -2253,7 +2373,10 @@ fn evaluate_capture_preflight(
         input_device,
         system_audio_ready,
         allow_degraded,
+        microphone_permission: MacPermissionStatus::Unknown,
+        screen_recording_permission: MacPermissionStatus::Unknown,
         blocking_reason,
+        blocking_kind,
         warnings,
     })
 }
@@ -2312,6 +2435,7 @@ pub fn preflight_recording_with_native_call_capture(
     if preflight.intent == RecordingIntent::Call {
         if preflight.system_audio_ready {
             preflight.blocking_reason = None;
+            preflight.blocking_kind = None;
             if preflight.warnings.is_empty() {
                 preflight.warnings.push(format!(
                     "Using '{}' as the capture route for call recording.",
@@ -2323,8 +2447,29 @@ pub fn preflight_recording_with_native_call_capture(
                 "Minutes inferred a call capture, but '{}' does not include a recognized system-audio route. To record both sides, choose a loopback/system-audio device like BlackHole for the call source or use the desktop app's native call capture path. If you intentionally want mic-only capture, explicitly allow degraded call capture.",
                 preflight.input_device
             ));
+            preflight.blocking_kind = Some(CapturePreflightBlockKind::CallRoute);
         }
     }
+
+    let microphone_permission = microphone_status();
+    let screen_recording_permission = screen_recording_status();
+    let permission_system_audio_ready = preflight.system_audio_ready
+        || (preflight.intent == RecordingIntent::Call
+            && native_call_capture_available
+            && screen_recording_permission.is_granted());
+    let permission_preflight = evaluate_permission_preflight(
+        preflight.intent,
+        microphone_permission,
+        screen_recording_permission,
+        permission_system_audio_ready,
+    );
+    preflight.microphone_permission = microphone_permission;
+    preflight.screen_recording_permission = screen_recording_permission;
+    if permission_preflight.blocking_reason.is_some() {
+        preflight.blocking_reason = permission_preflight.blocking_reason;
+        preflight.blocking_kind = permission_preflight.blocking_kind;
+    }
+    preflight.warnings.extend(permission_preflight.warnings);
 
     Ok(preflight)
 }
@@ -2894,6 +3039,10 @@ mod tests {
         assert_eq!(preflight.intent, RecordingIntent::Call);
         assert!(!preflight.system_audio_ready);
         assert!(preflight.blocking_reason.is_some());
+        assert_eq!(
+            preflight.blocking_kind,
+            Some(CapturePreflightBlockKind::CallRoute)
+        );
     }
 
     #[test]
@@ -2911,6 +3060,7 @@ mod tests {
 
         assert!(preflight.system_audio_ready);
         assert!(preflight.blocking_reason.is_none());
+        assert_eq!(preflight.blocking_kind, None);
         assert!(!preflight.warnings.is_empty());
     }
 
@@ -2928,8 +3078,219 @@ mod tests {
         .unwrap();
 
         assert!(preflight.blocking_reason.is_none());
+        assert_eq!(preflight.blocking_kind, None);
         assert!(preflight.allow_degraded);
         assert!(!preflight.warnings.is_empty());
+    }
+
+    #[test]
+    fn permission_preflight_granted_meeting_has_no_warning_or_block() {
+        let preflight = evaluate_permission_preflight(
+            RecordingIntent::Room,
+            MacPermissionStatus::Granted,
+            MacPermissionStatus::Granted,
+            false,
+        );
+
+        assert!(preflight.blocking_reason.is_none());
+        assert_eq!(preflight.blocking_kind, None);
+        assert!(preflight.warnings.is_empty());
+    }
+
+    #[test]
+    fn permission_preflight_denied_meeting_blocks_with_mic_fix() {
+        let preflight = evaluate_permission_preflight(
+            RecordingIntent::Room,
+            MacPermissionStatus::Denied,
+            MacPermissionStatus::Granted,
+            false,
+        );
+
+        assert_eq!(
+            preflight.blocking_kind,
+            Some(CapturePreflightBlockKind::Permission)
+        );
+        let blocking_reason = preflight
+            .blocking_reason
+            .expect("denied mic should block meeting capture");
+        assert!(blocking_reason.contains("microphone permission"));
+        assert!(blocking_reason.contains("System Settings > Privacy & Security > Microphone"));
+        assert!(preflight.warnings.is_empty());
+    }
+
+    #[test]
+    fn permission_preflight_denied_system_only_call_warns_without_blocking() {
+        let preflight = evaluate_permission_preflight(
+            RecordingIntent::Call,
+            MacPermissionStatus::Denied,
+            MacPermissionStatus::Granted,
+            true,
+        );
+
+        assert!(preflight.blocking_reason.is_none());
+        assert_eq!(preflight.blocking_kind, None);
+        assert_eq!(preflight.warnings.len(), 1);
+        assert_eq!(preflight.warnings[0], MIC_PERMISSION_DEGRADED_CALL_WARNING);
+        assert!(!preflight.warnings[0].contains("would capture silence"));
+    }
+
+    #[test]
+    fn permission_preflight_denied_call_without_system_audio_blocks() {
+        let preflight = evaluate_permission_preflight(
+            RecordingIntent::Call,
+            MacPermissionStatus::Denied,
+            MacPermissionStatus::Granted,
+            false,
+        );
+
+        assert!(preflight.blocking_reason.is_some());
+        assert_eq!(
+            preflight.blocking_kind,
+            Some(CapturePreflightBlockKind::Permission)
+        );
+        assert!(preflight.warnings.is_empty());
+    }
+
+    #[test]
+    fn permission_preflight_not_determined_meeting_warns_without_blocking() {
+        let preflight = evaluate_permission_preflight(
+            RecordingIntent::Room,
+            MacPermissionStatus::NotDetermined,
+            MacPermissionStatus::Granted,
+            false,
+        );
+
+        assert!(preflight.blocking_reason.is_none());
+        assert_eq!(preflight.blocking_kind, None);
+        assert_eq!(preflight.warnings.len(), 1);
+        assert!(preflight.warnings[0].contains("not yet confirmed microphone access"));
+    }
+
+    #[test]
+    fn permission_preflight_stale_meeting_warns_without_blocking() {
+        let preflight = evaluate_permission_preflight(
+            RecordingIntent::Room,
+            MacPermissionStatus::StaleOrRestartNeeded,
+            MacPermissionStatus::Granted,
+            false,
+        );
+
+        assert!(preflight.blocking_reason.is_none());
+        assert_eq!(preflight.blocking_kind, None);
+        assert_eq!(preflight.warnings.len(), 1);
+        assert!(preflight.warnings[0].contains("not yet confirmed microphone access"));
+    }
+
+    #[test]
+    fn permission_preflight_screen_recording_denied_call_warns_only() {
+        let preflight = evaluate_permission_preflight(
+            RecordingIntent::Call,
+            MacPermissionStatus::Granted,
+            MacPermissionStatus::Denied,
+            true,
+        );
+
+        assert!(preflight.blocking_reason.is_none());
+        assert_eq!(preflight.blocking_kind, None);
+        assert_eq!(preflight.warnings.len(), 1);
+        assert!(preflight.warnings[0].contains("Screen Recording permission"));
+    }
+
+    #[test]
+    fn permission_preflight_preserves_call_mode_block_when_mic_is_granted() {
+        let config = Config::default();
+        let mut preflight = evaluate_capture_preflight(
+            CaptureMode::Meeting,
+            Some(RecordingIntent::Call),
+            Some("Teams".into()),
+            "Built-in Microphone".into(),
+            false,
+            &config,
+        )
+        .unwrap();
+        let original_blocking_reason = preflight.blocking_reason.clone();
+        let permission_preflight = evaluate_permission_preflight(
+            preflight.intent,
+            MacPermissionStatus::Granted,
+            MacPermissionStatus::Granted,
+            preflight.system_audio_ready,
+        );
+
+        if permission_preflight.blocking_reason.is_some() {
+            preflight.blocking_reason = permission_preflight.blocking_reason;
+        }
+        preflight.warnings.extend(permission_preflight.warnings);
+
+        assert_eq!(preflight.blocking_reason, original_blocking_reason);
+        assert!(preflight.blocking_reason.is_some());
+        assert_eq!(
+            preflight.blocking_kind,
+            Some(CapturePreflightBlockKind::CallRoute)
+        );
+    }
+
+    #[test]
+    fn native_call_capture_bypass_only_skips_call_route_blocks() {
+        let config = Config::default();
+        let mut preflight = evaluate_capture_preflight(
+            CaptureMode::Meeting,
+            Some(RecordingIntent::Call),
+            Some("Teams".into()),
+            "Built-in Microphone".into(),
+            false,
+            &config,
+        )
+        .unwrap();
+
+        assert!(should_bypass_preflight_block_for_native_call_capture(
+            &preflight, true
+        ));
+
+        preflight.blocking_kind = Some(CapturePreflightBlockKind::Permission);
+        preflight.blocking_reason = Some(MIC_PERMISSION_BLOCKING_MESSAGE.into());
+        assert!(!should_bypass_preflight_block_for_native_call_capture(
+            &preflight, true
+        ));
+
+        preflight.blocking_kind = None;
+        assert!(!should_bypass_preflight_block_for_native_call_capture(
+            &preflight, true
+        ));
+    }
+
+    #[test]
+    fn microphone_only_preflight_granted_has_no_warning_or_block() {
+        let preflight = evaluate_microphone_only_permission_preflight(MacPermissionStatus::Granted);
+
+        assert!(preflight.blocking_reason.is_none());
+        assert_eq!(preflight.blocking_kind, None);
+        assert!(preflight.warnings.is_empty());
+    }
+
+    #[test]
+    fn microphone_only_preflight_denied_blocks_with_permission_kind() {
+        let preflight = evaluate_microphone_only_permission_preflight(MacPermissionStatus::Denied);
+
+        assert_eq!(
+            preflight.blocking_kind,
+            Some(CapturePreflightBlockKind::Permission)
+        );
+        assert_eq!(
+            preflight.blocking_reason.as_deref(),
+            Some(MIC_PERMISSION_BLOCKING_MESSAGE)
+        );
+        assert!(preflight.warnings.is_empty());
+    }
+
+    #[test]
+    fn microphone_only_preflight_not_determined_warns_without_blocking() {
+        let preflight =
+            evaluate_microphone_only_permission_preflight(MacPermissionStatus::NotDetermined);
+
+        assert!(preflight.blocking_reason.is_none());
+        assert_eq!(preflight.blocking_kind, None);
+        assert_eq!(preflight.warnings.len(), 1);
+        assert!(preflight.warnings[0].contains("not yet confirmed microphone access"));
     }
 
     #[test]

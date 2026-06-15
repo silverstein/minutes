@@ -448,7 +448,10 @@ fn dispatch_action(
                         crate::call_capture::availability(),
                         crate::call_capture::CallCaptureAvailability::Available { .. }
                     );
-                if !native_call_capture_available {
+                if !minutes_core::capture::should_bypass_preflight_block_for_native_call_capture(
+                    &preflight,
+                    native_call_capture_available,
+                ) {
                     return Err(format!("recording blocked: {}", reason));
                 }
             }

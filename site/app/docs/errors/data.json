@@ -1,6 +1,6 @@
 {
-  "generatedAt": "2026-06-11",
-  "visibleCount": 56,
+  "generatedAt": "2026-06-15",
+  "visibleCount": 58,
   "hiddenCount": 16,
   "groups": [
     {
@@ -493,7 +493,7 @@
     },
     {
       "enumName": "DictationError",
-      "count": 6,
+      "count": 7,
       "entries": [
         {
           "id": "dictationerror-recordingactive",
@@ -551,6 +551,17 @@
           "docsUrl": "https://useminutes.app/docs/errors#error-dictationerror-accessibilitydenied"
         },
         {
+          "id": "dictationerror-permissionblocked",
+          "enumName": "DictationError",
+          "variant": "PermissionBlocked",
+          "cfg": null,
+          "message": "{0}",
+          "sourceFile": "crates/core/src/error.rs",
+          "hidden": false,
+          "anchorId": "error-dictationerror-permissionblocked",
+          "docsUrl": "https://useminutes.app/docs/errors#error-dictationerror-permissionblocked"
+        },
+        {
           "id": "dictationerror-notactive",
           "enumName": "DictationError",
           "variant": "NotActive",
@@ -565,7 +576,7 @@
     },
     {
       "enumName": "LiveTranscriptError",
-      "count": 4,
+      "count": 5,
       "entries": [
         {
           "id": "livetranscripterror-recordingactive",
@@ -599,6 +610,17 @@
           "hidden": false,
           "anchorId": "error-livetranscripterror-alreadyactive",
           "docsUrl": "https://useminutes.app/docs/errors#error-livetranscripterror-alreadyactive"
+        },
+        {
+          "id": "livetranscripterror-permissionblocked",
+          "enumName": "LiveTranscriptError",
+          "variant": "PermissionBlocked",
+          "cfg": null,
+          "message": "{0}",
+          "sourceFile": "crates/core/src/error.rs",
+          "hidden": false,
+          "anchorId": "error-livetranscripterror-permissionblocked",
+          "docsUrl": "https://useminutes.app/docs/errors#error-livetranscripterror-permissionblocked"
         },
         {
           "id": "livetranscripterror-noactivesession",

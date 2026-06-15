@@ -2,11 +2,11 @@
 
 > Generated file. Do not edit by hand.
 > Source: crates/core thiserror definitions
-> Last generated: 2026-06-11
+> Last generated: 2026-06-15
 
 This is the generated public catalog of stable Minutes core errors. It intentionally favors actionable, user-facing errors over generic wrapper variants.
 
-- Visible actionable errors: 56
+- Visible actionable errors: 58
 - Hidden low-signal wrappers: 16
 
 # CaptureError
@@ -579,6 +579,18 @@ Source: `crates/core/src/error.rs`
 
 Reference URL: https://useminutes.app/docs/errors#error-dictationerror-accessibilitydenied
 
+<a id="error-dictationerror-permissionblocked"></a>
+
+## `DictationError::PermissionBlocked`
+
+Exact message:
+
+> {0}
+
+Source: `crates/core/src/error.rs`
+
+Reference URL: https://useminutes.app/docs/errors#error-dictationerror-permissionblocked
+
 <a id="error-dictationerror-notactive"></a>
 
 ## `DictationError::NotActive`
@@ -628,6 +640,18 @@ Exact message:
 Source: `crates/core/src/error.rs`
 
 Reference URL: https://useminutes.app/docs/errors#error-livetranscripterror-alreadyactive
+
+<a id="error-livetranscripterror-permissionblocked"></a>
+
+## `LiveTranscriptError::PermissionBlocked`
+
+Exact message:
+
+> {0}
+
+Source: `crates/core/src/error.rs`
+
+Reference URL: https://useminutes.app/docs/errors#error-livetranscripterror-permissionblocked
 
 <a id="error-livetranscripterror-noactivesession"></a>
 

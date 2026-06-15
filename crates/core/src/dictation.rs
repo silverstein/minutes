@@ -318,6 +318,14 @@ where
     #[cfg(feature = "whisper")]
     {
         let device_override = config.recording.device.as_deref();
+        let permission_preflight = crate::capture::preflight_microphone_only();
+        if let Some(reason) = permission_preflight.blocking_reason {
+            return Err(DictationError::PermissionBlocked(reason).into());
+        }
+        for warning in permission_preflight.warnings {
+            tracing::warn!(warning = %warning, "dictation microphone permission preflight warning");
+        }
+
         let audio_start = Instant::now();
         startup_debug(
             "audio_stream_start",

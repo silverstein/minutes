@@ -15,7 +15,7 @@ pub enum MacPermissionKind {
     Automation,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MacPermissionStatus {
     Granted,
@@ -24,6 +24,7 @@ pub enum MacPermissionStatus {
     NotNeeded,
     Unsupported,
     StaleOrRestartNeeded,
+    #[default]
     Unknown,
 }
 
@@ -103,8 +104,16 @@ pub fn permission_rows() -> Vec<MacPermissionRow> {
     ]
 }
 
+pub fn microphone_status() -> MacPermissionStatus {
+    platform::microphone_status()
+}
+
+pub fn screen_recording_status() -> MacPermissionStatus {
+    platform::screen_recording_status()
+}
+
 pub fn microphone_row() -> MacPermissionRow {
-    let status = platform::microphone_status();
+    let status = microphone_status();
     MacPermissionRow::new(MacPermissionRowSpec {
         kind: MacPermissionKind::Microphone,
         label: "Microphone",
@@ -138,7 +147,7 @@ pub fn microphone_row() -> MacPermissionRow {
 }
 
 pub fn screen_recording_row() -> MacPermissionRow {
-    let status = platform::screen_recording_status();
+    let status = screen_recording_status();
     MacPermissionRow::new(MacPermissionRowSpec {
         kind: MacPermissionKind::ScreenRecording,
         label: "Screen Recording",

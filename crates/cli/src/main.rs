@@ -8587,6 +8587,14 @@ fn cmd_dictate(stdout: bool, note_only: bool, config: &Config) -> Result<()> {
     use std::sync::atomic::AtomicBool;
     use std::sync::Arc;
 
+    let permission_preflight = minutes_core::capture::preflight_microphone_only();
+    if let Some(reason) = &permission_preflight.blocking_reason {
+        anyhow::bail!("{}", reason);
+    }
+    for warning in &permission_preflight.warnings {
+        eprintln!("[minutes] {}", warning);
+    }
+
     eprintln!("[minutes] Starting dictation (Ctrl-C to stop)...");
     if config.dictation.accumulate {
         eprintln!(
@@ -9158,6 +9166,14 @@ fn cmd_confirm(
 fn cmd_live(config: &Config) -> Result<()> {
     use std::sync::atomic::AtomicBool;
     use std::sync::Arc;
+
+    let permission_preflight = minutes_core::capture::preflight_microphone_only();
+    if let Some(reason) = &permission_preflight.blocking_reason {
+        anyhow::bail!("{}", reason);
+    }
+    for warning in &permission_preflight.warnings {
+        eprintln!("[minutes] {}", warning);
+    }
 
     eprintln!("Starting live transcript session...");
     if config.transcription.engine == "apple-speech" {

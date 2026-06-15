@@ -1714,41 +1714,39 @@ mod tests {
     }
 
     #[test]
-    fn native_app_detection_wins_before_browser_meet_probe() {
+    fn native_app_does_not_fall_back_to_process_match_after_browser_no_match() {
         let detector = CallDetector::new(test_call_detection_config(vec![
             "zoom.us".into(),
             "google-meet".into(),
         ]));
-
-        let running = ["zoom.us".into(), "Safari".into()];
-        let mic_live = true;
-
-        // Reproduce the decision ordering from detect_active_call without relying
-        // on live browser automation in tests.
         let config = detector.current_config();
-        let native_apps: Vec<&String> = config
-            .apps
-            .iter()
-            .filter(|app| app.as_str() != "google-meet")
-            .collect();
+        let processes = vec![
+            RunningProcess {
+                pid: 100,
+                ppid: 1,
+                name: "zoom.us".into(),
+            },
+            RunningProcess {
+                pid: 200,
+                ppid: 1,
+                name: "Google Chrome".into(),
+            },
+        ];
 
-        let mut detected = None;
-        if mic_live {
-            for config_app in native_apps {
-                let config_lower = config_app.to_lowercase();
-                if running.iter().any(|p: &String| {
-                    let p_lower = p.to_lowercase();
-                    p_lower == config_lower
-                        || p_lower.starts_with(&format!("{}.", config_lower))
-                        || p_lower.starts_with(&format!("{} ", config_lower))
-                }) {
-                    detected = Some(config_app.clone());
-                    break;
-                }
-            }
-        }
+        let result = detector.detect_active_call_from_process_snapshot(
+            &config,
+            true,
+            &processes,
+            None,
+            false,
+            |_detector, _running, want_meet, want_teams| {
+                assert!(want_meet);
+                assert!(!want_teams);
+                Some(BrowserMeetProbe::NoMatch)
+            },
+        );
 
-        assert_eq!(detected.as_deref(), Some("zoom.us"));
+        assert_eq!(result, DetectActiveCallResult::None);
     }
 
     #[test]

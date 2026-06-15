@@ -1016,6 +1016,14 @@ pub fn cmd_get_meeting_prompt(
     }
 }
 
+#[tauri::command]
+pub fn cmd_close_meeting_prompt(app: tauri::AppHandle) -> Result<(), String> {
+    if let Some(win) = app.get_webview_window("meeting-prompt") {
+        win.destroy().map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 /// Surface a deferred update notification if one is pending and no session is active.
 /// Call this after recording/live/dictation stops.
 pub fn surface_deferred_update(app: &tauri::AppHandle) {

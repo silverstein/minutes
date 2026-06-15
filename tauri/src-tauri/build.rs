@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn main() {
+    compile_mic_check_helper();
     compile_system_audio_helper();
     compile_calendar_helper();
     stage_minutes_cli_sidecar();
@@ -106,6 +107,42 @@ fn stage_minutes_cli_sidecar() {
         perm.set_mode(0o755);
         fs::set_permissions(&staged, perm).expect("chmod placeholder sidecar");
     }
+}
+
+fn compile_mic_check_helper() {
+    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    if target_os != "macos" {
+        return;
+    }
+
+    let manifest_dir = PathBuf::from(
+        std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR should be set"),
+    );
+    let source = manifest_dir.join("src/mic_check.swift");
+    let bin_dir = manifest_dir.join("bin");
+    let binary = bin_dir.join("mic_check");
+    let target = std::env::var("TARGET").unwrap_or_else(|_| "unknown-target".into());
+    let target_binary = bin_dir.join(format!("mic_check-{}", target));
+
+    println!("cargo:rerun-if-changed={}", source.display());
+    std::fs::create_dir_all(&bin_dir).expect("failed to create helper bin dir");
+
+    let output = Command::new("swiftc")
+        .arg(&source)
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .expect("failed to run swiftc for mic_check");
+
+    if !output.status.success() {
+        panic!(
+            "failed to compile mic_check.swift: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    std::fs::copy(&binary, &target_binary)
+        .expect("failed to copy target-specific mic_check helper");
 }
 
 fn compile_system_audio_helper() {

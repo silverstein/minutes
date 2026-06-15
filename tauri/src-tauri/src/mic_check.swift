@@ -1,37 +1,113 @@
-// Minimal Swift helper to check if the default audio input device is in use.
-// Outputs "1" if mic is active, "0" if idle.
-// Uses CoreAudio kAudioDevicePropertyDeviceIsRunningSomewhere which works
-// on both Intel and Apple Silicon Macs.
+// Minimal Swift helper to check if any audio input is active.
+// Outputs "1" if mic/input capture is active, "0" if idle.
 
 import CoreAudio
 import Foundation
 
-var defaultInputID = AudioObjectID(kAudioObjectSystemObject)
-var propAddr = AudioObjectPropertyAddress(
-    mSelector: kAudioHardwarePropertyDefaultInputDevice,
-    mScope: kAudioObjectPropertyScopeGlobal,
-    mElement: kAudioObjectPropertyElementMain
-)
-var size = UInt32(MemoryLayout<AudioObjectID>.size)
-let err = AudioObjectGetPropertyData(
-    AudioObjectID(kAudioObjectSystemObject), &propAddr, 0, nil, &size, &defaultInputID
-)
-guard err == noErr else {
-    print("0")
-    exit(0)
+let systemObject = AudioObjectID(kAudioObjectSystemObject)
+
+func objectIDs(
+    for selector: AudioObjectPropertySelector,
+    on objectID: AudioObjectID = systemObject,
+    scope: AudioObjectPropertyScope = kAudioObjectPropertyScopeGlobal
+) -> [AudioObjectID]? {
+    var address = AudioObjectPropertyAddress(
+        mSelector: selector,
+        mScope: scope,
+        mElement: kAudioObjectPropertyElementMain
+    )
+    var size: UInt32 = 0
+    guard AudioObjectGetPropertyDataSize(objectID, &address, 0, nil, &size) == noErr else {
+        return nil
+    }
+    let count = Int(size) / MemoryLayout<AudioObjectID>.size
+    guard count > 0 else {
+        return []
+    }
+
+    var ids = [AudioObjectID](repeating: AudioObjectID(kAudioObjectUnknown), count: count)
+    let status = ids.withUnsafeMutableBufferPointer { buffer in
+        guard let baseAddress = buffer.baseAddress else {
+            return kAudioHardwareBadObjectError
+        }
+        return AudioObjectGetPropertyData(objectID, &address, 0, nil, &size, baseAddress)
+    }
+    guard status == noErr else {
+        return nil
+    }
+    return ids
 }
 
-var isRunning: UInt32 = 0
-var runAddr = AudioObjectPropertyAddress(
-    mSelector: kAudioDevicePropertyDeviceIsRunningSomewhere,
-    mScope: kAudioObjectPropertyScopeGlobal,
-    mElement: kAudioObjectPropertyElementMain
-)
-size = UInt32(MemoryLayout<UInt32>.size)
-let err2 = AudioObjectGetPropertyData(defaultInputID, &runAddr, 0, nil, &size, &isRunning)
-guard err2 == noErr else {
-    print("0")
-    exit(0)
+func uint32Property(
+    _ selector: AudioObjectPropertySelector,
+    on objectID: AudioObjectID,
+    scope: AudioObjectPropertyScope = kAudioObjectPropertyScopeGlobal
+) -> UInt32? {
+    var value: UInt32 = 0
+    var size = UInt32(MemoryLayout<UInt32>.size)
+    var address = AudioObjectPropertyAddress(
+        mSelector: selector,
+        mScope: scope,
+        mElement: kAudioObjectPropertyElementMain
+    )
+    guard AudioObjectGetPropertyData(objectID, &address, 0, nil, &size, &value) == noErr else {
+        return nil
+    }
+    return value
 }
 
-print(isRunning > 0 ? "1" : "0")
+func anyProcessRunningInput() -> Bool? {
+    guard let processes = objectIDs(for: kAudioHardwarePropertyProcessObjectList) else {
+        return nil
+    }
+    var sawReadableProcess = false
+    for processID in processes {
+        guard let isRunning = uint32Property(kAudioProcessPropertyIsRunningInput, on: processID) else {
+            continue
+        }
+        sawReadableProcess = true
+        if isRunning > 0 {
+            return true
+        }
+    }
+    return sawReadableProcess ? false : nil
+}
+
+func inputChannelCount(for deviceID: AudioObjectID) -> UInt32 {
+    var address = AudioObjectPropertyAddress(
+        mSelector: kAudioDevicePropertyStreamConfiguration,
+        mScope: kAudioDevicePropertyScopeInput,
+        mElement: kAudioObjectPropertyElementMain
+    )
+    var size: UInt32 = 0
+    guard AudioObjectGetPropertyDataSize(deviceID, &address, 0, nil, &size) == noErr, size > 0 else {
+        return 0
+    }
+
+    let bufferList = UnsafeMutableRawPointer.allocate(
+        byteCount: Int(size),
+        alignment: MemoryLayout<AudioBufferList>.alignment
+    )
+    defer { bufferList.deallocate() }
+
+    guard AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, bufferList) == noErr else {
+        return 0
+    }
+
+    let audioBufferList = bufferList.assumingMemoryBound(to: AudioBufferList.self)
+    return UnsafeMutableAudioBufferListPointer(audioBufferList)
+        .reduce(UInt32(0)) { total, buffer in total + buffer.mNumberChannels }
+}
+
+func anyInputDeviceRunning() -> Bool {
+    guard let devices = objectIDs(for: kAudioHardwarePropertyDevices) else {
+        return false
+    }
+    return devices.contains { deviceID in
+        inputChannelCount(for: deviceID) > 0
+            && (uint32Property(kAudioDevicePropertyDeviceIsRunningSomewhere, on: deviceID) ?? 0) > 0
+    }
+}
+
+let micActive = anyProcessRunningInput() ?? anyInputDeviceRunning()
+print(micActive ? "1" : "0")

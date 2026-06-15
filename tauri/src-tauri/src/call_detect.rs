@@ -1,7 +1,7 @@
 //! Auto-detect video/voice calls and prompt the user to start recording.
 //!
-//! Detection strategy: poll for known call-app processes that are actively
-//! using the microphone. Two signals together (process running + mic active)
+//! Detection strategy: poll for known call-app processes while any audio input
+//! is actively capturing. Two signals together (process running + mic active)
 //! give high confidence with minimal false positives.
 //!
 //! Currently macOS-only. The detection functions (`running_process_names`,
@@ -1323,11 +1323,11 @@ fn process_names_from_ps_output(text: &str) -> Vec<String> {
         .collect()
 }
 
-/// Check if the default audio input device is currently being used.
+/// Check if any audio input is currently being used.
 ///
-/// Uses a pre-compiled Swift helper that calls CoreAudio
-/// `kAudioDevicePropertyDeviceIsRunningSomewhere` on the default input device.
-/// Works on both Intel and Apple Silicon Macs.
+/// Uses a pre-compiled Swift helper that queries CoreAudio process input
+/// activity and falls back to scanning input-capable devices. This catches
+/// call apps that capture from a non-default input route.
 ///
 /// Falls back to an inline `swift` invocation if the helper binary is missing.
 fn is_mic_in_use() -> bool {
@@ -1343,22 +1343,9 @@ fn is_mic_in_use() -> bool {
     }
 
     // Fallback: inline swift (slower: ~200ms, but always works)
-    let script = r#"
-import CoreAudio
-var id = AudioObjectID(kAudioObjectSystemObject)
-var pa = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyDefaultInputDevice, mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
-var sz = UInt32(MemoryLayout<AudioObjectID>.size)
-guard AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &pa, 0, nil, &sz, &id) == noErr else { print("0"); exit(0) }
-var r: UInt32 = 0
-var ra = AudioObjectPropertyAddress(mSelector: kAudioDevicePropertyDeviceIsRunningSomewhere, mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
-sz = UInt32(MemoryLayout<UInt32>.size)
-guard AudioObjectGetPropertyData(id, &ra, 0, nil, &sz, &r) == noErr else { print("0"); exit(0) }
-print(r > 0 ? "1" : "0")
-"#;
-
     let output = std::process::Command::new("swift")
         .arg("-e")
-        .arg(script)
+        .arg(include_str!("mic_check.swift"))
         .output();
 
     match output {
@@ -1796,6 +1783,32 @@ mod tests {
         // Just verify the function returns without crashing.
         // Will return false unless something is using the mic right now.
         let _result = is_mic_in_use();
+    }
+
+    #[test]
+    fn bundled_mic_check_detects_non_default_input_activity() {
+        let swift_source = include_str!("mic_check.swift");
+
+        assert!(
+            swift_source.contains("kAudioHardwarePropertyProcessObjectList"),
+            "mic_check should query CoreAudio process objects for input activity"
+        );
+        assert!(
+            swift_source.contains("kAudioProcessPropertyIsRunningInput"),
+            "mic_check should prefer process-level input activity over device-global running state"
+        );
+        assert!(
+            swift_source.contains("kAudioHardwarePropertyDevices"),
+            "mic_check must still enumerate devices as a fallback for non-default inputs"
+        );
+        assert!(
+            swift_source.contains("kAudioDevicePropertyScopeInput"),
+            "mic_check must limit activity checks to input-capable devices"
+        );
+        assert!(
+            !swift_source.contains("kAudioHardwarePropertyDefaultInputDevice"),
+            "mic_check must not regress to default-input-only detection"
+        );
     }
 
     #[test]

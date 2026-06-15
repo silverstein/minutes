@@ -1772,23 +1772,28 @@ mod tests {
     #[test]
     fn rename_meeting_resolves_slug_collision() {
         let dir = TempDir::new().unwrap();
+        let frontmatter =
+            "title: \"Call\"\ntype: meeting\ndate: 2026-04-07T10:00:00-07:00\nduration: 0\n";
         let path = write_meeting(
             &dir,
             "2026-04-07-call.md",
-            "title: \"Call\"\ntype: meeting\ndate: 2026-04-07T10:00:00-07:00\nduration: 0\n",
+            frontmatter,
             "## Transcript\n\nHi\n",
         );
         // Pre-create a sibling that the new slug would collide with.
+        let parsed: Frontmatter = serde_yaml::from_str(frontmatter).unwrap();
+        let collision_slug = generate_slug("Pricing Review", parsed.date, None);
         std::fs::write(
-            dir.path().join("2026-04-07-pricing-review.md"),
+            dir.path().join(&collision_slug),
             "---\ntitle: existing\ntype: meeting\ndate: 2026-04-07T10:00:00-07:00\nduration: 0\n---\n",
         )
         .unwrap();
 
         let new_path = rename_meeting(&path, "Pricing Review").unwrap();
         let name = new_path.file_name().unwrap().to_str().unwrap();
+        let collision_stem = collision_slug.trim_end_matches(".md");
         assert!(
-            name.starts_with("2026-04-07-pricing-review-") && name.ends_with(".md"),
+            name.starts_with(&format!("{collision_stem}-")) && name.ends_with(".md"),
             "expected collision-resolved slug, got {}",
             name
         );

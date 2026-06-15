@@ -11409,12 +11409,10 @@
     }
 
     // Idempotent DOM writes — skip when the value is unchanged. The status poll
-    // (checkStatus) reasserts identical idle text every 2s forever; on the main
-    // window (transparent + NSVisualEffectMaterial::Sidebar vibrancy) every text
-    // mutation forces WindowServer to re-blend the whole window, so unguarded
-    // no-op writes peg WindowServer while the app sits idle. These let an
-    // unchanged idle tick produce zero DOM churn. clearChildren() above is
-    // already idempotent (no-ops when the node is empty).
+    // (checkStatus) reasserts identical idle text every 2s forever; repeated
+    // no-op writes still make WebKit re-layout the main app surface while idle.
+    // These let an unchanged idle tick produce zero DOM churn. clearChildren()
+    // above is already idempotent (no-ops when the node is empty).
     function setText(el, value) {
       if (el && el.textContent !== value) el.textContent = value;
     }

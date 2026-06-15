@@ -32,6 +32,9 @@ mod text_insertion;
 const MINUTES_WEBSITE_URL: &str = "https://useminutes.app";
 const MINUTES_CHANGELOG_URL: &str = "https://github.com/silverstein/minutes/releases";
 const MINUTES_DISCUSSIONS_URL: &str = "https://github.com/silverstein/minutes/discussions";
+const MAIN_WINDOW_TRANSPARENT: bool = false;
+#[cfg(target_os = "macos")]
+const MAIN_WINDOW_APPLY_VIBRANCY: bool = false;
 
 static CLEAN_EXIT_STARTED: AtomicBool = AtomicBool::new(false);
 
@@ -255,7 +258,13 @@ fn show_main_window(app: &tauri::AppHandle) {
         .title("")
         .inner_size(560.0, 700.0)
         .min_inner_size(460.0, 520.0)
-        .transparent(true)
+        // The main window is hidden, shown, and resized while the app lives in
+        // the tray. On macOS 26, keeping that long-lived WebView transparent
+        // and backed by vibrancy can trip a WebKit frame-update PAC trap when
+        // the hidden window is re-framed. The UI already paints solid app
+        // surfaces, so keep this WebView opaque and reserve transparency for
+        // short-lived overlays that need it.
+        .transparent(MAIN_WINDOW_TRANSPARENT)
         .content_protected(Config::load().privacy.hide_from_screen_share)
         .focused(true);
 
@@ -271,7 +280,7 @@ fn show_main_window(app: &tauri::AppHandle) {
 
     if let Ok(win) = builder.build() {
         #[cfg(target_os = "macos")]
-        {
+        if MAIN_WINDOW_APPLY_VIBRANCY {
             use window_vibrancy::{apply_vibrancy, NSVisualEffectMaterial};
             apply_vibrancy(&win, NSVisualEffectMaterial::Sidebar, None, None).ok();
         }
@@ -2487,7 +2496,10 @@ fn main() {
 
 #[cfg(test)]
 mod tray_activity_tests {
-    use super::{derive_tray_activity, TrayActivity, TrayAppearance, TrayStateSnapshot};
+    use super::{
+        derive_tray_activity, TrayActivity, TrayAppearance, TrayStateSnapshot,
+        MAIN_WINDOW_TRANSPARENT,
+    };
 
     fn snap(recording: bool, live: bool, dictation: bool) -> TrayStateSnapshot {
         TrayStateSnapshot {
@@ -2495,6 +2507,20 @@ mod tray_activity_tests {
             live,
             dictation,
         }
+    }
+
+    #[test]
+    fn main_window_uses_opaque_webview_for_hidden_tray_lifecycle() {
+        assert!(
+            !MAIN_WINDOW_TRANSPARENT,
+            "the long-lived main WebView is hidden/shown from the tray; keep it opaque"
+        );
+
+        #[cfg(target_os = "macos")]
+        assert!(
+            !super::MAIN_WINDOW_APPLY_VIBRANCY,
+            "macOS vibrancy on the hidden main WebView can crash WebKit during frame updates"
+        );
     }
 
     #[test]

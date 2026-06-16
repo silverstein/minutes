@@ -103,52 +103,111 @@ pub struct CalendarEvent {
 /// Extract a meeting URL (Zoom, Google Meet, Teams, Webex) from text.
 /// Searches for common video conferencing URL patterns and returns the first match.
 pub fn extract_meeting_url(text: &str) -> Option<String> {
-    let patterns = [
-        "https://zoom.us/j/",
-        "https://us02web.zoom.us/j/",
-        "https://us04web.zoom.us/j/",
-        "https://us05web.zoom.us/j/",
-        "https://us06web.zoom.us/j/",
-        "https://meet.google.com/",
-        "https://teams.microsoft.com/l/meetup-join/",
-        "https://teams.live.com/meet/",
-        "https://webex.com/meet/",
-        "https://facetime.apple.com/",
-    ];
+    let mut remaining = text;
+    while let Some(start) = remaining.find("https://") {
+        let url_text = &remaining[start..];
+        let end = url_text
+            .find(|c: char| c.is_whitespace() || matches!(c, '<' | '>' | '"' | ')' | ']'))
+            .unwrap_or(url_text.len());
+        let url = url_text[..end].trim_end_matches(['.', ',', ';', '\'']);
 
-    for pattern in &patterns {
-        if let Some(start) = text.find(pattern) {
-            let url_text = &text[start..];
-            let end = url_text
-                .find(|c: char| c.is_whitespace() || c == '>' || c == '"' || c == ')')
-                .unwrap_or(url_text.len());
-            let url = &url_text[..end];
-            if url.len() > pattern.len() {
-                return Some(url.to_string());
+        if let Some(redirect_url) = extract_google_redirect_url(url) {
+            if is_meeting_url(&redirect_url) {
+                return Some(redirect_url);
             }
         }
-    }
 
-    // Fallback: look for any https:// URL containing common meeting keywords
-    for keyword in &[
-        "zoom.us",
-        "meet.google",
-        "teams.microsoft",
-        "webex.com",
-        "facetime.apple",
-    ] {
-        if let Some(https_pos) = text.find("https://") {
-            let url_text = &text[https_pos..];
-            if url_text.contains(keyword) {
-                let end = url_text
-                    .find(|c: char| c.is_whitespace() || c == '>' || c == '"' || c == ')')
-                    .unwrap_or(url_text.len());
-                return Some(url_text[..end].to_string());
-            }
+        if is_meeting_url(url) {
+            return Some(url.to_string());
         }
+
+        remaining = &url_text[end..];
     }
 
     None
+}
+
+fn is_meeting_url(url: &str) -> bool {
+    let Some(rest) = url.strip_prefix("https://") else {
+        return false;
+    };
+    let rest_lower = rest.to_ascii_lowercase();
+    let (host, path) = match rest_lower.find('/') {
+        Some(slash) => (&rest_lower[..slash], &rest_lower[slash..]),
+        None => (rest_lower.as_str(), ""),
+    };
+
+    if matches_domain(host, "zoom.us") || matches_domain(host, "zoom.com") {
+        return path.starts_with("/j/")
+            || path.starts_with("/my/")
+            || path.starts_with("/s/")
+            || path.starts_with("/wc/join/")
+            || path.starts_with("/join")
+            || path.starts_with("/meeting/register/")
+            || path.starts_with("/webinar/register/");
+    }
+
+    (host == "meet.google.com" && path.len() > 1)
+        || (host == "teams.microsoft.com" && path.starts_with("/l/meetup-join/"))
+        || (host == "teams.live.com" && path.starts_with("/meet/"))
+        || (matches_domain(host, "webex.com") && path.starts_with("/meet/"))
+        || (host == "facetime.apple.com" && path.len() > 1)
+}
+
+fn matches_domain(host: &str, domain: &str) -> bool {
+    host == domain || host.ends_with(&format!(".{domain}"))
+}
+
+fn extract_google_redirect_url(url: &str) -> Option<String> {
+    let rest = url.strip_prefix("https://")?;
+    let rest_lower = rest.to_ascii_lowercase();
+    let slash = rest_lower.find('/')?;
+    let host = &rest_lower[..slash];
+    if host != "google.com" && host != "www.google.com" {
+        return None;
+    }
+    let path_and_query = &rest[slash..];
+    if !path_and_query.starts_with("/url?") {
+        return None;
+    }
+    let query = path_and_query.split_once('?')?.1;
+    query.split('&').find_map(|param| {
+        let (key, value) = param.split_once('=')?;
+        if key == "q" || key == "url" {
+            Some(percent_decode(value))
+        } else {
+            None
+        }
+    })
+}
+
+fn percent_decode(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(high), Some(low)) = (hex_value(bytes[i + 1]), hex_value(bytes[i + 2])) {
+                decoded.push((high << 4) | low);
+                i += 3;
+                continue;
+            }
+        }
+        decoded.push(if bytes[i] == b'+' { b' ' } else { bytes[i] });
+        i += 1;
+    }
+
+    String::from_utf8_lossy(&decoded).into_owned()
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
 }
 
 /// Calendar authorization state as reported by the EventKit helper's
@@ -734,6 +793,51 @@ mod tests {
         assert_eq!(
             extract_meeting_url(text),
             Some("https://us02web.zoom.us/j/8765432?pwd=xyz".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_zoom_vanity_url() {
+        let text = "https://airwallex.zoom.com/j/93507198550";
+        assert_eq!(
+            extract_meeting_url(text),
+            Some("https://airwallex.zoom.com/j/93507198550".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_zoom_us_vanity_url_with_dash() {
+        let text = "Join from calendar: https://hooli-it.zoom.us/j/93507198550?pwd=abc";
+        assert_eq!(
+            extract_meeting_url(text),
+            Some("https://hooli-it.zoom.us/j/93507198550?pwd=abc".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_zoom_vanity_personal_link() {
+        let text = "Personal room: https://mycompany.zoom.us/my/grant";
+        assert_eq!(
+            extract_meeting_url(text),
+            Some("https://mycompany.zoom.us/my/grant".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_zoom_vanity_url_from_google_calendar_redirect() {
+        let text = "https://www.google.com/url?q=https://airwallex.zoom.com/j/93507198550?jst%3D2&sa=D&source=calendar";
+        assert_eq!(
+            extract_meeting_url(text),
+            Some("https://airwallex.zoom.com/j/93507198550?jst=2".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_visible_zoom_vanity_url_from_markdown_link() {
+        let text = "[https://airwallex.zoom.com/j/93507198550](https://www.google.com/url?q=https://airwallex.zoom.com/j/93507198550?jst%3D2&sa=D&source=calendar)";
+        assert_eq!(
+            extract_meeting_url(text),
+            Some("https://airwallex.zoom.com/j/93507198550".to_string())
         );
     }
 

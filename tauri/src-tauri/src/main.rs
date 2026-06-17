@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use tauri::{
     menu::{Menu, MenuItem, SubmenuBuilder},
     tray::TrayIconBuilder,
-    Emitter, Manager, WebviewUrl, WebviewWindowBuilder,
+    Emitter, LogicalPosition, LogicalSize, Manager, WebviewUrl, WebviewWindowBuilder,
 };
 
 #[cfg(feature = "parakeet")]
@@ -310,6 +310,76 @@ pub(crate) fn show_main_window(app: &tauri::AppHandle) {
 #[tauri::command]
 fn cmd_show_main_window(app: tauri::AppHandle) {
     show_main_window(&app);
+}
+
+#[tauri::command]
+fn cmd_apply_recall_window_layout(
+    app: tauri::AppHandle,
+    width: f64,
+    height: f64,
+    avoid_right_edge: bool,
+) -> Result<(), String> {
+    const MIN_WIDTH: f64 = 460.0;
+    const MAX_WIDTH: f64 = 1400.0;
+    const MIN_HEIGHT: f64 = 520.0;
+    const MAX_HEIGHT: f64 = 1000.0;
+    const FRAME_EPSILON: f64 = 1.0;
+
+    if !width.is_finite() || !height.is_finite() {
+        return Err("invalid recall window layout size".into());
+    }
+
+    let Some(win) = app.get_webview_window("main") else {
+        return Ok(());
+    };
+    if !win.is_visible().ok().unwrap_or(false) {
+        return Ok(());
+    }
+    if win.is_fullscreen().ok().unwrap_or(false) {
+        return Ok(());
+    }
+
+    let width = width.clamp(MIN_WIDTH, MAX_WIDTH);
+    let height = height.clamp(MIN_HEIGHT, MAX_HEIGHT);
+    let monitor = win.current_monitor().ok().flatten();
+    let scale = monitor.as_ref().map(|monitor| monitor.scale_factor());
+
+    if avoid_right_edge {
+        if let (Some(monitor), Some(scale)) = (monitor.as_ref(), scale) {
+            let position = win.outer_position().map_err(|e| e.to_string())?;
+            let logical_x = position.x as f64 / scale;
+            let logical_y = position.y as f64 / scale;
+            let work_area = monitor.work_area();
+            let work_x = work_area.position.x as f64 / scale;
+            let work_width = work_area.size.width as f64 / scale;
+            let work_right = work_x + work_width;
+            let new_right = logical_x + width;
+            if new_right - work_right > FRAME_EPSILON {
+                let shift_x = (logical_x - (new_right - work_right)).max(work_x);
+                if (shift_x - logical_x).abs() > FRAME_EPSILON {
+                    win.set_position(LogicalPosition::new(shift_x, logical_y))
+                        .map_err(|e| e.to_string())?;
+                }
+            }
+        }
+    }
+
+    let size_needs_update = match (win.outer_size(), scale) {
+        (Ok(size), Some(scale)) => {
+            let logical_width = size.width as f64 / scale;
+            let logical_height = size.height as f64 / scale;
+            (logical_width - width).abs() > FRAME_EPSILON
+                || (logical_height - height).abs() > FRAME_EPSILON
+        }
+        _ => true,
+    };
+
+    if size_needs_update {
+        win.set_size(LogicalSize::new(width, height))
+            .map_err(|e| e.to_string())?;
+    }
+
+    Ok(())
 }
 
 fn show_note_window(app: &tauri::AppHandle) {
@@ -1397,12 +1467,13 @@ fn main() {
                 windows
                     .sort_by_key(|window| (window.label() != "main", window.label().to_string()));
                 for window in &windows {
+                    if window.label() == "main" {
+                        continue;
+                    }
                     let _ = window.unminimize();
                     let _ = window.show();
                 }
-                if let Some(main) = app.get_webview_window("main") {
-                    let _ = main.set_focus();
-                }
+                show_main_window(app);
             }
             "app-quit" => {
                 request_clean_exit(app, 0);
@@ -2432,6 +2503,7 @@ fn main() {
             commands::cmd_download_model,
             commands::cmd_mark_activation_nudge_shown,
             cmd_show_main_window,
+            cmd_apply_recall_window_layout,
             commands::cmd_upcoming_meetings,
             commands::cmd_spawn_terminal,
             commands::cmd_pty_input,
@@ -2588,6 +2660,73 @@ mod tray_activity_tests {
         assert!(
             !prompt_html.contains("getCurrentWebviewWindow().close()"),
             "direct JS WebView close can crash WebKit during prompt frame updates"
+        );
+    }
+
+    #[test]
+    fn recall_layout_uses_native_guarded_command() {
+        let manifest = env!("CARGO_MANIFEST_DIR");
+        let main_rs = std::fs::read_to_string(format!("{}/src/main.rs", manifest))
+            .expect("failed to read main.rs");
+        let index_html = std::fs::read_to_string(format!("{}/../src/index.html", manifest))
+            .expect("failed to read index.html");
+        let capabilities =
+            std::fs::read_to_string(format!("{}/capabilities/default.json", manifest))
+                .expect("failed to read default capability");
+
+        assert!(
+            main_rs.contains("cmd_apply_recall_window_layout"),
+            "Recall window layout changes should route through a native command"
+        );
+        assert!(
+            main_rs.contains("FRAME_EPSILON") && main_rs.contains("win.outer_size()"),
+            "Recall native layout should skip no-op frame size updates"
+        );
+        assert!(
+            main_rs.contains("(shift_x - logical_x).abs() > FRAME_EPSILON"),
+            "Recall native layout should skip no-op frame position updates"
+        );
+        assert!(
+            index_html.contains("cmd_apply_recall_window_layout"),
+            "Recall frontend should call the guarded native layout command"
+        );
+        assert!(
+            !index_html.contains("currentWindow.setSize("),
+            "direct JS setSize on the long-lived main WebView can crash WebKit during frame updates"
+        );
+        assert!(
+            !index_html.contains("currentWindow.setPosition("),
+            "direct JS setPosition on the long-lived main WebView can crash WebKit during frame updates"
+        );
+        for permission in [
+            "core:window:allow-set-focus",
+            "core:window:allow-set-size",
+            "core:window:allow-set-position",
+            "core:window:allow-outer-position",
+            "core:window:allow-outer-size",
+        ] {
+            assert!(
+                !capabilities.contains(permission),
+                "frontend windows should not have {} while native commands own main-window frame updates",
+                permission
+            );
+        }
+    }
+
+    #[test]
+    fn dictation_overlay_lifecycle_uses_destroy_for_same_label_rebuilds() {
+        let manifest = env!("CARGO_MANIFEST_DIR");
+        let commands_rs = std::fs::read_to_string(format!("{}/src/commands.rs", manifest))
+            .expect("failed to read commands.rs");
+
+        assert!(
+            commands_rs.contains("get_webview_window(\"dictation-overlay\")")
+                && commands_rs.contains("win.destroy().ok()"),
+            "replacing an existing dictation overlay should destroy, not close, the old WebView"
+        );
+        assert!(
+            !commands_rs.contains("window.close()"),
+            "dictation overlay lifecycle should not queue async WebView close during teardown"
         );
     }
 

@@ -12652,9 +12652,11 @@ pub fn cmd_stop_dictation(state: tauri::State<AppState>) -> Result<String, Strin
 fn show_dictation_overlay(app: &tauri::AppHandle) {
     use tauri::WebviewUrl;
 
-    // Close existing overlay if any
+    // Destroy existing overlay synchronously before rebuilding the same label.
+    // `close()` only queues a close-request event; a stale transparent WebView
+    // can otherwise overlap the new overlay during AppKit/WebKit frame updates.
     if let Some(win) = app.get_webview_window("dictation-overlay") {
-        win.close().ok();
+        win.destroy().ok();
     }
 
     // Position: bottom-right HUD, anchored to the current monitor work area.
@@ -13587,7 +13589,7 @@ fn finish_dictation_overlay_lifecycle(app: &tauri::AppHandle, guard: Option<Dict
         None,
     );
     if let Some(window) = app.get_webview_window("dictation-overlay") {
-        if let Err(error) = window.close() {
+        if let Err(error) = window.destroy() {
             tracing::debug!(error = %error, "could not close dictation overlay");
             dictation_focus_debug(
                 "overlay_close_failed",

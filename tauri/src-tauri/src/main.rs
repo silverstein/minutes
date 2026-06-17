@@ -246,10 +246,17 @@ fn maybe_run_process_queue_worker() -> Option<i32> {
     }
 }
 
-fn show_main_window(app: &tauri::AppHandle) {
+pub(crate) fn show_main_window(app: &tauri::AppHandle) {
     if let Some(win) = app.get_webview_window("main") {
-        win.show().ok();
-        win.set_focus().ok();
+        if !win.is_visible().ok().unwrap_or(false) {
+            win.show().ok();
+        }
+        if win.is_minimized().ok().unwrap_or(false) {
+            win.unminimize().ok();
+        }
+        if !win.is_focused().ok().unwrap_or(false) {
+            win.set_focus().ok();
+        }
         return;
     }
     let mut builder = WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
@@ -298,6 +305,11 @@ fn show_main_window(app: &tauri::AppHandle) {
             }
         }
     }
+}
+
+#[tauri::command]
+fn cmd_show_main_window(app: tauri::AppHandle) {
+    show_main_window(&app);
 }
 
 fn show_note_window(app: &tauri::AppHandle) {
@@ -2414,6 +2426,7 @@ fn main() {
             commands::cmd_needs_setup,
             commands::cmd_download_model,
             commands::cmd_mark_activation_nudge_shown,
+            cmd_show_main_window,
             commands::cmd_upcoming_meetings,
             commands::cmd_spawn_terminal,
             commands::cmd_pty_input,
@@ -2526,6 +2539,24 @@ mod tray_activity_tests {
                 "macOS vibrancy on the hidden main WebView can crash WebKit during frame updates"
             );
         }
+    }
+
+    #[test]
+    fn show_main_window_restores_minimized_window_before_focus() {
+        let manifest = env!("CARGO_MANIFEST_DIR");
+        let main_rs =
+            std::fs::read_to_string(format!("{}/src/main.rs", manifest)).expect("read main.rs");
+        let restore_idx = main_rs
+            .find("win.unminimize().ok()")
+            .expect("main-window reveal should restore minimized windows");
+        let focus_idx = main_rs
+            .find("win.set_focus().ok()")
+            .expect("main-window reveal should focus the window");
+
+        assert!(
+            restore_idx < focus_idx,
+            "main-window reveal should unminimize before requesting focus"
+        );
     }
 
     #[test]

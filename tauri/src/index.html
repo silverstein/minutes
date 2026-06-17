@@ -10826,8 +10826,7 @@
 
       // Only steal focus on first detection, not periodic reminders
       if (!is_reminder) {
-        currentWindow.show();
-        currentWindow.setFocus();
+        invoke('cmd_show_main_window').catch(() => {});
       }
     });
 

@@ -43,7 +43,6 @@ use std::path::Path;
 use std::sync::atomic::Ordering;
 
 use serde::Deserialize;
-use tauri::Manager;
 use tauri::{AppHandle, Emitter, State};
 
 use minutes_core::palette::recents::RecentsStore;
@@ -465,10 +464,7 @@ fn dispatch_action(
                     // blocking modal as the in-window button instead of
                     // silently reporting success with no recording
                     // (spec Part A; review F1).
-                    if let Some(window) = app.get_webview_window("main") {
-                        window.show().ok();
-                        window.set_focus().ok();
-                    }
+                    crate::show_main_window(&app);
                     let _ = app.emit(
                         "minutes://recording-consent-required",
                         serde_json::json!({ "disclosure": disclosure }),

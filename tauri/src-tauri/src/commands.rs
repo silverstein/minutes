@@ -5545,10 +5545,7 @@ pub fn launch_recording(
             // the in-window button instead of erroring or bypassing
             // (spec Part A; review F1/F2). The frontend listener stashes the
             // pending args and re-invokes with consent confirmed.
-            if let Some(window) = app.get_webview_window("main") {
-                window.show().ok();
-                window.set_focus().ok();
-            }
+            crate::show_main_window(&app);
             let _ = app.emit(
                 "minutes://recording-consent-required",
                 serde_json::json!({ "disclosure": disclosure }),
@@ -8228,9 +8225,8 @@ pub fn spawn_terminal(
     // Emit recall:expand event to the main window instead of opening a
     // separate terminal window. The JS in index.html handles the panel
     // expand animation and xterm.js initialisation.
-    if let Some(win) = app.get_webview_window("main") {
-        win.show().ok();
-        win.set_focus().ok();
+    if app.get_webview_window("main").is_some() {
+        crate::show_main_window(app);
         app.emit_to(
             "main",
             "recall:expand",

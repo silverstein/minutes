@@ -2,13 +2,17 @@
 
 > Generated file. Do not edit by hand.
 > Source: manifest.json + crates/mcp/src/index.ts + site/lib/skills-catalog.json
-> Last generated: 2026-06-15
+> Last generated: 2026-06-17
 
 ## Product
 
 Minutes is an open-source meeting corpus you own. Record, transcribe, search, and query every meeting and voice memo on your own disk. No cloud, no vendor to outlive. Output is structured markdown in `~/meetings/` that Claude Desktop, Claude Code, Codex, Gemini CLI, Cursor, OpenCode, Pi, and any MCP-compatible client read from the same folder, without a proprietary SDK or API key. Ten years from now, `grep` still works on your corpus.
 
 31 tools • 7 resources • Interactive MCP App dashboard • Prompt templates
+
+**What's new in 0.18.13:**
+• **Recordings warn before they capture silence.** If macOS has not granted microphone permission (for example after an app update re-signed Minutes), recording now warns or blocks at the start with the exact fix, instead of producing a silent file you discover after the meeting. A call that can still capture the other side warns and proceeds; a mic-only recording blocks. Covers meetings, memos, dictation, and live transcript.
+• **Zoom call detection works with non-default input devices.** macOS native call detection could miss an active Zoom call when Zoom used an input route other than the system default. Detection now attributes active microphone input to the call app's process, so it no longer misses the call (and no longer false-positives when a dictation tool is the active mic consumer). Thanks to Caleb Chong for the fix and Quinn for confirming the related Windows menu rendering fix.
 
 **What's new in 0.18.12:**
 • **No more WebKit crash on tray hide/show.** The main window kept a transparent, vibrancy-backed WebView alive while it was hidden and re-shown from the tray, which could trip a WebKit frame-update crash on macOS 26. The window is now opaque (no visible change, the UI already paints solid surfaces) and the crash is gone.

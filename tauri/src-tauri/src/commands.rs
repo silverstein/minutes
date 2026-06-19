@@ -6975,11 +6975,46 @@ pub fn cmd_clear_latest_output(state: tauri::State<AppState>) {
     set_latest_output(&state.latest_output, None);
 }
 
+/// Persist the completion-notification preference to `config.toml`.
+///
+/// Extracted so the round-trip test can exercise the real save path without
+/// constructing a `tauri::State` (which has no public test constructor). The
+/// setter command below seeds AppState and then delegates here.
+fn persist_completion_notifications(enabled: bool) -> Result<(), String> {
+    let mut config = Config::load();
+    config.notifications.completion_enabled = enabled;
+    config
+        .save()
+        .map_err(|e| format!("Failed to save config: {}", e))
+}
+
+/// Persist the Quick-Thought global hotkey to `config.toml`.
+///
+/// Extracted (like `persist_completion_notifications`) so the round-trip test
+/// can verify the on-disk write without a `tauri::AppHandle` / global-shortcut
+/// manager. `cmd_set_global_hotkey` and the `quick_thought` slot of
+/// `cmd_set_shortcut` both target the same `[global_hotkey]` fields.
+fn persist_global_hotkey(enabled: bool, shortcut: &str) -> Result<(), String> {
+    let mut config = Config::load();
+    config.global_hotkey.shortcut_enabled = enabled;
+    config.global_hotkey.shortcut = shortcut.to_string();
+    config
+        .save()
+        .map_err(|e| format!("Failed to save config: {}", e))
+}
+
 #[tauri::command]
-pub fn cmd_set_completion_notifications(state: tauri::State<AppState>, enabled: bool) {
+pub fn cmd_set_completion_notifications(
+    state: tauri::State<AppState>,
+    enabled: bool,
+) -> Result<(), String> {
     state
         .completion_notifications_enabled
         .store(enabled, Ordering::Relaxed);
+
+    persist_completion_notifications(enabled)?;
+
+    Ok(())
 }
 
 #[tauri::command]
@@ -7027,8 +7062,10 @@ pub fn cmd_set_global_hotkey(
         .global_hotkey_enabled
         .store(enabled, Ordering::Relaxed);
     if let Ok(mut current) = state.global_hotkey_shortcut.lock() {
-        *current = next_shortcut;
+        *current = next_shortcut.clone();
     }
+
+    persist_global_hotkey(enabled, &next_shortcut)?;
 
     Ok(current_hotkey_settings(&state))
 }
@@ -8511,6 +8548,13 @@ pub fn cmd_get_settings() -> serde_json::Value {
             "shortcut_enabled": config.palette.shortcut_enabled,
             "shortcut": config.palette.shortcut,
         },
+        "global_hotkey": {
+            "shortcut_enabled": config.global_hotkey.shortcut_enabled,
+            "shortcut": config.global_hotkey.shortcut,
+        },
+        "notifications": {
+            "completion_enabled": config.notifications.completion_enabled,
+        },
         "identity": {
             "name": config.identity.name,
             "email": config.identity.email,
@@ -9355,10 +9399,12 @@ mod tests {
         ("dictation", "auto_paste"),
         ("dictation", "cleanup_engine"),
         ("dictation", "destination"),
-        // dictation.shortcut_enabled is written directly by cmd_set_shortcut
-        // via `config.dictation.shortcut_enabled = ...` — the cmd_set_setting
-        // arm is vestigial. Keep for symmetry with other shortcut slots.
-        ("dictation", "shortcut_enabled"),
+        // NOTE: ("dictation", "shortcut_enabled") used to live here as a
+        // vestigial arm (cmd_set_shortcut writes the field directly). It now
+        // has a real caller via the central path — the round-trip persistence
+        // test `dictation_shortcut_round_trips_to_config` exercises it — so it
+        // dropped off the allowlist. The arm⇒caller guard's stale-orphan check
+        // enforces this: leaving it here would fail the guard.
         // screen_context.keep_after_summary controls post-summary screenshot
         // retention. Low-traffic; TOML-only is fine.
         ("screen_context", "keep_after_summary"),
@@ -9462,6 +9508,396 @@ mod tests {
              Remove these from the allowlist so the guard catches future \
              regressions on them.",
             stale.join("\n  ")
+        );
+    }
+
+    /// Extract every *statically literal* `(section, key)` pair targeted by a
+    /// `cmd_set_setting` call — both the HTML
+    /// `invoke('cmd_set_setting', { section: 'X', key: 'Y', ... })` shape
+    /// (single- or multi-line) and the Rust
+    /// `cmd_set_setting("X".into(), "Y".into(), ...)` shape.
+    ///
+    /// Calls whose `key` (or `section`) is a non-literal expression — e.g. the
+    /// `desktop_context` wrappers that pass a `key` *variable* — are skipped:
+    /// they can't be resolved statically and are already covered by the
+    /// arm⇒caller wrapper allowlist in `arm_has_caller`.
+    /// Remove top-level `#[cfg(test)] mod ... { ... }` blocks from Rust source.
+    /// Test modules in these files are top-level (their closing `}` sits at
+    /// column 0), so a simple state machine that drops everything from the
+    /// `#[cfg(test)]` attribute through the next column-0 `}` is sufficient.
+    /// Used by the caller⇒arm guard so test scaffolding and the guard's own
+    /// literal anchors aren't mistaken for shipping call sites.
+    fn strip_cfg_test_modules(src: &str) -> String {
+        let mut out = String::with_capacity(src.len());
+        let mut in_test = false;
+        let mut pending_cfg = false;
+        for line in src.lines() {
+            if in_test {
+                if line == "}" {
+                    in_test = false;
+                }
+                out.push('\n');
+                continue;
+            }
+            let trimmed = line.trim();
+            if trimmed == "#[cfg(test)]" {
+                pending_cfg = true;
+                out.push('\n');
+                continue;
+            }
+            if pending_cfg {
+                pending_cfg = false;
+                if trimmed.starts_with("mod ") && trimmed.ends_with('{') {
+                    in_test = true;
+                    out.push('\n');
+                    continue;
+                }
+                // `#[cfg(test)]` on a non-module item (e.g. a single test fn or
+                // use); keep this line, it won't contain a real call site.
+            }
+            out.push_str(line);
+            out.push('\n');
+        }
+        out
+    }
+
+    fn extract_set_setting_callers(haystack: &str) -> Vec<(String, String)> {
+        let mut callers = Vec::new();
+        // Build every anchor at runtime (split literals) so this scanner's own
+        // source — the `anchors` array below — is not parsed as a real call
+        // site when the guard scans this file.
+        let rust_anchor = ["cmd_set_setting", "("].concat();
+        // HTML/JS `invoke(...)` anchors, both quoting styles. The single-quoted
+        // form is the legacy in-tree style; the double-quoted form catches a
+        // future `invoke("cmd_set_setting", { section: "x", key: "y" })`, which
+        // is otherwise invisible to caller⇒arm and would compile, ship, and
+        // silently drop. The object-value parser already handles either quote.
+        let html_anchor_single = ["'", "cmd_set_setting", "'"].concat();
+        let html_anchor_double = ["\"", "cmd_set_setting", "\""].concat();
+        let anchors = [
+            rust_anchor.as_str(),
+            html_anchor_single.as_str(),
+            html_anchor_double.as_str(),
+        ];
+        for anchor in &anchors {
+            let mut cursor = 0;
+            while let Some(offset) = haystack[cursor..].find(anchor) {
+                let abs = cursor + offset;
+                // Skip anchors that sit *inside* a string literal (the char
+                // right before the anchor is a quote), e.g. the `"cmd_set_setting("`
+                // array element in this very function. Those aren't call sites.
+                let preceded_by_quote = abs
+                    .checked_sub(1)
+                    .map(|i| matches!(haystack.as_bytes()[i], b'"' | b'\''))
+                    .unwrap_or(false);
+                if *anchor == rust_anchor.as_str() && preceded_by_quote {
+                    cursor = abs + anchor.len();
+                    continue;
+                }
+                let window_end = (abs + 320).min(haystack.len());
+                let window = &haystack[abs..window_end];
+
+                let pair = if *anchor == rust_anchor.as_str() {
+                    // Rust: cmd_set_setting("section".into(), "key".into(), ..)
+                    // First two quoted string literals after the paren.
+                    let after = &window[anchor.len()..];
+                    extract_first_two_double_quoted(after)
+                } else {
+                    // HTML: invoke('cmd_set_setting', { section: 'X', key: 'Y' })
+                    let section = extract_object_literal_value(window, "section:");
+                    let key = extract_object_literal_value(window, "key:");
+                    match (section, key) {
+                        (Some(s), Some(k)) => Some((s, k)),
+                        _ => None,
+                    }
+                };
+
+                if let Some(pair) = pair {
+                    callers.push(pair);
+                }
+                cursor = abs + anchor.len();
+            }
+        }
+        callers
+    }
+
+    /// Pull the first two `"..."`-quoted string literals out of a Rust slice.
+    fn extract_first_two_double_quoted(s: &str) -> Option<(String, String)> {
+        let (first, rest) = next_double_quoted(s)?;
+        let (second, _) = next_double_quoted(rest)?;
+        Some((first, second))
+    }
+
+    fn next_double_quoted(s: &str) -> Option<(String, &str)> {
+        let start = s.find('"')?;
+        let after = &s[start + 1..];
+        let end = after.find('"')?;
+        Some((after[..end].to_string(), &after[end + 1..]))
+    }
+
+    /// Resolve a `field: 'literal'` (or `field: "literal"`) value in a JS object
+    /// literal window. Returns `None` if the value is a non-literal expression
+    /// (variable / template / call), so dynamic callers are skipped rather than
+    /// mis-parsed.
+    fn extract_object_literal_value(window: &str, field: &str) -> Option<String> {
+        let idx = window.find(field)?;
+        let after = window[idx + field.len()..].trim_start();
+        let mut chars = after.char_indices();
+        let (_, quote) = chars.next()?;
+        if quote != '\'' && quote != '"' {
+            // Non-literal value (e.g. `key,` shorthand or an expression).
+            return None;
+        }
+        let body = &after[quote.len_utf8()..];
+        let end = body.find(quote)?;
+        Some(body[..end].to_string())
+    }
+
+    /// Both `invoke('cmd_set_setting', …)` (single-quoted, legacy in-tree
+    /// style) and `invoke("cmd_set_setting", …)` (double-quoted) call sites are
+    /// visible to `extract_set_setting_callers`. The double-quoted form was a
+    /// blind spot: `every_cmd_set_setting_caller_has_an_arm` would have missed
+    /// a future double-quoted caller to a (section, key) with no arm, letting it
+    /// compile, ship, and silently drop. The fixture anchors are assembled from
+    /// split literals so this test's own source isn't parsed as a call site.
+    #[test]
+    fn extract_set_setting_callers_handles_both_quote_styles() {
+        let invoke = "invoke(";
+        let cmd = "cmd_set_setting";
+        let single = format!(
+            "{}'{}', {{ section: 'bogus_single', key: 'k1' }})",
+            invoke, cmd
+        );
+        let double = format!(
+            "{}\"{}\", {{ section: \"bogus_double\", key: \"k2\" }})",
+            invoke, cmd
+        );
+        let haystack = format!("{}\n{}\n", single, double);
+
+        let callers = extract_set_setting_callers(&haystack);
+        assert!(
+            callers.contains(&("bogus_single".to_string(), "k1".to_string())),
+            "single-quoted caller not detected: {:?}",
+            callers
+        );
+        assert!(
+            callers.contains(&("bogus_double".to_string(), "k2".to_string())),
+            "double-quoted caller not detected (blind spot the anchor fix closes): {:?}",
+            callers
+        );
+    }
+
+    /// CI guard (inverse direction): every `cmd_set_setting` *call site* — HTML
+    /// `invoke` or Rust-internal — must target a `(section, key)` that actually
+    /// has a match arm. This catches the recurring palette-style regression
+    /// where a frontend call uses a section/key with no arm: it compiles,
+    /// ships, and silently drops. `every_cmd_set_setting_arm_has_a_caller`
+    /// proves arm⇒caller; this proves caller⇒arm.
+    #[test]
+    fn every_cmd_set_setting_caller_has_an_arm() {
+        let manifest = env!("CARGO_MANIFEST_DIR");
+        let commands_path = format!("{}/src/commands.rs", manifest);
+        let commands = std::fs::read_to_string(&commands_path).expect("failed to read commands.rs");
+        let arms = extract_set_setting_arms(&commands);
+        assert!(!arms.is_empty(), "found no cmd_set_setting arms");
+        let arm_set: std::collections::HashSet<(String, String)> = arms.into_iter().collect();
+
+        let mut missing: Vec<String> = Vec::new();
+
+        // Rust callers: scan every src/*.rs EXCEPT the test module's own
+        // synthetic literals would otherwise self-match. We strip the match
+        // block from commands.rs (the arms themselves are `("X", "Y") =>`, not
+        // `cmd_set_setting("X", ...)` calls, so they're already ignored by the
+        // anchor — but stripping keeps the window clean) and scan the rest.
+        let rust_root = format!("{}/src", manifest);
+        for path in walk_with_extensions(&rust_root, &["rs"]) {
+            let Ok(contents) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            // Strip test modules first: `#[cfg(test)]` code is scaffolding, not
+            // a shipping call site, and the guard's own parser/assertion-string
+            // literals would otherwise self-match. Then strip the match block in
+            // commands.rs (arm definitions aren't callers).
+            let no_tests = strip_cfg_test_modules(&contents);
+            let filtered = if path.file_name().and_then(|n| n.to_str()) == Some("commands.rs") {
+                strip_set_setting_match_block(&no_tests)
+            } else {
+                no_tests
+            };
+            for (s, k) in extract_set_setting_callers(&filtered) {
+                if !arm_set.contains(&(s.clone(), k.clone())) {
+                    missing.push(format!("Rust {}: (\"{}\", \"{}\")", path.display(), s, k));
+                }
+            }
+        }
+
+        // HTML/JS callers.
+        let html_root = format!("{}/../src", manifest);
+        for path in walk_with_extensions(&html_root, &["html", "js"]) {
+            let Ok(contents) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            for (s, k) in extract_set_setting_callers(&contents) {
+                if !arm_set.contains(&(s.clone(), k.clone())) {
+                    missing.push(format!("HTML {}: (\"{}\", \"{}\")", path.display(), s, k));
+                }
+            }
+        }
+
+        missing.sort();
+        missing.dedup();
+        assert!(
+            missing.is_empty(),
+            "cmd_set_setting call sites target a (section, key) with NO match arm \
+             (would compile, ship, and silently drop):\n  {}\n\n\
+             Add the arm in cmd_set_setting (and the config field), or fix the \
+             caller's section/key.",
+            missing.join("\n  ")
+        );
+    }
+
+    /// Round-trip: `cmd_set_completion_notifications`' persistence step writes
+    /// `notifications.completion_enabled` to config.toml and survives a fresh
+    /// `Config::load()`. Would have caught confirmed drop #2.
+    #[test]
+    fn completion_notifications_round_trips_to_config() {
+        with_temp_home(|_| {
+            // Default is true; flip to false and confirm it lands on disk.
+            persist_completion_notifications(false).unwrap();
+            assert!(
+                !Config::load().notifications.completion_enabled,
+                "completion_enabled=false did not persist"
+            );
+
+            persist_completion_notifications(true).unwrap();
+            assert!(
+                Config::load().notifications.completion_enabled,
+                "completion_enabled=true did not persist"
+            );
+        });
+    }
+
+    /// Round-trip: the Quick-Thought global hotkey persistence step (shared by
+    /// `cmd_set_global_hotkey` and the `quick_thought` slot of
+    /// `cmd_set_shortcut`) writes `global_hotkey.{shortcut_enabled,shortcut}`
+    /// to config.toml. Would have caught confirmed drops #1 and #3.
+    #[test]
+    fn global_hotkey_round_trips_to_config() {
+        with_temp_home(|_| {
+            // Default is disabled with CmdOrCtrl+Shift+M.
+            persist_global_hotkey(true, "CmdOrCtrl+Shift+J").unwrap();
+            let loaded = Config::load();
+            assert!(
+                loaded.global_hotkey.shortcut_enabled,
+                "global_hotkey.shortcut_enabled=true did not persist"
+            );
+            assert_eq!(
+                loaded.global_hotkey.shortcut, "CmdOrCtrl+Shift+J",
+                "global_hotkey.shortcut did not persist"
+            );
+
+            persist_global_hotkey(false, "CmdOrCtrl+Shift+T").unwrap();
+            let loaded = Config::load();
+            assert!(
+                !loaded.global_hotkey.shortcut_enabled,
+                "global_hotkey.shortcut_enabled=false did not persist"
+            );
+            assert_eq!(loaded.global_hotkey.shortcut, "CmdOrCtrl+Shift+T");
+        });
+    }
+
+    /// Round-trip regression coverage: the dictation shortcut written through
+    /// the `cmd_set_setting` central path persists. (`cmd_set_dictation_shortcut`
+    /// and the Dictation slot of `cmd_set_shortcut` write the same fields via
+    /// `Config::load()`→mutate→`save()`; this exercises the on-disk write of
+    /// those fields without a `tauri::AppHandle`.)
+    #[test]
+    fn dictation_shortcut_round_trips_to_config() {
+        with_temp_home(|_| {
+            cmd_set_setting("dictation".into(), "shortcut_enabled".into(), "true".into()).unwrap();
+            cmd_set_setting(
+                "dictation".into(),
+                "shortcut".into(),
+                "CmdOrCtrl+Alt+Space".into(),
+            )
+            .unwrap();
+            let loaded = Config::load();
+            assert!(loaded.dictation.shortcut_enabled);
+            assert_eq!(loaded.dictation.shortcut, "CmdOrCtrl+Alt+Space");
+        });
+    }
+
+    /// Ban the `.ok()`/`let _ =` swallow on `cmd_set_setting`. A discarded
+    /// Result hides an "Unknown setting" error and silently drops the write —
+    /// the exact failure mode behind the palette/live regressions. Require `?`
+    /// or an explicit `if let Err(e) = ... { log }` instead.
+    #[test]
+    fn cmd_set_setting_result_is_never_swallowed() {
+        let manifest = env!("CARGO_MANIFEST_DIR");
+        let rust_root = format!("{}/src", manifest);
+        // Build the banned anchors at runtime (split literals) so this very
+        // test's source — which must mention them to scan for them — does not
+        // self-match. A bare contiguous `cmd_set_setting(` never appears in
+        // this function's body.
+        let call_anchor = ["cmd_set_setting", "("].concat();
+        let discard_let = ["let _ = cmd_set", "_setting"].concat();
+        let ok_tail = [".ok", "()"].concat();
+        let mut offenders: Vec<String> = Vec::new();
+        for path in walk_with_extensions(&rust_root, &["rs"]) {
+            let Ok(contents) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let lines: Vec<&str> = contents.lines().collect();
+            for (lineno, line) in lines.iter().enumerate() {
+                let trimmed = line.trim_start();
+                if trimmed.starts_with("//") {
+                    continue;
+                }
+
+                // Shape A: `let _ = cmd_set_setting(...)`.
+                if line.contains(&discard_let) {
+                    offenders.push(format!("{}:{} {}", path.display(), lineno + 1, trimmed));
+                    continue;
+                }
+
+                // Shape B (inline): `cmd_set_setting(...).ok()` on one line.
+                if line.contains(&call_anchor) && line.contains(&ok_tail) {
+                    offenders.push(format!("{}:{} {}", path.display(), lineno + 1, trimmed));
+                    continue;
+                }
+
+                // Shape C (multi-line tail): a standalone `.ok()` line whose
+                // statement opened with a `cmd_set_setting(` call. Look back a
+                // few lines for the opener, stopping at a statement boundary
+                // (`;` or `{`/`}`) so array literals like
+                // `[cmd_set_setting(...), ...];` (terminated by `;`) don't match.
+                if trimmed.starts_with(&ok_tail) {
+                    for back in 1..=8usize {
+                        let Some(prev_idx) = lineno.checked_sub(back) else {
+                            break;
+                        };
+                        let prev = lines[prev_idx].trim();
+                        if prev.contains(&call_anchor) {
+                            offenders.push(format!(
+                                "{}:{} {}",
+                                path.display(),
+                                prev_idx + 1,
+                                lines[prev_idx].trim_start()
+                            ));
+                            break;
+                        }
+                        // Stop at a statement boundary that isn't the call we want.
+                        if prev.ends_with(';') || prev.ends_with('{') || prev.ends_with('}') {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "cmd_set_setting Result is swallowed (use `?` or `if let Err(e) = ..`):\n  {}",
+            offenders.join("\n  ")
         );
     }
 
@@ -12605,9 +13041,8 @@ pub fn cmd_set_live_shortcut(
         "live_transcript".into(),
         "shortcut_enabled".into(),
         enabled.to_string(),
-    )
-    .ok();
-    cmd_set_setting("live_transcript".into(), "shortcut".into(), next_shortcut).ok();
+    )?;
+    cmd_set_setting("live_transcript".into(), "shortcut".into(), next_shortcut)?;
 
     Ok(cmd_live_shortcut_settings(state))
 }
@@ -12727,7 +13162,18 @@ pub fn cmd_set_palette_shortcut(
                 state
                     .palette_shortcut_enabled
                     .store(false, Ordering::Relaxed);
-                cmd_set_setting("palette".into(), "shortcut_enabled".into(), "false".into()).ok();
+                // We're already returning an error to the user; if persisting
+                // the force-disabled state ALSO fails, log it rather than
+                // swallow (the original registration error is what the user
+                // needs to see, so don't override the return value here).
+                if let Err(persist_err) =
+                    cmd_set_setting("palette".into(), "shortcut_enabled".into(), "false".into())
+                {
+                    eprintln!(
+                        "[palette-shortcut] failed to persist force-disabled state: {}",
+                        persist_err
+                    );
+                }
                 return Err(format!(
                     "Could not register {} and could not restore the previous shortcut. \
                      Palette shortcut is now disabled — set a different binding from \
@@ -12755,9 +13201,8 @@ pub fn cmd_set_palette_shortcut(
         "palette".into(),
         "shortcut_enabled".into(),
         enabled.to_string(),
-    )
-    .ok();
-    cmd_set_setting("palette".into(), "shortcut".into(), next_shortcut).ok();
+    )?;
+    cmd_set_setting("palette".into(), "shortcut".into(), next_shortcut)?;
 
     Ok(cmd_palette_settings(state))
 }
@@ -13491,7 +13936,10 @@ pub fn cmd_set_shortcut(
                     config.dictation.hotkey_enabled = false;
                 }
             }
-            ShortcutSlot::QuickThought => {}
+            ShortcutSlot::QuickThought => {
+                config.global_hotkey.shortcut_enabled = true;
+                config.global_hotkey.shortcut = status.shortcut.clone();
+            }
         }
         config
             .save()
@@ -13522,7 +13970,12 @@ pub fn cmd_set_shortcut(
                     }
                 }
             }
-            ShortcutSlot::QuickThought => {}
+            ShortcutSlot::QuickThought => {
+                config.global_hotkey.shortcut_enabled = false;
+                if !shortcut.is_empty() {
+                    config.global_hotkey.shortcut = shortcut;
+                }
+            }
         }
         config
             .save()

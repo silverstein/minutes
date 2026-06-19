@@ -567,16 +567,26 @@ impl ShortcutManager {
                     message,
                 }
             }
-            None => ShortcutStatus {
-                slot: slot.as_str().into(),
-                enabled: false,
-                pending: false,
-                shortcut: default_shortcut_for_slot(slot).into(),
-                keycode: default_keycode_for_slot(slot),
-                backend: "standard".into(),
-                needs_permission: false,
-                message: "Off.".into(),
-            },
+            None => {
+                // Inactive slot: surface the PERSISTED config shortcut rather
+                // than the compile-time default. Otherwise a disabled slot with
+                // a custom chord reports the default, and toggling it back on
+                // (which echoes the reported shortcut) would clobber the user's
+                // saved chord. `Config::load()` here is cheap and only happens
+                // for inactive slots — not on any per-keystroke hot path.
+                let (shortcut, keycode, backend) =
+                    persisted_shortcut_for_slot(&minutes_core::Config::load(), slot);
+                ShortcutStatus {
+                    slot: slot.as_str().into(),
+                    enabled: false,
+                    pending: false,
+                    shortcut,
+                    keycode,
+                    backend: backend.into(),
+                    needs_permission: false,
+                    message: "Off.".into(),
+                }
+            }
         }
     }
 
@@ -597,10 +607,41 @@ pub fn default_shortcut_for_slot(slot: ShortcutSlot) -> &'static str {
     }
 }
 
-pub fn default_keycode_for_slot(slot: ShortcutSlot) -> i64 {
+/// Resolve the persisted shortcut for a slot from config, for use when the slot
+/// is currently inactive (not registered in the ShortcutManager).
+///
+/// Returns `(shortcut_string, keycode, backend_label)`. This mirrors the
+/// canonical startup-restore mapping in `main.rs`: for dictation the native
+/// keycode variant (CapsLock=57 / fn=63) takes precedence when
+/// `dictation.hotkey_enabled` is set, otherwise the standard chord
+/// (`dictation.shortcut`, keycode -1) is used. Quick Thought reads
+/// `global_hotkey.shortcut` (keycode -1, always standard backend).
+///
+/// Falls back to the compile-time defaults only when a config field is empty,
+/// so a user's saved-but-disabled custom chord is never replaced by the default.
+pub fn persisted_shortcut_for_slot(
+    config: &minutes_core::Config,
+    slot: ShortcutSlot,
+) -> (String, i64, &'static str) {
     match slot {
-        ShortcutSlot::QuickThought => -1,
-        ShortcutSlot::Dictation => -1,
+        ShortcutSlot::Dictation => {
+            if config.dictation.hotkey_enabled {
+                let kc = config.dictation.hotkey_keycode;
+                let label = if kc == 63 { "fn" } else { "CapsLock" };
+                (label.to_string(), kc, "native")
+            } else if !config.dictation.shortcut.is_empty() {
+                (config.dictation.shortcut.clone(), -1, "standard")
+            } else {
+                (default_shortcut_for_slot(slot).to_string(), -1, "standard")
+            }
+        }
+        ShortcutSlot::QuickThought => {
+            if !config.global_hotkey.shortcut.is_empty() {
+                (config.global_hotkey.shortcut.clone(), -1, "standard")
+            } else {
+                (default_shortcut_for_slot(slot).to_string(), -1, "standard")
+            }
+        }
     }
 }
 
@@ -993,6 +1034,78 @@ mod tests {
         // Second press while key is down = ignored
         let action = sm.handle_press();
         assert!(matches!(action, StateMachineAction::None));
+    }
+
+    #[test]
+    fn persisted_shortcut_disabled_slot_reports_custom_not_default() {
+        // A disabled slot with a custom persisted chord must report the custom
+        // chord, not the compile-time default. This is the core round-trip fix:
+        // build_status' inactive branch reads these values.
+        let mut config = minutes_core::Config::default();
+
+        // Quick Thought: custom chord, disabled.
+        config.global_hotkey.shortcut_enabled = false;
+        config.global_hotkey.shortcut = "CmdOrCtrl+Shift+J".into();
+        let (shortcut, keycode, backend) =
+            persisted_shortcut_for_slot(&config, ShortcutSlot::QuickThought);
+        assert_eq!(shortcut, "CmdOrCtrl+Shift+J");
+        assert_ne!(
+            shortcut,
+            default_shortcut_for_slot(ShortcutSlot::QuickThought)
+        );
+        assert_eq!(keycode, -1);
+        assert_eq!(backend, "standard");
+
+        // Dictation, standard chord variant: custom chord, disabled.
+        config.dictation.hotkey_enabled = false;
+        config.dictation.shortcut_enabled = false;
+        config.dictation.shortcut = "CmdOrCtrl+Shift+P".into();
+        let (shortcut, keycode, backend) =
+            persisted_shortcut_for_slot(&config, ShortcutSlot::Dictation);
+        assert_eq!(shortcut, "CmdOrCtrl+Shift+P");
+        assert_ne!(shortcut, default_shortcut_for_slot(ShortcutSlot::Dictation));
+        assert_eq!(keycode, -1);
+        assert_eq!(backend, "standard");
+    }
+
+    #[test]
+    fn persisted_shortcut_dictation_native_keycode_preserved() {
+        // Dictation's native keycode special-casing (CapsLock=57, fn=63) must be
+        // preserved when hotkey_enabled is set, even though the slot is inactive.
+        let mut config = minutes_core::Config::default();
+
+        config.dictation.hotkey_enabled = true;
+        config.dictation.hotkey_keycode = 57; // Caps Lock
+        let (shortcut, keycode, backend) =
+            persisted_shortcut_for_slot(&config, ShortcutSlot::Dictation);
+        assert_eq!(shortcut, "CapsLock");
+        assert_eq!(keycode, 57);
+        assert_eq!(backend, "native");
+
+        config.dictation.hotkey_keycode = 63; // fn
+        let (shortcut, keycode, backend) =
+            persisted_shortcut_for_slot(&config, ShortcutSlot::Dictation);
+        assert_eq!(shortcut, "fn");
+        assert_eq!(keycode, 63);
+        assert_eq!(backend, "native");
+    }
+
+    #[test]
+    fn persisted_shortcut_falls_back_to_default_when_config_empty() {
+        // An empty config field falls back to the compile-time default so we
+        // never report an empty chord.
+        let mut config = minutes_core::Config::default();
+        config.global_hotkey.shortcut = String::new();
+        let (shortcut, _, _) = persisted_shortcut_for_slot(&config, ShortcutSlot::QuickThought);
+        assert_eq!(
+            shortcut,
+            default_shortcut_for_slot(ShortcutSlot::QuickThought)
+        );
+
+        config.dictation.hotkey_enabled = false;
+        config.dictation.shortcut = String::new();
+        let (shortcut, _, _) = persisted_shortcut_for_slot(&config, ShortcutSlot::Dictation);
+        assert_eq!(shortcut, default_shortcut_for_slot(ShortcutSlot::Dictation));
     }
 
     #[test]

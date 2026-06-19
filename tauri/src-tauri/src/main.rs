@@ -1294,10 +1294,15 @@ fn main() {
     let processing_stage = Arc::new(Mutex::new(None));
     let latest_output = Arc::new(Mutex::new(None));
     let activation_progress = commands::load_activation_progress(&startup_config_snapshot);
-    let completion_notifications_enabled = Arc::new(AtomicBool::new(true));
-    let global_hotkey_enabled = Arc::new(AtomicBool::new(false));
-    let global_hotkey_shortcut =
-        Arc::new(Mutex::new(commands::default_hotkey_shortcut().to_string()));
+    let completion_notifications_enabled = Arc::new(AtomicBool::new(
+        startup_config_snapshot.notifications.completion_enabled,
+    ));
+    let global_hotkey_enabled = Arc::new(AtomicBool::new(
+        startup_config_snapshot.global_hotkey.shortcut_enabled,
+    ));
+    let global_hotkey_shortcut = Arc::new(Mutex::new(
+        startup_config_snapshot.global_hotkey.shortcut.clone(),
+    ));
     let dictation_shortcut_enabled = Arc::new(AtomicBool::new(false));
     let dictation_shortcut = Arc::new(Mutex::new(
         startup_config_snapshot.dictation.shortcut.clone(),

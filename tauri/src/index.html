@@ -6925,12 +6925,15 @@
       // Skip entirely if the unified shortcut system is active
       if (typeof unifiedShortcutsActive !== 'undefined' && unifiedShortcutsActive) return;
       try {
+        // config.toml is the source of truth: cmd_global_hotkey_settings
+        // returns AppState, which is seeded from config.global_hotkey at
+        // startup. localStorage is no longer authoritative (the old shadow
+        // store masked the config drop fixed in the settings round-trip
+        // audit); we keep writing it for backward-compat but never read it
+        // as the deciding value.
         const settings = await invoke('cmd_global_hotkey_settings');
-        hotkeyShortcut =
-          localStorage.getItem('minutes.globalHotkeyShortcut') || settings.shortcut || hotkeyShortcut;
-        const storedEnabled = localStorage.getItem('minutes.globalHotkeyEnabled');
-        const desiredEnabled = storedEnabled === null ? !!settings.enabled : storedEnabled === 'true';
-        await syncHotkey(desiredEnabled, hotkeyShortcut);
+        hotkeyShortcut = settings.shortcut || hotkeyShortcut;
+        await syncHotkey(!!settings.enabled, hotkeyShortcut);
       } catch (e) {
         console.error('Load hotkey settings:', e);
         setHotkeyStatus('Global shortcut is unavailable right now.', true);
@@ -8773,8 +8776,13 @@
           document.getElementById('settings-identity-emails').value = (s.identity.emails || []).join(', ');
           document.getElementById('settings-identity-aliases').value = (s.identity.aliases || []).join(', ');
         }
-        // General: sync with existing app state
-        setSettingsToggle('settings-notifications', notifyOnCompletion);
+        // General: notifications come from config (single source of truth);
+        // paint both the settings toggle and the footer toggle / in-memory var
+        // from notifications.completion_enabled, not the cached JS value.
+        const notifyEnabled = s?.notifications?.completion_enabled !== false;
+        setNotificationToggle(notifyEnabled);
+        setSettingsToggle('settings-notifications', notifyEnabled);
+        // Cues are localStorage-only (no config section).
         setSettingsToggle('settings-cues', playCaptureCues);
         // Autostart
         try { const autoOn = await invoke('cmd_get_autostart'); setSettingsToggle('settings-autostart', autoOn); } catch (e) { console.error('autostart check:', e); }
@@ -9950,7 +9958,9 @@
     function updateSlotUI(slot, status) {
       unifiedSlotState[slot] = status;
 
-      // Sync QuickThought state to localStorage for persistence and legacy compat
+      // Mirror QuickThought state to localStorage for legacy compat only.
+      // config.toml (via cmd_set_shortcut → config.global_hotkey) is the
+      // source of truth now; nothing reads this value as authoritative.
       if (slot === 'quick_thought') {
         localStorage.setItem('minutes.globalHotkeyEnabled', status.enabled ? 'true' : 'false');
         if (status.shortcut) localStorage.setItem('minutes.globalHotkeyShortcut', status.shortcut);
@@ -10240,9 +10250,89 @@
     // Flag: set synchronously so loadHotkeySettings() knows to skip
     let unifiedShortcutsActive = true;
 
+    // ── One-time legacy localStorage → config.toml migration ──────────────
+    // Before this change, two settings lived ONLY in localStorage (and the
+    // in-memory AppState seeded from it), never in config.toml:
+    //   • minutes.notifyOnCompletion   → notifications.completion_enabled
+    //   • minutes.globalHotkeyEnabled  → global_hotkey.shortcut_enabled
+    //   • minutes.globalHotkeyShortcut → global_hotkey.shortcut
+    // config.toml is now the single source of truth for both. On the first
+    // launch after this update we copy any pre-existing localStorage value
+    // INTO config, then DELETE the localStorage key so the migration runs
+    // exactly once and the old drift source is gone. Key-removal is the
+    // one-time guard: once removed, getItem() returns null and the block is
+    // a no-op, so a machine that already migrated can never have a stale JS
+    // value clobber config. A separate `minutes.localStorageConfigMigrated`
+    // sentinel is also set as a belt-and-suspenders marker.
+    //
+    // The promise is awaited by the unified-shortcut restore below (and the
+    // notifications init reads config after it resolves) so the migrated
+    // values are on disk BEFORE anything reads cmd_get_settings.
+    const legacyConfigMigrationReady = (async () => {
+      // One-time guard. updateSlotUI('quick_thought', …) re-writes the legacy
+      // hotkey mirror keys on every status update (they're kept as legacy
+      // compat), so key-removal alone is not durable — the sentinel is. Once
+      // set, this whole block short-circuits and config stays authoritative.
+      if (localStorage.getItem('minutes.localStorageConfigMigrated') === '1') return;
+      try {
+        // Notifications: only migrate an explicit stored value. The historical
+        // default was On, so a *missing* key means "user never changed it" →
+        // leave config's own default (completion_enabled = true) authoritative.
+        const storedNotify = localStorage.getItem('minutes.notifyOnCompletion');
+        if (storedNotify !== null) {
+          try {
+            await invoke('cmd_set_completion_notifications', { enabled: storedNotify !== 'false' });
+          } catch (e) {
+            console.error('Migrate notifyOnCompletion → config:', e);
+          }
+          localStorage.removeItem('minutes.notifyOnCompletion');
+        }
+
+        // Quick-Thought global hotkey: migrate the legacy enable+shortcut shadow
+        // into config via the unified ShortcutManager path (cmd_set_shortcut,
+        // slot quick_thought). We deliberately do NOT use cmd_set_global_hotkey
+        // here: that registers the OS chord through the plugin, and the unified
+        // restore below would then register the SAME chord again through the
+        // ShortcutManager → duplicate-registration error. Routing the migration
+        // through cmd_set_shortcut registers exactly once and persists the same
+        // config.global_hotkey.{shortcut_enabled,shortcut} fields, after which
+        // the restore loop's `current.enabled` guard skips the slot.
+        const storedHkEnabled = localStorage.getItem('minutes.globalHotkeyEnabled');
+        const storedHkShortcut = localStorage.getItem('minutes.globalHotkeyShortcut');
+        if (storedHkEnabled !== null || storedHkShortcut !== null) {
+          const enabled = storedHkEnabled === 'true';
+          const shortcut = storedHkShortcut || hotkeyShortcut || 'CmdOrCtrl+Shift+M';
+          // Migrate regardless of enabled state so a custom (but disabled)
+          // chord is preserved in config — the Rust disable arm keeps a
+          // non-empty shortcut. Skip only the pure no-op (disabled with no
+          // custom chord), where config's defaults already match.
+          if (enabled || storedHkShortcut !== null) {
+            try {
+              const status = await invoke('cmd_set_shortcut', {
+                slot: 'quick_thought', enabled, shortcut, keycode: -1,
+              });
+              updateSlotUI('quick_thought', status);
+            } catch (e) {
+              console.error('Migrate globalHotkey → config:', e);
+            }
+          }
+          // Remove BOTH legacy keys so the migration is one-shot. (updateSlotUI
+          // for quick_thought re-writes these as legacy-compat mirrors, so
+          // remove them AFTER the cmd_set_shortcut call above.)
+          localStorage.removeItem('minutes.globalHotkeyEnabled');
+          localStorage.removeItem('minutes.globalHotkeyShortcut');
+        }
+      } finally {
+        localStorage.setItem('minutes.localStorageConfigMigrated', '1');
+      }
+    })();
+
     // Load initial state for all slots
     // Also restore from saved config
     (async () => {
+      // Wait for the one-time migration so config reflects any legacy
+      // localStorage hotkey value before we read it as the source of truth.
+      await legacyConfigMigrationReady;
       const settings = await invoke('cmd_get_settings').catch(() => null);
       for (const slot of UNIFIED_SLOTS) {
         await loadSlotStatus(slot);
@@ -10270,11 +10360,13 @@
           }
 
           if (slot === 'quick_thought') {
-            const storedEnabled = localStorage.getItem('minutes.globalHotkeyEnabled');
-            const storedShortcut = localStorage.getItem('minutes.globalHotkeyShortcut');
-            if (storedEnabled === 'true') {
+            // config.toml is the source of truth (settings.global_hotkey),
+            // mirroring the dictation slot above. The old localStorage shadow
+            // store is no longer read here — it masked the config drop fixed
+            // in the settings round-trip audit.
+            if (settings.global_hotkey?.shortcut_enabled) {
               shouldRestore = true;
-              shortcut = storedShortcut || shortcut;
+              shortcut = settings.global_hotkey.shortcut || shortcut;
               keycode = -1;
             }
           }
@@ -12847,21 +12939,28 @@
     });
 
     // ── Init ──
-    const storedNotify = localStorage.getItem('minutes.notifyOnCompletion');
-    if (storedNotify === 'false') {
-      setNotificationToggle(false);
-    } else {
-      setNotificationToggle(true);
-    }
+    // Notifications: config.toml is the source of truth. Wait for the one-time
+    // localStorage→config migration, then paint the toggle from
+    // notifications.completion_enabled (cmd_get_settings). We no longer read
+    // minutes.notifyOnCompletion here, and we no longer push the JS value into
+    // config on launch — that push was what stomped a config `false` back to
+    // `true` whenever localStorage was absent/stale.
+    (async () => {
+      try {
+        await legacyConfigMigrationReady;
+        const s = await invoke('cmd_get_settings');
+        setNotificationToggle(s?.notifications?.completion_enabled !== false);
+      } catch (e) {
+        console.error('Init notifications from config:', e);
+      }
+    })();
+    // Capture cues are localStorage-only (no config section); unchanged.
     const storedCues = localStorage.getItem('minutes.playCaptureCues');
     if (storedCues === 'false') {
       setCueToggle(false);
     } else {
       setCueToggle(true);
     }
-    invoke('cmd_set_completion_notifications', { enabled: notifyOnCompletion }).catch((e) => {
-      console.error('Init notifications:', e);
-    });
     loadDesktopCapabilities();
     loadHotkeySettings();
     checkSetup();

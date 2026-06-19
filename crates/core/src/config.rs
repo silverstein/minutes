@@ -41,6 +41,60 @@ pub struct Config {
     pub hooks: HooksConfig,
     pub knowledge: KnowledgeConfig,
     pub palette: PaletteConfig,
+    pub global_hotkey: GlobalHotkeyConfig,
+    pub notifications: NotificationsConfig,
+}
+
+/// Quick-Thought global hotkey configuration.
+///
+/// Mirrors the shortcut-bearing sections (`palette`, `live_transcript`):
+/// a `shortcut_enabled` bool plus a `shortcut` chord string. This is the
+/// config-file home for the Quick-Thought hotkey that `cmd_set_global_hotkey`
+/// and the `quick_thought` slot of `cmd_set_shortcut` write to. The AppState
+/// fields `global_hotkey_enabled` / `global_hotkey_shortcut` are seeded from
+/// here at startup (see `main.rs`).
+///
+/// Defaults match the historical startup defaults: disabled, with the first
+/// entry of `HOTKEY_CHOICES` (`CmdOrCtrl+Shift+M`) as the chord. `#[serde(default)]`
+/// keeps `Config::load()` working on older `config.toml` files that predate
+/// this section.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GlobalHotkeyConfig {
+    /// Whether the Quick-Thought global hotkey is enabled.
+    pub shortcut_enabled: bool,
+    /// The hotkey chord string (e.g., "CmdOrCtrl+Shift+M").
+    pub shortcut: String,
+}
+
+impl Default for GlobalHotkeyConfig {
+    fn default() -> Self {
+        Self {
+            shortcut_enabled: false,
+            shortcut: "CmdOrCtrl+Shift+M".into(),
+        }
+    }
+}
+
+/// Notification preferences.
+///
+/// `completion_enabled` controls the system notification fired when a
+/// recording finishes processing. Defaults to `true` to preserve the
+/// historical behavior (AppState previously seeded `AtomicBool::new(true)`).
+/// `#[serde(default)]` keeps old `config.toml` files loading.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct NotificationsConfig {
+    /// Whether the "processing complete" notification is shown.
+    pub completion_enabled: bool,
+}
+
+impl Default for NotificationsConfig {
+    fn default() -> Self {
+        Self {
+            completion_enabled: true,
+        }
+    }
 }
 
 /// Command palette configuration.
@@ -879,6 +933,8 @@ impl Default for Config {
             hooks: HooksConfig::default(),
             knowledge: KnowledgeConfig::default(),
             palette: PaletteConfig::default(),
+            global_hotkey: GlobalHotkeyConfig::default(),
+            notifications: NotificationsConfig::default(),
         }
     }
 }
@@ -1816,6 +1872,44 @@ enabled = true
         let config = Config::default();
         assert!(config.palette.shortcut_enabled);
         assert_eq!(config.palette.shortcut, "CmdOrCtrl+Shift+K");
+    }
+
+    #[test]
+    fn global_hotkey_and_notifications_defaults_match_legacy_startup() {
+        let config = Config::default();
+        // Quick-Thought hotkey: disabled, CmdOrCtrl+Shift+M (HOTKEY_CHOICES[0]).
+        assert!(!config.global_hotkey.shortcut_enabled);
+        assert_eq!(config.global_hotkey.shortcut, "CmdOrCtrl+Shift+M");
+        // Completion notifications default-on, preserving prior behavior.
+        assert!(config.notifications.completion_enabled);
+    }
+
+    #[test]
+    fn old_config_without_new_sections_still_loads() {
+        // An old config.toml that predates [global_hotkey] / [notifications]
+        // must still deserialize (backward compatibility), falling back to the
+        // section defaults via `#[serde(default)]`.
+        let parsed: Config = toml::from_str(
+            "[transcription]\nengine = \"whisper\"\n\n[palette]\nshortcut_enabled = false\nshortcut = \"CmdOrCtrl+Shift+K\"\n",
+        )
+        .expect("old config without new sections must load");
+        assert!(!parsed.global_hotkey.shortcut_enabled);
+        assert_eq!(parsed.global_hotkey.shortcut, "CmdOrCtrl+Shift+M");
+        assert!(parsed.notifications.completion_enabled);
+    }
+
+    #[test]
+    fn new_sections_round_trip_through_toml() {
+        let mut config = Config::default();
+        config.global_hotkey.shortcut_enabled = true;
+        config.global_hotkey.shortcut = "CmdOrCtrl+Shift+J".into();
+        config.notifications.completion_enabled = false;
+
+        let out = toml::to_string(&config).unwrap();
+        let parsed: Config = toml::from_str(&out).unwrap();
+        assert!(parsed.global_hotkey.shortcut_enabled);
+        assert_eq!(parsed.global_hotkey.shortcut, "CmdOrCtrl+Shift+J");
+        assert!(!parsed.notifications.completion_enabled);
     }
 
     #[test]

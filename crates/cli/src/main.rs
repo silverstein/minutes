@@ -5266,11 +5266,14 @@ fn cmd_setup(model: &str, list: bool, diarization: bool) -> Result<()> {
         eprintln!("Speaker diarization:");
         eprintln!("  --diarization   34 MB   (pyannote-rs: segmentation + speaker embedding)");
         eprintln!();
-        eprintln!("Parakeet models (alternative engine, --parakeet):");
-        eprintln!("  tdt-ctc-110m  ~220 MB   (English, fast)");
+        eprintln!("Sherpa engine (recommended for multilingual / SOTA, --sherpa):");
         eprintln!(
-            "  tdt-600m      ~1.2 GB   (multilingual v3, 25 EU languages, best quality, default)"
+            "  parakeet-tdt-0.6b-v3-int8  ~670 MB   (in-process, no Python; `minutes setup --sherpa` downloads + enables it)"
         );
+        eprintln!();
+        eprintln!("Parakeet.cpp models (alternative subprocess engine, --parakeet):");
+        eprintln!("  tdt-ctc-110m  ~220 MB   (English, fast)");
+        eprintln!("  tdt-600m      ~1.2 GB   (multilingual v3, 25 EU languages, best quality)");
         return Ok(());
     }
 
@@ -5743,14 +5746,36 @@ fn cmd_setup_sherpa(config: &Config) -> Result<()> {
         eprintln!("Downloading {file} ...");
         download_file(&format!("{base}/{file}"), &dest)?;
     }
-    if minutes_core::sherpa_engine::model_files_present(&dir) {
-        eprintln!("\nSherpa model ready.");
-        eprintln!("Enable it: build with `--features engine-sherpa`, then set");
-        eprintln!("  transcription.engine = \"sherpa\"  in ~/.config/minutes/config.toml");
-    } else {
+    if !minutes_core::sherpa_engine::model_files_present(&dir) {
         anyhow::bail!(
             "sherpa model install incomplete; some files are missing in {}",
             dir.display()
+        );
+    }
+    eprintln!("\nSherpa model ready.");
+
+    // One-command UX: make sherpa the active engine. Safe to set unconditionally
+    // -- if this binary wasn't built with `--features engine-sherpa`, or the model
+    // ever goes missing, transcription auto-falls-back to whisper (with a warning),
+    // so the recording never breaks.
+    let mut cfg = Config::load();
+    if cfg.transcription.engine != "sherpa" {
+        cfg.transcription.engine = "sherpa".to_string();
+        match cfg.save() {
+            Ok(()) => eprintln!(
+                "Set transcription.engine = \"sherpa\" in {}",
+                Config::config_path().display()
+            ),
+            Err(e) => eprintln!(
+                "(could not write config: {e}). Set transcription.engine = \"sherpa\" manually in {}",
+                Config::config_path().display()
+            ),
+        }
+    }
+    if !cfg!(feature = "engine-sherpa") {
+        eprintln!(
+            "Note: this build lacks the sherpa engine, so transcription falls back to whisper \
+             until you build with `--features engine-sherpa`."
         );
     }
     Ok(())

@@ -330,7 +330,26 @@ fn transcribe_dispatch(
     match config.transcription.engine.as_str() {
         "whisper" => transcribe_whisper_dispatch(audio_path, config, hints),
         "parakeet" => transcribe_parakeet_dispatch(audio_path, config, hints),
-        "sherpa" => transcribe_sherpa_dispatch(audio_path, config, hints),
+        "sherpa" => {
+            // Whisper auto-fallback: sherpa is opt-in and needs its model. If the
+            // engine isn't compiled in, or the model isn't installed, never break
+            // the recording -- fall back to whisper (the bundled default). The
+            // `sherpa_engine` path helpers are always compiled, so this check
+            // works in any build.
+            let model_dir = crate::sherpa_engine::model_dir(config);
+            if cfg!(feature = "engine-sherpa")
+                && crate::sherpa_engine::model_files_present(&model_dir)
+            {
+                transcribe_sherpa_dispatch(audio_path, config, hints)
+            } else {
+                tracing::warn!(
+                    model_dir = %model_dir.display(),
+                    compiled = cfg!(feature = "engine-sherpa"),
+                    "engine = \"sherpa\" selected but unavailable (feature/model); falling back to whisper"
+                );
+                transcribe_whisper_dispatch(audio_path, config, hints)
+            }
+        }
         "apple-speech" => {
             tracing::warn!(
                 "apple-speech is experimental and live-transcript-only today — falling back to whisper for batch/default transcription"

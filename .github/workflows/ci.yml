@@ -98,12 +98,12 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y cmake
 
-      - name: Build core with sherpa engine (macOS/Linux)
+      - name: Build core with sherpa engine (all platforms)
         # Opt-in sherpa-onnx engine (engine-sherpa). sherpa-rs-sys cmake-builds
-        # sherpa-onnx in-process. Validated on macOS + Linux; Windows sherpa
-        # build is a follow-up. Catches engine-gated breakage that otherwise
-        # only surfaces at release, and exercises Linux beyond no-default-features.
-        if: runner.os != 'Windows'
+        # sherpa-onnx in-process. Now exercised on macOS + Linux + Windows so the
+        # cross-platform build is a verified gate for making sherpa the default
+        # (Windows runners ship cmake + MSVC). Catches engine-gated breakage that
+        # otherwise only surfaces at release, and exercises Linux beyond no-default-features.
         run: cargo build -p minutes-core --no-default-features --features engine-sherpa
 
       - name: Build full workspace (macOS only)

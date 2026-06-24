@@ -737,22 +737,42 @@ fn transcribe_sherpa_dispatch(
 ) -> Result<TranscribeResult, TranscribeError> {
     #[cfg(feature = "engine-sherpa")]
     {
-        // Decode-hint biasing for sherpa is a phase-2 follow-up.
+        // Decode-hint biasing for sherpa is a future follow-up.
         let _ = hints;
         let samples = load_audio_samples(audio_path)?;
         if samples.is_empty() {
             return Err(TranscribeError::EmptyAudio);
         }
-        let text = crate::sherpa_engine::transcribe_samples(&samples, config)
+        let transcript = crate::sherpa_engine::transcribe_samples(&samples, config)
             .map_err(TranscribeError::TranscriptionFailed)?;
-        if text.split_whitespace().count() < config.transcription.min_words {
+
+        // Transducer output is coherent (no whisper-style segment repetition), so
+        // like the parakeet path we keep the engine transcript and run the shared
+        // whisper-guard cleanup pipeline for diagnostic stats only.
+        let lines: Vec<String> = transcript.lines().map(str::to_string).collect();
+        let raw_segments = lines.len();
+        let cleanup = run_transcript_cleanup_pipeline(lines);
+        let word_count = transcript.split_whitespace().count();
+        if word_count < config.transcription.min_words {
             return Err(TranscribeError::EmptyTranscript(
                 config.transcription.min_words,
             ));
         }
+        let stats = FilterStats {
+            audio_duration_secs: samples.len() as f64 / 16_000.0,
+            raw_segments,
+            after_no_speech_filter: raw_segments,
+            after_dedup: cleanup.after(TranscriptCleanupStage::DedupSegments),
+            after_interleaved: cleanup.after(TranscriptCleanupStage::DedupInterleaved),
+            after_script_filter: cleanup.after(TranscriptCleanupStage::StripForeignScript),
+            after_noise_markers: cleanup.after(TranscriptCleanupStage::CollapseNoiseMarkers),
+            after_trailing_trim: cleanup.after(TranscriptCleanupStage::TrimTrailingNoise),
+            final_words: word_count,
+            ..Default::default()
+        };
         Ok(TranscribeResult {
-            text,
-            stats: FilterStats::default(),
+            text: transcript,
+            stats,
         })
     }
 

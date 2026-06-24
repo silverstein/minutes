@@ -36,7 +36,8 @@ pub mod screen;
 pub mod search;
 pub mod search_index;
 pub mod sensitive;
-#[cfg(feature = "engine-sherpa")]
+// Always compiled: the path/resolution helpers are pure std/Config so `setup`
+// can install models without the engine. Only `transcribe_samples` is gated.
 pub mod sherpa_engine;
 #[cfg(feature = "streaming-diarize")]
 pub mod streaming_diarize;

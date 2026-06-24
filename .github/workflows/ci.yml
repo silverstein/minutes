@@ -94,6 +94,18 @@ jobs:
         # on non-macOS until release.
         run: cargo build -p minutes-core --no-default-features --features parakeet
 
+      - name: Ensure cmake for sherpa-rs (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y cmake
+
+      - name: Build core with sherpa engine (macOS/Linux)
+        # Opt-in sherpa-onnx engine (engine-sherpa). sherpa-rs-sys cmake-builds
+        # sherpa-onnx in-process. Validated on macOS + Linux; Windows sherpa
+        # build is a follow-up. Catches engine-gated breakage that otherwise
+        # only surfaces at release, and exercises Linux beyond no-default-features.
+        if: runner.os != 'Windows'
+        run: cargo build -p minutes-core --no-default-features --features engine-sherpa
+
       - name: Build full workspace (macOS only)
         if: runner.os == 'macOS'
         run: cargo build --no-default-features

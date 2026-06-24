@@ -1,13 +1,37 @@
 # Sherpa Engine Setup
 
 Minutes supports [sherpa-onnx](https://k2-fsa.github.io/sherpa/onnx/index.html)
-as an opt-in transcription engine. The current Sherpa path runs
-parakeet-tdt-0.6b-v3 through the Rust `sherpa-rs` crate in-process, without
+as the recommended SOTA / multilingual transcription engine. The Sherpa path
+runs parakeet-tdt-0.6b-v3 through the Rust `sherpa-rs` crate in-process, without
 Python and without a separate sidecar binary.
 
-Whisper remains the default engine. Sherpa is compiled only when the
-`engine-sherpa` Cargo feature is enabled, and it is selected at runtime with
-`transcription.engine = "sherpa"`.
+Whisper.cpp remains the **bundled default** (it ships in every build and works
+on every platform with no extra download). Sherpa is **opt-in**: it is compiled
+when the `engine-sherpa` Cargo feature is enabled and selected at runtime with
+`transcription.engine = "sherpa"`. If you select Sherpa on a build/platform that
+does not have it, or before the model is installed, transcription automatically
+falls back to Whisper (with a warning) so a recording never breaks.
+
+## Quick Start (recommended)
+
+```bash
+# Build with the sherpa engine, then download + enable the model in one step:
+cargo build --release -p minutes-cli --features engine-sherpa
+rm -f ~/.local/bin/minutes && cp target/release/minutes ~/.local/bin/minutes
+
+minutes setup --sherpa     # downloads the int8 ONNX model + sets engine = "sherpa"
+```
+
+`minutes setup --sherpa` downloads the four model files (with a size-floor
+integrity check) and writes `transcription.engine = "sherpa"` to your config, so
+no manual edit is needed. If the binary lacks the `engine-sherpa` feature, setup
+still configures the engine and prints a note that transcription falls back to
+Whisper until you rebuild with the feature.
+
+Run `minutes setup --list` to see all engines and recommended models.
+
+The rest of this document covers manual install, configuration overrides, and
+build details.
 
 ## Why Sherpa?
 
@@ -30,15 +54,21 @@ Today, `engine = "sherpa"` is wired as an opt-in offline transcription engine
 behind the `engine-sherpa` feature. The dispatch path loads audio, converts it
 to 16 kHz mono samples, and calls the in-process Sherpa recognizer.
 
-If Sherpa support is not compiled into the current build, selecting
-`engine = "sherpa"` returns an engine-unavailable error for the
-`engine-sherpa` feature. Whisper remains the normal default and fallback
-engine for default builds.
+If Sherpa support is not compiled into the current build, or the model files
+are not yet installed, selecting `engine = "sherpa"` transparently falls back to
+Whisper for that recording and logs a warning (with the resolved model directory
+and whether the feature was compiled in). Whisper is the bundled default and the
+fallback target, so a selected-but-unavailable Sherpa engine never breaks a
+recording.
 
 The Sherpa engine is for transcription. Any "4 speaker" language in related
 notes refers to diarization work, not to the Sherpa transcription model.
 
 ## Install Models
+
+The recommended way is `minutes setup --sherpa` (see Quick Start above), which
+downloads the model and enables the engine in one step. The manual steps below
+are for custom install locations or air-gapped setups.
 
 Sherpa expects the int8 ONNX export from the HuggingFace repository
 `csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8`.
@@ -101,7 +131,9 @@ inherit your shell environment.
 
 ## Configure Minutes
 
-Edit `~/.config/minutes/config.toml`:
+`minutes setup --sherpa` sets `transcription.engine = "sherpa"` for you. To
+configure it by hand (or to point at a custom model directory), edit
+`~/.config/minutes/config.toml`:
 
 ```toml
 [transcription]

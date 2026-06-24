@@ -353,3 +353,44 @@ jobs:
 
       - name: Verify llms.txt and related agent docs are in sync with sources
         run: node scripts/generate_llms_txt.mjs --check
+
+  # Single aggregator gate, intended to be the ONLY required status check in
+  # branch protection. The Rust matrix jobs (test / install / linux_full_build /
+  # desktop_windows) are gated by `needs.changes.outputs.rust == 'true'`, so on a
+  # docs/site/MCP-only PR they are SKIPPED. GitHub treats a required-but-skipped
+  # check as unmet, which left non-Rust PRs permanently BLOCKED (an outside
+  # contributor could not merge them at all; the maintainer had to admin-merge).
+  #
+  # This job depends on every job whose check used to be individually required,
+  # runs with `if: always()`, and fails only if one of them actually FAILED or
+  # was CANCELLED. A `skipped` result (the path filter doing its job) passes the
+  # gate. So: required Rust jobs that ran must be green; required jobs the filter
+  # correctly skipped do not block. Point branch protection at "CI Gate" alone.
+  ci_gate:
+    name: CI Gate
+    needs:
+      - changes
+      - test
+      - install
+      - linux_full_build
+      - desktop_windows
+      - mcp
+      - agents_sync
+      - site_release_consistency
+      - llms_sync
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fail if any required job failed or was cancelled
+        if: >-
+          contains(needs.*.result, 'failure') ||
+          contains(needs.*.result, 'cancelled')
+        run: |
+          echo "Upstream job results: ${{ join(needs.*.result, ', ') }}"
+          echo "A required CI job failed or was cancelled."
+          exit 1
+
+      - name: Report success
+        run: |
+          echo "All required CI jobs passed or were legitimately skipped."
+          echo "Upstream job results: ${{ join(needs.*.result, ', ') }}"

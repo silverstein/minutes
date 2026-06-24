@@ -1,0 +1,22 @@
+[package]
+name = "minutes-diarize-sidecar"
+version = "0.1.0"
+edition = "2021"
+description = "Persistent streaming speaker-diarization sidecar (NVIDIA Sortformer via parakeet-rs/ONNX, no Python). Spoken to over stdin/stdout by the Minutes live path."
+
+[[bin]]
+name = "minutes-diarize-sidecar"
+path = "src/main.rs"
+
+[dependencies]
+parakeet-rs = { version = "0.3.6", features = ["sortformer"] }
+serde_json = "1"
+
+[profile.release]
+opt-level = 3
+
+# Own workspace root: keeps this crate OUT of the Minutes root workspace.
+# A workspace member would force one shared lockfile and re-trigger the
+# ort rc.10/ndarray-0.16 (pyannote-rs) vs rc.12/ndarray-0.17 (parakeet-rs)
+# conflict. Process isolation is the whole point of this sidecar.
+[workspace]

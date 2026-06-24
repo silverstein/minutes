@@ -772,6 +772,10 @@ enum Commands {
         #[arg(long, default_value = "tdt-600m")]
         parakeet_model: String,
 
+        /// Download the sherpa-onnx parakeet-v3 model for the opt-in `engine-sherpa` engine (~670 MB)
+        #[arg(long)]
+        sherpa: bool,
+
         /// Install the bundled 5-meeting fixture corpus for demoing search, graph, and MCP flows
         #[arg(long)]
         demo: bool,
@@ -1687,12 +1691,15 @@ fn main() -> Result<()> {
             diarization,
             parakeet,
             parakeet_model,
+            sherpa,
             demo,
         } => {
             if demo {
                 cmd_setup_demo()
             } else if parakeet {
                 cmd_setup_parakeet(&parakeet_model)
+            } else if sherpa {
+                cmd_setup_sherpa(&config)
             } else {
                 cmd_setup(&model, list, diarization)
             }
@@ -5715,6 +5722,40 @@ fn cmd_setup_parakeet(model: &str) -> Result<()> {
 }
 
 /// Download a file from a URL to a destination path, with progress reporting.
+/// Download the sherpa-onnx parakeet-tdt-0.6b-v3 (int8) model for the opt-in
+/// `engine-sherpa` transcription engine into the resolved model directory.
+fn cmd_setup_sherpa(config: &Config) -> Result<()> {
+    let dir = minutes_core::sherpa_engine::model_dir(config);
+    eprintln!("Installing sherpa-onnx parakeet-tdt-0.6b-v3 (int8) model");
+    eprintln!("  Dir: {}", dir.display());
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| anyhow::anyhow!("failed to create model dir {}: {}", dir.display(), e))?;
+    let base =
+        "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8/resolve/main";
+    for (file, min) in minutes_core::sherpa_engine::MODEL_FILES {
+        let dest = dir.join(file);
+        // Skip only if the file already meets its size floor; re-download
+        // zero-byte / truncated leftovers instead of trusting existence alone.
+        if dest.metadata().map(|m| m.len() >= min).unwrap_or(false) {
+            eprintln!("  {file} already present, skipping");
+            continue;
+        }
+        eprintln!("Downloading {file} ...");
+        download_file(&format!("{base}/{file}"), &dest)?;
+    }
+    if minutes_core::sherpa_engine::model_files_present(&dir) {
+        eprintln!("\nSherpa model ready.");
+        eprintln!("Enable it: build with `--features engine-sherpa`, then set");
+        eprintln!("  transcription.engine = \"sherpa\"  in ~/.config/minutes/config.toml");
+    } else {
+        anyhow::bail!(
+            "sherpa model install incomplete; some files are missing in {}",
+            dir.display()
+        );
+    }
+    Ok(())
+}
+
 fn download_file(url: &str, dest: &std::path::Path) -> Result<()> {
     eprintln!("  From: {}", url);
     eprintln!("  To:   {}", dest.display());

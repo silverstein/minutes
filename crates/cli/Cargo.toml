@@ -20,6 +20,10 @@ default = ["whisper", "diarize"]
 whisper = ["minutes-core/whisper"]
 diarize = ["minutes-core/diarize", "dep:pyannote-rs", "dep:ort", "dep:symphonia"]
 parakeet = ["minutes-core/parakeet"]
+# Opt-in sherpa-onnx + parakeet-v3 transcription engine (off by default).
+# `minutes setup --sherpa` works without this feature (path helpers are ungated);
+# this feature compiles the actual engine so `engine = "sherpa"` transcribes.
+engine-sherpa = ["minutes-core/engine-sherpa"]
 # Streaming Silero VAD via ort. Pulls minutes-core's vad-ort. Also
 # wires the setup-time download for silero-vad-v6.2.0.onnx.
 vad-ort = ["minutes-core/vad-ort", "dep:ort"]

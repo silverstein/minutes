@@ -213,6 +213,10 @@ pub struct TranscriptionConfig {
     pub parakeet_binary: String,
     /// Parakeet model type: "tdt-ctc-110m", "tdt-600m".
     pub parakeet_model: String,
+    /// Directory holding the sherpa-onnx parakeet-v3 model files (encoder/decoder/
+    /// joiner `.onnx` + `tokens.txt`) for the opt-in `engine-sherpa` engine. Empty
+    /// resolves to the default models dir (or the `MINUTES_SHERPA_MODEL_DIR` override).
+    pub sherpa_model_dir: String,
     /// Maximum number of knowledge-graph phrases to pass via `--boost`.
     /// Set to 0 to disable phrase boosting. Default: off until tuned further.
     pub parakeet_boost_limit: usize,
@@ -952,6 +956,7 @@ impl Default for TranscriptionConfig {
             noise_reduction: true,
             parakeet_binary: "parakeet".into(),
             parakeet_model: "tdt-600m".into(),
+            sherpa_model_dir: String::new(),
             parakeet_boost_limit: 0,
             parakeet_boost_score: 2.0,
             parakeet_fp16: true,

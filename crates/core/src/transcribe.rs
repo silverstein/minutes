@@ -330,6 +330,7 @@ fn transcribe_dispatch(
     match config.transcription.engine.as_str() {
         "whisper" => transcribe_whisper_dispatch(audio_path, config, hints),
         "parakeet" => transcribe_parakeet_dispatch(audio_path, config, hints),
+        "sherpa" => transcribe_sherpa_dispatch(audio_path, config, hints),
         "apple-speech" => {
             tracing::warn!(
                 "apple-speech is experimental and live-transcript-only today — falling back to whisper for batch/default transcription"
@@ -724,6 +725,41 @@ fn transcribe_parakeet_dispatch(
     {
         let _ = (audio_path, config, hints);
         Err(TranscribeError::EngineNotAvailable("parakeet".into()))
+    }
+}
+
+/// Dispatch for the opt-in sherpa-onnx engine (parakeet-tdt-0.6b-v3, multilingual).
+/// In-process via `sherpa_engine`; off by default behind `engine-sherpa`.
+fn transcribe_sherpa_dispatch(
+    audio_path: &Path,
+    config: &Config,
+    hints: &DecodeHints,
+) -> Result<TranscribeResult, TranscribeError> {
+    #[cfg(feature = "engine-sherpa")]
+    {
+        // Decode-hint biasing for sherpa is a phase-2 follow-up.
+        let _ = hints;
+        let samples = load_audio_samples(audio_path)?;
+        if samples.is_empty() {
+            return Err(TranscribeError::EmptyAudio);
+        }
+        let text = crate::sherpa_engine::transcribe_samples(&samples, config)
+            .map_err(TranscribeError::TranscriptionFailed)?;
+        if text.split_whitespace().count() < config.transcription.min_words {
+            return Err(TranscribeError::EmptyTranscript(
+                config.transcription.min_words,
+            ));
+        }
+        Ok(TranscribeResult {
+            text,
+            stats: FilterStats::default(),
+        })
+    }
+
+    #[cfg(not(feature = "engine-sherpa"))]
+    {
+        let _ = (audio_path, config, hints);
+        Err(TranscribeError::EngineNotAvailable("engine-sherpa".into()))
     }
 }
 

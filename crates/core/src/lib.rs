@@ -36,6 +36,8 @@ pub mod screen;
 pub mod search;
 pub mod search_index;
 pub mod sensitive;
+#[cfg(feature = "engine-sherpa")]
+pub mod sherpa_engine;
 #[cfg(feature = "streaming-diarize")]
 pub mod streaming_diarize;
 pub mod summarize;

@@ -29,6 +29,11 @@ denoise = ["dep:nnnoiseless"]
 # (recording sidecar) needs streaming audio. ort + ndarray are already
 # pulled in by `diarize`; cargo unifies them when both features are on.
 vad-ort = ["streaming", "dep:ort", "dep:ndarray"]
+# Opt-in SOTA transcription engine: sherpa-onnx + parakeet-tdt-0.6b-v3 (multilingual,
+# no Python), in-process via sherpa-rs. Off by default; whisper.cpp stays the default.
+# Validated to coexist with `diarize`/`vad-ort`'s ort (separate onnxruntime, hidden
+# symbols). No parakeet/ort dep -> no rc.10/rc.12 conflict.
+engine-sherpa = ["dep:sherpa-rs"]
 
 [dependencies]
 serde = { workspace = true }
@@ -45,6 +50,7 @@ cpal = { workspace = true }
 hound = { workspace = true }
 notify = { workspace = true }
 whisper-rs = { workspace = true, optional = true }
+sherpa-rs = { version = "0.6.8", optional = true }
 symphonia = { workspace = true }
 ureq = { workspace = true }
 fs2 = { workspace = true }

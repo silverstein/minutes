@@ -36,6 +36,8 @@ pub mod screen;
 pub mod search;
 pub mod search_index;
 pub mod sensitive;
+#[cfg(feature = "streaming-diarize")]
+pub mod streaming_diarize;
 pub mod summarize;
 pub mod system_audio_backend;
 pub mod template;

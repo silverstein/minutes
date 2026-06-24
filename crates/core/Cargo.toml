@@ -14,6 +14,10 @@ default = ["whisper"]
 whisper = ["dep:whisper-rs", "whisper-guard/whisper"]
 parakeet = []  # subprocess-based, uses tempfile for concurrent safety
 diarize = ["dep:pyannote-rs", "dep:ort", "dep:ndarray"]
+# Live speaker attribution via the external minutes-diarize-sidecar process.
+# Pure subprocess IPC on this side -> intentionally NO parakeet-rs/ort dep, so it
+# never collides with `diarize`'s pyannote-rs (ort rc.10 / ndarray 0.16).
+streaming-diarize = ["streaming"]
 coreml = ["whisper-rs/coreml"]
 cuda = ["whisper-rs/cuda"]
 hipblas = ["whisper-rs/hipblas"]

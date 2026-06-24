@@ -52,7 +52,7 @@ schema version bump. Additive fields do not.
 | `context` | string | Optional free-text notes the user added at record time. |
 | `recorded_by` | string | User identity slug (matches `people[]` if the user is in the corpus). |
 | `capture` | enum | Optional capture policy. `none` means the artifact came from a sensitive meeting with no audio capture. Omitted for normal captured artifacts. |
-| `sensitivity` | enum | Optional sensitivity designation. `restricted` means agents should treat the file as user-authored sensitive meeting material. Omitted means `normal`. |
+| `sensitivity` | enum | Optional sensitivity designation. `restricted` is an enforcement contract: the meeting is excluded by default from agent surfaces (MCP search/tools, the knowledge graph, person profiles, action/decision queries), not just labeled. Omitted means `normal`. See [Restricted meetings](#restricted-meetings-agent-layer-enforcement). |
 | `debrief` | enum | Optional debrief state. `pending` means the saved artifact still needs a written debrief. |
 | `consent` | enum | Optional capture basis: `verbal_all_parties`, `notice_in_invite`, `recorded_disclosed`, `na`, or `unattested`. |
 | `consent_notice` | string | Exact disclosure text used for the recording, when provided or configured. |
@@ -346,6 +346,25 @@ Audio was not captured for this sensitive meeting.
 ## Transcript
 Audio was not captured for this sensitive meeting.
 ```
+
+### Restricted meetings (agent-layer enforcement)
+
+`sensitivity: restricted` is an enforcement contract, not just a label. The
+human-readable markdown file stays on disk untouched, but the meeting is
+excluded **by default** from the agent surfaces that read the corpus:
+
+- MCP tools (list, search, get-by-path, person profiles, open actions,
+  decisions) read through the Minutes SDK reader, which drops restricted
+  meetings unless an explicit override is set.
+- The knowledge graph rebuild skips restricted meetings, so their people,
+  decisions, commitments, and topics never become agent-queryable facts.
+
+The override is explicit and logged: callers pass `includeRestricted: true`
+to the SDK reader functions, which emits a warning to stderr naming the count
+and surface. This keeps "designated sensitive" meaningful at the agent layer
+while leaving the operator's own files fully readable on disk. Agents never
+mutate the `sensitivity` field; it is set by Minutes when the meeting is
+designated.
 
 ---
 

@@ -14,6 +14,9 @@ import {
   humanizeTranscript,
   findOpenActions,
   getPersonProfile,
+  findDecisions,
+  listVoiceMemos,
+  isRestricted,
   type MeetingFile,
 } from "./reader.js";
 
@@ -87,6 +90,37 @@ intents: []
 ---
 
 This happened earlier.
+`;
+
+// A meeting designated restricted (Wave 2 sensitivity enforcement). Carries a
+// searchable title/body, an open action, a decision, and an attendee so the
+// exclusion can be asserted across every agent-facing read surface.
+const RESTRICTED_MEETING = `---
+title: Board Pricing Strategy
+type: meeting
+date: "2026-03-19T16:00:00"
+duration: 25m
+capture: none
+sensitivity: restricted
+tags:
+  - pricing
+attendees:
+  - Alex K.
+people:
+  - alex-k
+action_items:
+  - assignee: mat
+    task: Draft confidential pricing memo
+    due: Monday
+    status: open
+decisions:
+  - text: Hold the secret pricing floor at cost plus ten
+    topic: pricing
+intents: []
+---
+
+## Notes
+- [0:01] Confidential board pricing discussion.
 `;
 
 // ── Helpers ──────────────────────────────────────────────────
@@ -688,5 +722,109 @@ describe("getMeetingWithOverlays", () => {
       { minutesBin: "/nonexistent" }
     );
     expect(out).toBeNull();
+  });
+});
+
+// ── Sensitivity enforcement (restricted meetings) ────────────
+
+describe("sensitivity enforcement", () => {
+  it("isRestricted reflects the sensitivity frontmatter", () => {
+    const restricted = parseFrontmatter(RESTRICTED_MEETING, "r.md");
+    const normal = parseFrontmatter(VALID_MEETING, "v.md");
+    expect(isRestricted(restricted)).toBe(true);
+    expect(isRestricted(normal)).toBe(false);
+  });
+
+  it("listMeetings excludes restricted meetings by default", async () => {
+    writeMeeting("valid.md", VALID_MEETING);
+    writeMeeting("restricted.md", RESTRICTED_MEETING);
+    const meetings = await listMeetings(tempDir, 10);
+    const titles = meetings.map((m) => m.frontmatter.title);
+    expect(titles).toContain("Q2 Pricing Discussion");
+    expect(titles).not.toContain("Board Pricing Strategy");
+  });
+
+  it("listMeetings includes restricted meetings with the explicit override", async () => {
+    writeMeeting("valid.md", VALID_MEETING);
+    writeMeeting("restricted.md", RESTRICTED_MEETING);
+    const meetings = await listMeetings(tempDir, 10, { includeRestricted: true });
+    const titles = meetings.map((m) => m.frontmatter.title);
+    expect(titles).toContain("Board Pricing Strategy");
+  });
+
+  it("searchMeetings does not surface a restricted meeting that matches the query", async () => {
+    writeMeeting("valid.md", VALID_MEETING);
+    writeMeeting("restricted.md", RESTRICTED_MEETING);
+    // Both meetings mention "pricing"; only the non-restricted one is returned.
+    const def = await searchMeetings(tempDir, "pricing", 10);
+    expect(def.map((m) => m.frontmatter.title)).not.toContain(
+      "Board Pricing Strategy"
+    );
+    const overridden = await searchMeetings(tempDir, "pricing", 10, {
+      includeRestricted: true,
+    });
+    expect(overridden.map((m) => m.frontmatter.title)).toContain(
+      "Board Pricing Strategy"
+    );
+  });
+
+  it("getMeeting returns null for a restricted meeting even when given its path", async () => {
+    const path = writeMeeting("restricted.md", RESTRICTED_MEETING);
+    expect(await getMeeting(path)).toBeNull();
+    const overridden = await getMeeting(path, { includeRestricted: true });
+    expect(overridden?.frontmatter.title).toBe("Board Pricing Strategy");
+  });
+
+  it("getMeetingWithOverlays inherits the restricted exclusion", async () => {
+    const path = writeMeeting("restricted.md", RESTRICTED_MEETING);
+    // minutesBin points nowhere, so it falls back to getMeeting(), which excludes.
+    const out = await getMeetingWithOverlays(path, { minutesBin: "/nonexistent" });
+    expect(out).toBeNull();
+  });
+
+  it("findOpenActions skips actions from restricted meetings by default", async () => {
+    writeMeeting("valid.md", VALID_MEETING);
+    writeMeeting("restricted.md", RESTRICTED_MEETING);
+    const def = await findOpenActions(tempDir);
+    expect(def.some((a) => a.item.task === "Draft confidential pricing memo")).toBe(
+      false
+    );
+    const overridden = await findOpenActions(tempDir, undefined, {
+      includeRestricted: true,
+    });
+    expect(
+      overridden.some((a) => a.item.task === "Draft confidential pricing memo")
+    ).toBe(true);
+  });
+
+  it("findDecisions skips decisions from restricted meetings by default", async () => {
+    writeMeeting("valid.md", VALID_MEETING);
+    writeMeeting("restricted.md", RESTRICTED_MEETING);
+    const def = await findDecisions(tempDir, "pricing", 50);
+    expect(
+      def.some((d) => d.decision.text.includes("secret pricing floor"))
+    ).toBe(false);
+    const overridden = await findDecisions(tempDir, "pricing", 50, {
+      includeRestricted: true,
+    });
+    expect(
+      overridden.some((d) => d.decision.text.includes("secret pricing floor"))
+    ).toBe(true);
+  });
+
+  it("getPersonProfile excludes restricted meetings from a person's history by default", async () => {
+    writeMeeting("valid.md", VALID_MEETING);
+    writeMeeting("restricted.md", RESTRICTED_MEETING);
+    // "Alex K." attends both; the restricted one must not appear by default.
+    const def = await getPersonProfile(tempDir, "Alex");
+    expect(def.meetings.map((m) => m.title)).not.toContain(
+      "Board Pricing Strategy"
+    );
+    const overridden = await getPersonProfile(tempDir, "Alex", {
+      includeRestricted: true,
+    });
+    expect(overridden.meetings.map((m) => m.title)).toContain(
+      "Board Pricing Strategy"
+    );
   });
 });

@@ -743,15 +743,32 @@ fn transcribe_sherpa_dispatch(
         if samples.is_empty() {
             return Err(TranscribeError::EmptyAudio);
         }
-        let transcript = crate::sherpa_engine::transcribe_samples(&samples, config)
-            .map_err(TranscribeError::TranscriptionFailed)?;
+        let audio_duration_secs = samples.len() as f64 / 16_000.0;
 
-        // Transducer output is coherent (no whisper-style segment repetition), so
-        // like the parakeet path we keep the engine transcript and run the shared
-        // whisper-guard cleanup pipeline for diagnostic stats only.
-        let lines: Vec<String> = transcript.lines().map(str::to_string).collect();
+        // Windowed segments carry a start time, so we emit `[m:ss] text` lines
+        // (the same shape the parakeet path produces) -- this makes the sherpa
+        // transcript diarization-compatible and renders in the timestamped
+        // transcript format, rather than one untimed blob.
+        let segments = crate::sherpa_engine::transcribe_segments(&samples, config)
+            .map_err(TranscribeError::TranscriptionFailed)?;
+        let lines: Vec<String> = segments
+            .iter()
+            .map(|(start_ms, text)| {
+                let secs = start_ms / 1000;
+                format!("[{}:{:02}] {}", secs / 60, secs % 60, text)
+            })
+            .collect();
         let raw_segments = lines.len();
+
+        // Run the shared whisper-guard cleanup (dedups any window-boundary
+        // repeats); its output lines are the transcript.
         let cleanup = run_transcript_cleanup_pipeline(lines);
+        let transcript = cleanup.lines.join("\n");
+        let transcript = if transcript.is_empty() {
+            transcript
+        } else {
+            format!("{transcript}\n")
+        };
         let word_count = transcript.split_whitespace().count();
         if word_count < config.transcription.min_words {
             return Err(TranscribeError::EmptyTranscript(
@@ -759,7 +776,7 @@ fn transcribe_sherpa_dispatch(
             ));
         }
         let stats = FilterStats {
-            audio_duration_secs: samples.len() as f64 / 16_000.0,
+            audio_duration_secs,
             raw_segments,
             after_no_speech_filter: raw_segments,
             after_dedup: cleanup.after(TranscriptCleanupStage::DedupSegments),

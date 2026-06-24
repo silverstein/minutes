@@ -67,12 +67,18 @@ pub fn model_files_present(dir: &std::path::Path) -> bool {
     })
 }
 
-/// Transcribe 16 kHz mono f32 samples with parakeet-tdt-0.6b-v3 via sherpa-onnx.
-///
-/// Returns the trimmed transcript text, or an error string. The caller
-/// (`transcribe_sherpa_dispatch`) wraps errors into `TranscribeError`.
+/// Window length for batch transcription. Sherpa transducers are fed in ~15 s
+/// windows: this yields utterance-granularity timestamps (sufficient for the
+/// `[SPEAKER_X m:ss]` transcript format + diarization overlap-mapping), keeps
+/// each decode within the length offline transducers handle best (very long
+/// single decodes degrade), and uses ONLY safe high-level sherpa-rs calls -- no
+/// unsafe per-token FFI in the default transcription path. Per-token timestamp
+/// precision is tracked as an upstream sherpa-rs follow-up.
 #[cfg(feature = "engine-sherpa")]
-pub fn transcribe_samples(samples: &[f32], config: &Config) -> Result<String, String> {
+const WINDOW_SAMPLES: usize = 16_000 * 15;
+
+#[cfg(feature = "engine-sherpa")]
+fn build_recognizer(config: &Config) -> Result<TransducerRecognizer, String> {
     let dir = model_dir(config);
     if !model_files_present(&dir) {
         return Err(format!(
@@ -82,7 +88,6 @@ pub fn transcribe_samples(samples: &[f32], config: &Config) -> Result<String, St
         ));
     }
     let path = |file: &str| dir.join(file).to_string_lossy().into_owned();
-
     let cfg = TransducerConfig {
         encoder: path("encoder.int8.onnx"),
         decoder: path("decoder.int8.onnx"),
@@ -97,10 +102,35 @@ pub fn transcribe_samples(samples: &[f32], config: &Config) -> Result<String, St
         debug: false,
         ..Default::default()
     };
+    TransducerRecognizer::new(cfg).map_err(|e| format!("failed to load sherpa model: {e}"))
+}
 
-    let mut recognizer =
-        TransducerRecognizer::new(cfg).map_err(|e| format!("failed to load sherpa model: {e}"))?;
-    Ok(recognizer.transcribe(16_000, samples).trim().to_string())
+/// Transcribe 16 kHz mono f32 in ~15 s windows, returning `(start_ms, text)` for
+/// each non-empty window. The window start time gives a timestamp the pipeline
+/// uses for the `[m:ss]` transcript format and diarization speaker-mapping.
+#[cfg(feature = "engine-sherpa")]
+pub fn transcribe_segments(samples: &[f32], config: &Config) -> Result<Vec<(u64, String)>, String> {
+    let mut recognizer = build_recognizer(config)?;
+    let mut segments = Vec::new();
+    for (i, window) in samples.chunks(WINDOW_SAMPLES).enumerate() {
+        let start_ms = (i * WINDOW_SAMPLES) as u64 * 1000 / 16_000;
+        let text = recognizer.transcribe(16_000, window).trim().to_string();
+        if !text.is_empty() {
+            segments.push((start_ms, text));
+        }
+    }
+    Ok(segments)
+}
+
+/// Text-only transcript (concatenated windows). Back-compat for callers that do
+/// not need timestamps; `transcribe_segments` is preferred for the meeting path.
+#[cfg(feature = "engine-sherpa")]
+pub fn transcribe_samples(samples: &[f32], config: &Config) -> Result<String, String> {
+    Ok(transcribe_segments(samples, config)?
+        .into_iter()
+        .map(|(_, text)| text)
+        .collect::<Vec<_>>()
+        .join(" "))
 }
 
 #[cfg(test)]

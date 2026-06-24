@@ -1,6 +1,6 @@
 use crate::config::Config;
 use crate::diarize::SpeakerAttribution;
-use crate::markdown::{split_frontmatter, ContentType, EntityRef, Frontmatter};
+use crate::markdown::{split_frontmatter, ContentType, EntityRef, Frontmatter, Sensitivity};
 use crate::overlays;
 use crate::person_identity::PersonCanonicalizer;
 use chrono::Local;
@@ -422,6 +422,19 @@ fn rebuild_index_at_with_vocabulary_entities(
                 }
             }
         };
+
+        // Sensitivity enforcement (consent layer Wave 2): a restricted meeting is
+        // excluded from the knowledge graph by default. Its facts (people,
+        // decisions, commitments, topics) must not become agent-queryable just
+        // because the artifact exists on disk — the designation is an enforcement
+        // contract, not a label. The human-readable markdown file is untouched.
+        if matches!(frontmatter.sensitivity, Some(Sensitivity::Restricted)) {
+            tracing::debug!(
+                path = %file_path.display(),
+                "skipping restricted meeting during graph rebuild (sensitivity enforcement)"
+            );
+            continue;
+        }
 
         let content_type_str = match frontmatter.r#type {
             ContentType::Meeting => "meeting",
@@ -1398,6 +1411,51 @@ Skip the wizard. Drop users into a pre-populated demo workspace.
         assert!(stats.people_count >= 2); // Sarah + Alex (from attendees + transcript)
         assert_eq!(stats.meeting_count, 1);
         assert!(stats.commitment_count >= 3); // 1 action_item + 1 intent + 1 decision + transcript patterns
+    }
+
+    #[test]
+    fn rebuild_excludes_restricted_meetings() {
+        let tmp = TempDir::new().unwrap();
+        let meetings = tmp.path().join("meetings");
+        fs::create_dir_all(&meetings).unwrap();
+        write_meeting(&meetings, "q2-planning.md", MEETING_1);
+        // Restricted meeting with a unique attendee + decision. Sensitivity
+        // enforcement must keep ALL of it out of the graph, not just label it.
+        let restricted = r#"---
+title: Confidential Board Session
+type: meeting
+date: 2026-03-23T16:00:00-07:00
+duration: 20m
+capture: none
+sensitivity: restricted
+attendees: [Zelda Secretholder]
+decisions:
+  - text: Hold the undisclosed pricing floor
+    topic: pricing
+---
+
+## Notes
+- [0:01] Confidential board discussion.
+"#;
+        write_meeting(&meetings, "board.md", restricted);
+
+        let config = test_config(&meetings);
+        let db = tmp.path().join("graph.db");
+        let stats = rebuild_index_at(&config, &db).unwrap();
+
+        // Only the non-restricted meeting is indexed.
+        assert_eq!(stats.meeting_count, 1);
+
+        // The restricted meeting's unique attendee never enters the people table.
+        let conn = open_db(&db).unwrap();
+        let leaked: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM people WHERE name LIKE '%Secretholder%'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(leaked, 0, "restricted attendee leaked into the graph");
     }
 
     #[test]

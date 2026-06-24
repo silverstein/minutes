@@ -407,65 +407,144 @@ function sortByDateDesc(meetings: MeetingFile[]): MeetingFile[] {
   });
 }
 
-// ── Public API ───────────────────────────────────────────────
+// ── Sensitivity enforcement ──────────────────────────────────
 
 /**
- * List meetings from a directory, sorted by date descending.
+ * Options shared by the agent-facing read functions.
+ *
+ * Sensitivity is an enforcement contract, not just a label: meetings marked
+ * `sensitivity: restricted` are excluded by default from every agent surface
+ * that reads through this module (MCP search/tools, person profiles, open
+ * actions, decisions). Set `includeRestricted` to override that default; doing
+ * so is explicit and logged (a warning naming the count is written to stderr,
+ * which is the MCP server's log channel).
  */
-export async function listMeetings(
-  dir: string,
-  limit: number = 20
-): Promise<MeetingFile[]> {
-  const files = await findMarkdownFiles(dir);
-  const meetings: MeetingFile[] = [];
+export interface ReadOptions {
+  /** Include `sensitivity: restricted` meetings. Default false. */
+  includeRestricted?: boolean;
+}
 
+/** True when a meeting is marked `sensitivity: restricted`. */
+export function isRestricted(meeting: MeetingFile): boolean {
+  return meeting.frontmatter.sensitivity === "restricted";
+}
+
+/**
+ * Apply the default restricted-meeting exclusion to a parsed collection.
+ *
+ * Without `includeRestricted`, restricted meetings are dropped. With it, they
+ * are kept and the override is logged to stderr (naming the count and the
+ * surface) so the bypass is never silent.
+ */
+function enforceSensitivity<T extends MeetingFile>(
+  meetings: T[],
+  opts: ReadOptions,
+  surface: string
+): T[] {
+  if (opts.includeRestricted) {
+    const restricted = meetings.filter(isRestricted).length;
+    if (restricted > 0) {
+      console.warn(
+        `[minutes] include_restricted override: surfacing ${restricted} restricted meeting(s) via ${surface}`
+      );
+    }
+    return meetings;
+  }
+  return meetings.filter((m) => !isRestricted(m));
+}
+
+/**
+ * Read every file in `files` into a parsed meeting, dropping unreadable ones,
+ * then apply the sensitivity policy. All directory-scanning read functions
+ * route through here so restricted-meeting exclusion cannot be forgotten by a
+ * new caller.
+ */
+async function readMeetings(
+  files: string[],
+  opts: ReadOptions,
+  surface: string
+): Promise<MeetingFile[]> {
+  const meetings: MeetingFile[] = [];
   for (const file of files) {
     const meeting = await readMeetingFile(file);
     if (meeting) meetings.push(meeting);
   }
+  return enforceSensitivity(meetings, opts, surface);
+}
 
+// ── Public API ───────────────────────────────────────────────
+
+/**
+ * List meetings from a directory, sorted by date descending.
+ *
+ * Restricted meetings are excluded by default; pass `{ includeRestricted: true }`
+ * for an explicit, logged override.
+ */
+export async function listMeetings(
+  dir: string,
+  limit: number = 20,
+  opts: ReadOptions = {}
+): Promise<MeetingFile[]> {
+  const files = await findMarkdownFiles(dir);
+  const meetings = await readMeetings(files, opts, "list_meetings");
   return sortByDateDesc(meetings).slice(0, limit);
 }
 
 /**
  * Search meetings by a text query in title and body.
  * Uses String.includes() — no regex, safe from special character crashes.
+ *
+ * Restricted meetings are excluded by default; pass `{ includeRestricted: true }`
+ * for an explicit, logged override.
  */
 export async function searchMeetings(
   dir: string,
   query: string,
-  limit: number = 20
+  limit: number = 20,
+  opts: ReadOptions = {}
 ): Promise<MeetingFile[]> {
   if (!query) return [];
 
   const queryLower = query.toLowerCase();
   const files = await findMarkdownFiles(dir);
-  const results: MeetingFile[] = [];
-
-  for (const file of files) {
-    const meeting = await readMeetingFile(file);
-    if (!meeting) continue;
-
+  const meetings = await readMeetings(files, opts, "search_meetings");
+  const results = meetings.filter((meeting) => {
     const titleMatch = meeting.frontmatter.title
       .toLowerCase()
       .includes(queryLower);
     const bodyMatch = meeting.body.toLowerCase().includes(queryLower);
-
-    if (titleMatch || bodyMatch) {
-      results.push(meeting);
-    }
-  }
+    return titleMatch || bodyMatch;
+  });
 
   return sortByDateDesc(results).slice(0, limit);
 }
 
 /**
  * Get a single meeting by file path.
+ *
+ * A restricted meeting is excluded by default (returns null with a logged
+ * note), even when the caller already knows the path, so a stored path cannot
+ * be used to bypass the policy. Pass `{ includeRestricted: true }` for an
+ * explicit, logged override.
  */
 export async function getMeeting(
-  filePath: string
+  filePath: string,
+  opts: ReadOptions = {}
 ): Promise<MeetingFile | null> {
-  return readMeetingFile(filePath);
+  const meeting = await readMeetingFile(filePath);
+  if (!meeting) return null;
+  if (isRestricted(meeting)) {
+    if (!opts.includeRestricted) {
+      console.warn(
+        `[minutes] get_meeting: ${filePath} is restricted; excluded by default`
+      );
+      return null;
+    }
+    console.warn(
+      `[minutes] include_restricted override: returning restricted meeting ${filePath}`
+    );
+  }
+  return meeting;
 }
 
 /**
@@ -596,9 +675,11 @@ function humanizeOneLine(line: string, highMap: Map<string, string>): string {
  */
 export async function getMeetingWithOverlays(
   filePath: string,
-  options: { minutesBin?: string; timeoutMs?: number } = {}
+  options: { minutesBin?: string; timeoutMs?: number; includeRestricted?: boolean } = {}
 ): Promise<MeetingFile | null> {
-  const fallback = await getMeeting(filePath);
+  const fallback = await getMeeting(filePath, {
+    includeRestricted: options.includeRestricted,
+  });
   if (!fallback) return null;
 
   // Dynamically import child_process so this module still loads in
@@ -659,15 +740,14 @@ export async function getMeetingWithOverlays(
  */
 export async function findOpenActions(
   dir: string,
-  assignee?: string
+  assignee?: string,
+  opts: ReadOptions = {}
 ): Promise<Array<{ path: string; item: ActionItem }>> {
   const files = await findMarkdownFiles(dir);
+  const meetings = await readMeetings(files, opts, "find_open_actions");
   const results: Array<{ path: string; item: ActionItem }> = [];
 
-  for (const file of files) {
-    const meeting = await readMeetingFile(file);
-    if (!meeting) continue;
-
+  for (const meeting of meetings) {
     for (const item of meeting.frontmatter.action_items) {
       if (item.status !== "open") continue;
       if (
@@ -688,7 +768,8 @@ export async function findOpenActions(
  */
 export async function getPersonProfile(
   dir: string,
-  name: string
+  name: string,
+  opts: ReadOptions = {}
 ): Promise<{
   name: string;
   meetings: Array<{ title: string; date: string; path: string }>;
@@ -697,14 +778,12 @@ export async function getPersonProfile(
 }> {
   const nameLower = name.toLowerCase();
   const files = await findMarkdownFiles(dir);
+  const sourceMeetings = await readMeetings(files, opts, "person_profile");
   const meetings: Array<{ title: string; date: string; path: string }> = [];
   const openActions: ActionItem[] = [];
   const topicSet = new Set<string>();
 
-  for (const file of files) {
-    const meeting = await readMeetingFile(file);
-    if (!meeting) continue;
-
+  for (const meeting of sourceMeetings) {
     const attendees = [
       ...meeting.frontmatter.attendees,
       ...parseRawAttendees(meeting.frontmatter.attendees_raw),
@@ -762,13 +841,13 @@ export function defaultDir(): string {
  */
 export async function listVoiceMemos(
   dir: string,
-  options: { days?: number; limit?: number } = {}
+  options: { days?: number; limit?: number; includeRestricted?: boolean } = {}
 ): Promise<MeetingFile[]> {
-  const { days = 14, limit = 20 } = options;
+  const { days = 14, limit = 20, includeRestricted } = options;
   const cutoff = new Date();
   cutoff.setDate(cutoff.getDate() - days);
 
-  const meetings = await listMeetings(dir, 500);
+  const meetings = await listMeetings(dir, 500, { includeRestricted });
   const memos = meetings.filter((m) => {
     if (m.frontmatter.type !== "memo") return false;
     const date = new Date(m.frontmatter.date);
@@ -784,15 +863,14 @@ export async function listVoiceMemos(
 export async function findDecisions(
   dir: string,
   topic?: string,
-  limit: number = 50
+  limit: number = 50,
+  opts: ReadOptions = {}
 ): Promise<Array<{ path: string; title: string; date: string; decision: Decision }>> {
   const files = await findMarkdownFiles(dir);
+  const meetings = await readMeetings(files, opts, "find_decisions");
   const results: Array<{ path: string; title: string; date: string; decision: Decision }> = [];
 
-  for (const file of files) {
-    const meeting = await readMeetingFile(file);
-    if (!meeting) continue;
-
+  for (const meeting of meetings) {
     for (const decision of meeting.frontmatter.decisions) {
       if (topic) {
         const topicLower = topic.toLowerCase();

@@ -200,16 +200,174 @@ const ADDRESS_CUES: &[&str] = &[
 /// the dominant collision risk for short pool names (e.g. `we`->`Wei`,
 /// `all`->`Al`, `them`->`Team`, `go`->`Jo`, `well`->`Will`).
 const STOPWORDS: &[&str] = &[
-    "a", "an", "the", "and", "or", "but", "so", "as", "at", "by", "for", "from", "in", "into",
-    "of", "off", "on", "onto", "to", "too", "up", "down", "out", "over", "under", "with", "via",
-    "per", "vs", "we", "you", "your", "yours", "i", "me", "my", "mine", "he", "him", "his", "she",
-    "her", "hers", "it", "its", "they", "them", "their", "theirs", "this", "that", "these",
-    "those", "here", "there", "then", "than", "is", "am", "are", "was", "were", "be", "been",
-    "being", "do", "did", "does", "done", "has", "had", "have", "will", "would", "can", "could",
-    "should", "may", "might", "must", "shall", "go", "got", "get", "well", "yes", "no", "not",
-    "now", "new", "one", "two", "who", "why", "how", "what", "when", "where", "ok", "okay", "just",
-    "like", "also", "more", "most", "some", "any", "all", "each", "even", "only", "very", "much",
-    "many", "few", "our", "ours", "us", "if", "else", "about", "after", "before", "again",
+    "a",
+    "an",
+    "the",
+    "and",
+    "or",
+    "but",
+    "so",
+    "as",
+    "at",
+    "by",
+    "for",
+    "from",
+    "in",
+    "into",
+    "of",
+    "off",
+    "on",
+    "onto",
+    "to",
+    "too",
+    "up",
+    "down",
+    "out",
+    "over",
+    "under",
+    "with",
+    "via",
+    "per",
+    "vs",
+    "we",
+    "you",
+    "your",
+    "yours",
+    "i",
+    "me",
+    "my",
+    "mine",
+    "he",
+    "him",
+    "his",
+    "she",
+    "her",
+    "hers",
+    "it",
+    "its",
+    "they",
+    "them",
+    "their",
+    "theirs",
+    "this",
+    "that",
+    "these",
+    "those",
+    "here",
+    "there",
+    "then",
+    "than",
+    "is",
+    "am",
+    "are",
+    "was",
+    "were",
+    "be",
+    "been",
+    "being",
+    "do",
+    "did",
+    "does",
+    "done",
+    "has",
+    "had",
+    "have",
+    "will",
+    "would",
+    "can",
+    "could",
+    "should",
+    "may",
+    "might",
+    "must",
+    "shall",
+    "go",
+    "got",
+    "get",
+    "well",
+    "yes",
+    "no",
+    "not",
+    "now",
+    "new",
+    "one",
+    "two",
+    "who",
+    "why",
+    "how",
+    "what",
+    "when",
+    "where",
+    "ok",
+    "okay",
+    "just",
+    "like",
+    "also",
+    "more",
+    "most",
+    "some",
+    "any",
+    "all",
+    "each",
+    "even",
+    "only",
+    "very",
+    "much",
+    "many",
+    "few",
+    "our",
+    "ours",
+    "us",
+    "if",
+    "else",
+    "about",
+    "after",
+    "before",
+    "again",
+    // Collective / role nouns that arrive via multi-word attendee fields ("The
+    // Team", "Product Group") and would otherwise become correction targets.
+    "team",
+    "group",
+    "staff",
+    "board",
+    "crew",
+    "panel",
+    "folks",
+    "everyone",
+    "everybody",
+    "guys",
+    // Days and months: high-frequency words a short edit from many names.
+    "monday",
+    "tuesday",
+    "wednesday",
+    "thursday",
+    "friday",
+    "saturday",
+    "sunday",
+    "january",
+    "february",
+    "march",
+    "april",
+    "june",
+    "july",
+    "august",
+    "september",
+    "october",
+    "november",
+    "december",
+    // Common English words that double as names; too collision-prone to correct
+    // without stronger context (Bill<->Will, June<->Jane, Mark<->Marc, etc.).
+    "mark",
+    "bill",
+    "art",
+    "grace",
+    "hope",
+    "min",
+    "rose",
+    "dawn",
+    "sunny",
+    "drew",
+    "sun",
 ];
 
 /// True when the normalized token is a common word that must never be corrected.
@@ -296,9 +454,10 @@ fn match_token(
                 false
             } else if name_position {
                 // Context confirms a name: a pool name within 2 edits qualifies,
-                // even across a different first letter or short length. ASCII-only
-                // so a non-Latin token is never coerced into a Latin name.
-                tok_norm.is_ascii() && entry.norm.is_ascii() && dist <= 2
+                // even across a different first letter. ASCII-only so a non-Latin
+                // token is never coerced into a Latin name, and a >=3 floor keeps
+                // 2-char tokens (e.g. "Bo"->"Jo") out of the relaxed tier.
+                tok_norm.is_ascii() && entry.norm.is_ascii() && tok_norm.len() >= 3 && dist <= 2
             } else {
                 // No context: require a corroborating signal (same first letter
                 // OR matching Double Metaphone) and a minimum length.
@@ -561,11 +720,18 @@ mod tests {
     }
 
     #[test]
-    fn pool_excludes_common_words_from_attendees() {
-        // "The Team" must contribute "Team" but not "The"; "them" then stays put.
-        let names = build_name_pool(&["The Team".to_string()], None, None);
-        assert!(names.iter().any(|n| n == "Team"));
+    fn pool_keeps_real_names_drops_stopwords() {
+        // Real per-token names survive; stopwords ("The") and collective nouns
+        // ("Team") are dropped from the pool.
+        let names = build_name_pool(
+            &["Sarah Chen".to_string(), "The Team".to_string()],
+            None,
+            None,
+        );
+        assert!(names.iter().any(|n| n == "Sarah"));
+        assert!(names.iter().any(|n| n == "Chen"));
         assert!(!names.iter().any(|n| n.eq_ignore_ascii_case("the")));
+        assert!(!names.iter().any(|n| n.eq_ignore_ascii_case("team")));
         let (out, _) = correct_names("we did this for them today", &names);
         assert_eq!(out, "we did this for them today");
     }
@@ -592,6 +758,33 @@ mod tests {
         // after it is not relaxed-corrected.
         let (out, corr) = correct_names("send this to bob", &pool(&["Rob"]));
         assert_eq!(out, "send this to bob");
+        assert!(corr.is_empty());
+    }
+
+    #[test]
+    fn collective_noun_attendee_does_not_pollute_pool() {
+        // "The Team" must contribute no pool names, so "term will change" stays.
+        let names = build_name_pool(&["The Team".to_string()], None, None);
+        assert!(!names.iter().any(|n| n.eq_ignore_ascii_case("team")));
+        let (out, corr) = correct_names("the term will change", &names);
+        assert_eq!(out, "the term will change");
+        assert!(corr.is_empty());
+    }
+
+    #[test]
+    fn common_word_names_are_left_alone_in_name_position() {
+        // Words that double as names must not be rewritten across the gap.
+        let (out, _) = correct_names("Bill noted the issue", &pool(&["Will"]));
+        assert_eq!(out, "Bill noted the issue");
+        let (out2, _) = correct_names("June said yes", &pool(&["Jane"]));
+        assert_eq!(out2, "June said yes");
+    }
+
+    #[test]
+    fn two_char_token_not_corrected_in_name_position() {
+        // Below the relaxed-tier length floor; "Bo" stays even after a cue.
+        let (out, corr) = correct_names("thanks Bo now", &pool(&["Jo"]));
+        assert_eq!(out, "thanks Bo now");
         assert!(corr.is_empty());
     }
 }

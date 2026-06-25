@@ -421,6 +421,19 @@ pub enum ConsentMode {
 }
 
 /// Post-pass name correction behavior.
+///
+/// `Conservative` corrects transcript name-tokens toward the expected-name pool
+/// (attendees, identity, vocabulary) only on high-confidence, unique matches,
+/// and records the raw token in frontmatter provenance (never a silent rewrite).
+/// Off by default.
+///
+/// Known residual: when a name spoken in the meeting is NOT in the pool but is
+/// within ~2 edits of a pool name and sits in a name slot (e.g. a guest "Brett"
+/// near a pool "Geert"), it can be corrected to the pool name. This is inherent
+/// to fuzzy correction; it is mitigated by being off by default, requiring a
+/// unique match, and preserving the raw token in provenance for review. Default-on
+/// promotion should wait on a stronger signal (speaker attribution / phonetic
+/// agreement).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum NameCorrectionMode {

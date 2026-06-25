@@ -9936,11 +9936,13 @@
     });
 
     // ── In-panel mode toggle (developer mode shortcut in recall header) ──
+    // NOTE: recallDevMode (let) is declared later in the recall section.
+    // Read localStorage directly here to avoid a Temporal Dead Zone crash.
     const recallModeToggleBtn = document.getElementById('btn-recall-mode-toggle');
     if (recallModeToggleBtn) {
-      // Sync initial state with persisted preference.
-      recallModeToggleBtn.classList.toggle('active', recallDevMode);
-      if (recallDevMode) {
+      const _initDevMode = localStorage.getItem('minutes.recallDevMode') === 'true';
+      recallModeToggleBtn.classList.toggle('active', _initDevMode);
+      if (_initDevMode) {
         recallModeToggleBtn.title = 'Switch to chat (native mode)';
       }
       recallModeToggleBtn.addEventListener('click', () => {

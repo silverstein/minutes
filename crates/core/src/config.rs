@@ -429,6 +429,15 @@ pub struct RetentionConfig {
     pub successful_audio_days: u32,
     /// Keep failed/needs-review audio longer so the user can recover it.
     pub failed_audio_days: u32,
+    /// Keep audio for `sensitivity: restricted` meetings for this many days.
+    ///
+    /// Restricted meetings carry sensitive content, so their audio is held on a
+    /// tighter window than the normal `successful_audio_days`. The sensitivity
+    /// tier takes precedence over success/failure classification. An explicit
+    /// `audio_retention: pinned` in frontmatter still wins (operator intent),
+    /// and as with all retention, deletion only happens on `minutes cleanup
+    /// --apply` (or if `auto_cleanup` is enabled); the default is preview-only.
+    pub restricted_audio_days: u32,
     /// Honor `audio_retention: pinned` in meeting frontmatter.
     pub keep_pinned_audio: bool,
     /// Whether future cleanup runners may apply the policy automatically.
@@ -484,6 +493,7 @@ impl Default for RetentionConfig {
         Self {
             successful_audio_days: 30,
             failed_audio_days: 90,
+            restricted_audio_days: 7,
             keep_pinned_audio: true,
             auto_cleanup: false,
             cleanup_on_startup: false,

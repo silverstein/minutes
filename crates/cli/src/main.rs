@@ -2995,8 +2995,10 @@ fn print_storage_summary(plan: &minutes_core::retention::RetentionPlan, config: 
         plan.totals.delete_candidate_files
     );
     println!(
-        "  policy: successful audio {}d, failed/needs-review audio {}d, pinned audio kept",
-        config.retention.successful_audio_days, config.retention.failed_audio_days
+        "  policy: successful audio {}d, failed/needs-review audio {}d, restricted audio {}d, pinned audio kept",
+        config.retention.successful_audio_days,
+        config.retention.failed_audio_days,
+        config.retention.restricted_audio_days
     );
 }
 
@@ -3017,8 +3019,10 @@ fn print_cleanup_summary(report: &CleanupReport, config: &Config) {
         report.plan.totals.delete_candidate_files
     );
     println!(
-        "  policy: successful audio {}d, failed/needs-review audio {}d",
-        config.retention.successful_audio_days, config.retention.failed_audio_days
+        "  policy: successful audio {}d, failed/needs-review audio {}d, restricted audio {}d",
+        config.retention.successful_audio_days,
+        config.retention.failed_audio_days,
+        config.retention.restricted_audio_days
     );
 }
 

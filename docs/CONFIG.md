@@ -177,13 +177,21 @@ unless pinned.
 |---|---|---|
 | `successful_audio_days` | `30` | Days to keep raw audio for successfully processed recordings |
 | `failed_audio_days` | `90` | Days to keep raw audio for failed or needs-review recordings |
+| `restricted_audio_days` | `7` | Days to keep raw audio for `sensitivity: restricted` meetings (tighter window for sensitive content) |
 | `keep_pinned_audio` | `true` | Keep audio when meeting frontmatter has `audio_retention: pinned` |
 | `auto_cleanup` | `false` | Reserved for future automatic cleanup runners; current CLI cleanup requires explicit `--apply` |
 | `cleanup_on_startup` | `false` | Reserved for future startup cleanup |
 | `warn_above_gb` | `2` | Threshold for surfacing raw-audio storage warnings |
 
+`restricted_audio_days` applies to meetings marked `sensitivity: restricted`:
+sensitive content is held on a tighter window than normal recordings, and the
+sensitivity tier takes precedence over the successful/failed classification. An
+explicit `audio_retention: pinned` still wins (operator intent). Set it to `0`
+to make restricted audio delete-eligible the day after recording.
+
 Inspect storage with `minutes storage`. Preview cleanup with `minutes cleanup`;
-delete candidates only with the explicit `minutes cleanup --apply`.
+delete candidates only with the explicit `minutes cleanup --apply`. As with all
+retention, nothing is deleted automatically unless `auto_cleanup` is enabled.
 
 ### `[identity]` — who you are (for attribution)
 

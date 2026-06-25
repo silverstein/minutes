@@ -1,5 +1,5 @@
 use crate::config::Config;
-use crate::markdown::{split_frontmatter, Frontmatter, OutputStatus};
+use crate::markdown::{split_frontmatter, Frontmatter, OutputStatus, Sensitivity};
 use chrono::{DateTime, Local};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -11,6 +11,9 @@ use std::path::{Path, PathBuf};
 pub enum RetentionAudioClass {
     Successful,
     FailedOrNeedsReview,
+    /// Audio belonging to a `sensitivity: restricted` meeting. Held on the
+    /// tighter `restricted_audio_days` window regardless of success/failure.
+    Restricted,
     RuntimeScratch,
 }
 
@@ -90,7 +93,12 @@ fn collect_library_audio(
         };
 
         let pinned = config.retention.keep_pinned_audio && audio_is_pinned(frontmatter_str);
-        let class = if frontmatter.status == Some(OutputStatus::NoSpeech) {
+        // Sensitivity takes precedence over success/failure: a restricted
+        // meeting's audio is held on the tight window even if transcription
+        // succeeded. Explicit pinning still wins below (operator intent).
+        let class = if matches!(frontmatter.sensitivity, Some(Sensitivity::Restricted)) {
+            RetentionAudioClass::Restricted
+        } else if frontmatter.status == Some(OutputStatus::NoSpeech) {
             RetentionAudioClass::FailedOrNeedsReview
         } else {
             RetentionAudioClass::Successful
@@ -102,6 +110,7 @@ fn collect_library_audio(
         let retention_days = match class {
             RetentionAudioClass::Successful => config.retention.successful_audio_days,
             RetentionAudioClass::FailedOrNeedsReview => config.retention.failed_audio_days,
+            RetentionAudioClass::Restricted => config.retention.restricted_audio_days,
             RetentionAudioClass::RuntimeScratch => 0,
         } as i64;
 
@@ -161,6 +170,12 @@ fn library_action_and_reason(
         RetentionAudioClass::FailedOrNeedsReview => {
             format!(
                 "failed/needs-review audio older than {} days",
+                retention_days
+            )
+        }
+        RetentionAudioClass::Restricted => {
+            format!(
+                "restricted (sensitive) audio older than {} days",
                 retention_days
             )
         }
@@ -378,6 +393,71 @@ mod tests {
             );
             assert_eq!(plan.items[0].action, RetentionAction::Keep);
             assert_eq!(plan.items[0].reason, "within 90 day retention window");
+        });
+    }
+
+    #[test]
+    fn restricted_audio_uses_tighter_window_than_successful() {
+        with_temp_home(|tmp| {
+            let mut config = Config {
+                output_dir: tmp.path().join("meetings"),
+                ..Config::default()
+            };
+            config.retention.successful_audio_days = 30;
+            config.retention.restricted_audio_days = 7;
+            fs::create_dir_all(&config.output_dir).unwrap();
+            let md = config.output_dir.join("board.md");
+            // Captured-then-restricted meeting, 10 days old: past the 7-day
+            // restricted window but well within the 30-day successful window.
+            write_meeting(
+                &md,
+                "2026-05-02T09:00:00-07:00",
+                "sensitivity: restricted\n",
+            );
+            fs::write(config.output_dir.join("board.wav"), b"mixed").unwrap();
+
+            let now = Local.with_ymd_and_hms(2026, 5, 12, 9, 0, 0).unwrap();
+            let plan = preview_audio_retention(&config, now);
+
+            assert_eq!(plan.items.len(), 1);
+            assert_eq!(plan.items[0].class, RetentionAudioClass::Restricted);
+            // Sensitivity wins: delete-candidate even though it would be kept as
+            // a normal successful recording at the same age.
+            assert_eq!(plan.items[0].action, RetentionAction::DeleteCandidate);
+            assert_eq!(
+                plan.items[0].reason,
+                "restricted (sensitive) audio older than 7 days"
+            );
+        });
+    }
+
+    #[test]
+    fn pinned_restricted_audio_is_kept() {
+        with_temp_home(|tmp| {
+            let mut config = Config {
+                output_dir: tmp.path().join("meetings"),
+                ..Config::default()
+            };
+            config.retention.restricted_audio_days = 7;
+            fs::create_dir_all(&config.output_dir).unwrap();
+            let md = config.output_dir.join("board-pinned.md");
+            // Explicit pin is operator intent and wins over the restricted window.
+            write_meeting(
+                &md,
+                "2026-05-02T09:00:00-07:00",
+                "sensitivity: restricted\naudio_retention: pinned\n",
+            );
+            fs::write(config.output_dir.join("board-pinned.wav"), b"mixed").unwrap();
+
+            let now = Local.with_ymd_and_hms(2026, 5, 12, 9, 0, 0).unwrap();
+            let plan = preview_audio_retention(&config, now);
+
+            assert_eq!(plan.items.len(), 1);
+            assert_eq!(plan.items[0].action, RetentionAction::Keep);
+            assert_eq!(
+                plan.items[0].reason,
+                "audio retention pinned in frontmatter"
+            );
         });
     }
 

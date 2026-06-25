@@ -21,6 +21,10 @@ pub mod knowledge_extract;
 pub mod logging;
 pub mod macos_permissions;
 pub mod markdown;
+/// Name-accuracy evaluation harness (text-level). Test-only; the measurement
+/// contract for the post-pass name-correction lever (bead minutes-25x3.4).
+#[cfg(test)]
+mod name_eval;
 pub mod notes;
 pub mod overlays;
 pub mod palette;

@@ -103,7 +103,15 @@ pub fn read_clipboard() -> Result<String, String> {
         linux_read_clipboard()
     }
 
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(target_os = "windows")]
+    {
+        arboard::Clipboard::new()
+            .map_err(|error| format!("Could not open clipboard: {error}"))?
+            .get_text()
+            .map_err(|error| format!("Could not read clipboard: {error}"))
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     {
         Err("Clipboard snapshot is not implemented on this platform.".into())
     }
@@ -353,7 +361,15 @@ fn write_clipboard(text: &str) -> Result<(), String> {
         linux_write_clipboard(text)
     }
 
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(target_os = "windows")]
+    {
+        arboard::Clipboard::new()
+            .map_err(|error| format!("Could not open clipboard: {error}"))?
+            .set_text(text)
+            .map_err(|error| format!("Could not write to clipboard: {error}"))
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     {
         let _ = text;
         Err("Clipboard insertion is not implemented on this platform.".into())

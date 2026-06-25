@@ -68,7 +68,12 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          # ImageOS scopes the cache to the runner image family (e.g. macos26
+          # vs macos15). Without it, when `macos-latest` rotated from macOS 15 to
+          # macOS 26 the old target/ cache was restored onto the new image and the
+          # linker pulled `-L .../Xcode_16.4.app/.../clang/17/lib/darwin` (absent on
+          # macOS 26, which ships only Xcode 26.x) -> "clang_rt.osx not found".
+          key: ${{ runner.os }}-${{ env.ImageOS }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Build core (no whisper)
         run: cargo build -p minutes-core --no-default-features
@@ -158,7 +163,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-install-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-${{ env.ImageOS }}-install-${{ hashFiles('**/Cargo.lock') }}
 
       - name: cargo install minutes-cli (no whisper)
         run: cargo install --path crates/cli --no-default-features
@@ -206,7 +211,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cli-fullbuild-debug-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-${{ env.ImageOS }}-cli-fullbuild-debug-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Build CLI debug (whisper + diarize)
         run: cargo build -p minutes-cli
@@ -232,7 +237,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-desktop-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-${{ env.ImageOS }}-desktop-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Clean stale Windows native build cache
         shell: bash
@@ -247,7 +252,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/AppData/Local/dfbin
-          key: ${{ runner.os }}-ort-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-${{ env.ImageOS }}-ort-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Install Tauri CLI
         run: cargo install tauri-cli --version "2.10.1" --locked

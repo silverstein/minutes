@@ -21,6 +21,9 @@ pub mod knowledge_extract;
 pub mod logging;
 pub mod macos_permissions;
 pub mod markdown;
+/// Post-pass name correction (config-gated, off by default): the big lever of
+/// the name-accuracy epic (bead minutes-25x3.4).
+pub mod name_correction;
 /// Name-accuracy evaluation harness (text-level). Test-only; the measurement
 /// contract for the post-pass name-correction lever (bead minutes-25x3.4).
 #[cfg(test)]

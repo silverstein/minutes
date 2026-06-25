@@ -216,6 +216,31 @@ mod tests {
         }
     }
 
+    /// The real post-pass correction (minutes-25x3.4) measured against the
+    /// corpus. The gating invariant is zero false corrections; `recovered` is
+    /// reported and asserted at the level v1 actually achieves.
+    #[test]
+    fn post_pass_correction_recovers_without_false_corrections() {
+        let report = run_harness(|raw, pool| {
+            let pool_vec: Vec<String> = pool.iter().map(|s| (*s).to_string()).collect();
+            crate::name_correction::correct_names(raw, &pool_vec).0
+        });
+        eprintln!("NAME-CORRECTION HARNESS REPORT: {report:?}");
+        assert_eq!(
+            report.false_corrections, 0,
+            "false corrections must be zero: {report:?}"
+        );
+        assert_eq!(report.structural_mismatches, 0, "{report:?}");
+        // With name-position context, all 6 targets are recovered: the
+        // same-first-letter / accent cases plus the harder different-first-letter
+        // (Geert<-Bert, Xiulan<-shulan) and short-token (Thanh<-tan) cases, which
+        // the surrounding syntax (address cues / name-verbs) confirms as names.
+        assert_eq!(
+            report.recovered, 6,
+            "expected to recover all 6 corpus targets: {report:?}"
+        );
+    }
+
     /// A correction that blindly title-cases and swaps any pool name in would
     /// recover names but corrupt negatives. This asserts the scorer actually
     /// catches false corrections (guards the gating metric itself).

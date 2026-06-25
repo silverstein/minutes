@@ -17,14 +17,18 @@
 //!   accent restoration and bounded edit-distance with a corroborating signal
 //!   (same first letter OR matching Double Metaphone) and a minimum length.
 //!   This is the conservative tier that protects common words like `mark`.
-//! - **In name-position** (preceded by an address cue like `thanks`/`to`/`merci`
-//!   or followed by a name-verb like `will`/`owns`): the surrounding syntax
-//!   confirms the token is a person name, so the first-letter / DM / min-length
-//!   gates are relaxed and a unique pool name within 2 edits wins. This is what
-//!   safely recovers the harder different-first-letter (`Geert`<-`bert`) and
-//!   short-token (`Thanh`<-`tan`) cases. The edit-distance budget and
-//!   unique-winner requirement always hold, so a token far from any pool name
-//!   is never touched, in or out of name-position.
+//! - **In name-position** (preceded by an address cue like `thanks`/`merci`, or
+//!   followed by a name-verb like `will`/`owns`) AND the matched name is a
+//!   confirmed meeting participant (an attendee or a High-confidence attributed
+//!   speaker): the first-letter / length gates relax and a unique participant
+//!   within 2 edits wins. This is what safely recovers the harder
+//!   different-first-letter (`Geert`<-`bert`) and short-token (`Thanh`<-`tan`)
+//!   cases. Gating the aggressive tier to participants (speaker-turn context)
+//!   keeps it from rewriting toward names that are merely in the
+//!   vocabulary/graph but not in this meeting.
+//!
+//! The edit-distance budget and unique-winner requirement always hold, so a
+//! token far from any pool name is never touched, in or out of name-position.
 
 use rphonetic::{DoubleMetaphone, Encoder};
 use serde::{Deserialize, Serialize};
@@ -87,6 +91,11 @@ struct PoolEntry {
     norm: String,
     /// Double Metaphone primary code of the surface form.
     dm: String,
+    /// True when this name is a confirmed meeting participant (an attendee or a
+    /// High-confidence attributed speaker). Only participants are eligible for
+    /// the aggressive relaxed (name-position) tier; the conservative tier
+    /// (accent / same-first-letter) accepts any pool name.
+    is_participant: bool,
 }
 
 /// Fold common Latin accented characters to ASCII (Mónica -> monica). Covers
@@ -160,7 +169,10 @@ fn dm_encode(dm: &DoubleMetaphone, s: &str) -> String {
     }
 }
 
-fn build_pool(pool: &[String]) -> Vec<PoolEntry> {
+fn build_pool(
+    pool: &[String],
+    participant_norms: &std::collections::HashSet<String>,
+) -> Vec<PoolEntry> {
     let dm = DoubleMetaphone::default();
     pool.iter()
         .filter_map(|name| {
@@ -174,9 +186,11 @@ fn build_pool(pool: &[String]) -> Vec<PoolEntry> {
             if norm.is_empty() {
                 return None;
             }
+            let is_participant = participant_norms.contains(&norm);
             Some(PoolEntry {
                 surface: surface.to_string(),
                 dm: dm_encode(&dm, surface),
+                is_participant,
                 norm,
             })
         })
@@ -452,20 +466,24 @@ fn match_token(
             let dist = levenshtein(&tok_norm, &entry.norm);
             if dist == 0 {
                 false
-            } else if name_position {
-                // Context confirms a name: a pool name within 2 edits qualifies,
-                // even across a different first letter. ASCII-only so a non-Latin
-                // token is never coerced into a Latin name, and a >=3 floor keeps
-                // 2-char tokens (e.g. "Bo"->"Jo") out of the relaxed tier.
-                tok_norm.is_ascii() && entry.norm.is_ascii() && tok_norm.len() >= 3 && dist <= 2
             } else {
-                // No context: require a corroborating signal (same first letter
-                // OR matching Double Metaphone) and a minimum length.
-                let within = tok_norm.len() >= MIN_MISSPELL_LEN
-                    && dist <= distance_budget(tok_norm.len().max(entry.norm.len()));
+                let ascii = tok_norm.is_ascii() && entry.norm.is_ascii();
+                // Relaxed (aggressive) tier: in a name-position, a confirmed
+                // PARTICIPANT within 2 edits qualifies even across a different
+                // first letter / short length. Gated to participants (attendees +
+                // High-confidence attributed speakers) so it never rewrites toward
+                // a name merely in the vocabulary/graph but not in this meeting.
+                let relaxed =
+                    name_position && entry.is_participant && tok_norm.len() >= 3 && dist <= 2;
+                // Conservative tier (always available, no participant gate):
+                // bounded edit distance with same-first-letter OR Double Metaphone
+                // corroboration and a minimum length.
                 let same_first = tok_norm.as_bytes().first() == entry.norm.as_bytes().first();
                 let dm_match = !tok_dm.is_empty() && tok_dm == entry.dm;
-                tok_norm.is_ascii() && entry.norm.is_ascii() && within && (same_first || dm_match)
+                let conservative = tok_norm.len() >= MIN_MISSPELL_LEN
+                    && dist <= distance_budget(tok_norm.len().max(entry.norm.len()))
+                    && (same_first || dm_match);
+                ascii && (relaxed || conservative)
             }
         };
         if is_candidate {
@@ -485,8 +503,30 @@ fn match_token(
 /// text and the list of applied corrections (raw preserved). Non-word
 /// characters (whitespace, punctuation, the `[SPEAKER m:ss]` prefix) are passed
 /// through verbatim; only whole alphabetic word spans are ever rewritten.
+/// Correct names treating every pool name as a confirmed participant (no
+/// participant-gating). Used by tests and the eval harness; the pipeline uses
+/// [`correct_names_with_participants`] with the real participant set.
 pub fn correct_names(text: &str, pool: &[String]) -> (String, Vec<NameCorrection>) {
-    let entries = build_pool(pool);
+    correct_names_with_participants(text, pool, pool)
+}
+
+/// Correct names, gating the aggressive relaxed (name-position) tier to the
+/// `participants` set (attendees + High-confidence attributed speakers). The
+/// conservative tier (accent / same-first-letter) still uses the full `pool`.
+pub fn correct_names_with_participants(
+    text: &str,
+    pool: &[String],
+    participants: &[String],
+) -> (String, Vec<NameCorrection>) {
+    // Confirmed-participant names (attendees + High-confidence attributed
+    // speakers), normalized, gate the aggressive relaxed tier.
+    let participant_norms: std::collections::HashSet<String> = participants
+        .iter()
+        .flat_map(|p| p.split_whitespace())
+        .map(normalize)
+        .filter(|n| !n.is_empty())
+        .collect();
+    let entries = build_pool(pool, &participant_norms);
     if entries.is_empty() {
         return (text.to_string(), Vec::new());
     }
@@ -786,5 +826,29 @@ mod tests {
         let (out, corr) = correct_names("thanks Bo now", &pool(&["Jo"]));
         assert_eq!(out, "thanks Bo now");
         assert!(corr.is_empty());
+    }
+
+    #[test]
+    fn relaxed_tier_requires_a_confirmed_participant() {
+        // "bert"->Geert is a relaxed (different-first-letter) correction. It is
+        // suppressed when Geert is in the pool but NOT a confirmed participant,
+        // and fires once Geert is a participant.
+        let names = pool(&["Geert"]);
+        let (gated, corr) =
+            correct_names_with_participants("thanks bert for the notes", &names, &[]);
+        assert_eq!(gated, "thanks bert for the notes");
+        assert!(corr.is_empty());
+        let (allowed, _) =
+            correct_names_with_participants("thanks bert for the notes", &names, &names);
+        assert_eq!(allowed, "thanks Geert for the notes");
+    }
+
+    #[test]
+    fn conservative_tier_does_not_require_participant() {
+        // Same-first-letter correction fires even for a non-participant pool name
+        // and even in a name-position (the participant gate is relaxed-tier only).
+        let names = pool(&["Jacques"]);
+        let (out, _) = correct_names_with_participants("merci jacque for joining", &names, &[]);
+        assert_eq!(out, "merci Jacques for joining");
     }
 }

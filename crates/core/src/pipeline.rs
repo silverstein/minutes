@@ -1883,8 +1883,21 @@ where
             Some(&config.identity),
             load_vocabulary_for_decode_hints().as_ref(),
         );
+        // Confirmed participants gate the aggressive (name-position) tier:
+        // attendees plus High-confidence attributed speakers.
+        let mut participants = attendees.clone();
+        participants.extend(
+            speaker_map
+                .iter()
+                .filter(|a| a.confidence == crate::diarize::Confidence::High)
+                .map(|a| a.name.clone()),
+        );
         let (corrected_transcript, corrections) =
-            crate::name_correction::correct_names(&transcript, &name_pool);
+            crate::name_correction::correct_names_with_participants(
+                &transcript,
+                &name_pool,
+                &participants,
+            );
         transcript = corrected_transcript;
         corrections
     } else {
@@ -2466,8 +2479,21 @@ where
             Some(&config.identity),
             load_vocabulary_for_decode_hints().as_ref(),
         );
+        // Confirmed participants gate the aggressive (name-position) tier:
+        // attendees plus High-confidence attributed speakers.
+        let mut participants = attendees.clone();
+        participants.extend(
+            speaker_map
+                .iter()
+                .filter(|a| a.confidence == crate::diarize::Confidence::High)
+                .map(|a| a.name.clone()),
+        );
         let (corrected_transcript, corrections) =
-            crate::name_correction::correct_names(&transcript, &name_pool);
+            crate::name_correction::correct_names_with_participants(
+                &transcript,
+                &name_pool,
+                &participants,
+            );
         transcript = corrected_transcript;
         corrections
     } else {

@@ -4429,7 +4429,7 @@
         </div>
       </div>
       <div class="header-actions">
-        <button class="btn btn-icon" id="btn-settings" title="Settings (⌘,)">⚙</button>
+        <button class="btn btn-icon" id="btn-settings">⚙</button>
         <button class="header-chip readiness" id="btn-readiness">Readiness</button>
         <button class="header-chip" id="btn-jobs">Jobs <span id="jobs-count">0</span></button>
         <button class="header-chip" id="btn-recovery">Recovery <span id="recovery-count">0</span></button>
@@ -5745,6 +5745,22 @@
 
   <script>
     const { invoke } = window.__TAURI__.core;
+
+    // Platform detection — mirrors the data-platform attribute set in the inline
+    // <script> at the top of <head>. Used to swap macOS-specific symbols (⌘, ⌥)
+    // for their Windows/Linux equivalents without touching macOS behaviour.
+    const isMac = document.documentElement.dataset.platform === 'macos';
+
+    // Rewrite shortcut-select option labels to use platform-appropriate key names.
+    // On macOS: "Cmd+Shift+L" / "Cmd+Option+L" (unchanged).
+    // On Windows/Linux: "Ctrl+Shift+L" / "Ctrl+Alt+L".
+    if (!isMac) {
+      document.querySelectorAll('.shortcut-select option').forEach((opt) => {
+        opt.textContent = opt.textContent
+          .replace(/Cmd/g, 'Ctrl')
+          .replace(/Option/g, 'Alt');
+      });
+    }
 
     const statusPill = document.getElementById('status-pill');
     const recordingBar = document.getElementById('recording-bar');
@@ -8774,8 +8790,16 @@
     document.getElementById('btn-settings-close').addEventListener('click', closeSettings);
     settingsOverlay.addEventListener('click', (e) => { if (e.target === settingsOverlay) closeSettings(); });
 
-    // ⌘, keyboard shortcut
-    document.addEventListener('keydown', (e) => { if (e.metaKey && e.key === ',') { e.preventDefault(); openSettings(); } });
+    // Set platform-appropriate tooltip for the settings button.
+    document.getElementById('btn-settings').title = isMac ? 'Settings (⌘,)' : 'Settings (Ctrl+,)';
+
+    // ⌘, / Ctrl+, keyboard shortcut to open settings
+    document.addEventListener('keydown', (e) => {
+      if (isMac ? (e.metaKey && e.key === ',') : (e.ctrlKey && e.key === ',')) {
+        e.preventDefault();
+        openSettings();
+      }
+    });
     // Plain Cmd+K opens the palette when the Minutes window has focus
     // (minutes-s5fb). Skip while typing in inputs; the global Cmd+Shift+K
     // binding is unchanged.
@@ -9973,14 +9997,19 @@
     function shortcutDisplayLabel(shortcut, keycode) {
       if (keycode === 57) return 'Caps Lock';
       if (keycode === 63) return 'fn';
-      // Format "CmdOrCtrl+Shift+Space" as "⌘ Shift Space"
+      if (isMac) {
+        // Format "CmdOrCtrl+Shift+Space" as "⌘ Shift Space"
+        return shortcut
+          .replace(/CmdOrCtrl/g, '\u2318')
+          .replace(/Shift/g, 'Shift')
+          .replace(/Alt/g, 'Option')
+          .replace(/\+/g, ' ');
+      }
+      // Format "CmdOrCtrl+Shift+Space" as "Ctrl+Shift+Space" on Windows/Linux
       return shortcut
-        .replace(/CmdOrCtrl/g, '\u2318')
-        .replace(/Shift/g, 'Shift')
-        .replace(/Alt/g, 'Option')
-        .replace(/\+/g, ' ');
+        .replace(/CmdOrCtrl/g, 'Ctrl')
+        .replace(/\+/g, '+');
     }
-
     function updateSlotUI(slot, status) {
       unifiedSlotState[slot] = status;
 

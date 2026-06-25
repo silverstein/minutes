@@ -427,13 +427,19 @@ pub enum ConsentMode {
 /// and records the raw token in frontmatter provenance (never a silent rewrite).
 /// Off by default.
 ///
+/// The aggressive (different-first-letter / short-token) tier is gated to
+/// confirmed meeting participants (attendees + High-confidence attributed
+/// speakers, i.e. speaker-turn context), so it never rewrites toward a name
+/// that is merely in the vocabulary/graph but not in this meeting. The
+/// conservative tier (accent restoration / same-first-letter) applies to any
+/// pool name.
+///
 /// Known residual: when a name spoken in the meeting is NOT in the pool but is
-/// within ~2 edits of a pool name and sits in a name slot (e.g. a guest "Brett"
-/// near a pool "Geert"), it can be corrected to the pool name. This is inherent
-/// to fuzzy correction; it is mitigated by being off by default, requiring a
-/// unique match, and preserving the raw token in provenance for review. Default-on
-/// promotion should wait on a stronger signal (speaker attribution / phonetic
-/// agreement).
+/// within ~2 edits of a confirmed participant and sits in a name slot (e.g. a
+/// guest "Brett" near attendee "Geert"), it can still be corrected. This is
+/// inherent to fuzzy correction; it is mitigated by being off by default, the
+/// participant gate, requiring a unique match, and preserving the raw token in
+/// provenance. Default-on promotion should wait on a real-audio evaluation.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum NameCorrectionMode {

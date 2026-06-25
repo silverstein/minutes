@@ -8275,6 +8275,68 @@ pub fn spawn_terminal(
     Ok((crate::pty::ASSISTANT_SESSION_ID.into(), title))
 }
 
+/// Spawn `claude --output-format stream-json --no-interactive -p <message>` in
+/// the assistant workspace and stream the structured JSON chunks back to the
+/// frontend via `recall-chat-chunk` / `recall-chat-done` events.
+///
+/// This is the backend for the native Recall chat panel (dev-mode OFF). The
+/// existing PTY / xterm.js path is unchanged and still used when dev-mode is ON.
+#[tauri::command]
+pub async fn cmd_recall_chat_send(app: tauri::AppHandle, message: String) -> Result<(), String> {
+    use std::io::{BufRead, BufReader};
+    use std::process::{Command, Stdio};
+
+    let workspace = crate::context::workspace_dir();
+
+    let claude_bin = which::which("claude").map_err(|_| {
+        "claude not found on PATH; install Claude Code to enable native chat".to_string()
+    })?;
+
+    let mut child = Command::new(&claude_bin)
+        .args([
+            "--output-format",
+            "stream-json",
+            "--no-interactive",
+            "-p",
+            message.as_str(),
+        ])
+        .current_dir(&workspace)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| format!("Failed to spawn claude: {}", e))?;
+
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "No stdout handle from claude process".to_string())?;
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let reader = BufReader::new(stdout);
+        for line_result in reader.lines() {
+            match line_result {
+                Ok(line) if !line.trim().is_empty() => {
+                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&line) {
+                        app.emit_to("main", "recall-chat-chunk", json).ok();
+                    }
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    eprintln!("[recall-chat] stdout read error: {}", e);
+                    break;
+                }
+            }
+        }
+        app.emit_to("main", "recall-chat-done", ()).ok();
+        // Reap the child to avoid leaving a zombie on Unix.
+        let _ = child.wait();
+    })
+    .await
+    .map_err(|e| format!("Recall chat streaming task failed: {}", e))?;
+
+    Ok(())
+}
+
 #[tauri::command]
 pub fn cmd_spawn_terminal(
     app: tauri::AppHandle,

@@ -2505,6 +2505,7 @@ fn main() {
             cmd_show_main_window,
             cmd_apply_recall_window_layout,
             commands::cmd_upcoming_meetings,
+            commands::cmd_recall_chat_send,
             commands::cmd_spawn_terminal,
             commands::cmd_pty_input,
             commands::cmd_pty_resize,

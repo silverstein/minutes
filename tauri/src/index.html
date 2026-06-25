@@ -525,6 +525,91 @@
       transition: opacity 200ms ease;
     }
 
+    /* ── Recall native chat panel (dev-mode OFF) ── */
+    .recall-chat-container {
+      display: flex;
+      flex-direction: column;
+      flex: 1;
+      overflow: hidden;
+    }
+
+    .chat-messages {
+      flex: 1;
+      overflow-y: auto;
+      padding: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .chat-bubble {
+      font-family: 'Geist Mono', 'SF Mono', Menlo, monospace;
+      font-size: 12px;
+      line-height: 1.5;
+      max-width: 88%;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    .chat-bubble-user {
+      align-self: flex-end;
+      background: var(--bg-elevated);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 6px 10px;
+      color: var(--fg);
+    }
+
+    .chat-bubble-assistant {
+      align-self: flex-start;
+      color: var(--fg);
+      padding: 2px 0;
+    }
+
+    .chat-bubble-assistant.streaming::after {
+      content: '\25ae';
+      margin-left: 2px;
+      animation: recall-blink 1s step-end infinite;
+    }
+
+    @keyframes recall-blink {
+      50% { opacity: 0; }
+    }
+
+    .chat-input-row {
+      display: flex;
+      gap: 8px;
+      padding: 10px 12px;
+      border-top: 1px solid var(--border);
+      flex-shrink: 0;
+    }
+
+    .chat-input-row textarea {
+      flex: 1;
+      resize: none;
+      font-family: 'Geist Mono', 'SF Mono', Menlo, monospace;
+      font-size: 12px;
+      padding: 6px 10px;
+      background: var(--bg-elevated);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      color: var(--fg);
+      outline: none;
+      line-height: 1.4;
+    }
+
+    .chat-input-row textarea:focus {
+      border-color: var(--border-mid);
+    }
+
+    .chat-input-row textarea::placeholder {
+      opacity: 0.5;
+    }
+
+    .chat-input-row .btn {
+      align-self: flex-end;
+    }
+
     /* Quick note inside recall panel during recording */
     .recall-note {
       display: none;
@@ -4731,6 +4816,14 @@
       <pre id="recall-weekly-content">Loading weekly summary…</pre>
     </div>
     <div class="recall-terminal hidden" id="recall-terminal-container"></div>
+    <!-- Recall native chat panel — shown when developer mode is OFF -->
+    <div class="recall-chat-container" id="recall-chat-panel" style="display:none;">
+      <div class="chat-messages" id="recall-chat-messages"></div>
+      <div class="chat-input-row">
+        <textarea id="recall-chat-input" placeholder="Ask about this meeting…" rows="2"></textarea>
+        <button class="btn btn-secondary btn-sm" id="recall-chat-send">Send</button>
+      </div>
+    </div>
     <div class="recall-exit-banner" id="recall-exit-banner">
       Session ended.
       <button class="btn btn-secondary btn-sm" id="btn-recall-restart">Restart</button>
@@ -5558,6 +5651,11 @@
             <div class="about-controls-meta" id="settings-agent-args-help"></div>
           </div>
         </div>
+        <div class="about-controls">
+          <div class="about-controls-copy">Developer mode (terminal)</div>
+          <button class="btn btn-secondary btn-sm toggle-btn" id="settings-recall-dev-mode">Off</button>
+        </div>
+        <div class="about-controls-meta settings-compact-meta">Off: native chat bubbles — On: embedded terminal for power users</div>
       </div>
 
       <!-- Storage -->
@@ -8994,6 +9092,8 @@
             : 'The agent will ask before running tools like file edits and shell commands.';
           updateAssistantAgentUi(s.assistant.agent, extraArgs);
         } catch (e) { console.error('agent flags:', e); }
+        // Recall developer mode toggle (localStorage-only, not in config)
+        setSettingsToggle('settings-recall-dev-mode', recallDevMode);
         // Call detection settings
         if (s.call_detection) {
           setSettingsToggle('settings-call-detection', s.call_detection.enabled);
@@ -9788,6 +9888,16 @@
       await saveAgentArgs();
     });
     document.getElementById('settings-agent-args').addEventListener('change', () => saveAgentArgs());
+
+    document.getElementById('settings-recall-dev-mode').addEventListener('click', () => {
+      const btn = document.getElementById('settings-recall-dev-mode');
+      const next = btn.textContent.trim() !== 'On';
+      recallDevMode = next;
+      localStorage.setItem('minutes.recallDevMode', String(next));
+      setSettingsToggle('settings-recall-dev-mode', next);
+      // Apply the new mode immediately if the panel is currently open.
+      if (recallExpanded) applyRecallMode();
+    });
 
     // Call detection settings handlers
     document.getElementById('settings-call-detection').addEventListener('click', async () => {
@@ -10629,6 +10739,16 @@
     let recallThemeHandler = null;
     let expandAnimating = false;
 
+    // ── Recall native chat state ──
+    // Persisted in localStorage so it survives app restarts.
+    let recallDevMode = localStorage.getItem('minutes.recallDevMode') === 'true';
+    const recallChatPanel = document.getElementById('recall-chat-panel');
+    const recallChatMessages = document.getElementById('recall-chat-messages');
+    const recallChatInput = document.getElementById('recall-chat-input');
+    const recallChatSendBtn = document.getElementById('recall-chat-send');
+    let currentAssistantBubble = null;
+    let chatListenersRegistered = false;
+
     // ── Draggable split handle ──
     function clampRecallRatio(ratio) {
       return Math.min(MAX_RECALL_RATIO, Math.max(MIN_RECALL_RATIO, ratio));
@@ -10800,6 +10920,101 @@
       });
     }
 
+    // ── Recall native chat (dev-mode OFF) ──
+
+    /// Apply the current mode to the recall panel contents.
+    /// In dev-mode (terminal): hide chat panel (terminal visibility managed elsewhere).
+    /// In chat mode: hide terminal container, show chat panel.
+    function applyRecallMode() {
+      if (recallDevMode) {
+        if (recallChatPanel) recallChatPanel.style.display = 'none';
+      } else {
+        recallTerminalContainer.classList.add('hidden');
+        if (recallChatPanel) recallChatPanel.style.display = 'flex';
+        recallLoading.classList.remove('active');
+      }
+    }
+
+    /// Register one-time Tauri event listeners for recall-chat-chunk and recall-chat-done.
+    async function registerChatListeners() {
+      if (chatListenersRegistered) return;
+      chatListenersRegistered = true;
+
+      await currentWindow.listen('recall-chat-chunk', (event) => {
+        const chunk = event.payload;
+        // Claude --output-format stream-json emits assistant turns as:
+        // { type: "assistant", message: { content: [{ type: "text", text: "..." }] } }
+        let text = '';
+        if (chunk && chunk.type === 'assistant' && chunk.message && chunk.message.content) {
+          for (const part of chunk.message.content) {
+            if (part.type === 'text') text += part.text;
+          }
+        }
+        if (text && currentAssistantBubble) {
+          currentAssistantBubble.textContent += text;
+          if (recallChatMessages) recallChatMessages.scrollTop = recallChatMessages.scrollHeight;
+        }
+      });
+
+      await currentWindow.listen('recall-chat-done', () => {
+        if (currentAssistantBubble) {
+          currentAssistantBubble.classList.remove('streaming');
+          currentAssistantBubble = null;
+        }
+        if (recallChatSendBtn) recallChatSendBtn.disabled = false;
+        if (recallChatInput) {
+          recallChatInput.disabled = false;
+          recallChatInput.focus();
+        }
+      });
+    }
+
+    async function sendRecallChat() {
+      if (!recallChatInput || !recallChatMessages) return;
+      const text = recallChatInput.value.trim();
+      if (!text) return;
+
+      // Append user bubble
+      const userBubble = document.createElement('div');
+      userBubble.className = 'chat-bubble chat-bubble-user';
+      userBubble.textContent = text;
+      recallChatMessages.appendChild(userBubble);
+
+      // Append empty assistant bubble (filled by streaming chunks)
+      currentAssistantBubble = document.createElement('div');
+      currentAssistantBubble.className = 'chat-bubble chat-bubble-assistant streaming';
+      recallChatMessages.appendChild(currentAssistantBubble);
+      recallChatMessages.scrollTop = recallChatMessages.scrollHeight;
+
+      recallChatInput.value = '';
+      recallChatInput.disabled = true;
+      if (recallChatSendBtn) recallChatSendBtn.disabled = true;
+
+      try {
+        await invoke('cmd_recall_chat_send', { message: text });
+      } catch (e) {
+        if (currentAssistantBubble) {
+          currentAssistantBubble.classList.remove('streaming');
+          currentAssistantBubble.textContent = 'Error: ' + String(e);
+          currentAssistantBubble = null;
+        }
+        if (recallChatSendBtn) recallChatSendBtn.disabled = false;
+        if (recallChatInput) recallChatInput.disabled = false;
+      }
+    }
+
+    if (recallChatSendBtn) {
+      recallChatSendBtn.addEventListener('click', sendRecallChat);
+    }
+    if (recallChatInput) {
+      recallChatInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && !e.shiftKey) {
+          e.preventDefault();
+          sendRecallChat();
+        }
+      });
+    }
+
     // ── Expand / collapse with window resize ──
     function applyRecallWindowLayout(width, options = {}) {
       // Windows: skip OS resize — the flex layout reflows correctly without it,
@@ -10837,13 +11052,17 @@
       localStorage.setItem('minutes.recallExpanded', 'true');
       persistRecallWorkspaceState({ recallExpanded: true });
 
-      initRecallTerminal();
-      await registerPtyListeners();
-
-      setTimeout(() => {
-        if (recallFitAddon) recallFitAddon.fit();
-        if (recallTerminal) recallTerminal.focus();
-      }, 260);
+      if (recallDevMode) {
+        initRecallTerminal();
+        await registerPtyListeners();
+        setTimeout(() => {
+          if (recallFitAddon) recallFitAddon.fit();
+          if (recallTerminal) recallTerminal.focus();
+        }, 260);
+      } else {
+        applyRecallMode();
+        await registerChatListeners();
+      }
     }
 
     async function collapseRecallPanel() {
@@ -10884,6 +11103,16 @@
 
       await expandRecallPanel();
 
+      if (!recallDevMode) {
+        // Native chat mode: apply layout and register listeners.
+        // expandRecallPanel already called applyRecallMode() + registerChatListeners()
+        // but handle the case where the panel was already expanded (bailed early).
+        applyRecallMode();
+        await registerChatListeners();
+        return;
+      }
+
+      // Developer (terminal) mode \u2014 original PTY path.
       // If the panel was already expanded, expandRecallPanel bailed out
       // and skipped initRecallTerminal. Ensure it's initialized.
       initRecallTerminal();

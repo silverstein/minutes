@@ -11019,17 +11019,33 @@
 
       await currentWindow.listen('recall-chat-chunk', (event) => {
         const chunk = event.payload;
-        // Claude --output-format stream-json emits assistant turns as:
-        // { type: "assistant", message: { content: [{ type: "text", text: "..." }] } }
         let text = '';
         if (chunk && chunk.type === 'assistant' && chunk.message && chunk.message.content) {
+          // Streaming assistant turn: { type:"assistant", message:{ content:[{type:"text",text:"..."}] } }
           for (const part of chunk.message.content) {
             if (part.type === 'text') text += part.text;
+          }
+        } else if (chunk && chunk.type === 'result' && typeof chunk.result === 'string') {
+          // Final result event — use as fallback if the assistant bubble is still empty.
+          if (currentAssistantBubble && !currentAssistantBubble.textContent.trim()) {
+            text = chunk.result;
+          }
+          if (chunk.subtype !== 'success' && currentAssistantBubble && !currentAssistantBubble.textContent.trim()) {
+            text = chunk.error || chunk.result || 'Claude returned an error.';
           }
         }
         if (text && currentAssistantBubble) {
           currentAssistantBubble.textContent += text;
           if (recallChatMessages) recallChatMessages.scrollTop = recallChatMessages.scrollHeight;
+        }
+      });
+
+      await currentWindow.listen('recall-chat-error', (event) => {
+        // stderr from the claude process — shown only when the bubble is still empty.
+        const stderr = String(event.payload || '');
+        if (stderr && currentAssistantBubble && !currentAssistantBubble.textContent.trim()) {
+          currentAssistantBubble.classList.remove('streaming');
+          currentAssistantBubble.textContent = stderr;
         }
       });
 

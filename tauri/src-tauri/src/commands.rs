@@ -8314,7 +8314,7 @@ pub async fn cmd_recall_chat_send(app: tauri::AppHandle, message: String) -> Res
                 .args(["--output-format", "stream-json", "--no-interactive", "-p", message.as_str()])
                 .current_dir(&workspace)
                 .stdout(Stdio::piped())
-                .stderr(Stdio::null())
+                .stderr(Stdio::piped())
                 .spawn()
                 .map_err(|e| format!("Failed to spawn claude: {}", e))?
         } else {
@@ -8322,7 +8322,7 @@ pub async fn cmd_recall_chat_send(app: tauri::AppHandle, message: String) -> Res
                 .args(["--output-format", "stream-json", "--no-interactive", "-p", message.as_str()])
                 .current_dir(&workspace)
                 .stdout(Stdio::piped())
-                .stderr(Stdio::null())
+                .stderr(Stdio::piped())
                 .spawn()
                 .map_err(|e| format!("Failed to spawn claude: {}", e))?
         }
@@ -8339,7 +8339,7 @@ pub async fn cmd_recall_chat_send(app: tauri::AppHandle, message: String) -> Res
         ])
         .current_dir(&workspace)
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| format!("Failed to spawn claude: {}", e))?;
 
@@ -8348,7 +8348,31 @@ pub async fn cmd_recall_chat_send(app: tauri::AppHandle, message: String) -> Res
         .take()
         .ok_or_else(|| "No stdout handle from claude process".to_string())?;
 
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| "No stderr handle from claude process".to_string())?;
+
+    // Clone handle so stderr thread and stdout loop both have access.
+    let app_stderr = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
+        // Drain stderr concurrently to avoid pipe deadlock when both buffers fill.
+        let stderr_thread = std::thread::spawn(move || {
+            let reader = BufReader::new(stderr);
+            let mut buf = String::new();
+            for line in reader.lines().flatten() {
+                if !line.trim().is_empty() {
+                    buf.push_str(&line);
+                    buf.push('\n');
+                }
+            }
+            if !buf.is_empty() {
+                app_stderr
+                    .emit_to("main", "recall-chat-error", buf.trim().to_string())
+                    .ok();
+            }
+        });
+
         let reader = BufReader::new(stdout);
         for line_result in reader.lines() {
             match line_result {
@@ -8364,6 +8388,7 @@ pub async fn cmd_recall_chat_send(app: tauri::AppHandle, message: String) -> Res
                 }
             }
         }
+        let _ = stderr_thread.join();
         app.emit_to("main", "recall-chat-done", ()).ok();
         // Reap the child to avoid leaving a zombie on Unix.
         let _ = child.wait();

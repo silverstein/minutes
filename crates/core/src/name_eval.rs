@@ -115,6 +115,22 @@ pub(crate) const CORPUS: &[NameCase] = &[
         raw: "the feature is ready to demo",
         truth: "the feature is ready to demo",
     },
+    // A common word / pronoun in a name slot (after a cue, before a name-verb)
+    // that is a short edit from a short pool name. Must never be rewritten.
+    NameCase {
+        label: "neg-pronoun-in-name-position",
+        pool: &["Wei", "Aki"],
+        raw: "we will demo today",
+        truth: "we will demo today",
+    },
+    // The [SPEAKER_N m:ss] prefix: SPEAKER is a short edit from a pool name and
+    // is followed by a name-verb, but the bracket guard must keep it intact.
+    NameCase {
+        label: "neg-speaker-prefix",
+        pool: &["Spencer"],
+        raw: "[SPEAKER_1 0:05] will present",
+        truth: "[SPEAKER_1 0:05] will present",
+    },
 ];
 
 /// Score one candidate transcript against ground truth, position-aligned by
@@ -171,13 +187,13 @@ pub(crate) fn run_harness(correct: impl Fn(&str, &[&str]) -> String) -> HarnessR
 mod tests {
     use super::*;
 
-    /// The corpus has exactly 6 name targets (raw != truth) and 4 negatives.
+    /// The corpus has exactly 6 name targets (raw != truth) and 6 negatives.
     #[test]
-    fn corpus_shape_is_six_targets_four_negatives() {
+    fn corpus_shape_is_six_targets_six_negatives() {
         let targets = CORPUS.iter().filter(|c| c.raw != c.truth).count();
         let negatives = CORPUS.iter().filter(|c| c.raw == c.truth).count();
         assert_eq!(targets, 6, "expected 6 correction-target cases");
-        assert_eq!(negatives, 4, "expected 4 negative (no-change) cases");
+        assert_eq!(negatives, 6, "expected 6 negative (no-change) cases");
     }
 
     /// Baseline: the identity correction (no change) recovers nothing and, by

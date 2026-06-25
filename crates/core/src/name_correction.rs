@@ -68,6 +68,10 @@ pub fn build_name_pool(
         .map(str::trim)
         .filter(|token| token.chars().all(|c| c.is_alphabetic()))
         .filter(|token| token.chars().count() >= 2)
+        // A pool entry that is itself a common word (e.g. "The"/"Team" from a
+        // "The Team" attendee, or a stopword-like vocabulary term) would turn
+        // ordinary words into correction targets, so keep them out of the pool.
+        .filter(|token| !is_stopword(&normalize(token)))
     {
         if !names.iter().any(|name| name == token) {
             names.push(token.to_string());
@@ -144,6 +148,18 @@ fn distance_budget(len: usize) -> usize {
     }
 }
 
+/// Double Metaphone primary code, guarded to ASCII input. `rphonetic`'s
+/// encoder panics on some non-ASCII strings (e.g. "José"), and Double Metaphone
+/// is an ASCII/English algorithm anyway, so non-ASCII names get an empty code
+/// (they match via the accent/normalized path, never via phonetics).
+fn dm_encode(dm: &DoubleMetaphone, s: &str) -> String {
+    if s.is_ascii() {
+        dm.encode(s)
+    } else {
+        String::new()
+    }
+}
+
 fn build_pool(pool: &[String]) -> Vec<PoolEntry> {
     let dm = DoubleMetaphone::default();
     pool.iter()
@@ -160,7 +176,7 @@ fn build_pool(pool: &[String]) -> Vec<PoolEntry> {
             }
             Some(PoolEntry {
                 surface: surface.to_string(),
-                dm: dm.encode(surface),
+                dm: dm_encode(&dm, surface),
                 norm,
             })
         })
@@ -171,9 +187,35 @@ fn build_pool(pool: &[String]) -> Vec<PoolEntry> {
 /// or referenced (vocative / dative slots). Multilingual to match the
 /// multilingual name target (merci/gracias/etc.).
 const ADDRESS_CUES: &[&str] = &[
-    "thanks", "thank", "hi", "hey", "hello", "to", "from", "with", "cc", "ping", "dear", "for",
-    "merci", "gracias", "hola", "bonjour", "ciao", "over",
+    // Strong vocatives only. High-frequency prepositions (to/for/with/from/over/cc)
+    // are deliberately excluded: they dominate ordinary prepositional phrases, so
+    // they would turn "to go over" into a name slot. Names after a preposition are
+    // still corrected via the normal same-first-letter / accent path.
+    "thanks", "thank", "hi", "hey", "hello", "dear", "ping", "merci", "gracias", "hola", "bonjour",
+    "ciao",
 ];
+
+/// Common function words / pronouns / auxiliaries that must never be rewritten
+/// to a name and must never enter the pool, even in a name-position. They are
+/// the dominant collision risk for short pool names (e.g. `we`->`Wei`,
+/// `all`->`Al`, `them`->`Team`, `go`->`Jo`, `well`->`Will`).
+const STOPWORDS: &[&str] = &[
+    "a", "an", "the", "and", "or", "but", "so", "as", "at", "by", "for", "from", "in", "into",
+    "of", "off", "on", "onto", "to", "too", "up", "down", "out", "over", "under", "with", "via",
+    "per", "vs", "we", "you", "your", "yours", "i", "me", "my", "mine", "he", "him", "his", "she",
+    "her", "hers", "it", "its", "they", "them", "their", "theirs", "this", "that", "these",
+    "those", "here", "there", "then", "than", "is", "am", "are", "was", "were", "be", "been",
+    "being", "do", "did", "does", "done", "has", "had", "have", "will", "would", "can", "could",
+    "should", "may", "might", "must", "shall", "go", "got", "get", "well", "yes", "no", "not",
+    "now", "new", "one", "two", "who", "why", "how", "what", "when", "where", "ok", "okay", "just",
+    "like", "also", "more", "most", "some", "any", "all", "each", "even", "only", "very", "much",
+    "many", "few", "our", "ours", "us", "if", "else", "about", "after", "before", "again",
+];
+
+/// True when the normalized token is a common word that must never be corrected.
+fn is_stopword(norm: &str) -> bool {
+    STOPWORDS.contains(&norm)
+}
 
 /// Words that, immediately after a token, mark it as a person-subject.
 const NAME_VERB_CUES: &[&str] = &[
@@ -227,61 +269,57 @@ fn match_token(
         return None;
     }
     let tok_norm = normalize(token);
-    let tok_dm = dm.encode(token);
+    // Never rewrite a common function word / pronoun, in or out of name-position.
+    if is_stopword(&tok_norm) {
+        return None;
+    }
+    let tok_dm = dm_encode(dm, token);
 
-    let mut accent_hit: Option<&PoolEntry> = None;
-    let mut accent_count = 0usize;
-    let mut fuzzy_hit: Option<&PoolEntry> = None;
-    let mut fuzzy_count = 0usize;
+    // Collect DISTINCT candidate pool entries (accent restoration OR fuzzy). A
+    // correction fires only when exactly one pool name is a candidate, so an
+    // accent match is suppressed when another name is also fuzzy-close (and
+    // vice versa) -- ambiguity always means leave it alone.
+    let mut candidate: Option<&PoolEntry> = None;
+    let mut candidate_count = 0usize;
 
     for entry in pool {
         // Already the exact surface form, or a pure-casing variant: leave alone.
         if token == entry.surface || differs_only_by_case(token, &entry.surface) {
             return None;
         }
-        if tok_norm == entry.norm {
+        let is_candidate = if tok_norm == entry.norm {
             // Same letters, differ by accent only -> accent restoration.
-            accent_hit = Some(entry);
-            accent_count += 1;
-            continue;
-        }
-        let dist = levenshtein(&tok_norm, &entry.norm);
-        if dist == 0 {
-            continue;
-        }
-        if name_position {
-            // Context confirms a name: a unique pool name within 2 edits wins,
-            // even across a different first letter or short length.
-            if dist <= 2 {
-                fuzzy_hit = Some(entry);
-                fuzzy_count += 1;
+            true
+        } else {
+            let dist = levenshtein(&tok_norm, &entry.norm);
+            if dist == 0 {
+                false
+            } else if name_position {
+                // Context confirms a name: a pool name within 2 edits qualifies,
+                // even across a different first letter or short length. ASCII-only
+                // so a non-Latin token is never coerced into a Latin name.
+                tok_norm.is_ascii() && entry.norm.is_ascii() && dist <= 2
+            } else {
+                // No context: require a corroborating signal (same first letter
+                // OR matching Double Metaphone) and a minimum length.
+                let within = tok_norm.len() >= MIN_MISSPELL_LEN
+                    && dist <= distance_budget(tok_norm.len().max(entry.norm.len()));
+                let same_first = tok_norm.as_bytes().first() == entry.norm.as_bytes().first();
+                let dm_match = !tok_dm.is_empty() && tok_dm == entry.dm;
+                tok_norm.is_ascii() && entry.norm.is_ascii() && within && (same_first || dm_match)
             }
-            continue;
-        }
-        // No context: require a corroborating signal (same first normalized
-        // letter OR matching Double Metaphone) and a minimum length.
-        if tok_norm.len() < MIN_MISSPELL_LEN
-            || dist > distance_budget(tok_norm.len().max(entry.norm.len()))
-        {
-            continue;
-        }
-        let same_first = tok_norm.as_bytes().first() == entry.norm.as_bytes().first();
-        let dm_match = !tok_dm.is_empty() && tok_dm == entry.dm;
-        if same_first || dm_match {
-            fuzzy_hit = Some(entry);
-            fuzzy_count += 1;
+        };
+        if is_candidate {
+            candidate = Some(entry);
+            candidate_count += 1;
         }
     }
 
-    // Accent restoration is the highest-confidence path and wins when unique.
-    if accent_count == 1 {
-        return accent_hit.map(|e| e.surface.clone());
+    if candidate_count == 1 {
+        candidate.map(|e| e.surface.clone())
+    } else {
+        None
     }
-    // Otherwise require a unique fuzzy winner; ambiguity means leave it alone.
-    if accent_count == 0 && fuzzy_count == 1 {
-        return fuzzy_hit.map(|e| e.surface.clone());
-    }
-    None
 }
 
 /// Correct person-name tokens in `text` against `pool`. Returns the corrected
@@ -339,12 +377,35 @@ pub fn correct_names(text: &str, pool: &[String]) -> (String, Vec<NameCorrection
         })
     };
 
+    // Mark word segments that sit inside a `[...]` span (the `[SPEAKER_N m:ss]`
+    // prefix). Those tokens are never correction candidates -- correcting
+    // `SPEAKER` to a pool name would corrupt the speaker label.
+    let mut bracketed = vec![false; segs.len()];
+    let mut depth: i32 = 0;
+    for (i, s) in segs.iter().enumerate() {
+        match s {
+            Seg::Other(text) => {
+                for c in text.chars() {
+                    match c {
+                        '[' => depth += 1,
+                        ']' => depth = (depth - 1).max(0),
+                        _ => {}
+                    }
+                }
+            }
+            Seg::Word(_) => bracketed[i] = depth > 0,
+        }
+    }
+
     let mut corrections = Vec::new();
     let mut replacements: Vec<(usize, String)> = Vec::new();
     for (k, &i) in word_positions.iter().enumerate() {
         let Seg::Word(token) = &segs[i] else {
             continue;
         };
+        if bracketed[i] {
+            continue;
+        }
         let prev = word_at(k.checked_sub(1).and_then(|kp| word_positions.get(kp)));
         let next = word_at(word_positions.get(k + 1));
         if let Some(surface) = match_token(token, in_name_position(prev, next), &dm, &entries) {
@@ -474,6 +535,63 @@ mod tests {
     fn empty_pool_is_a_noop() {
         let (out, corr) = correct_names("merci jacque", &pool(&[]));
         assert_eq!(out, "merci jacque");
+        assert!(corr.is_empty());
+    }
+
+    // ---- regression guards for adversarial-review findings ----
+
+    #[test]
+    fn stopword_in_name_position_is_never_corrected() {
+        // "we"/"all" are common words a dist <= 2 from short pool names but must
+        // never be rewritten, even though the surrounding syntax is a name slot.
+        let (out, corr) = correct_names("we will demo today", &pool(&["Wei", "Aki"]));
+        assert_eq!(out, "we will demo today");
+        assert!(corr.is_empty());
+        let (out2, _) = correct_names("thanks all for joining", &pool(&["Al"]));
+        assert_eq!(out2, "thanks all for joining");
+    }
+
+    #[test]
+    fn speaker_prefix_is_never_corrupted() {
+        // SPEAKER sits inside the [..] prefix; "will" follows it, but the bracket
+        // guard keeps the label intact.
+        let (out, corr) = correct_names("[SPEAKER_1 0:05] will present", &pool(&["Spencer"]));
+        assert_eq!(out, "[SPEAKER_1 0:05] will present");
+        assert!(corr.is_empty());
+    }
+
+    #[test]
+    fn pool_excludes_common_words_from_attendees() {
+        // "The Team" must contribute "Team" but not "The"; "them" then stays put.
+        let names = build_name_pool(&["The Team".to_string()], None, None);
+        assert!(names.iter().any(|n| n == "Team"));
+        assert!(!names.iter().any(|n| n.eq_ignore_ascii_case("the")));
+        let (out, _) = correct_names("we did this for them today", &names);
+        assert_eq!(out, "we did this for them today");
+    }
+
+    #[test]
+    fn non_latin_token_is_not_fuzzy_matched_to_latin_name() {
+        let (out, corr) = correct_names("thanks 王 now", &pool(&["Al"]));
+        assert_eq!(out, "thanks 王 now");
+        assert!(corr.is_empty());
+    }
+
+    #[test]
+    fn accent_match_suppressed_when_another_name_is_also_close() {
+        // "Jose" accent-matches "José" but is also 1 edit from "Jase": ambiguous,
+        // so leave it alone rather than guess.
+        let (out, corr) = correct_names("thanks Jose now", &pool(&["José", "Jase"]));
+        assert_eq!(out, "thanks Jose now");
+        assert!(corr.is_empty());
+    }
+
+    #[test]
+    fn dropped_preposition_cue_does_not_open_a_name_slot() {
+        // "to" is no longer an address cue, so a different-first-letter token
+        // after it is not relaxed-corrected.
+        let (out, corr) = correct_names("send this to bob", &pool(&["Rob"]));
+        assert_eq!(out, "send this to bob");
         assert!(corr.is_empty());
     }
 }

@@ -32,6 +32,7 @@ So `minutes record --device "MacBook Pro Microphone"` always wins over `[recordi
 | `parakeet_sidecar_enabled` | auto | Warm sidecar: auto-enables when parakeet is the engine and `example-server` resolves. `true`/`"on"` forces on, `"off"` forces off. A legacy bool `false` is treated as auto (pre-0.18.8 saves wrote it into every config) (#295) |
 | `parakeet_fp16` | `true` | GPU fp16 inference for lower memory use |
 | `parakeet_boost_limit` / `parakeet_boost_score` | `0` / `2.0` | Knowledge-graph phrase boosting; 0 = off |
+| `name_correction` | `"off"` | Post-pass name correction against attendees and vocabulary. Values: `"off"` or `"conservative"`; off by default. |
 
 ### `[diarization]` — speaker attribution
 

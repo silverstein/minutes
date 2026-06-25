@@ -275,6 +275,9 @@ pub struct TranscriptionConfig {
     /// Default 30s matches the design note in `streaming_whisper.rs`. Raise
     /// for long-form dictation; lower if you still see CPU pressure.
     pub partial_max_secs: u32,
+    /// Post-pass person-name correction mode. Off by default.
+    #[serde(default)]
+    pub name_correction: NameCorrectionMode,
 }
 
 pub const VALID_PARAKEET_MODELS: &[&str] = &["tdt-ctc-110m", "tdt-600m"];
@@ -415,6 +418,15 @@ pub enum ConsentMode {
     #[default]
     Remind,
     Require,
+}
+
+/// Post-pass name correction behavior.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum NameCorrectionMode {
+    #[default]
+    Off,
+    Conservative,
 }
 
 /// Retention policy for raw audio artifacts.
@@ -974,6 +986,7 @@ impl Default for TranscriptionConfig {
             parakeet_fp16_blacklist_reset: false,
             parakeet_vocab: "tdt-600m.tokenizer.vocab".into(),
             partial_max_secs: 30,
+            name_correction: NameCorrectionMode::Off,
         }
     }
 }

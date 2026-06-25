@@ -1,4 +1,4 @@
-use crate::config::{Config, IdentityConfig};
+use crate::config::{Config, IdentityConfig, NameCorrectionMode};
 use crate::diarize;
 use crate::error::MinutesError;
 use crate::logging;
@@ -1608,6 +1608,7 @@ pub fn write_transcript_artifact(
         consent_notice: context.consent_notice.clone(),
         visibility: None,
         speaker_map: vec![],
+        name_corrections: Vec::new(),
         recording_health: context.recording_health.clone(),
         processing_warnings: Vec::new(),
         template: context.template.as_ref().map(|t| t.slug().to_string()),
@@ -1874,6 +1875,21 @@ where
     transcript = attribution.transcript;
     let speaker_map = attribution.speaker_map;
     let attendees = normalize_attendees_with_speaker_map(&attendees, &speaker_map);
+    let name_corrections = if config.transcription.name_correction != NameCorrectionMode::Off
+        && artifact.frontmatter.r#type == ContentType::Meeting
+    {
+        let name_pool = crate::name_correction::build_name_pool(
+            &attendees,
+            Some(&config.identity),
+            load_vocabulary_for_decode_hints().as_ref(),
+        );
+        let (corrected_transcript, corrections) =
+            crate::name_correction::correct_names(&transcript, &name_pool);
+        transcript = corrected_transcript;
+        corrections
+    } else {
+        Vec::new()
+    };
     let structured_actions =
         normalize_action_items_with_speaker_map(structured_actions, &speaker_map);
     let structured_intents = normalize_intents_with_speaker_map(structured_intents, &speaker_map);
@@ -1954,6 +1970,7 @@ where
     frontmatter.decisions = structured_decisions;
     frontmatter.intents = structured_intents;
     frontmatter.speaker_map = speaker_map;
+    frontmatter.name_corrections = name_corrections;
     frontmatter.recording_health =
         merge_recording_health(recording_health, frontmatter.recording_health);
 
@@ -2438,9 +2455,24 @@ where
         transcript,
     );
     let attribution_ms = attribution_start.elapsed().as_millis() as u64;
-    let transcript = attribution.transcript;
+    let mut transcript = attribution.transcript;
     let speaker_map = attribution.speaker_map;
     let attendees = normalize_attendees_with_speaker_map(&attendees, &speaker_map);
+    let name_corrections = if config.transcription.name_correction != NameCorrectionMode::Off
+        && content_type == ContentType::Meeting
+    {
+        let name_pool = crate::name_correction::build_name_pool(
+            &attendees,
+            Some(&config.identity),
+            load_vocabulary_for_decode_hints().as_ref(),
+        );
+        let (corrected_transcript, corrections) =
+            crate::name_correction::correct_names(&transcript, &name_pool);
+        transcript = corrected_transcript;
+        corrections
+    } else {
+        Vec::new()
+    };
     let structured_actions =
         normalize_action_items_with_speaker_map(structured_actions, &speaker_map);
     let structured_intents = normalize_intents_with_speaker_map(structured_intents, &speaker_map);
@@ -2580,6 +2612,7 @@ where
         consent_notice: None,
         visibility: None,
         speaker_map,
+        name_corrections,
         recording_health,
         template: template.map(|t| t.slug().to_string()),
         filter_diagnosis: if status == Some(OutputStatus::NoSpeech) {
@@ -4890,6 +4923,7 @@ mod tests {
             consent_notice: None,
             visibility: None,
             speaker_map: vec![],
+            name_corrections: Vec::new(),
             recording_health: None,
             processing_warnings: Vec::new(),
             template: None,
@@ -6358,6 +6392,7 @@ mod tests {
                 confidence: diarize::Confidence::Medium,
                 source: diarize::AttributionSource::Llm,
             }],
+            name_corrections: Vec::new(),
             recording_health: None,
             processing_warnings: Vec::new(),
             template: None,

@@ -27,6 +27,7 @@
 //!   is never touched, in or out of name-position.
 
 use rphonetic::{DoubleMetaphone, Encoder};
+use serde::{Deserialize, Serialize};
 
 /// Minimum token length eligible for a non-accent (misspelling) correction.
 /// Short tokens (`tan`, `mark`) collide with common words and real names too
@@ -35,12 +36,44 @@ const MIN_MISSPELL_LEN: usize = 4;
 
 /// A single applied correction, surfaced for frontmatter provenance so the
 /// rewrite is auditable and reversible. The raw token is always preserved.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct NameCorrection {
     /// The token as transcribed.
     pub raw: String,
     /// The pool spelling it was rewritten to.
     pub corrected: String,
+}
+
+pub fn build_name_pool(
+    attendees: &[String],
+    identity: Option<&crate::config::IdentityConfig>,
+    vocabulary: Option<&crate::vocabulary::VocabularyStore>,
+) -> Vec<String> {
+    let mut candidates = Vec::new();
+    if let Some(identity) = identity {
+        if let Some(name) = identity.name.as_ref() {
+            candidates.push(name.clone());
+        }
+        candidates.extend(identity.aliases.iter().cloned());
+    }
+    candidates.extend(attendees.iter().cloned());
+    if let Some(vocabulary) = vocabulary {
+        candidates.extend(vocabulary.decode_phrases(8));
+    }
+
+    let mut names = Vec::new();
+    for token in candidates
+        .iter()
+        .flat_map(|candidate| candidate.split_whitespace())
+        .map(str::trim)
+        .filter(|token| token.chars().all(|c| c.is_alphabetic()))
+        .filter(|token| token.chars().count() >= 2)
+    {
+        if !names.iter().any(|name| name == token) {
+            names.push(token.to_string());
+        }
+    }
+    names
 }
 
 struct PoolEntry {
@@ -341,6 +374,29 @@ mod tests {
 
     fn pool(names: &[&str]) -> Vec<String> {
         names.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn build_name_pool_collects_unique_single_name_tokens() {
+        let identity = crate::config::IdentityConfig {
+            name: Some("Mathieu Silverstein".into()),
+            aliases: vec!["Mat".into(), "M S".into(), "J9".into()],
+            ..Default::default()
+        };
+        let attendees = vec![
+            "Sarah Chen".into(),
+            "Mat".into(),
+            "A".into(),
+            "D4n".into(),
+            "Mónica".into(),
+        ];
+
+        let pool = build_name_pool(&attendees, Some(&identity), None);
+
+        assert_eq!(
+            pool,
+            vec!["Mathieu", "Silverstein", "Mat", "Sarah", "Chen", "Mónica"]
+        );
     }
 
     #[test]

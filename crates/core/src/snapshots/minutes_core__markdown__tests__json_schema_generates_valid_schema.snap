@@ -114,6 +114,12 @@ expression: schema
         "$ref": "#/$defs/Intent"
       }
     },
+    "name_corrections": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/NameCorrection"
+      }
+    },
     "people": {
       "type": "array",
       "items": {
@@ -502,6 +508,24 @@ expression: schema
         "decision",
         "open-question",
         "commitment"
+      ]
+    },
+    "NameCorrection": {
+      "description": "A single applied correction, surfaced for frontmatter provenance so the\nrewrite is auditable and reversible. The raw token is always preserved.",
+      "type": "object",
+      "properties": {
+        "corrected": {
+          "description": "The pool spelling it was rewritten to.",
+          "type": "string"
+        },
+        "raw": {
+          "description": "The token as transcribed.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "raw",
+        "corrected"
       ]
     },
     "OutputStatus": {

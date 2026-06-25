@@ -378,6 +378,7 @@ fn write_artifact(
         consent_notice: None,
         visibility: None,
         speaker_map: vec![],
+        name_corrections: Vec::new(),
         recording_health: None,
         template: None,
         filter_diagnosis: None,

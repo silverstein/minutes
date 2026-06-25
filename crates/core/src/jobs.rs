@@ -1806,6 +1806,7 @@ mod tests {
                 consent_notice: None,
                 visibility: None,
                 speaker_map: vec![],
+                name_corrections: Vec::new(),
                 recording_health: None,
                 processing_warnings: Vec::new(),
                 template: None,

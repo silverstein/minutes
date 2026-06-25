@@ -1138,6 +1138,7 @@ fn write_dictation_file(text: &str, duration_secs: f64, config: &Config) -> Opti
         consent_notice: None,
         visibility: None,
         speaker_map: vec![],
+        name_corrections: Vec::new(),
         recording_health: None,
         template: None,
         filter_diagnosis: None,

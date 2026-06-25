@@ -122,6 +122,8 @@ export interface Frontmatter {
   decisions: Decision[];
   intents: Intent[];
   speaker_map?: SpeakerAttribution[];
+  /** Applied post-pass name corrections (raw token preserved), if any. */
+  name_corrections?: { raw: string; corrected: string }[];
   recording_health?: RecordingHealth;
 }
 

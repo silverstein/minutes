@@ -69,6 +69,7 @@ schema version bump. Additive fields do not.
 | `attendees_raw` | string | Legacy free-text attendee string (e.g. Granola imports). Optional; prefer `attendees`. |
 | `entities` | object | Structured entity links. See [Entities](#entities) below. |
 | `speaker_map` | list&lt;SpeakerAttribution&gt; | Diarizer speaker label → real person mapping. See [Speaker attribution](#speaker-attribution) below. |
+| `name_corrections` | list&lt;NameCorrection&gt; | Applied post-pass name corrections as `{raw, corrected}` records. Omitted when no corrections were made. |
 
 ### Structured extraction
 

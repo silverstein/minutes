@@ -2213,7 +2213,7 @@ pub fn supports_call_detection() -> bool {
 }
 
 pub fn supports_tray_artifact_copy() -> bool {
-    cfg!(target_os = "macos")
+    cfg!(any(target_os = "macos", target_os = "windows"))
 }
 
 pub fn supports_dictation_hotkey() -> bool {

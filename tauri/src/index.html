@@ -2683,7 +2683,7 @@
       border: 1px solid var(--border-mid);
       border-radius: 20px;
       box-shadow: 0 24px 60px var(--shadow-stronger);
-      padding: 22px 22px 20px;
+      padding: 0 22px 20px;
       color: var(--text);
     }
 
@@ -2692,7 +2692,16 @@
       align-items: center;
       justify-content: space-between;
       gap: 12px;
-      margin-bottom: 16px;
+      position: sticky;
+      top: 0;
+      z-index: 2;
+      background: var(--bg-elevated);
+      /* Full-bleed to the card edges so scrolling content is covered. The 22px
+         top padding (moved off .about-card) restores the header inset, and the
+         16px bottom keeps the original gap to the first section. No negative top
+         margin, so the header pins flush to the card's top edge with no gap. */
+      margin: 0 -22px 0;
+      padding: 22px 22px 16px;
     }
 
     .about-brand {

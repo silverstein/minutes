@@ -59,7 +59,10 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
+          # Scope by ImageOS so a runner-image rotation does not restore a stale
+          # target/ cache with toolchain paths the new image no longer ships
+          # (e.g. macOS 15 -> macOS 26 Xcode change). See ci.yml.
+          key: ${{ runner.os }}-${{ env.ImageOS }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Clean stale Windows native build cache
         if: runner.os == 'Windows'

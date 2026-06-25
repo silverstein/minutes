@@ -622,6 +622,33 @@
       display: block;
     }
 
+    /* ── Recall mode toggle button (dev-mode switch in panel header) ── */
+    .recall-mode-toggle {
+      padding: 2px 6px;
+      border-radius: 6px;
+      border: none;
+      background: transparent;
+      color: var(--text-tertiary);
+      font-size: 12px;
+      cursor: pointer;
+      line-height: 1;
+    }
+
+    .recall-mode-toggle:hover {
+      color: var(--text-secondary);
+      background: var(--bg-hover);
+    }
+
+    .recall-mode-toggle:focus-visible {
+      outline: none;
+      color: var(--text-secondary);
+      background: var(--bg-hover);
+    }
+
+    .recall-mode-toggle.active {
+      color: var(--text-secondary);
+    }
+
     .recall-note-row {
       display: flex;
       gap: 8px;
@@ -4799,6 +4826,7 @@
       <div class="recall-header-actions">
         <button class="btn btn-secondary btn-sm" id="btn-recall-weekly">Weekly</button>
         <button class="btn btn-secondary btn-sm recall-end-btn" id="btn-recall-end">End Session</button>
+        <button class="recall-mode-toggle" id="btn-recall-mode-toggle" title="Switch to terminal (developer mode)">⌨</button>
         <button class="recall-close" id="btn-recall-close" title="Close panel">&times;</button>
       </div>
     </div>
@@ -9895,9 +9923,40 @@
       recallDevMode = next;
       localStorage.setItem('minutes.recallDevMode', String(next));
       setSettingsToggle('settings-recall-dev-mode', next);
+      // Sync the in-panel mode toggle button state.
+      const modeToggleBtn = document.getElementById('btn-recall-mode-toggle');
+      if (modeToggleBtn) {
+        modeToggleBtn.classList.toggle('active', next);
+        modeToggleBtn.title = next
+          ? 'Switch to chat (native mode)'
+          : 'Switch to terminal (developer mode)';
+      }
       // Apply the new mode immediately if the panel is currently open.
       if (recallExpanded) applyRecallMode();
     });
+
+    // ── In-panel mode toggle (developer mode shortcut in recall header) ──
+    const recallModeToggleBtn = document.getElementById('btn-recall-mode-toggle');
+    if (recallModeToggleBtn) {
+      // Sync initial state with persisted preference.
+      recallModeToggleBtn.classList.toggle('active', recallDevMode);
+      if (recallDevMode) {
+        recallModeToggleBtn.title = 'Switch to chat (native mode)';
+      }
+      recallModeToggleBtn.addEventListener('click', () => {
+        recallDevMode = !recallDevMode;
+        localStorage.setItem('minutes.recallDevMode', String(recallDevMode));
+        // Sync the Settings toggle.
+        setSettingsToggle('settings-recall-dev-mode', recallDevMode);
+        // Update button appearance.
+        recallModeToggleBtn.classList.toggle('active', recallDevMode);
+        recallModeToggleBtn.title = recallDevMode
+          ? 'Switch to chat (native mode)'
+          : 'Switch to terminal (developer mode)';
+        // Apply the new mode immediately if the panel is currently open.
+        if (recallExpanded) applyRecallMode();
+      });
+    }
 
     // Call detection settings handlers
     document.getElementById('settings-call-detection').addEventListener('click', async () => {
@@ -10824,6 +10883,10 @@
         recallLoading.classList.remove('active');
       }
       recallTerminalContainer.classList.toggle('hidden', phase === 'weekly');
+      // Hide chat panel in weekly view regardless of mode; restore it when leaving.
+      if (recallChatPanel) {
+        recallChatPanel.style.display = (phase === 'weekly' || recallDevMode) ? 'none' : 'flex';
+      }
       recallNote.classList.toggle('active', phase === 'listening');
       persistRecallWorkspaceState({ recallPhase: phase });
     }
@@ -10922,6 +10985,15 @@
 
     // ── Recall native chat (dev-mode OFF) ──
 
+    /// Insert a one-time welcome bubble when the chat panel is first shown.
+    function showChatWelcome() {
+      if (!recallChatMessages || recallChatMessages.children.length > 0) return;
+      const bubble = document.createElement('div');
+      bubble.className = 'chat-bubble chat-bubble-assistant';
+      bubble.textContent = 'Ask me about this meeting — action items, decisions, key moments from the transcript. I have access to your meeting workspace.';
+      recallChatMessages.appendChild(bubble);
+    }
+
     /// Apply the current mode to the recall panel contents.
     /// In dev-mode (terminal): hide chat panel (terminal visibility managed elsewhere).
     /// In chat mode: hide terminal container, show chat panel.
@@ -10930,7 +11002,10 @@
         if (recallChatPanel) recallChatPanel.style.display = 'none';
       } else {
         recallTerminalContainer.classList.add('hidden');
-        if (recallChatPanel) recallChatPanel.style.display = 'flex';
+        if (recallChatPanel) {
+          recallChatPanel.style.display = 'flex';
+          showChatWelcome();
+        }
         recallLoading.classList.remove('active');
       }
     }
@@ -10995,7 +11070,10 @@
       } catch (e) {
         if (currentAssistantBubble) {
           currentAssistantBubble.classList.remove('streaming');
-          currentAssistantBubble.textContent = 'Error: ' + String(e);
+          const errMsg = String(e);
+          currentAssistantBubble.textContent = errMsg.includes('claude not found')
+            ? 'Claude Code not found. Install it with: npm install -g @anthropic-ai/claude-code'
+            : 'Error: ' + errMsg;
           currentAssistantBubble = null;
         }
         if (recallChatSendBtn) recallChatSendBtn.disabled = false;
@@ -12380,7 +12458,12 @@
     // ── Button handlers ──
     assistantBtn.addEventListener('click', () => toggleRecallPanel());
     recallWeeklyBtn.addEventListener('click', () => {
-      openWeeklyPhase();
+      if (recallPhase === 'weekly') {
+        setRecallPhase('recall');
+        applyRecallMode();
+      } else {
+        openWeeklyPhase();
+      }
     });
 
     document.getElementById('btn-recall-close').addEventListener('click', () => {

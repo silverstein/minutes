@@ -8288,10 +8288,47 @@ pub async fn cmd_recall_chat_send(app: tauri::AppHandle, message: String) -> Res
 
     let workspace = crate::context::workspace_dir();
 
+    // Ensure workspace dir exists before using it as cwd.
+    if !workspace.exists() {
+        std::fs::create_dir_all(&workspace)
+            .map_err(|e| format!("Cannot create workspace dir: {}", e))?;
+    }
+
     let claude_bin = which::which("claude").map_err(|_| {
         "claude not found on PATH; install Claude Code to enable native chat".to_string()
     })?;
 
+    // On Windows, npm installs `claude` as a `.cmd` shim which cannot be spawned
+    // directly via Command::new — it must go through `cmd /C`.
+    #[cfg(target_os = "windows")]
+    let mut child = {
+        let ext = claude_bin
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        if ext == "cmd" || ext == "bat" {
+            Command::new("cmd")
+                .arg("/C")
+                .arg(&claude_bin)
+                .args(["--output-format", "stream-json", "--no-interactive", "-p", message.as_str()])
+                .current_dir(&workspace)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn()
+                .map_err(|e| format!("Failed to spawn claude: {}", e))?
+        } else {
+            Command::new(&claude_bin)
+                .args(["--output-format", "stream-json", "--no-interactive", "-p", message.as_str()])
+                .current_dir(&workspace)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn()
+                .map_err(|e| format!("Failed to spawn claude: {}", e))?
+        }
+    };
+
+    #[cfg(not(target_os = "windows"))]
     let mut child = Command::new(&claude_bin)
         .args([
             "--output-format",

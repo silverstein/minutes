@@ -842,4 +842,13 @@ mod tests {
         };
         assert_eq!(result.overlay_state(), "error");
     }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn windows_clipboard_round_trip() {
+        let text = "minutes-clipboard-test-windows";
+        write_clipboard(text).expect("write_clipboard should succeed on Windows");
+        let got = read_clipboard().expect("read_clipboard should succeed on Windows");
+        assert_eq!(got, text);
+    }
 }

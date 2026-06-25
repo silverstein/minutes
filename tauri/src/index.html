@@ -4271,6 +4271,15 @@
       gap: 12px;
     }
 
+    /* On non-macOS (Windows/Linux) the OS window stays wide when the panel is
+       collapsed, so the `padding: 16px` above — combined with `width: 0` and
+       `box-sizing: border-box` — leaves a ~32px phantom column on the right.
+       On macOS the window shrinks to 520px on collapse (below any threshold),
+       so this was never visible there. Zero the padding only when collapsed. */
+    html:not([data-platform="macos"]) .recall-panel:not(.expanded) {
+      padding: 0;
+    }
+
     .recall-header {
       border-radius: 12px;
     }
@@ -10568,6 +10577,14 @@
     const COLLAPSED_WIDTH = 520;
     const EXPANDED_WIDTH = 960;
     const DEFAULT_RECALL_RATIO = 0.5;
+    // On Windows the OS window resize (expand→960, collapse→520) is jarring:
+    // closing the panel snaps the window to 520px regardless of the user's size.
+    // The CSS flex layout (recall-panel width:0 / expanded, app-left flex:1) handles
+    // the visual reflow on its own — the OS resize is purely a macOS UX choice.
+    // Skip it on Windows so the window stays at whatever size the user set.
+    const IS_WINDOWS = typeof navigator !== 'undefined' &&
+      navigator.platform &&
+      navigator.platform.toLowerCase().startsWith('win');
     const MIN_RECALL_RATIO = 0.25;
     const MAX_RECALL_RATIO = 0.667;
     const SESSION_ID = 'assistant';
@@ -10756,6 +10773,10 @@
 
     // ── Expand / collapse with window resize ──
     function applyRecallWindowLayout(width, options = {}) {
+      // Windows: skip OS resize — the flex layout reflows correctly without it,
+      // and forcing a width on collapse (520px) is jarring when the user had a
+      // different window size. macOS/Linux behavior is unchanged.
+      if (IS_WINDOWS) return Promise.resolve();
       return invoke('cmd_apply_recall_window_layout', {
         width,
         height: 640,

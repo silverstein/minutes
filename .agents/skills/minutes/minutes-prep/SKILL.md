@@ -62,14 +62,14 @@ command -v m365 2>/dev/null && m365 status --output json 2>/dev/null
 m365 outlook event list \
   --userId "@meId" \
   --startDateTime "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-  --endDateTime "$(date -u +%Y-%m-%d)T23:59:59Z" \
+  --endDateTime "$(date -u -d '+1 day' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v+1d +%Y-%m-%dT%H:%M:%SZ)" \
   --output json 2>/dev/null
 ```
 Only use the result if the command exits with code 0 and returns a non-empty JSON array. Parse the response:
 - **Title**: `event.subject`
 - **Start time**: `event.start.dateTime` (UTC — convert to local time for display)
 - **Attendees**: `event.attendees[].emailAddress.name` (extract first names)
-- **Skip if**: `event.isAllDay === true`, `event.isCancelled === true`, or `event.attendees` is empty
+- **Skip if**: `event.isAllDay === true`, `event.isCancelled === true`, `event.attendees` is empty, or `event.start.dateTime` converted to **local** time is not today (the `now`..`now+24h` UTC window over-fetches so it never misses a local-today event near the UTC date boundary; this trims the next-day-local spillover)
 
 **5. None available** — skip to Phase 1 and ask manually.
 
@@ -222,7 +222,7 @@ node "$MINUTES_SKILLS_ROOT/_runtime/hooks/lib/minutes-learn-cli.mjs" set-alias "
 
 - **Calendar auto-detect is best-effort** — If no calendar source is available, silently fall back to asking manually. Never error or nag the user about calendar setup. The Google Calendar MCP (`gcal.mcp.claude.com/mcp`) is the recommended source for Claude users.
 - **m365 login is non-blocking** — Only prompt for `m365 login` if m365 is installed but the user is not yet authenticated. It's a one-time browser flow. If the user declines, fall through silently.
-- **m365 event times are UTC** — `start.dateTime` and `end.dateTime` are in UTC. Convert to local time before displaying to the user. Use `date -d` (Linux) or `date -jf` (macOS) for conversion, or show the raw UTC time with a `(UTC)` suffix if conversion is unavailable.
+- **m365 event window is timezone-safe via over-fetch + local filter** — the fetch window is `now`..`now+24h` in UTC, which always spans the rest of the user's local day regardless of offset (max UTC offset is under 14h). Times come back in UTC, so convert `start.dateTime` to local both for the local-today skip check and for display. Use `date -d` (Linux) or `date -jf` / `date -r` (macOS) for conversion, or show the raw UTC time with a `(UTC)` suffix if conversion is unavailable.
 - **Calendar attendee names may differ from meeting transcript names** — Calendar says "Alex Chen (sarah@company.com)" but transcripts say "Alex" or "SPEAKER_0". Match on first name.
 - **Skip all-day events and solo events** — Only show events with 2+ attendees as prep candidates. All-day events and events where the user is the only attendee aren't meetings.
 - **Push back on vague answers** — This is the most important pattern. Vague prep = useless prep. "Everyone" → "Name one person." "Catch up" → "What would you regret not discussing?"

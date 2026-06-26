@@ -80,8 +80,8 @@ command -v m365 2>/dev/null && m365 status --output json 2>/dev/null
 ```bash
 m365 outlook event list \
   --userId "@meId" \
-  --startDateTime "$(date -u +%Y-%m-%dT%H:%M:%S)" \
-  --endDateTime "$(date -u +%Y-%m-%d)T23:59:59" \
+  --startDateTime "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  --endDateTime "$(date -u +%Y-%m-%d)T23:59:59Z" \
   --output json 2>/dev/null
 ```
 Only use the result if the command exits with code 0 and returns a non-empty JSON array. Parse the response:

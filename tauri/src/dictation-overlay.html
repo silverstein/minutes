@@ -4,6 +4,8 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Dictation</title>
+  <script src="scripts/ui-zoom.js"></script>
+  <link rel="stylesheet" href="styles/ui-zoom-tokens.css">
   <style>
     @font-face {
       font-family: 'Geist';
@@ -203,7 +205,7 @@
 
     /* Label */
     .label {
-      font-size: 16px;
+      font-size: var(--text-base);
       font-weight: 600;
       letter-spacing: -0.02em;
       color: var(--text);
@@ -216,7 +218,7 @@
 
     /* Timer */
     .timer {
-      font-size: 14px;
+      font-size: var(--text-sm);
       font-weight: 600;
       color: var(--text-secondary);
       font-variant-numeric: tabular-nums;
@@ -265,7 +267,7 @@
     }
 
     .text-content {
-      font-size: 13px;
+      font-size: var(--text-body);
       font-weight: 400;
       color: var(--text-secondary);
       line-height: 1.35;
@@ -301,14 +303,14 @@
 
     /* Error icon */
     .error-icon {
-      font-size: 16px;
+      font-size: var(--text-base);
       color: var(--red);
       flex-shrink: 0;
     }
 
     /* Success icon */
     .success-icon {
-      font-size: 16px;
+      font-size: var(--text-base);
       color: var(--green);
       flex-shrink: 0;
     }

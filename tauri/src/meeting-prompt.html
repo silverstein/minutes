@@ -4,6 +4,8 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Upcoming Meeting</title>
+  <script src="scripts/ui-zoom.js"></script>
+  <link rel="stylesheet" href="styles/ui-zoom-tokens.css">
   <style>
     @font-face {
       font-family: 'Instrument Serif';
@@ -127,7 +129,7 @@
     }
 
     .eyebrow {
-      font-size: 10px;
+      font-size: var(--text-2xs);
       font-weight: 500;
       letter-spacing: 0.16em;
       text-transform: uppercase;
@@ -142,7 +144,7 @@
       display: inline-flex;
       align-items: center;
       justify-content: center;
-      font-size: 14px;
+      font-size: var(--text-sm);
       background: var(--accent-soft);
       color: var(--accent);
       flex-shrink: 0;
@@ -154,7 +156,7 @@
 
     .meeting-title {
       font-family: 'Instrument Serif', ui-serif, Georgia, serif;
-      font-size: 22px;
+      font-size: var(--text-2xl);
       line-height: 1.1;
       letter-spacing: -0.03em;
       color: var(--text);
@@ -175,7 +177,7 @@
       border-radius: 999px;
       background: var(--accent-soft);
       color: var(--accent);
-      font-size: 11px;
+      font-size: var(--text-meta);
       font-weight: 500;
       letter-spacing: 0.12em;
       text-transform: uppercase;
@@ -193,7 +195,7 @@
       border: 1px solid var(--border);
       background: var(--surface-fill);
       color: var(--text-tertiary);
-      font-size: 13px;
+      font-size: var(--text-body);
       cursor: pointer;
       line-height: 1;
       flex-shrink: 0;
@@ -202,7 +204,7 @@
     .close-btn:hover { color: var(--text-secondary); background: var(--bg-hover); }
 
     .summary {
-      font-size: 12px;
+      font-size: var(--text-xs);
       line-height: 1.45;
       color: var(--text-secondary);
       min-height: 34px;
@@ -219,7 +221,7 @@
       border-radius: 8px;
       border: none;
       font-family: inherit;
-      font-size: 13px;
+      font-size: var(--text-body);
       font-weight: 500;
       cursor: pointer;
       transition: all 0.12s ease;
@@ -256,7 +258,7 @@
     .btn-secondary:active { transform: scale(0.97); }
 
     .error-text {
-      font-size: 12px;
+      font-size: var(--text-xs);
       color: var(--red);
       display: none;
       line-height: 1.4;
@@ -269,7 +271,7 @@
       transform: translateX(-50%) translateY(30px);
       background: var(--accent);
       color: var(--bg);
-      font-size: 12px;
+      font-size: var(--text-xs);
       font-weight: 600;
       padding: 6px 14px;
       border-radius: 20px;

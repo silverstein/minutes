@@ -45,8 +45,8 @@
 
   // On initial load: resize window proportionally to saved zoom.
   // Skips the main window — its width is managed by the recall panel after load.
-  // Delegates to Rust (cmd_scale_window) — JS-side setSize is silently ignored
-  // for these windows.
+  // Rust owns each window's base size and computes base * (zoom/16), so resizing
+  // never reads the window's current dimensions (which would compound on reopen).
   window.addEventListener('DOMContentLoaded', function () {
     if (!window.__TAURI__) return;
     var zoom = parseFloat(localStorage.getItem(ZOOM_KEY));

@@ -8824,34 +8824,6 @@
       }
     });
 
-    // UI font scale: Cmd/Ctrl +/-/0
-    document.addEventListener('keydown', (e) => {
-      const textBase = 16;
-      const textMax = 26;
-      
-      if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey) {
-        if (e.key === '=' || e.key === '+') {
-          e.preventDefault();
-          const cur = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--text-scale-basis')) || textBase;
-          const next = Math.min(textMax, cur + 2);
-          document.documentElement.style.setProperty('--text-scale-basis', next);
-          localStorage.setItem('minutes.uiZoom', next);
-          if (recallTerminal) { recallTerminal.options.fontSize = getTerminalFontSize(); if (recallFitAddon) recallFitAddon.fit(); }
-        } else if (e.key === '-') {
-          e.preventDefault();
-          const cur = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--text-scale-basis')) || textBase;
-          const next = Math.max(textBase, cur - 2);
-          document.documentElement.style.setProperty('--text-scale-basis', next);
-          localStorage.setItem('minutes.uiZoom', next);
-          if (recallTerminal) { recallTerminal.options.fontSize = getTerminalFontSize(); if (recallFitAddon) recallFitAddon.fit(); }
-        } else if (e.key === '0') {
-          e.preventDefault();
-          document.documentElement.style.setProperty('--text-scale-basis', textBase);
-          localStorage.removeItem('minutes.uiZoom');
-          if (recallTerminal) { recallTerminal.options.fontSize = getTerminalFontSize(); if (recallFitAddon) recallFitAddon.fit(); }
-        }
-      }
-    });
 
     async function loadSettings() {
       try {
@@ -10792,6 +10764,10 @@
       recallTerminal.loadAddon(recallFitAddon);
       recallTerminal.open(recallTerminalContainer);
       window.MINUTES_XTERM_THEME_QUERY.addEventListener('change', recallThemeHandler);
+      document.addEventListener('uizoomchange', () => {
+        recallTerminal.options.fontSize = getTerminalFontSize();
+        if (recallFitAddon) recallFitAddon.fit();
+      });
 
       let fitTimeout;
       recallResizeObserver = new ResizeObserver(() => {

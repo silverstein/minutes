@@ -10617,6 +10617,11 @@
 
     const COLLAPSED_WIDTH = 520;
     const EXPANDED_WIDTH = 960;
+
+    function getZoomRatio() {
+      var z = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--text-scale-basis')) || 16;
+      return z / 16;
+    }
     const DEFAULT_RECALL_RATIO = 0.5;
     // On Windows the OS window resize (expand→960, collapse→520) is jarring:
     // closing the panel snaps the window to 520px regardless of the user's size.
@@ -10829,12 +10834,21 @@
       // and forcing a width on collapse (520px) is jarring when the user had a
       // different window size. macOS/Linux behavior is unchanged.
       if (IS_WINDOWS) return Promise.resolve();
+      const ratio = getZoomRatio();
       return invoke('cmd_apply_recall_window_layout', {
-        width,
-        height: 640,
+        width: Math.round(width * ratio),
+        height: Math.round(640 * ratio),
         avoidRightEdge: !!options.avoidRightEdge,
       });
     }
+
+    document.addEventListener('uizoomchange', async () => {
+      if (IS_WINDOWS) return;
+      const isFullscreen = await currentWindow.isFullscreen().catch(() => false);
+      if (isFullscreen) return;
+      const targetWidth = recallExpanded ? EXPANDED_WIDTH : COLLAPSED_WIDTH;
+      applyRecallWindowLayout(targetWidth).catch(() => {});
+    });
 
     async function expandRecallPanel() {
       if (recallExpanded || expandAnimating) return;

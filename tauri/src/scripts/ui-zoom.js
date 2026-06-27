@@ -44,7 +44,9 @@
   });
 
   // On initial load: resize window proportionally to saved zoom.
-  // Skips the main window — its width is managed by the recall panel after load.
+  // Skips the main window — its dimensions are managed by applyRecallWindowLayout
+  // (which reads the zoom ratio at call time) so zoom is applied automatically on
+  // expand/collapse and on uizoomchange. Secondary windows are resized here.
   // Rust owns each window's base size and computes base * (zoom/16), so resizing
   // never reads the window's current dimensions (which would compound on reopen).
   window.addEventListener('DOMContentLoaded', function () {

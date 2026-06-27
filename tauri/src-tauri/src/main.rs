@@ -382,6 +382,35 @@ fn cmd_apply_recall_window_layout(
     Ok(())
 }
 
+#[tauri::command]
+fn cmd_scale_window(app: tauri::AppHandle, label: String, zoom: f64) -> Result<(), String> {
+    const BASE: f64 = 16.0;
+    let Some(win) = app.get_webview_window(&label) else {
+        return Ok(());
+    };
+    let scale = win
+        .current_monitor()
+        .ok()
+        .flatten()
+        .map(|m| m.scale_factor())
+        .unwrap_or(1.0);
+    let size = win.inner_size().map_err(|e| e.to_string())?;
+    let ratio = zoom / BASE;
+    let new_w = ((size.width as f64 / scale) * ratio).round();
+    let new_h = ((size.height as f64 / scale) * ratio).round();
+    let was_resizable = win.is_resizable().unwrap_or(false);
+    if !was_resizable {
+        win.set_resizable(true).ok();
+    }
+    let result = win
+        .set_size(LogicalSize::new(new_w, new_h))
+        .map_err(|e| e.to_string());
+    if !was_resizable {
+        win.set_resizable(false).ok();
+    }
+    result
+}
+
 fn show_note_window(app: &tauri::AppHandle) {
     if let Some(win) = app.get_webview_window("note") {
         win.show().ok();
@@ -2504,6 +2533,7 @@ fn main() {
             commands::cmd_mark_activation_nudge_shown,
             cmd_show_main_window,
             cmd_apply_recall_window_layout,
+            cmd_scale_window,
             commands::cmd_upcoming_meetings,
             commands::cmd_spawn_terminal,
             commands::cmd_pty_input,

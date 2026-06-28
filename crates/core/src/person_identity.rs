@@ -210,12 +210,30 @@ fn normalize_raw_name(raw: &str) -> Option<(&str, &str)> {
     }
 }
 
+/// Returns true if `fragment` (the text after a separator) is a known role or title.
+///
+/// Normalizes hyphens to spaces and strips leading articles ("the", "a", "an") before
+/// matching, so "the core team" and "core-team" both match "core team".
+fn trailing_fragment_is_role(fragment: &str) -> bool {
+    let normalized: String = fragment
+        .to_lowercase()
+        .chars()
+        .map(|c| if c == '-' { ' ' } else { c })
+        .collect();
+    let text = normalized
+        .trim()
+        .trim_start_matches("the ")
+        .trim_start_matches("a ")
+        .trim_start_matches("an ");
+    ROLE_TITLE_SUFFIXES.iter().any(|&role| text.contains(role))
+}
+
 /// Strip a trailing role or title descriptor from a person name string.
 ///
-/// Handles separator-based patterns first (high precision), then falls back to
-/// matching against [`ROLE_TITLE_SUFFIXES`]. Inputs in both label form
-/// ("Junlei, tech lead") and slug form ("junlei-tech-lead") are handled —
-/// hyphens and spaces are treated as equivalent word separators in the vocab check.
+/// Each structural separator (comma, parenthetical, dash, connectors) only fires when
+/// the trailing fragment actually contains a [`ROLE_TITLE_SUFFIXES`] token, avoiding
+/// false positives on nicknames (`"Robert (Bob) Smith"`), generational suffixes
+/// (`"Sammy Davis, Jr."`), or names with connective words (`"Winnie the Pooh"`).
 ///
 /// Examples:
 /// - `"Junlei, tech lead"` → `"Junlei"`
@@ -225,27 +243,40 @@ fn normalize_raw_name(raw: &str) -> Option<(&str, &str)> {
 /// - `"Alex — engineering lead"` → `"Alex"`
 /// - `"Junlei Tech Lead"` → `"Junlei"`
 /// - `"junlei-tech-lead"` → `"junlei"`
+/// - `"Robert (Bob) Smith"` → `"Robert (Bob) Smith"` (unchanged)
+/// - `"Sammy Davis, Jr."` → `"Sammy Davis, Jr."` (unchanged)
+/// - `"Winnie the Pooh"` → `"Winnie the Pooh"` (unchanged)
 /// - `"Dan Benamoz"` → `"Dan Benamoz"` (unchanged)
 pub(crate) fn strip_role_suffix(name: &str) -> &str {
-    // 1. Comma: "Name, role" or "Name, the role"
+    // 1. Comma: "Name, role" — only when what follows is a known role.
     if let Some(pos) = name.find(", ") {
-        return name[..pos].trim();
+        if trailing_fragment_is_role(&name[pos + 2..]) {
+            return name[..pos].trim();
+        }
     }
-    // 2. Parenthetical: "Name (role)"
-    if let Some(pos) = name.find(" (") {
-        return name[..pos].trim();
+    // 2. Parenthetical at end: "Name (role)" — the ends_with(')') guard excludes
+    // "Name (nickname) Surname" patterns where the paren is not terminal.
+    if name.ends_with(')') {
+        if let Some(pos) = name.find(" (") {
+            let inside = name[pos + 2..name.len() - 1].trim();
+            if trailing_fragment_is_role(inside) {
+                return name[..pos].trim();
+            }
+        }
     }
     // 3. Spaced dash variants: "Name — role", "Name – role", "Name - role"
     for sep in [" — ", " – ", " - "] {
         if let Some(pos) = name.find(sep) {
-            return name[..pos].trim();
+            if trailing_fragment_is_role(&name[pos + sep.len()..]) {
+                return name[..pos].trim();
+            }
         }
     }
-    // 4. Connective words before a role descriptor
+    // 4. Connective words before a known role descriptor.
     for connector in [" from ", " the "] {
         if let Some(pos) = name.find(connector) {
             let before = name[..pos].trim();
-            if !before.is_empty() {
+            if !before.is_empty() && trailing_fragment_is_role(&name[pos + connector.len()..]) {
                 return before;
             }
         }
@@ -513,13 +544,44 @@ mod tests {
 
     #[test]
     fn strip_role_suffix_spaced_dash() {
-        assert_eq!(strip_role_suffix("Alex - PM"), "Alex");
+        assert_eq!(strip_role_suffix("Alex - tech lead"), "Alex");
+        assert_eq!(strip_role_suffix("Sam - product manager"), "Sam");
     }
 
     #[test]
     fn strip_role_suffix_from_connector() {
         assert_eq!(strip_role_suffix("Junrei from the core team"), "Junrei");
-        assert_eq!(strip_role_suffix("Sam from engineering"), "Sam");
+        // "engineering" alone is not a role token — must not strip.
+        assert_eq!(
+            strip_role_suffix("Sam from engineering"),
+            "Sam from engineering"
+        );
+    }
+
+    // ── false-positive guard tests (requested in silverstein/minutes#374) ─────
+
+    #[test]
+    fn strip_role_suffix_nickname_in_parens_left_intact() {
+        // Parenthetical nickname with surname: "Robert (Bob) Smith" must not lose the surname.
+        assert_eq!(
+            strip_role_suffix("Robert (Bob) Smith"),
+            "Robert (Bob) Smith"
+        );
+        assert_eq!(strip_role_suffix("Mike (Michael) Johnson"), "Mike (Michael) Johnson");
+    }
+
+    #[test]
+    fn strip_role_suffix_generational_suffix_left_intact() {
+        // Generational and credential suffixes after a comma must not be stripped.
+        assert_eq!(strip_role_suffix("Sammy Davis, Jr."), "Sammy Davis, Jr.");
+        assert_eq!(strip_role_suffix("Jane Doe, PhD"), "Jane Doe, PhD");
+    }
+
+    #[test]
+    fn strip_role_suffix_the_in_name_left_intact() {
+        // "the" connector must only fire when a known role follows.
+        assert_eq!(strip_role_suffix("Winnie the Pooh"), "Winnie the Pooh");
+        assert_eq!(strip_role_suffix("Alexander the Great"), "Alexander the Great");
     }
 
     #[test]

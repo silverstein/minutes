@@ -303,8 +303,7 @@ pub(crate) fn strip_role_suffix(name: &str) -> &str {
         if !name.is_char_boundary(split) {
             continue;
         }
-        let candidate =
-            name[..split].trim_end_matches(|c: char| c == '-' || c.is_whitespace());
+        let candidate = name[..split].trim_end_matches(|c: char| c == '-' || c.is_whitespace());
         if !candidate.is_empty() {
             return candidate;
         }
@@ -567,7 +566,10 @@ mod tests {
             strip_role_suffix("Robert (Bob) Smith"),
             "Robert (Bob) Smith"
         );
-        assert_eq!(strip_role_suffix("Mike (Michael) Johnson"), "Mike (Michael) Johnson");
+        assert_eq!(
+            strip_role_suffix("Mike (Michael) Johnson"),
+            "Mike (Michael) Johnson"
+        );
     }
 
     #[test]
@@ -581,7 +583,10 @@ mod tests {
     fn strip_role_suffix_the_in_name_left_intact() {
         // "the" connector must only fire when a known role follows.
         assert_eq!(strip_role_suffix("Winnie the Pooh"), "Winnie the Pooh");
-        assert_eq!(strip_role_suffix("Alexander the Great"), "Alexander the Great");
+        assert_eq!(
+            strip_role_suffix("Alexander the Great"),
+            "Alexander the Great"
+        );
     }
 
     #[test]

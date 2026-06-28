@@ -9,6 +9,7 @@ pub mod desktop_context;
 pub mod desktop_control;
 pub mod device_monitor;
 pub mod diarize;
+pub mod dictation_cleanup;
 pub mod dictation_memory;
 pub mod error;
 pub mod events;

@@ -217,7 +217,10 @@ retention, nothing is deleted automatically unless `auto_cleanup` is enabled.
 | `silence_timeout_ms` | `2000` | Silence threshold that ends a dictation session |
 | `max_utterance_secs` | `120` | Force-finalize an utterance at this length |
 | `model` | `"base"` | Whisper model for dictation |
-| `cleanup_engine` | unset | Optional LLM to clean up filler words |
+| `cleanup_engine` | `"rules"` | Text cleanup applied to each utterance: `"rules"` (deterministic on-device: capitalization, fillers, vocab) or `"none"`/`"off"` for raw ASR. `"ollama"` is reserved and currently falls back to rules |
+| `cleanup_remove_fillers` | `true` | Remove conservative filler words ("um", "uh") |
+| `cleanup_spoken_punctuation` | `false` | Convert spoken commands ("period", "new line") to punctuation. Opt-in: collides with those words used as content |
+| `cleanup_apply_vocabulary` | `false` | Apply your vocabulary store (Term/Acronym entries) as casing/replacement fixes (e.g. "gpt" → "GPT") |
 
 Dictation clipboard behavior is platform-specific:
 

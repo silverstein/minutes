@@ -617,6 +617,14 @@ pub struct DictationConfig {
     pub accumulate: bool,
     pub daily_note_log: bool,
     pub cleanup_engine: String,
+    /// Remove conservative filler words ("um", "uh") during cleanup. Default true.
+    pub cleanup_remove_fillers: bool,
+    /// Convert spoken punctuation commands ("period", "new line") during cleanup.
+    /// Off by default: these phrases collide with ordinary words.
+    pub cleanup_spoken_punctuation: bool,
+    /// Apply the vocabulary store (Term/Acronym entries) as casing/replacement fixes
+    /// during cleanup. Off by default to avoid surprising substitutions.
+    pub cleanup_apply_vocabulary: bool,
     pub auto_paste: bool,
     pub auto_paste_restore: bool,
     pub silence_timeout_ms: u64,
@@ -649,7 +657,10 @@ impl Default for DictationConfig {
             destination: "clipboard".into(),
             accumulate: true,
             daily_note_log: true,
-            cleanup_engine: String::new(),
+            cleanup_engine: "rules".into(),
+            cleanup_remove_fillers: true,
+            cleanup_spoken_punctuation: false,
+            cleanup_apply_vocabulary: false,
             auto_paste: false,
             auto_paste_restore: true,
             silence_timeout_ms: 2000,

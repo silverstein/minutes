@@ -61,6 +61,23 @@ jobs:
         if: runner.os == 'macOS'
         run: echo "CXXFLAGS=-I$(xcrun --show-sdk-path)/usr/include/c++/v1" >> $GITHUB_ENV
 
+      # Scope every cache to the exact runner image (ImageOS + ImageVersion).
+      # When `macos-latest` rotated from macOS 15 to macOS 26 the old target/ cache
+      # was restored onto the new image and the linker pulled
+      # `-L .../Xcode_16.4.app/.../clang/17/lib/darwin` (absent on macOS 26) ->
+      # "clang_rt.osx not found". We key on BOTH ImageOS and ImageVersion because
+      # ImageOS alone misses within-family bumps (e.g. macos26 swapping Xcode 26.4
+      # -> 26.5 on a weekly image update), which would re-poison compiled target/.
+      #
+      # ImageOS / ImageVersion are runner-injected env vars, NOT part of the
+      # ${{ env }} context (which only holds vars set via `env:` blocks), so the old
+      # `${{ env.ImageOS }}` key silently expanded to empty and never scoped anything.
+      # We compute the scope in a step and read it back as a step output below.
+      - name: Resolve runner image for cache scope
+        id: runner-image
+        shell: bash
+        run: echo "scope=${ImageOS:-noimage}-${ImageVersion:-noversion}" >> "$GITHUB_OUTPUT"
+
       - name: Cache cargo
         uses: actions/cache@v4
         with:
@@ -68,12 +85,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          # ImageOS scopes the cache to the runner image family (e.g. macos26
-          # vs macos15). Without it, when `macos-latest` rotated from macOS 15 to
-          # macOS 26 the old target/ cache was restored onto the new image and the
-          # linker pulled `-L .../Xcode_16.4.app/.../clang/17/lib/darwin` (absent on
-          # macOS 26, which ships only Xcode 26.x) -> "clang_rt.osx not found".
-          key: ${{ runner.os }}-${{ env.ImageOS }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-${{ steps.runner-image.outputs.scope }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Build core (no whisper)
         run: cargo build -p minutes-core --no-default-features
@@ -156,6 +168,14 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev libpipewire-0.3-dev libspa-0.2-dev
 
+      # Per-image cache scope (ImageOS + ImageVersion); see the test job comment.
+      # These are runner-injected vars absent from the ${{ env }} context, so we
+      # expose the value as a step output for the cache key below.
+      - name: Resolve runner image for cache scope
+        id: runner-image
+        shell: bash
+        run: echo "scope=${ImageOS:-noimage}-${ImageVersion:-noversion}" >> "$GITHUB_OUTPUT"
+
       - name: Cache cargo
         uses: actions/cache@v4
         with:
@@ -163,7 +183,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-${{ env.ImageOS }}-install-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-${{ steps.runner-image.outputs.scope }}-install-${{ hashFiles('**/Cargo.lock') }}
 
       - name: cargo install minutes-cli (no whisper)
         run: cargo install --path crates/cli --no-default-features
@@ -204,6 +224,14 @@ jobs:
             cmake build-essential pkg-config \
             libasound2-dev libpipewire-0.3-dev libspa-0.2-dev
 
+      # Per-image cache scope (ImageOS + ImageVersion); see the test job comment.
+      # These are runner-injected vars absent from the ${{ env }} context, so we
+      # expose the value as a step output for the cache key below.
+      - name: Resolve runner image for cache scope
+        id: runner-image
+        shell: bash
+        run: echo "scope=${ImageOS:-noimage}-${ImageVersion:-noversion}" >> "$GITHUB_OUTPUT"
+
       - name: Cache cargo
         uses: actions/cache@v4
         with:
@@ -211,7 +239,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-${{ env.ImageOS }}-cli-fullbuild-debug-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-${{ steps.runner-image.outputs.scope }}-cli-fullbuild-debug-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Build CLI debug (whisper + diarize)
         run: cargo build -p minutes-cli
@@ -230,6 +258,14 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
+      # Per-image cache scope (ImageOS + ImageVersion); see the test job comment.
+      # These are runner-injected vars absent from the ${{ env }} context, so we
+      # expose the value as a step output for the two cache keys below.
+      - name: Resolve runner image for cache scope
+        id: runner-image
+        shell: bash
+        run: echo "scope=${ImageOS:-noimage}-${ImageVersion:-noversion}" >> "$GITHUB_OUTPUT"
+
       - name: Cache cargo
         uses: actions/cache@v4
         with:
@@ -237,7 +273,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-${{ env.ImageOS }}-desktop-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-${{ steps.runner-image.outputs.scope }}-desktop-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Clean stale Windows native build cache
         shell: bash
@@ -252,7 +288,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/AppData/Local/dfbin
-          key: ${{ runner.os }}-${{ env.ImageOS }}-ort-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-${{ steps.runner-image.outputs.scope }}-ort-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Install Tauri CLI
         run: cargo install tauri-cli --version "2.10.1" --locked

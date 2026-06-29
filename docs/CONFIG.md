@@ -55,6 +55,7 @@ So `minutes record --device "MacBook Pro Microphone"` always wins over `[recordi
 | `openai_compatible_api_key_env` | unset | Optional environment variable name containing the API key. Leave blank for local servers. The desktop app can also save a gateway key in macOS Keychain and use that runtime secret for non-local endpoints without rewriting shared config. |
 | `mistral_model` | `"mistral-large-latest"` | Mistral API model |
 | `chunk_max_tokens` | `4000` | Max tokens per chunk when splitting long transcripts |
+| `speaker_mapping_timeout_secs` | `30` | Tight timeout for the Level-1 speaker-naming LLM call. On the agent path it also runs with no MCP servers and no tools so it can't hang on init. Clamped to [5, 120]. |
 
 For Pi coding-agent support, use `engine = "agent"` with `agent_command = "pi"`.
 Minutes invokes Pi in non-interactive, no-tools mode. This is distinct from

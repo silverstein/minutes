@@ -318,6 +318,12 @@ pub struct SummarizationConfig {
     /// Issue #243: when this budget is exceeded the pipeline emits a
     /// `processing_warnings` entry and promotes status to `degraded`.
     pub agent_timeout_secs: u64,
+    /// Timeout (seconds) for the Level-1 speaker-mapping LLM call specifically.
+    /// Speaker mapping is a tiny JSON classification task, not a full agent run,
+    /// so it gets a much tighter bound than `agent_timeout_secs`. Issue #382: the
+    /// agent path could hang the full (previously hardcoded 120s) budget on MCP
+    /// init and ship meetings anonymous. Clamped to [5, 120] at the call site.
+    pub speaker_mapping_timeout_secs: u64,
     pub chunk_max_tokens: usize,
     pub ollama_url: String,
     pub ollama_model: String,
@@ -1039,6 +1045,7 @@ impl Default for SummarizationConfig {
             engine: "none".into(),
             agent_command: "claude".into(),
             agent_timeout_secs: 300,
+            speaker_mapping_timeout_secs: 30,
             chunk_max_tokens: 4000,
             ollama_url: "http://localhost:11434".into(),
             ollama_model: "llama3.2".into(),

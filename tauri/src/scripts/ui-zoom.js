@@ -2,11 +2,21 @@
   var ZOOM_KEY = 'minutes.uiZoom';
   var TEXT_BASE = 16;
   var TEXT_MAX = 26;
-  var channel = new BroadcastChannel(ZOOM_KEY);
+  var ZOOM_EVENT = 'uizoom:changed';
 
   function applyZoom(next) {
     document.documentElement.style.setProperty('--text-scale-basis', next);
     document.dispatchEvent(new CustomEvent('uizoomchange', { detail: { value: next } }));
+  }
+
+  function resizeWindow(zoom) {
+    if (!window.__TAURI__) return;
+    var webviewWindow = window.__TAURI__.webviewWindow;
+    if (!webviewWindow) return;
+    var win = webviewWindow.getCurrentWebviewWindow();
+    if (win.label === 'main') return;
+    window.__TAURI__.core.invoke('cmd_scale_window', { label: win.label, zoom: zoom })
+      .catch(function () {});
   }
 
   // Restore before CSS renders
@@ -15,9 +25,22 @@
     document.documentElement.style.setProperty('--text-scale-basis', saved);
   }
 
-  channel.onmessage = function (e) {
-    applyZoom(e.data.value);
-  };
+  // Cross-window zoom sync via Tauri events.
+  // BroadcastChannel is not guaranteed to propagate across separate WKWebView
+  // processes on macOS; Tauri events are the reliable cross-window signal.
+  // Skip if already at this value — Tauri emit echoes back to the sender, and
+  // the sender already applied locally in the keydown handler.
+  if (window.__TAURI__ && window.__TAURI__.event) {
+    window.__TAURI__.event.listen(ZOOM_EVENT, function (e) {
+      var value = e.payload.value;
+      var current = parseFloat(
+        getComputedStyle(document.documentElement).getPropertyValue('--text-scale-basis')
+      ) || TEXT_BASE;
+      if (Math.abs(current - value) < 0.1) return;
+      applyZoom(value);
+      resizeWindow(value);
+    });
+  }
 
   document.addEventListener('keydown', function (e) {
     if (!(e.metaKey || e.ctrlKey) || e.shiftKey || e.altKey) return;
@@ -39,14 +62,18 @@
     } else {
       return;
     }
+    // Apply locally immediately, then broadcast to other windows.
     applyZoom(next);
-    channel.postMessage({ value: next });
+    resizeWindow(next);
+    if (window.__TAURI__ && window.__TAURI__.event) {
+      window.__TAURI__.event.emit(ZOOM_EVENT, { value: next })
+        .catch(function () {});
+    }
   });
 
-  // On initial load: resize window proportionally to saved zoom.
-  // Skips the main window — its dimensions are managed by applyRecallWindowLayout
-  // (which reads the zoom ratio at call time) so zoom is applied automatically on
-  // expand/collapse and on uizoomchange. Secondary windows are resized here.
+  // On initial load: resize non-main window to persisted zoom.
+  // Main window is handled elsewhere.
+  
   // Rust owns each window's base size and computes base * (zoom/16), so resizing
   // never reads the window's current dimensions (which would compound on reopen).
   window.addEventListener('DOMContentLoaded', function () {

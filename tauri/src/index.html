@@ -1863,7 +1863,7 @@
     }
 
     .artifact-template-card {
-      width: min(560px, 100%);
+      width: min(48.4ch, 100vw - 32px); /* ~560px */
       background: var(--bg-elevated);
       border: 1px solid var(--border);
       border-radius: calc(var(--radius-lg) + 2px);
@@ -2230,7 +2230,7 @@
     }
 
     .detail-card {
-      width: min(760px, 100%);
+      width: min(71ch, 100vw - 32px); /* ~760px */
       max-height: calc(100vh - 40px);
       background: var(--bg);
       border: 1px solid var(--border);
@@ -2252,8 +2252,8 @@
     }
 
     .detail-header-copy {
-      min-width: 0;
-      flex: 1;
+      min-width: 16.5ch;
+      flex: 1 1 16.5ch;
     }
 
     .detail-close-x {
@@ -2317,8 +2317,9 @@
 
     .detail-actions {
       display: flex;
+      flex-wrap: wrap;
       gap: 8px;
-      flex-shrink: 0;
+      justify-content: flex-end;
       padding-right: 28px;
     }
 
@@ -2678,7 +2679,7 @@
     }
 
     .about-card {
-      width: min(520px, 100%);
+      width: min(48.4ch, 100vw - 32px); /* ~520px */
       max-height: calc(100vh - 40px);
       overflow-y: auto;
       background: var(--bg-elevated);
@@ -2932,7 +2933,7 @@
     }
 
     .readiness-card {
-      width: min(720px, 100%);
+      width: min(67.1ch, 100vw - 32px); /* ~720px */
       max-height: calc(100vh - 40px);
       background: var(--bg);
       border: 1px solid var(--border);
@@ -3094,7 +3095,7 @@
     }
 
     .recovery-card {
-      width: min(760px, 100%);
+      width: min(41ch, 100vw - 32px); /* ~440px */
       max-height: calc(100vh - 40px);
       background: var(--bg);
       border: 1px solid var(--border);
@@ -3565,6 +3566,7 @@
 
     .call-ended-info {
       min-width: 0;
+      padding-bottom: 12px;
     }
 
     .call-ended-head {
@@ -3996,7 +3998,7 @@
     .cli-setup-scrim.active { display: flex; }
 
     .cli-setup-modal {
-      width: min(48.4ch, 100vw - 32px);
+      width: min(48.4ch, 100vw - 32px); /* ~560px */
       max-height: calc(100vh - 40px);
       overflow-y: auto;
       background: var(--bg-elevated);
@@ -4117,7 +4119,7 @@
       background: var(--bg-elevated);
       border: 1px solid var(--border-mid);
       border-radius: var(--radius-lg);
-      width: min(41ch, 100vw - 32px);
+      width: min(41ch, 100vw - 32px); /* ~440px */
       max-height: calc(100vh - 64px);
       display: flex;
       flex-direction: column;
@@ -4309,7 +4311,7 @@
     }
 
     .settings-card {
-      width: min(580px, 100%);
+      width: min(54ch, 100vw - 32px); /* ~580px */
       max-height: calc(100vh - 40px);
     }
 

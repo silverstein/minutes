@@ -410,19 +410,9 @@ fn cmd_scale_window(app: tauri::AppHandle, label: String, zoom: f64) -> Result<(
     let height = (base_h * ratio).round();
 
     // setFrame from Rust works on non-resizable windows; no resizable toggle is
-    // needed (toggling it makes macOS draw a square standard frame on the
-    // transparent rounded window).
+    // needed
     win.set_size(LogicalSize::new(width, height))
         .map_err(|e| e.to_string())?;
-
-    // Transparent + shadowed windows (palette) keep a stale square shadow around
-    // the full frame after a programmatic resize. Toggling the shadow forces
-    // AppKit to recompute it from the new rounded content mask. Decorated windows
-    // (note, meeting-prompt) and shadowless ones (dictation-overlay) don't need it.
-    if label == "palette" {
-        win.set_shadow(false).ok();
-        win.set_shadow(true).ok();
-    }
 
     // Clamp position so bottom-right anchored windows (e.g. dictation overlay)
     // don't extend off-screen after scaling up.

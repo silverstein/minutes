@@ -311,15 +311,212 @@ pub(crate) fn strip_role_suffix(name: &str) -> &str {
     name
 }
 
+/// Curated, exact-match list of non-person "names" that must never become a person
+/// entity. Deliberately NOT heuristic (no length or initials rules) so genuine short
+/// names like "An", "Jo", "Hai" are never dropped — losing a real attendee is as
+/// harmful as keeping a contaminated entry. Matched after normalization (lowercased,
+/// hyphens -> spaces, whitespace collapsed) and after role/speaker stripping (#385).
+const NON_PERSON_NAMES: &[&str] = &[
+    "all",
+    "none",
+    "none identified",
+    "not identified",
+    "unknown",
+    "unknown speaker",
+    "unnamed",
+    "unassigned",
+    "everyone",
+    "everybody",
+    "anyone",
+    "someone",
+    "somebody",
+    "nobody",
+    "no one",
+    "team",
+    "the team",
+    "team member",
+    "team members",
+    "group",
+    "the group",
+    "others",
+    "attendee",
+    "attendees",
+    "participant",
+    "participants",
+    "speaker",
+    "speakers",
+    // Multi-word role/group phrases (never a real person name), plus a few
+    // clearly-non-person single words. Single words that double as real
+    // given names or surnames (dev, guest, host, owner, engineer, manager,
+    // member, ...) are deliberately NOT listed — dropping a real attendee is
+    // as harmful as keeping a contaminated entry (#385).
+    "devops",
+    "chatbot",
+    "qa engineer",
+    "chatbot owner",
+    "chatbot owner developer",
+    "new member",
+    "new qa member",
+    "additional devops team members",
+];
+
+/// Normalize a name for non-person matching: lowercase, hyphens -> spaces, collapse
+/// whitespace.
+fn normalize_for_match(name: &str) -> String {
+    name.trim()
+        .to_lowercase()
+        .chars()
+        .map(|c| if c == '-' { ' ' } else { c })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// True if `name` is plausibly a person, not a generic/group/role token.
+///
+/// Conservative exact-match denylist: only the explicitly listed non-person tokens
+/// are rejected, so anything ambiguous (including short real names) is kept. Apply
+/// after [`strip_role_suffix`] / [`strip_speaker_label`] so e.g. "Junlei Tech Lead"
+/// has already become "Junlei" before this check.
+/// Group/role marker tokens used only for the multi-word all-markers rule below.
+/// Safe to be broad here (including name-colliding words like "dev"/"owner") because
+/// the rule requires EVERY token to be a marker, and a real multi-word person name
+/// always carries at least one non-marker token ("Mark Engineer", "An Le").
+const GROUP_ROLE_TOKENS: &[&str] = &[
+    "team",
+    "teams",
+    "group",
+    "groups",
+    "devops",
+    "ops",
+    "qa",
+    "member",
+    "members",
+    "new",
+    "additional",
+    "the",
+    "a",
+    "an",
+    "engineering",
+    "engineer",
+    "developer",
+    "dev",
+    "owner",
+    "manager",
+    "lead",
+    "leads",
+    "staff",
+    "crew",
+    "admin",
+    "intern",
+    "analyst",
+    "designer",
+    "consultant",
+    "chatbot",
+    "bot",
+    "others",
+    "attendees",
+    "participants",
+    "speaker",
+    "speakers",
+    "unknown",
+    "unnamed",
+    "unassigned",
+];
+
+pub(crate) fn is_plausible_person_name(name: &str) -> bool {
+    let normalized = normalize_for_match(name);
+    if normalized.is_empty() || NON_PERSON_NAMES.contains(&normalized.as_str()) {
+        return false;
+    }
+    // Reject multi-word phrases that are entirely group/role markers ("qa team",
+    // "devops team members"). Single tokens are governed only by the exact denylist
+    // above, so real one-word names (Dev, Owner, An) survive (#385).
+    let tokens: Vec<&str> = normalized.split(' ').collect();
+    if tokens.len() >= 2 && tokens.iter().all(|t| GROUP_ROLE_TOKENS.contains(t)) {
+        return false;
+    }
+    true
+}
+
+/// Strip a trailing diarization speaker label ("speaker 0", "-speaker-2") from a name,
+/// in slug or label form, leaving the rest of the name intact (#385).
+///
+/// - `"Geert speaker 0"` -> `"Geert"`
+/// - `"geert-speaker-0"` -> `"geert"`
+/// - `"gert anne speaker 2"` -> `"gert anne"`
+/// - `"speaker-1"` / `"speaker 0"` -> `""` (caller treats empty as non-person)
+/// - `"Dan Benamoz"` / `"Catch 22"` -> unchanged (no trailing speaker token)
+pub(crate) fn strip_speaker_label(name: &str) -> &str {
+    // Scan the ORIGINAL bytes (not a lowercased/normalized copy) so byte offsets
+    // can never drift on non-ASCII names (e.g. "İ" lowercasing to two chars). The
+    // label tokens ("speaker", digits, "-"/" ") are all ASCII, so ASCII-only
+    // comparison on the original is exact, and the cut index lands on a char
+    // boundary because the byte before it is an ASCII separator (or string start).
+    let b = name.as_bytes();
+    let mut end = b.len();
+    while end > 0 && b[end - 1].is_ascii_whitespace() {
+        end -= 1;
+    }
+    // Require a trailing run of digits...
+    let mut i = end;
+    while i > 0 && b[i - 1].is_ascii_digit() {
+        i -= 1;
+    }
+    if i == end {
+        return name;
+    }
+    // ...preceded by optional spaces/hyphens and the word "speaker".
+    let mut j = i;
+    while j > 0 && (b[j - 1] == b' ' || b[j - 1] == b'-') {
+        j -= 1;
+    }
+    const KW: &[u8] = b"speaker";
+    if j < KW.len() || !b[j - KW.len()..j].eq_ignore_ascii_case(KW) {
+        return name;
+    }
+    let start = j - KW.len();
+    // "speaker" must be at a word boundary: string start or an ASCII space/hyphen.
+    if start != 0 {
+        let prev = b[start - 1];
+        if prev != b' ' && prev != b'-' {
+            return name;
+        }
+    }
+    name[..start].trim_end_matches(|c: char| c == '-' || c.is_whitespace())
+}
+
+/// Strip both role/title suffixes and trailing speaker labels, to a fixpoint.
+///
+/// A single pass is order-sensitive ("Junlei Tech Lead speaker 0" needs the speaker
+/// label removed before the role becomes trailing) and not idempotent for stacked
+/// labels ("Geert speaker 0 speaker 1"). Iterating until stable handles both and
+/// guarantees `strip_contamination(strip_contamination(x)) == strip_contamination(x)`.
+pub(crate) fn strip_contamination(name: &str) -> &str {
+    let mut cur = name.trim();
+    loop {
+        let next = strip_speaker_label(strip_role_suffix(cur)).trim();
+        if next.len() == cur.len() {
+            return next;
+        }
+        cur = next;
+    }
+}
+
 fn normalize_entity_identity(entity: &EntityRef) -> Option<PersonIdentity> {
-    // Role/title descriptors ("tech lead", "core team") must not contaminate the
-    // canonical identity. Strip them before deriving slug and display name.
+    // Role/title descriptors ("tech lead"), diarization speaker labels
+    // ("speaker 0"), and generic/group tokens ("team", "qa engineer") must not
+    // become or contaminate a person identity. Strip then gate before slugging (#385).
     let raw = if entity.label.trim().is_empty() {
         entity.slug.trim()
     } else {
         entity.label.trim()
     };
-    let name = strip_role_suffix(raw).to_string();
+    let name = strip_contamination(raw).to_string();
+    if !is_plausible_person_name(&name) {
+        return None;
+    }
     let slug = slugify(&name);
     if slug.is_empty() {
         return None;
@@ -615,6 +812,172 @@ mod tests {
         assert_eq!(strip_role_suffix("Sarah Chen"), "Sarah Chen");
         assert_eq!(strip_role_suffix("Jordan Mills"), "Jordan Mills");
         assert_eq!(strip_role_suffix("dan-benamoz"), "dan-benamoz");
+    }
+
+    // ── speaker-label stripping (#385) ──────────────────────────
+
+    #[test]
+    fn strip_speaker_label_removes_trailing_label() {
+        assert_eq!(strip_speaker_label("Geert speaker 0"), "Geert");
+        assert_eq!(strip_speaker_label("geert-speaker-0"), "geert");
+        assert_eq!(strip_speaker_label("Tanya Speaker 1"), "Tanya");
+        assert_eq!(strip_speaker_label("gert anne speaker 2"), "gert anne");
+    }
+
+    #[test]
+    fn strip_speaker_label_bare_label_becomes_empty() {
+        assert_eq!(strip_speaker_label("speaker-1"), "");
+        assert_eq!(strip_speaker_label("speaker 0"), "");
+        assert_eq!(strip_speaker_label("Speaker 4"), "");
+    }
+
+    #[test]
+    fn strip_speaker_label_leaves_clean_names_and_trailing_numbers() {
+        assert_eq!(strip_speaker_label("Dan Benamoz"), "Dan Benamoz");
+        assert_eq!(strip_speaker_label("dan-benamoz"), "dan-benamoz");
+        // a trailing number that is not a speaker label is untouched
+        assert_eq!(strip_speaker_label("Catch 22"), "Catch 22");
+        assert_eq!(strip_speaker_label("Studio 54"), "Studio 54");
+    }
+
+    // ── non-person gate (#385) ──────────────────────────────────
+
+    #[test]
+    fn is_plausible_person_name_rejects_generic_and_role_tokens() {
+        for bad in [
+            "all",
+            "team",
+            "unassigned",
+            "none-identified",
+            "unknown",
+            "unnamed",
+            "speaker",
+            "qa-engineer",
+            "devops",
+            "chatbot-owner",
+            "chatbot-owner-developer",
+            "new-qa-member",
+            "additional-devops-team-members",
+            "The Team",
+            "PARTICIPANTS",
+        ] {
+            assert!(!is_plausible_person_name(bad), "should reject {bad:?}");
+        }
+    }
+
+    #[test]
+    fn is_plausible_person_name_keeps_real_short_and_compound_names() {
+        // genuine short (often non-Western) names must never be dropped, and single
+        // words that double as real given names / surnames must survive too (#385).
+        for ok in [
+            "An",
+            "Jo",
+            "Hai",
+            "Tao",
+            "Jia",
+            "Geert",
+            "Dan Benamoz",
+            "Mark Engineer",
+            "Dev",
+            "Guest",
+            "Host",
+            "Owner",
+            "Engineer",
+            "Manager",
+        ] {
+            assert!(is_plausible_person_name(ok), "should keep {ok:?}");
+        }
+    }
+
+    #[test]
+    fn is_plausible_person_name_rejects_group_phrase_variants() {
+        // multi-word phrases that are all group/role markers (#385 follow-on)
+        for bad in [
+            "qa team",
+            "devops team",
+            "devops team members",
+            "new qa members",
+            "additional devops team member",
+            "the team",
+        ] {
+            assert!(!is_plausible_person_name(bad), "should reject {bad:?}");
+        }
+        // but real multi-word names with a genuine name token survive
+        for ok in [
+            "Mark Engineer",
+            "Dev Patel",
+            "An Le",
+            "Dan Benamoz",
+            "Owner Mcowner",
+        ] {
+            assert!(is_plausible_person_name(ok), "should keep {ok:?}");
+        }
+    }
+
+    #[test]
+    fn strip_contamination_does_not_eat_real_name_tokens() {
+        // codex follow-up: confirm strip_role_suffix doesn't strip bare role-ish
+        // surnames before the gate sees them.
+        for name in ["Mark Engineer", "Dev", "Owner", "Manager", "Guest"] {
+            assert_eq!(
+                strip_contamination(name),
+                name,
+                "{name:?} must be untouched"
+            );
+        }
+    }
+
+    #[test]
+    fn strip_speaker_label_preserves_non_ascii_prefix() {
+        // byte-offset regression: lowercasing the Turkish dotted I changes byte length;
+        // scanning the original must not slice mid-name (#385).
+        assert_eq!(strip_speaker_label("İ Speaker 1"), "İ");
+        assert_eq!(strip_speaker_label("İsmet speaker 1"), "İsmet");
+        assert_eq!(strip_speaker_label("José speaker 2"), "José");
+    }
+
+    #[test]
+    fn strip_contamination_handles_order_and_is_idempotent() {
+        // speaker label trailing the role: must remove both regardless of order
+        assert_eq!(strip_contamination("Junlei Tech Lead speaker 0"), "Junlei");
+        assert_eq!(strip_contamination("Junlei, tech lead"), "Junlei");
+        // stacked labels collapse fully
+        assert_eq!(strip_contamination("Geert speaker 0 speaker 1"), "Geert");
+        // idempotent
+        for s in [
+            "Junlei Tech Lead speaker 0",
+            "Geert speaker 0 speaker 1",
+            "Dan Benamoz",
+        ] {
+            let once = strip_contamination(s);
+            assert_eq!(strip_contamination(once), once, "not idempotent for {s:?}");
+        }
+    }
+
+    #[test]
+    fn normalize_entity_identity_strips_speaker_label() {
+        let entity = EntityRef {
+            slug: "geert-speaker-0".into(),
+            label: "Geert speaker 0".into(),
+            aliases: vec![],
+        };
+        let identity = normalize_entity_identity(&entity).expect("should produce identity");
+        assert_eq!(identity.slug, "geert");
+    }
+
+    #[test]
+    fn normalize_entity_identity_rejects_non_person_tokens() {
+        for bad in ["all", "team", "unassigned", "qa-engineer", "speaker-1"] {
+            let entity = EntityRef {
+                slug: bad.into(),
+                label: String::new(),
+                aliases: vec![],
+            };
+            assert!(
+                normalize_entity_identity(&entity).is_none(),
+                "should drop {bad:?}"
+            );
+        }
     }
 
     #[test]

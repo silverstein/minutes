@@ -6,7 +6,7 @@ use crate::markdown::{
     self, ContentType, Frontmatter, OutputStatus, ProcessingWarning, WriteResult,
 };
 use crate::notes;
-use crate::person_identity::strip_role_suffix;
+use crate::person_identity::{is_plausible_person_name, strip_contamination};
 use crate::summarize;
 use chrono::{DateTime, Local};
 use std::collections::{BTreeMap, BTreeSet};
@@ -4389,8 +4389,11 @@ fn add_person_entity(entities: &mut BTreeMap<String, (String, BTreeSet<String>)>
     }
 
     let name_part = strip_email_domain(strip_name_disambiguation(&trimmed)).trim();
-    let canonical = strip_role_suffix(name_part).trim();
-    if canonical.is_empty() {
+    // Strip role/title and diarization speaker-label contamination (to a fixpoint),
+    // then reject non-person tokens (groups/roles/generics) before creating the
+    // entity (#385).
+    let canonical = strip_contamination(name_part);
+    if canonical.is_empty() || !is_plausible_person_name(canonical) {
         return;
     }
 

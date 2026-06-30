@@ -120,11 +120,35 @@ impl FilterStats {
     }
 }
 
+/// A single timestamped segment from the transcription pipeline.
+///
+/// `start` and `end` are in seconds with sub-second (centisecond) precision
+/// for the whisper engine. The sherpa engine provides start only; end is
+/// inferred from the next segment's start (or total audio duration for the
+/// final segment).
+#[derive(Debug, Clone)]
+pub struct TranscriptSegment {
+    /// Segment start time in seconds.
+    pub start: f64,
+    /// Segment end time in seconds.
+    pub end: f64,
+    /// Segment text, without any `[m:ss]` timestamp prefix.
+    pub text: String,
+}
+
 /// Result from the transcription pipeline, including filter diagnostics.
 #[derive(Debug, Clone)]
 pub struct TranscribeResult {
     pub text: String,
     pub stats: FilterStats,
+    /// Per-segment timing and clean text. Populated by the whisper and sherpa
+    /// engines; empty for parakeet (which uses a subprocess-based format) and
+    /// for chunked whisper paths (where segments are aggregated into lines).
+    pub segments: Vec<TranscriptSegment>,
+    /// Language code detected by the ASR engine (e.g. `"en"`, `"es"`).
+    /// `None` when the engine did not report a language or when the whisper
+    /// feature is disabled.
+    pub detected_language: Option<String>,
 }
 
 /// Meeting-local lexical hints that can safely inform batch decoding.
@@ -517,6 +541,8 @@ fn transcribe_chunk_ranges(
     Ok(Some(TranscribeResult {
         text,
         stats: aggregate,
+        segments: vec![],
+        detected_language: None,
     }))
 }
 
@@ -609,6 +635,8 @@ fn transcribe_whisper_chunk_ranges(
     Ok(Some(TranscribeResult {
         text,
         stats: aggregate,
+        segments: vec![],
+        detected_language: None,
     }))
 }
 
@@ -685,7 +713,12 @@ fn transcribe_whisper_dispatch(
             duration_secs,
             samples.len(),
         );
-        Ok(TranscribeResult { text, stats })
+        Ok(TranscribeResult {
+            text,
+            stats,
+            segments: vec![],
+            detected_language: None,
+        })
     }
 }
 
@@ -768,20 +801,37 @@ fn transcribe_sherpa_dispatch(
         // (the same shape the parakeet path produces) -- this makes the sherpa
         // transcript diarization-compatible and renders in the timestamped
         // transcript format, rather than one untimed blob.
-        let segments = crate::sherpa_engine::transcribe_segments(&samples, config)
+        //
+        // sherpa exposes start_ms only; end is inferred from the next segment's
+        // start (or audio_duration_secs for the final segment).
+        let raw_segs = crate::sherpa_engine::transcribe_segments(&samples, config)
             .map_err(TranscribeError::TranscriptionFailed)?;
-        let lines: Vec<String> = segments
+        // Build parallel (line, start_secs, end_secs, text) data
+        let n_raw = raw_segs.len();
+        let sherpa_seg_data: Vec<(String, f64, f64, String)> = raw_segs
             .iter()
-            .map(|(start_ms, text)| {
-                let secs = start_ms / 1000;
-                format!("[{}:{:02}] {}", secs / 60, secs % 60, text)
+            .enumerate()
+            .map(|(i, (start_ms, text))| {
+                let start_secs = *start_ms as f64 / 1000.0;
+                let end_secs = if i + 1 < n_raw {
+                    raw_segs[i + 1].0 as f64 / 1000.0
+                } else {
+                    audio_duration_secs
+                };
+                let secs_int = *start_ms / 1000;
+                let line = format!("[{}:{:02}] {}", secs_int / 60, secs_int % 60, text);
+                (line, start_secs, end_secs, text.clone())
             })
+            .collect();
+        let lines: Vec<String> = sherpa_seg_data
+            .iter()
+            .map(|(l, _, _, _)| l.clone())
             .collect();
         let raw_segments = lines.len();
 
         // Run the shared whisper-guard cleanup (dedups any window-boundary
         // repeats); its output lines are the transcript.
-        let cleanup = run_transcript_cleanup_pipeline(lines);
+        let cleanup = run_transcript_cleanup_pipeline(lines.clone());
         let transcript = cleanup.lines.join("\n");
         let transcript = if transcript.is_empty() {
             transcript
@@ -806,9 +856,14 @@ fn transcribe_sherpa_dispatch(
             final_words: word_count,
             ..Default::default()
         };
+        // Correlate surviving lines back to their timing data
+        let transcript_segments =
+            correlate_sherpa_segments(&cleanup.lines, &lines, &sherpa_seg_data);
         Ok(TranscribeResult {
             text: transcript,
             stats,
+            segments: transcript_segments,
+            detected_language: None, // sherpa does not report detected language
         })
     }
 
@@ -817,6 +872,68 @@ fn transcribe_sherpa_dispatch(
         let _ = (audio_path, config, hints);
         Err(TranscribeError::EngineNotAvailable("engine-sherpa".into()))
     }
+}
+
+/// Correlate cleanup-surviving lines back to sherpa segment timing data.
+///
+/// `cleanup_lines` is a subsequence of `all_lines` (same order, some removed
+/// by dedup). For each surviving line we find the earliest matching entry in
+/// `all_seg_data` (which is parallel to `all_lines`) and emit a
+/// [`TranscriptSegment`] with the real start/end times.
+#[cfg(feature = "engine-sherpa")]
+fn correlate_sherpa_segments(
+    cleanup_lines: &[String],
+    all_lines: &[String],
+    all_seg_data: &[(String, f64, f64, String)],
+) -> Vec<TranscriptSegment> {
+    let mut si = 0usize;
+    let mut result = Vec::new();
+    for cleaned in cleanup_lines {
+        while si < all_lines.len() {
+            if &all_lines[si] == cleaned {
+                let (_, start, end, text) = &all_seg_data[si];
+                result.push(TranscriptSegment {
+                    start: *start,
+                    end: *end,
+                    text: text.clone(),
+                });
+                si += 1;
+                break;
+            }
+            si += 1;
+        }
+    }
+    result
+}
+
+/// Correlate cleanup-surviving whisper lines back to raw segment timing data.
+///
+/// `cleanup_lines` is a subsequence of `all_lines` (same order, some removed).
+/// `seg_data` is parallel to `all_lines`: `(start_secs, end_secs, clean_text)`.
+#[cfg(feature = "whisper")]
+fn correlate_whisper_segments(
+    cleanup_lines: &[String],
+    all_lines: &[String],
+    seg_data: &[(f64, f64, String)],
+) -> Vec<TranscriptSegment> {
+    let mut si = 0usize;
+    let mut result = Vec::new();
+    for cleaned in cleanup_lines {
+        while si < all_lines.len() {
+            if &all_lines[si] == cleaned {
+                let (start, end, text) = &seg_data[si];
+                result.push(TranscriptSegment {
+                    start: *start,
+                    end: *end,
+                    text: text.clone(),
+                });
+                si += 1;
+                break;
+            }
+            si += 1;
+        }
+    }
+    result
 }
 
 /// Build `WhisperContextParameters` with GPU explicitly enabled when a GPU
@@ -1039,8 +1156,14 @@ fn transcribe_with_whisper(
     // We keep two lists: filtered (normal path) and rescued (all segments with text).
     // If the filter would produce 0 lines, we rescue the unfiltered segments instead
     // of producing a blank transcript — a noisy transcript beats nothing for long recordings.
+    //
+    // Each list has a parallel segment-data vec (start_secs, end_secs, clean_text) so
+    // that after whisper-guard cleanup we can correlate surviving lines back to their
+    // real centisecond-precision timestamps without re-parsing the [m:ss] prefix.
     let mut lines: Vec<String> = Vec::new();
+    let mut seg_data: Vec<(f64, f64, String)> = Vec::new(); // parallel to lines
     let mut rescued_lines: Vec<String> = Vec::new();
+    let mut rescued_seg_data: Vec<(f64, f64, String)> = Vec::new(); // parallel to rescued_lines
     let mut skipped_no_speech = 0u32;
     for i in 0..num_segments {
         let segment = match state.get_segment(i) {
@@ -1049,6 +1172,7 @@ fn transcribe_with_whisper(
         };
 
         let start_ts = segment.start_timestamp();
+        let end_ts = segment.end_timestamp();
         let text = segment
             .to_str_lossy()
             .map_err(|e| TranscribeError::TranscriptionFailed(format!("get text: {}", e)))?;
@@ -1062,6 +1186,11 @@ fn transcribe_with_whisper(
         let secs = (start_ts % 6000) / 100;
         let line = format!("[{}:{:02}] {}", mins, secs, text);
 
+        // Centiseconds → seconds (centisecond precision)
+        let start_secs = start_ts as f64 / 100.0;
+        let end_secs = end_ts as f64 / 100.0;
+        let seg_tuple = (start_secs, end_secs, text.to_string());
+
         // Layer 3: Skip segments with high no_speech probability (likely hallucination)
         let no_speech_prob = segment.no_speech_probability();
         if no_speech_prob > 0.8 {
@@ -1072,11 +1201,14 @@ fn transcribe_with_whisper(
                 "flagged segment — high no_speech probability"
             );
             rescued_lines.push(line);
+            rescued_seg_data.push(seg_tuple);
             continue;
         }
 
         rescued_lines.push(line.clone());
+        rescued_seg_data.push(seg_tuple.clone());
         lines.push(line);
+        seg_data.push(seg_tuple);
     }
 
     // Rescue: if ALL segments were filtered out but some had text, keep them.
@@ -1091,6 +1223,7 @@ fn transcribe_with_whisper(
             "no_speech filter would blank the transcript — rescuing all segments"
         );
         lines = rescued_lines;
+        seg_data = rescued_seg_data;
         stats.rescued_no_speech = rescued_count;
         // Don't count these as skipped since we rescued them
         skipped_no_speech = 0;
@@ -1107,15 +1240,29 @@ fn transcribe_with_whisper(
         );
     }
 
-    let cleanup = run_transcript_cleanup_pipeline(lines);
+    // Capture detected language before cleanup consumes the state.
+    // full_lang_id_from_state() returns -1 when no language was set or detected.
+    let detected_language = {
+        let lang_id = state.full_lang_id_from_state();
+        if lang_id >= 0 {
+            whisper_rs::get_lang_str(lang_id).map(str::to_owned)
+        } else {
+            None
+        }
+    };
+
+    let cleanup = run_transcript_cleanup_pipeline(lines.clone());
     stats.after_dedup = cleanup.after(TranscriptCleanupStage::DedupSegments);
     stats.after_interleaved = cleanup.after(TranscriptCleanupStage::DedupInterleaved);
     stats.after_script_filter = cleanup.after(TranscriptCleanupStage::StripForeignScript);
     stats.after_noise_markers = cleanup.after(TranscriptCleanupStage::CollapseNoiseMarkers);
     stats.after_trailing_trim = cleanup.after(TranscriptCleanupStage::TrimTrailingNoise);
-    let lines = cleanup.lines;
 
-    let transcript = lines.join("\n");
+    // Correlate surviving lines back to their real timestamps
+    let segments = correlate_whisper_segments(&cleanup.lines, &lines, &seg_data);
+
+    let surviving_lines = cleanup.lines;
+    let transcript = surviving_lines.join("\n");
     let transcript = if transcript.is_empty() {
         transcript
     } else {
@@ -1142,6 +1289,8 @@ fn transcribe_with_whisper(
     Ok(TranscribeResult {
         text: transcript,
         stats,
+        segments,
+        detected_language,
     })
 }
 
@@ -2256,6 +2405,8 @@ fn transcribe_result_from_parakeet_parsed(
     Ok(TranscribeResult {
         text: transcript,
         stats,
+        segments: vec![],
+        detected_language: None,
     })
 }
 

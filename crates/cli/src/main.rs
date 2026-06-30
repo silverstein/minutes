@@ -52,6 +52,23 @@ struct JsonEnvelope<T: Serialize> {
 }
 
 #[derive(Serialize)]
+struct TranscribeSegmentOutput {
+    start: f64,
+    end: f64,
+    text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    speaker: Option<String>,
+}
+
+#[derive(Serialize)]
+struct TranscribeOutput {
+    text: String,
+    language: String,
+    segments: Vec<TranscribeSegmentOutput>,
+    duration_ms: u64,
+}
+
+#[derive(Serialize)]
 struct ContextSummaryOutput {
     session: Option<minutes_core::context_store::ContextSession>,
     links: Vec<minutes_core::context_store::ContextLink>,
@@ -732,6 +749,25 @@ enum Commands {
         /// Use `minutes template list` to see available templates.
         #[arg(long)]
         template: Option<String>,
+    },
+
+    /// Transcribe an audio file to text without writing meeting files or summarizing.
+    /// Useful for integrations: audio in, transcript (or JSON) out.
+    Transcribe {
+        /// Audio file (.wav, .m4a, .mp3, .ogg, .webm, .mp4)
+        path: PathBuf,
+
+        /// Output a JSON envelope to stdout instead of plain text
+        #[arg(long)]
+        json: bool,
+
+        /// Transcription language override (e.g. "en", "es"). Uses config value if omitted.
+        #[arg(short, long)]
+        language: Option<String>,
+
+        /// Run speaker diarization and annotate each segment with a speaker label
+        #[arg(long)]
+        diarize: bool,
     },
 
     /// Manage summarization templates (list, show, validate)
@@ -1661,6 +1697,17 @@ fn main() -> Result<()> {
                 minutes_core::notes::cleanup();
             }
             result
+        }
+        Commands::Transcribe {
+            path,
+            json,
+            language,
+            diarize: do_diarize,
+        } => {
+            if let Some(lang) = language {
+                config.transcription.language = Some(lang);
+            }
+            cmd_transcribe(&path, json, do_diarize, &config)
         }
         Commands::Template { cmd } => cmd_template(cmd),
         Commands::Watch { dir, language } => {
@@ -4357,6 +4404,123 @@ fn cmd_clean(meeting: &str, apply: bool, config: &Config) -> Result<()> {
         );
         eprintln!("Run with --apply to fix them.");
     }
+
+    Ok(())
+}
+
+/// Transcribe an audio file to text and optionally JSON-encode the result.
+/// No meeting files are written, no summarization is performed.
+fn cmd_transcribe(path: &Path, output_json: bool, do_diarize: bool, config: &Config) -> Result<()> {
+    if !path.exists() {
+        anyhow::bail!("file not found: {}", path.display());
+    }
+
+    // Transcribe with whisper-guard cleanup applied.
+    // result.segments carries real centisecond-precision start/end from the engine.
+    // result.detected_language carries the language the ASR engine identified.
+    let result = minutes_core::transcribe::transcribe(path, config)
+        .map_err(|e| anyhow::anyhow!("transcription failed: {}", e))?;
+
+    if !output_json {
+        // Plain-text mode: emit the cleaned transcript unchanged
+        print!("{}", result.text.trim_end());
+        println!();
+        return Ok(());
+    }
+
+    let duration_ms = (result.stats.audio_duration_secs * 1000.0) as u64;
+
+    // Language: CLI override wins; fall back to what the engine detected.
+    let language = config
+        .transcription
+        .language
+        .as_deref()
+        .map(str::to_owned)
+        .or_else(|| result.detected_language.clone())
+        .unwrap_or_else(|| "unknown".to_string());
+
+    // Build output segments from the core result (real timestamps, no scraping).
+    let segments: Vec<TranscribeSegmentOutput> = if do_diarize {
+        let diarize_result = minutes_core::diarize::diarize(path, config);
+        if let Some(dr) = diarize_result {
+            result
+                .segments
+                .iter()
+                .map(|seg| {
+                    // Attribute this segment to the diarization speaker whose
+                    // window best overlaps [seg.start, seg.end].
+                    let speaker = dr
+                        .segments
+                        .iter()
+                        .find(|s| s.start < seg.end && s.end > seg.start)
+                        .map(|s| s.speaker.clone());
+                    TranscribeSegmentOutput {
+                        start: seg.start,
+                        end: seg.end,
+                        text: seg.text.clone(),
+                        speaker,
+                    }
+                })
+                .collect()
+        } else {
+            result
+                .segments
+                .iter()
+                .map(|seg| TranscribeSegmentOutput {
+                    start: seg.start,
+                    end: seg.end,
+                    text: seg.text.clone(),
+                    speaker: None,
+                })
+                .collect()
+        }
+    } else {
+        result
+            .segments
+            .iter()
+            .map(|seg| TranscribeSegmentOutput {
+                start: seg.start,
+                end: seg.end,
+                text: seg.text.clone(),
+                speaker: None,
+            })
+            .collect()
+    };
+
+    // data.text: segment texts joined with newlines (clean, no [m:ss] prefixes).
+    // Falls back to result.text when segments are empty (e.g. parakeet engine).
+    let clean_text = if segments.is_empty() {
+        // Strip [m:ss] prefixes from the existing timestamped text as a fallback
+        result
+            .text
+            .lines()
+            .map(|line| {
+                if let Some(rest) = line.strip_prefix('[') {
+                    if let Some(end) = rest.find(']') {
+                        return rest[end + 1..].trim().to_string();
+                    }
+                }
+                line.trim().to_string()
+            })
+            .filter(|l| !l.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n")
+    } else {
+        segments
+            .iter()
+            .map(|s| s.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    let data = TranscribeOutput {
+        text: clean_text,
+        language,
+        segments,
+        duration_ms,
+    };
+    let envelope = json_envelope("transcribe", data);
+    println!("{}", serde_json::to_string_pretty(&envelope)?);
 
     Ok(())
 }
@@ -7288,6 +7452,91 @@ life (qmd://life/)
         });
         assert_eq!(second, InterruptAction::ForceExit(1));
         assert_eq!(shutdowns.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn transcribe_subcommand_parses_minimal_args() {
+        let parsed = Cli::try_parse_from(["minutes", "transcribe", "/tmp/audio.wav"])
+            .expect("transcribe must parse with only a file path");
+        match parsed.command {
+            Commands::Transcribe {
+                path,
+                json,
+                language,
+                diarize,
+            } => {
+                assert_eq!(path, PathBuf::from("/tmp/audio.wav"));
+                assert!(!json);
+                assert!(language.is_none());
+                assert!(!diarize);
+            }
+            _ => panic!("expected Transcribe variant"),
+        }
+    }
+
+    #[test]
+    fn transcribe_subcommand_parses_all_flags() {
+        let parsed = Cli::try_parse_from([
+            "minutes",
+            "transcribe",
+            "/tmp/audio.wav",
+            "--json",
+            "--language",
+            "en",
+            "--diarize",
+        ])
+        .expect("transcribe must parse all flags");
+        match parsed.command {
+            Commands::Transcribe {
+                path,
+                json,
+                language,
+                diarize,
+            } => {
+                assert_eq!(path, PathBuf::from("/tmp/audio.wav"));
+                assert!(json);
+                assert_eq!(language.as_deref(), Some("en"));
+                assert!(diarize);
+            }
+            _ => panic!("expected Transcribe variant"),
+        }
+    }
+
+    #[test]
+    fn transcribe_output_uses_snake_case_duration() {
+        let output = TranscribeOutput {
+            text: "hello".to_string(),
+            language: "en".to_string(),
+            segments: vec![],
+            duration_ms: 1234,
+        };
+        let json = serde_json::to_string(&output).unwrap();
+        assert!(
+            json.contains("\"duration_ms\""),
+            "expected snake_case duration_ms, got: {}",
+            json
+        );
+        assert!(
+            !json.contains("durationMs"),
+            "camelCase durationMs must not appear in output, got: {}",
+            json
+        );
+    }
+
+    #[test]
+    fn transcribe_segment_omits_speaker_when_none() {
+        let seg = TranscribeSegmentOutput {
+            start: 0.0,
+            end: 1.5,
+            text: "hello".to_string(),
+            speaker: None,
+        };
+        let json = serde_json::to_string(&seg).unwrap();
+        assert!(
+            !json.contains("speaker"),
+            "speaker field must be omitted when None, got: {}",
+            json
+        );
     }
 }
 

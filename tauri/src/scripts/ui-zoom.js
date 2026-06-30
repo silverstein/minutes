@@ -43,7 +43,10 @@
   }
 
   document.addEventListener('keydown', function (e) {
-    if (!(e.metaKey || e.ctrlKey) || e.shiftKey || e.altKey) return;
+    // Allow Shift: on US layouts "+" is Shift+"=", so Cmd++ arrives as
+    // Cmd+Shift+"=" (e.key === "+"). The shifted forms of "-"/"0" produce
+    // different keys ("_"/")") that don't match below, so no false triggers.
+    if (!(e.metaKey || e.ctrlKey) || e.altKey) return;
     let next;
     if (e.key === '=' || e.key === '+') {
       e.preventDefault();

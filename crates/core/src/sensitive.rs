@@ -380,6 +380,7 @@ fn write_artifact(
         speaker_map: vec![],
         name_corrections: Vec::new(),
         recording_health: None,
+        speaker_mapping: None,
         template: None,
         filter_diagnosis: None,
     };

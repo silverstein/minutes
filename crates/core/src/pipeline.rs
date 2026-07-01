@@ -1611,6 +1611,7 @@ pub fn write_transcript_artifact(
         speaker_map: vec![],
         name_corrections: Vec::new(),
         recording_health: context.recording_health.clone(),
+        speaker_mapping: None,
         processing_warnings: Vec::new(),
         template: context.template.as_ref().map(|t| t.slug().to_string()),
         filter_diagnosis: if status == Some(OutputStatus::NoSpeech) {
@@ -2641,6 +2642,7 @@ where
         speaker_map,
         name_corrections,
         recording_health,
+        speaker_mapping: None,
         template: template.map(|t| t.slug().to_string()),
         filter_diagnosis: if status == Some(OutputStatus::NoSpeech) {
             // Prefer the all-noise-suppression diagnosis when it fired; it
@@ -4956,6 +4958,7 @@ mod tests {
             speaker_map: vec![],
             name_corrections: Vec::new(),
             recording_health: None,
+            speaker_mapping: None,
             processing_warnings: Vec::new(),
             template: None,
             filter_diagnosis: None,
@@ -6466,6 +6469,7 @@ mod tests {
             }],
             name_corrections: Vec::new(),
             recording_health: None,
+            speaker_mapping: None,
             processing_warnings: Vec::new(),
             template: None,
             filter_diagnosis: None,

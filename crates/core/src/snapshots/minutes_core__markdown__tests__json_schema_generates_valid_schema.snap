@@ -172,6 +172,17 @@ expression: schema
         "$ref": "#/$defs/SpeakerAttribution"
       }
     },
+    "speaker_mapping": {
+      "description": "Health of the Level-1 speaker-naming step. Lets a meeting be greppable for\n\"naming failed / incomplete\" instead of the failure living only in the JSON\nlog (#384). `None` for meetings processed before this field existed.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SpeakerMappingHealth"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "status": {
       "anyOf": [
         {
@@ -659,6 +670,67 @@ expression: schema
         "name",
         "confidence",
         "source"
+      ]
+    },
+    "SpeakerMappingHealth": {
+      "description": "Health of the Level-1 speaker-naming (`speaker_mapping`) step, surfaced in\nfrontmatter so a meeting that shipped anonymous is greppable and re-runnable\n(#382/#384). Counts are recorded separately from confidence so \"a map exists\"\nis never confused with \"every speaker was named\".",
+      "type": "object",
+      "properties": {
+        "attendees": {
+          "description": "Size of the attendee pool offered to the mapper.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "diarized_speakers": {
+          "description": "Distinct diarization speaker labels present (proxy for the raw diarization\nspeaker count, which needs the audio and so isn't recoverable on a redo).",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "duration_ms": {
+          "description": "Wall-clock of the mapping call.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "last_run": {
+          "description": "RFC3339 timestamp of the most recent mapping run.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "mapped_speakers": {
+          "description": "How many of those labels received a name.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "model": {
+          "description": "Engine/model hint used (e.g. `agent:claude`).",
+          "type": "string"
+        },
+        "reason": {
+          "description": "Machine-readable reason when `status` is not `ok`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "description": "`ok` (some labels named), `empty` (ran, no confident matches), `skipped`\n(no anonymous labels or no attendees to map against). Mirrors the\n`speaker_mapping` JSONL `outcome` vocabulary.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "status",
+        "diarized_speakers",
+        "mapped_speakers",
+        "attendees"
       ]
     },
     "Visibility": {

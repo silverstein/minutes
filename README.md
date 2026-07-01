@@ -995,6 +995,17 @@ minutes voices --json       # JSON output
 minutes voices --delete     # Remove all profiles
 ```
 
+**Recover a failed mapping (Level 1).** If a meeting shipped with anonymous `SPEAKER_n` labels (the Level-1 call timed out, errored, or ran before attendees were known), re-run just the speaker mapping without reprocessing the audio:
+
+```bash
+minutes redo-speaker-mapping <meeting>                          # dry run: show the proposed map
+minutes redo-speaker-mapping <meeting> --apply                  # write speaker_map + a speaker_mapping health block
+minutes redo-speaker-mapping <meeting> --engine ollama --apply  # override the engine for this run
+minutes redo-speaker-mapping <meeting> --json                   # machine-readable output
+```
+
+`<meeting>` is a path or a search term. The command never downgrades an existing High-confidence attribution, and it records a `speaker_mapping:` health block in the frontmatter (status `ok` / `empty` / `skipped`, plus the model, speaker/attendee counts, and timing) so a meeting that shipped anonymous is both greppable and re-runnable.
+
 **Privacy**: Voice enrollment is self-only (no enrolling others). Level 3 confirmed profiles require explicit opt-in per person. Voice embeddings are stored locally in `~/.minutes/voices.db` with 0600 permissions. Nothing leaves your machine.
 
 > **Platform notes:** Calendar integration (auto-detecting meeting attendees) requires macOS. Screen context capture works on macOS and Linux. The voice memo pipeline works on all platforms — any folder sync (iCloud, Dropbox, Google Drive, Syncthing) can feed the watcher. The `minutes service install` auto-start command requires macOS (launchd); on Linux, use systemd or cron. Speaker diarization (`pyannote-rs`) works on all platforms (CLI, Tauri app, and via MCP). All other features — recording, transcription, search, action items, person profiles — work on all platforms.

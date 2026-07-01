@@ -142,7 +142,7 @@ pub enum AttributionSource {
 }
 
 /// A mapping from an anonymous speaker label to a real person.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SpeakerAttribution {
     pub speaker_label: String,
     pub name: String,

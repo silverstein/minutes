@@ -240,6 +240,7 @@ mod tests {
             speaker_map: vec![],
             name_corrections: Vec::new(),
             recording_health: None,
+            speaker_mapping: None,
             processing_warnings: Vec::new(),
             template: None,
             filter_diagnosis: None,

@@ -711,7 +711,7 @@ pub(crate) fn summarization_model_hint(config: &Config, has_screen_context: bool
     }
 }
 
-pub(crate) fn speaker_mapping_model_hint(config: &Config) -> String {
+pub fn speaker_mapping_model_hint(config: &Config) -> String {
     match config.summarization.engine.as_str() {
         "none" | "auto" | "agent" => configured_agent_hint(config),
         "claude" => "anthropic:claude-sonnet-4-20250514".into(),

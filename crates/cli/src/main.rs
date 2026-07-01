@@ -724,6 +724,24 @@ enum Commands {
         apply: bool,
     },
 
+    /// Re-run speaker mapping on an existing meeting (recovery for failed/missing maps)
+    RedoSpeakerMapping {
+        /// Path to meeting .md file, or a search term to find one
+        meeting: String,
+
+        /// Actually write the new speaker map (default: dry-run showing what would change)
+        #[arg(long)]
+        apply: bool,
+
+        /// Override the summarization engine for this run (e.g. "agent", "ollama", "mistral")
+        #[arg(long)]
+        engine: Option<String>,
+
+        /// Emit machine-readable JSON instead of human output
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Process an audio file through the pipeline
     Process {
         /// Path to audio file (.wav, .m4a, .mp3)
@@ -1663,6 +1681,12 @@ fn main() -> Result<()> {
         } => cmd_export(content_type, output, &config),
         Commands::Ingest { path, all, dry_run } => cmd_ingest(path, all, dry_run, &config),
         Commands::Clean { meeting, apply } => cmd_clean(&meeting, apply, &config),
+        Commands::RedoSpeakerMapping {
+            meeting,
+            apply,
+            engine,
+            json,
+        } => cmd_redo_speaker_mapping(&meeting, apply, engine, json, &config),
         Commands::Process {
             path,
             content_type,
@@ -4224,6 +4248,345 @@ fn cmd_ingest(path: Option<PathBuf>, all: bool, dry_run: bool, config: &Config) 
     Ok(())
 }
 
+/// Resolve a single meeting `.md` file from a path or search term.
+///
+/// Both branches canonicalize the result and require it to live under the
+/// meetings directory, so neither a crafted path nor a symlinked search hit can
+/// point a mutating command at a file outside the user's meetings.
+fn resolve_single_meeting(meeting: &str, config: &Config) -> Result<std::path::PathBuf> {
+    let meetings_dir = &config.output_dir;
+    let meetings_canonical = meetings_dir
+        .canonicalize()
+        .unwrap_or_else(|_| meetings_dir.clone());
+    let ensure_contained = |canonical: std::path::PathBuf| -> Result<std::path::PathBuf> {
+        if !canonical.starts_with(&meetings_canonical) {
+            anyhow::bail!(
+                "path {} is outside the meetings directory ({})",
+                canonical.display(),
+                meetings_dir.display()
+            );
+        }
+        Ok(canonical)
+    };
+
+    let path = std::path::PathBuf::from(meeting);
+    if path.exists() {
+        return ensure_contained(path.canonicalize()?);
+    }
+
+    // Restrict the search to meetings so a memo/dictation never resolves here.
+    let filters = minutes_core::search::SearchFilters {
+        content_type: Some("meeting".into()),
+        since: None,
+        attendee: None,
+        intent_kind: None,
+        owner: None,
+        recorded_by: None,
+    };
+    let results = minutes_core::search::search(meeting, config, &filters)?;
+    if results.is_empty() {
+        anyhow::bail!("no meeting found matching: {}", meeting);
+    }
+    let canonical = ensure_contained(results[0].path.canonicalize()?)?;
+    eprintln!("  Matched: {}", canonical.display());
+    Ok(canonical)
+}
+
+/// Extract the body of the `## Transcript` section. Scans line-by-line so a
+/// fenced code block or a heading like `## Transcript cleanup notes` cannot be
+/// mistaken for the real transcript: only an H2 whose text is exactly
+/// `Transcript` (outside any code fence) opens the section, and the next real H2
+/// closes it. Returns `None` when there is no such section.
+fn transcript_section(body: &str) -> Option<String> {
+    // Track which marker opened the current fence so a `~~~` line inside a
+    // ``` block (or vice versa) is treated as content, not as a fence toggle.
+    let mut fence: Option<char> = None;
+    let mut found = false;
+    let mut collected: Vec<&str> = Vec::new();
+    for line in body.lines() {
+        let trimmed = line.trim_start();
+        let marker = if trimmed.starts_with("```") {
+            Some('`')
+        } else if trimmed.starts_with("~~~") {
+            Some('~')
+        } else {
+            None
+        };
+        if let Some(m) = marker {
+            match fence {
+                None => fence = Some(m),                 // open a fence
+                Some(open) if open == m => fence = None, // close only on a matching marker
+                Some(_) => {}                            // other marker inside a fence: content
+            }
+            if found {
+                collected.push(line);
+            }
+            continue;
+        }
+        if fence.is_none() {
+            if let Some(rest) = line.strip_prefix("## ") {
+                if found {
+                    break; // next section ends the transcript
+                }
+                if rest.trim() == "Transcript" {
+                    found = true;
+                    continue;
+                }
+            }
+        }
+        if found {
+            collected.push(line);
+        }
+    }
+    if !found {
+        return None;
+    }
+    Some(collected.join("\n").trim_start_matches('\n').to_string())
+}
+
+/// Merge a freshly-computed speaker map into the existing one without ever
+/// downgrading an existing High-confidence attribution. Fresh entries (Medium at
+/// most, from the LLM) fill in or refresh anything not already High-confidence.
+fn merge_speaker_map(
+    existing: &[minutes_core::diarize::SpeakerAttribution],
+    fresh: &[minutes_core::diarize::SpeakerAttribution],
+) -> Vec<minutes_core::diarize::SpeakerAttribution> {
+    use minutes_core::diarize::Confidence;
+    use std::collections::BTreeMap;
+
+    fn rank(c: Confidence) -> u8 {
+        match c {
+            Confidence::High => 2,
+            Confidence::Medium => 1,
+            Confidence::Low => 0,
+        }
+    }
+
+    let mut by_label: BTreeMap<String, minutes_core::diarize::SpeakerAttribution> = BTreeMap::new();
+    // Fold existing entries, keeping the highest-confidence one per label. This
+    // guards against a malformed frontmatter that lists the same label twice
+    // (e.g. High then Medium) silently dropping the High before merge.
+    for a in existing {
+        match by_label.get(&a.speaker_label) {
+            Some(cur) if rank(cur.confidence) >= rank(a.confidence) => {}
+            _ => {
+                by_label.insert(a.speaker_label.clone(), a.clone());
+            }
+        }
+    }
+    // Apply fresh results only where the retained existing entry is not High.
+    for a in fresh {
+        match by_label.get(&a.speaker_label) {
+            Some(cur) if cur.confidence == Confidence::High => {} // never downgrade
+            _ => {
+                by_label.insert(a.speaker_label.clone(), a.clone());
+            }
+        }
+    }
+    by_label.into_values().collect()
+}
+
+/// Re-run Level-1 speaker mapping on an existing meeting and (with `--apply`)
+/// write the merged map plus a `speaker_mapping` health block. Recovery path for
+/// meetings whose mapping failed, timed out, or never ran.
+fn cmd_redo_speaker_mapping(
+    meeting: &str,
+    apply: bool,
+    engine: Option<String>,
+    json: bool,
+    config: &Config,
+) -> Result<()> {
+    let path = resolve_single_meeting(meeting, config)?;
+    let content = std::fs::read_to_string(&path)?;
+    let (fm_str, body) = minutes_core::markdown::split_frontmatter(&content);
+    if fm_str.is_empty() {
+        anyhow::bail!(
+            "{} is not a meeting file (no YAML frontmatter)",
+            path.display()
+        );
+    }
+    let fm: minutes_core::markdown::Frontmatter = serde_yaml::from_str(fm_str)
+        .map_err(|e| anyhow::anyhow!("could not parse frontmatter in {}: {e}", path.display()))?;
+
+    // Only meetings carry diarized speaker labels. Refuse memos/dictation so we
+    // never write a speaker map (or call the LLM) on a non-meeting file.
+    if fm.r#type != minutes_core::markdown::ContentType::Meeting {
+        anyhow::bail!(
+            "{} is type {:?}, not a meeting; redo-speaker-mapping only operates on meetings",
+            path.display(),
+            fm.r#type
+        );
+    }
+
+    // Source-of-truth contract: we map the diarized transcript against the
+    // recorded attendee pool. If either is missing there is nothing to do, and
+    // we say exactly which side is missing rather than silently producing junk.
+    let transcript = transcript_section(body);
+    let labels: Vec<String> = transcript
+        .as_deref()
+        .map(minutes_core::summarize::extract_speaker_labels_pub)
+        .unwrap_or_default();
+    let attendees = fm.normalized_attendees();
+
+    // Engine override (validated lazily by the summarizer).
+    let mut cfg = config.clone();
+    if let Some(e) = &engine {
+        cfg.summarization.engine = e.clone();
+    }
+    let model = minutes_core::summarize::speaker_mapping_model_hint(&cfg);
+
+    // Contract failures short-circuit to a `skipped` health block.
+    let skip_reason: Option<&str> = if transcript.is_none() {
+        Some("no ## Transcript section in this meeting")
+    } else if labels.is_empty() {
+        Some("no anonymous SPEAKER_n labels remain to remap")
+    } else if attendees.is_empty() {
+        Some("no attendees recorded to map against; add attendees: to the frontmatter and retry")
+    } else {
+        None
+    };
+
+    if let Some(reason) = skip_reason {
+        let health = minutes_core::markdown::SpeakerMappingHealth {
+            status: "skipped".into(),
+            model,
+            diarized_speakers: labels.len(),
+            mapped_speakers: 0,
+            attendees: attendees.len(),
+            duration_ms: None,
+            reason: Some(reason.to_string()),
+            last_run: Some(Local::now().to_rfc3339()),
+        };
+        report_redo_result(
+            &path,
+            apply,
+            json,
+            &fm.speaker_map,
+            &fm.speaker_map,
+            &health,
+            config,
+        )?;
+        return Ok(());
+    }
+
+    let transcript = transcript.expect("transcript present past contract check");
+    let started = std::time::Instant::now();
+    let fresh = minutes_core::summarize::map_speakers(&transcript, &attendees, &cfg, None);
+    let duration_ms = started.elapsed().as_millis() as u64;
+    let merged = merge_speaker_map(&fm.speaker_map, &fresh);
+
+    let health = minutes_core::markdown::SpeakerMappingHealth {
+        status: if fresh.is_empty() {
+            "empty".into()
+        } else {
+            "ok".into()
+        },
+        model,
+        diarized_speakers: labels.len(),
+        mapped_speakers: fresh.len(),
+        attendees: attendees.len(),
+        duration_ms: Some(duration_ms),
+        reason: if fresh.is_empty() {
+            Some("mapper ran but produced no confident matches".into())
+        } else {
+            None
+        },
+        last_run: Some(Local::now().to_rfc3339()),
+    };
+
+    report_redo_result(
+        &path,
+        apply,
+        json,
+        &fm.speaker_map,
+        &merged,
+        &health,
+        config,
+    )?;
+    Ok(())
+}
+
+/// Apply (when `--apply`) then render the outcome of a redo run.
+///
+/// The write happens BEFORE any output so a failed write returns an error
+/// instead of first printing a success line/JSON the caller would trust. On
+/// `--apply` the `speaker_mapping` health block is always recorded (so a re-run
+/// is visible in the frontmatter) even when the map itself did not change.
+fn report_redo_result(
+    path: &std::path::Path,
+    apply: bool,
+    json: bool,
+    before: &[minutes_core::diarize::SpeakerAttribution],
+    after: &[minutes_core::diarize::SpeakerAttribution],
+    health: &minutes_core::markdown::SpeakerMappingHealth,
+    _config: &Config,
+) -> Result<()> {
+    let map_changed = before != after;
+    let mut frontmatter_written = false;
+
+    // Write first: if this fails we propagate the error and emit no success output.
+    if apply {
+        let health_owned = health.clone();
+        if map_changed {
+            let after_owned = after.to_vec();
+            minutes_core::markdown::update_frontmatter(path, move |f| {
+                f.speaker_map = after_owned;
+                f.speaker_mapping = Some(health_owned);
+            })?;
+        } else {
+            minutes_core::markdown::update_frontmatter(path, move |f| {
+                f.speaker_mapping = Some(health_owned);
+            })?;
+        }
+        frontmatter_written = true;
+    }
+
+    if json {
+        let payload = serde_json::json!({
+            "path": path.display().to_string(),
+            "map_changed": map_changed,
+            "written": frontmatter_written,
+            "health": health,
+            "speaker_map": after,
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json_envelope("redo-speaker-mapping", payload))?
+        );
+        return Ok(());
+    }
+
+    println!("Meeting: {}", path.display());
+    println!(
+        "  status: {} ({} of {} labels named, {} attendees)",
+        health.status, health.mapped_speakers, health.diarized_speakers, health.attendees
+    );
+    if let Some(reason) = &health.reason {
+        println!("  reason: {reason}");
+    }
+    if after.is_empty() {
+        println!("  map: (none)");
+    } else {
+        for a in after {
+            println!(
+                "  map: {} -> {} [{:?}, {:?}]",
+                a.speaker_label, a.name, a.confidence, a.source
+            );
+        }
+    }
+    if frontmatter_written {
+        if map_changed {
+            println!("  written: speaker_map + speaker_mapping health updated");
+        } else {
+            println!("  written: speaker_mapping health updated (map unchanged)");
+        }
+    } else {
+        println!("  (dry run: re-run with --apply to write)");
+    }
+
+    Ok(())
+}
+
 fn cmd_clean(meeting: &str, apply: bool, config: &Config) -> Result<()> {
     let meetings_dir = &config.output_dir;
 
@@ -6739,6 +7102,96 @@ mod tests {
         }
         std::fs::remove_dir_all(&dir).ok();
         result
+    }
+
+    fn attr(
+        label: &str,
+        name: &str,
+        confidence: minutes_core::diarize::Confidence,
+    ) -> minutes_core::diarize::SpeakerAttribution {
+        minutes_core::diarize::SpeakerAttribution {
+            speaker_label: label.into(),
+            name: name.into(),
+            confidence,
+            source: minutes_core::diarize::AttributionSource::Llm,
+        }
+    }
+
+    #[test]
+    fn merge_speaker_map_never_downgrades_high() {
+        use minutes_core::diarize::Confidence;
+        let existing = vec![attr("SPEAKER_00", "Sarah", Confidence::High)];
+        let fresh = vec![
+            attr("SPEAKER_00", "Someone Else", Confidence::Medium),
+            attr("SPEAKER_01", "Dan", Confidence::Medium),
+        ];
+        let merged = merge_speaker_map(&existing, &fresh);
+        let s0 = merged
+            .iter()
+            .find(|a| a.speaker_label == "SPEAKER_00")
+            .unwrap();
+        assert_eq!(s0.name, "Sarah", "existing High must survive");
+        assert_eq!(s0.confidence, Confidence::High);
+        let s1 = merged
+            .iter()
+            .find(|a| a.speaker_label == "SPEAKER_01")
+            .unwrap();
+        assert_eq!(s1.name, "Dan", "fresh fills in unmapped labels");
+    }
+
+    #[test]
+    fn merge_speaker_map_preserves_high_on_duplicate_existing_labels() {
+        use minutes_core::diarize::Confidence;
+        // Malformed frontmatter: same label listed twice, High then Medium.
+        let existing = vec![
+            attr("SPEAKER_00", "Sarah", Confidence::High),
+            attr("SPEAKER_00", "sarah lower", Confidence::Medium),
+        ];
+        // Even with an empty fresh map, the High entry must not be lost.
+        let merged = merge_speaker_map(&existing, &[]);
+        let s0 = merged
+            .iter()
+            .find(|a| a.speaker_label == "SPEAKER_00")
+            .unwrap();
+        assert_eq!(s0.name, "Sarah");
+        assert_eq!(s0.confidence, Confidence::High);
+        assert_eq!(merged.len(), 1, "duplicate labels collapse to one");
+    }
+
+    #[test]
+    fn transcript_section_requires_exact_heading() {
+        // A look-alike heading must not be treated as the transcript.
+        let body = "## Transcript cleanup notes\n\n[SPEAKER_00 0:00] not the transcript\n";
+        assert!(transcript_section(body).is_none());
+    }
+
+    #[test]
+    fn transcript_section_ignores_fenced_code_block() {
+        // A `## Transcript` line inside a code fence must be ignored; the real
+        // section after the fence is the one that wins.
+        let body = "## Summary\n\n```\n## Transcript\n[SPEAKER_99 0:00] fake\n```\n\n## Transcript\n\n[SPEAKER_00 0:00] real line\n";
+        let t = transcript_section(body).expect("real transcript section found");
+        assert!(t.contains("real line"));
+        assert!(!t.contains("fake"));
+    }
+
+    #[test]
+    fn transcript_section_handles_mixed_fence_markers() {
+        // A backtick fence whose body contains a `~~~` line must NOT be treated
+        // as closed by that tilde line; the fake `## Transcript` inside stays
+        // ignored and the real section after the fence wins.
+        let body = "## Summary\n\n```\n~~~\n## Transcript\n[SPEAKER_99 0:00] fake\n```\n\n## Transcript\n\n[SPEAKER_00 0:00] real line\n";
+        let t = transcript_section(body).expect("real transcript section found");
+        assert!(t.contains("real line"));
+        assert!(!t.contains("fake"));
+    }
+
+    #[test]
+    fn transcript_section_extracts_first_and_stops_at_next_h2() {
+        let body = "## Transcript\n\n[SPEAKER_00 0:00] hello\n\n## Action Items\n\n- do thing\n";
+        let t = transcript_section(body).unwrap();
+        assert!(t.contains("hello"));
+        assert!(!t.contains("Action Items"));
     }
 
     #[test]

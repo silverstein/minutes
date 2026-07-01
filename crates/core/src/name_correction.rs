@@ -134,7 +134,7 @@ fn differs_only_by_case(token: &str, surface: &str) -> bool {
     token != surface && token.to_lowercase() == surface.to_lowercase()
 }
 
-fn levenshtein(a: &str, b: &str) -> usize {
+pub(crate) fn levenshtein(a: &str, b: &str) -> usize {
     let a: Vec<char> = a.chars().collect();
     let b: Vec<char> = b.chars().collect();
     let mut prev: Vec<usize> = (0..=b.len()).collect();
@@ -148,6 +148,13 @@ fn levenshtein(a: &str, b: &str) -> usize {
         std::mem::swap(&mut prev, &mut cur);
     }
     prev[b.len()]
+}
+
+/// Case/accent-folded normalization of a name token, shared with the
+/// entity-resolution clustering pass so both layers agree on what "the same
+/// characters" means (lowercase + accent fold, e.g. `José` -> `jose`).
+pub(crate) fn normalize_name(s: &str) -> String {
+    normalize(s)
 }
 
 fn build_pool(

@@ -132,6 +132,12 @@ items below were confirmed by **direct source fetch**, and everything under
 
 ### Slice 0 — Entity-resolution eval harness (measure first)
 
+Status (2026-07-01): SHIPPED as `crates/core/src/entity_resolution_eval.rs`
+(test-gated, synthetic names). Gates `wrong_merges == 0` and full drift recall,
+reports B-cubed precision/recall, and scores (does not gate) the ambiguous
+short-name band. A full graph-rebuild test (`test_alias_clusters_full_rebuild`)
+exercises the real path, not just helpers.
+
 Extend `name_eval` into a clustering eval. Synthetic fixture: sets of name
 fragments with ground-truth person clusters, covering (a) spelling drift,
 (b) role/title contamination, and critically (c) **true-distinct-people
@@ -155,6 +161,20 @@ Regression cases land in the Slice 0 eval. Independent of the rest; shippable
 immediately.
 
 ### Slice 2 — alias clustering pass + confirm-merge
+
+Status (2026-07-01): part 1 (clustering pass) SHIPPED, suggestion-only. New
+edge predicate `entity_cluster::names_plausibly_same_person` (Double Metaphone +
+bounded Levenshtein, reused from `name_correction`, plus separator-insensitive
+compaction), unioned transitively with the existing `names_likely_same` via
+`entity_cluster::cluster_indices` and surfaced as `graph::AliasCluster` in
+`GraphStats` and the `minutes people` rebuild output. `shared_meetings` is
+evidence only, NOT a gate (drift variants of one person recur across *different*
+meetings). Part 2 (confirm-merge action + persistence) and any auto-merge remain
+DEFERRED — nothing is merged or written, so a wrong suggestion costs precision,
+not data. Class-2 multi-person concatenation (`gert-liam`) is also deferred: it
+must be source-aware and graph-rebuild-aware (splitting only `entities.people`
+would leave raw `attendees`/assignees to re-fuse on rebuild), and the safe
+delimiters are narrower than they look (`Ben & Jerry`, `Smith, John, Jr.`).
 
 Two parts, and the first is genuinely new work, not just promotion. The existing
 `names_likely_same` edge predicate requires identical first-name tokens, so it

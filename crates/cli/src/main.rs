@@ -3465,14 +3465,28 @@ fn cmd_people(rebuild: bool, json: bool, limit: usize, config: &Config) -> Resul
             "Index rebuilt: {} people, {} meetings, {} commitments in {}ms",
             stats.people_count, stats.meeting_count, stats.commitment_count, stats.rebuild_ms
         );
+        if !stats.alias_clusters.is_empty() {
+            eprintln!("\nPossible name variants (same person, different spellings?):");
+            for cluster in &stats.alias_clusters {
+                let shared = if cluster.max_shared_meetings > 0 {
+                    format!(" ({} shared meetings)", cluster.max_shared_meetings)
+                } else {
+                    String::new()
+                };
+                eprintln!("  {}{}", cluster.members.join(" ↔ "), shared);
+            }
+        }
         if !stats.alias_suggestions.is_empty() {
-            eprintln!("\nPossible duplicates:");
+            eprintln!("\nPossible duplicates (shortened / last-name match):");
             for alias in &stats.alias_suggestions {
                 eprintln!(
                     "  {} ↔ {} ({} shared meetings)",
                     alias.name_a, alias.name_b, alias.shared_meetings
                 );
             }
+        }
+        if !stats.alias_clusters.is_empty() || !stats.alias_suggestions.is_empty() {
+            eprintln!("  Review manually; automatic merging is not yet available.");
         }
         eprintln!();
     }

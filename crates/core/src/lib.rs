@@ -11,6 +11,13 @@ pub mod device_monitor;
 pub mod diarize;
 pub mod dictation_cleanup;
 pub mod dictation_memory;
+/// Person entity-resolution clustering (issue #385, class 3): suggestion-only
+/// grouping of name-variant fragments. Never merges.
+pub(crate) mod entity_cluster;
+/// Entity-resolution evaluation harness (cluster-level). Test-only; the
+/// measurement contract for the entity-clustering lever (issue #385 / #371).
+#[cfg(test)]
+mod entity_resolution_eval;
 pub mod error;
 pub mod events;
 pub mod ffmpeg;

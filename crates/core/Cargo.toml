@@ -64,7 +64,6 @@ nnnoiseless = { workspace = true, optional = true }
 base64 = "0.22"
 rusqlite = { workspace = true }
 tempfile = "3"
-rphonetic = "3.0.6"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

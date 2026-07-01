@@ -12,25 +12,29 @@
 //! the pipeline can record provenance (never a silent rewrite). The pass is
 //! config-gated and off by default.
 //!
-//! Two tiers of confidence:
-//! - **Out of name-position** (no syntactic name cue around the token): only
-//!   accent restoration and bounded edit-distance with a corroborating signal
-//!   (same first letter OR matching Double Metaphone) and a minimum length.
-//!   This is the conservative tier that protects common words like `mark`.
+//! Both fuzzy tiers require the target name to be a confirmed meeting
+//! participant (an attendee or a High-confidence attributed speaker) and refuse
+//! to rewrite a common English word. Correcting only toward this meeting's
+//! people, never a cross-vault vocabulary/graph name, plus the common-word gate,
+//! is what stops ordinary words from becoming coincidental look-alike names
+//! (#388: `work`->`York`, `crate`->`Cate`, `high`->`Hugh`). Accent restoration
+//! (same letters, e.g. `monica`->`Mónica`) is the only path open to any pool
+//! name.
+//!
+//! Two tiers of confidence (both participant-gated, both common-word-gated):
+//! - **Out of name-position** (no syntactic name cue around the token): a
+//!   single-edit same-first-letter misspelling of a participant name at least
+//!   `MIN_MISSPELL_LEN` long. The conservative tier that protects common words
+//!   like `mark`/`work`/`high`.
 //! - **In name-position** (preceded by an address cue like `thanks`/`merci`, or
-//!   followed by a name-verb like `will`/`owns`) AND the matched name is a
-//!   confirmed meeting participant (an attendee or a High-confidence attributed
-//!   speaker): the first-letter / length gates relax and a unique participant
-//!   within 2 edits wins. This is what safely recovers the harder
-//!   different-first-letter (`Geert`<-`bert`) and short-token (`Thanh`<-`tan`)
-//!   cases. Gating the aggressive tier to participants (speaker-turn context)
-//!   keeps it from rewriting toward names that are merely in the
-//!   vocabulary/graph but not in this meeting.
+//!   followed by a name-verb like `will`/`owns`): the first-letter / length
+//!   gates relax and a unique participant within 2 edits wins. This safely
+//!   recovers the harder different-first-letter (`Geert`<-`bert`) and short-token
+//!   (`Thanh`<-`tan`) cases.
 //!
 //! The edit-distance budget and unique-winner requirement always hold, so a
 //! token far from any pool name is never touched, in or out of name-position.
 
-use rphonetic::{DoubleMetaphone, Encoder};
 use serde::{Deserialize, Serialize};
 
 /// Minimum token length eligible for a non-accent (misspelling) correction.
@@ -89,12 +93,11 @@ struct PoolEntry {
     surface: String,
     /// Lowercased, accent-folded form for distance + accent comparison.
     norm: String,
-    /// Double Metaphone primary code of the surface form.
-    dm: String,
     /// True when this name is a confirmed meeting participant (an attendee or a
-    /// High-confidence attributed speaker). Only participants are eligible for
-    /// the aggressive relaxed (name-position) tier; the conservative tier
-    /// (accent / same-first-letter) accepts any pool name.
+    /// High-confidence attributed speaker). Both fuzzy tiers require a
+    /// participant target so a token is never rewritten toward a name that is
+    /// merely in the cross-vault vocabulary/graph but not in this meeting (#388).
+    /// Accent restoration (same letters) is the only path open to any pool name.
     is_participant: bool,
 }
 
@@ -147,33 +150,10 @@ fn levenshtein(a: &str, b: &str) -> usize {
     prev[b.len()]
 }
 
-/// Distance budget for a normalized token of the given length. Strict: 1 edit
-/// for short names, 2 for longer ones.
-fn distance_budget(len: usize) -> usize {
-    if len >= 6 {
-        2
-    } else {
-        1
-    }
-}
-
-/// Double Metaphone primary code, guarded to ASCII input. `rphonetic`'s
-/// encoder panics on some non-ASCII strings (e.g. "José"), and Double Metaphone
-/// is an ASCII/English algorithm anyway, so non-ASCII names get an empty code
-/// (they match via the accent/normalized path, never via phonetics).
-fn dm_encode(dm: &DoubleMetaphone, s: &str) -> String {
-    if s.is_ascii() {
-        dm.encode(s)
-    } else {
-        String::new()
-    }
-}
-
 fn build_pool(
     pool: &[String],
     participant_norms: &std::collections::HashSet<String>,
 ) -> Vec<PoolEntry> {
-    let dm = DoubleMetaphone::default();
     pool.iter()
         .filter_map(|name| {
             let surface = name.trim();
@@ -189,7 +169,6 @@ fn build_pool(
             let is_participant = participant_norms.contains(&norm);
             Some(PoolEntry {
                 surface: surface.to_string(),
-                dm: dm_encode(&dm, surface),
                 is_participant,
                 norm,
             })
@@ -389,6 +368,25 @@ fn is_stopword(norm: &str) -> bool {
     STOPWORDS.contains(&norm)
 }
 
+/// True when `norm` (already lowercase + accent-folded) is a common English
+/// word. The conservative correction tier refuses to rewrite these so ordinary
+/// words are never "corrected" into coincidental look-alike names (#388). The
+/// list is a bundled set of common 4+ character words; shorter tokens are
+/// already excluded by `MIN_MISSPELL_LEN`.
+fn is_common_word(norm: &str) -> bool {
+    use std::collections::HashSet;
+    use std::sync::OnceLock;
+    static WORDS: OnceLock<HashSet<&'static str>> = OnceLock::new();
+    let set = WORDS.get_or_init(|| {
+        include_str!("data/common_words.txt")
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .collect()
+    });
+    set.contains(norm)
+}
+
 /// Words that, immediately after a token, mark it as a person-subject.
 const NAME_VERB_CUES: &[&str] = &[
     "will",
@@ -426,16 +424,11 @@ fn in_name_position(prev_word: Option<&str>, next_word: Option<&str>) -> bool {
 }
 
 /// Decide the correction for a single word token, or `None` to leave it alone.
-/// `name_position` relaxes the misspelling gate (drops the first-letter / DM /
-/// min-length requirements) because the surrounding syntax already confirms the
-/// token is a person name; the edit-distance budget and unique-winner
-/// requirement still apply, so a token far from any pool name is never touched.
-fn match_token(
-    token: &str,
-    name_position: bool,
-    dm: &DoubleMetaphone,
-    pool: &[PoolEntry],
-) -> Option<String> {
+/// `name_position` relaxes the misspelling gate (drops the prefix / min-length
+/// requirements) because the surrounding syntax already confirms the token is a
+/// person name; the edit-distance budget and unique-winner requirement still
+/// apply, so a token far from any pool name is never touched.
+fn match_token(token: &str, name_position: bool, pool: &[PoolEntry]) -> Option<String> {
     // Only consider alphabetic tokens (skip numbers, IDs, mixed tokens).
     if token.is_empty() || !token.chars().all(|c| c.is_alphabetic()) {
         return None;
@@ -445,7 +438,6 @@ fn match_token(
     if is_stopword(&tok_norm) {
         return None;
     }
-    let tok_dm = dm_encode(dm, token);
 
     // Collect DISTINCT candidate pool entries (accent restoration OR fuzzy). A
     // correction fires only when exactly one pool name is a candidate, so an
@@ -468,21 +460,34 @@ fn match_token(
                 false
             } else {
                 let ascii = tok_norm.is_ascii() && entry.norm.is_ascii();
-                // Relaxed (aggressive) tier: in a name-position, a confirmed
-                // PARTICIPANT within 2 edits qualifies even across a different
-                // first letter / short length. Gated to participants (attendees +
-                // High-confidence attributed speakers) so it never rewrites toward
-                // a name merely in the vocabulary/graph but not in this meeting.
-                let relaxed =
-                    name_position && entry.is_participant && tok_norm.len() >= 3 && dist <= 2;
-                // Conservative tier (always available, no participant gate):
-                // bounded edit distance with same-first-letter OR Double Metaphone
-                // corroboration and a minimum length.
+                // Both fuzzy tiers require (a) the target be a confirmed meeting
+                // PARTICIPANT (attendee or High-confidence attributed speaker),
+                // never a name merely in the cross-vault vocabulary/graph, and
+                // (b) the raw token NOT be a common English word. (a) removes the
+                // class where an ordinary word maps to a look-alike name from
+                // another meeting (#388: work->York, crate->Cate, merge->Marge);
+                // (b) removes the class where an ordinary word maps to a
+                // participant name (#388: high->Hugh, line->Life, moat->Mat).
+                // Real misspellings (ashwarya->Aishwarya, jacque->Jacques) are
+                // not common words, so they still correct.
+                let is_common = is_common_word(&tok_norm);
+                // Relaxed (name-position) tier: a participant within 2 edits,
+                // even across a different first letter / short length, when
+                // surrounding syntax marks the token as a name.
+                let relaxed = name_position
+                    && entry.is_participant
+                    && tok_norm.len() >= 3
+                    && dist <= 2
+                    && !is_common;
+                // Conservative (no-context) tier: a single-edit, same-first-letter
+                // misspelling of a participant name at least MIN_MISSPELL_LEN long.
                 let same_first = tok_norm.as_bytes().first() == entry.norm.as_bytes().first();
-                let dm_match = !tok_dm.is_empty() && tok_dm == entry.dm;
-                let conservative = tok_norm.len() >= MIN_MISSPELL_LEN
-                    && dist <= distance_budget(tok_norm.len().max(entry.norm.len()))
-                    && (same_first || dm_match);
+                let conservative = entry.is_participant
+                    && tok_norm.len() >= MIN_MISSPELL_LEN
+                    && entry.norm.len() >= MIN_MISSPELL_LEN
+                    && dist <= 1
+                    && same_first
+                    && !is_common;
                 ascii && (relaxed || conservative)
             }
         };
@@ -530,7 +535,6 @@ pub fn correct_names_with_participants(
     if entries.is_empty() {
         return (text.to_string(), Vec::new());
     }
-    let dm = DoubleMetaphone::default();
 
     // Tokenize into alternating word / non-word segments, preserving everything
     // (whitespace, punctuation, the `[SPEAKER m:ss]` prefix) so only whole
@@ -607,7 +611,7 @@ pub fn correct_names_with_participants(
         }
         let prev = word_at(k.checked_sub(1).and_then(|kp| word_positions.get(kp)));
         let next = word_at(word_positions.get(k + 1));
-        if let Some(surface) = match_token(token, in_name_position(prev, next), &dm, &entries) {
+        if let Some(surface) = match_token(token, in_name_position(prev, next), &entries) {
             corrections.push(NameCorrection {
                 raw: token.clone(),
                 corrected: surface.clone(),
@@ -634,6 +638,101 @@ mod tests {
 
     fn pool(names: &[&str]) -> Vec<String> {
         names.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn issue_388_does_not_rewrite_common_words_to_names() {
+        // Real repro from the gtheys/Mat meeting: cross-vault names in the pool
+        // plus participant names (Hugh, Mat) that collide with common words. Not
+        // one common word may move. Covers work->York, moat->Mat, line->Life,
+        // high->Hugh, ways->Way, multiple->Multiplier, happier->Harper.
+        let names = pool(&["York", "Harper", "Life", "Hugh", "Mat", "Way", "Multiplier"]);
+        let participants = pool(&["Hugh", "Mat"]);
+        let cases = [
+            "this is never going to work",
+            "he builds a moat around it",
+            "on the command line interface",
+            "a high level of trust",
+            "asked the team multiple times",
+            "there are better ways to do it",
+            "bobby would be happier",
+        ];
+        for raw in cases {
+            let (out, corrections) = correct_names_with_participants(raw, &names, &participants);
+            assert_eq!(
+                out, raw,
+                "common words must be left intact: {raw:?} -> {out:?}"
+            );
+            assert!(
+                corrections.is_empty(),
+                "no corrections expected for {raw:?}, got {corrections:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn issue_388_name_position_does_not_rewrite_common_words_to_participants() {
+        // Codex review hole: the relaxed (name-position) tier must ALSO refuse
+        // common words, even when the target is a participant and syntax marks a
+        // name slot (a following name-verb like `will`).
+        let names = pool(&["Hugh", "Mat"]);
+        let participants = names.clone();
+        let cases = [
+            "the daily high will move lower", // high -> Hugh (participant) via next-verb `will`
+            "the moat will protect it",       // moat -> Mat (participant)
+        ];
+        for raw in cases {
+            let (out, corrections) = correct_names_with_participants(raw, &names, &participants);
+            assert_eq!(
+                out, raw,
+                "name-position common word must be intact: {raw:?} -> {out:?}"
+            );
+            assert!(
+                corrections.is_empty(),
+                "no corrections for {raw:?}: {corrections:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn issue_388_conservative_only_targets_participants() {
+        // Codex review hole: a non-common domain word one edit from a non-participant
+        // vocabulary name must NOT be rewritten. `crate`->`Cate`, `merge`->`Marge`.
+        let names = pool(&["Cate", "Marge"]); // in pool (vocabulary) but NOT participants
+        let participants: Vec<String> = Vec::new();
+        for raw in ["the rust crate failed", "merge the pull request"] {
+            let (out, corrections) = correct_names_with_participants(raw, &names, &participants);
+            assert_eq!(
+                out, raw,
+                "non-participant target must not fire: {raw:?} -> {out:?}"
+            );
+            assert!(
+                corrections.is_empty(),
+                "no corrections for {raw:?}: {corrections:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn issue_388_fix_still_corrects_real_misspellings() {
+        // The common-word gate must not disable legit corrections: a same-first,
+        // single-edit misspelling of a non-common name via the conservative tier
+        // (no name-position cue here), out of an edit budget the old code allowed.
+        let names = pool(&["Aishwarya", "Jacques"]);
+        let participants = names.clone();
+        let (out1, c1) =
+            correct_names_with_participants("over to ashwarya now", &names, &participants);
+        assert!(
+            out1.contains("Aishwarya"),
+            "ashwarya should still correct: {out1}"
+        );
+        assert!(!c1.is_empty());
+        let (out2, _) =
+            correct_names_with_participants("merci jacque for joining", &names, &participants);
+        assert!(
+            out2.contains("Jacques"),
+            "jacque should still correct: {out2}"
+        );
     }
 
     #[test]
@@ -844,11 +943,19 @@ mod tests {
     }
 
     #[test]
-    fn conservative_tier_does_not_require_participant() {
-        // Same-first-letter correction fires even for a non-participant pool name
-        // and even in a name-position (the participant gate is relaxed-tier only).
+    fn correction_requires_participant_target() {
+        // #388: both fuzzy tiers now require the target be a meeting participant,
+        // so a token is never rewritten toward a name that is only in the
+        // vocabulary/graph and not in this meeting.
         let names = pool(&["Jacques"]);
-        let (out, _) = correct_names_with_participants("merci jacque for joining", &names, &[]);
-        assert_eq!(out, "merci Jacques for joining");
+        // Not a participant -> left alone.
+        let (out_np, c_np) =
+            correct_names_with_participants("merci jacque for joining", &names, &[]);
+        assert_eq!(out_np, "merci jacque for joining");
+        assert!(c_np.is_empty());
+        // Participant -> the correction fires.
+        let (out_p, _) =
+            correct_names_with_participants("merci jacque for joining", &names, &names);
+        assert_eq!(out_p, "merci Jacques for joining");
     }
 }

@@ -1113,7 +1113,10 @@ impl Config {
     /// preserve behavior even before the migration has rewritten the file.
     pub fn effective_live_transcript_backend(&self) -> &str {
         let backend = self.live_transcript.backend.trim();
-        if backend.is_empty() || backend == LIVE_TRANSCRIPT_BACKEND_INHERIT {
+        // Case-insensitive: engine/backend matching is case-insensitive
+        // everywhere else, so a hand-edited "Inherit" must not be mistaken for
+        // an (unsupported) explicit backend and downgraded (#395).
+        if backend.is_empty() || backend.eq_ignore_ascii_case(LIVE_TRANSCRIPT_BACKEND_INHERIT) {
             if self
                 .transcription
                 .engine

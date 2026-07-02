@@ -10,11 +10,10 @@ fi
 
 export CXXFLAGS="-I$(xcrun --show-sdk-path)/usr/include/c++/v1"
 export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-11.0}"
-# engine-sherpa / vad-ort stay OPT-IN for app builds: their dynamic libraries
-# (libsherpa-onnx-c-api.dylib, libonnxruntime) are not bundled into the .app or
-# rpath'd into installed binaries yet, so a default build with them produces
-# apps/CLIs that crash at launch with dyld "Library not loaded" (#369, #395).
-# Opt in explicitly once packaging is solved:
+# engine-sherpa / vad-ort stay OPT-IN for app builds pending the #369 release
+# decision. Packaging is fixed for opt-in local builds: sherpa links statically
+# and the existing ort path does not leave dangling runtime dylib references.
+# Opt in explicitly:
 #   MINUTES_BUILD_FEATURES=parakeet,metal,vad-ort,engine-sherpa
 if [ -z "${MINUTES_BUILD_FEATURES+x}" ]; then
     MINUTES_BUILD_FEATURES="parakeet,metal"

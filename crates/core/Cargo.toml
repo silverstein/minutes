@@ -50,7 +50,7 @@ cpal = { workspace = true }
 hound = { workspace = true }
 notify = { workspace = true }
 whisper-rs = { workspace = true, optional = true }
-sherpa-rs = { version = "0.6.8", optional = true }
+sherpa-rs = { version = "0.6.8", default-features = false, features = ["download-binaries", "static"], optional = true }
 symphonia = { workspace = true }
 ureq = { workspace = true }
 fs2 = { workspace = true }

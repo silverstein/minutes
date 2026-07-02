@@ -10,17 +10,14 @@ fi
 
 export CXXFLAGS="-I$(xcrun --show-sdk-path)/usr/include/c++/v1"
 export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-11.0}"
-# Local app builds include the SOTA extras (engine-sherpa + vad-ort) when the
-# native toolchain can build them: sherpa-rs-sys needs cmake. Contributors
-# without cmake keep the lighter default instead of a broken build. Override
-# explicitly with MINUTES_BUILD_FEATURES to force either way.
+# engine-sherpa / vad-ort stay OPT-IN for app builds: their dynamic libraries
+# (libsherpa-onnx-c-api.dylib, libonnxruntime) are not bundled into the .app or
+# rpath'd into installed binaries yet, so a default build with them produces
+# apps/CLIs that crash at launch with dyld "Library not loaded" (#369, #395).
+# Opt in explicitly once packaging is solved:
+#   MINUTES_BUILD_FEATURES=parakeet,metal,vad-ort,engine-sherpa
 if [ -z "${MINUTES_BUILD_FEATURES+x}" ]; then
-    if command -v cmake >/dev/null 2>&1; then
-        MINUTES_BUILD_FEATURES="parakeet,metal,vad-ort,engine-sherpa"
-    else
-        echo "[minutes] cmake not found — building without vad-ort/engine-sherpa (brew install cmake to enable the sherpa stack)" >&2
-        MINUTES_BUILD_FEATURES="parakeet,metal"
-    fi
+    MINUTES_BUILD_FEATURES="parakeet,metal"
 fi
 
 # Ensure cargo runs through rustup so rust-toolchain.toml is honored.

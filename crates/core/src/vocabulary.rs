@@ -195,6 +195,12 @@ impl VocabularyStore {
                 if existing.source != VocabularySource::Manual {
                     existing.source = entry.source;
                 }
+                // Advance the audit timestamp to the most recent of the two so a
+                // later merge (which adds aliases) refreshes `updated_at`. Using
+                // max never regresses to an older stamp and never blanks an
+                // existing one when the incoming entry has no timestamp.
+                existing.updated_at =
+                    std::cmp::max(existing.updated_at.clone(), entry.updated_at.clone());
             } else {
                 merged.insert(key, entry);
             }
@@ -508,6 +514,79 @@ mod tests {
         assert_eq!(merged.entries.len(), 1);
         assert_eq!(merged.entries[0].aliases, vec!["Elijah", "Eli"]);
         assert_eq!(merged.entries[0].priority, VocabularyPriority::High);
+    }
+
+    #[test]
+    fn merge_refreshes_updated_at_when_aliases_added() {
+        // Two same-canonical entries with different timestamps; combining them
+        // adds an alias, so updated_at should advance to the newer stamp.
+        let store = VocabularyStore {
+            entries: vec![
+                VocabularyEntry {
+                    kind: VocabularyKind::Person,
+                    canonical: "Junrei".into(),
+                    aliases: vec!["Junlei".into()],
+                    updated_at: Some("2026-07-01T00:00:00+00:00".into()),
+                    ..VocabularyEntry::default()
+                },
+                VocabularyEntry {
+                    kind: VocabularyKind::Person,
+                    canonical: "Junrei".into(),
+                    aliases: vec!["Jun-Rei".into()],
+                    updated_at: Some("2026-07-02T00:00:00+00:00".into()),
+                    ..VocabularyEntry::default()
+                },
+            ],
+        }
+        .normalized()
+        .unwrap();
+        assert_eq!(store.entries.len(), 1);
+        assert_eq!(store.entries[0].aliases, vec!["Junlei", "Jun-Rei"]);
+        assert_eq!(
+            store.entries[0].updated_at.as_deref(),
+            Some("2026-07-02T00:00:00+00:00"),
+            "updated_at should advance to the newer merge"
+        );
+    }
+
+    #[test]
+    fn merge_updated_at_never_regresses_or_blanks() {
+        // Newer entry first, older second, plus an entry with no timestamp: the
+        // merged updated_at must be the newest present, never the older one, and
+        // never None.
+        let store = VocabularyStore {
+            entries: vec![
+                VocabularyEntry {
+                    kind: VocabularyKind::Person,
+                    canonical: "Junrei".into(),
+                    aliases: vec!["Junlei".into()],
+                    updated_at: Some("2026-07-05T00:00:00+00:00".into()),
+                    ..VocabularyEntry::default()
+                },
+                VocabularyEntry {
+                    kind: VocabularyKind::Person,
+                    canonical: "Junrei".into(),
+                    aliases: vec!["Jun-Rei".into()],
+                    updated_at: Some("2026-07-01T00:00:00+00:00".into()),
+                    ..VocabularyEntry::default()
+                },
+                VocabularyEntry {
+                    kind: VocabularyKind::Person,
+                    canonical: "Junrei".into(),
+                    aliases: vec!["Junwei".into()],
+                    updated_at: None,
+                    ..VocabularyEntry::default()
+                },
+            ],
+        }
+        .normalized()
+        .unwrap();
+        assert_eq!(store.entries.len(), 1);
+        assert_eq!(
+            store.entries[0].updated_at.as_deref(),
+            Some("2026-07-05T00:00:00+00:00"),
+            "must keep the newest stamp, never regress or blank"
+        );
     }
 
     #[test]

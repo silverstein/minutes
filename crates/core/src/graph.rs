@@ -1032,11 +1032,18 @@ fn detect_aliases(conn: &Connection) -> Result<Vec<AliasSuggestion>, GraphError>
 /// Suggestion only — nothing is merged.
 fn detect_alias_clusters(conn: &Connection) -> Result<Vec<AliasCluster>, GraphError> {
     // ORDER BY slug so cluster membership and ordering are stable across rebuilds
-    // (SQLite row order otherwise follows insertion history).
-    let mut stmt = conn.prepare("SELECT slug, name FROM people ORDER BY slug")?;
-    let people: Vec<(String, String)> = stmt
+    // (SQLite row order otherwise follows insertion history). meeting_count is
+    // carried so each cluster can put its highest-evidence spelling first — that
+    // is the sensible default canonical for a suggested merge, rather than an
+    // arbitrary alphabetical spelling that might be a typo (#385).
+    let mut stmt = conn.prepare("SELECT slug, name, meeting_count FROM people ORDER BY slug")?;
+    let people: Vec<(String, String, i64)> = stmt
         .query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
         })?
         .filter_map(|r| r.ok())
         .collect();
@@ -1070,9 +1077,18 @@ fn detect_alias_clusters(conn: &Connection) -> Result<Vec<AliasCluster>, GraphEr
                 max_shared = max_shared.max(shared as usize);
             }
         }
+        // Order members by evidence (meeting_count desc, then slug for stability)
+        // so members[0]/slugs[0] is the suggested canonical spelling.
+        let mut ordered: Vec<usize> = cluster.clone();
+        ordered.sort_by(|&a, &b| {
+            people[b]
+                .2
+                .cmp(&people[a].2)
+                .then_with(|| people[a].0.cmp(&people[b].0))
+        });
         result.push(AliasCluster {
-            members: cluster.iter().map(|&i| people[i].1.clone()).collect(),
-            slugs: cluster.iter().map(|&i| people[i].0.clone()).collect(),
+            members: ordered.iter().map(|&i| people[i].1.clone()).collect(),
+            slugs: ordered.iter().map(|&i| people[i].0.clone()).collect(),
             max_shared_meetings: max_shared,
         });
     }
@@ -1947,6 +1963,58 @@ Short meeting.
                 .iter()
                 .any(|m| m.eq_ignore_ascii_case("bright")),
             "distinct person leaked into drift cluster: {cluster:?}"
+        );
+    }
+
+    #[test]
+    fn test_confirmed_merge_collapses_variants_on_rebuild() {
+        // #385 confirm-merge durability: a Person vocabulary entry (canonical +
+        // variant aliases) must collapse the fragmented people into one on the
+        // next rebuild, with all meetings re-pointed to the canonical slug. This
+        // is the persistence contract the `minutes people merge` command relies on.
+        let tmp = TempDir::new().unwrap();
+        let meetings = tmp.path().join("meetings");
+        fs::create_dir_all(&meetings).unwrap();
+        let mk = |date: &str, attendee: &str| {
+            format!(
+                "---\ntitle: Sync\ntype: meeting\ndate: {date}T09:00:00-07:00\nduration: 15m\nattendees: [{attendee}]\ntags: []\n---\nNotes.\n"
+            )
+        };
+        write_meeting(&meetings, "a.md", &mk("2026-03-21", "Junrei"));
+        write_meeting(&meetings, "b.md", &mk("2026-03-22", "Junlei"));
+        write_meeting(&meetings, "c.md", &mk("2026-03-23", "Jun-Rei"));
+
+        let config = test_config(&meetings);
+        let db = tmp.path().join("graph.db");
+
+        // Without a confirmed merge: three fragmented people.
+        let stats = rebuild_index_at(&config, &db).unwrap();
+        assert_eq!(stats.people_count, 3, "expected 3 fragments before merge");
+
+        // Confirmed merge = a Person vocab entry (canonical + aliases), the exact
+        // shape `minutes people merge` writes.
+        let merged = vec![EntityRef {
+            slug: "junrei".into(),
+            label: "Junrei".into(),
+            aliases: vec!["Junlei".into(), "Jun-Rei".into()],
+        }];
+        let stats = rebuild_index_at_with_vocabulary_entities(&config, &db, merged).unwrap();
+        assert_eq!(
+            stats.people_count, 1,
+            "variants must collapse to one person"
+        );
+
+        let conn = open_db(&db).unwrap();
+        let (slug, name, meetings_count): (String, String, i64) = conn
+            .query_row("SELECT slug, name, meeting_count FROM people", [], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })
+            .unwrap();
+        assert_eq!(slug, "junrei");
+        assert_eq!(name, "Junrei");
+        assert_eq!(
+            meetings_count, 3,
+            "all three meetings re-point to the canonical"
         );
     }
 

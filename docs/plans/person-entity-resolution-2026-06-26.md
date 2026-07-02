@@ -169,12 +169,24 @@ compaction), unioned transitively with the existing `names_likely_same` via
 `entity_cluster::cluster_indices` and surfaced as `graph::AliasCluster` in
 `GraphStats` and the `minutes people` rebuild output. `shared_meetings` is
 evidence only, NOT a gate (drift variants of one person recur across *different*
-meetings). Part 2 (confirm-merge action + persistence) and any auto-merge remain
-DEFERRED — nothing is merged or written, so a wrong suggestion costs precision,
-not data. Class-2 multi-person concatenation (`gert-liam`) is also deferred: it
-must be source-aware and graph-rebuild-aware (splitting only `entities.people`
-would leave raw `attendees`/assignees to re-fuse on rebuild), and the safe
-delimiters are narrower than they look (`Ben & Jerry`, `Smith, John, Jr.`).
+meetings).
+
+Status (2026-07-02): part 2 (confirm-merge action + persistence) SHIPPED as
+`minutes people merge <canonical> <variant...>`. Persistence reuses the
+vocabulary store (no new graph routing): the command writes a `Person`
+`VocabularyEntry{canonical, aliases}`, which `load_vocabulary_person_entities`
+feeds into the `PersonCanonicalizer` on rebuild, collapsing every variant to the
+canonical slug and re-pointing meetings/commitments. It survives the `graph.db`
+wipe because vocabulary.toml is not derived. Canonical is evidence-ranked in the
+suggested command (highest `meeting_count` first); `validate_alias_conflicts`
+fail-closes on a variant already bound to a different canonical (named error +
+recovery command); the graph auto-rebuilds (or `--no-rebuild`), reporting
+saved/rebuilt separately. Auto-merge is still NOT done — merges are
+human-confirmed only. Class-2 multi-person concatenation (`gert-liam`) also
+remains DEFERRED: it must be source-aware and graph-rebuild-aware (splitting only
+`entities.people` would leave raw `attendees`/assignees to re-fuse on rebuild),
+and the safe delimiters are narrower than they look (`Ben & Jerry`, `Smith, John,
+Jr.`).
 
 Two parts, and the first is genuinely new work, not just promotion. The existing
 `names_likely_same` edge predicate requires identical first-name tokens, so it

@@ -622,6 +622,10 @@ enum Commands {
 
     /// Show relationship overview: top contacts, commitments, losing-touch alerts
     People {
+        /// Subcommand (e.g. `merge`); omit to list the relationship graph
+        #[command(subcommand)]
+        action: Option<PeopleAction>,
+
         /// Force full index rebuild from markdown files
         #[arg(long)]
         rebuild: bool,
@@ -1176,6 +1180,30 @@ enum SensitiveAction {
 }
 
 #[derive(Subcommand)]
+enum PeopleAction {
+    /// Confirm that several people are the same person and collapse them.
+    ///
+    /// Records a durable person alias (in the local vocabulary) so future
+    /// transcripts, search, and graph rebuilds resolve every variant spelling to
+    /// the canonical one. The first argument is the surviving canonical name; the
+    /// rest are its variants. Accepts slugs (from the "Possible name variants"
+    /// suggestions) or exact names.
+    Merge {
+        /// Canonical (surviving) person: a slug or exact name.
+        canonical: String,
+        /// Variant people to fold into the canonical: slugs or exact names.
+        #[arg(required = true)]
+        aliases: Vec<String>,
+        /// Skip the automatic graph rebuild (run `minutes people --rebuild` later).
+        #[arg(long)]
+        no_rebuild: bool,
+        /// Output raw JSON instead of formatted text
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
 enum VocabularyAction {
     /// List local vocabulary entries
     List {
@@ -1652,10 +1680,27 @@ fn main() -> Result<()> {
         } => cmd_consistency(owner.as_deref(), stale_after_days, &config),
         Commands::Person { name } => cmd_person(&name, &config),
         Commands::People {
+            action,
             rebuild,
             json,
             limit,
-        } => cmd_people(rebuild, json, limit, &config),
+        } => match action {
+            Some(PeopleAction::Merge {
+                canonical,
+                aliases,
+                no_rebuild,
+                json: merge_json,
+            }) => cmd_people_merge(
+                &canonical,
+                &aliases,
+                no_rebuild,
+                // Accept `--json` whether typed on `people` or on `merge`, so the
+                // otherwise-inert parent flag isn't silently ignored.
+                json || merge_json,
+                &config,
+            ),
+            None => cmd_people(rebuild, json, limit, &config),
+        },
         Commands::Vocabulary { action } => cmd_vocabulary(action, &config),
         Commands::Commitments { person, json } => cmd_commitments(person.as_deref(), json, &config),
         Commands::Research {
@@ -3455,6 +3500,203 @@ fn cmd_person(name: &str, config: &Config) -> Result<()> {
     Ok(())
 }
 
+/// Shell-quote a token for a copy-pasteable command (slugs rarely need it).
+fn shell_quote_arg(s: &str) -> String {
+    if !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    {
+        s.to_string()
+    } else {
+        format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+    }
+}
+
+/// Render the ready-to-run merge command for a suggested cluster. `slugs[0]` is
+/// the highest-evidence spelling (canonical); the rest fold into it.
+fn format_merge_command(slugs: &[String]) -> String {
+    let quoted: Vec<String> = slugs.iter().map(|s| shell_quote_arg(s)).collect();
+    format!("minutes people merge {}", quoted.join(" "))
+}
+
+#[derive(Serialize)]
+struct PeopleMergeOutput {
+    canonical: String,
+    aliases: Vec<String>,
+    unresolved: Vec<String>,
+    saved: bool,
+    rebuilt: bool,
+    people_before: Option<usize>,
+    people_after: Option<usize>,
+}
+
+/// Resolve a slug-or-name token to a graph person's display name. Exact match on
+/// slug or (case-insensitively) on name; never fuzzy. Returns `(name, resolved)`;
+/// an unresolved token is passed through literally so a person not yet in the
+/// graph can still be named, but the caller warns about it.
+fn resolve_person_token(
+    token: &str,
+    people: &[minutes_core::graph::PersonSummary],
+) -> (String, bool) {
+    let t = token.trim();
+    if let Some(p) = people.iter().find(|p| p.slug.eq_ignore_ascii_case(t)) {
+        return (p.name.clone(), true);
+    }
+    let name_matches: Vec<&minutes_core::graph::PersonSummary> = people
+        .iter()
+        .filter(|p| p.name.eq_ignore_ascii_case(t))
+        .collect();
+    if name_matches.len() == 1 {
+        return (name_matches[0].name.clone(), true);
+    }
+    (t.to_string(), false)
+}
+
+fn cmd_people_merge(
+    canonical: &str,
+    aliases: &[String],
+    no_rebuild: bool,
+    json: bool,
+    config: &Config,
+) -> Result<()> {
+    use minutes_core::graph;
+    use minutes_core::vocabulary;
+
+    // Best-effort: resolve slugs/names against the current graph. If the graph
+    // isn't built yet, fall back to treating every token as a literal name.
+    let people = graph::relationship_map(config).unwrap_or_default();
+
+    let (canonical_name, canonical_resolved) = resolve_person_token(canonical, &people);
+    let mut unresolved: Vec<String> = Vec::new();
+    if !canonical_resolved {
+        unresolved.push(canonical.trim().to_string());
+    }
+
+    // Resolve aliases; drop any that equal the canonical after resolution.
+    let mut alias_names: Vec<String> = Vec::new();
+    for a in aliases {
+        let (name, resolved) = resolve_person_token(a, &people);
+        if !resolved {
+            unresolved.push(a.trim().to_string());
+        }
+        if name.eq_ignore_ascii_case(&canonical_name)
+            || alias_names.iter().any(|n| n.eq_ignore_ascii_case(&name))
+        {
+            continue;
+        }
+        alias_names.push(name);
+    }
+
+    if alias_names.is_empty() {
+        anyhow::bail!(
+            "nothing to merge: no variant distinct from canonical \"{}\"",
+            canonical_name
+        );
+    }
+
+    if !unresolved.is_empty() {
+        eprintln!(
+            "  Note: not currently in the graph, treated as literal name(s): {}",
+            unresolved.join(", ")
+        );
+    }
+
+    // Persist the confirmed merge as a Person vocabulary entry (canonical +
+    // variant aliases). On rebuild the canonicalizer routes every variant to the
+    // canonical slug; the vocabulary survives the graph.db wipe.
+    let path = vocabulary::default_path();
+    let mut store = vocabulary::load().map_err(|e| anyhow::anyhow!("{}", e))?;
+    let now = Local::now().to_rfc3339();
+    store.entries.push(vocabulary::VocabularyEntry {
+        kind: vocabulary::VocabularyKind::Person,
+        canonical: canonical_name.clone(),
+        aliases: alias_names.clone(),
+        priority: vocabulary::VocabularyPriority::Normal,
+        source: vocabulary::VocabularySource::Manual,
+        created_at: Some(now.clone()),
+        updated_at: Some(now),
+        ..vocabulary::VocabularyEntry::default()
+    });
+
+    let normalized = match store.normalized() {
+        Ok(s) => s,
+        Err(e) => {
+            // Fail closed on alias conflict; name the offending entry + recovery.
+            if let vocabulary::VocabularyError::AliasConflict {
+                alias, existing, ..
+            } = &e
+            {
+                let existing_id = vocabulary::load()
+                    .ok()
+                    .and_then(|s| {
+                        s.entries
+                            .into_iter()
+                            .find(|entry| {
+                                entry.kind == vocabulary::VocabularyKind::Person
+                                    && entry.canonical.eq_ignore_ascii_case(existing)
+                            })
+                            .map(|entry| entry.id)
+                    })
+                    .unwrap_or_default();
+                anyhow::bail!(
+                    "\"{alias}\" is already a confirmed variant of \"{existing}\"{}. \
+                     Merge into \"{existing}\" instead (make it the canonical), or remove that entry first{}.",
+                    if existing_id.is_empty() { String::new() } else { format!(" (vocabulary entry {existing_id})") },
+                    if existing_id.is_empty() { String::new() } else { format!(": minutes vocabulary remove {existing_id}") }
+                );
+            }
+            return Err(anyhow::anyhow!("{}", e));
+        }
+    };
+    vocabulary::save_at(&path, &normalized).map_err(|e| anyhow::anyhow!("{}", e))?;
+
+    let people_before = Some(people.len());
+    let mut rebuilt = false;
+    let mut people_after = None;
+    if !no_rebuild {
+        match graph::rebuild_index(config) {
+            Ok(stats) => {
+                rebuilt = true;
+                people_after = Some(stats.people_count);
+            }
+            Err(e) => {
+                eprintln!(
+                    "  Saved the merge, but the graph rebuild failed ({e}). \
+                     Run `minutes people --rebuild` to apply it."
+                );
+            }
+        }
+    }
+
+    if json {
+        let out = PeopleMergeOutput {
+            canonical: canonical_name,
+            aliases: alias_names,
+            unresolved,
+            saved: true,
+            rebuilt,
+            people_before,
+            people_after,
+        };
+        println!("{}", serde_json::to_string_pretty(&out)?);
+    } else {
+        eprintln!(
+            "Merged {} variant(s) into \"{}\": {}",
+            alias_names.len(),
+            canonical_name,
+            alias_names.join(", ")
+        );
+        if rebuilt {
+            if let (Some(b), Some(a)) = (people_before, people_after) {
+                eprintln!("  Graph rebuilt: {b} → {a} people.");
+            }
+        } else if no_rebuild {
+            eprintln!("  Not rebuilt (--no-rebuild). Run `minutes people --rebuild` to apply.");
+        }
+    }
+    Ok(())
+}
+
 fn cmd_people(rebuild: bool, json: bool, limit: usize, config: &Config) -> Result<()> {
     use minutes_core::graph;
 
@@ -3474,6 +3716,9 @@ fn cmd_people(rebuild: bool, json: bool, limit: usize, config: &Config) -> Resul
                     String::new()
                 };
                 eprintln!("  {}{}", cluster.members.join(" ↔ "), shared);
+                // slugs[0] is the highest-evidence spelling (canonical); the rest
+                // fold into it. This is a ready-to-run confirm-merge.
+                eprintln!("    merge: {}", format_merge_command(&cluster.slugs));
             }
         }
         if !stats.alias_suggestions.is_empty() {
@@ -3484,9 +3729,6 @@ fn cmd_people(rebuild: bool, json: bool, limit: usize, config: &Config) -> Resul
                     alias.name_a, alias.name_b, alias.shared_meetings
                 );
             }
-        }
-        if !stats.alias_clusters.is_empty() || !stats.alias_suggestions.is_empty() {
-            eprintln!("  Review manually; automatic merging is not yet available.");
         }
         eprintln!();
     }
@@ -7129,6 +7371,63 @@ mod tests {
             confidence,
             source: minutes_core::diarize::AttributionSource::Llm,
         }
+    }
+
+    #[test]
+    fn shell_quote_arg_leaves_slugs_bare_and_quotes_spaces() {
+        assert_eq!(shell_quote_arg("jun-rei"), "jun-rei");
+        assert_eq!(shell_quote_arg("junrei_v2"), "junrei_v2");
+        assert_eq!(shell_quote_arg("Jun Rei"), "\"Jun Rei\"");
+        assert_eq!(shell_quote_arg("a\"b"), "\"a\\\"b\"");
+    }
+
+    #[test]
+    fn format_merge_command_uses_first_slug_as_canonical() {
+        let slugs = vec![
+            "junrei".to_string(),
+            "junlei".to_string(),
+            "jun-rei".to_string(),
+        ];
+        assert_eq!(
+            format_merge_command(&slugs),
+            "minutes people merge junrei junlei jun-rei"
+        );
+        // A name with a space gets quoted.
+        let slugs = vec!["jun rei".to_string(), "junlei".to_string()];
+        assert_eq!(
+            format_merge_command(&slugs),
+            "minutes people merge \"jun rei\" junlei"
+        );
+    }
+
+    #[test]
+    fn resolve_person_token_matches_slug_then_name_else_literal() {
+        let people = vec![minutes_core::graph::PersonSummary {
+            slug: "jun-rei".into(),
+            name: "Jun Rei".into(),
+            meeting_count: 3,
+            last_seen: String::new(),
+            days_since: 0.0,
+            open_commitments: 0,
+            top_topics: vec![],
+            score: 0.0,
+            losing_touch: false,
+        }];
+        // slug match (case-insensitive) -> display name, resolved
+        assert_eq!(
+            resolve_person_token("JUN-REI", &people),
+            ("Jun Rei".into(), true)
+        );
+        // exact name match -> resolved
+        assert_eq!(
+            resolve_person_token("jun rei", &people),
+            ("Jun Rei".into(), true)
+        );
+        // no match -> literal, unresolved
+        assert_eq!(
+            resolve_person_token("Bobby", &people),
+            ("Bobby".into(), false)
+        );
     }
 
     #[test]

@@ -182,11 +182,12 @@ minutes list                                      # Recent recordings
 ```bash
 minutes people                                     # Who you talk to, how often, about what
 minutes people --rebuild                           # Rebuild the relationship index
+minutes people merge junrei junlei jun-rei          # Confirm variants are one person (canonical first)
 minutes commitments                                # All open + overdue commitments
 minutes commitments --person alex                   # What did I promise Alex?
 ```
 
-Tracks people, commitments, topics, and relationship health across every meeting. Detects when you're losing touch with someone. Suggests duplicate contacts ("Sarah Chen" ↔ "Sarah"). Powered by a SQLite index rebuilt from your markdown in <50ms.
+Tracks people, commitments, topics, and relationship health across every meeting. Detects when you're losing touch with someone. Suggests duplicate contacts ("Sarah Chen" ↔ "Sarah") and name-variant fragments a transcriber spelled several ways ("junrei" ↔ "junlei" ↔ "jun-rei"). `minutes people --rebuild` prints a ready-to-run `minutes people merge` command under each suggested cluster; confirming it records a durable alias so every variant collapses to the canonical person on future rebuilds. Powered by a SQLite index rebuilt from your markdown in <50ms.
 
 ### Cross-meeting intelligence
 ```bash

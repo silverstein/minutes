@@ -127,6 +127,60 @@ fn live_supports_parakeet(engine: &str) -> bool {
     }
 }
 
+fn recording_sidecar_live_backend(config: &Config) -> (&str, Option<String>) {
+    let backend = config.effective_live_transcript_backend();
+    if backend.eq_ignore_ascii_case("parakeet") {
+        if live_supports_parakeet(backend) {
+            return ("parakeet", None);
+        }
+        return (
+            "whisper",
+            Some(
+                "live_transcript.backend resolved to parakeet, but this build lacks parakeet; using whisper for recording sidecar"
+                    .into(),
+            ),
+        );
+    }
+    if backend.eq_ignore_ascii_case("whisper") {
+        return ("whisper", None);
+    }
+    if backend.eq_ignore_ascii_case("apple-speech") {
+        return (
+            "whisper",
+            Some(
+                "apple-speech currently applies only to standalone live transcript; using whisper for recording sidecar"
+                    .into(),
+            ),
+        );
+    }
+
+    (
+        "whisper",
+        Some(format!(
+            "live_transcript.backend resolved to unsupported recording-sidecar backend '{backend}'; using whisper"
+        )),
+    )
+}
+
+/// Config to hand the general `transcribe()` dispatcher when the LIVE backend
+/// resolved to parakeet. The dispatcher switches on `transcription.engine`, and
+/// the live backend can be parakeet while the batch engine is something else
+/// (`live_transcript.backend = "parakeet"`), so the engine must be forced or
+/// the sidecar would silently run the batch engine under a parakeet label.
+/// Borrows when the engine already is parakeet; clones only on the override.
+/// Compiled for parakeet builds and for tests (the regression test must run in
+/// feature-less CI too); dead-code-free otherwise.
+#[cfg(any(feature = "parakeet", test))]
+fn forced_parakeet_config(config: &Config) -> std::borrow::Cow<'_, Config> {
+    if config.transcription.engine.eq_ignore_ascii_case("parakeet") {
+        std::borrow::Cow::Borrowed(config)
+    } else {
+        let mut owned = config.clone();
+        owned.transcription.engine = "parakeet".into();
+        std::borrow::Cow::Owned(owned)
+    }
+}
+
 #[cfg(feature = "parakeet")]
 fn live_ready_parakeet_fallback(config: &Config) -> bool {
     crate::transcription_coordinator::parakeet_backend_status(config).ready
@@ -267,6 +321,7 @@ struct LiveTranscriptWriter {
     wav_failed: bool,
     pending_utterances: u64,
     dropped_utterances: u64,
+    diagnostic: Option<String>,
     last_status_write: Instant,
 }
 
@@ -362,6 +417,7 @@ impl LiveTranscriptWriter {
             wav_failed: false,
             pending_utterances: 0,
             dropped_utterances: 0,
+            diagnostic: None,
             last_status_write: Instant::now()
                 .checked_sub(SIDECAR_HEARTBEAT_INTERVAL)
                 .unwrap_or_else(Instant::now),
@@ -391,7 +447,10 @@ impl LiveTranscriptWriter {
             last_offset_ms: self.start_time.elapsed().as_millis() as u64,
             last_duration_ms,
             session_id: self.session_id.clone(),
-            diagnostic: diagnostic.map(str::to_string).or(backlog_diagnostic),
+            diagnostic: diagnostic
+                .map(str::to_string)
+                .or(backlog_diagnostic)
+                .or_else(|| self.diagnostic.clone()),
             pending_utterances: (self.pending_utterances > 0).then_some(self.pending_utterances),
             dropped_utterances: (self.dropped_utterances > 0).then_some(self.dropped_utterances),
         };
@@ -403,6 +462,10 @@ impl LiveTranscriptWriter {
     fn set_backlog_stats(&mut self, pending: u64, dropped: u64) {
         self.pending_utterances = pending;
         self.dropped_utterances = dropped;
+    }
+
+    fn set_diagnostic(&mut self, diagnostic: Option<String>) {
+        self.diagnostic = diagnostic;
     }
 
     fn mark_healthy(&mut self) {
@@ -1663,7 +1726,13 @@ fn transcribe_with_parakeet_for_live_sidecar(
         .map_err(TranscribeError::Io)?;
     crate::transcribe::write_wav_16k_mono(tmp_wav.path(), samples)?;
 
-    match crate::transcribe::transcribe(tmp_wav.path(), config) {
+    // The general dispatcher switches on `transcription.engine`. The live
+    // backend can resolve to parakeet independently of the batch engine
+    // (`live_transcript.backend = "parakeet"` with e.g. a sherpa batch engine),
+    // so force the engine here or the sidecar would label itself parakeet
+    // while actually running the batch engine (#395).
+    let forced = forced_parakeet_config(config);
+    match crate::transcribe::transcribe(tmp_wav.path(), &forced) {
         Ok(result) => Ok(Some((result.text, samples.len() as f64 / 16000.0))),
         Err(TranscribeError::EmptyAudio) | Err(TranscribeError::EmptyTranscript(_)) => Ok(None),
         Err(error) => Err(error.into()),
@@ -2152,32 +2221,40 @@ fn run_sidecar_inner_mpsc(
         None,
         TranscriptSource::RecordingSidecar,
     )?)));
+    let (sidecar_backend, sidecar_backend_diagnostic) = recording_sidecar_live_backend(config);
     if let Some(w) = lock_ignore_poison(&writer).as_mut() {
+        w.set_diagnostic(sidecar_backend_diagnostic.clone());
         w.mark_healthy();
     }
 
     let mut vad = RecordingSidecarVad::new(config);
-    let parakeet_live_enabled = live_supports_parakeet(&config.transcription.engine);
+    let parakeet_live_enabled = sidecar_backend.eq_ignore_ascii_case("parakeet");
     let mut was_speaking = false;
     let mut utterance: Vec<f32> = Vec::new();
     let mut gating_stats = SidecarGatingStats::default();
     let max_utterance_secs = config.live_transcript.max_utterance_secs.max(5);
     let max_utterance_samples = (max_utterance_secs as usize).saturating_mul(16000);
 
-    if config.transcription.engine.eq_ignore_ascii_case("parakeet") && !parakeet_live_enabled {
-        emit_live_engine_scope_warning(&config.transcription.engine, "recording-sidecar");
-    }
-    if config
-        .transcription
-        .engine
-        .eq_ignore_ascii_case("apple-speech")
-    {
-        eprintln!(
-            "[minutes] apple-speech currently applies only to standalone live transcript; recording sidecar continues with whisper"
+    if let Some(diagnostic) = &sidecar_backend_diagnostic {
+        eprintln!("[minutes] {diagnostic}");
+        tracing::warn!(
+            requested_backend = %config.effective_live_transcript_backend(),
+            resolved_backend = sidecar_backend,
+            "recording sidecar live backend downgraded"
         );
-        tracing::info!(
-            "apple-speech requested for recording sidecar live transcript — keeping whisper for this scoped experiment"
-        );
+        crate::logging::append_log(&serde_json::json!({
+            "ts": Local::now().to_rfc3339(),
+            "level": "warn",
+            "step": "live_transcript_backend",
+            "file": "",
+            "message": diagnostic,
+            "extra": {
+                "source": "recording-sidecar",
+                "requested_backend": config.effective_live_transcript_backend(),
+                "resolved_backend": sidecar_backend,
+            }
+        }))
+        .ok();
     }
 
     // ── Transcription worker ─────────────────────────────────────
@@ -3816,6 +3893,64 @@ mod tests {
             );
         }
         assert_eq!(live_engine_scope_warning("whisper"), None);
+    }
+
+    #[test]
+    fn recording_sidecar_live_backend_downgrades_unsupported_inherited_engine() {
+        let mut config = Config::default();
+        config.transcription.engine = "sherpa".into();
+        config.live_transcript.backend = crate::config::LIVE_TRANSCRIPT_BACKEND_INHERIT.into();
+
+        let (backend, diagnostic) = recording_sidecar_live_backend(&config);
+
+        assert_eq!(backend, "whisper");
+        assert!(diagnostic
+            .as_deref()
+            .unwrap_or_default()
+            .contains("unsupported recording-sidecar backend 'sherpa'"));
+    }
+
+    #[test]
+    fn recording_sidecar_live_backend_honors_explicit_whisper_over_batch_engine() {
+        let mut config = Config::default();
+        config.transcription.engine = "sherpa".into();
+        config.live_transcript.backend = "whisper".into();
+
+        let (backend, diagnostic) = recording_sidecar_live_backend(&config);
+
+        assert_eq!(backend, "whisper");
+        assert_eq!(diagnostic, None);
+    }
+
+    #[test]
+    fn recording_sidecar_live_backend_treats_mixed_case_inherit_as_inherit() {
+        // A hand-edited "Inherit" must resolve like "inherit", not be treated
+        // as an unknown explicit backend and downgraded (#395 review finding).
+        let mut config = Config::default();
+        config.transcription.engine = "whisper".into();
+        config.live_transcript.backend = "Inherit".into();
+
+        let (backend, diagnostic) = recording_sidecar_live_backend(&config);
+
+        assert_eq!(backend, "whisper");
+        assert_eq!(diagnostic, None, "mixed-case inherit must not downgrade");
+    }
+
+    #[test]
+    fn forced_parakeet_config_overrides_batch_engine_for_live_dispatch() {
+        // live backend parakeet + batch engine sherpa: the dispatch config must
+        // carry engine=parakeet or the sidecar would run the batch engine under
+        // a parakeet label (#395 review finding).
+        let mut config = Config::default();
+        config.transcription.engine = "sherpa".into();
+        let forced = forced_parakeet_config(&config);
+        assert!(matches!(forced, std::borrow::Cow::Owned(_)));
+        assert_eq!(forced.transcription.engine, "parakeet");
+
+        // Already parakeet: no clone, config passes through.
+        config.transcription.engine = "Parakeet".into();
+        let forced = forced_parakeet_config(&config);
+        assert!(matches!(forced, std::borrow::Cow::Borrowed(_)));
     }
 
     /// Scope-warning and runtime-fallback-warning are semantically distinct:

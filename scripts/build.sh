@@ -10,7 +10,18 @@ fi
 
 export CXXFLAGS="-I$(xcrun --show-sdk-path)/usr/include/c++/v1"
 export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-11.0}"
-MINUTES_BUILD_FEATURES="${MINUTES_BUILD_FEATURES:-parakeet,metal}"
+# Local app builds include the SOTA extras (engine-sherpa + vad-ort) when the
+# native toolchain can build them: sherpa-rs-sys needs cmake. Contributors
+# without cmake keep the lighter default instead of a broken build. Override
+# explicitly with MINUTES_BUILD_FEATURES to force either way.
+if [ -z "${MINUTES_BUILD_FEATURES+x}" ]; then
+    if command -v cmake >/dev/null 2>&1; then
+        MINUTES_BUILD_FEATURES="parakeet,metal,vad-ort,engine-sherpa"
+    else
+        echo "[minutes] cmake not found — building without vad-ort/engine-sherpa (brew install cmake to enable the sherpa stack)" >&2
+        MINUTES_BUILD_FEATURES="parakeet,metal"
+    fi
+fi
 
 # Ensure cargo runs through rustup so rust-toolchain.toml is honored.
 # Without this, a system Homebrew rustc (e.g. /opt/homebrew/bin/cargo)

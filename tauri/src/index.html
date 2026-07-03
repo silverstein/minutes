@@ -256,6 +256,42 @@
       background: var(--bg);
       border-right: none;
       position: relative;
+      transition: flex-basis 160ms ease, width 160ms ease, min-width 160ms ease;
+    }
+
+    body.sidebar-collapsed .app-left {
+      flex: 0 0 0;
+      width: 0;
+      min-width: 0;
+    }
+
+    body.sidebar-collapsed .split-handle {
+      display: none;
+    }
+
+    /* When the list pane collapses, the terminal/assistant pane has a fixed
+       width, so it must grow to reclaim the freed space instead of leaving a
+       dead gap. flex-grow tracks .app-left's animated shrink for free. */
+    body.sidebar-collapsed .recall-panel.expanded {
+      width: auto;
+      flex: 1 1 auto;
+    }
+
+    @media (max-width: 720px) {
+      body:not(.sidebar-expanded-session) .app-left {
+        flex: 0 0 0;
+        width: 0;
+        min-width: 0;
+      }
+
+      body:not(.sidebar-expanded-session) .split-handle {
+        display: none;
+      }
+
+      body:not(.sidebar-expanded-session) .recall-panel.expanded {
+        width: auto;
+        flex: 1 1 auto;
+      }
     }
 
     .window-drag-strip {
@@ -1389,6 +1425,83 @@
       padding: 8px 16px 12px;
     }
 
+    .list-header-actions {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      margin-bottom: 8px;
+    }
+
+    .list-header-group {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      min-width: 0;
+    }
+
+    .list-toggle-btn,
+    .sidebar-collapse-btn {
+      border: 1px solid var(--border);
+      background: transparent;
+      color: var(--text-secondary);
+      border-radius: 7px;
+      cursor: pointer;
+      font-family: var(--font-mono);
+      font-size: var(--text-meta);
+      line-height: 1;
+      transition: background 150ms ease, border-color 150ms ease, color 150ms ease, transform 160ms ease;
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .app-left,
+      .sidebar-collapse-btn {
+        transition: none;
+      }
+    }
+
+
+    .list-toggle-btn {
+      padding: 6px 10px;
+    }
+
+    .sidebar-collapse-btn {
+      width: 28px;
+      height: 28px;
+      padding: 0;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      font-size: var(--text-xs);
+    }
+
+    .list-toggle-btn:hover,
+    .sidebar-collapse-btn:hover {
+      background: var(--surface-fill);
+      color: var(--text);
+      border-color: var(--border-mid);
+    }
+
+    .list-toggle-btn.is-active {
+      color: var(--text);
+      border-color: var(--border-mid);
+      background: var(--surface-fill);
+    }
+
+    .sidebar-collapse-btn.is-collapsed {
+      transform: rotate(180deg);
+    }
+
+    body.sidebar-collapsed .sidebar-collapse-btn {
+      position: fixed;
+      /* Match the button's expanded in-flow spot (search-wrap has 16px left
+         padding; the row sits ~88px down) so collapsing/expanding only rotates
+         the chevron instead of teleporting it vertically. */
+      left: 16px;
+      top: 88px;
+      z-index: 40;
+      background: var(--bg);
+    }
+
     .search-box {
       width: 100%;
       padding: 9px 12px 9px 34px;
@@ -1433,7 +1546,7 @@
       content: "⌕";
       position: absolute;
       left: 28px;
-      top: 17px;
+      top: 53px;
       font-size: var(--text-base);
       color: var(--text-secondary);
       pointer-events: none;
@@ -1535,6 +1648,13 @@
       text-transform: uppercase;
     }
 
+    .md-viewer-toolbar #md-viewer-preview-btn,
+    .md-viewer-toolbar #md-viewer-source-btn,
+    .md-viewer-toolbar #md-viewer-save-btn,
+    .md-viewer-toolbar .md-viewer-toolbar-sep {
+      display: none !important;
+    }
+
     .md-viewer-toolbar .md-viewer-mode-btn.active {
       background: var(--surface-fill-strong) !important;
       color: var(--text);
@@ -1599,6 +1719,12 @@
       user-select: text;
     }
 
+    .md-viewer-content>* {
+      max-width: 70ch;
+      margin-left: auto;
+      margin-right: auto;
+    }
+
     .md-viewer-content::-webkit-scrollbar {
       width: 5px;
     }
@@ -1616,15 +1742,16 @@
       display: none;
       flex: 1;
       min-height: 0;
-      width: 100%;
+      width: min(70ch, calc(100% - 40px));
       resize: none;
       border: none;
       outline: none;
       background: transparent;
       color: var(--text);
-      padding: 16px 20px;
+      padding: 20px 0;
+      margin: 0 auto;
       box-sizing: border-box;
-      font: 13px/1.6 var(--font-mono);
+      font: 13px/1.7 var(--font-mono);
       white-space: pre-wrap;
       overflow-y: auto;
     }
@@ -1654,6 +1781,10 @@
     }
 
     .md-viewer-status.warning {
+      color: var(--red);
+    }
+
+    .md-viewer-status.danger {
       color: var(--red);
     }
 
@@ -2072,6 +2203,7 @@
     }
 
     .meeting-item,
+    .document-item,
     .date-group {
       animation: list-enter 0.25s ease-out both;
     }
@@ -2137,6 +2269,28 @@
       box-shadow: 0 1px 4px var(--shadow-soft);
     }
 
+    .document-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 6px;
+      position: relative;
+      padding: 12px 16px 12px 28px;
+      border-radius: var(--radius);
+      cursor: pointer;
+      transition: background 0.15s ease, box-shadow 0.15s ease;
+    }
+
+    .document-item:hover {
+      background: var(--bg-hover);
+      box-shadow: 0 1px 4px var(--shadow-soft);
+    }
+
+    .document-item:active {
+      background: var(--surface-fill-strong);
+      box-shadow: none;
+    }
+
     .meeting-item:active {
       background: var(--surface-fill-strong);
       box-shadow: none;
@@ -2156,12 +2310,33 @@
       text-overflow: ellipsis;
     }
 
+    .document-title {
+      font-size: var(--text-sm);
+      font-family: var(--font-mono);
+      font-weight: 500;
+      color: var(--text);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
     .meeting-meta {
       font-size: var(--text-meta);
       font-family: var(--font-mono);
       color: var(--text-secondary);
       margin-top: 3px;
       letter-spacing: 0.2px;
+    }
+
+    .document-empty {
+      padding: 10px 12px;
+      color: var(--text-secondary);
+      font-family: var(--font-mono);
+      font-size: var(--text-meta);
+    }
+
+    .document-source {
+      color: var(--text);
     }
 
     .meeting-snippet {
@@ -2688,6 +2863,18 @@
       box-shadow: 0 24px 60px var(--shadow-stronger);
       padding: 0 22px 20px;
       color: var(--text);
+    }
+
+    /* Settings is tabbed, so the dialog top (title + tab bar) must not move
+       when switching between tabs of different content heights. Anchor the top
+       instead of vertically centering; the About modal keeps its centering. */
+    #settings-overlay {
+      align-items: flex-start;
+      padding-top: 6vh;
+    }
+
+    #settings-overlay .about-card {
+      max-height: calc(100vh - 6vh - 40px);
     }
 
     .about-top {
@@ -4589,6 +4776,12 @@
 
     <!-- Search -->
     <div class="search-wrap search-icon">
+      <div class="list-header-actions">
+        <div class="list-header-group">
+          <button class="sidebar-collapse-btn" id="btn-sidebar-collapse" type="button" aria-label="Collapse list pane" title="Collapse list pane">‹</button>
+        </div>
+        <button class="list-toggle-btn" id="btn-documents-toggle" type="button" aria-pressed="false">Documents</button>
+      </div>
       <input class="search-box" type="text" placeholder="Search recordings..." id="search-input" />
       <div class="search-error" id="search-error" hidden></div>
     </div>
@@ -5880,6 +6073,8 @@
     const noteInput = document.getElementById('note-inline-input');
     const footer = document.getElementById('footer');
     const meetingsScroll = document.getElementById('meetings-scroll');
+    const documentsToggle = document.getElementById('btn-documents-toggle');
+    const sidebarCollapseButton = document.getElementById('btn-sidebar-collapse');
     const searchInput = document.getElementById('search-input');
     const detailOverlay = document.getElementById('detail-overlay');
     const detailTitle = document.getElementById('detail-title');
@@ -5947,6 +6142,11 @@
     // Live bar elements are accessed by ID inline (live-time, live-utterances)
     let currentMeetingDetail = null;
     let activeSearchQuery = '';
+    let documentsViewActive = false;
+    let documentsCache = [];
+    let documentsLoadRequestId = 0;
+    let userExpandedSidebarThisSession = false;
+    let sidebarAutoCollapsed = false;
     let meetingsRefreshTimer = null;
     let currentSetup = null;
     let activationState = null;
@@ -8453,7 +8653,136 @@
       }
     }
 
+    function formatRelativeTime(ms) {
+      const timestamp = Number(ms);
+      if (!Number.isFinite(timestamp)) return '';
+      const delta = Date.now() - timestamp;
+      const minute = 60 * 1000;
+      const hour = 60 * minute;
+      const day = 24 * hour;
+      if (delta < minute) return 'just now';
+      if (delta < hour) {
+        const value = Math.max(1, Math.floor(delta / minute));
+        return `${value}m ago`;
+      }
+      if (delta < day) {
+        const value = Math.max(1, Math.floor(delta / hour));
+        return `${value}h ago`;
+      }
+      const value = Math.max(1, Math.floor(delta / day));
+      return `${value}d ago`;
+    }
+
+    function renderDocuments(documents) {
+      meetingsScroll.replaceChildren();
+      footer.classList.remove('footer-hidden');
+
+      if (!documents || documents.length === 0) {
+        const empty = document.createElement('div');
+        empty.className = 'document-empty';
+        empty.textContent = 'No documents yet.';
+        meetingsScroll.appendChild(empty);
+        return;
+      }
+
+      for (const doc of documents) {
+        const item = document.createElement('div');
+        item.className = 'document-item';
+        item.tabIndex = 0;
+        item.setAttribute('role', 'button');
+        item.setAttribute('aria-label', `Open ${doc.filename || 'document'}`);
+
+        const info = document.createElement('div');
+        info.className = 'meeting-info';
+
+        const title = document.createElement('div');
+        title.className = 'document-title';
+        title.textContent = doc.filename || 'Untitled';
+
+        const meta = document.createElement('div');
+        meta.className = 'meeting-meta';
+        const source = doc.source === 'assistant'
+          ? 'assistant'
+          : (doc.meeting_slug || 'meeting');
+        meta.textContent = [formatRelativeTime(doc.mtime), source].filter(Boolean).join(' · ');
+
+        info.appendChild(title);
+        info.appendChild(meta);
+
+        const badge = document.createElement('span');
+        badge.className = 'meeting-badge';
+        badge.textContent = doc.kind || 'text';
+
+        const openDocument = async () => {
+          try {
+            const access = await invoke('cmd_get_text_file_access', { path: doc.path });
+            const content = await invoke('cmd_read_text_file', { path: doc.path });
+            await showMdViewer(doc.path, doc.filename || doc.path.split(/[\\/]/).pop() || doc.path, content, {
+              editable: !!access.editable,
+              kind: access.kind || doc.kind || 'text',
+            });
+          } catch (e) {
+            console.error('Open document:', e);
+          }
+        };
+
+        item.addEventListener('click', openDocument);
+        item.addEventListener('keydown', (event) => {
+          if (event.key === 'Enter' || event.key === ' ') {
+            event.preventDefault();
+            openDocument();
+          }
+        });
+
+        item.appendChild(info);
+        item.appendChild(badge);
+        meetingsScroll.appendChild(item);
+      }
+    }
+
+    async function loadDocuments() {
+      const requestId = ++documentsLoadRequestId;
+      try {
+        documentsCache = await invoke('cmd_list_documents', { limit: 200 });
+        if (requestId !== documentsLoadRequestId || !documentsViewActive) return;
+        renderDocuments(documentsCache);
+      } catch (e) {
+        console.error('Load documents:', e);
+        if (requestId !== documentsLoadRequestId || !documentsViewActive) return;
+        renderDocuments([]);
+      }
+    }
+
+    function setDocumentsView(active) {
+      documentsViewActive = active;
+      documentsToggle.classList.toggle('is-active', active);
+      documentsToggle.setAttribute('aria-pressed', active ? 'true' : 'false');
+      // Label the button with its DESTINATION so returning to meetings is
+      // self-evident: it reads "Meetings" while documents are showing.
+      documentsToggle.textContent = active ? 'Meetings' : 'Documents';
+      documentsToggle.setAttribute(
+        'aria-label',
+        active ? 'Back to meetings' : 'Show documents',
+      );
+      searchInput.disabled = active;
+      searchInput.placeholder = active ? 'Documents' : 'Search recordings...';
+      if (active) {
+        searchInput.value = '';
+        activeSearchQuery = '';
+        setSearchError(null);
+        loadDocuments();
+      } else {
+        documentsLoadRequestId++;
+        searchInput.disabled = false;
+        loadMeetings();
+      }
+    }
+
     function renderMeetings(meetings) {
+      if (documentsViewActive) {
+        renderDocuments(documentsCache);
+        return;
+      }
       meetingsScroll.replaceChildren();
       appendProactiveContextCard();
 
@@ -8539,6 +8868,10 @@
     }
 
     async function loadMeetings() {
+      if (documentsViewActive) {
+        await loadDocuments();
+        return;
+      }
       try {
         await loadProactiveContextBundle();
         const meetings = await invoke('cmd_list_meetings', { limit: 30 });
@@ -8563,6 +8896,11 @@
     }
 
     async function refreshMeetingsForCurrentView() {
+      if (documentsViewActive) {
+        await loadDocuments();
+        await refreshOpenMeetingDetail();
+        return;
+      }
       if (activeSearchQuery) {
         try {
           const results = await invoke('cmd_search', { query: activeSearchQuery });
@@ -8594,7 +8932,9 @@
     // results when responses arrive out of order.
     let searchTimeout;
     let searchRequestId = 0;
+    documentsToggle.addEventListener('click', () => setDocumentsView(!documentsViewActive));
     searchInput.addEventListener('input', (e) => {
+      if (documentsViewActive) return;
       clearTimeout(searchTimeout);
       const query = e.target.value.trim();
       activeSearchQuery = query;
@@ -8934,9 +9274,7 @@
     // binding is unchanged.
     document.addEventListener('keydown', (e) => {
       if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && e.key === 'k') {
-        const target = e.target;
-        const tag = target && target.tagName ? target.tagName.toLowerCase() : '';
-        if (tag === 'input' || tag === 'textarea' || (target && target.isContentEditable)) return;
+        if (isEditableShortcutTarget(e.target || document.activeElement)) return;
         e.preventDefault();
         invoke('cmd_toggle_palette').catch(() => {});
       }
@@ -10636,26 +10974,48 @@
         if (typeof toggleRecallPanel === 'function') toggleRecallPanel();
         return;
       }
+      if (e.key !== 'Escape') return;
       if (e.key === 'Escape' && whatsNewScrim?.classList.contains('active')) {
+        e.preventDefault();
+        e.stopPropagation();
         closeWhatsNewModal();
+        return;
       }
       if (e.key === 'Escape' && aboutOverlay.classList.contains('active')) {
+        e.preventDefault();
+        e.stopPropagation();
         closeAbout();
+        return;
       }
       if (e.key === 'Escape' && settingsOverlay.classList.contains('active')) {
+        e.preventDefault();
+        e.stopPropagation();
         closeSettings();
+        return;
       }
       if (e.key === 'Escape' && readinessOverlay.classList.contains('active')) {
+        e.preventDefault();
+        e.stopPropagation();
         closeReadiness();
+        return;
       }
       if (e.key === 'Escape' && recoveryOverlay.classList.contains('active')) {
+        e.preventDefault();
+        e.stopPropagation();
         closeRecovery();
+        return;
       }
       if (e.key === 'Escape' && jobsOverlay.classList.contains('active')) {
+        e.preventDefault();
+        e.stopPropagation();
         closeJobs();
+        return;
       }
       if (e.key === 'Escape' && detailOverlay.classList.contains('active')) {
+        e.preventDefault();
+        e.stopPropagation();
         closeDetailView();
+        return;
       }
     });
     openExternalBtn.addEventListener('click', async () => {
@@ -10764,6 +11124,63 @@
     let recallThemeHandler = null;
     let expandAnimating = false;
 
+    function applySidebarCollapsed(collapsed, { explicit = false } = {}) {
+      // Pin the collapsed (fixed-position) chevron to the exact spot the button
+      // occupies while expanded, so collapsing only rotates it — no vertical
+      // jump. Measure the in-flow rect BEFORE the pane collapses; on expand,
+      // clear the inline coords so it returns to flow. (The CSS left/top on the
+      // collapsed rule is only a fallback for a collapsed-on-launch start.)
+      const alreadyCollapsed = document.body.classList.contains('sidebar-collapsed');
+      if (collapsed && !alreadyCollapsed) {
+        const rect = sidebarCollapseButton.getBoundingClientRect();
+        if (rect.width && rect.height) {
+          sidebarCollapseButton.style.top = `${Math.round(rect.top)}px`;
+          sidebarCollapseButton.style.left = `${Math.round(rect.left)}px`;
+        }
+      } else if (!collapsed) {
+        sidebarCollapseButton.style.top = '';
+        sidebarCollapseButton.style.left = '';
+      }
+      document.body.classList.toggle('sidebar-collapsed', collapsed);
+      sidebarCollapseButton.classList.toggle('is-collapsed', collapsed);
+      sidebarCollapseButton.setAttribute('aria-label', collapsed ? 'Expand list pane' : 'Collapse list pane');
+      sidebarCollapseButton.setAttribute('title', collapsed ? 'Expand list pane' : 'Collapse list pane');
+      if (explicit) {
+        sidebarAutoCollapsed = false;
+        localStorage.setItem('minutes.sidebarCollapsed', collapsed ? 'true' : 'false');
+        if (!collapsed) {
+          userExpandedSidebarThisSession = true;
+          document.body.classList.add('sidebar-expanded-session');
+        } else {
+          document.body.classList.remove('sidebar-expanded-session');
+        }
+      }
+    }
+
+    function toggleSidebarCollapsed() {
+      applySidebarCollapsed(!document.body.classList.contains('sidebar-collapsed'), { explicit: true });
+    }
+
+    const storedSidebarCollapsed = localStorage.getItem('minutes.sidebarCollapsed') === 'true';
+    applySidebarCollapsed(storedSidebarCollapsed);
+    if (window.innerWidth < 720 && !storedSidebarCollapsed && !userExpandedSidebarThisSession) {
+      sidebarAutoCollapsed = true;
+      document.body.classList.add('sidebar-collapsed');
+      sidebarCollapseButton.classList.add('is-collapsed');
+    }
+    sidebarCollapseButton.addEventListener('click', toggleSidebarCollapsed);
+    window.addEventListener('resize', () => {
+      if (window.innerWidth < 720 && !userExpandedSidebarThisSession && localStorage.getItem('minutes.sidebarCollapsed') !== 'true') {
+        sidebarAutoCollapsed = true;
+        document.body.classList.add('sidebar-collapsed');
+        sidebarCollapseButton.classList.add('is-collapsed');
+      } else if (window.innerWidth >= 720 && sidebarAutoCollapsed) {
+        sidebarAutoCollapsed = false;
+        document.body.classList.remove('sidebar-collapsed');
+        sidebarCollapseButton.classList.remove('is-collapsed');
+      }
+    });
+
     // ── Draggable split handle ──
     function clampRecallRatio(ratio) {
       return Math.min(MAX_RECALL_RATIO, Math.max(MIN_RECALL_RATIO, ratio));
@@ -10778,6 +11195,7 @@
     }
 
     splitHandle.addEventListener('mousedown', (e) => {
+      if (document.body.classList.contains('sidebar-collapsed')) return;
       if (!recallExpanded) return;
       e.preventDefault();
       splitHandle.classList.add('dragging');
@@ -12451,6 +12869,7 @@
     let openArtifactLastError = null;
     let openArtifactDirty = false;
     let openArtifactSaving = false;
+    let openArtifactSavePromise = null;
     let mdViewerMode = 'preview';
     let openArtifactExternalNotice = null;
     let artifactTemplateResolver = null;
@@ -12459,6 +12878,8 @@
     let openArtifactParseError = null;
     let mdViewerReviewVisible = false;
     let mdViewerReviewData = null;
+    let mdViewerSaveTimer = null;
+    let mdViewerLastSavedAt = null;
     let recallWorkspaceState = null;
 
     function formatArtifactOpenedAt(isoString) {
@@ -12705,6 +13126,10 @@
       if (tone) mdViewerStatus.classList.add(tone);
     }
 
+    function savedTimeLabel(date = new Date()) {
+      return date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+    }
+
     function currentArtifactBuffer() {
       return mdViewerMode === 'source' ? mdViewerEditor.value : (openArtifactContent || '');
     }
@@ -12751,23 +13176,23 @@
       mdViewerReview.classList.toggle('active', mdViewerReviewVisible && !!mdViewerReviewData?.available);
 
       if (openArtifactSaving) {
-        setMdViewerStatus('Saving...', 'saved');
+        setMdViewerStatus('saving', 'saved');
       } else if (openArtifactParseError) {
         setMdViewerStatus('Invalid JSON', 'warning');
       } else if (!openArtifactEditable && openArtifactPath) {
-        setMdViewerStatus('Read-only', 'readonly');
+        setMdViewerStatus('read-only', 'readonly');
       } else if (openArtifactDirty) {
-        setMdViewerStatus('Unsaved', 'unsaved');
+        setMdViewerStatus('edited', 'unsaved');
       } else if (openArtifactExternalNotice) {
         setMdViewerStatus(openArtifactExternalNotice, 'external');
-      } else if (sourceMode) {
-        setMdViewerStatus('Editing');
+      } else if (mdViewerLastSavedAt) {
+        setMdViewerStatus(`saved ${savedTimeLabel(mdViewerLastSavedAt)}`, 'saved');
       } else {
-        setMdViewerStatus('Viewing');
+        setMdViewerStatus('');
       }
     }
 
-    function setMdViewerMode(mode) {
+    async function setMdViewerMode(mode) {
       if (mode === 'source' && !openArtifactEditable) {
         mdViewerMode = 'preview';
       } else {
@@ -12779,7 +13204,9 @@
             ? formatJsonSource(openArtifactContent || '')
             : (openArtifactContent || '');
         }
+        requestAnimationFrame(() => mdViewerEditor.focus());
       } else {
+        await flushOpenArtifactSave();
         rerenderOpenArtifact(currentArtifactBuffer(), { preserveScroll: true });
       }
       refreshMdViewerChrome();
@@ -12859,28 +13286,65 @@
       }, 1000);
     }
 
+    function scheduleOpenArtifactSave() {
+      if (!openArtifactEditable || !openArtifactDirty) return;
+      if (mdViewerSaveTimer) clearTimeout(mdViewerSaveTimer);
+      mdViewerSaveTimer = setTimeout(() => {
+        mdViewerSaveTimer = null;
+        saveOpenArtifact();
+      }, 800);
+    }
+
+    async function flushOpenArtifactSave() {
+      if (mdViewerSaveTimer) {
+        clearTimeout(mdViewerSaveTimer);
+        mdViewerSaveTimer = null;
+      }
+      await saveOpenArtifact();
+    }
+
     async function saveOpenArtifact() {
-      if (!openArtifactPath || !openArtifactDirty || openArtifactSaving) return;
+      if (openArtifactSaving && openArtifactSavePromise) {
+        await openArtifactSavePromise;
+        return;
+      }
+      if (!openArtifactPath || !openArtifactDirty) return;
+      const savedPath = openArtifactPath;
+      const savedContent = mdViewerEditor.value;
       openArtifactSaving = true;
       refreshMdViewerChrome();
-      try {
-        const nextContent = mdViewerEditor.value;
-        await invoke('cmd_write_text_file', { path: openArtifactPath, content: nextContent });
-        openArtifactContent = nextContent;
-        openArtifactDirty = false;
-        openArtifactExternalNotice = null;
-        if (mdViewerMode === 'preview') {
-          rerenderOpenArtifact(nextContent, { preserveScroll: true });
+      const savePromise = (async () => {
+        try {
+          await invoke('cmd_write_text_file', { path: savedPath, content: savedContent });
+          if (openArtifactPath !== savedPath) return;
+          openArtifactContent = savedContent;
+          const currentContent = mdViewerEditor.value;
+          openArtifactDirty = currentContent !== savedContent;
+          openArtifactExternalNotice = null;
+          mdViewerLastSavedAt = new Date();
+          if (mdViewerMode === 'preview') {
+            rerenderOpenArtifact(currentContent, { preserveScroll: true });
+          }
+          if (openArtifactDirty) {
+            setMdViewerStatus('Unsaved changes', 'unsaved');
+            scheduleOpenArtifactSave();
+          } else {
+            setMdViewerStatus(`saved ${savedTimeLabel(mdViewerLastSavedAt)}`, 'saved');
+            await refreshArtifactReview();
+          }
+        } catch (e) {
+          console.error('Save artifact:', e);
+          setMdViewerStatus(String(e), 'danger');
+        } finally {
+          if (openArtifactSavePromise === savePromise) {
+            openArtifactSaving = false;
+            openArtifactSavePromise = null;
+            if (openArtifactPath === savedPath) refreshMdViewerChrome();
+          }
         }
-        setMdViewerStatus('Saved', 'saved');
-        await refreshArtifactReview();
-      } catch (e) {
-        console.error('Save artifact:', e);
-        setMdViewerStatus('Save failed', 'warning');
-      } finally {
-        openArtifactSaving = false;
-        refreshMdViewerChrome();
-      }
+      })();
+      openArtifactSavePromise = savePromise;
+      await openArtifactSavePromise;
     }
 
     async function showMdViewer(path, filename, markdownText, options = {}) {
@@ -12892,9 +13356,8 @@
         openArtifactPath !== path &&
         !confirmedDiscard
       ) {
-        const { ask } = window.__TAURI__.dialog;
-        const discard = await ask('Discard unsaved changes to the current artifact?', { title: 'Unsaved Changes', kind: 'warning' });
-        if (!discard) return false;
+        await flushOpenArtifactSave();
+        if (openArtifactDirty) return false;
       }
       const initialMode = options.mode === 'source' ? 'source' : 'preview';
       const editable = options.editable === true;
@@ -12904,12 +13367,14 @@
       openArtifactLastError = null;
       openArtifactDirty = false;
       openArtifactSaving = false;
+      openArtifactSavePromise = null;
       openArtifactExternalNotice = null;
       openArtifactEditable = editable;
       openArtifactKind = kind;
       openArtifactParseError = null;
       mdViewerReviewData = null;
       mdViewerReviewVisible = false;
+      mdViewerLastSavedAt = null;
       mdViewerMode = initialMode;
       mdViewerFilename.textContent = filename;
       rerenderOpenArtifact(markdownText);
@@ -12939,19 +13404,24 @@
 
     async function hideMdViewer() {
       if (openArtifactDirty) {
-        const { ask } = window.__TAURI__.dialog;
-        const discard = await ask('Discard unsaved changes to this artifact?', { title: 'Unsaved Changes', kind: 'warning' });
-        if (!discard) return;
+        await flushOpenArtifactSave();
+        if (openArtifactDirty) return;
       }
       if (openArtifactPollTimer) {
         clearInterval(openArtifactPollTimer);
         openArtifactPollTimer = null;
+      }
+      if (mdViewerSaveTimer) {
+        clearTimeout(mdViewerSaveTimer);
+        mdViewerSaveTimer = null;
       }
       openArtifactPath = null;
       openArtifactContent = null;
       openArtifactLastError = null;
       openArtifactDirty = false;
       openArtifactSaving = false;
+      openArtifactSavePromise = null;
+      mdViewerLastSavedAt = null;
       mdViewerMode = 'preview';
       mdViewerReviewData = null;
       mdViewerReviewVisible = false;
@@ -13105,6 +13575,10 @@
       openArtifactDirty = mdViewerEditor.value !== (openArtifactContent || '');
       if (openArtifactDirty) openArtifactExternalNotice = null;
       refreshMdViewerChrome();
+      scheduleOpenArtifactSave();
+    });
+    mdViewerEditor.addEventListener('blur', () => {
+      flushOpenArtifactSave();
     });
     artifactTemplateOverlay.addEventListener('click', (event) => {
       if (event.target === artifactTemplateOverlay) closeArtifactTemplatePicker(null);
@@ -13113,26 +13587,49 @@
     artifactTemplateOverlay.querySelectorAll('[data-artifact-kind]').forEach((button) => {
       button.addEventListener('click', () => closeArtifactTemplatePicker(button.getAttribute('data-artifact-kind')));
     });
+    function isEditableShortcutTarget(target = document.activeElement) {
+      const tag = target && target.tagName ? target.tagName.toLowerCase() : '';
+      const inTerminal = target?.closest?.('.recall-terminal');
+      return tag === 'input' || tag === 'textarea' || tag === 'select' || target?.isContentEditable || inTerminal;
+    }
+    function isOverlayActive() {
+      return [
+        whatsNewScrim,
+        aboutOverlay,
+        settingsOverlay,
+        readinessOverlay,
+        recoveryOverlay,
+        jobsOverlay,
+        detailOverlay,
+        recordingConsentOverlay,
+        cliSetupScrim,
+        artifactTemplateOverlay,
+      ].some((overlay) => overlay?.classList?.contains('active'));
+    }
     mdViewerContent.addEventListener('click', async (event) => {
-      const anchor = event.target.closest('a[href]');
-      if (!anchor) return;
-      event.preventDefault();
-      const href = anchor.getAttribute('href');
-      if (!href || href === '#') return;
-      try {
-        await invoke('cmd_open_file', { path: href });
-      } catch (e) {
-        console.error('Open markdown link:', e);
+      const clickedElement = event.target?.closest ? event.target : event.target?.parentElement;
+      const anchor = clickedElement?.closest?.('a[href]');
+      if (anchor) {
+        event.preventDefault();
+        const href = anchor.getAttribute('href');
+        if (!href || href === '#') return;
+        try {
+          await invoke('cmd_open_file', { path: href });
+        } catch (e) {
+          console.error('Open markdown link:', e);
+        }
+        return;
+      }
+      if (window.getSelection?.().toString()) return;
+      if (openArtifactEditable && mdViewerMode !== 'source') {
+        await setMdViewerMode('source');
       }
     });
 
     // Cmd+O shortcut — only when focus is not inside an editable context or the terminal
     document.addEventListener('keydown', (e) => {
       if ((e.metaKey || e.ctrlKey) && e.key === 'o') {
-        const tag = document.activeElement?.tagName;
-        const editable = document.activeElement?.isContentEditable;
-        const inTerminal = document.activeElement?.closest('.recall-terminal');
-        if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || editable || inTerminal) return;
+        if (isEditableShortcutTarget(e.target || document.activeElement)) return;
         e.preventDefault();
         openMarkdownFile();
       }
@@ -13140,10 +13637,30 @@
         const inTerminal = document.activeElement?.closest('.recall-terminal');
         if (inTerminal) return;
         e.preventDefault();
-        saveOpenArtifact();
+        flushOpenArtifactSave();
+      }
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'b') {
+        const target = e.target || document.activeElement;
+        const isSidebarButton = target?.closest?.('#btn-sidebar-collapse');
+        if (isEditableShortcutTarget(target)) return;
+        if (!isSidebarButton && (isOverlayActive() || mdViewer.classList.contains('active'))) return;
+        e.preventDefault();
+        toggleSidebarCollapsed();
       }
       if (e.key === 'Escape' && artifactTemplateOverlay.classList.contains('active')) {
+        e.preventDefault();
+        e.stopPropagation();
         closeArtifactTemplatePicker(null);
+        return;
+      }
+      if (e.key === 'Escape' && mdViewer.classList.contains('active')) {
+        if (e.defaultPrevented || isOverlayActive()) return;
+        e.preventDefault();
+        if (mdViewerMode === 'source') {
+          setMdViewerMode('preview');
+        } else {
+          hideMdViewer();
+        }
       }
     });
 

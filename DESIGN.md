@@ -250,3 +250,15 @@ Every state must be visible in every surface (tray, app, CLI output).
 | 2026-04-08 | Transcript output as hero visual | Real diarized output in Geist Mono replaces the existing DemoPlayer gif. The product's output is the aesthetic. |
 | 2026-04-08 | Warm near-black (#0D0D0B) not pure black | Slightly warm undertone unifies dark mode with the cream light mode surfaces. |
 | 2026-04-08 | No gradients, no glows, no illustration | Information density is the aesthetic. The only decoration is well-set type. |
+
+## Interaction craft
+
+How the app feels, held to like the accent rule:
+
+- **Feedback grants confidence, never demands attention.** Prove the system heard the user: live waveforms, quiet "saved 12:04" whispers, honest failure text. No modals for success, no toasts for routine.
+- **Motion: 120-170ms, ease, physics-honest.** Panes slide because they go somewhere; done-states dissolve. Nothing animates for decoration. Always respect prefers-reduced-motion.
+- **Spacing sits on the scale: 4/6/8/10/12/16/20px.** Off-scale values are bugs.
+- **Status speaks in --text-meta mono.** Whisper, do not announce. Sounds, where they exist, are dry ticks, never melodies.
+- **Speed is the first delight.** High-frequency actions must feel instant; show real progress (streamed partials), never spinners.
+- **Warmth is budgeted like the accent color**: at most one human touch per surface, chosen deliberately.
+- **UI changes ship with a human feel-test** in the installed dev app (see docs/PRE-COMMIT.md) covering timing and rhythm, not just correctness.

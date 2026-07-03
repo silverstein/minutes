@@ -1,10 +1,12 @@
 //! sherpa-onnx transcription engine (feature `engine-sherpa`, opt-in, off by default).
 //!
-//! In-process via the `sherpa-rs` crate (no Python). Validated 2026-06-24 to
-//! coexist with the existing `ort`-based pyannote/vad path: `sherpa-rs-sys`
-//! statically embeds onnxruntime with hidden symbols (no `links = onnxruntime`
-//! manifest), `ort` ships its own dynamic onnxruntime, and macOS two-level
-//! namespacing keeps them separate (both happen to be onnxruntime 1.17.1).
+//! In-process via the `sherpa-rs` crate (no Python). Linkage differs by target
+//! (see the per-target `sherpa-rs` deps in Cargo.toml): on macOS sherpa-onnx is
+//! linked STATICALLY so opt-in app/CLI binaries are self-contained (#369); on
+//! Linux/Windows it stays DYNAMIC (upstream's static path needs a global
+//! RUSTFLAGS hack there), so binaries must run from the cargo target layout.
+//! Either way it coexists with the `ort`-based pyannote/vad path: sherpa's
+//! onnxruntime symbols stay separate from the app's `ort` dependency.
 //! parakeet-tdt-0.6b-v3 is multilingual (FR/ES/etc.) with correct orthography.
 //!
 //! Scaffold scope: model directory is resolved from `MINUTES_SHERPA_MODEL_DIR`.
@@ -102,6 +104,10 @@ fn build_recognizer(config: &Config) -> Result<TransducerRecognizer, String> {
         debug: false,
         ..Default::default()
     };
+    tracing::info!(
+        model_dir = %dir.display(),
+        "loading sherpa-onnx transducer recognizer"
+    );
     TransducerRecognizer::new(cfg).map_err(|e| format!("failed to load sherpa model: {e}"))
 }
 
@@ -119,6 +125,11 @@ pub fn transcribe_segments(samples: &[f32], config: &Config) -> Result<Vec<(u64,
             segments.push((start_ms, text));
         }
     }
+    tracing::info!(
+        samples = samples.len(),
+        segments = segments.len(),
+        "sherpa-onnx transcription complete"
+    );
     Ok(segments)
 }
 

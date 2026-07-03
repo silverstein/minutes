@@ -52,6 +52,23 @@ struct JsonEnvelope<T: Serialize> {
 }
 
 #[derive(Serialize)]
+struct TranscribeSegmentOutput {
+    start: f64,
+    end: f64,
+    text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    speaker: Option<String>,
+}
+
+#[derive(Serialize)]
+struct TranscribeOutput {
+    text: String,
+    language: String,
+    segments: Vec<TranscribeSegmentOutput>,
+    duration_ms: u64,
+}
+
+#[derive(Serialize)]
 struct ContextSummaryOutput {
     session: Option<minutes_core::context_store::ContextSession>,
     links: Vec<minutes_core::context_store::ContextLink>,
@@ -605,6 +622,10 @@ enum Commands {
 
     /// Show relationship overview: top contacts, commitments, losing-touch alerts
     People {
+        /// Subcommand (e.g. `merge`); omit to list the relationship graph
+        #[command(subcommand)]
+        action: Option<PeopleAction>,
+
         /// Force full index rebuild from markdown files
         #[arg(long)]
         rebuild: bool,
@@ -707,6 +728,24 @@ enum Commands {
         apply: bool,
     },
 
+    /// Re-run speaker mapping on an existing meeting (recovery for failed/missing maps)
+    RedoSpeakerMapping {
+        /// Path to meeting .md file, or a search term to find one
+        meeting: String,
+
+        /// Actually write the new speaker map (default: dry-run showing what would change)
+        #[arg(long)]
+        apply: bool,
+
+        /// Override the summarization engine for this run (e.g. "agent", "ollama", "mistral")
+        #[arg(long)]
+        engine: Option<String>,
+
+        /// Emit machine-readable JSON instead of human output
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Process an audio file through the pipeline
     Process {
         /// Path to audio file (.wav, .m4a, .mp3)
@@ -732,6 +771,25 @@ enum Commands {
         /// Use `minutes template list` to see available templates.
         #[arg(long)]
         template: Option<String>,
+    },
+
+    /// Transcribe an audio file to text without writing meeting files or summarizing.
+    /// Useful for integrations: audio in, transcript (or JSON) out.
+    Transcribe {
+        /// Audio file (.wav, .m4a, .mp3, .ogg, .webm, .mp4)
+        path: PathBuf,
+
+        /// Output a JSON envelope to stdout instead of plain text
+        #[arg(long)]
+        json: bool,
+
+        /// Transcription language override (e.g. "en", "es"). Uses config value if omitted.
+        #[arg(short, long)]
+        language: Option<String>,
+
+        /// Run speaker diarization and annotate each segment with a speaker label
+        #[arg(long)]
+        diarize: bool,
     },
 
     /// Manage summarization templates (list, show, validate)
@@ -1119,6 +1177,30 @@ enum SensitiveAction {
     },
     /// Stop the active sensitive meeting and write its artifact
     Stop,
+}
+
+#[derive(Subcommand)]
+enum PeopleAction {
+    /// Confirm that several people are the same person and collapse them.
+    ///
+    /// Records a durable person alias (in the local vocabulary) so future
+    /// transcripts, search, and graph rebuilds resolve every variant spelling to
+    /// the canonical one. The first argument is the surviving canonical name; the
+    /// rest are its variants. Accepts slugs (from the "Possible name variants"
+    /// suggestions) or exact names.
+    Merge {
+        /// Canonical (surviving) person: a slug or exact name.
+        canonical: String,
+        /// Variant people to fold into the canonical: slugs or exact names.
+        #[arg(required = true)]
+        aliases: Vec<String>,
+        /// Skip the automatic graph rebuild (run `minutes people --rebuild` later).
+        #[arg(long)]
+        no_rebuild: bool,
+        /// Output raw JSON instead of formatted text
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1598,10 +1680,27 @@ fn main() -> Result<()> {
         } => cmd_consistency(owner.as_deref(), stale_after_days, &config),
         Commands::Person { name } => cmd_person(&name, &config),
         Commands::People {
+            action,
             rebuild,
             json,
             limit,
-        } => cmd_people(rebuild, json, limit, &config),
+        } => match action {
+            Some(PeopleAction::Merge {
+                canonical,
+                aliases,
+                no_rebuild,
+                json: merge_json,
+            }) => cmd_people_merge(
+                &canonical,
+                &aliases,
+                no_rebuild,
+                // Accept `--json` whether typed on `people` or on `merge`, so the
+                // otherwise-inert parent flag isn't silently ignored.
+                json || merge_json,
+                &config,
+            ),
+            None => cmd_people(rebuild, json, limit, &config),
+        },
         Commands::Vocabulary { action } => cmd_vocabulary(action, &config),
         Commands::Commitments { person, json } => cmd_commitments(person.as_deref(), json, &config),
         Commands::Research {
@@ -1627,6 +1726,12 @@ fn main() -> Result<()> {
         } => cmd_export(content_type, output, &config),
         Commands::Ingest { path, all, dry_run } => cmd_ingest(path, all, dry_run, &config),
         Commands::Clean { meeting, apply } => cmd_clean(&meeting, apply, &config),
+        Commands::RedoSpeakerMapping {
+            meeting,
+            apply,
+            engine,
+            json,
+        } => cmd_redo_speaker_mapping(&meeting, apply, engine, json, &config),
         Commands::Process {
             path,
             content_type,
@@ -1661,6 +1766,17 @@ fn main() -> Result<()> {
                 minutes_core::notes::cleanup();
             }
             result
+        }
+        Commands::Transcribe {
+            path,
+            json,
+            language,
+            diarize: do_diarize,
+        } => {
+            if let Some(lang) = language {
+                config.transcription.language = Some(lang);
+            }
+            cmd_transcribe(&path, json, do_diarize, &config)
         }
         Commands::Template { cmd } => cmd_template(cmd),
         Commands::Watch { dir, language } => {
@@ -3384,6 +3500,203 @@ fn cmd_person(name: &str, config: &Config) -> Result<()> {
     Ok(())
 }
 
+/// Shell-quote a token for a copy-pasteable command (slugs rarely need it).
+fn shell_quote_arg(s: &str) -> String {
+    if !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    {
+        s.to_string()
+    } else {
+        format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+    }
+}
+
+/// Render the ready-to-run merge command for a suggested cluster. `slugs[0]` is
+/// the highest-evidence spelling (canonical); the rest fold into it.
+fn format_merge_command(slugs: &[String]) -> String {
+    let quoted: Vec<String> = slugs.iter().map(|s| shell_quote_arg(s)).collect();
+    format!("minutes people merge {}", quoted.join(" "))
+}
+
+#[derive(Serialize)]
+struct PeopleMergeOutput {
+    canonical: String,
+    aliases: Vec<String>,
+    unresolved: Vec<String>,
+    saved: bool,
+    rebuilt: bool,
+    people_before: Option<usize>,
+    people_after: Option<usize>,
+}
+
+/// Resolve a slug-or-name token to a graph person's display name. Exact match on
+/// slug or (case-insensitively) on name; never fuzzy. Returns `(name, resolved)`;
+/// an unresolved token is passed through literally so a person not yet in the
+/// graph can still be named, but the caller warns about it.
+fn resolve_person_token(
+    token: &str,
+    people: &[minutes_core::graph::PersonSummary],
+) -> (String, bool) {
+    let t = token.trim();
+    if let Some(p) = people.iter().find(|p| p.slug.eq_ignore_ascii_case(t)) {
+        return (p.name.clone(), true);
+    }
+    let name_matches: Vec<&minutes_core::graph::PersonSummary> = people
+        .iter()
+        .filter(|p| p.name.eq_ignore_ascii_case(t))
+        .collect();
+    if name_matches.len() == 1 {
+        return (name_matches[0].name.clone(), true);
+    }
+    (t.to_string(), false)
+}
+
+fn cmd_people_merge(
+    canonical: &str,
+    aliases: &[String],
+    no_rebuild: bool,
+    json: bool,
+    config: &Config,
+) -> Result<()> {
+    use minutes_core::graph;
+    use minutes_core::vocabulary;
+
+    // Best-effort: resolve slugs/names against the current graph. If the graph
+    // isn't built yet, fall back to treating every token as a literal name.
+    let people = graph::relationship_map(config).unwrap_or_default();
+
+    let (canonical_name, canonical_resolved) = resolve_person_token(canonical, &people);
+    let mut unresolved: Vec<String> = Vec::new();
+    if !canonical_resolved {
+        unresolved.push(canonical.trim().to_string());
+    }
+
+    // Resolve aliases; drop any that equal the canonical after resolution.
+    let mut alias_names: Vec<String> = Vec::new();
+    for a in aliases {
+        let (name, resolved) = resolve_person_token(a, &people);
+        if !resolved {
+            unresolved.push(a.trim().to_string());
+        }
+        if name.eq_ignore_ascii_case(&canonical_name)
+            || alias_names.iter().any(|n| n.eq_ignore_ascii_case(&name))
+        {
+            continue;
+        }
+        alias_names.push(name);
+    }
+
+    if alias_names.is_empty() {
+        anyhow::bail!(
+            "nothing to merge: no variant distinct from canonical \"{}\"",
+            canonical_name
+        );
+    }
+
+    if !unresolved.is_empty() {
+        eprintln!(
+            "  Note: not currently in the graph, treated as literal name(s): {}",
+            unresolved.join(", ")
+        );
+    }
+
+    // Persist the confirmed merge as a Person vocabulary entry (canonical +
+    // variant aliases). On rebuild the canonicalizer routes every variant to the
+    // canonical slug; the vocabulary survives the graph.db wipe.
+    let path = vocabulary::default_path();
+    let mut store = vocabulary::load().map_err(|e| anyhow::anyhow!("{}", e))?;
+    let now = Local::now().to_rfc3339();
+    store.entries.push(vocabulary::VocabularyEntry {
+        kind: vocabulary::VocabularyKind::Person,
+        canonical: canonical_name.clone(),
+        aliases: alias_names.clone(),
+        priority: vocabulary::VocabularyPriority::Normal,
+        source: vocabulary::VocabularySource::Manual,
+        created_at: Some(now.clone()),
+        updated_at: Some(now),
+        ..vocabulary::VocabularyEntry::default()
+    });
+
+    let normalized = match store.normalized() {
+        Ok(s) => s,
+        Err(e) => {
+            // Fail closed on alias conflict; name the offending entry + recovery.
+            if let vocabulary::VocabularyError::AliasConflict {
+                alias, existing, ..
+            } = &e
+            {
+                let existing_id = vocabulary::load()
+                    .ok()
+                    .and_then(|s| {
+                        s.entries
+                            .into_iter()
+                            .find(|entry| {
+                                entry.kind == vocabulary::VocabularyKind::Person
+                                    && entry.canonical.eq_ignore_ascii_case(existing)
+                            })
+                            .map(|entry| entry.id)
+                    })
+                    .unwrap_or_default();
+                anyhow::bail!(
+                    "\"{alias}\" is already a confirmed variant of \"{existing}\"{}. \
+                     Merge into \"{existing}\" instead (make it the canonical), or remove that entry first{}.",
+                    if existing_id.is_empty() { String::new() } else { format!(" (vocabulary entry {existing_id})") },
+                    if existing_id.is_empty() { String::new() } else { format!(": minutes vocabulary remove {existing_id}") }
+                );
+            }
+            return Err(anyhow::anyhow!("{}", e));
+        }
+    };
+    vocabulary::save_at(&path, &normalized).map_err(|e| anyhow::anyhow!("{}", e))?;
+
+    let people_before = Some(people.len());
+    let mut rebuilt = false;
+    let mut people_after = None;
+    if !no_rebuild {
+        match graph::rebuild_index(config) {
+            Ok(stats) => {
+                rebuilt = true;
+                people_after = Some(stats.people_count);
+            }
+            Err(e) => {
+                eprintln!(
+                    "  Saved the merge, but the graph rebuild failed ({e}). \
+                     Run `minutes people --rebuild` to apply it."
+                );
+            }
+        }
+    }
+
+    if json {
+        let out = PeopleMergeOutput {
+            canonical: canonical_name,
+            aliases: alias_names,
+            unresolved,
+            saved: true,
+            rebuilt,
+            people_before,
+            people_after,
+        };
+        println!("{}", serde_json::to_string_pretty(&out)?);
+    } else {
+        eprintln!(
+            "Merged {} variant(s) into \"{}\": {}",
+            alias_names.len(),
+            canonical_name,
+            alias_names.join(", ")
+        );
+        if rebuilt {
+            if let (Some(b), Some(a)) = (people_before, people_after) {
+                eprintln!("  Graph rebuilt: {b} → {a} people.");
+            }
+        } else if no_rebuild {
+            eprintln!("  Not rebuilt (--no-rebuild). Run `minutes people --rebuild` to apply.");
+        }
+    }
+    Ok(())
+}
+
 fn cmd_people(rebuild: bool, json: bool, limit: usize, config: &Config) -> Result<()> {
     use minutes_core::graph;
 
@@ -3394,8 +3707,22 @@ fn cmd_people(rebuild: bool, json: bool, limit: usize, config: &Config) -> Resul
             "Index rebuilt: {} people, {} meetings, {} commitments in {}ms",
             stats.people_count, stats.meeting_count, stats.commitment_count, stats.rebuild_ms
         );
+        if !stats.alias_clusters.is_empty() {
+            eprintln!("\nPossible name variants (same person, different spellings?):");
+            for cluster in &stats.alias_clusters {
+                let shared = if cluster.max_shared_meetings > 0 {
+                    format!(" ({} shared meetings)", cluster.max_shared_meetings)
+                } else {
+                    String::new()
+                };
+                eprintln!("  {}{}", cluster.members.join(" ↔ "), shared);
+                // slugs[0] is the highest-evidence spelling (canonical); the rest
+                // fold into it. This is a ready-to-run confirm-merge.
+                eprintln!("    merge: {}", format_merge_command(&cluster.slugs));
+            }
+        }
         if !stats.alias_suggestions.is_empty() {
-            eprintln!("\nPossible duplicates:");
+            eprintln!("\nPossible duplicates (shortened / last-name match):");
             for alias in &stats.alias_suggestions {
                 eprintln!(
                     "  {} ↔ {} ({} shared meetings)",
@@ -4177,6 +4504,345 @@ fn cmd_ingest(path: Option<PathBuf>, all: bool, dry_run: bool, config: &Config) 
     Ok(())
 }
 
+/// Resolve a single meeting `.md` file from a path or search term.
+///
+/// Both branches canonicalize the result and require it to live under the
+/// meetings directory, so neither a crafted path nor a symlinked search hit can
+/// point a mutating command at a file outside the user's meetings.
+fn resolve_single_meeting(meeting: &str, config: &Config) -> Result<std::path::PathBuf> {
+    let meetings_dir = &config.output_dir;
+    let meetings_canonical = meetings_dir
+        .canonicalize()
+        .unwrap_or_else(|_| meetings_dir.clone());
+    let ensure_contained = |canonical: std::path::PathBuf| -> Result<std::path::PathBuf> {
+        if !canonical.starts_with(&meetings_canonical) {
+            anyhow::bail!(
+                "path {} is outside the meetings directory ({})",
+                canonical.display(),
+                meetings_dir.display()
+            );
+        }
+        Ok(canonical)
+    };
+
+    let path = std::path::PathBuf::from(meeting);
+    if path.exists() {
+        return ensure_contained(path.canonicalize()?);
+    }
+
+    // Restrict the search to meetings so a memo/dictation never resolves here.
+    let filters = minutes_core::search::SearchFilters {
+        content_type: Some("meeting".into()),
+        since: None,
+        attendee: None,
+        intent_kind: None,
+        owner: None,
+        recorded_by: None,
+    };
+    let results = minutes_core::search::search(meeting, config, &filters)?;
+    if results.is_empty() {
+        anyhow::bail!("no meeting found matching: {}", meeting);
+    }
+    let canonical = ensure_contained(results[0].path.canonicalize()?)?;
+    eprintln!("  Matched: {}", canonical.display());
+    Ok(canonical)
+}
+
+/// Extract the body of the `## Transcript` section. Scans line-by-line so a
+/// fenced code block or a heading like `## Transcript cleanup notes` cannot be
+/// mistaken for the real transcript: only an H2 whose text is exactly
+/// `Transcript` (outside any code fence) opens the section, and the next real H2
+/// closes it. Returns `None` when there is no such section.
+fn transcript_section(body: &str) -> Option<String> {
+    // Track which marker opened the current fence so a `~~~` line inside a
+    // ``` block (or vice versa) is treated as content, not as a fence toggle.
+    let mut fence: Option<char> = None;
+    let mut found = false;
+    let mut collected: Vec<&str> = Vec::new();
+    for line in body.lines() {
+        let trimmed = line.trim_start();
+        let marker = if trimmed.starts_with("```") {
+            Some('`')
+        } else if trimmed.starts_with("~~~") {
+            Some('~')
+        } else {
+            None
+        };
+        if let Some(m) = marker {
+            match fence {
+                None => fence = Some(m),                 // open a fence
+                Some(open) if open == m => fence = None, // close only on a matching marker
+                Some(_) => {}                            // other marker inside a fence: content
+            }
+            if found {
+                collected.push(line);
+            }
+            continue;
+        }
+        if fence.is_none() {
+            if let Some(rest) = line.strip_prefix("## ") {
+                if found {
+                    break; // next section ends the transcript
+                }
+                if rest.trim() == "Transcript" {
+                    found = true;
+                    continue;
+                }
+            }
+        }
+        if found {
+            collected.push(line);
+        }
+    }
+    if !found {
+        return None;
+    }
+    Some(collected.join("\n").trim_start_matches('\n').to_string())
+}
+
+/// Merge a freshly-computed speaker map into the existing one without ever
+/// downgrading an existing High-confidence attribution. Fresh entries (Medium at
+/// most, from the LLM) fill in or refresh anything not already High-confidence.
+fn merge_speaker_map(
+    existing: &[minutes_core::diarize::SpeakerAttribution],
+    fresh: &[minutes_core::diarize::SpeakerAttribution],
+) -> Vec<minutes_core::diarize::SpeakerAttribution> {
+    use minutes_core::diarize::Confidence;
+    use std::collections::BTreeMap;
+
+    fn rank(c: Confidence) -> u8 {
+        match c {
+            Confidence::High => 2,
+            Confidence::Medium => 1,
+            Confidence::Low => 0,
+        }
+    }
+
+    let mut by_label: BTreeMap<String, minutes_core::diarize::SpeakerAttribution> = BTreeMap::new();
+    // Fold existing entries, keeping the highest-confidence one per label. This
+    // guards against a malformed frontmatter that lists the same label twice
+    // (e.g. High then Medium) silently dropping the High before merge.
+    for a in existing {
+        match by_label.get(&a.speaker_label) {
+            Some(cur) if rank(cur.confidence) >= rank(a.confidence) => {}
+            _ => {
+                by_label.insert(a.speaker_label.clone(), a.clone());
+            }
+        }
+    }
+    // Apply fresh results only where the retained existing entry is not High.
+    for a in fresh {
+        match by_label.get(&a.speaker_label) {
+            Some(cur) if cur.confidence == Confidence::High => {} // never downgrade
+            _ => {
+                by_label.insert(a.speaker_label.clone(), a.clone());
+            }
+        }
+    }
+    by_label.into_values().collect()
+}
+
+/// Re-run Level-1 speaker mapping on an existing meeting and (with `--apply`)
+/// write the merged map plus a `speaker_mapping` health block. Recovery path for
+/// meetings whose mapping failed, timed out, or never ran.
+fn cmd_redo_speaker_mapping(
+    meeting: &str,
+    apply: bool,
+    engine: Option<String>,
+    json: bool,
+    config: &Config,
+) -> Result<()> {
+    let path = resolve_single_meeting(meeting, config)?;
+    let content = std::fs::read_to_string(&path)?;
+    let (fm_str, body) = minutes_core::markdown::split_frontmatter(&content);
+    if fm_str.is_empty() {
+        anyhow::bail!(
+            "{} is not a meeting file (no YAML frontmatter)",
+            path.display()
+        );
+    }
+    let fm: minutes_core::markdown::Frontmatter = serde_yaml::from_str(fm_str)
+        .map_err(|e| anyhow::anyhow!("could not parse frontmatter in {}: {e}", path.display()))?;
+
+    // Only meetings carry diarized speaker labels. Refuse memos/dictation so we
+    // never write a speaker map (or call the LLM) on a non-meeting file.
+    if fm.r#type != minutes_core::markdown::ContentType::Meeting {
+        anyhow::bail!(
+            "{} is type {:?}, not a meeting; redo-speaker-mapping only operates on meetings",
+            path.display(),
+            fm.r#type
+        );
+    }
+
+    // Source-of-truth contract: we map the diarized transcript against the
+    // recorded attendee pool. If either is missing there is nothing to do, and
+    // we say exactly which side is missing rather than silently producing junk.
+    let transcript = transcript_section(body);
+    let labels: Vec<String> = transcript
+        .as_deref()
+        .map(minutes_core::summarize::extract_speaker_labels_pub)
+        .unwrap_or_default();
+    let attendees = fm.normalized_attendees();
+
+    // Engine override (validated lazily by the summarizer).
+    let mut cfg = config.clone();
+    if let Some(e) = &engine {
+        cfg.summarization.engine = e.clone();
+    }
+    let model = minutes_core::summarize::speaker_mapping_model_hint(&cfg);
+
+    // Contract failures short-circuit to a `skipped` health block.
+    let skip_reason: Option<&str> = if transcript.is_none() {
+        Some("no ## Transcript section in this meeting")
+    } else if labels.is_empty() {
+        Some("no anonymous SPEAKER_n labels remain to remap")
+    } else if attendees.is_empty() {
+        Some("no attendees recorded to map against; add attendees: to the frontmatter and retry")
+    } else {
+        None
+    };
+
+    if let Some(reason) = skip_reason {
+        let health = minutes_core::markdown::SpeakerMappingHealth {
+            status: "skipped".into(),
+            model,
+            diarized_speakers: labels.len(),
+            mapped_speakers: 0,
+            attendees: attendees.len(),
+            duration_ms: None,
+            reason: Some(reason.to_string()),
+            last_run: Some(Local::now().to_rfc3339()),
+        };
+        report_redo_result(
+            &path,
+            apply,
+            json,
+            &fm.speaker_map,
+            &fm.speaker_map,
+            &health,
+            config,
+        )?;
+        return Ok(());
+    }
+
+    let transcript = transcript.expect("transcript present past contract check");
+    let started = std::time::Instant::now();
+    let fresh = minutes_core::summarize::map_speakers(&transcript, &attendees, &cfg, None);
+    let duration_ms = started.elapsed().as_millis() as u64;
+    let merged = merge_speaker_map(&fm.speaker_map, &fresh);
+
+    let health = minutes_core::markdown::SpeakerMappingHealth {
+        status: if fresh.is_empty() {
+            "empty".into()
+        } else {
+            "ok".into()
+        },
+        model,
+        diarized_speakers: labels.len(),
+        mapped_speakers: fresh.len(),
+        attendees: attendees.len(),
+        duration_ms: Some(duration_ms),
+        reason: if fresh.is_empty() {
+            Some("mapper ran but produced no confident matches".into())
+        } else {
+            None
+        },
+        last_run: Some(Local::now().to_rfc3339()),
+    };
+
+    report_redo_result(
+        &path,
+        apply,
+        json,
+        &fm.speaker_map,
+        &merged,
+        &health,
+        config,
+    )?;
+    Ok(())
+}
+
+/// Apply (when `--apply`) then render the outcome of a redo run.
+///
+/// The write happens BEFORE any output so a failed write returns an error
+/// instead of first printing a success line/JSON the caller would trust. On
+/// `--apply` the `speaker_mapping` health block is always recorded (so a re-run
+/// is visible in the frontmatter) even when the map itself did not change.
+fn report_redo_result(
+    path: &std::path::Path,
+    apply: bool,
+    json: bool,
+    before: &[minutes_core::diarize::SpeakerAttribution],
+    after: &[minutes_core::diarize::SpeakerAttribution],
+    health: &minutes_core::markdown::SpeakerMappingHealth,
+    _config: &Config,
+) -> Result<()> {
+    let map_changed = before != after;
+    let mut frontmatter_written = false;
+
+    // Write first: if this fails we propagate the error and emit no success output.
+    if apply {
+        let health_owned = health.clone();
+        if map_changed {
+            let after_owned = after.to_vec();
+            minutes_core::markdown::update_frontmatter(path, move |f| {
+                f.speaker_map = after_owned;
+                f.speaker_mapping = Some(health_owned);
+            })?;
+        } else {
+            minutes_core::markdown::update_frontmatter(path, move |f| {
+                f.speaker_mapping = Some(health_owned);
+            })?;
+        }
+        frontmatter_written = true;
+    }
+
+    if json {
+        let payload = serde_json::json!({
+            "path": path.display().to_string(),
+            "map_changed": map_changed,
+            "written": frontmatter_written,
+            "health": health,
+            "speaker_map": after,
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json_envelope("redo-speaker-mapping", payload))?
+        );
+        return Ok(());
+    }
+
+    println!("Meeting: {}", path.display());
+    println!(
+        "  status: {} ({} of {} labels named, {} attendees)",
+        health.status, health.mapped_speakers, health.diarized_speakers, health.attendees
+    );
+    if let Some(reason) = &health.reason {
+        println!("  reason: {reason}");
+    }
+    if after.is_empty() {
+        println!("  map: (none)");
+    } else {
+        for a in after {
+            println!(
+                "  map: {} -> {} [{:?}, {:?}]",
+                a.speaker_label, a.name, a.confidence, a.source
+            );
+        }
+    }
+    if frontmatter_written {
+        if map_changed {
+            println!("  written: speaker_map + speaker_mapping health updated");
+        } else {
+            println!("  written: speaker_mapping health updated (map unchanged)");
+        }
+    } else {
+        println!("  (dry run: re-run with --apply to write)");
+    }
+
+    Ok(())
+}
+
 fn cmd_clean(meeting: &str, apply: bool, config: &Config) -> Result<()> {
     let meetings_dir = &config.output_dir;
 
@@ -4357,6 +5023,123 @@ fn cmd_clean(meeting: &str, apply: bool, config: &Config) -> Result<()> {
         );
         eprintln!("Run with --apply to fix them.");
     }
+
+    Ok(())
+}
+
+/// Transcribe an audio file to text and optionally JSON-encode the result.
+/// No meeting files are written, no summarization is performed.
+fn cmd_transcribe(path: &Path, output_json: bool, do_diarize: bool, config: &Config) -> Result<()> {
+    if !path.exists() {
+        anyhow::bail!("file not found: {}", path.display());
+    }
+
+    // Transcribe with whisper-guard cleanup applied.
+    // result.segments carries real centisecond-precision start/end from the engine.
+    // result.detected_language carries the language the ASR engine identified.
+    let result = minutes_core::transcribe::transcribe(path, config)
+        .map_err(|e| anyhow::anyhow!("transcription failed: {}", e))?;
+
+    if !output_json {
+        // Plain-text mode: emit the cleaned transcript unchanged
+        print!("{}", result.text.trim_end());
+        println!();
+        return Ok(());
+    }
+
+    let duration_ms = (result.stats.audio_duration_secs * 1000.0) as u64;
+
+    // Language: CLI override wins; fall back to what the engine detected.
+    let language = config
+        .transcription
+        .language
+        .as_deref()
+        .map(str::to_owned)
+        .or_else(|| result.detected_language.clone())
+        .unwrap_or_else(|| "unknown".to_string());
+
+    // Build output segments from the core result (real timestamps, no scraping).
+    let segments: Vec<TranscribeSegmentOutput> = if do_diarize {
+        let diarize_result = minutes_core::diarize::diarize(path, config);
+        if let Some(dr) = diarize_result {
+            result
+                .segments
+                .iter()
+                .map(|seg| {
+                    // Attribute this segment to the diarization speaker whose
+                    // window best overlaps [seg.start, seg.end].
+                    let speaker = dr
+                        .segments
+                        .iter()
+                        .find(|s| s.start < seg.end && s.end > seg.start)
+                        .map(|s| s.speaker.clone());
+                    TranscribeSegmentOutput {
+                        start: seg.start,
+                        end: seg.end,
+                        text: seg.text.clone(),
+                        speaker,
+                    }
+                })
+                .collect()
+        } else {
+            result
+                .segments
+                .iter()
+                .map(|seg| TranscribeSegmentOutput {
+                    start: seg.start,
+                    end: seg.end,
+                    text: seg.text.clone(),
+                    speaker: None,
+                })
+                .collect()
+        }
+    } else {
+        result
+            .segments
+            .iter()
+            .map(|seg| TranscribeSegmentOutput {
+                start: seg.start,
+                end: seg.end,
+                text: seg.text.clone(),
+                speaker: None,
+            })
+            .collect()
+    };
+
+    // data.text: segment texts joined with newlines (clean, no [m:ss] prefixes).
+    // Falls back to result.text when segments are empty (e.g. parakeet engine).
+    let clean_text = if segments.is_empty() {
+        // Strip [m:ss] prefixes from the existing timestamped text as a fallback
+        result
+            .text
+            .lines()
+            .map(|line| {
+                if let Some(rest) = line.strip_prefix('[') {
+                    if let Some(end) = rest.find(']') {
+                        return rest[end + 1..].trim().to_string();
+                    }
+                }
+                line.trim().to_string()
+            })
+            .filter(|l| !l.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n")
+    } else {
+        segments
+            .iter()
+            .map(|s| s.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    let data = TranscribeOutput {
+        text: clean_text,
+        language,
+        segments,
+        duration_ms,
+    };
+    let envelope = json_envelope("transcribe", data);
+    println!("{}", serde_json::to_string_pretty(&envelope)?);
 
     Ok(())
 }
@@ -6577,6 +7360,153 @@ mod tests {
         result
     }
 
+    fn attr(
+        label: &str,
+        name: &str,
+        confidence: minutes_core::diarize::Confidence,
+    ) -> minutes_core::diarize::SpeakerAttribution {
+        minutes_core::diarize::SpeakerAttribution {
+            speaker_label: label.into(),
+            name: name.into(),
+            confidence,
+            source: minutes_core::diarize::AttributionSource::Llm,
+        }
+    }
+
+    #[test]
+    fn shell_quote_arg_leaves_slugs_bare_and_quotes_spaces() {
+        assert_eq!(shell_quote_arg("jun-rei"), "jun-rei");
+        assert_eq!(shell_quote_arg("junrei_v2"), "junrei_v2");
+        assert_eq!(shell_quote_arg("Jun Rei"), "\"Jun Rei\"");
+        assert_eq!(shell_quote_arg("a\"b"), "\"a\\\"b\"");
+    }
+
+    #[test]
+    fn format_merge_command_uses_first_slug_as_canonical() {
+        let slugs = vec![
+            "junrei".to_string(),
+            "junlei".to_string(),
+            "jun-rei".to_string(),
+        ];
+        assert_eq!(
+            format_merge_command(&slugs),
+            "minutes people merge junrei junlei jun-rei"
+        );
+        // A name with a space gets quoted.
+        let slugs = vec!["jun rei".to_string(), "junlei".to_string()];
+        assert_eq!(
+            format_merge_command(&slugs),
+            "minutes people merge \"jun rei\" junlei"
+        );
+    }
+
+    #[test]
+    fn resolve_person_token_matches_slug_then_name_else_literal() {
+        let people = vec![minutes_core::graph::PersonSummary {
+            slug: "jun-rei".into(),
+            name: "Jun Rei".into(),
+            meeting_count: 3,
+            last_seen: String::new(),
+            days_since: 0.0,
+            open_commitments: 0,
+            top_topics: vec![],
+            score: 0.0,
+            losing_touch: false,
+        }];
+        // slug match (case-insensitive) -> display name, resolved
+        assert_eq!(
+            resolve_person_token("JUN-REI", &people),
+            ("Jun Rei".into(), true)
+        );
+        // exact name match -> resolved
+        assert_eq!(
+            resolve_person_token("jun rei", &people),
+            ("Jun Rei".into(), true)
+        );
+        // no match -> literal, unresolved
+        assert_eq!(
+            resolve_person_token("Bobby", &people),
+            ("Bobby".into(), false)
+        );
+    }
+
+    #[test]
+    fn merge_speaker_map_never_downgrades_high() {
+        use minutes_core::diarize::Confidence;
+        let existing = vec![attr("SPEAKER_00", "Sarah", Confidence::High)];
+        let fresh = vec![
+            attr("SPEAKER_00", "Someone Else", Confidence::Medium),
+            attr("SPEAKER_01", "Dan", Confidence::Medium),
+        ];
+        let merged = merge_speaker_map(&existing, &fresh);
+        let s0 = merged
+            .iter()
+            .find(|a| a.speaker_label == "SPEAKER_00")
+            .unwrap();
+        assert_eq!(s0.name, "Sarah", "existing High must survive");
+        assert_eq!(s0.confidence, Confidence::High);
+        let s1 = merged
+            .iter()
+            .find(|a| a.speaker_label == "SPEAKER_01")
+            .unwrap();
+        assert_eq!(s1.name, "Dan", "fresh fills in unmapped labels");
+    }
+
+    #[test]
+    fn merge_speaker_map_preserves_high_on_duplicate_existing_labels() {
+        use minutes_core::diarize::Confidence;
+        // Malformed frontmatter: same label listed twice, High then Medium.
+        let existing = vec![
+            attr("SPEAKER_00", "Sarah", Confidence::High),
+            attr("SPEAKER_00", "sarah lower", Confidence::Medium),
+        ];
+        // Even with an empty fresh map, the High entry must not be lost.
+        let merged = merge_speaker_map(&existing, &[]);
+        let s0 = merged
+            .iter()
+            .find(|a| a.speaker_label == "SPEAKER_00")
+            .unwrap();
+        assert_eq!(s0.name, "Sarah");
+        assert_eq!(s0.confidence, Confidence::High);
+        assert_eq!(merged.len(), 1, "duplicate labels collapse to one");
+    }
+
+    #[test]
+    fn transcript_section_requires_exact_heading() {
+        // A look-alike heading must not be treated as the transcript.
+        let body = "## Transcript cleanup notes\n\n[SPEAKER_00 0:00] not the transcript\n";
+        assert!(transcript_section(body).is_none());
+    }
+
+    #[test]
+    fn transcript_section_ignores_fenced_code_block() {
+        // A `## Transcript` line inside a code fence must be ignored; the real
+        // section after the fence is the one that wins.
+        let body = "## Summary\n\n```\n## Transcript\n[SPEAKER_99 0:00] fake\n```\n\n## Transcript\n\n[SPEAKER_00 0:00] real line\n";
+        let t = transcript_section(body).expect("real transcript section found");
+        assert!(t.contains("real line"));
+        assert!(!t.contains("fake"));
+    }
+
+    #[test]
+    fn transcript_section_handles_mixed_fence_markers() {
+        // A backtick fence whose body contains a `~~~` line must NOT be treated
+        // as closed by that tilde line; the fake `## Transcript` inside stays
+        // ignored and the real section after the fence wins.
+        let body = "## Summary\n\n```\n~~~\n## Transcript\n[SPEAKER_99 0:00] fake\n```\n\n## Transcript\n\n[SPEAKER_00 0:00] real line\n";
+        let t = transcript_section(body).expect("real transcript section found");
+        assert!(t.contains("real line"));
+        assert!(!t.contains("fake"));
+    }
+
+    #[test]
+    fn transcript_section_extracts_first_and_stops_at_next_h2() {
+        let body = "## Transcript\n\n[SPEAKER_00 0:00] hello\n\n## Action Items\n\n- do thing\n";
+        let t = transcript_section(body).unwrap();
+        assert!(t.contains("hello"));
+        assert!(!t.contains("Action Items"));
+    }
+
     #[test]
     fn recording_consent_explicit_basis_still_reminds_in_remind_mode() {
         let config = Config::default();
@@ -7288,6 +8218,91 @@ life (qmd://life/)
         });
         assert_eq!(second, InterruptAction::ForceExit(1));
         assert_eq!(shutdowns.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn transcribe_subcommand_parses_minimal_args() {
+        let parsed = Cli::try_parse_from(["minutes", "transcribe", "/tmp/audio.wav"])
+            .expect("transcribe must parse with only a file path");
+        match parsed.command {
+            Commands::Transcribe {
+                path,
+                json,
+                language,
+                diarize,
+            } => {
+                assert_eq!(path, PathBuf::from("/tmp/audio.wav"));
+                assert!(!json);
+                assert!(language.is_none());
+                assert!(!diarize);
+            }
+            _ => panic!("expected Transcribe variant"),
+        }
+    }
+
+    #[test]
+    fn transcribe_subcommand_parses_all_flags() {
+        let parsed = Cli::try_parse_from([
+            "minutes",
+            "transcribe",
+            "/tmp/audio.wav",
+            "--json",
+            "--language",
+            "en",
+            "--diarize",
+        ])
+        .expect("transcribe must parse all flags");
+        match parsed.command {
+            Commands::Transcribe {
+                path,
+                json,
+                language,
+                diarize,
+            } => {
+                assert_eq!(path, PathBuf::from("/tmp/audio.wav"));
+                assert!(json);
+                assert_eq!(language.as_deref(), Some("en"));
+                assert!(diarize);
+            }
+            _ => panic!("expected Transcribe variant"),
+        }
+    }
+
+    #[test]
+    fn transcribe_output_uses_snake_case_duration() {
+        let output = TranscribeOutput {
+            text: "hello".to_string(),
+            language: "en".to_string(),
+            segments: vec![],
+            duration_ms: 1234,
+        };
+        let json = serde_json::to_string(&output).unwrap();
+        assert!(
+            json.contains("\"duration_ms\""),
+            "expected snake_case duration_ms, got: {}",
+            json
+        );
+        assert!(
+            !json.contains("durationMs"),
+            "camelCase durationMs must not appear in output, got: {}",
+            json
+        );
+    }
+
+    #[test]
+    fn transcribe_segment_omits_speaker_when_none() {
+        let seg = TranscribeSegmentOutput {
+            start: 0.0,
+            end: 1.5,
+            text: "hello".to_string(),
+            speaker: None,
+        };
+        let json = serde_json::to_string(&seg).unwrap();
+        assert!(
+            !json.contains("speaker"),
+            "speaker field must be omitted when None, got: {}",
+            json
+        );
     }
 }
 

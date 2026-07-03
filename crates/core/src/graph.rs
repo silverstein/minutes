@@ -42,6 +42,7 @@ pub struct GraphStats {
     pub commitment_count: usize,
     pub topic_count: usize,
     pub alias_suggestions: Vec<AliasSuggestion>,
+    pub alias_clusters: Vec<AliasCluster>,
     pub rebuild_ms: u64,
 }
 
@@ -75,6 +76,24 @@ pub struct AliasSuggestion {
     pub name_a: String,
     pub name_b: String,
     pub shared_meetings: usize,
+}
+
+/// A group of people who are plausibly the same person (issue #385, class 3
+/// name-variant fragmentation). Suggestion only — nothing is merged. Members form
+/// a clique under the separator / same-first-letter edit predicate in
+/// [`crate::entity_cluster`] (every pair directly matches), so transitive drift
+/// chains never bridge distinct people. Prefix/last-name matches are surfaced
+/// separately as pairwise `AliasSuggestion`s.
+#[derive(Debug, Clone, Serialize)]
+pub struct AliasCluster {
+    /// Display names of the cluster members, sorted for deterministic output.
+    pub members: Vec<String>,
+    /// Slugs of the members, aligned with `members`.
+    pub slugs: Vec<String>,
+    /// Largest shared-meeting count among any pair in the cluster. Evidence for
+    /// display only, never a gate: spelling-drift variants of one person often
+    /// appear in *different* meetings, so `0` is common and expected.
+    pub max_shared_meetings: usize,
 }
 
 /// Database path: ~/.minutes/graph.db
@@ -711,8 +730,9 @@ fn rebuild_index_at_with_vocabulary_entities(
         params![today],
     )?;
 
-    // Detect alias suggestions
+    // Detect alias suggestions (pairwise) and clusters (transitive, #385)
     let alias_suggestions = detect_aliases(&conn)?;
+    let alias_clusters = detect_alias_clusters(&conn)?;
 
     // Commit the transaction — all or nothing
     conn.execute_batch("COMMIT")?;
@@ -737,6 +757,7 @@ fn rebuild_index_at_with_vocabulary_entities(
         commitment_count,
         topic_count: topic_set.len(),
         alias_suggestions,
+        alias_clusters,
         rebuild_ms: elapsed,
     })
 }
@@ -956,9 +977,23 @@ pub fn relationship_map(config: &Config) -> Result<Vec<PersonSummary>, GraphErro
     Ok(people)
 }
 
+/// Count meetings two people (by slug) both attended. Shared evidence for alias
+/// suggestions/clusters.
+fn shared_meeting_count(conn: &Connection, slug_a: &str, slug_b: &str) -> Result<i64, GraphError> {
+    Ok(conn.query_row(
+        "SELECT COUNT(DISTINCT pm1.meeting_id) FROM people_meetings pm1
+         JOIN people p1 ON pm1.person_id = p1.id
+         JOIN people_meetings pm2 ON pm1.meeting_id = pm2.meeting_id
+         JOIN people p2 ON pm2.person_id = p2.id
+         WHERE p1.slug = ?1 AND p2.slug = ?2",
+        params![slug_a, slug_b],
+        |row| row.get(0),
+    )?)
+}
+
 /// Detect people who might be the same person (fuzzy name matching).
 fn detect_aliases(conn: &Connection) -> Result<Vec<AliasSuggestion>, GraphError> {
-    let mut stmt = conn.prepare("SELECT slug, name FROM people")?;
+    let mut stmt = conn.prepare("SELECT slug, name FROM people ORDER BY slug")?;
     let people: Vec<(String, String)> = stmt
         .query_map([], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
@@ -970,23 +1005,11 @@ fn detect_aliases(conn: &Connection) -> Result<Vec<AliasSuggestion>, GraphError>
 
     for i in 0..people.len() {
         for j in (i + 1)..people.len() {
-            let (_, name_a) = &people[i];
-            let (_, name_b) = &people[j];
+            let (slug_a, name_a) = &people[i];
+            let (slug_b, name_b) = &people[j];
 
             if names_likely_same(name_a, name_b) {
-                // Check shared meeting count
-                let (slug_a, _) = &people[i];
-                let (slug_b, _) = &people[j];
-                let shared: i64 = conn.query_row(
-                    "SELECT COUNT(DISTINCT pm1.meeting_id) FROM people_meetings pm1
-                     JOIN people p1 ON pm1.person_id = p1.id
-                     JOIN people_meetings pm2 ON pm1.meeting_id = pm2.meeting_id
-                     JOIN people p2 ON pm2.person_id = p2.id
-                     WHERE p1.slug = ?1 AND p2.slug = ?2",
-                    params![slug_a, slug_b],
-                    |row| row.get(0),
-                )?;
-
+                let shared = shared_meeting_count(conn, slug_a, slug_b)?;
                 suggestions.push(AliasSuggestion {
                     name_a: name_a.clone(),
                     name_b: name_b.clone(),
@@ -997,6 +1020,80 @@ fn detect_aliases(conn: &Connection) -> Result<Vec<AliasSuggestion>, GraphError>
     }
 
     Ok(suggestions)
+}
+
+/// Detect clusters of people who are plausibly the same person (issue #385).
+///
+/// Edges come from two predicates: the existing prefix/last-name
+/// [`names_likely_same`] and the phonetic/edit variant predicate
+/// [`crate::entity_cluster::names_plausibly_same_person`] (which finally links
+/// spelling drift like `junrei`/`junlei`/`jun-rei` that the first cannot). Edges
+/// are unioned transitively so a fragmented person surfaces as one cluster.
+/// Suggestion only — nothing is merged.
+fn detect_alias_clusters(conn: &Connection) -> Result<Vec<AliasCluster>, GraphError> {
+    // ORDER BY slug so cluster membership and ordering are stable across rebuilds
+    // (SQLite row order otherwise follows insertion history). meeting_count is
+    // carried so each cluster can put its highest-evidence spelling first — that
+    // is the sensible default canonical for a suggested merge, rather than an
+    // arbitrary alphabetical spelling that might be a typo (#385).
+    let mut stmt = conn.prepare("SELECT slug, name, meeting_count FROM people ORDER BY slug")?;
+    let people: Vec<(String, String, i64)> = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    // Clusters use ONLY the variant predicate (separator / same-first-letter
+    // single-edit). The prefix/last-name predicate (`names_likely_same`) stays a
+    // separate pairwise suggestion: mixing the two edge types in one transitive
+    // union bridges distinct people (e.g. `Jon`~`Jan` by edit + `Jan`~`Jan Smith`
+    // by prefix would fuse `Jon` and `Jan Smith`), violating "a wrong merge is
+    // worse than a split" even at the suggestion level (#385).
+    let mut edges: Vec<(usize, usize)> = Vec::new();
+    for i in 0..people.len() {
+        for j in (i + 1)..people.len() {
+            if crate::entity_cluster::names_plausibly_same_person(&people[i].1, &people[j].1)
+                .is_some()
+            {
+                edges.push((i, j));
+            }
+        }
+    }
+
+    let clusters = crate::entity_cluster::cluster_indices(people.len(), &edges);
+
+    let mut result = Vec::with_capacity(clusters.len());
+    for cluster in clusters {
+        let mut max_shared = 0usize;
+        for a in 0..cluster.len() {
+            for b in (a + 1)..cluster.len() {
+                let shared =
+                    shared_meeting_count(conn, &people[cluster[a]].0, &people[cluster[b]].0)?;
+                max_shared = max_shared.max(shared as usize);
+            }
+        }
+        // Order members by evidence (meeting_count desc, then slug for stability)
+        // so members[0]/slugs[0] is the suggested canonical spelling.
+        let mut ordered: Vec<usize> = cluster.clone();
+        ordered.sort_by(|&a, &b| {
+            people[b]
+                .2
+                .cmp(&people[a].2)
+                .then_with(|| people[a].0.cmp(&people[b].0))
+        });
+        result.push(AliasCluster {
+            members: ordered.iter().map(|&i| people[i].1.clone()).collect(),
+            slugs: ordered.iter().map(|&i| people[i].0.clone()).collect(),
+            max_shared_meetings: max_shared,
+        });
+    }
+
+    Ok(result)
 }
 
 // ── Helpers ───────────────────────────────────────────────────
@@ -1821,6 +1918,137 @@ Short meeting.
     }
 
     #[test]
+    fn test_alias_clusters_full_rebuild() {
+        // Full-path (#385): spelling-drift variants of one synthetic person
+        // spread across DIFFERENT meetings (so shared_meetings is 0) must still
+        // surface as one alias cluster, and a distinct person must not join it.
+        let tmp = TempDir::new().unwrap();
+        let meetings = tmp.path().join("meetings");
+        fs::create_dir_all(&meetings).unwrap();
+
+        let mk = |date: &str, attendee: &str| {
+            format!(
+                "---\ntitle: Sync\ntype: meeting\ndate: {date}T09:00:00-07:00\nduration: 15m\nattendees: [{attendee}, Bright]\ntags: []\n---\nNotes.\n"
+            )
+        };
+        write_meeting(&meetings, "d1.md", &mk("2026-03-21", "Tanvir"));
+        write_meeting(&meetings, "d2.md", &mk("2026-03-22", "Tan-Vir"));
+        write_meeting(&meetings, "d3.md", &mk("2026-03-23", "Tanmir"));
+
+        let config = test_config(&meetings);
+        let stats = rebuild_to_temp(&config, &tmp);
+
+        let cluster = stats
+            .alias_clusters
+            .iter()
+            .find(|c| {
+                c.slugs.iter().any(|s| s == "tanvir")
+                    || c.members.iter().any(|m| m.eq_ignore_ascii_case("tanvir"))
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "expected a cluster containing the Tanvir drift variants, got: {:?}",
+                    stats.alias_clusters
+                )
+            });
+
+        let slugs: std::collections::HashSet<&String> = cluster.slugs.iter().collect();
+        assert!(slugs.contains(&"tanvir".to_string()));
+        assert!(slugs.contains(&"tan-vir".to_string()));
+        assert!(slugs.contains(&"tanmir".to_string()));
+        // The distinct attendee present in every meeting must NOT be in the cluster.
+        assert!(
+            !cluster
+                .members
+                .iter()
+                .any(|m| m.eq_ignore_ascii_case("bright")),
+            "distinct person leaked into drift cluster: {cluster:?}"
+        );
+    }
+
+    #[test]
+    fn test_confirmed_merge_collapses_variants_on_rebuild() {
+        // #385 confirm-merge durability: a Person vocabulary entry (canonical +
+        // variant aliases) must collapse the fragmented people into one on the
+        // next rebuild, with all meetings re-pointed to the canonical slug. This
+        // is the persistence contract the `minutes people merge` command relies on.
+        let tmp = TempDir::new().unwrap();
+        let meetings = tmp.path().join("meetings");
+        fs::create_dir_all(&meetings).unwrap();
+        let mk = |date: &str, attendee: &str| {
+            format!(
+                "---\ntitle: Sync\ntype: meeting\ndate: {date}T09:00:00-07:00\nduration: 15m\nattendees: [{attendee}]\ntags: []\n---\nNotes.\n"
+            )
+        };
+        write_meeting(&meetings, "a.md", &mk("2026-03-21", "Junrei"));
+        write_meeting(&meetings, "b.md", &mk("2026-03-22", "Junlei"));
+        write_meeting(&meetings, "c.md", &mk("2026-03-23", "Jun-Rei"));
+
+        let config = test_config(&meetings);
+        let db = tmp.path().join("graph.db");
+
+        // Without a confirmed merge: three fragmented people.
+        let stats = rebuild_index_at(&config, &db).unwrap();
+        assert_eq!(stats.people_count, 3, "expected 3 fragments before merge");
+
+        // Confirmed merge = a Person vocab entry (canonical + aliases), the exact
+        // shape `minutes people merge` writes.
+        let merged = vec![EntityRef {
+            slug: "junrei".into(),
+            label: "Junrei".into(),
+            aliases: vec!["Junlei".into(), "Jun-Rei".into()],
+        }];
+        let stats = rebuild_index_at_with_vocabulary_entities(&config, &db, merged).unwrap();
+        assert_eq!(
+            stats.people_count, 1,
+            "variants must collapse to one person"
+        );
+
+        let conn = open_db(&db).unwrap();
+        let (slug, name, meetings_count): (String, String, i64) = conn
+            .query_row("SELECT slug, name, meeting_count FROM people", [], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })
+            .unwrap();
+        assert_eq!(slug, "junrei");
+        assert_eq!(name, "Junrei");
+        assert_eq!(
+            meetings_count, 3,
+            "all three meetings re-point to the canonical"
+        );
+    }
+
+    #[test]
+    fn test_alias_clusters_do_not_bridge_distinct_people() {
+        // #385 codex: `Jon`~`Jan` (edit) must not transitively fuse with
+        // `Jan`~`Jan Smith` (prefix) into one cluster. Prefix/last-name links
+        // stay pairwise alias_suggestions; clusters use only the variant predicate.
+        let tmp = TempDir::new().unwrap();
+        let meetings = tmp.path().join("meetings");
+        fs::create_dir_all(&meetings).unwrap();
+        let mk = |date: &str, attendee: &str| {
+            format!(
+                "---\ntitle: Sync\ntype: meeting\ndate: {date}T09:00:00-07:00\nduration: 15m\nattendees: [{attendee}]\ntags: []\n---\nNotes.\n"
+            )
+        };
+        write_meeting(&meetings, "b1.md", &mk("2026-03-21", "Jon"));
+        write_meeting(&meetings, "b2.md", &mk("2026-03-22", "Jan"));
+        write_meeting(&meetings, "b3.md", &mk("2026-03-23", "Jan Smith"));
+
+        let config = test_config(&meetings);
+        let stats = rebuild_to_temp(&config, &tmp);
+
+        for c in &stats.alias_clusters {
+            let has_jon = c.slugs.iter().any(|s| s == "jon");
+            let has_jan_smith = c.slugs.iter().any(|s| s == "jan-smith");
+            assert!(
+                !(has_jon && has_jan_smith),
+                "distinct people bridged into one cluster: {c:?}"
+            );
+        }
+    }
+
+    #[test]
     fn test_fix_frontmatter_date() {
         let fm = "title: Test\ntype: meeting\ndate: 2026-03-17T14:00:00\nduration: 5m";
         let fixed = fix_frontmatter(fm);
@@ -2108,6 +2336,103 @@ attendees: [Sarah Miller]
         assert_eq!(stats.meeting_count, 1);
         assert_eq!(stats.people_count, 0);
         assert!(stats.topic_count >= 1); // "idea" from tags
+    }
+
+    #[test]
+    fn role_suffix_on_entity_does_not_create_spurious_graph_node() {
+        // Regression for issue #370: the LLM sometimes appends role context to
+        // entity labels and slugs ("Junlei, tech lead" → slug "junlei-tech-lead").
+        // After the fix, only the clean slug "junlei" should appear in the graph.
+        let tmp = TempDir::new().unwrap();
+        let meetings = tmp.path().join("meetings");
+        fs::create_dir_all(&meetings).unwrap();
+        let meeting = r#"---
+title: Architecture Review
+type: meeting
+date: 2026-03-20T14:00:00-07:00
+duration: 30m
+attendees: [Junlei, Junrei]
+entities:
+  people:
+    - slug: junlei-tech-lead
+      label: "Junlei, tech lead"
+      aliases: []
+    - slug: junrei-core-team
+      label: "Junrei (core team)"
+      aliases: []
+action_items:
+  - assignee: Junlei
+    task: Review the architecture doc
+    due: "2026-03-25"
+    status: open
+---
+
+## Transcript
+[JUNLEI 0:00] Let's review the design.
+[JUNREI 0:30] I agree with the approach.
+"#;
+        write_meeting(&meetings, "arch-review.md", meeting);
+        let config = test_config(&meetings);
+        let db = tmp.path().join("graph.db");
+        rebuild_index_at(&config, &db).unwrap();
+        let conn = open_db(&db).unwrap();
+
+        // Contaminated slugs must not appear in the people table
+        let contaminated_junlei: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM people WHERE slug = 'junlei-tech-lead'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            contaminated_junlei, 0,
+            "role-contaminated slug 'junlei-tech-lead' must not exist in the graph"
+        );
+        let contaminated_junrei: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM people WHERE slug = 'junrei-core-team'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            contaminated_junrei, 0,
+            "role-contaminated slug 'junrei-core-team' must not exist in the graph"
+        );
+
+        // Clean slugs must be present
+        let junlei: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM people WHERE slug = 'junlei'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(junlei, 1, "clean slug 'junlei' must exist in the graph");
+        let junrei: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM people WHERE slug = 'junrei'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(junrei, 1, "clean slug 'junrei' must exist in the graph");
+
+        // The action item assigned to "Junlei" must resolve to the clean slug
+        let commitment_person_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM commitments c
+                 JOIN people p ON c.person_id = p.id
+                 WHERE c.commitment_type = 'action_item' AND p.slug = 'junlei'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            commitment_person_count, 1,
+            "action item must be linked to clean slug 'junlei'"
+        );
     }
 
     #[test]

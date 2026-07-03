@@ -711,7 +711,7 @@ pub(crate) fn summarization_model_hint(config: &Config, has_screen_context: bool
     }
 }
 
-pub(crate) fn speaker_mapping_model_hint(config: &Config) -> String {
+pub fn speaker_mapping_model_hint(config: &Config) -> String {
     match config.summarization.engine.as_str() {
         "none" | "auto" | "agent" => configured_agent_hint(config),
         "claude" => "anthropic:claude-sonnet-4-20250514".into(),
@@ -921,11 +921,33 @@ fn write_agent_prompt_file(
 fn prepare_agent_invocation(
     agent_cmd: &str,
     prompt: &str,
+    lean: bool,
 ) -> Result<AgentInvocation, Box<dyn std::error::Error>> {
     if matches_agent_binary(agent_cmd, "claude") {
+        // `lean` (#382): speaker mapping is a tiny text->JSON classification, not a
+        // full agent run. Run claude with NO MCP servers and NO tools so it can't
+        // hang on MCP/tool init (loading the user's own Minutes MCP server was a
+        // prime suspect for the 120s hang). `--strict-mcp-config` + an empty
+        // `{"mcpServers":{}}` guarantees zero MCP startup; `--tools ""` disables
+        // tools; plain single-shot print mode.
+        let args = if lean {
+            vec![
+                "-p".into(),
+                "--strict-mcp-config".into(),
+                "--mcp-config".into(),
+                "{\"mcpServers\":{}}".into(),
+                "--tools".into(),
+                String::new(),
+                "--output-format".into(),
+                "text".into(),
+                "-".into(),
+            ]
+        } else {
+            vec!["-p".into(), "-".into()]
+        };
         return Ok(AgentInvocation {
             cmd: agent_cmd.to_string(),
-            args: vec!["-p".into(), "-".into()],
+            args,
             stdin_payload: Some(prompt.as_bytes().to_vec()),
             cleanup_path: None,
         });
@@ -1080,7 +1102,7 @@ fn summarize_with_agent_impl_timeout(
 
     tracing::info!(agent = %agent_cmd, prompt_len = prompt.len(), "summarizing via agent CLI");
 
-    let invocation = prepare_agent_invocation(&agent_cmd, &prompt)?;
+    let invocation = prepare_agent_invocation(&agent_cmd, &prompt, false)?;
     let cleanup_path = invocation.cleanup_path.clone();
 
     // AIDEV-NOTE: Use Stdio::null() when no stdin payload is needed (e.g. pi, opencode
@@ -1929,7 +1951,7 @@ fn run_title_refinement_via_agent(
 ) -> Result<String, Box<dyn std::error::Error>> {
     use std::io::Write;
 
-    let invocation = prepare_agent_invocation(agent_cmd, prompt)?;
+    let invocation = prepare_agent_invocation(agent_cmd, prompt, false)?;
     let cleanup_path = invocation.cleanup_path.clone();
     // Same fix as summarize_with_agent_impl_timeout (#288): file-arg agents
     // (pi, opencode) have no stdin payload, and an unclosed piped stdin makes
@@ -2249,7 +2271,8 @@ fn run_speaker_mapping_via_agent(
         config.summarization.agent_command.clone()
     };
     let agent_cmd = resolve_agent_path(&agent_cmd);
-    let invocation = prepare_agent_invocation(&agent_cmd, prompt)?;
+    // Speaker mapping runs the agent in `lean` mode (no MCP, no tools): #382.
+    let invocation = prepare_agent_invocation(&agent_cmd, prompt, true)?;
     let cleanup_path = invocation.cleanup_path.clone();
     // Same fix as summarize_with_agent_impl_timeout (#288): file-arg agents
     // (pi, opencode) have no stdin payload, and an unclosed piped stdin makes
@@ -2259,18 +2282,26 @@ fn run_speaker_mapping_via_agent(
     } else {
         std::process::Stdio::null()
     };
-    let mut child = std::process::Command::new(&invocation.cmd)
+    let mut command = std::process::Command::new(&invocation.cmd);
+    command
         .args(&invocation.args)
         .stdin(stdin_stdio)
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| {
-            if let Some(path) = cleanup_path.as_ref() {
-                let _ = std::fs::remove_file(path);
-            }
-            format!("Agent '{}' not found: {}", agent_cmd, e)
-        })?;
+        .stderr(std::process::Stdio::piped());
+    // Put the agent in its own process group so a timeout can kill the WHOLE tree
+    // (#382): `claude` spawns MCP/tool child processes that would otherwise leak as
+    // stuck agents if we killed only the direct child.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    let mut child = command.spawn().map_err(|e| {
+        if let Some(path) = cleanup_path.as_ref() {
+            let _ = std::fs::remove_file(path);
+        }
+        format!("Agent '{}' not found: {}", agent_cmd, e)
+    })?;
     if let Some(bytes) = invocation.stdin_payload.clone() {
         let mut stdin = child
             .stdin
@@ -2280,8 +2311,17 @@ fn run_speaker_mapping_via_agent(
             stdin.write_all(&bytes).ok();
         });
     }
-    let timeout = std::time::Duration::from_secs(120);
+    // Tight, dedicated bound for speaker mapping (#382): a tiny JSON task must never
+    // burn the full agent budget. Clamp to a sane range so config can't reintroduce
+    // the old 120s+ hang or set an unusably short deadline.
+    let timeout = std::time::Duration::from_secs(
+        config
+            .summarization
+            .speaker_mapping_timeout_secs
+            .clamp(5, 120),
+    );
     let start = std::time::Instant::now();
+    let child_pid = child.id();
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
@@ -2300,7 +2340,11 @@ fn run_speaker_mapping_via_agent(
             }
             Ok(None) => {
                 if start.elapsed() > timeout {
+                    // Signal the whole group first (terminates MCP/tool children the
+                    // agent spawned), then the direct child, then reap to avoid a zombie.
+                    kill_process_group(child_pid);
                     child.kill().ok();
+                    let _ = child.wait();
                     if let Some(path) = cleanup_path.as_ref() {
                         let _ = std::fs::remove_file(path);
                     }
@@ -2312,6 +2356,28 @@ fn run_speaker_mapping_via_agent(
         }
     }
 }
+
+/// Signal the process group led by `pid`. The speaker-mapping agent is spawned as a
+/// group leader (`process_group(0)`), so `kill(-pid)` reaches the MCP/tool children
+/// it started, not just the direct child (#382). No-op on non-Unix; the caller also
+/// kills the direct child via `Child::kill`.
+#[cfg(unix)]
+fn kill_process_group(pid: u32) {
+    let pgid: libc::pid_t = -(pid as libc::pid_t);
+    // Safety: a plain kill(2) syscall.
+    let rc = unsafe { libc::kill(pgid, libc::SIGKILL) };
+    if rc != 0 {
+        let err = std::io::Error::last_os_error();
+        // ESRCH = the group already exited; anything else is a real (rare) failure
+        // of the leak guard, worth a breadcrumb since this whole bug was silent.
+        if err.raw_os_error() != Some(libc::ESRCH) {
+            tracing::debug!(pid, error = %err, "speaker-mapping group kill failed");
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn kill_process_group(_pid: u32) {}
 
 fn parse_speaker_mapping(
     response: &str,
@@ -2835,7 +2901,7 @@ PARTICIPANTS:
     fn prepare_agent_invocation_for_codex_skips_git_repo_check() {
         // Regression: summaries run in a non-repo job dir; without the bypass
         // Codex refuses to start and the summary degrades.
-        let invocation = prepare_agent_invocation("codex", "sensitive prompt").unwrap();
+        let invocation = prepare_agent_invocation("codex", "sensitive prompt", false).unwrap();
         assert_eq!(invocation.cmd, "codex");
         assert_eq!(
             invocation.args,
@@ -2849,11 +2915,30 @@ PARTICIPANTS:
     }
 
     #[test]
+    fn prepare_agent_invocation_claude_lean_disables_mcp_and_tools() {
+        // #382: speaker mapping must run claude with no MCP servers and no tools so
+        // it can't hang on MCP/tool init. Non-lean keeps the plain `-p -` form.
+        let lean = prepare_agent_invocation("claude", "p", true).unwrap();
+        assert!(lean.args.iter().any(|a| a == "--strict-mcp-config"));
+        assert!(lean.args.iter().any(|a| a == "--mcp-config"));
+        assert!(lean.args.iter().any(|a| a == "{\"mcpServers\":{}}"));
+        assert!(lean
+            .args
+            .windows(2)
+            .any(|w| w[0] == "--tools" && w[1].is_empty()));
+        assert!(lean.args.iter().any(|a| a == "-")); // prompt still on stdin
+
+        let plain = prepare_agent_invocation("claude", "p", false).unwrap();
+        assert_eq!(plain.args, vec!["-p", "-"]);
+        assert!(!plain.args.iter().any(|a| a == "--strict-mcp-config"));
+    }
+
+    #[test]
     fn prepare_agent_invocation_for_gemini_skips_workspace_trust() {
         // Regression (#280-adjacent): Gemini refuses to run in an untrusted
         // workspace ("not running in a trusted directory"), so the non-repo
         // job dir degraded summaries until --skip-trust was passed.
-        let invocation = prepare_agent_invocation("gemini", "sensitive prompt").unwrap();
+        let invocation = prepare_agent_invocation("gemini", "sensitive prompt", false).unwrap();
         assert_eq!(invocation.cmd, "gemini");
         assert_eq!(invocation.args, vec!["-p", "-", "--skip-trust"]);
         assert_eq!(
@@ -2866,7 +2951,8 @@ PARTICIPANTS:
     #[test]
     fn prepare_agent_invocation_for_opencode_uses_message_before_file_and_no_stdin() {
         with_temp_home(|home| {
-            let invocation = prepare_agent_invocation("opencode", "sensitive prompt").unwrap();
+            let invocation =
+                prepare_agent_invocation("opencode", "sensitive prompt", false).unwrap();
             assert_eq!(invocation.cmd, "opencode");
             assert_eq!(invocation.args[0], "run");
             assert_eq!(
@@ -2886,7 +2972,7 @@ PARTICIPANTS:
     #[test]
     fn prepare_agent_invocation_for_pi_uses_private_file_and_no_tools() {
         with_temp_home(|home| {
-            let invocation = prepare_agent_invocation("pi", "sensitive prompt").unwrap();
+            let invocation = prepare_agent_invocation("pi", "sensitive prompt", false).unwrap();
             assert_eq!(invocation.cmd, "pi");
             let arg_prefix = invocation.args[..7]
                 .iter()

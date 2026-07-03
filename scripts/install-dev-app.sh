@@ -6,7 +6,14 @@ cd "$ROOT_DIR"
 
 export CXXFLAGS="${CXXFLAGS:-"-I$(xcrun --show-sdk-path)/usr/include/c++/v1"}"
 export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-11.0}"
-MINUTES_BUILD_FEATURES="${MINUTES_BUILD_FEATURES:-parakeet,metal}"
+# engine-sherpa / vad-ort stay OPT-IN for app builds pending the #369 release
+# decision. Packaging is fixed for opt-in local builds: sherpa links statically
+# and the existing ort path does not leave dangling runtime dylib references.
+# Opt in explicitly:
+#   MINUTES_BUILD_FEATURES=parakeet,metal,vad-ort,engine-sherpa
+if [ -z "${MINUTES_BUILD_FEATURES+x}" ]; then
+    MINUTES_BUILD_FEATURES="parakeet,metal"
+fi
 
 # Match scripts/build.sh: route cargo through rustup so rust-toolchain.toml
 # is honored and we don't drift from CI's clippy/rustfmt versions. Uses
@@ -55,14 +62,19 @@ run_with_ort_retry() {
 }
 
 OPEN_AFTER_INSTALL=1
+INSTALL_AFTER_BUILD=1
 for arg in "$@"; do
   case "$arg" in
     --no-open)
       OPEN_AFTER_INSTALL=0
       ;;
+    --target-only)
+      OPEN_AFTER_INSTALL=0
+      INSTALL_AFTER_BUILD=0
+      ;;
     *)
       echo "Unknown option: $arg" >&2
-      echo "Usage: ./scripts/install-dev-app.sh [--no-open]" >&2
+      echo "Usage: ./scripts/install-dev-app.sh [--no-open] [--target-only]" >&2
       exit 1
       ;;
   esac
@@ -136,35 +148,50 @@ fi
 echo "=== Verifying bundle seal (strict) ==="
 codesign --verify --deep --strict "$BUILD_APP" && echo "  Seal OK"
 
-echo "=== Installing ${DEV_PRODUCT_NAME}.app to ${INSTALL_DIR} ==="
-mkdir -p "$INSTALL_DIR"
-rm -rf "$INSTALL_APP"
-cp -rf "$BUILD_APP" "$INSTALL_APP"
+if [[ "$INSTALL_AFTER_BUILD" == "1" ]]; then
+  echo "=== Installing ${DEV_PRODUCT_NAME}.app to ${INSTALL_DIR} ==="
+  mkdir -p "$INSTALL_DIR"
+  rm -rf "$INSTALL_APP"
+  cp -rf "$BUILD_APP" "$INSTALL_APP"
 
-echo "=== Running native hotkey diagnostic from installed dev app ==="
-set +e
-./scripts/diagnose-desktop-hotkey.sh "$INSTALL_APP"
-DIAG_EXIT=$?
-set -e
+  echo "=== Running native hotkey diagnostic from installed dev app ==="
+  set +e
+  ./scripts/diagnose-desktop-hotkey.sh "$INSTALL_APP"
+  DIAG_EXIT=$?
+  set -e
+else
+  DIAG_EXIT="skipped"
+fi
 
 echo ""
-echo "Installed app: $INSTALL_APP"
+if [[ "$INSTALL_AFTER_BUILD" == "1" ]]; then
+  echo "Installed app: $INSTALL_APP"
+else
+  echo "Built app: $BUILD_APP"
+fi
 echo "Bundle id: com.useminutes.desktop.dev"
 echo "Build features: $MINUTES_BUILD_FEATURES"
 echo "Signing mode: $SIGN_MODE"
 echo "Hotkey diagnostic exit code: $DIAG_EXIT"
 echo "  0 = CGEventTap started successfully"
 echo "  2 = Input Monitoring / macOS identity is still blocking the hotkey"
-echo ""
-echo "For TCC-sensitive testing, launch only this installed dev app."
-echo "Avoid the repo symlink (./Minutes.app), raw target bundles, or ad-hoc builds."
+if [[ "$INSTALL_AFTER_BUILD" == "1" ]]; then
+  echo ""
+  echo "For TCC-sensitive testing, launch only this installed dev app."
+  echo "Avoid the repo symlink (./Minutes.app), raw target bundles, or ad-hoc builds."
+fi
 if [[ "$SIGN_MODE" == "adhoc" ]]; then
   echo ""
   echo "Tip: export MINUTES_DEV_SIGNING_IDENTITY to a consistent local signing identity"
   echo "if you want more stable macOS permission behavior across rebuilds."
 fi
 
-if [[ "$OPEN_AFTER_INSTALL" == "1" ]]; then
+if [[ "$INSTALL_AFTER_BUILD" == "0" ]]; then
+  echo ""
+  echo "Target-only mode: launch $BUILD_APP directly for packaging checks."
+fi
+
+if [[ "$OPEN_AFTER_INSTALL" == "1" && "$INSTALL_AFTER_BUILD" == "1" ]]; then
   echo ""
   echo "=== Launching ${DEV_PRODUCT_NAME}.app ==="
   open -a "$INSTALL_APP"

@@ -1,4 +1,4 @@
-use crate::config::{Config, IdentityConfig};
+use crate::config::{Config, IdentityConfig, NameCorrectionMode};
 use crate::diarize;
 use crate::error::MinutesError;
 use crate::logging;
@@ -6,6 +6,7 @@ use crate::markdown::{
     self, ContentType, Frontmatter, OutputStatus, ProcessingWarning, WriteResult,
 };
 use crate::notes;
+use crate::person_identity::{is_plausible_person_name, strip_contamination};
 use crate::summarize;
 use chrono::{DateTime, Local};
 use std::collections::{BTreeMap, BTreeSet};
@@ -1608,7 +1609,9 @@ pub fn write_transcript_artifact(
         consent_notice: context.consent_notice.clone(),
         visibility: None,
         speaker_map: vec![],
+        name_corrections: Vec::new(),
         recording_health: context.recording_health.clone(),
+        speaker_mapping: None,
         processing_warnings: Vec::new(),
         template: context.template.as_ref().map(|t| t.slug().to_string()),
         filter_diagnosis: if status == Some(OutputStatus::NoSpeech) {
@@ -1871,14 +1874,61 @@ where
         transcript,
     );
     let attribution_ms = attribution_start.elapsed().as_millis() as u64;
+    // Count the speaker labels the summarizer actually saw (pre name-application),
+    // for the #392 collapse guard below.
+    let effective_speaker_labels =
+        count_non_unknown_labels(&attribution.debug.effective_transcript_speaker_labels);
     transcript = attribution.transcript;
     let speaker_map = attribution.speaker_map;
     let attendees = normalize_attendees_with_speaker_map(&attendees, &speaker_map);
-    let structured_actions =
+    let name_corrections = if config.transcription.name_correction != NameCorrectionMode::Off
+        && artifact.frontmatter.r#type == ContentType::Meeting
+    {
+        let name_pool = crate::name_correction::build_name_pool(
+            &attendees,
+            Some(&config.identity),
+            load_vocabulary_for_decode_hints().as_ref(),
+        );
+        // Confirmed participants gate the aggressive (name-position) tier:
+        // attendees plus High-confidence attributed speakers.
+        let mut participants = attendees.clone();
+        participants.extend(
+            speaker_map
+                .iter()
+                .filter(|a| a.confidence == crate::diarize::Confidence::High)
+                .map(|a| a.name.clone()),
+        );
+        let (corrected_transcript, corrections) =
+            crate::name_correction::correct_names_with_participants(
+                &transcript,
+                &name_pool,
+                &participants,
+            );
+        transcript = corrected_transcript;
+        corrections
+    } else {
+        Vec::new()
+    };
+    let mut structured_actions =
         normalize_action_items_with_speaker_map(structured_actions, &speaker_map);
-    let structured_intents = normalize_intents_with_speaker_map(structured_intents, &speaker_map);
+    let mut structured_intents =
+        normalize_intents_with_speaker_map(structured_intents, &speaker_map);
     let structured_decisions =
         normalize_decisions_with_speaker_map(structured_decisions, &speaker_map);
+
+    // #392: if diarization collapsed this multi-party meeting to <= 1 rendered
+    // speaker, withhold assignees rather than let the summarizer's guess invert
+    // who owes whom. Runs before entity extraction so the graph never sees a
+    // mis-attributed owner.
+    let collapse_warning = withhold_assignees_on_collapse(
+        &mut structured_actions,
+        &mut structured_intents,
+        artifact.frontmatter.r#type == ContentType::Meeting,
+        diarization_num_speakers,
+        effective_speaker_labels,
+        artifact.frontmatter.attendees.len(),
+        attendees.len(),
+    );
 
     let entities_started = std::time::Instant::now();
     let entities = build_entity_links(
@@ -1932,13 +1982,16 @@ where
     // engine != "none" (no all-noise gate at this site), so attempted-ness
     // collapses to the same condition.
     let summarization_attempted = config.summarization.engine != "none";
-    let summarization_warnings = detect_summarization_warnings(
+    let mut summarization_warnings = detect_summarization_warnings(
         summary.as_deref(),
         &config.summarization.engine,
         &config.summarization.agent_command,
         config.summarization.agent_timeout_secs,
         summarization_attempted,
     );
+    if let Some(warning) = collapse_warning {
+        summarization_warnings.push(warning);
+    }
     frontmatter.status = if !summarization_warnings.is_empty() {
         Some(OutputStatus::Degraded)
     } else if config.summarization.engine != "none" {
@@ -1954,6 +2007,7 @@ where
     frontmatter.decisions = structured_decisions;
     frontmatter.intents = structured_intents;
     frontmatter.speaker_map = speaker_map;
+    frontmatter.name_corrections = name_corrections;
     frontmatter.recording_health =
         merge_recording_health(recording_health, frontmatter.recording_health);
 
@@ -2438,14 +2492,59 @@ where
         transcript,
     );
     let attribution_ms = attribution_start.elapsed().as_millis() as u64;
-    let transcript = attribution.transcript;
+    // Speaker labels the summarizer saw (pre name-application), for the #392 guard.
+    let effective_speaker_labels =
+        count_non_unknown_labels(&attribution.debug.effective_transcript_speaker_labels);
+    let mut transcript = attribution.transcript;
     let speaker_map = attribution.speaker_map;
     let attendees = normalize_attendees_with_speaker_map(&attendees, &speaker_map);
-    let structured_actions =
+    let name_corrections = if config.transcription.name_correction != NameCorrectionMode::Off
+        && content_type == ContentType::Meeting
+    {
+        let name_pool = crate::name_correction::build_name_pool(
+            &attendees,
+            Some(&config.identity),
+            load_vocabulary_for_decode_hints().as_ref(),
+        );
+        // Confirmed participants gate the aggressive (name-position) tier:
+        // attendees plus High-confidence attributed speakers.
+        let mut participants = attendees.clone();
+        participants.extend(
+            speaker_map
+                .iter()
+                .filter(|a| a.confidence == crate::diarize::Confidence::High)
+                .map(|a| a.name.clone()),
+        );
+        let (corrected_transcript, corrections) =
+            crate::name_correction::correct_names_with_participants(
+                &transcript,
+                &name_pool,
+                &participants,
+            );
+        transcript = corrected_transcript;
+        corrections
+    } else {
+        Vec::new()
+    };
+    let mut structured_actions =
         normalize_action_items_with_speaker_map(structured_actions, &speaker_map);
-    let structured_intents = normalize_intents_with_speaker_map(structured_intents, &speaker_map);
+    let mut structured_intents =
+        normalize_intents_with_speaker_map(structured_intents, &speaker_map);
     let structured_decisions =
         normalize_decisions_with_speaker_map(structured_decisions, &speaker_map);
+
+    // #392: withhold assignees if diarization collapsed this multi-party meeting
+    // to <= 1 rendered speaker (trusted attendees = calendar attendees). Runs
+    // before entity extraction so a mis-attributed owner never reaches the graph.
+    let collapse_warning = withhold_assignees_on_collapse(
+        &mut structured_actions,
+        &mut structured_intents,
+        content_type == ContentType::Meeting,
+        diarization_num_speakers,
+        effective_speaker_labels,
+        calendar_attendees.len(),
+        attendees.len(),
+    );
 
     // Step 5: Write markdown (always)
     let duration = estimate_duration(audio_path);
@@ -2539,13 +2638,16 @@ where
     // no-speech recording would falsely look like a summarize failure.
     let summarization_attempted =
         forced_no_speech_diagnosis.is_none() && config.summarization.engine != "none";
-    let summarization_warnings = detect_summarization_warnings(
+    let mut summarization_warnings = detect_summarization_warnings(
         summary.as_deref(),
         &config.summarization.engine,
         &config.summarization.agent_command,
         config.summarization.agent_timeout_secs,
         summarization_attempted,
     );
+    if let Some(warning) = collapse_warning {
+        summarization_warnings.push(warning);
+    }
     let status = if !summarization_warnings.is_empty() && status == Some(OutputStatus::Complete) {
         Some(OutputStatus::Degraded)
     } else {
@@ -2580,7 +2682,9 @@ where
         consent_notice: None,
         visibility: None,
         speaker_map,
+        name_corrections,
         recording_health,
+        speaker_mapping: None,
         template: template.map(|t| t.slug().to_string()),
         filter_diagnosis: if status == Some(OutputStatus::NoSpeech) {
             // Prefer the all-noise-suppression diagnosis when it fired; it
@@ -3765,6 +3869,92 @@ fn normalize_intents_with_speaker_map(
         .collect()
 }
 
+/// Count the distinct real speaker labels (excluding `UNKNOWN`) from an already
+/// extracted label list. For #392 this must be fed the labels the SUMMARIZER saw
+/// (`attribution.debug.effective_transcript_speaker_labels`, captured before
+/// speaker-map name application), NOT the final written transcript: two distinct
+/// diarized labels that later map to one name still gave the summarizer two
+/// speakers to attribute, so that is not a collapse.
+fn count_non_unknown_labels(labels: &[String]) -> usize {
+    labels
+        .iter()
+        .filter(|label| label.as_str() != "UNKNOWN")
+        .count()
+}
+
+/// Guard against action-item / commitment assignee INVERSION when diarization
+/// collapses a multi-party meeting into a single rendered speaker (#392).
+///
+/// When the summarizer saw <= 1 real speaker label for a meeting that had
+/// multiple participants, it cannot reliably attribute commitments and
+/// empirically defaults ownership to the recorder, silently reversing who owes
+/// whom. In that state we withhold assignees (a wrong owner is worse than none):
+/// action-item assignees become the existing `unassigned` sentinel, and
+/// `ActionItem`/`Commitment` intent owners are cleared. Open questions and
+/// decisions are left alone. Returns a [`markdown::ProcessingWarning`] when
+/// anything was withheld so the frontmatter is honest (and status degrades).
+///
+/// Gate:
+/// - the file is a meeting,
+/// - diarization produced a result (`diarization_num_speakers >= 1`) — so this
+///   never fires for users who run with diarization disabled,
+/// - but the rendered transcript had `<= 1` effective speaker label, and
+/// - the meeting is expected to be multi-party: `trusted` (calendar/frontmatter)
+///   attendees `>= 2`, or merged/detected participants `>= 2` only when there is
+///   no trusted list (so the LLM that guessed ownership cannot also supply the
+///   multi-party proof).
+fn withhold_assignees_on_collapse(
+    action_items: &mut [markdown::ActionItem],
+    intents: &mut [markdown::Intent],
+    is_meeting: bool,
+    diarization_num_speakers: usize,
+    rendered_speaker_labels: usize,
+    trusted_attendee_count: usize,
+    merged_attendee_count: usize,
+) -> Option<markdown::ProcessingWarning> {
+    let multi_party =
+        trusted_attendee_count >= 2 || (trusted_attendee_count == 0 && merged_attendee_count >= 2);
+    let collapsed =
+        is_meeting && diarization_num_speakers >= 1 && rendered_speaker_labels <= 1 && multi_party;
+    if !collapsed {
+        return None;
+    }
+
+    let mut actions_withheld = 0usize;
+    for item in action_items.iter_mut() {
+        if item.assignee != "unassigned" {
+            item.assignee = "unassigned".to_string();
+            actions_withheld += 1;
+        }
+    }
+    let mut owners_withheld = 0usize;
+    for intent in intents.iter_mut() {
+        let ownable = matches!(
+            intent.kind,
+            markdown::IntentKind::ActionItem | markdown::IntentKind::Commitment
+        );
+        if ownable && intent.who.is_some() {
+            intent.who = None;
+            owners_withheld += 1;
+        }
+    }
+    if actions_withheld == 0 && owners_withheld == 0 {
+        return None;
+    }
+
+    Some(markdown::ProcessingWarning {
+        step: "attribution".to_string(),
+        reason: "diarization_collapsed".to_string(),
+        timeout_secs: None,
+        message: Some(format!(
+            "Diarization rendered {rendered_speaker_labels} speaker label(s) (raw {diarization_num_speakers}) \
+             for a meeting with {trusted_attendee_count} listed / {merged_attendee_count} detected participant(s). \
+             Attribution is unreliable, so {actions_withheld} action-item assignee(s) and {owners_withheld} \
+             action-item/commitment owner(s) were withheld (set to unassigned) rather than risk mis-attributing who owes whom."
+        )),
+    })
+}
+
 fn strip_conversational_prefixes(line: &str) -> String {
     let mut remaining = line.trim();
     let fillers = ["okay", "ok", "so", "well", "alright", "all right"];
@@ -4328,8 +4518,12 @@ fn add_person_entity(entities: &mut BTreeMap<String, (String, BTreeSet<String>)>
         return;
     }
 
-    let canonical = strip_email_domain(strip_name_disambiguation(&trimmed)).trim();
-    if canonical.is_empty() {
+    let name_part = strip_email_domain(strip_name_disambiguation(&trimmed)).trim();
+    // Strip role/title and diarization speaker-label contamination (to a fixpoint),
+    // then reject non-person tokens (groups/roles/generics) before creating the
+    // entity (#385).
+    let canonical = strip_contamination(name_part);
+    if canonical.is_empty() || !is_plausible_person_name(canonical) {
         return;
     }
 
@@ -4890,7 +5084,9 @@ mod tests {
             consent_notice: None,
             visibility: None,
             speaker_map: vec![],
+            name_corrections: Vec::new(),
             recording_health: None,
+            speaker_mapping: None,
             processing_warnings: Vec::new(),
             template: None,
             filter_diagnosis: None,
@@ -5136,6 +5332,137 @@ mod tests {
         assert_eq!(items[1].due, Some("March 21".into()));
 
         assert_eq!(items[2].assignee, "unassigned");
+    }
+
+    fn action(assignee: &str) -> markdown::ActionItem {
+        markdown::ActionItem {
+            assignee: assignee.into(),
+            task: "do a thing".into(),
+            due: None,
+            status: "open".into(),
+        }
+    }
+
+    fn intent(kind: markdown::IntentKind, who: Option<&str>) -> markdown::Intent {
+        markdown::Intent {
+            kind,
+            what: "something".into(),
+            who: who.map(|w| w.to_string()),
+            status: "open".into(),
+            by_date: None,
+        }
+    }
+
+    #[test]
+    fn count_non_unknown_labels_excludes_unknown() {
+        let labels = vec![
+            "SPEAKER_1".to_string(),
+            "Bobby".to_string(),
+            "UNKNOWN".to_string(),
+        ];
+        assert_eq!(count_non_unknown_labels(&labels), 2);
+        assert_eq!(count_non_unknown_labels(&["SPEAKER_1".to_string()]), 1);
+        assert_eq!(count_non_unknown_labels(&[]), 0);
+    }
+
+    #[test]
+    fn withhold_does_not_fire_when_two_labels_map_to_one_name() {
+        // Codex false-positive class: diarization separated two speakers (the
+        // summarizer saw SPEAKER_1 + SPEAKER_2), but both later map to one name.
+        // The guard is fed the pre-mapping effective-label count (2), so it must
+        // NOT fire even though the FINAL transcript would render one name.
+        let mut actions = vec![action("Matt")];
+        let mut intents = vec![intent(markdown::IntentKind::Commitment, Some("Matt"))];
+        let warning = withhold_assignees_on_collapse(&mut actions, &mut intents, true, 2, 2, 2, 2);
+        assert!(warning.is_none());
+        assert_eq!(actions[0].assignee, "Matt");
+    }
+
+    #[test]
+    fn withhold_fires_on_collapse_and_withholds_only_owned_intents() {
+        let mut actions = vec![action("Matt"), action("unassigned")];
+        let mut intents = vec![
+            intent(markdown::IntentKind::ActionItem, Some("Matt")),
+            intent(markdown::IntentKind::Commitment, Some("Matt")),
+            intent(markdown::IntentKind::OpenQuestion, Some("Matt")),
+            intent(markdown::IntentKind::Decision, Some("Matt")),
+        ];
+        // Meeting, diarization produced a result (2 raw), but rendered 1 label,
+        // and 2 trusted attendees -> collapse.
+        let warning = withhold_assignees_on_collapse(&mut actions, &mut intents, true, 2, 1, 2, 2);
+        assert!(warning.is_some(), "expected a collapse warning");
+        let warning = warning.unwrap();
+        assert_eq!(warning.reason, "diarization_collapsed");
+        assert_eq!(warning.step, "attribution");
+
+        assert_eq!(actions[0].assignee, "unassigned", "named assignee withheld");
+        assert_eq!(actions[1].assignee, "unassigned");
+        assert_eq!(intents[0].who, None, "action-item owner cleared");
+        assert_eq!(intents[1].who, None, "commitment owner cleared");
+        assert_eq!(
+            intents[2].who.as_deref(),
+            Some("Matt"),
+            "open-question owner is NOT in scope for #392"
+        );
+        assert_eq!(
+            intents[3].who.as_deref(),
+            Some("Matt"),
+            "decision owner is NOT in scope for #392"
+        );
+    }
+
+    #[test]
+    fn withhold_does_not_fire_when_diarization_separated_speakers() {
+        let mut actions = vec![action("Matt")];
+        let mut intents = vec![intent(markdown::IntentKind::Commitment, Some("Matt"))];
+        // 2 rendered labels = healthy attribution.
+        let warning = withhold_assignees_on_collapse(&mut actions, &mut intents, true, 2, 2, 2, 2);
+        assert!(warning.is_none());
+        assert_eq!(actions[0].assignee, "Matt");
+        assert_eq!(intents[0].who.as_deref(), Some("Matt"));
+    }
+
+    #[test]
+    fn withhold_does_not_fire_when_diarization_disabled() {
+        let mut actions = vec![action("Matt")];
+        let mut intents = vec![intent(markdown::IntentKind::Commitment, Some("Matt"))];
+        // diarization_num_speakers == 0 -> no diarization result -> do not fire.
+        let warning = withhold_assignees_on_collapse(&mut actions, &mut intents, true, 0, 0, 2, 2);
+        assert!(warning.is_none());
+        assert_eq!(actions[0].assignee, "Matt");
+    }
+
+    #[test]
+    fn withhold_does_not_fire_for_non_meeting_or_single_party() {
+        // Not a meeting (e.g. memo/dictation).
+        let mut a = vec![action("Matt")];
+        let mut i: Vec<markdown::Intent> = vec![];
+        assert!(withhold_assignees_on_collapse(&mut a, &mut i, false, 2, 1, 2, 2).is_none());
+        assert_eq!(a[0].assignee, "Matt");
+        // Single trusted attendee and single merged attendee -> not multi-party.
+        let mut a = vec![action("Matt")];
+        assert!(withhold_assignees_on_collapse(&mut a, &mut i, true, 2, 1, 1, 1).is_none());
+        assert_eq!(a[0].assignee, "Matt");
+    }
+
+    #[test]
+    fn withhold_uses_merged_attendees_only_when_no_trusted_list() {
+        // No calendar/trusted attendees, but the LLM detected 2 participants.
+        let mut actions = vec![action("Matt")];
+        let mut intents: Vec<markdown::Intent> = vec![];
+        let warning = withhold_assignees_on_collapse(&mut actions, &mut intents, true, 1, 1, 0, 2);
+        assert!(
+            warning.is_some(),
+            "merged fallback fires when trusted list is empty"
+        );
+        assert_eq!(actions[0].assignee, "unassigned");
+        // But a trusted list of 1 does NOT fall back to merged (avoids LLM self-proof).
+        let mut actions = vec![action("Matt")];
+        assert!(
+            withhold_assignees_on_collapse(&mut actions, &mut intents, true, 1, 1, 1, 5).is_none(),
+            "trusted list of 1 must not use merged fallback"
+        );
+        assert_eq!(actions[0].assignee, "Matt");
     }
 
     #[test]
@@ -5850,6 +6177,47 @@ mod tests {
     }
 
     #[test]
+    fn add_person_entity_strips_role_suffix_before_slug() {
+        // Issue #370: "Junlei, tech lead" must produce slug "junlei", not "junlei-tech-lead".
+        // The fix lives in pipeline.rs (extraction point) so the contaminated slug never
+        // reaches the frontmatter file on disk.
+        let entities = build_entity_links(
+            "meeting",
+            None,
+            &[
+                "Junlei, tech lead".into(),
+                "Junrei (core team)".into(),
+                "Sam - engineering lead".into(),
+            ],
+            &[],
+            &[],
+            &[],
+            &[],
+            None,
+        );
+
+        let slugs: Vec<&str> = entities.people.iter().map(|e| e.slug.as_str()).collect();
+        assert!(slugs.contains(&"junlei"), "bare name present: {:?}", slugs);
+        assert!(slugs.contains(&"junrei"), "bare name present: {:?}", slugs);
+        assert!(slugs.contains(&"sam"), "bare name present: {:?}", slugs);
+        assert!(
+            !slugs.contains(&"junlei-tech-lead"),
+            "role suffix must not appear in slug: {:?}",
+            slugs
+        );
+        assert!(
+            !slugs.contains(&"junrei-core-team"),
+            "role suffix must not appear in slug: {:?}",
+            slugs
+        );
+        assert!(
+            !slugs.contains(&"sam-engineering-lead"),
+            "role suffix must not appear in slug: {:?}",
+            slugs
+        );
+    }
+
+    #[test]
     fn build_entity_links_folds_user_identity_aliases_and_emails() {
         let identity = IdentityConfig {
             name: Some("Mat".into()),
@@ -6358,7 +6726,9 @@ mod tests {
                 confidence: diarize::Confidence::Medium,
                 source: diarize::AttributionSource::Llm,
             }],
+            name_corrections: Vec::new(),
             recording_health: None,
+            speaker_mapping: None,
             processing_warnings: Vec::new(),
             template: None,
             filter_diagnosis: None,

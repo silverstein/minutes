@@ -182,11 +182,12 @@ minutes list                                      # Recent recordings
 ```bash
 minutes people                                     # Who you talk to, how often, about what
 minutes people --rebuild                           # Rebuild the relationship index
+minutes people merge junrei junlei jun-rei          # Confirm variants are one person (canonical first)
 minutes commitments                                # All open + overdue commitments
 minutes commitments --person alex                   # What did I promise Alex?
 ```
 
-Tracks people, commitments, topics, and relationship health across every meeting. Detects when you're losing touch with someone. Suggests duplicate contacts ("Sarah Chen" ↔ "Sarah"). Powered by a SQLite index rebuilt from your markdown in <50ms.
+Tracks people, commitments, topics, and relationship health across every meeting. Detects when you're losing touch with someone. Suggests duplicate contacts ("Sarah Chen" ↔ "Sarah") and name-variant fragments a transcriber spelled several ways ("junrei" ↔ "junlei" ↔ "jun-rei"). `minutes people --rebuild` prints a ready-to-run `minutes people merge` command under each suggested cluster; confirming it records a durable alias so every variant collapses to the canonical person on future rebuilds. Powered by a SQLite index rebuilt from your markdown in <50ms.
 
 ### Cross-meeting intelligence
 ```bash
@@ -941,6 +942,8 @@ minutes setup --diarization
 minutes setup --sherpa        # downloads the int8 ONNX model (~670MB) + sets engine = "sherpa"
 # If you select sherpa without the feature/model, transcription auto-falls-back
 # to Whisper (the bundled default), so a recording never breaks. See docs/SHERPA-ENGINE.md.
+# macOS sherpa builds are self-contained (static). On Linux/Windows, run from the
+# repo (cargo run) rather than copying the binary out of target/ — details in the doc.
 
 # Alternative: use Parakeet engine (opt-in, local GPU via parakeet.cpp)
 # Requires (1) parakeet.cpp installed (https://github.com/Frikallo/parakeet.cpp)
@@ -994,6 +997,17 @@ minutes voices              # List profiles
 minutes voices --json       # JSON output
 minutes voices --delete     # Remove all profiles
 ```
+
+**Recover a failed mapping (Level 1).** If a meeting shipped with anonymous `SPEAKER_n` labels (the Level-1 call timed out, errored, or ran before attendees were known), re-run just the speaker mapping without reprocessing the audio:
+
+```bash
+minutes redo-speaker-mapping <meeting>                          # dry run: show the proposed map
+minutes redo-speaker-mapping <meeting> --apply                  # write speaker_map + a speaker_mapping health block
+minutes redo-speaker-mapping <meeting> --engine ollama --apply  # override the engine for this run
+minutes redo-speaker-mapping <meeting> --json                   # machine-readable output
+```
+
+`<meeting>` is a path or a search term. The command never downgrades an existing High-confidence attribution, and it records a `speaker_mapping:` health block in the frontmatter (status `ok` / `empty` / `skipped`, plus the model, speaker/attendee counts, and timing) so a meeting that shipped anonymous is both greppable and re-runnable.
 
 **Privacy**: Voice enrollment is self-only (no enrolling others). Level 3 confirmed profiles require explicit opt-in per person. Voice embeddings are stored locally in `~/.minutes/voices.db` with 0600 permissions. Nothing leaves your machine.
 

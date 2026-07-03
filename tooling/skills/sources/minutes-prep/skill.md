@@ -64,7 +64,33 @@ gog calendar list --today --json -a <account> 2>/dev/null
 osascript -e 'tell application "Calendar" to get {summary, start date} of (every event of every calendar whose start date >= (current date) and start date < ((current date) + 1 * days))'
 ```
 
-**4. None available** — skip to Phase 1 and ask manually.
+**4. Microsoft 365 / Outlook (`m365` CLI)** (if installed):
+
+First check if m365 is installed and whether it's logged in:
+```bash
+command -v m365 2>/dev/null && m365 status --output json 2>/dev/null
+```
+
+- **If not installed**: skip silently to the next source.
+- **If installed but not logged in** (`status` returns `"Logged out"`): ask the user via AskUserQuestion:
+  > "I found the Microsoft 365 CLI (`m365`) but you're not logged in. Want me to start the login flow so I can pull your Outlook calendar?"
+  - If **yes**: run `m365 login --authType browser` and wait. Once done, proceed to fetch events below.
+  - If **no**: skip to the next source silently.
+- **If installed and logged in**: fetch today's remaining events:
+```bash
+m365 outlook event list \
+  --userId "@meId" \
+  --startDateTime "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  --endDateTime "$(date -u -d '+1 day' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v+1d +%Y-%m-%dT%H:%M:%SZ)" \
+  --output json 2>/dev/null
+```
+Only use the result if the command exits with code 0 and returns a non-empty JSON array. Parse the response:
+- **Title**: `event.subject`
+- **Start time**: `event.start.dateTime` (UTC — convert to local time for display)
+- **Attendees**: `event.attendees[].emailAddress.name` (extract first names)
+- **Skip if**: `event.isAllDay === true`, `event.isCancelled === true`, `event.attendees` is empty, or `event.start.dateTime` converted to **local** time is not today (the `now`..`now+24h` UTC window over-fetches so it never misses a local-today event near the UTC date boundary; this trims the next-day-local spillover)
+
+**5. None available** — skip to Phase 1 and ask manually.
 
 **If upcoming meetings are found:**
 Present via AskUserQuestion: "I see you have these meetings coming up today:
@@ -214,6 +240,8 @@ node "${CLAUDE_PLUGIN_ROOT}/hooks/lib/minutes-learn-cli.mjs" set-alias "Case Win
 ```
 
 - **Calendar auto-detect is best-effort** — If no calendar source is available, silently fall back to asking manually. Never error or nag the user about calendar setup. The Google Calendar MCP (`gcal.mcp.claude.com/mcp`) is the recommended source for Claude users.
+- **m365 login is non-blocking** — Only prompt for `m365 login` if m365 is installed but the user is not yet authenticated. It's a one-time browser flow. If the user declines, fall through silently.
+- **m365 event window is timezone-safe via over-fetch + local filter** — the fetch window is `now`..`now+24h` in UTC, which always spans the rest of the user's local day regardless of offset (max UTC offset is under 14h). Times come back in UTC, so convert `start.dateTime` to local both for the local-today skip check and for display. Use `date -d` (Linux) or `date -jf` / `date -r` (macOS) for conversion, or show the raw UTC time with a `(UTC)` suffix if conversion is unavailable.
 - **Calendar attendee names may differ from meeting transcript names** — Calendar says "Alex Chen (sarah@company.com)" but transcripts say "Alex" or "SPEAKER_0". Match on first name.
 - **Skip all-day events and solo events** — Only show events with 2+ attendees as prep candidates. All-day events and events where the user is the only attendee aren't meetings.
 - **Push back on vague answers** — This is the most important pattern. Vague prep = useless prep. "Everyone" → "Name one person." "Catch up" → "What would you regret not discussing?"

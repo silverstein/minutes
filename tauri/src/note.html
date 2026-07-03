@@ -4,6 +4,8 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Add Note</title>
+  <script src="scripts/ui-zoom.js"></script>
+  <link rel="stylesheet" href="styles/ui-zoom-tokens.css">
   <style>
     @font-face {
       font-family: 'Instrument Serif';
@@ -122,7 +124,7 @@
     }
 
     .label {
-      font-size: 11px;
+      font-size: var(--text-meta);
       font-weight: 500;
       letter-spacing: 0.14em;
       text-transform: uppercase;
@@ -131,14 +133,14 @@
 
     .title {
       font-family: 'Instrument Serif', ui-serif, Georgia, serif;
-      font-size: 26px;
+      font-size: var(--text-2xl);
       line-height: 0.95;
       letter-spacing: -0.03em;
       color: var(--text);
     }
 
     .subtitle {
-      font-size: 12px;
+      font-size: var(--text-xs);
       line-height: 1.45;
       color: var(--text-secondary);
       max-width: 320px;
@@ -161,7 +163,7 @@
       justify-content: space-between;
       gap: 10px;
       margin-bottom: 8px;
-      font-size: 10px;
+      font-size: var(--text-2xs);
       text-transform: uppercase;
       letter-spacing: 0.12em;
       color: var(--text-secondary);
@@ -185,7 +187,7 @@
       background: transparent;
       color: var(--text);
       font-family: inherit;
-      font-size: 14px;
+      font-size: var(--text-sm);
       line-height: 1.55;
       resize: none;
       outline: none;
@@ -209,7 +211,7 @@
     }
 
     .hint {
-      font-size: 11px;
+      font-size: var(--text-meta);
       color: var(--text-secondary);
       line-height: 1.4;
     }
@@ -221,7 +223,7 @@
       background: var(--bg-hover);
       color: var(--text-secondary);
       font-family: 'Geist Mono', 'SF Mono', monospace;
-      font-size: 10px;
+      font-size: var(--text-2xs);
       border: 1px solid var(--border-mid);
     }
 
@@ -230,7 +232,7 @@
       border-radius: 8px;
       border: none;
       font-family: inherit;
-      font-size: 13px;
+      font-size: var(--text-body);
       font-weight: 500;
       cursor: pointer;
       transition: all 0.12s ease;
@@ -260,7 +262,7 @@
       transform: translateX(-50%) translateY(40px);
       background: var(--accent);
       color: var(--bg);
-      font-size: 12px;
+      font-size: var(--text-xs);
       font-weight: 600;
       padding: 6px 14px;
       border-radius: 20px;

@@ -134,6 +134,37 @@ pub struct ProcessingWarning {
     pub message: Option<String>,
 }
 
+/// Health of the Level-1 speaker-naming (`speaker_mapping`) step, surfaced in
+/// frontmatter so a meeting that shipped anonymous is greppable and re-runnable
+/// (#382/#384). Counts are recorded separately from confidence so "a map exists"
+/// is never confused with "every speaker was named".
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct SpeakerMappingHealth {
+    /// `ok` (some labels named), `empty` (ran, no confident matches), `skipped`
+    /// (no anonymous labels or no attendees to map against). Mirrors the
+    /// `speaker_mapping` JSONL `outcome` vocabulary.
+    pub status: String,
+    /// Engine/model hint used (e.g. `agent:claude`).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub model: String,
+    /// Distinct diarization speaker labels present (proxy for the raw diarization
+    /// speaker count, which needs the audio and so isn't recoverable on a redo).
+    pub diarized_speakers: usize,
+    /// How many of those labels received a name.
+    pub mapped_speakers: usize,
+    /// Size of the attendee pool offered to the mapper.
+    pub attendees: usize,
+    /// Wall-clock of the mapping call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    /// Machine-readable reason when `status` is not `ok`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// RFC3339 timestamp of the most recent mapping run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_run: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct RecordingHealth {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -284,8 +315,15 @@ pub struct Frontmatter {
     pub visibility: Option<Visibility>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub speaker_map: Vec<crate::diarize::SpeakerAttribution>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub name_corrections: Vec<crate::name_correction::NameCorrection>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recording_health: Option<RecordingHealth>,
+    /// Health of the Level-1 speaker-naming step. Lets a meeting be greppable for
+    /// "naming failed / incomplete" instead of the failure living only in the JSON
+    /// log (#384). `None` for meetings processed before this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speaker_mapping: Option<SpeakerMappingHealth>,
     /// Slug of the template applied to this recording, if any.
     /// Recorded so a Phase 2 reprocessor knows which template produced the
     /// summary. `None` means no template was passed (legacy / default flow).
@@ -999,6 +1037,81 @@ fn resolve_collision(dir: &Path, filename: &str) -> PathBuf {
     dir.join(format!("{}-{}.md", stem, ts))
 }
 
+/// Surgically update only a meeting's frontmatter, preserving the body
+/// (summary / notes / transcript) byte-for-byte.
+///
+/// Unlike [`rewrite`], which regenerates the whole file from passed-in sections,
+/// this parses the existing frontmatter, applies `update`, re-serializes only the
+/// YAML block, and splices it back in front of the original body. Fail-closed:
+/// refuses files without parseable frontmatter, validates the result parses
+/// before swapping, and writes atomically via a tmp sibling while preserving the
+/// original file mode (#384).
+///
+/// This is a generic frontmatter updater: it does NOT enforce `type: meeting`.
+/// Callers that should only touch meetings must check `frontmatter.r#type`
+/// themselves (see `cmd_redo_speaker_mapping`).
+pub fn update_frontmatter<F>(path: &Path, update: F) -> Result<(), MarkdownError>
+where
+    F: FnOnce(&mut Frontmatter),
+{
+    let original = fs::read_to_string(path)?;
+    // Take the body slice straight from `split_frontmatter` so we share its exact
+    // boundary semantics. `body` is a suffix slice of `original`, so splicing it
+    // back verbatim preserves every body byte even for oddly-fenced inputs (no
+    // second, subtly-different offset computation that could drop bytes; #384).
+    let (fm_str, body) = split_frontmatter(&original);
+    if fm_str.is_empty() {
+        return Err(MarkdownError::RenameRefused(
+            "not a meeting file (no frontmatter)".into(),
+        ));
+    }
+    let mut frontmatter: Frontmatter = serde_yaml::from_str(fm_str)
+        .map_err(|e| MarkdownError::RenameRefused(format!("frontmatter does not parse: {e}")))?;
+
+    update(&mut frontmatter);
+
+    let serialized = serde_yaml::to_string(&frontmatter)
+        .map_err(|e| MarkdownError::SerializationError(e.to_string()))?;
+    let new_fm_text = serialized.trim_end_matches('\n');
+
+    let new_content = format!("---\n{}\n---\n{}", new_fm_text, body);
+
+    // Atomic write through a tmp sibling, preserving the original file mode.
+    let tmp_path = path.with_extension("md.fmupdate.tmp");
+    if let Err(e) = fs::write(&tmp_path, &new_content) {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(MarkdownError::Io(e));
+    }
+    let original_mode = preserved_file_mode(path);
+    if let Err(e) = set_permissions(&tmp_path, original_mode) {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(e);
+    }
+
+    // Parse-after-write validation: confirm the result still parses before swapping.
+    match fs::read_to_string(&tmp_path) {
+        Ok(written) => {
+            let (wfm, _) = split_frontmatter(&written);
+            if wfm.is_empty() || serde_yaml::from_str::<Frontmatter>(wfm).is_err() {
+                let _ = fs::remove_file(&tmp_path);
+                return Err(MarkdownError::SerializationError(
+                    "post-write frontmatter validation failed".into(),
+                ));
+            }
+        }
+        Err(e) => {
+            let _ = fs::remove_file(&tmp_path);
+            return Err(MarkdownError::Io(e));
+        }
+    }
+
+    if let Err(e) = fs::rename(&tmp_path, path) {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(MarkdownError::Io(e));
+    }
+    Ok(())
+}
+
 /// Set file permissions to the given mode (Unix only; no-op on Windows).
 fn set_permissions(path: &Path, _mode: u32) -> Result<(), MarkdownError> {
     #[cfg(unix)]
@@ -1100,7 +1213,9 @@ mod tests {
             consent_notice: None,
             visibility: None,
             speaker_map: vec![],
+            name_corrections: Vec::new(),
             recording_health: None,
+            speaker_mapping: None,
             processing_warnings: Vec::new(),
             template: None,
             filter_diagnosis: None,
@@ -1655,6 +1770,100 @@ mod tests {
         // Hand-edited section must survive.
         assert!(content.contains("## Custom Section From User"));
         assert!(content.contains("Hand-edited stuff"));
+    }
+
+    #[test]
+    fn update_frontmatter_preserves_body_byte_for_byte() {
+        let dir = TempDir::new().unwrap();
+        // Body with unicode, emoji, trailing spaces, and a markdown rule that
+        // contains "---" to make sure we never confuse it with the fence.
+        let body = "## Summary\n\nWent well café 🎤\n\n---\n\n## Custom Notes\n\n- trailing spaces   \n\n## Transcript\n\n[SPEAKER_00 00:00] Hi\n[SPEAKER_01 00:05] Hello\n";
+        let path = write_meeting(
+            &dir,
+            "2026-04-07-redo.md",
+            "title: \"Redo Test\"\ntype: meeting\ndate: 2026-04-07T10:00:00-07:00\nduration: 0\n",
+            body,
+        );
+        let original = std::fs::read_to_string(&path).unwrap();
+        let (_, orig_body) = split_frontmatter(&original);
+        let orig_body = orig_body.to_string();
+
+        update_frontmatter(&path, |fm| {
+            fm.speaker_mapping = Some(SpeakerMappingHealth {
+                status: "ok".into(),
+                model: "agent:claude".into(),
+                diarized_speakers: 2,
+                mapped_speakers: 2,
+                attendees: 2,
+                duration_ms: Some(1234),
+                reason: None,
+                last_run: Some("2026-06-30T12:00:00-07:00".into()),
+            });
+        })
+        .unwrap();
+
+        let updated = std::fs::read_to_string(&path).unwrap();
+        let (updated_fm, updated_body) = split_frontmatter(&updated);
+
+        // The body must be preserved exactly.
+        assert_eq!(orig_body, updated_body);
+        // The new field must have landed and round-trip through serde.
+        assert!(updated_fm.contains("speaker_mapping:"));
+        let parsed: Frontmatter = serde_yaml::from_str(updated_fm).unwrap();
+        let health = parsed.speaker_mapping.expect("speaker_mapping written");
+        assert_eq!(health.status, "ok");
+        assert_eq!(health.mapped_speakers, 2);
+        assert_eq!(health.duration_ms, Some(1234));
+    }
+
+    #[test]
+    fn update_frontmatter_preserves_body_with_glued_closing_fence() {
+        // Regression (#384): a closing fence glued to body text with no newline
+        // anywhere after it. `split_frontmatter` keeps the trailing bytes; the
+        // earlier bespoke offset math in `update_frontmatter` dropped them. Now
+        // both share `split_frontmatter`'s body, so nothing is lost.
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("glued.md");
+        let original = "---\ntitle: \"Glued\"\ntype: meeting\ndate: 2026-04-07T10:00:00-07:00\nduration: 0\n---BODYBYTES";
+        std::fs::write(&path, original).unwrap();
+
+        let (_, orig_body) = split_frontmatter(original);
+        assert_eq!(orig_body, "BODYBYTES"); // sanity: the bytes we must not lose
+
+        update_frontmatter(&path, |fm| {
+            fm.speaker_mapping = Some(SpeakerMappingHealth {
+                status: "skipped".into(),
+                model: "none".into(),
+                diarized_speakers: 0,
+                mapped_speakers: 0,
+                attendees: 0,
+                duration_ms: None,
+                reason: Some("test".into()),
+                last_run: None,
+            });
+        })
+        .unwrap();
+
+        let updated = std::fs::read_to_string(&path).unwrap();
+        let (_, updated_body) = split_frontmatter(&updated);
+        assert_eq!(updated_body, "BODYBYTES");
+    }
+
+    #[test]
+    fn update_frontmatter_refuses_non_meeting_file() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("not-a-meeting.md");
+        let original = "# Just markdown\n\nNo frontmatter here.\n";
+        std::fs::write(&path, original).unwrap();
+
+        let err = update_frontmatter(&path, |fm| {
+            fm.title = "Hijacked".into();
+        })
+        .unwrap_err();
+        assert!(matches!(err, MarkdownError::RenameRefused(_)));
+
+        // File must be untouched.
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
     }
 
     #[test]

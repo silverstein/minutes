@@ -275,6 +275,9 @@ pub struct TranscriptionConfig {
     /// Default 30s matches the design note in `streaming_whisper.rs`. Raise
     /// for long-form dictation; lower if you still see CPU pressure.
     pub partial_max_secs: u32,
+    /// Post-pass person-name correction mode. Off by default.
+    #[serde(default)]
+    pub name_correction: NameCorrectionMode,
 }
 
 pub const VALID_PARAKEET_MODELS: &[&str] = &["tdt-ctc-110m", "tdt-600m"];
@@ -315,6 +318,12 @@ pub struct SummarizationConfig {
     /// Issue #243: when this budget is exceeded the pipeline emits a
     /// `processing_warnings` entry and promotes status to `degraded`.
     pub agent_timeout_secs: u64,
+    /// Timeout (seconds) for the Level-1 speaker-mapping LLM call specifically.
+    /// Speaker mapping is a tiny JSON classification task, not a full agent run,
+    /// so it gets a much tighter bound than `agent_timeout_secs`. Issue #382: the
+    /// agent path could hang the full (previously hardcoded 120s) budget on MCP
+    /// init and ship meetings anonymous. Clamped to [5, 120] at the call site.
+    pub speaker_mapping_timeout_secs: u64,
     pub chunk_max_tokens: usize,
     pub ollama_url: String,
     pub ollama_model: String,
@@ -415,6 +424,34 @@ pub enum ConsentMode {
     #[default]
     Remind,
     Require,
+}
+
+/// Post-pass name correction behavior.
+///
+/// `Conservative` corrects transcript name-tokens toward the expected-name pool
+/// (attendees, identity, vocabulary) only on high-confidence, unique matches,
+/// and records the raw token in frontmatter provenance (never a silent rewrite).
+/// Off by default.
+///
+/// The aggressive (different-first-letter / short-token) tier is gated to
+/// confirmed meeting participants (attendees + High-confidence attributed
+/// speakers, i.e. speaker-turn context), so it never rewrites toward a name
+/// that is merely in the vocabulary/graph but not in this meeting. The
+/// conservative tier (accent restoration / same-first-letter) applies to any
+/// pool name.
+///
+/// Known residual: when a name spoken in the meeting is NOT in the pool but is
+/// within ~2 edits of a confirmed participant and sits in a name slot (e.g. a
+/// guest "Brett" near attendee "Geert"), it can still be corrected. This is
+/// inherent to fuzzy correction; it is mitigated by being off by default, the
+/// participant gate, requiring a unique match, and preserving the raw token in
+/// provenance. Default-on promotion should wait on a real-audio evaluation.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum NameCorrectionMode {
+    #[default]
+    Off,
+    Conservative,
 }
 
 /// Retention policy for raw audio artifacts.
@@ -586,6 +623,14 @@ pub struct DictationConfig {
     pub accumulate: bool,
     pub daily_note_log: bool,
     pub cleanup_engine: String,
+    /// Remove conservative filler words ("um", "uh") during cleanup. Default true.
+    pub cleanup_remove_fillers: bool,
+    /// Convert spoken punctuation commands ("period", "new line") during cleanup.
+    /// Off by default: these phrases collide with ordinary words.
+    pub cleanup_spoken_punctuation: bool,
+    /// Apply the vocabulary store (Term/Acronym entries) as casing/replacement fixes
+    /// during cleanup. Off by default to avoid surprising substitutions.
+    pub cleanup_apply_vocabulary: bool,
     pub auto_paste: bool,
     pub auto_paste_restore: bool,
     pub silence_timeout_ms: u64,
@@ -618,7 +663,10 @@ impl Default for DictationConfig {
             destination: "clipboard".into(),
             accumulate: true,
             daily_note_log: true,
-            cleanup_engine: String::new(),
+            cleanup_engine: "rules".into(),
+            cleanup_remove_fillers: true,
+            cleanup_spoken_punctuation: false,
+            cleanup_apply_vocabulary: false,
             auto_paste: false,
             auto_paste_restore: true,
             silence_timeout_ms: 2000,
@@ -974,6 +1022,7 @@ impl Default for TranscriptionConfig {
             parakeet_fp16_blacklist_reset: false,
             parakeet_vocab: "tdt-600m.tokenizer.vocab".into(),
             partial_max_secs: 30,
+            name_correction: NameCorrectionMode::Off,
         }
     }
 }
@@ -996,6 +1045,7 @@ impl Default for SummarizationConfig {
             engine: "none".into(),
             agent_command: "claude".into(),
             agent_timeout_secs: 300,
+            speaker_mapping_timeout_secs: 30,
             chunk_max_tokens: 4000,
             ollama_url: "http://localhost:11434".into(),
             ollama_model: "llama3.2".into(),
@@ -1063,7 +1113,10 @@ impl Config {
     /// preserve behavior even before the migration has rewritten the file.
     pub fn effective_live_transcript_backend(&self) -> &str {
         let backend = self.live_transcript.backend.trim();
-        if backend.is_empty() || backend == LIVE_TRANSCRIPT_BACKEND_INHERIT {
+        // Case-insensitive: engine/backend matching is case-insensitive
+        // everywhere else, so a hand-edited "Inherit" must not be mistaken for
+        // an (unsupported) explicit backend and downgraded (#395).
+        if backend.is_empty() || backend.eq_ignore_ascii_case(LIVE_TRANSCRIPT_BACKEND_INHERIT) {
             if self
                 .transcription
                 .engine

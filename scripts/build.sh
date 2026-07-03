@@ -10,7 +10,14 @@ fi
 
 export CXXFLAGS="-I$(xcrun --show-sdk-path)/usr/include/c++/v1"
 export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-11.0}"
-MINUTES_BUILD_FEATURES="${MINUTES_BUILD_FEATURES:-parakeet,metal}"
+# engine-sherpa / vad-ort stay OPT-IN for app builds pending the #369 release
+# decision. Packaging is fixed for opt-in local builds: sherpa links statically
+# and the existing ort path does not leave dangling runtime dylib references.
+# Opt in explicitly:
+#   MINUTES_BUILD_FEATURES=parakeet,metal,vad-ort,engine-sherpa
+if [ -z "${MINUTES_BUILD_FEATURES+x}" ]; then
+    MINUTES_BUILD_FEATURES="parakeet,metal"
+fi
 
 # Ensure cargo runs through rustup so rust-toolchain.toml is honored.
 # Without this, a system Homebrew rustc (e.g. /opt/homebrew/bin/cargo)

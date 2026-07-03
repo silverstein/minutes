@@ -32,6 +32,7 @@ So `minutes record --device "MacBook Pro Microphone"` always wins over `[recordi
 | `parakeet_sidecar_enabled` | auto | Warm sidecar: auto-enables when parakeet is the engine and `example-server` resolves. `true`/`"on"` forces on, `"off"` forces off. A legacy bool `false` is treated as auto (pre-0.18.8 saves wrote it into every config) (#295) |
 | `parakeet_fp16` | `true` | GPU fp16 inference for lower memory use |
 | `parakeet_boost_limit` / `parakeet_boost_score` | `0` / `2.0` | Knowledge-graph phrase boosting; 0 = off |
+| `name_correction` | `"off"` | Post-pass name correction against attendees and vocabulary. Values: `"off"` or `"conservative"`; off by default. |
 
 ### `[diarization]` — speaker attribution
 
@@ -54,6 +55,7 @@ So `minutes record --device "MacBook Pro Microphone"` always wins over `[recordi
 | `openai_compatible_api_key_env` | unset | Optional environment variable name containing the API key. Leave blank for local servers. The desktop app can also save a gateway key in macOS Keychain and use that runtime secret for non-local endpoints without rewriting shared config. |
 | `mistral_model` | `"mistral-large-latest"` | Mistral API model |
 | `chunk_max_tokens` | `4000` | Max tokens per chunk when splitting long transcripts |
+| `speaker_mapping_timeout_secs` | `30` | Tight timeout for the Level-1 speaker-naming LLM call. On the agent path it also runs with no MCP servers and no tools so it can't hang on init. Clamped to [5, 120]. |
 
 For Pi coding-agent support, use `engine = "agent"` with `agent_command = "pi"`.
 Minutes invokes Pi in non-interactive, no-tools mode. This is distinct from
@@ -216,7 +218,10 @@ retention, nothing is deleted automatically unless `auto_cleanup` is enabled.
 | `silence_timeout_ms` | `2000` | Silence threshold that ends a dictation session |
 | `max_utterance_secs` | `120` | Force-finalize an utterance at this length |
 | `model` | `"base"` | Whisper model for dictation |
-| `cleanup_engine` | unset | Optional LLM to clean up filler words |
+| `cleanup_engine` | `"rules"` | Text cleanup applied to each utterance: `"rules"` (deterministic on-device: capitalization, fillers, vocab) or `"none"`/`"off"` for raw ASR. `"ollama"` is reserved and currently falls back to rules |
+| `cleanup_remove_fillers` | `true` | Remove conservative filler words ("um", "uh") |
+| `cleanup_spoken_punctuation` | `false` | Convert spoken commands ("period", "new line") to punctuation. Opt-in: collides with those words used as content |
+| `cleanup_apply_vocabulary` | `false` | Apply your vocabulary store (Term/Acronym entries) as casing/replacement fixes (e.g. "gpt" → "GPT") |
 
 Dictation clipboard behavior is platform-specific:
 

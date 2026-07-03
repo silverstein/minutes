@@ -115,6 +115,22 @@ pub(crate) const CORPUS: &[NameCase] = &[
         raw: "the feature is ready to demo",
         truth: "the feature is ready to demo",
     },
+    // A common word / pronoun in a name slot (after a cue, before a name-verb)
+    // that is a short edit from a short pool name. Must never be rewritten.
+    NameCase {
+        label: "neg-pronoun-in-name-position",
+        pool: &["Wei", "Aki"],
+        raw: "we will demo today",
+        truth: "we will demo today",
+    },
+    // The [SPEAKER_N m:ss] prefix: SPEAKER is a short edit from a pool name and
+    // is followed by a name-verb, but the bracket guard must keep it intact.
+    NameCase {
+        label: "neg-speaker-prefix",
+        pool: &["Spencer"],
+        raw: "[SPEAKER_1 0:05] will present",
+        truth: "[SPEAKER_1 0:05] will present",
+    },
 ];
 
 /// Score one candidate transcript against ground truth, position-aligned by
@@ -171,13 +187,13 @@ pub(crate) fn run_harness(correct: impl Fn(&str, &[&str]) -> String) -> HarnessR
 mod tests {
     use super::*;
 
-    /// The corpus has exactly 6 name targets (raw != truth) and 4 negatives.
+    /// The corpus has exactly 6 name targets (raw != truth) and 6 negatives.
     #[test]
-    fn corpus_shape_is_six_targets_four_negatives() {
+    fn corpus_shape_is_six_targets_six_negatives() {
         let targets = CORPUS.iter().filter(|c| c.raw != c.truth).count();
         let negatives = CORPUS.iter().filter(|c| c.raw == c.truth).count();
         assert_eq!(targets, 6, "expected 6 correction-target cases");
-        assert_eq!(negatives, 4, "expected 4 negative (no-change) cases");
+        assert_eq!(negatives, 6, "expected 6 negative (no-change) cases");
     }
 
     /// Baseline: the identity correction (no change) recovers nothing and, by
@@ -214,6 +230,31 @@ mod tests {
                 case.label
             );
         }
+    }
+
+    /// The real post-pass correction (minutes-25x3.4) measured against the
+    /// corpus. The gating invariant is zero false corrections; `recovered` is
+    /// reported and asserted at the level v1 actually achieves.
+    #[test]
+    fn post_pass_correction_recovers_without_false_corrections() {
+        let report = run_harness(|raw, pool| {
+            let pool_vec: Vec<String> = pool.iter().map(|s| (*s).to_string()).collect();
+            crate::name_correction::correct_names(raw, &pool_vec).0
+        });
+        eprintln!("NAME-CORRECTION HARNESS REPORT: {report:?}");
+        assert_eq!(
+            report.false_corrections, 0,
+            "false corrections must be zero: {report:?}"
+        );
+        assert_eq!(report.structural_mismatches, 0, "{report:?}");
+        // With name-position context, all 6 targets are recovered: the
+        // same-first-letter / accent cases plus the harder different-first-letter
+        // (Geert<-Bert, Xiulan<-shulan) and short-token (Thanh<-tan) cases, which
+        // the surrounding syntax (address cues / name-verbs) confirms as names.
+        assert_eq!(
+            report.recovered, 6,
+            "expected to recover all 6 corpus targets: {report:?}"
+        );
     }
 
     /// A correction that blindly title-cases and swaps any pool name in would

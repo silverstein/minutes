@@ -382,6 +382,69 @@ fn cmd_apply_recall_window_layout(
     Ok(())
 }
 
+/// Unscaled (zoom=16) logical size each secondary window is built at. Scaling
+/// always derives from this constant, never from the window's current size, so
+/// repeated opens can't compound the dimensions. Keep in sync with each
+/// window's `.inner_size(..)` in its builder.
+fn window_base_size(label: &str) -> Option<(f64, f64)> {
+    match label {
+        "palette" => Some((640.0, 420.0)),
+        "note" => Some((420.0, 260.0)),
+        "dictation-overlay" => Some((320.0, 88.0)),
+        "meeting-prompt" => Some((380.0, 240.0)),
+        _ => None,
+    }
+}
+
+#[tauri::command]
+fn cmd_scale_window(app: tauri::AppHandle, label: String, zoom: f64) -> Result<(), String> {
+    const BASE: f64 = 16.0;
+    let Some(win) = app.get_webview_window(&label) else {
+        return Ok(());
+    };
+    let Some((base_w, base_h)) = window_base_size(&label) else {
+        return Ok(());
+    };
+    let ratio = zoom / BASE;
+    let width = (base_w * ratio).round();
+    let height = (base_h * ratio).round();
+
+    // setFrame from Rust works on non-resizable windows; no resizable toggle is
+    // needed
+    win.set_size(LogicalSize::new(width, height))
+        .map_err(|e| e.to_string())?;
+
+    // Clamp position so bottom-right anchored windows (e.g. dictation overlay)
+    // don't extend off-screen after scaling up.
+    let monitor = win
+        .current_monitor()
+        .ok()
+        .flatten()
+        .or_else(|| win.primary_monitor().ok().flatten())
+        .or_else(|| {
+            app.get_webview_window("main")
+                .and_then(|m| m.current_monitor().ok().flatten())
+        });
+    if let (Some(monitor), Ok(pos)) = (monitor, win.outer_position()) {
+        let scale = monitor.scale_factor();
+        let work_area = monitor.work_area();
+        let work_x = work_area.position.x as f64 / scale;
+        let work_y = work_area.position.y as f64 / scale;
+        let work_right = work_x + work_area.size.width as f64 / scale;
+        let work_bottom = work_y + work_area.size.height as f64 / scale;
+        let logical_x = pos.x as f64 / scale;
+        let logical_y = pos.y as f64 / scale;
+        let clamped_x = logical_x.min(work_right - width).max(work_x);
+        let clamped_y = logical_y.min(work_bottom - height).max(work_y);
+        if (clamped_x - logical_x).abs() > 0.5 || (clamped_y - logical_y).abs() > 0.5 {
+            win.set_position(LogicalPosition::new(clamped_x, clamped_y))
+                .ok();
+        }
+    }
+
+    Ok(())
+}
+
 fn show_note_window(app: &tauri::AppHandle) {
     if let Some(win) = app.get_webview_window("note") {
         win.show().ok();
@@ -2504,6 +2567,7 @@ fn main() {
             commands::cmd_mark_activation_nudge_shown,
             cmd_show_main_window,
             cmd_apply_recall_window_layout,
+            cmd_scale_window,
             commands::cmd_upcoming_meetings,
             commands::cmd_recall_chat_send,
             commands::cmd_spawn_terminal,

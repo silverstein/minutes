@@ -1,4 +1,5 @@
 use crate::config::Config;
+use crate::dictation_cleanup::{clean_dictation_text, CleanupEngine, CleanupOptions};
 use crate::error::{DictationError, MinutesError, TranscribeError};
 use crate::markdown::{ContentType, Frontmatter, OutputStatus};
 use crate::pid;
@@ -852,10 +853,21 @@ fn finish_utterance(text: &str, duration_secs: f64, config: &Config) -> Option<D
 }
 
 fn prepare_result(text: &str, duration_secs: f64, config: &Config) -> Option<DictationResult> {
-    let text = text.trim().to_string();
-    if text.is_empty() {
+    let raw_text = text.trim().to_string();
+    if raw_text.is_empty() {
         return None;
     }
+
+    // Polish the raw ASR output (capitalization, fillers, optional vocab/punctuation)
+    // before it reaches the clipboard/file/daily-note. `raw_text` keeps the original.
+    // If cleanup empties the text (e.g. an all-filler utterance), fall back to the raw
+    // text rather than silently dropping content the user actually spoke.
+    let cleaned = clean_dictation_text(&raw_text, &build_cleanup_options(config));
+    let text = if cleaned.is_empty() {
+        raw_text.clone()
+    } else {
+        cleaned
+    };
 
     tracing::info!(
         words = text.split_whitespace().count(),
@@ -864,13 +876,64 @@ fn prepare_result(text: &str, duration_secs: f64, config: &Config) -> Option<Dic
     );
 
     Some(DictationResult {
-        raw_text: text.clone(),
+        raw_text,
         text,
         duration_secs,
         destination: config.dictation.destination.clone(),
         file_path: None,
         daily_note_appended: false,
     })
+}
+
+/// Build cleanup options from config, loading vocabulary replacements when enabled.
+fn build_cleanup_options(config: &Config) -> CleanupOptions {
+    let d = &config.dictation;
+    let engine = CleanupEngine::parse(&d.cleanup_engine);
+    let replacements = if d.cleanup_apply_vocabulary && engine != CleanupEngine::None {
+        load_vocab_replacements()
+    } else {
+        Vec::new()
+    };
+    CleanupOptions {
+        engine,
+        remove_fillers: d.cleanup_remove_fillers,
+        spoken_punctuation: d.cleanup_spoken_punctuation,
+        replacements,
+    }
+    .with_sorted_replacements()
+}
+
+/// Load vocabulary-derived `(surface, canonical)` replacements fresh from the store.
+///
+/// Read on each utterance finalize (only when vocabulary cleanup is enabled, which is
+/// off by default) so edits to the vocabulary store are picked up without restarting.
+/// Restricted to `Term`/`Acronym` entries so dictation casing fixes (e.g. "gpt" ->
+/// "GPT") apply, while person/org/project names (meant for transcription biasing) are
+/// not substituted into prose. Empty if the store is missing or unreadable.
+fn load_vocab_replacements() -> Vec<(String, String)> {
+    let Ok(store) = crate::vocabulary::load() else {
+        return Vec::new();
+    };
+    let mut pairs: Vec<(String, String)> = Vec::new();
+    for entry in &store.entries {
+        if !matches!(
+            entry.kind,
+            crate::vocabulary::VocabularyKind::Term | crate::vocabulary::VocabularyKind::Acronym
+        ) {
+            continue;
+        }
+        let canonical = entry.canonical.trim().to_string();
+        if canonical.is_empty() {
+            continue;
+        }
+        for surface in entry.surface_forms() {
+            let surface = surface.trim();
+            if !surface.is_empty() {
+                pairs.push((surface.to_string(), canonical.clone()));
+            }
+        }
+    }
+    pairs
 }
 
 fn write_result_outputs(mut result: DictationResult, config: &Config) -> Option<DictationResult> {
@@ -1138,7 +1201,9 @@ fn write_dictation_file(text: &str, duration_secs: f64, config: &Config) -> Opti
         consent_notice: None,
         visibility: None,
         speaker_map: vec![],
+        name_corrections: Vec::new(),
         recording_health: None,
+        speaker_mapping: None,
         template: None,
         filter_diagnosis: None,
     };

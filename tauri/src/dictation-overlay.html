@@ -324,6 +324,35 @@
       color: var(--green);
       flex-shrink: 0;
     }
+
+    @media (prefers-reduced-motion: reduce) {
+      *,
+      *::before,
+      *::after {
+        animation-duration: 0.001ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.001ms !important;
+        scroll-behavior: auto !important;
+      }
+
+      .pill,
+      .pill.dismissing,
+      .dot.blink,
+      .spinner,
+      .waveform,
+      .waveform .bar,
+      .waveform.processing .bar,
+      .label,
+      .timer,
+      .text-row,
+      .silence-bar,
+      .soft-swap {
+        animation: none !important;
+        transition: none !important;
+        transform: none !important;
+        filter: none !important;
+      }
+    }
   </style>
 </head>
 <body>
@@ -378,6 +407,8 @@
     let silenceStartTime = null;
     let silentSince = null;
     let insertionMessage = '';
+    let earlyInsertionFallback = false;
+    let dismissTimer = null;
 
     Object.assign(cues.start, { volume: 0.18 });
     Object.assign(cues.stop, { volume: 0.16 });
@@ -492,9 +523,37 @@
       waveform.classList.toggle('processing', processing);
     }
 
+    function isTerminalState(state) {
+      return state === 'typed'
+        || state === 'pasted'
+        || state === 'copied'
+        || state === 'blocked'
+        || state === 'error'
+        || state === 'cancelled'
+        || state === 'yielded';
+    }
+
+    function cancelDismissTimer() {
+      if (dismissTimer) {
+        clearTimeout(dismissTimer);
+        dismissTimer = null;
+      }
+    }
+
+    function scheduleDismiss(ms) {
+      cancelDismissTimer();
+      dismissTimer = setTimeout(() => {
+        dismissTimer = null;
+        dismiss();
+      }, ms);
+    }
+
     // Listen for state changes from Tauri backend
     listen('dictation:state', (e) => {
       const state = e.payload;
+      if (!isTerminalState(state)) {
+        cancelDismissTimer();
+      }
 
       if (state !== lastState) {
         if ((state === 'listening' || state === 'accumulating') && !sessionStarted) {
@@ -535,7 +594,7 @@
 
         case 'listening':
           setIndicator('dot-blink');
-          label.textContent = 'Listening\u2026';
+          label.textContent = earlyInsertionFallback && insertionMessage ? insertionMessage : 'Listening\u2026';
           waveform.style.display = 'flex';
           timer.style.display = '';
           showExpanded(false);
@@ -546,7 +605,7 @@
 
         case 'accumulating':
           setIndicator('dot-solid');
-          label.textContent = 'Dictating';
+          label.textContent = earlyInsertionFallback && insertionMessage ? insertionMessage : 'Dictating';
           waveform.style.display = 'flex';
           timer.style.display = '';
           // Stay compact during dictation — text appears only on success
@@ -577,13 +636,20 @@
           break;
 
         case 'success':
-        case 'copied':
           setIndicator('success');
-          label.textContent = state === 'copied' ? 'Copied' : 'Done';
+          label.textContent = 'Captured';
           waveform.style.display = 'none';
           timer.style.display = 'none';
           showExpanded(true);
-          setTimeout(() => dismiss(), 400);
+          break;
+
+        case 'copied':
+          setIndicator('success');
+          label.textContent = 'Copied';
+          waveform.style.display = 'none';
+          timer.style.display = 'none';
+          showExpanded(true);
+          scheduleDismiss(400);
           break;
 
         case 'typed':
@@ -592,7 +658,7 @@
           waveform.style.display = 'none';
           timer.style.display = 'none';
           showExpanded(true);
-          setTimeout(() => dismiss(), 400);
+          scheduleDismiss(400);
           break;
 
         case 'pasted':
@@ -601,7 +667,7 @@
           waveform.style.display = 'none';
           timer.style.display = 'none';
           showExpanded(true);
-          setTimeout(() => dismiss(), 400);
+          scheduleDismiss(400);
           break;
 
         case 'blocked':
@@ -611,7 +677,7 @@
           waveform.style.display = 'none';
           timer.style.display = 'none';
           showExpanded(false);
-          setTimeout(() => dismiss(), 2500);
+          scheduleDismiss(2500);
           break;
 
         case 'error':
@@ -621,7 +687,7 @@
           waveform.style.display = 'none';
           timer.style.display = 'none';
           showExpanded(false);
-          setTimeout(() => dismiss(), 4000);
+          scheduleDismiss(4000);
           break;
 
         case 'cancelled':
@@ -667,7 +733,9 @@
         silentSince = null;
         if (lastState === 'listening' || lastState === 'accumulating') {
           pill.classList.remove('error');
-          label.textContent = lastState === 'accumulating' ? 'Dictating' : 'Listening\u2026';
+          label.textContent = earlyInsertionFallback && insertionMessage
+            ? insertionMessage
+            : (lastState === 'accumulating' ? 'Dictating' : 'Listening\u2026');
         }
       }
       bars.forEach((bar, i) => {
@@ -679,6 +747,10 @@
 
     listen('dictation:insertion', (e) => {
       insertionMessage = e.payload?.message || '';
+      earlyInsertionFallback = Boolean(e.payload?.earlyFallback);
+      if (earlyInsertionFallback && (lastState === 'listening' || lastState === 'accumulating')) {
+        label.textContent = insertionMessage;
+      }
     });
 
     // Listen for silence countdown (emitted by backend as ms remaining)
@@ -700,6 +772,7 @@
     });
 
     function dismiss() {
+      cancelDismissTimer();
       pill.classList.add('dismissing');
       setTimeout(() => {
         window.__TAURI__.core.invoke('cmd_dismiss_dictation_overlay')
@@ -709,7 +782,7 @@
 
     // Click to dismiss early (during success state)
     pill.addEventListener('click', () => {
-      if (lastState === 'success' || lastState === 'error') {
+      if (isTerminalState(lastState)) {
         dismiss();
       }
     });

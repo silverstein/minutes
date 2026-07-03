@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use tauri::{Emitter, Manager};
 
 // ── Types ────────────────────────────────────────────────────
@@ -95,8 +95,10 @@ pub fn classify_shortcut(keycode: i64) -> ShortcutBackend {
 /// Unified three-mode state machine for shortcut-triggered actions.
 ///
 /// Modes:
-/// - Hold-to-talk: press past HOLD_THRESHOLD_MS starts action, release stops it.
-/// - Double-tap-lock: quick tap (<HOLD_THRESHOLD_MS) toggles action on/off.
+/// - Hold-to-talk: keydown starts capture immediately, release at/after
+///   HOLD_THRESHOLD_MS stops and finalizes.
+/// - Tap-to-lock: keydown starts capture immediately, release before
+///   HOLD_THRESHOLD_MS keeps the session capturing until the next tap.
 /// - Quick-tap-discard: captures shorter than MIN_CAPTURE_DURATION_MS are discarded.
 #[derive(Debug, Default)]
 pub struct ShortcutStateMachine {
@@ -104,7 +106,6 @@ pub struct ShortcutStateMachine {
     pub key_down_started_at: Option<Instant>,
     pub active_capture: Option<CaptureStyle>,
     pub capture_started_at: Option<Instant>,
-    pub hold_generation: u64,
 }
 
 /// Actions the state machine tells the caller to take.
@@ -138,27 +139,20 @@ impl ShortcutStateMachine {
     ///
     /// For Standard backend (global-shortcut plugin), this is called on ShortcutState::Pressed.
     /// For Native backend (CGEventTap), this is called on HotkeyEvent::Press.
-    pub fn handle_press(&mut self) -> StateMachineAction {
+    pub fn handle_press(&mut self, is_session_active: bool) -> StateMachineAction {
         if self.key_down {
             return StateMachineAction::None; // Key repeat, ignore
         }
         self.key_down = true;
         self.key_down_started_at = Some(Instant::now());
-        self.hold_generation = self.hold_generation.wrapping_add(1);
 
-        // The hold-to-talk check happens after a delay (see schedule_hold_check).
-        // We return None here; the hold timer will call start_hold_if_still_down().
-        StateMachineAction::None
-    }
-
-    /// Called after HOLD_THRESHOLD_MS to check if the key is still held.
-    /// If so, returns StartHold. Otherwise returns None.
-    pub fn start_hold_if_still_down(&self, generation: u64) -> StateMachineAction {
-        if self.key_down && self.hold_generation == generation && self.active_capture.is_none() {
-            StateMachineAction::StartHold
-        } else {
-            StateMachineAction::None
+        if is_session_active || self.active_capture.is_some() {
+            return StateMachineAction::None;
         }
+
+        self.active_capture = Some(CaptureStyle::Hold);
+        self.capture_started_at = Some(Instant::now());
+        StateMachineAction::StartHold
     }
 
     /// Handle a key release event. Returns the action to take.
@@ -173,12 +167,23 @@ impl ShortcutStateMachine {
             })
             .unwrap_or(false);
 
-        // If we're in a hold capture, stop it on release.
+        // A quick release latches the already-started hold capture into locked
+        // mode. A release at/after the threshold is a normal hold-to-talk stop.
         if matches!(self.active_capture, Some(CaptureStyle::Hold)) {
+            if was_short_tap {
+                self.active_capture = Some(CaptureStyle::Locked);
+                return StateMachineAction::None;
+            }
             let discard = self.should_discard_capture();
             self.active_capture = None;
             self.capture_started_at = None;
             return StateMachineAction::Stop { discard };
+        }
+
+        if matches!(self.active_capture, Some(CaptureStyle::Locked)) && is_session_active {
+            self.active_capture = None;
+            self.capture_started_at = None;
+            return StateMachineAction::Stop { discard: false };
         }
 
         // Not a short tap = we were waiting for hold but never started. Ignore.
@@ -204,11 +209,6 @@ impl ShortcutStateMachine {
                 Instant::now().duration_since(started).as_millis() < MIN_CAPTURE_DURATION_MS as u128
             })
             .unwrap_or(false)
-    }
-
-    /// Get the current hold generation for scheduling a hold check.
-    pub fn hold_generation(&self) -> u64 {
-        self.hold_generation
     }
 }
 
@@ -447,18 +447,20 @@ impl ShortcutManager {
             .map(|(&slot, _)| slot)
     }
 
-    /// Handle a press event for a slot. Returns the slot + generation for the
-    /// hold-check timer. The caller must schedule the hold check AFTER dropping
-    /// the lock.
-    pub fn handle_press(&mut self, slot: ShortcutSlot) -> Option<(ShortcutSlot, u64)> {
-        let active = self.slots.get_mut(&slot)?;
+    /// Handle a press event for a slot. Returns the action to execute AFTER the
+    /// caller drops the lock.
+    pub fn handle_press(
+        &mut self,
+        slot: ShortcutSlot,
+        is_session_active: bool,
+    ) -> (ShortcutSlot, StateMachineAction) {
+        let active = match self.slots.get_mut(&slot) {
+            Some(active) => active,
+            None => return (slot, StateMachineAction::None),
+        };
 
-        let _action = active.state_machine.handle_press();
-        let generation = active.state_machine.hold_generation();
-
-        // Return slot+generation so the caller can schedule a hold check
-        // after dropping the lock.
-        Some((slot, generation))
+        let action = active.state_machine.handle_press(is_session_active);
+        (slot, action)
     }
 
     /// Handle a release event for a slot. Returns the action to execute
@@ -475,15 +477,6 @@ impl ShortcutManager {
 
         let action = active.state_machine.handle_release(is_session_active);
         (slot, action)
-    }
-
-    /// Check if a hold should start (called from the hold-check timer thread
-    /// after re-acquiring the lock).
-    pub fn check_hold_start(&self, slot: ShortcutSlot, generation: u64) -> StateMachineAction {
-        match self.slots.get(&slot) {
-            Some(active) => active.state_machine.start_hold_if_still_down(generation),
-            None => StateMachineAction::None,
-        }
     }
 
     /// Update native monitor lifecycle status.
@@ -670,13 +663,6 @@ pub fn is_slot_session_active_fast(app: &tauri::AppHandle, slot: ShortcutSlot) -
 pub fn execute_action(app: &tauri::AppHandle, slot: ShortcutSlot, action: StateMachineAction) {
     match action {
         StateMachineAction::StartHold => {
-            // Mark session BEFORE starting to close the TOCTOU gap:
-            // a fast key release between start and mark would miss the active_capture.
-            if let Some(mgr_state) = app.try_state::<Arc<Mutex<ShortcutManager>>>() {
-                if let Ok(mut mgr) = mgr_state.lock() {
-                    mgr.mark_session_started(slot, CaptureStyle::Hold);
-                }
-            }
             if let Err(e) = start_slot_session(app, slot, CaptureStyle::Hold) {
                 // Revert the mark on failure
                 if let Some(mgr_state) = app.try_state::<Arc<Mutex<ShortcutManager>>>() {
@@ -711,34 +697,6 @@ pub fn execute_action(app: &tauri::AppHandle, slot: ShortcutSlot, action: StateM
         }
         StateMachineAction::None => {}
     }
-}
-
-/// Schedule a hold-check timer. Called AFTER the lock is dropped.
-pub fn schedule_hold_check(app: &tauri::AppHandle, slot: ShortcutSlot, generation: u64) {
-    let app_clone = app.clone();
-    std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(HOLD_THRESHOLD_MS));
-        let mgr_state: tauri::State<Arc<Mutex<ShortcutManager>>> = match app_clone.try_state() {
-            Some(state) => state,
-            None => return,
-        };
-        let action = {
-            let mgr = match mgr_state.lock() {
-                Ok(mgr) => mgr,
-                Err(e) => {
-                    eprintln!("[shortcut_manager] mutex poisoned in hold check: {}", e);
-                    return;
-                }
-            };
-            if is_slot_session_active_fast(&app_clone, slot) {
-                return;
-            }
-            mgr.check_hold_start(slot, generation)
-        }; // lock dropped
-        if matches!(action, StateMachineAction::StartHold) {
-            execute_action(&app_clone, slot, StateMachineAction::StartHold);
-        }
-    });
 }
 
 /// Start a session for a slot.
@@ -852,7 +810,7 @@ fn handle_native_event_callback(
             if slot == ShortcutSlot::Dictation {
                 crate::commands::capture_pending_dictation_target(app);
             }
-            let hold_info = {
+            let action = {
                 let mut mgr = match mgr_state.lock() {
                     Ok(mgr) => mgr,
                     Err(e) => {
@@ -860,10 +818,15 @@ fn handle_native_event_callback(
                         return;
                     }
                 };
-                mgr.handle_press(slot)
+                let session_active = is_slot_session_active_fast(app, slot);
+                let (_slot, action) = mgr.handle_press(slot, session_active);
+                action
             }; // lock dropped
-            if let Some((slot, generation)) = hold_info {
-                schedule_hold_check(app, slot, generation);
+            if !matches!(action, StateMachineAction::None) {
+                let app_clone = app.clone();
+                std::thread::spawn(move || {
+                    execute_action(&app_clone, slot, action);
+                });
             }
         }
         minutes_core::hotkey_macos::HotkeyEvent::Release => {
@@ -942,6 +905,7 @@ fn handle_native_status_callback(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     #[test]
     fn classify_caps_lock_as_native() {
@@ -977,21 +941,13 @@ mod tests {
     fn state_machine_hold_to_talk() {
         let mut sm = ShortcutStateMachine::default();
 
-        // Press
-        let action = sm.handle_press();
-        assert!(matches!(action, StateMachineAction::None));
-        assert!(sm.key_down);
-
-        let gen = sm.hold_generation();
-
-        // After threshold, still holding
-        let action = sm.start_hold_if_still_down(gen);
+        let action = sm.handle_press(false);
         assert!(matches!(action, StateMachineAction::StartHold));
-
-        // Mark session started
-        sm.mark_session_started(CaptureStyle::Hold);
+        assert!(sm.key_down);
+        assert!(matches!(sm.active_capture, Some(CaptureStyle::Hold)));
 
         // Release stops the hold
+        sm.key_down_started_at = Some(Instant::now() - Duration::from_millis(300));
         let action = sm.handle_release(true);
         assert!(matches!(action, StateMachineAction::Stop { .. }));
     }
@@ -1000,48 +956,54 @@ mod tests {
     fn state_machine_tap_to_lock() {
         let mut sm = ShortcutStateMachine::default();
 
-        // Quick press
-        sm.handle_press();
+        let action = sm.handle_press(false);
+        assert!(matches!(action, StateMachineAction::StartHold));
 
         // Quick release (before threshold) with no active session
         sm.key_down_started_at = Some(Instant::now()); // ensure it's "just now"
         let action = sm.handle_release(false);
-        assert!(matches!(action, StateMachineAction::StartLocked));
+        assert!(matches!(action, StateMachineAction::None));
+        assert!(matches!(sm.active_capture, Some(CaptureStyle::Locked)));
     }
 
     #[test]
     fn state_machine_discriminates_tap_under_threshold_from_hold() {
         let mut sm = ShortcutStateMachine::default();
-        sm.handle_press();
+        let action = sm.handle_press(false);
+        assert!(matches!(action, StateMachineAction::StartHold));
         sm.key_down_started_at = Some(Instant::now() - Duration::from_millis(299));
 
         let action = sm.handle_release(false);
 
-        assert!(matches!(action, StateMachineAction::StartLocked));
+        assert!(matches!(action, StateMachineAction::None));
+        assert!(matches!(sm.active_capture, Some(CaptureStyle::Locked)));
     }
 
     #[test]
-    fn state_machine_release_after_threshold_without_hold_start_is_ignored() {
+    fn state_machine_release_after_threshold_stops_hold() {
         let mut sm = ShortcutStateMachine::default();
-        sm.handle_press();
+        let action = sm.handle_press(false);
+        assert!(matches!(action, StateMachineAction::StartHold));
         sm.key_down_started_at = Some(Instant::now() - Duration::from_millis(301));
 
         let action = sm.handle_release(false);
 
-        assert!(matches!(action, StateMachineAction::None));
+        assert!(matches!(action, StateMachineAction::Stop { .. }));
     }
 
     #[test]
     fn state_machine_tap_to_stop_locked() {
         let mut sm = ShortcutStateMachine::default();
 
-        // First tap to start (mocked as if session is now active)
-        sm.handle_press();
+        // First tap starts capture immediately, then latches it.
+        sm.handle_press(false);
         sm.key_down_started_at = Some(Instant::now());
-        let _ = sm.handle_release(false); // Would return StartLocked
+        let action = sm.handle_release(false);
+        assert!(matches!(action, StateMachineAction::None));
+        assert!(matches!(sm.active_capture, Some(CaptureStyle::Locked)));
 
         // Session is now active. Second tap to stop.
-        sm.handle_press();
+        sm.handle_press(true);
         sm.key_down_started_at = Some(Instant::now());
         let action = sm.handle_release(true); // session active
         assert!(matches!(
@@ -1053,11 +1015,11 @@ mod tests {
     #[test]
     fn state_machine_ignores_key_repeat() {
         let mut sm = ShortcutStateMachine::default();
-        sm.handle_press();
+        sm.handle_press(false);
         assert!(sm.key_down);
 
         // Second press while key is down = ignored
-        let action = sm.handle_press();
+        let action = sm.handle_press(false);
         assert!(matches!(action, StateMachineAction::None));
     }
 
@@ -1131,20 +1093,5 @@ mod tests {
         config.dictation.shortcut = String::new();
         let (shortcut, _, _) = persisted_shortcut_for_slot(&config, ShortcutSlot::Dictation);
         assert_eq!(shortcut, default_shortcut_for_slot(ShortcutSlot::Dictation));
-    }
-
-    #[test]
-    fn stale_hold_generation_ignored() {
-        let mut sm = ShortcutStateMachine::default();
-        sm.handle_press();
-        let gen = sm.hold_generation();
-
-        // Simulate: key was released and pressed again (new generation)
-        sm.key_down = false;
-        sm.handle_press();
-
-        // Old generation check should return None
-        let action = sm.start_hold_if_still_down(gen);
-        assert!(matches!(action, StateMachineAction::None));
     }
 }

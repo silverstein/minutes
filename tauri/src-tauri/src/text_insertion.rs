@@ -7,6 +7,7 @@ pub struct TextInsertionRequest {
     pub mode: TextInsertionMode,
     pub restore_clipboard: bool,
     pub clipboard_snapshot: Option<String>,
+    pub expected_target: Option<ActiveTargetContext>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -154,6 +155,22 @@ pub fn restore_target_focus(context: &ActiveTargetContext) -> Result<(), String>
     }
 }
 
+pub fn can_insert_into_apps() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        minutes_core::hotkey_macos::is_accessibility_trusted()
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        true
+    }
+}
+
+pub fn insertion_permission_fallback_message() -> &'static str {
+    "needs Accessibility to insert; text will stay on the clipboard"
+}
+
 fn copy_only(text: &str, target_context: Option<ActiveTargetContext>) -> TextInsertionResult {
     match write_clipboard(text) {
         Ok(()) => TextInsertionResult {
@@ -181,7 +198,17 @@ fn best_effort_verified(
     target_context: Option<ActiveTargetContext>,
 ) -> TextInsertionResult {
     if !minutes_core::hotkey_macos::is_accessibility_trusted() {
-        return copy_after_block(request, target_context, "needs Accessibility to insert");
+        return copy_after_block(
+            request,
+            target_context,
+            insertion_permission_fallback_message(),
+        );
+    }
+
+    if let Err(message) =
+        verify_paste_target(request.expected_target.as_ref(), target_context.as_ref())
+    {
+        return copy_after_block(request, target_context, &message);
     }
 
     let before_value = focused_ax_value().ok();
@@ -334,6 +361,7 @@ fn restore_clipboard_if_requested(restore: bool, snapshot: Option<&str>) -> bool
     write_clipboard(snapshot).is_ok()
 }
 
+#[cfg(test)]
 fn clipboard_paste_restore_with(
     text: &str,
     restore: bool,
@@ -352,6 +380,15 @@ fn clipboard_paste_restore_with(
         }
     }
     Ok(false)
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ClipboardSnapshot {
+    change_count: i64,
+    text: Option<String>,
+    has_plain_text: bool,
+    types: Vec<String>,
 }
 
 fn write_clipboard(text: &str) -> Result<(), String> {
@@ -403,14 +440,121 @@ fn paste_via_clipboard_restoring(
     restore: bool,
     snapshot: Option<&str>,
 ) -> Result<bool, String> {
-    clipboard_paste_restore_with(
-        text,
-        restore,
-        snapshot,
-        write_clipboard,
-        simulate_macos_paste,
-        || std::thread::sleep(Duration::from_millis(150)),
-    )
+    let snapshot_before_write = if restore {
+        match macos_clipboard_snapshot() {
+            Ok(snapshot) => Some(snapshot),
+            Err(error) => {
+                tracing::warn!(error = %error, "could not snapshot clipboard before dictation paste");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    let _ = snapshot;
+    write_clipboard(text)?;
+    let after_write_change_count = macos_clipboard_change_count().ok();
+    simulate_macos_paste()?;
+
+    let Some(snapshot) = snapshot_before_write else {
+        return Ok(false);
+    };
+    restore_macos_clipboard_after_paste(snapshot, after_write_change_count)
+}
+
+#[cfg(target_os = "macos")]
+fn verify_paste_target(
+    expected: Option<&ActiveTargetContext>,
+    actual: Option<&ActiveTargetContext>,
+) -> Result<(), String> {
+    let Some(expected_bundle_id) = expected
+        .and_then(|context| context.bundle_id.as_deref())
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(());
+    };
+
+    let actual_bundle_id = actual
+        .and_then(|context| context.bundle_id.as_deref())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "app changed, text is on the clipboard".to_string())?;
+
+    if actual_bundle_id == expected_bundle_id {
+        Ok(())
+    } else {
+        Err("app changed, text is on the clipboard".into())
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn restore_macos_clipboard_after_paste(
+    snapshot: ClipboardSnapshot,
+    after_write_change_count: Option<i64>,
+) -> Result<bool, String> {
+    if !snapshot.has_plain_text {
+        tracing::info!(
+            change_count = snapshot.change_count,
+            types = ?snapshot.types,
+            "skipping dictation clipboard restore because original clipboard was non-text"
+        );
+        return Ok(false);
+    }
+
+    let Some(text) = snapshot.text else {
+        tracing::info!(
+            change_count = snapshot.change_count,
+            types = ?snapshot.types,
+            "skipping dictation clipboard restore because original text was unavailable"
+        );
+        return Ok(false);
+    };
+
+    let Some(after_write_change_count) = after_write_change_count else {
+        tracing::warn!(
+            "skipping dictation clipboard restore because changeCount after write was unavailable"
+        );
+        return Ok(false);
+    };
+
+    wait_for_clipboard_restore_window(after_write_change_count);
+    let current_change_count = macos_clipboard_change_count()?;
+    if current_change_count != after_write_change_count {
+        tracing::info!(
+            after_write_change_count,
+            current_change_count,
+            "skipping dictation clipboard restore because another app changed the clipboard"
+        );
+        return Ok(false);
+    }
+
+    write_clipboard(&text)?;
+    Ok(true)
+}
+
+#[cfg(target_os = "macos")]
+fn wait_for_clipboard_restore_window(after_write_change_count: i64) {
+    const MAX_WAIT: Duration = Duration::from_millis(500);
+    const STEP: Duration = Duration::from_millis(25);
+    let started = std::time::Instant::now();
+    while started.elapsed() < MAX_WAIT {
+        std::thread::sleep(STEP);
+        match macos_clipboard_change_count() {
+            Ok(current) if current != after_write_change_count => break,
+            Ok(_) => {}
+            Err(_) => break,
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_clipboard_change_count() -> Result<i64, String> {
+    Ok(macos_pasteboard::snapshot()?.change_count)
+}
+
+#[cfg(target_os = "macos")]
+fn macos_clipboard_snapshot() -> Result<ClipboardSnapshot, String> {
+    macos_pasteboard::snapshot()
 }
 
 #[cfg(target_os = "macos")]
@@ -735,6 +879,194 @@ fn focused_ax_value() -> Result<String, String> {
 }
 
 #[cfg(target_os = "macos")]
+mod macos_pasteboard {
+    use super::ClipboardSnapshot;
+    use std::ffi::{c_char, c_void, CStr, CString};
+
+    type Id = *mut c_void;
+    type Sel = *mut c_void;
+    type Class = *mut c_void;
+    type NSInteger = isize;
+    type NSUInteger = usize;
+
+    unsafe extern "C" {
+        fn objc_getClass(name: *const c_char) -> Class;
+        fn sel_registerName(name: *const c_char) -> Sel;
+        fn objc_msgSend();
+    }
+
+    #[link(name = "Foundation", kind = "framework")]
+    unsafe extern "C" {}
+
+    const NS_UTF8_STRING_ENCODING: NSUInteger = 4;
+
+    pub fn snapshot() -> Result<ClipboardSnapshot, String> {
+        unsafe {
+            let pasteboard = general_pasteboard()?;
+            let change_count = msg_send_id_isize(pasteboard, sel("changeCount")?) as i64;
+            let types = read_types(pasteboard)?;
+            let has_plain_text = types.iter().any(|ty| {
+                ty == "public.utf8-plain-text" || ty == "NSStringPboardType" || ty == "public.text"
+            });
+            let text = if has_plain_text {
+                read_string_for_type(pasteboard, "public.utf8-plain-text")?
+                    .or(read_string_for_type(pasteboard, "NSStringPboardType")?)
+                    .or(read_string_for_type(pasteboard, "public.text")?)
+            } else {
+                None
+            };
+            Ok(ClipboardSnapshot {
+                change_count,
+                text,
+                has_plain_text,
+                types,
+            })
+        }
+    }
+
+    unsafe fn general_pasteboard() -> Result<Id, String> {
+        let class = class("NSPasteboard")?;
+        let pasteboard = msg_send_class_id(class, sel("generalPasteboard")?);
+        if pasteboard.is_null() {
+            Err("NSPasteboard generalPasteboard returned nil".into())
+        } else {
+            Ok(pasteboard)
+        }
+    }
+
+    unsafe fn read_types(pasteboard: Id) -> Result<Vec<String>, String> {
+        let array = msg_send_id_id(pasteboard, sel("types")?);
+        if array.is_null() {
+            return Ok(Vec::new());
+        }
+        let count = msg_send_id_usize(array, sel("count")?);
+        let object_at_index = sel("objectAtIndex:")?;
+        let mut out = Vec::new();
+        for index in 0..count {
+            let value = msg_send_id_usize_id(array, object_at_index, index);
+            if let Some(s) = nsstring_to_string(value) {
+                out.push(s);
+            }
+        }
+        Ok(out)
+    }
+
+    unsafe fn read_string_for_type(pasteboard: Id, ty: &str) -> Result<Option<String>, String> {
+        let ns_type = nsstring(ty)?;
+        let value = msg_send_id_id_id(pasteboard, sel("stringForType:")?, ns_type);
+        Ok(nsstring_to_string(value))
+    }
+
+    unsafe fn nsstring(value: &str) -> Result<Id, String> {
+        let class = class("NSString")?;
+        let alloc = msg_send_class_id(class, sel("alloc")?);
+        let c_string = CString::new(value)
+            .map_err(|_| "NSString value contained an interior NUL byte".to_string())?;
+        let ns = msg_send_id_ptr_usize_id(
+            alloc,
+            sel("initWithBytes:length:encoding:")?,
+            c_string.as_ptr().cast(),
+            value.len(),
+            NS_UTF8_STRING_ENCODING,
+        );
+        if ns.is_null() {
+            Err("Could not create NSString".into())
+        } else {
+            Ok(ns)
+        }
+    }
+
+    unsafe fn nsstring_to_string(value: Id) -> Option<String> {
+        if value.is_null() {
+            return None;
+        }
+        let c_string = msg_send_id_ptr(value, sel("UTF8String").ok()?);
+        if c_string.is_null() {
+            return None;
+        }
+        CStr::from_ptr(c_string.cast())
+            .to_str()
+            .ok()
+            .map(|s| s.to_string())
+    }
+
+    fn class(name: &str) -> Result<Class, String> {
+        let c_name = CString::new(name)
+            .map_err(|_| "Objective-C class name contained an interior NUL byte".to_string())?;
+        let class = unsafe { objc_getClass(c_name.as_ptr()) };
+        if class.is_null() {
+            Err(format!("Objective-C class {name} was not found"))
+        } else {
+            Ok(class)
+        }
+    }
+
+    fn sel(name: &str) -> Result<Sel, String> {
+        let c_name = CString::new(name)
+            .map_err(|_| "Objective-C selector contained an interior NUL byte".to_string())?;
+        let selector = unsafe { sel_registerName(c_name.as_ptr()) };
+        if selector.is_null() {
+            Err(format!("Objective-C selector {name} was not found"))
+        } else {
+            Ok(selector)
+        }
+    }
+
+    unsafe fn msg_send_class_id(receiver: Class, selector: Sel) -> Id {
+        let f: unsafe extern "C" fn(Class, Sel) -> Id =
+            std::mem::transmute(objc_msgSend as *const ());
+        f(receiver, selector)
+    }
+
+    unsafe fn msg_send_id_id(receiver: Id, selector: Sel) -> Id {
+        let f: unsafe extern "C" fn(Id, Sel) -> Id = std::mem::transmute(objc_msgSend as *const ());
+        f(receiver, selector)
+    }
+
+    unsafe fn msg_send_id_isize(receiver: Id, selector: Sel) -> NSInteger {
+        let f: unsafe extern "C" fn(Id, Sel) -> NSInteger =
+            std::mem::transmute(objc_msgSend as *const ());
+        f(receiver, selector)
+    }
+
+    unsafe fn msg_send_id_usize(receiver: Id, selector: Sel) -> NSUInteger {
+        let f: unsafe extern "C" fn(Id, Sel) -> NSUInteger =
+            std::mem::transmute(objc_msgSend as *const ());
+        f(receiver, selector)
+    }
+
+    unsafe fn msg_send_id_usize_id(receiver: Id, selector: Sel, index: NSUInteger) -> Id {
+        let f: unsafe extern "C" fn(Id, Sel, NSUInteger) -> Id =
+            std::mem::transmute(objc_msgSend as *const ());
+        f(receiver, selector, index)
+    }
+
+    unsafe fn msg_send_id_id_id(receiver: Id, selector: Sel, arg: Id) -> Id {
+        let f: unsafe extern "C" fn(Id, Sel, Id) -> Id =
+            std::mem::transmute(objc_msgSend as *const ());
+        f(receiver, selector, arg)
+    }
+
+    unsafe fn msg_send_id_ptr(receiver: Id, selector: Sel) -> *const c_char {
+        let f: unsafe extern "C" fn(Id, Sel) -> *const c_char =
+            std::mem::transmute(objc_msgSend as *const ());
+        f(receiver, selector)
+    }
+
+    unsafe fn msg_send_id_ptr_usize_id(
+        receiver: Id,
+        selector: Sel,
+        bytes: *const c_void,
+        len: NSUInteger,
+        encoding: NSUInteger,
+    ) -> Id {
+        let f: unsafe extern "C" fn(Id, Sel, *const c_void, NSUInteger, NSUInteger) -> Id =
+            std::mem::transmute(objc_msgSend as *const ());
+        f(receiver, selector, bytes, len, encoding)
+    }
+}
+
+#[cfg(target_os = "macos")]
 mod macos_ax {
     use std::ffi::{c_char, c_void, CString};
     use std::ptr;
@@ -934,6 +1266,42 @@ mod tests {
             operations.into_inner(),
             vec!["write:dictated text", "paste"]
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn paste_target_verification_blocks_bundle_mismatch() {
+        let expected = ActiveTargetContext {
+            platform: "macos".into(),
+            app_name: Some("Notes".into()),
+            bundle_id: Some("com.apple.Notes".into()),
+        };
+        let actual = ActiveTargetContext {
+            platform: "macos".into(),
+            app_name: Some("Slack".into()),
+            bundle_id: Some("com.tinyspeck.slackmacgap".into()),
+        };
+
+        let error = verify_paste_target(Some(&expected), Some(&actual)).unwrap_err();
+
+        assert_eq!(error, "app changed, text is on the clipboard");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn paste_target_verification_allows_matching_bundle() {
+        let expected = ActiveTargetContext {
+            platform: "macos".into(),
+            app_name: Some("Notes".into()),
+            bundle_id: Some("com.apple.Notes".into()),
+        };
+        let actual = ActiveTargetContext {
+            platform: "macos".into(),
+            app_name: Some("Notes".into()),
+            bundle_id: Some("com.apple.Notes".into()),
+        };
+
+        verify_paste_target(Some(&expected), Some(&actual)).unwrap();
     }
 
     #[test]

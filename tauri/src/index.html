@@ -11125,6 +11125,22 @@
     let expandAnimating = false;
 
     function applySidebarCollapsed(collapsed, { explicit = false } = {}) {
+      // Pin the collapsed (fixed-position) chevron to the exact spot the button
+      // occupies while expanded, so collapsing only rotates it — no vertical
+      // jump. Measure the in-flow rect BEFORE the pane collapses; on expand,
+      // clear the inline coords so it returns to flow. (The CSS left/top on the
+      // collapsed rule is only a fallback for a collapsed-on-launch start.)
+      const alreadyCollapsed = document.body.classList.contains('sidebar-collapsed');
+      if (collapsed && !alreadyCollapsed) {
+        const rect = sidebarCollapseButton.getBoundingClientRect();
+        if (rect.width && rect.height) {
+          sidebarCollapseButton.style.top = `${Math.round(rect.top)}px`;
+          sidebarCollapseButton.style.left = `${Math.round(rect.left)}px`;
+        }
+      } else if (!collapsed) {
+        sidebarCollapseButton.style.top = '';
+        sidebarCollapseButton.style.left = '';
+      }
       document.body.classList.toggle('sidebar-collapsed', collapsed);
       sidebarCollapseButton.classList.toggle('is-collapsed', collapsed);
       sidebarCollapseButton.setAttribute('aria-label', collapsed ? 'Expand list pane' : 'Collapse list pane');

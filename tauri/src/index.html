@@ -4424,6 +4424,66 @@
     .download-progress.is-visible {
       display: block;
     }
+
+    /* Settings tabs */
+    .settings-tabs {
+      display: flex;
+      gap: 0;
+      border-bottom: 1px solid var(--border);
+      margin: 0 -22px 20px;
+      padding: 0 22px;
+      overflow-x: auto;
+      position: sticky;
+      top: 57px;
+      z-index: 2;
+      background: var(--bg-elevated);
+      scrollbar-width: none;
+      -ms-overflow-style: none;
+    }
+
+    .settings-tabs::-webkit-scrollbar {
+      display: none;
+    }
+
+    .settings-tab {
+      background: transparent;
+      border: none;
+      border-bottom: 2px solid transparent;
+      margin-bottom: -1px;
+      padding: 9px 10px 8px;
+      cursor: pointer;
+      font-family: var(--font-mono);
+      font-size: var(--text-meta);
+      font-weight: 500;
+      color: var(--text-tertiary);
+      white-space: nowrap;
+      letter-spacing: 0.01em;
+      transition: color 0.15s ease;
+      outline: none;
+    }
+
+    .settings-tab.is-active {
+      color: var(--text);
+      border-bottom-color: var(--text);
+    }
+
+    .settings-tab:hover:not(.is-active) {
+      color: var(--text-secondary);
+    }
+
+    .settings-tab:focus-visible {
+      outline: 2px solid var(--focus-ring);
+      outline-offset: -2px;
+      border-radius: 3px;
+    }
+
+    .settings-tab-panel {
+      display: none;
+    }
+
+    .settings-tab-panel.is-active {
+      display: block;
+    }
   </style>
 </head>
 
@@ -4953,6 +5013,15 @@
         <button class="btn btn-secondary btn-sm" id="btn-settings-close">Close</button>
       </div>
 
+      <nav class="settings-tabs" role="tablist" aria-label="Settings sections">
+        <button class="settings-tab is-active" role="tab" id="tab-general" aria-selected="true" aria-controls="panel-general" tabindex="0" data-tab="general">General</button>
+        <button class="settings-tab" role="tab" id="tab-capture" aria-selected="false" aria-controls="panel-capture" tabindex="-1" data-tab="capture">Capture</button>
+        <button class="settings-tab" role="tab" id="tab-transcription" aria-selected="false" aria-controls="panel-transcription" tabindex="-1" data-tab="transcription">Transcription</button>
+        <button class="settings-tab" role="tab" id="tab-ai" aria-selected="false" aria-controls="panel-ai" tabindex="-1" data-tab="ai">AI &amp; Privacy</button>
+        <button class="settings-tab" role="tab" id="tab-advanced" aria-selected="false" aria-controls="panel-advanced" tabindex="-1" data-tab="advanced">Advanced</button>
+      </nav>
+
+      <div class="settings-tab-panel is-active" role="tabpanel" id="panel-general" data-panel="general" aria-labelledby="tab-general">
       <!-- Identity -->
       <div class="settings-section">
         <div class="about-item-title">IDENTITY</div>
@@ -5012,6 +5081,9 @@
         </div>
       </div>
 
+      </div><!-- /panel-general -->
+
+      <div class="settings-tab-panel" role="tabpanel" id="panel-capture" data-panel="capture" aria-labelledby="tab-capture">
       <!-- Dictation -->
       <div class="settings-section">
         <div class="about-item-title">DICTATION</div>
@@ -5115,6 +5187,9 @@
         </div>
       </div>
 
+      </div><!-- /panel-capture -->
+
+      <div class="settings-tab-panel" role="tabpanel" id="panel-transcription" data-panel="transcription" aria-labelledby="tab-transcription">
       <!-- Transcription -->
       <div class="settings-section">
         <div class="about-item-title">TRANSCRIPTION</div>
@@ -5274,6 +5349,9 @@
         </div>
       </div>
 
+      </div><!-- /panel-transcription -->
+
+      <div class="settings-tab-panel" role="tabpanel" id="panel-ai" data-panel="ai" aria-labelledby="tab-ai">
       <!-- Summarization -->
       <div class="settings-section">
         <div class="about-item-title">AUTO-SUMMARIZATION</div>
@@ -5573,6 +5651,9 @@
         </div>
       </div>
 
+      </div><!-- /panel-ai -->
+
+      <div class="settings-tab-panel" role="tabpanel" id="panel-advanced" data-panel="advanced" aria-labelledby="tab-advanced">
       <!-- Storage -->
       <div class="settings-section settings-section-tight">
         <div class="about-item-title">STORAGE</div>
@@ -5614,6 +5695,8 @@
           <button class="btn btn-secondary btn-sm" id="settings-open-config-docs">View docs</button>
         </div>
       </div>
+
+      </div><!-- /panel-advanced -->
 
       <div class="about-footer settings-footer about-footer-small">
         Config file: <span id="settings-config-path" class="settings-config-path"></span>
@@ -8794,8 +8877,41 @@
     });
     // Settings overlay
     const settingsOverlay = document.getElementById('settings-overlay');
-    function openSettings() { settingsOverlay.classList.add('active'); loadSettings(); }
+    const settingsTabs = document.querySelectorAll('.settings-tab');
+
+    function openSettings() {
+      settingsOverlay.classList.add('active');
+      // Reset to General tab on every open
+      settingsTabs[0].click();
+      loadSettings();
+    }
     function closeSettings() { settingsOverlay.classList.remove('active'); }
+
+    // Tab switching — click
+    settingsTabs.forEach(tab => {
+      tab.addEventListener('click', () => {
+        const name = tab.dataset.tab;
+        settingsTabs.forEach(t => {
+          t.classList.toggle('is-active', t === tab);
+          t.setAttribute('aria-selected', t === tab ? 'true' : 'false');
+          t.tabIndex = t === tab ? 0 : -1;
+        });
+        document.querySelectorAll('.settings-tab-panel').forEach(p =>
+          p.classList.toggle('is-active', p.dataset.panel === name));
+      });
+    });
+
+    // Tab switching — keyboard (arrow keys, Home, End)
+    document.querySelector('.settings-tabs').addEventListener('keydown', e => {
+      const idx = [...settingsTabs].indexOf(document.activeElement);
+      if (idx === -1) return;
+      let next = -1;
+      if (e.key === 'ArrowRight') next = (idx + 1) % settingsTabs.length;
+      if (e.key === 'ArrowLeft')  next = (idx - 1 + settingsTabs.length) % settingsTabs.length;
+      if (e.key === 'Home')       next = 0;
+      if (e.key === 'End')        next = settingsTabs.length - 1;
+      if (next !== -1) { e.preventDefault(); settingsTabs[next].focus(); settingsTabs[next].click(); }
+    });
 
     document.getElementById('btn-about-close').addEventListener('click', closeAbout);
     aboutOverlay.addEventListener('click', (e) => { if (e.target === aboutOverlay) closeAbout(); });

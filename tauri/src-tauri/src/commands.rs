@@ -1681,15 +1681,54 @@ fn push_document_if_allowed(
     });
 }
 
+fn push_assistant_document_if_allowed(
+    documents: &mut Vec<DocumentView>,
+    seen: &mut std::collections::HashSet<PathBuf>,
+    path: &Path,
+    allowed_roots: &[PathBuf],
+) {
+    let Ok(canonical) = validate_text_file_path(path) else {
+        return;
+    };
+    if !allowed_roots.iter().any(|root| canonical.starts_with(root)) {
+        return;
+    }
+    if !seen.insert(canonical.clone()) {
+        return;
+    }
+    let Some(mtime) = file_mtime_ms(&canonical) else {
+        return;
+    };
+    documents.push(DocumentView {
+        path: canonical.display().to_string(),
+        filename: filename_for_path(&canonical),
+        kind: text_file_kind(&canonical).unwrap_or("text").to_string(),
+        mtime,
+        source: "assistant".to_string(),
+        meeting_slug: None,
+    });
+}
+
+fn is_plain_file_entry(path: &Path) -> bool {
+    let Ok(metadata) = std::fs::symlink_metadata(path) else {
+        return false;
+    };
+    let file_type = metadata.file_type();
+    file_type.is_file() && !file_type.is_symlink()
+}
+
 fn append_assistant_documents(
     documents: &mut Vec<DocumentView>,
     seen: &mut std::collections::HashSet<PathBuf>,
     assistant_dir: &Path,
 ) {
+    let Ok(assistant_root) = std::fs::canonicalize(assistant_dir) else {
+        return;
+    };
     if let Ok(entries) = std::fs::read_dir(assistant_dir) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if !path.is_file() || is_assistant_instruction_file(&path) {
+            if !is_plain_file_entry(&path) || is_assistant_instruction_file(&path) {
                 continue;
             }
             let ext = path
@@ -1697,16 +1736,31 @@ fn append_assistant_documents(
                 .and_then(|ext| ext.to_str())
                 .map(|ext| ext.to_ascii_lowercase());
             if matches!(ext.as_deref(), Some("md" | "markdown" | "txt")) {
-                push_document_if_allowed(documents, seen, &path, "assistant", None);
+                push_assistant_document_if_allowed(
+                    documents,
+                    seen,
+                    &path,
+                    std::slice::from_ref(&assistant_root),
+                );
             }
         }
     }
 
     let artifacts_dir = assistant_dir.join("artifacts");
+    let Ok(artifact_metadata) = std::fs::symlink_metadata(&artifacts_dir) else {
+        return;
+    };
+    if artifact_metadata.file_type().is_symlink() || !artifact_metadata.is_dir() {
+        return;
+    }
+    let Ok(artifacts_root) = std::fs::canonicalize(&artifacts_dir) else {
+        return;
+    };
+    let allowed_roots = [assistant_root, artifacts_root];
     if let Ok(entries) = std::fs::read_dir(&artifacts_dir) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if !path.is_file() || is_assistant_instruction_file(&path) {
+            if !is_plain_file_entry(&path) || is_assistant_instruction_file(&path) {
                 continue;
             }
             let ext = path
@@ -1714,7 +1768,7 @@ fn append_assistant_documents(
                 .and_then(|ext| ext.to_str())
                 .map(|ext| ext.to_ascii_lowercase());
             if matches!(ext.as_deref(), Some("md" | "markdown" | "txt")) {
-                push_document_if_allowed(documents, seen, &path, "assistant", None);
+                push_assistant_document_if_allowed(documents, seen, &path, &allowed_roots);
             }
         }
     }
@@ -11982,6 +12036,14 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(5));
         let meeting = meetings.join("2026-07-02-product-review.md");
         std::fs::write(&meeting, "# Meeting artifact").unwrap();
+        let outside = temp.path().join("outside-secret.md");
+        std::fs::write(&outside, "# Outside").unwrap();
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&outside, assistant.join("outside-secret.md")).unwrap();
+            std::os::unix::fs::symlink(&outside, assistant_artifacts.join("linked-secret.md"))
+                .unwrap();
+        }
 
         let config = Config {
             output_dir: meetings.clone(),
@@ -11998,6 +12060,16 @@ mod tests {
         assert!(names.contains(&"prep.md"));
         assert!(names.contains(&"debrief.txt"));
         assert!(!names.contains(&"CLAUDE.md"));
+        assert!(!names.contains(&"outside-secret.md"));
+        assert!(!names.contains(&"linked-secret.md"));
+
+        let capped =
+            list_documents_for_roots_with_recent_state(&config, &assistant, 2, &state_path);
+        let capped_names: Vec<_> = capped.iter().map(|doc| doc.filename.as_str()).collect();
+        assert_eq!(
+            capped_names,
+            vec!["2026-07-02-product-review.md", "debrief.txt"]
+        );
 
         let meeting_doc = docs
             .iter()
@@ -12013,6 +12085,30 @@ mod tests {
         let assistant_doc = docs.iter().find(|doc| doc.filename == "prep.md").unwrap();
         assert_eq!(assistant_doc.source, "assistant");
         assert_eq!(assistant_doc.meeting_slug, None);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt;
+
+            let non_utf8_name = std::ffi::OsString::from_vec(b"nonutf-\xFF.md".to_vec());
+            let non_utf8_path = assistant.join(non_utf8_name);
+            match std::fs::write(&non_utf8_path, "# Non UTF-8") {
+                Ok(()) => {
+                    let docs = list_documents_for_roots_with_recent_state(
+                        &config,
+                        &assistant,
+                        200,
+                        &state_path,
+                    );
+                    assert!(docs
+                        .iter()
+                        .any(|doc| doc.filename == "Document" && doc.source == "assistant"));
+                }
+                Err(_) => {
+                    assert_eq!(filename_for_path(&non_utf8_path), "Document");
+                }
+            }
+        }
     }
 
     #[test]

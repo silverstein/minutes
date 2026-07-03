@@ -269,6 +269,14 @@
       display: none;
     }
 
+    /* When the list pane collapses, the terminal/assistant pane has a fixed
+       width, so it must grow to reclaim the freed space instead of leaving a
+       dead gap. flex-grow tracks .app-left's animated shrink for free. */
+    body.sidebar-collapsed .recall-panel.expanded {
+      width: auto;
+      flex: 1 1 auto;
+    }
+
     @media (max-width: 720px) {
       body:not(.sidebar-expanded-session) .app-left {
         flex: 0 0 0;
@@ -278,6 +286,11 @@
 
       body:not(.sidebar-expanded-session) .split-handle {
         display: none;
+      }
+
+      body:not(.sidebar-expanded-session) .recall-panel.expanded {
+        width: auto;
+        flex: 1 1 auto;
       }
     }
 
@@ -2847,6 +2860,18 @@
       box-shadow: 0 24px 60px var(--shadow-stronger);
       padding: 0 22px 20px;
       color: var(--text);
+    }
+
+    /* Settings is tabbed, so the dialog top (title + tab bar) must not move
+       when switching between tabs of different content heights. Anchor the top
+       instead of vertically centering; the About modal keeps its centering. */
+    #settings-overlay {
+      align-items: flex-start;
+      padding-top: 6vh;
+    }
+
+    #settings-overlay .about-card {
+      max-height: calc(100vh - 6vh - 40px);
     }
 
     .about-top {

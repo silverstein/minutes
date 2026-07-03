@@ -13640,9 +13640,11 @@
         flushOpenArtifactSave();
       }
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'b') {
+        // Layout shortcut (à la VS Code): toggle regardless of focus, including
+        // while the terminal or a text field has it — Cmd+B is not a text-entry
+        // key here. Only suppress it under a modal/viewer overlay.
         const target = e.target || document.activeElement;
         const isSidebarButton = target?.closest?.('#btn-sidebar-collapse');
-        if (isEditableShortcutTarget(target)) return;
         if (!isSidebarButton && (isOverlayActive() || mdViewer.classList.contains('active'))) return;
         e.preventDefault();
         toggleSidebarCollapsed();

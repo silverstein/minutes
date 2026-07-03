@@ -88,6 +88,11 @@ pub struct AppState {
     /// from the cancel bit so the detector can tell an explicit user cancel
     /// from an internal reset or teardown path.
     pub call_end_countdown_terminal_state: Arc<AtomicU8>,
+    /// Conversation history for the native Recall chat panel.
+    /// Each entry is `(user_message, assistant_response)`. Cleared via
+    /// `cmd_recall_chat_clear`. Capped to the last 6 turns in the prompt
+    /// to keep token usage bounded.
+    pub recall_chat_history: Arc<Mutex<Vec<(String, String)>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -8275,128 +8280,675 @@ pub fn spawn_terminal(
     Ok((crate::pty::ASSISTANT_SESSION_ID.into(), title))
 }
 
-/// Spawn `claude --output-format stream-json --no-interactive -p <message>` in
-/// the assistant workspace and stream the structured JSON chunks back to the
-/// frontend via `recall-chat-chunk` / `recall-chat-done` events.
+// ── Recall native chat ────────────────────────────────────────
+
+/// Build a prompt string combining conversation history (last 6 turns) and
+/// the current enriched user message.
+fn build_recall_chat_prompt(history: &[(String, String)], enriched_message: &str) -> String {
+    let mut prompt = String::new();
+
+    let recent: &[(String, String)] = if history.len() > 6 {
+        &history[history.len() - 6..]
+    } else {
+        history
+    };
+
+    if !recent.is_empty() {
+        prompt.push_str("[Previous conversation]\n");
+        for (user_msg, assistant_msg) in recent {
+            prompt.push_str("User: ");
+            prompt.push_str(user_msg);
+            prompt.push('\n');
+            prompt.push_str("Assistant: ");
+            prompt.push_str(assistant_msg);
+            prompt.push('\n');
+        }
+        prompt.push_str("\n[Current question]\n");
+    }
+
+    prompt.push_str(enriched_message);
+    prompt
+}
+
+/// Send a message from the native Recall chat panel and stream the response.
 ///
-/// This is the backend for the native Recall chat panel (dev-mode OFF). The
-/// existing PTY / xterm.js path is unchanged and still used when dev-mode is ON.
+/// Provider priority:
+///   1. `config.summarization.engine == "ollama"` — HTTP to Ollama (localhost:11434)
+///   2. `ANTHROPIC_API_KEY` in env — Anthropic Messages API (streaming SSE)
+///   3. `detect_agent_cli()` found something — use that CLI:
+///      - `claude`: lean stream-json via `build_chat_invocation` (no MCP, no
+///        tools, prompt on stdin), streamed token-by-token
+///      - others (codex/gemini/opencode): captured as plain-text stdout
+///   4. Nothing found — descriptive error returned to frontend
+///
+/// Before invoking the AI, context is injected in two layers (capped at
+/// 12 000 chars total): (1) the full content of the meeting currently
+/// focused in the panel, if any — read via the same `current_meeting_path`
+/// state the palette uses — so referential questions like "what did we
+/// discuss in this meeting?" work even with no content-bearing keywords,
+/// and (2) up to 5 keyword-matched snippets from other meetings. Conversation
+/// history (last 6 turns) is prepended to the prompt.
+///
+/// Frontend events emitted: `recall-chat-chunk`, `recall-chat-done`,
+/// `recall-chat-error`. The existing PTY/xterm.js path is unchanged.
 #[tauri::command]
-pub async fn cmd_recall_chat_send(app: tauri::AppHandle, message: String) -> Result<(), String> {
+pub async fn cmd_recall_chat_send(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    message: String,
+) -> Result<(), String> {
     use std::io::{BufRead, BufReader};
     use std::process::{Command, Stdio};
 
     let workspace = crate::context::workspace_dir();
-
-    // Ensure workspace dir exists before using it as cwd.
     if !workspace.exists() {
         std::fs::create_dir_all(&workspace)
             .map_err(|e| format!("Cannot create workspace dir: {}", e))?;
     }
 
-    let claude_bin = which::which("claude").map_err(|_| {
-        "claude not found on PATH; install Claude Code to enable native chat".to_string()
-    })?;
+    // The native chat panel is a lean, tool-less invocation whose entire context
+    // comes from the keyword-search injection below. Run the CLI from a dedicated
+    // neutral directory — NOT the shared ~/.minutes/assistant workspace — so it
+    // does not auto-load that workspace's CLAUDE.md / AGENTS.md. Those files are
+    // written for the full-tool PTY assistant and instruct the model to read
+    // CURRENT_MEETING.md and run `minutes` commands; a tool-less process cannot,
+    // so it narrates a cascade of failed tool calls straight into the chat.
+    // Claude/agents still auto-load memory files from cwd regardless of
+    // `--tools ""` / `--strict-mcp-config`, so isolating cwd is the fix.
+    let chat_cwd = workspace
+        .parent()
+        .map(|p| p.join("chat"))
+        .unwrap_or_else(|| workspace.clone());
+    let _ = std::fs::create_dir_all(&chat_cwd);
 
-    // On Windows, npm installs `claude` as a `.cmd` shim which cannot be spawned
-    // directly via Command::new — it must go through `cmd /C`.
-    #[cfg(target_os = "windows")]
-    let mut child = {
-        let ext = claude_bin
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("")
-            .to_ascii_lowercase();
-        if ext == "cmd" || ext == "bat" {
-            Command::new("cmd")
-                .arg("/C")
-                .arg(&claude_bin)
-                .args(["--output-format", "stream-json", "--no-interactive", "-p", message.as_str()])
-                .current_dir(&workspace)
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn()
-                .map_err(|e| format!("Failed to spawn claude: {}", e))?
+    // ── Step 1: inject meeting context ────────────────────────────────────────
+    let config = minutes_core::config::Config::load();
+    let meeting_context = {
+        let mut sections: Vec<String> = Vec::new();
+
+        // Prioritize the meeting the panel currently has focused. Keyword
+        // search on the raw question ("what did we discuss in this
+        // meeting?") often has no content-bearing terms and returns
+        // nothing, even though the user is clearly pointing at a specific,
+        // already-open meeting — see the Recall panel header context label.
+        if let Some(focused_path) = recall_workspace_current_meeting() {
+            if let Ok(content) = std::fs::read_to_string(&focused_path) {
+                let (frontmatter_str, body) = minutes_core::markdown::split_frontmatter(&content);
+                let title = serde_yaml::from_str::<minutes_core::markdown::Frontmatter>(
+                    frontmatter_str.trim(),
+                )
+                .ok()
+                .map(|fm| fm.title)
+                .unwrap_or_else(|| {
+                    focused_path
+                        .file_stem()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .unwrap_or_default()
+                });
+                let body = body.trim();
+                let truncated_body = if body.len() > 6000 {
+                    &body[..6000]
+                } else {
+                    body
+                };
+                sections.push(format!(
+                    "## Currently focused meeting: {}\n{}",
+                    title, truncated_body
+                ));
+            }
+        }
+
+        let filters = minutes_core::search::SearchFilters::default();
+        if let Ok(results) = minutes_core::search::search(&message, &config, &filters) {
+            let snippets: Vec<String> = results
+                .iter()
+                .take(5)
+                .map(|r| format!("## {} ({})\n{}", r.title, r.date, r.snippet))
+                .collect();
+            if !snippets.is_empty() {
+                sections.push(format!(
+                    "## Other relevant excerpts from your meetings\n\n{}",
+                    snippets.join("\n\n")
+                ));
+            }
+        }
+
+        if sections.is_empty() {
+            String::new()
         } else {
-            Command::new(&claude_bin)
-                .args(["--output-format", "stream-json", "--no-interactive", "-p", message.as_str()])
-                .current_dir(&workspace)
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn()
-                .map_err(|e| format!("Failed to spawn claude: {}", e))?
+            let raw = format!("Meeting context:\n\n{}\n\n---\n\n", sections.join("\n\n"));
+            if raw.len() > 12000 {
+                raw[..12000].to_string()
+            } else {
+                raw
+            }
         }
     };
+    // Explicit tool-less framing. Belt-and-suspenders alongside the neutral cwd
+    // above: even if a memory file is found further up the tree (e.g. a global
+    // ~/CLAUDE.md), or the model is simply inclined to emit tool-call syntax from
+    // training, this tells it plainly that it has no file/tool access and must
+    // answer only from the supplied excerpts — preventing the narrated / failed
+    // tool-call cascade that leaked into the chat bubble.
+    const CHAT_NO_TOOLS_PREAMBLE: &str = "You are answering inside the Minutes app chat panel. You have NO access to the \
+file system, shell, tools, or MCP servers, and you are NOT in an agentic loop. Answer using ONLY the meeting excerpts \
+and conversation history provided below. Do not attempt to read files, run commands, or call tools, and do not narrate \
+tool calls. If the provided context does not contain the answer, say so briefly and suggest the user open or select the \
+relevant meeting.\n\n";
+    let enriched_message = format!(
+        "{}{}User question: {}",
+        CHAT_NO_TOOLS_PREAMBLE, meeting_context, message
+    );
 
-    #[cfg(not(target_os = "windows"))]
-    let mut child = Command::new(&claude_bin)
-        .args([
-            "--output-format",
-            "stream-json",
-            "--no-interactive",
-            "-p",
-            message.as_str(),
-        ])
-        .current_dir(&workspace)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("Failed to spawn claude: {}", e))?;
+    // ── Step 2: build prompt with history ─────────────────────────────────────
+    let history_snapshot: Vec<(String, String)> = {
+        let h = state.recall_chat_history.lock().unwrap();
+        h.clone()
+    };
+    let full_prompt = build_recall_chat_prompt(&history_snapshot, &enriched_message);
 
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| "No stdout handle from claude process".to_string())?;
+    // ── Step 3: detect provider ────────────────────────────────────────────────
+    let use_ollama = config.summarization.engine == "ollama";
+    let anthropic_api_key: Option<String> = if !use_ollama {
+        std::env::var("ANTHROPIC_API_KEY").ok()
+    } else {
+        None
+    };
 
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| "No stderr handle from claude process".to_string())?;
+    // ── Ollama path ────────────────────────────────────────────────────────────
+    if use_ollama {
+        let ollama_url = config.summarization.ollama_url.clone();
+        let ollama_model = config.summarization.ollama_model.clone();
+        let app_clone = app.clone();
+        let message_clone = message.clone();
+        let history_arc = state.recall_chat_history.clone();
 
-    // Clone handle so stderr thread and stdout loop both have access.
-    let app_stderr = app.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        // Drain stderr concurrently to avoid pipe deadlock when both buffers fill.
-        let stderr_thread = std::thread::spawn(move || {
-            let reader = BufReader::new(stderr);
-            let mut buf = String::new();
-            for line in reader.lines().flatten() {
-                if !line.trim().is_empty() {
-                    buf.push_str(&line);
-                    buf.push('\n');
+        tauri::async_runtime::spawn_blocking(move || {
+            let url = format!("{}/api/chat", ollama_url);
+
+            let mut messages: Vec<serde_json::Value> = Vec::new();
+            for (u, a) in &history_snapshot {
+                messages.push(serde_json::json!({"role": "user", "content": u}));
+                messages.push(serde_json::json!({"role": "assistant", "content": a}));
+            }
+            messages.push(serde_json::json!({"role": "user", "content": enriched_message}));
+
+            let body = serde_json::json!({
+                "model": ollama_model,
+                "messages": messages,
+                "stream": true,
+            });
+
+            let agent = ureq::Agent::new_with_config(
+                ureq::config::Config::builder()
+                    .timeout_global(Some(std::time::Duration::from_secs(120)))
+                    .http_status_as_error(false)
+                    .build(),
+            );
+
+            let mut resp = match agent
+                .post(&url)
+                .header("Content-Type", "application/json")
+                .send_json(&body)
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    app_clone
+                        .emit_to("main", "recall-chat-error", format!("Ollama error: {}", e))
+                        .ok();
+                    app_clone.emit_to("main", "recall-chat-done", ()).ok();
+                    return;
                 }
-            }
-            if !buf.is_empty() {
-                app_stderr
-                    .emit_to("main", "recall-chat-error", buf.trim().to_string())
-                    .ok();
-            }
-        });
+            };
 
-        let reader = BufReader::new(stdout);
-        for line_result in reader.lines() {
-            match line_result {
-                Ok(line) if !line.trim().is_empty() => {
-                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&line) {
-                        app.emit_to("main", "recall-chat-chunk", json).ok();
+            if resp.status().as_u16() >= 400 {
+                let status = resp.status().as_u16();
+                let body_text = resp.body_mut().read_to_string().unwrap_or_default();
+                app_clone
+                    .emit_to(
+                        "main",
+                        "recall-chat-error",
+                        format!("Ollama HTTP {}: {}", status, body_text),
+                    )
+                    .ok();
+                app_clone.emit_to("main", "recall-chat-done", ()).ok();
+                return;
+            }
+
+            let mut body = resp.into_body();
+            let reader = BufReader::new(body.as_reader());
+            let mut full_response = String::new();
+            for line_result in reader.lines() {
+                match line_result {
+                    Ok(line) if !line.trim().is_empty() => {
+                        if let Ok(val) = serde_json::from_str::<serde_json::Value>(&line) {
+                            if let Some(text) = val
+                                .get("message")
+                                .and_then(|m| m.get("content"))
+                                .and_then(|c| c.as_str())
+                            {
+                                full_response.push_str(text);
+                                app_clone
+                                    .emit_to(
+                                        "main",
+                                        "recall-chat-chunk",
+                                        serde_json::json!({"type": "text", "text": text}),
+                                    )
+                                    .ok();
+                            }
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        eprintln!("[recall-chat/ollama] read error: {}", e);
+                        break;
                     }
                 }
-                Ok(_) => {}
+            }
+
+            if !full_response.is_empty() {
+                let mut h = history_arc.lock().unwrap();
+                h.push((message_clone, full_response));
+            }
+            app_clone.emit_to("main", "recall-chat-done", ()).ok();
+        })
+        .await
+        .map_err(|e| format!("Recall chat Ollama task failed: {}", e))?;
+
+        return Ok(());
+    }
+
+    // ── Anthropic API path ─────────────────────────────────────────────────────
+    if let Some(api_key) = anthropic_api_key {
+        let app_clone = app.clone();
+        let message_clone = message.clone();
+        let history_arc = state.recall_chat_history.clone();
+
+        tauri::async_runtime::spawn_blocking(move || {
+            let mut messages: Vec<serde_json::Value> = Vec::new();
+            for (u, a) in &history_snapshot {
+                messages.push(serde_json::json!({"role": "user", "content": u}));
+                messages.push(serde_json::json!({"role": "assistant", "content": a}));
+            }
+            messages.push(serde_json::json!({"role": "user", "content": enriched_message}));
+
+            let body = serde_json::json!({
+                "model": "claude-haiku-4-5",
+                "max_tokens": 1024,
+                "stream": true,
+                "messages": messages,
+            });
+
+            let agent = ureq::Agent::new_with_config(
+                ureq::config::Config::builder()
+                    .timeout_global(Some(std::time::Duration::from_secs(120)))
+                    .http_status_as_error(false)
+                    .build(),
+            );
+
+            let mut resp = match agent
+                .post("https://api.anthropic.com/v1/messages")
+                .header("x-api-key", &api_key)
+                .header("anthropic-version", "2023-06-01")
+                .header("Content-Type", "application/json")
+                .send_json(&body)
+            {
+                Ok(r) => r,
                 Err(e) => {
-                    eprintln!("[recall-chat] stdout read error: {}", e);
-                    break;
+                    app_clone
+                        .emit_to(
+                            "main",
+                            "recall-chat-error",
+                            format!("Anthropic API error: {}", e),
+                        )
+                        .ok();
+                    app_clone.emit_to("main", "recall-chat-done", ()).ok();
+                    return;
+                }
+            };
+
+            if resp.status().as_u16() >= 400 {
+                let status = resp.status().as_u16();
+                let body_text = resp.body_mut().read_to_string().unwrap_or_default();
+                app_clone
+                    .emit_to(
+                        "main",
+                        "recall-chat-error",
+                        format!("Anthropic HTTP {}: {}", status, body_text),
+                    )
+                    .ok();
+                app_clone.emit_to("main", "recall-chat-done", ()).ok();
+                return;
+            }
+
+            // Anthropic streams SSE: `data: {...}` lines.
+            let mut body = resp.into_body();
+            let reader = BufReader::new(body.as_reader());
+            let mut full_response = String::new();
+            for line_result in reader.lines() {
+                match line_result {
+                    Ok(line) => {
+                        let data = line.strip_prefix("data: ").unwrap_or("").trim();
+                        if data.is_empty() || data == "[DONE]" {
+                            continue;
+                        }
+                        if let Ok(val) = serde_json::from_str::<serde_json::Value>(data) {
+                            if val.get("type").and_then(|t| t.as_str())
+                                == Some("content_block_delta")
+                            {
+                                if let Some(text) = val
+                                    .get("delta")
+                                    .and_then(|d| d.get("text"))
+                                    .and_then(|t| t.as_str())
+                                {
+                                    full_response.push_str(text);
+                                    app_clone
+                                        .emit_to(
+                                            "main",
+                                            "recall-chat-chunk",
+                                            serde_json::json!({"type": "text", "text": text}),
+                                        )
+                                        .ok();
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("[recall-chat/anthropic] read error: {}", e);
+                        break;
+                    }
                 }
             }
+
+            if !full_response.is_empty() {
+                let mut h = history_arc.lock().unwrap();
+                h.push((message_clone, full_response));
+            }
+            app_clone.emit_to("main", "recall-chat-done", ()).ok();
+        })
+        .await
+        .map_err(|e| format!("Recall chat Anthropic task failed: {}", e))?;
+
+        return Ok(());
+    }
+
+    // ── CLI agent path ─────────────────────────────────────────────────────────
+    let agent_bin = minutes_core::summarize::detect_agent_cli().ok_or_else(|| {
+        "No AI provider found. Options: install Claude Code (claude), Codex (codex), \
+         Gemini CLI (gemini), configure Ollama ([summarization] engine = \"ollama\" in \
+         config.toml), or set ANTHROPIC_API_KEY."
+            .to_string()
+    })?;
+
+    let is_claude_cli = std::path::Path::new(&agent_bin)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .map(|s| s.eq_ignore_ascii_case("claude"))
+        .unwrap_or(false);
+
+    let history_arc = state.recall_chat_history.clone();
+    let message_clone = message.clone();
+
+    if is_claude_cli {
+        // Claude CLI: incremental stream-json output, prompt via stdin.
+        // Routed through the shared lean invocation builder (#382) so the chat
+        // path gets the same no-MCP / no-tools / stdin-prompt treatment as the
+        // summarization path, upgraded to `--output-format stream-json --verbose`
+        // for token-by-token rendering. Passing the prompt on stdin (not as a
+        // `-p <arg>`) also avoids the Windows command-line length limit on long
+        // transcripts. This replaced a hand-rolled arg list that carried a
+        // non-existent `--no-interactive` flag and errored on every message.
+        let invocation =
+            minutes_core::summarize::build_chat_invocation(&agent_bin, &full_prompt, true)
+                .map_err(|e| format!("Failed to prepare claude invocation: {}", e))?;
+        let args = invocation.args.clone();
+
+        #[cfg(target_os = "windows")]
+        let mut child = {
+            let ext = std::path::Path::new(&agent_bin)
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            if ext == "cmd" || ext == "bat" {
+                Command::new("cmd")
+                    .arg("/C")
+                    .arg(&agent_bin)
+                    .args(&args)
+                    .current_dir(&chat_cwd)
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn()
+                    .map_err(|e| format!("Failed to spawn claude: {}", e))?
+            } else {
+                Command::new(&agent_bin)
+                    .args(&args)
+                    .current_dir(&chat_cwd)
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn()
+                    .map_err(|e| format!("Failed to spawn claude: {}", e))?
+            }
+        };
+
+        #[cfg(not(target_os = "windows"))]
+        let mut child = Command::new(&agent_bin)
+            .args(&args)
+            .current_dir(&chat_cwd)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("Failed to spawn claude: {}", e))?;
+
+        if let Some(payload) = invocation.stdin_payload {
+            if let Some(mut stdin_handle) = child.stdin.take() {
+                use std::io::Write;
+                let _ = stdin_handle.write_all(&payload);
+            }
         }
-        let _ = stderr_thread.join();
-        app.emit_to("main", "recall-chat-done", ()).ok();
-        // Reap the child to avoid leaving a zombie on Unix.
-        let _ = child.wait();
-    })
-    .await
-    .map_err(|e| format!("Recall chat streaming task failed: {}", e))?;
+
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| "No stdout handle from claude".to_string())?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| "No stderr handle from claude".to_string())?;
+
+        let app_stderr = app.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            let stderr_thread = std::thread::spawn(move || {
+                let reader = BufReader::new(stderr);
+                let mut buf = String::new();
+                for line in reader.lines().flatten() {
+                    if !line.trim().is_empty() {
+                        buf.push_str(&line);
+                        buf.push('\n');
+                    }
+                }
+                if !buf.is_empty() {
+                    app_stderr
+                        .emit_to("main", "recall-chat-error", buf.trim().to_string())
+                        .ok();
+                }
+            });
+
+            let reader = BufReader::new(stdout);
+            let mut full_response = String::new();
+            for line_result in reader.lines() {
+                match line_result {
+                    Ok(line) if !line.trim().is_empty() => {
+                        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&line) {
+                            if json.get("type").and_then(|t| t.as_str()) == Some("assistant") {
+                                if let Some(arr) = json
+                                    .get("message")
+                                    .and_then(|m| m.get("content"))
+                                    .and_then(|c| c.as_array())
+                                {
+                                    for block in arr {
+                                        if let Some(text) =
+                                            block.get("text").and_then(|t| t.as_str())
+                                        {
+                                            full_response.push_str(text);
+                                        }
+                                    }
+                                }
+                            }
+                            app.emit_to("main", "recall-chat-chunk", json).ok();
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        eprintln!("[recall-chat] stdout read error: {}", e);
+                        break;
+                    }
+                }
+            }
+            let _ = stderr_thread.join();
+
+            if !full_response.is_empty() {
+                let mut h = history_arc.lock().unwrap();
+                h.push((message_clone, full_response));
+            }
+
+            app.emit_to("main", "recall-chat-done", ()).ok();
+            let _ = child.wait();
+        })
+        .await
+        .map_err(|e| format!("Recall chat streaming task failed: {}", e))?;
+    } else {
+        // Other CLIs (codex / gemini / opencode): capture plain-text stdout.
+        let invocation =
+            minutes_core::summarize::build_chat_invocation(&agent_bin, &full_prompt, false)
+                .map_err(|e| format!("Failed to prepare agent invocation: {}", e))?;
+
+        let stdin_stdio = if invocation.stdin_payload.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        };
+
+        #[cfg(target_os = "windows")]
+        let mut child = {
+            let ext = std::path::Path::new(&invocation.cmd)
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            if ext == "cmd" || ext == "bat" {
+                Command::new("cmd")
+                    .arg("/C")
+                    .arg(&invocation.cmd)
+                    .args(&invocation.args)
+                    .current_dir(&chat_cwd)
+                    .stdin(stdin_stdio)
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn()
+                    .map_err(|e| format!("Failed to spawn {}: {}", invocation.cmd, e))?
+            } else {
+                Command::new(&invocation.cmd)
+                    .args(&invocation.args)
+                    .current_dir(&chat_cwd)
+                    .stdin(stdin_stdio)
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn()
+                    .map_err(|e| format!("Failed to spawn {}: {}", invocation.cmd, e))?
+            }
+        };
+
+        #[cfg(not(target_os = "windows"))]
+        let mut child = Command::new(&invocation.cmd)
+            .args(&invocation.args)
+            .current_dir(&chat_cwd)
+            .stdin(stdin_stdio)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("Failed to spawn {}: {}", invocation.cmd, e))?;
+
+        if let Some(payload) = invocation.stdin_payload {
+            if let Some(mut stdin_handle) = child.stdin.take() {
+                use std::io::Write;
+                let _ = stdin_handle.write_all(&payload);
+            }
+        }
+
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| format!("No stdout from {}", invocation.cmd))?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| format!("No stderr from {}", invocation.cmd))?;
+
+        let cleanup_path = invocation.cleanup_path;
+        let app_clone = app.clone();
+
+        tauri::async_runtime::spawn_blocking(move || {
+            let app_stderr2 = app_clone.clone();
+            let stderr_thread = std::thread::spawn(move || {
+                let reader = BufReader::new(stderr);
+                let mut buf = String::new();
+                for line in reader.lines().flatten() {
+                    if !line.trim().is_empty() {
+                        buf.push_str(&line);
+                        buf.push('\n');
+                    }
+                }
+                if !buf.is_empty() {
+                    app_stderr2
+                        .emit_to("main", "recall-chat-error", buf.trim().to_string())
+                        .ok();
+                }
+            });
+
+            use std::io::Read;
+            let mut full_response = String::new();
+            let mut reader = BufReader::new(stdout);
+            let _ = reader.read_to_string(&mut full_response);
+
+            let _ = stderr_thread.join();
+
+            if let Some(path) = cleanup_path {
+                let _ = std::fs::remove_file(path);
+            }
+
+            let trimmed = full_response.trim().to_string();
+            if !trimmed.is_empty() {
+                app_clone
+                    .emit_to(
+                        "main",
+                        "recall-chat-chunk",
+                        serde_json::json!({"type": "text", "text": &trimmed}),
+                    )
+                    .ok();
+                let mut h = history_arc.lock().unwrap();
+                h.push((message_clone, trimmed));
+            }
+
+            app_clone.emit_to("main", "recall-chat-done", ()).ok();
+            let _ = child.wait();
+        })
+        .await
+        .map_err(|e| format!("Recall chat agent task failed: {}", e))?;
+    }
 
     Ok(())
+}
+
+/// Clear the Recall chat conversation history so the next message starts
+/// a fresh context. The frontend should call this when the user resets the panel.
+#[tauri::command]
+pub fn cmd_recall_chat_clear(state: tauri::State<'_, AppState>) {
+    let mut h = state.recall_chat_history.lock().unwrap();
+    h.clear();
 }
 
 #[tauri::command]

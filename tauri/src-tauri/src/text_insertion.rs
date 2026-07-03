@@ -181,20 +181,20 @@ fn best_effort_verified(
     target_context: Option<ActiveTargetContext>,
 ) -> TextInsertionResult {
     if !minutes_core::hotkey_macos::is_accessibility_trusted() {
-        return copy_after_block(request, target_context, "Accessibility permission is required to type into the active app. Copied dictation instead.");
+        return copy_after_block(request, target_context, "needs Accessibility to insert");
     }
 
     let before_value = focused_ax_value().ok();
 
-    match paste_via_clipboard(&request.text) {
-        Ok(()) => {
+    match paste_via_clipboard_restoring(
+        &request.text,
+        request.restore_clipboard,
+        request.clipboard_snapshot.as_deref(),
+    ) {
+        Ok(restored) => {
             let verified = focused_ax_value().ok().is_some_and(|after| {
                 before_value.as_ref() != Some(&after) && after.contains(&request.text)
             });
-            let restored = restore_clipboard_if_requested(
-                request.restore_clipboard,
-                request.clipboard_snapshot.as_deref(),
-            );
             TextInsertionResult {
                 outcome: if verified {
                     InsertOutcome::Typed
@@ -322,6 +322,7 @@ fn copy_after_block(
     }
 }
 
+#[cfg(not(target_os = "macos"))]
 fn restore_clipboard_if_requested(restore: bool, snapshot: Option<&str>) -> bool {
     if !restore {
         return false;
@@ -331,6 +332,26 @@ fn restore_clipboard_if_requested(restore: bool, snapshot: Option<&str>) -> bool
     };
     std::thread::sleep(Duration::from_millis(150));
     write_clipboard(snapshot).is_ok()
+}
+
+fn clipboard_paste_restore_with(
+    text: &str,
+    restore: bool,
+    snapshot: Option<&str>,
+    mut write: impl FnMut(&str) -> Result<(), String>,
+    mut paste: impl FnMut() -> Result<(), String>,
+    mut wait_before_restore: impl FnMut(),
+) -> Result<bool, String> {
+    write(text)?;
+    paste()?;
+    if restore {
+        if let Some(snapshot) = snapshot {
+            wait_before_restore();
+            write(snapshot)?;
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn write_clipboard(text: &str) -> Result<(), String> {
@@ -377,8 +398,23 @@ fn write_clipboard(text: &str) -> Result<(), String> {
 }
 
 #[cfg(target_os = "macos")]
-fn paste_via_clipboard(text: &str) -> Result<(), String> {
-    write_clipboard(text)?;
+fn paste_via_clipboard_restoring(
+    text: &str,
+    restore: bool,
+    snapshot: Option<&str>,
+) -> Result<bool, String> {
+    clipboard_paste_restore_with(
+        text,
+        restore,
+        snapshot,
+        write_clipboard,
+        simulate_macos_paste,
+        || std::thread::sleep(Duration::from_millis(150)),
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn simulate_macos_paste() -> Result<(), String> {
     let output = std::process::Command::new("osascript")
         .arg("-e")
         .arg(r#"tell application "System Events" to keystroke "v" using command down"#)
@@ -841,6 +877,63 @@ mod tests {
             message: String::new(),
         };
         assert_eq!(result.overlay_state(), "error");
+    }
+
+    #[test]
+    fn clipboard_paste_restore_orders_operations() {
+        let operations = std::cell::RefCell::new(Vec::new());
+        let restored = clipboard_paste_restore_with(
+            "dictated text",
+            true,
+            Some("previous clipboard"),
+            |text| {
+                operations.borrow_mut().push(format!("write:{text}"));
+                Ok(())
+            },
+            || {
+                operations.borrow_mut().push("paste".into());
+                Ok(())
+            },
+            || operations.borrow_mut().push("wait".into()),
+        )
+        .expect("clipboard flow should succeed");
+
+        assert!(restored);
+        assert_eq!(
+            operations.into_inner(),
+            vec![
+                "write:dictated text",
+                "paste",
+                "wait",
+                "write:previous clipboard"
+            ]
+        );
+    }
+
+    #[test]
+    fn clipboard_paste_restore_skips_restore_without_snapshot() {
+        let operations = std::cell::RefCell::new(Vec::new());
+        let restored = clipboard_paste_restore_with(
+            "dictated text",
+            true,
+            None,
+            |text| {
+                operations.borrow_mut().push(format!("write:{text}"));
+                Ok(())
+            },
+            || {
+                operations.borrow_mut().push("paste".into());
+                Ok(())
+            },
+            || operations.borrow_mut().push("wait".into()),
+        )
+        .expect("clipboard flow should succeed");
+
+        assert!(!restored);
+        assert_eq!(
+            operations.into_inner(),
+            vec!["write:dictated text", "paste"]
+        );
     }
 
     #[test]

@@ -207,7 +207,7 @@
     .label {
       font-size: var(--text-base);
       font-weight: 600;
-      letter-spacing: -0.02em;
+      letter-spacing: 0;
       color: var(--text);
       flex: 1;
       white-space: nowrap;
@@ -223,7 +223,7 @@
       color: var(--text-secondary);
       font-variant-numeric: tabular-nums;
       flex-shrink: 0;
-      letter-spacing: 0.02em;
+      letter-spacing: 0;
       transition: opacity 180ms ease, transform 180ms ease;
     }
 
@@ -244,6 +244,16 @@
       transition: height 120ms ease, opacity 120ms ease;
       min-height: 5px;
       opacity: 0.75;
+    }
+
+    .waveform.processing .bar {
+      animation: quietPulse 900ms ease-in-out infinite;
+      opacity: 0.55;
+    }
+
+    @keyframes quietPulse {
+      0%, 100% { height: 6px; opacity: 0.42; }
+      50% { height: 12px; opacity: 0.72; }
     }
 
     .soft-swap {
@@ -366,6 +376,8 @@
     let partialDebounce = null;
     let silenceTimeout = null;
     let silenceStartTime = null;
+    let silentSince = null;
+    let insertionMessage = '';
 
     Object.assign(cues.start, { volume: 0.18 });
     Object.assign(cues.stop, { volume: 0.16 });
@@ -379,7 +391,7 @@
     }
 
     function startTimer() {
-      startTime = Date.now();
+      if (!startTime) startTime = Date.now();
       timerInterval = setInterval(() => {
         const elapsed = (Date.now() - startTime) / 1000;
         timer.textContent = formatTime(elapsed);
@@ -470,6 +482,16 @@
       silenceStartTime = null;
     }
 
+    function resetSessionClock() {
+      stopTimer();
+      startTime = null;
+      timer.textContent = '0:00';
+    }
+
+    function setWaveformProcessing(processing) {
+      waveform.classList.toggle('processing', processing);
+    }
+
     // Listen for state changes from Tauri backend
     listen('dictation:state', (e) => {
       const state = e.payload;
@@ -499,9 +521,11 @@
       stopTimer();
       hideSilenceBar();
       soften(label);
+      setWaveformProcessing(false);
 
       switch (state) {
         case 'loading':
+          resetSessionClock();
           setIndicator('spinner');
           label.textContent = 'Loading model\u2026';
           waveform.style.display = 'none';
@@ -512,11 +536,12 @@
         case 'listening':
           setIndicator('dot-blink');
           label.textContent = 'Listening\u2026';
-          waveform.style.display = 'none';
-          timer.style.display = 'none';
+          waveform.style.display = 'flex';
+          timer.style.display = '';
           showExpanded(false);
           partialText = '';
           setTextContent('...', true);
+          if (!startTime) startTimer();
           break;
 
         case 'accumulating':
@@ -530,9 +555,10 @@
           break;
 
         case 'processing':
-          // Seamless transition: keep "Dictating" label, swap dot for spinner
-          setIndicator('spinner');
-          waveform.style.display = 'none';
+          setIndicator('none');
+          label.textContent = 'Processing';
+          waveform.style.display = 'flex';
+          setWaveformProcessing(true);
           // timer stays frozen (don't hide it)
           // Stay compact — will expand when success shows final text
           showExpanded(false);
@@ -553,12 +579,11 @@
         case 'success':
         case 'copied':
           setIndicator('success');
-          label.textContent = 'Copied';
+          label.textContent = state === 'copied' ? 'Copied' : 'Done';
           waveform.style.display = 'none';
           timer.style.display = 'none';
           showExpanded(true);
-          // Auto-dismiss after 2.5s. Click to dismiss early.
-          setTimeout(() => dismiss(), 2500);
+          setTimeout(() => dismiss(), 400);
           break;
 
         case 'typed':
@@ -567,7 +592,7 @@
           waveform.style.display = 'none';
           timer.style.display = 'none';
           showExpanded(true);
-          setTimeout(() => dismiss(), 2500);
+          setTimeout(() => dismiss(), 400);
           break;
 
         case 'pasted':
@@ -576,22 +601,23 @@
           waveform.style.display = 'none';
           timer.style.display = 'none';
           showExpanded(true);
-          setTimeout(() => dismiss(), 2500);
+          setTimeout(() => dismiss(), 400);
           break;
 
         case 'blocked':
-          setIndicator('success');
-          label.textContent = 'Copied instead';
+          pill.classList.add('error');
+          setIndicator('error');
+          label.textContent = insertionMessage || 'needs Accessibility to insert';
           waveform.style.display = 'none';
           timer.style.display = 'none';
-          showExpanded(true);
-          setTimeout(() => dismiss(), 3500);
+          showExpanded(false);
+          setTimeout(() => dismiss(), 2500);
           break;
 
         case 'error':
           pill.classList.add('error');
           setIndicator('error');
-          label.textContent = 'Failed \u2014 audio saved';
+          label.textContent = 'mic silent, check input device';
           waveform.style.display = 'none';
           timer.style.display = 'none';
           showExpanded(false);
@@ -631,11 +657,28 @@
     listen('dictation:level', (e) => {
       const level = e.payload; // 0-100
       const normalized = level / 100;
+      if ((lastState === 'listening' || lastState === 'accumulating') && level <= 1) {
+        silentSince = silentSince || Date.now();
+        if (Date.now() - silentSince > 1000) {
+          pill.classList.add('error');
+          label.textContent = 'mic silent, check input device';
+        }
+      } else if (level > 1) {
+        silentSince = null;
+        if (lastState === 'listening' || lastState === 'accumulating') {
+          pill.classList.remove('error');
+          label.textContent = lastState === 'accumulating' ? 'Dictating' : 'Listening\u2026';
+        }
+      }
       bars.forEach((bar, i) => {
         const variance = Math.sin((i / bars.length) * Math.PI + Date.now() / 200) * 0.3 + 0.7;
         const h = 4 + normalized * 12 * variance;
         bar.style.height = `${Math.max(4, Math.min(16, h))}px`;
       });
+    });
+
+    listen('dictation:insertion', (e) => {
+      insertionMessage = e.payload?.message || '';
     });
 
     // Listen for silence countdown (emitted by backend as ms remaining)

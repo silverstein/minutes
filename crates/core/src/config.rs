@@ -660,7 +660,7 @@ impl Default for DictationConfig {
     fn default() -> Self {
         Self {
             backend: "whisper".into(),
-            destination: "clipboard".into(),
+            destination: "insert".into(),
             accumulate: true,
             daily_note_log: true,
             cleanup_engine: "rules".into(),
@@ -2414,6 +2414,30 @@ mod sidecar_tristate_tests {
                 .parakeet_sidecar_enabled,
             Some(true)
         );
+    }
+}
+
+#[cfg(test)]
+mod dictation_destination_tests {
+    use super::*;
+
+    #[test]
+    fn dictation_destination_defaults_to_insert() {
+        let config = Config::default();
+        assert_eq!(config.dictation.destination, "insert");
+    }
+
+    #[test]
+    fn explicit_clipboard_destination_overrides_insert_default() {
+        let config: Config = toml::from_str(
+            r#"
+[dictation]
+destination = "clipboard"
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(config.dictation.destination, "clipboard");
     }
 }
 

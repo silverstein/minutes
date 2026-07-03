@@ -816,6 +816,9 @@ fn stop_slot_session(app: &tauri::AppHandle, slot: ShortcutSlot, discard: bool) 
             }
         }
         ShortcutSlot::Dictation => {
+            if let Ok(mut released_at) = state.dictation_release_started_at.lock() {
+                *released_at = Some(Instant::now());
+            }
             state.dictation_stop_flag.store(true, Ordering::Relaxed);
         }
     }
@@ -1004,6 +1007,28 @@ mod tests {
         sm.key_down_started_at = Some(Instant::now()); // ensure it's "just now"
         let action = sm.handle_release(false);
         assert!(matches!(action, StateMachineAction::StartLocked));
+    }
+
+    #[test]
+    fn state_machine_discriminates_tap_under_threshold_from_hold() {
+        let mut sm = ShortcutStateMachine::default();
+        sm.handle_press();
+        sm.key_down_started_at = Some(Instant::now() - Duration::from_millis(299));
+
+        let action = sm.handle_release(false);
+
+        assert!(matches!(action, StateMachineAction::StartLocked));
+    }
+
+    #[test]
+    fn state_machine_release_after_threshold_without_hold_start_is_ignored() {
+        let mut sm = ShortcutStateMachine::default();
+        sm.handle_press();
+        sm.key_down_started_at = Some(Instant::now() - Duration::from_millis(301));
+
+        let action = sm.handle_release(false);
+
+        assert!(matches!(action, StateMachineAction::None));
     }
 
     #[test]

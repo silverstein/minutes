@@ -1444,6 +1444,7 @@ fn main() {
     let discard_short_hotkey_capture = Arc::new(AtomicBool::new(false));
     let dictation_active = Arc::new(AtomicBool::new(false));
     let dictation_stop_flag = Arc::new(AtomicBool::new(false));
+    let dictation_release_started_at = Arc::new(Mutex::new(None));
     let live_transcript_active = Arc::new(AtomicBool::new(false));
     let live_transcript_stop_flag = Arc::new(AtomicBool::new(false));
     let screen_share_hidden = Arc::new(AtomicBool::new(
@@ -1565,6 +1566,9 @@ fn main() {
                                 if let Some(slot) = mgr.find_slot_for_shortcut_id(shortcut_id) {
                                     match event.state() {
                                         tauri_plugin_global_shortcut::ShortcutState::Pressed => {
+                                            if slot == shortcut_manager::ShortcutSlot::Dictation {
+                                                commands::capture_pending_dictation_target(app);
+                                            }
                                             let hold_info = mgr.handle_press(slot);
                                             Some((slot, None, hold_info))
                                         }
@@ -1688,6 +1692,7 @@ fn main() {
             dictation_stop_flag: dictation_stop_flag.clone(),
             dictation_focus_guard: Arc::new(Mutex::new(None)),
             pending_dictation_target: Arc::new(Mutex::new(None)),
+            dictation_release_started_at: dictation_release_started_at.clone(),
             live_transcript_active: live_transcript_active.clone(),
             live_transcript_stop_flag: live_transcript_stop_flag.clone(),
             live_shortcut_enabled: {

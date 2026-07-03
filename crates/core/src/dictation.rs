@@ -188,6 +188,8 @@ pub enum DictationEvent {
     Processing,
     /// Partial transcription (streaming mode) — text updates progressively.
     PartialText(String),
+    /// Input level 0-100 for lightweight UI feedback.
+    AudioLevel(u32),
     /// Silence countdown: total timeout ms, remaining ms.
     SilenceCountdown {
         total_ms: u64,
@@ -484,6 +486,9 @@ where
             };
 
             let vad_result = vad.process(chunk.rms);
+            on_event(DictationEvent::AudioLevel(
+                crate::streaming::stream_audio_level(),
+            ));
 
             if vad_result.speaking {
                 if !was_speaking {

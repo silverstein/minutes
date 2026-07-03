@@ -9714,6 +9714,8 @@ fn cmd_dictate(stdout: bool, note_only: bool, config: &Config) -> Result<()> {
         config.dictation.daily_note_log = !note_only;
     } else if note_only {
         config.dictation.destination = "daily_note".into();
+    } else if config.dictation.destination == "insert" {
+        config.dictation.destination = "clipboard".into();
     }
 
     minutes_core::dictation::run(
@@ -9729,6 +9731,7 @@ fn cmd_dictate(stdout: bool, note_only: bool, config: &Config) -> Result<()> {
                     // Clear line and show partial text (streaming preview)
                     eprint!("\r\x1b[K[minutes] {}", text);
                 }
+                DictationEvent::AudioLevel(_) => {}
                 DictationEvent::SilenceCountdown { .. } => {} // CLI doesn't show countdown
                 DictationEvent::Success => {
                     eprintln!(); // newline after partial text

@@ -5298,6 +5298,16 @@
         </div>
         <div class="about-controls">
           <div class="about-controls-group">
+            <div class="about-controls-copy">Where dictated text goes</div>
+            <select id="settings-dictation-destination" class="settings-field">
+              <option value="insert">Type at cursor — inserts into the app you're in (needs Accessibility)</option>
+              <option value="clipboard">Copy to clipboard — paste it yourself</option>
+            </select>
+            <div class="about-controls-meta">"Type at cursor" pastes the transcript straight into the focused app. macOS asks for Accessibility permission the first time; until granted it falls back to the clipboard.</div>
+          </div>
+        </div>
+        <div class="about-controls">
+          <div class="about-controls-group">
             <div class="about-controls-copy">Dictation whisper model</div>
             <select id="settings-dictation-model" class="settings-field">
               <option value="tiny">tiny — fastest, lower quality</option>
@@ -9474,6 +9484,9 @@
         }
         // Dictation settings
         if (s.dictation) {
+          // Empty/unset destination means the compiled default (insert).
+          document.getElementById('settings-dictation-destination').value =
+            (s.dictation.destination && s.dictation.destination !== '') ? s.dictation.destination : 'insert';
           document.getElementById('settings-dictation-model').value = s.dictation.model || 'base';
           setSettingsToggle('settings-dictation-daily-note', s.dictation.daily_note_log !== false);
           document.getElementById('settings-dictation-silence').value = String(s.dictation.silence_timeout_ms || 2000);
@@ -10345,6 +10358,7 @@
         document.getElementById('settings-dictation-shortcut-status').textContent = String(e2);
       }
     });
+    document.getElementById('settings-dictation-destination').addEventListener('change', (e) => invoke('cmd_set_setting', { section: 'dictation', key: 'destination', value: e.target.value }));
     document.getElementById('settings-dictation-model').addEventListener('change', (e) => invoke('cmd_set_setting', { section: 'dictation', key: 'model', value: e.target.value }));
     document.getElementById('settings-dictation-silence').addEventListener('change', (e) => invoke('cmd_set_setting', { section: 'dictation', key: 'silence_timeout_ms', value: e.target.value }));
     document.getElementById('settings-dictation-daily-note').addEventListener('click', async () => {

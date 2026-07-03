@@ -1493,8 +1493,11 @@
 
     body.sidebar-collapsed .sidebar-collapse-btn {
       position: fixed;
-      left: 10px;
-      top: 40px;
+      /* Match the button's expanded in-flow spot (search-wrap has 16px left
+         padding; the row sits ~88px down) so collapsing/expanding only rotates
+         the chevron instead of teleporting it vertically. */
+      left: 16px;
+      top: 88px;
       z-index: 40;
       background: var(--bg);
     }
@@ -8754,6 +8757,13 @@
       documentsViewActive = active;
       documentsToggle.classList.toggle('is-active', active);
       documentsToggle.setAttribute('aria-pressed', active ? 'true' : 'false');
+      // Label the button with its DESTINATION so returning to meetings is
+      // self-evident: it reads "Meetings" while documents are showing.
+      documentsToggle.textContent = active ? 'Meetings' : 'Documents';
+      documentsToggle.setAttribute(
+        'aria-label',
+        active ? 'Back to meetings' : 'Show documents',
+      );
       searchInput.disabled = active;
       searchInput.placeholder = active ? 'Documents' : 'Search recordings...';
       if (active) {

@@ -935,10 +935,11 @@ brew install ffmpeg           # macOS
 # Enable speaker diarization (optional, ~34MB ONNX models)
 minutes setup --diarization
 
-# Recommended SOTA engine: Sherpa (in-process sherpa-onnx running parakeet-tdt-0.6b-v3).
-# Lower error rate than equivalent Whisper, multilingual (EN/FR/ES and more EU
-# languages), no Python and no sidecar binary. Opt-in: compile the CLI with
-# `--features engine-sherpa`, then enable it in one command:
+# Experimental engine: Sherpa (in-process sherpa-onnx running parakeet-tdt-0.6b-v3).
+# Newer multilingual model (EN/FR/ES and more EU languages), no Python. Opt-in and
+# NOT yet the recommended daily engine: in real-meeting A/B it trails the Parakeet
+# engine on segmentation/casing (see issue #369). Compile with `--features
+# engine-sherpa`, then enable in one command:
 minutes setup --sherpa        # downloads the int8 ONNX model (~670MB) + sets engine = "sherpa"
 # If you select sherpa without the feature/model, transcription auto-falls-back
 # to Whisper (the bundled default), so a recording never breaks. See docs/SHERPA-ENGINE.md.

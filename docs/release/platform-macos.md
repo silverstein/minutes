@@ -115,8 +115,8 @@ first and then run the same commands.
   binaries become a requirement later, track that separately instead of
   complicating this first trusted pipeline.
 - Windows desktop release guidance lives in
-  [docs/RELEASE-WINDOWS.md](/docs/RELEASE-WINDOWS.md).
+  [docs/release/platform-windows.md](/docs/release/platform-windows.md).
 - Channel and rollback rules live in
-  [docs/RELEASE-CHANNELS.md](/docs/RELEASE-CHANNELS.md).
+  [docs/release/channels.md](/docs/release/channels.md).
 - Reproducible release-note generation lives in
-  [docs/RELEASE-NOTES.md](/docs/RELEASE-NOTES.md).
+  [docs/release/notes-index.md](/docs/release/notes-index.md).

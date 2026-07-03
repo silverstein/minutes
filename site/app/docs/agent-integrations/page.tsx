@@ -45,7 +45,7 @@ const checklist = [
   "Identify whether the host supports file reads, MCP, .agents skill discovery, host-specific skill discovery, and non-interactive CLI prompts.",
   "Reuse .agents/skills when the host already discovers it. Do not add a duplicate generated tree just for symmetry.",
   "Add a host-specific skill compiler target only when the host cannot consume the portable skill pack.",
-  "For summarization backends, update summarize.rs, desktop settings, docs/CONFIG.md, and targeted invocation tests.",
+  "For summarization backends, update summarize.rs, desktop settings, docs/architecture/config.md, and targeted invocation tests.",
   "For model providers, prefer one generic OpenAI-compatible backend with presets over one top-level engine per gateway.",
   "For routing evals, update tooling/skills/compiler/agent-routing.ts and run the routing-agent smoke where auth allows.",
   "Update README, /for-agents, product-surfaces.json, manifest.json, llms.txt, and any provider-specific docs.",
@@ -241,10 +241,10 @@ export default function AgentIntegrationsPage() {
         <p className="text-[14px] leading-7 text-[var(--text-secondary)]">
           The full contributor checklist lives in{" "}
           <a
-            href="https://github.com/silverstein/minutes/blob/main/docs/AGENT-INTEGRATIONS.md"
+            href="https://github.com/silverstein/minutes/blob/main/docs/integration/agent-integrations.md"
             className="text-[var(--accent)] hover:underline"
           >
-            docs/AGENT-INTEGRATIONS.md
+            docs/integration/agent-integrations.md
           </a>
           . It names the exact files to update for compiler hosts,
           summarization backends, routing evals, and generated public agent docs.

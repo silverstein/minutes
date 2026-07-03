@@ -63,7 +63,7 @@ pub struct AppState {
     /// Explicit lifecycle state for the palette overlay window. Tracked as a
     /// four-state machine (Closed/Opening/Open/Closing) rather than a boolean
     /// so fast `⌘⇧K` mashing during the close path doesn't eat keypresses.
-    /// See PLAN.md.command-palette-slice-2 D3.
+    /// See docs/plans/command-palette-slice-2.md D3.
     pub palette_lifecycle: Arc<Mutex<PaletteLifecycle>>,
     /// Set when a hotkey press lands in the `Closing` state. The close path
     /// drains this flag on completion and re-opens the palette if it was set.
@@ -13578,7 +13578,7 @@ fn palette_first_run_marker() -> PathBuf {
 /// ON for both fresh installs and upgrades, but fires this
 /// notification on the first launch so users with a real conflict
 /// hear about it immediately and can disable from the settings UI in
-/// one click. See PLAN.md.command-palette-slice-2 D10 (post-fix).
+/// one click. See docs/plans/command-palette-slice-2.md D10 (post-fix).
 pub fn maybe_show_palette_first_run_notice(app: &tauri::AppHandle) {
     let marker = palette_first_run_marker();
     if marker.exists() {

@@ -38,7 +38,7 @@ path as the **first runtime fallback**. If `engine = "apple-speech"` is set for
 `minutes live` and Apple Speech cannot run or fails mid-session, Minutes tries
 a ready Parakeet backend before falling back to Whisper. Apple Speech itself is
 still configured separately and remains standalone-live-only; this note is just
-about the fallback order behind that path. See [`docs/APPLE_SPEECH.md`](APPLE_SPEECH.md)
+about the fallback order behind that path. See [`docs/architecture/apple-speech.md`](apple-speech.md)
 for the current Apple Speech scope and desktop-settings limitation.
 
 Strongly recommended for live use: install `example-server` (the sidecar then auto-enables; `parakeet_sidecar_enabled = true` forces it) and

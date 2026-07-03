@@ -190,7 +190,7 @@ pub struct TranscriptionConfig {
     /// for users who explicitly accept the regression tradeoff.
     /// FSM tuning (candidates: max-chunk cap or chunk-boundary
     /// smoothing) is needed before promotion to the general
-    /// default; see `PLAN-vad-refactor.md` and the harness at
+    /// default; see `docs/plans/vad-refactor.md` and the harness at
     /// `crates/core/examples/dogfood_vad_engines.rs`.
     ///
     /// **`"whisper-silero"`**: whisper-rs's bundled Silero,

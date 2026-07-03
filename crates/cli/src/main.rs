@@ -6496,7 +6496,7 @@ fn cmd_setup_parakeet(model: &str) -> Result<()> {
                 "To build it, configure parakeet.cpp with -DPARAKEET_BUILD_SERVER_EXAMPLE=ON"
             );
             eprintln!("and copy build/**/example-server next to your parakeet binary.");
-            eprintln!("Details: https://github.com/silverstein/minutes/blob/main/docs/PARAKEET.md");
+            eprintln!("Details: https://github.com/silverstein/minutes/blob/main/docs/architecture/parakeet.md");
         }
     }
 

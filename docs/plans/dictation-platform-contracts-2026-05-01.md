@@ -36,9 +36,9 @@ Current code to preserve while extending the system:
 - `tauri/src-tauri/src/commands.rs` maps `DictationEvent` into overlay events
   and contains a separate macOS clipboard/paste helper for latest artifacts.
 - `tauri/src/dictation-overlay.html` renders the live dictation state machine.
-- `docs/APPLE_SPEECH.md` says Apple Speech is standalone-live-only today, not
+- `docs/architecture/apple-speech.md` says Apple Speech is standalone-live-only today, not
   dictation.
-- `docs/PARAKEET.md` says dictation still uses Whisper because current Parakeet
+- `docs/architecture/parakeet.md` says dictation still uses Whisper because current Parakeet
   live integrations are utterance-granular and do not match dictation partials.
 - `crates/core/src/vocabulary.rs` already defines the local vocabulary store for
   names, organizations, projects, acronyms, and recurring terms.

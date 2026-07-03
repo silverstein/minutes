@@ -166,8 +166,8 @@ For each platform, record:
 If runtime behavior is materially narrower than the current docs or UI imply,
 update:
 
-- `docs/CONFIG.md`
-- `docs/DESKTOP-DEVELOPMENT.md`
+- `docs/architecture/config.md`
+- `docs/development/desktop-development.md`
 - any desktop-context settings copy in the app UI
 
 ## Exit criteria for this checklist

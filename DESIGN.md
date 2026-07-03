@@ -261,4 +261,4 @@ How the app feels, held to like the accent rule:
 - **Status speaks in --text-meta mono.** Whisper, do not announce. Sounds, where they exist, are dry ticks, never melodies.
 - **Speed is the first delight.** High-frequency actions must feel instant; show real progress (streamed partials), never spinners.
 - **Warmth is budgeted like the accent color**: at most one human touch per surface, chosen deliberately.
-- **UI changes ship with a human feel-test** in the installed dev app (see docs/PRE-COMMIT.md) covering timing and rhythm, not just correctness.
+- **UI changes ship with a human feel-test** in the installed dev app (see docs/checklists/pre-commit.md) covering timing and rhythm, not just correctness.

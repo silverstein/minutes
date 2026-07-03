@@ -90,14 +90,14 @@ fallback, not as the default desktop experience.
    - targeted `prepare_agent_invocation_*` tests
    - `tauri/src-tauri/src/commands.rs`
    - `tauri/src/index.html`
-   - `docs/CONFIG.md`
+   - `docs/architecture/config.md`
 
 5. If adding a direct model backend rather than an agent host, update:
    - `crates/core/src/summarize.rs`
    - `SummarizationConfig` in `crates/core/src/config.rs`
    - desktop settings and validation in `tauri/src-tauri/src/commands.rs`
    - `tauri/src/index.html`
-   - `docs/CONFIG.md`
+   - `docs/architecture/config.md`
    - provider-specific docs only when there are real caveats
 
 6. If the host should participate in routing evals, update:
@@ -109,7 +109,7 @@ fallback, not as the default desktop experience.
    - `site/app/for-agents/page.tsx`
    - `site/lib/product-surfaces.json`
    - `manifest.json`
-   - `docs/CONFIG.md`
+   - `docs/architecture/config.md`
    - `docs/<agent>.md` when the host has provider-specific caveats
    - run `node scripts/generate_llms_txt.mjs`
 

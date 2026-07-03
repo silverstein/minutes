@@ -630,7 +630,7 @@ pub mod recents {
     //! intentionally schema-versioned **and** the entry list is parsed as
     //! raw `serde_json::Value` rather than as strongly-typed `ActionId` so
     //! a downgraded older client never silently eats entries written by a
-    //! newer client. See D5 of `PLAN.md.command-palette-slice-2`.
+    //! newer client. See D5 of `docs/plans/command-palette-slice-2.md`.
     //!
     //! # Format
     //!

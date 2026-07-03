@@ -82,18 +82,18 @@ impl TranscriptSource {
     }
 }
 
-pub const PARAKEET_SCOPE_DOC_REF: &str = "docs/PARAKEET.md#scope";
+pub const PARAKEET_SCOPE_DOC_REF: &str = "docs/architecture/parakeet.md#scope";
 /// Shown at session start when the user configured `engine = "parakeet"` but the
 /// binary was built without the `parakeet` Cargo feature. The engine choice is
 /// silently honored as whisper for this session.
 pub const PARAKEET_LIVE_SCOPE_WARNING: &str =
-    "this build does not include parakeet; live transcription uses whisper (see docs/PARAKEET.md#scope)";
+    "this build does not include parakeet; live transcription uses whisper (see docs/architecture/parakeet.md#scope)";
 /// Shown at runtime when the parakeet engine IS compiled in but fails during a
 /// live session (warmup error, sidecar unreachable, transcribe error). The
 /// session transparently falls back to whisper for the remainder.
 #[cfg(feature = "parakeet")]
 pub const PARAKEET_LIVE_FALLBACK_WARNING: &str =
-    "parakeet live transcription failed; falling back to whisper for this session (see docs/PARAKEET.md#scope)";
+    "parakeet live transcription failed; falling back to whisper for this session (see docs/architecture/parakeet.md#scope)";
 
 pub const APPLE_SPEECH_SCOPE_DOC_REF: &str = "docs/designs/apple-speech-benchmark-2026-04-22.md";
 pub const APPLE_SPEECH_LIVE_SCOPE_WARNING: &str =
@@ -3354,7 +3354,7 @@ mod tests {
         (ort_speak, whisper_speak)
     }
 
-    /// Apply the codex parity bar from PLAN-vad-refactor.md to
+    /// Apply the codex parity bar from docs/plans/vad-refactor.md to
     /// per-chunk speaking flags from both engines. `label` shows up
     /// in the eprintln preamble so test output is greppable per
     /// fixture.
@@ -3611,7 +3611,7 @@ mod tests {
     }
 
     /// SPIKE — does whisper-rs's Silero VAD carry LSTM state across
-    /// `detect_speech` calls? If yes, Option A in PLAN-vad-refactor.md is
+    /// `detect_speech` calls? If yes, Option A in docs/plans/vad-refactor.md is
     /// viable: feed only new-since-last-call samples per chunk, accumulate
     /// probabilities externally. If no, the per-chunk re-scan is structural
     /// and Option B (independent ort-backed Silero) is required.

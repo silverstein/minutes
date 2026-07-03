@@ -2,7 +2,7 @@
 
 - **Status**: Draft
 - **Authors**: @silverstein
-- **Related**: `docs/PARAKEET.md#scope`, `docs/designs/parakeet-warm-server-sidecar-2026-04-14.md`, `docs/designs/parakeet-perf-2026-04-14.md`
+- **Related**: `docs/architecture/parakeet.md#scope`, `docs/designs/parakeet-warm-server-sidecar-2026-04-14.md`, `docs/designs/parakeet-perf-2026-04-14.md`
 - **Created**: 2026-04-17
 
 ## Summary
@@ -11,7 +11,7 @@ Wire the Parakeet transcription engine into the standalone live transcript path 
 
 ## Motivation
 
-`docs/PARAKEET.md#scope` documents a real gap: `engine = "parakeet"` is honored for batch transcription, folder-watcher memos, and the recording-sidecar live path, but NOT for standalone live (`minutes live`) or dictation. Users who configure parakeet and run `minutes live` silently get whisper instead, with a `tracing::warn!` and no user-visible signal that the engine choice was ignored.
+`docs/architecture/parakeet.md#scope` documents a real gap: `engine = "parakeet"` is honored for batch transcription, folder-watcher memos, and the recording-sidecar live path, but NOT for standalone live (`minutes live`) or dictation. Users who configure parakeet and run `minutes live` silently get whisper instead, with a `tracing::warn!` and no user-visible signal that the engine choice was ignored.
 
 This gap exists because:
 
@@ -100,11 +100,11 @@ Match the recording-sidecar's approach exactly:
 Two distinct user-visible messages, each with a clear trigger:
 
 **Scope warning** (`PARAKEET_LIVE_SCOPE_WARNING`): fires at session start when the user configured `engine = "parakeet"` but the binary was built without the `parakeet` Cargo feature.
-- Message: `"this build does not include parakeet; live transcription uses whisper (see docs/PARAKEET.md#scope)"`
+- Message: `"this build does not include parakeet; live transcription uses whisper (see docs/architecture/parakeet.md#scope)"`
 - Source field: `"standalone"` or `"recording-sidecar"`
 
 **Runtime fallback warning** (`PARAKEET_LIVE_FALLBACK_WARNING`): fires when the parakeet engine IS compiled in but fails mid-session (transcribe error). The session transparently switches to whisper for the remainder.
-- Message: `"parakeet live transcription failed; falling back to whisper for this session (see docs/PARAKEET.md#scope)"`
+- Message: `"parakeet live transcription failed; falling back to whisper for this session (see docs/architecture/parakeet.md#scope)"`
 - Source field + detail: identifies which path failed and why
 
 Both write to stderr, tracing, and the JSON structured log.
@@ -126,7 +126,7 @@ Sub-1s VAD blips are dropped before reaching the parakeet sidecar/subprocess, ma
   - Rename `PARAKEET_RECORDING_LIVE_SCOPE_WARNING` → `PARAKEET_LIVE_SCOPE_WARNING` and update message.
   - Call `warmup_active_backend` at session start when `engine == "parakeet"`.
 - `crates/core/src/transcription_coordinator.rs`: no code change; `warmup_active_backend` already handles both sidecar and subprocess lanes.
-- `docs/PARAKEET.md`: update `## Scope` section to list standalone live as parakeet-wired. Keep dictation listed as whisper-only.
+- `docs/architecture/parakeet.md`: update `## Scope` section to list standalone live as parakeet-wired. Keep dictation listed as whisper-only.
 - `CLAUDE.md`: no change. The architecture description already covers the shared helper pattern.
 
 ### Phase 2: dictation (future RFC)
@@ -196,7 +196,7 @@ Summary of issues found and resolved before landing:
 | RFC promised user-visible "Warming parakeet sidecar..." stderr line; code didn't emit it | codex | drift | Implemented on stderr before + after warmup |
 | RFC promised 1s minimum-audio floor; code did not apply it | codex | drift | Added `PARAKEET_LIVE_MIN_SAMPLES = 16_000` + two tests |
 | Fallback path had zero test coverage | Claude | important | Added `scope_and_fallback_warnings_are_distinct_messages`, `parakeet_live_helper_drops_subsecond_utterances`, `parakeet_live_helper_threshold_edges` |
-| Docs presented parakeet live as unconditional once feature is on, but still requires whisper feature for runtime fallback | codex | doc drift | Added note to `docs/PARAKEET.md#scope` clarifying whisper is required |
+| Docs presented parakeet live as unconditional once feature is on, but still requires whisper feature for runtime fallback | codex | doc drift | Added note to `docs/architecture/parakeet.md#scope` clarifying whisper is required |
 
 Net result: the implementation is stricter about silent-failure modes than the recording-sidecar pattern it was originally copied from — and the recording-sidecar itself was patched to use the new `emit_live_engine_fallback_warning` for its runtime fallback sites.
 

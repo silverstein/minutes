@@ -347,7 +347,7 @@ This section is the policy layer for meeting-adjacent desktop context:
 - domain lists are forward-compatible policy hooks for future browser URL enrichment
 
 For real desktop validation of the Windows and Linux collectors, use
-[DESKTOP-CONTEXT-RUNTIME-CHECKLIST.md](./DESKTOP-CONTEXT-RUNTIME-CHECKLIST.md).
+[../checklists/desktop-context-runtime-checklist.md](../checklists/desktop-context-runtime-checklist.md).
 
 ### `[search]` — search backend
 

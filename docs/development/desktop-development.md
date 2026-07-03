@@ -4,7 +4,7 @@ This guide is specifically for the macOS desktop app identity and TCC-sensitive
 development workflow.
 
 If you are looking for Windows desktop packaging or release behavior, use
-[docs/RELEASE-WINDOWS.md](/docs/RELEASE-WINDOWS.md)
+[docs/release/platform-windows.md](/docs/release/platform-windows.md)
 instead.
 
 This project has two distinct desktop app identities on macOS:
@@ -196,7 +196,7 @@ breaking Windows builds or local build scripts.
 Compile/build coverage for desktop-context parity now runs in CI on macOS,
 Windows, and Ubuntu, but runtime truth still needs real desktop sessions.
 
-Use [DESKTOP-CONTEXT-RUNTIME-CHECKLIST.md](./DESKTOP-CONTEXT-RUNTIME-CHECKLIST.md)
+Use [../checklists/desktop-context-runtime-checklist.md](../checklists/desktop-context-runtime-checklist.md)
 when validating:
 
 - Windows foreground app/window-title capture on an actual Windows desktop

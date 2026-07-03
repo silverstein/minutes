@@ -19,7 +19,7 @@
 // cost of running whisper-rs's Silero on the full 3–8 s sliding
 // buffer every 100 ms. With per-chunk streaming, cost is
 // O(new_audio): a 100 ms call processes ~3 chunks of 512 samples,
-// each ~0.5 ms of inference. PLAN-vad-refactor.md has the full
+// each ~0.5 ms of inference. docs/plans/vad-refactor.md has the full
 // rationale.
 //
 // The ONNX I/O contract was codex-verified against the
@@ -107,7 +107,7 @@ impl OrtSileroVad {
     /// Build with custom smoothing parameters. Mostly useful for
     /// tests; production should stick to the whisper-Silero defaults
     /// so behavior matches the existing engine within the tolerance
-    /// PLAN-vad-refactor.md documents.
+    /// docs/plans/vad-refactor.md documents.
     pub fn with_params(
         silero_vad_path: &Path,
         params: SmoothingParams,

@@ -182,14 +182,14 @@ export default function UsingMinutesPage() {
         </a>
         {" · "}
         <a
-          href="https://github.com/silverstein/minutes/blob/main/docs/CONFIG.md"
+          href="https://github.com/silverstein/minutes/blob/main/docs/architecture/config.md"
           className="text-[var(--text)] underline decoration-[color:var(--border-mid)] underline-offset-2 hover:text-[var(--accent)]"
         >
           CONFIG.md
         </a>
         {" · "}
         <a
-          href="https://github.com/silverstein/minutes/blob/main/docs/audio-devices.md"
+          href="https://github.com/silverstein/minutes/blob/main/docs/architecture/audio-devices.md"
           className="text-[var(--text)] underline decoration-[color:var(--border-mid)] underline-offset-2 hover:text-[var(--accent)]"
         >
           Audio device guide

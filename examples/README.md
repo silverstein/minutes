@@ -2,7 +2,7 @@
 
 Small working adapters that pipe Minutes markdown output into third-party
 agent-memory platforms. Each one demonstrates that the
-[Minutes frontmatter contract](../docs/frontmatter-schema.md) interoperates
+[Minutes frontmatter contract](../docs/architecture/frontmatter-schema.md) interoperates
 with the rest of the agent-memory ecosystem at a baseline level. The filesystem
 is the integration contract; these adapters are runnable proof sketches, not
 production-grade integrations.

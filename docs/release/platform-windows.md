@@ -114,9 +114,9 @@ cargo tauri build --ci --bundles nsis --no-sign
 - The Windows-specific installer defaults live in
   [tauri.windows.conf.json](/tauri/src-tauri/tauri.windows.conf.json).
 - macOS app identity / TCC-sensitive development guidance lives in
-  [docs/DESKTOP-DEVELOPMENT.md](/docs/DESKTOP-DEVELOPMENT.md).
+  [docs/development/desktop-development.md](/docs/development/desktop-development.md).
 - The macOS-only bundle settings remain in
   [tauri.macos.conf.json](/tauri/src-tauri/tauri.macos.conf.json)
   so the shared config stays cross-platform.
 - Channel and rollback rules live in
-  [docs/RELEASE-CHANNELS.md](/docs/RELEASE-CHANNELS.md).
+  [docs/release/channels.md](/docs/release/channels.md).

@@ -1,7 +1,7 @@
 # PLAN: Command Palette — Slice 2 (UI + hotkey + dogfood)
 
 > **Single source of truth** for slice 2 of the command palette work.
-> Sibling to `PLAN.md.command-palette` (slice 1, merged as `fdbcbf9`).
+> Sibling to `docs/plans/command-palette.md` (slice 1, merged as `fdbcbf9`).
 > Update this file at every step. If conversation context is lost, this
 > file is enough to resume.
 

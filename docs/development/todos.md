@@ -1,7 +1,7 @@
-# TODOS.md — Minutes
+# Todos — Minutes
 
 ## P1: Dictation Shortcut Settings Simplification
-**What:** Merge the two independent shortcut systems (standard shortcut + raw key hotkey) into one unified dropdown with value-prefix dispatch. See PLAN.dictation-ux.md for full spec.
+**What:** Merge the two independent shortcut systems (standard shortcut + raw key hotkey) into one unified dropdown with value-prefix dispatch. See `docs/plans/dictation-ux.md` for full spec.
 **Why:** Current 6-control settings section is confusing. Users don't know which shortcut system to use.
 **Effort:** M (human: ~1 week / CC: ~30 min)
 **Depends on:** Nothing — can be done independently.
@@ -45,5 +45,5 @@
 - ~~P2: Claude Code Plugin Distribution~~ — `claude plugin marketplace add silverstein/minutes`
 - ~~P2: Cross-Device Dictation~~ — Ghost context layer, phone → desktop pipeline (v0.7.0)
 - ~~P3: Publish to crates.io~~ — `cargo install minutes-cli`
-- ~~P3: Open Source Interactive Skill Template~~ — `docs/SKILL-TEMPLATE-INTERACTIVE.md`
+- ~~P3: Open Source Interactive Skill Template~~ — `docs/development/skill-template-interactive.md`
 - ~~P3: Create DESIGN.md~~ — Design tokens, components, conventions

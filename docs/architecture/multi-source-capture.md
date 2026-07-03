@@ -1,6 +1,6 @@
 # Multi-Source Capture
 
-> Addendum to [Call Capture Durable Plan](CALL-CAPTURE-DURABLE-PLAN.md) for [#34](https://github.com/silverstein/minutes/issues/34).
+> Addendum to [Call Capture Durable Plan](../plans/call-capture-durable-plan.md) for [#34](https://github.com/silverstein/minutes/issues/34).
 > Adds CLI multi-source capture, stem-based speaker attribution, and live mode speaker tags.
 
 **Status:** Reviewed (eng review + codex outside voice, 2026-03-31). CLI dual-source capture is now wired into `minutes record` for the macOS loopback/manual-two-device path; remaining design items in this document (live-mode source tags, Linux follow-ons, richer source UX) are still planned follow-up work.

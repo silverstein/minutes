@@ -10,7 +10,7 @@
 // engine in `silero_vad` and any future on-device VAD can share it.
 //
 // Why this is its own thing instead of inline in OrtSileroVad:
-// codex caught the original 4-state FSM in PLAN-vad-refactor.md as
+// codex caught the original 4-state FSM in docs/plans/vad-refactor.md as
 // too simplified — the reference implementation uses hysteresis (a
 // `neg_threshold = threshold - 0.15` band where neither speech nor
 // silence is committed) plus a `temp_end` accounting trick that a

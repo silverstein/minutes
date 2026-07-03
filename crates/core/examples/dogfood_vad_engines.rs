@@ -17,7 +17,7 @@
 //   - Stdout report: counts, durations, exact/near/different buckets,
 //     same-engine variance baseline, all-silence flag
 //
-// Why this exists: PLAN-vad-refactor.md commit 3 flips the default
+// Why this exists: docs/plans/vad-refactor.md commit 3 flips the default
 // from "whisper-silero" to "ort-silero". The flip needs empirical
 // evidence beyond the unit tests and parity fixtures — actual runs
 // of the production sidecar on real meeting audio. Each engine

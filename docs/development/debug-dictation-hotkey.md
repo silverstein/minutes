@@ -19,7 +19,7 @@ Use the dedicated dev app install flow instead:
 ./scripts/diagnose-desktop-hotkey.sh "$HOME/Applications/Minutes Dev.app"
 ```
 
-See [docs/DESKTOP-DEVELOPMENT.md](/docs/DESKTOP-DEVELOPMENT.md)
+See [docs/development/desktop-development.md](/docs/development/desktop-development.md)
 for the current canonical workflow.
 
 ## Problem

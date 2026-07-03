@@ -1,6 +1,6 @@
 # Pre-release checklist
 
-Use this before cutting any `vX.Y.Z` tag. Companion to [`RELEASE-CHANNELS.md`](./RELEASE-CHANNELS.md), [`RELEASE-MACOS.md`](./RELEASE-MACOS.md), and [`RELEASE-WINDOWS.md`](./RELEASE-WINDOWS.md).
+Use this before cutting any `vX.Y.Z` tag. Companion to [`channels.md`](./channels.md), [`platform-macos.md`](./platform-macos.md), and [`platform-windows.md`](./platform-windows.md).
 
 > **Plugin-only releases follow a different path.** If the only thing you're
 > shipping is changes under `.claude/plugins/minutes/` (new skills, skill
@@ -18,7 +18,7 @@ The point of this doc is not to slow releases down. It is to make sure that the 
 A release that fails partway through is much more expensive than a release that takes ten extra minutes to validate. The v0.10.3 release shipped with two avoidable post-tag fixes:
 
 1. `crates/mcp/package.json` was bumped to depend on `minutes-sdk@^0.10.3` in the same commit that bumped the SDK itself, which broke main CI because `minutes-sdk@0.10.3` was not yet on npm. The pattern is: publish SDK first, then bump MCP dep.
-2. The release notes were written in an ad-hoc shape and did not match the five required sections in [`RELEASE-CHANNELS.md`](./RELEASE-CHANNELS.md).
+2. The release notes were written in an ad-hoc shape and did not match the five required sections in [`channels.md`](./channels.md).
 
 This checklist exists so the next person (or agent) doing a release does not repeat either.
 
@@ -87,7 +87,7 @@ npm view minutes-mcp@<new-version> version --registry https://registry.npmjs.org
 
 ## Phase 5: Release notes (must match the policy)
 
-[`RELEASE-CHANNELS.md`](./RELEASE-CHANNELS.md) requires every release note to have these five sections:
+[`channels.md`](./channels.md) requires every release note to have these five sections:
 
 1. **What changed**
 2. **Who should care**
@@ -116,7 +116,7 @@ the whole major-release narrative into the patch body.
 
 ## Phase 6: Cut the release
 
-Per [`RELEASE-MACOS.md`](./RELEASE-MACOS.md), the convention is "create the GitHub Release first, let that create the tag", which then triggers the build workflows:
+Per [`platform-macos.md`](./platform-macos.md), the convention is "create the GitHub Release first, let that create the tag", which then triggers the build workflows:
 
 ```bash
 gh release create vX.Y.Z \
@@ -157,7 +157,7 @@ Watch them with:
 gh run list --repo silverstein/minutes --limit 5
 ```
 
-If any of them fail, the failure shows up on the release page rather than as user-facing breakage in the artifact, but check the logs and decide whether the release needs a follow-up patch (per [`RELEASE-CHANNELS.md`](./RELEASE-CHANNELS.md): cut a new tag, do not retag).
+If any of them fail, the failure shows up on the release page rather than as user-facing breakage in the artifact, but check the logs and decide whether the release needs a follow-up patch (per [`channels.md`](./channels.md): cut a new tag, do not retag).
 
 Also check the regular `CI` workflow run on the version-bump commit. The MCP Server job in particular will fail if Phase 4 was skipped.
 
@@ -236,7 +236,7 @@ Anyone running `brew install --cask silverstein/tap/minutes` is silently stuck o
 - `pyannote-rs` moved from the forked git dep to crates.io 0.3.4.
 - `cpal` moved from the git rev pin to crates.io 0.18.1 (with `windows-core` pinned to 0.61.2 in the lockfile; see RustAudio/cpal#1242).
 
-Publishing is a manual release step, consistent with how whisper-guard and the npm packages are published: see **RELEASE.md Step 11.6** (publish `minutes-core`, then `minutes-cli`, in dependency order). The crates.io README badge is restored.
+Publishing is a manual release step, consistent with how whisper-guard and the npm packages are published: see **procedure.md Step 11.6** (publish `minutes-core`, then `minutes-cli`, in dependency order). The crates.io README badge is restored.
 
 History: the crates sat at v0.9.4 and were unpublishable from ~v0.10 onward because the forked pyannote-rs and the cpal git rev are git dependencies, which `cargo publish` rejects. Both are now crates.io releases, so the next tagged release should republish at the main version (currently 0.18.5).
 
@@ -264,7 +264,7 @@ gh issue list --repo silverstein/minutes --search "v0.10.3 OR 0.10.3" --state al
 
 ## What to do if something breaks after the tag is published
 
-[`RELEASE-CHANNELS.md`](./RELEASE-CHANNELS.md) is explicit: do not retag, do not silently replace. Cut a new patch version with the fix and call out the regression in the next release notes.
+[`channels.md`](./channels.md) is explicit: do not retag, do not silently replace. Cut a new patch version with the fix and call out the regression in the next release notes.
 
 If the breakage affected release-note delivery itself, the patch release must
 repeat the missed major-release narrative, not just describe the mechanical fix.

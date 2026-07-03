@@ -53,4 +53,4 @@ Apple Speech does **not** currently:
 - Benchmark evidence:
   [`docs/designs/apple-speech-benchmark-2026-04-22.md`](designs/apple-speech-benchmark-2026-04-22.md)
 - Parakeet setup and scope:
-  [`docs/PARAKEET.md`](PARAKEET.md)
+  [`docs/architecture/parakeet.md`](parakeet.md)

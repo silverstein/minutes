@@ -13,7 +13,7 @@ always includes:
 - `Known issues`
 
 That keeps every release aligned with
-[docs/RELEASE-CHANNELS.md](/docs/RELEASE-CHANNELS.md).
+[docs/release/channels.md](/docs/release/channels.md).
 
 ## How it works
 

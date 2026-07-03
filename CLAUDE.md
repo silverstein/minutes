@@ -96,7 +96,7 @@ Native hotkey sanity check:
 ./scripts/diagnose-desktop-hotkey.sh "$HOME/Applications/Minutes Dev.app"
 ```
 
-See [docs/DESKTOP-DEVELOPMENT.md](/docs/DESKTOP-DEVELOPMENT.md) for the full workflow.
+See [docs/development/desktop-development.md](/docs/development/desktop-development.md) for the full workflow.
 
 For dictation shortcut work:
 
@@ -118,7 +118,7 @@ certificate or local notarization credentials.
 
 ## Pre-Commit Checklist
 
-**Full table lives in [docs/PRE-COMMIT.md](docs/PRE-COMMIT.md).** Read it before any commit that touches Rust, the MCP server, the frontend, or release surfaces — it covers manifest sync, MCPB bundle guards, fmt/clippy/test, Unix-only-API gating, feature-stub parity, site release constants, skill compiler outputs, the toolchain pin, and UI render verification.
+**Full table lives in [docs/checklists/pre-commit.md](docs/checklists/pre-commit.md).** Read it before any commit that touches Rust, the MCP server, the frontend, or release surfaces — it covers manifest sync, MCPB bundle guards, fmt/clippy/test, Unix-only-API gating, feature-stub parity, site release constants, skill compiler outputs, the toolchain pin, and UI render verification.
 
 Two traps that bite hardest (the rest are in the doc):
 - **Toolchain pin.** `command -v cargo` must match `rustup which cargo`. If Homebrew rust shadows the rustup proxy, `rust-toolchain.toml` is silently ignored and your local clippy/rustfmt drift from CI's. Fix once: prepend rustup's bin dir to PATH or `brew uninstall rust`.
@@ -126,7 +126,7 @@ Two traps that bite hardest (the rest are in the doc):
 
 ## Release Checklist
 
-**Full procedure lives in [docs/RELEASE.md](docs/RELEASE.md).** Walk through every step in order when shipping. Highlights:
+**Full procedure lives in [docs/release/procedure.md](docs/release/procedure.md).** Walk through every step in order when shipping. Highlights:
 - All 6 version sources must match (`Cargo.toml`, `crates/cli/Cargo.toml`, `tauri/src-tauri/tauri.conf.json`, `crates/mcp/package.json`, `crates/sdk/package.json`, `manifest.json`) plus the version string in `crates/mcp/src/index.ts`.
 - `crates/whisper-guard/` ships on its own cadence — bump + publish independently if it changed since last whisper-guard publish.
 - Push to `main` and wait for CI green **before** tagging. Create the GitHub release as a `--draft`, wait for release workflows, then `--draft=false`. Never `git tag` locally.
@@ -179,7 +179,6 @@ If there are merge conflicts, resolve them on the PR branch and merge through Gi
 minutes/
 ├── PLAN.md                    # Master plan (survives compaction — read this first)
 ├── CLAUDE.md                  # This file
-├── BUILD-STATUS.md            # Build progress tracker
 ├── Cargo.toml                 # Workspace root
 ├── crates/
 │   ├── core/src/              # 34 Rust modules — the engine
@@ -232,6 +231,20 @@ minutes/
 └── tests/integration/         # Integration tests (including real whisper tests)
 ```
 
+## Documentation Structure
+
+Documentation is organized under `docs/` by purpose. See [docs/README.md](docs/README.md) for the index.
+
+- `docs/architecture/` — Technical subsystems (transcription engines, audio capture, config)
+- `docs/checklists/` — Pre-commit, compatibility, and regression checklists
+- `docs/development/` — Developer guides, build status, and technical HOWTOs
+- `docs/investigations/` — One-off handoff notes, evaluations, and debugging investigations
+- `docs/release/` — Release process, platforms, channels, and versioned release notes
+- `docs/integration/` — Agent integration guides
+- `docs/plans/`, `docs/designs/`, `docs/rfcs/`, `docs/eval/` — Already organized by type
+
+New docs go in the folder matching their purpose. Root-level `PLAN.md` is the master architecture; all other plans live in `docs/plans/`.
+
 ## Development Commands
 
 ```bash
@@ -257,7 +270,7 @@ node test/mcp_tools_test.mjs                        # 8 MCP integration tests
 
 - **Rust** for the engine — single 6.7MB binary, cross-platform, fast
 - **whisper-rs** (whisper.cpp) for transcription (default) — local, Apple Silicon optimized, params match whisper-cli defaults (best_of=5, entropy/logprob thresholds)
-- **parakeet.cpp** for transcription (opt-in) — NVIDIA FastConformer via subprocess, Metal GPU acceleration on Apple Silicon. Lower WER than Whisper at equivalent model sizes. Requires `--features parakeet` at build time. See `docs/PARAKEET.md` for setup
+- **parakeet.cpp** for transcription (opt-in) — NVIDIA FastConformer via subprocess, Metal GPU acceleration on Apple Silicon. Lower WER than Whisper at equivalent model sizes. Requires `--features parakeet` at build time. See `docs/architecture/parakeet.md` for setup
 - **ffmpeg preferred for audio decoding** — shells out to ffmpeg for m4a/mp3/ogg when available (identical to whisper-cli's pipeline). Falls back to symphonia (pure Rust) when ffmpeg isn't installed. This matters for non-English audio — symphonia's AAC decoder produces subtly different samples that trigger whisper hallucination loops (issue #21).
 - **Silero VAD** (via whisper-rs) — ML-based voice activity detection integrated directly into whisper's transcription params. Prevents hallucination loops by skipping silence segments. Auto-downloaded during `minutes setup`.
 - **whisper-guard** crate — standalone anti-hallucination toolkit extracted from minutes-core. 6-layer defense: Silero VAD gating, no_speech probability filtering (>80% = skip), consecutive segment dedup (3+ similar collapsed), interleaved A/B/A/B pattern detection, foreign-script hallucination detection, language-agnostic noise marker collapse (`[Śmiech]`, `[music]`, `[risas]`, etc.), trailing noise trimming. Publishable to crates.io independently.

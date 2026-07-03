@@ -9074,7 +9074,7 @@
       if (parakeetGuideBtn) {
         parakeetGuideBtn.addEventListener('click', async () => {
           try {
-            await invoke('cmd_open_file', { path: (parakeet && parakeet.guideUrl) || 'https://github.com/silverstein/minutes/blob/main/docs/PARAKEET.md' });
+            await invoke('cmd_open_file', { path: (parakeet && parakeet.guideUrl) || 'https://github.com/silverstein/minutes/blob/main/docs/architecture/parakeet.md' });
           } catch (e) {
             console.error('open parakeet guide:', e);
           }
@@ -9932,7 +9932,7 @@
     document.getElementById('settings-open-config-docs').addEventListener('click', async () => {
       try {
         await invoke('cmd_open_file', {
-          path: 'https://github.com/silverstein/minutes/blob/main/docs/CONFIG.md',
+          path: 'https://github.com/silverstein/minutes/blob/main/docs/architecture/config.md',
         });
       } catch (e) {
         console.error('open config docs:', e);
@@ -10019,7 +10019,7 @@
     });
     document.getElementById('btn-open-parakeet-guide').addEventListener('click', async () => {
       const target = document.getElementById('btn-open-parakeet-guide').dataset.guideUrl ||
-        'https://github.com/silverstein/minutes/blob/main/docs/PARAKEET.md';
+        'https://github.com/silverstein/minutes/blob/main/docs/architecture/parakeet.md';
       try {
         await invoke('cmd_open_file', { path: target });
       } catch (e) {

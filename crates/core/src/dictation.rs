@@ -1329,7 +1329,8 @@ mod tests {
 
     #[test]
     fn combine_results_joins_text_and_duration() {
-        let config = Config::default();
+        let mut config = Config::default();
+        config.dictation.destination = "clipboard".into();
         let results = vec![
             DictationResult {
                 raw_text: "first sentence.".into(),

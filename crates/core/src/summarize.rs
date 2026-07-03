@@ -743,7 +743,7 @@ pub fn speaker_mapping_model_hint(config: &Config) -> String {
 
 /// Detect the first available AI CLI in preference order: claude > codex > gemini > opencode.
 /// Returns the resolved path if found and executable, None otherwise.
-pub(crate) fn detect_agent_cli() -> Option<String> {
+pub fn detect_agent_cli() -> Option<String> {
     for cmd in &["claude", "codex", "gemini", "opencode"] {
         let resolved = resolve_agent_path(cmd);
         // resolve_agent_path returns the bare name if not found — check if we got a real path
@@ -847,6 +847,51 @@ struct AgentInvocation {
     args: Vec<String>,
     stdin_payload: Option<Vec<u8>>,
     cleanup_path: Option<std::path::PathBuf>,
+}
+
+/// Public process descriptor for the native chat panel.
+/// Carries everything needed to spawn the CLI and stream its output.
+pub struct ChatInvocation {
+    pub cmd: String,
+    pub args: Vec<String>,
+    pub stdin_payload: Option<Vec<u8>>,
+    pub cleanup_path: Option<std::path::PathBuf>,
+}
+
+/// Build a [`ChatInvocation`] for the given agent CLI and prompt.
+///
+/// Uses `lean = true` for claude (no MCP servers, no tools) and the same
+/// per-CLI argument conventions as the summarization path. This is the single
+/// source of truth for how the native chat panel launches every provider,
+/// including claude — there is no separate hand-rolled claude argument list.
+///
+/// When `stream_json` is set and the agent is claude, the lean
+/// `--output-format text` is upgraded to `--output-format stream-json`
+/// (with the `--verbose` that claude's `--print` mode requires for that
+/// format) so the panel can render tokens incrementally. Other CLIs ignore
+/// `stream_json`: their stdout is captured as a single blob and the flag has
+/// no bearing on their arguments.
+pub fn build_chat_invocation(
+    agent_cmd: &str,
+    prompt: &str,
+    stream_json: bool,
+) -> Result<ChatInvocation, Box<dyn std::error::Error>> {
+    let inner = prepare_agent_invocation(agent_cmd, prompt, true)?;
+    let mut args = inner.args;
+    if stream_json && matches_agent_binary(agent_cmd, "claude") {
+        if let Some(pos) = args.iter().position(|a| a == "--output-format") {
+            if args.get(pos + 1).map(String::as_str) == Some("text") {
+                args[pos + 1] = "stream-json".to_string();
+                args.insert(pos + 2, "--verbose".to_string());
+            }
+        }
+    }
+    Ok(ChatInvocation {
+        cmd: inner.cmd,
+        args,
+        stdin_payload: inner.stdin_payload,
+        cleanup_path: inner.cleanup_path,
+    })
 }
 
 fn write_agent_prompt_file(
@@ -2931,6 +2976,54 @@ PARTICIPANTS:
         let plain = prepare_agent_invocation("claude", "p", false).unwrap();
         assert_eq!(plain.args, vec!["-p", "-"]);
         assert!(!plain.args.iter().any(|a| a == "--strict-mcp-config"));
+    }
+
+    #[test]
+    fn build_chat_invocation_claude_streams_json_and_stays_lean() {
+        // Recall chat: claude must keep the #382 lean flags (no MCP, no tools,
+        // prompt on stdin) AND stream incrementally. `--no-interactive` (which
+        // does not exist on the claude CLI and broke every chat message) must
+        // never appear.
+        let inv = build_chat_invocation("claude", "hola", true).unwrap();
+        assert_eq!(inv.cmd, "claude");
+        // Lean flags preserved.
+        assert!(inv.args.iter().any(|a| a == "--strict-mcp-config"));
+        assert!(inv
+            .args
+            .windows(2)
+            .any(|w| w[0] == "--tools" && w[1].is_empty()));
+        // Streaming upgrade applied, `text` replaced, `--verbose` present.
+        assert!(inv
+            .args
+            .windows(2)
+            .any(|w| w[0] == "--output-format" && w[1] == "stream-json"));
+        assert!(inv.args.iter().any(|a| a == "--verbose"));
+        assert!(!inv.args.iter().any(|a| a == "text"));
+        // No bogus / removed flags, prompt travels on stdin not argv.
+        assert!(!inv.args.iter().any(|a| a == "--no-interactive"));
+        assert!(inv.args.iter().any(|a| a == "-"));
+        assert_eq!(inv.stdin_payload.as_deref(), Some("hola".as_bytes()));
+    }
+
+    #[test]
+    fn build_chat_invocation_claude_without_stream_uses_text() {
+        let inv = build_chat_invocation("claude", "hola", false).unwrap();
+        assert!(inv
+            .args
+            .windows(2)
+            .any(|w| w[0] == "--output-format" && w[1] == "text"));
+        assert!(!inv.args.iter().any(|a| a == "stream-json"));
+        assert!(!inv.args.iter().any(|a| a == "--verbose"));
+    }
+
+    #[test]
+    fn build_chat_invocation_non_claude_ignores_stream_flag() {
+        // codex has no stream-json path here; the flag must not perturb its args.
+        let streamed = build_chat_invocation("codex", "hola", true).unwrap();
+        let plain = build_chat_invocation("codex", "hola", false).unwrap();
+        assert_eq!(streamed.args, plain.args);
+        assert!(!streamed.args.iter().any(|a| a == "stream-json"));
+        assert_eq!(streamed.cmd, "codex");
     }
 
     #[test]

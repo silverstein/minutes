@@ -2531,6 +2531,7 @@ fn main() {
             commands::cmd_get_text_file_access,
             commands::cmd_get_text_file_review,
             commands::cmd_recent_artifacts,
+            commands::cmd_list_documents,
             commands::cmd_get_recall_workspace_state,
             commands::cmd_set_recall_workspace_state,
             commands::cmd_write_text_file,

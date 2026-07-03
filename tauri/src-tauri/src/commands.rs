@@ -1359,6 +1359,17 @@ pub struct RecentArtifactView {
     pub review_available: bool,
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DocumentView {
+    pub path: String,
+    pub filename: String,
+    pub kind: String,
+    pub mtime: i64,
+    pub source: String,
+    pub meeting_slug: Option<String>,
+}
+
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct RecallWorkspaceState {
@@ -1564,10 +1575,19 @@ fn recent_artifact_views(
     exclude_path: Option<&Path>,
 ) -> Vec<RecentArtifactView> {
     let state_path = recent_artifacts_state_path();
+    recent_artifact_views_from(config, limit, exclude_path, &state_path)
+}
+
+fn recent_artifact_views_from(
+    config: &Config,
+    limit: usize,
+    exclude_path: Option<&Path>,
+    state_path: &Path,
+) -> Vec<RecentArtifactView> {
     let exclude = exclude_path.map(|path| path.display().to_string());
     let mut views = Vec::new();
 
-    for entry in load_recent_artifacts_from(&state_path).into_iter() {
+    for entry in load_recent_artifacts_from(state_path).into_iter() {
         if views.len() >= limit {
             break;
         }
@@ -1601,6 +1621,144 @@ fn recent_artifact_views(
     }
 
     views
+}
+
+fn file_mtime_ms(path: &Path) -> Option<i64> {
+    let modified = std::fs::metadata(path).ok()?.modified().ok()?;
+    let duration = modified
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    Some(duration.as_millis().min(i64::MAX as u128) as i64)
+}
+
+fn filename_for_path(path: &Path) -> String {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("Document")
+        .to_string()
+}
+
+fn meeting_slug_for_document(path: &Path) -> String {
+    path.file_stem()
+        .and_then(|name| name.to_str())
+        .unwrap_or("meeting")
+        .to_string()
+}
+
+fn is_assistant_instruction_file(path: &Path) -> bool {
+    matches!(
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .map(|name| name.to_ascii_uppercase())
+            .as_deref(),
+        Some("CLAUDE.MD" | "AGENTS.MD" | "MEMORY.MD")
+    )
+}
+
+fn push_document_if_allowed(
+    documents: &mut Vec<DocumentView>,
+    seen: &mut std::collections::HashSet<PathBuf>,
+    path: &Path,
+    source: &str,
+    meeting_slug: Option<String>,
+) {
+    let Ok(canonical) = validate_text_file_path(path) else {
+        return;
+    };
+    if !seen.insert(canonical.clone()) {
+        return;
+    }
+    let Some(mtime) = file_mtime_ms(&canonical) else {
+        return;
+    };
+    documents.push(DocumentView {
+        path: canonical.display().to_string(),
+        filename: filename_for_path(&canonical),
+        kind: text_file_kind(&canonical).unwrap_or("text").to_string(),
+        mtime,
+        source: source.to_string(),
+        meeting_slug,
+    });
+}
+
+fn append_assistant_documents(
+    documents: &mut Vec<DocumentView>,
+    seen: &mut std::collections::HashSet<PathBuf>,
+    assistant_dir: &Path,
+) {
+    if let Ok(entries) = std::fs::read_dir(assistant_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() || is_assistant_instruction_file(&path) {
+                continue;
+            }
+            let ext = path
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .map(|ext| ext.to_ascii_lowercase());
+            if matches!(ext.as_deref(), Some("md" | "markdown" | "txt")) {
+                push_document_if_allowed(documents, seen, &path, "assistant", None);
+            }
+        }
+    }
+
+    let artifacts_dir = assistant_dir.join("artifacts");
+    if let Ok(entries) = std::fs::read_dir(&artifacts_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() || is_assistant_instruction_file(&path) {
+                continue;
+            }
+            let ext = path
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .map(|ext| ext.to_ascii_lowercase());
+            if matches!(ext.as_deref(), Some("md" | "markdown" | "txt")) {
+                push_document_if_allowed(documents, seen, &path, "assistant", None);
+            }
+        }
+    }
+}
+
+fn list_documents_for_roots(
+    config: &Config,
+    assistant_dir: &Path,
+    limit: usize,
+) -> Vec<DocumentView> {
+    let state_path = recent_artifacts_state_path();
+    list_documents_for_roots_with_recent_state(config, assistant_dir, limit, &state_path)
+}
+
+fn list_documents_for_roots_with_recent_state(
+    config: &Config,
+    assistant_dir: &Path,
+    limit: usize,
+    recent_state_path: &Path,
+) -> Vec<DocumentView> {
+    let mut documents = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    // Reuse the same recent artifact view path that powers the meeting detail
+    // "Adjacent Artifacts" rows, then enrich it with mtime/source metadata.
+    for artifact in recent_artifact_views_from(config, limit, None, recent_state_path) {
+        let path = PathBuf::from(&artifact.path);
+        push_document_if_allowed(
+            &mut documents,
+            &mut seen,
+            &path,
+            "meeting",
+            Some(meeting_slug_for_document(&path)),
+        );
+    }
+
+    append_assistant_documents(&mut documents, &mut seen, assistant_dir);
+    documents.sort_by(|a, b| {
+        b.mtime
+            .cmp(&a.mtime)
+            .then_with(|| a.filename.cmp(&b.filename))
+    });
+    documents.truncate(limit);
+    documents
 }
 
 fn update_activation_progress<F>(state: &Arc<Mutex<ActivationProgress>>, mutate: F)
@@ -4323,7 +4481,11 @@ fn artifact_directory(config: &Config) -> Result<PathBuf, String> {
 
 fn is_editable_text_file_path(path: &Path, config: &Config) -> bool {
     let workspace = crate::context::workspace_dir();
-    let trusted_roots = [config.output_dir.clone(), workspace.join("artifacts")];
+    let trusted_roots = [
+        config.output_dir.clone(),
+        workspace.clone(),
+        workspace.join("artifacts"),
+    ];
     trusted_roots.iter().any(|root| path.starts_with(root))
 }
 
@@ -6887,6 +7049,14 @@ pub fn cmd_get_text_file_review(path: String) -> Result<TextFileReview, String> 
 pub fn cmd_recent_artifacts(limit: Option<usize>) -> serde_json::Value {
     let config = Config::load();
     let views = recent_artifact_views(&config, limit.unwrap_or(8), None);
+    serde_json::to_value(views).unwrap_or_else(|_| serde_json::json!([]))
+}
+
+#[tauri::command]
+pub fn cmd_list_documents(limit: Option<usize>) -> serde_json::Value {
+    let config = Config::load();
+    let workspace = crate::context::workspace_dir();
+    let views = list_documents_for_roots(&config, &workspace, limit.unwrap_or(200).min(200));
     serde_json::to_value(views).unwrap_or_else(|_| serde_json::json!([]))
 }
 
@@ -11451,6 +11621,8 @@ mod tests {
             debrief: None,
             visibility: None,
             speaker_map: vec![],
+            name_corrections: Vec::new(),
+            speaker_mapping: None,
             template: None,
             filter_diagnosis: None,
             consent: None,
@@ -11514,6 +11686,8 @@ mod tests {
             debrief: None,
             visibility: None,
             speaker_map: vec![],
+            name_corrections: Vec::new(),
+            speaker_mapping: None,
             template: None,
             filter_diagnosis: None,
             consent: None,
@@ -11568,6 +11742,8 @@ mod tests {
             debrief: None,
             visibility: None,
             speaker_map: vec![],
+            name_corrections: Vec::new(),
+            speaker_mapping: None,
             template: None,
             filter_diagnosis: None,
             consent: None,
@@ -11770,6 +11946,63 @@ mod tests {
         assert_eq!(text_file_kind(Path::new("/tmp/test.json")), Some("json"));
         assert_eq!(text_file_kind(Path::new("/tmp/test.md")), Some("markdown"));
         assert_eq!(text_file_kind(Path::new("/tmp/test.txt")), Some("text"));
+    }
+
+    #[test]
+    fn list_documents_merges_assistant_and_meeting_sources_by_recency() {
+        let home = dirs::home_dir().expect("home dir");
+        let temp = tempfile::Builder::new()
+            .prefix("minutes-documents-test-")
+            .tempdir_in(home)
+            .unwrap();
+        let assistant = temp.path().join("assistant");
+        let assistant_artifacts = assistant.join("artifacts");
+        let meetings = temp.path().join("meetings");
+        let state_path = temp.path().join("recent-artifacts.json");
+        std::fs::create_dir_all(&assistant_artifacts).unwrap();
+        std::fs::create_dir_all(&meetings).unwrap();
+
+        let older = assistant.join("prep.md");
+        std::fs::write(&older, "# Prep").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        std::fs::write(assistant.join("CLAUDE.md"), "# Instructions").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let nested = assistant_artifacts.join("debrief.txt");
+        std::fs::write(&nested, "Debrief").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let meeting = meetings.join("2026-07-02-product-review.md");
+        std::fs::write(&meeting, "# Meeting artifact").unwrap();
+
+        let config = Config {
+            output_dir: meetings.clone(),
+            ..Config::default()
+        };
+        record_recent_artifact_canonical_with_limit(&meeting, 8, &state_path);
+
+        let docs =
+            list_documents_for_roots_with_recent_state(&config, &assistant, 200, &state_path);
+        let names: Vec<_> = docs.iter().map(|doc| doc.filename.as_str()).collect();
+
+        assert_eq!(names.len(), 3);
+        assert_eq!(names[0], "2026-07-02-product-review.md");
+        assert!(names.contains(&"prep.md"));
+        assert!(names.contains(&"debrief.txt"));
+        assert!(!names.contains(&"CLAUDE.md"));
+
+        let meeting_doc = docs
+            .iter()
+            .find(|doc| doc.filename == "2026-07-02-product-review.md")
+            .unwrap();
+        assert_eq!(meeting_doc.source, "meeting");
+        assert_eq!(
+            meeting_doc.meeting_slug.as_deref(),
+            Some("2026-07-02-product-review")
+        );
+        assert_eq!(meeting_doc.kind, "markdown");
+
+        let assistant_doc = docs.iter().find(|doc| doc.filename == "prep.md").unwrap();
+        assert_eq!(assistant_doc.source, "assistant");
+        assert_eq!(assistant_doc.meeting_slug, None);
     }
 
     #[test]

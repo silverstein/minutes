@@ -1439,9 +1439,16 @@
       line-height: 1;
       transition: background 150ms ease, border-color 150ms ease, color 150ms ease, transform 160ms ease;
     }
+    @media (prefers-reduced-motion: reduce) {
+      .app-left,
+      .sidebar-collapse-btn {
+        transition: none;
+      }
+    }
+
 
     .list-toggle-btn {
-      padding: 6px 9px;
+      padding: 6px 10px;
     }
 
     .sidebar-collapse-btn {

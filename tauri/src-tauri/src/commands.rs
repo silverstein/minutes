@@ -4481,6 +4481,16 @@ fn artifact_directory(config: &Config) -> Result<PathBuf, String> {
 
 fn is_editable_text_file_path(path: &Path, config: &Config) -> bool {
     let workspace = crate::context::workspace_dir();
+    // Agent instruction files stay read-only in the viewer even though they
+    // live under the writable workspace root: the app is for documents, and
+    // silently editing the assistant's own instructions is a footgun.
+    if path.starts_with(&workspace) {
+        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+            if matches!(name, "CLAUDE.md" | "AGENTS.md" | "MEMORY.md") {
+                return false;
+            }
+        }
+    }
     let trusted_roots = [
         config.output_dir.clone(),
         workspace.clone(),

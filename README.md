@@ -942,6 +942,8 @@ minutes setup --diarization
 minutes setup --sherpa        # downloads the int8 ONNX model (~670MB) + sets engine = "sherpa"
 # If you select sherpa without the feature/model, transcription auto-falls-back
 # to Whisper (the bundled default), so a recording never breaks. See docs/SHERPA-ENGINE.md.
+# macOS sherpa builds are self-contained (static). On Linux/Windows, run from the
+# repo (cargo run) rather than copying the binary out of target/ — details in the doc.
 
 # Alternative: use Parakeet engine (opt-in, local GPU via parakeet.cpp)
 # Requires (1) parakeet.cpp installed (https://github.com/Frikallo/parakeet.cpp)

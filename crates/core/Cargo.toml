@@ -31,8 +31,9 @@ denoise = ["dep:nnnoiseless"]
 vad-ort = ["streaming", "dep:ort", "dep:ndarray"]
 # Opt-in SOTA transcription engine: sherpa-onnx + parakeet-tdt-0.6b-v3 (multilingual,
 # no Python), in-process via sherpa-rs. Off by default; whisper.cpp stays the default.
-# Validated to coexist with `diarize`/`vad-ort`'s ort (separate onnxruntime, hidden
-# symbols). No parakeet/ort dep -> no rc.10/rc.12 conflict.
+# Linkage is per-target (see the [target.*] sherpa-rs deps below): macOS static
+# (self-contained binaries, #369), Linux/Windows dynamic (run from target layout).
+# Coexists with `diarize`/`vad-ort`'s ort either way; no parakeet/ort dep here.
 engine-sherpa = ["dep:sherpa-rs"]
 
 [dependencies]

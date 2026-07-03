@@ -1,9 +1,12 @@
 //! sherpa-onnx transcription engine (feature `engine-sherpa`, opt-in, off by default).
 //!
-//! In-process via the `sherpa-rs` crate (no Python). Validated 2026-06-24 to
-//! coexist with the existing `ort`-based pyannote/vad path: `sherpa-rs-sys`
-//! statically embeds onnxruntime with hidden symbols (no `links = onnxruntime`
-//! manifest), while the app's `ort` dependency is linked separately.
+//! In-process via the `sherpa-rs` crate (no Python). Linkage differs by target
+//! (see the per-target `sherpa-rs` deps in Cargo.toml): on macOS sherpa-onnx is
+//! linked STATICALLY so opt-in app/CLI binaries are self-contained (#369); on
+//! Linux/Windows it stays DYNAMIC (upstream's static path needs a global
+//! RUSTFLAGS hack there), so binaries must run from the cargo target layout.
+//! Either way it coexists with the `ort`-based pyannote/vad path: sherpa's
+//! onnxruntime symbols stay separate from the app's `ort` dependency.
 //! parakeet-tdt-0.6b-v3 is multilingual (FR/ES/etc.) with correct orthography.
 //!
 //! Scaffold scope: model directory is resolved from `MINUTES_SHERPA_MODEL_DIR`.

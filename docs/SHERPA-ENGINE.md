@@ -22,6 +22,15 @@ rm -f ~/.local/bin/minutes && cp target/release/minutes ~/.local/bin/minutes
 minutes setup --sherpa     # downloads the int8 ONNX model + sets engine = "sherpa"
 ```
 
+> **Platform note.** On macOS, `engine-sherpa` links sherpa-onnx statically, so
+> the binary is self-contained and the copy above just works. On Linux and
+> Windows, sherpa-rs still links dynamic libraries (`libsherpa-onnx-c-api`,
+> `libonnxruntime`) that live in the cargo `target/` tree: a binary copied out
+> of `target/` fails at startup with a library-not-found error. On those
+> platforms run from the repo (`cargo run --release -p minutes-cli --features
+> engine-sherpa -- ...`) or put the libraries on your loader path yourself.
+> Installable Linux/Windows packaging is tracked in #369.
+
 `minutes setup --sherpa` downloads the four model files (with a size-floor
 integrity check) and writes `transcription.engine = "sherpa"` to your config, so
 no manual edit is needed. If the binary lacks the `engine-sherpa` feature, setup

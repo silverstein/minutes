@@ -8282,6 +8282,51 @@ pub fn spawn_terminal(
 
 // ── Recall native chat ────────────────────────────────────────
 
+/// Written to `chat_cwd/CLAUDE.md` on every `cmd_recall_chat_send` call so
+/// claude auto-loads it from cwd at process start (see `build_chat_invocation`
+/// in `minutes_core::summarize` for the matching `--allowedTools` scope this
+/// describes). Deliberately honest about the constraints of a single-shot,
+/// non-interactive process instead of pretending to be a full agentic
+/// session — see PR #404 review discussion: a chat-scoped CLAUDE.md that's
+/// honest about the non-interactive context is a better foundation than a
+/// hard `--tools ""` lockout, and leaves room to grow the allow-list later.
+const CHAT_WORKSPACE_CLAUDE_MD: &str = "\
+# Minutes — Recall chat (single-shot session)
+
+You are answering one message inside the Minutes app's Recall chat panel, not running an interactive \
+agent loop. Each message is a fresh, non-interactive `claude -p` process — there is no persistent \
+session, no shell, and no file write access of any kind. There is nobody watching this session to \
+approve a permission prompt, so an unlisted tool call is rejected immediately rather than pausing to ask.
+
+## What's already in front of you
+
+The current user message below already includes: the currently focused meeting's content (if any), \
+up to 5 keyword-matched excerpts from other meetings, and the last few turns of this conversation. \
+Read that first — it answers most questions without any tool call.
+
+## Tools you do have (read-only, pre-approved)
+
+A small allow-list of the Minutes MCP server's read-only tools is available for lookups the inline \
+context doesn't cover:
+
+- `search_meetings`, `get_meeting`, `list_meetings`, `research_topic` — find and read past meetings/memos
+- `get_person_profile`, `relationship_map`, `track_commitments` — relationship and commitment memory
+- `get_meeting_insights`, `consistency_report`, `get_agent_annotations` — structured decisions/insights
+- `list_processing_jobs`, `get_status`, `list_voices`, `knowledge_status`, `qmd_collection_status` — status/inventory checks
+- `read_live_transcript` — read an in-progress recording or live-transcript session
+- `activity_summary`, `search_context`, `get_moment` — desktop-context lookups (app focus, window titles)
+
+Prefer these over guessing when the inline context is missing something concrete and answerable.
+
+## What you don't have
+
+No shell, no file access, no writes of any kind — no starting/stopping recordings or dictation, no \
+adding notes or agent annotations, no confirming speakers, no changing config, no opening the dashboard. \
+If you're unsure whether something is allowed, assume it isn't. If a tool call fails or the context is \
+missing what's needed, say so briefly and suggest the user open or select the relevant meeting — don't \
+narrate or retry failed tool calls.
+";
+
 /// Build a prompt string combining conversation history (last 6 turns) and
 /// the current enriched user message.
 fn build_recall_chat_prompt(history: &[(String, String)], enriched_message: &str) -> String {
@@ -8314,12 +8359,15 @@ fn build_recall_chat_prompt(history: &[(String, String)], enriched_message: &str
 ///
 /// Provider priority:
 ///   1. `config.summarization.engine == "ollama"` — HTTP to Ollama (localhost:11434)
-///   2. `ANTHROPIC_API_KEY` in env — Anthropic Messages API (streaming SSE)
-///   3. `detect_agent_cli()` found something — use that CLI:
-///      - `claude`: lean stream-json via `build_chat_invocation` (no MCP, no
-///        tools, prompt on stdin), streamed token-by-token
+///   2. `detect_agent_cli()` found something — use that CLI:
+///      - `claude`: stream-json via `build_chat_invocation` — scoped to a
+///        read-only `--allowedTools` allow-list on the Minutes MCP server
+///        only (no shell, no writes, prompt on stdin), streamed token-by-token
 ///      - others (codex/gemini/opencode): captured as plain-text stdout
-///   4. Nothing found — descriptive error returned to frontend
+///   3. Nothing found — descriptive error returned to frontend, pointing the
+///      user at installing Claude Code. Minutes intentionally has no direct
+///      cloud-API fallback for chat: no-API-key-required is core to the
+///      product, so an installed agent CLI (or Ollama) is the only path.
 ///
 /// Before invoking the AI, context is injected in two layers (capped at
 /// 12 000 chars total): (1) the full content of the meeting currently
@@ -8346,20 +8394,26 @@ pub async fn cmd_recall_chat_send(
             .map_err(|e| format!("Cannot create workspace dir: {}", e))?;
     }
 
-    // The native chat panel is a lean, tool-less invocation whose entire context
-    // comes from the keyword-search injection below. Run the CLI from a dedicated
-    // neutral directory — NOT the shared ~/.minutes/assistant workspace — so it
-    // does not auto-load that workspace's CLAUDE.md / AGENTS.md. Those files are
-    // written for the full-tool PTY assistant and instruct the model to read
-    // CURRENT_MEETING.md and run `minutes` commands; a tool-less process cannot,
-    // so it narrates a cascade of failed tool calls straight into the chat.
-    // Claude/agents still auto-load memory files from cwd regardless of
-    // `--tools ""` / `--strict-mcp-config`, so isolating cwd is the fix.
+    // The native chat panel's context mostly comes from the keyword-search
+    // injection below, plus (for claude) a small read-only MCP tool allow-list —
+    // see build_chat_invocation. Run the CLI from a dedicated neutral directory —
+    // NOT the shared ~/.minutes/assistant workspace — so it does not auto-load
+    // that workspace's CLAUDE.md / AGENTS.md. Those files are written for the
+    // full-tool PTY assistant and instruct the model to read CURRENT_MEETING.md
+    // and run `minutes` commands via a shell it doesn't have here, so it would
+    // narrate a cascade of failed tool calls straight into the chat. Instead this
+    // cwd gets its own CHAT_WORKSPACE_CLAUDE_MD, honest about the single-shot,
+    // read-only-tools-only context. Claude/agents auto-load memory files from cwd
+    // regardless of `--strict-mcp-config` / `--allowedTools`, so isolating cwd
+    // (and writing our own CLAUDE.md into it) is the fix.
     let chat_cwd = workspace
         .parent()
         .map(|p| p.join("chat"))
         .unwrap_or_else(|| workspace.clone());
     let _ = std::fs::create_dir_all(&chat_cwd);
+    // Rewritten on every message (cheap, static content) so a binary upgrade
+    // picks up new wording without requiring the user to clear the chat cwd.
+    let _ = std::fs::write(chat_cwd.join("CLAUDE.md"), CHAT_WORKSPACE_CLAUDE_MD);
 
     // ── Step 1: inject meeting context ────────────────────────────────────────
     let config = minutes_core::config::Config::load();
@@ -8424,21 +8478,16 @@ pub async fn cmd_recall_chat_send(
             }
         }
     };
-    // Explicit tool-less framing. Belt-and-suspenders alongside the neutral cwd
-    // above: even if a memory file is found further up the tree (e.g. a global
-    // ~/CLAUDE.md), or the model is simply inclined to emit tool-call syntax from
-    // training, this tells it plainly that it has no file/tool access and must
-    // answer only from the supplied excerpts — preventing the narrated / failed
-    // tool-call cascade that leaked into the chat bubble.
-    const CHAT_NO_TOOLS_PREAMBLE: &str = "You are answering inside the Minutes app chat panel. You have NO access to the \
-file system, shell, tools, or MCP servers, and you are NOT in an agentic loop. Answer using ONLY the meeting excerpts \
-and conversation history provided below. Do not attempt to read files, run commands, or call tools, and do not narrate \
-tool calls. If the provided context does not contain the answer, say so briefly and suggest the user open or select the \
-relevant meeting.\n\n";
-    let enriched_message = format!(
-        "{}{}User question: {}",
-        CHAT_NO_TOOLS_PREAMBLE, meeting_context, message
-    );
+    // The honest, single-shot / read-only-tools framing now lives in
+    // CHAT_WORKSPACE_CLAUDE_MD, written to chat_cwd/CLAUDE.md above — claude
+    // auto-loads CLAUDE.md from cwd at process start, so it doesn't need to be
+    // repeated inline on every message the way the old CHAT_NO_TOOLS_PREAMBLE
+    // was. Non-claude agent CLIs invoked via build_chat_invocation don't read
+    // that file's tool-scoping the same way, but the "single-shot, ground
+    // answers in the excerpts below" guidance still applies to them, so it's
+    // still useful context — just no longer claiming zero tool access, since
+    // claude's chat session does have a pre-approved read-only allow-list.
+    let enriched_message = format!("{}User question: {}", meeting_context, message);
 
     // ── Step 2: build prompt with history ─────────────────────────────────────
     let history_snapshot: Vec<(String, String)> = {
@@ -8449,11 +8498,6 @@ relevant meeting.\n\n";
 
     // ── Step 3: detect provider ────────────────────────────────────────────────
     let use_ollama = config.summarization.engine == "ollama";
-    let anthropic_api_key: Option<String> = if !use_ollama {
-        std::env::var("ANTHROPIC_API_KEY").ok()
-    } else {
-        None
-    };
 
     // ── Ollama path ────────────────────────────────────────────────────────────
     if use_ollama {
@@ -8558,125 +8602,12 @@ relevant meeting.\n\n";
         return Ok(());
     }
 
-    // ── Anthropic API path ─────────────────────────────────────────────────────
-    if let Some(api_key) = anthropic_api_key {
-        let app_clone = app.clone();
-        let message_clone = message.clone();
-        let history_arc = state.recall_chat_history.clone();
-
-        tauri::async_runtime::spawn_blocking(move || {
-            let mut messages: Vec<serde_json::Value> = Vec::new();
-            for (u, a) in &history_snapshot {
-                messages.push(serde_json::json!({"role": "user", "content": u}));
-                messages.push(serde_json::json!({"role": "assistant", "content": a}));
-            }
-            messages.push(serde_json::json!({"role": "user", "content": enriched_message}));
-
-            let body = serde_json::json!({
-                "model": "claude-haiku-4-5",
-                "max_tokens": 1024,
-                "stream": true,
-                "messages": messages,
-            });
-
-            let agent = ureq::Agent::new_with_config(
-                ureq::config::Config::builder()
-                    .timeout_global(Some(std::time::Duration::from_secs(120)))
-                    .http_status_as_error(false)
-                    .build(),
-            );
-
-            let mut resp = match agent
-                .post("https://api.anthropic.com/v1/messages")
-                .header("x-api-key", &api_key)
-                .header("anthropic-version", "2023-06-01")
-                .header("Content-Type", "application/json")
-                .send_json(&body)
-            {
-                Ok(r) => r,
-                Err(e) => {
-                    app_clone
-                        .emit_to(
-                            "main",
-                            "recall-chat-error",
-                            format!("Anthropic API error: {}", e),
-                        )
-                        .ok();
-                    app_clone.emit_to("main", "recall-chat-done", ()).ok();
-                    return;
-                }
-            };
-
-            if resp.status().as_u16() >= 400 {
-                let status = resp.status().as_u16();
-                let body_text = resp.body_mut().read_to_string().unwrap_or_default();
-                app_clone
-                    .emit_to(
-                        "main",
-                        "recall-chat-error",
-                        format!("Anthropic HTTP {}: {}", status, body_text),
-                    )
-                    .ok();
-                app_clone.emit_to("main", "recall-chat-done", ()).ok();
-                return;
-            }
-
-            // Anthropic streams SSE: `data: {...}` lines.
-            let mut body = resp.into_body();
-            let reader = BufReader::new(body.as_reader());
-            let mut full_response = String::new();
-            for line_result in reader.lines() {
-                match line_result {
-                    Ok(line) => {
-                        let data = line.strip_prefix("data: ").unwrap_or("").trim();
-                        if data.is_empty() || data == "[DONE]" {
-                            continue;
-                        }
-                        if let Ok(val) = serde_json::from_str::<serde_json::Value>(data) {
-                            if val.get("type").and_then(|t| t.as_str())
-                                == Some("content_block_delta")
-                            {
-                                if let Some(text) = val
-                                    .get("delta")
-                                    .and_then(|d| d.get("text"))
-                                    .and_then(|t| t.as_str())
-                                {
-                                    full_response.push_str(text);
-                                    app_clone
-                                        .emit_to(
-                                            "main",
-                                            "recall-chat-chunk",
-                                            serde_json::json!({"type": "text", "text": text}),
-                                        )
-                                        .ok();
-                                }
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        eprintln!("[recall-chat/anthropic] read error: {}", e);
-                        break;
-                    }
-                }
-            }
-
-            if !full_response.is_empty() {
-                let mut h = history_arc.lock().unwrap();
-                h.push((message_clone, full_response));
-            }
-            app_clone.emit_to("main", "recall-chat-done", ()).ok();
-        })
-        .await
-        .map_err(|e| format!("Recall chat Anthropic task failed: {}", e))?;
-
-        return Ok(());
-    }
-
     // ── CLI agent path ─────────────────────────────────────────────────────────
     let agent_bin = minutes_core::summarize::detect_agent_cli().ok_or_else(|| {
-        "No AI provider found. Options: install Claude Code (claude), Codex (codex), \
-         Gemini CLI (gemini), configure Ollama ([summarization] engine = \"ollama\" in \
-         config.toml), or set ANTHROPIC_API_KEY."
+        "No AI agent found for Recall chat. Install Claude Code (npm install -g \
+         @anthropic-ai/claude-code), Codex, or Gemini CLI to enable chat — or configure \
+         Ollama ([summarization] engine = \"ollama\" in config.toml) for a fully local \
+         option. Minutes doesn't require an API key for this feature."
             .to_string()
     })?;
 
@@ -8691,13 +8622,16 @@ relevant meeting.\n\n";
 
     if is_claude_cli {
         // Claude CLI: incremental stream-json output, prompt via stdin.
-        // Routed through the shared lean invocation builder (#382) so the chat
-        // path gets the same no-MCP / no-tools / stdin-prompt treatment as the
-        // summarization path, upgraded to `--output-format stream-json --verbose`
-        // for token-by-token rendering. Passing the prompt on stdin (not as a
-        // `-p <arg>`) also avoids the Windows command-line length limit on long
-        // transcripts. This replaced a hand-rolled arg list that carried a
-        // non-existent `--no-interactive` flag and errored on every message.
+        // Built by build_chat_invocation's claude-specific path (separate from
+        // the #382 zero-MCP/zero-tools lean branch used by speaker mapping):
+        // `--strict-mcp-config` + an inline `--mcp-config` register only the
+        // Minutes MCP server, and `--allowedTools` pre-approves a read-only
+        // subset of its tools, upgraded to `--output-format stream-json
+        // --verbose` for token-by-token rendering. Passing the prompt on stdin
+        // (not as a `-p <arg>`) also avoids the Windows command-line length
+        // limit on long transcripts. This replaced a hand-rolled arg list that
+        // carried a non-existent `--no-interactive` flag and errored on every
+        // message.
         let invocation =
             minutes_core::summarize::build_chat_invocation(&agent_bin, &full_prompt, true)
                 .map_err(|e| format!("Failed to prepare claude invocation: {}", e))?;

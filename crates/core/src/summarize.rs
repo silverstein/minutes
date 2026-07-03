@@ -860,23 +860,33 @@ pub struct ChatInvocation {
 
 /// Build a [`ChatInvocation`] for the given agent CLI and prompt.
 ///
-/// Uses `lean = true` for claude (no MCP servers, no tools) and the same
-/// per-CLI argument conventions as the summarization path. This is the single
-/// source of truth for how the native chat panel launches every provider,
-/// including claude — there is no separate hand-rolled claude argument list.
+/// Non-claude agents get the same `lean = true` argument conventions as the
+/// summarization path (see `prepare_agent_invocation`). claude gets its own
+/// arg-building path — [`prepare_claude_chat_invocation`] — which is
+/// deliberately *not* the shared `lean = true` claude branch: that branch is
+/// load-bearing for `run_speaker_mapping_via_agent` (#382, zero MCP/tools so
+/// a tiny classification call can't hang on tool-permission init) and must
+/// stay untouched. The chat panel instead gets a conservative read-only
+/// `--allowedTools` scope onto the Minutes MCP server, so it can ground
+/// answers in real search/graph data — see [`prepare_claude_chat_invocation`]
+/// for the full rationale and the tool allow-list.
 ///
-/// When `stream_json` is set and the agent is claude, the lean
-/// `--output-format text` is upgraded to `--output-format stream-json`
-/// (with the `--verbose` that claude's `--print` mode requires for that
-/// format) so the panel can render tokens incrementally. Other CLIs ignore
-/// `stream_json`: their stdout is captured as a single blob and the flag has
-/// no bearing on their arguments.
+/// When `stream_json` is set and the agent is claude, the `--output-format
+/// text` produced by the branch above is upgraded to `--output-format
+/// stream-json` (with the `--verbose` that claude's `--print` mode requires
+/// for that format) so the panel can render tokens incrementally. Other CLIs
+/// ignore `stream_json`: their stdout is captured as a single blob and the
+/// flag has no bearing on their arguments.
 pub fn build_chat_invocation(
     agent_cmd: &str,
     prompt: &str,
     stream_json: bool,
 ) -> Result<ChatInvocation, Box<dyn std::error::Error>> {
-    let inner = prepare_agent_invocation(agent_cmd, prompt, true)?;
+    let inner = if matches_agent_binary(agent_cmd, "claude") {
+        prepare_claude_chat_invocation(agent_cmd, prompt)
+    } else {
+        prepare_agent_invocation(agent_cmd, prompt, true)?
+    };
     let mut args = inner.args;
     if stream_json && matches_agent_binary(agent_cmd, "claude") {
         if let Some(pos) = args.iter().position(|a| a == "--output-format") {
@@ -892,6 +902,86 @@ pub fn build_chat_invocation(
         stdin_payload: inner.stdin_payload,
         cleanup_path: inner.cleanup_path,
     })
+}
+
+/// Minutes MCP server tools considered safe to pre-approve for the
+/// unattended Recall chat process: every tool the server itself annotates
+/// `readOnlyHint: true` in `crates/mcp/src/index.ts` (search, meeting/person
+/// lookups, insights, commitments, status checks, live-transcript reads),
+/// *except* `open_dashboard`. `open_dashboard` is read-only with respect to
+/// Minutes' own data, but it starts a local HTTP server and opens the user's
+/// default browser — a side effect that should never fire from an unattended
+/// headless process. Nothing that writes data (notes, annotations, speaker
+/// confirmations), controls recording/dictation, or touches config is in
+/// this list; those all require a human in the loop.
+///
+/// `activity_summary`, `search_context`, and `get_moment` are included
+/// because the server marks them read-only, but they surface desktop-context
+/// data (other apps' window/tab titles) rather than pure meeting content —
+/// worth a second look if that trust boundary feels too broad for chat.
+const CHAT_ALLOWED_MCP_TOOLS: &[&str] = &[
+    "get_status",
+    "list_processing_jobs",
+    "list_meetings",
+    "search_meetings",
+    "activity_summary",
+    "search_context",
+    "get_moment",
+    "consistency_report",
+    "get_person_profile",
+    "research_topic",
+    "get_meeting",
+    "qmd_collection_status",
+    "track_commitments",
+    "relationship_map",
+    "list_voices",
+    "get_agent_annotations",
+    "get_meeting_insights",
+    "read_live_transcript",
+    "knowledge_status",
+];
+
+/// Self-contained MCP config declaring only the Minutes MCP server (same
+/// `npx minutes-mcp` invocation documented in README.md's "Any MCP client"
+/// section). Passed alongside `--strict-mcp-config` so this process ignores
+/// whatever else the user has registered in their own claude config —
+/// the chat panel gets exactly this one server, nothing more.
+const CHAT_MCP_CONFIG: &str =
+    "{\"mcpServers\":{\"minutes\":{\"command\":\"npx\",\"args\":[\"minutes-mcp\"]}}}";
+
+/// claude-specific chat invocation (see [`build_chat_invocation`] for why
+/// this is separate from the shared `lean = true` branch in
+/// `prepare_agent_invocation`). Registers only the Minutes MCP server via an
+/// inline `--mcp-config` + `--strict-mcp-config`, and pre-approves a
+/// read-only tool allow-list via `--allowedTools` (confirmed flag name/syntax
+/// against `claude --help` on this machine: `--allowedTools, --allowed-tools
+/// <tools...>`, MCP tools addressed as `mcp__<server>__<tool>`). In `-p`
+/// (print/non-interactive) mode, a tool call outside the allow-list is
+/// rejected outright rather than blocking on an approval prompt, which is
+/// what makes this safe to run unattended.
+fn prepare_claude_chat_invocation(agent_cmd: &str, prompt: &str) -> AgentInvocation {
+    let allowed_tools = CHAT_ALLOWED_MCP_TOOLS
+        .iter()
+        .map(|name| format!("mcp__minutes__{}", name))
+        .collect::<Vec<_>>()
+        .join(",");
+
+    AgentInvocation {
+        cmd: agent_cmd.to_string(),
+        args: vec![
+            "-p".into(),
+            "--strict-mcp-config".into(),
+            "--mcp-config".into(),
+            CHAT_MCP_CONFIG.into(),
+            "--allowedTools".into(),
+            allowed_tools,
+            "--output-format".into(),
+            "text".into(),
+            "-".into(),
+        ],
+        stdin_payload: Some(prompt.as_bytes().to_vec()),
+        cleanup_path: None,
+    }
 }
 
 fn write_agent_prompt_file(
@@ -2979,19 +3069,35 @@ PARTICIPANTS:
     }
 
     #[test]
-    fn build_chat_invocation_claude_streams_json_and_stays_lean() {
-        // Recall chat: claude must keep the #382 lean flags (no MCP, no tools,
-        // prompt on stdin) AND stream incrementally. `--no-interactive` (which
-        // does not exist on the claude CLI and broke every chat message) must
-        // never appear.
+    fn build_chat_invocation_claude_streams_json_and_scopes_readonly_tools() {
+        // Recall chat: claude must be strictly scoped to the Minutes MCP
+        // server with a read-only --allowedTools list (not the #382 zero-MCP
+        // lean branch, which stays reserved for speaker mapping) AND stream
+        // incrementally. `--no-interactive` (which does not exist on the
+        // claude CLI and broke every chat message) must never appear.
         let inv = build_chat_invocation("claude", "hola", true).unwrap();
         assert_eq!(inv.cmd, "claude");
-        // Lean flags preserved.
+        // Scoped to exactly the Minutes MCP server, no other configured servers.
         assert!(inv.args.iter().any(|a| a == "--strict-mcp-config"));
         assert!(inv
             .args
+            .iter()
+            .any(|a| a.contains("\"minutes\"") && a.contains("npx") && a.contains("minutes-mcp")));
+        // Read-only allow-list present, addressed as mcp__minutes__<tool>, and
+        // does not include mutating tools or open_dashboard (browser side effect).
+        let allowed_tools = inv
+            .args
             .windows(2)
-            .any(|w| w[0] == "--tools" && w[1].is_empty()));
+            .find(|w| w[0] == "--allowedTools")
+            .map(|w| w[1].as_str())
+            .expect("--allowedTools must be present");
+        assert!(allowed_tools.contains("mcp__minutes__search_meetings"));
+        assert!(allowed_tools.contains("mcp__minutes__get_meeting"));
+        assert!(!allowed_tools.contains("start_recording"));
+        assert!(!allowed_tools.contains("add_note"));
+        assert!(!allowed_tools.contains("open_dashboard"));
+        // The old hard `--tools ""` lockout is gone.
+        assert!(!inv.args.iter().any(|a| a == "--tools"));
         // Streaming upgrade applied, `text` replaced, `--verbose` present.
         assert!(inv
             .args

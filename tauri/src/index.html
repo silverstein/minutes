@@ -10828,6 +10828,12 @@
     const recallChatSendBtn = document.getElementById('recall-chat-send');
     let currentAssistantBubble = null;
     let chatListenersRegistered = false;
+    // Tracks which meeting the *currently displayed* native chat conversation
+    // belongs to. Deliberately separate from currentMeetingPath: other flows
+    // (e.g. closeDetailView()) null out currentMeetingPath transiently before
+    // openRecall() re-sets it, which would cause a false "meeting changed"
+    // read if we compared against currentMeetingPath directly.
+    let recallChatMeetingPath = null;
 
     // ── Draggable split handle ──
     function clampRecallRatio(ratio) {
@@ -10903,7 +10909,13 @@
       if (phase === 'weekly') {
         recallLoading.classList.remove('active');
       }
-      recallTerminalContainer.classList.toggle('hidden', phase === 'weekly');
+      // Keep the (flex:1) terminal container hidden whenever it isn't the active
+      // surface: in weekly view, and — critically — in native chat mode. Without
+      // the `!recallDevMode` guard a recording/restore phase change unhid the
+      // empty terminal, which then split the panel's vertical space 50/50 with
+      // the chat container and pushed the welcome/messages into the middle
+      // (looked "vertically centered" instead of top-anchored).
+      recallTerminalContainer.classList.toggle('hidden', phase === 'weekly' || !recallDevMode);
       // Hide chat panel in weekly view regardless of mode; restore it when leaving.
       if (recallChatPanel) {
         recallChatPanel.style.display = (phase === 'weekly' || recallDevMode) ? 'none' : 'flex';
@@ -10999,6 +11011,13 @@
           bytes[i] = raw.charCodeAt(i);
         }
         recallTerminal.write(bytes);
+        // The PTY session keeps running in the background after switching to
+        // chat mode (so its context survives a later switch back), so it can
+        // keep emitting data while chat is the active view. Only reveal the
+        // terminal container for that data if terminal mode is actually the
+        // current view — otherwise this unconditionally re-showed the
+        // terminal on top of/alongside the chat panel ("split view").
+        if (!recallDevMode) return;
         const wasHidden = recallTerminalContainer.classList.contains('hidden');
         recallLoading.classList.remove('active');
         recallTerminalContainer.classList.remove('hidden');
@@ -11026,14 +11045,72 @@
       recallChatMessages.appendChild(bubble);
     }
 
+    /// Reset native chat state when focus switches to a different meeting.
+    ///
+    /// Clears the visible chat bubbles and the backend's turn history so the
+    /// new meeting starts with a clean conversation instead of inheriting
+    /// stale context from whatever meeting was previously focused. Callers
+    /// are responsible for confirming the meeting actually changed before
+    /// calling this — it unconditionally wipes the current conversation.
+    async function resetRecallChat() {
+      if (recallChatMessages) recallChatMessages.replaceChildren();
+      currentAssistantBubble = null;
+      try {
+        await invoke('cmd_recall_chat_clear');
+      } catch (e) {
+        console.error('cmd_recall_chat_clear failed:', e);
+      }
+      showChatWelcome();
+    }
+
     /// Apply the current mode to the recall panel contents.
-    /// In dev-mode (terminal): hide chat panel (terminal visibility managed elsewhere).
-    /// In chat mode: hide terminal container, show chat panel.
-    function applyRecallMode() {
+    ///
+    /// Symmetric in both directions so switching mode *after* the panel is
+    /// already open behaves exactly like opening in that mode:
+    ///  - dev/terminal: hide chat, reveal + init the terminal, ensure a PTY.
+    ///  - chat/native: hide the terminal, register chat listeners, show chat.
+    ///
+    /// Previously the dev branch only hid the chat panel and never spun up a
+    /// PTY, so toggling to terminal mode mid-session showed a black pane.
+    async function applyRecallMode() {
       if (recallDevMode) {
+        // Terminal (developer) mode — mirror openRecall()'s dev path.
+        // cmd_spawn_terminal is idempotent: if the assistant session already
+        // exists the backend no-ops, so chat→terminal→chat→terminal never
+        // double-spawns. A PTY started earlier is left running when we switch
+        // away to chat, so re-entering terminal mode just re-reveals it.
         if (recallChatPanel) recallChatPanel.style.display = 'none';
+        recallTerminalContainer.classList.remove('hidden');
+        initRecallTerminal();
+        await registerPtyListeners();
+        if (!recallPtyAlive) {
+          try {
+            await invoke('cmd_spawn_terminal', { mode: 'assistant' });
+            recallPtyAlive = true;
+            recallEndBtn.classList.add('active');
+          } catch (e) {
+            const msg = typeof e === 'string' ? e : String(e);
+            if (msg.includes('already running') || msg.includes('Already')) {
+              recallPtyAlive = true;
+              recallEndBtn.classList.add('active');
+            } else {
+              console.error('Recall terminal spawn:', e);
+            }
+          }
+        }
+        recallLoading.classList.remove('active');
+        // Re-fit once the container is actually visible so xterm measures the
+        // real width; focus for immediate typing.
+        setTimeout(() => {
+          if (recallFitAddon) recallFitAddon.fit();
+          if (recallTerminal) recallTerminal.focus();
+        }, 60);
       } else {
+        // Chat (native) mode. Leave any PTY session running in the background
+        // so switching back preserves the agent's context — End Session is the
+        // explicit teardown. Any in-flight chat request completes harmlessly.
         recallTerminalContainer.classList.add('hidden');
+        await registerChatListeners();
         if (recallChatPanel) {
           recallChatPanel.style.display = 'flex';
           showChatWelcome();
@@ -11242,6 +11319,26 @@
         // Native chat mode: apply layout and register listeners.
         // expandRecallPanel already called applyRecallMode() + registerChatListeners()
         // but handle the case where the panel was already expanded (bailed early).
+        // Unlike the terminal branch below, this path never forwarded
+        // meetingPath anywhere, so the backend chat handler had no way to
+        // know which meeting was focused ("Discuss with Agent" opened the
+        // chat but cmd_recall_chat_send saw no current_meeting_path).
+        if (meetingPath) {
+          // Only reset the conversation when switching to a *different*
+          // meeting. Re-focusing the same meeting (closing/reopening the
+          // panel, clicking "Discuss with Agent" again) must preserve the
+          // ongoing chat. Compare against recallChatMeetingPath rather than
+          // currentMeetingPath — some callers (closeDetailView) null out
+          // currentMeetingPath transiently right before invoking openRecall,
+          // which would otherwise look like a meeting switch every time.
+          const switchedMeeting = meetingPath !== recallChatMeetingPath;
+          currentMeetingPath = meetingPath;
+          recallChatMeetingPath = meetingPath;
+          persistRecallWorkspaceState({ currentMeetingPath: meetingPath });
+          if (switchedMeeting) {
+            await resetRecallChat();
+          }
+        }
         applyRecallMode();
         await registerChatListeners();
         return;
@@ -12494,7 +12591,9 @@
       }
       recallPtyAlive = true;
       recallLoading.classList.remove('active');
-      recallTerminalContainer.classList.remove('hidden');
+      // Only reveal the terminal when it's the active surface (dev mode); in
+      // chat mode it must stay hidden so it doesn't steal the panel's height.
+      if (recallDevMode) recallTerminalContainer.classList.remove('hidden');
       recallEndBtn.classList.add('active');
     });
 

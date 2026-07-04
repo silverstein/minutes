@@ -189,6 +189,37 @@ fn detect_summarization_warnings(
     warnings
 }
 
+const SILENT_REMOTE_WARNING_MESSAGE: &str =
+    "Call/remote audio was not captured (system stem silent); transcript reflects only your microphone";
+
+fn detect_silent_remote_stem_warning(
+    content_type: ContentType,
+    audio_path: &Path,
+    source: Option<&str>,
+    recording_health: Option<&markdown::RecordingHealth>,
+) -> Option<ProcessingWarning> {
+    if content_type != ContentType::Meeting {
+        return None;
+    }
+    if infer_capture_backend(audio_path, source) != "native-call" {
+        return None;
+    }
+
+    let health = recording_health?;
+    let voice = health.voice_stem_active_ratio?;
+    let system = health.system_stem_active_ratio?;
+    if voice < SPARSE_STEM_ACTIVE_RATIO || system >= SPARSE_STEM_ACTIVE_RATIO {
+        return None;
+    }
+
+    Some(ProcessingWarning {
+        step: "capture".to_string(),
+        reason: "remote_audio_not_captured".to_string(),
+        timeout_secs: None,
+        message: Some(SILENT_REMOTE_WARNING_MESSAGE.to_string()),
+    })
+}
+
 /// Result of Level 2 voice enrollment matching.
 struct VoiceMatchResult {
     /// Speaker attributions from voice matching (one per matched label).
@@ -1992,6 +2023,18 @@ where
     if let Some(warning) = collapse_warning {
         summarization_warnings.push(warning);
     }
+    if let Some(warning) = detect_silent_remote_stem_warning(
+        artifact.frontmatter.r#type,
+        audio_path,
+        artifact.frontmatter.source.as_deref(),
+        merge_recording_health(
+            recording_health.clone(),
+            artifact.frontmatter.recording_health.clone(),
+        )
+        .as_ref(),
+    ) {
+        summarization_warnings.push(warning);
+    }
     frontmatter.status = if !summarization_warnings.is_empty() {
         Some(OutputStatus::Degraded)
     } else if config.summarization.engine != "none" {
@@ -2648,7 +2691,15 @@ where
     if let Some(warning) = collapse_warning {
         summarization_warnings.push(warning);
     }
-    let status = if !summarization_warnings.is_empty() && status == Some(OutputStatus::Complete) {
+    if let Some(warning) = detect_silent_remote_stem_warning(
+        content_type,
+        audio_path,
+        source.as_deref(),
+        recording_health.as_ref(),
+    ) {
+        summarization_warnings.push(warning);
+    }
+    let status = if !summarization_warnings.is_empty() && status != Some(OutputStatus::NoSpeech) {
         Some(OutputStatus::Degraded)
     } else {
         status
@@ -4945,6 +4996,78 @@ mod tests {
             .as_ref()
             .unwrap()
             .contains("engine `claude`"));
+    }
+
+    fn apply_silent_remote_warning_on_batch_path(
+        content_type: ContentType,
+        audio_path: &Path,
+        source: Option<&str>,
+        health: Option<&markdown::RecordingHealth>,
+        initial_status: Option<OutputStatus>,
+    ) -> (Vec<ProcessingWarning>, Option<OutputStatus>) {
+        let mut warnings = Vec::new();
+        if let Some(warning) =
+            detect_silent_remote_stem_warning(content_type, audio_path, source, health)
+        {
+            warnings.push(warning);
+        }
+        let status = if !warnings.is_empty() && initial_status != Some(OutputStatus::NoSpeech) {
+            Some(OutputStatus::Degraded)
+        } else {
+            initial_status
+        };
+        (warnings, status)
+    }
+
+    #[test]
+    fn call_recording_with_silent_system_stem_warns_and_degrades() {
+        let health = sparse_health(0.90, 0.0);
+        let (warnings, status) = apply_silent_remote_warning_on_batch_path(
+            ContentType::Meeting,
+            Path::new("/tmp/native-captures/call.wav"),
+            Some("native-call"),
+            Some(&health),
+            Some(OutputStatus::Complete),
+        );
+
+        assert_eq!(status, Some(OutputStatus::Degraded));
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].step, "capture");
+        assert_eq!(warnings[0].reason, "remote_audio_not_captured");
+        assert_eq!(
+            warnings[0].message.as_deref(),
+            Some(SILENT_REMOTE_WARNING_MESSAGE)
+        );
+    }
+
+    #[test]
+    fn non_call_mic_only_recording_does_not_warn() {
+        let health = sparse_health(0.90, 0.0);
+        let (warnings, status) = apply_silent_remote_warning_on_batch_path(
+            ContentType::Meeting,
+            Path::new("/tmp/in-person-meeting.wav"),
+            None,
+            Some(&health),
+            Some(OutputStatus::Complete),
+        );
+
+        assert!(warnings.is_empty());
+        assert_eq!(status, Some(OutputStatus::Complete));
+    }
+
+    #[test]
+    fn healthy_call_with_both_stems_active_does_not_warn() {
+        let health = sparse_health(0.90, 0.85);
+        let (warnings, status) = apply_silent_remote_warning_on_batch_path(
+            ContentType::Meeting,
+            Path::new("/tmp/native-captures/call.wav"),
+            Some("native-call"),
+            Some(&health),
+            Some(OutputStatus::Complete),
+        );
+
+        assert!(warnings.is_empty());
+        assert_eq!(status, Some(OutputStatus::Complete));
     }
 
     /// Simulates the branch logic the `process` path applies after

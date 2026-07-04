@@ -192,23 +192,8 @@ fn detect_summarization_warnings(
 const SILENT_REMOTE_WARNING_MESSAGE: &str =
     "Call/remote audio was not captured (system stem silent); transcript reflects only your microphone";
 
-const SILENT_REMOTE_SYSTEM_ACTIVE_RATIO: f32 = 0.005;
-
-fn warning_is_system_capture_loss(warning: &markdown::CaptureWarning) -> bool {
+fn warning_is_native_call_system_stem_recovery(warning: &markdown::CaptureWarning) -> bool {
     match &warning.kind {
-        diarize::FailureKind::Silent
-        | diarize::FailureKind::Missing
-        | diarize::FailureKind::BackendUnavailable
-        | diarize::FailureKind::StreamError
-        | diarize::FailureKind::SourceStarved
-        | diarize::FailureKind::MisconfiguredRoute
-        | diarize::FailureKind::PermissionDenied
-        | diarize::FailureKind::RouteUnavailable => {
-            matches!(
-                warning.source,
-                diarize::CaptureSource::System | diarize::CaptureSource::Both
-            )
-        }
         diarize::FailureKind::Other { code } if code == "native-call-stem-recovery" => warning
             .message
             .to_ascii_lowercase()
@@ -228,21 +213,12 @@ fn detect_silent_remote_stem_warning(
     }
 
     let health = recording_health?;
-    let capture_warning_lost_system = health
+    let native_call_lost_system = health
         .capture_warnings
         .iter()
-        .any(warning_is_system_capture_loss);
-    let near_zero_system_stem = match (
-        health.voice_stem_active_ratio,
-        health.system_stem_active_ratio,
-    ) {
-        (Some(voice), Some(system)) => {
-            voice >= SPARSE_STEM_ACTIVE_RATIO && system < SILENT_REMOTE_SYSTEM_ACTIVE_RATIO
-        }
-        _ => false,
-    };
+        .any(warning_is_native_call_system_stem_recovery);
 
-    if !capture_warning_lost_system && !near_zero_system_stem {
+    if !native_call_lost_system {
         return None;
     }
 
@@ -4855,11 +4831,26 @@ mod tests {
 
     fn mic_only_health() -> markdown::RecordingHealth {
         markdown::RecordingHealth {
-            voice_stem_active_ratio: Some(0.90),
+            voice_stem_active_ratio: None,
             system_stem_active_ratio: None,
             system_dominant_ratio: None,
             capture_warnings: vec![],
             diarization_path: None,
+        }
+    }
+
+    fn in_person_system_silent_health() -> markdown::RecordingHealth {
+        markdown::RecordingHealth {
+            voice_stem_active_ratio: Some(1.0),
+            system_stem_active_ratio: Some(0.0),
+            system_dominant_ratio: None,
+            capture_warnings: vec![markdown::CaptureWarning {
+                kind: diarize::FailureKind::Silent,
+                source: diarize::CaptureSource::System,
+                message: "System audio was silent during capture; speaker labels were recovered from degraded mic bleed with low confidence.".into(),
+                diagnostic_confidence: diarize::DiagnosticConfidence::Inferred,
+            }],
+            diarization_path: Some(markdown::DiarizationPath::MlBleedDegraded),
         }
     }
 
@@ -5081,7 +5072,22 @@ mod tests {
     }
 
     #[test]
-    fn call_recording_with_silent_system_stem_warns_and_degrades() {
+    fn in_person_system_silent_capture_does_not_warn_without_recovery_marker() {
+        let health = in_person_system_silent_health();
+        let (warnings, status) = apply_silent_remote_warning_on_batch_path(
+            ContentType::Meeting,
+            Path::new("/tmp/in-person-meeting.wav"),
+            None,
+            Some(&health),
+            Some(OutputStatus::Complete),
+        );
+
+        assert!(warnings.is_empty());
+        assert_eq!(status, Some(OutputStatus::Complete));
+    }
+
+    #[test]
+    fn active_voice_zero_system_ratio_does_not_warn_without_recovery_marker() {
         let health = sparse_health(0.90, 0.0);
         let (warnings, status) = apply_silent_remote_warning_on_batch_path(
             ContentType::Meeting,
@@ -5091,34 +5097,12 @@ mod tests {
             Some(OutputStatus::Complete),
         );
 
-        assert_eq!(status, Some(OutputStatus::Degraded));
-        assert_eq!(warnings.len(), 1);
-        assert_eq!(warnings[0].step, "capture");
-        assert_eq!(warnings[0].reason, "remote_audio_not_captured");
-        assert_eq!(
-            warnings[0].message.as_deref(),
-            Some(SILENT_REMOTE_WARNING_MESSAGE)
-        );
+        assert!(warnings.is_empty());
+        assert_eq!(status, Some(OutputStatus::Complete));
     }
 
     #[test]
-    fn queued_call_with_silent_system_stem_warns_without_source_or_native_path() {
-        let health = sparse_health(0.90, 0.0);
-        let (warnings, status) = apply_silent_remote_warning_on_batch_path(
-            ContentType::Meeting,
-            Path::new("/Users/test/.minutes/jobs/job-123.mov"),
-            None,
-            Some(&health),
-            Some(OutputStatus::Complete),
-        );
-
-        assert_eq!(status, Some(OutputStatus::Degraded));
-        assert_eq!(warnings.len(), 1);
-        assert_eq!(warnings[0].reason, "remote_audio_not_captured");
-    }
-
-    #[test]
-    fn recovery_health_without_ratios_warns_and_degrades_from_capture_warning() {
+    fn native_call_recovery_marker_warns_and_degrades() {
         let health = native_call_system_recovery_health();
         let (warnings, status) = apply_silent_remote_warning_on_batch_path(
             ContentType::Meeting,
@@ -5130,7 +5114,12 @@ mod tests {
 
         assert_eq!(status, Some(OutputStatus::Degraded));
         assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].step, "capture");
         assert_eq!(warnings[0].reason, "remote_audio_not_captured");
+        assert_eq!(
+            warnings[0].message.as_deref(),
+            Some(SILENT_REMOTE_WARNING_MESSAGE)
+        );
     }
 
     #[test]

@@ -1478,6 +1478,7 @@ pub fn transcribe_to_artifact(
         config,
         decode_hints,
     )?;
+    crate::process_trace::stage("transcribe.done");
     drop(mixed_stem_path);
     let transcript = if content_type == ContentType::Meeting {
         normalize_transcript_for_self_name_participant(&result.text, &attendees, &config.identity)
@@ -1485,7 +1486,8 @@ pub fn transcribe_to_artifact(
         result.text
     };
     let filter_stats = result.stats;
-    write_transcript_artifact(
+    crate::process_trace::stage("pipeline.write.start");
+    let artifact = write_transcript_artifact(
         audio_path,
         content_type,
         title,
@@ -1495,7 +1497,15 @@ pub fn transcribe_to_artifact(
         transcript,
         filter_stats,
         step_start.elapsed().as_millis() as u64,
-    )
+    );
+    match &artifact {
+        Ok(_) => crate::process_trace::stage("pipeline.write.done"),
+        Err(error) => crate::process_trace::stage_with_extra(
+            "pipeline.write.error",
+            serde_json::json!({"error": error.to_string()}),
+        ),
+    }
+    artifact
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2261,6 +2271,7 @@ where
         config,
         decode_hints,
     )?;
+    crate::process_trace::stage("transcribe.done");
     drop(mixed_stem_path);
     let transcribe_ms = step_start.elapsed().as_millis() as u64;
     let transcript = if content_type == ContentType::Meeting {
@@ -2765,6 +2776,7 @@ where
     };
 
     tracing::info!(step = "write", "writing markdown");
+    crate::process_trace::stage("pipeline.write.start");
     let step_start = std::time::Instant::now();
     let mut result = markdown::write_with_retry_path(
         &frontmatter,
@@ -2817,6 +2829,10 @@ where
         write_ms,
         serde_json::json!({"output": result.path.display().to_string(), "words": result.word_count}),
     );
+    crate::process_trace::stage_with_extra(
+        "pipeline.write.done",
+        serde_json::json!({"output": result.path.display().to_string(), "words": result.word_count}),
+    );
 
     // Emit structured insight events for agent subscription
     if let Some(ref summary_data) = raw_summary {
@@ -2861,6 +2877,10 @@ where
         words = result.word_count,
         elapsed_ms = elapsed.as_millis() as u64,
         "pipeline complete"
+    );
+    crate::process_trace::stage_with_extra(
+        "pipeline.done",
+        serde_json::json!({"output": result.path.display().to_string(), "words": result.word_count}),
     );
 
     Ok(result)

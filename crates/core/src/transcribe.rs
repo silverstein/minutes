@@ -977,15 +977,19 @@ pub(crate) fn whisper_context_params() -> whisper_rs::WhisperContextParameters<'
 #[cfg(feature = "whisper")]
 fn load_whisper_context(config: &Config) -> Result<whisper_rs::WhisperContext, TranscribeError> {
     let model_path = resolve_model_path(config)?;
+    crate::process_trace::update_model_path(&model_path);
+    crate::process_trace::stage("whisper.model_load.start");
     tracing::info!(model = %model_path.display(), "loading whisper model");
 
-    whisper_rs::WhisperContext::new_with_params(
+    let ctx = whisper_rs::WhisperContext::new_with_params(
         model_path
             .to_str()
             .ok_or_else(|| TranscribeError::ModelLoadError("invalid model path encoding".into()))?,
         whisper_context_params(),
     )
-    .map_err(|e| TranscribeError::ModelLoadError(format!("{}", e)))
+    .map_err(|e| TranscribeError::ModelLoadError(format!("{}", e)))?;
+    crate::process_trace::stage("whisper.model_load.done");
+    Ok(ctx)
 }
 
 #[cfg(feature = "whisper")]
@@ -1100,11 +1104,14 @@ fn transcribe_with_whisper(
 
     // Resolve VAD model path and convert to string for FullParams lifetime.
     // Skip VAD on retry — it may have been too aggressive on this audio.
+    crate::process_trace::stage("whisper.vad_setup.start");
     let vad_path = if force_disable_vad {
         None
     } else {
         resolve_vad_model_path(config)
     };
+    crate::process_trace::update_vad_enabled(vad_path.is_some());
+    crate::process_trace::stage("whisper.vad_setup.done");
     let vad_path_str = vad_path.as_ref().and_then(|p| p.to_str());
     let mut params = default_whisper_params(vad_path_str);
     params.set_n_threads(num_cpus());
@@ -1136,6 +1143,10 @@ fn transcribe_with_whisper(
         exceeded
     });
 
+    crate::process_trace::stage_with_extra(
+        "whisper.full.start",
+        serde_json::json!({"timeout_secs": timeout_secs}),
+    );
     state.full(params, samples).map_err(|e| {
         let msg = format!("{}", e);
         if msg.contains("abort") {
@@ -1148,6 +1159,7 @@ fn transcribe_with_whisper(
             TranscribeError::TranscriptionFailed(msg)
         }
     })?;
+    crate::process_trace::stage("whisper.full.done");
 
     let num_segments = state.full_n_segments();
     stats.raw_segments = num_segments as usize;
@@ -1307,15 +1319,38 @@ fn load_audio_samples(path: &Path) -> Result<Vec<f32>, TranscribeError> {
         .unwrap_or("")
         .to_lowercase();
 
-    match ext.as_str() {
-        "wav" => load_wav(path),
+    let samples = match ext.as_str() {
+        "wav" => {
+            crate::process_trace::stage_with_extra(
+                "decode.start",
+                serde_json::json!({"decoder": "wav"}),
+            );
+            let samples = load_wav(path)?;
+            crate::process_trace::update_audio(samples.len());
+            crate::process_trace::stage_with_extra(
+                "decode.done",
+                serde_json::json!({"decoder": "wav"}),
+            );
+            samples
+        }
         "m4a" | "mp3" | "ogg" | "webm" | "mp4" | "mov" | "aac" => {
             // Prefer ffmpeg — its resampler and AAC decoder produce samples that
             // whisper transcribes correctly across all languages. Symphonia's AAC
             // decoder produces subtly different samples that trigger hallucination
             // loops on non-English audio (confirmed in issue #21).
+            crate::process_trace::stage_with_extra(
+                "decode.start",
+                serde_json::json!({"decoder": "ffmpeg"}),
+            );
             match decode_with_ffmpeg(path) {
-                Ok(samples) => Ok(samples),
+                Ok(samples) => {
+                    crate::process_trace::update_audio(samples.len());
+                    crate::process_trace::stage_with_extra(
+                        "decode.done",
+                        serde_json::json!({"decoder": "ffmpeg"}),
+                    );
+                    samples
+                }
                 Err(e) => {
                     let is_not_found = e.to_string().contains("not available")
                         || e.to_string().contains("not found");
@@ -1332,12 +1367,23 @@ fn load_audio_samples(path: &Path) -> Result<Vec<f32>, TranscribeError> {
                             "ffmpeg decode failed — falling back to symphonia"
                         );
                     }
-                    decode_with_symphonia(path)
+                    crate::process_trace::stage_with_extra(
+                        "decode.start",
+                        serde_json::json!({"decoder": "symphonia", "fallback_from": "ffmpeg"}),
+                    );
+                    let samples = decode_with_symphonia(path)?;
+                    crate::process_trace::update_audio(samples.len());
+                    crate::process_trace::stage_with_extra(
+                        "decode.done",
+                        serde_json::json!({"decoder": "symphonia", "fallback_from": "ffmpeg"}),
+                    );
+                    samples
                 }
             }
         }
-        other => Err(TranscribeError::UnsupportedFormat(other.to_string())),
-    }
+        other => return Err(TranscribeError::UnsupportedFormat(other.to_string())),
+    };
+    Ok(samples)
 }
 
 /// Load WAV file as f32 samples, converting to 16kHz mono if needed.
@@ -3524,6 +3570,76 @@ mod tests {
         assert!(!samples.is_empty());
         // 1 second at 16kHz = 16000 samples
         assert_eq!(samples.len(), 16000);
+    }
+
+    #[test]
+    #[cfg(not(feature = "whisper"))]
+    fn traced_transcribe_path_writes_ordered_process_breadcrumbs() {
+        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _lock = ENV_LOCK.lock().unwrap();
+        let old_minutes_home = std::env::var_os("MINUTES_HOME");
+        let old_minutes_trace = std::env::var_os("MINUTES_TRACE");
+
+        let dir = tempfile::TempDir::new().unwrap();
+        std::env::set_var("MINUTES_HOME", dir.path());
+        std::env::remove_var("MINUTES_TRACE");
+
+        let audio_path = dir.path().join("probe.wav");
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: 16000,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut writer = hound::WavWriter::create(&audio_path, spec).unwrap();
+        for _ in 0..1600 {
+            writer.write_sample(0_i16).unwrap();
+        }
+        writer.finalize().unwrap();
+
+        let mut config = Config::default();
+        config.transcription.language = Some("fr".into());
+        let _trace_guard = crate::process_trace::start_process_trace(
+            &audio_path,
+            crate::markdown::ContentType::Memo,
+            &config,
+        );
+        transcribe_with_hints(&audio_path, &config, &DecodeHints::default()).unwrap();
+        crate::process_trace::stage("process.done");
+
+        let trace_path = crate::process_trace::trace_file_path_for_tests().unwrap();
+        let trace = std::fs::read_to_string(trace_path).unwrap();
+        let events = trace
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        let stages = events
+            .iter()
+            .map(|event| event["stage"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            stages,
+            vec![
+                "process.start",
+                "decode.start",
+                "decode.done",
+                "process.done"
+            ]
+        );
+        assert!(events.iter().all(|event| event["ts"].is_string()));
+        assert_eq!(events[0]["input_path"], audio_path.display().to_string());
+        assert_eq!(events[0]["language"], "fr");
+        assert_eq!(events[0]["content_type"], "memo");
+        assert_eq!(events[2]["audio_samples"], 1600);
+
+        match old_minutes_home {
+            Some(value) => std::env::set_var("MINUTES_HOME", value),
+            None => std::env::remove_var("MINUTES_HOME"),
+        }
+        match old_minutes_trace {
+            Some(value) => std::env::set_var("MINUTES_TRACE", value),
+            None => std::env::remove_var("MINUTES_TRACE"),
+        }
     }
 
     #[test]

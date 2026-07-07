@@ -2060,6 +2060,52 @@
       gap: 8px;
     }
 
+    .input-modal-card {
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+      width: min(42ch, 100vw - 32px);
+      padding-top: 18px;
+    }
+
+    .input-modal-title {
+      font-family: var(--font-display);
+      font-size: var(--text-xl);
+      color: var(--text);
+    }
+
+    .input-modal-field {
+      display: grid;
+      gap: 8px;
+    }
+
+    .input-modal-label {
+      font: 500 var(--text-xs) var(--font-mono);
+      color: var(--text-secondary);
+    }
+
+    .input-modal-input {
+      width: 100%;
+      border: 1px solid var(--border-mid);
+      border-radius: var(--radius);
+      background: var(--surface-fill);
+      color: var(--text);
+      font: 13px var(--font-mono);
+      padding: 8px 10px;
+      outline: none;
+    }
+
+    .input-modal-input:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+    }
+
+    .input-modal-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 8px;
+    }
+
     /* Markdown rendered styles */
     .md-viewer-content h1,
     .md-viewer-content h2,
@@ -5059,6 +5105,20 @@
     </div>
   </div>
 
+  <div class="about-overlay input-modal-overlay" id="input-modal-overlay">
+    <div class="about-card input-modal-card" role="dialog" aria-modal="true" aria-labelledby="input-modal-title">
+      <div class="input-modal-title" id="input-modal-title"></div>
+      <label class="input-modal-field" for="input-modal-input">
+        <span class="input-modal-label" id="input-modal-label"></span>
+        <input class="input-modal-input" id="input-modal-input" type="text" autocomplete="off" />
+      </label>
+      <div class="input-modal-actions">
+        <button class="btn btn-secondary btn-sm" id="input-modal-cancel">Cancel</button>
+        <button class="btn btn-primary btn-sm" id="input-modal-confirm">Confirm</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Readiness -->
   <div class="readiness-overlay" id="readiness-overlay">
     <div class="readiness-card" role="dialog" aria-modal="true" aria-labelledby="readiness-title">
@@ -6099,6 +6159,12 @@
     const aboutSettingsButton = document.getElementById('btn-about-settings');
     const aboutChangelogButton = document.getElementById('btn-about-changelog');
     const aboutDiscussionsButton = document.getElementById('btn-about-discussions');
+    const inputModalOverlay = document.getElementById('input-modal-overlay');
+    const inputModalTitle = document.getElementById('input-modal-title');
+    const inputModalLabel = document.getElementById('input-modal-label');
+    const inputModalInput = document.getElementById('input-modal-input');
+    const inputModalCancel = document.getElementById('input-modal-cancel');
+    const inputModalConfirm = document.getElementById('input-modal-confirm');
     const notificationToggle = document.getElementById('btn-toggle-notifications');
     const cueToggle = document.getElementById('btn-toggle-cues');
     const hotkeyToggle = document.getElementById('btn-toggle-hotkey');
@@ -6166,6 +6232,8 @@
     let processingJobs = [];
     let readinessItems = [];
     let recoveryItems = [];
+    let inputModalResolver = null;
+    let inputModalPreviousFocus = null;
     let retryingAllRecovery = false;
     let jobsHistory = [];
     let notifyOnCompletion = true;
@@ -8182,6 +8250,60 @@
       aboutOverlay.classList.add('active');
     }
 
+    function closeInputModal(result = null) {
+      inputModalOverlay.classList.remove('active');
+      const resolver = inputModalResolver;
+      const previousFocus = inputModalPreviousFocus;
+      inputModalResolver = null;
+      inputModalPreviousFocus = null;
+      inputModalInput.value = '';
+      if (resolver) resolver(result);
+      if (previousFocus && typeof previousFocus.focus === 'function') {
+        previousFocus.focus();
+      }
+    }
+
+    function confirmInputModal() {
+      const value = inputModalInput.value.trim();
+      closeInputModal(value || null);
+    }
+
+    function showInputModal({ title, label, value = '', confirmText = 'Confirm' }) {
+      if (inputModalResolver) closeInputModal(null);
+      inputModalPreviousFocus = document.activeElement;
+      inputModalTitle.textContent = title || '';
+      inputModalLabel.textContent = label || '';
+      inputModalInput.value = value || '';
+      inputModalConfirm.textContent = confirmText || 'Confirm';
+      inputModalOverlay.classList.add('active');
+      requestAnimationFrame(() => {
+        inputModalInput.focus();
+        inputModalInput.select();
+      });
+      return new Promise((resolve) => {
+        inputModalResolver = resolve;
+      });
+    }
+
+    inputModalCancel.addEventListener('click', () => closeInputModal(null));
+    inputModalConfirm.addEventListener('click', confirmInputModal);
+    inputModalOverlay.addEventListener('click', (event) => {
+      if (event.target === inputModalOverlay) closeInputModal(null);
+    });
+    inputModalInput.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        confirmInputModal();
+      }
+    });
+    document.addEventListener('keydown', (event) => {
+      if (!inputModalOverlay.classList.contains('active')) return;
+      if (event.key !== 'Escape') return;
+      event.preventDefault();
+      event.stopPropagation();
+      closeInputModal(null);
+    }, true);
+
     function showDetailFeedback(message, tone = 'success') {
       if (detailFeedbackTimer) {
         clearTimeout(detailFeedbackTimer);
@@ -8306,7 +8428,12 @@
             btn.className = 'speaker-confirm-btn';
             btn.textContent = 'Confirm';
             btn.onclick = async () => {
-              const newName = prompt(`Confirm speaker name for ${attr.speaker_label}:`, attr.name);
+              const newName = await showInputModal({
+                title: 'Confirm speaker',
+                label: `Name for ${attr.speaker_label}`,
+                value: attr.name,
+                confirmText: 'Confirm',
+              });
               if (newName) {
                 btn.disabled = true;
                 const previousLabel = btn.textContent;

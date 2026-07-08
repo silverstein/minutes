@@ -34,11 +34,13 @@ window.__MINUTES_I18N['zh-CN'] = {
     "Finishing recording…": "正在结束录音…",
     "mic silent, check input device": "麦克风无声，请检查输入设备",
 
-    // ── Output notice ───────────────────────────────────────────────
+    // ── Output / processing notices (dynamically rendered from Rust data) ─
+    "Processing failed": "处理失败",
+    "Open Capture": "打开采集",
+    "Open Meeting": "打开会议",
+    "Capture preserved": "采集已保留",
+    "Needs attention": "需要注意",
     "Saved meeting": "已保存会议",
-    "Open": "打开",
-    "Retry": "重试",
-    "Dismiss": "忽略",
 
     // ── Quick note / search ─────────────────────────────────────────
     "Quick note...": "快速笔记…",
@@ -505,6 +507,7 @@ window.__MINUTES_I18N['zh-CN'] = {
     "Yoruba": "约鲁巴语"
   },
   patterns: [
+    { re: "^whisper model at (.+?) looks truncated: file is ([\\d.]+) MB but the (.+?) model should be at least ([\\d.]+) MB\\. A previous download was probably interrupted\\. Fix: rm \"(.+?)\" && minutes setup --model (.+?)$", to: "whisper 模型 $1 看起来已截断：文件为 $2 MB，但 $3 模型应至少为 $4 MB。之前的下载可能中断了。修复：删除 \"$5\" 并运行 minutes setup --model $6" },
     { re: "^(\\d+) utterances$", to: "$1 条语音" },
     { re: "^(\\d+) utterance$", to: "$1 条语音" },
     { re: "^(\\d+) chars$", to: "$1 字符" },

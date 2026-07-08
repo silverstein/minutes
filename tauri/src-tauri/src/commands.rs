@@ -4072,6 +4072,13 @@ fn desktop_recording_consent_required(
 }
 
 fn show_user_notification_nonmodal(app_handle: &tauri::AppHandle, title: &str, body: &str) {
+    // Localize once here so every call site gets translated titles/bodies for
+    // free. Dynamic/interpolated bodies simply fall back to English (no entry).
+    let title = minutes_core::i18n::tr(title);
+    let title = title.as_ref();
+    let body = minutes_core::i18n::tr(body);
+    let body = body.as_ref();
+
     #[cfg(target_os = "macos")]
     {
         let identifier = app_handle.config().identifier.as_str();
@@ -4493,6 +4500,13 @@ fn maybe_show_completion_notification(
 }
 
 pub fn show_user_notification(app_handle: &tauri::AppHandle, title: &str, body: &str) {
+    // Localize once here so every call site gets translated titles/bodies for
+    // free. Dynamic/interpolated bodies simply fall back to English (no entry).
+    let title = minutes_core::i18n::tr(title);
+    let title = title.as_ref();
+    let body = minutes_core::i18n::tr(body);
+    let body = body.as_ref();
+
     #[cfg(target_os = "macos")]
     {
         let identifier = app_handle.config().identifier.as_str();
@@ -5394,6 +5408,54 @@ pub fn cmd_vault_unlink() -> Result<String, String> {
         .save()
         .map_err(|e| format!("Failed to save config: {}", e))?;
     Ok(format!("Vault unlinked (was: {})", old))
+}
+
+/// Returns the resolved UI language (`"en"` or `"zh-CN"`) for the frontend.
+///
+/// Reads the persisted `[ui] language` preference and resolves `"auto"` plus
+/// the `MINUTES_LANG` env override through [`minutes_core::i18n`]. The frontend
+/// calls this once on load to reconcile its client-side cache with the
+/// authoritative config value.
+#[tauri::command]
+pub fn cmd_get_ui_language() -> String {
+    let config = Config::load();
+    locale_tag(minutes_core::i18n::resolve_locale(&config.ui.language))
+}
+
+/// Persists the UI language preference and applies it to the running process.
+///
+/// `language` is `"auto"`, `"en"`, or `"zh-CN"`. After saving, the active
+/// locale is updated so any native shell strings (tray / menus / notifications)
+/// built afterward render in the new language, and the tray + native menu are
+/// rebuilt in place. Returns the resolved locale (`"en"` / `"zh-CN"`) so the
+/// caller can drive `MinutesI18n.setLocale` for the frontend.
+#[tauri::command]
+pub fn cmd_set_ui_language(app: tauri::AppHandle, language: String) -> Result<String, String> {
+    let normalized = match language.as_str() {
+        "auto" | "en" | "zh-CN" => language,
+        other => return Err(format!("Unsupported language: {}", other)),
+    };
+
+    let mut config = Config::load();
+    config.ui.language = normalized;
+    config
+        .save()
+        .map_err(|e| format!("Failed to save config: {}", e))?;
+
+    let locale = minutes_core::i18n::resolve_locale(&config.ui.language);
+    minutes_core::i18n::set_locale(locale);
+    // Rebuild the native tray/menu so already-visible labels switch language.
+    crate::rebuild_localized_shell(&app);
+
+    Ok(locale_tag(locale))
+}
+
+/// Maps a [`minutes_core::i18n::Locale`] to the tag string the frontend uses.
+fn locale_tag(locale: minutes_core::i18n::Locale) -> String {
+    match locale {
+        minutes_core::i18n::Locale::ZhCn => "zh-CN".to_string(),
+        minutes_core::i18n::Locale::En => "en".to_string(),
+    }
 }
 
 fn is_hidden_or_system_file(path: &std::path::Path) -> bool {
@@ -7358,7 +7420,7 @@ pub fn cmd_delete_meeting(
                 "Archive \"{}\" and its audio recording?\nThey will be moved to the archive folder.",
                 title
             ))
-            .title("Archive Meeting")
+            .title(minutes_core::i18n::tr("Archive Meeting"))
             .kind(MessageDialogKind::Warning)
             .buttons(tauri_plugin_dialog::MessageDialogButtons::OkCancel)
             .blocking_show();
@@ -11089,6 +11151,9 @@ pub fn cmd_get_settings() -> serde_json::Value {
             "email": config.identity.email,
             "emails": config.identity.emails,
             "aliases": config.identity.aliases,
+        },
+        "ui": {
+            "language": config.ui.language,
         },
     })
 }
@@ -16795,7 +16860,7 @@ fn show_dictation_overlay(app: &tauri::AppHandle) {
         "dictation-overlay",
         WebviewUrl::App("dictation-overlay.html".into()),
     )
-    .title("Dictation")
+    .title(minutes_core::i18n::tr("Dictation"))
     .inner_size(width, height)
     .position(x, y)
     .resizable(false)
@@ -18117,7 +18182,7 @@ pub fn maybe_show_palette_first_run_notice(app: &tauri::AppHandle) {
     let delivery_result = app
         .notification()
         .builder()
-        .title("Minutes command palette")
+        .title(minutes_core::i18n::tr("Minutes command palette"))
         .body(body)
         .show();
 
@@ -19598,7 +19663,7 @@ fn create_or_show_palette_window_inner(app: &tauri::AppHandle) {
         "palette",
         WebviewUrl::App("palette/index.html".into()),
     )
-    .title("Minutes Palette")
+    .title(minutes_core::i18n::tr("Minutes Palette"))
     .inner_size(width, height)
     .resizable(false)
     .decorations(false)

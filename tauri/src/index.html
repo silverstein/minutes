@@ -11,6 +11,8 @@
     }
   </script>
   <script src="scripts/ui-zoom.js"></script>
+  <script src="locales/zh-CN.js"></script>
+  <script src="scripts/i18n.js"></script>
   <link rel="stylesheet" href="styles/ui-zoom-tokens.css">
   <style>
     @font-face {
@@ -5906,6 +5908,17 @@
       <div class="settings-section">
         <div class="about-item-title">GENERAL</div>
         <div class="about-controls">
+          <div class="about-controls-group">
+            <div class="about-controls-copy">Language</div>
+            <select id="settings-ui-language" class="settings-field">
+              <option value="auto">System default</option>
+              <option value="en">English</option>
+              <option value="zh-CN">简体中文</option>
+            </select>
+            <div class="about-controls-meta">Display language for the app, menus, and notifications.</div>
+          </div>
+        </div>
+        <div class="about-controls">
           <div class="about-controls-copy">Show completion alerts</div>
           <button class="btn btn-secondary btn-sm toggle-btn" id="settings-notifications">On</button>
         </div>
@@ -11127,6 +11140,9 @@
         setSettingsToggle('settings-notifications', notifyEnabled);
         copilotCriticalAlertsEnabled = s?.notifications?.copilot_critical_enabled === true;
         setSettingsToggle('settings-copilot-notifications', copilotCriticalAlertsEnabled);
+        // UI language — show the raw preference (auto/en/zh-CN), not the resolved locale.
+        const uiLangSelect = document.getElementById('settings-ui-language');
+        if (uiLangSelect && s?.ui?.language) uiLangSelect.value = s.ui.language;
         // Cues are localStorage-only (no config section).
         setSettingsToggle('settings-cues', playCaptureCues);
         // Autostart
@@ -12249,6 +12265,14 @@
       }
     });
     document.getElementById('settings-dictation-destination').addEventListener('change', (e) => invoke('cmd_set_setting', { section: 'dictation', key: 'destination', value: e.target.value }));
+    // UI language: persist via config + rebuild native shell, then apply to the
+    // frontend in place (cmd returns the resolved locale, "en" | "zh-CN").
+    document.getElementById('settings-ui-language').addEventListener('change', async (e) => {
+      try {
+        const resolved = await invoke('cmd_set_ui_language', { language: e.target.value });
+        if (window.MinutesI18n) window.MinutesI18n.setLocale(resolved);
+      } catch (err) { console.error('set ui language:', err); }
+    });
     document.getElementById('settings-dictation-model').addEventListener('change', (e) => invoke('cmd_set_setting', { section: 'dictation', key: 'model', value: e.target.value }));
     document.getElementById('settings-dictation-silence').addEventListener('change', (e) => invoke('cmd_set_setting', { section: 'dictation', key: 'silence_timeout_ms', value: e.target.value }));
     document.getElementById('settings-dictation-daily-note').addEventListener('click', async () => {

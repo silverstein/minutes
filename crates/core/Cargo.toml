@@ -69,6 +69,7 @@ whisper-guard = { path = "../whisper-guard", version = "0.3.0" }
 nnnoiseless = { workspace = true, optional = true }
 base64 = "0.22"
 rusqlite = { workspace = true }
+sys-locale = { workspace = true }
 tempfile = "3"
 sha2 = "0.10"
 cap-std = { workspace = true }

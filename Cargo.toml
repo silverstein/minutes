@@ -100,3 +100,6 @@ ndarray = "0.16"
 
 # SQLite (relationship graph index)
 rusqlite = { version = "0.33", features = ["bundled", "hooks", "limits"] }
+
+# System locale detection (UI language "auto" resolution — see crate::i18n)
+sys-locale = "0.3"

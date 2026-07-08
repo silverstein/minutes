@@ -46,6 +46,7 @@ pub mod ffmpeg;
 pub mod graph;
 pub mod graph_worker;
 pub mod health;
+pub mod i18n;
 pub mod jobs;
 pub mod knowledge;
 pub mod knowledge_extract;

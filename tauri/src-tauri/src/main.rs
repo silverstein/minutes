@@ -459,7 +459,7 @@ fn show_note_window(app: &tauri::AppHandle) {
         return;
     }
     let _win = WebviewWindowBuilder::new(app, "note", WebviewUrl::App("note.html".into()))
-        .title("Add Note")
+        .title(minutes_core::i18n::tr("Add Note"))
         .inner_size(420.0, 260.0)
         .resizable(false)
         .content_protected(Config::load().privacy.hide_from_screen_share)
@@ -523,6 +523,21 @@ pub struct TrayMenuHandles {
     pub quick_thought: tauri::menu::MenuItem<tauri::Wry>,
     pub stop: tauri::menu::MenuItem<tauri::Wry>,
     pub coach: tauri::menu::MenuItem<tauri::Wry>,
+    // Remaining static-label items, held so a UI language switch can relabel
+    // them in place via `tr()` without an app restart (see
+    // `rebuild_localized_shell`). The dynamic Stop label + tooltip are handled
+    // separately through `apply_tray_activity`.
+    pub open: tauri::menu::MenuItem<tauri::Wry>,
+    pub sensitive: tauri::menu::MenuItem<tauri::Wry>,
+    pub mic_mute: tauri::menu::MenuItem<tauri::Wry>,
+    pub note: tauri::menu::MenuItem<tauri::Wry>,
+    pub assistant: tauri::menu::MenuItem<tauri::Wry>,
+    pub list: tauri::menu::MenuItem<tauri::Wry>,
+    pub paste_summary: tauri::menu::MenuItem<tauri::Wry>,
+    pub paste_transcript: tauri::menu::MenuItem<tauri::Wry>,
+    pub screen_share: tauri::menu::MenuItem<tauri::Wry>,
+    pub check_update: tauri::menu::MenuItem<tauri::Wry>,
+    pub quit: tauri::menu::MenuItem<tauri::Wry>,
 }
 
 /// The active "recording-class" activity that the tray reflects. Each
@@ -742,7 +757,8 @@ fn apply_tray_activity(
             // uses the template so the M adopts the menu-bar tint.
             tray.set_icon_as_template(!activity.is_active()).ok();
         }
-        tray.set_tooltip(Some(activity.tooltip())).ok();
+        tray.set_tooltip(Some(minutes_core::i18n::tr(activity.tooltip())))
+            .ok();
     }
 
     // Sync tray menu item enabled state with the lifecycle. Tray callback
@@ -767,14 +783,17 @@ fn apply_tray_activity(
                 .set_enabled(!activity.blocks_capture_controls())
                 .ok();
             handles.stop.set_enabled(activity.is_active()).ok();
-            handles.stop.set_text(activity.stop_label()).ok();
+            handles
+                .stop
+                .set_text(minutes_core::i18n::tr(activity.stop_label()))
+                .ok();
             handles
                 .coach
-                .set_text(if snapshot.copilot {
+                .set_text(minutes_core::i18n::tr(if snapshot.copilot {
                     "Coach ✓"
                 } else {
                     "Coach"
-                })
+                }))
                 .ok();
         }
         None => {
@@ -796,6 +815,56 @@ fn apply_tray_activity(
                 "active": activity.is_active(),
             }),
         );
+    }
+}
+
+/// Re-applies localized strings to the native tray after a UI language switch
+/// (invoked by `cmd_set_ui_language`).
+///
+/// `minutes_core::i18n::set_locale` has already been called. `apply_tray_activity`
+/// refreshes the dynamic bits (tooltip + Stop label), and this then relabels the
+/// static tray items in place via `tr()` so the whole tray switches language
+/// without an app restart. The `✓`-bearing items derive their variant from
+/// current state (mic mute is global; screen-share reads config — a rare
+/// language switch may briefly show a stale checkmark that self-corrects on the
+/// next toggle or launch).
+pub fn rebuild_localized_shell(app: &tauri::AppHandle) {
+    use minutes_core::i18n::tr;
+
+    let activity = derive_tray_activity(snapshot_tray_state(app));
+    apply_tray_activity(app, activity, false);
+
+    if let Some(h) = app.try_state::<TrayMenuHandles>() {
+        h.open.set_text(tr("Open Minutes")).ok();
+        h.record.set_text(tr("Start Recording")).ok();
+        h.quick_thought.set_text(tr("Quick Thought")).ok();
+        h.sensitive.set_text(tr("Sensitive Meeting")).ok();
+        h.mic_mute
+            .set_text(tr(if minutes_core::streaming::is_mic_muted() {
+                "Mute My Mic (Recording Only) ✓"
+            } else {
+                "Mute My Mic (Recording Only)"
+            }))
+            .ok();
+        h.note.set_text(tr("Add Note...")).ok();
+        h.assistant.set_text(tr("Recall")).ok();
+        h.list.set_text(tr("Open Meetings Folder")).ok();
+        h.paste_summary.set_text(tr("Copy Latest Summary")).ok();
+        h.paste_transcript.set_text(tr("Copy Latest Transcript")).ok();
+        let hidden = minutes_core::config::Config::load()
+            .privacy
+            .hide_from_screen_share;
+        h.screen_share
+            .set_text(tr(if hidden {
+                "Hide from Screen Share ✓"
+            } else {
+                "Hide from Screen Share"
+            }))
+            .ok();
+        h.check_update.set_text(tr("Check for Updates")).ok();
+        h.quit.set_text(tr("Quit Minutes")).ok();
+        // Note: the Stop item's label is dynamic and already set by
+        // `apply_tray_activity` above, so it is intentionally not touched here.
     }
 }
 
@@ -909,22 +978,26 @@ async fn check_for_update(app: &tauri::AppHandle, manual: bool) {
 }
 
 fn build_app_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
+    // Labels + submenu titles go through `tr()` (the process locale is set at
+    // the start of `main()`). This menu is cross-platform: the `app_menu`
+    // submenu is macOS-only, but File/Edit/View/Window/Help build everywhere.
+    use minutes_core::i18n::tr;
     #[cfg(target_os = "macos")]
     let app_menu = {
         let about_item =
-            MenuItem::with_id(app, "app-show-about", "About Minutes", true, None::<&str>)?;
+            MenuItem::with_id(app, "app-show-about", tr("About Minutes"), true, None::<&str>)?;
         let whats_new_item =
-            MenuItem::with_id(app, "app-show-whats-new", "What’s New…", true, None::<&str>)?;
+            MenuItem::with_id(app, "app-show-whats-new", tr("What’s New…"), true, None::<&str>)?;
         let settings_item =
-            MenuItem::with_id(app, "app-open-settings", "Settings…", true, Some("Cmd+,"))?;
+            MenuItem::with_id(app, "app-open-settings", tr("Settings…"), true, Some("Cmd+,"))?;
         let check_updates_item = MenuItem::with_id(
             app,
             "app-check-for-updates",
-            "Check for Updates…",
+            tr("Check for Updates…"),
             true,
             None::<&str>,
         )?;
-        let quit_item = MenuItem::with_id(app, "app-quit", "Quit Minutes", true, Some("Cmd+Q"))?;
+        let quit_item = MenuItem::with_id(app, "app-quit", tr("Quit Minutes"), true, Some("Cmd+Q"))?;
 
         SubmenuBuilder::new(app, &app.package_info().name)
             .item(&about_item)
@@ -944,20 +1017,20 @@ fn build_app_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
 
     let file_menu = {
         let open_item =
-            MenuItem::with_id(app, "app-open-main", "Open Minutes", true, Some("Cmd+O"))?;
+            MenuItem::with_id(app, "app-open-main", tr("Open Minutes"), true, Some("Cmd+O"))?;
         let note_item =
-            MenuItem::with_id(app, "app-add-note", "Add Note…", true, Some("Cmd+Shift+N"))?;
+            MenuItem::with_id(app, "app-add-note", tr("Add Note…"), true, Some("Cmd+Shift+N"))?;
         let list_item = MenuItem::with_id(
             app,
             "app-open-meetings-folder",
-            "Open Meetings Folder",
+            tr("Open Meetings Folder"),
             true,
             None::<&str>,
         )?;
 
         #[cfg(target_os = "macos")]
         {
-            SubmenuBuilder::new(app, "File")
+            SubmenuBuilder::new(app, tr("File"))
                 .item(&open_item)
                 .separator()
                 .item(&note_item)
@@ -969,9 +1042,9 @@ fn build_app_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
 
         #[cfg(not(target_os = "macos"))]
         {
-            let quit_item = MenuItem::with_id(app, "app-quit", "Quit Minutes", true, None::<&str>)?;
+            let quit_item = MenuItem::with_id(app, "app-quit", tr("Quit Minutes"), true, None::<&str>)?;
 
-            SubmenuBuilder::new(app, "File")
+            SubmenuBuilder::new(app, tr("File"))
                 .item(&open_item)
                 .separator()
                 .item(&note_item)
@@ -983,7 +1056,7 @@ fn build_app_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         }
     };
 
-    let edit_menu = SubmenuBuilder::new(app, "Edit")
+    let edit_menu = SubmenuBuilder::new(app, tr("Edit"))
         .undo()
         .redo()
         .separator()
@@ -994,18 +1067,18 @@ fn build_app_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         .build()?;
 
     #[cfg(target_os = "macos")]
-    let view_menu = SubmenuBuilder::new(app, "View").fullscreen().build()?;
+    let view_menu = SubmenuBuilder::new(app, tr("View")).fullscreen().build()?;
 
     let window_menu = {
         let bring_all_to_front = MenuItem::with_id(
             app,
             "window-bring-all-to-front",
-            "Bring All to Front",
+            tr("Bring All to Front"),
             true,
             None::<&str>,
         )?;
 
-        SubmenuBuilder::new(app, "Window")
+        SubmenuBuilder::new(app, tr("Window"))
             .minimize()
             .maximize()
             .separator()
@@ -1018,26 +1091,26 @@ fn build_app_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         let website_item = MenuItem::with_id(
             app,
             "help-open-website",
-            "Minutes Website",
+            tr("Minutes Website"),
             true,
             None::<&str>,
         )?;
         let changelog_item = MenuItem::with_id(
             app,
             "help-open-changelog",
-            "Release Notes",
+            tr("Release Notes"),
             true,
             None::<&str>,
         )?;
         let discussions_item = MenuItem::with_id(
             app,
             "help-open-discussions",
-            "Get Help / Discussions",
+            tr("Get Help / Discussions"),
             true,
             None::<&str>,
         )?;
 
-        SubmenuBuilder::new(app, "Help")
+        SubmenuBuilder::new(app, tr("Help"))
             .item(&website_item)
             .item(&changelog_item)
             .item(&discussions_item)
@@ -1176,7 +1249,7 @@ fn show_meeting_prompt(app: &tauri::AppHandle, event: &minutes_core::calendar::C
 
     let url = format!("meeting-prompt.html?t={}", token);
     match WebviewWindowBuilder::new(app, "meeting-prompt", WebviewUrl::App(url.into()))
-        .title("Upcoming Meeting")
+        .title(minutes_core::i18n::tr("Upcoming Meeting"))
         .inner_size(380.0, 240.0)
         .position(pos_x, pos_y)
         .resizable(false)
@@ -1468,6 +1541,11 @@ fn main() {
     // subscriber into this process, set `whisper_rs=warn` and `ggml=warn`
     // in the filter or the flood returns.
     minutes_core::install_whisper_logging_hooks();
+
+    // Resolve the UI language once at startup so native shell strings (tray,
+    // menus, notifications) built during setup render in the configured locale.
+    // The frontend reconciles separately via `cmd_get_ui_language`.
+    minutes_core::i18n::set_locale_from_str(&minutes_core::config::Config::load().ui.language);
 
     #[cfg(target_os = "macos")]
     if let Some(code) = maybe_run_hotkey_diagnostic() {
@@ -2051,13 +2129,17 @@ fn main() {
                 notified: std::collections::HashSet::new(),
             }));
 
-            // Tray menu
-            let open_item = MenuItem::with_id(app, "open", "Open Minutes", true, None::<&str>)?;
+            // Tray menu. Labels go through `tr()` so the tray renders in the
+            // configured UI language (the process locale is set at the top of
+            // `main()` before setup runs). `rebuild_localized_shell` relabels
+            // these same items in place on a live language switch.
+            use minutes_core::i18n::tr;
+            let open_item = MenuItem::with_id(app, "open", tr("Open Minutes"), true, None::<&str>)?;
             let sep0 = MenuItem::with_id(app, "sep0", "──────────", false, None::<&str>)?;
             let record_item = MenuItem::with_id(
                 app,
                 "record",
-                "Start Recording",
+                tr("Start Recording"),
                 !initial_recording,
                 None::<&str>,
             )?;
@@ -2065,18 +2147,18 @@ fn main() {
             let quick_thought_item = MenuItem::with_id(
                 app,
                 "quick-thought",
-                "Quick Thought",
+                tr("Quick Thought"),
                 !initial_recording,
                 None::<&str>,
             )?;
             let quick_thought_item_ref = quick_thought_item.clone();
             let sensitive_item =
-                MenuItem::with_id(app, "sensitive", "Sensitive Meeting", true, None::<&str>)?;
+                MenuItem::with_id(app, "sensitive", tr("Sensitive Meeting"), true, None::<&str>)?;
             let sensitive_item_ref = sensitive_item.clone();
             let stop_item = MenuItem::with_id(
                 app,
                 "stop",
-                "Stop Recording",
+                tr("Stop Recording"),
                 initial_recording,
                 None::<&str>,
             )?;
@@ -2090,42 +2172,42 @@ fn main() {
             let mic_mute_item = MenuItem::with_id(
                 app,
                 "mic-mute-toggle",
-                if initial_mic_muted {
+                tr(if initial_mic_muted {
                     "Mute My Mic (Recording Only) ✓"
                 } else {
                     "Mute My Mic (Recording Only)"
-                },
+                }),
                 true,
                 None::<&str>,
             )?;
             let mic_mute_item_ref = mic_mute_item.clone();
             let sep = MenuItem::with_id(app, "sep1", "──────────", false, None::<&str>)?;
-            let note_item = MenuItem::with_id(app, "note", "Add Note...", true, None::<&str>)?;
+            let note_item = MenuItem::with_id(app, "note", tr("Add Note..."), true, None::<&str>)?;
             let list_item =
-                MenuItem::with_id(app, "list", "Open Meetings Folder", true, None::<&str>)?;
+                MenuItem::with_id(app, "list", tr("Open Meetings Folder"), true, None::<&str>)?;
             let paste_summary_item = MenuItem::with_id(
                 app,
                 "paste-summary",
-                "Copy Latest Summary",
+                tr("Copy Latest Summary"),
                 true,
                 None::<&str>,
             )?;
             let paste_transcript_item = MenuItem::with_id(
                 app,
                 "paste-transcript",
-                "Copy Latest Transcript",
+                tr("Copy Latest Transcript"),
                 true,
                 None::<&str>,
             )?;
-            let assistant_item = MenuItem::with_id(app, "assistant", "Recall", true, None::<&str>)?;
+            let assistant_item = MenuItem::with_id(app, "assistant", tr("Recall"), true, None::<&str>)?;
             let screen_share_item = MenuItem::with_id(
                 app,
                 "screen-share-toggle",
-                if startup_config.privacy.hide_from_screen_share {
+                tr(if startup_config.privacy.hide_from_screen_share {
                     "Hide from Screen Share ✓"
                 } else {
                     "Hide from Screen Share"
-                },
+                }),
                 true,
                 None::<&str>,
             )?;
@@ -2133,12 +2215,12 @@ fn main() {
             let check_update_item = MenuItem::with_id(
                 app,
                 "check-for-updates",
-                "Check for Updates",
+                tr("Check for Updates"),
                 true,
                 None::<&str>,
             )?;
             let sep2 = MenuItem::with_id(app, "sep2", "──────────", false, None::<&str>)?;
-            let quit_item = MenuItem::with_id(app, "quit", "Quit Minutes", true, None::<&str>)?;
+            let quit_item = MenuItem::with_id(app, "quit", tr("Quit Minutes"), true, None::<&str>)?;
 
             let menu = Menu::new(app)?;
             menu.append_items(&[
@@ -2497,6 +2579,17 @@ fn main() {
                 quick_thought: quick_thought_item.clone(),
                 stop: stop_item.clone(),
                 coach: coach_item.clone(),
+                open: open_item.clone(),
+                sensitive: sensitive_item.clone(),
+                mic_mute: mic_mute_item.clone(),
+                note: note_item.clone(),
+                assistant: assistant_item.clone(),
+                list: list_item.clone(),
+                paste_summary: paste_summary_item.clone(),
+                paste_transcript: paste_transcript_item.clone(),
+                screen_share: screen_share_item.clone(),
+                check_update: check_update_item.clone(),
+                quit: quit_item.clone(),
             });
 
             // Seed the appearance state from the main window's theme. The
@@ -2746,6 +2839,8 @@ fn main() {
             commands::cmd_vault_status,
             commands::cmd_vault_setup,
             commands::cmd_vault_unlink,
+            commands::cmd_get_ui_language,
+            commands::cmd_set_ui_language,
             commands::cmd_open_meeting_url,
             commands::cmd_get_meeting_prompt,
             commands::cmd_close_meeting_prompt,

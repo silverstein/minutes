@@ -44,6 +44,38 @@ pub struct Config {
     pub palette: PaletteConfig,
     pub global_hotkey: GlobalHotkeyConfig,
     pub notifications: NotificationsConfig,
+    pub ui: UiConfig,
+}
+
+/// UI language / localization preferences.
+///
+/// `language` controls the display language of the desktop app, the CLI's
+/// runtime messages, and the native shell (tray menu, native menus, and
+/// system notifications). Recognized values:
+/// - `"auto"` (default): detect from the operating-system locale, falling
+///   back to English when the OS locale isn't a supported language.
+/// - `"en"`: force English (the untranslated source strings).
+/// - `"zh-CN"`: Simplified Chinese.
+///
+/// The `MINUTES_LANG` environment variable overrides this field at runtime,
+/// which is handy for one-off CLI invocations. `#[serde(default)]` keeps old
+/// `config.toml` files that predate this section loading unchanged.
+///
+/// The actual string lookup lives in [`crate::i18n`]; this struct is only the
+/// persisted preference.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UiConfig {
+    /// Display language: `"auto"`, `"en"`, or `"zh-CN"`.
+    pub language: String,
+}
+
+impl Default for UiConfig {
+    fn default() -> Self {
+        Self {
+            language: "auto".into(),
+        }
+    }
 }
 
 /// Quick-Thought global hotkey configuration.
@@ -1300,6 +1332,7 @@ impl Default for Config {
             palette: PaletteConfig::default(),
             global_hotkey: GlobalHotkeyConfig::default(),
             notifications: NotificationsConfig::default(),
+            ui: UiConfig::default(),
         }
     }
 }

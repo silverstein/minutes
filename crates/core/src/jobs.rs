@@ -1782,7 +1782,7 @@ mod tests {
 
             // Run the preserve step for one job per config value; return
             // whether that job's screens dir survived.
-            let mut screens_dir_survives = |job_id: &str, keep: bool| {
+            let screens_dir_survives = |job_id: &str, keep: bool| {
                 let audio_path = jobs_root.join(format!("{job_id}.wav"));
                 fs::write(&audio_path, b"mixed").unwrap();
 

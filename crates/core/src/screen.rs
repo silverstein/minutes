@@ -238,6 +238,17 @@ pub fn list_screenshots(dir: &Path) -> Vec<PathBuf> {
     files
 }
 
+/// Parse the elapsed-seconds component out of a capture filename
+/// (`screen-{index:04}-{elapsed:04}s.png`, written above). Returns None for
+/// filenames that don't follow the capture format (e.g. user-provided PNGs),
+/// letting callers fall back to order-based handling.
+pub fn elapsed_secs_from_filename(path: &Path) -> Option<u64> {
+    let stem = path.file_stem()?.to_str()?;
+    let rest = stem.strip_prefix("screen-")?;
+    let (_, elapsed) = rest.split_once('-')?;
+    elapsed.strip_suffix('s')?.parse().ok()
+}
+
 /// Handle that represents an active screen capture session.
 /// The capture thread runs until the stop_flag is set.
 /// Joining the thread on drop ensures no screenshots are captured
@@ -272,5 +283,31 @@ mod tests {
         assert!(files[0].to_str().unwrap().contains("0000"));
         assert!(files[1].to_str().unwrap().contains("0001"));
         assert!(files[2].to_str().unwrap().contains("0002"));
+    }
+
+    #[test]
+    fn elapsed_secs_parses_capture_filenames_and_rejects_others() {
+        use std::path::Path;
+        assert_eq!(
+            elapsed_secs_from_filename(Path::new("/x/screen-0042-1260s.png")),
+            Some(1260)
+        );
+        assert_eq!(
+            elapsed_secs_from_filename(Path::new("screen-0000-0000s.png")),
+            Some(0)
+        );
+        // Elapsed can outgrow the 4-digit padding on very long recordings.
+        assert_eq!(
+            elapsed_secs_from_filename(Path::new("screen-0100-36000s.png")),
+            Some(36000)
+        );
+        assert_eq!(
+            elapsed_secs_from_filename(Path::new("Screenshot 2026-06-17.png")),
+            None
+        );
+        assert_eq!(
+            elapsed_secs_from_filename(Path::new("screen-12s.png")),
+            None
+        );
     }
 }

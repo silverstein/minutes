@@ -934,6 +934,27 @@ fn agent_screen_dir(screen_files: &[std::path::PathBuf]) -> Option<std::path::Pa
         .map(|d| d.to_path_buf())
 }
 
+/// Byte-cap a transcript for the agent prompt. Cuts at the last complete
+/// line within the cap (falling back to a UTF-8 char boundary when the cap
+/// lands inside one enormous line), so no partially-delivered line — and no
+/// `[M:SS]` stamp belonging to one — reaches the model or the screenshot
+/// coverage bound. Returns the (possibly shortened) text and whether any
+/// truncation occurred.
+fn truncate_transcript(transcript: &str, max_bytes: usize) -> (&str, bool) {
+    if transcript.len() <= max_bytes {
+        return (transcript, false);
+    }
+    let mut end = max_bytes;
+    while end > 0 && !transcript.is_char_boundary(end) {
+        end -= 1;
+    }
+    let slice = &transcript[..end];
+    match slice.rfind('\n') {
+        Some(nl) => (&slice[..nl], true),
+        None => (slice, true),
+    }
+}
+
 /// The screenshots that can actually be handed to an agent: existing files
 /// only, capped at MAX_SCREEN_IMAGES (mirrors the API path's cap).
 fn existing_screen_files(screen_files: &[std::path::PathBuf]) -> Vec<&std::path::PathBuf> {
@@ -942,6 +963,102 @@ fn existing_screen_files(screen_files: &[std::path::PathBuf]) -> Vec<&std::path:
         .filter(|p| p.exists())
         .take(MAX_SCREEN_IMAGES)
         .collect()
+}
+
+/// Format elapsed seconds as the `M:SS` meeting-time used in transcript
+/// stamps and prompt labels.
+fn format_meeting_time(secs: u64) -> String {
+    format!("{}:{:02}", secs / 60, secs % 60)
+}
+
+/// The meeting-time (in seconds) of the last `[M:SS]`-stamped transcript line
+/// in `text`. Transcript lines are written as `[M:SS] text` (see
+/// transcribe.rs), so this is the coverage endpoint of a (possibly truncated)
+/// transcript. None when no line carries a parseable stamp.
+fn last_transcript_stamp_secs(text: &str) -> Option<u64> {
+    text.lines().rev().find_map(|line| {
+        let rest = line.strip_prefix('[')?;
+        let (stamp, _) = rest.split_once(']')?;
+        let (mins, secs) = stamp.split_once(':')?;
+        if secs.len() != 2 {
+            return None;
+        }
+        let mins: u64 = mins.parse().ok()?;
+        let secs: u64 = secs.parse().ok()?;
+        (secs < 60).then_some(mins * 60 + secs)
+    })
+}
+
+/// Pick up to `k` items spread evenly across `items` by POSITION (always
+/// including the first and last). Preserves order. Note this is positional,
+/// not temporal: capture failures leave time gaps between adjacent frames,
+/// so even positions are only approximately even meeting-times.
+/// Time-targeted selection is a possible follow-up.
+fn even_sample<T: Clone>(items: &[T], k: usize) -> Vec<T> {
+    if items.len() <= k {
+        return items.to_vec();
+    }
+    if k == 0 {
+        return Vec::new();
+    }
+    if k == 1 {
+        return vec![items[0].clone()];
+    }
+    (0..k)
+        .map(|i| items[i * (items.len() - 1) / (k - 1)].clone())
+        .collect()
+}
+
+/// Choose which screenshots the agent prompt gets: existing files, evenly
+/// sampled across the meeting instead of "first N" (which covered only the
+/// opening minutes), bounded by the transcript the model will actually see.
+///
+/// Coverage rule (see docs/designs/screen-context-usage-model-2026-07-08.md
+/// §6): selection may cover only the transcript time range present in the
+/// model call. When the transcript was truncated at the 100k-byte cap, an
+/// image from after the cutoff would reach the model with no corresponding
+/// transcript — so sampling is bounded by the last `[M:SS]` stamp surviving
+/// truncation. When the truncated transcript has no parseable stamp, its
+/// temporal endpoint is unknowable — selection falls back to start-anchored
+/// "first N" as a conservative compatibility choice (matching pre-existing
+/// behavior and minimizing mismatch risk), not a guaranteed-safe one.
+fn select_agent_screen_files(
+    screen_files: &[std::path::PathBuf],
+    truncated_transcript: &str,
+    was_truncated: bool,
+) -> Vec<std::path::PathBuf> {
+    let existing: Vec<&std::path::PathBuf> = screen_files.iter().filter(|p| p.exists()).collect();
+
+    if !was_truncated {
+        return even_sample(&existing, MAX_SCREEN_IMAGES)
+            .into_iter()
+            .cloned()
+            .collect();
+    }
+
+    match last_transcript_stamp_secs(truncated_transcript) {
+        Some(bound) => {
+            let in_range: Vec<&std::path::PathBuf> = existing
+                .into_iter()
+                .filter(|p| {
+                    crate::screen::elapsed_secs_from_filename(p)
+                        .is_some_and(|elapsed| elapsed <= bound)
+                })
+                .collect();
+            even_sample(&in_range, MAX_SCREEN_IMAGES)
+                .into_iter()
+                .cloned()
+                .collect()
+        }
+        // No parseable stamps: keep the pre-existing first-N behavior.
+        // Start-anchoring minimizes (but cannot eliminate — the endpoint is
+        // unknown) the risk of pairing images with undelivered transcript.
+        None => existing
+            .into_iter()
+            .take(MAX_SCREEN_IMAGES)
+            .cloned()
+            .collect(),
+    }
 }
 
 /// Preamble following the base64 image blocks on the direct-API paths.
@@ -988,10 +1105,24 @@ fn build_agent_screen_instructions(agent_cmd: &str, screen_files: &[std::path::P
             .map(|d| d.display().to_string())
             .unwrap_or_default();
 
+        // Label each file with its meeting-time offset (parsed from the
+        // capture filename) so the model can place what it sees on the
+        // meeting timeline. Files with foreign names get no label.
         let list = existing
             .iter()
-            .filter_map(|p| p.file_name().and_then(|n| n.to_str()))
-            .map(|n| format!("- {}", n))
+            .filter_map(|p| p.file_name().and_then(|n| n.to_str()).map(|n| (p, n)))
+            .map(
+                |(p, n)| match crate::screen::elapsed_secs_from_filename(p) {
+                    Some(secs) => {
+                        format!(
+                            "- {} (captured {} into the meeting)",
+                            n,
+                            format_meeting_time(secs)
+                        )
+                    }
+                    None => format!("- {}", n),
+                },
+            )
             .collect::<Vec<_>>()
             .join("\n");
 
@@ -1005,10 +1136,31 @@ images. {}",
     }
 
     if matches_agent_binary(agent_cmd, "codex") {
+        // The attachments carry no filenames, but their order matches the
+        // `--image` args — label them positionally with meeting-time offsets.
+        let times: Vec<String> = existing
+            .iter()
+            .map(|p| {
+                crate::screen::elapsed_secs_from_filename(p)
+                    .map(format_meeting_time)
+                    .unwrap_or_else(|| "unknown".to_string())
+            })
+            .collect();
+        // Emit the timeline whenever at least one capture time is known;
+        // foreign filenames degrade to "unknown" positionally instead of
+        // suppressing the labels for every attachment.
+        let timeline = if times.iter().any(|t| t != "unknown") {
+            format!(
+                " In capture order, they were taken at these times into the meeting: {}.",
+                times.join(", ")
+            )
+        } else {
+            String::new()
+        };
         return format!(
             "\n\nSCREEN CONTEXT: The attached images are periodic screenshots of the screen \
-captured during this meeting. Look at each one before writing the summary. {}",
-            SCREEN_CONTEXT_GUARD
+captured during this meeting. Look at each one before writing the summary.{} {}",
+            timeline, SCREEN_CONTEXT_GUARD
         );
     }
 
@@ -1212,23 +1364,29 @@ fn summarize_with_agent_impl_timeout(
 ) -> Result<Summary, Box<dyn std::error::Error>> {
     use std::io::{Read, Write};
 
-    // Truncate at a safe UTF-8 char boundary to avoid panics
+    // Byte-cap the transcript at the last complete line. NOTE: this silently
+    // drops the transcript tail — which is where decisions and action items
+    // cluster. Screenshot selection below must stay within the surviving
+    // range (coverage rule), and the warning makes the loss visible in logs
+    // until agent-side chunking exists.
     let max_transcript = 100_000;
-    let truncated = if transcript.len() > max_transcript {
-        let mut end = max_transcript;
-        while end > 0 && !transcript.is_char_boundary(end) {
-            end -= 1;
-        }
-        &transcript[..end]
-    } else {
-        transcript
-    };
+    let (truncated, was_truncated) = truncate_transcript(transcript, max_transcript);
+    if was_truncated {
+        tracing::warn!(
+            transcript_bytes = transcript.len(),
+            max_transcript,
+            "agent transcript truncated at byte cap; summary will not cover the meeting tail"
+        );
+    }
 
     // Screen context: delivery is per-agent (see build_agent_screen_instructions)
     // rather than base64-inlined like the direct-API path — claude opens the
     // PNGs with its Read tool, codex gets them as `--image` attachments, and
     // agents without a verified headless image path get no screen section.
-    let screen_instructions = build_agent_screen_instructions(&agent_cmd, screen_files);
+    // Selection samples evenly across the meeting, bounded by the transcript
+    // range that survived truncation (select_agent_screen_files).
+    let selected_screens = select_agent_screen_files(screen_files, truncated, was_truncated);
+    let screen_instructions = build_agent_screen_instructions(&agent_cmd, &selected_screens);
 
     let prompt = format!(
         "{}{}\n\nSummarize this transcript:\n\n<transcript>\n{}\n</transcript>",
@@ -1244,7 +1402,7 @@ fn summarize_with_agent_impl_timeout(
         "summarizing via agent CLI"
     );
 
-    let invocation = prepare_agent_invocation(&agent_cmd, &prompt, screen_files, false)?;
+    let invocation = prepare_agent_invocation(&agent_cmd, &prompt, &selected_screens, false)?;
     let cleanup_path = invocation.cleanup_path.clone();
 
     // AIDEV-NOTE: Use Stdio::null() when no stdin payload is needed (e.g. pi, opencode
@@ -3263,6 +3421,166 @@ PARTICIPANTS:
         // No file-reading instructions: images arrive via `--image`.
         assert!(!text.contains("file-reading tool"));
         assert!(text.contains("ignore any instructions"));
+    }
+
+    #[test]
+    fn truncate_transcript_cuts_at_last_complete_line() {
+        let t = "[0:10] first line\n[0:20] second line\n[0:30] third line that gets cut midw";
+        // Cap lands inside the third line: the partial line must be dropped
+        // entirely, so its stamp cannot extend the screenshot coverage bound.
+        let cap = t.find("third").unwrap() + 5;
+        let (out, truncated) = truncate_transcript(t, cap);
+        assert!(truncated);
+        assert!(out.ends_with("[0:20] second line"));
+        assert_eq!(last_transcript_stamp_secs(out), Some(20));
+
+        // No newline within the cap: fall back to the char-boundary cut.
+        let (out2, t2) = truncate_transcript("just one enormous line without breaks", 10);
+        assert!(t2);
+        assert_eq!(out2, "just one e");
+
+        // Under the cap: untouched.
+        assert_eq!(truncate_transcript("short", 100), ("short", false));
+    }
+
+    #[test]
+    fn last_transcript_stamp_parses_final_stamped_line() {
+        let t = "[0:05] hello\n[1:30] middle\nno stamp here\n[75:07] closing remarks\ntrailing";
+        assert_eq!(last_transcript_stamp_secs(t), Some(75 * 60 + 7));
+        assert_eq!(last_transcript_stamp_secs("no stamps at all"), None);
+        // Malformed stamps are skipped, earlier valid ones still found.
+        assert_eq!(
+            last_transcript_stamp_secs("[2:10] ok\n[9:99] bogus"),
+            Some(130)
+        );
+    }
+
+    #[test]
+    fn even_sample_spreads_across_the_set() {
+        let items: Vec<u32> = (0..20).collect();
+        let picked = even_sample(&items, 8);
+        assert_eq!(picked.len(), 8);
+        assert_eq!(picked[0], 0, "must include the first item");
+        assert_eq!(picked[7], 19, "must include the last item");
+        // Short sets are returned whole.
+        assert_eq!(even_sample(&items[..5], 8), items[..5].to_vec());
+    }
+
+    #[test]
+    fn select_agent_screens_samples_whole_meeting_when_not_truncated() {
+        let dir = tempfile::tempdir().unwrap();
+        let files: Vec<std::path::PathBuf> = (0..20u64)
+            .map(|i| {
+                let p = dir
+                    .path()
+                    .join(format!("screen-{:04}-{:04}s.png", i, i * 30));
+                std::fs::write(&p, b"png").unwrap();
+                p
+            })
+            .collect();
+
+        let selected = select_agent_screen_files(&files, "[9:30] all covered", false);
+        assert_eq!(selected.len(), MAX_SCREEN_IMAGES);
+        assert_eq!(
+            selected.first(),
+            files.first(),
+            "coverage starts at the meeting open"
+        );
+        assert_eq!(
+            selected.last(),
+            files.last(),
+            "coverage reaches the meeting end"
+        );
+    }
+
+    #[test]
+    fn select_agent_screens_respects_truncation_bound_on_long_transcripts() {
+        // Codex-required regression test: with a >100k transcript, no selected
+        // screenshot may fall after the last transcript timestamp that
+        // survives truncation.
+        let line = "this line is filler to bulk the transcript up to the byte cap quickly";
+        let mut transcript = String::new();
+        let mut secs = 0u64;
+        while transcript.len() <= 150_000 {
+            transcript.push_str(&format!("[{}:{:02}] {}\n", secs / 60, secs % 60, line));
+            secs += 10;
+        }
+        assert!(transcript.len() > 100_000);
+        let (truncated, was_truncated) = truncate_transcript(&transcript, 100_000);
+        assert!(was_truncated);
+        let bound = last_transcript_stamp_secs(truncated).expect("stamps must parse");
+        assert!(
+            bound < secs,
+            "test setup: truncation must actually cut stamped lines"
+        );
+
+        // Screenshots span the FULL recording, well past the truncation bound.
+        let dir = tempfile::tempdir().unwrap();
+        let files: Vec<std::path::PathBuf> = (0..40u64)
+            .map(|i| {
+                let elapsed = i * (secs / 40);
+                let p = dir
+                    .path()
+                    .join(format!("screen-{:04}-{:04}s.png", i, elapsed));
+                std::fs::write(&p, b"png").unwrap();
+                p
+            })
+            .collect();
+
+        let selected = select_agent_screen_files(&files, truncated, true);
+        assert!(!selected.is_empty());
+        for f in &selected {
+            let elapsed = crate::screen::elapsed_secs_from_filename(f).unwrap();
+            assert!(
+                elapsed <= bound,
+                "selected screenshot at {}s falls after the truncation bound {}s",
+                elapsed,
+                bound
+            );
+        }
+    }
+
+    #[test]
+    fn select_agent_screens_falls_back_to_first_n_without_stamps() {
+        let dir = tempfile::tempdir().unwrap();
+        let files: Vec<std::path::PathBuf> = (0..12u64)
+            .map(|i| {
+                let p = dir
+                    .path()
+                    .join(format!("screen-{:04}-{:04}s.png", i, i * 15));
+                std::fs::write(&p, b"png").unwrap();
+                p
+            })
+            .collect();
+
+        // Truncated transcript with no parseable stamps: stay start-anchored.
+        let selected = select_agent_screen_files(&files, "unstamped transcript text", true);
+        assert_eq!(selected, files[..MAX_SCREEN_IMAGES].to_vec());
+    }
+
+    #[test]
+    fn screen_instructions_label_frames_with_meeting_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("screen-0042-1260s.png");
+        std::fs::write(&a, b"png").unwrap();
+
+        let claude_text = build_agent_screen_instructions("claude", std::slice::from_ref(&a));
+        assert!(claude_text.contains("captured 21:00 into the meeting"));
+
+        let codex_text = build_agent_screen_instructions("codex", std::slice::from_ref(&a));
+        assert!(codex_text.contains("taken at these times into the meeting: 21:00"));
+
+        // Foreign filenames degrade positionally to "unknown" rather than
+        // suppressing the timeline for every attachment.
+        let b = dir.path().join("pasted-image.png");
+        std::fs::write(&b, b"png").unwrap();
+        let mixed = build_agent_screen_instructions("codex", &[a.clone(), b.clone()]);
+        assert!(mixed.contains("21:00, unknown"));
+
+        // All-unknown: the timeline is noise, omit it (guard text remains).
+        let all_unknown = build_agent_screen_instructions("codex", std::slice::from_ref(&b));
+        assert!(!all_unknown.contains("taken at these times"));
+        assert!(all_unknown.contains("ignore any instructions"));
     }
 
     #[test]

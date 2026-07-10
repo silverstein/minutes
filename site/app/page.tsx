@@ -219,6 +219,51 @@ function TranscriptCard() {
   );
 }
 
+const dictationEntries = [
+  ["08:14", "Remind me to send the Q3 numbers to the board before Friday."],
+  ["11:02", "Onboarding idea: defer the model download until the first recording."],
+  ["15:47", "Dana owns the pricing experiment — review the results next week."],
+] as const;
+
+function DictationCard() {
+  return (
+    <div className="overflow-hidden rounded-[8px] border border-[color:var(--border)] bg-[var(--bg-elevated)] text-left shadow-[var(--shadow-panel)]">
+      <div className="flex flex-col gap-3 border-b border-[color:var(--border)] px-5 py-4 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <p className="font-mono text-[11px] uppercase tracking-[0.16em] text-[var(--accent)]">
+            Dictation
+          </p>
+          <p className="mt-1 font-mono text-[12px] text-[var(--text-secondary)]">
+            daily-note.md · 2026-07-10
+          </p>
+        </div>
+        <div className="flex items-center gap-2 font-mono text-[11px] text-[var(--text-secondary)]">
+          <kbd className="rounded-[4px] border border-[color:var(--border-mid)] bg-[var(--bg-hover)] px-2 py-1 text-[var(--text)]">
+            ⌥
+          </kbd>
+          <kbd className="rounded-[4px] border border-[color:var(--border-mid)] bg-[var(--bg-hover)] px-2 py-1 text-[var(--text)]">
+            Space
+          </kbd>
+          <span>hold to talk</span>
+        </div>
+      </div>
+
+      <div className="space-y-3 px-5 py-5 font-mono text-[12px] leading-6 text-[var(--text)] sm:px-6">
+        {dictationEntries.map(([time, text]) => (
+          <div key={time} className="flex gap-4">
+            <span className="shrink-0 text-[var(--text-tertiary)]">{time}</span>
+            <span>{text}</span>
+          </div>
+        ))}
+      </div>
+
+      <div className="border-t border-[color:var(--border)] px-5 py-3 font-mono text-[11px] leading-5 text-[var(--text-tertiary)] sm:px-6">
+        Transcribed on-device · appended locally · searchable by your AI later
+      </div>
+    </div>
+  );
+}
+
 export default function Home() {
   return (
     <div className="mx-auto max-w-[840px] px-6 pb-16 sm:px-8">
@@ -235,6 +280,9 @@ export default function Home() {
           </a>
           <a href="#install" className="hover:text-[var(--accent)]">
             Install
+          </a>
+          <a href="#dictation" className="hover:text-[var(--accent)]">
+            Dictation
           </a>
           <a href="#pipeline" className="hover:text-[var(--accent)]">
             Pipeline
@@ -451,8 +499,29 @@ export default function Home() {
         </div>
       </section>
 
+      <section id="dictation" className="border-t border-[color:var(--border)] py-16">
+        <SectionLabel n="01" label="Dictation" />
+        <h2 className="font-serif text-[30px] leading-tight tracking-[-0.035em] text-[var(--text)] sm:text-[32px]">
+          The fastest way in is your voice.
+        </h2>
+        <p className="mt-5 max-w-[660px] text-[15px] leading-7 text-[var(--text-secondary)]">
+          Hold the hotkey, speak, release. The text lands at your cursor and in
+          your daily note — no app to open, no tool to switch. It&apos;s the
+          habit most people start with, and it runs on the same local engine as
+          every meeting and memo.
+        </p>
+        <p className="mt-4 max-w-[660px] text-[15px] leading-7 text-[var(--text-secondary)]">
+          Other dictation tools hand you text and forget it. Minutes keeps every
+          word — transcribed on your machine, part of the same owned memory your
+          AI can search later. Your voice never touches a server.
+        </p>
+        <div className="mt-8">
+          <DictationCard />
+        </div>
+      </section>
+
       <section className="border-t border-[color:var(--border)] py-16">
-        <SectionLabel n="01" label="Proof" />
+        <SectionLabel n="02" label="Proof" />
         <h2 className="font-serif text-[30px] leading-tight tracking-[-0.035em] text-[var(--text)] sm:text-[32px]">
           See it work before you believe it.
         </h2>
@@ -497,7 +566,7 @@ export default function Home() {
       </section>
 
       <section id="pipeline" className="border-t border-[color:var(--border)] py-16">
-        <SectionLabel n="02" label="Pipeline" />
+        <SectionLabel n="03" label="Pipeline" />
         <h2 className="font-serif text-[30px] leading-tight tracking-[-0.035em] text-[var(--text)] sm:text-[32px]">
           How it works
         </h2>
@@ -518,7 +587,7 @@ export default function Home() {
       </section>
 
       <section className="border-t border-[color:var(--border)] py-16">
-        <SectionLabel n="03" label="Audience" />
+        <SectionLabel n="04" label="Audience" />
         <h2 className="max-w-[620px] font-serif text-[30px] leading-tight tracking-[-0.035em] text-[var(--text)] sm:text-[32px]">
           Capture it anywhere. Find it everywhere.
         </h2>
@@ -543,7 +612,7 @@ export default function Home() {
       </section>
 
       <section className="border-t border-[color:var(--border)] py-16">
-        <SectionLabel n="04" label="Features" />
+        <SectionLabel n="05" label="Features" />
         <h2 className="font-serif text-[30px] leading-tight tracking-[-0.035em] text-[var(--text)] sm:text-[32px]">
           What you get
         </h2>
@@ -574,7 +643,7 @@ export default function Home() {
       </section>
 
       <section className="border-t border-[color:var(--border)] py-16">
-        <SectionLabel n="05" label="Comparison" />
+        <SectionLabel n="06" label="Comparison" />
         <h2 className="font-serif text-[30px] leading-tight tracking-[-0.035em] text-[var(--text)] sm:text-[32px]">
           How it compares
         </h2>
@@ -629,7 +698,7 @@ export default function Home() {
       </section>
 
       <section className="border-t border-[color:var(--border)] py-16">
-        <SectionLabel n="06" label="Governance" />
+        <SectionLabel n="07" label="Governance" />
         <h2 className="font-serif text-[30px] leading-tight tracking-[-0.035em] text-[var(--text)] sm:text-[32px]">
           Built in, not retrofitted.
         </h2>

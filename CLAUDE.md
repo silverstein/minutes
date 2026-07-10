@@ -42,13 +42,11 @@ open target/release/bundle/macos/Minutes.app   # Launch app
 
 - If the work touches TCC-sensitive features, do **not** keep replacing `/Applications/Minutes.app` with local rebuilds.
 - Use `./scripts/install-dev-app.sh` and test `~/Applications/Minutes Dev.app`.
-- If a stable local codesigning identity exists, export `MINUTES_DEV_SIGNING_IDENTITY` before running the script.
-- On this machine, the preferred identity is:
-  - `Developer ID Application: Mathieu Silverstein (63TMLKT8HN)`
-- Example:
+- If a stable local codesigning identity exists, export `MINUTES_DEV_SIGNING_IDENTITY` before running the script. This is machine-local — set it in your shell profile or a local (untracked) env file to your **own** signing identity; do not hardcode a specific identity here, since exporting an identity whose cert isn't in the local keychain makes the signing step abort. Without it, the script falls back to ad-hoc signing.
+- Example (substitute your own identity):
 
 ```bash
-export MINUTES_DEV_SIGNING_IDENTITY="Developer ID Application: Mathieu Silverstein (63TMLKT8HN)"
+export MINUTES_DEV_SIGNING_IDENTITY="Developer ID Application: Your Name (TEAMID)"
 ./scripts/install-dev-app.sh
 ```
 

@@ -8,7 +8,7 @@ release without touching the production install in `/Applications/Minutes.app`.
 Always use the signed development identity:
 
 ```bash
-export MINUTES_DEV_SIGNING_IDENTITY="Developer ID Application: Mathieu Silverstein (63TMLKT8HN)"
+export MINUTES_DEV_SIGNING_IDENTITY="Developer ID Application: Your Name (TEAMID)"
 ./scripts/install-dev-app.sh --no-open
 open -a "$HOME/Applications/Minutes Dev.app"
 ```

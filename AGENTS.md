@@ -86,7 +86,7 @@ global hotkeys), do **not** dogfood by repeatedly replacing
 Use the dedicated development app identity instead:
 
 ```bash
-export MINUTES_DEV_SIGNING_IDENTITY="Developer ID Application: Mathieu Silverstein (63TMLKT8HN)"
+export MINUTES_DEV_SIGNING_IDENTITY="Developer ID Application: Your Name (TEAMID)"
 ./scripts/install-dev-app.sh
 ```
 

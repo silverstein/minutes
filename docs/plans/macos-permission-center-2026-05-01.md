@@ -197,7 +197,7 @@ not raw `target/` binaries.
 Run with `~/Applications/Minutes Dev.app`, installed through:
 
 ```bash
-export MINUTES_DEV_SIGNING_IDENTITY="Developer ID Application: Mathieu Silverstein (63TMLKT8HN)"
+export MINUTES_DEV_SIGNING_IDENTITY="Developer ID Application: Your Name (TEAMID)"
 ./scripts/install-dev-app.sh --no-open
 ```
 

@@ -49,7 +49,7 @@ cargo clippy --all --no-default-features -- -D warnings  # Rust lints
 **macOS desktop note:**
 - For local TCC-sensitive dogfooding before release, rebuild the dev app with:
 ```bash
-export MINUTES_DEV_SIGNING_IDENTITY="Developer ID Application: Mathieu Silverstein (63TMLKT8HN)"
+export MINUTES_DEV_SIGNING_IDENTITY="Developer ID Application: Your Name (TEAMID)"
 ./scripts/install-dev-app.sh --no-open
 ```
 - Do not treat a raw local `/Applications/Minutes.app` copy as the canonical test surface for permission-sensitive features.

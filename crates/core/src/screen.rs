@@ -76,9 +76,18 @@ pub fn start_capture(
     }
 
     let dir = output_dir.to_path_buf();
+    // The handle owns a second stop flag alongside the caller's shared one:
+    // not every record-loop exit path sets the shared flag (e.g. the
+    // `minutes stop` sentinel and safety-guard auto-stop), and Drop joins the
+    // capture thread — without a handle-owned signal, drop would block while
+    // screenshots keep being taken after the recording ends (#423).
+    let own_stop = Arc::new(AtomicBool::new(false));
     let thread_stop = stop_flag.clone();
+    let thread_own_stop = own_stop.clone();
 
     let handle = std::thread::spawn(move || {
+        let should_stop =
+            || thread_stop.load(Ordering::Relaxed) || thread_own_stop.load(Ordering::Relaxed);
         let mut index: u32 = 0;
         let start = std::time::Instant::now();
 
@@ -92,7 +101,7 @@ pub fn start_capture(
         // which is usually taken before the meeting content is on screen)
         let first_sleep_end = std::time::Instant::now() + interval;
         while std::time::Instant::now() < first_sleep_end {
-            if thread_stop.load(Ordering::Relaxed) {
+            if should_stop() {
                 tracing::info!(
                     captures = 0,
                     "screen capture stopped (before first capture)"
@@ -102,7 +111,7 @@ pub fn start_capture(
             std::thread::sleep(Duration::from_millis(250));
         }
 
-        while !thread_stop.load(Ordering::Relaxed) && index < MAX_SCREENSHOTS {
+        while !should_stop() && index < MAX_SCREENSHOTS {
             let elapsed = start.elapsed().as_secs();
             let filename = format!("screen-{:04}-{:04}s.png", index, elapsed);
             let path = dir.join(&filename);
@@ -124,7 +133,7 @@ pub fn start_capture(
             // Sleep in small increments so we can respond to stop quickly
             let sleep_end = std::time::Instant::now() + interval;
             while std::time::Instant::now() < sleep_end {
-                if thread_stop.load(Ordering::Relaxed) {
+                if should_stop() {
                     break;
                 }
                 std::thread::sleep(Duration::from_millis(250));
@@ -135,6 +144,7 @@ pub fn start_capture(
     });
 
     Ok(ScreenCaptureHandle {
+        stop: own_stop,
         thread: Some(handle),
     })
 }
@@ -250,17 +260,20 @@ pub fn elapsed_secs_from_filename(path: &Path) -> Option<u64> {
 }
 
 /// Handle that represents an active screen capture session.
-/// The capture thread runs until the stop_flag is set.
-/// Joining the thread on drop ensures no screenshots are captured
-/// after recording stops.
+/// The capture thread runs until the shared stop_flag is set or the handle
+/// is dropped. Dropping signals the handle-owned stop flag before joining,
+/// so no screenshots are captured after recording stops regardless of
+/// whether the caller's exit path set the shared flag (#423).
 pub struct ScreenCaptureHandle {
+    stop: Arc<AtomicBool>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
 impl Drop for ScreenCaptureHandle {
     fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
         if let Some(handle) = self.thread.take() {
-            // Wait for the capture thread to finish (it checks stop_flag every 250ms)
+            // Wait for the capture thread to finish (it checks the flags every 250ms)
             handle.join().ok();
         }
     }
@@ -309,5 +322,30 @@ mod tests {
             elapsed_secs_from_filename(Path::new("screen-12s.png")),
             None
         );
+    }
+
+    // Regression test for #423: `minutes stop` breaks the record loop without
+    // setting the shared stop flag, so drop must stop the thread on its own.
+    // The interval is long enough that the thread stays in its pre-first-capture
+    // wait, so the test never takes a real screenshot.
+    #[test]
+    fn drop_stops_capture_thread_without_external_stop_flag() {
+        let dir = tempfile::tempdir().unwrap();
+        let external_stop = Arc::new(AtomicBool::new(false));
+        let handle =
+            start_capture(dir.path(), Duration::from_secs(3600), external_stop.clone()).unwrap();
+
+        let started = std::time::Instant::now();
+        drop(handle);
+
+        // The capture thread polls every 250ms; well under 5s means the join
+        // returned because drop signaled its own stop, not the 1h interval.
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "drop blocked on the capture thread: took {:?}",
+            started.elapsed()
+        );
+        assert!(!external_stop.load(Ordering::Relaxed));
+        assert!(list_screenshots(dir.path()).is_empty());
     }
 }

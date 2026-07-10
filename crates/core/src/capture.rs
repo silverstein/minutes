@@ -1196,36 +1196,7 @@ fn record_to_wav_dual_source(
     );
     emit_recording_started(started_context);
 
-    let _screen_handle = if config.screen_context.enabled {
-        if !crate::screen::check_screen_permission() {
-            eprintln!("[minutes] Screen context disabled — grant Screen Recording permission in System Settings > Privacy & Security");
-            None
-        } else {
-            let screen_dir = crate::screen::screens_dir_for(output_path);
-            match crate::screen::start_capture(
-                &screen_dir,
-                std::time::Duration::from_secs(config.screen_context.interval_secs),
-                Arc::clone(&stop_flag),
-            ) {
-                Ok(handle) => {
-                    eprintln!(
-                        "[minutes] Screen context capture enabled (every {}s)",
-                        config.screen_context.interval_secs
-                    );
-                    Some(handle)
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        "screen capture init failed: {} — continuing without screen context",
-                        e
-                    );
-                    None
-                }
-            }
-        }
-    } else {
-        None
-    };
+    let _screen_handle = start_screen_capture_if_enabled(config, output_path, &stop_flag);
 
     let preflight_intent = config
         .recording
@@ -1254,6 +1225,9 @@ fn record_to_wav_dual_source(
 
         if crate::pid::check_and_clear_sentinel() {
             tracing::info!("stop sentinel detected — stopping dual-source recording");
+            // Set the shared flag so everything watching it (screen capture,
+            // live sidecar, streams) winds down like on Ctrl+C (#423).
+            stop_flag.store(true, Ordering::Relaxed);
             break;
         }
 
@@ -1590,36 +1564,7 @@ pub fn record_to_wav_with_lifecycle(
     let mut current_device_name = device_name;
 
     // Start screen context capture if enabled (with permission check)
-    let _screen_handle = if config.screen_context.enabled {
-        if !crate::screen::check_screen_permission() {
-            eprintln!("[minutes] Screen context disabled — grant Screen Recording permission in System Settings > Privacy & Security");
-            None
-        } else {
-            let screen_dir = crate::screen::screens_dir_for(output_path);
-            match crate::screen::start_capture(
-                &screen_dir,
-                std::time::Duration::from_secs(config.screen_context.interval_secs),
-                Arc::clone(&stop_flag),
-            ) {
-                Ok(handle) => {
-                    eprintln!(
-                        "[minutes] Screen context capture enabled (every {}s)",
-                        config.screen_context.interval_secs
-                    );
-                    Some(handle)
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        "screen capture init failed: {} — continuing without screen context",
-                        e
-                    );
-                    None
-                }
-            }
-        }
-    } else {
-        None
-    };
+    let _screen_handle = start_screen_capture_if_enabled(config, output_path, &stop_flag);
 
     // Safety guard for auto-stop on silence, time cap, disk space
     let preflight_intent = config
@@ -1638,6 +1583,9 @@ pub fn record_to_wav_with_lifecycle(
 
         if crate::pid::check_and_clear_sentinel() {
             tracing::info!("stop sentinel detected — stopping recording");
+            // Set the shared flag so everything watching it (screen capture,
+            // live sidecar, streams) winds down like on Ctrl+C (#423).
+            stop_flag.store(true, Ordering::Relaxed);
             break;
         }
 
@@ -1806,6 +1754,68 @@ fn emit_recording_started(started_context: Option<RecordingStartedContext>) {
             context.capabilities,
         ));
     }
+}
+
+/// Start screen-context capture for a recording when enabled in config.
+/// Returns None (and reports the failure) when the Screen Recording
+/// permission probe fails; recording continues without screenshots.
+fn start_screen_capture_if_enabled(
+    config: &crate::config::Config,
+    output_path: &Path,
+    stop_flag: &Arc<AtomicBool>,
+) -> Option<crate::screen::ScreenCaptureHandle> {
+    if !config.screen_context.enabled {
+        return None;
+    }
+
+    if !crate::screen::check_screen_permission() {
+        report_screen_permission_failure(output_path);
+        return None;
+    }
+
+    let screen_dir = crate::screen::screens_dir_for(output_path);
+    match crate::screen::start_capture(
+        &screen_dir,
+        std::time::Duration::from_secs(config.screen_context.interval_secs),
+        Arc::clone(stop_flag),
+    ) {
+        Ok(handle) => {
+            eprintln!(
+                "[minutes] Screen context capture enabled (every {}s)",
+                config.screen_context.interval_secs
+            );
+            Some(handle)
+        }
+        Err(e) => {
+            tracing::warn!(
+                "screen capture init failed: {} — continuing without screen context",
+                e
+            );
+            None
+        }
+    }
+}
+
+/// Surface a failed Screen Recording permission probe at recording start.
+/// stderr is discarded for GUI launches and System Settings can show a stale
+/// grant as enabled after the app's signature changes, so the failure must
+/// also reach the structured log, the event stream, and the desktop (#424).
+fn report_screen_permission_failure(output_path: &Path) {
+    let message = "Screen context is enabled but Screen Recording permission is unavailable — recording continues without screenshots. If System Settings already shows Minutes as enabled, the grant is stale: toggle it off and on under Privacy & Security > Screen & System Audio Recording, then restart the recording.";
+
+    eprintln!("[minutes] {}", message);
+    crate::logging::log_error(
+        "screen_context",
+        &output_path.display().to_string(),
+        message,
+    );
+    crate::events::append_event(crate::events::MinutesEvent::ScreenContextUnavailable {
+        reason: "screen-recording-permission".into(),
+        message: message.into(),
+    });
+    send_desktop_notification(
+        "Screen context is on, but Screen Recording permission is missing or stale — this recording will have no screenshots. Re-enable it in System Settings > Privacy & Security.",
+    );
 }
 
 /// Spawn a live transcript sidecar thread that receives audio samples and
@@ -2476,6 +2486,11 @@ pub fn preflight_recording_with_native_call_capture(
 
 /// Send a macOS notification when silence is detected during recording.
 fn send_silence_notification_msg(body: &str) {
+    send_desktop_notification(body);
+}
+
+/// Send a desktop notification (macOS notification center; stderr elsewhere).
+fn send_desktop_notification(body: &str) {
     #[cfg(target_os = "macos")]
     {
         let script = format!(
@@ -2486,7 +2501,7 @@ fn send_silence_notification_msg(body: &str) {
             .args(["-e", &script])
             .output()
         {
-            Ok(_) => tracing::debug!("safety notification sent"),
+            Ok(_) => tracing::debug!("desktop notification sent"),
             Err(e) => tracing::warn!("failed to send notification: {}", e),
         }
     }

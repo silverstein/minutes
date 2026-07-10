@@ -161,6 +161,30 @@ as a different identity until proven otherwise.
 For contributors using ad-hoc signing, repeated prompts are more likely. That
 is expected until you switch to a stable local signing identity.
 
+## Screen Recording never re-prompts (stale-grant trap)
+
+Microphone and Screen Recording behave differently after a signing-identity
+change, and the asymmetry is a trap (#424):
+
+- **Microphone** self-heals: macOS re-prompts on the next launch and the
+  recording keeps working.
+- **Screen Recording** silently dies: the grant stays keyed to the old
+  identity, System Settings still shows Minutes toggled ON, and macOS never
+  re-prompts. Recordings look healthy (waveform, transcript, summary) but
+  produce zero screenshots.
+
+Recovery: System Settings → Privacy & Security → Screen & System Audio
+Recording → toggle Minutes off and on, then restart the recording.
+
+Fast liveness check after any identity change: start a recording **from the
+app** and confirm `~/.minutes/screens/current/` appears within ~20 seconds.
+`minutes health` (with `[screen_context] enabled = true`) probes the
+permission with a real capture attempt, but TCC grants are per-identity — run
+from a terminal it validates CLI recordings, not the app's grant. The app
+path is validated at recording start: a failed probe is reported to
+`~/.minutes/logs/minutes.log`, `~/.minutes/events.jsonl`
+(`screen_context.unavailable`), and a desktop notification.
+
 ## Guidance for AI agents
 
 When working in this repo:

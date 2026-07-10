@@ -352,6 +352,15 @@ pub enum MinutesEvent {
         offset_ms: u64,
         duration_ms: u64,
     },
+    /// Screen-context capture could not start for a recording (e.g. the macOS
+    /// Screen Recording permission is missing, or stale after the app's
+    /// signature changed). Recording continues without screenshots; agents
+    /// and the desktop app can surface this to the user (#424).
+    #[serde(rename = "screen_context.unavailable")]
+    ScreenContextUnavailable {
+        reason: String,
+        message: String,
+    },
     /// Append-only agent commentary. This never mutates human-authored notes.
     #[serde(rename = "agent.annotation")]
     AgentAnnotation {
@@ -1653,6 +1662,32 @@ mod tests {
         assert!(json.contains("\"seq\":42"));
         assert!(json.contains("\"event_type\":\"NoteAdded\""));
         assert!(json.contains("\"text\":\"Important point\""));
+    }
+
+    #[test]
+    fn screen_context_unavailable_serializes_dotted_name() {
+        let envelope = EventEnvelope {
+            v: EVENT_SCHEMA_VERSION,
+            seq: 7,
+            timestamp: Local::now(),
+            event: MinutesEvent::ScreenContextUnavailable {
+                reason: "screen-recording-permission".into(),
+                message: "Screen Recording permission is unavailable.".into(),
+            },
+        };
+
+        let value = serde_json::to_value(&envelope).unwrap();
+        assert_eq!(value["event_type"], "screen_context.unavailable");
+        assert_eq!(value["reason"], "screen-recording-permission");
+
+        let parsed: EventEnvelope =
+            serde_json::from_str(&serde_json::to_string(&envelope).unwrap()).unwrap();
+        match parsed.event {
+            MinutesEvent::ScreenContextUnavailable { reason, .. } => {
+                assert_eq!(reason, "screen-recording-permission");
+            }
+            other => panic!("unexpected event: {:?}", other),
+        }
     }
 
     #[test]

@@ -154,7 +154,25 @@ echo ""
 # Install to /Applications if --install flag is passed
 if [[ " $* " == *" --install "* ]]; then
     echo "=== Installing app to /Applications ==="
-    cp -rf target/release/bundle/macos/Minutes.app /Applications/
+    # Never copy INTO the existing bundle: macOS App Management can deny the
+    # write mid-copy and `cp -rf` leaves /Applications/Minutes.app hollowed out
+    # (skeleton dir, files gone) — the app is destroyed, not just stale (#422).
+    # Stage to a fresh sibling path first (App Management denial surfaces there,
+    # harmlessly), then atomically swap only after the staged copy succeeds.
+    STAGING="/Applications/.Minutes.app.installing.$$"
+    rm -rf "$STAGING" 2>/dev/null || true
+    if ! ditto target/release/bundle/macos/Minutes.app "$STAGING" 2>/tmp/minutes-install-err.$$; then
+        echo "  ERROR: could not write to /Applications — the existing app was NOT touched." >&2
+        sed 's/^/    /' /tmp/minutes-install-err.$$ >&2 2>/dev/null || true
+        rm -rf "$STAGING" /tmp/minutes-install-err.$$ 2>/dev/null || true
+        echo "  This is usually macOS App Management: grant your terminal" >&2
+        echo "  System Settings → Privacy & Security → App Management, then re-run." >&2
+        exit 1
+    fi
+    rm -f /tmp/minutes-install-err.$$ 2>/dev/null || true
+    # Staged copy succeeded, so /Applications is writable — swap is now safe.
+    rm -rf "/Applications/Minutes.app" 2>/dev/null || true
+    mv "$STAGING" "/Applications/Minutes.app"
     echo "  Installed to /Applications/Minutes.app"
 fi
 

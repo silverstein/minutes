@@ -6,13 +6,13 @@
 
 **Open-source conversation memory.** &nbsp; [useminutes.app](https://useminutes.app)
 
-Agents have run logs. Humans have conversations. **minutes** captures the human side — the decisions, the intent, the context that agents need but can't observe — and makes it queryable.
+**Your AI remembers every conversation — and no one can take it from you.**
 
-Record a meeting. Capture a voice memo on a walk. Ask Claude *"what did I promise Sarah?"* — and get an answer. Your AI remembers every conversation you've had.
+Agents have run logs. Humans have conversations. **minutes** captures the human side — the decisions, the intent, the context that agents need but can't observe — and makes it queryable. Record a meeting. Capture a voice memo on a walk. Dictate a thought at your cursor. Ask Claude *"what did I promise Sarah?"* — and get an answer.
 
-Minutes is not just a meeting-notes app. It is local conversation infrastructure for agents: audio capture, transcripts, decisions, commitments, people, and provenance exposed through plain files, CLI commands, MCP tools, and live transcript streams.
+Everything is transcribed **on your machine** and written to `~/meetings/` as plain markdown, which every AI you use (Claude Code, Codex, Gemini CLI, Cursor, OpenCode, Pi) reads directly. Nothing is uploaded. When a cloud memory app gets acquired or subpoenaed, your recordings aren't theirs to hand over — they never left your disk.
 
-> **Own every conversation you've ever had.** Cloud meeting tools rent your own conversations back to you. Minutes writes every meeting to `~/meetings/` as plain markdown, which every AI you use (Claude Code, Codex, Gemini CLI, Cursor, OpenCode, Pi) reads directly. No SDK. No API key. No vendor to outlive. Ten years from now, `grep` still works on your corpus. &nbsp;[**For agents →**](https://useminutes.app/for-agents) &nbsp;·&nbsp; [**Frontmatter schema →**](docs/architecture/frontmatter-schema.md)
+> **The private, owned conversation-memory layer.** Not another AI notetaker — that category ships free inside Zoom and Meet now. Minutes is audio capture, transcripts, decisions, commitments, people, and provenance as plain files, CLI commands, MCP tools, and live transcript streams. No SDK. No API key. No vendor to outlive. Ten years from now, `grep` still works on your corpus. &nbsp;[**For agents →**](https://useminutes.app/for-agents) &nbsp;·&nbsp; [**Frontmatter schema →**](docs/architecture/frontmatter-schema.md)
 
 <p align="center">
   <img src="docs/assets/demo.gif" alt="minutes demo — record, dictate, phone sync, AI recall" width="750">

@@ -264,6 +264,92 @@ function DictationCard() {
   );
 }
 
+type HomeFlowStep = { label: string; detail: string; offDevice?: boolean };
+
+const cloudFlow: HomeFlowStep[] = [
+  { label: "Capture from your mic", detail: "device audio, on your Mac" },
+  { label: "Transcribe", detail: "cloud providers", offDevice: true },
+  { label: "Enhance notes", detail: "hosted AI", offDevice: true },
+  { label: "Store transcripts + notes", detail: "their servers", offDevice: true },
+];
+
+const minutesFlow: HomeFlowStep[] = [
+  { label: "Capture from your mic", detail: "device audio, on your Mac" },
+  { label: "Transcribe", detail: "on-device — whisper.cpp / parakeet.cpp" },
+  { label: "Store transcripts + notes", detail: "your disk — markdown in ~/meetings" },
+];
+
+function HomeFlowCard({
+  name,
+  leavesDevice,
+  steps,
+  footnote,
+}: {
+  name: string;
+  leavesDevice: boolean;
+  steps: HomeFlowStep[];
+  footnote: string;
+}) {
+  return (
+    <div className="rounded-[8px] border border-[color:var(--border)] bg-[var(--bg-elevated)] p-6 text-left shadow-[var(--shadow-panel)]">
+      <div className="flex items-center justify-between gap-3">
+        <p className="font-mono text-[13px] font-medium text-[var(--text)]">{name}</p>
+        <span
+          className={`rounded-full px-2.5 py-1 font-mono text-[10px] uppercase tracking-[0.14em] ${
+            leavesDevice
+              ? "bg-[var(--bg-hover)] text-[var(--text-secondary)]"
+              : "bg-[var(--accent-soft)] text-[var(--accent)]"
+          }`}
+        >
+          {leavesDevice ? "Leaves your device" : "Stays on device"}
+        </span>
+      </div>
+      <ol className="mt-5">
+        {steps.map((step, i) => (
+          <li key={step.label}>
+            <div
+              className={`rounded-[6px] px-4 py-3 ${
+                step.offDevice
+                  ? "border border-dashed border-[color:var(--border-mid)] bg-transparent"
+                  : "border border-[color:var(--border)] bg-[var(--bg)]"
+              }`}
+            >
+              <div className="flex items-center justify-between gap-3">
+                <span className="font-mono text-[13px] text-[var(--text)]">
+                  {step.label}
+                </span>
+                <span
+                  className={`shrink-0 font-mono text-[10px] uppercase tracking-[0.12em] ${
+                    step.offDevice
+                      ? "text-[var(--text-tertiary)]"
+                      : "text-[var(--accent)]"
+                  }`}
+                >
+                  {step.offDevice ? "☁ cloud" : "on-device"}
+                </span>
+              </div>
+              <p className="mt-1 font-mono text-[11px] leading-5 text-[var(--text-secondary)]">
+                {step.detail}
+              </p>
+            </div>
+            {i < steps.length - 1 ? (
+              <div
+                className="flex justify-center py-1.5 text-[15px] text-[var(--text-tertiary)]"
+                aria-hidden="true"
+              >
+                ↓
+              </div>
+            ) : null}
+          </li>
+        ))}
+      </ol>
+      <p className="mt-5 border-t border-[color:var(--border)] pt-4 text-[13px] leading-7 text-[var(--text-secondary)]">
+        {footnote}
+      </p>
+    </div>
+  );
+}
+
 export default function Home() {
   return (
     <div className="mx-auto max-w-[840px] px-6 pb-16 sm:px-8">
@@ -283,6 +369,9 @@ export default function Home() {
           </a>
           <a href="#dictation" className="hover:text-[var(--accent)]">
             Dictation
+          </a>
+          <a href="#local" className="hover:text-[var(--accent)]">
+            On-device
           </a>
           <a href="#pipeline" className="hover:text-[var(--accent)]">
             Pipeline
@@ -319,7 +408,22 @@ export default function Home() {
           subpoenaed, your recordings aren&apos;t theirs to hand over — they
           never left your machine.
         </p>
-        <p className="mx-auto mt-5 max-w-[720px] font-mono text-[12px] uppercase tracking-[0.14em] text-[var(--text-secondary)]">
+        <div className="mx-auto mt-7 flex max-w-[640px] flex-wrap justify-center gap-2">
+          {[
+            "On-device transcription",
+            "Nothing uploaded",
+            "Open source · MIT",
+            "Consent in every file",
+          ].map((claim) => (
+            <span
+              key={claim}
+              className="rounded-full border border-[color:var(--border-mid)] px-3 py-1 font-mono text-[11px] tracking-[0.02em] text-[var(--text-secondary)]"
+            >
+              {claim}
+            </span>
+          ))}
+        </div>
+        <p className="mx-auto mt-6 max-w-[720px] font-mono text-[12px] uppercase tracking-[0.14em] text-[var(--text-secondary)]">
           {GITHUB_STARS} GitHub stars • {GITHUB_FORKS} forks •{" "}
           {GITHUB_CONTRIBUTORS} contributors • {NPM_MONTHLY_DOWNLOADS} npm
           installs/mo
@@ -520,8 +624,35 @@ export default function Home() {
         </div>
       </section>
 
+      <section id="local" className="border-t border-[color:var(--border)] py-16">
+        <SectionLabel n="02" label="On-device" />
+        <h2 className="font-serif text-[30px] leading-tight tracking-[-0.035em] text-[var(--text)] sm:text-[32px]">
+          Your conversation never leaves your machine.
+        </h2>
+        <p className="mt-5 max-w-[660px] text-[15px] leading-7 text-[var(--text-secondary)]">
+          Every other tool sends your audio somewhere to be understood — a cloud
+          transcriber, a hosted AI, a server that keeps the result. Minutes
+          doesn&apos;t. Transcription runs on your Mac and the record is markdown
+          on your own disk. There is no server to trust, breach, or subpoena.
+        </p>
+        <div className="mt-8 grid gap-5 lg:grid-cols-2">
+          <HomeFlowCard
+            name="Cloud notetakers"
+            leavesDevice
+            steps={cloudFlow}
+            footnote="Even the privacy-conscious ones capture locally, then stream your audio to the cloud to transcribe and store the result on their servers."
+          />
+          <HomeFlowCard
+            name="Minutes"
+            leavesDevice={false}
+            steps={minutesFlow}
+            footnote="Audio, transcript, and notes never leave your machine. You hold the only copy — nothing to upload, sell, or lose in an acquisition."
+          />
+        </div>
+      </section>
+
       <section className="border-t border-[color:var(--border)] py-16">
-        <SectionLabel n="02" label="Proof" />
+        <SectionLabel n="03" label="Proof" />
         <h2 className="font-serif text-[30px] leading-tight tracking-[-0.035em] text-[var(--text)] sm:text-[32px]">
           See it work before you believe it.
         </h2>
@@ -566,7 +697,7 @@ export default function Home() {
       </section>
 
       <section id="pipeline" className="border-t border-[color:var(--border)] py-16">
-        <SectionLabel n="03" label="Pipeline" />
+        <SectionLabel n="04" label="Pipeline" />
         <h2 className="font-serif text-[30px] leading-tight tracking-[-0.035em] text-[var(--text)] sm:text-[32px]">
           How it works
         </h2>
@@ -587,7 +718,7 @@ export default function Home() {
       </section>
 
       <section className="border-t border-[color:var(--border)] py-16">
-        <SectionLabel n="04" label="Audience" />
+        <SectionLabel n="05" label="Audience" />
         <h2 className="max-w-[620px] font-serif text-[30px] leading-tight tracking-[-0.035em] text-[var(--text)] sm:text-[32px]">
           Capture it anywhere. Find it everywhere.
         </h2>
@@ -612,7 +743,7 @@ export default function Home() {
       </section>
 
       <section className="border-t border-[color:var(--border)] py-16">
-        <SectionLabel n="05" label="Features" />
+        <SectionLabel n="06" label="Features" />
         <h2 className="font-serif text-[30px] leading-tight tracking-[-0.035em] text-[var(--text)] sm:text-[32px]">
           What you get
         </h2>
@@ -643,7 +774,7 @@ export default function Home() {
       </section>
 
       <section className="border-t border-[color:var(--border)] py-16">
-        <SectionLabel n="06" label="Comparison" />
+        <SectionLabel n="07" label="Comparison" />
         <h2 className="font-serif text-[30px] leading-tight tracking-[-0.035em] text-[var(--text)] sm:text-[32px]">
           How it compares
         </h2>
@@ -698,7 +829,7 @@ export default function Home() {
       </section>
 
       <section className="border-t border-[color:var(--border)] py-16">
-        <SectionLabel n="07" label="Governance" />
+        <SectionLabel n="08" label="Governance" />
         <h2 className="font-serif text-[30px] leading-tight tracking-[-0.035em] text-[var(--text)] sm:text-[32px]">
           Built in, not retrofitted.
         </h2>

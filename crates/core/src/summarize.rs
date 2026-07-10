@@ -1073,14 +1073,18 @@ fn format_meeting_time(secs: u64) -> String {
     format!("{}:{:02}", secs / 60, secs % 60)
 }
 
-/// The meeting-time (in seconds) of the last `[M:SS]`-stamped transcript line
-/// in `text`. Transcript lines are written as `[M:SS] text` (see
-/// transcribe.rs), so this is the coverage endpoint of a (possibly truncated)
+/// The meeting-time (in seconds) of the last stamped transcript line in
+/// `text`. Transcript lines are written as `[M:SS] text` (see transcribe.rs)
+/// or, after diarization, `[SPEAKER_N M:SS] text` (see diarize.rs
+/// apply_speakers) — the stamp is the last whitespace-separated token inside
+/// the brackets. This is the coverage endpoint of a (possibly truncated)
 /// transcript. None when no line carries a parseable stamp.
 fn last_transcript_stamp_secs(text: &str) -> Option<u64> {
     text.lines().rev().find_map(|line| {
         let rest = line.strip_prefix('[')?;
         let (stamp, _) = rest.split_once(']')?;
+        // Tolerate diarized `[SPEAKER_N M:SS]` stamps alongside bare `[M:SS]`.
+        let stamp = stamp.split_whitespace().last().unwrap_or(stamp);
         let (mins, secs) = stamp.split_once(':')?;
         if secs.len() != 2 {
             return None;
@@ -3593,6 +3597,19 @@ PARTICIPANTS:
             last_transcript_stamp_secs("[2:10] ok\n[9:99] bogus"),
             Some(130)
         );
+        // Diarized transcripts stamp lines as `[SPEAKER_N M:SS]` (diarize.rs
+        // apply_speakers) — the speaker label must not defeat the parse.
+        assert_eq!(
+            last_transcript_stamp_secs("[SPEAKER_0 0:00] hi\n[SPEAKER_1 12:34] bye"),
+            Some(12 * 60 + 34)
+        );
+        // Real speaker names after attribution parse the same way.
+        assert_eq!(
+            last_transcript_stamp_secs("[Ryan Malia 3:21] point made"),
+            Some(3 * 60 + 21)
+        );
+        // Noise markers like `[music]` still yield nothing.
+        assert_eq!(last_transcript_stamp_secs("[music]"), None);
     }
 
     #[test]
@@ -3688,6 +3705,55 @@ PARTICIPANTS:
                 elapsed,
                 bound
             );
+        }
+    }
+
+    #[test]
+    fn select_agent_screens_respects_truncation_bound_on_diarized_transcripts() {
+        // Maintainer-requested regression (#421 final review): diarized
+        // transcripts stamp lines as `[SPEAKER_N M:SS]`. The bound parser must
+        // read them — otherwise every long diarized meeting fails closed and
+        // silently loses screenshots on exactly the meetings that need them.
+        let line = "this line is filler to bulk the transcript up to the byte cap quickly";
+        let mut transcript = String::new();
+        let mut secs = 0u64;
+        while transcript.len() <= 150_000 {
+            transcript.push_str(&format!(
+                "[SPEAKER_{} {}:{:02}] {}\n",
+                secs / 10 % 2,
+                secs / 60,
+                secs % 60,
+                line
+            ));
+            secs += 10;
+        }
+        let (truncated, was_truncated) =
+            truncate_transcript(&transcript, MAX_AGENT_TRANSCRIPT_BYTES);
+        assert!(was_truncated);
+        let bound =
+            last_transcript_stamp_secs(truncated).expect("diarized stamps must parse (#421)");
+        assert!(bound < secs);
+
+        let dir = tempfile::tempdir().unwrap();
+        let files: Vec<std::path::PathBuf> = (0..40u64)
+            .map(|i| {
+                let elapsed = i * (secs / 40);
+                let p = dir
+                    .path()
+                    .join(format!("screen-{:04}-{:04}s.png", i, elapsed));
+                std::fs::write(&p, b"png").unwrap();
+                p
+            })
+            .collect();
+
+        let selected = select_agent_screen_files(&files, truncated, true);
+        assert!(
+            !selected.is_empty(),
+            "diarized long meetings must still receive screenshots"
+        );
+        for f in &selected {
+            let elapsed = crate::screen::elapsed_secs_from_filename(f).unwrap();
+            assert!(elapsed <= bound);
         }
     }
 

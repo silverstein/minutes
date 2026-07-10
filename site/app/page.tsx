@@ -258,16 +258,18 @@ export default function Home() {
         <p className="mb-5 font-mono text-[11px] uppercase tracking-[0.18em] text-[var(--accent)]">
           Open source · Local first · MIT
         </p>
-        <h1 className="mx-auto max-w-[720px] font-serif text-[40px] leading-[0.98] tracking-[-0.045em] text-[var(--text)] sm:text-[58px]">
-          The conversation memory
+        <h1 className="mx-auto max-w-[760px] font-serif text-[40px] leading-[0.98] tracking-[-0.045em] text-[var(--text)] sm:text-[58px]">
+          Your AI remembers every conversation —
           <br />
-          <span className="italic text-[var(--accent)]">your agents can actually read.</span>
+          <span className="italic text-[var(--accent)]">and no one can take it from you.</span>
         </h1>
-        <p className="mx-auto mt-5 max-w-[620px] text-[16px] leading-7 text-[var(--text-secondary)] sm:text-[17px]">
-          Cloud meeting tools rent your own conversations back to you. Minutes
-          records meetings, voice memos, and dictation locally, writes structured
-          markdown to your own disk, and gives every AI you use (Claude, Codex,
-          Gemini, anything MCP) the same folder of truth.
+        <p className="mx-auto mt-5 max-w-[640px] text-[16px] leading-7 text-[var(--text-secondary)] sm:text-[17px]">
+          Meetings, voice memos, dictation — Minutes transcribes them locally,
+          writes structured markdown to your own disk, and lets every AI you use
+          (Claude, Codex, Gemini, anything MCP) read the same folder of truth.
+          Nothing is uploaded. When a cloud memory app gets acquired or
+          subpoenaed, your recordings aren&apos;t theirs to hand over — they
+          never left your machine.
         </p>
         <p className="mx-auto mt-5 max-w-[720px] font-mono text-[12px] uppercase tracking-[0.14em] text-[var(--text-secondary)]">
           {GITHUB_STARS} GitHub stars • {GITHUB_FORKS} forks •{" "}
@@ -632,10 +634,12 @@ export default function Home() {
           Built in, not retrofitted.
         </h2>
         <p className="mt-5 max-w-[660px] text-[15px] leading-7 text-[var(--text-secondary)]">
-          Default-on recording is coming to work, and most tools plan to bolt
-          the controls on afterward. Minutes takes the other path: governance
-          lives in the record itself, because the record&apos;s primary reader
-          is now an agent.
+          If you take notes on client conversations for a living — legal,
+          clinical, financial — a cloud recorder isn&apos;t a preference, it&apos;s
+          a compliance problem. Minutes keeps both the audio and the record on
+          your own machine, and puts governance in the record itself: every file
+          states the consent it was captured under, because its primary reader is
+          now an agent.
         </p>
         <div className="mt-8 grid gap-4 md:grid-cols-3">
           <div className="rounded-[8px] border border-[color:var(--border)] bg-[var(--bg-elevated)] p-5 shadow-[var(--shadow-panel)]">

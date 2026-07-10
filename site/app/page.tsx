@@ -150,7 +150,7 @@ function SectionLabel({ n, label }: { n: string; label: string }) {
 
 function TranscriptCard() {
   return (
-    <div className="overflow-hidden rounded-[8px] border border-[color:var(--border)] bg-[var(--bg-elevated)] text-left shadow-[var(--shadow-panel)]">
+    <div className="stream-card overflow-hidden rounded-[8px] border border-[color:var(--border)] bg-[var(--bg-elevated)] text-left shadow-[var(--shadow-panel)]">
       <div className="flex flex-col gap-3 border-b border-[color:var(--border)] px-5 py-4 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <p className="font-mono text-[11px] uppercase tracking-[0.16em] text-[var(--accent)]">
@@ -195,7 +195,7 @@ function TranscriptCard() {
           </span>
         </div>
 
-        <div className="border-t border-[color:var(--border)] pt-5">
+        <div className="stream-actions border-t border-[color:var(--border)] pt-5">
           <p className="mb-3 font-mono text-[11px] uppercase tracking-[0.16em] text-[var(--text-secondary)]">
             Action Items
           </p>

@@ -145,7 +145,9 @@ Consistent rounding. Landing is slightly sharper than the app. Never fully squar
 - **Panel open/close:** 0.2s ease-out
 - **Recording pulse:** 1s ease-in-out, infinite — the only animation that loops
 
-No bounces, no entrance animations, no scroll-driven effects. Utility-grade motion.
+No bounces, no scroll-driven effects, no decorative entrance animations. Utility-grade motion.
+
+**One sanctioned exception — product-honest reveals.** Motion that *demonstrates how the product actually behaves* is not decoration and is allowed, held to the same restraint as everything else. The landing hero's transcript card streams its lines in once on load, mirroring how Minutes streams real transcription — the same instinct as "show real progress (streamed partials), never spinners" under Interaction craft. Such reveals must: play once (never loop), finish under ~2.5s, use the standard 160–260ms ease per element, and be gated behind `prefers-reduced-motion: no-preference` so the reduce path renders the final state instantly. If a reveal doesn't teach the viewer something true about the product, it's decoration — cut it.
 
 ## Component Patterns
 
@@ -250,6 +252,7 @@ Every state must be visible in every surface (tray, app, CLI output).
 | 2026-04-08 | Transcript output as hero visual | Real diarized output in Geist Mono replaces the existing DemoPlayer gif. The product's output is the aesthetic. |
 | 2026-04-08 | Warm near-black (#0D0D0B) not pure black | Slightly warm undertone unifies dark mode with the cream light mode surfaces. |
 | 2026-04-08 | No gradients, no glows, no illustration | Information density is the aesthetic. The only decoration is well-set type. |
+| 2026-07-10 | Sanctioned "product-honest reveal" exception to the no-entrance-animation rule | Resolves the tension between "no entrance animations" (Motion) and "show streamed partials, never spinners" (Interaction craft). The hero transcript streams in once to mirror real transcription; reduce-motion renders it static. Reveals that don't demonstrate real product behavior remain banned. |
 
 ## Interaction craft
 

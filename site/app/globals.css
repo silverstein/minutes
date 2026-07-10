@@ -88,3 +88,39 @@ button {
     gap: 8px 10px;
   }
 }
+
+/* Streaming-transcript hero reveal. Product-honest, not decorative: it mirrors
+   how Minutes streams real transcription in (see DESIGN.md → Motion). Plays
+   once on load, and only when the user has not asked to reduce motion — under
+   `reduce`, no rule applies and every line is visible immediately. */
+@media (prefers-reduced-motion: no-preference) {
+  .stream-card .transcript-grid > span,
+  .stream-card .stream-actions {
+    opacity: 0;
+    animation: stream-in 200ms ease forwards;
+  }
+  .stream-card .transcript-grid > span:nth-child(-n + 3) {
+    animation-delay: 0.35s;
+  }
+  .stream-card .transcript-grid > span:nth-child(n + 4):nth-child(-n + 6) {
+    animation-delay: 1s;
+  }
+  .stream-card .transcript-grid > span:nth-child(n + 7) {
+    animation-delay: 1.65s;
+  }
+  .stream-card .stream-actions {
+    animation-delay: 2.35s;
+    animation-duration: 260ms;
+  }
+}
+
+@keyframes stream-in {
+  from {
+    opacity: 0;
+    transform: translateY(3px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}

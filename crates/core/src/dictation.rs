@@ -188,6 +188,8 @@ pub enum DictationEvent {
     Processing,
     /// Partial transcription (streaming mode) — text updates progressively.
     PartialText(String),
+    /// Input level 0-100 for lightweight UI feedback.
+    AudioLevel(u32),
     /// Silence countdown: total timeout ms, remaining ms.
     SilenceCountdown {
         total_ms: u64,
@@ -484,6 +486,9 @@ where
             };
 
             let vad_result = vad.process(chunk.rms);
+            on_event(DictationEvent::AudioLevel(
+                crate::streaming::stream_audio_level(),
+            ));
 
             if vad_result.speaking {
                 if !was_speaking {
@@ -1324,7 +1329,8 @@ mod tests {
 
     #[test]
     fn combine_results_joins_text_and_duration() {
-        let config = Config::default();
+        let mut config = Config::default();
+        config.dictation.destination = "clipboard".into();
         let results = vec![
             DictationResult {
                 raw_text: "first sentence.".into(),

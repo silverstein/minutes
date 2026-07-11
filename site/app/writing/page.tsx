@@ -11,6 +11,13 @@ export const metadata: Metadata = {
 
 const posts = [
   {
+    slug: "whisper-cpp-vs-parakeet-cpp",
+    date: "2026-07-11",
+    title: "whisper.cpp vs parakeet.cpp for local transcription",
+    summary:
+      "We ship both engines in production. Real numbers on accuracy and Apple Silicon speed, why Whisper is still the default, and the build friction nobody mentions.",
+  },
+  {
     slug: "governance-built-in-not-retrofitted",
     date: "2026-06-10",
     title: "Governance built in, not retrofitted",

@@ -82,18 +82,18 @@ impl TranscriptSource {
     }
 }
 
-pub const PARAKEET_SCOPE_DOC_REF: &str = "docs/PARAKEET.md#scope";
+pub const PARAKEET_SCOPE_DOC_REF: &str = "docs/architecture/parakeet.md#scope";
 /// Shown at session start when the user configured `engine = "parakeet"` but the
 /// binary was built without the `parakeet` Cargo feature. The engine choice is
 /// silently honored as whisper for this session.
 pub const PARAKEET_LIVE_SCOPE_WARNING: &str =
-    "this build does not include parakeet; live transcription uses whisper (see docs/PARAKEET.md#scope)";
+    "this build does not include parakeet; live transcription uses whisper (see docs/architecture/parakeet.md#scope)";
 /// Shown at runtime when the parakeet engine IS compiled in but fails during a
 /// live session (warmup error, sidecar unreachable, transcribe error). The
 /// session transparently falls back to whisper for the remainder.
 #[cfg(feature = "parakeet")]
 pub const PARAKEET_LIVE_FALLBACK_WARNING: &str =
-    "parakeet live transcription failed; falling back to whisper for this session (see docs/PARAKEET.md#scope)";
+    "parakeet live transcription failed; falling back to whisper for this session (see docs/architecture/parakeet.md#scope)";
 
 pub const APPLE_SPEECH_SCOPE_DOC_REF: &str = "docs/designs/apple-speech-benchmark-2026-04-22.md";
 pub const APPLE_SPEECH_LIVE_SCOPE_WARNING: &str =
@@ -1253,6 +1253,29 @@ struct RecordingSidecarVad {
 #[cfg(feature = "whisper")]
 impl RecordingSidecarVad {
     fn new(config: &Config) -> Self {
+        #[cfg(feature = "vad-ort")]
+        {
+            return Self::new_with_ort_constructor(
+                config,
+                crate::silero_vad::OrtSileroVad::new_catching_unwind,
+            );
+        }
+        #[cfg(not(feature = "vad-ort"))]
+        {
+            Self::new_without_ort(config)
+        }
+    }
+
+    #[cfg(feature = "vad-ort")]
+    fn new_with_ort_constructor(
+        config: &Config,
+        ort_constructor: impl FnOnce(
+            &Path,
+        ) -> Result<
+            crate::silero_vad::OrtSileroVad,
+            crate::silero_vad::OrtSileroError,
+        >,
+    ) -> Self {
         // Pick the engine the user asked for. When ort-silero is
         // requested but unavailable (feature off, ONNX missing, or
         // load failure), fall through to whisper-silero with an
@@ -1276,7 +1299,15 @@ impl RecordingSidecarVad {
         #[cfg(feature = "vad-ort")]
         if want_ort {
             if let Some(onnx_path) = crate::transcribe::resolve_silero_onnx_path(config) {
-                match crate::silero_vad::OrtSileroVad::new(&onnx_path) {
+                let ort_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    ort_constructor(&onnx_path)
+                }))
+                .unwrap_or_else(|payload| {
+                    Err(crate::silero_vad::OrtSileroError::Panic(
+                        crate::silero_vad::panic_payload_message(payload),
+                    ))
+                });
+                match ort_result {
                     Ok(engine) => {
                         tracing::info!(
                             vad_engine = "ort-silero",
@@ -1291,7 +1322,7 @@ impl RecordingSidecarVad {
                         tracing::warn!(
                             onnx_model = %onnx_path.display(),
                             error = %e,
-                            "ort-Silero load failed — falling back to whisper-silero"
+                            "ort-silero VAD failed to initialize; falling back to whisper-silero"
                         );
                     }
                 }
@@ -1304,6 +1335,67 @@ impl RecordingSidecarVad {
             }
         }
         #[cfg(not(feature = "vad-ort"))]
+        if want_ort {
+            tracing::warn!(
+                "ort-silero requested but this build was not compiled with the `vad-ort` \
+                 feature — falling back to whisper-silero"
+            );
+        }
+
+        if let Some(vad_path) = crate::transcribe::resolve_vad_model_path(config) {
+            match SileroSidecarVad::new(&vad_path) {
+                Ok(vad) => {
+                    tracing::info!(
+                        vad_engine = "whisper-silero",
+                        vad_model = %vad_path.display(),
+                        "recording sidecar using whisper-Silero VAD"
+                    );
+                    return Self {
+                        backend: RecordingSidecarVadBackend::Silero(vad),
+                    };
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        vad_model = %vad_path.display(),
+                        error = %e,
+                        "failed to initialize Silero VAD for recording sidecar — falling back to energy VAD"
+                    );
+                }
+            }
+        } else {
+            tracing::warn!(
+                "Silero VAD model unavailable for recording sidecar — falling back to energy VAD"
+            );
+        }
+
+        tracing::info!(vad_engine = "energy", "recording sidecar using energy VAD");
+        Self {
+            backend: RecordingSidecarVadBackend::Energy(Vad::new()),
+        }
+    }
+
+    #[cfg(not(feature = "vad-ort"))]
+    fn new_without_ort(config: &Config) -> Self {
+        // Pick the engine the user asked for. When ort-silero is
+        // requested but unavailable (feature off, ONNX missing, or
+        // load failure), fall through to whisper-silero with an
+        // explicit warn — silent fallback is the support footgun
+        // codex flagged in the spec review.
+        let requested = config.transcription.vad_engine.trim().to_lowercase();
+        let want_ort = matches!(requested.as_str(), "ort-silero" | "ort" | "silero-ort");
+        if !requested.is_empty()
+            && !want_ort
+            && !matches!(
+                requested.as_str(),
+                "whisper-silero" | "silero" | "whisper" | "default"
+            )
+        {
+            tracing::warn!(
+                requested = %requested,
+                "unknown transcription.vad_engine value — falling through to whisper-silero"
+            );
+        }
+
         if want_ort {
             tracing::warn!(
                 "ort-silero requested but this build was not compiled with the `vad-ort` \
@@ -3173,6 +3265,33 @@ mod tests {
         assert!(!<SileroSidecarVad as VadEngine>::is_healthy(&silero));
     }
 
+    #[cfg(all(feature = "whisper", feature = "streaming", feature = "vad-ort"))]
+    #[test]
+    fn ort_silero_init_panic_falls_back_to_whisper_silero() {
+        let default_config = Config::default();
+        let Some(vad_model) = crate::transcribe::resolve_vad_model_path(&default_config) else {
+            eprintln!("[ort_fallback] skipping: no whisper-Silero VAD model installed");
+            return;
+        };
+
+        let dir = tempdir().unwrap();
+        std::fs::copy(&vad_model, dir.path().join("ggml-silero-v6.2.0.bin")).unwrap();
+        std::fs::write(dir.path().join("silero-vad-v6.2.0.onnx"), b"dummy onnx").unwrap();
+
+        let mut config = default_config;
+        config.transcription.model_path = dir.path().to_path_buf();
+        config.transcription.vad_model = "silero-v6.2.0".into();
+        config.transcription.vad_engine = "ort-silero".into();
+
+        let vad = RecordingSidecarVad::new_with_ort_constructor(&config, |_onnx_path| {
+            panic!("Failed to initialize ORT API")
+        });
+        assert!(
+            matches!(vad.backend, RecordingSidecarVadBackend::Silero(_)),
+            "ort-silero init panic must fall back to whisper-silero"
+        );
+    }
+
     /// Look up the canonical Silero model paths for parity tests.
     /// Returns `None` if either model is missing — the caller prints
     /// a `skipping` message and returns instead of failing.
@@ -3235,7 +3354,7 @@ mod tests {
         (ort_speak, whisper_speak)
     }
 
-    /// Apply the codex parity bar from PLAN-vad-refactor.md to
+    /// Apply the codex parity bar from docs/plans/vad-refactor.md to
     /// per-chunk speaking flags from both engines. `label` shows up
     /// in the eprintln preamble so test output is greppable per
     /// fixture.
@@ -3492,7 +3611,7 @@ mod tests {
     }
 
     /// SPIKE — does whisper-rs's Silero VAD carry LSTM state across
-    /// `detect_speech` calls? If yes, Option A in PLAN-vad-refactor.md is
+    /// `detect_speech` calls? If yes, Option A in docs/plans/vad-refactor.md is
     /// viable: feed only new-since-last-call samples per chunk, accumulate
     /// probabilities externally. If no, the per-chunk re-scan is structural
     /// and Option B (independent ort-backed Silero) is required.

@@ -21,7 +21,7 @@
 //! recording/dictation/live-transcript PIDs from outside the app process.
 //! `backend_flags()` resolves state the same way `cmd_status`,
 //! `cmd_live_transcript_status`, and `cmd_stop_dictation` do: atomic flag OR
-//! pid-aware probe. See P0 finding 4 in `PLAN.md.command-palette`.
+//! pid-aware probe. See P0 finding 4 in `docs/plans/command-palette.md`.
 //!
 //! `LIVE_TRANSCRIPT` is set only when a *standalone* live transcript session
 //! is active. The recording sidecar transcript does not count, because
@@ -386,7 +386,7 @@ fn record_recent(action: &ActionId) {
 ///
 /// Returns a tagged [`ActionResponse`] envelope rather than a free-form
 /// `serde_json::Value`. The frontend discriminates on `kind`. See D7 of
-/// `PLAN.md.command-palette-slice-2`.
+/// `docs/plans/command-palette-slice-2.md`.
 ///
 /// On a successful execution the action is pushed to the recents store
 /// **with its full hydrated payload** (`SearchTranscripts { query:

@@ -1,7 +1,7 @@
 //! Bundled-CLI setup: link `~/.local/bin/minutes` to the sidecar inside the
 //! `.app` bundle so app updates automatically update the CLI.
 //!
-//! See `docs/PLAN-bundle-cli-in-app.md` for the design rationale. The exported
+//! See `docs/plans/bundle-cli-in-app.md` for the design rationale. The exported
 //! Tauri commands at the bottom of this file are the public surface.
 //!
 //! macOS-only. The whole module is gated at the `mod` declaration in main.rs.

@@ -4,7 +4,7 @@ This document records the first real local benchmark run for Minutes' Apple
 speech evaluation path.
 
 If you are looking for the **current shipped Apple Speech scope**, see
-[`docs/APPLE_SPEECH.md`](../APPLE_SPEECH.md). This benchmark memo is historical
+[`docs/architecture/apple-speech.md`](../architecture/apple-speech.md). This benchmark memo is historical
 evidence and backend-evaluation context, not the primary product-scope doc.
 
 It is intentionally narrower than a final backend decision memo. The goal of

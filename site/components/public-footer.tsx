@@ -19,6 +19,10 @@ export function PublicFooter() {
           Proof
         </a>
         <span aria-hidden="true">·</span>
+        <a href="/security" className="hover:text-[var(--accent)]">
+          Security
+        </a>
+        <span aria-hidden="true">·</span>
         <a href="/compare" className="hover:text-[var(--accent)]">
           Compare
         </a>

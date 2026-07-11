@@ -189,6 +189,47 @@ fn detect_summarization_warnings(
     warnings
 }
 
+const SILENT_REMOTE_WARNING_MESSAGE: &str =
+    "Call/remote audio was not captured (system stem silent); transcript reflects only your microphone";
+
+fn warning_is_native_call_system_stem_recovery(warning: &markdown::CaptureWarning) -> bool {
+    match &warning.kind {
+        diarize::FailureKind::Other { code } if code == "native-call-stem-recovery" => warning
+            .message
+            .to_ascii_lowercase()
+            .contains("system-audio stem"),
+        _ => false,
+    }
+}
+
+fn detect_silent_remote_stem_warning(
+    content_type: ContentType,
+    _audio_path: &Path,
+    _source: Option<&str>,
+    recording_health: Option<&markdown::RecordingHealth>,
+) -> Option<ProcessingWarning> {
+    if content_type != ContentType::Meeting {
+        return None;
+    }
+
+    let health = recording_health?;
+    let native_call_lost_system = health
+        .capture_warnings
+        .iter()
+        .any(warning_is_native_call_system_stem_recovery);
+
+    if !native_call_lost_system {
+        return None;
+    }
+
+    Some(ProcessingWarning {
+        step: "capture".to_string(),
+        reason: "remote_audio_not_captured".to_string(),
+        timeout_secs: None,
+        message: Some(SILENT_REMOTE_WARNING_MESSAGE.to_string()),
+    })
+}
+
 /// Result of Level 2 voice enrollment matching.
 struct VoiceMatchResult {
     /// Speaker attributions from voice matching (one per matched label).
@@ -1437,6 +1478,7 @@ pub fn transcribe_to_artifact(
         config,
         decode_hints,
     )?;
+    crate::process_trace::stage("transcribe.done");
     drop(mixed_stem_path);
     let transcript = if content_type == ContentType::Meeting {
         normalize_transcript_for_self_name_participant(&result.text, &attendees, &config.identity)
@@ -1444,7 +1486,8 @@ pub fn transcribe_to_artifact(
         result.text
     };
     let filter_stats = result.stats;
-    write_transcript_artifact(
+    crate::process_trace::stage("pipeline.write.start");
+    let artifact = write_transcript_artifact(
         audio_path,
         content_type,
         title,
@@ -1454,7 +1497,15 @@ pub fn transcribe_to_artifact(
         transcript,
         filter_stats,
         step_start.elapsed().as_millis() as u64,
-    )
+    );
+    match &artifact {
+        Ok(_) => crate::process_trace::stage("pipeline.write.done"),
+        Err(error) => crate::process_trace::stage_with_extra(
+            "pipeline.write.error",
+            serde_json::json!({"error": error.to_string()}),
+        ),
+    }
+    artifact
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1756,17 +1807,12 @@ where
     let mut raw_summary: Option<summarize::Summary> = None;
     let summary = if config.summarization.engine != "none" {
         on_progress(PipelineStage::Summarizing);
-        let transcript_with_notes = if let Some(notes) = context.user_notes.as_ref() {
-            format!(
-                "USER NOTES (these moments were marked as important — weight them heavily):\n{}\n\nTRANSCRIPT:\n{}",
-                notes, transcript
-            )
-        } else {
-            transcript.clone()
-        };
-
+        // Notes are passed separately so the agent path can byte-budget them
+        // apart from the transcript and keep the screenshot coverage bound
+        // derived from transcript text only.
         summarize::summarize_with_template(
-            &transcript_with_notes,
+            &transcript,
+            context.user_notes.as_deref(),
             &screen_files,
             config,
             context.template.as_ref(),
@@ -1992,6 +2038,18 @@ where
     if let Some(warning) = collapse_warning {
         summarization_warnings.push(warning);
     }
+    if let Some(warning) = detect_silent_remote_stem_warning(
+        artifact.frontmatter.r#type,
+        audio_path,
+        artifact.frontmatter.source.as_deref(),
+        merge_recording_health(
+            recording_health.clone(),
+            artifact.frontmatter.recording_health.clone(),
+        )
+        .as_ref(),
+    ) {
+        summarization_warnings.push(warning);
+    }
     frontmatter.status = if !summarization_warnings.is_empty() {
         Some(OutputStatus::Degraded)
     } else if config.summarization.engine != "none" {
@@ -2208,6 +2266,7 @@ where
         config,
         decode_hints,
     )?;
+    crate::process_trace::stage("transcribe.done");
     drop(mixed_stem_path);
     let transcribe_ms = step_start.elapsed().as_millis() as u64;
     let transcript = if content_type == ContentType::Meeting {
@@ -2352,19 +2411,13 @@ where
         on_progress(PipelineStage::Summarizing);
         tracing::info!(step = "summarize", "generating summary");
 
-        // Build transcript with user notes as context
-        let transcript_with_notes = if let Some(ref n) = user_notes {
-            format!(
-                "USER NOTES (these moments were marked as important — weight them heavily):\n{}\n\nTRANSCRIPT:\n{}",
-                n, transcript
-            )
-        } else {
-            transcript.clone()
-        };
-
-        // Send screenshots as actual images to vision-capable LLMs
+        // Send screenshots as actual images to vision-capable LLMs. Notes are
+        // passed separately so the agent path can byte-budget them apart from
+        // the transcript and keep the screenshot coverage bound derived from
+        // transcript text only.
         summarize::summarize_with_template(
-            &transcript_with_notes,
+            &transcript,
+            user_notes.as_deref(),
             &screen_files,
             config,
             template,
@@ -2648,7 +2701,15 @@ where
     if let Some(warning) = collapse_warning {
         summarization_warnings.push(warning);
     }
-    let status = if !summarization_warnings.is_empty() && status == Some(OutputStatus::Complete) {
+    if let Some(warning) = detect_silent_remote_stem_warning(
+        content_type,
+        audio_path,
+        source.as_deref(),
+        recording_health.as_ref(),
+    ) {
+        summarization_warnings.push(warning);
+    }
+    let status = if !summarization_warnings.is_empty() && status != Some(OutputStatus::NoSpeech) {
         Some(OutputStatus::Degraded)
     } else {
         status
@@ -2704,6 +2765,7 @@ where
     };
 
     tracing::info!(step = "write", "writing markdown");
+    crate::process_trace::stage("pipeline.write.start");
     let step_start = std::time::Instant::now();
     let mut result = markdown::write_with_retry_path(
         &frontmatter,
@@ -2756,6 +2818,10 @@ where
         write_ms,
         serde_json::json!({"output": result.path.display().to_string(), "words": result.word_count}),
     );
+    crate::process_trace::stage_with_extra(
+        "pipeline.write.done",
+        serde_json::json!({"output": result.path.display().to_string(), "words": result.word_count}),
+    );
 
     // Emit structured insight events for agent subscription
     if let Some(ref summary_data) = raw_summary {
@@ -2800,6 +2866,10 @@ where
         words = result.word_count,
         elapsed_ms = elapsed.as_millis() as u64,
         "pipeline complete"
+    );
+    crate::process_trace::stage_with_extra(
+        "pipeline.done",
+        serde_json::json!({"output": result.path.display().to_string(), "words": result.word_count}),
     );
 
     Ok(result)
@@ -4768,6 +4838,48 @@ mod tests {
         }
     }
 
+    fn mic_only_health() -> markdown::RecordingHealth {
+        markdown::RecordingHealth {
+            voice_stem_active_ratio: None,
+            system_stem_active_ratio: None,
+            system_dominant_ratio: None,
+            capture_warnings: vec![],
+            diarization_path: None,
+        }
+    }
+
+    fn in_person_system_silent_health() -> markdown::RecordingHealth {
+        markdown::RecordingHealth {
+            voice_stem_active_ratio: Some(1.0),
+            system_stem_active_ratio: Some(0.0),
+            system_dominant_ratio: None,
+            capture_warnings: vec![markdown::CaptureWarning {
+                kind: diarize::FailureKind::Silent,
+                source: diarize::CaptureSource::System,
+                message: "System audio was silent during capture; speaker labels were recovered from degraded mic bleed with low confidence.".into(),
+                diagnostic_confidence: diarize::DiagnosticConfidence::Inferred,
+            }],
+            diarization_path: Some(markdown::DiarizationPath::MlBleedDegraded),
+        }
+    }
+
+    fn native_call_system_recovery_health() -> markdown::RecordingHealth {
+        markdown::RecordingHealth {
+            voice_stem_active_ratio: None,
+            system_stem_active_ratio: None,
+            system_dominant_ratio: None,
+            capture_warnings: vec![markdown::CaptureWarning {
+                kind: diarize::FailureKind::Other {
+                    code: "native-call-stem-recovery".into(),
+                },
+                source: diarize::CaptureSource::Voice,
+                message: "Native call capture did not produce a usable system-audio stem; processing the local microphone stem only.".into(),
+                diagnostic_confidence: diarize::DiagnosticConfidence::Inferred,
+            }],
+            diarization_path: Some(markdown::DiarizationPath::None),
+        }
+    }
+
     #[test]
     fn suppress_if_all_noise_fires_on_all_noise_with_sparse_stems() {
         // The exact failure case from issue #241.
@@ -4945,6 +5057,123 @@ mod tests {
             .as_ref()
             .unwrap()
             .contains("engine `claude`"));
+    }
+
+    fn apply_silent_remote_warning_on_batch_path(
+        content_type: ContentType,
+        audio_path: &Path,
+        source: Option<&str>,
+        health: Option<&markdown::RecordingHealth>,
+        initial_status: Option<OutputStatus>,
+    ) -> (Vec<ProcessingWarning>, Option<OutputStatus>) {
+        let mut warnings = Vec::new();
+        if let Some(warning) =
+            detect_silent_remote_stem_warning(content_type, audio_path, source, health)
+        {
+            warnings.push(warning);
+        }
+        let status = if !warnings.is_empty() && initial_status != Some(OutputStatus::NoSpeech) {
+            Some(OutputStatus::Degraded)
+        } else {
+            initial_status
+        };
+        (warnings, status)
+    }
+
+    #[test]
+    fn in_person_system_silent_capture_does_not_warn_without_recovery_marker() {
+        let health = in_person_system_silent_health();
+        let (warnings, status) = apply_silent_remote_warning_on_batch_path(
+            ContentType::Meeting,
+            Path::new("/tmp/in-person-meeting.wav"),
+            None,
+            Some(&health),
+            Some(OutputStatus::Complete),
+        );
+
+        assert!(warnings.is_empty());
+        assert_eq!(status, Some(OutputStatus::Complete));
+    }
+
+    #[test]
+    fn active_voice_zero_system_ratio_does_not_warn_without_recovery_marker() {
+        let health = sparse_health(0.90, 0.0);
+        let (warnings, status) = apply_silent_remote_warning_on_batch_path(
+            ContentType::Meeting,
+            Path::new("/tmp/native-captures/call.wav"),
+            Some("native-call"),
+            Some(&health),
+            Some(OutputStatus::Complete),
+        );
+
+        assert!(warnings.is_empty());
+        assert_eq!(status, Some(OutputStatus::Complete));
+    }
+
+    #[test]
+    fn native_call_recovery_marker_warns_and_degrades() {
+        let health = native_call_system_recovery_health();
+        let (warnings, status) = apply_silent_remote_warning_on_batch_path(
+            ContentType::Meeting,
+            Path::new("/Users/test/.minutes/jobs/job-123.voice.wav"),
+            None,
+            Some(&health),
+            Some(OutputStatus::TranscriptOnly),
+        );
+
+        assert_eq!(status, Some(OutputStatus::Degraded));
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].step, "capture");
+        assert_eq!(warnings[0].reason, "remote_audio_not_captured");
+        assert_eq!(
+            warnings[0].message.as_deref(),
+            Some(SILENT_REMOTE_WARNING_MESSAGE)
+        );
+    }
+
+    #[test]
+    fn sparse_but_captured_remote_does_not_warn() {
+        let health = sparse_health(0.90, 0.015);
+        let (warnings, status) = apply_silent_remote_warning_on_batch_path(
+            ContentType::Meeting,
+            Path::new("/tmp/native-captures/call.wav"),
+            Some("native-call"),
+            Some(&health),
+            Some(OutputStatus::Complete),
+        );
+
+        assert!(warnings.is_empty());
+        assert_eq!(status, Some(OutputStatus::Complete));
+    }
+
+    #[test]
+    fn non_call_mic_only_recording_does_not_warn() {
+        let health = mic_only_health();
+        let (warnings, status) = apply_silent_remote_warning_on_batch_path(
+            ContentType::Meeting,
+            Path::new("/tmp/in-person-meeting.wav"),
+            None,
+            Some(&health),
+            Some(OutputStatus::Complete),
+        );
+
+        assert!(warnings.is_empty());
+        assert_eq!(status, Some(OutputStatus::Complete));
+    }
+
+    #[test]
+    fn healthy_call_with_both_stems_active_does_not_warn() {
+        let health = sparse_health(0.90, 0.85);
+        let (warnings, status) = apply_silent_remote_warning_on_batch_path(
+            ContentType::Meeting,
+            Path::new("/tmp/native-captures/call.wav"),
+            Some("native-call"),
+            Some(&health),
+            Some(OutputStatus::Complete),
+        );
+
+        assert!(warnings.is_empty());
+        assert_eq!(status, Some(OutputStatus::Complete));
     }
 
     /// Simulates the branch logic the `process` path applies after

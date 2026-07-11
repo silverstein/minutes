@@ -1743,27 +1743,50 @@ fn main() -> Result<()> {
             if let Some(lang) = language {
                 config.transcription.language = Some(lang);
             }
-            // Save note as context for the pipeline
-            if let Some(ref n) = note {
-                minutes_core::notes::save_context(n)?;
-            }
-            let resolved_template = match template.as_deref() {
-                Some(slug) => Some(
-                    minutes_core::TemplateResolver::new()
-                        .resolve(slug)
-                        .map_err(|e| anyhow::anyhow!("{}", e))?,
-                ),
-                None => None,
+            let trace_content_type = match content_type.as_str() {
+                "meeting" => ContentType::Meeting,
+                "memo" => ContentType::Memo,
+                other => anyhow::bail!("unknown content type: {}. Use 'meeting' or 'memo'.", other),
             };
-            let result = cmd_process(
+            let _trace_guard = minutes_core::process_trace::start_process_trace(
                 &path,
-                &content_type,
-                title.as_deref(),
-                resolved_template.as_ref(),
+                trace_content_type,
                 &config,
             );
-            if note.is_some() {
-                minutes_core::notes::cleanup();
+            let mut entered_pipeline = false;
+            let result = (|| -> Result<()> {
+                // Save note as context for the pipeline
+                if let Some(ref n) = note {
+                    minutes_core::notes::save_context(n)?;
+                }
+                let resolved_template = match template.as_deref() {
+                    Some(slug) => Some(
+                        minutes_core::TemplateResolver::new()
+                            .resolve(slug)
+                            .map_err(|e| anyhow::anyhow!("{}", e))?,
+                    ),
+                    None => None,
+                };
+                entered_pipeline = true;
+                let result = cmd_process(
+                    &path,
+                    &content_type,
+                    title.as_deref(),
+                    resolved_template.as_ref(),
+                    &config,
+                );
+                if note.is_some() {
+                    minutes_core::notes::cleanup();
+                }
+                result
+            })();
+            if !entered_pipeline {
+                if let Err(error) = &result {
+                    minutes_core::process_trace::stage_with_extra(
+                        "process.error",
+                        serde_json::json!({"error": error.to_string()}),
+                    );
+                }
             }
             result
         }
@@ -5151,41 +5174,56 @@ fn cmd_process(
     template: Option<&minutes_core::Template>,
     config: &Config,
 ) -> Result<()> {
-    if !path.exists() {
-        anyhow::bail!("file not found: {}", path.display());
-    }
-
     let ct = match content_type {
         "meeting" => ContentType::Meeting,
         "memo" => ContentType::Memo,
         other => anyhow::bail!("unknown content type: {}. Use 'meeting' or 'memo'.", other),
     };
 
-    config.ensure_dirs()?;
-    let result = minutes_core::pipeline::process_with_template(
-        path,
-        ct,
-        title,
-        config,
-        None,
-        template,
-        |_| {},
-    )?;
-    eprintln!("Saved: {}", result.path.display());
+    let _trace_guard = if minutes_core::process_trace::is_active() {
+        None
+    } else {
+        minutes_core::process_trace::start_process_trace(path, ct, config)
+    };
+    let result = (|| -> Result<()> {
+        if !path.exists() {
+            anyhow::bail!("file not found: {}", path.display());
+        }
 
-    // Update relationship graph index
-    if let Err(e) = minutes_core::graph::rebuild_index(config) {
-        tracing::warn!(error = %e, "graph index rebuild failed (non-fatal)");
+        config.ensure_dirs()?;
+        let result = minutes_core::pipeline::process_with_template(
+            path,
+            ct,
+            title,
+            config,
+            None,
+            template,
+            |_| {},
+        )?;
+        eprintln!("Saved: {}", result.path.display());
+
+        // Update relationship graph index
+        if let Err(e) = minutes_core::graph::rebuild_index(config) {
+            tracing::warn!(error = %e, "graph index rebuild failed (non-fatal)");
+        }
+
+        let json = serde_json::to_string_pretty(&serde_json::json!({
+            "status": "done",
+            "file": result.path.display().to_string(),
+            "title": result.title,
+            "words": result.word_count,
+        }))?;
+        println!("{}", json);
+        Ok(())
+    })();
+    match &result {
+        Ok(_) => minutes_core::process_trace::stage("process.done"),
+        Err(error) => minutes_core::process_trace::stage_with_extra(
+            "process.error",
+            serde_json::json!({"error": error.to_string()}),
+        ),
     }
-
-    let json = serde_json::to_string_pretty(&serde_json::json!({
-        "status": "done",
-        "file": result.path.display().to_string(),
-        "title": result.title,
-        "words": result.word_count,
-    }))?;
-    println!("{}", json);
-    Ok(())
+    result
 }
 
 fn cmd_template(cmd: TemplateCmd) -> Result<()> {
@@ -6458,7 +6496,7 @@ fn cmd_setup_parakeet(model: &str) -> Result<()> {
                 "To build it, configure parakeet.cpp with -DPARAKEET_BUILD_SERVER_EXAMPLE=ON"
             );
             eprintln!("and copy build/**/example-server next to your parakeet binary.");
-            eprintln!("Details: https://github.com/silverstein/minutes/blob/main/docs/PARAKEET.md");
+            eprintln!("Details: https://github.com/silverstein/minutes/blob/main/docs/architecture/parakeet.md");
         }
     }
 
@@ -9714,6 +9752,8 @@ fn cmd_dictate(stdout: bool, note_only: bool, config: &Config) -> Result<()> {
         config.dictation.daily_note_log = !note_only;
     } else if note_only {
         config.dictation.destination = "daily_note".into();
+    } else if config.dictation.destination == "insert" {
+        config.dictation.destination = "clipboard".into();
     }
 
     minutes_core::dictation::run(
@@ -9729,6 +9769,7 @@ fn cmd_dictate(stdout: bool, note_only: bool, config: &Config) -> Result<()> {
                     // Clear line and show partial text (streaming preview)
                     eprint!("\r\x1b[K[minutes] {}", text);
                 }
+                DictationEvent::AudioLevel(_) => {}
                 DictationEvent::SilenceCountdown { .. } => {} // CLI doesn't show countdown
                 DictationEvent::Success => {
                     eprintln!(); // newline after partial text

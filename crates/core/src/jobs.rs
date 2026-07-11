@@ -1056,7 +1056,7 @@ fn terminal_state_for_artifact(artifact: &pipeline::TranscriptArtifact) -> JobSt
 /// Move the captured audio alongside the output markdown so users can reprocess later.
 /// e.g. ~/meetings/2026-04-02-standup.md → ~/meetings/2026-04-02-standup.wav
 /// or, for native call captures, ~/meetings/2026-04-02-call.mov.
-fn preserve_audio_alongside_output(job: &ProcessingJob) {
+fn preserve_audio_alongside_output(job: &ProcessingJob, config: &Config) {
     let Some(ref output_path) = job.output_path else {
         return;
     };
@@ -1088,10 +1088,14 @@ fn preserve_audio_alongside_output(job: &ProcessingJob) {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&audio_dest, fs::Permissions::from_mode(0o600)).ok();
     }
-    // Clean up any screen capture artifacts left in the jobs dir
-    let screens_dir = crate::screen::screens_dir_for(&audio_src);
-    if screens_dir.exists() {
-        fs::remove_dir_all(screens_dir).ok();
+    // Clean up any screen capture artifacts left in the jobs dir, unless the
+    // user opted to keep screenshots after summarization. Without this guard we
+    // would delete screenshots the pipeline deliberately preserved.
+    if !config.screen_context.keep_after_summary {
+        let screens_dir = crate::screen::screens_dir_for(&audio_src);
+        if screens_dir.exists() {
+            fs::remove_dir_all(screens_dir).ok();
+        }
     }
     // Update the job record so audio_path points to the new location
     let dest_str = audio_dest.display().to_string();
@@ -1398,7 +1402,7 @@ where
                 // Run post_record hook (async, non-blocking)
                 pipeline::run_post_record_hook(config, &result.path);
                 if completed_job.state == JobState::Complete {
-                    preserve_audio_alongside_output(&completed_job);
+                    preserve_audio_alongside_output(&completed_job, config);
                 }
                 // Reload job after preserve may have updated audio_path
                 let final_job = load_job(&completed_job.id).unwrap_or(completed_job);
@@ -1697,7 +1701,7 @@ mod tests {
             };
             write_job(&job).unwrap();
 
-            preserve_audio_alongside_output(&job);
+            preserve_audio_alongside_output(&job, &Config::default());
 
             let preserved_audio = output_path.with_extension("wav");
             let preserved_stems = crate::capture::stem_paths_for(&preserved_audio).unwrap();
@@ -1756,7 +1760,7 @@ mod tests {
             };
             write_job(&job).unwrap();
 
-            preserve_audio_alongside_output(&job);
+            preserve_audio_alongside_output(&job, &Config::default());
 
             let preserved_audio = output_path.with_extension("mov");
             let preserved_stems = crate::capture::stem_paths_for(&preserved_audio).unwrap();
@@ -1767,6 +1771,74 @@ mod tests {
             assert!(!audio_path.exists());
             assert!(!stems.voice.exists());
             assert!(!stems.system.exists());
+        });
+    }
+
+    #[test]
+    fn preserve_audio_alongside_output_respects_keep_after_summary() {
+        with_temp_home(|tmp| {
+            let jobs_root = jobs_dir();
+            fs::create_dir_all(&jobs_root).unwrap();
+
+            // Run the preserve step for one job per config value; return
+            // whether that job's screens dir survived.
+            let screens_dir_survives = |job_id: &str, keep: bool| {
+                let audio_path = jobs_root.join(format!("{job_id}.wav"));
+                fs::write(&audio_path, b"mixed").unwrap();
+
+                let screens_dir = crate::screen::screens_dir_for(&audio_path);
+                fs::create_dir_all(&screens_dir).unwrap();
+                fs::write(screens_dir.join("0001.png"), b"png").unwrap();
+
+                let output_path = tmp.path().join(format!("meetings/{job_id}.md"));
+                fs::create_dir_all(output_path.parent().unwrap()).unwrap();
+                fs::write(&output_path, "# out").unwrap();
+
+                let job = ProcessingJob {
+                    id: job_id.into(),
+                    mode: CaptureMode::Meeting,
+                    content_type: ContentType::Meeting,
+                    title: Some("keep screens".into()),
+                    audio_path: audio_path.display().to_string(),
+                    output_path: Some(output_path.display().to_string()),
+                    state: JobState::Complete,
+                    stage: None,
+                    created_at: Local::now(),
+                    started_at: None,
+                    finished_at: None,
+                    notice_dismissed_at: None,
+                    recording_started_at: None,
+                    recording_finished_at: None,
+                    context_session_id: None,
+                    user_notes: None,
+                    pre_context: None,
+                    consent: None,
+                    consent_notice: None,
+                    calendar_event: None,
+                    template_slug: None,
+                    recording_health: None,
+                    word_count: None,
+                    error: None,
+                    owner_pid: None,
+                    retry_count: 0,
+                };
+                write_job(&job).unwrap();
+
+                let mut config = Config::default();
+                config.screen_context.keep_after_summary = keep;
+                preserve_audio_alongside_output(&job, &config);
+
+                screens_dir.exists()
+            };
+
+            assert!(
+                screens_dir_survives("job-keep-screens", true),
+                "screens dir must survive when keep_after_summary is on"
+            );
+            assert!(
+                !screens_dir_survives("job-drop-screens", false),
+                "screens dir must be cleaned up when keep_after_summary is off"
+            );
         });
     }
 

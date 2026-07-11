@@ -150,7 +150,7 @@ function SectionLabel({ n, label }: { n: string; label: string }) {
 
 function TranscriptCard() {
   return (
-    <div className="overflow-hidden rounded-[8px] border border-[color:var(--border)] bg-[var(--bg-elevated)] text-left shadow-[var(--shadow-panel)]">
+    <div className="stream-card overflow-hidden rounded-[8px] border border-[color:var(--border)] bg-[var(--bg-elevated)] text-left shadow-[var(--shadow-panel)]">
       <div className="flex flex-col gap-3 border-b border-[color:var(--border)] px-5 py-4 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <p className="font-mono text-[11px] uppercase tracking-[0.16em] text-[var(--accent)]">
@@ -195,7 +195,7 @@ function TranscriptCard() {
           </span>
         </div>
 
-        <div className="border-t border-[color:var(--border)] pt-5">
+        <div className="stream-actions border-t border-[color:var(--border)] pt-5">
           <p className="mb-3 font-mono text-[11px] uppercase tracking-[0.16em] text-[var(--text-secondary)]">
             Action Items
           </p>
@@ -219,6 +219,137 @@ function TranscriptCard() {
   );
 }
 
+const dictationEntries = [
+  ["08:14", "Remind me to send the Q3 numbers to the board before Friday."],
+  ["11:02", "Onboarding idea: defer the model download until the first recording."],
+  ["15:47", "Dana owns the pricing experiment — review the results next week."],
+] as const;
+
+function DictationCard() {
+  return (
+    <div className="overflow-hidden rounded-[8px] border border-[color:var(--border)] bg-[var(--bg-elevated)] text-left shadow-[var(--shadow-panel)]">
+      <div className="flex flex-col gap-3 border-b border-[color:var(--border)] px-5 py-4 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <p className="font-mono text-[11px] uppercase tracking-[0.16em] text-[var(--accent)]">
+            Dictation
+          </p>
+          <p className="mt-1 font-mono text-[12px] text-[var(--text-secondary)]">
+            daily-note.md · 2026-07-10
+          </p>
+        </div>
+        <div className="flex items-center gap-2 font-mono text-[11px] text-[var(--text-secondary)]">
+          <kbd className="rounded-[4px] border border-[color:var(--border-mid)] bg-[var(--bg-hover)] px-2 py-1 text-[var(--text)]">
+            ⌥
+          </kbd>
+          <kbd className="rounded-[4px] border border-[color:var(--border-mid)] bg-[var(--bg-hover)] px-2 py-1 text-[var(--text)]">
+            Space
+          </kbd>
+          <span>hold to talk</span>
+        </div>
+      </div>
+
+      <div className="space-y-3 px-5 py-5 font-mono text-[12px] leading-6 text-[var(--text)] sm:px-6">
+        {dictationEntries.map(([time, text]) => (
+          <div key={time} className="flex gap-4">
+            <span className="shrink-0 text-[var(--text-tertiary)]">{time}</span>
+            <span>{text}</span>
+          </div>
+        ))}
+      </div>
+
+      <div className="border-t border-[color:var(--border)] px-5 py-3 font-mono text-[11px] leading-5 text-[var(--text-tertiary)] sm:px-6">
+        Transcribed on-device · appended locally · searchable by your AI later
+      </div>
+    </div>
+  );
+}
+
+type HomeFlowStep = { label: string; detail: string; offDevice?: boolean };
+
+const cloudFlow: HomeFlowStep[] = [
+  { label: "Capture from your mic", detail: "device audio, on your Mac" },
+  { label: "Transcribe", detail: "cloud providers", offDevice: true },
+  { label: "Enhance notes", detail: "hosted AI", offDevice: true },
+  { label: "Store transcripts + notes", detail: "their servers", offDevice: true },
+];
+
+const minutesFlow: HomeFlowStep[] = [
+  { label: "Capture from your mic", detail: "device audio, on your Mac" },
+  { label: "Transcribe", detail: "on-device — whisper.cpp / parakeet.cpp" },
+  { label: "Store transcripts + notes", detail: "your disk — markdown in ~/meetings" },
+];
+
+function HomeFlowCard({
+  name,
+  leavesDevice,
+  steps,
+  footnote,
+}: {
+  name: string;
+  leavesDevice: boolean;
+  steps: HomeFlowStep[];
+  footnote: string;
+}) {
+  return (
+    <div className="rounded-[8px] border border-[color:var(--border)] bg-[var(--bg-elevated)] p-6 text-left shadow-[var(--shadow-panel)]">
+      <div className="flex items-center justify-between gap-3">
+        <p className="font-mono text-[13px] font-medium text-[var(--text)]">{name}</p>
+        <span
+          className={`rounded-full px-2.5 py-1 font-mono text-[10px] uppercase tracking-[0.14em] ${
+            leavesDevice
+              ? "bg-[var(--bg-hover)] text-[var(--text-secondary)]"
+              : "bg-[var(--accent-soft)] text-[var(--accent)]"
+          }`}
+        >
+          {leavesDevice ? "Leaves your device" : "Stays on device"}
+        </span>
+      </div>
+      <ol className="mt-5">
+        {steps.map((step, i) => (
+          <li key={step.label}>
+            <div
+              className={`rounded-[6px] px-4 py-3 ${
+                step.offDevice
+                  ? "border border-dashed border-[color:var(--border-mid)] bg-transparent"
+                  : "border border-[color:var(--border)] bg-[var(--bg)]"
+              }`}
+            >
+              <div className="flex items-center justify-between gap-3">
+                <span className="font-mono text-[13px] text-[var(--text)]">
+                  {step.label}
+                </span>
+                <span
+                  className={`shrink-0 font-mono text-[10px] uppercase tracking-[0.12em] ${
+                    step.offDevice
+                      ? "text-[var(--text-tertiary)]"
+                      : "text-[var(--accent)]"
+                  }`}
+                >
+                  {step.offDevice ? "☁ cloud" : "on-device"}
+                </span>
+              </div>
+              <p className="mt-1 font-mono text-[11px] leading-5 text-[var(--text-secondary)]">
+                {step.detail}
+              </p>
+            </div>
+            {i < steps.length - 1 ? (
+              <div
+                className="flex justify-center py-1.5 text-[15px] text-[var(--text-tertiary)]"
+                aria-hidden="true"
+              >
+                ↓
+              </div>
+            ) : null}
+          </li>
+        ))}
+      </ol>
+      <p className="mt-5 border-t border-[color:var(--border)] pt-4 text-[13px] leading-7 text-[var(--text-secondary)]">
+        {footnote}
+      </p>
+    </div>
+  );
+}
+
 export default function Home() {
   return (
     <div className="mx-auto max-w-[840px] px-6 pb-16 sm:px-8">
@@ -235,6 +366,12 @@ export default function Home() {
           </a>
           <a href="#install" className="hover:text-[var(--accent)]">
             Install
+          </a>
+          <a href="#dictation" className="hover:text-[var(--accent)]">
+            Dictation
+          </a>
+          <a href="#local" className="hover:text-[var(--accent)]">
+            On-device
           </a>
           <a href="#pipeline" className="hover:text-[var(--accent)]">
             Pipeline
@@ -258,18 +395,35 @@ export default function Home() {
         <p className="mb-5 font-mono text-[11px] uppercase tracking-[0.18em] text-[var(--accent)]">
           Open source · Local first · MIT
         </p>
-        <h1 className="mx-auto max-w-[720px] font-serif text-[40px] leading-[0.98] tracking-[-0.045em] text-[var(--text)] sm:text-[58px]">
-          The conversation memory
+        <h1 className="mx-auto max-w-[760px] font-serif text-[40px] leading-[0.98] tracking-[-0.045em] text-[var(--text)] sm:text-[58px]">
+          Your AI remembers every conversation —
           <br />
-          <span className="italic text-[var(--accent)]">your agents can actually read.</span>
+          <span className="italic text-[var(--accent)]">and no one can take it from you.</span>
         </h1>
-        <p className="mx-auto mt-5 max-w-[620px] text-[16px] leading-7 text-[var(--text-secondary)] sm:text-[17px]">
-          Cloud meeting tools rent your own conversations back to you. Minutes
-          records meetings, voice memos, and dictation locally, writes structured
-          markdown to your own disk, and gives every AI you use (Claude, Codex,
-          Gemini, anything MCP) the same folder of truth.
+        <p className="mx-auto mt-5 max-w-[640px] text-[16px] leading-7 text-[var(--text-secondary)] sm:text-[17px]">
+          Meetings, voice memos, dictation — Minutes transcribes them locally,
+          writes structured markdown to your own disk, and lets every AI you use
+          (Claude, Codex, Gemini, anything MCP) read the same folder of truth.
+          Nothing is uploaded. When a cloud memory app gets acquired or
+          subpoenaed, your recordings aren&apos;t theirs to hand over — they
+          never left your machine.
         </p>
-        <p className="mx-auto mt-5 max-w-[720px] font-mono text-[12px] uppercase tracking-[0.14em] text-[var(--text-secondary)]">
+        <div className="mx-auto mt-7 flex max-w-[640px] flex-wrap justify-center gap-2">
+          {[
+            "On-device transcription",
+            "Nothing uploaded",
+            "Open source · MIT",
+            "Consent in every file",
+          ].map((claim) => (
+            <span
+              key={claim}
+              className="rounded-full border border-[color:var(--border-mid)] px-3 py-1 font-mono text-[11px] tracking-[0.02em] text-[var(--text-secondary)]"
+            >
+              {claim}
+            </span>
+          ))}
+        </div>
+        <p className="mx-auto mt-6 max-w-[720px] font-mono text-[12px] uppercase tracking-[0.14em] text-[var(--text-secondary)]">
           {GITHUB_STARS} GitHub stars • {GITHUB_FORKS} forks •{" "}
           {GITHUB_CONTRIBUTORS} contributors • {NPM_MONTHLY_DOWNLOADS} npm
           installs/mo
@@ -449,8 +603,56 @@ export default function Home() {
         </div>
       </section>
 
+      <section id="dictation" className="border-t border-[color:var(--border)] py-16">
+        <SectionLabel n="01" label="Dictation" />
+        <h2 className="font-serif text-[30px] leading-tight tracking-[-0.035em] text-[var(--text)] sm:text-[32px]">
+          The fastest way in is your voice.
+        </h2>
+        <p className="mt-5 max-w-[660px] text-[15px] leading-7 text-[var(--text-secondary)]">
+          Hold the hotkey, speak, release. The text lands at your cursor and in
+          your daily note — no app to open, no tool to switch. It&apos;s the
+          habit most people start with, and it runs on the same local engine as
+          every meeting and memo.
+        </p>
+        <p className="mt-4 max-w-[660px] text-[15px] leading-7 text-[var(--text-secondary)]">
+          Other dictation tools hand you text and forget it. Minutes keeps every
+          word — transcribed on your machine, part of the same owned memory your
+          AI can search later. Your voice never touches a server.
+        </p>
+        <div className="mt-8">
+          <DictationCard />
+        </div>
+      </section>
+
+      <section id="local" className="border-t border-[color:var(--border)] py-16">
+        <SectionLabel n="02" label="On-device" />
+        <h2 className="font-serif text-[30px] leading-tight tracking-[-0.035em] text-[var(--text)] sm:text-[32px]">
+          Your conversation never leaves your machine.
+        </h2>
+        <p className="mt-5 max-w-[660px] text-[15px] leading-7 text-[var(--text-secondary)]">
+          Every other tool sends your audio somewhere to be understood — a cloud
+          transcriber, a hosted AI, a server that keeps the result. Minutes
+          doesn&apos;t. Transcription runs on your Mac and the record is markdown
+          on your own disk. There is no server to trust, breach, or subpoena.
+        </p>
+        <div className="mt-8 grid gap-5 lg:grid-cols-2">
+          <HomeFlowCard
+            name="Cloud notetakers"
+            leavesDevice
+            steps={cloudFlow}
+            footnote="Even the privacy-conscious ones capture locally, then stream your audio to the cloud to transcribe and store the result on their servers."
+          />
+          <HomeFlowCard
+            name="Minutes"
+            leavesDevice={false}
+            steps={minutesFlow}
+            footnote="Audio, transcript, and notes never leave your machine. You hold the only copy — nothing to upload, sell, or lose in an acquisition."
+          />
+        </div>
+      </section>
+
       <section className="border-t border-[color:var(--border)] py-16">
-        <SectionLabel n="01" label="Proof" />
+        <SectionLabel n="03" label="Proof" />
         <h2 className="font-serif text-[30px] leading-tight tracking-[-0.035em] text-[var(--text)] sm:text-[32px]">
           See it work before you believe it.
         </h2>
@@ -495,7 +697,7 @@ export default function Home() {
       </section>
 
       <section id="pipeline" className="border-t border-[color:var(--border)] py-16">
-        <SectionLabel n="02" label="Pipeline" />
+        <SectionLabel n="04" label="Pipeline" />
         <h2 className="font-serif text-[30px] leading-tight tracking-[-0.035em] text-[var(--text)] sm:text-[32px]">
           How it works
         </h2>
@@ -516,7 +718,7 @@ export default function Home() {
       </section>
 
       <section className="border-t border-[color:var(--border)] py-16">
-        <SectionLabel n="03" label="Audience" />
+        <SectionLabel n="05" label="Audience" />
         <h2 className="max-w-[620px] font-serif text-[30px] leading-tight tracking-[-0.035em] text-[var(--text)] sm:text-[32px]">
           Capture it anywhere. Find it everywhere.
         </h2>
@@ -541,7 +743,7 @@ export default function Home() {
       </section>
 
       <section className="border-t border-[color:var(--border)] py-16">
-        <SectionLabel n="04" label="Features" />
+        <SectionLabel n="06" label="Features" />
         <h2 className="font-serif text-[30px] leading-tight tracking-[-0.035em] text-[var(--text)] sm:text-[32px]">
           What you get
         </h2>
@@ -572,7 +774,7 @@ export default function Home() {
       </section>
 
       <section className="border-t border-[color:var(--border)] py-16">
-        <SectionLabel n="05" label="Comparison" />
+        <SectionLabel n="07" label="Comparison" />
         <h2 className="font-serif text-[30px] leading-tight tracking-[-0.035em] text-[var(--text)] sm:text-[32px]">
           How it compares
         </h2>
@@ -627,15 +829,17 @@ export default function Home() {
       </section>
 
       <section className="border-t border-[color:var(--border)] py-16">
-        <SectionLabel n="06" label="Governance" />
+        <SectionLabel n="08" label="Governance" />
         <h2 className="font-serif text-[30px] leading-tight tracking-[-0.035em] text-[var(--text)] sm:text-[32px]">
           Built in, not retrofitted.
         </h2>
         <p className="mt-5 max-w-[660px] text-[15px] leading-7 text-[var(--text-secondary)]">
-          Default-on recording is coming to work, and most tools plan to bolt
-          the controls on afterward. Minutes takes the other path: governance
-          lives in the record itself, because the record&apos;s primary reader
-          is now an agent.
+          If you take notes on client conversations for a living — legal,
+          clinical, financial — a cloud recorder isn&apos;t a preference, it&apos;s
+          a compliance problem. Minutes keeps both the audio and the record on
+          your own machine, and puts governance in the record itself: every file
+          states the consent it was captured under, because its primary reader is
+          now an agent.
         </p>
         <div className="mt-8 grid gap-4 md:grid-cols-3">
           <div className="rounded-[8px] border border-[color:var(--border)] bg-[var(--bg-elevated)] p-5 shadow-[var(--shadow-panel)]">

@@ -39,6 +39,7 @@ pub fn check_all(config: &Config) -> Vec<HealthItem> {
         diarization_status(config),
         mic_status(),
         check_system_audio_capture(config),
+        screen_recording_status(config),
         calendar_status(config),
         watcher_status(config),
         output_dir_status(config),
@@ -332,6 +333,93 @@ pub fn mic_status() -> HealthItem {
     }
 }
 
+/// Check screen-context capture readiness for recordings started from this
+/// process's environment.
+///
+/// macOS: probes Screen Recording permission with a real capture attempt
+/// (same check the recording path uses), which also catches the stale-grant
+/// case: after an app's code signature changes, System Settings still shows
+/// it as enabled while macOS silently denies capture and never re-prompts
+/// (#424). Note TCC grants are per-identity — run from a terminal this
+/// validates CLI recordings, not the desktop app; the app's own probe at
+/// recording start raises a notification when it fails.
+pub fn screen_recording_status(config: &Config) -> HealthItem {
+    if !config.screen_context.enabled {
+        return HealthItem {
+            label: "Screen recording".into(),
+            state: "ready".into(),
+            detail:
+                "Screen-context capture disabled. Enable with [screen_context] enabled = true in config.toml."
+                    .into(),
+            optional: true,
+        };
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        if crate::screen::check_screen_permission() {
+            HealthItem {
+                label: "Screen recording".into(),
+                state: "ready".into(),
+                detail: format!(
+                    "Screen Recording permission granted for this environment — recordings started here will capture screenshots every {}s. The desktop app's grant is separate; if it fails at recording start, a notification is raised.",
+                    config.screen_context.interval_secs
+                ),
+                optional: true,
+            }
+        } else {
+            HealthItem {
+                label: "Screen recording".into(),
+                state: "attention".into(),
+                detail: "Screen-context capture is enabled but Screen Recording permission is unavailable in this environment — recordings started here will have no screenshots. If System Settings shows the app as enabled, the grant is stale: toggle it off and on under Privacy & Security > Screen & System Audio Recording."
+                    .into(),
+                optional: true,
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        // Mirrors capture_screenshot's tool order (scrot, then gnome-screenshot).
+        let tool = ["scrot", "gnome-screenshot"].into_iter().find(|tool| {
+            std::process::Command::new(tool)
+                .arg("--version")
+                .output()
+                .is_ok()
+        });
+        match tool {
+            Some(tool) => HealthItem {
+                label: "Screen recording".into(),
+                state: "ready".into(),
+                detail: format!(
+                    "Screenshots will be captured with {} every {}s during recordings.",
+                    tool, config.screen_context.interval_secs
+                ),
+                optional: true,
+            },
+            None => HealthItem {
+                label: "Screen recording".into(),
+                state: "attention".into(),
+                detail: "Screen-context capture is enabled but no screenshot tool was found — install scrot or gnome-screenshot, or recordings will have no screenshots."
+                    .into(),
+                optional: true,
+            },
+        }
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        HealthItem {
+            label: "Screen recording".into(),
+            state: "attention".into(),
+            detail:
+                "Screen-context capture is not supported on this platform — recordings will have no screenshots."
+                    .into(),
+            optional: true,
+        }
+    }
+}
+
 /// Check macOS calendar access (macOS only, returns unavailable on other platforms).
 pub fn calendar_status(config: &Config) -> HealthItem {
     if !config.calendar.enabled {
@@ -522,6 +610,21 @@ mod tests {
                 item.state
             );
         }
+    }
+
+    #[test]
+    fn screen_recording_health_is_ready_when_disabled() {
+        let config = Config::default();
+        assert!(
+            !config.screen_context.enabled,
+            "screen context should be disabled by default"
+        );
+        let item = screen_recording_status(&config);
+
+        assert_eq!(item.label, "Screen recording");
+        assert_eq!(item.state, "ready");
+        assert!(item.optional);
+        assert!(item.detail.contains("disabled"));
     }
 
     #[test]

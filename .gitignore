@@ -91,3 +91,8 @@ tmp/
 docs/assets/demo*
 .agents/napkin.md
 .claude/scheduled_tasks.lock
+
+# Local maintainer scratch (never commit)
+.logs/
+ISSUE_*.md
+PLAN.ia-*.md

@@ -2,7 +2,7 @@
 
 > Generated file. Do not edit by hand.
 > Source: manifest.json + crates/mcp/src/index.ts + site/lib/skills-catalog.json
-> Last generated: 2026-06-25
+> Last generated: 2026-07-08
 
 ## Product
 
@@ -10,10 +10,13 @@ Minutes is an open-source meeting corpus you own. Record, transcribe, search, an
 
 31 tools • 7 resources • Interactive MCP App dashboard • Prompt templates
 
-**What's new in 0.18.14:**
-• **The macOS window-lifecycle crash is closed.** The desktop app could crash on WebKit/AppKit frame reconciliation when the main window was revealed, resized, or rebuilt. All window frame mutations now run through Rust-owned, visibility-guarded paths, the reveal helper is idempotent and unminimizes correctly, the frontend's window-mutation capabilities are removed, and the Recall layout no longer fires no-op frame changes. Thanks to Caleb Chong.
-• **Zoom call detection handles vanity meeting URLs.** Calendar detection now recognizes Zoom links on vanity subdomains (company.zoom.us / .zoom.com), personal-link and dashed-host forms, and unwraps Google Calendar redirect wrappers. Thanks to Caleb Chong.
-• **App settings persist reliably.** Several Settings toggles (global hotkey, completion notifications) could appear to change in the app but not write to config.toml or revert on restart. The settings round-trip was audited and hardened with a guard test.
+Minutes 0.20.0 adds dictation that types straight into any app, an in-app Documents pane for your prep notes and drafts, and honest failure signals across recording and transcription.
+
+**What's new in 0.20.0:**
+• **Dictation types where your cursor is.** Insert-at-cursor dictation now writes straight into the active app with a live-waveform pill, while clipboard mode stays available when you want explicit paste control.
+• **Documents live inside the app.** A calm Documents pane lets you read, edit, and autosave prep notes and drafts; Cmd/Ctrl+B collapses the list when you need more room.
+• **Settings are easier to scan.** The desktop settings surface is reorganized into five focused tabs instead of one long panel.
+• **Transcription is sharper and failures are louder.** macOS uses static sherpa plus speech-boundary segmentation, speaker Confirm buttons work, and recording/transcription paths now fail honestly: no silent engine fallback, lost remote-side call audio is flagged, and experimental engine/VAD routes fall back instead of hanging.
 
 **What's new in 0.18.13:**
 • **Recordings warn before they capture silence.** If macOS has not granted microphone permission (for example after an app update re-signed Minutes), recording now warns or blocks at the start with the exact fix, instead of producing a silent file you discover after the meeting. A call that can still capture the other side warns and proceeds; a mic-only recording blocks. Covers meetings, memos, dictation, and live transcript.

@@ -11,6 +11,28 @@ type SourceLink = {
   href: string;
 };
 
+type FlowStep = {
+  label: string;
+  detail?: string;
+  /** True when data has left the user's machine at this step (rendered as a
+   * dashed "cloud" box). False/undefined = on-device (solid box). */
+  offDevice?: boolean;
+};
+
+type FlowColumn = {
+  name: string;
+  steps: FlowStep[];
+  footnote: string;
+  /** Controls the summary chip: does the conversation leave the device at all? */
+  leavesDevice: boolean;
+};
+
+type Architecture = {
+  caption?: string;
+  competitor: FlowColumn;
+  minutes: FlowColumn;
+};
+
 type ComparePageProps = {
   competitorName: string;
   competitorLabel: string;
@@ -26,6 +48,10 @@ type ComparePageProps = {
   notRightFitSection: string[];
   evaluatedSection: string[];
   sources: SourceLink[];
+  /** Optional per-page override; defaults to the shared review date. */
+  lastReviewed?: string;
+  /** Optional data-flow diagram (only some comparisons carry one). */
+  architecture?: Architecture;
 };
 
 function SectionLabel({ label }: { label: string }) {
@@ -35,6 +61,71 @@ function SectionLabel({ label }: { label: string }) {
         {label}
       </span>
       <div className="h-px flex-1 bg-[var(--border)]" />
+    </div>
+  );
+}
+
+function FlowCard({ column }: { column: FlowColumn }) {
+  return (
+    <div className="rounded-[8px] border border-[color:var(--border)] bg-[var(--bg-elevated)] p-6 shadow-[var(--shadow-panel)]">
+      <div className="flex items-center justify-between gap-3">
+        <p className="font-mono text-[13px] font-medium text-[var(--text)]">
+          {column.name}
+        </p>
+        <span
+          className={`rounded-full px-2.5 py-1 font-mono text-[10px] uppercase tracking-[0.14em] ${
+            column.leavesDevice
+              ? "bg-[var(--bg-hover)] text-[var(--text-secondary)]"
+              : "bg-[var(--accent-soft)] text-[var(--accent)]"
+          }`}
+        >
+          {column.leavesDevice ? "Leaves your device" : "Stays on device"}
+        </span>
+      </div>
+      <ol className="mt-5">
+        {column.steps.map((step, i) => (
+          <li key={step.label}>
+            <div
+              className={`rounded-[6px] px-4 py-3 ${
+                step.offDevice
+                  ? "border border-dashed border-[color:var(--border-mid)] bg-transparent"
+                  : "border border-[color:var(--border)] bg-[var(--bg)]"
+              }`}
+            >
+              <div className="flex items-center justify-between gap-3">
+                <span className="font-mono text-[13px] text-[var(--text)]">
+                  {step.label}
+                </span>
+                <span
+                  className={`shrink-0 font-mono text-[10px] uppercase tracking-[0.12em] ${
+                    step.offDevice
+                      ? "text-[var(--text-tertiary)]"
+                      : "text-[var(--accent)]"
+                  }`}
+                >
+                  {step.offDevice ? "☁ cloud" : "on-device"}
+                </span>
+              </div>
+              {step.detail ? (
+                <p className="mt-1 font-mono text-[11px] leading-5 text-[var(--text-secondary)]">
+                  {step.detail}
+                </p>
+              ) : null}
+            </div>
+            {i < column.steps.length - 1 ? (
+              <div
+                className="flex justify-center py-1.5 text-[15px] text-[var(--text-tertiary)]"
+                aria-hidden="true"
+              >
+                ↓
+              </div>
+            ) : null}
+          </li>
+        ))}
+      </ol>
+      <p className="mt-5 border-t border-[color:var(--border)] pt-4 text-[13px] leading-7 text-[var(--text-secondary)]">
+        {column.footnote}
+      </p>
     </div>
   );
 }
@@ -54,6 +145,8 @@ export function ComparePage({
   notRightFitSection,
   evaluatedSection,
   sources,
+  lastReviewed = "2026-04-09",
+  architecture,
 }: ComparePageProps) {
   return (
     <div className="mx-auto max-w-[980px] px-6 pb-16 pt-10 sm:px-8 sm:pt-14">
@@ -89,7 +182,7 @@ export function ComparePage({
         </p>
         <div className="mt-6 flex flex-wrap gap-3">
           <span className="rounded-full bg-[var(--bg-elevated)] px-3 py-1 font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--text-secondary)]">
-            Last reviewed: 2026-04-09
+            Last reviewed: {lastReviewed}
           </span>
           <span className="rounded-full bg-[var(--accent-soft)] px-3 py-1 font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--accent)]">
             Fit-based comparison
@@ -112,6 +205,21 @@ export function ComparePage({
           </p>
         </div>
       </section>
+
+      {architecture ? (
+        <section className="mt-14">
+          <SectionLabel label="Where Your Conversation Goes" />
+          {architecture.caption ? (
+            <p className="mb-6 max-w-[760px] text-[15px] leading-8 text-[var(--text-secondary)]">
+              {architecture.caption}
+            </p>
+          ) : null}
+          <div className="grid gap-5 lg:grid-cols-2">
+            <FlowCard column={architecture.competitor} />
+            <FlowCard column={architecture.minutes} />
+          </div>
+        </section>
+      ) : null}
 
       <section className="mt-14">
         <SectionLabel label="At A Glance" />

@@ -4,7 +4,7 @@ import { ComparePage } from "@/components/compare-page";
 export const metadata: Metadata = {
   title: "Minutes vs Granola AI",
   description:
-    "A fit-based comparison of Minutes and Granola AI for local-first meeting memory, MCP workflows, collaboration, and team note-taking.",
+    "Minutes vs Granola AI: both skip the meeting bot and capture locally, but Granola transcribes and stores in its US cloud while Minutes keeps every step on your device. A sourced, fit-based comparison.",
   alternates: {
     canonical: "/compare/granola-vs-minutes",
   },
@@ -13,13 +13,33 @@ export const metadata: Metadata = {
 const comparisonRows = [
   {
     label: "Best for",
-    competitor: "Polished AI notepad, sharing, and team-friendly meeting notes",
-    minutes: "Local conversation infrastructure, agent workflows, and inspectable output",
+    competitor: "Polished, collaborative AI notepad and team-friendly meeting notes",
+    minutes: "On-device conversation memory and agent workflows over inspectable files",
   },
   {
-    label: "Pricing",
-    competitor: "Basic free, Business $14/user/mo, Enterprise $35+/user/mo",
-    minutes: "Open source and free to run yourself",
+    label: "Where audio is transcribed",
+    competitor: "Cloud providers (Deepgram, AssemblyAI)",
+    minutes: "On your device (whisper.cpp or parakeet.cpp)",
+  },
+  {
+    label: "Where transcripts and notes live",
+    competitor: "Granola's servers (AWS, US only)",
+    minutes: "Your own disk, as markdown files",
+  },
+  {
+    label: "Audio retention",
+    competitor: "Streamed to the cloud, then deleted after transcription",
+    minutes: "Never uploaded; kept locally only if you choose to",
+  },
+  {
+    label: "EU data residency",
+    competitor: "Not available yet",
+    minutes: "Moot — data never leaves your machine",
+  },
+  {
+    label: "Compliance posture",
+    competitor: "SOC 2 Type 2, GDPR DPA on request, no third-party model training",
+    minutes: "No vendor in the loop to trust, breach, or subpoena",
   },
   {
     label: "Open source",
@@ -27,33 +47,84 @@ const comparisonRows = [
     minutes: "Yes, MIT",
   },
   {
-    label: "Local-first processing",
-    competitor: "Not its core product story",
-    minutes: "Core part of the product",
+    label: "Pricing",
+    competitor: "Basic free, Business $14/user/mo, Enterprise $35+/user/mo",
+    minutes: "Open source and free to run yourself",
   },
   {
     label: "MCP support",
-    competitor: "Yes, attached to a hosted notes product",
-    minutes: "Yes, over local files, CLI workflows, and generated public docs",
-  },
-  {
-    label: "CLI workflow",
-    competitor: "Not the main product shape",
-    minutes: "First-class surface",
+    competitor: "Yes, over a hosted cloud notes product",
+    minutes: "Yes, over local files, a CLI, and generated public docs",
   },
   {
     label: "Team sharing and collaboration",
     competitor: "Stronger today",
     minutes: "Not the main wedge",
   },
-  {
-    label: "Inspectable files",
-    competitor: "Less central to the product",
-    minutes: "Structured markdown is a core artifact",
-  },
 ] as const;
 
+const architecture = {
+  caption:
+    "Both apps capture audio locally and neither drops a bot into your call — that's real common ground. The difference is what happens next: where your conversation goes to be transcribed, enhanced, and stored.",
+  competitor: {
+    name: "Granola",
+    leavesDevice: true,
+    steps: [
+      {
+        label: "Capture from your mic",
+        detail: "device audio, on your Mac",
+        offDevice: false,
+      },
+      {
+        label: "Transcribe",
+        detail: "cloud providers — Deepgram / AssemblyAI",
+        offDevice: true,
+      },
+      {
+        label: "Enhance notes",
+        detail: "cloud AI — OpenAI / Anthropic",
+        offDevice: true,
+      },
+      {
+        label: "Store transcripts + notes",
+        detail: "Granola servers — AWS, US only",
+        offDevice: true,
+      },
+    ],
+    footnote:
+      "Audio is streamed to third-party transcription and deleted afterward — genuinely privacy-conscious for a cloud tool (bot-free, SOC 2 Type 2, no model training). But your transcripts and notes live in Granola's US cloud, and there's no EU data residency yet.",
+  },
+  minutes: {
+    name: "Minutes",
+    leavesDevice: false,
+    steps: [
+      {
+        label: "Capture from your mic",
+        detail: "device audio, on your Mac",
+        offDevice: false,
+      },
+      {
+        label: "Transcribe",
+        detail: "on-device — whisper.cpp / parakeet.cpp",
+        offDevice: false,
+      },
+      {
+        label: "Store transcripts + notes",
+        detail: "your disk — markdown in ~/meetings",
+        offDevice: false,
+      },
+    ],
+    footnote:
+      "Nothing is uploaded. Audio, transcript, and notes never leave your machine — there is no vendor cloud to trust, breach, or subpoena. That's the difference between “we delete your audio” and “we never had it.”",
+  },
+} as const;
+
 const sources = [
+  { label: "Granola security", href: "https://www.granola.ai/security" },
+  {
+    label: "Granola security, privacy & data FAQs",
+    href: "https://docs.granola.ai/help-center/consent-security-privacy/security-privacy-data-faqs",
+  },
   { label: "Granola pricing", href: "https://www.granola.ai/pricing/" },
   { label: "Granola integrations", href: "https://docs.granola.ai/article/integrations-with-granola" },
   { label: "Granola MCP", href: "https://help.granola.ai/article/granola-mcp" },
@@ -69,36 +140,38 @@ export default function GranolaVsMinutesPage() {
       competitorName="Granola"
       competitorLabel="Granola AI"
       markdownHref="/compare/granola-vs-minutes.md"
-      heroSummary="Granola and Minutes are both good, but they solve different problems. Granola is a better fit if you want a polished AI note-taking product with stronger collaboration and integration ergonomics. Minutes is a better fit if you want local conversation infrastructure, inspectable markdown, and a workflow your agents can use across MCP, CLI, desktop, and plugin surfaces."
-      quickVerdictCompetitor="your top priority is a polished AI notepad, collaboration, and a product built around reading, editing, and sharing notes inside the app."
-      quickVerdictMinutes="your top priority is local processing, inspectable files, and a memory layer that Claude, Codex, and other MCP clients can query later."
+      lastReviewed="2026-07-10"
+      heroSummary="Granola and Minutes both skip the meeting bot and capture audio locally — but they draw the privacy line in different places. Granola sends that audio to cloud transcription and AI services, then stores your transcripts and notes on its own US servers; it's a polished, collaborative product built around that hosted cloud. Minutes transcribes on your device and writes markdown to your own disk, so nothing leaves your machine. It's the difference between “we delete your audio” and “we never had it.”"
+      quickVerdictCompetitor="you want a polished, collaborative AI notepad and you're comfortable with cloud transcription and hosted storage on US servers — backed by SOC 2, audio auto-deletion, and no third-party model training."
+      quickVerdictMinutes="your conversations must never leave your machine — for compliance, client confidentiality, or principle — and you want inspectable files your own agents can read, not a hosted app."
+      architecture={architecture as any}
       comparisonRows={comparisonRows as any}
       competitorWins={[
-        "The standalone note-taking experience looks more polished and better optimized for users who mainly want to live inside one app.",
-        "Granola's collaboration and integration story is more mature if your job is sharing notes across a team or pushing them into the rest of your stack.",
-        "For many non-technical users, Granola will feel simpler because the product is centered on hosted note workflows rather than files, CLIs, and multiple surfaces.",
+        "The hosted product is more polished and collaborative: sharing, team workspaces, and integrations are more mature than anything file-native Minutes offers today.",
+        "Granola's cloud is genuinely privacy-conscious for a cloud tool — bot-free capture, audio deleted after transcription, SOC 2 Type 2, and no third-party model training.",
+        "For non-technical teams that live inside one app and want enhanced notes shared widely, Granola will simply feel simpler than files, a CLI, and MCP surfaces.",
       ]}
       minutesWins={[
-        "Minutes is local-first and file-native. The durable output is structured markdown you can inspect, sync, grep, and use outside the app.",
-        "Minutes is stronger if your real goal is giving Claude, Codex, or another MCP client durable local conversation memory instead of just a better note view.",
-        "Minutes has a broader operator/developer surface: MCP server, desktop app, CLI, SDK, and Claude Code plugin rather than one primary app experience.",
+        "Nothing leaves your machine. Transcription runs on-device and the record is markdown on your own disk — the only architecture that satisfies “no client audio in anyone's cloud,” not just “audio deleted after.”",
+        "No US-only data-residency problem, no vendor to breach or subpoena, no DPA to negotiate — because there is no third party in the loop at all.",
+        "The durable output is inspectable files any agent can read: Claude, Codex, and other MCP clients query your meetings as local memory across CLI, desktop, SDK, and the Claude Code plugin.",
       ]}
       workflowSection={[
-        "Granola now has official MCP support, so the comparison is no longer 'Granola for humans, Minutes for MCP.' The more honest distinction is what the MCP layer is serving. Granola's MCP offering is attached to a hosted AI notes product. Minutes is built around a broader operator and developer workflow: local processing, inspectable markdown, a public MCP reference, a CLI, a desktop app, live transcript reads, and a Claude Code plugin.",
-        "If your question is 'can my assistant access some meeting notes?', both can be relevant. If your question is 'can my assistant use my meetings as durable local memory across tools and workflows?', that is where Minutes is more purpose-built.",
+        "Both now have MCP, so this is no longer 'Granola for humans, Minutes for agents.' The honest distinction is where the data the MCP serves actually lives. Granola's MCP reads a hosted notes product on Granola's servers; Minutes' MCP reads local files you own, alongside a CLI, a desktop app, live transcript reads, a public MCP reference, and a Claude Code plugin.",
+        "If the question is 'can my assistant see some meeting notes?', both qualify. If it's 'can my assistant use my meetings as durable local memory that never leaves my control?', only one architecture answers yes.",
       ]}
       chooseSection={[
-        "Pick Granola if your team wants the better all-in-one note-taking product, collaboration story, and hosted UX.",
-        "Pick Minutes if you care more about local ownership, file-native output, and agent workflows that extend beyond one note-taking app.",
-        "The important thing is that these are not fake alternatives. They overlap, but they are optimized for different jobs.",
+        "Pick Granola if you want the more polished, collaborative hosted product and you're comfortable with cloud transcription and US-based storage.",
+        "Pick Minutes if local ownership is non-negotiable — regulated work, client confidentiality, or simply not wanting your conversations on someone else's servers — and you want files your agents can use.",
+        "These are real, different trade-offs, not fake alternatives: one optimizes for hosted polish and collaboration, the other for on-device ownership and agent-native files.",
       ]}
       notRightFitSection={[
-        "Minutes is probably not the right first choice if your highest priority is a hosted, collaborative note-taking product for teams that want to stay inside one polished app and share enhanced meeting notes broadly.",
-        "It is also not the best fit if you do not care about local files, inspectable output, MCP workflows, or developer/operator control. In that case, Granola may simply be the better product for the job.",
+        "Minutes is not the right first choice if your priority is a hosted, collaborative note-taking app for a team that wants to live in one polished product and share enhanced notes broadly. Granola is better at that today.",
+        "It is also not the fit if you don't care about local processing, inspectable files, or agent workflows, and you'd rather trade on-device control for collaboration and ease. That's a legitimate choice, and Granola may be the better product for it.",
       ]}
       evaluatedSection={[
-        "This page is based on current official product and documentation sources, reviewed on 2026-04-09. It is intentionally a fit-based comparison, not a teardown. Where a claim depends on current pricing or current MCP scope, the official source is linked below.",
-        "The Minutes side of the comparison is grounded in the current public agent-facing docs surface and generated MCP reference, not hand-maintained marketing copy.",
+        "This is a fit-based comparison, not a teardown, reviewed on 2026-07-10 against Granola's official product, security, and help-center documentation, linked below. Granola's data flow — local capture, cloud transcription via Deepgram/AssemblyAI, AI enhancement via OpenAI/Anthropic, and storage on AWS in the US — is drawn from Granola's own security and privacy FAQ.",
+        "The Minutes side is grounded in its public agent-facing docs and generated MCP reference. Where a claim depends on current pricing, storage region, or MCP scope, the official source is linked.",
       ]}
       sources={sources as any}
     />

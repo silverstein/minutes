@@ -712,10 +712,10 @@ export default function ForAgentsPage() {
           MCP tools and the CLI. The full field-by-field schema — every required
           and optional field, with examples and stability guarantees — is at{" "}
           <a
-            href="https://github.com/silverstein/minutes/blob/main/docs/frontmatter-schema.md"
+            href="https://github.com/silverstein/minutes/blob/main/docs/architecture/frontmatter-schema.md"
             className="text-[var(--accent)] hover:underline"
           >
-            docs/frontmatter-schema.md
+            docs/architecture/frontmatter-schema.md
           </a>
           . That page is the interop contract: any tool that wants to read or
           produce Minutes-compatible output should target it.

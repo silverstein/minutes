@@ -91,7 +91,7 @@ jobs:
 
           if [ "${#missing[@]}" -gt 0 ]; then
             echo "Missing required release secrets: ${missing[*]}" >&2
-            echo "See docs/RELEASE-MACOS.md for the expected values." >&2
+            echo "See docs/release/platform-macos.md for the expected values." >&2
             exit 1
           fi
 

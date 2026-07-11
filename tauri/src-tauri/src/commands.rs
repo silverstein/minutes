@@ -45,6 +45,7 @@ pub struct AppState {
     pub dictation_stop_flag: Arc<AtomicBool>,
     pub dictation_focus_guard: Arc<Mutex<Option<DictationFocusGuard>>>,
     pub pending_dictation_target: Arc<Mutex<Option<PendingDictationTarget>>>,
+    pub dictation_release_started_at: Arc<Mutex<Option<Instant>>>,
     pub dictation_shortcut_enabled: Arc<AtomicBool>,
     pub dictation_shortcut: Arc<Mutex<String>>,
     pub live_transcript_active: Arc<AtomicBool>,
@@ -62,7 +63,7 @@ pub struct AppState {
     /// Explicit lifecycle state for the palette overlay window. Tracked as a
     /// four-state machine (Closed/Opening/Open/Closing) rather than a boolean
     /// so fast `⌘⇧K` mashing during the close path doesn't eat keypresses.
-    /// See PLAN.md.command-palette-slice-2 D3.
+    /// See docs/plans/command-palette-slice-2.md D3.
     pub palette_lifecycle: Arc<Mutex<PaletteLifecycle>>,
     /// Set when a hotkey press lands in the `Closing` state. The close path
     /// drains this flag on completion and re-opens the palette if it was set.
@@ -1364,6 +1365,17 @@ pub struct RecentArtifactView {
     pub review_available: bool,
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DocumentView {
+    pub path: String,
+    pub filename: String,
+    pub kind: String,
+    pub mtime: i64,
+    pub source: String,
+    pub meeting_slug: Option<String>,
+}
+
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct RecallWorkspaceState {
@@ -1569,10 +1581,19 @@ fn recent_artifact_views(
     exclude_path: Option<&Path>,
 ) -> Vec<RecentArtifactView> {
     let state_path = recent_artifacts_state_path();
+    recent_artifact_views_from(config, limit, exclude_path, &state_path)
+}
+
+fn recent_artifact_views_from(
+    config: &Config,
+    limit: usize,
+    exclude_path: Option<&Path>,
+    state_path: &Path,
+) -> Vec<RecentArtifactView> {
     let exclude = exclude_path.map(|path| path.display().to_string());
     let mut views = Vec::new();
 
-    for entry in load_recent_artifacts_from(&state_path).into_iter() {
+    for entry in load_recent_artifacts_from(state_path).into_iter() {
         if views.len() >= limit {
             break;
         }
@@ -1606,6 +1627,198 @@ fn recent_artifact_views(
     }
 
     views
+}
+
+fn file_mtime_ms(path: &Path) -> Option<i64> {
+    let modified = std::fs::metadata(path).ok()?.modified().ok()?;
+    let duration = modified
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    Some(duration.as_millis().min(i64::MAX as u128) as i64)
+}
+
+fn filename_for_path(path: &Path) -> String {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("Document")
+        .to_string()
+}
+
+fn meeting_slug_for_document(path: &Path) -> String {
+    path.file_stem()
+        .and_then(|name| name.to_str())
+        .unwrap_or("meeting")
+        .to_string()
+}
+
+fn is_assistant_instruction_file(path: &Path) -> bool {
+    matches!(
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .map(|name| name.to_ascii_uppercase())
+            .as_deref(),
+        Some("CLAUDE.MD" | "AGENTS.MD" | "MEMORY.MD")
+    )
+}
+
+fn push_document_if_allowed(
+    documents: &mut Vec<DocumentView>,
+    seen: &mut std::collections::HashSet<PathBuf>,
+    path: &Path,
+    source: &str,
+    meeting_slug: Option<String>,
+) {
+    let Ok(canonical) = validate_text_file_path(path) else {
+        return;
+    };
+    if !seen.insert(canonical.clone()) {
+        return;
+    }
+    let Some(mtime) = file_mtime_ms(&canonical) else {
+        return;
+    };
+    documents.push(DocumentView {
+        path: canonical.display().to_string(),
+        filename: filename_for_path(&canonical),
+        kind: text_file_kind(&canonical).unwrap_or("text").to_string(),
+        mtime,
+        source: source.to_string(),
+        meeting_slug,
+    });
+}
+
+fn push_assistant_document_if_allowed(
+    documents: &mut Vec<DocumentView>,
+    seen: &mut std::collections::HashSet<PathBuf>,
+    path: &Path,
+    allowed_roots: &[PathBuf],
+) {
+    let Ok(canonical) = validate_text_file_path(path) else {
+        return;
+    };
+    if !allowed_roots.iter().any(|root| canonical.starts_with(root)) {
+        return;
+    }
+    if !seen.insert(canonical.clone()) {
+        return;
+    }
+    let Some(mtime) = file_mtime_ms(&canonical) else {
+        return;
+    };
+    documents.push(DocumentView {
+        path: canonical.display().to_string(),
+        filename: filename_for_path(&canonical),
+        kind: text_file_kind(&canonical).unwrap_or("text").to_string(),
+        mtime,
+        source: "assistant".to_string(),
+        meeting_slug: None,
+    });
+}
+
+fn is_plain_file_entry(path: &Path) -> bool {
+    let Ok(metadata) = std::fs::symlink_metadata(path) else {
+        return false;
+    };
+    let file_type = metadata.file_type();
+    file_type.is_file() && !file_type.is_symlink()
+}
+
+fn append_assistant_documents(
+    documents: &mut Vec<DocumentView>,
+    seen: &mut std::collections::HashSet<PathBuf>,
+    assistant_dir: &Path,
+) {
+    let Ok(assistant_root) = std::fs::canonicalize(assistant_dir) else {
+        return;
+    };
+    if let Ok(entries) = std::fs::read_dir(assistant_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !is_plain_file_entry(&path) || is_assistant_instruction_file(&path) {
+                continue;
+            }
+            let ext = path
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .map(|ext| ext.to_ascii_lowercase());
+            if matches!(ext.as_deref(), Some("md" | "markdown" | "txt")) {
+                push_assistant_document_if_allowed(
+                    documents,
+                    seen,
+                    &path,
+                    std::slice::from_ref(&assistant_root),
+                );
+            }
+        }
+    }
+
+    let artifacts_dir = assistant_dir.join("artifacts");
+    let Ok(artifact_metadata) = std::fs::symlink_metadata(&artifacts_dir) else {
+        return;
+    };
+    if artifact_metadata.file_type().is_symlink() || !artifact_metadata.is_dir() {
+        return;
+    }
+    let Ok(artifacts_root) = std::fs::canonicalize(&artifacts_dir) else {
+        return;
+    };
+    let allowed_roots = [assistant_root, artifacts_root];
+    if let Ok(entries) = std::fs::read_dir(&artifacts_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !is_plain_file_entry(&path) || is_assistant_instruction_file(&path) {
+                continue;
+            }
+            let ext = path
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .map(|ext| ext.to_ascii_lowercase());
+            if matches!(ext.as_deref(), Some("md" | "markdown" | "txt")) {
+                push_assistant_document_if_allowed(documents, seen, &path, &allowed_roots);
+            }
+        }
+    }
+}
+
+fn list_documents_for_roots(
+    config: &Config,
+    assistant_dir: &Path,
+    limit: usize,
+) -> Vec<DocumentView> {
+    let state_path = recent_artifacts_state_path();
+    list_documents_for_roots_with_recent_state(config, assistant_dir, limit, &state_path)
+}
+
+fn list_documents_for_roots_with_recent_state(
+    config: &Config,
+    assistant_dir: &Path,
+    limit: usize,
+    recent_state_path: &Path,
+) -> Vec<DocumentView> {
+    let mut documents = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    // Reuse the same recent artifact view path that powers the meeting detail
+    // "Adjacent Artifacts" rows, then enrich it with mtime/source metadata.
+    for artifact in recent_artifact_views_from(config, limit, None, recent_state_path) {
+        let path = PathBuf::from(&artifact.path);
+        push_document_if_allowed(
+            &mut documents,
+            &mut seen,
+            &path,
+            "meeting",
+            Some(meeting_slug_for_document(&path)),
+        );
+    }
+
+    append_assistant_documents(&mut documents, &mut seen, assistant_dir);
+    documents.sort_by(|a, b| {
+        b.mtime
+            .cmp(&a.mtime)
+            .then_with(|| a.filename.cmp(&b.filename))
+    });
+    documents.truncate(limit);
+    documents
 }
 
 fn update_activation_progress<F>(state: &Arc<Mutex<ActivationProgress>>, mutate: F)
@@ -4328,7 +4541,21 @@ fn artifact_directory(config: &Config) -> Result<PathBuf, String> {
 
 fn is_editable_text_file_path(path: &Path, config: &Config) -> bool {
     let workspace = crate::context::workspace_dir();
-    let trusted_roots = [config.output_dir.clone(), workspace.join("artifacts")];
+    // Agent instruction files stay read-only in the viewer even though they
+    // live under the writable workspace root: the app is for documents, and
+    // silently editing the assistant's own instructions is a footgun.
+    if path.starts_with(&workspace) {
+        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+            if matches!(name, "CLAUDE.md" | "AGENTS.md" | "MEMORY.md") {
+                return false;
+            }
+        }
+    }
+    let trusted_roots = [
+        config.output_dir.clone(),
+        workspace.clone(),
+        workspace.join("artifacts"),
+    ];
     trusted_roots.iter().any(|root| path.starts_with(root))
 }
 
@@ -5888,6 +6115,9 @@ pub fn handle_dictation_shortcut_event(
             }
         }))
         .ok();
+        if let Ok(mut released_at) = state.dictation_release_started_at.lock() {
+            *released_at = Some(Instant::now());
+        }
         state.dictation_stop_flag.store(true, Ordering::Relaxed);
         return;
     }
@@ -6892,6 +7122,14 @@ pub fn cmd_get_text_file_review(path: String) -> Result<TextFileReview, String> 
 pub fn cmd_recent_artifacts(limit: Option<usize>) -> serde_json::Value {
     let config = Config::load();
     let views = recent_artifact_views(&config, limit.unwrap_or(8), None);
+    serde_json::to_value(views).unwrap_or_else(|_| serde_json::json!([]))
+}
+
+#[tauri::command]
+pub fn cmd_list_documents(limit: Option<usize>) -> serde_json::Value {
+    let config = Config::load();
+    let workspace = crate::context::workspace_dir();
+    let views = list_documents_for_roots(&config, &workspace, limit.unwrap_or(200).min(200));
     serde_json::to_value(views).unwrap_or_else(|_| serde_json::json!([]))
 }
 
@@ -9679,6 +9917,7 @@ mod tests {
             dictation_stop_flag: Arc::new(AtomicBool::new(false)),
             dictation_focus_guard: Arc::new(Mutex::new(None)),
             pending_dictation_target: Arc::new(Mutex::new(None)),
+            dictation_release_started_at: Arc::new(Mutex::new(None)),
             dictation_shortcut_enabled: Arc::new(AtomicBool::new(false)),
             dictation_shortcut: Arc::new(Mutex::new("CmdOrCtrl+Shift+Space".into())),
             live_transcript_active: Arc::new(AtomicBool::new(false)),
@@ -12061,6 +12300,8 @@ mod tests {
             debrief: None,
             visibility: None,
             speaker_map: vec![],
+            name_corrections: Vec::new(),
+            speaker_mapping: None,
             template: None,
             filter_diagnosis: None,
             consent: None,
@@ -12124,6 +12365,8 @@ mod tests {
             debrief: None,
             visibility: None,
             speaker_map: vec![],
+            name_corrections: Vec::new(),
+            speaker_mapping: None,
             template: None,
             filter_diagnosis: None,
             consent: None,
@@ -12178,6 +12421,8 @@ mod tests {
             debrief: None,
             visibility: None,
             speaker_map: vec![],
+            name_corrections: Vec::new(),
+            speaker_mapping: None,
             template: None,
             filter_diagnosis: None,
             consent: None,
@@ -12380,6 +12625,105 @@ mod tests {
         assert_eq!(text_file_kind(Path::new("/tmp/test.json")), Some("json"));
         assert_eq!(text_file_kind(Path::new("/tmp/test.md")), Some("markdown"));
         assert_eq!(text_file_kind(Path::new("/tmp/test.txt")), Some("text"));
+    }
+
+    #[test]
+    fn list_documents_merges_assistant_and_meeting_sources_by_recency() {
+        let home = dirs::home_dir().expect("home dir");
+        let temp = tempfile::Builder::new()
+            .prefix("minutes-documents-test-")
+            .tempdir_in(home)
+            .unwrap();
+        let assistant = temp.path().join("assistant");
+        let assistant_artifacts = assistant.join("artifacts");
+        let meetings = temp.path().join("meetings");
+        let state_path = temp.path().join("recent-artifacts.json");
+        std::fs::create_dir_all(&assistant_artifacts).unwrap();
+        std::fs::create_dir_all(&meetings).unwrap();
+
+        let older = assistant.join("prep.md");
+        std::fs::write(&older, "# Prep").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        std::fs::write(assistant.join("CLAUDE.md"), "# Instructions").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let nested = assistant_artifacts.join("debrief.txt");
+        std::fs::write(&nested, "Debrief").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let meeting = meetings.join("2026-07-02-product-review.md");
+        std::fs::write(&meeting, "# Meeting artifact").unwrap();
+        let outside = temp.path().join("outside-secret.md");
+        std::fs::write(&outside, "# Outside").unwrap();
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&outside, assistant.join("outside-secret.md")).unwrap();
+            std::os::unix::fs::symlink(&outside, assistant_artifacts.join("linked-secret.md"))
+                .unwrap();
+        }
+
+        let config = Config {
+            output_dir: meetings.clone(),
+            ..Config::default()
+        };
+        record_recent_artifact_canonical_with_limit(&meeting, 8, &state_path);
+
+        let docs =
+            list_documents_for_roots_with_recent_state(&config, &assistant, 200, &state_path);
+        let names: Vec<_> = docs.iter().map(|doc| doc.filename.as_str()).collect();
+
+        assert_eq!(names.len(), 3);
+        assert_eq!(names[0], "2026-07-02-product-review.md");
+        assert!(names.contains(&"prep.md"));
+        assert!(names.contains(&"debrief.txt"));
+        assert!(!names.contains(&"CLAUDE.md"));
+        assert!(!names.contains(&"outside-secret.md"));
+        assert!(!names.contains(&"linked-secret.md"));
+
+        let capped =
+            list_documents_for_roots_with_recent_state(&config, &assistant, 2, &state_path);
+        let capped_names: Vec<_> = capped.iter().map(|doc| doc.filename.as_str()).collect();
+        assert_eq!(
+            capped_names,
+            vec!["2026-07-02-product-review.md", "debrief.txt"]
+        );
+
+        let meeting_doc = docs
+            .iter()
+            .find(|doc| doc.filename == "2026-07-02-product-review.md")
+            .unwrap();
+        assert_eq!(meeting_doc.source, "meeting");
+        assert_eq!(
+            meeting_doc.meeting_slug.as_deref(),
+            Some("2026-07-02-product-review")
+        );
+        assert_eq!(meeting_doc.kind, "markdown");
+
+        let assistant_doc = docs.iter().find(|doc| doc.filename == "prep.md").unwrap();
+        assert_eq!(assistant_doc.source, "assistant");
+        assert_eq!(assistant_doc.meeting_slug, None);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt;
+
+            let non_utf8_name = std::ffi::OsString::from_vec(b"nonutf-\xFF.md".to_vec());
+            let non_utf8_path = assistant.join(non_utf8_name);
+            match std::fs::write(&non_utf8_path, "# Non UTF-8") {
+                Ok(()) => {
+                    let docs = list_documents_for_roots_with_recent_state(
+                        &config,
+                        &assistant,
+                        200,
+                        &state_path,
+                    );
+                    assert!(docs
+                        .iter()
+                        .any(|doc| doc.filename == "Document" && doc.source == "assistant"));
+                }
+                Err(_) => {
+                    assert_eq!(filename_for_path(&non_utf8_path), "Document");
+                }
+            }
+        }
     }
 
     #[test]
@@ -13220,6 +13564,7 @@ pub fn cmd_copy_dictation(
             mode: crate::text_insertion::TextInsertionMode::CopyOnly,
             restore_clipboard: false,
             clipboard_snapshot: None,
+            expected_target: None,
         },
     ))
 }
@@ -13243,6 +13588,7 @@ pub fn cmd_repaste_dictation(
             mode: crate::text_insertion::TextInsertionMode::BestEffortVerified,
             restore_clipboard: config.dictation.auto_paste_restore,
             clipboard_snapshot,
+            expected_target: None,
         },
     ))
 }
@@ -13250,6 +13596,9 @@ pub fn cmd_repaste_dictation(
 #[tauri::command]
 pub fn cmd_stop_dictation(state: tauri::State<AppState>) -> Result<String, String> {
     if state.dictation_active.load(Ordering::Relaxed) {
+        if let Ok(mut released_at) = state.dictation_release_started_at.lock() {
+            *released_at = Some(Instant::now());
+        }
         state.dictation_stop_flag.store(true, Ordering::Relaxed);
         return Ok("Dictation stop requested".into());
     }
@@ -13269,10 +13618,9 @@ fn show_dictation_overlay(app: &tauri::AppHandle) {
         win.destroy().ok();
     }
 
-    // Position: bottom-right HUD, anchored to the current monitor work area.
+    // Position: bottom-center HUD, anchored to the current monitor work area.
     let width = 320.0;
     let height = 88.0;
-    let inset_x = 16.0;
     let inset_y = 16.0;
 
     let monitor = app
@@ -13291,11 +13639,11 @@ fn show_dictation_overlay(app: &tauri::AppHandle) {
         let work_width = work_area.size.width as f64 / scale;
         let work_height = work_area.size.height as f64 / scale;
         (
-            work_x + work_width - width - inset_x,
+            work_x + (work_width - width) / 2.0,
             work_y + work_height - height - inset_y,
         )
     } else {
-        (1440.0 - width - inset_x, 900.0 - height - inset_y)
+        ((1440.0 - width) / 2.0, 900.0 - height - inset_y)
     };
 
     match tauri::WebviewWindowBuilder::new(
@@ -13840,7 +14188,7 @@ fn palette_first_run_marker() -> PathBuf {
 /// ON for both fresh installs and upgrades, but fires this
 /// notification on the first launch so users with a real conflict
 /// hear about it immediately and can disable from the settings UI in
-/// one click. See PLAN.md.command-palette-slice-2 D10 (post-fix).
+/// one click. See docs/plans/command-palette-slice-2.md D10 (post-fix).
 pub fn maybe_show_palette_first_run_notice(app: &tauri::AppHandle) {
     let marker = palette_first_run_marker();
     if marker.exists() {
@@ -14116,6 +14464,60 @@ fn record_dictation_memory(
     }
 }
 
+fn dictation_should_insert(config: &Config) -> bool {
+    match config.dictation.destination.as_str() {
+        "insert" => true,
+        "" | "clipboard" => false,
+        _ => config.dictation.auto_paste,
+    }
+}
+
+fn dictation_insert_fallback_message(config: &Config) -> Option<&'static str> {
+    if dictation_should_insert(config) && !crate::text_insertion::can_insert_into_apps() {
+        Some(crate::text_insertion::insertion_permission_fallback_message())
+    } else {
+        None
+    }
+}
+
+fn take_dictation_release_started_at(state: &AppState) -> Option<Instant> {
+    state
+        .dictation_release_started_at
+        .lock()
+        .ok()
+        .and_then(|mut released_at| released_at.take())
+}
+
+fn log_dictation_insert(
+    result: &minutes_core::dictation::DictationResult,
+    insertion: &crate::text_insertion::TextInsertionResult,
+    release_started_at: Option<Instant>,
+    insert_started_at: Instant,
+) {
+    let release_to_inserted_ms = release_started_at.map(|started| started.elapsed().as_millis());
+    let duration_ms =
+        release_to_inserted_ms.unwrap_or_else(|| insert_started_at.elapsed().as_millis());
+    let file_label = result
+        .file_path
+        .as_ref()
+        .map(|path| path.display().to_string())
+        .unwrap_or_default();
+    minutes_core::logging::log_step(
+        "dictation_insert",
+        &file_label,
+        duration_ms as u64,
+        serde_json::json!({
+            "release_to_inserted_ms": release_to_inserted_ms,
+            "insert_operation_ms": insert_started_at.elapsed().as_millis(),
+            "destination": result.destination,
+            "outcome": insertion.outcome.as_str(),
+            "method": insertion.method.as_str(),
+            "verified": insertion.verified,
+            "clipboard_restored": insertion.clipboard_restored,
+        }),
+    );
+}
+
 fn restore_dictation_target_focus(
     target_context: &Option<crate::text_insertion::ActiveTargetContext>,
 ) {
@@ -14315,6 +14717,9 @@ fn start_dictation_session(
     app.emit("dictation:state", "loading").ok();
 
     state.dictation_stop_flag.store(false, Ordering::Relaxed);
+    if let Ok(mut released_at) = state.dictation_release_started_at.lock() {
+        *released_at = None;
+    }
     // dictation_active is already true from try_acquire_dictation; sync the
     // tray so the menu reflects the just-started session.
     crate::sync_tray_state(app);
@@ -14335,12 +14740,10 @@ fn start_dictation_session(
         // disconnects (#189). In-memory only; startup-side persistence
         // is in main.rs.
         minutes_core::capture::auto_heal_missing_recording_device(&mut config);
-        let clipboard_snapshot =
-            if config.dictation.auto_paste && config.dictation.auto_paste_restore {
-                crate::text_insertion::read_clipboard().ok()
-            } else {
-                None
-            };
+        let insert_available_at_start = dictation_insert_fallback_message(&config).is_none();
+        let insert_fallback_message_for_events =
+            dictation_insert_fallback_message(&config).map(str::to_string);
+        let insert_fallback_emitted = Arc::new(AtomicBool::new(false));
         let app_for_events = app_clone.clone();
         let app_for_results = app_clone.clone();
         let config_for_results = config.clone();
@@ -14357,6 +14760,7 @@ fn start_dictation_session(
                     DictationEvent::Accumulating => "accumulating",
                     DictationEvent::Processing => "processing",
                     DictationEvent::PartialText(_) => "partial",
+                    DictationEvent::AudioLevel(_) => "",
                     DictationEvent::SilenceCountdown { .. } => "",
                     DictationEvent::Success => "success",
                     DictationEvent::Error => "error",
@@ -14364,11 +14768,30 @@ fn start_dictation_session(
                     DictationEvent::Yielded => "yielded",
                 };
                 if !state_str.is_empty() {
+                    if matches!(&event, DictationEvent::Listening) {
+                        if let Some(message) = insert_fallback_message_for_events.as_ref() {
+                            if !insert_fallback_emitted.swap(true, Ordering::Relaxed) {
+                                app_for_events
+                                    .emit(
+                                        "dictation:insertion",
+                                        serde_json::json!({
+                                            "message": message,
+                                            "earlyFallback": true,
+                                        }),
+                                    )
+                                    .ok();
+                            }
+                        }
+                    }
                     app_for_events.emit("dictation:state", state_str).ok();
                 }
 
                 if let DictationEvent::PartialText(text) = &event {
                     app_for_events.emit("dictation:partial", text.as_str()).ok();
+                }
+
+                if let DictationEvent::AudioLevel(level) = &event {
+                    app_for_events.emit("dictation:level", level).ok();
                 }
 
                 if let DictationEvent::SilenceCountdown {
@@ -14386,19 +14809,15 @@ fn start_dictation_session(
                         )
                         .ok();
                 }
-
-                if matches!(
-                    &event,
-                    DictationEvent::Accumulating | DictationEvent::PartialText(_)
-                ) {
-                    let level = minutes_core::streaming::stream_audio_level();
-                    app_for_events.emit("dictation:level", level).ok();
-                }
             },
             move |result| {
                 final_output_for_results.store(true, Ordering::Relaxed);
                 app_for_results.emit("dictation:result", &result.text).ok();
-                if config_for_results.dictation.auto_paste {
+                let insert_started_at = Instant::now();
+                let release_started_at = app_for_results
+                    .try_state::<AppState>()
+                    .and_then(|state| take_dictation_release_started_at(&state));
+                if dictation_should_insert(&config_for_results) && insert_available_at_start {
                     app_for_results.emit("dictation:state", "inserting").ok();
                     dictation_focus_debug(
                         "before_insert_restore",
@@ -14412,13 +14831,20 @@ fn start_dictation_session(
                             text: result.text.clone(),
                             mode: crate::text_insertion::TextInsertionMode::BestEffortVerified,
                             restore_clipboard: config_for_results.dictation.auto_paste_restore,
-                            clipboard_snapshot: clipboard_snapshot.clone(),
+                            clipboard_snapshot: None,
+                            expected_target: dictation_target_context_for_results.clone(),
                         },
                     );
                     app_for_results.emit("dictation:insertion", &insertion).ok();
                     app_for_results
                         .emit("dictation:state", insertion.overlay_state())
                         .ok();
+                    log_dictation_insert(
+                        &result,
+                        &insertion,
+                        release_started_at,
+                        insert_started_at,
+                    );
                     record_dictation_memory(&config_for_results, &result, &insertion);
                 } else {
                     dictation_focus_debug(
@@ -14434,12 +14860,19 @@ fn start_dictation_session(
                             mode: crate::text_insertion::TextInsertionMode::CopyOnly,
                             restore_clipboard: false,
                             clipboard_snapshot: None,
+                            expected_target: None,
                         },
                     );
                     app_for_results.emit("dictation:insertion", &insertion).ok();
                     app_for_results
                         .emit("dictation:state", insertion.overlay_state())
                         .ok();
+                    log_dictation_insert(
+                        &result,
+                        &insertion,
+                        release_started_at,
+                        insert_started_at,
+                    );
                     record_dictation_memory(&config_for_results, &result, &insertion);
                 }
             },

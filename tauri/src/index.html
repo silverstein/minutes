@@ -256,6 +256,42 @@
       background: var(--bg);
       border-right: none;
       position: relative;
+      transition: flex-basis 160ms ease, width 160ms ease, min-width 160ms ease;
+    }
+
+    body.sidebar-collapsed .app-left {
+      flex: 0 0 0;
+      width: 0;
+      min-width: 0;
+    }
+
+    body.sidebar-collapsed .split-handle {
+      display: none;
+    }
+
+    /* When the list pane collapses, the terminal/assistant pane has a fixed
+       width, so it must grow to reclaim the freed space instead of leaving a
+       dead gap. flex-grow tracks .app-left's animated shrink for free. */
+    body.sidebar-collapsed .recall-panel.expanded {
+      width: auto;
+      flex: 1 1 auto;
+    }
+
+    @media (max-width: 720px) {
+      body:not(.sidebar-expanded-session) .app-left {
+        flex: 0 0 0;
+        width: 0;
+        min-width: 0;
+      }
+
+      body:not(.sidebar-expanded-session) .split-handle {
+        display: none;
+      }
+
+      body:not(.sidebar-expanded-session) .recall-panel.expanded {
+        width: auto;
+        flex: 1 1 auto;
+      }
     }
 
     .window-drag-strip {
@@ -1501,6 +1537,83 @@
       padding: 8px 16px 12px;
     }
 
+    .list-header-actions {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      margin-bottom: 8px;
+    }
+
+    .list-header-group {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      min-width: 0;
+    }
+
+    .list-toggle-btn,
+    .sidebar-collapse-btn {
+      border: 1px solid var(--border);
+      background: transparent;
+      color: var(--text-secondary);
+      border-radius: 7px;
+      cursor: pointer;
+      font-family: var(--font-mono);
+      font-size: var(--text-meta);
+      line-height: 1;
+      transition: background 150ms ease, border-color 150ms ease, color 150ms ease, transform 160ms ease;
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .app-left,
+      .sidebar-collapse-btn {
+        transition: none;
+      }
+    }
+
+
+    .list-toggle-btn {
+      padding: 6px 10px;
+    }
+
+    .sidebar-collapse-btn {
+      width: 28px;
+      height: 28px;
+      padding: 0;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      font-size: var(--text-xs);
+    }
+
+    .list-toggle-btn:hover,
+    .sidebar-collapse-btn:hover {
+      background: var(--surface-fill);
+      color: var(--text);
+      border-color: var(--border-mid);
+    }
+
+    .list-toggle-btn.is-active {
+      color: var(--text);
+      border-color: var(--border-mid);
+      background: var(--surface-fill);
+    }
+
+    .sidebar-collapse-btn.is-collapsed {
+      transform: rotate(180deg);
+    }
+
+    body.sidebar-collapsed .sidebar-collapse-btn {
+      position: fixed;
+      /* Match the button's expanded in-flow spot (search-wrap has 16px left
+         padding; the row sits ~88px down) so collapsing/expanding only rotates
+         the chevron instead of teleporting it vertically. */
+      left: 16px;
+      top: 88px;
+      z-index: 40;
+      background: var(--bg);
+    }
+
     .search-box {
       width: 100%;
       padding: 9px 12px 9px 34px;
@@ -1545,7 +1658,7 @@
       content: "⌕";
       position: absolute;
       left: 28px;
-      top: 17px;
+      top: 53px;
       font-size: var(--text-base);
       color: var(--text-secondary);
       pointer-events: none;
@@ -1647,6 +1760,13 @@
       text-transform: uppercase;
     }
 
+    .md-viewer-toolbar #md-viewer-preview-btn,
+    .md-viewer-toolbar #md-viewer-source-btn,
+    .md-viewer-toolbar #md-viewer-save-btn,
+    .md-viewer-toolbar .md-viewer-toolbar-sep {
+      display: none !important;
+    }
+
     .md-viewer-toolbar .md-viewer-mode-btn.active {
       background: var(--surface-fill-strong) !important;
       color: var(--text);
@@ -1711,6 +1831,12 @@
       user-select: text;
     }
 
+    .md-viewer-content>* {
+      max-width: 70ch;
+      margin-left: auto;
+      margin-right: auto;
+    }
+
     .md-viewer-content::-webkit-scrollbar {
       width: 5px;
     }
@@ -1728,15 +1854,16 @@
       display: none;
       flex: 1;
       min-height: 0;
-      width: 100%;
+      width: min(70ch, calc(100% - 40px));
       resize: none;
       border: none;
       outline: none;
       background: transparent;
       color: var(--text);
-      padding: 16px 20px;
+      padding: 20px 0;
+      margin: 0 auto;
       box-sizing: border-box;
-      font: 13px/1.6 var(--font-mono);
+      font: 13px/1.7 var(--font-mono);
       white-space: pre-wrap;
       overflow-y: auto;
     }
@@ -1766,6 +1893,10 @@
     }
 
     .md-viewer-status.warning {
+      color: var(--red);
+    }
+
+    .md-viewer-status.danger {
       color: var(--red);
     }
 
@@ -2041,6 +2172,52 @@
       gap: 8px;
     }
 
+    .input-modal-card {
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+      width: min(42ch, 100vw - 32px);
+      padding-top: 18px;
+    }
+
+    .input-modal-title {
+      font-family: var(--font-display);
+      font-size: var(--text-xl);
+      color: var(--text);
+    }
+
+    .input-modal-field {
+      display: grid;
+      gap: 8px;
+    }
+
+    .input-modal-label {
+      font: 500 var(--text-xs) var(--font-mono);
+      color: var(--text-secondary);
+    }
+
+    .input-modal-input {
+      width: 100%;
+      border: 1px solid var(--border-mid);
+      border-radius: var(--radius);
+      background: var(--surface-fill);
+      color: var(--text);
+      font: 13px var(--font-mono);
+      padding: 8px 10px;
+      outline: none;
+    }
+
+    .input-modal-input:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+    }
+
+    .input-modal-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 8px;
+    }
+
     /* Markdown rendered styles */
     .md-viewer-content h1,
     .md-viewer-content h2,
@@ -2184,6 +2361,7 @@
     }
 
     .meeting-item,
+    .document-item,
     .date-group {
       animation: list-enter 0.25s ease-out both;
     }
@@ -2249,6 +2427,28 @@
       box-shadow: 0 1px 4px var(--shadow-soft);
     }
 
+    .document-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 6px;
+      position: relative;
+      padding: 12px 16px 12px 28px;
+      border-radius: var(--radius);
+      cursor: pointer;
+      transition: background 0.15s ease, box-shadow 0.15s ease;
+    }
+
+    .document-item:hover {
+      background: var(--bg-hover);
+      box-shadow: 0 1px 4px var(--shadow-soft);
+    }
+
+    .document-item:active {
+      background: var(--surface-fill-strong);
+      box-shadow: none;
+    }
+
     .meeting-item:active {
       background: var(--surface-fill-strong);
       box-shadow: none;
@@ -2268,12 +2468,33 @@
       text-overflow: ellipsis;
     }
 
+    .document-title {
+      font-size: var(--text-sm);
+      font-family: var(--font-mono);
+      font-weight: 500;
+      color: var(--text);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
     .meeting-meta {
       font-size: var(--text-meta);
       font-family: var(--font-mono);
       color: var(--text-secondary);
       margin-top: 3px;
       letter-spacing: 0.2px;
+    }
+
+    .document-empty {
+      padding: 10px 12px;
+      color: var(--text-secondary);
+      font-family: var(--font-mono);
+      font-size: var(--text-meta);
+    }
+
+    .document-source {
+      color: var(--text);
     }
 
     .meeting-snippet {
@@ -2800,6 +3021,18 @@
       box-shadow: 0 24px 60px var(--shadow-stronger);
       padding: 0 22px 20px;
       color: var(--text);
+    }
+
+    /* Settings is tabbed, so the dialog top (title + tab bar) must not move
+       when switching between tabs of different content heights. Anchor the top
+       instead of vertically centering; the About modal keeps its centering. */
+    #settings-overlay {
+      align-items: flex-start;
+      padding-top: 6vh;
+    }
+
+    #settings-overlay .about-card {
+      max-height: calc(100vh - 6vh - 40px);
     }
 
     .about-top {
@@ -4536,6 +4769,66 @@
     .download-progress.is-visible {
       display: block;
     }
+
+    /* Settings tabs */
+    .settings-tabs {
+      display: flex;
+      gap: 0;
+      border-bottom: 1px solid var(--border);
+      margin: 0 -22px 20px;
+      padding: 0 22px;
+      overflow-x: auto;
+      position: sticky;
+      top: 57px;
+      z-index: 2;
+      background: var(--bg-elevated);
+      scrollbar-width: none;
+      -ms-overflow-style: none;
+    }
+
+    .settings-tabs::-webkit-scrollbar {
+      display: none;
+    }
+
+    .settings-tab {
+      background: transparent;
+      border: none;
+      border-bottom: 2px solid transparent;
+      margin-bottom: -1px;
+      padding: 9px 10px 8px;
+      cursor: pointer;
+      font-family: var(--font-mono);
+      font-size: var(--text-meta);
+      font-weight: 500;
+      color: var(--text-tertiary);
+      white-space: nowrap;
+      letter-spacing: 0.01em;
+      transition: color 0.15s ease;
+      outline: none;
+    }
+
+    .settings-tab.is-active {
+      color: var(--text);
+      border-bottom-color: var(--text);
+    }
+
+    .settings-tab:hover:not(.is-active) {
+      color: var(--text-secondary);
+    }
+
+    .settings-tab:focus-visible {
+      outline: 2px solid var(--focus-ring);
+      outline-offset: -2px;
+      border-radius: 3px;
+    }
+
+    .settings-tab-panel {
+      display: none;
+    }
+
+    .settings-tab-panel.is-active {
+      display: block;
+    }
   </style>
 </head>
 
@@ -4641,6 +4934,12 @@
 
     <!-- Search -->
     <div class="search-wrap search-icon">
+      <div class="list-header-actions">
+        <div class="list-header-group">
+          <button class="sidebar-collapse-btn" id="btn-sidebar-collapse" type="button" aria-label="Collapse list pane" title="Collapse list pane">‹</button>
+        </div>
+        <button class="list-toggle-btn" id="btn-documents-toggle" type="button" aria-pressed="false">Documents</button>
+      </div>
       <input class="search-box" type="text" placeholder="Search recordings..." id="search-input" />
       <div class="search-error" id="search-error" hidden></div>
     </div>
@@ -4927,6 +5226,20 @@
     </div>
   </div>
 
+  <div class="about-overlay input-modal-overlay" id="input-modal-overlay">
+    <div class="about-card input-modal-card" role="dialog" aria-modal="true" aria-labelledby="input-modal-title">
+      <div class="input-modal-title" id="input-modal-title"></div>
+      <label class="input-modal-field" for="input-modal-input">
+        <span class="input-modal-label" id="input-modal-label"></span>
+        <input class="input-modal-input" id="input-modal-input" type="text" autocomplete="off" />
+      </label>
+      <div class="input-modal-actions">
+        <button class="btn btn-secondary btn-sm" id="input-modal-cancel">Cancel</button>
+        <button class="btn btn-primary btn-sm" id="input-modal-confirm">Confirm</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Readiness -->
   <div class="readiness-overlay" id="readiness-overlay">
     <div class="readiness-card" role="dialog" aria-modal="true" aria-labelledby="readiness-title">
@@ -5074,6 +5387,15 @@
         <button class="btn btn-secondary btn-sm" id="btn-settings-close">Close</button>
       </div>
 
+      <nav class="settings-tabs" role="tablist" aria-label="Settings sections">
+        <button class="settings-tab is-active" role="tab" id="tab-general" aria-selected="true" aria-controls="panel-general" tabindex="0" data-tab="general">General</button>
+        <button class="settings-tab" role="tab" id="tab-capture" aria-selected="false" aria-controls="panel-capture" tabindex="-1" data-tab="capture">Capture</button>
+        <button class="settings-tab" role="tab" id="tab-transcription" aria-selected="false" aria-controls="panel-transcription" tabindex="-1" data-tab="transcription">Transcription</button>
+        <button class="settings-tab" role="tab" id="tab-ai" aria-selected="false" aria-controls="panel-ai" tabindex="-1" data-tab="ai">AI &amp; Privacy</button>
+        <button class="settings-tab" role="tab" id="tab-advanced" aria-selected="false" aria-controls="panel-advanced" tabindex="-1" data-tab="advanced">Advanced</button>
+      </nav>
+
+      <div class="settings-tab-panel is-active" role="tabpanel" id="panel-general" data-panel="general" aria-labelledby="tab-general">
       <!-- Identity -->
       <div class="settings-section">
         <div class="about-item-title">IDENTITY</div>
@@ -5133,6 +5455,9 @@
         </div>
       </div>
 
+      </div><!-- /panel-general -->
+
+      <div class="settings-tab-panel" role="tabpanel" id="panel-capture" data-panel="capture" aria-labelledby="tab-capture">
       <!-- Dictation -->
       <div class="settings-section">
         <div class="about-item-title">DICTATION</div>
@@ -5151,6 +5476,16 @@
               again to stop.</div>
           </div>
           <button class="btn btn-secondary btn-sm toggle-btn" id="shortcut-toggle-dictation">Off</button>
+        </div>
+        <div class="about-controls">
+          <div class="about-controls-group">
+            <div class="about-controls-copy">Where dictated text goes</div>
+            <select id="settings-dictation-destination" class="settings-field">
+              <option value="insert">Type at cursor — inserts into the app you're in (needs Accessibility)</option>
+              <option value="clipboard">Copy to clipboard — paste it yourself</option>
+            </select>
+            <div class="about-controls-meta">"Type at cursor" pastes the transcript straight into the focused app. macOS asks for Accessibility permission the first time; until granted it falls back to the clipboard.</div>
+          </div>
         </div>
         <div class="about-controls">
           <div class="about-controls-group">
@@ -5236,6 +5571,9 @@
         </div>
       </div>
 
+      </div><!-- /panel-capture -->
+
+      <div class="settings-tab-panel" role="tabpanel" id="panel-transcription" data-panel="transcription" aria-labelledby="tab-transcription">
       <!-- Transcription -->
       <div class="settings-section">
         <div class="about-item-title">TRANSCRIPTION</div>
@@ -5395,6 +5733,9 @@
         </div>
       </div>
 
+      </div><!-- /panel-transcription -->
+
+      <div class="settings-tab-panel" role="tabpanel" id="panel-ai" data-panel="ai" aria-labelledby="tab-ai">
       <!-- Summarization -->
       <div class="settings-section">
         <div class="about-item-title">AUTO-SUMMARIZATION</div>
@@ -5699,6 +6040,9 @@
         <div class="about-controls-meta settings-compact-meta">Off: native chat bubbles — On: embedded terminal for power users</div>
       </div>
 
+      </div><!-- /panel-ai -->
+
+      <div class="settings-tab-panel" role="tabpanel" id="panel-advanced" data-panel="advanced" aria-labelledby="tab-advanced">
       <!-- Storage -->
       <div class="settings-section settings-section-tight">
         <div class="about-item-title">STORAGE</div>
@@ -5740,6 +6084,8 @@
           <button class="btn btn-secondary btn-sm" id="settings-open-config-docs">View docs</button>
         </div>
       </div>
+
+      </div><!-- /panel-advanced -->
 
       <div class="about-footer settings-footer about-footer-small">
         Config file: <span id="settings-config-path" class="settings-config-path"></span>
@@ -5923,6 +6269,8 @@
     const noteInput = document.getElementById('note-inline-input');
     const footer = document.getElementById('footer');
     const meetingsScroll = document.getElementById('meetings-scroll');
+    const documentsToggle = document.getElementById('btn-documents-toggle');
+    const sidebarCollapseButton = document.getElementById('btn-sidebar-collapse');
     const searchInput = document.getElementById('search-input');
     const detailOverlay = document.getElementById('detail-overlay');
     const detailTitle = document.getElementById('detail-title');
@@ -5937,6 +6285,12 @@
     const aboutSettingsButton = document.getElementById('btn-about-settings');
     const aboutChangelogButton = document.getElementById('btn-about-changelog');
     const aboutDiscussionsButton = document.getElementById('btn-about-discussions');
+    const inputModalOverlay = document.getElementById('input-modal-overlay');
+    const inputModalTitle = document.getElementById('input-modal-title');
+    const inputModalLabel = document.getElementById('input-modal-label');
+    const inputModalInput = document.getElementById('input-modal-input');
+    const inputModalCancel = document.getElementById('input-modal-cancel');
+    const inputModalConfirm = document.getElementById('input-modal-confirm');
     const notificationToggle = document.getElementById('btn-toggle-notifications');
     const cueToggle = document.getElementById('btn-toggle-cues');
     const hotkeyToggle = document.getElementById('btn-toggle-hotkey');
@@ -5990,6 +6344,11 @@
     // Live bar elements are accessed by ID inline (live-time, live-utterances)
     let currentMeetingDetail = null;
     let activeSearchQuery = '';
+    let documentsViewActive = false;
+    let documentsCache = [];
+    let documentsLoadRequestId = 0;
+    let userExpandedSidebarThisSession = false;
+    let sidebarAutoCollapsed = false;
     let meetingsRefreshTimer = null;
     let currentSetup = null;
     let activationState = null;
@@ -5999,6 +6358,8 @@
     let processingJobs = [];
     let readinessItems = [];
     let recoveryItems = [];
+    let inputModalResolver = null;
+    let inputModalPreviousFocus = null;
     let retryingAllRecovery = false;
     let jobsHistory = [];
     let notifyOnCompletion = true;
@@ -8015,6 +8376,60 @@
       aboutOverlay.classList.add('active');
     }
 
+    function closeInputModal(result = null) {
+      inputModalOverlay.classList.remove('active');
+      const resolver = inputModalResolver;
+      const previousFocus = inputModalPreviousFocus;
+      inputModalResolver = null;
+      inputModalPreviousFocus = null;
+      inputModalInput.value = '';
+      if (resolver) resolver(result);
+      if (previousFocus && typeof previousFocus.focus === 'function') {
+        previousFocus.focus();
+      }
+    }
+
+    function confirmInputModal() {
+      const value = inputModalInput.value.trim();
+      closeInputModal(value || null);
+    }
+
+    function showInputModal({ title, label, value = '', confirmText = 'Confirm' }) {
+      if (inputModalResolver) closeInputModal(null);
+      inputModalPreviousFocus = document.activeElement;
+      inputModalTitle.textContent = title || '';
+      inputModalLabel.textContent = label || '';
+      inputModalInput.value = value || '';
+      inputModalConfirm.textContent = confirmText || 'Confirm';
+      inputModalOverlay.classList.add('active');
+      requestAnimationFrame(() => {
+        inputModalInput.focus();
+        inputModalInput.select();
+      });
+      return new Promise((resolve) => {
+        inputModalResolver = resolve;
+      });
+    }
+
+    inputModalCancel.addEventListener('click', () => closeInputModal(null));
+    inputModalConfirm.addEventListener('click', confirmInputModal);
+    inputModalOverlay.addEventListener('click', (event) => {
+      if (event.target === inputModalOverlay) closeInputModal(null);
+    });
+    inputModalInput.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        confirmInputModal();
+      }
+    });
+    document.addEventListener('keydown', (event) => {
+      if (!inputModalOverlay.classList.contains('active')) return;
+      if (event.key !== 'Escape') return;
+      event.preventDefault();
+      event.stopPropagation();
+      closeInputModal(null);
+    }, true);
+
     function showDetailFeedback(message, tone = 'success') {
       if (detailFeedbackTimer) {
         clearTimeout(detailFeedbackTimer);
@@ -8139,7 +8554,12 @@
             btn.className = 'speaker-confirm-btn';
             btn.textContent = 'Confirm';
             btn.onclick = async () => {
-              const newName = prompt(`Confirm speaker name for ${attr.speaker_label}:`, attr.name);
+              const newName = await showInputModal({
+                title: 'Confirm speaker',
+                label: `Name for ${attr.speaker_label}`,
+                value: attr.name,
+                confirmText: 'Confirm',
+              });
               if (newName) {
                 btn.disabled = true;
                 const previousLabel = btn.textContent;
@@ -8496,7 +8916,136 @@
       }
     }
 
+    function formatRelativeTime(ms) {
+      const timestamp = Number(ms);
+      if (!Number.isFinite(timestamp)) return '';
+      const delta = Date.now() - timestamp;
+      const minute = 60 * 1000;
+      const hour = 60 * minute;
+      const day = 24 * hour;
+      if (delta < minute) return 'just now';
+      if (delta < hour) {
+        const value = Math.max(1, Math.floor(delta / minute));
+        return `${value}m ago`;
+      }
+      if (delta < day) {
+        const value = Math.max(1, Math.floor(delta / hour));
+        return `${value}h ago`;
+      }
+      const value = Math.max(1, Math.floor(delta / day));
+      return `${value}d ago`;
+    }
+
+    function renderDocuments(documents) {
+      meetingsScroll.replaceChildren();
+      footer.classList.remove('footer-hidden');
+
+      if (!documents || documents.length === 0) {
+        const empty = document.createElement('div');
+        empty.className = 'document-empty';
+        empty.textContent = 'No documents yet.';
+        meetingsScroll.appendChild(empty);
+        return;
+      }
+
+      for (const doc of documents) {
+        const item = document.createElement('div');
+        item.className = 'document-item';
+        item.tabIndex = 0;
+        item.setAttribute('role', 'button');
+        item.setAttribute('aria-label', `Open ${doc.filename || 'document'}`);
+
+        const info = document.createElement('div');
+        info.className = 'meeting-info';
+
+        const title = document.createElement('div');
+        title.className = 'document-title';
+        title.textContent = doc.filename || 'Untitled';
+
+        const meta = document.createElement('div');
+        meta.className = 'meeting-meta';
+        const source = doc.source === 'assistant'
+          ? 'assistant'
+          : (doc.meeting_slug || 'meeting');
+        meta.textContent = [formatRelativeTime(doc.mtime), source].filter(Boolean).join(' · ');
+
+        info.appendChild(title);
+        info.appendChild(meta);
+
+        const badge = document.createElement('span');
+        badge.className = 'meeting-badge';
+        badge.textContent = doc.kind || 'text';
+
+        const openDocument = async () => {
+          try {
+            const access = await invoke('cmd_get_text_file_access', { path: doc.path });
+            const content = await invoke('cmd_read_text_file', { path: doc.path });
+            await showMdViewer(doc.path, doc.filename || doc.path.split(/[\\/]/).pop() || doc.path, content, {
+              editable: !!access.editable,
+              kind: access.kind || doc.kind || 'text',
+            });
+          } catch (e) {
+            console.error('Open document:', e);
+          }
+        };
+
+        item.addEventListener('click', openDocument);
+        item.addEventListener('keydown', (event) => {
+          if (event.key === 'Enter' || event.key === ' ') {
+            event.preventDefault();
+            openDocument();
+          }
+        });
+
+        item.appendChild(info);
+        item.appendChild(badge);
+        meetingsScroll.appendChild(item);
+      }
+    }
+
+    async function loadDocuments() {
+      const requestId = ++documentsLoadRequestId;
+      try {
+        documentsCache = await invoke('cmd_list_documents', { limit: 200 });
+        if (requestId !== documentsLoadRequestId || !documentsViewActive) return;
+        renderDocuments(documentsCache);
+      } catch (e) {
+        console.error('Load documents:', e);
+        if (requestId !== documentsLoadRequestId || !documentsViewActive) return;
+        renderDocuments([]);
+      }
+    }
+
+    function setDocumentsView(active) {
+      documentsViewActive = active;
+      documentsToggle.classList.toggle('is-active', active);
+      documentsToggle.setAttribute('aria-pressed', active ? 'true' : 'false');
+      // Label the button with its DESTINATION so returning to meetings is
+      // self-evident: it reads "Meetings" while documents are showing.
+      documentsToggle.textContent = active ? 'Meetings' : 'Documents';
+      documentsToggle.setAttribute(
+        'aria-label',
+        active ? 'Back to meetings' : 'Show documents',
+      );
+      searchInput.disabled = active;
+      searchInput.placeholder = active ? 'Documents' : 'Search recordings...';
+      if (active) {
+        searchInput.value = '';
+        activeSearchQuery = '';
+        setSearchError(null);
+        loadDocuments();
+      } else {
+        documentsLoadRequestId++;
+        searchInput.disabled = false;
+        loadMeetings();
+      }
+    }
+
     function renderMeetings(meetings) {
+      if (documentsViewActive) {
+        renderDocuments(documentsCache);
+        return;
+      }
       meetingsScroll.replaceChildren();
       appendProactiveContextCard();
 
@@ -8582,6 +9131,10 @@
     }
 
     async function loadMeetings() {
+      if (documentsViewActive) {
+        await loadDocuments();
+        return;
+      }
       try {
         await loadProactiveContextBundle();
         const meetings = await invoke('cmd_list_meetings', { limit: 30 });
@@ -8606,6 +9159,11 @@
     }
 
     async function refreshMeetingsForCurrentView() {
+      if (documentsViewActive) {
+        await loadDocuments();
+        await refreshOpenMeetingDetail();
+        return;
+      }
       if (activeSearchQuery) {
         try {
           const results = await invoke('cmd_search', { query: activeSearchQuery });
@@ -8637,7 +9195,9 @@
     // results when responses arrive out of order.
     let searchTimeout;
     let searchRequestId = 0;
+    documentsToggle.addEventListener('click', () => setDocumentsView(!documentsViewActive));
     searchInput.addEventListener('input', (e) => {
+      if (documentsViewActive) return;
       clearTimeout(searchTimeout);
       const query = e.target.value.trim();
       activeSearchQuery = query;
@@ -8767,7 +9327,7 @@
       if (parakeetGuideBtn) {
         parakeetGuideBtn.addEventListener('click', async () => {
           try {
-            await invoke('cmd_open_file', { path: (parakeet && parakeet.guideUrl) || 'https://github.com/silverstein/minutes/blob/main/docs/PARAKEET.md' });
+            await invoke('cmd_open_file', { path: (parakeet && parakeet.guideUrl) || 'https://github.com/silverstein/minutes/blob/main/docs/architecture/parakeet.md' });
           } catch (e) {
             console.error('open parakeet guide:', e);
           }
@@ -8920,8 +9480,41 @@
     });
     // Settings overlay
     const settingsOverlay = document.getElementById('settings-overlay');
-    function openSettings() { settingsOverlay.classList.add('active'); loadSettings(); }
+    const settingsTabs = document.querySelectorAll('.settings-tab');
+
+    function openSettings() {
+      settingsOverlay.classList.add('active');
+      // Reset to General tab on every open
+      settingsTabs[0].click();
+      loadSettings();
+    }
     function closeSettings() { settingsOverlay.classList.remove('active'); }
+
+    // Tab switching — click
+    settingsTabs.forEach(tab => {
+      tab.addEventListener('click', () => {
+        const name = tab.dataset.tab;
+        settingsTabs.forEach(t => {
+          t.classList.toggle('is-active', t === tab);
+          t.setAttribute('aria-selected', t === tab ? 'true' : 'false');
+          t.tabIndex = t === tab ? 0 : -1;
+        });
+        document.querySelectorAll('.settings-tab-panel').forEach(p =>
+          p.classList.toggle('is-active', p.dataset.panel === name));
+      });
+    });
+
+    // Tab switching — keyboard (arrow keys, Home, End)
+    document.querySelector('.settings-tabs').addEventListener('keydown', e => {
+      const idx = [...settingsTabs].indexOf(document.activeElement);
+      if (idx === -1) return;
+      let next = -1;
+      if (e.key === 'ArrowRight') next = (idx + 1) % settingsTabs.length;
+      if (e.key === 'ArrowLeft')  next = (idx - 1 + settingsTabs.length) % settingsTabs.length;
+      if (e.key === 'Home')       next = 0;
+      if (e.key === 'End')        next = settingsTabs.length - 1;
+      if (next !== -1) { e.preventDefault(); settingsTabs[next].focus(); settingsTabs[next].click(); }
+    });
 
     document.getElementById('btn-about-close').addEventListener('click', closeAbout);
     aboutOverlay.addEventListener('click', (e) => { if (e.target === aboutOverlay) closeAbout(); });
@@ -8944,9 +9537,7 @@
     // binding is unchanged.
     document.addEventListener('keydown', (e) => {
       if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && e.key === 'k') {
-        const target = e.target;
-        const tag = target && target.tagName ? target.tagName.toLowerCase() : '';
-        if (tag === 'input' || tag === 'textarea' || (target && target.isContentEditable)) return;
+        if (isEditableShortcutTarget(e.target || document.activeElement)) return;
         e.preventDefault();
         invoke('cmd_toggle_palette').catch(() => {});
       }
@@ -9148,6 +9739,9 @@
         }
         // Dictation settings
         if (s.dictation) {
+          // Empty/unset destination means the compiled default (insert).
+          document.getElementById('settings-dictation-destination').value =
+            (s.dictation.destination && s.dictation.destination !== '') ? s.dictation.destination : 'insert';
           document.getElementById('settings-dictation-model').value = s.dictation.model || 'base';
           setSettingsToggle('settings-dictation-daily-note', s.dictation.daily_note_log !== false);
           document.getElementById('settings-dictation-silence').value = String(s.dictation.silence_timeout_ms || 2000);
@@ -9593,7 +10187,7 @@
     document.getElementById('settings-open-config-docs').addEventListener('click', async () => {
       try {
         await invoke('cmd_open_file', {
-          path: 'https://github.com/silverstein/minutes/blob/main/docs/CONFIG.md',
+          path: 'https://github.com/silverstein/minutes/blob/main/docs/architecture/config.md',
         });
       } catch (e) {
         console.error('open config docs:', e);
@@ -9680,7 +10274,7 @@
     });
     document.getElementById('btn-open-parakeet-guide').addEventListener('click', async () => {
       const target = document.getElementById('btn-open-parakeet-guide').dataset.guideUrl ||
-        'https://github.com/silverstein/minutes/blob/main/docs/PARAKEET.md';
+        'https://github.com/silverstein/minutes/blob/main/docs/architecture/parakeet.md';
       try {
         await invoke('cmd_open_file', { path: target });
       } catch (e) {
@@ -10062,6 +10656,7 @@
         document.getElementById('settings-dictation-shortcut-status').textContent = String(e2);
       }
     });
+    document.getElementById('settings-dictation-destination').addEventListener('change', (e) => invoke('cmd_set_setting', { section: 'dictation', key: 'destination', value: e.target.value }));
     document.getElementById('settings-dictation-model').addEventListener('change', (e) => invoke('cmd_set_setting', { section: 'dictation', key: 'model', value: e.target.value }));
     document.getElementById('settings-dictation-silence').addEventListener('change', (e) => invoke('cmd_set_setting', { section: 'dictation', key: 'silence_timeout_ms', value: e.target.value }));
     document.getElementById('settings-dictation-daily-note').addEventListener('click', async () => {
@@ -10691,26 +11286,48 @@
         if (typeof toggleRecallPanel === 'function') toggleRecallPanel();
         return;
       }
+      if (e.key !== 'Escape') return;
       if (e.key === 'Escape' && whatsNewScrim?.classList.contains('active')) {
+        e.preventDefault();
+        e.stopPropagation();
         closeWhatsNewModal();
+        return;
       }
       if (e.key === 'Escape' && aboutOverlay.classList.contains('active')) {
+        e.preventDefault();
+        e.stopPropagation();
         closeAbout();
+        return;
       }
       if (e.key === 'Escape' && settingsOverlay.classList.contains('active')) {
+        e.preventDefault();
+        e.stopPropagation();
         closeSettings();
+        return;
       }
       if (e.key === 'Escape' && readinessOverlay.classList.contains('active')) {
+        e.preventDefault();
+        e.stopPropagation();
         closeReadiness();
+        return;
       }
       if (e.key === 'Escape' && recoveryOverlay.classList.contains('active')) {
+        e.preventDefault();
+        e.stopPropagation();
         closeRecovery();
+        return;
       }
       if (e.key === 'Escape' && jobsOverlay.classList.contains('active')) {
+        e.preventDefault();
+        e.stopPropagation();
         closeJobs();
+        return;
       }
       if (e.key === 'Escape' && detailOverlay.classList.contains('active')) {
+        e.preventDefault();
+        e.stopPropagation();
         closeDetailView();
+        return;
       }
     });
     openExternalBtn.addEventListener('click', async () => {
@@ -10835,6 +11452,63 @@
     // read if we compared against currentMeetingPath directly.
     let recallChatMeetingPath = null;
 
+    function applySidebarCollapsed(collapsed, { explicit = false } = {}) {
+      // Pin the collapsed (fixed-position) chevron to the exact spot the button
+      // occupies while expanded, so collapsing only rotates it — no vertical
+      // jump. Measure the in-flow rect BEFORE the pane collapses; on expand,
+      // clear the inline coords so it returns to flow. (The CSS left/top on the
+      // collapsed rule is only a fallback for a collapsed-on-launch start.)
+      const alreadyCollapsed = document.body.classList.contains('sidebar-collapsed');
+      if (collapsed && !alreadyCollapsed) {
+        const rect = sidebarCollapseButton.getBoundingClientRect();
+        if (rect.width && rect.height) {
+          sidebarCollapseButton.style.top = `${Math.round(rect.top)}px`;
+          sidebarCollapseButton.style.left = `${Math.round(rect.left)}px`;
+        }
+      } else if (!collapsed) {
+        sidebarCollapseButton.style.top = '';
+        sidebarCollapseButton.style.left = '';
+      }
+      document.body.classList.toggle('sidebar-collapsed', collapsed);
+      sidebarCollapseButton.classList.toggle('is-collapsed', collapsed);
+      sidebarCollapseButton.setAttribute('aria-label', collapsed ? 'Expand list pane' : 'Collapse list pane');
+      sidebarCollapseButton.setAttribute('title', collapsed ? 'Expand list pane' : 'Collapse list pane');
+      if (explicit) {
+        sidebarAutoCollapsed = false;
+        localStorage.setItem('minutes.sidebarCollapsed', collapsed ? 'true' : 'false');
+        if (!collapsed) {
+          userExpandedSidebarThisSession = true;
+          document.body.classList.add('sidebar-expanded-session');
+        } else {
+          document.body.classList.remove('sidebar-expanded-session');
+        }
+      }
+    }
+
+    function toggleSidebarCollapsed() {
+      applySidebarCollapsed(!document.body.classList.contains('sidebar-collapsed'), { explicit: true });
+    }
+
+    const storedSidebarCollapsed = localStorage.getItem('minutes.sidebarCollapsed') === 'true';
+    applySidebarCollapsed(storedSidebarCollapsed);
+    if (window.innerWidth < 720 && !storedSidebarCollapsed && !userExpandedSidebarThisSession) {
+      sidebarAutoCollapsed = true;
+      document.body.classList.add('sidebar-collapsed');
+      sidebarCollapseButton.classList.add('is-collapsed');
+    }
+    sidebarCollapseButton.addEventListener('click', toggleSidebarCollapsed);
+    window.addEventListener('resize', () => {
+      if (window.innerWidth < 720 && !userExpandedSidebarThisSession && localStorage.getItem('minutes.sidebarCollapsed') !== 'true') {
+        sidebarAutoCollapsed = true;
+        document.body.classList.add('sidebar-collapsed');
+        sidebarCollapseButton.classList.add('is-collapsed');
+      } else if (window.innerWidth >= 720 && sidebarAutoCollapsed) {
+        sidebarAutoCollapsed = false;
+        document.body.classList.remove('sidebar-collapsed');
+        sidebarCollapseButton.classList.remove('is-collapsed');
+      }
+    });
+
     // ── Draggable split handle ──
     function clampRecallRatio(ratio) {
       return Math.min(MAX_RECALL_RATIO, Math.max(MIN_RECALL_RATIO, ratio));
@@ -10849,6 +11523,7 @@
     }
 
     splitHandle.addEventListener('mousedown', (e) => {
+      if (document.body.classList.contains('sidebar-collapsed')) return;
       if (!recallExpanded) return;
       e.preventDefault();
       splitHandle.classList.add('dragging');
@@ -12764,6 +13439,7 @@
     let openArtifactLastError = null;
     let openArtifactDirty = false;
     let openArtifactSaving = false;
+    let openArtifactSavePromise = null;
     let mdViewerMode = 'preview';
     let openArtifactExternalNotice = null;
     let artifactTemplateResolver = null;
@@ -12772,6 +13448,8 @@
     let openArtifactParseError = null;
     let mdViewerReviewVisible = false;
     let mdViewerReviewData = null;
+    let mdViewerSaveTimer = null;
+    let mdViewerLastSavedAt = null;
     let recallWorkspaceState = null;
 
     function formatArtifactOpenedAt(isoString) {
@@ -13018,6 +13696,10 @@
       if (tone) mdViewerStatus.classList.add(tone);
     }
 
+    function savedTimeLabel(date = new Date()) {
+      return date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+    }
+
     function currentArtifactBuffer() {
       return mdViewerMode === 'source' ? mdViewerEditor.value : (openArtifactContent || '');
     }
@@ -13064,23 +13746,23 @@
       mdViewerReview.classList.toggle('active', mdViewerReviewVisible && !!mdViewerReviewData?.available);
 
       if (openArtifactSaving) {
-        setMdViewerStatus('Saving...', 'saved');
+        setMdViewerStatus('saving', 'saved');
       } else if (openArtifactParseError) {
         setMdViewerStatus('Invalid JSON', 'warning');
       } else if (!openArtifactEditable && openArtifactPath) {
-        setMdViewerStatus('Read-only', 'readonly');
+        setMdViewerStatus('read-only', 'readonly');
       } else if (openArtifactDirty) {
-        setMdViewerStatus('Unsaved', 'unsaved');
+        setMdViewerStatus('edited', 'unsaved');
       } else if (openArtifactExternalNotice) {
         setMdViewerStatus(openArtifactExternalNotice, 'external');
-      } else if (sourceMode) {
-        setMdViewerStatus('Editing');
+      } else if (mdViewerLastSavedAt) {
+        setMdViewerStatus(`saved ${savedTimeLabel(mdViewerLastSavedAt)}`, 'saved');
       } else {
-        setMdViewerStatus('Viewing');
+        setMdViewerStatus('');
       }
     }
 
-    function setMdViewerMode(mode) {
+    async function setMdViewerMode(mode) {
       if (mode === 'source' && !openArtifactEditable) {
         mdViewerMode = 'preview';
       } else {
@@ -13092,7 +13774,9 @@
             ? formatJsonSource(openArtifactContent || '')
             : (openArtifactContent || '');
         }
+        requestAnimationFrame(() => mdViewerEditor.focus());
       } else {
+        await flushOpenArtifactSave();
         rerenderOpenArtifact(currentArtifactBuffer(), { preserveScroll: true });
       }
       refreshMdViewerChrome();
@@ -13172,28 +13856,65 @@
       }, 1000);
     }
 
+    function scheduleOpenArtifactSave() {
+      if (!openArtifactEditable || !openArtifactDirty) return;
+      if (mdViewerSaveTimer) clearTimeout(mdViewerSaveTimer);
+      mdViewerSaveTimer = setTimeout(() => {
+        mdViewerSaveTimer = null;
+        saveOpenArtifact();
+      }, 800);
+    }
+
+    async function flushOpenArtifactSave() {
+      if (mdViewerSaveTimer) {
+        clearTimeout(mdViewerSaveTimer);
+        mdViewerSaveTimer = null;
+      }
+      await saveOpenArtifact();
+    }
+
     async function saveOpenArtifact() {
-      if (!openArtifactPath || !openArtifactDirty || openArtifactSaving) return;
+      if (openArtifactSaving && openArtifactSavePromise) {
+        await openArtifactSavePromise;
+        return;
+      }
+      if (!openArtifactPath || !openArtifactDirty) return;
+      const savedPath = openArtifactPath;
+      const savedContent = mdViewerEditor.value;
       openArtifactSaving = true;
       refreshMdViewerChrome();
-      try {
-        const nextContent = mdViewerEditor.value;
-        await invoke('cmd_write_text_file', { path: openArtifactPath, content: nextContent });
-        openArtifactContent = nextContent;
-        openArtifactDirty = false;
-        openArtifactExternalNotice = null;
-        if (mdViewerMode === 'preview') {
-          rerenderOpenArtifact(nextContent, { preserveScroll: true });
+      const savePromise = (async () => {
+        try {
+          await invoke('cmd_write_text_file', { path: savedPath, content: savedContent });
+          if (openArtifactPath !== savedPath) return;
+          openArtifactContent = savedContent;
+          const currentContent = mdViewerEditor.value;
+          openArtifactDirty = currentContent !== savedContent;
+          openArtifactExternalNotice = null;
+          mdViewerLastSavedAt = new Date();
+          if (mdViewerMode === 'preview') {
+            rerenderOpenArtifact(currentContent, { preserveScroll: true });
+          }
+          if (openArtifactDirty) {
+            setMdViewerStatus('Unsaved changes', 'unsaved');
+            scheduleOpenArtifactSave();
+          } else {
+            setMdViewerStatus(`saved ${savedTimeLabel(mdViewerLastSavedAt)}`, 'saved');
+            await refreshArtifactReview();
+          }
+        } catch (e) {
+          console.error('Save artifact:', e);
+          setMdViewerStatus(String(e), 'danger');
+        } finally {
+          if (openArtifactSavePromise === savePromise) {
+            openArtifactSaving = false;
+            openArtifactSavePromise = null;
+            if (openArtifactPath === savedPath) refreshMdViewerChrome();
+          }
         }
-        setMdViewerStatus('Saved', 'saved');
-        await refreshArtifactReview();
-      } catch (e) {
-        console.error('Save artifact:', e);
-        setMdViewerStatus('Save failed', 'warning');
-      } finally {
-        openArtifactSaving = false;
-        refreshMdViewerChrome();
-      }
+      })();
+      openArtifactSavePromise = savePromise;
+      await openArtifactSavePromise;
     }
 
     async function showMdViewer(path, filename, markdownText, options = {}) {
@@ -13205,9 +13926,8 @@
         openArtifactPath !== path &&
         !confirmedDiscard
       ) {
-        const { ask } = window.__TAURI__.dialog;
-        const discard = await ask('Discard unsaved changes to the current artifact?', { title: 'Unsaved Changes', kind: 'warning' });
-        if (!discard) return false;
+        await flushOpenArtifactSave();
+        if (openArtifactDirty) return false;
       }
       const initialMode = options.mode === 'source' ? 'source' : 'preview';
       const editable = options.editable === true;
@@ -13217,12 +13937,14 @@
       openArtifactLastError = null;
       openArtifactDirty = false;
       openArtifactSaving = false;
+      openArtifactSavePromise = null;
       openArtifactExternalNotice = null;
       openArtifactEditable = editable;
       openArtifactKind = kind;
       openArtifactParseError = null;
       mdViewerReviewData = null;
       mdViewerReviewVisible = false;
+      mdViewerLastSavedAt = null;
       mdViewerMode = initialMode;
       mdViewerFilename.textContent = filename;
       rerenderOpenArtifact(markdownText);
@@ -13252,19 +13974,24 @@
 
     async function hideMdViewer() {
       if (openArtifactDirty) {
-        const { ask } = window.__TAURI__.dialog;
-        const discard = await ask('Discard unsaved changes to this artifact?', { title: 'Unsaved Changes', kind: 'warning' });
-        if (!discard) return;
+        await flushOpenArtifactSave();
+        if (openArtifactDirty) return;
       }
       if (openArtifactPollTimer) {
         clearInterval(openArtifactPollTimer);
         openArtifactPollTimer = null;
+      }
+      if (mdViewerSaveTimer) {
+        clearTimeout(mdViewerSaveTimer);
+        mdViewerSaveTimer = null;
       }
       openArtifactPath = null;
       openArtifactContent = null;
       openArtifactLastError = null;
       openArtifactDirty = false;
       openArtifactSaving = false;
+      openArtifactSavePromise = null;
+      mdViewerLastSavedAt = null;
       mdViewerMode = 'preview';
       mdViewerReviewData = null;
       mdViewerReviewVisible = false;
@@ -13418,6 +14145,10 @@
       openArtifactDirty = mdViewerEditor.value !== (openArtifactContent || '');
       if (openArtifactDirty) openArtifactExternalNotice = null;
       refreshMdViewerChrome();
+      scheduleOpenArtifactSave();
+    });
+    mdViewerEditor.addEventListener('blur', () => {
+      flushOpenArtifactSave();
     });
     artifactTemplateOverlay.addEventListener('click', (event) => {
       if (event.target === artifactTemplateOverlay) closeArtifactTemplatePicker(null);
@@ -13426,26 +14157,49 @@
     artifactTemplateOverlay.querySelectorAll('[data-artifact-kind]').forEach((button) => {
       button.addEventListener('click', () => closeArtifactTemplatePicker(button.getAttribute('data-artifact-kind')));
     });
+    function isEditableShortcutTarget(target = document.activeElement) {
+      const tag = target && target.tagName ? target.tagName.toLowerCase() : '';
+      const inTerminal = target?.closest?.('.recall-terminal');
+      return tag === 'input' || tag === 'textarea' || tag === 'select' || target?.isContentEditable || inTerminal;
+    }
+    function isOverlayActive() {
+      return [
+        whatsNewScrim,
+        aboutOverlay,
+        settingsOverlay,
+        readinessOverlay,
+        recoveryOverlay,
+        jobsOverlay,
+        detailOverlay,
+        recordingConsentOverlay,
+        cliSetupScrim,
+        artifactTemplateOverlay,
+      ].some((overlay) => overlay?.classList?.contains('active'));
+    }
     mdViewerContent.addEventListener('click', async (event) => {
-      const anchor = event.target.closest('a[href]');
-      if (!anchor) return;
-      event.preventDefault();
-      const href = anchor.getAttribute('href');
-      if (!href || href === '#') return;
-      try {
-        await invoke('cmd_open_file', { path: href });
-      } catch (e) {
-        console.error('Open markdown link:', e);
+      const clickedElement = event.target?.closest ? event.target : event.target?.parentElement;
+      const anchor = clickedElement?.closest?.('a[href]');
+      if (anchor) {
+        event.preventDefault();
+        const href = anchor.getAttribute('href');
+        if (!href || href === '#') return;
+        try {
+          await invoke('cmd_open_file', { path: href });
+        } catch (e) {
+          console.error('Open markdown link:', e);
+        }
+        return;
+      }
+      if (window.getSelection?.().toString()) return;
+      if (openArtifactEditable && mdViewerMode !== 'source') {
+        await setMdViewerMode('source');
       }
     });
 
     // Cmd+O shortcut — only when focus is not inside an editable context or the terminal
     document.addEventListener('keydown', (e) => {
       if ((e.metaKey || e.ctrlKey) && e.key === 'o') {
-        const tag = document.activeElement?.tagName;
-        const editable = document.activeElement?.isContentEditable;
-        const inTerminal = document.activeElement?.closest('.recall-terminal');
-        if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || editable || inTerminal) return;
+        if (isEditableShortcutTarget(e.target || document.activeElement)) return;
         e.preventDefault();
         openMarkdownFile();
       }
@@ -13453,10 +14207,32 @@
         const inTerminal = document.activeElement?.closest('.recall-terminal');
         if (inTerminal) return;
         e.preventDefault();
-        saveOpenArtifact();
+        flushOpenArtifactSave();
+      }
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'b') {
+        // Layout shortcut (à la VS Code): toggle regardless of focus, including
+        // while the terminal or a text field has it — Cmd+B is not a text-entry
+        // key here. Only suppress it under a modal/viewer overlay.
+        const target = e.target || document.activeElement;
+        const isSidebarButton = target?.closest?.('#btn-sidebar-collapse');
+        if (!isSidebarButton && (isOverlayActive() || mdViewer.classList.contains('active'))) return;
+        e.preventDefault();
+        toggleSidebarCollapsed();
       }
       if (e.key === 'Escape' && artifactTemplateOverlay.classList.contains('active')) {
+        e.preventDefault();
+        e.stopPropagation();
         closeArtifactTemplatePicker(null);
+        return;
+      }
+      if (e.key === 'Escape' && mdViewer.classList.contains('active')) {
+        if (e.defaultPrevented || isOverlayActive()) return;
+        e.preventDefault();
+        if (mdViewerMode === 'source') {
+          setMdViewerMode('preview');
+        } else {
+          hideMdViewer();
+        }
       }
     });
 

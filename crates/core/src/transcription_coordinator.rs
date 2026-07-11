@@ -242,7 +242,7 @@ pub fn transcribe_path_for_content_with_hints(
 }
 
 pub fn parakeet_guide_url() -> &'static str {
-    "https://github.com/silverstein/minutes/blob/main/docs/PARAKEET.md"
+    "https://github.com/silverstein/minutes/blob/main/docs/architecture/parakeet.md"
 }
 
 pub fn parakeet_setup_command(model: &str) -> String {

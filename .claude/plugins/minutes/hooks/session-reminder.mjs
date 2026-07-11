@@ -269,7 +269,7 @@ try {
       // refreshes when you explicitly ask for it — /plugin update alone
       // consults the stale mirror and reports "already at latest" even when
       // the upstream has moved far ahead. You must refresh the mirror first.
-      // See docs/PRE-RELEASE-CHECKLIST.md for the full background on why.
+      // See docs/release/pre-release-checklist.md for the full background on why.
       if (remoteVersion && isNewer(localVersion, remoteVersion) && !isSnoozed(remoteVersion)) {
         updateContext = `\n\nMinutes plugin update available: v${remoteVersion} (user is on v${localVersion}). Mention it ONCE in ONE line early in the response — do not harp on it. Tell them the upgrade takes THREE steps, because Claude Code's marketplace has a local git mirror that must be refreshed first:
 

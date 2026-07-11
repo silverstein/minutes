@@ -19,7 +19,7 @@
 // cost of running whisper-rs's Silero on the full 3–8 s sliding
 // buffer every 100 ms. With per-chunk streaming, cost is
 // O(new_audio): a 100 ms call processes ~3 chunks of 512 samples,
-// each ~0.5 ms of inference. PLAN-vad-refactor.md has the full
+// each ~0.5 ms of inference. docs/plans/vad-refactor.md has the full
 // rationale.
 //
 // The ONNX I/O contract was codex-verified against the
@@ -40,6 +40,7 @@ use crate::vad::{VadEngine, VadResult};
 use ndarray::{Array1, Array2, Array3};
 use ort::session::builder::GraphOptimizationLevel;
 use ort::session::Session;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::Path;
 
 /// Number of carry samples prepended to each chunk before inference.
@@ -94,10 +95,19 @@ impl OrtSileroVad {
         Self::with_params(silero_vad_path, SmoothingParams::whisper_silero_defaults())
     }
 
+    /// Build a fresh session, converting ORT init panics into normal
+    /// constructor errors so the recording sidecar can fall back.
+    pub fn new_catching_unwind(silero_vad_path: &Path) -> Result<Self, OrtSileroError> {
+        match catch_unwind(AssertUnwindSafe(|| Self::new(silero_vad_path))) {
+            Ok(result) => result,
+            Err(payload) => Err(OrtSileroError::Panic(panic_payload_message(payload))),
+        }
+    }
+
     /// Build with custom smoothing parameters. Mostly useful for
     /// tests; production should stick to the whisper-Silero defaults
     /// so behavior matches the existing engine within the tolerance
-    /// PLAN-vad-refactor.md documents.
+    /// docs/plans/vad-refactor.md documents.
     pub fn with_params(
         silero_vad_path: &Path,
         params: SmoothingParams,
@@ -372,6 +382,8 @@ impl VadEngine for OrtSileroVad {
 /// failure rather than starting a doomed engine.
 #[derive(Debug, thiserror::Error)]
 pub enum OrtSileroError {
+    #[error("ort init panicked: {0}")]
+    Panic(String),
     #[error("ort session builder: {0}")]
     SessionBuilder(String),
     #[error("ort model load: {0}")]
@@ -380,6 +392,16 @@ pub enum OrtSileroError {
     Inference(String),
     #[error("Silero ONNX schema mismatch (Silero release changed contract?): {0}")]
     SchemaMismatch(String),
+}
+
+pub(crate) fn panic_payload_message(payload: Box<dyn std::any::Any + Send>) -> String {
+    if let Some(message) = payload.downcast_ref::<&str>() {
+        (*message).to_string()
+    } else if let Some(message) = payload.downcast_ref::<String>() {
+        message.clone()
+    } else {
+        "unknown panic payload".to_string()
+    }
 }
 
 #[cfg(test)]
@@ -426,6 +448,14 @@ mod tests {
         let engine = engine.unwrap();
         assert!(engine.is_healthy());
         assert_eq!(engine.name(), "ort-silero");
+    }
+
+    #[test]
+    fn panic_payload_message_preserves_ort_init_text() {
+        let error = OrtSileroError::Panic(panic_payload_message(Box::new(
+            "Failed to initialize ORT API",
+        )));
+        assert!(error.to_string().contains("Failed to initialize ORT API"));
     }
 
     #[test]

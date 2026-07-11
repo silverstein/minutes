@@ -86,7 +86,7 @@ global hotkeys), do **not** dogfood by repeatedly replacing
 Use the dedicated development app identity instead:
 
 ```bash
-export MINUTES_DEV_SIGNING_IDENTITY="Developer ID Application: Mathieu Silverstein (63TMLKT8HN)"
+export MINUTES_DEV_SIGNING_IDENTITY="Developer ID Application: Your Name (TEAMID)"
 ./scripts/install-dev-app.sh
 ```
 
@@ -102,7 +102,7 @@ Why:
 
 ## Pre-Commit Discipline
 
-The full pre-commit checklist lives in [`docs/PRE-COMMIT.md`](docs/PRE-COMMIT.md). It covers MCP manifest sync, MCPB bundle guards, cargo fmt/clippy/test, Unix-only-API gating, feature-stub parity, site release constants, skill compiler outputs, and the toolchain + UI items below. **Read it before any commit that touches Rust, MCP server, frontend, or release surfaces** — the table is the single source of truth and is kept up to date as failure modes get caught.
+The full pre-commit checklist lives in [`docs/checklists/pre-commit.md`](docs/checklists/pre-commit.md). It covers MCP manifest sync, MCPB bundle guards, cargo fmt/clippy/test, Unix-only-API gating, feature-stub parity, site release constants, skill compiler outputs, and the toolchain + UI items below. **Read it before any commit that touches Rust, MCP server, frontend, or release surfaces** — the table is the single source of truth and is kept up to date as failure modes get caught.
 
 Two items added after PR #206 that bear repeating here because they bit hard:
 
@@ -133,7 +133,7 @@ LAST_PUBLISH_COMMIT=$(git log --grep="whisper-guard $PUBLISHED" --format="%H" | 
 git log "$LAST_PUBLISH_COMMIT"..HEAD -- crates/whisper-guard/
 ```
 
-If that diff is non-empty, publish whisper-guard first. The full procedure lives in [`docs/RELEASE.md`](docs/RELEASE.md) Step 11.5.
+If that diff is non-empty, publish whisper-guard first. The full procedure lives in [`docs/release/procedure.md`](docs/release/procedure.md) Step 11.5.
 
 **Why this matters:** whisper-guard has external consumers (~277 downloads at last check). Repo state drifting ahead of crates.io means downstream users silently miss anti-hallucination fixes shipped here.
 

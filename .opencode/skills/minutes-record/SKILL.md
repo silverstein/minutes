@@ -82,7 +82,7 @@ This downloads a ~466MB model. For faster but lower quality: `--model tiny` (75M
 minutes setup --parakeet                           # English (tdt-ctc-110m, ~220MB)
 minutes setup --parakeet --parakeet-model tdt-600m  # Multilingual v3 (~1.2GB)
 ```
-Requires both parakeet.cpp installed AND a Minutes CLI compiled with `--features parakeet`. The downloadable DMG and tagged CLI release binaries include the feature; the Homebrew Formula CLI (`brew install silverstein/tap/minutes`) and bare `cargo install minutes-cli` do not. If `minutes setup --parakeet` reports `WARNING: this minutes binary was compiled WITHOUT the parakeet feature`, rebuild from source with the flag. See `docs/PARAKEET.md` for the full walkthrough.
+Requires both parakeet.cpp installed AND a Minutes CLI compiled with `--features parakeet`. The downloadable DMG and tagged CLI release binaries include the feature; the Homebrew Formula CLI (`brew install silverstein/tap/minutes`) and bare `cargo install minutes-cli` do not. If `minutes setup --parakeet` reports `WARNING: this minutes binary was compiled WITHOUT the parakeet feature`, rebuild from source with the flag. See `docs/architecture/parakeet.md` for the full walkthrough.
 
 ## Gotchas
 

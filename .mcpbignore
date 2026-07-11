@@ -112,7 +112,6 @@ tooling/
 CLAUDE.md
 PLAN.md
 PLAN.md*
-BUILD-STATUS.md
 *.md
 !README.md
 

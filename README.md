@@ -6,13 +6,13 @@
 
 **Open-source conversation memory.** &nbsp; [useminutes.app](https://useminutes.app)
 
-Agents have run logs. Humans have conversations. **minutes** captures the human side — the decisions, the intent, the context that agents need but can't observe — and makes it queryable.
+**Your AI remembers every conversation — and no one can take it from you.**
 
-Record a meeting. Capture a voice memo on a walk. Ask Claude *"what did I promise Sarah?"* — and get an answer. Your AI remembers every conversation you've had.
+Agents have run logs. Humans have conversations. **minutes** captures the human side — the decisions, the intent, the context that agents need but can't observe — and makes it queryable. Record a meeting. Capture a voice memo on a walk. Dictate a thought at your cursor. Ask Claude *"what did I promise Sarah?"* — and get an answer.
 
-Minutes is not just a meeting-notes app. It is local conversation infrastructure for agents: audio capture, transcripts, decisions, commitments, people, and provenance exposed through plain files, CLI commands, MCP tools, and live transcript streams.
+Everything is transcribed **on your machine** and written to `~/meetings/` as plain markdown, which every AI you use (Claude Code, Codex, Gemini CLI, Cursor, OpenCode, Pi) reads directly. Nothing is uploaded. When a cloud memory app gets acquired or subpoenaed, your recordings aren't theirs to hand over — they never left your disk.
 
-> **Own every conversation you've ever had.** Cloud meeting tools rent your own conversations back to you. Minutes writes every meeting to `~/meetings/` as plain markdown, which every AI you use (Claude Code, Codex, Gemini CLI, Cursor, OpenCode, Pi) reads directly. No SDK. No API key. No vendor to outlive. Ten years from now, `grep` still works on your corpus. &nbsp;[**For agents →**](https://useminutes.app/for-agents) &nbsp;·&nbsp; [**Frontmatter schema →**](docs/frontmatter-schema.md)
+> **The private, owned conversation-memory layer.** Not another AI notetaker — that category ships free inside Zoom and Meet now. Minutes is audio capture, transcripts, decisions, commitments, people, and provenance as plain files, CLI commands, MCP tools, and live transcript streams. No SDK. No API key. No vendor to outlive. Ten years from now, `grep` still works on your corpus. &nbsp;[**For agents →**](https://useminutes.app/for-agents) &nbsp;·&nbsp; [**Frontmatter schema →**](docs/architecture/frontmatter-schema.md)
 
 <p align="center">
   <img src="docs/assets/demo.gif" alt="minutes demo — record, dictate, phone sync, AI recall" width="750">
@@ -109,7 +109,7 @@ minutes record --template standup                 # Apply a summary template
 minutes stop                                      # Stop from another terminal
 ```
 
-**Recording calls (Zoom, Meet, Teams, Webex):** the desktop app captures both your mic and the call's audio natively (ScreenCaptureKit, macOS 15+, no extra software). Grant Screen Recording + Microphone permission and start from the "Call detected" banner; Google Meet and Teams-in-browser need their experimental detection toggles enabled. The CLI (`minutes record`) cannot use native capture, so for command-line call recording you route system audio through BlackHole and a Multi-Output Device. Full setup in [`docs/audio-devices.md`](docs/audio-devices.md).
+**Recording calls (Zoom, Meet, Teams, Webex):** the desktop app captures both your mic and the call's audio natively (ScreenCaptureKit, macOS 15+, no extra software). Grant Screen Recording + Microphone permission and start from the "Call detected" banner; Google Meet and Teams-in-browser need their experimental detection toggles enabled. The CLI (`minutes record`) cannot use native capture, so for command-line call recording you route system audio through BlackHole and a Multi-Output Device. Full setup in [`docs/architecture/audio-devices.md`](docs/architecture/audio-devices.md).
 
 ### Consent disclosure aid
 
@@ -201,7 +201,7 @@ minutes consistency                                # Flag contradicting decision
 minutes live                                     # Start real-time transcription
 minutes stop                                     # Stop live session
 ```
-Streams local transcription to a JSONL file in real time — any AI agent can read it mid-meeting for live coaching. Depending on your build and config, live mode can run on Whisper, Parakeet, or the experimental Apple Speech standalone-live path. Apple Speech currently applies to standalone live transcript (`minutes live`) and opt-in dictation finalization, not recording-sidecar or batch transcription, and it falls back to a ready Parakeet backend before Whisper if Apple Speech is unavailable or fails mid-session in live mode. See [docs/APPLE_SPEECH.md](docs/APPLE_SPEECH.md) for the current Apple Speech scope. The MCP `read_live_transcript` tool provides delta reads (by line cursor or wall-clock duration). Works with Claude Code, Codex, OpenCode, Gemini CLI, or any agent that reads files. The Tauri desktop app has a Live Mode toggle that starts this with one click.
+Streams local transcription to a JSONL file in real time — any AI agent can read it mid-meeting for live coaching. Depending on your build and config, live mode can run on Whisper, Parakeet, or the experimental Apple Speech standalone-live path. Apple Speech currently applies to standalone live transcript (`minutes live`) and opt-in dictation finalization, not recording-sidecar or batch transcription, and it falls back to a ready Parakeet backend before Whisper if Apple Speech is unavailable or fails mid-session in live mode. See [docs/architecture/apple-speech.md](docs/architecture/apple-speech.md) for the current Apple Speech scope. The MCP `read_live_transcript` tool provides delta reads (by line cursor or wall-clock duration). Works with Claude Code, Codex, OpenCode, Gemini CLI, or any agent that reads files. The Tauri desktop app has a Live Mode toggle that starts this with one click.
 
 ### Dictation mode
 ```bash
@@ -935,13 +935,14 @@ brew install ffmpeg           # macOS
 # Enable speaker diarization (optional, ~34MB ONNX models)
 minutes setup --diarization
 
-# Recommended SOTA engine: Sherpa (in-process sherpa-onnx running parakeet-tdt-0.6b-v3).
-# Lower error rate than equivalent Whisper, multilingual (EN/FR/ES and more EU
-# languages), no Python and no sidecar binary. Opt-in: compile the CLI with
-# `--features engine-sherpa`, then enable it in one command:
+# Experimental engine: Sherpa (in-process sherpa-onnx running parakeet-tdt-0.6b-v3).
+# Newer multilingual model (EN/FR/ES and more EU languages), no Python. Opt-in and
+# NOT yet the recommended daily engine: in real-meeting A/B it trails the Parakeet
+# engine on segmentation/casing (see issue #369). Compile with `--features
+# engine-sherpa`, then enable in one command:
 minutes setup --sherpa        # downloads the int8 ONNX model (~670MB) + sets engine = "sherpa"
 # If you select sherpa without the feature/model, transcription auto-falls-back
-# to Whisper (the bundled default), so a recording never breaks. See docs/SHERPA-ENGINE.md.
+# to Whisper (the bundled default), so a recording never breaks. See docs/architecture/sherpa-engine.md.
 # macOS sherpa builds are self-contained (static). On Linux/Windows, run from the
 # repo (cargo run) rather than copying the binary out of target/ — details in the doc.
 
@@ -950,7 +951,7 @@ minutes setup --sherpa        # downloads the int8 ONNX model (~670MB) + sets en
 # AND (2) a Minutes CLI compiled with `--features parakeet`. The downloadable
 # DMG and tagged CLI release binaries include the feature; the Homebrew Formula
 # CLI (`brew install silverstein/tap/minutes`) and bare `cargo install minutes-cli`
-# do not. See docs/PARAKEET.md for the source-build walkthrough.
+# do not. See docs/architecture/parakeet.md for the source-build walkthrough.
 #
 # Note: `minutes setup --parakeet` installs the bundled Silero VAD weights
 # (~1.2 MB) and prints a manual recipe for downloading + converting the
@@ -1043,8 +1044,8 @@ The desktop app adds a system tray icon, recording controls, audio visualizer, R
 
 Release workflow details live in:
 
-- [docs/RELEASE-MACOS.md](docs/RELEASE-MACOS.md)
-- [docs/RELEASE-WINDOWS.md](docs/RELEASE-WINDOWS.md)
+- [docs/release/platform-macos.md](docs/release/platform-macos.md)
+- [docs/release/platform-windows.md](docs/release/platform-windows.md)
 
 For macOS development, use a dedicated signed dev app identity:
 
@@ -1129,7 +1130,7 @@ model = "small"           # whisper: tiny (75MB), base, small (466MB), medium, l
                           # Default: auto-detect. Set this for similar-sounding languages (Urdu/Hindi, etc.)
 # engine = "apple-speech"  # Experimental: standalone `minutes live` only. Configure via config file or CLI, not desktop settings.
 #                         # If Apple Speech cannot run, standalone live falls back to a ready Parakeet backend, then Whisper.
-#                         # See docs/APPLE_SPEECH.md for current scope and limitations.
+#                         # See docs/architecture/apple-speech.md for current scope and limitations.
 # parakeet_model = "tdt-600m"                    # parakeet: tdt-ctc-110m (English), tdt-600m (multilingual v3)
 # parakeet_binary = "parakeet"                   # Path to parakeet.cpp binary (or name in PATH)
 # parakeet_boost_limit = 25                      # Experimental: boost top graph-derived phrases (0 disables)

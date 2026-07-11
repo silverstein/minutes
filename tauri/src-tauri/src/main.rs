@@ -1444,6 +1444,7 @@ fn main() {
     let discard_short_hotkey_capture = Arc::new(AtomicBool::new(false));
     let dictation_active = Arc::new(AtomicBool::new(false));
     let dictation_stop_flag = Arc::new(AtomicBool::new(false));
+    let dictation_release_started_at = Arc::new(Mutex::new(None));
     let live_transcript_active = Arc::new(AtomicBool::new(false));
     let live_transcript_stop_flag = Arc::new(AtomicBool::new(false));
     let screen_share_hidden = Arc::new(AtomicBool::new(
@@ -1554,8 +1555,7 @@ fn main() {
                     // AFTER dropping it to avoid deadlock.
                     type UnifiedResult = Option<(
                         shortcut_manager::ShortcutSlot,
-                        Option<shortcut_manager::StateMachineAction>,
-                        Option<(shortcut_manager::ShortcutSlot, u64)>,
+                        shortcut_manager::StateMachineAction,
                     )>;
                     let unified_result: UnifiedResult = {
                         if let Some(mgr_state) =
@@ -1565,8 +1565,16 @@ fn main() {
                                 if let Some(slot) = mgr.find_slot_for_shortcut_id(shortcut_id) {
                                     match event.state() {
                                         tauri_plugin_global_shortcut::ShortcutState::Pressed => {
-                                            let hold_info = mgr.handle_press(slot);
-                                            Some((slot, None, hold_info))
+                                            if slot == shortcut_manager::ShortcutSlot::Dictation {
+                                                commands::capture_pending_dictation_target(app);
+                                            }
+                                            let session_active =
+                                                shortcut_manager::is_slot_session_active_fast(
+                                                    app, slot,
+                                                );
+                                            let (_s, action) =
+                                                mgr.handle_press(slot, session_active);
+                                            Some((slot, action))
                                         }
                                         tauri_plugin_global_shortcut::ShortcutState::Released => {
                                             let session_active =
@@ -1575,7 +1583,7 @@ fn main() {
                                                 );
                                             let (_s, action) =
                                                 mgr.handle_release(slot, session_active);
-                                            Some((slot, Some(action), None))
+                                            Some((slot, action))
                                         }
                                     }
                                 } else {
@@ -1589,12 +1597,9 @@ fn main() {
                         }
                     }; // lock dropped here
 
-                    if let Some((slot, action, hold_info)) = unified_result {
-                        if let Some(action) = action {
+                    if let Some((slot, action)) = unified_result {
+                        if !matches!(action, shortcut_manager::StateMachineAction::None) {
                             shortcut_manager::execute_action(app, slot, action);
-                        }
-                        if let Some((slot, generation)) = hold_info {
-                            shortcut_manager::schedule_hold_check(app, slot, generation);
                         }
                         return;
                     }
@@ -1688,6 +1693,7 @@ fn main() {
             dictation_stop_flag: dictation_stop_flag.clone(),
             dictation_focus_guard: Arc::new(Mutex::new(None)),
             pending_dictation_target: Arc::new(Mutex::new(None)),
+            dictation_release_started_at: dictation_release_started_at.clone(),
             live_transcript_active: live_transcript_active.clone(),
             live_transcript_stop_flag: live_transcript_stop_flag.clone(),
             live_shortcut_enabled: {
@@ -2532,6 +2538,7 @@ fn main() {
             commands::cmd_get_text_file_access,
             commands::cmd_get_text_file_review,
             commands::cmd_recent_artifacts,
+            commands::cmd_list_documents,
             commands::cmd_get_recall_workspace_state,
             commands::cmd_set_recall_workspace_state,
             commands::cmd_write_text_file,
@@ -2794,6 +2801,64 @@ mod tray_activity_tests {
         assert!(
             !commands_rs.contains("window.close()"),
             "dictation overlay lifecycle should not queue async WebView close during teardown"
+        );
+    }
+
+    #[test]
+    fn dictation_overlay_success_is_not_terminal_dismiss() {
+        let manifest = env!("CARGO_MANIFEST_DIR");
+        let overlay =
+            std::fs::read_to_string(format!("{}/../src/dictation-overlay.html", manifest))
+                .expect("failed to read dictation overlay");
+        let success_case = overlay
+            .split("case 'success':")
+            .nth(1)
+            .and_then(|tail| tail.split("case 'copied':").next())
+            .expect("success case should be extractable");
+
+        assert!(
+            success_case.contains("label.textContent = 'Captured'"),
+            "per-utterance success should be presented as an in-session capture checkpoint"
+        );
+        assert!(
+            !success_case.contains("scheduleDismiss") && !success_case.contains("dismiss()"),
+            "per-utterance success must not schedule dismissal while dictation can continue"
+        );
+        assert!(
+            overlay.contains("if (!isTerminalState(state))")
+                && overlay.contains("cancelDismissTimer();"),
+            "non-terminal state changes should cancel any pending terminal dismiss timer"
+        );
+    }
+
+    #[test]
+    fn dictation_overlay_reduced_motion_disables_animations() {
+        let manifest = env!("CARGO_MANIFEST_DIR");
+        let overlay =
+            std::fs::read_to_string(format!("{}/../src/dictation-overlay.html", manifest))
+                .expect("failed to read dictation overlay");
+
+        assert!(
+            overlay.contains("@media (prefers-reduced-motion: reduce)"),
+            "dictation overlay must honor reduced motion"
+        );
+        for selector in [
+            ".pill.dismissing",
+            ".dot.blink",
+            ".spinner",
+            ".waveform.processing .bar",
+            ".silence-bar",
+            ".soft-swap",
+        ] {
+            assert!(
+                overlay.contains(selector),
+                "reduced-motion block should cover {selector}"
+            );
+        }
+        assert!(
+            overlay.contains("animation: none !important")
+                && overlay.contains("transition: none !important"),
+            "reduced-motion block should effectively disable animation and transition effects"
         );
     }
 

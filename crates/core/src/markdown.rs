@@ -746,7 +746,7 @@ pub fn rewrite_with_retry_path(
 /// instead of attempting a string replace that could corrupt YAML
 /// anchors, folded scalars, literal blocks, or aliases.
 ///
-/// Steps (described in `PLAN.md.command-palette-slice-2` D8):
+/// Steps (described in `docs/plans/command-palette-slice-2.md` D8):
 /// 1. Read the file.
 /// 2. Split frontmatter via `split_frontmatter`. Empty frontmatter
 ///    means "not a Minutes meeting" → refuse.

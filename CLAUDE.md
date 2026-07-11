@@ -289,7 +289,7 @@ node test/mcp_tools_test.mjs                        # 8 MCP integration tests
 
 - All audio processing is local (whisper.cpp or parakeet.cpp + pyannote-rs + Silero VAD). ffmpeg recommended but optional.
 - Claude summarizes via MCP when the user asks (no API key needed)
-- Optional automated summarization via Ollama (local), Mistral, or cloud LLMs
+- Optional automated summarization fully on-device via Apple Foundation Models (macOS 26+, `engine = "apple"`; preferred by `"auto"` when available — see docs/architecture/apple-foundation-models.md), via Ollama (local), Mistral, or cloud LLMs
 - Config at `~/.config/minutes/config.toml` (optional, compiled defaults work)
 - Tauri assistant uses a singleton workspace at `~/.minutes/assistant/`
 - `CLAUDE.md` and `AGENTS.md` hold matching general assistant instructions; `CURRENT_MEETING.md` is the active meeting focus for "Discuss with AI"

@@ -1,3 +1,4 @@
+pub mod apple_fm;
 pub mod apple_speech;
 pub mod autoresearch;
 pub mod calendar;

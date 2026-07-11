@@ -241,7 +241,8 @@ fn ensure_helper_installed() -> crate::error::Result<PathBuf> {
     Ok(bin_path)
 }
 
-#[cfg(test)]
+// Stub-script-based tests are unix-only: the fake helper is a /bin/sh script.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::io::Write;

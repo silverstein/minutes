@@ -18,13 +18,17 @@ const routes = [
   "/dojo",
   "/for-agents",
   "/proof",
+  "/resources/ai-notetakers-attorney-client-privilege",
+  "/resources/best-local-speech-to-text",
   "/resources/best-mcp-meeting-memory-tools",
   "/resources/best-meeting-tools-for-claude-code-and-codex",
   "/resources/is-otter-ai-hipaa-compliant",
   "/resources/open-source-alternatives-to-granola-ai",
+  "/resources/remove-ai-notetaker-bots-from-meetings",
   "/security",
   "/writing",
   "/writing/governance-built-in-not-retrofitted",
+  "/writing/whisper-cpp-vs-parakeet-cpp",
 ] as const;
 
 export default function sitemap(): MetadataRoute.Sitemap {

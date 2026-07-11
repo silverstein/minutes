@@ -41,6 +41,24 @@ const pages = [
     blurb:
       "Best if you are choosing between a polished dictation tool and an open-source conversation memory layer where dictation is one of four capture modes.",
   },
+  {
+    title: "Minutes vs Fathom",
+    href: "/compare/fathom-vs-minutes",
+    blurb:
+      "Best if you are weighing the strongest free cloud notetaker against an on-device memory layer where nothing is ever uploaded.",
+  },
+  {
+    title: "Minutes vs MacWhisper",
+    href: "/compare/macwhisper-vs-minutes",
+    blurb:
+      "Best if you are choosing between two local-first Mac tools: the best file-transcription GUI versus a conversation memory layer for agents.",
+  },
+  {
+    title: "Minutes vs Krisp",
+    href: "/compare/krisp-vs-minutes",
+    blurb:
+      "Best if you are deciding between on-device noise cancellation with cloud notes added on, and a fully on-device conversation record.",
+  },
 ] as const;
 
 export default function CompareHubPage() {

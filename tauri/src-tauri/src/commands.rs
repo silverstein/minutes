@@ -8678,8 +8678,14 @@ pub async fn cmd_recall_chat_send(
                         .unwrap_or_default()
                 });
                 let body = body.trim();
+                // Floor to a UTF-8 char boundary: a bare `&body[..6000]` panics
+                // when a multi-byte char (accents, CJK, emoji) straddles 6000.
                 let truncated_body = if body.len() > 6000 {
-                    &body[..6000]
+                    let mut end = 6000;
+                    while end > 0 && !body.is_char_boundary(end) {
+                        end -= 1;
+                    }
+                    &body[..end]
                 } else {
                     body
                 };
@@ -8709,8 +8715,14 @@ pub async fn cmd_recall_chat_send(
             String::new()
         } else {
             let raw = format!("Meeting context:\n\n{}\n\n---\n\n", sections.join("\n\n"));
+            // Floor to a UTF-8 char boundary: `raw[..12000]` panics if a
+            // multi-byte char straddles 12000 (non-ASCII meeting content).
             if raw.len() > 12000 {
-                raw[..12000].to_string()
+                let mut end = 12000;
+                while end > 0 && !raw.is_char_boundary(end) {
+                    end -= 1;
+                }
+                raw[..end].to_string()
             } else {
                 raw
             }

@@ -202,11 +202,12 @@ export default function MeetingMinutesTemplatePage() {
           <p>
             Full disclosure: we publish this page and we also build the tool that makes it
             partly obsolete. <span className="font-medium text-[var(--text)]">Minutes</span>{" "}
-            (open source, free) records the meeting, transcribes it on your device, and writes
-            exactly the structure above automatically — attendees, decisions, and action items
-            as structured YAML in a markdown file on your own disk. The template becomes the
-            output format, not homework. Templates still win for meetings you don&rsquo;t
-            record, and formal board minutes where a human secretary is the point.
+            (open source, free) records the meeting, transcribes it on your device, and — once
+            you connect an assistant (Claude via MCP, or a local LLM) — fills in the structure
+            above automatically: attendees, decisions, and action items as structured YAML in a
+            markdown file on your own disk. The template becomes the output format, not
+            homework. Templates still win for meetings you don&rsquo;t record, and formal board
+            minutes where a human secretary is the point.
           </p>
         </div>
       </section>

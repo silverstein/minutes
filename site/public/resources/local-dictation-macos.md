@@ -6,16 +6,16 @@ Dictation is the most personal audio there is, and it's where cloud processing i
 
 ## Quick answer
 
-- Occasional sentence → **built-in macOS dictation** (already installed; Apple processes many languages on-device on Apple Silicon)
+- Occasional sentence → **built-in macOS dictation** (already installed; Apple processes many languages on-device on Apple Silicon, with auto-punctuation)
 - Heavy daily dictation with per-app formatting → **superwhisper** (local models by default, closed source, subscription)
-- File transcription first, dictation included → **MacWhisper** (one-time Pro purchase)
-- Dictation as part of a conversation-memory system → **Minutes** (open source, free; clipboard + timestamped daily note, plus meetings/memos/live transcription, all agent-searchable)
+- File transcription first, dictation included → **MacWhisper** (one-time Pro purchase; dictation is in the direct-download version only, not the App Store build)
+- Dictation as part of a conversation-memory system → **Minutes** (open source, free; text typed at your cursor — or clipboard via CLI — plus a timestamped daily note, alongside meetings/memos/live transcription, all agent-searchable)
 
 Careful if "local" is your requirement: several popular dictation apps (Wispr Flow best known) process speech in the cloud — a different privacy contract.
 
 ## Setting up Minutes dictation
 
-Install, run `minutes setup --model tiny` once, bind the hotkey in the menu bar app. Speak: text lands in your clipboard AND a timestamped daily note in ~/meetings. Text you paste into other apps vanishes into those apps; text that also lands in your own files compounds — your agents can answer "what was that idea I had last Tuesday?"
+Install, run `minutes setup --model tiny` once, bind the hotkey in the menu bar app. Speak: text is inserted at your cursor (CLI mode uses the clipboard), and a timestamped copy is appended to your daily note in ~/meetings. Text you dictate into other apps vanishes into those apps; text that also lands in your own files compounds — your agents can answer "what was that idea I had last Tuesday?"
 
 ## How to choose
 

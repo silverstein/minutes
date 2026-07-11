@@ -18,13 +18,13 @@ const comparisonRows = [
   },
   {
     label: "Capture method",
-    competitor: "Bot or bot-free (desktop app), per meeting — Zoom, Meet, Teams, Slack Huddles",
+    competitor: "Bot, or bot-free via desktop app (beta), per meeting — Zoom, Meet, Teams, Slack Huddles",
     minutes: "Always botless — records device-side, works for in-person conversations too",
   },
   {
     label: "Where audio is processed",
-    competitor: "Fathom's cloud, after the meeting ends; AI via Anthropic, OpenAI, and Google",
-    minutes: "On your device (whisper.cpp or parakeet.cpp); nothing is uploaded",
+    competitor: "Fathom's cloud; AI via Anthropic, OpenAI, and Google",
+    minutes: "On your device (whisper.cpp or parakeet.cpp); audio is never uploaded",
   },
   {
     label: "Where recordings live",
@@ -58,7 +58,7 @@ const comparisonRows = [
   },
   {
     label: "Pricing",
-    competitor: "Free (unlimited recording); Premium $20, Team $19, Business $34 per user/mo; Enterprise custom",
+    competitor: "Free (unlimited recording); Premium $20, Team $19, Business $34 per user/mo billed monthly ($16/$15/$25 annually); Enterprise custom",
     minutes: "Open source and free to run yourself",
   },
 ] as const;
@@ -72,7 +72,7 @@ const architecture = {
     steps: [
       {
         label: "Capture",
-        detail: "bot in the call, or bot-free via desktop app",
+        detail: "bot in the call, or bot-free via desktop app (beta)",
         offDevice: false,
       },
       {
@@ -110,7 +110,7 @@ const architecture = {
       },
     ],
     footnote:
-      "Nothing is uploaded. There is no retention policy to configure because there is no vendor copy to retain — the only copy is yours.",
+      "Nothing is uploaded by default — the only network traffic is one-time model downloads, plus transcript text if you explicitly configure an LLM summarizer (local via Ollama, or a provider you choose). There is no retention policy to configure because there is no vendor copy to retain — the only copy is yours.",
   },
 } as const;
 
@@ -124,6 +124,7 @@ const sources = [
   { label: "Fathom MCP docs", href: "https://developers.fathom.ai/mcp-docs" },
   { label: "Minutes for agents", href: "https://useminutes.app/for-agents" },
   { label: "Minutes MCP reference", href: "https://useminutes.app/docs/mcp/tools" },
+  { label: "Minutes security & privacy architecture", href: "/security" },
 ] as const;
 
 export default function FathomVsMinutesPage() {
@@ -133,7 +134,7 @@ export default function FathomVsMinutesPage() {
       competitorLabel="Fathom"
       markdownHref="/compare/fathom-vs-minutes.md"
       lastReviewed="2026-07-11"
-      heroSummary="Fathom is the strongest free offer in cloud meeting notes — unlimited recording at $0, polished summaries, CRM sync, and now a bot-free capture option. Minutes draws the line somewhere Fathom doesn't: your conversation never leaves your machine at all. Fathom processes and stores every meeting in its US cloud, with AI running through Anthropic, OpenAI, and Google; Minutes transcribes on-device and writes markdown to your own disk. Which trade you should make depends on whether 'free and polished' or 'never uploaded' is your constraint."
+      heroSummary="Fathom is the strongest free offer in cloud meeting notes — unlimited recording at $0, polished summaries, CRM sync, and now a bot-free capture option (in beta). Minutes draws the line somewhere Fathom doesn't: recording, transcription, and storage all happen on your own machine, and your audio is never uploaded. Fathom processes and stores every meeting in its US cloud, with AI running through Anthropic, OpenAI, and Google; Minutes transcribes on-device and writes markdown to your own disk. Which trade you should make depends on whether 'free and polished' or 'never uploaded' is your constraint."
       quickVerdictCompetitor="you want excellent free meeting summaries with CRM workflows and you're comfortable with your recordings living in a US cloud, processed by major AI providers under no-training contracts."
       quickVerdictMinutes="your conversations must never leave your machine — for compliance, confidentiality, or principle — and you want inspectable markdown your own agents query locally, not another cloud account."
       architecture={architecture as any}
@@ -141,10 +142,10 @@ export default function FathomVsMinutesPage() {
       competitorWins={[
         "The free tier is genuinely exceptional: unlimited recordings, transcription, and storage at $0 — nobody else in the category, including us, matches that offer.",
         "Sales and CRM workflows are real product depth: HubSpot/Salesforce field sync, coaching metrics, AI scorecards, deal views.",
-        "Good agent-ecosystem citizenship: a public API and a first-party MCP server, plus bot-free capture that addresses the most-hated part of cloud notetakers.",
+        "Good agent-ecosystem citizenship: a public API and a first-party MCP server, plus bot-free capture (beta) that addresses the most-hated part of cloud notetakers.",
       ]}
       minutesWins={[
-        "Nothing leaves your machine — Fathom's bot-free mode still uploads your meeting to its cloud; Minutes' botless capture never uploads anything anywhere.",
+        "Your audio never leaves your machine — Fathom's bot-free mode still uploads your meeting to its cloud; Minutes' capture-to-storage pipeline has no upload step at all (see our security page for the complete list of what does touch the network).",
         "No indefinite vendor retention: Fathom keeps recordings by default until deleted, with auto-delete rules gated to Business+. Minutes' only copy is the one on your disk.",
         "Open source (MIT) and free forever — the privacy claims are verifiable Rust, not a trust page; and it captures in-person conversations and voice memos, not just video calls.",
       ]}

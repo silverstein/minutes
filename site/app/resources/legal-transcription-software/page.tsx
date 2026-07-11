@@ -175,11 +175,11 @@ export default function LegalTranscriptionSoftwarePage() {
           <p>
             <span className="font-medium text-[var(--text)]">Minutes</span> is built for job #2.
             It records and transcribes on your own machine (whisper.cpp — the audio has no
-            network path), labels speakers, extracts action items, and stores everything as
-            markdown files on your disk with owner-only permissions — organized, greppable, and
-            queryable by your AI assistant without any of it leaving your control. It&rsquo;s
-            open source (MIT), so your security review can read the code instead of a vendor
-            questionnaire.
+            network path), labels speakers, and stores everything as markdown files on your disk
+            with owner-only permissions — organized, greppable, and readable by your AI
+            assistant straight from local files, with structured action items filled in once you
+            connect one. It&rsquo;s open source (MIT), so your security review can read the code
+            instead of a vendor questionnaire.
           </p>
           <p>
             Where it is <em>not</em> the tool: certified transcripts (job #1 — hire a human),

@@ -13,7 +13,7 @@ export const metadata: Metadata = {
 const pipeline = [
   {
     step: "Capture",
-    detail: "Mic and system audio, recorded on your machine (cpal)",
+    detail: "Mic (cpal) and system audio (native macOS capture in the desktop app, or a loopback device), recorded on your machine",
   },
   {
     step: "Transcribe",
@@ -163,17 +163,19 @@ export default function SecurityPage() {
           <p>
             A security page you can trust has to be honest about the exceptions, so here is the
             complete list. Minutes downloads transcription and diarization models once, at setup.
-            If you install updates, those come over the network too. And if you explicitly
-            configure an LLM for automated summarization, your transcript text goes wherever you
-            pointed it — at a local model via Ollama (the private default posture), or at a cloud
-            provider if you choose one and supply a key.
+            If you install updates, those come over the network too. And if you enable automated
+            summarization — it is off by default — your transcript text goes wherever you point
+            it: a local model via Ollama, an agent CLI you&rsquo;ve signed into (claude, codex,
+            gemini — which round-trips through that provider&rsquo;s cloud), or a cloud API if
+            you supply a key.
           </p>
           <p>
             What is never in that traffic: your audio and your transcripts, unless you yourself
             configured a summarizer to receive them. Out of the box, Minutes needs no API key and
             sends conversation content nowhere. When Claude summarizes a meeting through MCP, it
             reads local files through tools you granted — visible in your agent&rsquo;s tool log,
-            not a background sync.
+            not a background sync — and what it reads travels to your agent&rsquo;s model
+            provider as conversation context, like anything else you show your agent.
           </p>
         </div>
       </section>

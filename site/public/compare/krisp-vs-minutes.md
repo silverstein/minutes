@@ -2,7 +2,7 @@
 
 Last reviewed: 2026-07-11
 
-Krisp has real on-device credentials: its noise cancellation processes audio locally and never sends it anywhere. But its meeting-notes product is a different pipeline — summaries via Microsoft Azure, transcripts and recordings in Krisp Cloud by default, fully on-device configuration gated to Enterprise (and English-only). Minutes runs the entire pipeline on your machine for everyone.
+Krisp has real on-device credentials: its noise cancellation processes audio locally and never sends it anywhere. But its meeting-notes product is a different pipeline — summaries via Microsoft Azure, transcripts and recordings stored in Krisp Cloud once you enable notes (an explicit opt-in per Krisp's security page, but the only storage option outside Enterprise), and fully on-device storage gated to Enterprise. Minutes runs the entire pipeline on your machine for everyone.
 
 ## Quick verdict
 
@@ -11,7 +11,7 @@ Krisp has real on-device credentials: its noise cancellation processes audio loc
 
 ## Where your conversation goes
 
-**Krisp** (hybrid): capture + denoise on-device (genuinely local) → transcribe on-device for English, Krisp servers for 15 other languages → AI notes in the cloud (Microsoft Azure) → transcripts/recordings stored in Krisp Cloud, US servers (on-device storage: Enterprise, English-only). SOC 2 Type II, HIPAA BAAs on business tiers, published DPA.
+**Krisp** (hybrid): capture + denoise on-device (genuinely local) → transcribe on-device for English, Krisp servers for 15 other languages → AI notes in the cloud (Microsoft Azure) → transcripts/recordings stored in Krisp Cloud (US servers) once notes are enabled; on-device storage is an Enterprise feature. SOC 2 Type II, HIPAA BAA available (its security page references a legacy "Business tier"; pricing lists BAA under Enterprise), published DPA.
 
 **Minutes** (all local): capture device audio → transcribe + diarize on-device (whisper.cpp/parakeet.cpp + pyannote) → markdown on your disk, 0600 permissions. The private configuration is the only configuration.
 
@@ -21,10 +21,10 @@ Krisp has real on-device credentials: its noise cancellation processes audio loc
 - Noise cancellation — Krisp: best in category, on-device; Minutes: optional local RNNoise denoising, not the headline
 - Transcription — Krisp: on-device English, server-side for 15 languages; Minutes: on-device always, ~99 languages
 - AI notes — Krisp: cloud (Azure); Minutes: local structure; LLM only if you configure one
-- Transcript storage — Krisp: Krisp Cloud default, US; Minutes: your disk, everyone
+- Transcript storage — Krisp: Krisp Cloud (US) once notes are enabled, Enterprise for on-device; Minutes: your disk, everyone
 - Open source — Krisp: no; Minutes: MIT
 - Platforms — Krisp: macOS + Windows; Minutes: macOS app + CLI (open source)
-- Pricing — Krisp: Free (2 AI notes/day), Core $16/$8, Advanced $30/$15, Enterprise custom; Minutes: free
+- Pricing — Krisp: free plan per its help center (2 AI notes/day; pricing page currently shows a 7-day trial), Core $16/$8, Advanced $30/$15, Enterprise custom; Minutes: free
 
 ## Where Krisp wins
 
@@ -34,7 +34,7 @@ Krisp has real on-device credentials: its noise cancellation processes audio loc
 
 ## Where Minutes wins
 
-- Private-by-architecture for every user, free — Krisp gates on-device transcripts to Enterprise, English-only
+- Private-by-architecture for every user, free — Krisp gates on-device transcript storage to Enterprise (and its on-device transcription covers English only)
 - Real memory layer: diarized speakers, YAML action items/decisions, months of meetings queryable via MCP/CLI/SDK
 - Open source: "audio has no network path" is verifiable in source
 

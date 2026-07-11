@@ -96,6 +96,6 @@ Minutes are not a transcript. They answer three future questions: what did we de
 
 ## Or stop filling in templates
 
-Full disclosure: we build the tool that makes this page partly obsolete. Minutes (open source, free) records the meeting, transcribes on your device, and writes exactly this structure automatically — attendees, decisions, action items as structured YAML in markdown on your own disk. Templates still win for meetings you don't record and formal board minutes where a human secretary is the point.
+Full disclosure: we build the tool that makes this page partly obsolete. Minutes (open source, free) records the meeting, transcribes on your device, and — once you connect an assistant (Claude via MCP, or a local LLM) — fills in this structure automatically: attendees, decisions, action items as structured YAML in markdown on your own disk. Templates still win for meetings you don't record and formal board minutes where a human secretary is the point.
 
 https://github.com/silverstein/minutes

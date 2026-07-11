@@ -17,7 +17,7 @@ Most "legal transcription software" roundups compare turnaround times and per-mi
 
 ## Where Minutes fits — and doesn't
 
-Minutes is built for job #2: records and transcribes on your own machine (whisper.cpp — the audio has no network path), labels speakers, extracts action items, stores markdown on your disk with owner-only permissions — greppable and queryable by your AI assistant without leaving your control. Open source (MIT): your security review can read the code.
+Minutes is built for job #2: records and transcribes on your own machine (whisper.cpp — the audio has no network path), labels speakers, stores markdown on your disk with owner-only permissions — greppable, readable by your AI assistant straight from local files, with structured action items filled in once you connect one. Open source (MIT): your security review can read the code.
 
 Not the tool for: certified transcripts (hire a human), jurisdiction-formatted verbatim output, medical-legal templating. Your own obligations — consent, device encryption, matter-based access — stay with you.
 

@@ -6,7 +6,7 @@ Cloud notetakers answer the security question with policies: encryption in trans
 
 ## The pipeline — every step on your device
 
-1. **Capture** — mic and system audio, recorded on your machine (cpal)
+1. **Capture** — mic (cpal) and system audio (native macOS capture in the desktop app, or a loopback device), recorded on your machine
 2. **Transcribe** — whisper.cpp or parakeet.cpp, running on your CPU/GPU
 3. **Diarize** — pyannote ONNX models, local; speaker labels never computed in a cloud
 4. **Store** — markdown + YAML frontmatter on your own disk, 0600 owner-only permissions
@@ -22,9 +22,9 @@ Cloud notetakers answer the security question with policies: encryption in trans
 
 - Transcription and diarization models are downloaded once, at setup
 - Updates, if you install them
-- If you explicitly configure an LLM for automated summarization, transcript text goes where you pointed it — a local model via Ollama (the private default posture), or a cloud provider if you choose one and supply a key
+- If you enable automated summarization (off by default), transcript text goes where you point it — a local model via Ollama, an agent CLI you've signed into (claude/codex/gemini — which round-trips through that provider's cloud), or a cloud API if you supply a key
 
-What is never in that traffic: your audio and transcripts, unless you yourself configured a summarizer to receive them. Out of the box, Minutes needs no API key and sends conversation content nowhere. When Claude summarizes a meeting through MCP, it reads local files through tools you granted — visible in your agent's tool log, not a background sync.
+What is never in that traffic: your audio and transcripts, unless you yourself configured a summarizer to receive them. Out of the box, Minutes needs no API key and sends conversation content nowhere. When Claude summarizes a meeting through MCP, it reads local files through tools you granted — visible in your agent's tool log, not a background sync — and what it reads travels to your agent's model provider as conversation context, like anything else you show your agent.
 
 ## For regulated work
 

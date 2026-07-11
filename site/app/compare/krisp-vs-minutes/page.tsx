@@ -4,7 +4,7 @@ import { ComparePage } from "@/components/compare-page";
 export const metadata: Metadata = {
   title: "Minutes vs Krisp",
   description:
-    "Minutes vs Krisp: Krisp's noise cancellation is genuinely on-device, but its meeting notes run through the cloud and transcripts live in Krisp Cloud by default. Minutes keeps the entire pipeline on your machine. A sourced, fit-based comparison.",
+    "Minutes vs Krisp: Krisp's noise cancellation is genuinely on-device, but its meeting notes run through the cloud and transcripts are stored in Krisp Cloud once notes are enabled. Minutes keeps the entire pipeline on your machine. A sourced, fit-based comparison.",
   alternates: {
     canonical: "/compare/krisp-vs-minutes",
   },
@@ -38,12 +38,12 @@ const comparisonRows = [
   },
   {
     label: "Where transcripts live",
-    competitor: "Krisp Cloud by default (US servers); on-device storage is Enterprise-gated and English-only",
+    competitor: "Krisp Cloud (US servers) once meeting notes are enabled — the only non-Enterprise option; on-device storage is Enterprise-gated",
     minutes: "Your own disk, as markdown — for everyone, not a plan tier",
   },
   {
     label: "Compliance posture",
-    competitor: "SOC 2 Type II, HIPAA with BAA on business/enterprise tiers, published DPA",
+    competitor: "SOC 2 Type II, HIPAA BAA available per its security page (which references a legacy 'Business tier'; pricing lists BAA under Enterprise), published DPA",
     minutes: "No vendor in the loop to trust, breach, or subpoena",
   },
   {
@@ -58,14 +58,14 @@ const comparisonRows = [
   },
   {
     label: "Pricing",
-    competitor: "Free (2 AI notes/day); Core $16/mo ($8 annual); Advanced $30/mo ($15 annual); Enterprise custom",
+    competitor: "Free plan per its help center (2 AI notes/day; the pricing page currently shows a 7-day trial); Core $16/mo ($8 annual); Advanced $30/mo ($15 annual); Enterprise custom",
     minutes: "Open source and free to run yourself",
   },
 ] as const;
 
 const architecture = {
   caption:
-    "Krisp earned its reputation honestly: noise cancellation runs on your device and that audio path never touches its servers. The notes product is a different pipeline — summaries are generated in the cloud and transcripts live in Krisp Cloud by default, with fully on-device storage reserved for Enterprise.",
+    "Krisp earned its reputation honestly: noise cancellation runs on your device and that audio path never touches its servers. The notes product is a different pipeline — summaries are generated in the cloud, and once you enable meeting notes, transcripts are stored in Krisp Cloud (per Krisp's security page, an explicit opt-in — but the only storage option outside Enterprise).",
   competitor: {
     name: "Krisp",
     leavesDevice: true,
@@ -87,7 +87,7 @@ const architecture = {
       },
       {
         label: "Store transcripts + recordings",
-        detail: "Krisp Cloud, US servers (on-device option: Enterprise, English-only)",
+        detail: "Krisp Cloud, US servers, once notes are enabled (on-device option: Enterprise)",
         offDevice: true,
       },
     ],
@@ -139,7 +139,7 @@ export default function KrispVsMinutesPage() {
       competitorLabel="Krisp"
       markdownHref="/compare/krisp-vs-minutes.md"
       lastReviewed="2026-07-11"
-      heroSummary="Krisp is the rare cloud-era company with real on-device credentials: its noise cancellation processes audio locally and never sends it anywhere, which is why it became the default answer to 'my calls sound bad.' But Krisp's meeting-notes product is a different pipeline — summaries are generated through Microsoft Azure, transcripts and recordings live in Krisp Cloud by default, and the fully on-device configuration is gated to Enterprise. Minutes runs the entire pipeline on your machine for everyone. If you need better-sounding calls, buy Krisp. If you need a private record of your conversations, the architectures diverge exactly where it matters."
+      heroSummary="Krisp is the rare cloud-era company with real on-device credentials: its noise cancellation processes audio locally and never sends it anywhere, which is why it became the default answer to 'my calls sound bad.' But Krisp's meeting-notes product is a different pipeline — summaries are generated through Microsoft Azure, transcripts and recordings are stored in Krisp Cloud once you enable notes, and the fully on-device storage configuration is gated to Enterprise. Minutes runs the entire pipeline on your machine for everyone. If you need better-sounding calls, buy Krisp. If you need a private record of your conversations, the architectures diverge exactly where it matters."
       quickVerdictCompetitor="your primary problem is call audio quality — noise, echo, accents — and AI notes are a convenient add-on you're comfortable having processed and stored in Krisp's cloud."
       quickVerdictMinutes="your primary problem is owning a private record of your conversations — transcripts that never leave your machine, structured notes, and agent access — and you want that as the default, not an Enterprise upgrade."
       architecture={architecture as any}
@@ -150,7 +150,7 @@ export default function KrispVsMinutesPage() {
         "Windows support today, plus an enterprise trust stack: SOC 2 Type II, HIPAA BAAs, PCI-DSS, published DPA.",
       ]}
       minutesWins={[
-        "The private configuration is the only configuration: on-device transcription and local storage for every user, free — where Krisp gates on-device transcripts/recordings to Enterprise and English-only.",
+        "The private configuration is the only configuration: on-device transcription and local storage for every user, free — where Krisp gates on-device transcript/recording storage to Enterprise (and its on-device transcription itself covers English only).",
         "It's a real memory layer: diarized speakers, action items and decisions in YAML, months of meetings greppable and queryable by your agents via MCP, CLI, SDK, and the Claude Code plugin.",
         "Open source (MIT): the claim that audio has no network path is verifiable in the Rust source, not a security-page promise.",
       ]}
@@ -161,7 +161,7 @@ export default function KrispVsMinutesPage() {
       chooseSection={[
         "Pick Krisp if the pain is acoustic: noisy environments, echo, accent friction on calls. That's its core competency and it is genuinely excellent at it.",
         "Pick Minutes if the pain is memory and privacy: you want every conversation transcribed, structured, and owned — with nothing in any vendor's cloud, on any plan.",
-        "If you're evaluating Krisp specifically for its AI notes, apply the architecture test: ask where the transcript lives and what plan tier makes it private. Then compare that answer to a tool where the private answer is the only answer.",
+        "If you're evaluating Krisp specifically for its AI notes, apply the architecture test: ask where the transcript is stored once notes are on, and what plan tier makes that storage private. Then compare that answer to a tool where the private answer is the only answer.",
       ]}
       notRightFitSection={[
         "Minutes is not the right first choice if your actual problem is call audio quality — Minutes doesn't make you sound better on calls; Krisp does, brilliantly.",

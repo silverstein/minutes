@@ -15,7 +15,7 @@ const options = [
     name: "Built-in macOS dictation",
     bestFor: "Zero-install, occasional use",
     detail:
-      "Press the shortcut, talk, done. Apple processes many languages on-device on Apple Silicon Macs. No punctuation intelligence to speak of, no custom vocabulary, and no formatting modes — but it's free, already installed, and fine for a quick sentence.",
+      "Press the shortcut, talk, done. Apple processes many languages on-device on Apple Silicon Macs, with automatic punctuation. No custom vocabulary and no formatting modes — but it's free, already installed, and fine for a quick sentence.",
   },
   {
     name: "superwhisper",
@@ -27,13 +27,13 @@ const options = [
     name: "MacWhisper",
     bestFor: "File transcription first, dictation included",
     detail:
-      "Primarily the best drag-and-drop file transcriber on macOS, with a menu-bar dictation feature included. If you mostly transcribe recordings and only sometimes dictate, one purchase covers both. Closed source; free tier, one-time Pro purchase.",
+      "Primarily the best drag-and-drop file transcriber on macOS, with a system-wide dictation feature included in the direct-download version (the App Store build lacks dictation). If you mostly transcribe recordings and only sometimes dictate, the direct version covers both. Closed source; free tier, one-time Pro purchase.",
   },
   {
     name: "Minutes",
     bestFor: "Dictation as part of a conversation-memory system",
     detail:
-      "Open source (MIT) and free. Dictation is one of four capture modes: speak, and text lands in your clipboard and a timestamped daily note — alongside meeting recording, voice memos, and live transcription, all on-device, all searchable by your AI agents via MCP. Full disclosure: Minutes is our tool.",
+      "Open source (MIT) and free. Dictation is one of four capture modes: speak, and the text is typed at your cursor (or lands in your clipboard via the CLI), with a timestamped copy in your daily note — alongside meeting recording, voice memos, and live transcription, all on-device, all searchable by your AI agents via MCP. Full disclosure: Minutes is our tool.",
   },
 ] as const;
 
@@ -153,14 +153,14 @@ export default function LocalDictationMacosPage() {
               minutes setup --model tiny
             </code>{" "}
             once to download a local Whisper model, and bind the dictation hotkey in the menu bar
-            app. Speak; the transcribed text lands in your clipboard for pasting anywhere, and a
-            timestamped copy is appended to your daily note in{" "}
+            app. Speak; the text is inserted where your cursor is (the CLI mode lands it in your
+            clipboard instead), and a timestamped copy is appended to your daily note in{" "}
             <code className="rounded-[3px] bg-[var(--bg-hover)] px-1.5 py-0.5 font-mono text-[13px]">
               ~/meetings
             </code>{" "}
             — which means every idea you&rsquo;ve ever dictated is greppable, and your agents can
             answer &ldquo;what was that idea I had last Tuesday?&rdquo; That daily-note trail is
-            the practical difference from pure dictation tools: text you paste into other apps
+            the practical difference from pure dictation tools: text you dictate into other apps
             vanishes into those apps; text that also lands in your own files compounds.
           </p>
         </div>

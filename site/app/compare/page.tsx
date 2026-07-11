@@ -35,6 +35,12 @@ const pages = [
     blurb:
       "Best if you are choosing between two open-source local-first tools: a notepad you write in versus a memory layer your agents query.",
   },
+  {
+    title: "Minutes vs superwhisper",
+    href: "/compare/superwhisper-vs-minutes",
+    blurb:
+      "Best if you are choosing between a polished dictation tool and an open-source conversation memory layer where dictation is one of four capture modes.",
+  },
 ] as const;
 
 export default function CompareHubPage() {

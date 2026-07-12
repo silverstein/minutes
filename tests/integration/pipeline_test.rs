@@ -169,6 +169,7 @@ fn search_filters_by_content_type() {
         intent_kind: None,
         owner: None,
         recorded_by: None,
+        include_restricted: false,
     };
 
     // Search for content that exists in the output (varies by whisper vs placeholder)

@@ -4631,6 +4631,17 @@ fn derive_structured_tags(
 }
 
 fn add_person_entity(entities: &mut BTreeMap<String, (String, BTreeSet<String>)>, raw: &str) {
+    // #385 class 2: split multi-person strings ("Gert and Liam") into separate
+    // references before each is stripped, gated, and slugged individually.
+    for reference in crate::person_identity::split_person_references(raw) {
+        add_single_person_entity(entities, &reference);
+    }
+}
+
+fn add_single_person_entity(
+    entities: &mut BTreeMap<String, (String, BTreeSet<String>)>,
+    raw: &str,
+) {
     let Some(trimmed) = (match resolve_speaker_reference(raw, &[], false) {
         Some(name) => Some(name),
         None => {
@@ -6565,6 +6576,46 @@ mod tests {
         assert!(
             !slugs.contains(&"sam-engineering-lead"),
             "role suffix must not appear in slug: {:?}",
+            slugs
+        );
+    }
+
+    #[test]
+    fn add_person_entity_splits_multi_person_strings() {
+        // #385 class 2: "Gert and Liam" must become two entities, not "gert-liam".
+        let entities = build_entity_links(
+            "meeting",
+            None,
+            &[
+                "Gert and Liam".into(),
+                "Liam & Joe".into(),
+                "Sarah Chen".into(),
+            ],
+            &[],
+            &[],
+            &[],
+            &[],
+            None,
+        );
+
+        let slugs: Vec<&str> = entities.people.iter().map(|e| e.slug.as_str()).collect();
+        assert!(slugs.contains(&"gert"), "gert present: {:?}", slugs);
+        assert!(slugs.contains(&"liam"), "liam present: {:?}", slugs);
+        assert!(slugs.contains(&"joe"), "joe present: {:?}", slugs);
+        assert!(
+            !slugs.contains(&"gert-liam"),
+            "must not fuse multi-person: {:?}",
+            slugs
+        );
+        assert!(
+            !slugs.contains(&"liam-joe"),
+            "must not fuse multi-person: {:?}",
+            slugs
+        );
+        // A genuine two-word name must NOT be split (would appear as sarah + chen).
+        assert!(
+            slugs.contains(&"sarah-chen"),
+            "real two-word name must stay intact: {:?}",
             slugs
         );
     }

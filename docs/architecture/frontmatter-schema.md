@@ -367,6 +367,11 @@ while leaving the operator's own files fully readable on disk. Agents never
 mutate the `sensitivity` field; it is set by Minutes when the meeting is
 designated.
 
+The full per-surface contract — core search/actions/research, CLI
+`--include-restricted` with `sensitivity.override` event logging, knowledge
+ingest refusal, the get-by-path stub, and MCP tool parameters — is documented
+in [consent-enforcement.md](consent-enforcement.md).
+
 ---
 
 ## Consuming Minutes

@@ -326,6 +326,57 @@ function registerDocsAppTool(
 
 const execFileAsync = promisify(execFile);
 
+// ── Sensitivity enforcement shims (consent layer Wave 2) ────
+// The published minutes-sdk typings can lag the in-repo reader: the
+// `sensitivity` frontmatter field, the ReadOptions `includeRestricted`
+// parameter, and the restricted `getMeeting` stub ship with sdk >= 0.20.
+// These wrappers keep the server compiling against older typings while
+// passing the option through. With an older sdk at runtime the extra
+// argument is ignored (no exclusion in the pure-TS fallback yet) and the
+// CLI path still enforces the exclusion + records the override event.
+
+type SensitivityReadOptions = { includeRestricted?: boolean };
+
+/** `frontmatter.sensitivity`, tolerant of older sdk typings. */
+function meetingSensitivity(meeting: unknown): string | undefined {
+  return (meeting as any)?.frontmatter?.sensitivity;
+}
+
+/** True for the minimal restricted stub returned by sdk >= 0.20 getMeeting. */
+function isRestrictedStubMeeting(meeting: unknown): boolean {
+  return Boolean((meeting as any)?.restricted_stub);
+}
+
+const listMeetingsWithOpts = reader.listMeetings as unknown as (
+  dir: string,
+  limit?: number,
+  opts?: SensitivityReadOptions
+) => ReturnType<typeof reader.listMeetings>;
+
+const searchMeetingsWithOpts = reader.searchMeetings as unknown as (
+  dir: string,
+  query: string,
+  limit?: number,
+  opts?: SensitivityReadOptions
+) => ReturnType<typeof reader.searchMeetings>;
+
+const findOpenActionsWithOpts = reader.findOpenActions as unknown as (
+  dir: string,
+  assignee?: string,
+  opts?: SensitivityReadOptions
+) => ReturnType<typeof reader.findOpenActions>;
+
+const getPersonProfileWithOpts = reader.getPersonProfile as unknown as (
+  dir: string,
+  name: string,
+  opts?: SensitivityReadOptions
+) => ReturnType<typeof reader.getPersonProfile>;
+
+const getMeetingWithOpts = reader.getMeeting as unknown as (
+  filePath: string,
+  opts?: SensitivityReadOptions
+) => ReturnType<typeof reader.getMeeting>;
+
 // ── QMD semantic search (optional — falls back to CLI) ──────
 
 let qmdAvailable: boolean | null = null;
@@ -355,12 +406,29 @@ async function isQmdAvailable(): Promise<boolean> {
   return qmdAvailable;
 }
 
-async function enrichWithFrontmatter(qmdResults: any[]): Promise<any[]> {
-  return Promise.all(
+async function enrichWithFrontmatter(
+  qmdResults: any[],
+  includeRestricted: boolean
+): Promise<any[]> {
+  const enriched = await Promise.all(
     qmdResults.map(async (r: any) => {
       const filePath = r.source_path || r.path;
       try {
-        const meeting = await reader.getMeeting(filePath);
+        const meeting = await getMeetingWithOpts(filePath, {
+          includeRestricted,
+        });
+        // Sensitivity enforcement: without the override, drop restricted (or
+        // unreadable) hits entirely so a semantic index match cannot leak a
+        // restricted meeting into search results. Older sdks return null for
+        // restricted meetings; sdk >= 0.20 returns a stub — both are dropped.
+        if (
+          !includeRestricted &&
+          (!meeting ||
+            isRestrictedStubMeeting(meeting) ||
+            meetingSensitivity(meeting) === "restricted")
+        ) {
+          return null;
+        }
         return {
           date: meeting?.frontmatter.date || "",
           title: meeting?.frontmatter.title || "",
@@ -379,12 +447,14 @@ async function enrichWithFrontmatter(qmdResults: any[]): Promise<any[]> {
       }
     })
   );
+  return enriched.filter((r): r is any => r !== null);
 }
 
 async function searchViaQmd(
   query: string,
   limit: number,
-  contentType?: string
+  contentType?: string,
+  includeRestricted: boolean = false
 ): Promise<any[] | null> {
   if (!(await isQmdAvailable())) return null;
 
@@ -397,7 +467,7 @@ async function searchViaQmd(
     const results = Array.isArray(parsed) ? parsed : parsed.results || [];
     if (results.length === 0) return null;
 
-    const enriched = await enrichWithFrontmatter(results);
+    const enriched = await enrichWithFrontmatter(results, includeRestricted);
 
     // Apply content type filter if specified
     if (contentType) {
@@ -1699,22 +1769,28 @@ registerDocsAppTool(
   server,
   "list_meetings",
   {
-    description: "List recent meetings and voice memos.",
+    description: "List recent meetings and voice memos. Meetings designated `sensitivity: restricted` are excluded unless include_restricted is set; the override is logged.",
     inputSchema: {
       limit: z.number().optional().default(10).describe("Maximum results"),
       type: z.enum(["meeting", "memo"]).optional().describe("Filter by type"),
+      include_restricted: z
+        .boolean()
+        .optional()
+        .default(false)
+        .describe("Include meetings designated `sensitivity: restricted` (excluded by default; the override is logged)"),
     },
     annotations: { title: "List Meetings", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     _meta: { ui: { resourceUri: UI_RESOURCE_URI } },
   },
-  async ({ limit, type: contentType }) => {
+  async ({ limit, type: contentType, include_restricted }) => {
     // Pure-TS fallback when CLI is not available
     if (!(await isCliAvailable())) {
-      const meetings = await reader.listMeetings(MEETINGS_DIR, limit);
+      const opts = { includeRestricted: include_restricted };
+      const meetings = await listMeetingsWithOpts(MEETINGS_DIR, limit, opts);
       const filtered = contentType
         ? meetings.filter((m) => m.frontmatter.type === contentType)
         : meetings;
-      const openActions = await reader.findOpenActions(MEETINGS_DIR);
+      const openActions = await findOpenActionsWithOpts(MEETINGS_DIR, undefined, opts);
 
       if (filtered.length === 0) {
         return {
@@ -1739,11 +1815,16 @@ registerDocsAppTool(
 
     const args = ["list", "--limit", String(limit)];
     if (contentType) args.push("-t", contentType);
+    // The CLI records the sensitivity.override event when this flag is set.
+    if (include_restricted) args.push("--include-restricted");
+
+    const actionArgs = ["search", "", "--intents-only", "--intent-kind", "action-item", "--limit", "20"];
+    if (include_restricted) actionArgs.push("--include-restricted");
 
     // Fetch meetings and action items in parallel
     const [meetingsResult, actionsResult] = await Promise.all([
       runMinutes(args),
-      runMinutes(["search", "", "--intents-only", "--intent-kind", "action-item", "--limit", "20"]).catch(() => ({ stdout: "[]", stderr: "" })),
+      runMinutes(actionArgs).catch(() => ({ stdout: "[]", stderr: "" })),
     ]);
 
     const meetings = parseJsonOutput(meetingsResult.stdout);
@@ -1779,7 +1860,7 @@ registerDocsAppTool(
   server,
   "search_meetings",
   {
-    description: "Search meeting transcripts and voice memos.",
+    description: "Search meeting transcripts and voice memos. Meetings designated `sensitivity: restricted` are excluded unless include_restricted is set; the override is logged.",
     inputSchema: {
       query: z.string().describe("Text to search for"),
       type: z.enum(["meeting", "memo"]).optional().describe("Filter by type"),
@@ -1795,11 +1876,16 @@ registerDocsAppTool(
         .optional()
         .default(false)
         .describe("Return structured intent records instead of transcript snippets"),
+      include_restricted: z
+        .boolean()
+        .optional()
+        .default(false)
+        .describe("Include meetings designated `sensitivity: restricted` (excluded by default; the override is logged)"),
     },
     annotations: { title: "Search Meetings", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     _meta: { ui: { resourceUri: UI_RESOURCE_URI } },
   },
-  async ({ query, type: contentType, since, limit, intent_kind, owner, intents_only }) => {
+  async ({ query, type: contentType, since, limit, intent_kind, owner, intents_only, include_restricted }) => {
     // Pure-TS fallback when CLI is not available
     if (!(await isCliAvailable())) {
       const droppedFilters = [since && "since", intent_kind && "intent_kind", owner && "owner", intents_only && "intents_only"].filter(Boolean);
@@ -1807,7 +1893,9 @@ registerDocsAppTool(
         ? `\n\n(Note: ${droppedFilters.join(", ")} filters require the CLI. Install: brew install minutes)`
         : "";
 
-      const results = await reader.searchMeetings(MEETINGS_DIR, query, limit);
+      const results = await searchMeetingsWithOpts(MEETINGS_DIR, query, limit, {
+        includeRestricted: include_restricted,
+      });
       const filtered = contentType
         ? results.filter((m) => m.frontmatter.type === contentType)
         : results;
@@ -1834,15 +1922,17 @@ registerDocsAppTool(
       };
     }
 
-    // Intent/metadata queries always use CLI (QMD doesn't index YAML frontmatter fields)
-    const useCliOnly = intents_only || intent_kind || owner || since;
+    // Intent/metadata queries always use CLI (QMD doesn't index YAML frontmatter fields).
+    // include_restricted also routes through the CLI so the override is
+    // recorded on the event bus, not just applied.
+    const useCliOnly = intents_only || intent_kind || owner || since || include_restricted;
 
     // Try QMD semantic search for text queries
     let results: any[] | null = null;
     let usedQmd = false;
 
     if (!useCliOnly) {
-      results = await searchViaQmd(query, limit, contentType);
+      results = await searchViaQmd(query, limit, contentType, include_restricted);
       if (results) usedQmd = true;
     }
 
@@ -1854,6 +1944,8 @@ registerDocsAppTool(
       if (intent_kind) args.push("--intent-kind", intent_kind);
       if (owner) args.push("--owner", owner);
       if (intents_only) args.push("--intents-only");
+      // The CLI records the sensitivity.override event when this flag is set.
+      if (include_restricted) args.push("--include-restricted");
 
       const { stdout, stderr } = await runMinutes(args);
       const parsed = parseJsonOutput(stdout);
@@ -2058,7 +2150,7 @@ registerDocsAppTool(
   server,
   "consistency_report",
   {
-    description: "Flag conflicting decisions and stale commitments across meetings using structured intent data.",
+    description: "Flag conflicting decisions and stale commitments across meetings using structured intent data. Meetings designated `sensitivity: restricted` are always excluded from this report.",
     inputSchema: {
       owner: z.string().optional().describe("Filter stale commitments by owner / person"),
       stale_after_days: z
@@ -2137,14 +2229,19 @@ registerDocsAppTool(
   server,
   "get_person_profile",
   {
-    description: "Get a rich relationship profile for a person: meetings, commitments, topics, relationship score, and trend. Uses the conversation graph index for instant results.",
+    description: "Get a rich relationship profile for a person: meetings, commitments, topics, relationship score, and trend. Uses the conversation graph index for instant results. Meetings designated `sensitivity: restricted` never enter the graph; include_restricted only affects the file-reader fallback and is logged.",
     inputSchema: {
       name: z.string().describe("Person / attendee name to profile"),
+      include_restricted: z
+        .boolean()
+        .optional()
+        .default(false)
+        .describe("Include meetings designated `sensitivity: restricted` in the file-reader fallback (graph-backed results always exclude them; the override is logged)"),
     },
     annotations: { title: "Person Profile", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     _meta: { ui: { resourceUri: UI_RESOURCE_URI } },
   },
-  async ({ name }) => {
+  async ({ name, include_restricted }) => {
     // Try graph index first (via CLI `minutes people --json`)
     if (await isCliAvailable()) {
       const { stdout } = await runMinutes(["people", "--json"]);
@@ -2217,7 +2314,9 @@ registerDocsAppTool(
     }
 
     // Pure-TS fallback when CLI is not available
-    const profile = await reader.getPersonProfile(MEETINGS_DIR, name);
+    const profile = await getPersonProfileWithOpts(MEETINGS_DIR, name, {
+      includeRestricted: include_restricted,
+    });
     const sections = [];
     if (profile.topics.length > 0) sections.push("Topics: " + profile.topics.join(", "));
     if (profile.meetings.length > 0) sections.push("Meetings:\n" + profile.meetings.map((m) => `- ${m.date} — ${m.title}`).join("\n"));
@@ -2235,18 +2334,25 @@ registerDocsAppTool(
 
 registerTool(
   "research_topic",
-  "Research a topic across meetings, decisions, and open follow-ups.",
+  "Research a topic across meetings, decisions, and open follow-ups. Meetings designated `sensitivity: restricted` are excluded unless include_restricted is set; the override is logged.",
   {
     query: z.string().describe("Topic or question to investigate across meetings"),
     type: z.enum(["meeting", "memo"]).optional().describe("Filter by type"),
     since: z.string().optional().describe("Only results after this date (ISO)"),
     attendee: z.string().optional().describe("Filter by attendee / person"),
+    include_restricted: z
+      .boolean()
+      .optional()
+      .default(false)
+      .describe("Include meetings designated `sensitivity: restricted` (excluded by default; the override is logged)"),
   },
   { title: "Research Topic", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-  async ({ query, type: contentType, since, attendee }) => {
+  async ({ query, type: contentType, since, attendee, include_restricted }) => {
     if (!(await isCliAvailable())) {
       // Fallback: basic search when CLI is not available
-      const results = await reader.searchMeetings(MEETINGS_DIR, query, 20);
+      const results = await searchMeetingsWithOpts(MEETINGS_DIR, query, 20, {
+        includeRestricted: include_restricted,
+      });
       const filtered = contentType ? results.filter((m) => m.frontmatter.type === contentType) : results;
       const text = filtered.length > 0
         ? filtered.map((m) => `${m.frontmatter.date} — ${m.frontmatter.title}\n  ${m.path}`).join("\n\n")
@@ -2258,6 +2364,8 @@ registerTool(
     if (contentType) args.push("-t", contentType);
     if (since) args.push("--since", since);
     if (attendee) args.push("--attendee", attendee);
+    // The CLI records the sensitivity.override event when this flag is set.
+    if (include_restricted) args.push("--include-restricted");
 
     const { stdout, stderr } = await runMinutes(args);
     const report = parseJsonOutput(stdout);
@@ -2338,17 +2446,56 @@ registerDocsAppTool(
   server,
   "get_meeting",
   {
-    description: "Get the full transcript and details of a specific meeting or memo. Speaker attributions reflect sidecar overlay confirmations.",
+    description: "Get the full transcript and details of a specific meeting or memo. Speaker attributions reflect sidecar overlay confirmations. A meeting designated `sensitivity: restricted` returns a minimal stub unless include_restricted is set; the override is logged.",
     inputSchema: {
       path: z.string().describe("Path to the meeting markdown file"),
+      include_restricted: z
+        .boolean()
+        .optional()
+        .default(false)
+        .describe("Return the full content of a meeting designated `sensitivity: restricted` (a stub is returned by default; the override is logged)"),
     },
     annotations: { title: "View Meeting", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     _meta: { ui: { resourceUri: UI_RESOURCE_URI } },
   },
-  async ({ path: filePath }) => {
+  async ({ path: filePath, include_restricted }) => {
     try {
       const resolved = validatePathInDirectory(filePath, await getEffectiveMeetingsDir(), [".md"]);
       const rawContent = await readFile(resolved, "utf-8");
+
+      // Sensitivity enforcement (consent layer Wave 2): a restricted meeting
+      // fetched by exact path returns a minimal stub — title, date, and the
+      // designation — never the transcript, unless the caller overrides.
+      const sensitivityParsed = reader.parseFrontmatter(rawContent, resolved);
+      if (sensitivityParsed && meetingSensitivity(sensitivityParsed) === "restricted") {
+        if (!include_restricted) {
+          const stubText = [
+            `${sensitivityParsed.frontmatter.title}`,
+            `date: ${sensitivityParsed.frontmatter.date}`,
+            "sensitivity: restricted",
+            "",
+            "Content excluded by default: this meeting is designated `sensitivity: restricted`.",
+            "Pass include_restricted: true for an explicit, logged override.",
+          ].join("\n");
+          return {
+            content: [{ type: "text" as const, text: stubText }],
+            structuredContent: {
+              path: resolved,
+              title: sensitivityParsed.frontmatter.title,
+              date: sensitivityParsed.frontmatter.date,
+              sensitivity: "restricted",
+              restricted_stub: true,
+              view: "detail",
+            },
+            _meta: { ui: { resourceUri: UI_RESOURCE_URI }, view: "detail", path: resolved },
+          };
+        }
+        // The MCP server has no direct event-bus writer; the override is
+        // recorded in the server log and flagged in the response instead.
+        console.error(
+          `[Minutes] include_restricted override: returning restricted meeting ${resolved} via get_meeting`
+        );
+      }
 
       // Ask the CLI for an overlay-applied structured view. Raw markdown on
       // disk is never mutated — the CLI just layers ~/.minutes/overlays.db on
@@ -2403,9 +2550,18 @@ registerDocsAppTool(
         }
       }
 
+      let structuredOut: Record<string, unknown> = structured;
+      if (include_restricted && meetingSensitivity(sensitivityParsed) === "restricted") {
+        structuredOut = {
+          ...structured,
+          sensitivity: "restricted",
+          sensitivity_override: { applied: true, logged: "server-log" },
+        };
+      }
+
       return {
         content: [{ type: "text" as const, text: rawContent }],
-        structuredContent: structured,
+        structuredContent: structuredOut,
         _meta: { ui: { resourceUri: UI_RESOURCE_URI }, view: "detail", path: resolved },
       };
     } catch (error: any) {
@@ -2625,7 +2781,7 @@ registerDocsAppTool(
   server,
   "track_commitments",
   {
-    description: "List open and stale commitments (action items, intents, decisions) across all meetings. Optionally filter by person. Answers: 'What did I promise Sarah?' or 'What's overdue?'",
+    description: "List open and stale commitments (action items, intents, decisions) across all meetings. Optionally filter by person. Answers: 'What did I promise Sarah?' or 'What's overdue?' Meetings designated `sensitivity: restricted` never enter the underlying graph.",
     inputSchema: {
       person: z.string().optional().describe("Filter by person name or slug (optional — omit for all commitments)"),
     },
@@ -2690,7 +2846,7 @@ registerDocsAppTool(
   server,
   "relationship_map",
   {
-    description: "Show all contacts with relationship scores, meeting frequency, and 'losing touch' alerts. Overview of your entire conversation network.",
+    description: "Show all contacts with relationship scores, meeting frequency, and 'losing touch' alerts. Overview of your entire conversation network. Meetings designated `sensitivity: restricted` never enter the underlying graph.",
     inputSchema: {
       limit: z.number().optional().describe("Max people to return (default: 15)"),
     },

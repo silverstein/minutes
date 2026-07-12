@@ -6,7 +6,7 @@
 //! hallucination propagation.
 
 use crate::config::{Config, KnowledgeConfig};
-use crate::markdown::Frontmatter;
+use crate::markdown::{Frontmatter, Sensitivity};
 use chrono::{DateTime, Local};
 use std::collections::HashMap;
 use std::fs;
@@ -107,6 +107,21 @@ pub fn update_from_meeting(
     _transcript: &str,
     config: &Config,
 ) -> Result<UpdateResult, Box<dyn std::error::Error>> {
+    // Sensitivity enforcement (consent layer Wave 2): a restricted meeting
+    // contributes no facts to the knowledge base. Batch and pipeline callers
+    // skip silently; the explicit `ingest_file` path refuses with a message.
+    if matches!(frontmatter.sensitivity, Some(Sensitivity::Restricted)) {
+        tracing::debug!(
+            path = %result.path.display(),
+            "skipping restricted meeting during knowledge update (sensitivity enforcement)"
+        );
+        return Ok(UpdateResult {
+            facts_written: 0,
+            facts_skipped: 0,
+            people_updated: vec![],
+        });
+    }
+
     if !config.knowledge.enabled || config.knowledge.path.as_os_str().is_empty() {
         return Ok(UpdateResult {
             facts_written: 0,
@@ -190,6 +205,18 @@ pub fn ingest_file(
         return Err("no frontmatter found".into());
     }
     let frontmatter: Frontmatter = serde_yaml::from_str(fm_str)?;
+
+    // Sensitivity enforcement (consent layer Wave 2): refusing an explicitly
+    // named restricted meeting must be loud, not a silent zero-fact result.
+    // There is no override for knowledge ingest in this wave.
+    if matches!(frontmatter.sensitivity, Some(Sensitivity::Restricted)) {
+        return Err(format!(
+            "{} is designated `sensitivity: restricted`; it is excluded from knowledge ingest by default and was not written to the knowledge base",
+            meeting_path.display()
+        )
+        .into());
+    }
+
     let result = crate::WriteResult {
         path: meeting_path.to_path_buf(),
         title: frontmatter.title.clone(),
@@ -609,6 +636,63 @@ mod tests {
         assert_eq!(slugify("Dan Benamoz"), "dan-benamoz");
         assert_eq!(slugify("  Mat  "), "mat");
         assert_eq!(slugify("Sarah O'Brien"), "sarah-o-brien");
+    }
+
+    #[test]
+    fn update_from_meeting_skips_restricted_meetings() {
+        let dir = TempDir::new().unwrap();
+        let config = Config {
+            knowledge: KnowledgeConfig {
+                enabled: true,
+                path: dir.path().to_path_buf(),
+                adapter: "wiki".into(),
+                ..Default::default()
+            },
+            ..Config::default()
+        };
+
+        let frontmatter: Frontmatter = serde_yaml::from_str(
+            "title: Board Sync\ntype: meeting\ndate: 2026-06-10T12:00:00-07:00\nduration: 30m\nsensitivity: restricted\nattendees: [Alex Kim]\naction_items:\n  - assignee: Alex Kim\n    task: Draft board memo\n    status: open\ndecisions: []\nintents: []",
+        )
+        .unwrap();
+        let result = crate::WriteResult {
+            path: dir.path().join("2026-06-10-board.md"),
+            title: "Board Sync".into(),
+            word_count: 10,
+            content_type: crate::ContentType::Meeting,
+        };
+
+        let update = update_from_meeting(&result, &frontmatter, "notes", &config).unwrap();
+        assert_eq!(update.facts_written, 0);
+        assert_eq!(update.facts_skipped, 0);
+        assert!(update.people_updated.is_empty());
+        // Nothing was written to the knowledge base — not even the log.
+        assert!(fs::read_dir(dir.path()).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn ingest_file_refuses_restricted_meetings() {
+        let kb = TempDir::new().unwrap();
+        let meetings = TempDir::new().unwrap();
+        let meeting_path = meetings.path().join("2026-06-10-board.md");
+        fs::write(
+            &meeting_path,
+            "---\ntitle: Board Sync\ntype: meeting\ndate: 2026-06-10T12:00:00-07:00\nduration: 30m\nsensitivity: restricted\nattendees: [Alex Kim]\naction_items: []\ndecisions: []\nintents: []\n---\n\nnotes\n",
+        )
+        .unwrap();
+        let config = Config {
+            knowledge: KnowledgeConfig {
+                enabled: true,
+                path: kb.path().to_path_buf(),
+                adapter: "wiki".into(),
+                ..Default::default()
+            },
+            ..Config::default()
+        };
+
+        let error = ingest_file(&meeting_path, &config).unwrap_err();
+        assert!(error.to_string().contains("sensitivity: restricted"));
+        assert!(fs::read_dir(kb.path()).unwrap().next().is_none());
     }
 
     #[test]

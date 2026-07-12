@@ -532,6 +532,7 @@ fn dispatch_action(
                 intent_kind: None,
                 owner: None,
                 recorded_by: None,
+                include_restricted: true,
             };
             let results = minutes_core::search::search("", &config, &filters)
                 .map_err(|e| format!("list meetings: {}", e))?;
@@ -563,6 +564,7 @@ fn dispatch_action(
                 intent_kind: None,
                 owner: None,
                 recorded_by: None,
+                include_restricted: true,
             };
             let results = minutes_core::search::search("", &config, &filters)
                 .map_err(|e| format!("list today's meetings: {}", e))?;
@@ -627,6 +629,7 @@ fn dispatch_action(
                 intent_kind: None,
                 owner: None,
                 recorded_by: None,
+                include_restricted: true,
             };
             let research = minutes_core::search::cross_meeting_research(&q, &config, &filters)
                 .map_err(|e| format!("research: {}", e))?;
@@ -636,7 +639,7 @@ fn dispatch_action(
         }
         ActionId::FindOpenActionItems => {
             let config = Config::load();
-            let actions = minutes_core::search::find_open_actions(&config, None)
+            let actions = minutes_core::search::find_open_actions(&config, None, true)
                 .map_err(|e| format!("find open actions: {}", e))?;
             let actions =
                 serde_json::to_value(&actions).map_err(|e| format!("serialize actions: {}", e))?;
@@ -651,6 +654,7 @@ fn dispatch_action(
                 intent_kind: Some(minutes_core::markdown::IntentKind::Decision),
                 owner: None,
                 recorded_by: None,
+                include_restricted: true,
             };
             let decisions = minutes_core::search::search_intents("", &config, &filters)
                 .map_err(|e| format!("search decisions: {}", e))?;

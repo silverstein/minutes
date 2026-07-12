@@ -346,6 +346,7 @@ pub fn generate_assistant_context(config: &Config) -> Result<String, String> {
         intent_kind: None,
         owner: None,
         recorded_by: None,
+        include_restricted: false,
     };
 
     if let Ok(results) = search::search("", config, &filters) {
@@ -373,6 +374,7 @@ pub fn generate_assistant_context(config: &Config) -> Result<String, String> {
         intent_kind: None,
         owner: None,
         recorded_by: None,
+        include_restricted: false,
     };
     if let Ok(intents) = search::search_intents("", config, &intent_filters) {
         let open: Vec<_> = intents

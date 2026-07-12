@@ -361,6 +361,19 @@ pub enum MinutesEvent {
         reason: String,
         message: String,
     },
+    /// Explicit override that surfaced `sensitivity: restricted` meetings on
+    /// an agent-facing read surface. Restricted meetings are excluded from
+    /// those surfaces by default; when a caller opts in, the override is
+    /// recorded here so it is never silent (consent layer Wave 2).
+    #[serde(rename = "sensitivity.override")]
+    SensitivityOverride {
+        /// Read surface that honored the override (e.g. "cli.search",
+        /// "cli.actions", "cli.research").
+        surface: String,
+        /// Query or filter context supplied by the caller, if any.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        query: Option<String>,
+    },
     /// Append-only agent commentary. This never mutates human-authored notes.
     #[serde(rename = "agent.annotation")]
     AgentAnnotation {
@@ -1688,6 +1701,46 @@ mod tests {
             }
             other => panic!("unexpected event: {:?}", other),
         }
+    }
+
+    #[test]
+    fn sensitivity_override_serializes_dotted_name() {
+        let envelope = EventEnvelope {
+            v: EVENT_SCHEMA_VERSION,
+            seq: 9,
+            timestamp: Local::now(),
+            event: MinutesEvent::SensitivityOverride {
+                surface: "cli.search".into(),
+                query: Some("pricing".into()),
+            },
+        };
+
+        let value = serde_json::to_value(&envelope).unwrap();
+        assert_eq!(value["event_type"], "sensitivity.override");
+        assert_eq!(value["surface"], "cli.search");
+        assert_eq!(value["query"], "pricing");
+
+        let parsed: EventEnvelope =
+            serde_json::from_str(&serde_json::to_string(&envelope).unwrap()).unwrap();
+        match parsed.event {
+            MinutesEvent::SensitivityOverride { surface, query } => {
+                assert_eq!(surface, "cli.search");
+                assert_eq!(query.as_deref(), Some("pricing"));
+            }
+            other => panic!("unexpected event: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn sensitivity_override_omits_absent_query() {
+        let envelope = EventEnvelope::new(MinutesEvent::SensitivityOverride {
+            surface: "cli.actions".into(),
+            query: None,
+        });
+
+        let json = serde_json::to_string(&envelope).unwrap();
+        assert!(json.contains("\"event_type\":\"sensitivity.override\""));
+        assert!(!json.contains("\"query\""));
     }
 
     #[test]

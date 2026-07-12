@@ -1,6 +1,6 @@
 use crate::config::Config;
 use crate::error::SearchError;
-use crate::markdown::{extract_field, split_frontmatter, Frontmatter, IntentKind};
+use crate::markdown::{extract_field, split_frontmatter, Frontmatter, IntentKind, Sensitivity};
 use crate::overlays;
 use chrono::Local;
 use serde::Serialize;
@@ -27,6 +27,28 @@ fn walk_meeting_files(dir: &Path) -> impl Iterator<Item = walkdir::DirEntry> {
         })
         .filter_map(|e| e.ok())
         .filter(|e| e.path().extension().is_some_and(|ext| ext == "md"))
+}
+
+/// True when the file at `path` carries `sensitivity: restricted` frontmatter.
+///
+/// Reads only the frontmatter via the line-based `extract_field` helper, so
+/// the check stays cheap enough to post-filter index results. Unreadable
+/// files are treated as not restricted — every consumer skips them anyway.
+fn is_restricted_path(path: &Path) -> bool {
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    let (frontmatter, _) = split_frontmatter(&content);
+    extract_field(frontmatter, "sensitivity").as_deref() == Some("restricted")
+}
+
+/// Drop results whose source meeting is `sensitivity: restricted` unless the
+/// caller opted in via `filters.include_restricted` (consent layer Wave 2).
+fn exclude_restricted_results(results: &mut Vec<SearchResult>, filters: &SearchFilters) {
+    if filters.include_restricted {
+        return;
+    }
+    results.retain(|result| !is_restricted_path(&result.path));
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -312,6 +334,12 @@ pub struct SearchFilters {
     pub intent_kind: Option<IntentKind>,
     pub owner: Option<String>,
     pub recorded_by: Option<String>,
+    /// Include meetings designated `sensitivity: restricted`. Default false:
+    /// restricted meetings are excluded from search and intent results unless
+    /// the caller opts in explicitly (consent layer Wave 2). Callers that set
+    /// this on an agent-facing surface must record the override on the event
+    /// bus (`sensitivity.override`).
+    pub include_restricted: bool,
 }
 
 /// Resolve a meeting file by slug prefix (date-title pattern).
@@ -380,6 +408,14 @@ pub fn cross_meeting_research(
                 continue;
             }
         };
+
+        // Sensitivity enforcement (consent layer Wave 2): restricted meetings
+        // stay out of cross-meeting research unless explicitly overridden.
+        if !filters.include_restricted
+            && matches!(frontmatter.sensitivity, Some(Sensitivity::Restricted))
+        {
+            continue;
+        }
 
         let content_type = match frontmatter.r#type {
             crate::markdown::ContentType::Meeting => "meeting".to_string(),
@@ -573,7 +609,9 @@ fn search_with_mode_and_vocabulary(
 
     let expansions = vocabulary_search_expansions(query, vocabulary_override);
     if expansions.len() <= 1 {
-        return Ok(index.search(query, filters, None)?);
+        let mut results = index.search(query, filters, None)?;
+        exclude_restricted_results(&mut results, filters);
+        return Ok(results);
     }
 
     let original_key = search_expansion_key(query);
@@ -593,6 +631,7 @@ fn search_with_mode_and_vocabulary(
         }
     }
 
+    exclude_restricted_results(&mut merged, filters);
     Ok(merged)
 }
 
@@ -730,6 +769,12 @@ fn consistency_report_at(
         }
 
         match serde_yaml::from_str::<Frontmatter>(frontmatter_str) {
+            // Sensitivity enforcement (consent layer Wave 2): restricted
+            // meetings never feed the consistency report. No override on this
+            // surface in this wave — like the graph, exclusion is complete.
+            Ok(frontmatter) if matches!(frontmatter.sensitivity, Some(Sensitivity::Restricted)) => {
+                tracing::debug!(path = %path.display(), "skipping restricted meeting in consistency report (sensitivity enforcement)");
+            }
             Ok(frontmatter) => parsed_frontmatters.push((path.to_path_buf(), frontmatter)),
             Err(e) => {
                 tracing::warn!(path = %path.display(), error = %e, "skipping malformed frontmatter in consistency report");
@@ -914,6 +959,12 @@ pub fn person_profile(config: &Config, person: &str) -> Result<PersonProfile, Se
         }
 
         match serde_yaml::from_str::<Frontmatter>(frontmatter_str) {
+            // Sensitivity enforcement (consent layer Wave 2): restricted
+            // meetings never feed person profiles. No override on this
+            // surface in this wave — like the graph, exclusion is complete.
+            Ok(frontmatter) if matches!(frontmatter.sensitivity, Some(Sensitivity::Restricted)) => {
+                tracing::debug!(path = %path.display(), "skipping restricted meeting in person profile (sensitivity enforcement)");
+            }
             Ok(frontmatter) => parsed_frontmatters.push((path.to_path_buf(), frontmatter)),
             Err(e) => {
                 tracing::warn!(path = %path.display(), error = %e, "skipping malformed frontmatter in person profile");
@@ -1125,6 +1176,14 @@ fn process_intent_file(
     let frontmatter: Frontmatter = serde_yaml::from_str(frontmatter_str)
         .map_err(|e| SearchError::Io(std::io::Error::other(e.to_string())))?;
 
+    // Sensitivity enforcement (consent layer Wave 2): restricted meetings
+    // contribute no intent records unless explicitly overridden.
+    if !filters.include_restricted
+        && matches!(frontmatter.sensitivity, Some(Sensitivity::Restricted))
+    {
+        return Ok(vec![]);
+    }
+
     let date = frontmatter.date.to_rfc3339();
     let content_type = match frontmatter.r#type {
         crate::markdown::ContentType::Meeting => "meeting".to_string(),
@@ -1216,9 +1275,14 @@ fn process_intent_file(
 
 /// Find meetings with open action items, optionally filtered by assignee.
 /// Parses YAML frontmatter for the structured action_items field.
+///
+/// Meetings designated `sensitivity: restricted` are excluded unless
+/// `include_restricted` is true; callers that set it on an agent-facing
+/// surface must record the override on the event bus (consent layer Wave 2).
 pub fn find_open_actions(
     config: &Config,
     assignee: Option<&str>,
+    include_restricted: bool,
 ) -> Result<Vec<ActionResult>, SearchError> {
     let dir = &config.output_dir;
     if !dir.exists() {
@@ -1235,6 +1299,15 @@ pub fn find_open_actions(
         };
 
         let (fm_str, _) = split_frontmatter(&content);
+
+        // Sensitivity enforcement (consent layer Wave 2): restricted meetings
+        // contribute no action items unless explicitly overridden.
+        if !include_restricted
+            && extract_field(fm_str, "sensitivity").as_deref() == Some("restricted")
+        {
+            continue;
+        }
+
         let title = extract_field(fm_str, "title").unwrap_or_default();
         let date = extract_field(fm_str, "date").unwrap_or_default();
 
@@ -1402,6 +1475,7 @@ mod tests {
             intent_kind: None,
             owner: None,
             recorded_by: None,
+            include_restricted: false,
         };
 
         let results = search("pricing", &config, &filters).unwrap();
@@ -1430,6 +1504,7 @@ mod tests {
             intent_kind: None,
             owner: None,
             recorded_by: None,
+            include_restricted: false,
         };
 
         let results = search("nonexistent", &config, &filters).unwrap();
@@ -1457,6 +1532,7 @@ mod tests {
             intent_kind: None,
             owner: None,
             recorded_by: None,
+            include_restricted: false,
         };
 
         let results = search("pricing", &config, &filters).unwrap();
@@ -1533,6 +1609,7 @@ mod tests {
             intent_kind: None,
             owner: None,
             recorded_by: Some("mat".into()),
+            include_restricted: false,
         };
         let non_matching_filters = SearchFilters {
             content_type: None,
@@ -1541,6 +1618,7 @@ mod tests {
             intent_kind: None,
             owner: None,
             recorded_by: Some("sarah".into()),
+            include_restricted: false,
         };
 
         let matching_results = search("pricing", &config, &matching_filters).unwrap();
@@ -1565,6 +1643,7 @@ mod tests {
             intent_kind: None,
             owner: None,
             recorded_by: None,
+            include_restricted: false,
         };
 
         let results = search("anything", &config, &filters).unwrap();
@@ -1606,6 +1685,7 @@ mod tests {
             intent_kind: None,
             owner: None,
             recorded_by: None,
+            include_restricted: false,
         };
 
         let overlay_db = dir.path().join("overlays.db");
@@ -1643,6 +1723,7 @@ mod tests {
             intent_kind: Some(IntentKind::Commitment),
             owner: Some("sarah".into()),
             recorded_by: None,
+            include_restricted: false,
         };
 
         let overlay_db = dir.path().join("overlays.db");
@@ -1691,6 +1772,7 @@ mod tests {
             intent_kind: Some(IntentKind::ActionItem),
             owner: Some("alex".into()),
             recorded_by: None,
+            include_restricted: false,
         };
 
         let results = search_intents_at("", &config, &filters, &overlay_db).unwrap();
@@ -1720,6 +1802,7 @@ mod tests {
             intent_kind: None,
             owner: None,
             recorded_by: Some("mat".into()),
+            include_restricted: false,
         };
         let non_matching_filters = SearchFilters {
             content_type: None,
@@ -1728,6 +1811,7 @@ mod tests {
             intent_kind: None,
             owner: None,
             recorded_by: Some("sarah".into()),
+            include_restricted: false,
         };
 
         let matching_results = process_intent_file(
@@ -2060,6 +2144,7 @@ mod tests {
             intent_kind: None,
             owner: None,
             recorded_by: None,
+            include_restricted: false,
         };
         let report = cross_meeting_research("pricing", &config, &filters).unwrap();
 
@@ -2088,13 +2173,168 @@ mod tests {
             ..Config::default()
         };
 
-        let results = find_open_actions(&config, None).unwrap();
+        let results = find_open_actions(&config, None, false).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].assignee, "mat");
         assert_eq!(results[0].task, "Send doc");
 
         // Filter by assignee
-        let filtered = find_open_actions(&config, Some("nobody")).unwrap();
+        let filtered = find_open_actions(&config, Some("nobody"), false).unwrap();
         assert!(filtered.is_empty());
+    }
+
+    // ── Sensitivity enforcement (consent layer Wave 2) ──────────
+
+    const RESTRICTED_MEETING: &str = "---\ntitle: Board Pricing Strategy\ntype: meeting\ndate: 2026-06-11T12:00:00-07:00\nduration: 30m\nstatus: complete\nsensitivity: restricted\nattendees: [Alex Kim]\npeople: [Alex Kim]\naction_items:\n  - assignee: Alex Kim\n    task: Draft board pricing memo\n    status: open\ndecisions:\n  - text: Hold the pricing floor at current levels\n    topic: pricing\nintents:\n  - kind: commitment\n    what: Draft board pricing memo\n    who: Alex Kim\n    status: open\n---\n\n## Transcript\n\nRestricted pricing discussion.\n";
+
+    const NORMAL_MEETING: &str = "---\ntitle: Pricing Sync\ntype: meeting\ndate: 2026-06-10T12:00:00-07:00\nduration: 30m\nstatus: complete\nattendees: [Sam Lee]\npeople: [Sam Lee]\naction_items:\n  - assignee: Sam Lee\n    task: Share pricing deck\n    status: open\ndecisions:\n  - text: Ship monthly pricing page\n    topic: pricing\nintents:\n  - kind: commitment\n    what: Share pricing deck\n    who: Sam Lee\n    status: open\n---\n\n## Transcript\n\nWe discussed pricing.\n";
+
+    fn restricted_test_dir() -> TempDir {
+        let dir = TempDir::new().unwrap();
+        create_test_file(dir.path(), "2026-06-10-pricing-sync.md", NORMAL_MEETING);
+        create_test_file(dir.path(), "2026-06-11-board.md", RESTRICTED_MEETING);
+        dir
+    }
+
+    #[test]
+    fn search_excludes_restricted_meetings_by_default() {
+        let _guard = crate::test_home_env_lock();
+        let dir = restricted_test_dir();
+        let config = Config {
+            output_dir: dir.path().to_path_buf(),
+            ..Config::default()
+        };
+
+        let default_results = search("pricing", &config, &SearchFilters::default()).unwrap();
+        assert_eq!(default_results.len(), 1);
+        assert_eq!(default_results[0].title, "Pricing Sync");
+
+        let overridden = search(
+            "pricing",
+            &config,
+            &SearchFilters {
+                include_restricted: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(overridden.len(), 2);
+        assert!(overridden
+            .iter()
+            .any(|result| result.title == "Board Pricing Strategy"));
+    }
+
+    #[test]
+    fn search_intents_excludes_restricted_meetings_by_default() {
+        let _guard = crate::test_home_env_lock();
+        let dir = restricted_test_dir();
+        let config = Config {
+            output_dir: dir.path().to_path_buf(),
+            ..Config::default()
+        };
+
+        let default_results =
+            search_intents("pricing", &config, &SearchFilters::default()).unwrap();
+        assert_eq!(default_results.len(), 1);
+        assert_eq!(default_results[0].what, "Share pricing deck");
+
+        let overridden = search_intents(
+            "pricing",
+            &config,
+            &SearchFilters {
+                include_restricted: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(overridden.len(), 2);
+    }
+
+    #[test]
+    fn find_open_actions_excludes_restricted_meetings_by_default() {
+        let _guard = crate::test_home_env_lock();
+        let dir = restricted_test_dir();
+        let config = Config {
+            output_dir: dir.path().to_path_buf(),
+            ..Config::default()
+        };
+
+        let default_results = find_open_actions(&config, None, false).unwrap();
+        assert_eq!(default_results.len(), 1);
+        assert_eq!(default_results[0].task, "Share pricing deck");
+
+        let overridden = find_open_actions(&config, None, true).unwrap();
+        assert_eq!(overridden.len(), 2);
+        assert!(overridden
+            .iter()
+            .any(|action| action.task == "Draft board pricing memo"));
+    }
+
+    #[test]
+    fn cross_meeting_research_excludes_restricted_meetings_by_default() {
+        let _guard = crate::test_home_env_lock();
+        let dir = restricted_test_dir();
+        let config = Config {
+            output_dir: dir.path().to_path_buf(),
+            ..Config::default()
+        };
+
+        let report = cross_meeting_research("pricing", &config, &SearchFilters::default()).unwrap();
+        assert!(report
+            .recent_meetings
+            .iter()
+            .all(|meeting| meeting.title != "Board Pricing Strategy"));
+        assert!(report
+            .related_decisions
+            .iter()
+            .all(|decision| !decision.what.contains("pricing floor")));
+
+        let overridden = cross_meeting_research(
+            "pricing",
+            &config,
+            &SearchFilters {
+                include_restricted: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(overridden
+            .recent_meetings
+            .iter()
+            .any(|meeting| meeting.title == "Board Pricing Strategy"));
+    }
+
+    #[test]
+    fn person_profile_always_excludes_restricted_meetings() {
+        let _guard = crate::test_home_env_lock();
+        let dir = restricted_test_dir();
+        let config = Config {
+            output_dir: dir.path().to_path_buf(),
+            ..Config::default()
+        };
+
+        // Alex Kim only appears in the restricted meeting, so the profile
+        // must come back empty — no override exists on this surface.
+        let profile = person_profile(&config, "Alex Kim").unwrap();
+        assert!(profile.recent_meetings.is_empty());
+        assert!(profile.open_intents.is_empty());
+        assert!(profile.recent_decisions.is_empty());
+    }
+
+    #[test]
+    fn consistency_report_always_excludes_restricted_meetings() {
+        let _guard = crate::test_home_env_lock();
+        let dir = restricted_test_dir();
+        let config = Config {
+            output_dir: dir.path().to_path_buf(),
+            ..Config::default()
+        };
+
+        let overlay_db = TempDir::new().unwrap().path().join("overlays.db");
+        let report = consistency_report_at(&config, None, 0, &overlay_db).unwrap();
+        assert!(report
+            .stale_commitments
+            .iter()
+            .all(|stale| stale.entry.what != "Draft board pricing memo"));
     }
 }

@@ -1908,6 +1908,7 @@ fn latest_saved_artifact_from_search(config: &Config) -> Option<PathBuf> {
         intent_kind: None,
         owner: None,
         recorded_by: None,
+        include_restricted: true,
     };
     minutes_core::search::search("", config, &filters)
         .ok()?
@@ -2105,6 +2106,7 @@ fn build_related_context(
             intent_kind: None,
             owner: None,
             recorded_by: None,
+            include_restricted: true,
         };
         if let Ok(report) = minutes_core::search::cross_meeting_research(topic, config, &filters) {
             for meeting in report.recent_meetings.into_iter().take(3) {
@@ -4356,6 +4358,7 @@ fn latest_saved_artifact_path(
         intent_kind: None,
         owner: None,
         recorded_by: None,
+        include_restricted: true,
     };
     let latest = minutes_core::search::search("", &config, &filters)
         .map_err(|e| e.to_string())?
@@ -6595,6 +6598,7 @@ pub fn cmd_weekly_summary() -> Result<WeeklySummaryView, String> {
         intent_kind: None,
         owner: None,
         recorded_by: None,
+        include_restricted: true,
     };
 
     let meetings =
@@ -6602,7 +6606,7 @@ pub fn cmd_weekly_summary() -> Result<WeeklySummaryView, String> {
     let consistency =
         minutes_core::search::consistency_report(&config, None, 7).map_err(|e| e.to_string())?;
     let open_actions =
-        minutes_core::search::find_open_actions(&config, None).map_err(|e| e.to_string())?;
+        minutes_core::search::find_open_actions(&config, None, true).map_err(|e| e.to_string())?;
 
     let meetings_count = meetings.len();
     let recent_titles = if meetings.is_empty() {
@@ -6693,6 +6697,7 @@ pub fn cmd_proactive_context_bundle() -> Result<ProactiveContextBundleView, Stri
         intent_kind: None,
         owner: None,
         recorded_by: None,
+        include_restricted: false,
     };
 
     let recent_results =
@@ -6811,6 +6816,7 @@ pub fn cmd_list_meetings(limit: Option<usize>) -> serde_json::Value {
         intent_kind: None,
         owner: None,
         recorded_by: None,
+        include_restricted: true,
     };
     match minutes_core::search::search("", &config, &filters) {
         Ok(results) => {
@@ -6873,7 +6879,12 @@ fn compute_lifecycle_badges(
 #[tauri::command]
 pub fn cmd_search(query: String) -> Result<Vec<minutes_core::search::SearchResult>, String> {
     let config = Config::load();
-    let filters = minutes_core::search::SearchFilters::default();
+    // Desktop search is the operator's own surface, not an agent surface:
+    // restricted meetings stay visible to the human in their own app.
+    let filters = minutes_core::search::SearchFilters {
+        include_restricted: true,
+        ..Default::default()
+    };
     minutes_core::search::search(&query, &config, &filters).map_err(|e| e.to_string())
 }
 

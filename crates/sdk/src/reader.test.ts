@@ -768,18 +768,40 @@ describe("sensitivity enforcement", () => {
     );
   });
 
-  it("getMeeting returns null for a restricted meeting even when given its path", async () => {
+  it("getMeeting returns a minimal stub for a restricted meeting fetched by path", async () => {
     const path = writeMeeting("restricted.md", RESTRICTED_MEETING);
-    expect(await getMeeting(path)).toBeNull();
-    const overridden = await getMeeting(path, { includeRestricted: true });
-    expect(overridden?.frontmatter.title).toBe("Board Pricing Strategy");
+    const stub = await getMeeting(path);
+    expect(stub).not.toBeNull();
+    expect(stub!.restricted_stub).toBe(true);
+    // The stub keeps only title/date/type/sensitivity...
+    expect(stub!.frontmatter.title).toBe("Board Pricing Strategy");
+    expect(stub!.frontmatter.sensitivity).toBe("restricted");
+    expect(stub!.frontmatter.date).not.toBe("");
+    // ...and points at the override, never the content.
+    expect(stub!.body).toContain("excluded by default");
+    expect(stub!.body).toContain("include_restricted");
+    expect(stub!.body).not.toContain("Confidential board pricing discussion");
+    expect(stub!.frontmatter.action_items).toEqual([]);
+    expect(stub!.frontmatter.decisions).toEqual([]);
+    expect(stub!.frontmatter.attendees).toEqual([]);
   });
 
-  it("getMeetingWithOverlays inherits the restricted exclusion", async () => {
+  it("getMeeting returns the full restricted meeting with the explicit override", async () => {
     const path = writeMeeting("restricted.md", RESTRICTED_MEETING);
-    // minutesBin points nowhere, so it falls back to getMeeting(), which excludes.
+    const overridden = await getMeeting(path, { includeRestricted: true });
+    expect(overridden?.restricted_stub).toBeUndefined();
+    expect(overridden?.frontmatter.title).toBe("Board Pricing Strategy");
+    expect(overridden?.frontmatter.action_items.length).toBeGreaterThan(0);
+    expect(overridden?.body).toContain("Confidential board pricing discussion");
+  });
+
+  it("getMeetingWithOverlays inherits the restricted stub without calling the CLI", async () => {
+    const path = writeMeeting("restricted.md", RESTRICTED_MEETING);
+    // minutesBin points nowhere, so any CLI attempt would fail; the stub is
+    // returned before the overlay path runs at all.
     const out = await getMeetingWithOverlays(path, { minutesBin: "/nonexistent" });
-    expect(out).toBeNull();
+    expect(out?.restricted_stub).toBe(true);
+    expect(out?.body).toContain("excluded by default");
   });
 
   it("findOpenActions skips actions from restricted meetings by default", async () => {

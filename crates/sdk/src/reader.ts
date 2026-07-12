@@ -131,6 +131,14 @@ export interface MeetingFile {
   frontmatter: Frontmatter;
   body: string;
   path: string;
+  /**
+   * True when this object is a minimal placeholder for a meeting designated
+   * `sensitivity: restricted`, returned by `getMeeting` without the
+   * `includeRestricted` override. A stub carries only title, date, type, and
+   * the sensitivity designation — never the transcript body, action items,
+   * decisions, or attendees.
+   */
+  restricted_stub?: boolean;
 }
 
 function parseRawAttendees(raw?: string): string[] {
@@ -522,12 +530,49 @@ export async function searchMeetings(
 }
 
 /**
+ * Body text carried by a restricted-meeting stub instead of the transcript.
+ */
+const RESTRICTED_STUB_NOTE =
+  "Content excluded by default: this meeting is designated `sensitivity: restricted`. " +
+  "Pass the include_restricted parameter for an explicit, logged override.";
+
+/**
+ * Build the minimal placeholder returned for a restricted meeting fetched by
+ * exact path without the override: title, date, type, and the sensitivity
+ * designation only. The transcript body, action items, decisions, and
+ * attendees are never included.
+ */
+function restrictedStub(meeting: MeetingFile): MeetingFile {
+  return {
+    path: meeting.path,
+    restricted_stub: true,
+    body: RESTRICTED_STUB_NOTE,
+    frontmatter: {
+      title: meeting.frontmatter.title,
+      type: meeting.frontmatter.type,
+      date: meeting.frontmatter.date,
+      duration: "",
+      capture: meeting.frontmatter.capture,
+      sensitivity: "restricted",
+      tags: [],
+      attendees: [],
+      people: [],
+      action_items: [],
+      decisions: [],
+      intents: [],
+    },
+  };
+}
+
+/**
  * Get a single meeting by file path.
  *
- * A restricted meeting is excluded by default (returns null with a logged
- * note), even when the caller already knows the path, so a stored path cannot
- * be used to bypass the policy. Pass `{ includeRestricted: true }` for an
- * explicit, logged override.
+ * A restricted meeting is reduced to a minimal stub by default — title, date,
+ * `sensitivity: restricted`, and a note that content is excluded until the
+ * `includeRestricted` override is passed — even when the caller already knows
+ * the path, so a stored path cannot be used to bypass the policy. Pass
+ * `{ includeRestricted: true }` for an explicit, logged override; check
+ * `restricted_stub` on the result to tell the two apart.
  */
 export async function getMeeting(
   filePath: string,
@@ -538,9 +583,9 @@ export async function getMeeting(
   if (isRestricted(meeting)) {
     if (!opts.includeRestricted) {
       console.warn(
-        `[minutes] get_meeting: ${filePath} is restricted; excluded by default`
+        `[minutes] get_meeting: ${filePath} is restricted; returning stub (content excluded by default)`
       );
-      return null;
+      return restrictedStub(meeting);
     }
     console.warn(
       `[minutes] include_restricted override: returning restricted meeting ${filePath}`
@@ -683,6 +728,9 @@ export async function getMeetingWithOverlays(
     includeRestricted: options.includeRestricted,
   });
   if (!fallback) return null;
+  // A restricted stub never goes through the CLI overlay path: overlays would
+  // add speaker names to a meeting whose content is excluded by default.
+  if (fallback.restricted_stub) return fallback;
 
   // Dynamically import child_process so this module still loads in
   // environments without it (browsers, Edge runtimes). The function

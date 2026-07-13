@@ -612,12 +612,14 @@
       animation: recall-blink 1s step-end infinite;
     }
 
-    /* Pre-first-token "thinking" state: an empty streaming bubble shows quiet
-       pulsing dots so a slow agent cold-start (spawning claude, MCP init, first
-       inference) reads as working, not frozen (#404). Replaced by streamed text
-       the moment the first chunk lands. */
+    /* Pre-first-token grounding state: an empty streaming bubble narrates what
+       the agent is doing via data-status — "thinking", then live MCP tool
+       labels ("searching your meetings", "checking commitments") — with pulsing
+       dots, so a slow agent cold-start reads as working, not frozen (#404). It
+       vanishes the moment streamed text lands (the bubble is no longer :empty).
+       data-status unset falls back to just the dots. */
     .chat-bubble-assistant.streaming:empty::before {
-      content: '\2022\2009\2022\2009\2022';
+      content: attr(data-status) '\2009\2022\2009\2022\2009\2022';
       color: var(--fg);
       animation: recall-thinking 1.4s ease-in-out infinite;
     }
@@ -11811,6 +11813,45 @@
       }
     }
 
+    // #404: friendly status labels for the read-only Minutes MCP tools the
+    // Recall chat can call, so the pre-answer grounding phase narrates what the
+    // agent is actually doing ("searching your meetings") instead of dead air.
+    const RECALL_TOOL_STATUS = {
+      search_meetings: 'searching your meetings',
+      list_meetings: 'browsing your meetings',
+      get_meeting: 'reading a meeting',
+      research_topic: 'researching a topic',
+      get_person_profile: 'looking up a person',
+      relationship_map: 'mapping relationships',
+      track_commitments: 'checking commitments',
+      get_meeting_insights: 'pulling out insights',
+      consistency_report: 'checking for conflicts',
+      get_agent_annotations: 'reading annotations',
+      read_live_transcript: 'reading the live transcript',
+      activity_summary: 'reviewing recent activity',
+      search_context: 'searching desktop context',
+      get_moment: 'looking up a moment',
+      list_processing_jobs: 'checking processing status',
+      get_status: 'checking status',
+      list_voices: 'checking voices',
+      knowledge_status: 'checking your knowledge base',
+      qmd_collection_status: 'checking your collections',
+    };
+
+    // Update the empty-bubble status label from a claude stream-json chunk's
+    // tool_use blocks. Only while the answer text hasn't started (:empty), so
+    // the narration never overwrites a streaming reply.
+    function updateRecallChatStatus(chunk) {
+      if (!currentAssistantBubble || currentAssistantBubble.textContent.trim()) return;
+      if (!chunk || chunk.type !== 'assistant' || !chunk.message || !chunk.message.content) return;
+      for (const part of chunk.message.content) {
+        if (part && part.type === 'tool_use') {
+          const tool = String(part.name || '').replace(/^mcp__[^_]+__/, '');
+          currentAssistantBubble.dataset.status = RECALL_TOOL_STATUS[tool] || 'consulting your memory';
+        }
+      }
+    }
+
     /// Register one-time Tauri event listeners for recall-chat-chunk and recall-chat-done.
     async function registerChatListeners() {
       if (chatListenersRegistered) return;
@@ -11818,6 +11859,7 @@
 
       await currentWindow.listen('recall-chat-chunk', (event) => {
         const chunk = event.payload;
+        updateRecallChatStatus(chunk);
         let text = '';
         if (chunk && chunk.type === 'assistant' && chunk.message && chunk.message.content) {
           // Streaming assistant turn: { type:"assistant", message:{ content:[{type:"text",text:"..."}] } }
@@ -11872,9 +11914,12 @@
       userBubble.textContent = text;
       recallChatMessages.appendChild(userBubble);
 
-      // Append empty assistant bubble (filled by streaming chunks)
+      // Append empty assistant bubble (filled by streaming chunks). data-status
+      // drives the pre-answer grounding narration (#404); it starts at
+      // "thinking" and updateRecallChatStatus swaps in live MCP tool labels.
       currentAssistantBubble = document.createElement('div');
       currentAssistantBubble.className = 'chat-bubble chat-bubble-assistant streaming';
+      currentAssistantBubble.dataset.status = 'thinking';
       recallChatMessages.appendChild(currentAssistantBubble);
       recallChatMessages.scrollTop = recallChatMessages.scrollHeight;
 

@@ -20,6 +20,7 @@ pub struct Config {
     pub transcription: TranscriptionConfig,
     pub diarization: DiarizationConfig,
     pub summarization: SummarizationConfig,
+    pub copilot: CopilotConfig,
     pub search: SearchConfig,
     pub daily_notes: DailyNotesConfig,
     pub security: SecurityConfig,
@@ -332,6 +333,45 @@ pub struct SummarizationConfig {
     pub openai_compatible_api_key_env: String,
     pub mistral_model: String,
     pub language: String,
+}
+
+/// Real-time copilot configuration.
+///
+/// This is deliberately separate from [`SummarizationConfig`]: the copilot is
+/// a latency-bounded, failure-isolated event-stream consumer, while meeting
+/// summarization is a post-processing pipeline. `auto-local` resolves to
+/// Ollama on every supported platform; platform accelerators implement the
+/// provider trait without changing this portable default.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CopilotConfig {
+    /// Permit hosts to auto-start the copilot. An explicit CLI start is still
+    /// treated as intentional one-session activation when this is false.
+    pub enabled: bool,
+    /// Default presentation surface (`tui` or `stdout`).
+    pub surface: String,
+    /// Fast-lane provider. `auto-local` resolves to `ollama` in contract v1.
+    pub fast_provider: String,
+    /// Model name sent to the fast provider.
+    pub fast_model: String,
+    /// Hard opt-in gate for future cloud provider implementations.
+    pub allow_cloud: bool,
+    /// Lifetime of a rendered nudge.
+    pub nudge_ttl_ms: u64,
+    /// End-to-end fast-lane latency budget and provider timeout.
+    pub target_latency_ms: u64,
+    /// Whether graph/search history is assembled into the battle card.
+    pub history_grounding: bool,
+}
+
+impl CopilotConfig {
+    /// Resolve the contract's platform-fair provider alias.
+    pub fn resolved_fast_provider(&self) -> &str {
+        match self.fast_provider.trim() {
+            "" | "auto-local" => "ollama",
+            provider => provider,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -990,6 +1030,7 @@ impl Default for Config {
             transcription: TranscriptionConfig::default(),
             diarization: DiarizationConfig::default(),
             summarization: SummarizationConfig::default(),
+            copilot: CopilotConfig::default(),
             search: SearchConfig::default(),
             daily_notes: DailyNotesConfig::default(),
             security: SecurityConfig::default(),
@@ -1070,6 +1111,21 @@ impl Default for SummarizationConfig {
             openai_compatible_api_key_env: String::new(),
             mistral_model: "mistral-large-latest".into(),
             language: "auto".into(),
+        }
+    }
+}
+
+impl Default for CopilotConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            surface: "tui".into(),
+            fast_provider: "auto-local".into(),
+            fast_model: "llama3.2".into(),
+            allow_cloud: false,
+            nudge_ttl_ms: 12_000,
+            target_latency_ms: 5_000,
+            history_grounding: true,
         }
     }
 }
@@ -1575,6 +1631,15 @@ mod tests {
         );
         assert_eq!(config.diarization.engine, "auto");
         assert_eq!(config.summarization.engine, "none");
+        assert!(!config.copilot.enabled);
+        assert_eq!(config.copilot.surface, "tui");
+        assert_eq!(config.copilot.fast_provider, "auto-local");
+        assert_eq!(config.copilot.resolved_fast_provider(), "ollama");
+        assert_eq!(config.copilot.fast_model, "llama3.2");
+        assert!(!config.copilot.allow_cloud);
+        assert_eq!(config.copilot.nudge_ttl_ms, 12_000);
+        assert_eq!(config.copilot.target_latency_ms, 5_000);
+        assert!(config.copilot.history_grounding);
         assert_eq!(config.search.engine, "builtin");
         assert!(!config.daily_notes.enabled);
         assert_eq!(config.dictation.backend, "whisper");
@@ -1588,6 +1653,36 @@ mod tests {
         assert_eq!(config.consent.mode, ConsentMode::Remind);
         assert!(config.consent.default_basis.is_none());
         assert!(config.consent.disclosure_script.contains("Minutes"));
+    }
+
+    #[test]
+    fn copilot_config_deserializes_independently_from_summarization() {
+        let parsed: Config = toml::from_str(
+            r#"
+            [summarization]
+            engine = "none"
+
+            [copilot]
+            enabled = true
+            surface = "stdout"
+            fast_provider = "ollama"
+            fast_model = "qwen3:4b"
+            allow_cloud = false
+            nudge_ttl_ms = 9000
+            target_latency_ms = 3500
+            history_grounding = false
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(parsed.summarization.engine, "none");
+        assert!(parsed.copilot.enabled);
+        assert_eq!(parsed.copilot.surface, "stdout");
+        assert_eq!(parsed.copilot.resolved_fast_provider(), "ollama");
+        assert_eq!(parsed.copilot.fast_model, "qwen3:4b");
+        assert_eq!(parsed.copilot.nudge_ttl_ms, 9_000);
+        assert_eq!(parsed.copilot.target_latency_ms, 3_500);
+        assert!(!parsed.copilot.history_grounding);
     }
 
     #[test]

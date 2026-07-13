@@ -504,6 +504,55 @@ pub(crate) fn strip_contamination(name: &str) -> &str {
     }
 }
 
+/// Split a raw people string into individual person references on explicit
+/// conjunctions, so multi-person strings ("Gert and Liam", "Liam & Joe") don't
+/// fuse into one entity (#385 class 2).
+///
+/// Separators: the word `and` (case-insensitive), `&`, `+`, `;`. Commas are
+/// treated as separators ONLY when one of those conjunctions is also present
+/// (an "A, B, and C" list) — a lone comma is often "Last, First" for a single
+/// person, so `"Chen, Sarah"` is deliberately left intact. A name with no
+/// separator ("Sarah Chen", "Anne Marie") passes through unchanged.
+pub(crate) fn split_person_references(raw: &str) -> Vec<String> {
+    let has_conjunction = raw
+        .split_whitespace()
+        .any(|t| t.eq_ignore_ascii_case("and"))
+        || raw.contains('&')
+        || raw.contains('+');
+    let split_char = |c: char| c == '&' || c == '+' || c == ';' || (has_conjunction && c == ',');
+
+    let mut out: Vec<String> = Vec::new();
+    let mut current: Vec<String> = Vec::new();
+    let flush = |current: &mut Vec<String>, out: &mut Vec<String>| {
+        if !current.is_empty() {
+            out.push(current.join(" "));
+            current.clear();
+        }
+    };
+
+    for token in raw.split_whitespace() {
+        if token.eq_ignore_ascii_case("and") {
+            flush(&mut current, &mut out);
+            continue;
+        }
+        for (i, piece) in token.split(split_char).enumerate() {
+            if i > 0 {
+                flush(&mut current, &mut out);
+            }
+            let piece = piece.trim();
+            if !piece.is_empty() {
+                current.push(piece.to_string());
+            }
+        }
+    }
+    flush(&mut current, &mut out);
+
+    if out.is_empty() {
+        out.push(raw.trim().to_string());
+    }
+    out
+}
+
 fn normalize_entity_identity(entity: &EntityRef) -> Option<PersonIdentity> {
     // Role/title descriptors ("tech lead"), diarization speaker labels
     // ("speaker 0"), and generic/group tokens ("team", "qa engineer") must not
@@ -952,6 +1001,35 @@ mod tests {
             let once = strip_contamination(s);
             assert_eq!(strip_contamination(once), once, "not idempotent for {s:?}");
         }
+    }
+
+    #[test]
+    fn split_person_references_splits_on_conjunctions() {
+        // #385 class 2: multi-person strings become separate references.
+        assert_eq!(split_person_references("Gert and Liam"), ["Gert", "Liam"]);
+        assert_eq!(split_person_references("Liam & Joe"), ["Liam", "Joe"]);
+        assert_eq!(split_person_references("Liam+Joe"), ["Liam", "Joe"]);
+        assert_eq!(
+            split_person_references("Gert and Liam and Junrei"),
+            ["Gert", "Liam", "Junrei"]
+        );
+        // Comma splits only because a conjunction is present (an "A, B, and C" list).
+        assert_eq!(
+            split_person_references("Gert, Liam, and Junrei"),
+            ["Gert", "Liam", "Junrei"]
+        );
+    }
+
+    #[test]
+    fn split_person_references_preserves_single_names() {
+        // Real names must never be split.
+        assert_eq!(split_person_references("Sarah Chen"), ["Sarah Chen"]);
+        assert_eq!(split_person_references("Anne Marie"), ["Anne Marie"]);
+        assert_eq!(split_person_references("Mat"), ["Mat"]);
+        // "Andrew" contains "and" but not as a standalone token — must not split.
+        assert_eq!(split_person_references("Andrew"), ["Andrew"]);
+        // Lone comma with no conjunction = "Last, First", left intact.
+        assert_eq!(split_person_references("Chen, Sarah"), ["Chen, Sarah"]);
     }
 
     #[test]

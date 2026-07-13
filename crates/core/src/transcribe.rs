@@ -697,8 +697,10 @@ fn transcribe_whisper_dispatch(
 
     #[cfg(not(feature = "whisper"))]
     {
-        let mut stats = FilterStats::default();
-        stats.audio_duration_secs = samples.len() as f64 / 16000.0;
+        let stats = FilterStats {
+            audio_duration_secs: samples.len() as f64 / 16000.0,
+            ..Default::default()
+        };
         let _ = config; // suppress unused warning
         let _ = hints; // only used when the whisper feature is enabled
         let duration_secs = samples.len() as f64 / 16000.0;

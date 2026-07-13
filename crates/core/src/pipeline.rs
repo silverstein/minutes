@@ -3038,13 +3038,18 @@ where
                     llm_duration_ms,
                 }
             } else {
+                let reason = if looks_like_instruction_echo(&cleaned) {
+                    "rejected-echo"
+                } else {
+                    "rejected-title"
+                };
                 TitleGenerationDecision {
                     final_title: fallback_title.to_string(),
                     refined_title: None,
                     outcome: "fallback",
                     model: Some(refined.model),
                     input_chars: refined.input_chars,
-                    detail: Some(format!("rejected-title: {}", cleaned)),
+                    detail: Some(format!("{}: {}", reason, cleaned)),
                     llm_duration_ms,
                 }
             }
@@ -3141,6 +3146,14 @@ fn llm_title_passes_quality(candidate: &str) -> bool {
         return false;
     }
 
+    // #401: the model sometimes answers the title prompt conversationally
+    // ("I'll create a concise meeting title...") instead of returning a bare
+    // title, and the echo was slugified straight into the filename. Reject
+    // instruction-echo / meta-talk so the deterministic fallback title is used.
+    if looks_like_instruction_echo(candidate) {
+        return false;
+    }
+
     let words: Vec<String> = candidate
         .split_whitespace()
         .map(|word| {
@@ -3188,6 +3201,53 @@ fn llm_title_passes_quality(candidate: &str) -> bool {
     !words
         .iter()
         .all(|word| generic_words.contains(&word.as_str()) || stopwords.contains(&word.as_str()))
+}
+
+/// #401: detect when an LLM answered the title prompt conversationally or
+/// echoed the instructions back, instead of returning a bare title. These
+/// patterns are meta-talk about the task, vanishingly unlikely in a real
+/// 3-8 word meeting title, so matching one means the candidate should be
+/// rejected in favor of the deterministic fallback title.
+fn looks_like_instruction_echo(candidate: &str) -> bool {
+    let lower = candidate.trim().to_lowercase();
+    if lower.is_empty() {
+        return false;
+    }
+
+    // Phrases lifted straight from the title prompt, or clear meta-talk.
+    const ECHO_PHRASES: &[&str] = &[
+        "concise meeting title",
+        "the title text",
+        "here is the title",
+        "here's the title",
+        "as an ai",
+        "meeting title:",
+    ];
+    if ECHO_PHRASES.iter().any(|p| lower.contains(p)) {
+        return true;
+    }
+
+    // Conversational lead-ins a model uses when it replies in prose rather
+    // than emitting a bare title. Kept deliberately narrow to avoid rejecting
+    // legitimate titles (e.g. "Here" or "Sure" as standalone words are fine).
+    const ECHO_PREFIXES: &[&str] = &[
+        "i'll ",
+        "i will ",
+        "i'd ",
+        "i can ",
+        "i have ",
+        "i've ",
+        "here is ",
+        "here's ",
+        "here are ",
+        "sure,",
+        "sure ",
+        "certainly",
+        "of course",
+        "let me ",
+        "based on ",
+    ];
+    ECHO_PREFIXES.iter().any(|p| lower.starts_with(p))
 }
 
 /// Generate a smart title from either the user-provided context or transcript.
@@ -4571,6 +4631,17 @@ fn derive_structured_tags(
 }
 
 fn add_person_entity(entities: &mut BTreeMap<String, (String, BTreeSet<String>)>, raw: &str) {
+    // #385 class 2: split multi-person strings ("Gert and Liam") into separate
+    // references before each is stripped, gated, and slugged individually.
+    for reference in crate::person_identity::split_person_references(raw) {
+        add_single_person_entity(entities, &reference);
+    }
+}
+
+fn add_single_person_entity(
+    entities: &mut BTreeMap<String, (String, BTreeSet<String>)>,
+    raw: &str,
+) {
     let Some(trimmed) = (match resolve_speaker_reference(raw, &[], false) {
         Some(name) => Some(name),
         None => {
@@ -5472,6 +5543,69 @@ mod tests {
         assert_eq!(decision.final_title, "Roadmap Review");
         assert_eq!(decision.refined_title, None);
         assert_eq!(decision.outcome, "fallback");
+    }
+
+    #[test]
+    fn instruction_echo_titles_are_detected() {
+        // #401: these are meta-talk / prompt echoes, not titles.
+        assert!(looks_like_instruction_echo(
+            "I'll create a concise meeting title"
+        ));
+        assert!(looks_like_instruction_echo(
+            "Here is a concise meeting title for you"
+        ));
+        assert!(looks_like_instruction_echo("Sure, here's a good title"));
+        assert!(looks_like_instruction_echo(
+            "Based on the summary, Q3 Planning"
+        ));
+        assert!(looks_like_instruction_echo("Meeting title: Q3 Planning"));
+        assert!(looks_like_instruction_echo(
+            "As an AI, I'd suggest Roadmap Review"
+        ));
+        // Legitimate titles must pass through untouched.
+        assert!(!looks_like_instruction_echo(
+            "Q3 Pricing Experiment Decision"
+        ));
+        assert!(!looks_like_instruction_echo("Consultant Billing Switch"));
+        assert!(!looks_like_instruction_echo("Roadmap Review"));
+        // "Here Comes..." is not the "here is/are" lead-in — must not trip.
+        assert!(!looks_like_instruction_echo(
+            "Here Comes the Sun Launch Plan"
+        ));
+    }
+
+    #[test]
+    fn instruction_echo_title_falls_back_and_logs_rejected_echo() {
+        // #401 end-to-end: the exact echo that became a filename must be
+        // rejected, fall back to the deterministic title, and log greppably.
+        let summary = sample_summary();
+        let mut config = Config::default();
+        config.summarization.engine = "agent".into();
+        config.summarization.agent_command = "claude".into();
+        let decision = maybe_refine_title_with_llm(
+            "Roadmap Review",
+            None,
+            Some("Roadmap discussion"),
+            Some(&summary),
+            &markdown::EntityLinks::default(),
+            &config,
+            |_, _, _, _| {
+                Ok(summarize::TitleRefinement {
+                    title: "I'll create a concise meeting title:".into(),
+                    model: "agent:claude".into(),
+                    input_chars: 64,
+                })
+            },
+        );
+
+        assert_eq!(decision.final_title, "Roadmap Review");
+        assert_eq!(decision.refined_title, None);
+        assert_eq!(decision.outcome, "fallback");
+        assert!(decision
+            .detail
+            .as_deref()
+            .unwrap_or_default()
+            .starts_with("rejected-echo:"));
     }
 
     #[test]
@@ -6442,6 +6576,46 @@ mod tests {
         assert!(
             !slugs.contains(&"sam-engineering-lead"),
             "role suffix must not appear in slug: {:?}",
+            slugs
+        );
+    }
+
+    #[test]
+    fn add_person_entity_splits_multi_person_strings() {
+        // #385 class 2: "Gert and Liam" must become two entities, not "gert-liam".
+        let entities = build_entity_links(
+            "meeting",
+            None,
+            &[
+                "Gert and Liam".into(),
+                "Liam & Joe".into(),
+                "Sarah Chen".into(),
+            ],
+            &[],
+            &[],
+            &[],
+            &[],
+            None,
+        );
+
+        let slugs: Vec<&str> = entities.people.iter().map(|e| e.slug.as_str()).collect();
+        assert!(slugs.contains(&"gert"), "gert present: {:?}", slugs);
+        assert!(slugs.contains(&"liam"), "liam present: {:?}", slugs);
+        assert!(slugs.contains(&"joe"), "joe present: {:?}", slugs);
+        assert!(
+            !slugs.contains(&"gert-liam"),
+            "must not fuse multi-person: {:?}",
+            slugs
+        );
+        assert!(
+            !slugs.contains(&"liam-joe"),
+            "must not fuse multi-person: {:?}",
+            slugs
+        );
+        // A genuine two-word name must NOT be split (would appear as sarah + chen).
+        assert!(
+            slugs.contains(&"sarah-chen"),
+            "real two-word name must stay intact: {:?}",
             slugs
         );
     }

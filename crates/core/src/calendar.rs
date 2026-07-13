@@ -261,6 +261,8 @@ pub fn calendar_access_status() -> CalendarAccess {
 }
 
 /// Parse the helper's `--status` JSON line into a [`CalendarAccess`].
+/// Only reachable from the macOS helper path in non-test builds.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn parse_calendar_access(raw: &str) -> CalendarAccess {
     let value: serde_json::Value = match serde_json::from_str(raw.trim()) {
         Ok(value) => value,

@@ -594,6 +594,11 @@ enum Commands {
         /// every millisecond counts.
         #[arg(long, conflicts_with = "sync")]
         no_sync: bool,
+
+        /// Include meetings designated `sensitivity: restricted` (excluded
+        /// by default). The override is recorded on the event bus.
+        #[arg(long)]
+        include_restricted: bool,
     },
 
     /// Show open action items across all meetings
@@ -601,6 +606,11 @@ enum Commands {
         /// Filter by assignee name
         #[arg(short, long)]
         assignee: Option<String>,
+
+        /// Include meetings designated `sensitivity: restricted` (excluded
+        /// by default). The override is recorded on the event bus.
+        #[arg(long)]
+        include_restricted: bool,
     },
 
     /// Flag conflicting decisions and stale commitments across meetings
@@ -672,6 +682,11 @@ enum Commands {
         /// Filter by attendee / person
         #[arg(short, long)]
         attendee: Option<String>,
+
+        /// Include meetings designated `sensitivity: restricted` (excluded
+        /// by default). The override is recorded on the event bus.
+        #[arg(long)]
+        include_restricted: bool,
     },
 
     /// List recent meetings and voice memos
@@ -691,6 +706,11 @@ enum Commands {
         /// Skip filesystem sync entirely; query the index as-is.
         #[arg(long, conflicts_with = "sync")]
         no_sync: bool,
+
+        /// Include meetings designated `sensitivity: restricted` (excluded
+        /// by default). The override is recorded on the event bus.
+        #[arg(long)]
+        include_restricted: bool,
     },
 
     /// Export meetings as CSV (to stdout or file)
@@ -1661,6 +1681,7 @@ fn main() -> Result<()> {
             format,
             sync,
             no_sync,
+            include_restricted,
         } => cmd_search(
             &query,
             content_type,
@@ -1671,9 +1692,13 @@ fn main() -> Result<()> {
             owner,
             &format,
             resolve_sync_mode(sync, no_sync),
+            include_restricted,
             &config,
         ),
-        Commands::Actions { assignee } => cmd_actions(assignee.as_deref(), &config),
+        Commands::Actions {
+            assignee,
+            include_restricted,
+        } => cmd_actions(assignee.as_deref(), include_restricted, &config),
         Commands::Consistency {
             owner,
             stale_after_days,
@@ -1708,16 +1733,26 @@ fn main() -> Result<()> {
             content_type,
             since,
             attendee,
-        } => cmd_research(&query, content_type, since, attendee, &config),
+            include_restricted,
+        } => cmd_research(
+            &query,
+            content_type,
+            since,
+            attendee,
+            include_restricted,
+            &config,
+        ),
         Commands::List {
             limit,
             content_type,
             sync,
             no_sync,
+            include_restricted,
         } => cmd_list(
             limit,
             content_type,
             resolve_sync_mode(sync, no_sync),
+            include_restricted,
             &config,
         ),
         Commands::Export {
@@ -2807,11 +2842,12 @@ fn build_weekly_summary_markdown(config: &Config) -> Result<String> {
         intent_kind: None,
         owner: None,
         recorded_by: None,
+        include_restricted: false,
     };
 
     let meetings = minutes_core::search::search("", config, &filters)?;
     let consistency = minutes_core::search::consistency_report(config, None, 7)?;
-    let open_actions = minutes_core::search::find_open_actions(config, None)?;
+    let open_actions = minutes_core::search::find_open_actions(config, None, false)?;
 
     let recent_titles = if meetings.is_empty() {
         "- No meetings or memos in the last 7 days.".to_string()
@@ -2895,6 +2931,7 @@ fn build_proactive_context_markdown(config: &Config) -> Result<String> {
         intent_kind: None,
         owner: None,
         recorded_by: None,
+        include_restricted: false,
     };
     let recent_results = minutes_core::search::search("", config, &filters)?;
     let recent_meetings = recent_results
@@ -3223,6 +3260,24 @@ fn resolve_sync_mode(sync: bool, no_sync: bool) -> minutes_core::search_index::S
     }
 }
 
+/// Record an explicit `--include-restricted` override on the event bus
+/// before any results are returned, so the bypass is never silent (consent
+/// layer Wave 2). Best-effort by design: a failed append warns on stderr but
+/// never blocks the caller (headless/hook discipline).
+fn record_sensitivity_override(surface: &str, query: Option<&str>) {
+    if let Err(error) = minutes_core::events::append_event_strict(
+        minutes_core::events::MinutesEvent::SensitivityOverride {
+            surface: surface.to_string(),
+            query: query.map(|q| q.to_string()),
+        },
+    ) {
+        eprintln!(
+            "WARN: could not record sensitivity.override event: {}",
+            error
+        );
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn cmd_search(
     query: &str,
@@ -3234,9 +3289,13 @@ fn cmd_search(
     owner: Option<String>,
     format: &str,
     sync_mode: minutes_core::search_index::SyncMode,
+    include_restricted: bool,
     config: &Config,
 ) -> Result<()> {
     let json_mode = format == "json";
+    if include_restricted {
+        record_sensitivity_override("cli.search", Some(query));
+    }
     let filters = minutes_core::search::SearchFilters {
         content_type,
         since,
@@ -3244,6 +3303,7 @@ fn cmd_search(
         intent_kind: intent_kind.as_deref().map(parse_intent_kind).transpose()?,
         owner,
         recorded_by: None,
+        include_restricted,
     };
 
     if intents_only {
@@ -3328,8 +3388,11 @@ fn cmd_search(
     Ok(())
 }
 
-fn cmd_actions(assignee: Option<&str>, config: &Config) -> Result<()> {
-    let results = minutes_core::search::find_open_actions(config, assignee)
+fn cmd_actions(assignee: Option<&str>, include_restricted: bool, config: &Config) -> Result<()> {
+    if include_restricted {
+        record_sensitivity_override("cli.actions", assignee);
+    }
+    let results = minutes_core::search::find_open_actions(config, assignee, include_restricted)
         .map_err(|e| anyhow::anyhow!("{}", e))?;
 
     if results.is_empty() {
@@ -3354,6 +3417,7 @@ fn cmd_list(
     limit: usize,
     content_type: Option<String>,
     sync_mode: minutes_core::search_index::SyncMode,
+    include_restricted: bool,
     config: &Config,
 ) -> Result<()> {
     // List delegates to search with an empty query — DRY, no duplicated file walking
@@ -3367,6 +3431,7 @@ fn cmd_list(
         None,
         "text",
         sync_mode,
+        include_restricted,
         config,
     )
 }
@@ -3383,6 +3448,7 @@ fn cmd_export(
         intent_kind: None,
         owner: None,
         recorded_by: None,
+        include_restricted: true,
     };
 
     // Reuse search with empty query to get all meetings
@@ -4312,8 +4378,12 @@ fn cmd_research(
     content_type: Option<String>,
     since: Option<String>,
     attendee: Option<String>,
+    include_restricted: bool,
     config: &Config,
 ) -> Result<()> {
+    if include_restricted {
+        record_sensitivity_override("cli.research", Some(query));
+    }
     let filters = minutes_core::search::SearchFilters {
         content_type,
         since,
@@ -4321,6 +4391,7 @@ fn cmd_research(
         intent_kind: None,
         owner: None,
         recorded_by: None,
+        include_restricted,
     };
 
     let report = minutes_core::search::cross_meeting_research(query, config, &filters)
@@ -4392,6 +4463,17 @@ fn parse_intent_kind(kind: &str) -> Result<minutes_core::markdown::IntentKind> {
     }
 }
 
+/// True when the meeting file at `path` carries `sensitivity: restricted`
+/// frontmatter (consent layer Wave 2). Unreadable files are treated as not
+/// restricted; downstream ingest surfaces its own read errors.
+fn meeting_is_restricted(path: &Path) -> bool {
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    let (fm_str, _) = minutes_core::markdown::split_frontmatter(&content);
+    minutes_core::markdown::extract_field(fm_str, "sensitivity").as_deref() == Some("restricted")
+}
+
 fn cmd_ingest(path: Option<PathBuf>, all: bool, dry_run: bool, config: &Config) -> Result<()> {
     if !config.knowledge.enabled || config.knowledge.path.as_os_str().is_empty() {
         eprintln!("Knowledge base is not configured.");
@@ -4424,10 +4506,28 @@ fn cmd_ingest(path: Option<PathBuf>, all: bool, dry_run: bool, config: &Config) 
             }
         }
         found.sort();
+        // Sensitivity enforcement (consent layer Wave 2): restricted meetings
+        // never enter the knowledge base via batch ingest. There is no
+        // override for knowledge ingest in this wave.
+        let before = found.len();
+        found.retain(|p| !meeting_is_restricted(p));
+        let skipped_restricted = before - found.len();
+        if skipped_restricted > 0 {
+            eprintln!(
+                "  skipping {} meeting(s) designated `sensitivity: restricted` (excluded from knowledge ingest)",
+                skipped_restricted
+            );
+        }
         found
     } else if let Some(ref p) = path {
         if !p.exists() {
             anyhow::bail!("File not found: {}", p.display());
+        }
+        if meeting_is_restricted(p) {
+            anyhow::bail!(
+                "{} is designated `sensitivity: restricted`; it is excluded from knowledge ingest by default and was not written to the knowledge base",
+                p.display()
+            );
         }
         vec![p.clone()]
     } else {
@@ -4561,6 +4661,7 @@ fn resolve_single_meeting(meeting: &str, config: &Config) -> Result<std::path::P
         intent_kind: None,
         owner: None,
         recorded_by: None,
+        include_restricted: true,
     };
     let results = minutes_core::search::search(meeting, config, &filters)?;
     if results.is_empty() {
@@ -4920,6 +5021,7 @@ fn cmd_clean(meeting: &str, apply: bool, config: &Config) -> Result<()> {
                 intent_kind: None,
                 owner: None,
                 recorded_by: None,
+                include_restricted: true,
             };
             let results = minutes_core::search::search(meeting, config, &filters)?;
             if results.is_empty() {

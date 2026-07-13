@@ -8,8 +8,10 @@ use std::time::Instant;
 // LLM summarization module (pluggable).
 //
 // Supported engines:
-//   "auto"    → Detect installed AI CLI (claude > codex > gemini > opencode), skip if none found (default)
+//   "auto"    → Prefer on-device Apple Foundation Models when available, else detect an
+//               installed AI CLI (claude > codex > gemini > opencode), skip if none found (default)
 //   "none"    → Skip summarization — Claude summarizes via MCP when asked
+//   "apple"   → Apple Foundation Models, fully on-device (macOS 26+ with Apple Intelligence)
 //   "agent"   → Agent CLI (claude -p, codex exec, gemini -p, opencode run, pi -p) — uses existing subscription, no API key
 //   "ollama"  → Local Ollama server (no API key needed)
 //   "claude"  → Anthropic Claude API (ANTHROPIC_API_KEY env var, legacy)
@@ -124,7 +126,14 @@ pub fn summarize_with_template(
 
     let result = match engine.as_str() {
         "auto" => {
-            if let Some(agent) = detect_agent_cli() {
+            // Privacy-first ordering: a working on-device model beats any path
+            // that round-trips through a provider's cloud.
+            if crate::apple_fm::is_available() {
+                tracing::info!(
+                    "auto-selected Apple Foundation Models (on-device) for summarization"
+                );
+                summarize_with_apple_fm(&combined, config, template)
+            } else if let Some(agent) = detect_agent_cli() {
                 tracing::info!(agent = %agent, "auto-detected AI CLI for summarization");
                 summarize_with_agent_cmd(
                     transcript,
@@ -156,6 +165,7 @@ pub fn summarize_with_template(
             }
         }
         "agent" => summarize_with_agent(transcript, user_notes, screen_files, config, template),
+        "apple" | "apple-fm" => summarize_with_apple_fm(&combined, config, template),
         "claude" => summarize_with_claude(&combined, screen_files, config, template),
         "openai" => summarize_with_openai(&combined, screen_files, config, template),
         "mistral" => summarize_with_mistral(&combined, screen_files, config, template),
@@ -334,7 +344,14 @@ pub fn title_refinement_input_chars(
 
 pub fn title_refinement_model(config: &Config) -> Option<String> {
     match config.summarization.engine.as_str() {
-        "auto" => detect_agent_cli().map(|agent| format!("agent:{}", agent_label(&agent))),
+        "auto" => {
+            if crate::apple_fm::is_available() {
+                Some("apple:foundation-models".into())
+            } else {
+                detect_agent_cli().map(|agent| format!("agent:{}", agent_label(&agent)))
+            }
+        }
+        "apple" | "apple-fm" => Some("apple:foundation-models".into()),
         "agent" => {
             let agent_cmd = if config.summarization.agent_command.is_empty() {
                 "claude".to_string()
@@ -730,6 +747,7 @@ pub(crate) fn summarization_model_hint(config: &Config, has_screen_context: bool
     match config.summarization.engine.as_str() {
         "auto" => "agent:auto".into(),
         "agent" => configured_agent_hint(config),
+        "apple" | "apple-fm" => "apple:foundation-models".into(),
         "claude" => "anthropic:claude-sonnet-4-20250514".into(),
         "openai" => {
             if has_screen_context {
@@ -751,6 +769,7 @@ pub(crate) fn summarization_model_hint(config: &Config, has_screen_context: bool
 pub fn speaker_mapping_model_hint(config: &Config) -> String {
     match config.summarization.engine.as_str() {
         "none" | "auto" | "agent" => configured_agent_hint(config),
+        "apple" | "apple-fm" => "apple:foundation-models".into(),
         "claude" => "anthropic:claude-sonnet-4-20250514".into(),
         "openai" => "openai:gpt-4o-mini".into(),
         "mistral" => format!("mistral:{}", config.summarization.mistral_model),
@@ -2108,6 +2127,37 @@ fn summarize_with_openai_compatible(
 
 // ── Ollama (local) ───────────────────────────────────────────
 
+/// Summarize fully on-device via Apple Foundation Models (macOS 26+).
+///
+/// Same map-reduce chunking as the other engines, but capped at the FM
+/// context window (`APPLE_FM_MAX_CHUNK_TOKENS`) regardless of the configured
+/// `chunk_max_tokens`. No network traffic at any point.
+fn summarize_with_apple_fm(
+    transcript: &str,
+    config: &Config,
+    template: Option<&Template>,
+) -> Result<Summary, Box<dyn std::error::Error>> {
+    let chunk_tokens = config
+        .summarization
+        .chunk_max_tokens
+        .min(crate::apple_fm::APPLE_FM_MAX_CHUNK_TOKENS);
+    let chunks = build_prompt(transcript, chunk_tokens);
+    let system_prompt = build_system_prompt(get_effective_summary_language(config), template);
+    let mut all_text = String::new();
+
+    for chunk in &chunks {
+        let prompt = format!(
+            "Summarize this transcript:\n\n<transcript>\n{}\n</transcript>",
+            chunk
+        );
+        let text = crate::apple_fm::generate(&system_prompt, &prompt)?;
+        all_text.push_str(&text);
+        all_text.push('\n');
+    }
+
+    Ok(parse_summary_response(&all_text))
+}
+
 fn summarize_with_ollama(
     transcript: &str,
     config: &Config,
@@ -2265,11 +2315,16 @@ fn run_title_refinement_prompt(
 ) -> Result<String, Box<dyn std::error::Error>> {
     match config.summarization.engine.as_str() {
         "auto" => {
-            if let Some(agent) = detect_agent_cli() {
+            if crate::apple_fm::is_available() {
+                crate::apple_fm::generate("You generate concise meeting titles.", prompt)
+            } else if let Some(agent) = detect_agent_cli() {
                 run_title_refinement_via_agent(prompt, &agent)
             } else {
                 Err("no AI CLI found (claude, codex, gemini, opencode)".into())
             }
+        }
+        "apple" | "apple-fm" => {
+            crate::apple_fm::generate("You generate concise meeting titles.", prompt)
         }
         "agent" => {
             let agent_cmd = if config.summarization.agent_command.is_empty() {

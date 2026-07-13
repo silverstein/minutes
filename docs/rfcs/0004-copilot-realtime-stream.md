@@ -1,6 +1,6 @@
 # RFC 0004: Copilot Real-Time Stream Contract
 
-Status: proposed as the v1 contract baseline for the real-time meeting copilot.
+Status: accepted as the v1 contract baseline for the real-time meeting copilot.
 
 This document defines the portable contract between live transcript producers,
 the copilot engine, and presentation surfaces. The contract belongs to the open

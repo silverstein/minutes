@@ -827,6 +827,8 @@ pub struct LiveTranscriptConfig {
     pub max_utterance_secs: u64,
     /// Whether to save raw WAV alongside JSONL for post-meeting reprocessing.
     pub save_wav: bool,
+    /// What to do with a saved standalone live transcript when the session stops.
+    pub promote_on_stop: LiveTranscriptPromoteOnStop,
     /// Whether the keyboard shortcut is enabled.
     pub shortcut_enabled: bool,
     /// The keyboard shortcut string (e.g., "CmdOrCtrl+Shift+L").
@@ -840,10 +842,24 @@ impl Default for LiveTranscriptConfig {
             model: String::new(), // empty = use dictation model
             max_utterance_secs: 30,
             save_wav: true,
+            promote_on_stop: LiveTranscriptPromoteOnStop::Process,
             shortcut_enabled: false,
             shortcut: "CmdOrCtrl+Shift+L".into(),
         }
     }
+}
+
+/// Stop-time handling for the fixed standalone live transcript scratch files.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum LiveTranscriptPromoteOnStop {
+    /// Preserve the WAV/JSONL pair and run the normal meeting pipeline.
+    #[default]
+    Process,
+    /// Preserve the WAV/JSONL pair without creating a meeting.
+    Preserve,
+    /// Leave the fixed scratch files in place (legacy, overwrite-prone behavior).
+    Off,
 }
 
 pub const LIVE_TRANSCRIPT_BACKEND_INHERIT: &str = "inherit";

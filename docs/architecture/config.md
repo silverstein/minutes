@@ -292,7 +292,8 @@ Dictation clipboard behavior is platform-specific:
 |---|---|---|
 | `model` | inherits dictation model | Whisper model for live mode |
 | `max_utterance_secs` | `30` | Force-finalize an utterance at this length |
-| `save_wav` | `false` | Keep raw WAV alongside JSONL for post-meeting reprocessing |
+| `save_wav` | `true` | Save raw WAV so the stopped session can be preserved or processed |
+| `promote_on_stop` | `"process"` | `"process"` creates a normal meeting; `"preserve"` keeps a timestamped WAV/JSONL pair only; `"off"` leaves the overwrite-prone fixed slot unchanged |
 | `shortcut_enabled` | `false` | Global shortcut on |
 | `shortcut` | `"CmdOrCtrl+Shift+L"` | Chord |
 

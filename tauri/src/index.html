@@ -11538,6 +11538,9 @@
     const recallChatSendBtn = document.getElementById('recall-chat-send');
     let currentAssistantBubble = null;
     let currentAssistantRaw = '';
+    // True once token-level deltas have rendered for the current turn, so the
+    // trailing complete `assistant` message isn't appended as a duplicate.
+    let currentAssistantStreamed = false;
     let chatListenersRegistered = false;
     let recallChatStreaming = false;
 
@@ -11871,6 +11874,7 @@
       if (recallChatMessages) recallChatMessages.replaceChildren();
       currentAssistantBubble = null;
       currentAssistantRaw = '';
+      currentAssistantStreamed = false;
       const jumpPill = document.getElementById('recall-chat-jump');
       if (jumpPill) jumpPill.style.display = 'none';
       try {
@@ -12006,10 +12010,25 @@
         const chunk = event.payload;
         updateRecallChatStatus(chunk);
         let text = '';
-        if (chunk && chunk.type === 'assistant' && chunk.message && chunk.message.content) {
-          // Streaming assistant turn: { type:"assistant", message:{ content:[{type:"text",text:"..."}] } }
-          for (const part of chunk.message.content) {
-            if (part.type === 'text') text += part.text;
+        if (chunk && chunk.type === 'stream_event' && chunk.event) {
+          // Token-level streaming (claude --include-partial-messages): render
+          // text as it generates instead of waiting for the whole reply. The
+          // complete `assistant` event that follows is then a duplicate and is
+          // skipped below (currentAssistantStreamed).
+          const ev = chunk.event;
+          if (ev.type === 'content_block_delta' && ev.delta && ev.delta.type === 'text_delta') {
+            text = ev.delta.text || '';
+            if (text) currentAssistantStreamed = true;
+          }
+        } else if (chunk && chunk.type === 'assistant' && chunk.message && chunk.message.content) {
+          // Complete assistant turn. When token deltas already streamed it in,
+          // its text is a duplicate — skip it (updateRecallChatStatus above
+          // still read any tool_use blocks for the grounding narration). Only
+          // used to render when partial streaming didn't run (fallback).
+          if (!currentAssistantStreamed) {
+            for (const part of chunk.message.content) {
+              if (part.type === 'text') text += part.text;
+            }
           }
         } else if (chunk && chunk.type === 'result' && typeof chunk.result === 'string') {
           // Final result event — use as fallback if the assistant bubble is still empty.
@@ -12072,6 +12091,7 @@
       currentAssistantBubble.className = 'chat-bubble chat-bubble-assistant streaming';
       currentAssistantBubble.dataset.status = 'thinking';
       currentAssistantRaw = '';
+      currentAssistantStreamed = false;
       recallChatMessages.appendChild(currentAssistantBubble);
       // Sending is a deliberate action — always drop to the bottom + clear the pill.
       scrollRecallChatToBottom();

@@ -604,14 +604,31 @@
       padding: 2px 0;
     }
 
-    .chat-bubble-assistant.streaming::after {
+    /* Streaming caret — only once text is arriving, so an empty bubble doesn't
+       read as a stray cursor. */
+    .chat-bubble-assistant.streaming:not(:empty)::after {
       content: '\25ae';
       margin-left: 2px;
       animation: recall-blink 1s step-end infinite;
     }
 
+    /* Pre-first-token "thinking" state: an empty streaming bubble shows quiet
+       pulsing dots so a slow agent cold-start (spawning claude, MCP init, first
+       inference) reads as working, not frozen (#404). Replaced by streamed text
+       the moment the first chunk lands. */
+    .chat-bubble-assistant.streaming:empty::before {
+      content: '\2022\2009\2022\2009\2022';
+      color: var(--fg);
+      animation: recall-thinking 1.4s ease-in-out infinite;
+    }
+
     @keyframes recall-blink {
       50% { opacity: 0; }
+    }
+
+    @keyframes recall-thinking {
+      0%, 100% { opacity: 0.3; }
+      50% { opacity: 0.85; }
     }
 
     .chat-input-row {

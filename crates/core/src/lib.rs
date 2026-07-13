@@ -27,6 +27,7 @@ pub mod health;
 pub mod jobs;
 pub mod knowledge;
 pub mod knowledge_extract;
+pub mod live_session;
 pub mod logging;
 pub mod macos_permissions;
 pub mod markdown;

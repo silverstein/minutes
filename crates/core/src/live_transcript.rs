@@ -664,7 +664,7 @@ pub fn run(
 
     // Acquire PID with flock held for session lifetime (prevents concurrent starts)
     let lt_pid = pid::live_transcript_pid_path();
-    let _pid_guard = match pid::create_pid_guard(&lt_pid) {
+    let pid_guard = match pid::create_pid_guard(&lt_pid) {
         Ok(pid_guard) => pid_guard,
         Err(e) => {
             let error = match e {
@@ -691,23 +691,48 @@ pub fn run(
 
     match run_inner(stop_flag, config, context_session_id.clone()) {
         Ok((lines, duration, path)) => {
+            // The writer is closed now. Keep the liveness lock until the fixed
+            // scratch files have moved so a new session cannot truncate them,
+            // then release it before the potentially long meeting pipeline.
+            let finalization = match crate::live_session::finalize_stopped_live_session_with_release(
+                config,
+                &pid::live_transcript_wav_path(),
+                &path,
+                || drop(pid_guard),
+            ) {
+                Ok(finalization) => finalization,
+                Err(error) => {
+                    if let Some(session_id) = context_session_id.as_deref() {
+                        crate::context_store::mark_live_transcript_failed(
+                            session_id,
+                            Some(Local::now()),
+                            &error.to_string(),
+                        )
+                        .ok();
+                    }
+                    return Err(error);
+                }
+            };
             if let Some(session_id) = context_session_id.as_deref() {
-                let wav_path = pid::live_transcript_wav_path();
                 crate::context_store::mark_live_transcript_complete(
                     session_id,
-                    &path,
-                    wav_path.exists().then_some(wav_path.as_path()),
+                    finalization.jsonl_path(),
+                    finalization.wav_path(),
                     Some(Local::now()),
                     json!({
                         "line_count": lines,
                         "duration_secs": duration,
+                        "meeting_path": finalization
+                            .meeting_path()
+                            .map(|path| path.display().to_string()),
                     }),
                 )
                 .ok();
             }
-            Ok((lines, duration, path))
+            Ok((lines, duration, finalization.output_path().to_path_buf()))
         }
         Err(error) => {
+            drop(pid_guard);
             if let Some(session_id) = context_session_id.as_deref() {
                 crate::context_store::mark_live_transcript_failed(
                     session_id,

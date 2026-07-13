@@ -13765,15 +13765,21 @@ fn run_live_session(app: tauri::AppHandle, active: Arc<AtomicBool>, stop_flag: A
     }
 
     match result {
-        Ok((lines, duration, _path)) => {
+        Ok((lines, duration, path)) => {
             eprintln!(
-                "[live-transcript] ended: {} lines in {:.0}s",
-                lines, duration
+                "[live-transcript] ended: {} lines in {:.0}s; saved to {}",
+                lines,
+                duration,
+                path.display()
             );
             if let Some(win) = app.get_webview_window("main") {
                 win.emit(
                     "live-transcript:stopped",
-                    serde_json::json!({ "lines": lines, "duration_secs": duration }),
+                    serde_json::json!({
+                        "lines": lines,
+                        "duration_secs": duration,
+                        "path": path.display().to_string(),
+                    }),
                 )
                 .ok();
             }

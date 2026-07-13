@@ -17,7 +17,8 @@ use std::hash::{Hash, Hasher};
 use std::io::{self, Write};
 use std::path::Path;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 use tauri::{Emitter, Manager};
@@ -94,6 +95,18 @@ pub struct AppState {
     /// `cmd_recall_chat_clear`. Capped to the last 6 turns in the prompt
     /// to keep token usage bounded.
     pub recall_chat_history: Arc<Mutex<Vec<(String, String)>>>,
+    /// The one Recall chat turn currently in flight. The child stays here so a
+    /// separate cancel command can terminate its complete process tree.
+    pub(crate) recall_chat_turn: Arc<Mutex<Option<RecallChatTurn>>>,
+    /// Monotonic ID source used to keep late teardown from an old cancelled
+    /// reader from finishing a newer turn.
+    pub(crate) recall_chat_next_turn_id: Arc<AtomicU64>,
+}
+
+pub(crate) struct RecallChatTurn {
+    id: u64,
+    cancelled: Arc<AtomicBool>,
+    child: Option<Child>,
 }
 
 #[derive(Debug, Clone)]
@@ -8604,6 +8617,201 @@ fn build_recall_chat_prompt(history: &[(String, String)], enriched_message: &str
     prompt
 }
 
+struct RecallChatProcessIo {
+    stdin: Option<ChildStdin>,
+    stdout: ChildStdout,
+    stderr: ChildStderr,
+}
+
+fn begin_recall_chat_turn(state: &AppState) -> Result<(u64, Arc<AtomicBool>), String> {
+    let mut current = state.recall_chat_turn.lock().unwrap();
+    if current.is_some() {
+        return Err("A Recall chat turn is already in progress.".into());
+    }
+
+    let id = state
+        .recall_chat_next_turn_id
+        .fetch_add(1, Ordering::Relaxed);
+    let cancelled = Arc::new(AtomicBool::new(false));
+    *current = Some(RecallChatTurn {
+        id,
+        cancelled: cancelled.clone(),
+        child: None,
+    });
+    Ok((id, cancelled))
+}
+
+fn clear_recall_chat_turn_if_current(
+    current_turn: &Arc<Mutex<Option<RecallChatTurn>>>,
+    turn_id: u64,
+) -> bool {
+    let mut current = current_turn.lock().unwrap();
+    if current.as_ref().is_some_and(|turn| turn.id == turn_id) {
+        current.take();
+        true
+    } else {
+        false
+    }
+}
+
+fn finish_recall_chat_turn(
+    app: &tauri::AppHandle,
+    current_turn: &Arc<Mutex<Option<RecallChatTurn>>>,
+    turn_id: u64,
+) {
+    if clear_recall_chat_turn_if_current(current_turn, turn_id) {
+        app.emit_to("main", "recall-chat-done", ()).ok();
+    }
+}
+
+fn configure_recall_chat_process_group(command: &mut Command) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        command.creation_flags(CREATE_NEW_PROCESS_GROUP);
+    }
+}
+
+fn terminate_recall_chat_process_tree(child: &mut Child) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        let process_group = -(child.id() as i32);
+        let term_result = unsafe { libc::kill(process_group, libc::SIGTERM) };
+        if term_result != 0 {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::ESRCH) {
+                child.kill()?;
+            }
+        }
+
+        let mut leader_reaped = false;
+        for _ in 0..10 {
+            if child.try_wait()?.is_some() {
+                leader_reaped = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+
+        // The group leader can exit on SIGTERM while a descendant ignores it.
+        // Always follow with SIGKILL for the process group; ESRCH means the
+        // entire group is already gone.
+        let kill_result = unsafe { libc::kill(process_group, libc::SIGKILL) };
+        if kill_result != 0 {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::ESRCH) && !leader_reaped {
+                child.kill()?;
+            }
+        }
+        if !leader_reaped {
+            let _ = child.wait()?;
+        }
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    {
+        let pid = child.id().to_string();
+        let status = Command::new("taskkill")
+            .args(["/PID", &pid, "/T", "/F"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        if !status.is_ok_and(|status| status.success()) && child.try_wait()?.is_none() {
+            child.kill()?;
+        }
+        let _ = child.wait()?;
+        Ok(())
+    }
+}
+
+fn spawn_tracked_recall_chat_child(
+    mut command: Command,
+    current_turn: &Arc<Mutex<Option<RecallChatTurn>>>,
+    turn_id: u64,
+) -> Result<RecallChatProcessIo, String> {
+    configure_recall_chat_process_group(&mut command);
+
+    // Hold the turn lock across spawn + registration. A simultaneous cancel
+    // therefore sees either no child yet (before this block) or the fully
+    // tracked child; it can never miss a process that has already spawned.
+    let mut current = current_turn.lock().unwrap();
+    let turn = current
+        .as_mut()
+        .filter(|turn| turn.id == turn_id)
+        .ok_or_else(|| "Recall chat turn was cancelled before the agent started.".to_string())?;
+    if turn.cancelled.load(Ordering::Relaxed) {
+        return Err("Recall chat turn was cancelled before the agent started.".into());
+    }
+
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("Failed to spawn Recall chat agent: {error}"))?;
+    let stdin = child.stdin.take();
+    let stdout = match child.stdout.take() {
+        Some(stdout) => stdout,
+        None => {
+            let _ = terminate_recall_chat_process_tree(&mut child);
+            return Err("No stdout handle from Recall chat agent".into());
+        }
+    };
+    let stderr = match child.stderr.take() {
+        Some(stderr) => stderr,
+        None => {
+            let _ = terminate_recall_chat_process_tree(&mut child);
+            return Err("No stderr handle from Recall chat agent".into());
+        }
+    };
+    turn.child = Some(child);
+    Ok(RecallChatProcessIo {
+        stdin,
+        stdout,
+        stderr,
+    })
+}
+
+fn reap_recall_chat_child(current_turn: &Arc<Mutex<Option<RecallChatTurn>>>, turn_id: u64) {
+    let child = {
+        let mut current = current_turn.lock().unwrap();
+        current
+            .as_mut()
+            .filter(|turn| turn.id == turn_id)
+            .and_then(|turn| turn.child.take())
+    };
+    if let Some(mut child) = child {
+        let _ = child.wait();
+    }
+}
+
+/// Cancel the current turn and return whether the caller owns its one-and-only
+/// `recall-chat-done` emission. A worker that won the teardown race emits it
+/// instead, so an old turn can never tear down a newer one.
+fn cancel_recall_chat_turn(current_turn: &Arc<Mutex<Option<RecallChatTurn>>>) -> bool {
+    let (turn_id, child) = {
+        let mut current = current_turn.lock().unwrap();
+        let Some(turn) = current.as_mut() else {
+            return false;
+        };
+        turn.cancelled.store(true, Ordering::Relaxed);
+        (turn.id, turn.child.take())
+    };
+
+    if let Some(mut child) = child {
+        if let Err(error) = terminate_recall_chat_process_tree(&mut child) {
+            tracing::warn!(error = %error, "failed to terminate Recall chat process tree cleanly");
+        }
+    }
+
+    clear_recall_chat_turn_if_current(current_turn, turn_id)
+}
+
 /// Send a message from the native Recall chat panel and stream the response.
 ///
 /// Provider priority:
@@ -8635,7 +8843,6 @@ pub async fn cmd_recall_chat_send(
     message: String,
 ) -> Result<(), String> {
     use std::io::{BufRead, BufReader};
-    use std::process::{Command, Stdio};
 
     let workspace = crate::context::workspace_dir();
     if !workspace.exists() {
@@ -8762,13 +8969,15 @@ pub async fn cmd_recall_chat_send(
 
     // ── Ollama path ────────────────────────────────────────────────────────────
     if use_ollama {
+        let (turn_id, cancelled) = begin_recall_chat_turn(&state)?;
         let ollama_url = config.summarization.ollama_url.clone();
         let ollama_model = config.summarization.ollama_model.clone();
         let app_clone = app.clone();
         let message_clone = message.clone();
         let history_arc = state.recall_chat_history.clone();
+        let current_turn = state.recall_chat_turn.clone();
 
-        tauri::async_runtime::spawn_blocking(move || {
+        let task_result = tauri::async_runtime::spawn_blocking(move || {
             let url = format!("{}/api/chat", ollama_url);
 
             let mut messages: Vec<serde_json::Value> = Vec::new();
@@ -8798,10 +9007,12 @@ pub async fn cmd_recall_chat_send(
             {
                 Ok(r) => r,
                 Err(e) => {
-                    app_clone
-                        .emit_to("main", "recall-chat-error", format!("Ollama error: {}", e))
-                        .ok();
-                    app_clone.emit_to("main", "recall-chat-done", ()).ok();
+                    if !cancelled.load(Ordering::Relaxed) {
+                        app_clone
+                            .emit_to("main", "recall-chat-error", format!("Ollama error: {}", e))
+                            .ok();
+                    }
+                    finish_recall_chat_turn(&app_clone, &current_turn, turn_id);
                     return;
                 }
             };
@@ -8809,14 +9020,16 @@ pub async fn cmd_recall_chat_send(
             if resp.status().as_u16() >= 400 {
                 let status = resp.status().as_u16();
                 let body_text = resp.body_mut().read_to_string().unwrap_or_default();
-                app_clone
-                    .emit_to(
-                        "main",
-                        "recall-chat-error",
-                        format!("Ollama HTTP {}: {}", status, body_text),
-                    )
-                    .ok();
-                app_clone.emit_to("main", "recall-chat-done", ()).ok();
+                if !cancelled.load(Ordering::Relaxed) {
+                    app_clone
+                        .emit_to(
+                            "main",
+                            "recall-chat-error",
+                            format!("Ollama HTTP {}: {}", status, body_text),
+                        )
+                        .ok();
+                }
+                finish_recall_chat_turn(&app_clone, &current_turn, turn_id);
                 return;
             }
 
@@ -8824,6 +9037,9 @@ pub async fn cmd_recall_chat_send(
             let reader = BufReader::new(body.as_reader());
             let mut full_response = String::new();
             for line_result in reader.lines() {
+                if cancelled.load(Ordering::Relaxed) {
+                    break;
+                }
                 match line_result {
                     Ok(line) if !line.trim().is_empty() => {
                         if let Ok(val) = serde_json::from_str::<serde_json::Value>(&line) {
@@ -8832,6 +9048,9 @@ pub async fn cmd_recall_chat_send(
                                 .and_then(|m| m.get("content"))
                                 .and_then(|c| c.as_str())
                             {
+                                if cancelled.load(Ordering::Relaxed) {
+                                    break;
+                                }
                                 full_response.push_str(text);
                                 app_clone
                                     .emit_to(
@@ -8851,14 +9070,18 @@ pub async fn cmd_recall_chat_send(
                 }
             }
 
-            if !full_response.is_empty() {
+            if !cancelled.load(Ordering::Relaxed) && !full_response.is_empty() {
                 let mut h = history_arc.lock().unwrap();
                 h.push((message_clone, full_response));
             }
-            app_clone.emit_to("main", "recall-chat-done", ()).ok();
+            finish_recall_chat_turn(&app_clone, &current_turn, turn_id);
         })
-        .await
-        .map_err(|e| format!("Recall chat Ollama task failed: {}", e))?;
+        .await;
+
+        if let Err(error) = task_result {
+            clear_recall_chat_turn_if_current(&state.recall_chat_turn, turn_id);
+            return Err(format!("Recall chat Ollama task failed: {error}"));
+        }
 
         return Ok(());
     }
@@ -8899,73 +9122,77 @@ pub async fn cmd_recall_chat_send(
         let args = invocation.args.clone();
 
         #[cfg(target_os = "windows")]
-        let mut child = {
+        let mut command = {
             let ext = std::path::Path::new(&agent_bin)
                 .extension()
                 .and_then(|e| e.to_str())
                 .unwrap_or("")
                 .to_ascii_lowercase();
             if ext == "cmd" || ext == "bat" {
-                Command::new("cmd")
-                    .arg("/C")
-                    .arg(&agent_bin)
-                    .args(&args)
-                    .current_dir(&chat_cwd)
-                    .stdin(Stdio::piped())
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::piped())
-                    .spawn()
-                    .map_err(|e| format!("Failed to spawn claude: {}", e))?
+                let mut command = Command::new("cmd");
+                command.arg("/C").arg(&agent_bin);
+                command
             } else {
                 Command::new(&agent_bin)
-                    .args(&args)
-                    .current_dir(&chat_cwd)
-                    .stdin(Stdio::piped())
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::piped())
-                    .spawn()
-                    .map_err(|e| format!("Failed to spawn claude: {}", e))?
             }
         };
 
         #[cfg(not(target_os = "windows"))]
-        let mut child = Command::new(&agent_bin)
+        let mut command = Command::new(&agent_bin);
+        command
             .args(&args)
             .current_dir(&chat_cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| format!("Failed to spawn claude: {}", e))?;
+            .stderr(Stdio::piped());
+
+        #[cfg(target_os = "windows")]
+        command
+            .args(&args)
+            .current_dir(&chat_cwd)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        let (turn_id, cancelled) = begin_recall_chat_turn(&state)?;
+        let process =
+            match spawn_tracked_recall_chat_child(command, &state.recall_chat_turn, turn_id) {
+                Ok(process) => process,
+                Err(error) => {
+                    clear_recall_chat_turn_if_current(&state.recall_chat_turn, turn_id);
+                    return Err(error);
+                }
+            };
+        let RecallChatProcessIo {
+            mut stdin,
+            stdout,
+            stderr,
+        } = process;
 
         if let Some(payload) = invocation.stdin_payload {
-            if let Some(mut stdin_handle) = child.stdin.take() {
-                use std::io::Write;
+            if let Some(mut stdin_handle) = stdin.take() {
                 let _ = stdin_handle.write_all(&payload);
             }
         }
 
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| "No stdout handle from claude".to_string())?;
-        let stderr = child
-            .stderr
-            .take()
-            .ok_or_else(|| "No stderr handle from claude".to_string())?;
-
         let app_stderr = app.clone();
+        let stderr_cancelled = cancelled.clone();
+        let current_turn = state.recall_chat_turn.clone();
+        let worker_turn = current_turn.clone();
         tauri::async_runtime::spawn_blocking(move || {
             let stderr_thread = std::thread::spawn(move || {
                 let reader = BufReader::new(stderr);
                 let mut buf = String::new();
-                for line in reader.lines().flatten() {
+                for line in reader.lines().map_while(Result::ok) {
+                    if stderr_cancelled.load(Ordering::Relaxed) {
+                        break;
+                    }
                     if !line.trim().is_empty() {
                         buf.push_str(&line);
                         buf.push('\n');
                     }
                 }
-                if !buf.is_empty() {
+                if !stderr_cancelled.load(Ordering::Relaxed) && !buf.is_empty() {
                     app_stderr
                         .emit_to("main", "recall-chat-error", buf.trim().to_string())
                         .ok();
@@ -8975,6 +9202,9 @@ pub async fn cmd_recall_chat_send(
             let reader = BufReader::new(stdout);
             let mut full_response = String::new();
             for line_result in reader.lines() {
+                if cancelled.load(Ordering::Relaxed) {
+                    break;
+                }
                 match line_result {
                     Ok(line) if !line.trim().is_empty() => {
                         if let Ok(json) = serde_json::from_str::<serde_json::Value>(&line) {
@@ -8993,7 +9223,9 @@ pub async fn cmd_recall_chat_send(
                                     }
                                 }
                             }
-                            app.emit_to("main", "recall-chat-chunk", json).ok();
+                            if !cancelled.load(Ordering::Relaxed) {
+                                app.emit_to("main", "recall-chat-chunk", json).ok();
+                            }
                         }
                     }
                     Ok(_) => {}
@@ -9005,16 +9237,19 @@ pub async fn cmd_recall_chat_send(
             }
             let _ = stderr_thread.join();
 
-            if !full_response.is_empty() {
+            if !cancelled.load(Ordering::Relaxed) && !full_response.is_empty() {
                 let mut h = history_arc.lock().unwrap();
                 h.push((message_clone, full_response));
             }
 
-            app.emit_to("main", "recall-chat-done", ()).ok();
-            let _ = child.wait();
+            reap_recall_chat_child(&worker_turn, turn_id);
+            finish_recall_chat_turn(&app, &worker_turn, turn_id);
         })
         .await
-        .map_err(|e| format!("Recall chat streaming task failed: {}", e))?;
+        .map_err(|e| {
+            clear_recall_chat_turn_if_current(&current_turn, turn_id);
+            format!("Recall chat streaming task failed: {e}")
+        })?;
     } else {
         // Other CLIs (codex / gemini / opencode): capture plain-text stdout.
         let invocation =
@@ -9028,76 +9263,80 @@ pub async fn cmd_recall_chat_send(
         };
 
         #[cfg(target_os = "windows")]
-        let mut child = {
+        let mut command = {
             let ext = std::path::Path::new(&invocation.cmd)
                 .extension()
                 .and_then(|e| e.to_str())
                 .unwrap_or("")
                 .to_ascii_lowercase();
             if ext == "cmd" || ext == "bat" {
-                Command::new("cmd")
-                    .arg("/C")
-                    .arg(&invocation.cmd)
-                    .args(&invocation.args)
-                    .current_dir(&chat_cwd)
-                    .stdin(stdin_stdio)
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::piped())
-                    .spawn()
-                    .map_err(|e| format!("Failed to spawn {}: {}", invocation.cmd, e))?
+                let mut command = Command::new("cmd");
+                command.arg("/C").arg(&invocation.cmd);
+                command
             } else {
                 Command::new(&invocation.cmd)
-                    .args(&invocation.args)
-                    .current_dir(&chat_cwd)
-                    .stdin(stdin_stdio)
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::piped())
-                    .spawn()
-                    .map_err(|e| format!("Failed to spawn {}: {}", invocation.cmd, e))?
             }
         };
 
         #[cfg(not(target_os = "windows"))]
-        let mut child = Command::new(&invocation.cmd)
+        let mut command = Command::new(&invocation.cmd);
+        command
             .args(&invocation.args)
             .current_dir(&chat_cwd)
             .stdin(stdin_stdio)
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| format!("Failed to spawn {}: {}", invocation.cmd, e))?;
+            .stderr(Stdio::piped());
+
+        #[cfg(target_os = "windows")]
+        command
+            .args(&invocation.args)
+            .current_dir(&chat_cwd)
+            .stdin(stdin_stdio)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        let (turn_id, cancelled) = begin_recall_chat_turn(&state)?;
+        let process =
+            match spawn_tracked_recall_chat_child(command, &state.recall_chat_turn, turn_id) {
+                Ok(process) => process,
+                Err(error) => {
+                    clear_recall_chat_turn_if_current(&state.recall_chat_turn, turn_id);
+                    return Err(error);
+                }
+            };
+        let RecallChatProcessIo {
+            mut stdin,
+            stdout,
+            stderr,
+        } = process;
 
         if let Some(payload) = invocation.stdin_payload {
-            if let Some(mut stdin_handle) = child.stdin.take() {
-                use std::io::Write;
+            if let Some(mut stdin_handle) = stdin.take() {
                 let _ = stdin_handle.write_all(&payload);
             }
         }
 
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| format!("No stdout from {}", invocation.cmd))?;
-        let stderr = child
-            .stderr
-            .take()
-            .ok_or_else(|| format!("No stderr from {}", invocation.cmd))?;
-
         let cleanup_path = invocation.cleanup_path;
         let app_clone = app.clone();
+        let stderr_cancelled = cancelled.clone();
+        let current_turn = state.recall_chat_turn.clone();
+        let worker_turn = current_turn.clone();
 
         tauri::async_runtime::spawn_blocking(move || {
             let app_stderr2 = app_clone.clone();
             let stderr_thread = std::thread::spawn(move || {
                 let reader = BufReader::new(stderr);
                 let mut buf = String::new();
-                for line in reader.lines().flatten() {
+                for line in reader.lines().map_while(Result::ok) {
+                    if stderr_cancelled.load(Ordering::Relaxed) {
+                        break;
+                    }
                     if !line.trim().is_empty() {
                         buf.push_str(&line);
                         buf.push('\n');
                     }
                 }
-                if !buf.is_empty() {
+                if !stderr_cancelled.load(Ordering::Relaxed) && !buf.is_empty() {
                     app_stderr2
                         .emit_to("main", "recall-chat-error", buf.trim().to_string())
                         .ok();
@@ -9116,7 +9355,7 @@ pub async fn cmd_recall_chat_send(
             }
 
             let trimmed = full_response.trim().to_string();
-            if !trimmed.is_empty() {
+            if !cancelled.load(Ordering::Relaxed) && !trimmed.is_empty() {
                 app_clone
                     .emit_to(
                         "main",
@@ -9128,13 +9367,30 @@ pub async fn cmd_recall_chat_send(
                 h.push((message_clone, trimmed));
             }
 
-            app_clone.emit_to("main", "recall-chat-done", ()).ok();
-            let _ = child.wait();
+            reap_recall_chat_child(&worker_turn, turn_id);
+            finish_recall_chat_turn(&app_clone, &worker_turn, turn_id);
         })
         .await
-        .map_err(|e| format!("Recall chat agent task failed: {}", e))?;
+        .map_err(|e| {
+            clear_recall_chat_turn_if_current(&current_turn, turn_id);
+            format!("Recall chat agent task failed: {e}")
+        })?;
     }
 
+    Ok(())
+}
+
+/// Stop the in-flight native Recall chat turn. The worker and this command race
+/// through the same turn-ID teardown, so exactly one `recall-chat-done` event
+/// restores the frontend even when the child exits while cancellation runs.
+#[tauri::command]
+pub fn cmd_recall_chat_cancel(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    if cancel_recall_chat_turn(&state.recall_chat_turn) {
+        app.emit_to("main", "recall-chat-done", ()).ok();
+    }
     Ok(())
 }
 
@@ -9961,7 +10217,65 @@ mod tests {
             call_end_countdown_active: Arc::new(AtomicBool::new(false)),
             call_end_countdown_terminal_state: Arc::new(AtomicU8::new(0)),
             recall_chat_history: Arc::new(Mutex::new(Vec::new())),
+            recall_chat_turn: Arc::new(Mutex::new(None)),
+            recall_chat_next_turn_id: Arc::new(AtomicU64::new(1)),
         }
+    }
+
+    #[test]
+    fn recall_chat_cancel_without_in_flight_turn_is_a_noop() {
+        let state = test_app_state();
+
+        assert!(!cancel_recall_chat_turn(&state.recall_chat_turn));
+        assert!(state.recall_chat_turn.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn recall_chat_cancel_kills_live_tracked_child_and_clears_handle() {
+        let state = test_app_state();
+        let (turn_id, _) = begin_recall_chat_turn(&state).unwrap();
+
+        #[cfg(unix)]
+        let mut command = {
+            let mut command = Command::new("sh");
+            // Ignore the graceful signal so the test also exercises the
+            // process-group SIGKILL fallback instead of only the happy path.
+            command.args(["-c", "trap '' TERM; while :; do :; done"]);
+            command
+        };
+
+        #[cfg(windows)]
+        let mut command = {
+            let mut command = Command::new("cmd");
+            command.args(["/C", "ping -n 30 127.0.0.1 >NUL"]);
+            command
+        };
+
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let process =
+            spawn_tracked_recall_chat_child(command, &state.recall_chat_turn, turn_id).unwrap();
+        let child_pid = state
+            .recall_chat_turn
+            .lock()
+            .unwrap()
+            .as_ref()
+            .and_then(|turn| turn.child.as_ref())
+            .map(Child::id)
+            .expect("spawned child should be tracked");
+        assert!(minutes_core::pid::is_process_alive(child_pid));
+        #[cfg(unix)]
+        assert_eq!(unsafe { libc::getpgid(child_pid as i32) }, child_pid as i32);
+        drop(process);
+
+        #[cfg(unix)]
+        std::thread::sleep(Duration::from_millis(100));
+
+        assert!(cancel_recall_chat_turn(&state.recall_chat_turn));
+        assert!(state.recall_chat_turn.lock().unwrap().is_none());
+        assert!(!minutes_core::pid::is_process_alive(child_pid));
     }
 
     #[test]

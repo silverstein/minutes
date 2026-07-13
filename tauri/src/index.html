@@ -11539,6 +11539,7 @@
     let currentAssistantBubble = null;
     let currentAssistantRaw = '';
     let chatListenersRegistered = false;
+    let recallChatStreaming = false;
 
     // Render a safe markdown subset for assistant replies (#404 follow-up).
     // XSS-safe by construction: fenced code is pulled out and escaped, the rest
@@ -11975,6 +11976,27 @@
       }
     }
 
+    function setRecallChatStreaming(streaming) {
+      recallChatStreaming = streaming;
+      if (recallChatSendBtn) {
+        recallChatSendBtn.disabled = false;
+        recallChatSendBtn.textContent = streaming ? 'Stop' : 'Send';
+        recallChatSendBtn.setAttribute('aria-label', streaming ? 'Stop response' : 'Send message');
+      }
+      if (recallChatInput) {
+        recallChatInput.disabled = streaming;
+        if (!streaming) recallChatInput.focus();
+      }
+    }
+
+    function finishRecallChatUi() {
+      if (currentAssistantBubble) {
+        currentAssistantBubble.classList.remove('streaming');
+        currentAssistantBubble = null;
+      }
+      setRecallChatStreaming(false);
+    }
+
     /// Register one-time Tauri event listeners for recall-chat-chunk and recall-chat-done.
     async function registerChatListeners() {
       if (chatListenersRegistered) return;
@@ -12027,20 +12049,13 @@
       });
 
       await currentWindow.listen('recall-chat-done', () => {
-        if (currentAssistantBubble) {
-          currentAssistantBubble.classList.remove('streaming');
-          currentAssistantBubble = null;
-        }
-        if (recallChatSendBtn) recallChatSendBtn.disabled = false;
-        if (recallChatInput) {
-          recallChatInput.disabled = false;
-          recallChatInput.focus();
-        }
+        finishRecallChatUi();
       });
     }
 
     async function sendRecallChat() {
       if (!recallChatInput || !recallChatMessages) return;
+      if (recallChatStreaming) return;
       const text = recallChatInput.value.trim();
       if (!text) return;
 
@@ -12062,8 +12077,7 @@
       scrollRecallChatToBottom();
 
       recallChatInput.value = '';
-      recallChatInput.disabled = true;
-      if (recallChatSendBtn) recallChatSendBtn.disabled = true;
+      setRecallChatStreaming(true);
 
       try {
         await invoke('cmd_recall_chat_send', { message: text });
@@ -12076,13 +12090,29 @@
             : 'Error: ' + errMsg;
           currentAssistantBubble = null;
         }
+        setRecallChatStreaming(false);
+      }
+    }
+
+    async function cancelRecallChat() {
+      if (!recallChatStreaming) return;
+      if (recallChatSendBtn) recallChatSendBtn.disabled = true;
+      try {
+        await invoke('cmd_recall_chat_cancel');
+      } catch (e) {
+        console.error('cmd_recall_chat_cancel failed:', e);
         if (recallChatSendBtn) recallChatSendBtn.disabled = false;
-        if (recallChatInput) recallChatInput.disabled = false;
       }
     }
 
     if (recallChatSendBtn) {
-      recallChatSendBtn.addEventListener('click', sendRecallChat);
+      recallChatSendBtn.addEventListener('click', () => {
+        if (recallChatStreaming) {
+          cancelRecallChat();
+        } else {
+          sendRecallChat();
+        }
+      });
     }
     // Scroll-anchoring wiring: the pill jumps to latest; scrolling back to the
     // bottom re-attaches and dismisses the pill (#404 follow-up, coach mode).

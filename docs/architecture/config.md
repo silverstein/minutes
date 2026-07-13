@@ -96,6 +96,29 @@ Screenshot context requires an endpoint that accepts OpenAI-style image content
 parts. Text-only summaries use plain string chat content for broader local
 server compatibility.
 
+### `[copilot]` — real-time nudge stream
+
+This section is deliberately separate from `[summarization]`: the copilot is a
+latency-bounded live consumer, while summarization runs after recording. An
+explicit `minutes copilot start` may start a foreground session when
+`enabled = false`; the flag controls implicit startup by future host surfaces.
+
+| key | default | meaning |
+|---|---|---|
+| `enabled` | `false` | Allow implicit copilot startup; explicit CLI startup remains available. |
+| `surface` | `"tui"` | Default CLI surface: `"tui"` or newline-delimited JSON with `"stdout"`. |
+| `fast_provider` | `"auto-local"` | Fast-lane provider. In v1, `"auto-local"` resolves to `"ollama"` on every platform. |
+| `fast_model` | `"llama3.2"` | Ollama model used for structured nudges. |
+| `allow_cloud` | `false` | Cloud opt-in gate. Cloud adapters are intentionally not implemented in the first copilot release. |
+| `nudge_ttl_ms` | `12000` | Lifetime of a rendered nudge in milliseconds. |
+| `target_latency_ms` | `5000` | Fast request timeout/latency target; timeout degrades only the copilot. |
+| `history_grounding` | `true` | Preload a bounded battle card from unrestricted graph, structured intent, and FTS data. |
+
+Ollama defaults to `http://localhost:11434`. Set `OLLAMA_HOST` to use another
+local endpoint. Meeting text and history are passed as delimited untrusted data,
+the loop exposes no tools, and restricted meetings are excluded from every
+battle-card source. See [RFC 0004](../rfcs/0004-copilot-realtime-stream.md).
+
 ### `[recording]` — capture behavior
 
 | key | default | meaning |

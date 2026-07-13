@@ -86,10 +86,6 @@ const capabilityColumns = [
         "Track people, projects, and unresolved commitments across meetings.",
       ],
       [
-        "Real-time copilot",
-        "Local Ollama nudges in the CLI/TUI, grounded in the live event stream and unrestricted meeting history.",
-      ],
-      [
         "Cross-meeting search",
         "Search everything or ask your assistant to pull the thread for you.",
       ],

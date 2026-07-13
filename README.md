@@ -203,18 +203,6 @@ minutes stop                                     # Stop live session
 ```
 Streams local transcription to a JSONL file in real time — any AI agent can read it mid-meeting for live coaching. When the session stops, the default `[live_transcript] promote_on_stop = "process"` preserves the raw WAV/JSONL pair and runs the normal diarization and summarization pipeline to create a meeting; use `"preserve"` to keep only the timestamped source pair or `"off"` for the legacy overwrite-prone fixed slot. Depending on your build and config, live mode can run on Whisper, Parakeet, or the experimental Apple Speech standalone-live path. Apple Speech currently applies to standalone live transcript (`minutes live`) and opt-in dictation finalization, not recording-sidecar or batch transcription, and it falls back to a ready Parakeet backend before Whisper if Apple Speech is unavailable or fails mid-session in live mode. See [docs/architecture/apple-speech.md](docs/architecture/apple-speech.md) for the current Apple Speech scope. The MCP `read_live_transcript` tool provides delta reads (by line cursor or wall-clock duration). Works with Claude Code, Codex, OpenCode, Gemini CLI, or any agent that reads files. The Tauri desktop app has a Live Mode toggle that starts this with one click.
 
-### Real-time copilot (local preview)
-
-```bash
-ollama serve
-ollama pull llama3.2
-minutes copilot start --goal "Keep the rollout decision concrete"
-minutes copilot status
-minutes copilot pause    # resume and stop are available too
-```
-
-The cross-platform CLI copilot attaches to the durable Agent Event Bus and consumes only `live.utterance.final` events through its sequence cursor. It displays one short-lived, evidence-revisioned nudge at a time in a minimal TUI (or use `--surface stdout` for NDJSON). Ollama is the local default; model failure never stops capture. If another process owns recording, the copilot attaches to its shared event stream. If no capture is producing events, it waits visibly and does not silently poll transcript JSONL. Partial transcript production, cloud and Apple model providers, and the desktop HUD are later tiers of the [versioned copilot contract](docs/rfcs/0004-copilot-realtime-stream.md).
-
 ### Dictation mode
 ```bash
 minutes dictate                                  # Speak → text appears as you talk
@@ -1166,16 +1154,6 @@ openai_compatible_base_url = "http://localhost:11434/v1"
 openai_compatible_model = "llama3.2"
 openai_compatible_api_key_env = "" # Blank means no Authorization header for local endpoints. Desktop cloud endpoints can still use a saved Keychain key without rewriting config.
 
-[copilot]
-enabled = false            # `copilot start` explicitly enables this session; false prevents implicit startup
-surface = "tui"            # "tui" or "stdout"
-fast_provider = "auto-local" # Resolves to Ollama on every platform in the current release
-fast_model = "llama3.2"
-allow_cloud = false
-nudge_ttl_ms = 12000
-target_latency_ms = 5000
-history_grounding = true
-
 [diarization]
 engine = "auto"           # "auto" (default — uses pyannote-rs if models downloaded, otherwise skips),
                           # "pyannote-rs" (always on — native Rust, no Python),
@@ -1226,8 +1204,8 @@ agent_args = []           # Optional extra args, e.g. ["--dangerously-skip-permi
 
 ```
 minutes/
-├── crates/core/          66 Rust modules — the engine (shared by all interfaces)
-├── crates/cli/           CLI binary — 56 commands (recording, search, health, storage, templates, workflows, copilot)
+├── crates/core/          53 Rust modules — the engine (shared by all interfaces)
+├── crates/cli/           CLI binary — 52 commands (recording, search, health, storage, templates, workflows)
 ├── crates/whisper-guard/ Anti-hallucination toolkit (VAD gating, dedup, noise trimming)
 ├── crates/reader/        Lightweight read-only meeting parser (no audio deps)
 ├── crates/assets/        Bundled assets (demo.wav)

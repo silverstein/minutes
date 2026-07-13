@@ -744,31 +744,39 @@
       display: block;
     }
 
-    /* ── Recall mode toggle button (dev-mode switch in panel header) ── */
+    /* ── Recall mode toggle: a visible labeled button switching between the chat
+       panel and the terminal. Was a near-invisible faint keyboard glyph — now a
+       clear bordered control that reads the mode it switches TO. */
     .recall-mode-toggle {
-      padding: 2px 6px;
+      padding: 3px 9px;
       border-radius: 6px;
-      border: none;
+      border: 1px solid var(--border-mid);
       background: transparent;
-      color: var(--text-tertiary);
-      font-size: 12px;
+      color: var(--text-secondary);
+      font-family: 'Geist Mono', 'SF Mono', Menlo, monospace;
+      font-size: 10px;
+      font-weight: 500;
+      letter-spacing: 0.02em;
       cursor: pointer;
       line-height: 1;
+      white-space: nowrap;
     }
 
-    .recall-mode-toggle:hover {
-      color: var(--text-secondary);
-      background: var(--bg-hover);
+    /* Label shows the target mode: chat → "Terminal", terminal → "Chat". */
+    .recall-mode-toggle::after {
+      content: 'Terminal';
     }
 
+    .recall-mode-toggle.active::after {
+      content: 'Chat';
+    }
+
+    .recall-mode-toggle:hover,
     .recall-mode-toggle:focus-visible {
       outline: none;
-      color: var(--text-secondary);
+      color: var(--text);
       background: var(--bg-hover);
-    }
-
-    .recall-mode-toggle.active {
-      color: var(--text-secondary);
+      border-color: var(--text-tertiary);
     }
 
     .recall-note-row {
@@ -5222,7 +5230,7 @@
       <div class="recall-header-actions">
         <button class="btn btn-secondary btn-sm" id="btn-recall-weekly">Weekly</button>
         <button class="btn btn-secondary btn-sm recall-end-btn" id="btn-recall-end">End Session</button>
-        <button class="recall-mode-toggle" id="btn-recall-mode-toggle" title="Switch to terminal (developer mode)">⌨</button>
+        <button class="recall-mode-toggle" id="btn-recall-mode-toggle" title="Switch to terminal (developer mode)"></button>
         <button class="recall-close" id="btn-recall-close" title="Close panel">&times;</button>
       </div>
     </div>

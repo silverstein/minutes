@@ -569,6 +569,7 @@
       flex-direction: column;
       flex: 1;
       overflow: hidden;
+      position: relative;
     }
 
     .chat-messages {
@@ -578,6 +579,50 @@
       display: flex;
       flex-direction: column;
       gap: 10px;
+    }
+
+    /* "Jump to latest" pill — shown only when the user has scrolled up and new
+       content arrived, so streaming never yanks them off a paragraph they're
+       reading aloud in coach mode (#404 follow-up). */
+    .chat-jump-latest {
+      position: absolute;
+      left: 50%;
+      bottom: 64px;
+      transform: translateX(-50%);
+      z-index: 6;
+      font-family: 'Geist Mono', 'SF Mono', Menlo, monospace;
+      font-size: 11px;
+      padding: 4px 12px;
+      border: none;
+      border-radius: 999px;
+      background: var(--accent);
+      color: var(--bg);
+      cursor: pointer;
+      box-shadow: 0 2px 10px rgba(0, 0, 0, 0.25);
+      opacity: 0.95;
+    }
+
+    .chat-jump-latest:hover {
+      opacity: 1;
+    }
+
+    /* Coach mode on a small prompter window: reclaim vertical space for the
+       chat by compacting the Recall header and hiding optional chrome when the
+       viewport is short (#404 follow-up — teleprompter / live-feedback use).
+       End Session, the terminal toggle, and close stay reachable. */
+    @media (max-height: 620px) {
+      .recall-header {
+        padding: 5px 12px;
+      }
+      .recall-header .recall-context-label {
+        display: none;
+      }
+      #btn-recall-weekly {
+        display: none;
+      }
+      .recall-note {
+        display: none;
+      }
     }
 
     .chat-bubble {
@@ -5198,6 +5243,7 @@
     <!-- Recall native chat panel — shown when developer mode is OFF -->
     <div class="recall-chat-container" id="recall-chat-panel" style="display:none;">
       <div class="chat-messages" id="recall-chat-messages"></div>
+      <button class="chat-jump-latest" id="recall-chat-jump" style="display:none;" aria-label="Jump to latest message">↓ new messages</button>
       <div class="chat-input-row">
         <textarea id="recall-chat-input" placeholder="Ask about this meeting…" rows="2"></textarea>
         <button class="btn btn-secondary btn-sm" id="recall-chat-send">Send</button>
@@ -11493,6 +11539,25 @@
     // never introduce an element or attribute. No link hrefs (URLs stay text).
     // The bubble's `white-space: pre-wrap` handles newlines, paragraphs, and
     // dash/number list layout, so only inline emphasis + code need handling.
+    // Scroll-anchoring for the chat: auto-scroll while streaming ONLY if the
+    // user is already at the bottom. If they've scrolled up to read (e.g. a
+    // paragraph the coach scripted to say aloud), new content appends silently
+    // and a "jump to latest" pill appears — the tmux-scrollback behavior the
+    // old terminal had (#404 follow-up, coach/live mode).
+    function recallChatNearBottom() {
+      if (!recallChatMessages) return true;
+      return recallChatMessages.scrollHeight - recallChatMessages.scrollTop - recallChatMessages.clientHeight < 48;
+    }
+    function scrollRecallChatToBottom() {
+      if (recallChatMessages) recallChatMessages.scrollTop = recallChatMessages.scrollHeight;
+      const pill = document.getElementById('recall-chat-jump');
+      if (pill) pill.style.display = 'none';
+    }
+    function showRecallChatJump() {
+      const pill = document.getElementById('recall-chat-jump');
+      if (pill) pill.style.display = 'block';
+    }
+
     function renderChatMarkdown(src) {
       const esc = (s) => s
         .replace(/&/g, '&amp;')
@@ -11796,6 +11861,9 @@
     async function resetRecallChat() {
       if (recallChatMessages) recallChatMessages.replaceChildren();
       currentAssistantBubble = null;
+      currentAssistantRaw = '';
+      const jumpPill = document.getElementById('recall-chat-jump');
+      if (jumpPill) jumpPill.style.display = 'none';
       try {
         await invoke('cmd_recall_chat_clear');
       } catch (e) {
@@ -11923,12 +11991,21 @@
           }
         }
         if (text && currentAssistantBubble) {
+          // Capture BEFORE the content grows: was the user already at the bottom?
+          const atBottom = recallChatNearBottom();
           // Accumulate raw text and re-render markdown each chunk (cheap at
           // chat length). renderChatMarkdown escapes first, so the model's
           // output can never inject HTML (#404 follow-up).
           currentAssistantRaw += text;
           currentAssistantBubble.innerHTML = renderChatMarkdown(currentAssistantRaw);
-          if (recallChatMessages) recallChatMessages.scrollTop = recallChatMessages.scrollHeight;
+          // Only auto-scroll if they were at the bottom — never yank someone off
+          // a paragraph they've scrolled up to read aloud in coach mode. When
+          // scrolled up, surface a "jump to latest" pill instead (#404 follow-up).
+          if (atBottom) {
+            scrollRecallChatToBottom();
+          } else {
+            showRecallChatJump();
+          }
         }
       });
 
@@ -11973,7 +12050,8 @@
       currentAssistantBubble.dataset.status = 'thinking';
       currentAssistantRaw = '';
       recallChatMessages.appendChild(currentAssistantBubble);
-      recallChatMessages.scrollTop = recallChatMessages.scrollHeight;
+      // Sending is a deliberate action — always drop to the bottom + clear the pill.
+      scrollRecallChatToBottom();
 
       recallChatInput.value = '';
       recallChatInput.disabled = true;
@@ -11997,6 +12075,17 @@
 
     if (recallChatSendBtn) {
       recallChatSendBtn.addEventListener('click', sendRecallChat);
+    }
+    // Scroll-anchoring wiring: the pill jumps to latest; scrolling back to the
+    // bottom re-attaches and dismisses the pill (#404 follow-up, coach mode).
+    const recallChatJumpBtn = document.getElementById('recall-chat-jump');
+    if (recallChatJumpBtn) {
+      recallChatJumpBtn.addEventListener('click', scrollRecallChatToBottom);
+    }
+    if (recallChatMessages) {
+      recallChatMessages.addEventListener('scroll', () => {
+        if (recallChatNearBottom() && recallChatJumpBtn) recallChatJumpBtn.style.display = 'none';
+      });
     }
     if (recallChatInput) {
       recallChatInput.addEventListener('keydown', (e) => {

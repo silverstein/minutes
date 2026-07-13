@@ -9280,6 +9280,10 @@ pub async fn cmd_recall_chat_send(
 
         #[cfg(not(target_os = "windows"))]
         let mut command = Command::new(&invocation.cmd);
+        // This block was missing its cfg gate, so on Windows both it and the
+        // windows block below ran, moving the non-Copy `stdin_stdio` twice
+        // (E0382). Gate it to non-windows to match its `command` definition.
+        #[cfg(not(target_os = "windows"))]
         command
             .args(&invocation.args)
             .current_dir(&chat_cwd)

@@ -949,7 +949,13 @@ pub fn build_chat_invocation(
         if let Some(pos) = args.iter().position(|a| a == "--output-format") {
             if args.get(pos + 1).map(String::as_str) == Some("text") {
                 args[pos + 1] = "stream-json".to_string();
+                // `--verbose` is required by claude's `--print` mode for
+                // stream-json; `--include-partial-messages` upgrades it from
+                // one complete assistant message at the end to token-level
+                // `content_block_delta` events, so the panel renders the reply
+                // as it generates instead of dumping it all at once.
                 args.insert(pos + 2, "--verbose".to_string());
+                args.insert(pos + 3, "--include-partial-messages".to_string());
             }
         }
     }
@@ -3586,6 +3592,8 @@ PARTICIPANTS:
             .windows(2)
             .any(|w| w[0] == "--output-format" && w[1] == "stream-json"));
         assert!(inv.args.iter().any(|a| a == "--verbose"));
+        // Token-level streaming so the panel renders as the reply generates.
+        assert!(inv.args.iter().any(|a| a == "--include-partial-messages"));
         assert!(!inv.args.iter().any(|a| a == "text"));
         // No bogus / removed flags, prompt travels on stdin not argv.
         assert!(!inv.args.iter().any(|a| a == "--no-interactive"));

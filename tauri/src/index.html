@@ -633,6 +633,26 @@
       50% { opacity: 0.85; }
     }
 
+    /* Rendered-markdown code in assistant replies (#404 follow-up). */
+    .chat-bubble-assistant .chat-code {
+      font-family: 'Geist Mono', 'SF Mono', Menlo, monospace;
+      font-size: 11px;
+      background: var(--bg-elevated);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 6px 8px;
+      margin: 4px 0;
+      overflow-x: auto;
+      white-space: pre;
+    }
+
+    .chat-bubble-assistant .chat-code-inline {
+      font-family: 'Geist Mono', 'SF Mono', Menlo, monospace;
+      background: var(--bg-elevated);
+      border-radius: 3px;
+      padding: 0 3px;
+    }
+
     .chat-input-row {
       display: flex;
       gap: 8px;
@@ -11463,7 +11483,34 @@
     const recallChatInput = document.getElementById('recall-chat-input');
     const recallChatSendBtn = document.getElementById('recall-chat-send');
     let currentAssistantBubble = null;
+    let currentAssistantRaw = '';
     let chatListenersRegistered = false;
+
+    // Render a safe markdown subset for assistant replies (#404 follow-up).
+    // XSS-safe by construction: fenced code is pulled out and escaped, the rest
+    // is HTML-escaped BEFORE any formatting, and the inline rules only wrap
+    // already-escaped text in a fixed set of safe tags — the model's output can
+    // never introduce an element or attribute. No link hrefs (URLs stay text).
+    // The bubble's `white-space: pre-wrap` handles newlines, paragraphs, and
+    // dash/number list layout, so only inline emphasis + code need handling.
+    function renderChatMarkdown(src) {
+      const esc = (s) => s
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+      const blocks = [];
+      // Fenced code blocks first, so their contents aren't formatted.
+      let s = String(src).replace(/```[^\n]*\n?([\s\S]*?)```/g, (_, code) => {
+        blocks.push('<pre class="chat-code">' + esc(code.replace(/\n$/, '')) + '</pre>');
+        return '\x00B' + (blocks.length - 1) + '\x00';
+      });
+      s = esc(s);
+      s = s.replace(/`([^`\n]+)`/g, (_, c) => '<code class="chat-code-inline">' + c + '</code>');
+      s = s.replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>');
+      s = s.replace(/(^|[^*])\*([^*\n]+)\*(?!\*)/g, '$1<em>$2</em>');
+      s = s.replace(/\x00B(\d+)\x00/g, (_, i) => blocks[Number(i)]);
+      return s;
+    }
     // Tracks which meeting the *currently displayed* native chat conversation
     // belongs to. Deliberately separate from currentMeetingPath: other flows
     // (e.g. closeDetailView()) null out currentMeetingPath transiently before
@@ -11876,7 +11923,11 @@
           }
         }
         if (text && currentAssistantBubble) {
-          currentAssistantBubble.textContent += text;
+          // Accumulate raw text and re-render markdown each chunk (cheap at
+          // chat length). renderChatMarkdown escapes first, so the model's
+          // output can never inject HTML (#404 follow-up).
+          currentAssistantRaw += text;
+          currentAssistantBubble.innerHTML = renderChatMarkdown(currentAssistantRaw);
           if (recallChatMessages) recallChatMessages.scrollTop = recallChatMessages.scrollHeight;
         }
       });
@@ -11920,6 +11971,7 @@
       currentAssistantBubble = document.createElement('div');
       currentAssistantBubble.className = 'chat-bubble chat-bubble-assistant streaming';
       currentAssistantBubble.dataset.status = 'thinking';
+      currentAssistantRaw = '';
       recallChatMessages.appendChild(currentAssistantBubble);
       recallChatMessages.scrollTop = recallChatMessages.scrollHeight;
 

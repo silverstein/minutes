@@ -9960,6 +9960,7 @@ mod tests {
             call_end_countdown_cancel: Arc::new(AtomicBool::new(false)),
             call_end_countdown_active: Arc::new(AtomicBool::new(false)),
             call_end_countdown_terminal_state: Arc::new(AtomicU8::new(0)),
+            recall_chat_history: Arc::new(Mutex::new(Vec::new())),
         }
     }
 

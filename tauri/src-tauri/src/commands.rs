@@ -8978,101 +8978,43 @@ pub async fn cmd_recall_chat_send(
         let current_turn = state.recall_chat_turn.clone();
 
         let task_result = tauri::async_runtime::spawn_blocking(move || {
-            let url = format!("{}/api/chat", ollama_url);
-
-            let mut messages: Vec<serde_json::Value> = Vec::new();
+            let mut messages = Vec::new();
             for (u, a) in &history_snapshot {
-                messages.push(serde_json::json!({"role": "user", "content": u}));
-                messages.push(serde_json::json!({"role": "assistant", "content": a}));
+                messages.push(minutes_core::ollama::OllamaChatMessage::new("user", u));
+                messages.push(minutes_core::ollama::OllamaChatMessage::new("assistant", a));
             }
-            messages.push(serde_json::json!({"role": "user", "content": enriched_message}));
-
-            let body = serde_json::json!({
-                "model": ollama_model,
-                "messages": messages,
-                "stream": true,
-            });
-
-            let agent = ureq::Agent::new_with_config(
-                ureq::config::Config::builder()
-                    .timeout_global(Some(std::time::Duration::from_secs(120)))
-                    .http_status_as_error(false)
-                    .build(),
+            messages.push(minutes_core::ollama::OllamaChatMessage::new(
+                "user",
+                enriched_message,
+            ));
+            let request = minutes_core::ollama::OllamaStreamRequest::chat(messages);
+            let adapter = minutes_core::ollama::OllamaAdapter::new(
+                ollama_url,
+                ollama_model,
+                std::time::Duration::from_secs(120),
             );
-
-            let mut resp = match agent
-                .post(&url)
-                .header("Content-Type", "application/json")
-                .send_json(&body)
-            {
-                Ok(r) => r,
-                Err(e) => {
-                    if !cancelled.load(Ordering::Relaxed) {
+            let cancel_token = minutes_core::ollama::CancelToken::from_shared(cancelled.clone());
+            match adapter.stream_chat(&request, &cancel_token, |text| {
+                app_clone
+                    .emit_to(
+                        "main",
+                        "recall-chat-chunk",
+                        serde_json::json!({"type": "text", "text": text}),
+                    )
+                    .ok();
+            }) {
+                Ok(response) if !cancel_token.is_cancelled() => {
+                    let mut h = history_arc.lock().unwrap();
+                    h.push((message_clone, response.text));
+                }
+                Ok(_) | Err(minutes_core::ollama::OllamaError::Cancelled) => {}
+                Err(error) => {
+                    if !cancel_token.is_cancelled() {
                         app_clone
-                            .emit_to("main", "recall-chat-error", format!("Ollama error: {}", e))
+                            .emit_to("main", "recall-chat-error", error.to_string())
                             .ok();
                     }
-                    finish_recall_chat_turn(&app_clone, &current_turn, turn_id);
-                    return;
                 }
-            };
-
-            if resp.status().as_u16() >= 400 {
-                let status = resp.status().as_u16();
-                let body_text = resp.body_mut().read_to_string().unwrap_or_default();
-                if !cancelled.load(Ordering::Relaxed) {
-                    app_clone
-                        .emit_to(
-                            "main",
-                            "recall-chat-error",
-                            format!("Ollama HTTP {}: {}", status, body_text),
-                        )
-                        .ok();
-                }
-                finish_recall_chat_turn(&app_clone, &current_turn, turn_id);
-                return;
-            }
-
-            let mut body = resp.into_body();
-            let reader = BufReader::new(body.as_reader());
-            let mut full_response = String::new();
-            for line_result in reader.lines() {
-                if cancelled.load(Ordering::Relaxed) {
-                    break;
-                }
-                match line_result {
-                    Ok(line) if !line.trim().is_empty() => {
-                        if let Ok(val) = serde_json::from_str::<serde_json::Value>(&line) {
-                            if let Some(text) = val
-                                .get("message")
-                                .and_then(|m| m.get("content"))
-                                .and_then(|c| c.as_str())
-                            {
-                                if cancelled.load(Ordering::Relaxed) {
-                                    break;
-                                }
-                                full_response.push_str(text);
-                                app_clone
-                                    .emit_to(
-                                        "main",
-                                        "recall-chat-chunk",
-                                        serde_json::json!({"type": "text", "text": text}),
-                                    )
-                                    .ok();
-                            }
-                        }
-                    }
-                    Ok(_) => {}
-                    Err(e) => {
-                        eprintln!("[recall-chat/ollama] read error: {}", e);
-                        break;
-                    }
-                }
-            }
-
-            if !cancelled.load(Ordering::Relaxed) && !full_response.is_empty() {
-                let mut h = history_arc.lock().unwrap();
-                h.push((message_clone, full_response));
             }
             finish_recall_chat_turn(&app_clone, &current_turn, turn_id);
         })
@@ -10589,7 +10531,6 @@ mod tests {
         ("dictation", "accumulate"),
         ("dictation", "auto_paste"),
         ("dictation", "cleanup_engine"),
-        ("dictation", "destination"),
         // NOTE: ("dictation", "shortcut_enabled") used to live here as a
         // vestigial arm (cmd_set_shortcut writes the field directly). It now
         // has a real caller via the central path — the round-trip persistence
@@ -12971,6 +12912,7 @@ mod tests {
 
     #[test]
     fn list_documents_merges_assistant_and_meeting_sources_by_recency() {
+        let _guard = test_guard();
         let home = dirs::home_dir().expect("home dir");
         let temp = tempfile::Builder::new()
             .prefix("minutes-documents-test-")

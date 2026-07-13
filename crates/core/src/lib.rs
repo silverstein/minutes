@@ -5,6 +5,7 @@ pub mod calendar;
 pub mod capture;
 pub mod config;
 pub mod context_store;
+pub mod copilot;
 pub mod daily_notes;
 pub mod desktop_context;
 pub mod desktop_control;
@@ -39,6 +40,7 @@ pub mod name_correction;
 #[cfg(test)]
 mod name_eval;
 pub mod notes;
+pub mod ollama;
 pub mod overlays;
 pub mod palette;
 pub mod parakeet;

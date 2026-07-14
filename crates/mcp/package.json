@@ -32,10 +32,11 @@
   "scripts": {
     "build": "tsc && vite build",
     "build:ui": "vite build",
-    "test": "npm run build && node test/mcp_tools_test.mjs",
+    "test": "npm run build && node test/mcp_tools_test.mjs && node test/copilot_mcp_contract.mjs",
     "test:unit": "vitest run",
     "test:host-compat": "node test/live_events_host_compat.mjs",
-    "test:all": "vitest run && npm run build && node test/mcp_tools_test.mjs",
+    "test:copilot": "node test/copilot_mcp_contract.mjs",
+    "test:all": "vitest run && npm run build && node test/mcp_tools_test.mjs && node test/copilot_mcp_contract.mjs",
     "start": "node dist/index.js",
     "dev": "tsx src/index.ts"
   },

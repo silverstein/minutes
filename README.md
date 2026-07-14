@@ -572,7 +572,7 @@ command = "npx"
 args = ["minutes-mcp"]
 ```
 
-All 31 tools are available in Vibe as `minutes_*` (e.g. `minutes_start_recording`, `minutes_search_meetings`).
+All 35 tools are available in Vibe as `minutes_*` (e.g. `minutes_start_recording`, `minutes_search_meetings`).
 
 ### Claude Code (Plugin)
 
@@ -1210,7 +1210,7 @@ minutes/
 ├── crates/reader/        Lightweight read-only meeting parser (no audio deps)
 ├── crates/assets/        Bundled assets (demo.wav)
 ├── crates/sdk/           TypeScript SDK — `npm install minutes-sdk` (query meetings programmatically)
-├── crates/mcp/           MCP server — 31 tools + 7 resources + interactive dashboard
+├── crates/mcp/           MCP server — 35 tools + 8 resources + interactive dashboard
 │   └── ui/               MCP App dashboard (vanilla TS → single-file HTML)
 ├── tauri/                Menu bar app — system tray, recording UI, singleton AI Assistant
 └── .claude/plugins/minutes/   Claude Code plugin — 19 skills + 1 agent + 2 hooks
@@ -1226,10 +1226,10 @@ Minutes is designed as infrastructure for AI agents. Files are the durable subst
 - **Track people**: `get_person_profile` builds cross-meeting profiles with topics, open commitments
 - **Monitor consistency**: `consistency_report` flags conflicting decisions and stale commitments
 - **Record + process**: `start_recording`, `stop_recording`, `process_audio` for pipeline control
-- **Live coaching**: `start_live_transcript`, `read_live_transcript` for real-time mid-meeting access
+- **Live coaching**: `start_live_transcript`, `read_live_transcript` for transcript access; `start_copilot`, `copilot_status`, `read_copilot_nudges`, and `stop_copilot` control and observe the independent real-time copilot
 - **Local event stream**: `minutes events --follow --since-seq N` tails newline-delimited events, including finalized live utterances, for agents that want a durable cursor
 - **Voice profiles**: `list_voices`, `confirm_speaker` for speaker identification workflows
-- **Resources**: Stable URIs (`minutes://meetings/recent`, `minutes://actions/open`) for agent context injection
+- **Resources**: Stable URIs (`minutes://meetings/recent`, `minutes://actions/open`, `minutes://live/copilot`) for agent context injection and live copilot observation
 
 Any agent framework that speaks MCP can use Minutes as its conversation memory layer — the agent handles the intelligence, Minutes handles the recall.
 

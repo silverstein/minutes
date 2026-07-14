@@ -126,6 +126,21 @@
       content: '';
     }
 
+    /* Subtle film grain: warms the panel + kills gradient banding.
+       Behind content (never over text), desaturated, disabled in forced-colors. */
+    .hud::after {
+      content: '';
+      position: absolute;
+      inset: 0;
+      z-index: -1;
+      pointer-events: none;
+      border-radius: inherit;
+      opacity: 0.045;
+      mix-blend-mode: soft-light;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='g'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23g)'/%3E%3C/svg%3E");
+      background-size: 120px 120px;
+    }
+
     @keyframes hud-enter {
       from { opacity: 0; transform: translateY(10px) scale(0.985); }
       to { opacity: 1; transform: translateY(0) scale(1); }
@@ -509,6 +524,7 @@
     }
 
     @media (forced-colors: active) {
+      .hud::after { display: none; }
       .hud,
       button,
       .kind,

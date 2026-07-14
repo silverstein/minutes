@@ -1,0 +1,530 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Coach</title>
+  <script src="scripts/ui-zoom.js"></script>
+  <link rel="stylesheet" href="styles/ui-zoom-tokens.css">
+  <style>
+    @font-face {
+      font-family: 'Geist';
+      font-style: normal;
+      font-weight: 400;
+      src: url('fonts/Geist-Regular.woff2') format('woff2');
+    }
+    @font-face {
+      font-family: 'Geist';
+      font-style: normal;
+      font-weight: 500 600;
+      src: url('fonts/Geist-Medium.woff2') format('woff2');
+    }
+    @font-face {
+      font-family: 'Geist Mono';
+      font-style: normal;
+      font-weight: 400;
+      src: url('fonts/GeistMono-Regular.woff2') format('woff2');
+    }
+
+    * { box-sizing: border-box; }
+
+    :root {
+      color-scheme: dark;
+      --panel: rgba(22, 22, 20, 0.96);
+      --panel-raised: rgba(34, 33, 29, 0.94);
+      --border: rgba(242, 237, 224, 0.14);
+      --border-strong: rgba(242, 237, 224, 0.23);
+      --text: #f1ede4;
+      --muted: #aaa49a;
+      --quiet: #777169;
+      --amber: #e5a85e;
+      --amber-soft: rgba(229, 168, 94, 0.15);
+      --green: #72c78b;
+      --red: #ef8478;
+      --blue: #82afd2;
+      --shadow: 0 18px 42px rgba(0, 0, 0, 0.38), 0 4px 12px rgba(0, 0, 0, 0.26);
+    }
+
+    @media (prefers-color-scheme: light) {
+      :root {
+        color-scheme: light;
+        --panel: rgba(246, 242, 234, 0.97);
+        --panel-raised: rgba(255, 252, 245, 0.96);
+        --border: rgba(36, 32, 25, 0.12);
+        --border-strong: rgba(36, 32, 25, 0.20);
+        --text: #211f1b;
+        --muted: #68635b;
+        --quiet: #969087;
+        --amber: #a95e2e;
+        --amber-soft: rgba(169, 94, 46, 0.11);
+        --green: #357a4d;
+        --red: #b84e43;
+        --blue: #3f708f;
+        --shadow: 0 18px 42px rgba(55, 45, 30, 0.18), 0 4px 12px rgba(55, 45, 30, 0.10);
+      }
+    }
+
+    html, body {
+      width: 100%;
+      height: 100%;
+      margin: 0;
+      overflow: hidden;
+      background: transparent;
+    }
+
+    body {
+      display: flex;
+      align-items: flex-end;
+      font-family: 'Geist', -apple-system, BlinkMacSystemFont, sans-serif;
+      color: var(--text);
+      -webkit-user-select: none;
+      user-select: none;
+    }
+
+    .hud {
+      position: relative;
+      width: 100%;
+      min-height: 10.25rem;
+      padding: 0.875rem 1rem 0.75rem;
+      overflow: hidden;
+      border: 1px solid var(--border-strong);
+      border-radius: 1.25rem;
+      background:
+        radial-gradient(circle at 8% 0%, var(--amber-soft), transparent 42%),
+        var(--panel);
+      box-shadow: var(--shadow), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+      animation: enter 180ms cubic-bezier(0.32, 0.72, 0, 1);
+    }
+
+    .hud::before {
+      content: '';
+      position: absolute;
+      inset: 0 auto 0 0;
+      width: 3px;
+      background: var(--amber);
+      opacity: 0.75;
+      transition: background-color 180ms ease, opacity 180ms ease;
+    }
+
+    .hud[data-state="listening"]::before { background: var(--green); opacity: 0.55; }
+    .hud[data-state="thinking"]::before { background: var(--blue); }
+    .hud[data-state="paused"]::before { background: var(--quiet); }
+    .hud[data-state="degraded"]::before { background: var(--red); }
+
+    @keyframes enter {
+      from { opacity: 0; transform: translateY(9px) scale(0.988); }
+      to { opacity: 1; transform: translateY(0) scale(1); }
+    }
+
+    .topline {
+      display: flex;
+      align-items: center;
+      gap: 0.625rem;
+      min-height: 1.75rem;
+    }
+
+    .state {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.4rem;
+      min-width: 0;
+      font-family: 'Geist Mono', ui-monospace, monospace;
+      font-size: var(--text-xs);
+      color: var(--muted);
+      letter-spacing: 0.025em;
+      text-transform: uppercase;
+    }
+
+    .state-dot {
+      width: 0.45rem;
+      height: 0.45rem;
+      flex: 0 0 auto;
+      border-radius: 999px;
+      background: var(--amber);
+      box-shadow: 0 0 0 3px var(--amber-soft);
+    }
+
+    [data-state="listening"] .state-dot { background: var(--green); }
+    [data-state="thinking"] .state-dot { background: var(--blue); animation: think 1.4s ease-in-out infinite; }
+    [data-state="paused"] .state-dot { background: var(--quiet); box-shadow: none; }
+    [data-state="degraded"] .state-dot { background: var(--red); box-shadow: 0 0 0 3px rgba(239, 132, 120, 0.13); }
+
+    @keyframes think {
+      0%, 100% { opacity: 0.45; transform: scale(0.82); }
+      50% { opacity: 1; transform: scale(1); }
+    }
+
+    .thinking-track {
+      display: none;
+      align-items: center;
+      gap: 0.2rem;
+      margin-left: 0.1rem;
+    }
+
+    [data-state="thinking"] .thinking-track { display: inline-flex; }
+
+    .thinking-track i {
+      width: 3px;
+      height: 3px;
+      border-radius: 50%;
+      background: var(--blue);
+      animation: thinking-step 1.1s ease-in-out infinite;
+    }
+
+    .thinking-track i:nth-child(2) { animation-delay: 120ms; }
+    .thinking-track i:nth-child(3) { animation-delay: 240ms; }
+
+    @keyframes thinking-step {
+      0%, 65%, 100% { opacity: 0.25; transform: translateY(0); }
+      35% { opacity: 1; transform: translateY(-2px); }
+    }
+
+    .spacer { flex: 1; }
+
+    .controls {
+      display: flex;
+      gap: 0.375rem;
+    }
+
+    button {
+      min-height: 1.75rem;
+      padding: 0.25rem 0.625rem;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.035);
+      color: var(--muted);
+      font: 500 var(--text-xs) 'Geist', sans-serif;
+      cursor: pointer;
+      transition: color 130ms ease, border-color 130ms ease, background 130ms ease, transform 130ms ease;
+    }
+
+    button:hover:not(:disabled) {
+      color: var(--text);
+      border-color: var(--border-strong);
+      background: rgba(255, 255, 255, 0.075);
+    }
+
+    button:active:not(:disabled) { transform: scale(0.97); }
+    button:focus-visible { outline: 2px solid var(--amber); outline-offset: 2px; }
+    button:disabled { opacity: 0.38; cursor: default; }
+
+    .content {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr);
+      gap: 0.65rem;
+      align-items: start;
+      min-height: 4.65rem;
+      padding-top: 0.7rem;
+    }
+
+    .kind {
+      display: none;
+      min-width: 3.2rem;
+      margin-top: 0.12rem;
+      padding: 0.25rem 0.4rem;
+      border: 1px solid color-mix(in srgb, var(--kind-color, var(--amber)) 42%, transparent);
+      border-radius: 0.45rem;
+      background: color-mix(in srgb, var(--kind-color, var(--amber)) 11%, transparent);
+      color: var(--kind-color, var(--amber));
+      font-family: 'Geist Mono', ui-monospace, monospace;
+      font-size: var(--text-xs);
+      text-align: center;
+      text-transform: uppercase;
+      letter-spacing: 0.045em;
+    }
+
+    .has-nudge .kind { display: block; }
+    .hud[data-kind="ask"] { --kind-color: var(--blue); }
+    .hud[data-kind="clarify"] { --kind-color: var(--amber); }
+    .hud[data-kind="hold"] { --kind-color: var(--quiet); }
+    .hud[data-kind="watch"] { --kind-color: var(--red); }
+    .hud[data-kind="say"] { --kind-color: var(--green); }
+
+    .advice {
+      min-width: 0;
+    }
+
+    .nudge-text {
+      display: none;
+      margin: 0;
+      max-height: 3.45rem;
+      overflow: hidden;
+      color: var(--text);
+      font-size: var(--text-base);
+      font-weight: 500;
+      line-height: 1.42;
+      letter-spacing: -0.012em;
+    }
+
+    .has-nudge .nudge-text { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+
+    .state-copy {
+      margin: 0.05rem 0 0;
+      color: var(--text);
+      font-size: var(--text-base);
+      font-weight: 500;
+      line-height: 1.42;
+    }
+
+    .has-nudge .state-copy { display: none; }
+
+    .source-row {
+      display: none;
+      align-items: center;
+      gap: 0.45rem;
+      margin-top: 0.45rem;
+    }
+
+    .has-nudge .source-row { display: flex; }
+
+    .source-chip {
+      max-width: 15rem;
+      overflow: hidden;
+      padding: 0.2rem 0.45rem;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      background: var(--panel-raised);
+      color: var(--muted);
+      font-family: 'Geist Mono', ui-monospace, monospace;
+      font-size: var(--text-xs);
+      white-space: nowrap;
+      text-overflow: ellipsis;
+    }
+
+    .source-label {
+      color: var(--quiet);
+      font-size: var(--text-xs);
+    }
+
+    .bottomline {
+      display: flex;
+      align-items: center;
+      gap: 0.65rem;
+      min-height: 1.4rem;
+      padding-top: 0.45rem;
+      border-top: 1px solid var(--border);
+    }
+
+    .detail {
+      min-width: 0;
+      flex: 1;
+      overflow: hidden;
+      color: var(--quiet);
+      font-size: var(--text-xs);
+      line-height: 1.25;
+      white-space: nowrap;
+      text-overflow: ellipsis;
+    }
+
+    .freshness {
+      display: none;
+      width: 3.75rem;
+      height: 3px;
+      overflow: hidden;
+      border-radius: 999px;
+      background: var(--border);
+    }
+
+    .has-nudge .freshness { display: block; }
+
+    .freshness-fill {
+      width: 100%;
+      height: 100%;
+      border-radius: inherit;
+      background: var(--kind-color, var(--amber));
+      transform: scaleX(var(--freshness, 1));
+      transform-origin: left;
+      opacity: calc(0.25 + (var(--freshness, 1) * 0.75));
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after {
+        animation: none !important;
+        transition: none !important;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="hud" id="hud" data-state="arming" data-kind="say" aria-live="polite">
+    <div class="topline">
+      <div class="state">
+        <span class="state-dot" aria-hidden="true"></span>
+        <span id="state-label">Arming</span>
+        <span class="thinking-track" aria-label="Thinking quietly">
+          <i></i><i></i><i></i>
+        </span>
+      </div>
+      <div class="spacer"></div>
+      <div class="controls">
+        <button id="pause" type="button">Pause</button>
+        <button id="dismiss" type="button" disabled>Dismiss</button>
+      </div>
+    </div>
+
+    <div class="content">
+      <div class="kind" id="kind">Say</div>
+      <div class="advice">
+        <p class="nudge-text" id="nudge-text"></p>
+        <p class="state-copy" id="state-copy">Loading meeting context and local model…</p>
+        <div class="source-row">
+          <span class="source-label">from</span>
+          <span class="source-chip" id="source-chip"></span>
+        </div>
+      </div>
+    </div>
+
+    <div class="bottomline">
+      <div class="detail" id="detail">Arming · loading context and provider</div>
+      <div class="freshness" role="img" aria-label="Nudge freshness">
+        <div class="freshness-fill"></div>
+      </div>
+    </div>
+  </main>
+
+  <script>
+    const { invoke } = window.__TAURI__.core;
+    const { listen } = window.__TAURI__.event;
+    const hud = document.getElementById('hud');
+    const stateLabel = document.getElementById('state-label');
+    const stateCopy = document.getElementById('state-copy');
+    const detail = document.getElementById('detail');
+    const kind = document.getElementById('kind');
+    const nudgeText = document.getElementById('nudge-text');
+    const sourceChip = document.getElementById('source-chip');
+    const pauseButton = document.getElementById('pause');
+    const dismissButton = document.getElementById('dismiss');
+
+    const labels = {
+      arming: 'Arming',
+      listening: 'Listening',
+      thinking: 'Thinking',
+      nudge: 'Nudge',
+      paused: 'Paused',
+      degraded: 'Degraded',
+      off: 'Off',
+    };
+    const stateFallbacks = {
+      arming: 'Loading meeting context and local model…',
+      listening: 'Listening for the next useful moment…',
+      thinking: 'Listening stays active while Coach considers the latest turn.',
+      nudge: 'Fresh advice is ready.',
+      paused: 'Coach is paused. Recording and transcription continue.',
+      degraded: 'Local coaching is limited. Recording and transcription continue.',
+      off: 'Coach is off.',
+    };
+
+    let snapshot = null;
+    let freshnessFrame = null;
+
+    function stateName(value) {
+      return String(value || 'Off').toLowerCase();
+    }
+
+    function stopFreshness() {
+      if (freshnessFrame !== null) cancelAnimationFrame(freshnessFrame);
+      freshnessFrame = null;
+      hud.style.setProperty('--freshness', 0);
+    }
+
+    function startFreshness(nudge) {
+      stopFreshness();
+      const created = Date.parse(nudge.created_ts || nudge.createdTs || '');
+      const ttl = Math.max(1, Number(nudge.ttl_ms ?? nudge.ttlMs ?? 0));
+      if (!Number.isFinite(created) || !ttl) return;
+      const expires = created + ttl;
+      const paint = () => {
+        const remaining = Math.max(0, expires - Date.now());
+        hud.style.setProperty('--freshness', Math.min(1, remaining / ttl));
+        if (remaining <= 0) {
+          freshnessFrame = null;
+          if (snapshot?.nudge?.id === nudge.id) {
+            snapshot = {
+              ...snapshot,
+              nudge: null,
+              state: snapshot.paused ? 'Paused' : snapshot.limitation ? 'Degraded' : 'Listening',
+            };
+            render(snapshot);
+          }
+          return;
+        }
+        freshnessFrame = requestAnimationFrame(paint);
+      };
+      paint();
+    }
+
+    function render(next) {
+      snapshot = next || {};
+      const state = stateName(snapshot.state);
+      const nudge = snapshot.nudge || null;
+      hud.dataset.state = state;
+      stateLabel.textContent = labels[state] || labels.degraded;
+      pauseButton.textContent = snapshot.paused || state === 'paused' ? 'Resume' : 'Pause';
+      pauseButton.disabled = !snapshot.active;
+      dismissButton.disabled = !nudge;
+
+      if (nudge) {
+        const nudgeKind = String(nudge.kind || 'Say');
+        hud.classList.add('has-nudge');
+        hud.dataset.kind = nudgeKind.toLowerCase();
+        kind.textContent = nudgeKind;
+        nudgeText.textContent = nudge.text || '';
+        sourceChip.textContent = nudge.source_chip || nudge.sourceChip || 'live transcript';
+        startFreshness(nudge);
+      } else {
+        hud.classList.remove('has-nudge');
+        hud.dataset.kind = '';
+        nudgeText.textContent = '';
+        sourceChip.textContent = '';
+        stopFreshness();
+      }
+
+      // Progress/health language lives outside #nudge-text so Arming,
+      // Listening, Thinking, Paused, and Degraded never masquerade as advice.
+      stateCopy.textContent = snapshot.detail || stateFallbacks[state] || stateFallbacks.degraded;
+      const limitation = snapshot.limitation && snapshot.limitation !== snapshot.detail
+        ? ` · ${snapshot.limitation}`
+        : '';
+      detail.textContent = `${labels[state] || 'Degraded'} · ${snapshot.detail || stateFallbacks[state]}${limitation}`;
+      detail.title = detail.textContent;
+    }
+
+    pauseButton.addEventListener('click', async () => {
+      const paused = snapshot?.paused || stateName(snapshot?.state) === 'paused';
+      pauseButton.disabled = true;
+      pauseButton.textContent = paused ? 'Resuming…' : 'Pausing…';
+      try {
+        render(await invoke(paused ? 'cmd_resume_copilot_surface' : 'cmd_pause_copilot_surface'));
+      } catch (error) {
+        render({
+          ...(snapshot || {}),
+          state: 'Degraded',
+          limitation: String(error),
+          detail: `Coach control failed: ${error}`,
+        });
+      }
+    });
+
+    dismissButton.addEventListener('click', async () => {
+      dismissButton.disabled = true;
+      try {
+        render(await invoke('cmd_dismiss_copilot_nudge'));
+      } catch (error) {
+        dismissButton.disabled = false;
+      }
+    });
+
+    listen('copilot:state', event => render(event.payload));
+    listen('copilot:nudge', event => render({ ...(snapshot || {}), state: 'Nudge', nudge: event.payload }));
+
+    invoke('cmd_copilot_surface_status')
+      .then(render)
+      .catch(error => render({
+        active: false,
+        state: 'Degraded',
+        detail: `Coach status unavailable: ${error}`,
+        limitation: String(error),
+      }));
+  </script>
+</body>
+</html>

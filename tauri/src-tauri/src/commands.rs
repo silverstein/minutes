@@ -11,7 +11,7 @@ use minutes_core::{CaptureMode, Config, ContentType};
 use reqwest::header::{ACCEPT, CONTENT_LENGTH};
 use std::cmp::Reverse;
 use std::collections::hash_map::DefaultHasher;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fs::OpenOptions;
 use std::hash::{Hash, Hasher};
 use std::io::{self, Write};
@@ -53,6 +53,14 @@ pub struct AppState {
     pub live_transcript_stop_flag: Arc<AtomicBool>,
     pub live_shortcut_enabled: Arc<AtomicBool>,
     pub live_shortcut: Arc<Mutex<String>>,
+    /// Desktop-owned lifecycle for the optional Coach HUD consumer. This is
+    /// independent of recording/live capture: the copilot only reads the
+    /// Agent Event Bus and must never own or stop capture.
+    pub copilot_active: Arc<AtomicBool>,
+    pub copilot_stop_flag: Arc<AtomicBool>,
+    pub copilot_paused: Arc<AtomicBool>,
+    pub copilot_hud: Arc<Mutex<CopilotHudSnapshot>>,
+    pub copilot_critical_notifications_enabled: Arc<AtomicBool>,
     pub pending_update: Arc<Mutex<Option<PendingUpdate>>>,
     pub update_install_running: Arc<AtomicBool>,
     pub update_install_cancel: Arc<AtomicBool>,
@@ -101,6 +109,40 @@ pub struct AppState {
     /// Monotonic ID source used to keep late teardown from an old cancelled
     /// reader from finishing a newer turn.
     pub(crate) recall_chat_next_turn_id: Arc<AtomicU64>,
+}
+
+pub const DEFAULT_COPILOT_GOAL: &str =
+    "Help me move this meeting toward clear decisions, owners, and next steps.";
+
+/// The complete presentation snapshot shared by the main window, Coach HUD,
+/// tray, and notification policy. Keeping the active nudge beside the core
+/// state prevents frontend windows from inventing their own lifecycle truth.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CopilotHudSnapshot {
+    pub active: bool,
+    pub paused: bool,
+    pub state: minutes_core::copilot::CopilotState,
+    pub goal: String,
+    pub detail: String,
+    pub limitation: Option<String>,
+    pub nudge: Option<minutes_core::copilot::Nudge>,
+    pub critical_notifications_enabled: bool,
+}
+
+impl CopilotHudSnapshot {
+    pub fn off(critical_notifications_enabled: bool) -> Self {
+        Self {
+            active: false,
+            paused: false,
+            state: minutes_core::copilot::CopilotState::Off,
+            goal: String::new(),
+            detail: "Coach is off.".into(),
+            limitation: None,
+            nudge: None,
+            critical_notifications_enabled,
+        }
+    }
 }
 
 pub(crate) struct RecallChatTurn {
@@ -7255,6 +7297,14 @@ fn persist_completion_notifications(enabled: bool) -> Result<(), String> {
         .map_err(|e| format!("Failed to save config: {}", e))
 }
 
+fn persist_copilot_critical_notifications(enabled: bool) -> Result<(), String> {
+    let mut config = Config::load();
+    config.notifications.copilot_critical_enabled = enabled;
+    config
+        .save()
+        .map_err(|e| format!("Failed to save config: {}", e))
+}
+
 /// Persist the Quick-Thought global hotkey to `config.toml`.
 ///
 /// Extracted (like `persist_completion_notifications`) so the round-trip test
@@ -7282,6 +7332,21 @@ pub fn cmd_set_completion_notifications(
     persist_completion_notifications(enabled)?;
 
     Ok(())
+}
+
+#[tauri::command]
+pub fn cmd_set_copilot_critical_notifications(
+    app: tauri::AppHandle,
+    state: tauri::State<AppState>,
+    enabled: bool,
+) -> Result<CopilotHudSnapshot, String> {
+    persist_copilot_critical_notifications(enabled)?;
+    state
+        .copilot_critical_notifications_enabled
+        .store(enabled, Ordering::Relaxed);
+    Ok(publish_copilot_hud(&app, &state.copilot_hud, |snapshot| {
+        snapshot.critical_notifications_enabled = enabled
+    }))
 }
 
 #[tauri::command]
@@ -9685,6 +9750,7 @@ pub fn cmd_get_settings() -> serde_json::Value {
         },
         "notifications": {
             "completion_enabled": config.notifications.completion_enabled,
+            "copilot_critical_enabled": config.notifications.copilot_critical_enabled,
         },
         "identity": {
             "name": config.identity.name,
@@ -10207,6 +10273,11 @@ mod tests {
             live_transcript_stop_flag: Arc::new(AtomicBool::new(false)),
             live_shortcut_enabled: Arc::new(AtomicBool::new(false)),
             live_shortcut: Arc::new(Mutex::new("CmdOrCtrl+Shift+L".into())),
+            copilot_active: Arc::new(AtomicBool::new(false)),
+            copilot_stop_flag: Arc::new(AtomicBool::new(false)),
+            copilot_paused: Arc::new(AtomicBool::new(false)),
+            copilot_hud: Arc::new(Mutex::new(CopilotHudSnapshot::off(false))),
+            copilot_critical_notifications_enabled: Arc::new(AtomicBool::new(false)),
             pending_update: Arc::new(Mutex::new(None)),
             update_install_running: Arc::new(AtomicBool::new(false)),
             update_install_cancel: Arc::new(AtomicBool::new(false)),
@@ -10589,7 +10660,6 @@ mod tests {
         ("dictation", "accumulate"),
         ("dictation", "auto_paste"),
         ("dictation", "cleanup_engine"),
-        ("dictation", "destination"),
         // NOTE: ("dictation", "shortcut_enabled") used to live here as a
         // vestigial arm (cmd_set_shortcut writes the field directly). It now
         // has a real caller via the central path — the round-trip persistence
@@ -10966,6 +11036,43 @@ mod tests {
                 "completion_enabled=true did not persist"
             );
         });
+    }
+
+    #[test]
+    fn copilot_critical_notifications_are_opt_in_and_persisted() {
+        with_temp_home(|_| {
+            assert!(!Config::load().notifications.copilot_critical_enabled);
+            persist_copilot_critical_notifications(true).unwrap();
+            assert!(Config::load().notifications.copilot_critical_enabled);
+            persist_copilot_critical_notifications(false).unwrap();
+            assert!(!Config::load().notifications.copilot_critical_enabled);
+        });
+    }
+
+    #[test]
+    fn only_watch_nudges_cross_the_critical_notification_gate() {
+        let nudge = |kind| minutes_core::copilot::Nudge {
+            v: 1,
+            id: "nudge-test".into(),
+            kind,
+            text: "Check the unresolved risk.".into(),
+            source_chip: "risk".into(),
+            evidence_revision: 7,
+            created_ts: chrono::Utc::now(),
+            ttl_ms: 12_000,
+            supersedes: None,
+        };
+        assert!(copilot_nudge_is_critical(&nudge(
+            minutes_core::copilot::NudgeKind::Watch
+        )));
+        for kind in [
+            minutes_core::copilot::NudgeKind::Say,
+            minutes_core::copilot::NudgeKind::Ask,
+            minutes_core::copilot::NudgeKind::Clarify,
+            minutes_core::copilot::NudgeKind::Hold,
+        ] {
+            assert!(!copilot_nudge_is_critical(&nudge(kind)));
+        }
     }
 
     /// Round-trip: the Quick-Thought global hotkey persistence step (shared by
@@ -14009,6 +14116,653 @@ fn show_dictation_overlay(app: &tauri::AppHandle) {
         Ok(_) => eprintln!("[dictation] overlay shown"),
         Err(e) => eprintln!("[dictation] overlay failed: {}", e),
     }
+}
+
+// ── Copilot Coach HUD commands ──────────────────────────────
+
+fn current_copilot_hud(hud: &Arc<Mutex<CopilotHudSnapshot>>) -> CopilotHudSnapshot {
+    match hud.lock() {
+        Ok(snapshot) => snapshot.clone(),
+        Err(poisoned) => poisoned.into_inner().clone(),
+    }
+}
+
+fn publish_copilot_hud<F>(
+    app: &tauri::AppHandle,
+    hud: &Arc<Mutex<CopilotHudSnapshot>>,
+    update: F,
+) -> CopilotHudSnapshot
+where
+    F: FnOnce(&mut CopilotHudSnapshot),
+{
+    let snapshot = match hud.lock() {
+        Ok(mut snapshot) => {
+            update(&mut snapshot);
+            snapshot.clone()
+        }
+        Err(poisoned) => {
+            let mut snapshot = poisoned.into_inner();
+            update(&mut snapshot);
+            snapshot.clone()
+        }
+    };
+    app.emit("copilot:state", snapshot.clone()).ok();
+    snapshot
+}
+
+fn copilot_capture_attachment() -> String {
+    let recording = minutes_core::pid::inspect_pid_file(&minutes_core::pid::pid_path());
+    let live = minutes_core::pid::inspect_pid_file(&minutes_core::pid::live_transcript_pid_path());
+    if recording.is_active() {
+        return match recording.pid() {
+            Some(pid) if pid != std::process::id() => format!(
+                "Attached to the shared event cursor; recording remains owned by PID {pid}."
+            ),
+            Some(pid) => format!("Attached to the recording event cursor for PID {pid}."),
+            None => "Attached to the shared event cursor; another process owns recording.".into(),
+        };
+    }
+    if live.is_active() {
+        return match live.pid() {
+            Some(pid) if pid != std::process::id() => format!(
+                "Attached to the shared event cursor; live transcript remains owned by PID {pid}."
+            ),
+            Some(pid) => format!("Attached to the live transcript event cursor for PID {pid}."),
+            None => {
+                "Attached to the shared event cursor; another process owns live transcript.".into()
+            }
+        };
+    }
+    "Waiting for a recording or live transcript to publish speech.".into()
+}
+
+fn copilot_state_detail(
+    state: minutes_core::copilot::CopilotState,
+    model: &str,
+    limitation: Option<&str>,
+) -> String {
+    use minutes_core::copilot::CopilotState;
+    match state {
+        CopilotState::Off => "Coach is off.".into(),
+        CopilotState::Arming => {
+            format!("Loading meeting context and warming the local {model} model…")
+        }
+        CopilotState::Listening => copilot_capture_attachment(),
+        CopilotState::Thinking => "Considering the latest turn…".into(),
+        CopilotState::Nudge => "Fresh advice from the latest transcript evidence.".into(),
+        CopilotState::Paused => "Coach paused. Recording and transcription continue.".into(),
+        CopilotState::Degraded => limitation
+            .unwrap_or("Local coaching is temporarily limited; capture continues.")
+            .into(),
+    }
+}
+
+fn copilot_presentation_state(
+    runner_state: minutes_core::copilot::CopilotState,
+    paused: bool,
+    limitation: Option<&str>,
+) -> minutes_core::copilot::CopilotState {
+    use minutes_core::copilot::CopilotState;
+    if paused {
+        CopilotState::Paused
+    } else if runner_state == CopilotState::Listening && limitation.is_some() {
+        CopilotState::Degraded
+    } else {
+        runner_state
+    }
+}
+
+/// Build the Coach HUD with the same window contract as dictation: destroy a
+/// stale same-label WebView, anchor to the current monitor work area, keep the
+/// transparent undecorated surface above other windows, and never activate it.
+fn show_copilot_hud(app: &tauri::AppHandle) -> Result<(), String> {
+    use tauri::WebviewUrl;
+
+    if let Some(window) = app.get_webview_window("copilot-hud") {
+        window.destroy().ok();
+    }
+
+    let width = 440.0;
+    let height = 176.0;
+    // Sit above the dictation pill if both optional surfaces happen to be
+    // active, rather than covering the existing overlay.
+    let inset_y = 112.0;
+    let monitor = app
+        .get_webview_window("main")
+        .and_then(|window| window.current_monitor().ok().flatten())
+        .or_else(|| {
+            app.get_webview_window("main")
+                .and_then(|window| window.primary_monitor().ok().flatten())
+        });
+    let (x, y) = if let Some(monitor) = monitor {
+        let scale = monitor.scale_factor();
+        let work_area = monitor.work_area();
+        let work_x = work_area.position.x as f64 / scale;
+        let work_y = work_area.position.y as f64 / scale;
+        let work_width = work_area.size.width as f64 / scale;
+        let work_height = work_area.size.height as f64 / scale;
+        (
+            work_x + (work_width - width) / 2.0,
+            work_y + work_height - height - inset_y,
+        )
+    } else {
+        ((1440.0 - width) / 2.0, 900.0 - height - inset_y)
+    };
+
+    tauri::WebviewWindowBuilder::new(
+        app,
+        "copilot-hud",
+        WebviewUrl::App("copilot-hud.html".into()),
+    )
+    .title("Coach")
+    .inner_size(width, height)
+    .position(x, y)
+    .resizable(false)
+    .decorations(false)
+    .transparent(true)
+    .shadow(false)
+    .content_protected(Config::load().privacy.hide_from_screen_share)
+    .always_on_top(true)
+    .focused(false)
+    .focusable(false)
+    .skip_taskbar(true)
+    .build()
+    .map(|_| ())
+    .map_err(|error| format!("Could not open the Coach HUD: {error}"))
+}
+
+fn destroy_copilot_hud(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("copilot-hud") {
+        // Match the dictation/prompt lifecycle: direct native destruction avoids
+        // leaving a transparent WebView queued during frame updates.
+        window.destroy().ok();
+    }
+}
+
+fn copilot_nudge_is_critical(nudge: &minutes_core::copilot::Nudge) -> bool {
+    // Contract v1 has no separate severity field. Watch is the only kind whose
+    // meaning is explicitly risk/contradiction/unresolved-signal monitoring;
+    // all Say/Ask/Clarify/Hold nudges stay in the HUD only.
+    matches!(nudge.kind, minutes_core::copilot::NudgeKind::Watch)
+}
+
+fn maybe_show_copilot_notification(
+    app: &tauri::AppHandle,
+    notifications_enabled: &Arc<AtomicBool>,
+    nudge: &minutes_core::copilot::Nudge,
+) {
+    if !notifications_enabled.load(Ordering::Relaxed) || !copilot_nudge_is_critical(nudge) {
+        return;
+    }
+    let hud_visible = app
+        .get_webview_window("copilot-hud")
+        .and_then(|window| window.is_visible().ok())
+        .unwrap_or(false);
+    if hud_visible {
+        return;
+    }
+    show_user_notification(app, "Coach — urgent watch", &nudge.text);
+}
+
+struct CopilotActiveGuard {
+    app: tauri::AppHandle,
+    active: Arc<AtomicBool>,
+    paused: Arc<AtomicBool>,
+    hud: Arc<Mutex<CopilotHudSnapshot>>,
+    critical_notifications_enabled: Arc<AtomicBool>,
+}
+
+impl Drop for CopilotActiveGuard {
+    fn drop(&mut self) {
+        self.active.store(false, Ordering::SeqCst);
+        self.paused.store(false, Ordering::SeqCst);
+        let notifications = self.critical_notifications_enabled.load(Ordering::Relaxed);
+        publish_copilot_hud(&self.app, &self.hud, |snapshot| {
+            *snapshot = CopilotHudSnapshot::off(notifications);
+        });
+        destroy_copilot_hud(&self.app);
+        crate::sync_tray_state(&self.app);
+    }
+}
+
+struct CopilotSurfaceRunContext {
+    app: tauri::AppHandle,
+    config: Config,
+    goal: String,
+    active: Arc<AtomicBool>,
+    stop_flag: Arc<AtomicBool>,
+    paused_flag: Arc<AtomicBool>,
+    hud: Arc<Mutex<CopilotHudSnapshot>>,
+    critical_notifications_enabled: Arc<AtomicBool>,
+    session_guard: minutes_core::pid::PidGuard,
+}
+
+fn run_copilot_surface(context: CopilotSurfaceRunContext) {
+    use minutes_core::copilot::{
+        BattleCard, CopilotRequest, CopilotRunner, CopilotSessionStatus, CopilotState,
+        CopilotUtterance, NudgePolicy, OllamaCopilotModel, RunnerEvent, TranscriptUpdateKind,
+    };
+
+    let CopilotSurfaceRunContext {
+        app,
+        config,
+        goal,
+        active,
+        stop_flag,
+        paused_flag,
+        hud,
+        critical_notifications_enabled,
+        session_guard,
+    } = context;
+
+    let _active_guard = CopilotActiveGuard {
+        app: app.clone(),
+        active,
+        paused: paused_flag.clone(),
+        hud: hud.clone(),
+        critical_notifications_enabled: critical_notifications_enabled.clone(),
+    };
+    let _session_guard = session_guard;
+
+    let mut context_limitation = None;
+    let battle_card = if config.copilot.history_grounding {
+        match BattleCard::assemble(&config, &goal) {
+            Ok(card) => card,
+            Err(error) => {
+                context_limitation = Some(format!(
+                    "Meeting history is unavailable; coaching is using live transcript only ({error})."
+                ));
+                BattleCard::empty()
+            }
+        }
+    } else {
+        BattleCard::empty()
+    };
+
+    if stop_flag.load(Ordering::Acquire) || minutes_core::copilot::copilot_stop_path().exists() {
+        return;
+    }
+
+    publish_copilot_hud(&app, &hud, |snapshot| {
+        snapshot.detail = format!(
+            "Meeting context ready. Warming the local {} model…",
+            config.copilot.fast_model
+        );
+        snapshot.limitation = context_limitation.clone();
+    });
+
+    let model = Arc::new(OllamaCopilotModel::from_config(&config.copilot));
+    let runner = CopilotRunner::start(model, NudgePolicy::new(config.copilot.nudge_ttl_ms));
+    let mut cursor = minutes_core::events::latest_event_seq();
+    let mut utterances: VecDeque<CopilotUtterance> = VecDeque::new();
+    let mut paused = false;
+    let mut observed_runner_state = CopilotState::Arming;
+    let mut provider_limitation: Option<String> = None;
+    let mut last_status_write = Instant::now() - Duration::from_secs(2);
+    let mut status = CopilotSessionStatus {
+        active: true,
+        pid: Some(std::process::id()),
+        goal: goal.clone(),
+        surface: "hud".into(),
+        cursor,
+        capture_attachment: copilot_capture_attachment(),
+        health: runner.health(),
+        updated_ts: chrono::Utc::now(),
+    };
+    if let Err(error) = minutes_core::copilot::write_session_status(&status) {
+        tracing::warn!(error = %error, "failed to write desktop copilot status");
+    }
+
+    while !stop_flag.load(Ordering::Acquire) && !minutes_core::copilot::copilot_stop_path().exists()
+    {
+        let pause_requested = minutes_core::copilot::copilot_pause_path().exists();
+        if pause_requested != paused {
+            paused = pause_requested;
+            paused_flag.store(paused, Ordering::SeqCst);
+            if paused {
+                runner.pause();
+            } else {
+                runner.resume();
+            }
+        }
+
+        for envelope in minutes_core::events::read_events_since_seq(cursor, None) {
+            cursor = cursor.max(envelope.seq);
+            let minutes_core::events::MinutesEvent::LiveUtteranceFinal {
+                source,
+                text,
+                speaker,
+                offset_ms,
+                duration_ms,
+                ..
+            } = envelope.event
+            else {
+                continue;
+            };
+            if text.trim().is_empty() {
+                continue;
+            }
+
+            utterances.push_back(CopilotUtterance {
+                revision: envelope.seq,
+                update_kind: TranscriptUpdateKind::Final,
+                source,
+                text,
+                speaker,
+                // The v0 bridge carries no independently verified live identity.
+                speaker_verified: false,
+                offset_ms,
+                duration_ms,
+            });
+            while utterances.len() > 24
+                || utterances.iter().map(|item| item.text.len()).sum::<usize>() > 6_000
+            {
+                utterances.pop_front();
+            }
+            let request = CopilotRequest {
+                goal: goal.clone(),
+                evidence_revision: envelope.seq,
+                update_kind: TranscriptUpdateKind::Final,
+                utterances: utterances.iter().cloned().collect(),
+                battle_card: battle_card.clone(),
+            };
+            let _ = runner.submit(request);
+        }
+
+        while let Some(event) = runner.try_recv() {
+            match event {
+                RunnerEvent::Nudge(nudge) => {
+                    provider_limitation = None;
+                    let limitation = context_limitation.clone();
+                    publish_copilot_hud(&app, &hud, |snapshot| {
+                        snapshot.state = CopilotState::Nudge;
+                        snapshot.paused = false;
+                        snapshot.detail = copilot_state_detail(
+                            CopilotState::Nudge,
+                            &config.copilot.fast_model,
+                            None,
+                        );
+                        snapshot.limitation = limitation;
+                        snapshot.nudge = Some(nudge.clone());
+                    });
+                    app.emit("copilot:nudge", nudge.clone()).ok();
+                    maybe_show_copilot_notification(&app, &critical_notifications_enabled, &nudge);
+                }
+                RunnerEvent::Degraded { error } => {
+                    provider_limitation = Some(format!(
+                        "Local model is unavailable; capture continues ({error})."
+                    ));
+                    let limitation = provider_limitation
+                        .clone()
+                        .or_else(|| context_limitation.clone());
+                    publish_copilot_hud(&app, &hud, |snapshot| {
+                        snapshot.state = CopilotState::Degraded;
+                        snapshot.detail = copilot_state_detail(
+                            CopilotState::Degraded,
+                            &config.copilot.fast_model,
+                            limitation.as_deref(),
+                        );
+                        snapshot.limitation = limitation;
+                    });
+                }
+                RunnerEvent::StateChanged(runner_state) => {
+                    observed_runner_state = runner_state;
+                    let limitation = provider_limitation
+                        .clone()
+                        .or_else(|| context_limitation.clone());
+                    let state =
+                        copilot_presentation_state(runner_state, paused, limitation.as_deref());
+                    publish_copilot_hud(&app, &hud, |snapshot| {
+                        snapshot.state = state;
+                        snapshot.paused = paused;
+                        snapshot.detail = copilot_state_detail(
+                            state,
+                            &config.copilot.fast_model,
+                            limitation.as_deref(),
+                        );
+                        snapshot.limitation = limitation;
+                        if runner_state == CopilotState::Off
+                            || snapshot
+                                .nudge
+                                .as_ref()
+                                .is_some_and(|nudge| nudge.is_expired_at(chrono::Utc::now()))
+                        {
+                            snapshot.nudge = None;
+                        }
+                    });
+                }
+                RunnerEvent::RequestCancelled { .. } | RunnerEvent::Model(_) => {}
+            }
+        }
+
+        runner.tick(chrono::Utc::now());
+        let health = runner.health();
+        if health.state != observed_runner_state {
+            observed_runner_state = health.state;
+            let limitation = provider_limitation
+                .clone()
+                .or_else(|| context_limitation.clone());
+            let state = copilot_presentation_state(health.state, paused, limitation.as_deref());
+            publish_copilot_hud(&app, &hud, |snapshot| {
+                snapshot.state = state;
+                snapshot.paused = paused;
+                snapshot.detail =
+                    copilot_state_detail(state, &config.copilot.fast_model, limitation.as_deref());
+                snapshot.limitation = limitation;
+                if health.state != CopilotState::Nudge {
+                    snapshot.nudge = None;
+                }
+            });
+        }
+
+        if last_status_write.elapsed() >= Duration::from_secs(1) {
+            status.cursor = cursor;
+            status.health = health;
+            status.updated_ts = chrono::Utc::now();
+            status.capture_attachment = copilot_capture_attachment();
+            if let Err(error) = minutes_core::copilot::write_session_status(&status) {
+                tracing::warn!(error = %error, "failed to update desktop copilot status");
+            }
+            last_status_write = Instant::now();
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+
+    runner.stop();
+    status.active = false;
+    status.pid = None;
+    status.health = runner.health();
+    status.health.state = CopilotState::Off;
+    status.updated_ts = chrono::Utc::now();
+    if let Err(error) = minutes_core::copilot::write_session_status(&status) {
+        tracing::warn!(error = %error, "failed to write stopped desktop copilot status");
+    }
+    if let Err(error) = minutes_core::copilot::clear_session_controls() {
+        tracing::warn!(error = %error, "failed to clear desktop copilot controls");
+    }
+}
+
+#[tauri::command]
+pub fn cmd_start_copilot_surface(
+    app: tauri::AppHandle,
+    state: tauri::State<AppState>,
+    goal: Option<String>,
+) -> Result<CopilotHudSnapshot, String> {
+    let goal = goal
+        .as_deref()
+        .map(str::trim)
+        .filter(|goal| !goal.is_empty())
+        .unwrap_or(DEFAULT_COPILOT_GOAL)
+        .to_string();
+    let config = Config::load();
+    let provider = config.copilot.resolved_fast_provider();
+    if provider != "ollama" {
+        if provider == "cloud" && !config.copilot.allow_cloud {
+            return Err(
+                "Cloud Coach is disabled. Contract v1 uses the local Ollama provider.".into(),
+            );
+        }
+        return Err(format!(
+            "Coach provider '{provider}' is not available in contract v1; use auto-local or ollama."
+        ));
+    }
+
+    if state
+        .copilot_active
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        show_copilot_hud(&app)?;
+        return Ok(current_copilot_hud(&state.copilot_hud));
+    }
+
+    let session_guard = match minutes_core::copilot::create_session_guard() {
+        Ok(guard) => guard,
+        Err(error) => {
+            state.copilot_active.store(false, Ordering::SeqCst);
+            return Err(format!(
+                "Another Coach session is active or its lock is unavailable: {error}"
+            ));
+        }
+    };
+    if let Err(error) = minutes_core::copilot::clear_session_controls() {
+        state.copilot_active.store(false, Ordering::SeqCst);
+        drop(session_guard);
+        return Err(format!("Could not reset Coach controls: {error}"));
+    }
+
+    state.copilot_stop_flag.store(false, Ordering::SeqCst);
+    state.copilot_paused.store(false, Ordering::SeqCst);
+    let notifications = state
+        .copilot_critical_notifications_enabled
+        .load(Ordering::Relaxed);
+    publish_copilot_hud(&app, &state.copilot_hud, |snapshot| {
+        *snapshot = CopilotHudSnapshot {
+            active: true,
+            paused: false,
+            state: minutes_core::copilot::CopilotState::Arming,
+            goal: goal.clone(),
+            detail: copilot_state_detail(
+                minutes_core::copilot::CopilotState::Arming,
+                &config.copilot.fast_model,
+                None,
+            ),
+            limitation: None,
+            nudge: None,
+            critical_notifications_enabled: notifications,
+        };
+    });
+    if let Err(error) = show_copilot_hud(&app) {
+        state.copilot_active.store(false, Ordering::SeqCst);
+        publish_copilot_hud(&app, &state.copilot_hud, |snapshot| {
+            *snapshot = CopilotHudSnapshot::off(notifications);
+        });
+        drop(session_guard);
+        return Err(error);
+    }
+    crate::sync_tray_state(&app);
+
+    let app_for_thread = app.clone();
+    let active = state.copilot_active.clone();
+    let stop_flag = state.copilot_stop_flag.clone();
+    let paused = state.copilot_paused.clone();
+    let hud = state.copilot_hud.clone();
+    let critical_notifications_enabled = state.copilot_critical_notifications_enabled.clone();
+    std::thread::spawn(move || {
+        run_copilot_surface(CopilotSurfaceRunContext {
+            app: app_for_thread,
+            config,
+            goal,
+            active,
+            stop_flag,
+            paused_flag: paused,
+            hud,
+            critical_notifications_enabled,
+            session_guard,
+        })
+    });
+
+    Ok(current_copilot_hud(&state.copilot_hud))
+}
+
+#[tauri::command]
+pub fn cmd_stop_copilot_surface(
+    state: tauri::State<AppState>,
+) -> Result<CopilotHudSnapshot, String> {
+    if !state.copilot_active.load(Ordering::SeqCst) {
+        return Ok(current_copilot_hud(&state.copilot_hud));
+    }
+    state.copilot_stop_flag.store(true, Ordering::SeqCst);
+    minutes_core::copilot::request_stop()
+        .map_err(|error| format!("Could not request Coach stop: {error}"))?;
+    Ok(current_copilot_hud(&state.copilot_hud))
+}
+
+#[tauri::command]
+pub fn cmd_pause_copilot_surface(
+    app: tauri::AppHandle,
+    state: tauri::State<AppState>,
+) -> Result<CopilotHudSnapshot, String> {
+    if !state.copilot_active.load(Ordering::SeqCst) {
+        return Err("Coach is not active.".into());
+    }
+    minutes_core::copilot::request_pause()
+        .map_err(|error| format!("Could not pause Coach: {error}"))?;
+    state.copilot_paused.store(true, Ordering::SeqCst);
+    Ok(publish_copilot_hud(&app, &state.copilot_hud, |snapshot| {
+        snapshot.paused = true;
+        snapshot.state = minutes_core::copilot::CopilotState::Paused;
+        snapshot.detail = copilot_state_detail(
+            minutes_core::copilot::CopilotState::Paused,
+            "",
+            snapshot.limitation.as_deref(),
+        );
+    }))
+}
+
+#[tauri::command]
+pub fn cmd_resume_copilot_surface(
+    app: tauri::AppHandle,
+    state: tauri::State<AppState>,
+) -> Result<CopilotHudSnapshot, String> {
+    if !state.copilot_active.load(Ordering::SeqCst) {
+        return Err("Coach is not active.".into());
+    }
+    minutes_core::copilot::request_resume()
+        .map_err(|error| format!("Could not resume Coach: {error}"))?;
+    state.copilot_paused.store(false, Ordering::SeqCst);
+    Ok(publish_copilot_hud(&app, &state.copilot_hud, |snapshot| {
+        snapshot.paused = false;
+        snapshot.state = if snapshot.limitation.is_some() {
+            minutes_core::copilot::CopilotState::Degraded
+        } else {
+            minutes_core::copilot::CopilotState::Listening
+        };
+        snapshot.detail = copilot_state_detail(snapshot.state, "", snapshot.limitation.as_deref());
+    }))
+}
+
+#[tauri::command]
+pub fn cmd_dismiss_copilot_nudge(
+    app: tauri::AppHandle,
+    state: tauri::State<AppState>,
+) -> CopilotHudSnapshot {
+    publish_copilot_hud(&app, &state.copilot_hud, |snapshot| {
+        snapshot.nudge = None;
+        snapshot.state = if snapshot.paused {
+            minutes_core::copilot::CopilotState::Paused
+        } else if snapshot.limitation.is_some() {
+            minutes_core::copilot::CopilotState::Degraded
+        } else {
+            minutes_core::copilot::CopilotState::Listening
+        };
+        snapshot.detail = copilot_state_detail(snapshot.state, "", snapshot.limitation.as_deref());
+    })
+}
+
+#[tauri::command]
+pub fn cmd_copilot_surface_status(state: tauri::State<AppState>) -> CopilotHudSnapshot {
+    current_copilot_hud(&state.copilot_hud)
 }
 
 // ── Live transcript commands ─────────────────────────────────

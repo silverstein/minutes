@@ -1222,6 +1222,18 @@
       gap: 8px;
     }
 
+    .coach-toggle.is-active {
+      color: var(--green);
+      border-color: var(--green-border);
+      background: var(--green-tint-soft);
+    }
+
+    .coach-toggle.is-paused {
+      color: var(--text-secondary);
+      border-color: var(--border);
+      background: transparent;
+    }
+
     /* ── Recording bar ── */
     .recording-bar {
       display: none;
@@ -4962,6 +4974,7 @@
       </div>
       <div class="audio-viz" id="audio-viz"></div>
       <div class="recording-actions">
+        <button class="btn btn-secondary btn-sm coach-toggle" id="btn-coach-recording" type="button" aria-pressed="false">Coach</button>
         <button class="btn btn-secondary btn-sm" id="btn-note-inline" title="Add a note">Add Note</button>
         <button class="btn btn-danger btn-sm" id="btn-stop">Stop Recording</button>
       </div>
@@ -4981,6 +4994,7 @@
       </div>
       <div class="live-utterances" id="live-utterances">0 utterances</div>
       <div class="live-actions">
+        <button class="btn btn-secondary btn-sm coach-toggle" id="btn-coach-live" type="button" aria-pressed="false">Coach</button>
         <button class="btn btn-secondary btn-sm" id="btn-stop-live">Stop Live</button>
       </div>
     </div>
@@ -5521,6 +5535,10 @@
         <div class="about-controls">
           <div class="about-controls-copy">Show completion alerts</div>
           <button class="btn btn-secondary btn-sm toggle-btn" id="settings-notifications">On</button>
+        </div>
+        <div class="about-controls">
+          <div class="about-controls-copy">Critical Coach alerts when the HUD is hidden</div>
+          <button class="btn btn-secondary btn-sm toggle-btn" id="settings-copilot-notifications">Off</button>
         </div>
         <div class="about-controls">
           <div class="about-controls-copy">Play sound cues for start, stop, and complete</div>
@@ -6409,6 +6427,10 @@
     const recordButton = document.getElementById('btn-record');
     const liveButton = document.getElementById('btn-live');
     const quickThoughtButton = document.getElementById('btn-quick-thought');
+    const coachButtons = [
+      document.getElementById('btn-coach-recording'),
+      document.getElementById('btn-coach-live'),
+    ].filter(Boolean);
     const aboutTrayCopy = document.getElementById('about-tray-copy');
     const updateBanner = document.getElementById('update-banner');
     const updateBannerTitle = document.getElementById('update-banner-title');
@@ -6431,6 +6453,9 @@
     let isStarting = false;
     let isProcessing = false;
     let isLiveTranscript = false;
+    let copilotSnapshot = { active: false, paused: false, state: 'Off', nudge: null };
+    let copilotTransition = null;
+    let copilotCriticalAlertsEnabled = false;
     let isSensitiveMeeting = false;
     let currentMeetingPath = null;
     const liveBar = document.getElementById('live-bar');
@@ -7499,6 +7524,63 @@
         setTitle(quickThoughtButton, '');
       }
     }
+
+    function copilotStateName(snapshot = copilotSnapshot) {
+      return String(snapshot?.state || 'Off').toLowerCase();
+    }
+
+    function renderCoachControls(next = copilotSnapshot) {
+      copilotSnapshot = next || copilotSnapshot;
+      const active = !!copilotSnapshot.active;
+      const paused = !!copilotSnapshot.paused || copilotStateName() === 'paused';
+      const state = copilotStateName();
+      const text = copilotTransition
+        || (!active ? 'Coach' : paused ? 'Coach Paused' : state === 'arming' ? 'Coach Arming' : 'Coach On');
+      coachButtons.forEach(button => {
+        button.textContent = text;
+        button.disabled = !!copilotTransition;
+        button.classList.toggle('is-active', active && !paused);
+        button.classList.toggle('is-paused', active && paused);
+        button.setAttribute('aria-pressed', active ? 'true' : 'false');
+        button.setAttribute(
+          'aria-label',
+          active ? 'Stop the Coach HUD' : 'Start the Coach HUD for this meeting'
+        );
+        button.title = active
+          ? (paused ? 'Coach is paused. Click to stop it; resume from the HUD.' : 'Coach is active. Click to stop it.')
+          : 'Start the private, glanceable Coach HUD';
+      });
+    }
+
+    function showCoachError(error) {
+      updateOutputNotice({
+        kind: 'error',
+        title: 'Coach not started',
+        detail: String(error?.message || error || 'Coach could not be started.'),
+        path: '',
+      });
+    }
+
+    async function toggleCoachSurface() {
+      const stopping = !!copilotSnapshot.active;
+      copilotTransition = stopping ? 'Stopping…' : 'Arming…';
+      renderCoachControls();
+      try {
+        const next = stopping
+          ? await invoke('cmd_stop_copilot_surface')
+          : await invoke('cmd_start_copilot_surface', { goal: null });
+        if (!stopping) {
+          copilotTransition = null;
+          renderCoachControls(next);
+        }
+      } catch (error) {
+        copilotTransition = null;
+        renderCoachControls();
+        showCoachError(error);
+      }
+    }
+
+    coachButtons.forEach(button => button.addEventListener('click', toggleCoachSurface));
 
     function setHotkeyStatus(text, isError = false) {
       if (!hotkeyStatus) return;
@@ -9656,6 +9738,8 @@
         const notifyEnabled = s?.notifications?.completion_enabled !== false;
         setNotificationToggle(notifyEnabled);
         setSettingsToggle('settings-notifications', notifyEnabled);
+        copilotCriticalAlertsEnabled = s?.notifications?.copilot_critical_enabled === true;
+        setSettingsToggle('settings-copilot-notifications', copilotCriticalAlertsEnabled);
         // Cues are localStorage-only (no config section).
         setSettingsToggle('settings-cues', playCaptureCues);
         // Autostart
@@ -10252,6 +10336,16 @@
     document.getElementById('settings-notifications').addEventListener('click', async () => {
       const next = !notifyOnCompletion;
       try { await invoke('cmd_set_completion_notifications', { enabled: next }); setNotificationToggle(next); setSettingsToggle('settings-notifications', next); } catch (e) { console.error(e); }
+    });
+    document.getElementById('settings-copilot-notifications').addEventListener('click', async () => {
+      const next = !copilotCriticalAlertsEnabled;
+      try {
+        await invoke('cmd_set_copilot_critical_notifications', { enabled: next });
+        copilotCriticalAlertsEnabled = next;
+        setSettingsToggle('settings-copilot-notifications', next);
+      } catch (e) {
+        console.error('Set critical Coach notifications:', e);
+      }
     });
     document.getElementById('settings-cues').addEventListener('click', () => {
       setCueToggle(!playCaptureCues);
@@ -13479,6 +13573,21 @@
       if (notice) notice.classList.add('active');
     });
 
+    currentWindow.listen('copilot:state', (event) => {
+      copilotTransition = null;
+      renderCoachControls(event.payload || copilotSnapshot);
+    });
+
+    currentWindow.listen('copilot:nudge', (event) => {
+      copilotTransition = null;
+      renderCoachControls({
+        ...copilotSnapshot,
+        active: true,
+        state: 'Nudge',
+        nudge: event.payload || null,
+      });
+    });
+
     currentWindow.listen('artifacts:changed', () => {
       scheduleMeetingsRefresh();
     });
@@ -14509,10 +14618,14 @@
         await legacyConfigMigrationReady;
         const s = await invoke('cmd_get_settings');
         setNotificationToggle(s?.notifications?.completion_enabled !== false);
+        copilotCriticalAlertsEnabled = s?.notifications?.copilot_critical_enabled === true;
       } catch (e) {
         console.error('Init notifications from config:', e);
       }
     })();
+    invoke('cmd_copilot_surface_status')
+      .then(renderCoachControls)
+      .catch(error => console.error('Init Coach status:', error));
     // Capture cues are localStorage-only (no config section); unchanged.
     const storedCues = localStorage.getItem('minutes.playCaptureCues');
     if (storedCues === 'false') {

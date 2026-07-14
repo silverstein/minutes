@@ -82,18 +82,24 @@ impl Default for GlobalHotkeyConfig {
 /// `completion_enabled` controls the system notification fired when a
 /// recording finishes processing. Defaults to `true` to preserve the
 /// historical behavior (AppState previously seeded `AtomicBool::new(true)`).
-/// `#[serde(default)]` keeps old `config.toml` files loading.
+/// `copilot_critical_enabled` is deliberately opt-in: the Coach HUD is the
+/// primary advice surface, and system notifications are reserved for critical
+/// advice while that HUD is hidden. `#[serde(default)]` keeps old
+/// `config.toml` files loading.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct NotificationsConfig {
     /// Whether the "processing complete" notification is shown.
     pub completion_enabled: bool,
+    /// Whether critical Coach advice may notify while the HUD is hidden.
+    pub copilot_critical_enabled: bool,
 }
 
 impl Default for NotificationsConfig {
     fn default() -> Self {
         Self {
             completion_enabled: true,
+            copilot_critical_enabled: false,
         }
     }
 }
@@ -2093,6 +2099,8 @@ enabled = true
         assert_eq!(config.global_hotkey.shortcut, "CmdOrCtrl+Shift+M");
         // Completion notifications default-on, preserving prior behavior.
         assert!(config.notifications.completion_enabled);
+        // Coach alerts are opt-in and hidden-HUD-only.
+        assert!(!config.notifications.copilot_critical_enabled);
     }
 
     #[test]
@@ -2107,6 +2115,7 @@ enabled = true
         assert!(!parsed.global_hotkey.shortcut_enabled);
         assert_eq!(parsed.global_hotkey.shortcut, "CmdOrCtrl+Shift+M");
         assert!(parsed.notifications.completion_enabled);
+        assert!(!parsed.notifications.copilot_critical_enabled);
     }
 
     #[test]
@@ -2115,12 +2124,14 @@ enabled = true
         config.global_hotkey.shortcut_enabled = true;
         config.global_hotkey.shortcut = "CmdOrCtrl+Shift+J".into();
         config.notifications.completion_enabled = false;
+        config.notifications.copilot_critical_enabled = true;
 
         let out = toml::to_string(&config).unwrap();
         let parsed: Config = toml::from_str(&out).unwrap();
         assert!(parsed.global_hotkey.shortcut_enabled);
         assert_eq!(parsed.global_hotkey.shortcut, "CmdOrCtrl+Shift+J");
         assert!(!parsed.notifications.completion_enabled);
+        assert!(parsed.notifications.copilot_critical_enabled);
     }
 
     #[test]

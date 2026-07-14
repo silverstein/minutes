@@ -42,6 +42,12 @@ static CLEAN_EXIT_STARTED: AtomicBool = AtomicBool::new(false);
 static MACOS_TERMINATE_APP_HANDLE: OnceLock<tauri::AppHandle> = OnceLock::new();
 
 fn cleanup_before_process_exit(app: &tauri::AppHandle) {
+    if let Some(state) = app.try_state::<commands::AppState>() {
+        if state.copilot_active.load(Ordering::Relaxed) {
+            state.copilot_stop_flag.store(true, Ordering::Release);
+            let _ = minutes_core::copilot::request_stop();
+        }
+    }
     let sessions = app
         .try_state::<commands::AppState>()
         .and_then(|state| {
@@ -391,6 +397,7 @@ fn window_base_size(label: &str) -> Option<(f64, f64)> {
         "palette" => Some((640.0, 420.0)),
         "note" => Some((420.0, 260.0)),
         "dictation-overlay" => Some((320.0, 88.0)),
+        "copilot-hud" => Some((440.0, 176.0)),
         "meeting-prompt" => Some((380.0, 240.0)),
         _ => None,
     }
@@ -515,6 +522,7 @@ pub struct TrayMenuHandles {
     pub record: tauri::menu::MenuItem<tauri::Wry>,
     pub quick_thought: tauri::menu::MenuItem<tauri::Wry>,
     pub stop: tauri::menu::MenuItem<tauri::Wry>,
+    pub coach: tauri::menu::MenuItem<tauri::Wry>,
 }
 
 /// The active "recording-class" activity that the tray reflects. Each
@@ -529,7 +537,7 @@ pub struct TrayMenuHandles {
 /// when its `run` fails and its RAII guard drops, re-syncing the tray.
 ///
 /// `derive_tray_activity` defines a deterministic priority order
-/// (Recording > Live > Dictation > Idle) so the tray renders coherently
+/// (Recording > Live > Dictation > Copilot > Idle) so the tray renders coherently
 /// during the brief drift window. Properly closing the cross-mode race
 /// needs a single serialized lifecycle primitive (e.g. an `AtomicU8` mode
 /// CAS or a mutex around mode reservation) — out of scope here, tracked
@@ -540,6 +548,7 @@ pub enum TrayActivity {
     Recording,
     Live,
     Dictation,
+    Copilot,
 }
 
 /// Inferred macOS menu-bar appearance. Honestly a proxy: we read the app's
@@ -609,6 +618,10 @@ impl TrayActivity {
         !matches!(self, Self::Idle)
     }
 
+    fn blocks_capture_controls(self) -> bool {
+        matches!(self, Self::Recording | Self::Live | Self::Dictation)
+    }
+
     fn icon_bytes(self, appearance: TrayAppearance) -> &'static [u8] {
         match (self, appearance) {
             (Self::Idle, _) => include_bytes!("../icons/icon-tray.png"),
@@ -618,8 +631,12 @@ impl TrayActivity {
             (Self::Recording | Self::Dictation, TrayAppearance::Dark) => {
                 include_bytes!("../icons/icon-recording-dark.png")
             }
-            (Self::Live, TrayAppearance::Light) => include_bytes!("../icons/icon-live.png"),
-            (Self::Live, TrayAppearance::Dark) => include_bytes!("../icons/icon-live-dark.png"),
+            (Self::Live | Self::Copilot, TrayAppearance::Light) => {
+                include_bytes!("../icons/icon-live.png")
+            }
+            (Self::Live | Self::Copilot, TrayAppearance::Dark) => {
+                include_bytes!("../icons/icon-live-dark.png")
+            }
         }
     }
 
@@ -629,6 +646,7 @@ impl TrayActivity {
             Self::Recording => "Minutes — Recording...",
             Self::Live => "Minutes — Live Transcribing...",
             Self::Dictation => "Minutes — Dictating...",
+            Self::Copilot => "Minutes — Coach Listening...",
         }
     }
 
@@ -639,6 +657,7 @@ impl TrayActivity {
             Self::Idle | Self::Recording => "Stop Recording",
             Self::Live => "Stop Live Transcript",
             Self::Dictation => "Stop Dictation",
+            Self::Copilot => "Stop Coach",
         }
     }
 
@@ -648,6 +667,7 @@ impl TrayActivity {
             Self::Recording => "recording",
             Self::Live => "live-transcript",
             Self::Dictation => "dictation",
+            Self::Copilot => "copilot",
         }
     }
 }
@@ -660,13 +680,15 @@ pub struct TrayStateSnapshot {
     pub recording: bool,
     pub live: bool,
     pub dictation: bool,
+    pub copilot: bool,
 }
 
 /// Derive the tray activity from a state snapshot. Pure function; tested in
 /// the module's `#[cfg(test)]` block. Priority is Recording > Live >
-/// Dictation > Idle so an external CLI recording (surfaced through
+/// Dictation > Copilot > Idle so an external CLI recording (surfaced through
 /// `recording_active` PID check) keeps the tray rendering as recording even
-/// if an in-app dictation flag is somehow also set.
+/// if an in-app dictation flag is somehow also set. Copilot comes after every
+/// capture mode because it can coexist with them and never owns capture.
 pub fn derive_tray_activity(snapshot: TrayStateSnapshot) -> TrayActivity {
     if snapshot.recording {
         TrayActivity::Recording
@@ -674,6 +696,8 @@ pub fn derive_tray_activity(snapshot: TrayStateSnapshot) -> TrayActivity {
         TrayActivity::Live
     } else if snapshot.dictation {
         TrayActivity::Dictation
+    } else if snapshot.copilot {
+        TrayActivity::Copilot
     } else {
         TrayActivity::Idle
     }
@@ -687,11 +711,13 @@ fn snapshot_tray_state(app: &tauri::AppHandle) -> TrayStateSnapshot {
             recording: commands::recording_active(&state.recording),
             live: state.live_transcript_active.load(Ordering::Relaxed),
             dictation: state.dictation_active.load(Ordering::Relaxed),
+            copilot: state.copilot_active.load(Ordering::Relaxed),
         },
         None => TrayStateSnapshot {
             recording: false,
             live: false,
             dictation: false,
+            copilot: false,
         },
     }
 }
@@ -701,7 +727,12 @@ fn snapshot_tray_state(app: &tauri::AppHandle) -> TrayStateSnapshot {
 /// (which must wake the palette so its visible command list re-fetches)
 /// from appearance-only repaints (which would otherwise spam the palette
 /// with no-op refreshes — codex plan-review #4).
-fn apply_tray_activity(app: &tauri::AppHandle, activity: TrayActivity, emit_palette_refresh: bool) {
+fn apply_tray_activity(
+    app: &tauri::AppHandle,
+    snapshot: TrayStateSnapshot,
+    activity: TrayActivity,
+    emit_palette_refresh: bool,
+) {
     let appearance = current_tray_appearance(app);
     if let Some(tray) = app.tray_by_id("minutes-tray") {
         if let Ok(icon) = tauri::image::Image::from_bytes(activity.icon_bytes(appearance)) {
@@ -727,13 +758,24 @@ fn apply_tray_activity(app: &tauri::AppHandle, activity: TrayActivity, emit_pale
     // than silent regression).
     match app.try_state::<TrayMenuHandles>() {
         Some(handles) => {
-            handles.record.set_enabled(!activity.is_active()).ok();
+            handles
+                .record
+                .set_enabled(!activity.blocks_capture_controls())
+                .ok();
             handles
                 .quick_thought
-                .set_enabled(!activity.is_active())
+                .set_enabled(!activity.blocks_capture_controls())
                 .ok();
             handles.stop.set_enabled(activity.is_active()).ok();
             handles.stop.set_text(activity.stop_label()).ok();
+            handles
+                .coach
+                .set_text(if snapshot.copilot {
+                    "Coach ✓"
+                } else {
+                    "Coach"
+                })
+                .ok();
         }
         None => {
             tracing::warn!(
@@ -764,7 +806,7 @@ fn apply_tray_activity(app: &tauri::AppHandle, activity: TrayActivity, emit_pale
 pub fn sync_tray_state(app: &tauri::AppHandle) {
     let snapshot = snapshot_tray_state(app);
     let activity = derive_tray_activity(snapshot);
-    apply_tray_activity(app, activity, true);
+    apply_tray_activity(app, snapshot, activity, true);
 }
 
 /// Re-paint the tray for an appearance change (system Light/Dark toggle)
@@ -774,7 +816,7 @@ pub fn sync_tray_state(app: &tauri::AppHandle) {
 pub fn sync_tray_appearance(app: &tauri::AppHandle) {
     let snapshot = snapshot_tray_state(app);
     let activity = derive_tray_activity(snapshot);
-    apply_tray_activity(app, activity, false);
+    apply_tray_activity(app, snapshot, activity, false);
 }
 
 // ── Auto-updater ────────────────────────────────────────────
@@ -1447,6 +1489,19 @@ fn main() {
     let dictation_release_started_at = Arc::new(Mutex::new(None));
     let live_transcript_active = Arc::new(AtomicBool::new(false));
     let live_transcript_stop_flag = Arc::new(AtomicBool::new(false));
+    let copilot_active = Arc::new(AtomicBool::new(false));
+    let copilot_stop_flag = Arc::new(AtomicBool::new(false));
+    let copilot_paused = Arc::new(AtomicBool::new(false));
+    let copilot_critical_notifications_enabled = Arc::new(AtomicBool::new(
+        startup_config_snapshot
+            .notifications
+            .copilot_critical_enabled,
+    ));
+    let copilot_hud = Arc::new(Mutex::new(commands::CopilotHudSnapshot::off(
+        startup_config_snapshot
+            .notifications
+            .copilot_critical_enabled,
+    )));
     let screen_share_hidden = Arc::new(AtomicBool::new(
         startup_config_snapshot.privacy.hide_from_screen_share,
     ));
@@ -1669,6 +1724,7 @@ fn main() {
                 .skip_initial_state("note")
                 .skip_initial_state("meeting-prompt")
                 .skip_initial_state("dictation-overlay")
+                .skip_initial_state("copilot-hud")
                 .build(),
         )
         .manage(commands::AppState {
@@ -1696,6 +1752,11 @@ fn main() {
             dictation_release_started_at: dictation_release_started_at.clone(),
             live_transcript_active: live_transcript_active.clone(),
             live_transcript_stop_flag: live_transcript_stop_flag.clone(),
+            copilot_active: copilot_active.clone(),
+            copilot_stop_flag: copilot_stop_flag.clone(),
+            copilot_paused: copilot_paused.clone(),
+            copilot_hud: copilot_hud.clone(),
+            copilot_critical_notifications_enabled: copilot_critical_notifications_enabled.clone(),
             live_shortcut_enabled: {
                 let cfg = minutes_core::config::Config::load();
                 Arc::new(AtomicBool::new(cfg.live_transcript.shortcut_enabled))
@@ -1964,6 +2025,7 @@ fn main() {
                 None::<&str>,
             )?;
             let stop_item_ref = stop_item.clone();
+            let coach_item = MenuItem::with_id(app, "coach-toggle", "Coach", true, None::<&str>)?;
             // Enabled regardless of recording state: toggling when no recording
             // is active primes the sentinel so the NEXT dual-source recording
             // starts muted. During a recording, the toggle takes effect on the
@@ -2030,6 +2092,7 @@ fn main() {
                 &quick_thought_item,
                 &sensitive_item,
                 &stop_item,
+                &coach_item,
                 &mic_mute_item,
                 &sep,
                 &note_item,
@@ -2113,14 +2176,15 @@ fn main() {
                         }
                         "stop" => {
                             // The Stop menu item is enabled whenever ANY
-                            // recording-class state is active: recording
-                            // proper, live transcript, OR dictation. Route to
+                            // activity is active: recording proper, live
+                            // transcript, dictation, OR Coach alone. Route to
                             // the active flow. Each has a distinct stop path:
                             //   - recording → `commands::request_stop`
                             //   - live      → `commands::cmd_stop_live_transcript`
                             //   - dictation → `commands::cmd_stop_dictation`
+                            //   - copilot   → `commands::cmd_stop_copilot_surface`
                             // Priority order matches `derive_tray_activity`
-                            // (Recording > Live > Dictation) so behavior is
+                            // (Recording > Live > Dictation > Copilot) so behavior is
                             // deterministic if two flags are somehow both
                             // true.
                             let state = app.state::<commands::AppState>();
@@ -2128,6 +2192,7 @@ fn main() {
                             let live_active = state.live_transcript_active.load(Ordering::Relaxed);
                             let dictation_was_active =
                                 state.dictation_active.load(Ordering::Relaxed);
+                            let copilot_was_active = state.copilot_active.load(Ordering::Relaxed);
 
                             let stop_ok = if recording_was_active {
                                 commands::request_stop(&recording, &stop).is_ok()
@@ -2135,6 +2200,8 @@ fn main() {
                                 commands::cmd_stop_live_transcript(state).is_ok()
                             } else if dictation_was_active {
                                 commands::cmd_stop_dictation(state).is_ok()
+                            } else if copilot_was_active {
+                                commands::cmd_stop_copilot_surface(state).is_ok()
                             } else {
                                 false
                             };
@@ -2167,7 +2234,7 @@ fn main() {
                                         sync_tray_state(&app_done);
                                     }
                                 } else {
-                                    // Live transcript / dictation paths:
+                                    // Live transcript / dictation / Coach paths:
                                     // both stop calls just flip a flag; the
                                     // session's own guard (LiveActiveGuard /
                                     // DictationActiveGuard) calls
@@ -2182,6 +2249,22 @@ fn main() {
                                     qi.set_text("Quick Thought").ok();
                                 }
                             });
+                        }
+                        "coach-toggle" => {
+                            let state = app.state::<commands::AppState>();
+                            let result = if state.copilot_active.load(Ordering::Relaxed) {
+                                commands::cmd_stop_copilot_surface(state).map(|_| ())
+                            } else {
+                                commands::cmd_start_copilot_surface(
+                                    app.clone(),
+                                    state,
+                                    Some(commands::DEFAULT_COPILOT_GOAL.into()),
+                                )
+                                .map(|_| ())
+                            };
+                            if let Err(error) = result {
+                                commands::show_user_notification(app, "Coach", &error);
+                            }
                         }
                         "mic-mute-toggle" => {
                             let new_state =
@@ -2358,6 +2441,7 @@ fn main() {
                 record: record_item.clone(),
                 quick_thought: quick_thought_item.clone(),
                 stop: stop_item.clone(),
+                coach: coach_item.clone(),
             });
 
             // Seed the appearance state from the main window's theme. The
@@ -2617,6 +2701,13 @@ fn main() {
             commands::cmd_start_live_transcript,
             commands::cmd_stop_live_transcript,
             commands::cmd_live_transcript_status,
+            commands::cmd_start_copilot_surface,
+            commands::cmd_stop_copilot_surface,
+            commands::cmd_pause_copilot_surface,
+            commands::cmd_resume_copilot_surface,
+            commands::cmd_dismiss_copilot_nudge,
+            commands::cmd_copilot_surface_status,
+            commands::cmd_set_copilot_critical_notifications,
             commands::cmd_live_shortcut_settings,
             commands::cmd_set_live_shortcut,
             commands::cmd_install_update,
@@ -2674,6 +2765,21 @@ mod tray_activity_tests {
             recording,
             live,
             dictation,
+            copilot: false,
+        }
+    }
+
+    fn snap_with_copilot(
+        recording: bool,
+        live: bool,
+        dictation: bool,
+        copilot: bool,
+    ) -> TrayStateSnapshot {
+        TrayStateSnapshot {
+            recording,
+            live,
+            dictation,
+            copilot,
         }
     }
 
@@ -2866,6 +2972,44 @@ mod tray_activity_tests {
     }
 
     #[test]
+    fn copilot_hud_reuses_the_non_activating_overlay_contract() {
+        let manifest = env!("CARGO_MANIFEST_DIR");
+        let commands_rs = std::fs::read_to_string(format!("{}/src/commands.rs", manifest))
+            .expect("failed to read commands.rs");
+        let hud = std::fs::read_to_string(format!("{}/../src/copilot-hud.html", manifest))
+            .expect("failed to read Coach HUD");
+
+        for contract in [
+            "get_webview_window(\"copilot-hud\")",
+            "WebviewUrl::App(\"copilot-hud.html\".into())",
+            ".decorations(false)",
+            ".transparent(true)",
+            ".content_protected(",
+            ".always_on_top(true)",
+            ".focused(false)",
+            ".focusable(false)",
+            ".skip_taskbar(true)",
+        ] {
+            assert!(
+                commands_rs.contains(contract),
+                "Coach HUD must preserve overlay contract: {contract}"
+            );
+        }
+        for state in [
+            "Arming",
+            "Listening",
+            "Thinking",
+            "Nudge",
+            "Paused",
+            "Degraded",
+        ] {
+            assert!(hud.contains(state), "HUD must name the {state} state");
+        }
+        assert!(hud.contains("id=\"nudge-text\""));
+        assert!(hud.contains("@media (prefers-reduced-motion: reduce)"));
+    }
+
+    #[test]
     fn idle_when_all_flags_false() {
         assert_eq!(
             derive_tray_activity(snap(false, false, false)),
@@ -2917,11 +3061,33 @@ mod tray_activity_tests {
     }
 
     #[test]
+    fn copilot_is_the_activity_only_when_no_capture_mode_is_active() {
+        assert_eq!(
+            derive_tray_activity(snap_with_copilot(false, false, false, true)),
+            TrayActivity::Copilot
+        );
+        assert_eq!(
+            derive_tray_activity(snap_with_copilot(true, false, false, true)),
+            TrayActivity::Recording
+        );
+        assert_eq!(
+            derive_tray_activity(snap_with_copilot(false, true, false, true)),
+            TrayActivity::Live
+        );
+        assert_eq!(
+            derive_tray_activity(snap_with_copilot(false, false, true, true)),
+            TrayActivity::Dictation
+        );
+    }
+
+    #[test]
     fn is_active_only_for_non_idle() {
         assert!(!TrayActivity::Idle.is_active());
         assert!(TrayActivity::Recording.is_active());
         assert!(TrayActivity::Live.is_active());
         assert!(TrayActivity::Dictation.is_active());
+        assert!(TrayActivity::Copilot.is_active());
+        assert!(!TrayActivity::Copilot.blocks_capture_controls());
     }
 
     #[test]
@@ -2933,6 +3099,7 @@ mod tray_activity_tests {
         assert_eq!(TrayActivity::Recording.stop_label(), "Stop Recording");
         assert_eq!(TrayActivity::Live.stop_label(), "Stop Live Transcript");
         assert_eq!(TrayActivity::Dictation.stop_label(), "Stop Dictation");
+        assert_eq!(TrayActivity::Copilot.stop_label(), "Stop Coach");
     }
 
     #[test]
@@ -2941,6 +3108,7 @@ mod tray_activity_tests {
         assert_eq!(TrayActivity::Recording.palette_source(), "recording");
         assert_eq!(TrayActivity::Live.palette_source(), "live-transcript");
         assert_eq!(TrayActivity::Dictation.palette_source(), "dictation");
+        assert_eq!(TrayActivity::Copilot.palette_source(), "copilot");
     }
 
     #[test]
@@ -2962,6 +3130,13 @@ mod tray_activity_tests {
         let live_dark = TrayActivity::Live.icon_bytes(TrayAppearance::Dark);
         assert_ne!(live_light, live_dark);
 
+        // Coach reuses the live-listening asset while still participating as
+        // its own centrally-derived activity.
+        let copilot_light = TrayActivity::Copilot.icon_bytes(TrayAppearance::Light);
+        let copilot_dark = TrayActivity::Copilot.icon_bytes(TrayAppearance::Dark);
+        assert_eq!(copilot_light, live_light);
+        assert_eq!(copilot_dark, live_dark);
+
         // Dictation reuses the recording asset (no dedicated dictation
         // icon — out of scope for this commit). Same bytes per appearance
         // as recording, distinct across appearance variants.
@@ -2975,7 +3150,15 @@ mod tray_activity_tests {
         // If a future asset substitution swaps in the wrong format this
         // catches it before runtime.
         for bytes in [
-            idle_light, rec_light, rec_dark, live_light, live_dark, dict_light, dict_dark,
+            idle_light,
+            rec_light,
+            rec_dark,
+            live_light,
+            live_dark,
+            copilot_light,
+            copilot_dark,
+            dict_light,
+            dict_dark,
         ] {
             assert!(
                 bytes.starts_with(b"\x89PNG\r\n\x1a\n"),

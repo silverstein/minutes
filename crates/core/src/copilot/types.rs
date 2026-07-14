@@ -27,6 +27,13 @@ pub struct Nudge {
     pub evidence_utterance_sequence: u64,
     #[serde(default)]
     pub evidence_utterance_revision: u64,
+    /// Partial lineage present anywhere in the model prompt. These fields stay
+    /// populated even when the triggering update is a final so later producer
+    /// supersession can still invalidate advice grounded in provisional text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grounded_partial_utterance_sequence: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grounded_partial_utterance_revision: Option<u64>,
     pub update_kind: TranscriptUpdateKind,
     pub created_ts: DateTime<Utc>,
     pub ttl_ms: u64,
@@ -42,6 +49,11 @@ impl Nudge {
 
     pub fn is_expired_at(&self, now: DateTime<Utc>) -> bool {
         now >= self.expires_at()
+    }
+
+    pub fn grounded_partial_identity(&self) -> Option<(u64, u64)> {
+        self.grounded_partial_utterance_sequence
+            .zip(self.grounded_partial_utterance_revision)
     }
 }
 
@@ -111,6 +123,14 @@ impl CopilotRequest {
             return false;
         }
         self.update_kind == TranscriptUpdateKind::Final || self.utterances != older.utterances
+    }
+
+    pub fn grounded_partial_identity(&self) -> Option<(u64, u64)> {
+        self.utterances
+            .iter()
+            .filter(|utterance| utterance.update_kind == TranscriptUpdateKind::Partial)
+            .map(|utterance| (utterance.utterance_sequence, utterance.revision))
+            .max()
     }
 
     /// Fixed model instructions. Meeting content is intentionally absent from

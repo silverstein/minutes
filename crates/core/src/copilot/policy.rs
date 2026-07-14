@@ -45,6 +45,7 @@ impl NudgePolicy {
         let supersedes = self.active_at(now).map(|nudge| nudge.id.clone());
         let id = format!("nudge-{}-{}", request.evidence_revision, self.next_id);
         self.next_id = self.next_id.saturating_add(1);
+        let grounded_partial_identity = request.grounded_partial_identity();
         let nudge = Nudge {
             v: COPILOT_CONTRACT_VERSION,
             id,
@@ -55,6 +56,10 @@ impl NudgePolicy {
             evidence_revision: request.evidence_revision,
             evidence_utterance_sequence: request.evidence_utterance_sequence,
             evidence_utterance_revision: request.evidence_utterance_revision,
+            grounded_partial_utterance_sequence: grounded_partial_identity
+                .map(|(sequence, _)| sequence),
+            grounded_partial_utterance_revision: grounded_partial_identity
+                .map(|(_, revision)| revision),
             update_kind: request.update_kind,
             created_ts: now,
             ttl_ms: self.ttl_ms,

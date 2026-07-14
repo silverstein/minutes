@@ -109,3 +109,35 @@ fn elapsed_us(origin: Instant, at: Instant) -> u64 {
         .as_micros()
         .min(u64::MAX as u128) as u64
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn latency_ring_keeps_only_newest_64_of_65_records() {
+        let mut tracker = LatencyTracker::default();
+        let origin = Instant::now();
+        for revision in 1..=65 {
+            let offset = Duration::from_micros(revision);
+            tracker.begin(
+                revision,
+                PartialLatencySeed {
+                    session_epoch: 1,
+                    utterance_sequence: revision,
+                    utterance_revision: 1,
+                    audio_received_at: origin,
+                    partial_published_at: origin + offset,
+                    trigger_at: origin + offset,
+                    context_ready_at: origin + offset,
+                },
+            );
+        }
+
+        let records = tracker.records();
+        assert_eq!(records.len(), MAX_LATENCY_RECORDS);
+        assert_eq!(records.first().unwrap().evidence_revision, 2);
+        assert_eq!(records.last().unwrap().evidence_revision, 65);
+    }
+}

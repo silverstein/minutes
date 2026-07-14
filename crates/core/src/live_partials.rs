@@ -2,9 +2,12 @@
 //!
 //! The producer runs on the standalone live audio/VAD thread. Its only shared
 //! operations are lock-free queue pushes and atomic stores. It never waits for
-//! a consumer and never performs I/O. A full data ring drops the hypothesis;
-//! partials are hints, while the existing durable final path remains the
-//! authority.
+//! a consumer and never performs I/O. `ArrayQueue` is lock-free rather than
+//! wait-free and may use a brief bounded backoff while a concurrent slot stamp
+//! settles; that microsecond-scale in-memory spin is acceptable here and has
+//! none of the multi-second file-lock behavior this path was built to avoid. A
+//! full data ring drops the hypothesis; partials are hints, while the existing
+//! durable final path remains the authority.
 
 use crossbeam_queue::ArrayQueue;
 use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
@@ -74,11 +77,74 @@ pub enum PartialPublishOutcome {
 struct ChannelInner {
     epoch: u64,
     partials: ArrayQueue<LivePartial>,
+    freshness_version: AtomicU64,
     latest_utterance_sequence: AtomicU64,
     latest_revision: AtomicU64,
     superseded_through: AtomicU64,
     superseded_last_revision: AtomicU64,
     superseded_reason: AtomicU8,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LivePartialFreshness {
+    pub session_epoch: u64,
+    pub utterance_sequence: u64,
+    pub revision: u64,
+    pub superseded_through_utterance_sequence: u64,
+    pub superseded_last_revision: u64,
+    pub superseded_reason: SupersessionReason,
+}
+
+impl LivePartialFreshness {
+    pub fn latest_identity(self) -> Option<(u64, u64)> {
+        (self.utterance_sequence > self.superseded_through_utterance_sequence && self.revision > 0)
+            .then_some((self.utterance_sequence, self.revision))
+    }
+
+    pub fn is_current(self, session_epoch: u64, utterance_sequence: u64, revision: u64) -> bool {
+        self.session_epoch == session_epoch
+            && self.latest_identity() == Some((utterance_sequence, revision))
+    }
+}
+
+impl ChannelInner {
+    fn begin_freshness_write(&self) {
+        let prior = self.freshness_version.fetch_add(1, Ordering::SeqCst);
+        debug_assert_eq!(prior & 1, 0, "live partial freshness writer overlapped");
+    }
+
+    fn end_freshness_write(&self) {
+        let prior = self.freshness_version.fetch_add(1, Ordering::SeqCst);
+        debug_assert_eq!(prior & 1, 1, "live partial freshness write was not open");
+    }
+
+    fn freshness_snapshot(&self) -> LivePartialFreshness {
+        loop {
+            let before = self.freshness_version.load(Ordering::SeqCst);
+            if before & 1 != 0 {
+                std::hint::spin_loop();
+                continue;
+            }
+
+            let snapshot = LivePartialFreshness {
+                session_epoch: self.epoch,
+                utterance_sequence: self.latest_utterance_sequence.load(Ordering::SeqCst),
+                revision: self.latest_revision.load(Ordering::SeqCst),
+                superseded_through_utterance_sequence: self
+                    .superseded_through
+                    .load(Ordering::SeqCst),
+                superseded_last_revision: self.superseded_last_revision.load(Ordering::SeqCst),
+                superseded_reason: SupersessionReason::decode(
+                    self.superseded_reason.load(Ordering::SeqCst),
+                ),
+            };
+            let after = self.freshness_version.load(Ordering::SeqCst);
+            if before == after {
+                return snapshot;
+            }
+            std::hint::spin_loop();
+        }
+    }
 }
 
 /// Single-producer endpoint owned by the standalone live audio/VAD loop.
@@ -112,14 +178,18 @@ impl LivePartialPublisher {
         let audio_received_at = self.audio_received_at.unwrap_or_else(Instant::now);
         self.revision = self.revision.saturating_add(1);
 
-        // Publish freshness before the data push. A consumer can therefore
-        // reject an older queued/in-flight revision even when this push drops.
+        // Publish freshness as one version-guarded snapshot before the data
+        // push. A consumer can therefore reject an older queued/in-flight
+        // revision even when this push drops, without tearing fields across
+        // two utterances.
+        self.inner.begin_freshness_write();
         self.inner
             .latest_revision
-            .store(self.revision, Ordering::Release);
+            .store(self.revision, Ordering::SeqCst);
         self.inner
             .latest_utterance_sequence
-            .store(self.utterance_sequence, Ordering::Release);
+            .store(self.utterance_sequence, Ordering::SeqCst);
+        self.inner.end_freshness_write();
 
         let partial_published_at = Instant::now();
         let partial = LivePartial {
@@ -148,15 +218,17 @@ impl LivePartialPublisher {
         if self.audio_received_at.is_none() && self.revision == 0 {
             return;
         }
+        self.inner.begin_freshness_write();
         self.inner
             .superseded_last_revision
-            .store(self.revision, Ordering::Relaxed);
+            .store(self.revision, Ordering::SeqCst);
         self.inner
             .superseded_reason
-            .store(reason.encode(), Ordering::Relaxed);
+            .store(reason.encode(), Ordering::SeqCst);
         self.inner
             .superseded_through
-            .store(self.utterance_sequence, Ordering::Release);
+            .store(self.utterance_sequence, Ordering::SeqCst);
+        self.inner.end_freshness_write();
 
         self.utterance_sequence = self.utterance_sequence.saturating_add(1);
         self.revision = 0;
@@ -175,38 +247,48 @@ impl LivePartialSubscriber {
         self.inner.epoch
     }
 
+    /// Read producer identity and supersession as one linearizable snapshot.
+    pub fn freshness_snapshot(&self) -> LivePartialFreshness {
+        self.inner.freshness_snapshot()
+    }
+
     /// Returns the freshest producer revision that has not been finalized or
     /// discarded. This includes revisions whose data was dropped on overflow,
     /// allowing the consumer to cancel stale in-flight advice.
     pub fn latest_identity(&self) -> Option<(u64, u64)> {
-        let sequence = self.inner.latest_utterance_sequence.load(Ordering::Acquire);
-        if sequence == 0 || sequence <= self.inner.superseded_through.load(Ordering::Acquire) {
-            return None;
-        }
-        let revision = self.inner.latest_revision.load(Ordering::Acquire);
-        (revision > 0).then_some((sequence, revision))
+        self.freshness_snapshot().latest_identity()
     }
 
     pub fn is_current(&self, partial: &LivePartial) -> bool {
-        partial.session_epoch == self.inner.epoch
-            && self.latest_identity().is_some_and(|(sequence, revision)| {
-                sequence == partial.utterance_sequence && revision == partial.revision
-            })
+        self.freshness_snapshot().is_current(
+            partial.session_epoch,
+            partial.utterance_sequence,
+            partial.revision,
+        )
+    }
+
+    pub fn is_identity_current(
+        &self,
+        session_epoch: u64,
+        utterance_sequence: u64,
+        revision: u64,
+    ) -> bool {
+        self.freshness_snapshot()
+            .is_current(session_epoch, utterance_sequence, revision)
     }
 
     /// Poll one event without blocking. Supersession is checked first and stale
     /// queued partials are discarded locally before anything reaches a model.
     pub fn try_recv(&mut self) -> Option<LivePartialEvent> {
-        let superseded_through = self.inner.superseded_through.load(Ordering::Acquire);
+        let freshness = self.freshness_snapshot();
+        let superseded_through = freshness.superseded_through_utterance_sequence;
         if superseded_through > self.seen_superseded_through {
             self.seen_superseded_through = superseded_through;
             return Some(LivePartialEvent::Superseded(LivePartialSuperseded {
-                session_epoch: self.inner.epoch,
+                session_epoch: freshness.session_epoch,
                 through_utterance_sequence: superseded_through,
-                last_revision: self.inner.superseded_last_revision.load(Ordering::Relaxed),
-                reason: SupersessionReason::decode(
-                    self.inner.superseded_reason.load(Ordering::Relaxed),
-                ),
+                last_revision: freshness.superseded_last_revision,
+                reason: freshness.superseded_reason,
             }));
         }
 
@@ -226,6 +308,7 @@ pub fn channel(
     let inner = Arc::new(ChannelInner {
         epoch: session_epoch,
         partials: ArrayQueue::new(capacity.max(1)),
+        freshness_version: AtomicU64::new(0),
         latest_utterance_sequence: AtomicU64::new(0),
         latest_revision: AtomicU64::new(0),
         superseded_through: AtomicU64::new(0),
@@ -249,6 +332,7 @@ pub fn channel(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::mpsc;
     use std::time::Duration;
 
     #[test]
@@ -298,12 +382,56 @@ mod tests {
     }
 
     #[test]
+    fn freshness_snapshot_never_exposes_mixed_utterance_fields() {
+        let (mut publisher, subscriber) = channel(11, 1);
+        publisher.begin_utterance(Instant::now());
+        assert_eq!(
+            publisher.try_publish("old".into(), 0),
+            PartialPublishOutcome::Published
+        );
+
+        let inner = Arc::clone(&subscriber.inner);
+        let (half_written_tx, half_written_rx) = mpsc::sync_channel(0);
+        let (finish_tx, finish_rx) = mpsc::sync_channel(0);
+        let writer = std::thread::spawn(move || {
+            inner.begin_freshness_write();
+            inner.latest_utterance_sequence.store(2, Ordering::SeqCst);
+            half_written_tx.send(()).unwrap();
+            finish_rx.recv().unwrap();
+            inner.latest_revision.store(7, Ordering::SeqCst);
+            inner.superseded_through.store(1, Ordering::SeqCst);
+            inner.end_freshness_write();
+        });
+        half_written_rx.recv().unwrap();
+
+        let (snapshot_tx, snapshot_rx) = mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            snapshot_tx.send(subscriber.freshness_snapshot()).unwrap();
+        });
+        assert!(
+            snapshot_rx.recv_timeout(Duration::from_millis(25)).is_err(),
+            "consumer returned while the freshness tuple was half-written"
+        );
+        finish_tx.send(()).unwrap();
+
+        let snapshot = snapshot_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert_eq!(snapshot.session_epoch, 11);
+        assert_eq!(snapshot.utterance_sequence, 2);
+        assert_eq!(snapshot.revision, 7);
+        assert_eq!(snapshot.superseded_through_utterance_sequence, 1);
+        assert_eq!(snapshot.latest_identity(), Some((2, 7)));
+        writer.join().unwrap();
+        reader.join().unwrap();
+    }
+
+    #[test]
     fn partial_path_contains_no_event_log_or_lock_operation() {
         let forbidden = [
             ["append", "_event"].concat(),
             ["events", ".lock"].concat(),
             [".lo", "ck()"].concat(),
             ["std::", "fs"].concat(),
+            ["normalize", "_live_transcript_text"].concat(),
         ];
 
         let channel_source = include_str!("live_partials.rs");

@@ -565,7 +565,7 @@ impl LiveTranscriptWriter {
     }
 }
 
-fn normalize_live_transcript_text(text: &str) -> Option<String> {
+pub fn normalize_live_transcript_text(text: &str) -> Option<String> {
     let normalized_lines: Vec<String> = text
         .lines()
         .filter_map(|line| {
@@ -1180,15 +1180,13 @@ fn run_inner(
                 }
             } else if let Ok(whisper_ctx) = ensure_live_whisper_ctx(&mut whisper_ctx, config) {
                 if let Some(sr) = streaming.feed(&chunk.samples, whisper_ctx) {
-                    if let (Some(publisher), Some(text)) = (
-                        partial_publisher.as_mut(),
-                        normalize_live_transcript_text(&sr.text),
-                    ) {
+                    if let Some(publisher) = partial_publisher.as_mut() {
                         let _ = publisher
-                            .try_publish(text, writer.start_time.elapsed().as_millis() as u64);
+                            .try_publish(sr.text, writer.start_time.elapsed().as_millis() as u64);
                         // A full ring drops here. Do not log, wait, retry,
-                        // allocate another queue, or touch the durable event
-                        // path from this thread.
+                        // normalize, allocate another queue, or touch the
+                        // durable event path from this thread. Text cleanup is
+                        // intentionally owned by the consumer.
                     }
                 }
             }

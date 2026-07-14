@@ -7489,7 +7489,7 @@ mod tests {
     };
     use serde_json::json;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    use std::sync::{Mutex, MutexGuard, OnceLock};
+    use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
     #[cfg(feature = "parakeet")]
     #[derive(Serialize)]
@@ -8470,6 +8470,154 @@ life (qmd://life/)
         );
     }
 
+    fn test_partial_nudge(
+        session_epoch: u64,
+        utterance_sequence: u64,
+        revision: u64,
+        text: &str,
+    ) -> minutes_core::copilot::Nudge {
+        use minutes_core::copilot::{
+            BattleCard, CopilotRequest, CopilotUtterance, NudgeDraft, NudgeKind, NudgePolicy,
+            TranscriptUpdateKind,
+        };
+
+        let request = CopilotRequest {
+            goal: "land the decision".into(),
+            session_epoch,
+            evidence_revision: revision,
+            evidence_utterance_sequence: utterance_sequence,
+            evidence_utterance_revision: revision,
+            update_kind: TranscriptUpdateKind::Partial,
+            utterances: vec![CopilotUtterance {
+                utterance_sequence,
+                revision,
+                update_kind: TranscriptUpdateKind::Partial,
+                source: "in-process-live".into(),
+                text: text.into(),
+                speaker: None,
+                speaker_verified: false,
+                offset_ms: 0,
+                duration_ms: 10,
+            }],
+            battle_card: BattleCard::empty(),
+        };
+        NudgePolicy::new(12_000)
+            .accept(
+                NudgeDraft {
+                    kind: NudgeKind::Say,
+                    text: text.into(),
+                    source_chip: "decision".into(),
+                },
+                &request,
+                chrono::Utc::now(),
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn producer_update_between_poll_and_render_suppresses_partial_nudge() {
+        use minutes_core::live_partials::{
+            channel, LivePartialEvent, PartialPublishOutcome, SupersessionReason,
+        };
+
+        let (mut publisher, mut subscriber) = channel(91, 2);
+        publisher.begin_utterance(std::time::Instant::now());
+        assert_eq!(
+            publisher.try_publish("Approve".into(), 0),
+            PartialPublishOutcome::Published
+        );
+        let LivePartialEvent::Partial(approve) = subscriber.try_recv().unwrap() else {
+            panic!("first partial");
+        };
+        let approve_nudge = test_partial_nudge(
+            approve.session_epoch,
+            approve.utterance_sequence,
+            approve.revision,
+            &approve.text,
+        );
+        assert!(copilot_nudge_is_fresh_for_render(
+            &approve_nudge,
+            Some(&subscriber)
+        ));
+
+        // This arrives after runner polling but before the output write.
+        assert_eq!(
+            publisher.try_publish("Reject".into(), 1),
+            PartialPublishOutcome::Published
+        );
+        assert!(!copilot_nudge_is_fresh_for_render(
+            &approve_nudge,
+            Some(&subscriber)
+        ));
+
+        let LivePartialEvent::Partial(reject) = subscriber.try_recv().unwrap() else {
+            panic!("corrected partial");
+        };
+        let reject_nudge = test_partial_nudge(
+            reject.session_epoch,
+            reject.utterance_sequence,
+            reject.revision,
+            &reject.text,
+        );
+        publisher.supersede_current(SupersessionReason::Finalized);
+        assert!(!copilot_nudge_is_fresh_for_render(
+            &reject_nudge,
+            Some(&subscriber)
+        ));
+    }
+
+    struct PanickingNudgeSink;
+
+    impl std::io::Write for PanickingNudgeSink {
+        fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+            panic!("simulated broken pipe panic");
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn capture_guard_finalizes_wav_when_nudge_sink_panics() {
+        with_temp_home(|home| {
+            let wav_path = home.join("copilot-live.wav");
+            let stop = Arc::new(AtomicBool::new(false));
+            let capture_stop = Arc::clone(&stop);
+            let thread_path = wav_path.clone();
+            let (finalized_tx, finalized_rx) = std::sync::mpsc::channel();
+            let capture_thread = std::thread::spawn(move || {
+                let spec = hound::WavSpec {
+                    channels: 1,
+                    sample_rate: 16_000,
+                    bits_per_sample: 16,
+                    sample_format: hound::SampleFormat::Int,
+                };
+                let mut writer = hound::WavWriter::create(&thread_path, spec).unwrap();
+                writer.write_sample(1_i16).unwrap();
+                while !capture_stop.load(Ordering::Acquire) {
+                    std::thread::yield_now();
+                }
+                writer.write_sample(2_i16).unwrap();
+                writer.finalize().unwrap();
+                finalized_tx.send(()).unwrap();
+            });
+
+            let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _capture_guard = LiveCaptureGuard::new(stop, Some(capture_thread));
+                let nudge = test_partial_nudge(1, 1, 1, "Approve");
+                let mut sink = PanickingNudgeSink;
+                render_copilot_nudge_to(&nudge, "stdout", false, &mut sink).unwrap();
+            }));
+            assert!(panic.is_err());
+            finalized_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("capture guard must stop and join the WAV writer");
+            let reader = hound::WavReader::open(&wav_path).expect("finalized WAV header");
+            assert_eq!(reader.duration(), 2);
+        });
+    }
+
     #[test]
     fn transcribe_subcommand_parses_all_flags() {
         let parsed = Cli::try_parse_from([
@@ -8683,6 +8831,31 @@ fn cmd_copilot(action: CopilotAction, config: &Config) -> Result<()> {
     }
 }
 
+struct LiveCaptureGuard {
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl LiveCaptureGuard {
+    fn new(
+        stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        thread: Option<std::thread::JoinHandle<()>>,
+    ) -> Self {
+        Self { stop, thread }
+    }
+
+    fn stop_and_join(&mut self) -> std::thread::Result<()> {
+        self.stop.store(true, std::sync::atomic::Ordering::Release);
+        self.thread.take().map_or(Ok(()), |thread| thread.join())
+    }
+}
+
+impl Drop for LiveCaptureGuard {
+    fn drop(&mut self) {
+        let _ = self.stop_and_join();
+    }
+}
+
 fn cmd_copilot_start(
     goal: &str,
     surface: Option<&str>,
@@ -8831,6 +9004,9 @@ fn cmd_copilot_start(
     let capture_thread: Option<std::thread::JoinHandle<()>> = None;
     #[cfg(not(feature = "whisper"))]
     drop(partial_publisher);
+    // From this point onward every return and unwind stops and joins capture,
+    // allowing live_transcript::run_with_partials to finalize its WAV.
+    let mut capture_guard = LiveCaptureGuard::new(Arc::clone(&stop), capture_thread);
 
     let mut cursor = minutes_core::events::latest_event_seq();
     let mut next_evidence_revision = cursor;
@@ -8918,6 +9094,9 @@ fn cmd_copilot_start(
                         if !subscriber.is_current(&partial) {
                             continue;
                         }
+                        let Some(text) = normalize_copilot_partial_text(&partial.text) else {
+                            continue;
+                        };
                         let trigger_at = Instant::now();
                         utterances.retain(|utterance| {
                             utterance.update_kind == TranscriptUpdateKind::Final
@@ -8933,7 +9112,7 @@ fn cmd_copilot_start(
                             revision: partial.revision,
                             update_kind: TranscriptUpdateKind::Partial,
                             source: "in-process-live".into(),
-                            text: partial.text,
+                            text,
                             speaker: partial.speaker,
                             speaker_verified: false,
                             offset_ms: partial.offset_ms,
@@ -8991,6 +9170,22 @@ fn cmd_copilot_start(
                 continue;
             }
 
+            if let Some(finalized_partial_through) = utterances
+                .iter()
+                .filter(|utterance| utterance.update_kind == TranscriptUpdateKind::Partial)
+                .map(|utterance| utterance.utterance_sequence)
+                .max()
+            {
+                // The final is authoritative for the current in-process
+                // utterance. Invalidate model work before building its prompt,
+                // and never carry the provisional text into a final request.
+                runner.retract_partials(session_epoch, finalized_partial_through);
+                utterances.retain(|utterance| {
+                    utterance.update_kind == TranscriptUpdateKind::Final
+                        || utterance.utterance_sequence > finalized_partial_through
+                });
+            }
+
             utterances.push_back(CopilotUtterance {
                 utterance_sequence: envelope.seq,
                 revision: envelope.seq,
@@ -9027,7 +9222,14 @@ fn cmd_copilot_start(
 
         while let Some(event) = runner.try_recv() {
             match event {
-                RunnerEvent::Nudge(nudge) => render_copilot_nudge(&nudge, surface)?,
+                RunnerEvent::Nudge(nudge) => {
+                    // Close the poll-to-render gap against the producer itself,
+                    // not only the runner's last mutex state.
+                    if !copilot_nudge_is_fresh_for_render(&nudge, partial_subscriber.as_ref()) {
+                        continue;
+                    }
+                    render_copilot_nudge(&nudge, surface)?;
+                }
                 RunnerEvent::Degraded { error } => {
                     eprintln!(
                         "Copilot degraded: {error}. Recording/live capture continues unaffected."
@@ -9059,11 +9261,8 @@ fn cmd_copilot_start(
         std::thread::sleep(Duration::from_millis(200));
     }
 
-    stop.store(true, Ordering::Release);
-    if let Some(thread) = capture_thread {
-        if thread.join().is_err() && capture_failure.is_none() {
-            capture_failure = Some(anyhow::anyhow!("in-process live capture worker panicked"));
-        }
+    if capture_guard.stop_and_join().is_err() && capture_failure.is_none() {
+        capture_failure = Some(anyhow::anyhow!("in-process live capture worker panicked"));
     }
     runner.stop();
     status.active = false;
@@ -9086,22 +9285,35 @@ fn cmd_copilot_start(
 }
 
 fn render_copilot_nudge(nudge: &minutes_core::copilot::Nudge, surface: &str) -> Result<()> {
+    let stdout = std::io::stdout();
+    let terminal = stdout.is_terminal();
+    let mut stdout = stdout.lock();
+    render_copilot_nudge_to(nudge, surface, terminal, &mut stdout)
+}
+
+fn render_copilot_nudge_to(
+    nudge: &minutes_core::copilot::Nudge,
+    surface: &str,
+    terminal: bool,
+    writer: &mut dyn Write,
+) -> Result<()> {
     if surface == "stdout" {
-        println!("{}", serde_json::to_string(nudge)?);
-        std::io::stdout().flush()?;
+        writeln!(writer, "{}", serde_json::to_string(nudge)?)?;
+        writer.flush()?;
         return Ok(());
     }
 
-    let terminal = std::io::stdout().is_terminal();
     if terminal {
-        println!(
+        writeln!(
+            writer,
             "\n\x1b[1;36m┌ {:?}\x1b[0m  \x1b[2m{} · {}s\x1b[0m",
             nudge.kind,
             nudge.source_chip,
             nudge.ttl_ms / 1_000
-        );
-        println!("\x1b[1m│ {}\x1b[0m", nudge.text);
-        println!(
+        )?;
+        writeln!(writer, "\x1b[1m│ {}\x1b[0m", nudge.text)?;
+        writeln!(
+            writer,
             "\x1b[2m└ evidence revision {}{}\x1b[0m",
             nudge.evidence_revision,
             nudge
@@ -9109,15 +9321,39 @@ fn render_copilot_nudge(nudge: &minutes_core::copilot::Nudge, surface: &str) -> 
                 .as_deref()
                 .map(|id| format!(" · supersedes {id}"))
                 .unwrap_or_default()
-        );
+        )?;
     } else {
-        println!(
+        writeln!(
+            writer,
             "[{:?}] {} — {} (evidence r{}, ttl {}ms)",
             nudge.kind, nudge.text, nudge.source_chip, nudge.evidence_revision, nudge.ttl_ms
-        );
+        )?;
     }
-    std::io::stdout().flush()?;
+    writer.flush()?;
     Ok(())
+}
+
+fn copilot_nudge_is_fresh_for_render(
+    nudge: &minutes_core::copilot::Nudge,
+    partial_subscriber: Option<&minutes_core::live_partials::LivePartialSubscriber>,
+) -> bool {
+    nudge
+        .grounded_partial_identity()
+        .is_none_or(|(sequence, revision)| {
+            partial_subscriber.is_some_and(|subscriber| {
+                subscriber.is_identity_current(nudge.session_epoch, sequence, revision)
+            })
+        })
+}
+
+#[cfg(feature = "whisper")]
+fn normalize_copilot_partial_text(text: &str) -> Option<String> {
+    minutes_core::live_transcript::normalize_live_transcript_text(text)
+}
+
+#[cfg(not(feature = "whisper"))]
+fn normalize_copilot_partial_text(_text: &str) -> Option<String> {
+    None
 }
 
 fn copilot_external_capture_active() -> bool {

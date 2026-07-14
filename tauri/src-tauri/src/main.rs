@@ -397,7 +397,7 @@ fn window_base_size(label: &str) -> Option<(f64, f64)> {
         "palette" => Some((640.0, 420.0)),
         "note" => Some((420.0, 260.0)),
         "dictation-overlay" => Some((320.0, 88.0)),
-        "copilot-hud" => Some((440.0, 176.0)),
+        "copilot-hud" => Some((500.0, 224.0)),
         "meeting-prompt" => Some((380.0, 240.0)),
         _ => None,
     }

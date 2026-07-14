@@ -1,7 +1,8 @@
 use super::latency::LatencyTracker;
 use super::{
-    CancelToken, CopilotHealth, CopilotModel, CopilotRequest, CopilotState, LatencyRecord,
-    ModelErrorKind, ModelStreamEvent, Nudge, NudgePolicy, PartialLatencySeed, TranscriptUpdateKind,
+    CancelToken, CopilotClock, CopilotHealth, CopilotModel, CopilotRequest, CopilotState,
+    LatencyRecord, ModelErrorKind, ModelStreamEvent, Nudge, NudgePolicy, PartialLatencySeed,
+    SystemCopilotClock, TranscriptUpdateKind,
 };
 use chrono::{DateTime, Utc};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -92,6 +93,7 @@ pub struct CopilotRunner {
     event_tx: SyncSender<RunnerEvent>,
     event_rx: Mutex<Receiver<RunnerEvent>>,
     runtime: Arc<Mutex<RunnerRuntime>>,
+    clock: Arc<dyn CopilotClock>,
     worker: Mutex<Option<JoinHandle<()>>>,
 }
 
@@ -104,6 +106,24 @@ impl CopilotRunner {
         model: Arc<dyn CopilotModel>,
         policy: NudgePolicy,
         partial_debounce: Duration,
+    ) -> Self {
+        Self::start_with_clock(
+            model,
+            policy,
+            partial_debounce,
+            Arc::new(SystemCopilotClock),
+        )
+    }
+
+    /// Start the runner with an injected time source.
+    ///
+    /// This is the deterministic replay seam. Runtime callers should normally
+    /// use [`Self::start`] or [`Self::start_with_debounce`].
+    pub fn start_with_clock(
+        model: Arc<dyn CopilotModel>,
+        policy: NudgePolicy,
+        partial_debounce: Duration,
+        clock: Arc<dyn CopilotClock>,
     ) -> Self {
         let (command_tx, command_rx) = mpsc::sync_channel(COMMAND_CHANNEL_CAPACITY);
         let (event_tx, event_rx) = mpsc::sync_channel(EVENT_CHANNEL_CAPACITY);
@@ -126,6 +146,7 @@ impl CopilotRunner {
         }));
         let worker_runtime = runtime.clone();
         let worker_event_tx = event_tx.clone();
+        let worker_clock = Arc::clone(&clock);
         let worker = std::thread::spawn(move || {
             run_worker(
                 model,
@@ -134,6 +155,7 @@ impl CopilotRunner {
                 command_rx,
                 worker_event_tx,
                 worker_runtime,
+                worker_clock,
             )
         });
         Self {
@@ -141,6 +163,7 @@ impl CopilotRunner {
             event_tx,
             event_rx: Mutex::new(event_rx),
             runtime,
+            clock,
             worker: Mutex::new(Some(worker)),
         }
     }
@@ -392,7 +415,7 @@ impl CopilotRunner {
             latest_evidence_revision: runtime.latest_evidence_revision,
             last_error: runtime.last_error.clone(),
             latency_records: runtime.latency.records(),
-            updated_ts: Utc::now(),
+            updated_ts: self.clock.utc_now(),
         }
     }
 
@@ -465,6 +488,7 @@ fn run_worker(
     command_rx: Receiver<RunnerCommand>,
     event_tx: SyncSender<RunnerEvent>,
     runtime: Arc<Mutex<RunnerRuntime>>,
+    clock: Arc<dyn CopilotClock>,
 ) {
     let prewarm_result = model.prewarm();
     let (stopped, paused) = {
@@ -592,7 +616,7 @@ fn run_worker(
             runtime.latency.mark_model_request(
                 request.session_epoch,
                 request.evidence_revision,
-                Instant::now(),
+                clock.monotonic_now(),
             );
         }
         try_emit(&event_tx, RunnerEvent::StateChanged(CopilotState::Thinking));
@@ -601,11 +625,12 @@ fn run_worker(
         let stream_runtime = Arc::clone(&runtime);
         let stream_epoch = request.session_epoch;
         let stream_revision = request.evidence_revision;
+        let stream_clock = Arc::clone(&clock);
         let stream_sink = move |event| {
             stream_runtime.lock().unwrap().latency.mark_first_token(
                 stream_epoch,
                 stream_revision,
-                Instant::now(),
+                stream_clock.monotonic_now(),
             );
             try_emit(&stream_tx, RunnerEvent::Model(event));
         };
@@ -642,7 +667,7 @@ fn run_worker(
 
         match result {
             Ok(draft) => {
-                if let Some(nudge) = policy.accept(draft, &request, Utc::now()) {
+                if let Some(nudge) = policy.accept(draft, &request, clock.utc_now()) {
                     {
                         let mut runtime = runtime.lock().unwrap();
                         if !request_is_current(&runtime, &request) {
@@ -655,7 +680,7 @@ fn run_worker(
                         runtime.latency.mark_nudge(
                             request.session_epoch,
                             request.evidence_revision,
-                            Instant::now(),
+                            clock.monotonic_now(),
                         );
                     }
                     try_emit(&event_tx, RunnerEvent::Nudge(nudge));

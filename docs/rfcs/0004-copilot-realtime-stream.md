@@ -167,6 +167,9 @@ first-token, and nudge. `CopilotRunner` health/status exposes these records to
 the owning process. Status sidecar serialization explicitly omits them; they
 are never appended to the event log or transcript artifacts.
 
+RFC 0005 freezes the deterministic replay, scoring, and CI threshold contract
+that consumes these records.
+
 ## Prompt and Execution Boundary
 
 Transcript text, meeting history, FTS snippets, battle cards, and user-provided

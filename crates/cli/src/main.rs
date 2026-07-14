@@ -1409,6 +1409,20 @@ enum CopilotAction {
     Resume,
     /// Stop the active copilot session
     Stop,
+    /// Replay the versioned coaching corpus and enforce quality baselines
+    Eval {
+        /// Load versioned JSON fixtures from this directory instead of the built-in corpus
+        #[arg(long)]
+        fixtures: Option<PathBuf>,
+
+        /// Use the deterministic virtual clock instead of sleeping to transcript offsets
+        #[arg(long)]
+        accelerated: bool,
+
+        /// Print the complete machine-readable report instead of the table
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -8450,6 +8464,35 @@ life (qmd://life/)
     }
 
     #[test]
+    fn copilot_eval_parses_deterministic_suite_options() {
+        let parsed = Cli::try_parse_from([
+            "minutes",
+            "copilot",
+            "eval",
+            "--fixtures",
+            "/tmp/copilot-fixtures",
+            "--accelerated",
+            "--json",
+        ])
+        .expect("copilot eval flags must parse");
+        match parsed.command {
+            Commands::Copilot {
+                action:
+                    CopilotAction::Eval {
+                        fixtures,
+                        accelerated,
+                        json,
+                    },
+            } => {
+                assert_eq!(fixtures, Some(PathBuf::from("/tmp/copilot-fixtures")));
+                assert!(accelerated);
+                assert!(json);
+            }
+            _ => panic!("expected Copilot Eval variant"),
+        }
+    }
+
+    #[test]
     fn copilot_external_attach_and_non_streaming_backends_are_final_only() {
         let mut config = Config::default();
         assert_eq!(
@@ -8828,7 +8871,52 @@ fn cmd_copilot(action: CopilotAction, config: &Config) -> Result<()> {
         CopilotAction::Pause => cmd_copilot_pause(),
         CopilotAction::Resume => cmd_copilot_resume(),
         CopilotAction::Stop => cmd_copilot_stop(),
+        CopilotAction::Eval {
+            fixtures,
+            accelerated,
+            json,
+        } => cmd_copilot_eval(fixtures.as_deref(), accelerated, json),
     }
+}
+
+fn cmd_copilot_eval(fixtures: Option<&Path>, accelerated: bool, json: bool) -> Result<()> {
+    use minutes_core::copilot::eval::{
+        builtin_fixtures, load_fixtures_dir, render_report_table, run_suite, EvalOptions,
+        ReplayMode,
+    };
+
+    let fixtures = match fixtures {
+        Some(path) => load_fixtures_dir(path)?,
+        None => builtin_fixtures()?,
+    };
+    let report = run_suite(
+        &fixtures,
+        EvalOptions {
+            mode: if accelerated {
+                ReplayMode::Accelerated
+            } else {
+                ReplayMode::RealTime
+            },
+        },
+    )?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        print!("{}", render_report_table(&report));
+        println!(
+            "summary_json={}",
+            serde_json::to_string(&serde_json::json!({
+                "suite_version": report.suite_version,
+                "fixed_seed": report.fixed_seed,
+                "mode": report.mode,
+                "summary": report.summary,
+            }))?
+        );
+    }
+    if !report.summary.baseline_passed {
+        anyhow::bail!("copilot eval baseline failed");
+    }
+    Ok(())
 }
 
 struct LiveCaptureGuard {

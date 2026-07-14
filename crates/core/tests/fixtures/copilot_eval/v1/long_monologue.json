@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "id": "synthetic-long-monologue",
+  "description": "A long turn must surface an early ownership/deadline opportunity from synthesized partials.",
+  "content_origin": "synthetic",
+  "goal": "Leave with a named owner and delivery date.",
+  "synthesize_partials": true,
+  "transcript": [
+    {
+      "utterance_sequence": 1,
+      "offset_ms": 0,
+      "duration_ms": 14000,
+      "final_text": "Budget ownership is still unclear and Friday is the deadline for the launch plan, although the team has reviewed the draft, discussed the dependencies, compared the rollout options, and agreed that the remaining technical details can be handled after this meeting."
+    }
+  ],
+  "labels": {
+    "opportunities": [
+      {
+        "id": "name-budget-owner",
+        "start_ms": 0,
+        "end_ms": 5200,
+        "kind": "Clarify",
+        "match_any": ["owner", "Friday"]
+      }
+    ],
+    "no_opportunity_ranges": [
+      {
+        "id": "monologue-after-owner-cue",
+        "start_ms": 6000,
+        "end_ms": 14000
+      }
+    ],
+    "revision_reversals": []
+  },
+  "mock_script": [
+    {
+      "cue": {
+        "update_kind": "partial",
+        "utterance_sequence": 1,
+        "text_contains": "Budget ownership"
+      },
+      "first_token_ms": 25,
+      "completion_ms": 70,
+      "draft": {
+        "kind": "Clarify",
+        "text": "Clarify who owns the budget and confirm Friday as the deadline.",
+        "source_chip": "budget owner / Friday"
+      }
+    }
+  ]
+}

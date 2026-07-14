@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "id": "synthetic-no-opportunity-stretch",
+  "description": "Routine status narration should not provoke coaching or nagging.",
+  "content_origin": "synthetic",
+  "goal": "Intervene only when a decision or commitment needs help.",
+  "synthesize_partials": true,
+  "transcript": [
+    {
+      "utterance_sequence": 1,
+      "offset_ms": 0,
+      "duration_ms": 2200,
+      "final_text": "The synthetic test environment is online and yesterday's completed checks are visible in the dashboard."
+    },
+    {
+      "utterance_sequence": 2,
+      "offset_ms": 2700,
+      "duration_ms": 2100,
+      "final_text": "Everyone has the agenda and the next scheduled update remains on the calendar."
+    }
+  ],
+  "labels": {
+    "opportunities": [],
+    "no_opportunity_ranges": [
+      {
+        "id": "routine-status-only",
+        "start_ms": 0,
+        "end_ms": 4800
+      }
+    ],
+    "revision_reversals": []
+  },
+  "mock_script": []
+}

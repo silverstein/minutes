@@ -1,4 +1,4 @@
-use super::{CopilotFeedback, CopilotHealth, CopilotState};
+use super::{CopilotFeedback, CopilotHealth, CopilotInputMode, CopilotSetupNeeded, CopilotState};
 use crate::config::Config;
 use crate::error::PidError;
 use crate::pid::{self, PidGuard};
@@ -37,6 +37,15 @@ pub struct CopilotSessionStatus {
     #[serde(default)]
     pub evidence_mode: CopilotEvidenceMode,
     pub capture_attachment: String,
+    pub provider_selection: String,
+    /// Non-error first-run guidance for hosts to render when Coach cannot
+    /// start yet.
+    #[serde(default)]
+    pub setup_needed: Option<CopilotSetupNeeded>,
+    /// Developer-facing input capability. User-facing hosts must render this
+    /// through [`CopilotInputMode::user_message`].
+    #[serde(default)]
+    pub input_mode: CopilotInputMode,
     pub health: CopilotHealth,
     pub updated_ts: DateTime<Utc>,
 }
@@ -58,6 +67,9 @@ impl Default for CopilotSessionStatus {
             relay_cursor: None,
             evidence_mode: CopilotEvidenceMode::FinalOnly,
             capture_attachment: "not attached".into(),
+            provider_selection: String::new(),
+            setup_needed: None,
+            input_mode: CopilotInputMode::default(),
             health: CopilotHealth {
                 state: CopilotState::Off,
                 provider: String::new(),
@@ -71,6 +83,30 @@ impl Default for CopilotSessionStatus {
                 updated_ts: Utc::now(),
             },
             updated_ts: Utc::now(),
+        }
+    }
+}
+
+impl CopilotSessionStatus {
+    /// One plain-language line shared by the CLI and future desktop hosts.
+    pub fn user_summary(&self) -> &'static str {
+        if self.setup_needed.is_some() {
+            "Setup needed"
+        } else if !self.active {
+            CopilotState::Off.user_message()
+        } else {
+            self.health.state.user_message()
+        }
+    }
+
+    /// Plain-language model location without exposing implementation names.
+    pub fn user_model_summary(&self) -> Option<&'static str> {
+        if !self.active || self.health.provider.trim().is_empty() {
+            None
+        } else if self.health.provider == "cloud" {
+            Some("Using your online AI model.")
+        } else {
+            Some("Using your local AI model.")
         }
     }
 }
@@ -183,4 +219,42 @@ pub fn read_session_status() -> CopilotSessionStatus {
         status.health.in_flight_revision = None;
     }
     status
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn setup_needed_is_a_non_error_status_with_plain_summary() {
+        let status = CopilotSessionStatus {
+            setup_needed: Some(CopilotSetupNeeded::private_ai()),
+            ..CopilotSessionStatus::default()
+        };
+
+        assert!(!status.active);
+        assert_eq!(status.user_summary(), "Setup needed");
+        assert!(status.health.last_error.is_none());
+
+        let json = serde_json::to_value(status).unwrap();
+        assert_eq!(json["setup_needed"]["kind"], "private_ai_required");
+        assert_eq!(json["setup_needed"]["action"]["kind"], "run_command");
+        assert_eq!(
+            json["setup_needed"]["action"]["command"],
+            "minutes coach setup"
+        );
+    }
+
+    #[test]
+    fn model_implementation_names_map_to_the_same_local_summary() {
+        for implementation in ["apple-fm", "ollama"] {
+            let mut status = CopilotSessionStatus::default();
+            status.active = true;
+            status.health.provider = implementation.into();
+            assert_eq!(
+                status.user_model_summary(),
+                Some("Using your local AI model.")
+            );
+        }
+    }
 }

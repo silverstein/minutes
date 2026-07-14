@@ -237,6 +237,87 @@ pub struct CopilotHealth {
     pub updated_ts: DateTime<Utc>,
 }
 
+/// Why Coach needs the user to complete setup before it can start.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CopilotSetupKind {
+    PrivateAiRequired,
+}
+
+/// The kind of setup step a user-facing host can offer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CopilotSetupActionKind {
+    RunCommand,
+}
+
+/// A concrete setup step. Desktop hosts can turn this into a button while the
+/// CLI can render the same label and command as text.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CopilotSetupAction {
+    pub kind: CopilotSetupActionKind,
+    pub label: String,
+    pub command: String,
+}
+
+/// A non-error first-run state for Coach.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CopilotSetupNeeded {
+    pub kind: CopilotSetupKind,
+    pub message: String,
+    pub action: CopilotSetupAction,
+}
+
+impl CopilotSetupNeeded {
+    pub fn private_ai() -> Self {
+        Self {
+            kind: CopilotSetupKind::PrivateAiRequired,
+            message: "Coach needs a small on-device AI model to run privately on your Mac. Set it up with one command:".into(),
+            action: CopilotSetupAction {
+                kind: CopilotSetupActionKind::RunCommand,
+                label: "Set up Coach's private AI".into(),
+                command: "minutes coach setup".into(),
+            },
+        }
+    }
+}
+
+/// How quickly Coach receives meeting speech. This remains separate from
+/// model health: completed-sentence coaching works, but suggestions arrive a
+/// little later than they would from a partial-speech stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CopilotInputMode {
+    Realtime,
+    #[default]
+    FinalOnly,
+}
+
+impl CopilotInputMode {
+    pub fn user_message(self) -> Option<&'static str> {
+        match self {
+            Self::Realtime => None,
+            Self::FinalOnly => Some("Coaching on completed sentences (a bit slower)."),
+        }
+    }
+}
+
+impl CopilotState {
+    pub fn user_message(self) -> &'static str {
+        match self {
+            Self::Off => "Off",
+            Self::Arming => "Getting ready",
+            Self::Listening => "Listening and ready to help",
+            Self::Thinking => "Preparing a suggestion",
+            Self::Nudge => "A suggestion is ready",
+            Self::Paused => "Paused",
+            Self::Degraded => {
+                "Having trouble making suggestions. Coach will keep trying, and your recording is safe"
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -317,5 +398,48 @@ mod tests {
         let final_request = request(12, TranscriptUpdateKind::Final, "hello there");
         assert!(tiny.materially_newer_than(&old));
         assert!(final_request.materially_newer_than(&tiny));
+    }
+
+    #[test]
+    fn setup_and_status_copy_stays_plain_and_actionable() {
+        let setup = CopilotSetupNeeded::private_ai();
+        let strings = [
+            setup.message.as_str(),
+            setup.action.label.as_str(),
+            setup.action.command.as_str(),
+            CopilotInputMode::FinalOnly.user_message().unwrap(),
+            CopilotState::Off.user_message(),
+            CopilotState::Arming.user_message(),
+            CopilotState::Listening.user_message(),
+            CopilotState::Thinking.user_message(),
+            CopilotState::Nudge.user_message(),
+            CopilotState::Paused.user_message(),
+            CopilotState::Degraded.user_message(),
+        ];
+        let forbidden = [
+            "final_only",
+            "auto-local",
+            "apple-fm",
+            "ollama",
+            "contract v1",
+            "provider",
+            "utterance",
+            "epoch",
+        ];
+
+        for value in strings {
+            let lower = value.to_ascii_lowercase();
+            for term in forbidden {
+                assert!(
+                    !lower.contains(term),
+                    "user-facing copy contains forbidden term {term:?}: {value:?}"
+                );
+            }
+        }
+        assert_eq!(setup.action.command, "minutes coach setup");
+        assert_eq!(
+            CopilotInputMode::FinalOnly.user_message(),
+            Some("Coaching on completed sentences (a bit slower).")
+        );
     }
 }

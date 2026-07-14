@@ -50,8 +50,9 @@ pub use runner::{
 pub use strategy::{StrategyRefreshReason, StrategyRequest, StrategyState, StrategyStateDraft};
 pub use topic::{is_decisive_final, keywords as topic_keywords, TopicShift, TopicShiftDetector};
 pub use types::{
-    CopilotHealth, CopilotRequest, CopilotState, CopilotUtterance, Nudge, NudgeDraft, NudgeKind,
-    TranscriptUpdateKind, COPILOT_CONTRACT_VERSION,
+    CopilotHealth, CopilotInputMode, CopilotRequest, CopilotSetupAction, CopilotSetupActionKind,
+    CopilotSetupKind, CopilotSetupNeeded, CopilotState, CopilotUtterance, Nudge, NudgeDraft,
+    NudgeKind, TranscriptUpdateKind, COPILOT_CONTRACT_VERSION,
 };
 pub use window_contract::{
     current_window_environment, evaluate_copilot_window_contract, ContractSupport,

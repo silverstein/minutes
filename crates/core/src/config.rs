@@ -364,6 +364,14 @@ pub struct CopilotConfig {
     pub fast_model: String,
     /// Hard opt-in gate for future cloud provider implementations.
     pub allow_cloud: bool,
+    /// Optional default outcome the user wants Coach to optimize for.
+    pub meeting_goal: Option<String>,
+    /// How a desktop host should offer Coach at recording start.
+    pub arming_behavior: CopilotArmingBehavior,
+    /// Limit Coach notifications to suggestions marked as critical.
+    pub critical_notifications_only: bool,
+    /// Whether the desktop first-run Coach explainer has been dismissed.
+    pub onboarding_seen: bool,
     /// Lifetime of a rendered nudge.
     pub nudge_ttl_ms: u64,
     /// End-to-end fast-lane latency budget and provider timeout.
@@ -379,6 +387,29 @@ pub struct CopilotConfig {
     pub depth_refresh_secs: u64,
     /// Minimum cadence for stable-final grounding refreshes. Topic shifts bypass it.
     pub grounding_refresh_secs: u64,
+}
+
+/// Recording-start behavior for desktop Coach hosts.
+///
+/// `Off` keeps manual Coach starts available; it only suppresses automatic
+/// startup and the per-meeting prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum CopilotArmingBehavior {
+    Automatic,
+    #[default]
+    AskEachMeeting,
+    Off,
+}
+
+impl CopilotArmingBehavior {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Automatic => "automatic",
+            Self::AskEachMeeting => "ask-each-meeting",
+            Self::Off => "off",
+        }
+    }
 }
 
 impl CopilotConfig {
@@ -1142,6 +1173,10 @@ impl Default for CopilotConfig {
             fast_provider: "auto-local".into(),
             fast_model: "llama3.2".into(),
             allow_cloud: false,
+            meeting_goal: None,
+            arming_behavior: CopilotArmingBehavior::AskEachMeeting,
+            critical_notifications_only: true,
+            onboarding_seen: false,
             nudge_ttl_ms: 12_000,
             target_latency_ms: 5_000,
             history_grounding: true,
@@ -1661,6 +1696,13 @@ mod tests {
         assert_eq!(config.copilot.resolved_fast_provider(), "auto-local");
         assert_eq!(config.copilot.fast_model, "llama3.2");
         assert!(!config.copilot.allow_cloud);
+        assert_eq!(
+            config.copilot.arming_behavior,
+            CopilotArmingBehavior::AskEachMeeting
+        );
+        assert!(config.copilot.meeting_goal.is_none());
+        assert!(config.copilot.critical_notifications_only);
+        assert!(!config.copilot.onboarding_seen);
         assert_eq!(config.copilot.nudge_ttl_ms, 12_000);
         assert_eq!(config.copilot.target_latency_ms, 5_000);
         assert!(config.copilot.history_grounding);
@@ -1697,6 +1739,10 @@ mod tests {
             fast_provider = "ollama"
             fast_model = "qwen3:4b"
             allow_cloud = false
+            meeting_goal = "Leave with a clear next step"
+            arming_behavior = "automatic"
+            critical_notifications_only = false
+            onboarding_seen = true
             nudge_ttl_ms = 9000
             target_latency_ms = 3500
             history_grounding = false
@@ -1714,6 +1760,16 @@ mod tests {
         assert_eq!(parsed.copilot.mode, "decision");
         assert_eq!(parsed.copilot.resolved_fast_provider(), "ollama");
         assert_eq!(parsed.copilot.fast_model, "qwen3:4b");
+        assert_eq!(
+            parsed.copilot.meeting_goal.as_deref(),
+            Some("Leave with a clear next step")
+        );
+        assert_eq!(
+            parsed.copilot.arming_behavior,
+            CopilotArmingBehavior::Automatic
+        );
+        assert!(!parsed.copilot.critical_notifications_only);
+        assert!(parsed.copilot.onboarding_seen);
         assert_eq!(parsed.copilot.nudge_ttl_ms, 9_000);
         assert_eq!(parsed.copilot.target_latency_ms, 3_500);
         assert!(!parsed.copilot.history_grounding);

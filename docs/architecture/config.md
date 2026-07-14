@@ -108,9 +108,13 @@ explicit `minutes copilot start` may start a foreground session when
 | `enabled` | `false` | Allow implicit copilot startup; explicit CLI startup remains available. |
 | `surface` | `"tui"` | Default CLI surface: `"tui"` or newline-delimited JSON with `"stdout"`. |
 | `mode` | `"generic"` | Default session policy: `sales`, `discovery`, `interview`, `negotiation`, `difficult-conversation`, `decision`, or `generic`; `--mode` overrides it. |
-| `fast_provider` | `"auto-local"` | Fast-lane provider. In v1, `"auto-local"` resolves to `"ollama"` on every platform. |
+| `fast_provider` | `"auto-local"` | Fast-lane provider request. `"auto-local"` probes eligible local providers at session start and selects a healthy model within the routing policy; Apple Foundation Models remains a provider stub until the separate native fast-follow lands. |
 | `fast_model` | `"llama3.2"` | Ollama model used for structured nudges. |
 | `allow_cloud` | `false` | Cloud opt-in gate. Cloud adapters are intentionally not implemented in the first copilot release. |
+| `meeting_goal` | unset | Optional default outcome Coach should optimize for. |
+| `arming_behavior` | `"ask-each-meeting"` | Desktop behavior at recording start: `"automatic"`, `"ask-each-meeting"`, or `"off"` (manual starts remain available). |
+| `critical_notifications_only` | `true` | Suppress non-critical Coach notifications. |
+| `onboarding_seen` | `false` | Desktop first-run explainer state. Managed by the app. |
 | `nudge_ttl_ms` | `12000` | Lifetime of a rendered nudge in milliseconds. |
 | `target_latency_ms` | `5000` | Fast request timeout/latency target; timeout degrades only the copilot. |
 | `history_grounding` | `true` | Refresh a bounded battle card asynchronously from unrestricted graph, structured intent, and FTS data. |

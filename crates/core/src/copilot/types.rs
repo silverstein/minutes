@@ -203,7 +203,7 @@ impl CopilotSetupNeeded {
     pub fn private_ai() -> Self {
         Self {
             kind: CopilotSetupKind::PrivateAiRequired,
-            message: "Coach needs a small on-device AI model to run privately on your Mac. Set it up with one command:".into(),
+            message: "Coach needs a small on-device AI model to run privately on your Mac. Setup usually takes about 30 seconds.".into(),
             action: CopilotSetupAction {
                 kind: CopilotSetupActionKind::RunCommand,
                 label: "Set up Coach's private AI".into(),

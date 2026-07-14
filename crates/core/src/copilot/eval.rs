@@ -5,10 +5,12 @@
 //! real-time playback merely sleeps before advancing it.
 
 use super::{
-    BattleCard, CancelToken, CopilotClock, CopilotModel, CopilotRequest, CopilotRunner,
-    CopilotState, CopilotUtterance, LatencyRecord, ModelError, ModelEventSink, ModelHealth,
+    BattleCard, CancelToken, CopilotClock, CopilotFeedback, CopilotModel, CopilotRequest,
+    CopilotRunner, CopilotState, CopilotUtterance, DepthLaneConfig, DepthLaneSnapshot,
+    GroundingSource, LatencyRecord, MeetingMode, ModelError, ModelEventSink, ModelHealth,
     ModelHealthStatus, ModelStreamEvent, NudgeDraft, NudgeKind, NudgePolicy, PartialLatencySeed,
-    RunnerEvent, SubmitOutcome, TranscriptUpdateKind,
+    RunnerEvent, StrategyRefreshReason, StrategyRequest, StrategyStateDraft, SubmitOutcome,
+    TranscriptUpdateKind,
 };
 use chrono::{DateTime, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
@@ -70,12 +72,18 @@ pub struct EvalFixture {
     pub content_origin: FixtureContentOrigin,
     pub goal: String,
     #[serde(default)]
+    pub mode: MeetingMode,
+    #[serde(default)]
     pub synthesize_partials: bool,
     pub transcript: Vec<FixtureUtterance>,
     #[serde(default)]
     pub labels: FixtureLabels,
     #[serde(default)]
     pub mock_script: Vec<MockRule>,
+    #[serde(default)]
+    pub strategy_script: Vec<MockStrategyRule>,
+    #[serde(default)]
+    pub feedback: Vec<FixtureFeedback>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -109,6 +117,47 @@ pub struct FixtureLabels {
     pub no_opportunity_ranges: Vec<NoOpportunityRange>,
     #[serde(default)]
     pub revision_reversals: Vec<RevisionReversal>,
+    #[serde(default)]
+    pub strategy: Option<StrategyExpectation>,
+    #[serde(default)]
+    pub topic_shift_utterances: Vec<u64>,
+    #[serde(default)]
+    pub mode_policy: Option<ModePolicyExpectation>,
+    #[serde(default)]
+    pub feedback: Option<FeedbackExpectation>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StrategyExpectation {
+    #[serde(default)]
+    pub open_threads: Vec<String>,
+    #[serde(default)]
+    pub unmet_goal_items: Vec<String>,
+    #[serde(default)]
+    pub unresolved_objections: Vec<String>,
+    #[serde(default)]
+    pub steer_toward: Vec<String>,
+    #[serde(default)]
+    pub refresh_reasons: Vec<StrategyRefreshReason>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModePolicyExpectation {
+    pub expected_nudges: usize,
+    pub expected_filtered_by_mode: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FeedbackExpectation {
+    pub expected_feedback: u32,
+    pub min_filtered_by_cadence: u32,
+    pub min_effective_interval_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FixtureFeedback {
+    pub after_nudge: usize,
+    pub rating: CopilotFeedback,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -144,6 +193,10 @@ pub struct MockCue {
     pub utterance_sequence: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text_contains: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<MeetingMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strategy_contains: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -154,6 +207,20 @@ pub struct MockRule {
     pub completion_ms: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub draft: Option<NudgeDraft>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MockStrategyCue {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text_contains: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<StrategyRefreshReason>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MockStrategyRule {
+    pub cue: MockStrategyCue,
+    pub state: StrategyStateDraft,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -201,10 +268,23 @@ pub struct QualityMetrics {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct IntelligenceMetrics {
+    pub strategy_state_correctness: RateMetric,
+    pub strategy_trigger_recall: RateMetric,
+    pub topic_shift_recall: RateMetric,
+    pub topic_shift_grounding_rate: RateMetric,
+    pub mode_policy_accuracy: RateMetric,
+    pub feedback_adaptation_accuracy: RateMetric,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NudgeObservation {
+    pub id: String,
     pub kind: NudgeKind,
     pub text: String,
     pub source_chip: String,
+    pub opportunity: super::OpportunityKind,
+    pub confidence: u8,
     pub evidence_revision: u64,
     pub evidence_time_ms: u64,
     pub delivered_at_ms: u64,
@@ -224,6 +304,9 @@ pub struct FixtureReport {
     pub transcript_updates: usize,
     pub nudges: Vec<NudgeObservation>,
     pub quality: QualityMetrics,
+    pub intelligence: IntelligenceMetrics,
+    pub policy: super::PolicySnapshot,
+    pub depth: DepthLaneSnapshot,
     pub latency: BTreeMap<String, LatencyPercentiles>,
 }
 
@@ -237,6 +320,12 @@ pub struct BaselineThresholds {
     pub min_no_nudge_quality: f64,
     pub max_model_to_first_token_p95_ms: f64,
     pub max_audio_to_nudge_p95_ms: f64,
+    pub min_strategy_state_correctness: f64,
+    pub min_strategy_trigger_recall: f64,
+    pub min_topic_shift_recall: f64,
+    pub min_topic_shift_grounding_rate: f64,
+    pub min_mode_policy_accuracy: f64,
+    pub min_feedback_adaptation_accuracy: f64,
 }
 
 impl Default for BaselineThresholds {
@@ -250,6 +339,12 @@ impl Default for BaselineThresholds {
             min_no_nudge_quality: 1.0,
             max_model_to_first_token_p95_ms: 100.0,
             max_audio_to_nudge_p95_ms: 5_000.0,
+            min_strategy_state_correctness: 1.0,
+            min_strategy_trigger_recall: 1.0,
+            min_topic_shift_recall: 1.0,
+            min_topic_shift_grounding_rate: 1.0,
+            min_mode_policy_accuracy: 1.0,
+            min_feedback_adaptation_accuracy: 1.0,
         }
     }
 }
@@ -260,6 +355,7 @@ pub struct SuiteSummary {
     pub transcript_updates: usize,
     pub nudges: usize,
     pub quality: QualityMetrics,
+    pub intelligence: IntelligenceMetrics,
     pub latency: BTreeMap<String, LatencyPercentiles>,
     pub baseline_passed: bool,
     pub baseline_failures: Vec<String>,
@@ -368,16 +464,26 @@ enum MockSignal {
 pub struct ScriptedCopilotModel {
     rules: Vec<MockRule>,
     uses: Mutex<Vec<bool>>,
+    strategy_rules: Vec<MockStrategyRule>,
+    strategy_uses: Mutex<Vec<bool>>,
     clock: Arc<LogicalClock>,
     signal_tx: Sender<MockSignal>,
 }
 
 impl ScriptedCopilotModel {
-    fn new(rules: Vec<MockRule>, clock: Arc<LogicalClock>, signal_tx: Sender<MockSignal>) -> Self {
+    fn new(
+        rules: Vec<MockRule>,
+        strategy_rules: Vec<MockStrategyRule>,
+        clock: Arc<LogicalClock>,
+        signal_tx: Sender<MockSignal>,
+    ) -> Self {
         let uses = vec![false; rules.len()];
+        let strategy_uses = vec![false; strategy_rules.len()];
         Self {
             rules,
             uses: Mutex::new(uses),
+            strategy_rules,
+            strategy_uses: Mutex::new(strategy_uses),
             clock,
             signal_tx,
         }
@@ -404,6 +510,25 @@ impl ScriptedCopilotModel {
             draft: None,
         }
     }
+
+    fn strategy_response_for(&self, request: &StrategyRequest) -> StrategyStateDraft {
+        let trigger = request
+            .utterances
+            .iter()
+            .rev()
+            .find(|utterance| utterance.update_kind == TranscriptUpdateKind::Final);
+        let mut uses = self.strategy_uses.lock().unwrap();
+        if let Some((index, rule)) = self
+            .strategy_rules
+            .iter()
+            .enumerate()
+            .find(|(index, rule)| !uses[*index] && rule.cue.matches(request, trigger))
+        {
+            uses[index] = true;
+            return rule.state.clone();
+        }
+        request.heuristic_draft()
+    }
 }
 
 impl MockCue {
@@ -413,6 +538,20 @@ impl MockCue {
             && self
                 .utterance_sequence
                 .is_none_or(|sequence| sequence == request.evidence_utterance_sequence)
+            && self.text_contains.as_ref().is_none_or(|needle| {
+                trigger.is_some_and(|utterance| contains(&utterance.text, needle))
+            })
+            && self.mode.is_none_or(|mode| mode == request.mode)
+            && self
+                .strategy_contains
+                .as_ref()
+                .is_none_or(|needle| contains(&request.strategy_state.rendered, needle))
+    }
+}
+
+impl MockStrategyCue {
+    fn matches(&self, request: &StrategyRequest, trigger: Option<&CopilotUtterance>) -> bool {
+        self.reason.is_none_or(|reason| reason == request.reason)
             && self.text_contains.as_ref().is_none_or(|needle| {
                 trigger.is_some_and(|utterance| contains(&utterance.text, needle))
             })
@@ -468,7 +607,23 @@ impl CopilotModel for ScriptedCopilotModel {
             kind: NudgeKind::Hold,
             text: String::new(),
             source_chip: String::new(),
+            opportunity: super::OpportunityKind::General,
+            confidence: 100,
         }))
+    }
+
+    fn refresh_strategy(
+        &self,
+        request: &StrategyRequest,
+        cancel: &CancelToken,
+    ) -> Result<super::StrategyState, ModelError> {
+        if cancel.is_cancelled() {
+            return Err(ModelError::cancelled());
+        }
+        Ok(super::StrategyState::from_draft(
+            self.strategy_response_for(request),
+            request.evidence_revision,
+        ))
     }
 
     fn health(&self) -> ModelHealth {
@@ -479,6 +634,19 @@ impl CopilotModel for ScriptedCopilotModel {
             detail: "deterministic no-network fixture provider".into(),
             checked_ts: self.clock.utc_now(),
         }
+    }
+}
+
+#[derive(Debug, Default)]
+struct ScriptedGrounding;
+
+impl GroundingSource for ScriptedGrounding {
+    fn refresh(&self, query: &str) -> Result<BattleCard, super::BattleCardError> {
+        Ok(BattleCard {
+            fts_excerpts: vec![format!("Synthetic grounding for {query}")],
+            rendered: format!("Synthetic unrestricted grounding for: {query}"),
+            ..BattleCard::default()
+        })
     }
 }
 
@@ -528,7 +696,7 @@ struct ReplayResult {
 }
 
 pub fn builtin_fixtures() -> Result<Vec<EvalFixture>, EvalError> {
-    const BUILTINS: [(&str, &str); 4] = [
+    const BUILTINS: [(&str, &str); 9] = [
         (
             "long_monologue.json",
             include_str!("../../tests/fixtures/copilot_eval/v1/long_monologue.json"),
@@ -544,6 +712,26 @@ pub fn builtin_fixtures() -> Result<Vec<EvalFixture>, EvalError> {
         (
             "no_opportunity.json",
             include_str!("../../tests/fixtures/copilot_eval/v1/no_opportunity.json"),
+        ),
+        (
+            "multi_thread_strategy.json",
+            include_str!("../../tests/fixtures/copilot_eval/v1/multi_thread_strategy.json"),
+        ),
+        (
+            "topic_shift_refresh.json",
+            include_str!("../../tests/fixtures/copilot_eval/v1/topic_shift_refresh.json"),
+        ),
+        (
+            "mode_discovery.json",
+            include_str!("../../tests/fixtures/copilot_eval/v1/mode_discovery.json"),
+        ),
+        (
+            "mode_decision.json",
+            include_str!("../../tests/fixtures/copilot_eval/v1/mode_decision.json"),
+        ),
+        (
+            "feedback_reduces_nagging.json",
+            include_str!("../../tests/fixtures/copilot_eval/v1/feedback_reduces_nagging.json"),
         ),
     ];
     BUILTINS
@@ -660,6 +848,22 @@ fn validate_fixture(fixture: &EvalFixture) -> Result<(), EvalError> {
             ));
         }
     }
+    let mut prior_after_nudge = 0;
+    for feedback in &fixture.feedback {
+        if feedback.after_nudge == 0 || feedback.after_nudge < prior_after_nudge {
+            return Err(invalid(
+                "feedback after_nudge values must be non-zero and ordered".into(),
+            ));
+        }
+        prior_after_nudge = feedback.after_nudge;
+    }
+    for sequence in &fixture.labels.topic_shift_utterances {
+        if !sequences.contains(sequence) {
+            return Err(invalid(format!(
+                "topic-shift utterance {sequence} is absent from transcript"
+            )));
+        }
+    }
     Ok(())
 }
 
@@ -684,14 +888,16 @@ pub fn run_suite(fixtures: &[EvalFixture], options: EvalOptions) -> Result<EvalR
     }
 
     let quality = aggregate_quality(reports.iter().map(|report| &report.quality));
+    let intelligence = aggregate_intelligence(reports.iter().map(|report| &report.intelligence));
     let latency = aggregate_latency(&all_records);
     let thresholds = BaselineThresholds::default();
-    let baseline_failures = threshold_failures(&quality, &latency, &thresholds);
+    let baseline_failures = threshold_failures(&quality, &intelligence, &latency, &thresholds);
     let summary = SuiteSummary {
         fixtures: reports.len(),
         transcript_updates: reports.iter().map(|report| report.transcript_updates).sum(),
         nudges: reports.iter().map(|report| report.nudges.len()).sum(),
         quality,
+        intelligence,
         latency,
         baseline_passed: baseline_failures.is_empty(),
         baseline_failures,
@@ -713,14 +919,17 @@ fn run_fixture(fixture: &EvalFixture, mode: ReplayMode) -> Result<ReplayResult, 
     let (signal_tx, signal_rx) = mpsc::channel();
     let model = Arc::new(ScriptedCopilotModel::new(
         fixture.mock_script.clone(),
+        fixture.strategy_script.clone(),
         Arc::clone(&clock),
         signal_tx,
     ));
-    let runner = CopilotRunner::start_with_clock(
+    let runner = CopilotRunner::start_with_clock_and_depth(
         model,
-        NudgePolicy::new(12_000),
+        NudgePolicy::for_mode(12_000, fixture.mode),
         Duration::ZERO,
         clock.clone(),
+        Some(Arc::new(ScriptedGrounding)),
+        DepthLaneConfig::new(Duration::from_secs(30), Duration::from_secs(10)),
     );
     wait_for_runner_ready(&runner)?;
 
@@ -730,6 +939,7 @@ fn run_fixture(fixture: &EvalFixture, mode: ReplayMode) -> Result<ReplayResult, 
     let mut transcript = BTreeMap::<u64, CopilotUtterance>::new();
     let mut snapshots = BTreeMap::<u64, RequestSnapshot>::new();
     let mut observations = Vec::new();
+    let mut applied_feedback = 0;
     let mut latest_revision = 0;
 
     while event_index < events.len() || active_call.is_some() {
@@ -765,6 +975,7 @@ fn run_fixture(fixture: &EvalFixture, mode: ReplayMode) -> Result<ReplayResult, 
             );
             let request = CopilotRequest {
                 goal: fixture.goal.clone(),
+                mode: fixture.mode,
                 session_epoch: epoch,
                 evidence_revision: event.evidence_revision,
                 evidence_utterance_sequence: event.utterance_sequence,
@@ -772,6 +983,7 @@ fn run_fixture(fixture: &EvalFixture, mode: ReplayMode) -> Result<ReplayResult, 
                 update_kind: event.update_kind,
                 utterances: transcript.values().cloned().collect(),
                 battle_card: BattleCard::empty(),
+                strategy_state: super::StrategyState::empty(),
             };
             snapshots.insert(
                 event.evidence_revision,
@@ -834,6 +1046,15 @@ fn run_fixture(fixture: &EvalFixture, mode: ReplayMode) -> Result<ReplayResult, 
                     latest_revision,
                     &mut observations,
                 )?;
+                if snapshots
+                    .get(&call.evidence_revision)
+                    .is_some_and(|snapshot| {
+                        snapshot.request.update_kind == TranscriptUpdateKind::Final
+                    })
+                {
+                    wait_for_depth_processed(&runner, call.evidence_revision)?;
+                }
+                apply_fixture_feedback(fixture, &runner, &observations, &mut applied_feedback)?;
                 active_call = None;
             }
         }
@@ -847,9 +1068,14 @@ fn run_fixture(fixture: &EvalFixture, mode: ReplayMode) -> Result<ReplayResult, 
         latest_revision,
         &mut observations,
     )?;
+    apply_fixture_feedback(fixture, &runner, &observations, &mut applied_feedback)?;
+    wait_for_feedback_count(&runner, applied_feedback as u32)?;
     let latency_records = runner.latency_records();
+    let policy = runner.health().policy;
+    let depth = runner.depth_snapshot();
     runner.stop();
     let quality = score_observations(fixture, &events, &snapshots, &mut observations);
+    let intelligence = score_intelligence(fixture, &events, &observations, &policy, &depth);
     let report = FixtureReport {
         fixture_id: fixture.id.clone(),
         description: fixture.description.clone(),
@@ -857,6 +1083,9 @@ fn run_fixture(fixture: &EvalFixture, mode: ReplayMode) -> Result<ReplayResult, 
         transcript_updates: events.len(),
         nudges: observations,
         quality,
+        intelligence,
+        policy,
+        depth,
         latency: aggregate_latency(&latency_records),
     };
     Ok(ReplayResult {
@@ -1028,9 +1257,12 @@ fn drain_runner_events(
                     })
                 });
                 observations.push(NudgeObservation {
+                    id: nudge.id,
                     kind: nudge.kind,
                     text: nudge.text,
                     source_chip: nudge.source_chip,
+                    opportunity: nudge.opportunity,
+                    confidence: nudge.confidence,
                     evidence_revision: nudge.evidence_revision,
                     evidence_time_ms: snapshot.evidence_time_ms,
                     delivered_at_ms: clock.elapsed_us() / 1_000,
@@ -1045,10 +1277,81 @@ fn drain_runner_events(
             RunnerEvent::StateChanged(_)
             | RunnerEvent::Model(_)
             | RunnerEvent::RequestCancelled { .. }
-            | RunnerEvent::EvidenceRetracted { .. } => {}
+            | RunnerEvent::EvidenceRetracted { .. }
+            | RunnerEvent::TopicShiftDetected { .. }
+            | RunnerEvent::GroundingRefreshed { .. }
+            | RunnerEvent::StrategyUpdated { .. }
+            | RunnerEvent::PolicyAdjusted(_)
+            | RunnerEvent::DepthDegraded { .. } => {}
         }
     }
     Ok(())
+}
+
+fn wait_for_depth_processed(
+    runner: &CopilotRunner,
+    evidence_revision: u64,
+) -> Result<(), EvalError> {
+    let deadline = Instant::now() + WORKER_TIMEOUT;
+    while Instant::now() < deadline {
+        if runner
+            .depth_snapshot()
+            .latest_processed_revision
+            .is_some_and(|revision| revision >= evidence_revision)
+        {
+            return Ok(());
+        }
+        std::thread::yield_now();
+    }
+    Err(EvalError::RunnerStalled(format!(
+        "depth lane for revision {evidence_revision}"
+    )))
+}
+
+fn apply_fixture_feedback(
+    fixture: &EvalFixture,
+    runner: &CopilotRunner,
+    observations: &[NudgeObservation],
+    applied: &mut usize,
+) -> Result<(), EvalError> {
+    while let Some(feedback) = fixture.feedback.get(*applied) {
+        if observations.len() < feedback.after_nudge {
+            break;
+        }
+        let Some(nudge) = observations.get(feedback.after_nudge.saturating_sub(1)) else {
+            break;
+        };
+        let outcome = runner.record_feedback(nudge.id.clone(), feedback.rating);
+        if outcome != super::FeedbackOutcome::Queued {
+            return Err(EvalError::RunnerStalled(format!(
+                "feedback {} for fixture {}",
+                *applied + 1,
+                fixture.id
+            )));
+        }
+        *applied += 1;
+    }
+    Ok(())
+}
+
+fn wait_for_feedback_count(runner: &CopilotRunner, expected: u32) -> Result<(), EvalError> {
+    if expected == 0 {
+        return Ok(());
+    }
+    let deadline = Instant::now() + WORKER_TIMEOUT;
+    while Instant::now() < deadline {
+        let policy = runner.health().policy;
+        if policy
+            .helpful
+            .saturating_add(policy.not_helpful)
+            .saturating_add(policy.dismissed)
+            >= expected
+        {
+            return Ok(());
+        }
+        std::thread::yield_now();
+    }
+    Err(EvalError::RunnerStalled("feedback application".into()))
 }
 
 fn expand_fixture(fixture: &EvalFixture) -> Vec<ExpandedEvent> {
@@ -1324,6 +1627,143 @@ fn aggregate_quality<'a>(metrics: impl Iterator<Item = &'a QualityMetrics>) -> Q
     }
 }
 
+fn score_intelligence(
+    fixture: &EvalFixture,
+    events: &[ExpandedEvent],
+    observations: &[NudgeObservation],
+    policy: &super::PolicySnapshot,
+    depth: &DepthLaneSnapshot,
+) -> IntelligenceMetrics {
+    let strategy_state_correctness = fixture.labels.strategy.as_ref().map_or_else(
+        || rate(0, 0, 1.0),
+        |expected| {
+            let expected_groups = [
+                (&expected.open_threads, &depth.latest_strategy.open_threads),
+                (
+                    &expected.unmet_goal_items,
+                    &depth.latest_strategy.unmet_goal_items,
+                ),
+                (
+                    &expected.unresolved_objections,
+                    &depth.latest_strategy.unresolved_objections,
+                ),
+                (&expected.steer_toward, &depth.latest_strategy.steer_toward),
+            ];
+            let denominator = expected_groups.iter().map(|(terms, _)| terms.len()).sum();
+            let numerator = expected_groups
+                .iter()
+                .map(|(terms, actual)| {
+                    terms
+                        .iter()
+                        .filter(|term| actual.iter().any(|item| contains(item, term)))
+                        .count()
+                })
+                .sum();
+            rate(numerator, denominator, 1.0)
+        },
+    );
+
+    let expected_shift_revisions = fixture
+        .labels
+        .topic_shift_utterances
+        .iter()
+        .filter_map(|sequence| {
+            events
+                .iter()
+                .find(|event| {
+                    event.utterance_sequence == *sequence
+                        && event.update_kind == TranscriptUpdateKind::Final
+                })
+                .map(|event| event.evidence_revision)
+        })
+        .collect::<Vec<_>>();
+    let topic_shift_recall = rate(
+        expected_shift_revisions
+            .iter()
+            .filter(|revision| depth.topic_shift_revisions.contains(revision))
+            .count(),
+        expected_shift_revisions.len(),
+        1.0,
+    );
+    let strategy_trigger_recall = fixture.labels.strategy.as_ref().map_or_else(
+        || rate(0, 0, 1.0),
+        |expected| {
+            let mut actual = depth.strategy_update_reasons.clone();
+            let matched = expected
+                .refresh_reasons
+                .iter()
+                .filter(|reason| {
+                    actual
+                        .iter()
+                        .position(|actual_reason| actual_reason == *reason)
+                        .map(|index| actual.remove(index))
+                        .is_some()
+                })
+                .count();
+            rate(matched, expected.refresh_reasons.len(), 1.0)
+        },
+    );
+    let topic_shift_grounding_rate = rate(
+        expected_shift_revisions
+            .iter()
+            .filter(|revision| depth.grounding_refresh_revisions.contains(revision))
+            .count(),
+        expected_shift_revisions.len(),
+        1.0,
+    );
+    let mode_policy_accuracy = fixture.labels.mode_policy.as_ref().map_or_else(
+        || rate(0, 0, 1.0),
+        |expected| {
+            let passed = observations.len() == expected.expected_nudges
+                && policy.filtered_by_mode == expected.expected_filtered_by_mode;
+            rate(usize::from(passed), 1, 1.0)
+        },
+    );
+    let feedback_adaptation_accuracy = fixture.labels.feedback.as_ref().map_or_else(
+        || rate(0, 0, 1.0),
+        |expected| {
+            let feedback_count = policy
+                .helpful
+                .saturating_add(policy.not_helpful)
+                .saturating_add(policy.dismissed);
+            let passed = feedback_count == expected.expected_feedback
+                && policy.filtered_by_cadence >= expected.min_filtered_by_cadence
+                && policy.effective_minimum_interval_ms >= expected.min_effective_interval_ms;
+            rate(usize::from(passed), 1, 1.0)
+        },
+    );
+    IntelligenceMetrics {
+        strategy_state_correctness,
+        strategy_trigger_recall,
+        topic_shift_recall,
+        topic_shift_grounding_rate,
+        mode_policy_accuracy,
+        feedback_adaptation_accuracy,
+    }
+}
+
+fn aggregate_intelligence<'a>(
+    metrics: impl Iterator<Item = &'a IntelligenceMetrics>,
+) -> IntelligenceMetrics {
+    let metrics = metrics.collect::<Vec<_>>();
+    let sum = |select: fn(&IntelligenceMetrics) -> &RateMetric| {
+        let numerator = metrics.iter().map(|metric| select(metric).numerator).sum();
+        let denominator = metrics
+            .iter()
+            .map(|metric| select(metric).denominator)
+            .sum();
+        rate(numerator, denominator, 1.0)
+    };
+    IntelligenceMetrics {
+        strategy_state_correctness: sum(|metric| &metric.strategy_state_correctness),
+        strategy_trigger_recall: sum(|metric| &metric.strategy_trigger_recall),
+        topic_shift_recall: sum(|metric| &metric.topic_shift_recall),
+        topic_shift_grounding_rate: sum(|metric| &metric.topic_shift_grounding_rate),
+        mode_policy_accuracy: sum(|metric| &metric.mode_policy_accuracy),
+        feedback_adaptation_accuracy: sum(|metric| &metric.feedback_adaptation_accuracy),
+    }
+}
+
 fn aggregate_latency(records: &[LatencyRecord]) -> BTreeMap<String, LatencyPercentiles> {
     let mut stages = BTreeMap::<String, Vec<u64>>::new();
     for record in records {
@@ -1429,6 +1869,7 @@ fn micros_to_ms(micros: u64) -> f64 {
 
 fn threshold_failures(
     quality: &QualityMetrics,
+    intelligence: &IntelligenceMetrics,
     latency: &BTreeMap<String, LatencyPercentiles>,
     thresholds: &BaselineThresholds,
 ) -> Vec<String> {
@@ -1477,6 +1918,42 @@ fn threshold_failures(
             .and_then(|metric| metric.p95_ms),
         thresholds.max_model_to_first_token_p95_ms,
     );
+    check_min(
+        &mut failures,
+        "strategy_state_correctness",
+        intelligence.strategy_state_correctness.rate,
+        thresholds.min_strategy_state_correctness,
+    );
+    check_min(
+        &mut failures,
+        "strategy_trigger_recall",
+        intelligence.strategy_trigger_recall.rate,
+        thresholds.min_strategy_trigger_recall,
+    );
+    check_min(
+        &mut failures,
+        "topic_shift_recall",
+        intelligence.topic_shift_recall.rate,
+        thresholds.min_topic_shift_recall,
+    );
+    check_min(
+        &mut failures,
+        "topic_shift_grounding_rate",
+        intelligence.topic_shift_grounding_rate.rate,
+        thresholds.min_topic_shift_grounding_rate,
+    );
+    check_min(
+        &mut failures,
+        "mode_policy_accuracy",
+        intelligence.mode_policy_accuracy.rate,
+        thresholds.min_mode_policy_accuracy,
+    );
+    check_min(
+        &mut failures,
+        "feedback_adaptation_accuracy",
+        intelligence.feedback_adaptation_accuracy.rate,
+        thresholds.min_feedback_adaptation_accuracy,
+    );
     check_optional_max(
         &mut failures,
         "audio_to_nudge_p95_ms",
@@ -1515,6 +1992,35 @@ pub fn render_report_table(report: &EvalReport) -> String {
     output.push_str(&format!(
         "Copilot eval v{} | {:?} | seed {} | {}\n",
         report.suite_version, report.mode, report.fixed_seed, report.provider
+    ));
+    output.push_str(
+        "two-lane                        strategy triggers topic grounding mode feedback\n",
+    );
+    for fixture in &report.fixtures {
+        output.push_str(&format!(
+            "{:<31} {:>7.1}% {:>7.1}% {:>5.1}% {:>8.1}% {:>5.1}% {:>7.1}%\n",
+            truncate(&fixture.fixture_id, 31),
+            fixture.intelligence.strategy_state_correctness.rate * 100.0,
+            fixture.intelligence.strategy_trigger_recall.rate * 100.0,
+            fixture.intelligence.topic_shift_recall.rate * 100.0,
+            fixture.intelligence.topic_shift_grounding_rate.rate * 100.0,
+            fixture.intelligence.mode_policy_accuracy.rate * 100.0,
+            fixture.intelligence.feedback_adaptation_accuracy.rate * 100.0,
+        ));
+    }
+    output.push_str(&format!(
+        "two-lane summary                {:>7.1}% {:>7.1}% {:>5.1}% {:>8.1}% {:>5.1}% {:>7.1}%\n",
+        report.summary.intelligence.strategy_state_correctness.rate * 100.0,
+        report.summary.intelligence.strategy_trigger_recall.rate * 100.0,
+        report.summary.intelligence.topic_shift_recall.rate * 100.0,
+        report.summary.intelligence.topic_shift_grounding_rate.rate * 100.0,
+        report.summary.intelligence.mode_policy_accuracy.rate * 100.0,
+        report
+            .summary
+            .intelligence
+            .feedback_adaptation_accuracy
+            .rate
+            * 100.0,
     ));
     output.push_str(
         "fixture                         nudges precision stale contradict duplicate no-nudge audio->nudge p95\n",
@@ -1575,6 +2081,7 @@ fn format_latency(value: Option<f64>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::copilot::{OpportunityKind, StrategyState};
 
     #[test]
     fn builtin_suite_is_deterministic_and_clears_baseline() {
@@ -1590,7 +2097,7 @@ mod tests {
             "baseline failures: {:?}",
             first.summary.baseline_failures
         );
-        assert_eq!(first.summary.fixtures, 4);
+        assert_eq!(first.summary.fixtures, 9);
         assert!(first
             .fixtures
             .iter()
@@ -1605,6 +2112,7 @@ mod tests {
             description: "synthetic metric positive control".into(),
             content_origin: FixtureContentOrigin::Synthetic,
             goal: "test metrics".into(),
+            mode: MeetingMode::Generic,
             synthesize_partials: false,
             transcript: vec![FixtureUtterance {
                 utterance_sequence: 1,
@@ -1631,12 +2139,16 @@ mod tests {
                     from_contains: "Approve".into(),
                     to_contains: "Reject".into(),
                 }],
+                ..FixtureLabels::default()
             },
             mock_script: vec![],
+            strategy_script: vec![],
+            feedback: vec![],
         };
         let events = expand_fixture(&fixture);
         let request = CopilotRequest {
             goal: fixture.goal.clone(),
+            mode: MeetingMode::Generic,
             session_epoch: 1,
             evidence_revision: 1,
             evidence_utterance_sequence: 1,
@@ -1654,6 +2166,7 @@ mod tests {
                 duration_ms: 100,
             }],
             battle_card: BattleCard::empty(),
+            strategy_state: StrategyState::empty(),
         };
         let snapshots = BTreeMap::from([(
             1,
@@ -1663,9 +2176,12 @@ mod tests {
             },
         )]);
         let observation = || NudgeObservation {
+            id: "nudge-1-1".into(),
             kind: NudgeKind::Say,
             text: "Approve now".into(),
             source_chip: "approve".into(),
+            opportunity: OpportunityKind::Decision,
+            confidence: 100,
             evidence_revision: 1,
             evidence_time_ms: 100,
             delivered_at_ms: 150,

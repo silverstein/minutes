@@ -1,0 +1,117 @@
+{
+  "schema_version": 1,
+  "id": "synthetic-multi-thread-strategy",
+  "description": "The slow lane must carry multiple open threads and an objection into a later fast-lane decision nudge.",
+  "content_origin": "synthetic",
+  "goal": "Resolve pricing ownership, the annual-term objection, and a decision deadline.",
+  "mode": "decision",
+  "synthesize_partials": false,
+  "transcript": [
+    {
+      "utterance_sequence": 1,
+      "offset_ms": 0,
+      "duration_ms": 1000,
+      "final_text": "Pricing ownership remains open and the discount guardrail still needs an owner."
+    },
+    {
+      "utterance_sequence": 2,
+      "offset_ms": 31000,
+      "duration_ms": 1000,
+      "final_text": "The pricing discount guardrail remains open because finance still needs a named owner."
+    },
+    {
+      "utterance_sequence": 3,
+      "offset_ms": 36000,
+      "duration_ms": 1000,
+      "final_text": "Separately, procurement objects to the annual term while the security review remains unresolved."
+    },
+    {
+      "utterance_sequence": 4,
+      "offset_ms": 41000,
+      "duration_ms": 1000,
+      "final_text": "Given the procurement annual-term objection, we decided the pricing owner and decision deadline must be named today."
+    }
+  ],
+  "labels": {
+    "opportunities": [
+      {
+        "id": "close-multi-thread-decision",
+        "start_ms": 41000,
+        "end_ms": 43000,
+        "kind": "Clarify",
+        "match_any": ["pricing owner", "deadline"]
+      }
+    ],
+    "no_opportunity_ranges": [],
+    "revision_reversals": [],
+    "strategy": {
+      "open_threads": ["pricing owner", "security review"],
+      "unmet_goal_items": ["decision deadline"],
+      "unresolved_objections": ["procurement objects to annual term"],
+      "steer_toward": ["name owner and deadline"],
+      "refresh_reasons": ["initial", "cadence", "topic_shift", "decisive_final"]
+    },
+    "topic_shift_utterances": [3],
+    "mode_policy": {
+      "expected_nudges": 1,
+      "expected_filtered_by_mode": 0
+    }
+  },
+  "mock_script": [
+    {
+      "cue": {
+        "update_kind": "final",
+        "utterance_sequence": 4,
+        "strategy_contains": "procurement objects to annual term"
+      },
+      "first_token_ms": 20,
+      "completion_ms": 60,
+      "draft": {
+        "kind": "Clarify",
+        "text": "Name the pricing owner and decision deadline while closing the annual-term objection.",
+        "source_chip": "pricing owner / deadline",
+        "opportunity": "decision",
+        "confidence": 92
+      }
+    }
+  ],
+  "strategy_script": [
+    {
+      "cue": { "text_contains": "Pricing ownership" },
+      "state": {
+        "open_threads": ["Pricing owner"],
+        "unmet_goal_items": ["Decision deadline"],
+        "unresolved_objections": [],
+        "steer_toward": ["Name owner and deadline"]
+      }
+    },
+    {
+      "cue": { "text_contains": "finance still needs" },
+      "state": {
+        "open_threads": ["Pricing owner"],
+        "unmet_goal_items": ["Decision deadline"],
+        "unresolved_objections": [],
+        "steer_toward": ["Name owner and deadline"]
+      }
+    },
+    {
+      "cue": { "text_contains": "procurement objects" },
+      "state": {
+        "open_threads": ["Pricing owner", "Security review"],
+        "unmet_goal_items": ["Decision deadline"],
+        "unresolved_objections": ["Procurement objects to annual term"],
+        "steer_toward": ["Name owner and deadline"]
+      }
+    },
+    {
+      "cue": { "text_contains": "we decided" },
+      "state": {
+        "open_threads": ["Pricing owner", "Security review"],
+        "unmet_goal_items": ["Decision deadline"],
+        "unresolved_objections": ["Procurement objects to annual term"],
+        "steer_toward": ["Name owner and deadline"]
+      }
+    }
+  ],
+  "feedback": []
+}

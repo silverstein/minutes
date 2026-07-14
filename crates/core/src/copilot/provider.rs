@@ -1,4 +1,4 @@
-use super::{CancelToken, CopilotRequest, NudgeDraft};
+use super::{CancelToken, CopilotRequest, NudgeDraft, StrategyRequest, StrategyState};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -83,6 +83,22 @@ pub trait CopilotModel: Send + Sync + 'static {
         cancel: &CancelToken,
         sink: &dyn ModelEventSink,
     ) -> Result<NudgeDraft, ModelError>;
+    /// Slow-lane strategy refresh. Providers may override this with a compact
+    /// model call; the deterministic fallback keeps custom providers source
+    /// compatible and never emits a second user-facing stream.
+    fn refresh_strategy(
+        &self,
+        request: &StrategyRequest,
+        cancel: &CancelToken,
+    ) -> Result<StrategyState, ModelError> {
+        if cancel.is_cancelled() {
+            return Err(ModelError::cancelled());
+        }
+        Ok(StrategyState::from_draft(
+            request.heuristic_draft(),
+            request.evidence_revision,
+        ))
+    }
     fn health(&self) -> ModelHealth;
 }
 

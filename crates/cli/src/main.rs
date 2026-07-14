@@ -1396,6 +1396,10 @@ enum CopilotAction {
         #[arg(long, value_parser = ["tui", "stdout"])]
         surface: Option<String>,
 
+        /// Per-session coaching policy (defaults to [copilot].mode)
+        #[arg(long, value_parser = ["sales", "discovery", "interview", "negotiation", "difficult-conversation", "decision", "generic"])]
+        mode: Option<String>,
+
         /// Own a standalone live capture in this process, enabling ephemeral
         /// partial coaching when the backend and config support it
         #[arg(long)]
@@ -1409,6 +1413,16 @@ enum CopilotAction {
     Resume,
     /// Stop the active copilot session
     Stop,
+    /// Rate a rendered nudge; adaptation is bounded to the active session
+    Feedback {
+        /// Nudge ID shown by the TUI or stdout JSON
+        #[arg(long)]
+        nudge_id: String,
+
+        /// Feedback signal
+        #[arg(long, value_parser = ["helpful", "not-helpful", "dismissed"])]
+        rating: String,
+    },
     /// Replay the versioned coaching corpus and enforce quality baselines
     Eval {
         /// Load versioned JSON fixtures from this directory instead of the built-in corpus
@@ -8439,6 +8453,8 @@ life (qmd://life/)
             "land the decision",
             "--surface",
             "stdout",
+            "--mode",
+            "decision",
         ])
         .expect("copilot start must parse its portable surface");
         match parsed.command {
@@ -8447,11 +8463,13 @@ life (qmd://life/)
                     CopilotAction::Start {
                         goal,
                         surface,
+                        mode,
                         live,
                     },
             } => {
                 assert_eq!(goal, "land the decision");
                 assert_eq!(surface.as_deref(), Some("stdout"));
+                assert_eq!(mode.as_deref(), Some("decision"));
                 assert!(!live);
             }
             _ => panic!("expected Copilot Start variant"),
@@ -8461,6 +8479,29 @@ life (qmd://life/)
     #[test]
     fn copilot_start_requires_goal() {
         assert!(Cli::try_parse_from(["minutes", "copilot", "start"]).is_err());
+    }
+
+    #[test]
+    fn copilot_feedback_parses_explicit_rating() {
+        let parsed = Cli::try_parse_from([
+            "minutes",
+            "copilot",
+            "feedback",
+            "--nudge-id",
+            "nudge-7-2",
+            "--rating",
+            "not-helpful",
+        ])
+        .expect("copilot feedback flags must parse");
+        match parsed.command {
+            Commands::Copilot {
+                action: CopilotAction::Feedback { nudge_id, rating },
+            } => {
+                assert_eq!(nudge_id, "nudge-7-2");
+                assert_eq!(rating, "not-helpful");
+            }
+            _ => panic!("expected Copilot Feedback variant"),
+        }
     }
 
     #[test]
@@ -8520,12 +8561,13 @@ life (qmd://life/)
         text: &str,
     ) -> minutes_core::copilot::Nudge {
         use minutes_core::copilot::{
-            BattleCard, CopilotRequest, CopilotUtterance, NudgeDraft, NudgeKind, NudgePolicy,
-            TranscriptUpdateKind,
+            BattleCard, CopilotRequest, CopilotUtterance, MeetingMode, NudgeDraft, NudgeKind,
+            NudgePolicy, OpportunityKind, StrategyState, TranscriptUpdateKind,
         };
 
         let request = CopilotRequest {
             goal: "land the decision".into(),
+            mode: MeetingMode::Generic,
             session_epoch,
             evidence_revision: revision,
             evidence_utterance_sequence: utterance_sequence,
@@ -8543,6 +8585,7 @@ life (qmd://life/)
                 duration_ms: 10,
             }],
             battle_card: BattleCard::empty(),
+            strategy_state: StrategyState::empty(),
         };
         NudgePolicy::new(12_000)
             .accept(
@@ -8550,6 +8593,8 @@ life (qmd://life/)
                     kind: NudgeKind::Say,
                     text: text.into(),
                     source_chip: "decision".into(),
+                    opportunity: OpportunityKind::Decision,
+                    confidence: 100,
                 },
                 &request,
                 chrono::Utc::now(),
@@ -8865,12 +8910,14 @@ fn cmd_copilot(action: CopilotAction, config: &Config) -> Result<()> {
         CopilotAction::Start {
             goal,
             surface,
+            mode,
             live,
-        } => cmd_copilot_start(&goal, surface.as_deref(), live, config),
+        } => cmd_copilot_start(&goal, surface.as_deref(), mode.as_deref(), live, config),
         CopilotAction::Status => cmd_copilot_status(),
         CopilotAction::Pause => cmd_copilot_pause(),
         CopilotAction::Resume => cmd_copilot_resume(),
         CopilotAction::Stop => cmd_copilot_stop(),
+        CopilotAction::Feedback { nudge_id, rating } => cmd_copilot_feedback(&nudge_id, &rating),
         CopilotAction::Eval {
             fixtures,
             accelerated,
@@ -8947,13 +8994,15 @@ impl Drop for LiveCaptureGuard {
 fn cmd_copilot_start(
     goal: &str,
     surface: Option<&str>,
+    mode: Option<&str>,
     own_live_capture: bool,
     config: &Config,
 ) -> Result<()> {
     use minutes_core::copilot::{
         BattleCard, CopilotEvidenceMode, CopilotRequest, CopilotRunner, CopilotSessionStatus,
-        CopilotState, CopilotUtterance, NudgePolicy, OllamaCopilotModel, PartialLatencySeed,
-        RunnerEvent, TranscriptUpdateKind,
+        CopilotState, CopilotUtterance, DepthLaneConfig, MeetingMode, NudgePolicy,
+        OllamaCopilotModel, PartialLatencySeed, RepositoryGrounding, RunnerEvent, StrategyState,
+        TranscriptUpdateKind,
     };
     use minutes_core::live_partials::{self, LivePartialEvent, DEFAULT_PARTIAL_CHANNEL_CAPACITY};
     use std::collections::VecDeque;
@@ -8969,6 +9018,10 @@ fn cmd_copilot_start(
     if !matches!(surface, "tui" | "stdout") {
         anyhow::bail!("unsupported copilot surface '{surface}'; use tui or stdout");
     }
+    let mode = mode
+        .unwrap_or(config.copilot.mode.as_str())
+        .parse::<MeetingMode>()
+        .map_err(anyhow::Error::msg)?;
 
     let provider = config.copilot.resolved_fast_provider();
     if provider != "ollama" {
@@ -9028,25 +9081,24 @@ fn cmd_copilot_start(
         );
     }
 
-    let battle_card = if config.copilot.history_grounding {
-        match BattleCard::assemble(config, goal) {
-            Ok(card) => card,
-            Err(error) => {
-                eprintln!(
-                    "Copilot history grounding is degraded: {error}. Continuing with live evidence only."
-                );
-                BattleCard::empty()
-            }
-        }
-    } else {
-        BattleCard::empty()
-    };
+    // Retrieval belongs exclusively to the slow worker. The first stable final
+    // triggers an asynchronous refresh; fast requests start with an empty card.
+    let battle_card = BattleCard::empty();
+    let grounding = config.copilot.history_grounding.then(|| {
+        Arc::new(RepositoryGrounding::new(config.clone()))
+            as Arc<dyn minutes_core::copilot::GroundingSource>
+    });
 
     let model = Arc::new(OllamaCopilotModel::from_config(&config.copilot));
-    let runner = CopilotRunner::start_with_debounce(
+    let runner = CopilotRunner::start_with_depth(
         model,
-        NudgePolicy::new(config.copilot.nudge_ttl_ms),
+        NudgePolicy::for_mode(config.copilot.nudge_ttl_ms, mode),
         Duration::from_millis(config.copilot.partial_debounce_ms),
+        grounding,
+        DepthLaneConfig::new(
+            Duration::from_secs(config.copilot.depth_refresh_secs),
+            Duration::from_secs(config.copilot.grounding_refresh_secs),
+        ),
     );
     let session_epoch = runner.session_epoch();
     let stop = Arc::new(AtomicBool::new(false));
@@ -9115,12 +9167,25 @@ fn cmd_copilot_start(
     };
     minutes_core::copilot::write_session_status(&status)?;
 
-    eprintln!("Copilot listening. Press Ctrl-C or run `minutes copilot stop` to stop.");
+    eprintln!(
+        "Copilot listening in {mode} mode. Press Ctrl-C or run `minutes copilot stop` to stop."
+    );
     let mut capture_failure = None;
 
     while !stop.load(Ordering::Acquire) {
         if minutes_core::copilot::copilot_stop_path().exists() {
             break;
+        }
+
+        match minutes_core::copilot::take_feedback_request() {
+            Ok(Some(feedback)) => {
+                let outcome = runner.record_feedback(feedback.nudge_id, feedback.feedback);
+                if outcome == minutes_core::copilot::FeedbackOutcome::DroppedQueueFull {
+                    tracing::warn!("copilot feedback queue full; feedback was not applied");
+                }
+            }
+            Ok(None) => {}
+            Err(error) => tracing::warn!(error = %error, "failed to read copilot feedback"),
         }
 
         let pause_requested = minutes_core::copilot::copilot_pause_path().exists();
@@ -9215,6 +9280,7 @@ fn cmd_copilot_start(
                         next_evidence_revision = next_evidence_revision.saturating_add(1);
                         let request = CopilotRequest {
                             goal: goal.into(),
+                            mode,
                             session_epoch,
                             evidence_revision: next_evidence_revision,
                             evidence_utterance_sequence: partial.utterance_sequence,
@@ -9222,6 +9288,7 @@ fn cmd_copilot_start(
                             update_kind: TranscriptUpdateKind::Partial,
                             utterances: utterances.iter().cloned().collect(),
                             battle_card: battle_card.clone(),
+                            strategy_state: StrategyState::empty(),
                         };
                         let context_ready_at = Instant::now();
                         let _ = runner.submit_with_latency(
@@ -9297,6 +9364,7 @@ fn cmd_copilot_start(
             next_evidence_revision = next_evidence_revision.saturating_add(1).max(envelope.seq);
             let request = CopilotRequest {
                 goal: goal.into(),
+                mode,
                 session_epoch,
                 evidence_revision: next_evidence_revision,
                 evidence_utterance_sequence: envelope.seq,
@@ -9304,6 +9372,7 @@ fn cmd_copilot_start(
                 update_kind: TranscriptUpdateKind::Final,
                 utterances: utterances.iter().cloned().collect(),
                 battle_card: battle_card.clone(),
+                strategy_state: StrategyState::empty(),
             };
             let _ = runner.submit(request);
         }
@@ -9323,10 +9392,19 @@ fn cmd_copilot_start(
                         "Copilot degraded: {error}. Recording/live capture continues unaffected."
                     );
                 }
+                RunnerEvent::DepthDegraded { error } => {
+                    eprintln!(
+                        "Copilot depth lane degraded: {error}. Fast coaching and capture continue unaffected."
+                    );
+                }
                 RunnerEvent::RequestCancelled { .. }
                 | RunnerEvent::EvidenceRetracted { .. }
                 | RunnerEvent::StateChanged(_)
-                | RunnerEvent::Model(_) => {}
+                | RunnerEvent::Model(_)
+                | RunnerEvent::TopicShiftDetected { .. }
+                | RunnerEvent::GroundingRefreshed { .. }
+                | RunnerEvent::StrategyUpdated { .. }
+                | RunnerEvent::PolicyAdjusted(_) => {}
             }
         }
 
@@ -9402,7 +9480,8 @@ fn render_copilot_nudge_to(
         writeln!(writer, "\x1b[1m│ {}\x1b[0m", nudge.text)?;
         writeln!(
             writer,
-            "\x1b[2m└ evidence revision {}{}\x1b[0m",
+            "\x1b[2m└ {} · evidence revision {}{}\x1b[0m",
+            nudge.id,
             nudge.evidence_revision,
             nudge
                 .supersedes
@@ -9413,8 +9492,13 @@ fn render_copilot_nudge_to(
     } else {
         writeln!(
             writer,
-            "[{:?}] {} — {} (evidence r{}, ttl {}ms)",
-            nudge.kind, nudge.text, nudge.source_chip, nudge.evidence_revision, nudge.ttl_ms
+            "[{:?}] {} — {} (id {}, evidence r{}, ttl {}ms)",
+            nudge.kind,
+            nudge.text,
+            nudge.source_chip,
+            nudge.id,
+            nudge.evidence_revision,
+            nudge.ttl_ms
         )?;
     }
     writer.flush()?;
@@ -9512,11 +9596,20 @@ fn cmd_copilot_status() -> Result<()> {
     println!("Goal: {}", status.goal);
     println!("Surface: {}", status.surface);
     println!("Evidence mode: {}", status.evidence_mode.as_str());
+    println!("Meeting mode: {}", status.health.policy.mode);
     println!(
         "Provider: {} / {}",
         status.health.provider, status.health.model
     );
     println!("Evidence cursor: {}", status.cursor);
+    println!(
+        "Policy: cadence={}ms confidence={} feedback(helpful={}, not_helpful={}, dismissed={})",
+        status.health.policy.effective_minimum_interval_ms,
+        status.health.policy.effective_minimum_confidence,
+        status.health.policy.helpful,
+        status.health.policy.not_helpful,
+        status.health.policy.dismissed,
+    );
     println!("Latency records: in_memory_only (available from the active CopilotRunner status)");
     println!("{}", status.capture_attachment);
     if let Some(error) = status.health.last_error {
@@ -9550,6 +9643,26 @@ fn cmd_copilot_stop() -> Result<()> {
     }
     minutes_core::copilot::request_stop()?;
     eprintln!("Stop requested. Capture continues unchanged.");
+    Ok(())
+}
+
+fn cmd_copilot_feedback(nudge_id: &str, rating: &str) -> Result<()> {
+    use minutes_core::copilot::{CopilotFeedback, CopilotFeedbackRequest};
+
+    if !minutes_core::copilot::read_session_status().active {
+        anyhow::bail!("no active copilot session to rate");
+    }
+    let feedback = match rating {
+        "helpful" => CopilotFeedback::Helpful,
+        "not-helpful" => CopilotFeedback::NotHelpful,
+        "dismissed" => CopilotFeedback::Dismissed,
+        _ => anyhow::bail!("unsupported feedback rating '{rating}'"),
+    };
+    minutes_core::copilot::request_feedback(&CopilotFeedbackRequest {
+        nudge_id: nudge_id.trim().into(),
+        feedback,
+    })?;
+    eprintln!("Feedback queued for this copilot session.");
     Ok(())
 }
 

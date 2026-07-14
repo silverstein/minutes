@@ -350,6 +350,8 @@ pub struct CopilotConfig {
     pub enabled: bool,
     /// Default presentation surface (`tui` or `stdout`).
     pub surface: String,
+    /// Default per-session coaching policy. The CLI `--mode` flag overrides it.
+    pub mode: String,
     /// Fast-lane provider. `auto-local` resolves to `ollama` in contract v1.
     pub fast_provider: String,
     /// Model name sent to the fast provider.
@@ -367,6 +369,10 @@ pub struct CopilotConfig {
     pub live_partials: bool,
     /// Coalesce fast partial corrections before starting a model request.
     pub partial_debounce_ms: u64,
+    /// Slow strategy refresh cadence, clamped to 30–90 seconds by the runner.
+    pub depth_refresh_secs: u64,
+    /// Minimum cadence for stable-final grounding refreshes. Topic shifts bypass it.
+    pub grounding_refresh_secs: u64,
 }
 
 impl CopilotConfig {
@@ -1125,6 +1131,7 @@ impl Default for CopilotConfig {
         Self {
             enabled: false,
             surface: "tui".into(),
+            mode: "generic".into(),
             fast_provider: "auto-local".into(),
             fast_model: "llama3.2".into(),
             allow_cloud: false,
@@ -1133,6 +1140,8 @@ impl Default for CopilotConfig {
             history_grounding: true,
             live_partials: true,
             partial_debounce_ms: 250,
+            depth_refresh_secs: 60,
+            grounding_refresh_secs: 15,
         }
     }
 }
@@ -1640,6 +1649,7 @@ mod tests {
         assert_eq!(config.summarization.engine, "none");
         assert!(!config.copilot.enabled);
         assert_eq!(config.copilot.surface, "tui");
+        assert_eq!(config.copilot.mode, "generic");
         assert_eq!(config.copilot.fast_provider, "auto-local");
         assert_eq!(config.copilot.resolved_fast_provider(), "ollama");
         assert_eq!(config.copilot.fast_model, "llama3.2");
@@ -1649,6 +1659,8 @@ mod tests {
         assert!(config.copilot.history_grounding);
         assert!(config.copilot.live_partials);
         assert_eq!(config.copilot.partial_debounce_ms, 250);
+        assert_eq!(config.copilot.depth_refresh_secs, 60);
+        assert_eq!(config.copilot.grounding_refresh_secs, 15);
         assert_eq!(config.search.engine, "builtin");
         assert!(!config.daily_notes.enabled);
         assert_eq!(config.dictation.backend, "whisper");
@@ -1674,6 +1686,7 @@ mod tests {
             [copilot]
             enabled = true
             surface = "stdout"
+            mode = "decision"
             fast_provider = "ollama"
             fast_model = "qwen3:4b"
             allow_cloud = false
@@ -1682,6 +1695,8 @@ mod tests {
             history_grounding = false
             live_partials = false
             partial_debounce_ms = 400
+            depth_refresh_secs = 75
+            grounding_refresh_secs = 20
             "#,
         )
         .unwrap();
@@ -1689,6 +1704,7 @@ mod tests {
         assert_eq!(parsed.summarization.engine, "none");
         assert!(parsed.copilot.enabled);
         assert_eq!(parsed.copilot.surface, "stdout");
+        assert_eq!(parsed.copilot.mode, "decision");
         assert_eq!(parsed.copilot.resolved_fast_provider(), "ollama");
         assert_eq!(parsed.copilot.fast_model, "qwen3:4b");
         assert_eq!(parsed.copilot.nudge_ttl_ms, 9_000);
@@ -1696,6 +1712,8 @@ mod tests {
         assert!(!parsed.copilot.history_grounding);
         assert!(!parsed.copilot.live_partials);
         assert_eq!(parsed.copilot.partial_debounce_ms, 400);
+        assert_eq!(parsed.copilot.depth_refresh_secs, 75);
+        assert_eq!(parsed.copilot.grounding_refresh_secs, 20);
     }
 
     #[test]

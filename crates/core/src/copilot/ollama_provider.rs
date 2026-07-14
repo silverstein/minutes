@@ -1,6 +1,7 @@
 use super::{
     CancelToken, CopilotModel, CopilotRequest, ModelError, ModelErrorKind, ModelEventSink,
-    ModelHealth, ModelHealthStatus, ModelStreamEvent, NudgeDraft,
+    ModelHealth, ModelHealthStatus, ModelStreamEvent, NudgeDraft, StrategyRequest, StrategyState,
+    StrategyStateDraft,
 };
 use crate::config::CopilotConfig;
 use crate::ollama::{OllamaAdapter, OllamaChatMessage, OllamaError, OllamaStreamRequest};
@@ -42,7 +43,9 @@ impl CopilotModel for OllamaCopilotModel {
     }
 
     fn prewarm(&self) -> Result<(), ModelError> {
-        self.adapter.prewarm().map_err(map_ollama_error)
+        self.adapter
+            .prewarm()
+            .map_err(|error| map_ollama_error(error, "prewarm"))
     }
 
     fn stream_structured(
@@ -53,7 +56,7 @@ impl CopilotModel for OllamaCopilotModel {
     ) -> Result<NudgeDraft, ModelError> {
         let stream_request = OllamaStreamRequest {
             messages: vec![
-                OllamaChatMessage::new("system", CopilotRequest::system_prompt()),
+                OllamaChatMessage::new("system", request.trusted_system_prompt()),
                 OllamaChatMessage::new("user", request.untrusted_payload()),
             ],
             format: Some(nudge_draft_schema()),
@@ -64,10 +67,31 @@ impl CopilotModel for OllamaCopilotModel {
             .stream_chat(&stream_request, cancel, |text| {
                 sink.on_event(ModelStreamEvent::TextDelta(text.to_string()));
             })
-            .map_err(map_ollama_error)?;
+            .map_err(|error| map_ollama_error(error, "fast lane"))?;
         let draft = parse_nudge_draft(&response.text)?;
         sink.on_event(ModelStreamEvent::Structured(draft.clone()));
         Ok(draft)
+    }
+
+    fn refresh_strategy(
+        &self,
+        request: &StrategyRequest,
+        cancel: &CancelToken,
+    ) -> Result<StrategyState, ModelError> {
+        let stream_request = OllamaStreamRequest {
+            messages: vec![
+                OllamaChatMessage::new("system", request.system_prompt()),
+                OllamaChatMessage::new("user", request.untrusted_payload()),
+            ],
+            format: Some(strategy_state_schema()),
+            temperature: Some(0.1),
+        };
+        let response = self
+            .adapter
+            .stream_chat(&stream_request, cancel, |_| {})
+            .map_err(|error| map_ollama_error(error, "depth lane"))?;
+        let draft = parse_json::<StrategyStateDraft>(&response.text, "strategy state")?;
+        Ok(StrategyState::from_draft(draft, request.evidence_revision))
     }
 
     fn health(&self) -> ModelHealth {
@@ -96,13 +120,39 @@ fn nudge_draft_schema() -> serde_json::Value {
             },
             "text": { "type": "string" },
             "source_chip": { "type": "string" }
+            ,"opportunity": {
+                "type": "string",
+                "enum": ["pain", "objection", "next_step", "evidence", "decision", "leverage", "rapport", "clarity", "safety", "general"]
+            },
+            "confidence": { "type": "integer", "minimum": 0, "maximum": 100 }
         },
-        "required": ["kind", "text", "source_chip"],
+        "required": ["kind", "text", "source_chip", "opportunity", "confidence"],
+        "additionalProperties": false
+    })
+}
+
+fn strategy_state_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "open_threads": { "type": "array", "items": { "type": "string" }, "maxItems": 6 },
+            "unmet_goal_items": { "type": "array", "items": { "type": "string" }, "maxItems": 6 },
+            "unresolved_objections": { "type": "array", "items": { "type": "string" }, "maxItems": 6 },
+            "steer_toward": { "type": "array", "items": { "type": "string" }, "maxItems": 6 }
+        },
+        "required": ["open_threads", "unmet_goal_items", "unresolved_objections", "steer_toward"],
         "additionalProperties": false
     })
 }
 
 fn parse_nudge_draft(raw: &str) -> Result<NudgeDraft, ModelError> {
+    parse_json(raw, "nudge")
+}
+
+fn parse_json<T: serde::de::DeserializeOwned>(
+    raw: &str,
+    response_kind: &str,
+) -> Result<T, ModelError> {
     let trimmed = raw.trim();
     let candidate = if trimmed.starts_with("```") {
         trimmed
@@ -118,19 +168,19 @@ fn parse_nudge_draft(raw: &str) -> Result<NudgeDraft, ModelError> {
     serde_json::from_str(candidate).map_err(|error| {
         ModelError::new(
             ModelErrorKind::InvalidResponse,
-            format!("Ollama returned invalid nudge JSON: {error}"),
+            format!("Ollama returned invalid {response_kind} JSON: {error}"),
         )
     })
 }
 
-fn map_ollama_error(error: OllamaError) -> ModelError {
+fn map_ollama_error(error: OllamaError, lane: &str) -> ModelError {
     match error {
         OllamaError::Cancelled => ModelError::cancelled(),
         OllamaError::Transport(message)
             if message.to_ascii_lowercase().contains("timeout")
                 || message.to_ascii_lowercase().contains("timed out") =>
         {
-            ModelError::timeout(format!("Ollama fast lane timed out: {message}"))
+            ModelError::timeout(format!("Ollama {lane} timed out: {message}"))
         }
         OllamaError::Transport(message) => ModelError::new(ModelErrorKind::Unavailable, message),
         OllamaError::Http { status, body } => ModelError::new(
@@ -158,6 +208,8 @@ mod tests {
             kind: NudgeKind::Clarify,
             text: "Clarify who owns the launch.".into(),
             source_chip: "launch owner".into(),
+            opportunity: super::super::OpportunityKind::Clarity,
+            confidence: 87,
         };
         let json = serde_json::to_string(&expected).unwrap();
         assert_eq!(parse_nudge_draft(&json).unwrap(), expected);

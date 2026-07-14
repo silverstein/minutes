@@ -107,19 +107,24 @@ explicit `minutes copilot start` may start a foreground session when
 |---|---|---|
 | `enabled` | `false` | Allow implicit copilot startup; explicit CLI startup remains available. |
 | `surface` | `"tui"` | Default CLI surface: `"tui"` or newline-delimited JSON with `"stdout"`. |
+| `mode` | `"generic"` | Default session policy: `sales`, `discovery`, `interview`, `negotiation`, `difficult-conversation`, `decision`, or `generic`; `--mode` overrides it. |
 | `fast_provider` | `"auto-local"` | Fast-lane provider. In v1, `"auto-local"` resolves to `"ollama"` on every platform. |
 | `fast_model` | `"llama3.2"` | Ollama model used for structured nudges. |
 | `allow_cloud` | `false` | Cloud opt-in gate. Cloud adapters are intentionally not implemented in the first copilot release. |
 | `nudge_ttl_ms` | `12000` | Lifetime of a rendered nudge in milliseconds. |
 | `target_latency_ms` | `5000` | Fast request timeout/latency target; timeout degrades only the copilot. |
-| `history_grounding` | `true` | Preload a bounded battle card from unrestricted graph, structured intent, and FTS data. |
+| `history_grounding` | `true` | Refresh a bounded battle card asynchronously from unrestricted graph, structured intent, and FTS data. |
 | `live_partials` | `true` | Enable ephemeral partial coaching when `minutes copilot start --live` owns a streaming Whisper session in-process. External capture remains `final_only`. |
-| `partial_debounce_ms` | `250` | Coalesce rapid partial corrections before starting the single model lane. |
+| `partial_debounce_ms` | `250` | Coalesce rapid partial corrections before starting the fast model lane. |
+| `depth_refresh_secs` | `60` | Slow strategy refresh cadence, clamped to 30–90 seconds; topic shifts and decisive finals may refresh earlier. |
+| `grounding_refresh_secs` | `15` | Minimum stable-final grounding cadence; topic shifts bypass it. Retrieval never runs on capture or the fast path. |
 
 Ollama defaults to `http://localhost:11434`. Set `OLLAMA_HOST` to use another
 local endpoint. Meeting text and history are passed as delimited untrusted data,
 the loop exposes no tools, and restricted meetings are excluded from every
-battle-card source. See [RFC 0004](../rfcs/0004-copilot-realtime-stream.md).
+battle-card source. Dismissed/helpful/not-helpful feedback changes only bounded
+session cadence and confidence gates. See
+[RFC 0004](../rfcs/0004-copilot-realtime-stream.md).
 
 ### `[recording]` — capture behavior
 

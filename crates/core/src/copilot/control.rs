@@ -1,4 +1,4 @@
-use super::{CopilotHealth, CopilotState};
+use super::{CopilotFeedback, CopilotHealth, CopilotState};
 use crate::config::Config;
 use crate::error::PidError;
 use crate::pid::{self, PidGuard};
@@ -37,6 +37,12 @@ pub struct CopilotSessionStatus {
     pub updated_ts: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CopilotFeedbackRequest {
+    pub nudge_id: String,
+    pub feedback: CopilotFeedback,
+}
+
 impl Default for CopilotSessionStatus {
     fn default() -> Self {
         Self {
@@ -55,6 +61,7 @@ impl Default for CopilotSessionStatus {
                 in_flight_revision: None,
                 latest_evidence_revision: None,
                 last_error: None,
+                policy: super::PolicySnapshot::default(),
                 latency_records: Vec::new(),
                 updated_ts: Utc::now(),
             },
@@ -79,12 +86,20 @@ pub fn copilot_status_path() -> PathBuf {
     Config::minutes_dir().join("copilot-status.json")
 }
 
+pub fn copilot_feedback_path() -> PathBuf {
+    Config::minutes_dir().join("copilot.feedback.json")
+}
+
 pub fn create_session_guard() -> Result<PidGuard, PidError> {
     pid::create_pid_guard(&copilot_pid_path())
 }
 
 pub fn clear_session_controls() -> std::io::Result<()> {
-    for path in [copilot_pause_path(), copilot_stop_path()] {
+    for path in [
+        copilot_pause_path(),
+        copilot_stop_path(),
+        copilot_feedback_path(),
+    ] {
         match std::fs::remove_file(path) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -108,6 +123,29 @@ pub fn request_resume() -> std::io::Result<()> {
 
 pub fn request_stop() -> std::io::Result<()> {
     write_control(copilot_stop_path(), "stop")
+}
+
+pub fn request_feedback(request: &CopilotFeedbackRequest) -> std::io::Result<()> {
+    let json =
+        serde_json::to_string(request).map_err(|error| std::io::Error::other(error.to_string()))?;
+    write_control(copilot_feedback_path(), &json)
+}
+
+pub fn take_feedback_request() -> std::io::Result<Option<CopilotFeedbackRequest>> {
+    let path = copilot_feedback_path();
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    match std::fs::remove_file(&path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    serde_json::from_str(&raw)
+        .map(Some)
+        .map_err(|error| std::io::Error::other(error.to_string()))
 }
 
 fn write_control(path: PathBuf, value: &str) -> std::io::Result<()> {

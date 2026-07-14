@@ -1,10 +1,13 @@
 use super::latency::LatencyTracker;
 use super::{
-    CancelToken, CopilotClock, CopilotHealth, CopilotModel, CopilotRequest, CopilotState,
-    LatencyRecord, ModelErrorKind, ModelStreamEvent, Nudge, NudgePolicy, PartialLatencySeed,
-    SystemCopilotClock, TranscriptUpdateKind,
+    is_decisive_final, topic_keywords, CancelToken, CopilotClock, CopilotFeedback, CopilotHealth,
+    CopilotModel, CopilotRequest, CopilotState, GroundingSource, LatencyRecord, ModelErrorKind,
+    ModelStreamEvent, Nudge, NudgePolicy, PartialLatencySeed, PolicySnapshot,
+    StrategyRefreshReason, StrategyRequest, StrategyState, SystemCopilotClock, TopicShiftDetector,
+    TranscriptUpdateKind,
 };
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(test)]
 use std::sync::mpsc::Sender;
@@ -19,6 +22,7 @@ static NEXT_SESSION_EPOCH: AtomicU64 = AtomicU64::new(1);
 // saturation drops transient UI/model updates rather than growing memory.
 const COMMAND_CHANNEL_CAPACITY: usize = 32;
 const EVENT_CHANNEL_CAPACITY: usize = 256;
+const DEPTH_CHANNEL_CAPACITY: usize = 16;
 
 fn next_session_epoch() -> u64 {
     NEXT_SESSION_EPOCH.fetch_add(1, Ordering::Relaxed)
@@ -39,6 +43,20 @@ pub enum RunnerEvent {
     Degraded {
         error: String,
     },
+    TopicShiftDetected {
+        evidence_revision: u64,
+    },
+    GroundingRefreshed {
+        evidence_revision: u64,
+    },
+    StrategyUpdated {
+        evidence_revision: u64,
+        reason: StrategyRefreshReason,
+    },
+    PolicyAdjusted(PolicySnapshot),
+    DepthDegraded {
+        error: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,6 +70,101 @@ pub enum SubmitOutcome {
     DroppedQueueFull,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FeedbackOutcome {
+    Queued,
+    IgnoredAfterStop,
+    DroppedQueueFull,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct DepthLaneConfig {
+    pub strategy_interval: Duration,
+    pub grounding_interval: Duration,
+}
+
+impl DepthLaneConfig {
+    pub fn new(strategy_interval: Duration, grounding_interval: Duration) -> Self {
+        Self {
+            strategy_interval: strategy_interval
+                .clamp(Duration::from_secs(30), Duration::from_secs(90)),
+            grounding_interval: grounding_interval.max(Duration::from_secs(1)),
+        }
+    }
+}
+
+impl Default for DepthLaneConfig {
+    fn default() -> Self {
+        Self::new(Duration::from_secs(60), Duration::from_secs(15))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DepthLaneSnapshot {
+    pub latest_strategy: StrategyState,
+    pub strategy_updates: u32,
+    pub grounding_refreshes: u32,
+    pub topic_shifts: u32,
+    pub decisive_finals: u32,
+    pub latest_processed_revision: Option<u64>,
+    pub last_strategy_reason: Option<StrategyRefreshReason>,
+    pub strategy_update_reasons: Vec<StrategyRefreshReason>,
+    pub strategy_update_revisions: Vec<u64>,
+    pub grounding_refresh_revisions: Vec<u64>,
+    pub topic_shift_revisions: Vec<u64>,
+    pub last_grounding_error: Option<String>,
+    pub last_strategy_error: Option<String>,
+}
+
+impl Default for DepthLaneSnapshot {
+    fn default() -> Self {
+        Self {
+            latest_strategy: StrategyState::empty(),
+            strategy_updates: 0,
+            grounding_refreshes: 0,
+            topic_shifts: 0,
+            decisive_finals: 0,
+            latest_processed_revision: None,
+            last_strategy_reason: None,
+            strategy_update_reasons: Vec::new(),
+            strategy_update_revisions: Vec::new(),
+            grounding_refresh_revisions: Vec::new(),
+            topic_shift_revisions: Vec::new(),
+            last_grounding_error: None,
+            last_strategy_error: None,
+        }
+    }
+}
+
+struct DepthShared {
+    session_epoch: u64,
+    snapshot: DepthLaneSnapshot,
+    battle_card: Option<super::BattleCard>,
+}
+
+struct FastWorkerContext {
+    model: Arc<dyn CopilotModel>,
+    policy: NudgePolicy,
+    partial_debounce: Duration,
+    command_rx: Receiver<RunnerCommand>,
+    event_tx: SyncSender<RunnerEvent>,
+    runtime: Arc<Mutex<RunnerRuntime>>,
+    clock: Arc<dyn CopilotClock>,
+    depth_tx: SyncSender<DepthCommand>,
+    depth_shared: Arc<Mutex<DepthShared>>,
+}
+
+struct DepthWorkerContext {
+    model: Arc<dyn CopilotModel>,
+    grounding: Option<Arc<dyn GroundingSource>>,
+    config: DepthLaneConfig,
+    command_rx: Receiver<DepthCommand>,
+    event_tx: SyncSender<RunnerEvent>,
+    clock: Arc<dyn CopilotClock>,
+    active_cancel: Arc<Mutex<Option<CancelToken>>>,
+    shared: Arc<Mutex<DepthShared>>,
+}
+
 struct PendingRequest {
     request: CopilotRequest,
     invalidates_partials: bool,
@@ -62,6 +175,16 @@ enum RunnerCommand {
     InvalidatePartials,
     BeginSession,
     Wake,
+    Feedback {
+        nudge_id: String,
+        feedback: CopilotFeedback,
+    },
+    Stop,
+}
+
+enum DepthCommand {
+    Observe(Box<CopilotRequest>),
+    Reset,
     Stop,
 }
 
@@ -80,9 +203,10 @@ struct RunnerRuntime {
     nudge_expires_at: Option<DateTime<Utc>>,
     paused: bool,
     stopped: bool,
+    policy: PolicySnapshot,
 }
 
-/// Single-lane request runner.
+/// Fast request runner with an isolated slow strategy/retrieval worker.
 ///
 /// The worker is the only code that invokes `stream_structured`, so two fast
 /// requests can never overlap. Submitters can still cancel the current token
@@ -90,11 +214,15 @@ struct RunnerRuntime {
 /// queued requests and runs only the newest revision.
 pub struct CopilotRunner {
     command_tx: SyncSender<RunnerCommand>,
+    depth_tx: SyncSender<DepthCommand>,
     event_tx: SyncSender<RunnerEvent>,
     event_rx: Mutex<Receiver<RunnerEvent>>,
     runtime: Arc<Mutex<RunnerRuntime>>,
     clock: Arc<dyn CopilotClock>,
     worker: Mutex<Option<JoinHandle<()>>>,
+    depth_worker: Mutex<Option<JoinHandle<()>>>,
+    depth_cancel: Arc<Mutex<Option<CancelToken>>>,
+    depth_shared: Arc<Mutex<DepthShared>>,
 }
 
 impl CopilotRunner {
@@ -125,9 +253,66 @@ impl CopilotRunner {
         partial_debounce: Duration,
         clock: Arc<dyn CopilotClock>,
     ) -> Self {
+        Self::start_internal(
+            model,
+            policy,
+            partial_debounce,
+            clock,
+            None,
+            DepthLaneConfig::default(),
+        )
+    }
+
+    pub fn start_with_depth(
+        model: Arc<dyn CopilotModel>,
+        policy: NudgePolicy,
+        partial_debounce: Duration,
+        grounding: Option<Arc<dyn GroundingSource>>,
+        depth_config: DepthLaneConfig,
+    ) -> Self {
+        Self::start_internal(
+            model,
+            policy,
+            partial_debounce,
+            Arc::new(SystemCopilotClock),
+            grounding,
+            depth_config,
+        )
+    }
+
+    /// Deterministic replay seam for exercising both lanes with an injected
+    /// clock and grounding source.
+    pub fn start_with_clock_and_depth(
+        model: Arc<dyn CopilotModel>,
+        policy: NudgePolicy,
+        partial_debounce: Duration,
+        clock: Arc<dyn CopilotClock>,
+        grounding: Option<Arc<dyn GroundingSource>>,
+        depth_config: DepthLaneConfig,
+    ) -> Self {
+        Self::start_internal(
+            model,
+            policy,
+            partial_debounce,
+            clock,
+            grounding,
+            depth_config,
+        )
+    }
+
+    fn start_internal(
+        model: Arc<dyn CopilotModel>,
+        policy: NudgePolicy,
+        partial_debounce: Duration,
+        clock: Arc<dyn CopilotClock>,
+        grounding: Option<Arc<dyn GroundingSource>>,
+        depth_config: DepthLaneConfig,
+    ) -> Self {
         let (command_tx, command_rx) = mpsc::sync_channel(COMMAND_CHANNEL_CAPACITY);
+        let (depth_tx, depth_rx) = mpsc::sync_channel(DEPTH_CHANNEL_CAPACITY);
         let (event_tx, event_rx) = mpsc::sync_channel(EVENT_CHANNEL_CAPACITY);
         let session_epoch = next_session_epoch();
+        let policy_snapshot = policy.snapshot();
         let runtime = Arc::new(Mutex::new(RunnerRuntime {
             state: CopilotState::Arming,
             provider: model.provider_name().into(),
@@ -143,28 +328,60 @@ impl CopilotRunner {
             nudge_expires_at: None,
             paused: false,
             stopped: false,
+            policy: policy_snapshot,
+        }));
+        let depth_cancel = Arc::new(Mutex::new(None));
+        let depth_shared = Arc::new(Mutex::new(DepthShared {
+            session_epoch,
+            snapshot: DepthLaneSnapshot::default(),
+            battle_card: None,
         }));
         let worker_runtime = runtime.clone();
         let worker_event_tx = event_tx.clone();
         let worker_clock = Arc::clone(&clock);
+        let worker_depth_tx = depth_tx.clone();
+        let worker_depth_shared = Arc::clone(&depth_shared);
+        let fast_model = Arc::clone(&model);
         let worker = std::thread::spawn(move || {
-            run_worker(
-                model,
+            run_worker(FastWorkerContext {
+                model: fast_model,
                 policy,
                 partial_debounce,
                 command_rx,
-                worker_event_tx,
-                worker_runtime,
-                worker_clock,
-            )
+                event_tx: worker_event_tx,
+                runtime: worker_runtime,
+                clock: worker_clock,
+                depth_tx: worker_depth_tx,
+                depth_shared: worker_depth_shared,
+            })
+        });
+        let slow_event_tx = event_tx.clone();
+        let slow_clock = Arc::clone(&clock);
+        let slow_cancel = Arc::clone(&depth_cancel);
+        let slow_shared = Arc::clone(&depth_shared);
+        let depth_worker = std::thread::spawn(move || {
+            run_depth_worker(DepthWorkerContext {
+                model,
+                grounding,
+                config: depth_config,
+                command_rx: depth_rx,
+                event_tx: slow_event_tx,
+                clock: slow_clock,
+                active_cancel: slow_cancel,
+                shared: slow_shared,
+            })
         });
         Self {
             command_tx,
+            depth_tx,
             event_tx,
             event_rx: Mutex::new(event_rx),
             runtime,
             clock,
             worker: Mutex::new(Some(worker)),
+            depth_worker: Mutex::new(Some(depth_worker)),
+            depth_cancel,
+            depth_shared,
         }
     }
 
@@ -194,6 +411,12 @@ impl CopilotRunner {
         }
         if request.session_epoch != runtime.session_epoch {
             return SubmitOutcome::IgnoredStaleSession;
+        }
+
+        if let Ok(active_depth) = self.depth_cancel.try_lock() {
+            if let Some(cancel) = active_depth.as_ref() {
+                cancel.cancel();
+            }
         }
 
         let mut outcome = SubmitOutcome::Queued;
@@ -288,7 +511,19 @@ impl CopilotRunner {
                 CopilotState::Listening
             };
         }
+        if let Ok(active_depth) = self.depth_cancel.lock() {
+            if let Some(cancel) = active_depth.as_ref() {
+                cancel.cancel();
+            }
+        }
+        {
+            let mut depth = self.depth_shared.lock().unwrap();
+            depth.session_epoch = epoch;
+            depth.snapshot = DepthLaneSnapshot::default();
+            depth.battle_card = None;
+        }
         let _ = self.command_tx.try_send(RunnerCommand::BeginSession);
+        let _ = self.depth_tx.try_send(DepthCommand::Reset);
         epoch
     }
 
@@ -401,6 +636,24 @@ impl CopilotRunner {
         }
     }
 
+    pub fn record_feedback(
+        &self,
+        nudge_id: impl Into<String>,
+        feedback: CopilotFeedback,
+    ) -> FeedbackOutcome {
+        if self.runtime.lock().unwrap().stopped {
+            return FeedbackOutcome::IgnoredAfterStop;
+        }
+        match self.command_tx.try_send(RunnerCommand::Feedback {
+            nudge_id: nudge_id.into(),
+            feedback,
+        }) {
+            Ok(()) => FeedbackOutcome::Queued,
+            Err(TrySendError::Full(_)) => FeedbackOutcome::DroppedQueueFull,
+            Err(TrySendError::Disconnected(_)) => FeedbackOutcome::IgnoredAfterStop,
+        }
+    }
+
     pub fn health(&self) -> CopilotHealth {
         let runtime = self.runtime.lock().unwrap();
         CopilotHealth {
@@ -414,6 +667,7 @@ impl CopilotRunner {
                 .map(|request| request.evidence_revision),
             latest_evidence_revision: runtime.latest_evidence_revision,
             last_error: runtime.last_error.clone(),
+            policy: runtime.policy.clone(),
             latency_records: runtime.latency.records(),
             updated_ts: self.clock.utc_now(),
         }
@@ -456,6 +710,12 @@ impl CopilotRunner {
         self.runtime.lock().unwrap().latency.records()
     }
 
+    /// Process-local slow-lane instrumentation used by status surfaces and
+    /// deterministic eval. It is never appended to meeting artifacts.
+    pub fn depth_snapshot(&self) -> DepthLaneSnapshot {
+        self.depth_shared.lock().unwrap().snapshot.clone()
+    }
+
     pub fn stop(&self) {
         {
             let mut runtime = self.runtime.lock().unwrap();
@@ -468,8 +728,17 @@ impl CopilotRunner {
                 cancel.cancel();
             }
         }
+        if let Ok(active_depth) = self.depth_cancel.lock() {
+            if let Some(cancel) = active_depth.as_ref() {
+                cancel.cancel();
+            }
+        }
         let _ = self.command_tx.try_send(RunnerCommand::Stop);
+        let _ = self.depth_tx.try_send(DepthCommand::Stop);
         if let Some(worker) = self.worker.lock().unwrap().take() {
+            let _ = worker.join();
+        }
+        if let Some(worker) = self.depth_worker.lock().unwrap().take() {
             let _ = worker.join();
         }
     }
@@ -481,15 +750,18 @@ impl Drop for CopilotRunner {
     }
 }
 
-fn run_worker(
-    model: Arc<dyn CopilotModel>,
-    mut policy: NudgePolicy,
-    partial_debounce: Duration,
-    command_rx: Receiver<RunnerCommand>,
-    event_tx: SyncSender<RunnerEvent>,
-    runtime: Arc<Mutex<RunnerRuntime>>,
-    clock: Arc<dyn CopilotClock>,
-) {
+fn run_worker(context: FastWorkerContext) {
+    let FastWorkerContext {
+        model,
+        mut policy,
+        partial_debounce,
+        command_rx,
+        event_tx,
+        runtime,
+        clock,
+        depth_tx,
+        depth_shared,
+    } = context;
     let prewarm_result = model.prewarm();
     let (stopped, paused) = {
         let runtime = runtime.lock().unwrap();
@@ -525,13 +797,23 @@ fn run_worker(
     while let Ok(command) = command_rx.recv() {
         let mut pending = match command {
             RunnerCommand::Request(request) => *request,
-            RunnerCommand::InvalidatePartials | RunnerCommand::BeginSession => {
+            RunnerCommand::InvalidatePartials => {
                 policy.clear();
+                emit_current_state(&runtime, &event_tx);
+                continue;
+            }
+            RunnerCommand::BeginSession => {
+                policy.reset_session();
+                runtime.lock().unwrap().policy = policy.snapshot();
                 emit_current_state(&runtime, &event_tx);
                 continue;
             }
             RunnerCommand::Wake => {
                 emit_current_state(&runtime, &event_tx);
+                continue;
+            }
+            RunnerCommand::Feedback { nudge_id, feedback } => {
+                apply_feedback(&mut policy, &runtime, &event_tx, &nudge_id, feedback);
                 continue;
             }
             RunnerCommand::Stop => break,
@@ -557,8 +839,13 @@ fn run_worker(
                         pending.invalidates_partials = invalidates_partials;
                     }
                     Ok(RunnerCommand::Request(_)) | Ok(RunnerCommand::Wake) => {}
-                    Ok(RunnerCommand::InvalidatePartials) | Ok(RunnerCommand::BeginSession) => {
-                        policy.clear()
+                    Ok(RunnerCommand::Feedback { nudge_id, feedback }) => {
+                        apply_feedback(&mut policy, &runtime, &event_tx, &nudge_id, feedback)
+                    }
+                    Ok(RunnerCommand::InvalidatePartials) => policy.clear(),
+                    Ok(RunnerCommand::BeginSession) => {
+                        policy.reset_session();
+                        runtime.lock().unwrap().policy = policy.snapshot();
                     }
                     Ok(RunnerCommand::Stop) => {
                         should_stop = true;
@@ -584,7 +871,14 @@ fn run_worker(
                     pending.invalidates_partials = invalidates_partials;
                 }
                 RunnerCommand::Request(_) | RunnerCommand::Wake => {}
-                RunnerCommand::InvalidatePartials | RunnerCommand::BeginSession => policy.clear(),
+                RunnerCommand::Feedback { nudge_id, feedback } => {
+                    apply_feedback(&mut policy, &runtime, &event_tx, &nudge_id, feedback)
+                }
+                RunnerCommand::InvalidatePartials => policy.clear(),
+                RunnerCommand::BeginSession => {
+                    policy.reset_session();
+                    runtime.lock().unwrap().policy = policy.snapshot();
+                }
                 RunnerCommand::Stop => should_stop = true,
             }
         }
@@ -594,7 +888,19 @@ fn run_worker(
         if pending.invalidates_partials {
             policy.clear();
         }
-        let request = pending.request;
+        let mut request = pending.request;
+
+        // A failed try_lock means the depth worker is publishing a new compact
+        // snapshot. The fast lane proceeds immediately with its prior request
+        // context; it never waits for retrieval or strategy.
+        if let Ok(depth) = depth_shared.try_lock() {
+            if depth.session_epoch == request.session_epoch {
+                request.strategy_state = depth.snapshot.latest_strategy.clone();
+                if let Some(battle_card) = depth.battle_card.as_ref() {
+                    request.battle_card = battle_card.clone();
+                }
+            }
+        }
 
         {
             let runtime = runtime.lock().unwrap();
@@ -665,9 +971,15 @@ fn run_worker(
             continue;
         }
 
+        if request.update_kind == TranscriptUpdateKind::Final {
+            let _ = depth_tx.try_send(DepthCommand::Observe(Box::new(request.clone())));
+        }
+
         match result {
             Ok(draft) => {
-                if let Some(nudge) = policy.accept(draft, &request, clock.utc_now()) {
+                let accepted = policy.accept(draft, &request, clock.utc_now());
+                runtime.lock().unwrap().policy = policy.snapshot();
+                if let Some(nudge) = accepted {
                     {
                         let mut runtime = runtime.lock().unwrap();
                         if !request_is_current(&runtime, &request) {
@@ -702,6 +1014,264 @@ fn run_worker(
     }
 
     set_state(&runtime, &event_tx, CopilotState::Off, None);
+}
+
+fn apply_feedback(
+    policy: &mut NudgePolicy,
+    runtime: &Arc<Mutex<RunnerRuntime>>,
+    event_tx: &SyncSender<RunnerEvent>,
+    nudge_id: &str,
+    feedback: CopilotFeedback,
+) {
+    if !policy.record_feedback(nudge_id, feedback) {
+        return;
+    }
+    let snapshot = policy.snapshot();
+    {
+        let mut runtime = runtime.lock().unwrap();
+        runtime.policy = snapshot.clone();
+        if feedback == CopilotFeedback::Dismissed && runtime.state == CopilotState::Nudge {
+            runtime.state = CopilotState::Listening;
+            runtime.nudge_expires_at = None;
+        }
+    }
+    try_emit(event_tx, RunnerEvent::PolicyAdjusted(snapshot));
+}
+
+fn run_depth_worker(context: DepthWorkerContext) {
+    let DepthWorkerContext {
+        model,
+        grounding,
+        config,
+        command_rx,
+        event_tx,
+        clock,
+        active_cancel,
+        shared,
+    } = context;
+    let mut detector = TopicShiftDetector::default();
+    let mut last_strategy_at: Option<Instant> = None;
+    let mut last_grounding_at: Option<Instant> = None;
+
+    while let Ok(command) = command_rx.recv() {
+        let request = match command {
+            DepthCommand::Observe(request) => *request,
+            DepthCommand::Reset => {
+                detector.reset();
+                last_strategy_at = None;
+                last_grounding_at = None;
+                let mut shared = shared.lock().unwrap();
+                shared.snapshot = DepthLaneSnapshot::default();
+                shared.battle_card = None;
+                continue;
+            }
+            DepthCommand::Stop => break,
+        };
+        if request.update_kind != TranscriptUpdateKind::Final {
+            continue;
+        }
+        if shared.lock().unwrap().session_epoch != request.session_epoch {
+            continue;
+        }
+
+        let trigger_text = request
+            .utterances
+            .iter()
+            .find(|utterance| {
+                utterance.utterance_sequence == request.evidence_utterance_sequence
+                    && utterance.revision == request.evidence_utterance_revision
+            })
+            .map(|utterance| utterance.text.as_str())
+            .unwrap_or_default();
+        let topic_shift = detector.observe_final(trigger_text);
+        let decisive = is_decisive_final(trigger_text);
+        let now = clock.monotonic_now();
+        if topic_shift.is_some() {
+            let mut state = shared.lock().unwrap();
+            state.snapshot.topic_shifts = state.snapshot.topic_shifts.saturating_add(1);
+            push_revision(
+                &mut state.snapshot.topic_shift_revisions,
+                request.evidence_revision,
+            );
+            drop(state);
+            try_emit(
+                &event_tx,
+                RunnerEvent::TopicShiftDetected {
+                    evidence_revision: request.evidence_revision,
+                },
+            );
+        }
+        if decisive {
+            let mut state = shared.lock().unwrap();
+            state.snapshot.decisive_finals = state.snapshot.decisive_finals.saturating_add(1);
+        }
+
+        let grounding_due = last_grounding_at.is_none()
+            || topic_shift.is_some()
+            || last_grounding_at.is_some_and(|last| {
+                now.saturating_duration_since(last) >= config.grounding_interval
+            });
+        if grounding_due {
+            if let Some(source) = grounding.as_ref() {
+                let query = grounding_query(&request);
+                match source.refresh(&query) {
+                    Ok(card) => {
+                        let mut state = shared.lock().unwrap();
+                        if state.session_epoch != request.session_epoch {
+                            continue;
+                        }
+                        state.battle_card = Some(card);
+                        state.snapshot.grounding_refreshes =
+                            state.snapshot.grounding_refreshes.saturating_add(1);
+                        state.snapshot.last_grounding_error = None;
+                        push_revision(
+                            &mut state.snapshot.grounding_refresh_revisions,
+                            request.evidence_revision,
+                        );
+                        drop(state);
+                        try_emit(
+                            &event_tx,
+                            RunnerEvent::GroundingRefreshed {
+                                evidence_revision: request.evidence_revision,
+                            },
+                        );
+                    }
+                    Err(error) => {
+                        let message = error.to_string();
+                        let mut state = shared.lock().unwrap();
+                        if state.session_epoch == request.session_epoch {
+                            state.snapshot.last_grounding_error = Some(message.clone());
+                            drop(state);
+                            try_emit(
+                                &event_tx,
+                                RunnerEvent::DepthDegraded {
+                                    error: format!("grounding refresh: {message}"),
+                                },
+                            );
+                        }
+                    }
+                }
+            }
+            last_grounding_at = Some(now);
+        }
+
+        let strategy_reason = if last_strategy_at.is_none() {
+            Some(StrategyRefreshReason::Initial)
+        } else if topic_shift.is_some() {
+            Some(StrategyRefreshReason::TopicShift)
+        } else if decisive {
+            Some(StrategyRefreshReason::DecisiveFinal)
+        } else if last_strategy_at
+            .is_some_and(|last| now.saturating_duration_since(last) >= config.strategy_interval)
+        {
+            Some(StrategyRefreshReason::Cadence)
+        } else {
+            None
+        };
+
+        if let Some(reason) = strategy_reason {
+            let (prior_state, battle_card) = {
+                let state = shared.lock().unwrap();
+                (
+                    state.snapshot.latest_strategy.clone(),
+                    state
+                        .battle_card
+                        .clone()
+                        .unwrap_or_else(|| request.battle_card.clone()),
+                )
+            };
+            let strategy_request = StrategyRequest {
+                goal: request.goal.clone(),
+                mode: request.mode,
+                evidence_revision: request.evidence_revision,
+                reason,
+                utterances: request.utterances.clone(),
+                battle_card,
+                prior_state,
+            };
+            let cancel = CancelToken::new();
+            *active_cancel.lock().unwrap() = Some(cancel.clone());
+            let result = model.refresh_strategy(&strategy_request, &cancel);
+            active_cancel.lock().unwrap().take();
+            if !cancel.is_cancelled() {
+                match result {
+                    Ok(strategy) => {
+                        let mut state = shared.lock().unwrap();
+                        if state.session_epoch != request.session_epoch {
+                            continue;
+                        }
+                        state.snapshot.latest_strategy = strategy;
+                        state.snapshot.strategy_updates =
+                            state.snapshot.strategy_updates.saturating_add(1);
+                        state.snapshot.last_strategy_reason = Some(reason);
+                        state.snapshot.strategy_update_reasons.push(reason);
+                        if state.snapshot.strategy_update_reasons.len() > 64 {
+                            state.snapshot.strategy_update_reasons.remove(0);
+                        }
+                        state.snapshot.last_strategy_error = None;
+                        push_revision(
+                            &mut state.snapshot.strategy_update_revisions,
+                            request.evidence_revision,
+                        );
+                        drop(state);
+                        try_emit(
+                            &event_tx,
+                            RunnerEvent::StrategyUpdated {
+                                evidence_revision: request.evidence_revision,
+                                reason,
+                            },
+                        );
+                    }
+                    Err(error) if error.kind == ModelErrorKind::Cancelled => {}
+                    Err(error) => {
+                        let mut state = shared.lock().unwrap();
+                        if state.session_epoch == request.session_epoch {
+                            state.snapshot.last_strategy_error = Some(error.message.clone());
+                            drop(state);
+                            try_emit(
+                                &event_tx,
+                                RunnerEvent::DepthDegraded {
+                                    error: format!("strategy refresh: {}", error.message),
+                                },
+                            );
+                        }
+                    }
+                }
+            }
+            last_strategy_at = Some(now);
+        }
+        let mut state = shared.lock().unwrap();
+        if state.session_epoch == request.session_epoch {
+            state.snapshot.latest_processed_revision = Some(request.evidence_revision);
+        }
+    }
+}
+
+fn grounding_query(request: &CopilotRequest) -> String {
+    let mut terms = request
+        .utterances
+        .iter()
+        .filter(|utterance| utterance.update_kind == TranscriptUpdateKind::Final)
+        .rev()
+        .take(6)
+        .flat_map(|utterance| topic_keywords(&utterance.text))
+        .take(18)
+        .collect::<Vec<_>>();
+    terms.sort();
+    terms.dedup();
+    if terms.is_empty() {
+        request.goal.chars().take(240).collect()
+    } else {
+        terms.join(" ")
+    }
+}
+
+fn push_revision(revisions: &mut Vec<u64>, revision: u64) {
+    const REVISION_HISTORY_LIMIT: usize = 64;
+    if revisions.len() == REVISION_HISTORY_LIMIT {
+        revisions.remove(0);
+    }
+    revisions.push(revision);
 }
 
 fn request_is_current(runtime: &RunnerRuntime, request: &CopilotRequest) -> bool {
@@ -768,8 +1338,9 @@ fn emit_current_state(runtime: &Arc<Mutex<RunnerRuntime>>, event_tx: &SyncSender
 mod tests {
     use super::*;
     use crate::copilot::{
-        BattleCard, CopilotUtterance, ModelError, ModelEventSink, ModelHealth, ModelHealthStatus,
-        NudgeDraft, NudgeKind, TranscriptUpdateKind,
+        BattleCard, CopilotUtterance, MeetingMode, ModelError, ModelEventSink, ModelHealth,
+        ModelHealthStatus, NudgeDraft, NudgeKind, OpportunityKind, StrategyState,
+        TranscriptUpdateKind,
     };
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -815,6 +1386,8 @@ mod tests {
                 kind: NudgeKind::Ask,
                 text: "Ask for the owner.".into(),
                 source_chip: "owner".into(),
+                opportunity: OpportunityKind::General,
+                confidence: 100,
             })
         }
 
@@ -903,6 +1476,8 @@ mod tests {
                 kind: NudgeKind::Say,
                 text,
                 source_chip: "correction".into(),
+                opportunity: OpportunityKind::General,
+                confidence: 100,
             })
         }
 
@@ -918,6 +1493,65 @@ mod tests {
     }
 
     struct StreamingModel;
+
+    struct BlockingDepthModel {
+        fast_started: Sender<u64>,
+        depth_started: Sender<u64>,
+        depth_cancellations: AtomicUsize,
+    }
+
+    impl CopilotModel for BlockingDepthModel {
+        fn provider_name(&self) -> &str {
+            "test"
+        }
+
+        fn model_name(&self) -> &str {
+            "blocking-depth"
+        }
+
+        fn prewarm(&self) -> Result<(), ModelError> {
+            Ok(())
+        }
+
+        fn stream_structured(
+            &self,
+            request: &CopilotRequest,
+            _cancel: &CancelToken,
+            _sink: &dyn ModelEventSink,
+        ) -> Result<NudgeDraft, ModelError> {
+            let _ = self.fast_started.send(request.evidence_revision);
+            Ok(NudgeDraft {
+                kind: NudgeKind::Hold,
+                text: String::new(),
+                source_chip: String::new(),
+                opportunity: OpportunityKind::General,
+                confidence: 100,
+            })
+        }
+
+        fn refresh_strategy(
+            &self,
+            request: &StrategyRequest,
+            cancel: &CancelToken,
+        ) -> Result<StrategyState, ModelError> {
+            let _ = self.depth_started.send(request.evidence_revision);
+            while !cancel.is_cancelled() {
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            self.depth_cancellations.fetch_add(1, Ordering::SeqCst);
+            Err(ModelError::cancelled())
+        }
+
+        fn health(&self) -> ModelHealth {
+            ModelHealth {
+                provider: "test".into(),
+                model: "blocking-depth".into(),
+                status: ModelHealthStatus::Available,
+                detail: "ok".into(),
+                checked_ts: Utc::now(),
+            }
+        }
+    }
 
     impl CopilotModel for StreamingModel {
         fn provider_name(&self) -> &str {
@@ -943,6 +1577,8 @@ mod tests {
                 kind: NudgeKind::Ask,
                 text: "Ask what changed".into(),
                 source_chip: "change".into(),
+                opportunity: OpportunityKind::General,
+                confidence: 100,
             })
         }
 
@@ -960,6 +1596,7 @@ mod tests {
     fn request(session_epoch: u64, revision: u64) -> CopilotRequest {
         CopilotRequest {
             goal: "secure next steps".into(),
+            mode: MeetingMode::Generic,
             session_epoch,
             evidence_revision: revision,
             evidence_utterance_sequence: 1,
@@ -977,6 +1614,7 @@ mod tests {
                 duration_ms: 100,
             }],
             battle_card: BattleCard::empty(),
+            strategy_state: StrategyState::empty(),
         }
     }
 
@@ -988,6 +1626,7 @@ mod tests {
     ) -> CopilotRequest {
         CopilotRequest {
             goal: "secure next steps".into(),
+            mode: MeetingMode::Generic,
             session_epoch,
             evidence_revision,
             evidence_utterance_sequence: 1,
@@ -1005,6 +1644,7 @@ mod tests {
                 duration_ms: 100,
             }],
             battle_card: BattleCard::empty(),
+            strategy_state: StrategyState::empty(),
         }
     }
 
@@ -1380,5 +2020,33 @@ mod tests {
         assert!(record.nudge_us.is_some());
         let serialized_health = serde_json::to_value(runner.health()).unwrap();
         assert!(serialized_health.get("latency_records").is_none());
+    }
+
+    #[test]
+    fn blocked_depth_lane_is_cancelled_without_delaying_next_fast_request() {
+        let (fast_tx, fast_rx) = mpsc::channel();
+        let (depth_tx, depth_rx) = mpsc::channel();
+        let model = Arc::new(BlockingDepthModel {
+            fast_started: fast_tx,
+            depth_started: depth_tx,
+            depth_cancellations: AtomicUsize::new(0),
+        });
+        let runner = CopilotRunner::start(model.clone(), NudgePolicy::new(12_000));
+        let epoch = runner.session_epoch();
+        assert_eq!(runner.submit(request(epoch, 1)), SubmitOutcome::Queued);
+        assert_eq!(fast_rx.recv_timeout(Duration::from_secs(1)).unwrap(), 1);
+        assert_eq!(depth_rx.recv_timeout(Duration::from_secs(1)).unwrap(), 1);
+
+        let submitted_at = Instant::now();
+        assert_eq!(runner.submit(request(epoch, 2)), SubmitOutcome::Queued);
+        assert_eq!(fast_rx.recv_timeout(Duration::from_millis(250)).unwrap(), 2);
+        assert!(submitted_at.elapsed() < Duration::from_millis(250));
+
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while Instant::now() < deadline && model.depth_cancellations.load(Ordering::SeqCst) == 0 {
+            std::thread::yield_now();
+        }
+        assert!(model.depth_cancellations.load(Ordering::SeqCst) > 0);
+        runner.stop();
     }
 }

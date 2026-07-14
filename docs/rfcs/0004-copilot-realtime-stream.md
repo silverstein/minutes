@@ -184,8 +184,8 @@ model.
 
 ## Battle Card
 
-The engine preloads an approximately 1,000–2,000-token battle card assembled
-from existing local data:
+The depth worker asynchronously refreshes an approximately 1,000–2,000-token
+battle card from existing local data after stable finals and topic shifts:
 
 - graph people and relationship topics
 - open commitments
@@ -196,7 +196,7 @@ The card is a bounded cache, not a license to expose the full archive. Meetings
 with `sensitivity: restricted` are excluded at every source: the graph rebuild,
 structured searches, and FTS post-filter. The copilot has no override flag for
 restricted history. Context failures yield an empty/degraded card and never
-block capture.
+block capture or the fast nudge lane.
 
 Historical names may appear as historical entities. They must not be used to
 guess who is speaking live. Without an independently verified live identity,
@@ -210,6 +210,7 @@ Copilot settings live in their own section and do not overload summarization:
 [copilot]
 enabled = false
 surface = "tui"
+mode = "generic"
 fast_provider = "auto-local"
 fast_model = "llama3.2"
 allow_cloud = false
@@ -218,6 +219,8 @@ target_latency_ms = 5000
 history_grounding = true
 live_partials = true
 partial_debounce_ms = 250
+depth_refresh_secs = 60
+grounding_refresh_secs = 15
 ```
 
 Semantics:
@@ -232,21 +235,29 @@ Semantics:
 - `target_latency_ms` is the fast-lane timeout budget. A timeout degrades the
   copilot, not recording.
 - `history_grounding = false` omits the battle card but still permits live-only
-  nudges.
+  nudges. When enabled, graph/structured/FTS retrieval runs only on the slow
+  worker after stable finals or a topic shift.
 - `live_partials = true` applies only when the copilot owns a standalone
   streaming Whisper session in-process. External capture and non-streaming
   backends report `final_only` and continue using durable finals.
-- `partial_debounce_ms` bounds correction coalescing before a model request.
+- `partial_debounce_ms` bounds correction coalescing before a fast model request.
+- `mode` supplies the default opportunity, cadence, threshold, and tone policy.
+  `--mode` selects it per session.
+- `depth_refresh_secs` refreshes compact strategy (open threads, unmet goal
+  items, unresolved objections, and steering direction) every 30–90 seconds,
+  on topic changes, and after decisive finals. Slow work is cancelled when new
+  fast evidence arrives and never emits a second nudge stream.
 
 ## First CLI Surface
 
 The first portable surface is:
 
 ```text
-minutes copilot start --goal "..." [--surface tui] [--live]
+minutes copilot start --goal "..." [--surface tui] [--mode generic] [--live]
 minutes copilot status
 minutes copilot pause
 minutes copilot resume
+minutes copilot feedback --nudge-id "nudge-7-2" --rating helpful
 minutes copilot stop
 ```
 

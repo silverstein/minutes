@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 const BATTLE_CARD_CHAR_BUDGET: usize = 7_000;
 
-/// Bounded, preloaded historical context for the fast lane.
+/// Bounded historical context refreshed asynchronously for the fast lane.
 ///
 /// Every repository query uses the default restricted-history exclusion. The
 /// rendered field is the model-facing representation and is capped to roughly
@@ -23,6 +23,30 @@ pub struct BattleCard {
 pub enum BattleCardError {
     #[error("battle-card sources were unavailable: {0}")]
     SourcesUnavailable(String),
+}
+
+/// Retrieval seam owned by the slow lane. Implementations may touch graph,
+/// FTS, or optional QMD, so callers must never invoke this from capture or the
+/// fast nudge path.
+pub trait GroundingSource: Send + Sync + 'static {
+    fn refresh(&self, query: &str) -> Result<BattleCard, BattleCardError>;
+}
+
+#[derive(Debug, Clone)]
+pub struct RepositoryGrounding {
+    config: Config,
+}
+
+impl RepositoryGrounding {
+    pub fn new(config: Config) -> Self {
+        Self { config }
+    }
+}
+
+impl GroundingSource for RepositoryGrounding {
+    fn refresh(&self, query: &str) -> Result<BattleCard, BattleCardError> {
+        BattleCard::assemble(&self.config, query)
+    }
 }
 
 impl BattleCard {

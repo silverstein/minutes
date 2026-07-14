@@ -1,4 +1,4 @@
-use super::BattleCard;
+use super::{BattleCard, LatencyRecord};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -20,7 +20,14 @@ pub struct Nudge {
     pub kind: NudgeKind,
     pub text: String,
     pub source_chip: String,
+    #[serde(default)]
+    pub session_epoch: u64,
     pub evidence_revision: u64,
+    #[serde(default)]
+    pub evidence_utterance_sequence: u64,
+    #[serde(default)]
+    pub evidence_utterance_revision: u64,
+    pub update_kind: TranscriptUpdateKind,
     pub created_ts: DateTime<Utc>,
     pub ttl_ms: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -57,6 +64,8 @@ pub enum TranscriptUpdateKind {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CopilotUtterance {
+    #[serde(default)]
+    pub utterance_sequence: u64,
     pub revision: u64,
     pub update_kind: TranscriptUpdateKind,
     pub source: String,
@@ -82,7 +91,13 @@ impl CopilotUtterance {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CopilotRequest {
     pub goal: String,
+    #[serde(default)]
+    pub session_epoch: u64,
     pub evidence_revision: u64,
+    #[serde(default)]
+    pub evidence_utterance_sequence: u64,
+    #[serde(default)]
+    pub evidence_utterance_revision: u64,
     pub update_kind: TranscriptUpdateKind,
     pub utterances: Vec<CopilotUtterance>,
     pub battle_card: BattleCard,
@@ -90,20 +105,12 @@ pub struct CopilotRequest {
 
 impl CopilotRequest {
     pub fn materially_newer_than(&self, older: &Self) -> bool {
-        if self.evidence_revision <= older.evidence_revision {
+        if self.session_epoch != older.session_epoch
+            || self.evidence_revision <= older.evidence_revision
+        {
             return false;
         }
-        if self.update_kind == TranscriptUpdateKind::Final {
-            return true;
-        }
-
-        let old_chars: usize = older.utterances.iter().map(|item| item.text.len()).sum();
-        let new_chars: usize = self.utterances.iter().map(|item| item.text.len()).sum();
-        new_chars.saturating_sub(old_chars) >= 32
-            || self
-                .evidence_revision
-                .saturating_sub(older.evidence_revision)
-                >= 3
+        self.update_kind == TranscriptUpdateKind::Final || self.utterances != older.utterances
     }
 
     /// Fixed model instructions. Meeting content is intentionally absent from
@@ -122,6 +129,7 @@ impl CopilotRequest {
             .iter()
             .map(|utterance| {
                 serde_json::json!({
+                    "utterance_sequence": utterance.utterance_sequence,
                     "revision": utterance.revision,
                     "stability": utterance.update_kind,
                     "source": utterance.source,
@@ -135,7 +143,10 @@ impl CopilotRequest {
         let data = serde_json::json!({
             "goal": self.goal,
             "battle_card": self.battle_card.rendered,
+            "session_epoch": self.session_epoch,
             "evidence_revision": self.evidence_revision,
+            "evidence_utterance_sequence": self.evidence_utterance_sequence,
+            "evidence_utterance_revision": self.evidence_utterance_revision,
             "transcript": transcript,
         });
         format!(
@@ -162,9 +173,15 @@ pub struct CopilotHealth {
     pub state: CopilotState,
     pub provider: String,
     pub model: String,
+    #[serde(default)]
+    pub session_epoch: u64,
     pub in_flight_revision: Option<u64>,
     pub latest_evidence_revision: Option<u64>,
     pub last_error: Option<String>,
+    /// Detailed timing stays process-local. Operational status sidecars omit
+    /// it so audio-derived instrumentation is never persisted.
+    #[serde(skip)]
+    pub latency_records: Vec<LatencyRecord>,
     pub updated_ts: DateTime<Utc>,
 }
 
@@ -175,9 +192,13 @@ mod tests {
     fn request(revision: u64, kind: TranscriptUpdateKind, text: &str) -> CopilotRequest {
         CopilotRequest {
             goal: "close next steps".into(),
+            session_epoch: 1,
             evidence_revision: revision,
+            evidence_utterance_sequence: 1,
+            evidence_utterance_revision: revision,
             update_kind: kind,
             utterances: vec![CopilotUtterance {
+                utterance_sequence: 1,
                 revision,
                 update_kind: kind,
                 source: "system".into(),
@@ -201,11 +222,11 @@ mod tests {
     }
 
     #[test]
-    fn final_revision_is_materially_newer_but_tiny_partial_is_not() {
+    fn every_changed_newer_revision_supersedes_including_short_corrections() {
         let old = request(10, TranscriptUpdateKind::Partial, "hello");
         let tiny = request(11, TranscriptUpdateKind::Partial, "hello there");
         let final_request = request(12, TranscriptUpdateKind::Final, "hello there");
-        assert!(!tiny.materially_newer_than(&old));
+        assert!(tiny.materially_newer_than(&old));
         assert!(final_request.materially_newer_than(&tiny));
     }
 }

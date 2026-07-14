@@ -1,4 +1,4 @@
-use super::{Nudge, NudgeDraft, COPILOT_CONTRACT_VERSION};
+use super::{CopilotRequest, Nudge, NudgeDraft, COPILOT_CONTRACT_VERSION};
 use chrono::{DateTime, Utc};
 
 /// Applies deterministic lifetime, evidence, and supersession rules to
@@ -33,7 +33,7 @@ impl NudgePolicy {
     pub fn accept(
         &mut self,
         mut draft: NudgeDraft,
-        evidence_revision: u64,
+        request: &CopilotRequest,
         now: DateTime<Utc>,
     ) -> Option<Nudge> {
         draft.text = truncate_chars(draft.text.trim(), 240);
@@ -43,7 +43,7 @@ impl NudgePolicy {
         }
 
         let supersedes = self.active_at(now).map(|nudge| nudge.id.clone());
-        let id = format!("nudge-{evidence_revision}-{}", self.next_id);
+        let id = format!("nudge-{}-{}", request.evidence_revision, self.next_id);
         self.next_id = self.next_id.saturating_add(1);
         let nudge = Nudge {
             v: COPILOT_CONTRACT_VERSION,
@@ -51,7 +51,11 @@ impl NudgePolicy {
             kind: draft.kind,
             text: draft.text,
             source_chip: draft.source_chip,
-            evidence_revision,
+            session_epoch: request.session_epoch,
+            evidence_revision: request.evidence_revision,
+            evidence_utterance_sequence: request.evidence_utterance_sequence,
+            evidence_utterance_revision: request.evidence_utterance_revision,
+            update_kind: request.update_kind,
             created_ts: now,
             ttl_ms: self.ttl_ms,
             supersedes,
@@ -76,7 +80,7 @@ fn truncate_chars(value: &str, limit: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::copilot::NudgeKind;
+    use crate::copilot::{BattleCard, NudgeKind, TranscriptUpdateKind};
     use chrono::TimeZone;
 
     fn now() -> DateTime<Utc> {
@@ -93,10 +97,25 @@ mod tests {
         }
     }
 
+    fn request(revision: u64) -> CopilotRequest {
+        CopilotRequest {
+            goal: "close next steps".into(),
+            session_epoch: 1,
+            evidence_revision: revision,
+            evidence_utterance_sequence: 1,
+            evidence_utterance_revision: revision,
+            update_kind: TranscriptUpdateKind::Partial,
+            utterances: Vec::new(),
+            battle_card: BattleCard::empty(),
+        }
+    }
+
     #[test]
     fn nudge_expires_at_ttl_boundary() {
         let mut policy = NudgePolicy::new(12_000);
-        let nudge = policy.accept(draft("Ask for a date"), 42, now()).unwrap();
+        let nudge = policy
+            .accept(draft("Ask for a date"), &request(42), now())
+            .unwrap();
         assert!(!nudge.is_expired_at(now() + chrono::Duration::milliseconds(11_999)));
         assert!(nudge.is_expired_at(now() + chrono::Duration::milliseconds(12_000)));
         assert!(policy
@@ -107,11 +126,13 @@ mod tests {
     #[test]
     fn newer_nudge_supersedes_active_nudge_only() {
         let mut policy = NudgePolicy::new(12_000);
-        let first = policy.accept(draft("Ask for a date"), 42, now()).unwrap();
+        let first = policy
+            .accept(draft("Ask for a date"), &request(42), now())
+            .unwrap();
         let second = policy
             .accept(
                 draft("Clarify the owner"),
-                43,
+                &request(43),
                 now() + chrono::Duration::seconds(1),
             )
             .unwrap();
@@ -120,7 +141,7 @@ mod tests {
         let third = policy
             .accept(
                 draft("Ask what changed"),
-                44,
+                &request(44),
                 now() + chrono::Duration::seconds(20),
             )
             .unwrap();

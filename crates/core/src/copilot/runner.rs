@@ -1,20 +1,36 @@
+use super::latency::LatencyTracker;
 use super::{
-    CancelToken, CopilotHealth, CopilotModel, CopilotRequest, CopilotState, ModelErrorKind,
-    ModelStreamEvent, Nudge, NudgePolicy,
+    CancelToken, CopilotHealth, CopilotModel, CopilotRequest, CopilotState, LatencyRecord,
+    ModelErrorKind, ModelStreamEvent, Nudge, NudgePolicy, PartialLatencySeed, TranscriptUpdateKind,
 };
 use chrono::{DateTime, Utc};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+static NEXT_SESSION_EPOCH: AtomicU64 = AtomicU64::new(1);
+
+fn next_session_epoch() -> u64 {
+    NEXT_SESSION_EPOCH.fetch_add(1, Ordering::Relaxed)
+}
 
 #[derive(Debug, Clone)]
 pub enum RunnerEvent {
     StateChanged(CopilotState),
     Model(ModelStreamEvent),
     Nudge(Nudge),
-    RequestCancelled { evidence_revision: u64 },
-    Degraded { error: String },
+    RequestCancelled {
+        evidence_revision: u64,
+    },
+    EvidenceRetracted {
+        session_epoch: u64,
+        through_utterance_sequence: u64,
+    },
+    Degraded {
+        error: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -24,10 +40,17 @@ pub enum SubmitOutcome {
     IgnoredNotMateriallyNewer,
     IgnoredWhilePaused,
     IgnoredAfterStop,
+    IgnoredStaleSession,
+}
+
+struct PendingRequest {
+    request: CopilotRequest,
 }
 
 enum RunnerCommand {
-    Request(Box<CopilotRequest>),
+    Request(Box<PendingRequest>),
+    InvalidatePartials,
+    BeginSession,
     Wake,
     Stop,
 }
@@ -38,7 +61,11 @@ struct RunnerRuntime {
     model: String,
     current_request: Option<CopilotRequest>,
     current_cancel: Option<CancelToken>,
+    session_epoch: u64,
     latest_evidence_revision: Option<u64>,
+    latest_partial_identity: Option<(u64, u64)>,
+    retracted_through_utterance_sequence: u64,
+    latency: LatencyTracker,
     last_error: Option<String>,
     nudge_expires_at: Option<DateTime<Utc>>,
     paused: bool,
@@ -53,6 +80,7 @@ struct RunnerRuntime {
 /// queued requests and runs only the newest revision.
 pub struct CopilotRunner {
     command_tx: Sender<RunnerCommand>,
+    event_tx: Sender<RunnerEvent>,
     event_rx: Mutex<Receiver<RunnerEvent>>,
     runtime: Arc<Mutex<RunnerRuntime>>,
     worker: Mutex<Option<JoinHandle<()>>>,
@@ -60,26 +88,48 @@ pub struct CopilotRunner {
 
 impl CopilotRunner {
     pub fn start(model: Arc<dyn CopilotModel>, policy: NudgePolicy) -> Self {
+        Self::start_with_debounce(model, policy, Duration::ZERO)
+    }
+
+    pub fn start_with_debounce(
+        model: Arc<dyn CopilotModel>,
+        policy: NudgePolicy,
+        partial_debounce: Duration,
+    ) -> Self {
         let (command_tx, command_rx) = mpsc::channel();
         let (event_tx, event_rx) = mpsc::channel();
+        let session_epoch = next_session_epoch();
         let runtime = Arc::new(Mutex::new(RunnerRuntime {
             state: CopilotState::Arming,
             provider: model.provider_name().into(),
             model: model.model_name().into(),
             current_request: None,
             current_cancel: None,
+            session_epoch,
             latest_evidence_revision: None,
+            latest_partial_identity: None,
+            retracted_through_utterance_sequence: 0,
+            latency: LatencyTracker::default(),
             last_error: None,
             nudge_expires_at: None,
             paused: false,
             stopped: false,
         }));
         let worker_runtime = runtime.clone();
+        let worker_event_tx = event_tx.clone();
         let worker = std::thread::spawn(move || {
-            run_worker(model, policy, command_rx, event_tx, worker_runtime)
+            run_worker(
+                model,
+                policy,
+                partial_debounce,
+                command_rx,
+                worker_event_tx,
+                worker_runtime,
+            )
         });
         Self {
             command_tx,
+            event_tx,
             event_rx: Mutex::new(event_rx),
             runtime,
             worker: Mutex::new(Some(worker)),
@@ -87,6 +137,22 @@ impl CopilotRunner {
     }
 
     pub fn submit(&self, request: CopilotRequest) -> SubmitOutcome {
+        self.submit_inner(request, None)
+    }
+
+    pub fn submit_with_latency(
+        &self,
+        request: CopilotRequest,
+        latency: PartialLatencySeed,
+    ) -> SubmitOutcome {
+        self.submit_inner(request, Some(latency))
+    }
+
+    fn submit_inner(
+        &self,
+        request: CopilotRequest,
+        latency: Option<PartialLatencySeed>,
+    ) -> SubmitOutcome {
         let mut runtime = self.runtime.lock().unwrap();
         if runtime.stopped {
             return SubmitOutcome::IgnoredAfterStop;
@@ -94,33 +160,143 @@ impl CopilotRunner {
         if runtime.paused {
             return SubmitOutcome::IgnoredWhilePaused;
         }
+        if request.session_epoch != runtime.session_epoch {
+            return SubmitOutcome::IgnoredStaleSession;
+        }
 
         let mut outcome = SubmitOutcome::Queued;
         if let Some(current) = runtime.current_request.as_ref() {
-            if !request.materially_newer_than(current) {
-                return SubmitOutcome::IgnoredNotMateriallyNewer;
-            }
-            if let Some(cancel) = runtime.current_cancel.as_ref() {
-                cancel.cancel();
-                outcome = SubmitOutcome::CancelledOlderRequest;
+            if current.session_epoch == request.session_epoch {
+                if !request.materially_newer_than(current) {
+                    return SubmitOutcome::IgnoredNotMateriallyNewer;
+                }
+                if let Some(cancel) = runtime.current_cancel.as_ref() {
+                    cancel.cancel();
+                    outcome = SubmitOutcome::CancelledOlderRequest;
+                }
             }
         }
-        runtime.latest_evidence_revision = Some(
-            runtime
-                .latest_evidence_revision
-                .unwrap_or(0)
-                .max(request.evidence_revision),
-        );
+        if runtime
+            .latest_evidence_revision
+            .is_some_and(|revision| request.evidence_revision <= revision)
+        {
+            return SubmitOutcome::IgnoredNotMateriallyNewer;
+        }
+        runtime.latest_evidence_revision = Some(request.evidence_revision);
+        if request.update_kind == TranscriptUpdateKind::Partial {
+            runtime.latest_partial_identity = Some((
+                request.evidence_utterance_sequence,
+                request.evidence_utterance_revision,
+            ));
+        }
+        if let Some(seed) = latency {
+            runtime.latency.begin(request.evidence_revision, seed);
+        }
         drop(runtime);
 
         if self
             .command_tx
-            .send(RunnerCommand::Request(Box::new(request)))
+            .send(RunnerCommand::Request(Box::new(PendingRequest { request })))
             .is_err()
         {
             return SubmitOutcome::IgnoredAfterStop;
         }
         outcome
+    }
+
+    pub fn session_epoch(&self) -> u64 {
+        self.runtime.lock().unwrap().session_epoch
+    }
+
+    /// Start a new in-memory evidence epoch and cancel any prior session's
+    /// request. A delayed model result from the old epoch is filtered even if
+    /// the provider ignores cooperative cancellation.
+    pub fn begin_session(&self) -> u64 {
+        let epoch = next_session_epoch();
+        {
+            let mut runtime = self.runtime.lock().unwrap();
+            if runtime.stopped {
+                return runtime.session_epoch;
+            }
+            if let Some(cancel) = runtime.current_cancel.as_ref() {
+                cancel.cancel();
+            }
+            runtime.session_epoch = epoch;
+            runtime.latest_evidence_revision = None;
+            runtime.latest_partial_identity = None;
+            runtime.retracted_through_utterance_sequence = 0;
+            runtime.nudge_expires_at = None;
+            runtime.state = if runtime.paused {
+                CopilotState::Paused
+            } else {
+                CopilotState::Listening
+            };
+        }
+        let _ = self.command_tx.send(RunnerCommand::BeginSession);
+        epoch
+    }
+
+    /// Observe producer freshness even when the bounded data ring dropped the
+    /// newer text. This can only cancel stale advice; it never queues work.
+    pub fn supersede_partial_revision(
+        &self,
+        session_epoch: u64,
+        utterance_sequence: u64,
+        revision: u64,
+    ) {
+        let mut runtime = self.runtime.lock().unwrap();
+        if runtime.stopped || runtime.session_epoch != session_epoch {
+            return;
+        }
+        if runtime
+            .latest_partial_identity
+            .is_none_or(|identity| (utterance_sequence, revision) > identity)
+        {
+            runtime.latest_partial_identity = Some((utterance_sequence, revision));
+        }
+        if let Some(current) = runtime.current_request.as_ref() {
+            let current_identity = (
+                current.evidence_utterance_sequence,
+                current.evidence_utterance_revision,
+            );
+            if current.update_kind == TranscriptUpdateKind::Partial
+                && (utterance_sequence, revision) > current_identity
+            {
+                if let Some(cancel) = runtime.current_cancel.as_ref() {
+                    cancel.cancel();
+                }
+            }
+        }
+    }
+
+    pub fn retract_partials(&self, session_epoch: u64, through_utterance_sequence: u64) {
+        {
+            let mut runtime = self.runtime.lock().unwrap();
+            if runtime.stopped || runtime.session_epoch != session_epoch {
+                return;
+            }
+            runtime.retracted_through_utterance_sequence = runtime
+                .retracted_through_utterance_sequence
+                .max(through_utterance_sequence);
+            runtime.nudge_expires_at = None;
+            if runtime.state == CopilotState::Nudge {
+                runtime.state = CopilotState::Listening;
+            }
+            if let Some(current) = runtime.current_request.as_ref() {
+                if current.update_kind == TranscriptUpdateKind::Partial
+                    && current.evidence_utterance_sequence <= through_utterance_sequence
+                {
+                    if let Some(cancel) = runtime.current_cancel.as_ref() {
+                        cancel.cancel();
+                    }
+                }
+            }
+        }
+        let _ = self.command_tx.send(RunnerCommand::InvalidatePartials);
+        let _ = self.event_tx.send(RunnerEvent::EvidenceRetracted {
+            session_epoch,
+            through_utterance_sequence,
+        });
     }
 
     pub fn pause(&self) {
@@ -168,22 +344,53 @@ impl CopilotRunner {
             state: runtime.state,
             provider: runtime.provider.clone(),
             model: runtime.model.clone(),
+            session_epoch: runtime.session_epoch,
             in_flight_revision: runtime
                 .current_request
                 .as_ref()
                 .map(|request| request.evidence_revision),
             latest_evidence_revision: runtime.latest_evidence_revision,
             last_error: runtime.last_error.clone(),
+            latency_records: runtime.latency.records(),
             updated_ts: Utc::now(),
         }
     }
 
     pub fn try_recv(&self) -> Option<RunnerEvent> {
-        self.event_rx.lock().unwrap().try_recv().ok()
+        loop {
+            let event = self.event_rx.lock().unwrap().try_recv().ok()?;
+            if let RunnerEvent::Nudge(nudge) = &event {
+                let runtime = self.runtime.lock().unwrap();
+                if !nudge_is_current(&runtime, nudge) {
+                    continue;
+                }
+            }
+            return Some(event);
+        }
     }
 
     pub fn recv_timeout(&self, timeout: Duration) -> Option<RunnerEvent> {
-        self.event_rx.lock().unwrap().recv_timeout(timeout).ok()
+        let deadline = Instant::now() + timeout;
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let event = self.event_rx.lock().unwrap().recv_timeout(remaining).ok()?;
+            if let RunnerEvent::Nudge(nudge) = &event {
+                let runtime = self.runtime.lock().unwrap();
+                if !nudge_is_current(&runtime, nudge) {
+                    if Instant::now() >= deadline {
+                        return None;
+                    }
+                    continue;
+                }
+            }
+            return Some(event);
+        }
+    }
+
+    /// Bounded process-local instrumentation. These records are never appended
+    /// to the event log or transcript artifacts.
+    pub fn latency_records(&self) -> Vec<LatencyRecord> {
+        self.runtime.lock().unwrap().latency.records()
     }
 
     pub fn stop(&self) {
@@ -214,6 +421,7 @@ impl Drop for CopilotRunner {
 fn run_worker(
     model: Arc<dyn CopilotModel>,
     mut policy: NudgePolicy,
+    partial_debounce: Duration,
     command_rx: Receiver<RunnerCommand>,
     event_tx: Sender<RunnerEvent>,
     runtime: Arc<Mutex<RunnerRuntime>>,
@@ -251,8 +459,13 @@ fn run_worker(
     }
 
     while let Ok(command) = command_rx.recv() {
-        let mut request = match command {
+        let mut pending = match command {
             RunnerCommand::Request(request) => *request,
+            RunnerCommand::InvalidatePartials | RunnerCommand::BeginSession => {
+                policy.clear();
+                emit_current_state(&runtime, &event_tx);
+                continue;
+            }
             RunnerCommand::Wake => {
                 emit_current_state(&runtime, &event_tx);
                 continue;
@@ -261,27 +474,62 @@ fn run_worker(
         };
 
         let mut should_stop = false;
+        if pending.request.update_kind == TranscriptUpdateKind::Partial
+            && !partial_debounce.is_zero()
+        {
+            let deadline = Instant::now() + partial_debounce;
+            loop {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    break;
+                }
+                match command_rx.recv_timeout(remaining) {
+                    Ok(RunnerCommand::Request(candidate))
+                        if candidate.request.evidence_revision
+                            >= pending.request.evidence_revision =>
+                    {
+                        pending = *candidate;
+                    }
+                    Ok(RunnerCommand::Request(_)) | Ok(RunnerCommand::Wake) => {}
+                    Ok(RunnerCommand::InvalidatePartials) | Ok(RunnerCommand::BeginSession) => {
+                        policy.clear()
+                    }
+                    Ok(RunnerCommand::Stop) => {
+                        should_stop = true;
+                        break;
+                    }
+                    Err(mpsc::RecvTimeoutError::Timeout) => break,
+                    Err(mpsc::RecvTimeoutError::Disconnected) => {
+                        should_stop = true;
+                        break;
+                    }
+                }
+            }
+        }
+
         while let Ok(next) = command_rx.try_recv() {
             match next {
                 RunnerCommand::Request(candidate)
-                    if candidate.evidence_revision >= request.evidence_revision =>
+                    if candidate.request.evidence_revision >= pending.request.evidence_revision =>
                 {
-                    request = *candidate;
+                    pending = *candidate;
                 }
                 RunnerCommand::Request(_) | RunnerCommand::Wake => {}
+                RunnerCommand::InvalidatePartials | RunnerCommand::BeginSession => policy.clear(),
                 RunnerCommand::Stop => should_stop = true,
             }
         }
         if should_stop {
             break;
         }
+        let request = pending.request;
 
         {
             let runtime = runtime.lock().unwrap();
             if runtime.stopped {
                 break;
             }
-            if runtime.paused {
+            if runtime.paused || !request_is_current(&runtime, &request) {
                 continue;
             }
         }
@@ -293,11 +541,24 @@ fn run_worker(
             runtime.current_cancel = Some(cancel.clone());
             runtime.state = CopilotState::Thinking;
             runtime.nudge_expires_at = None;
+            runtime.latency.mark_model_request(
+                request.session_epoch,
+                request.evidence_revision,
+                Instant::now(),
+            );
         }
         let _ = event_tx.send(RunnerEvent::StateChanged(CopilotState::Thinking));
 
         let stream_tx = event_tx.clone();
+        let stream_runtime = Arc::clone(&runtime);
+        let stream_epoch = request.session_epoch;
+        let stream_revision = request.evidence_revision;
         let stream_sink = move |event| {
+            stream_runtime.lock().unwrap().latency.mark_first_token(
+                stream_epoch,
+                stream_revision,
+                Instant::now(),
+            );
             let _ = stream_tx.send(RunnerEvent::Model(event));
         };
         let result = model.stream_structured(&request, &cancel, &stream_sink);
@@ -308,13 +569,9 @@ fn run_worker(
             runtime.current_cancel = None;
         }
 
-        let superseded_by_newer_evidence = runtime
-            .lock()
-            .unwrap()
-            .latest_evidence_revision
-            .is_some_and(|revision| revision > request.evidence_revision);
+        let evidence_is_stale = !request_is_current(&runtime.lock().unwrap(), &request);
         if cancel.is_cancelled()
-            || superseded_by_newer_evidence
+            || evidence_is_stale
             || result
                 .as_ref()
                 .err()
@@ -334,12 +591,21 @@ fn run_worker(
 
         match result {
             Ok(draft) => {
-                if let Some(nudge) = policy.accept(draft, request.evidence_revision, Utc::now()) {
+                if let Some(nudge) = policy.accept(draft, &request, Utc::now()) {
                     {
                         let mut runtime = runtime.lock().unwrap();
+                        if !request_is_current(&runtime, &request) {
+                            policy.clear();
+                            continue;
+                        }
                         runtime.state = CopilotState::Nudge;
                         runtime.last_error = None;
                         runtime.nudge_expires_at = Some(nudge.expires_at());
+                        runtime.latency.mark_nudge(
+                            request.session_epoch,
+                            request.evidence_revision,
+                            Instant::now(),
+                        );
                     }
                     let _ = event_tx.send(RunnerEvent::Nudge(nudge));
                     let _ = event_tx.send(RunnerEvent::StateChanged(CopilotState::Nudge));
@@ -360,6 +626,40 @@ fn run_worker(
     }
 
     set_state(&runtime, &event_tx, CopilotState::Off, None);
+}
+
+fn request_is_current(runtime: &RunnerRuntime, request: &CopilotRequest) -> bool {
+    if runtime.session_epoch != request.session_epoch
+        || runtime.latest_evidence_revision != Some(request.evidence_revision)
+    {
+        return false;
+    }
+    if request.update_kind == TranscriptUpdateKind::Final {
+        return true;
+    }
+    request.evidence_utterance_sequence > runtime.retracted_through_utterance_sequence
+        && runtime.latest_partial_identity
+            == Some((
+                request.evidence_utterance_sequence,
+                request.evidence_utterance_revision,
+            ))
+}
+
+fn nudge_is_current(runtime: &RunnerRuntime, nudge: &Nudge) -> bool {
+    if runtime.session_epoch != nudge.session_epoch
+        || runtime
+            .latest_evidence_revision
+            .is_some_and(|revision| revision > nudge.evidence_revision)
+    {
+        return false;
+    }
+    nudge.update_kind == TranscriptUpdateKind::Final
+        || (nudge.evidence_utterance_sequence > runtime.retracted_through_utterance_sequence
+            && runtime.latest_partial_identity
+                == Some((
+                    nudge.evidence_utterance_sequence,
+                    nudge.evidence_utterance_revision,
+                )))
 }
 
 fn set_state(
@@ -487,16 +787,141 @@ mod tests {
         }
     }
 
-    fn request(revision: u64) -> CopilotRequest {
+    struct IgnoringCancellationModel {
+        calls: AtomicUsize,
+        started: Sender<u64>,
+        release_first: Mutex<Receiver<()>>,
+    }
+
+    impl CopilotModel for IgnoringCancellationModel {
+        fn provider_name(&self) -> &str {
+            "test"
+        }
+
+        fn model_name(&self) -> &str {
+            "ignores-cancellation"
+        }
+
+        fn prewarm(&self) -> Result<(), ModelError> {
+            Ok(())
+        }
+
+        fn stream_structured(
+            &self,
+            request: &CopilotRequest,
+            _cancel: &CancelToken,
+            _sink: &dyn ModelEventSink,
+        ) -> Result<NudgeDraft, ModelError> {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            let _ = self.started.send(request.evidence_revision);
+            if call == 0 {
+                self.release_first.lock().unwrap().recv().unwrap();
+            }
+            let text = request
+                .utterances
+                .last()
+                .map(|utterance| utterance.text.clone())
+                .unwrap_or_default();
+            Ok(NudgeDraft {
+                kind: NudgeKind::Say,
+                text,
+                source_chip: "correction".into(),
+            })
+        }
+
+        fn health(&self) -> ModelHealth {
+            ModelHealth {
+                provider: "test".into(),
+                model: "ignores-cancellation".into(),
+                status: ModelHealthStatus::Available,
+                detail: "ok".into(),
+                checked_ts: Utc::now(),
+            }
+        }
+    }
+
+    struct StreamingModel;
+
+    impl CopilotModel for StreamingModel {
+        fn provider_name(&self) -> &str {
+            "test"
+        }
+
+        fn model_name(&self) -> &str {
+            "streaming"
+        }
+
+        fn prewarm(&self) -> Result<(), ModelError> {
+            Ok(())
+        }
+
+        fn stream_structured(
+            &self,
+            _request: &CopilotRequest,
+            _cancel: &CancelToken,
+            sink: &dyn ModelEventSink,
+        ) -> Result<NudgeDraft, ModelError> {
+            sink.on_event(ModelStreamEvent::TextDelta("first".into()));
+            Ok(NudgeDraft {
+                kind: NudgeKind::Ask,
+                text: "Ask what changed".into(),
+                source_chip: "change".into(),
+            })
+        }
+
+        fn health(&self) -> ModelHealth {
+            ModelHealth {
+                provider: "test".into(),
+                model: "streaming".into(),
+                status: ModelHealthStatus::Available,
+                detail: "ok".into(),
+                checked_ts: Utc::now(),
+            }
+        }
+    }
+
+    fn request(session_epoch: u64, revision: u64) -> CopilotRequest {
         CopilotRequest {
             goal: "secure next steps".into(),
+            session_epoch,
             evidence_revision: revision,
+            evidence_utterance_sequence: 1,
+            evidence_utterance_revision: revision,
             update_kind: TranscriptUpdateKind::Final,
             utterances: vec![CopilotUtterance {
+                utterance_sequence: 1,
                 revision,
                 update_kind: TranscriptUpdateKind::Final,
                 source: "system".into(),
                 text: format!("revision {revision}"),
+                speaker: None,
+                speaker_verified: false,
+                offset_ms: 0,
+                duration_ms: 100,
+            }],
+            battle_card: BattleCard::empty(),
+        }
+    }
+
+    fn partial_request(
+        session_epoch: u64,
+        evidence_revision: u64,
+        utterance_revision: u64,
+        text: &str,
+    ) -> CopilotRequest {
+        CopilotRequest {
+            goal: "secure next steps".into(),
+            session_epoch,
+            evidence_revision,
+            evidence_utterance_sequence: 1,
+            evidence_utterance_revision: utterance_revision,
+            update_kind: TranscriptUpdateKind::Partial,
+            utterances: vec![CopilotUtterance {
+                utterance_sequence: 1,
+                revision: utterance_revision,
+                update_kind: TranscriptUpdateKind::Partial,
+                source: "in-process-live".into(),
+                text: text.into(),
                 speaker: None,
                 speaker_verified: false,
                 offset_ms: 0,
@@ -516,11 +941,12 @@ mod tests {
             started: started_tx,
         });
         let runner = CopilotRunner::start(model.clone(), NudgePolicy::new(12_000));
+        let epoch = runner.session_epoch();
 
-        assert_eq!(runner.submit(request(10)), SubmitOutcome::Queued);
+        assert_eq!(runner.submit(request(epoch, 10)), SubmitOutcome::Queued);
         assert_eq!(started_rx.recv_timeout(Duration::from_secs(1)).unwrap(), 10);
         assert_eq!(
-            runner.submit(request(11)),
+            runner.submit(request(epoch, 11)),
             SubmitOutcome::CancelledOlderRequest
         );
 
@@ -547,7 +973,10 @@ mod tests {
     #[test]
     fn provider_timeout_degrades_only_the_copilot_runner() {
         let runner = CopilotRunner::start(Arc::new(TimeoutModel), NudgePolicy::new(12_000));
-        assert_eq!(runner.submit(request(20)), SubmitOutcome::Queued);
+        assert_eq!(
+            runner.submit(request(runner.session_epoch(), 20)),
+            SubmitOutcome::Queued
+        );
 
         let deadline = std::time::Instant::now() + Duration::from_secs(1);
         let mut degraded = false;
@@ -563,5 +992,170 @@ mod tests {
         assert_eq!(runner.health().state, CopilotState::Degraded);
         // No error is returned through `submit`; capture/transcript producers
         // are not referenced by the runner and therefore cannot be failed.
+    }
+
+    #[test]
+    fn short_partial_correction_never_surfaces_superseded_nudge() {
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let model = Arc::new(IgnoringCancellationModel {
+            calls: AtomicUsize::new(0),
+            started: started_tx,
+            release_first: Mutex::new(release_rx),
+        });
+        let runner = CopilotRunner::start(model, NudgePolicy::new(12_000));
+        let epoch = runner.session_epoch();
+
+        assert_eq!(
+            runner.submit(partial_request(epoch, 1, 1, "Approve")),
+            SubmitOutcome::Queued
+        );
+        assert_eq!(started_rx.recv_timeout(Duration::from_secs(1)).unwrap(), 1);
+        assert_eq!(
+            runner.submit(partial_request(epoch, 2, 2, "Reject")),
+            SubmitOutcome::CancelledOlderRequest
+        );
+        release_tx.send(()).unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut surfaced_revisions = Vec::new();
+        while Instant::now() < deadline && !surfaced_revisions.contains(&2) {
+            if let Some(RunnerEvent::Nudge(nudge)) = runner.recv_timeout(Duration::from_millis(50))
+            {
+                surfaced_revisions.push(nudge.evidence_revision);
+                if nudge.evidence_revision == 2 {
+                    assert_eq!(nudge.text, "Reject");
+                }
+            }
+        }
+        assert_eq!(surfaced_revisions, vec![2]);
+    }
+
+    #[test]
+    fn debounce_coalesces_to_the_latest_partial_before_model_request() {
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let model = Arc::new(IgnoringCancellationModel {
+            calls: AtomicUsize::new(0),
+            started: started_tx,
+            release_first: Mutex::new(release_rx),
+        });
+        let runner = CopilotRunner::start_with_debounce(
+            model,
+            NudgePolicy::new(12_000),
+            Duration::from_millis(50),
+        );
+        let epoch = runner.session_epoch();
+        assert_eq!(
+            runner.submit(partial_request(epoch, 1, 1, "Approve")),
+            SubmitOutcome::Queued
+        );
+        assert_eq!(
+            runner.submit(partial_request(epoch, 2, 2, "Reject")),
+            SubmitOutcome::Queued
+        );
+        assert_eq!(started_rx.recv_timeout(Duration::from_secs(1)).unwrap(), 2);
+        assert!(started_rx.try_recv().is_err());
+        release_tx.send(()).unwrap();
+    }
+
+    #[test]
+    fn retracted_partial_never_surfaces_a_nudge() {
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let model = Arc::new(IgnoringCancellationModel {
+            calls: AtomicUsize::new(0),
+            started: started_tx,
+            release_first: Mutex::new(release_rx),
+        });
+        let runner = CopilotRunner::start(model, NudgePolicy::new(12_000));
+        let epoch = runner.session_epoch();
+        assert_eq!(
+            runner.submit(partial_request(epoch, 1, 1, "Approve")),
+            SubmitOutcome::Queued
+        );
+        started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        runner.retract_partials(epoch, 1);
+        release_tx.send(()).unwrap();
+
+        let deadline = Instant::now() + Duration::from_millis(500);
+        while Instant::now() < deadline {
+            if let Some(event) = runner.recv_timeout(Duration::from_millis(25)) {
+                assert!(!matches!(event, RunnerEvent::Nudge(_)));
+            }
+        }
+    }
+
+    #[test]
+    fn new_session_epoch_rejects_prior_in_flight_nudge() {
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let model = Arc::new(IgnoringCancellationModel {
+            calls: AtomicUsize::new(0),
+            started: started_tx,
+            release_first: Mutex::new(release_rx),
+        });
+        let runner = CopilotRunner::start(model, NudgePolicy::new(12_000));
+        let old_epoch = runner.session_epoch();
+        assert_eq!(
+            runner.submit(partial_request(old_epoch, 1, 1, "old session")),
+            SubmitOutcome::Queued
+        );
+        started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        let new_epoch = runner.begin_session();
+        assert!(new_epoch > old_epoch);
+        release_tx.send(()).unwrap();
+        assert_eq!(
+            runner.submit(partial_request(new_epoch, 1, 1, "new session")),
+            SubmitOutcome::Queued
+        );
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut nudged_epoch = None;
+        while Instant::now() < deadline && nudged_epoch.is_none() {
+            if let Some(RunnerEvent::Nudge(nudge)) = runner.recv_timeout(Duration::from_millis(50))
+            {
+                nudged_epoch = Some(nudge.session_epoch);
+            }
+        }
+        assert_eq!(nudged_epoch, Some(new_epoch));
+    }
+
+    #[test]
+    fn latency_status_records_every_in_process_stage_without_persistence() {
+        let runner = CopilotRunner::start(Arc::new(StreamingModel), NudgePolicy::new(12_000));
+        let epoch = runner.session_epoch();
+        let audio_received_at = Instant::now();
+        let seed = PartialLatencySeed {
+            session_epoch: epoch,
+            utterance_sequence: 1,
+            utterance_revision: 1,
+            audio_received_at,
+            partial_published_at: audio_received_at + Duration::from_millis(1),
+            trigger_at: audio_received_at + Duration::from_millis(2),
+            context_ready_at: audio_received_at + Duration::from_millis(3),
+        };
+        assert_eq!(
+            runner.submit_with_latency(partial_request(epoch, 1, 1, "hello"), seed),
+            SubmitOutcome::Queued
+        );
+
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while Instant::now() < deadline {
+            if matches!(
+                runner.recv_timeout(Duration::from_millis(25)),
+                Some(RunnerEvent::Nudge(_))
+            ) {
+                break;
+            }
+        }
+        let records = runner.health().latency_records;
+        assert_eq!(records.len(), 1);
+        let record = &records[0];
+        assert!(record.model_request_us.is_some());
+        assert!(record.first_token_us.is_some());
+        assert!(record.nudge_us.is_some());
+        let serialized_health = serde_json::to_value(runner.health()).unwrap();
+        assert!(serialized_health.get("latency_records").is_none());
     }
 }

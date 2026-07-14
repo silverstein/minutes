@@ -6,6 +6,23 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CopilotEvidenceMode {
+    #[default]
+    FinalOnly,
+    InProcessPartials,
+}
+
+impl CopilotEvidenceMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::FinalOnly => "final_only",
+            Self::InProcessPartials => "in_process_partials",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CopilotSessionStatus {
     pub active: bool,
@@ -13,6 +30,8 @@ pub struct CopilotSessionStatus {
     pub goal: String,
     pub surface: String,
     pub cursor: u64,
+    #[serde(default)]
+    pub evidence_mode: CopilotEvidenceMode,
     pub capture_attachment: String,
     pub health: CopilotHealth,
     pub updated_ts: DateTime<Utc>,
@@ -26,14 +45,17 @@ impl Default for CopilotSessionStatus {
             goal: String::new(),
             surface: "tui".into(),
             cursor: 0,
+            evidence_mode: CopilotEvidenceMode::FinalOnly,
             capture_attachment: "not attached".into(),
             health: CopilotHealth {
                 state: CopilotState::Off,
                 provider: String::new(),
                 model: String::new(),
+                session_epoch: 0,
                 in_flight_revision: None,
                 latest_evidence_revision: None,
                 last_error: None,
+                latency_records: Vec::new(),
                 updated_ts: Utc::now(),
             },
             updated_ts: Utc::now(),

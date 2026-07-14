@@ -362,6 +362,11 @@ pub struct CopilotConfig {
     pub target_latency_ms: u64,
     /// Whether graph/search history is assembled into the battle card.
     pub history_grounding: bool,
+    /// Enable ephemeral in-process partial evidence for a copilot-owned live
+    /// session. External capture and non-streaming backends remain final-only.
+    pub live_partials: bool,
+    /// Coalesce fast partial corrections before starting a model request.
+    pub partial_debounce_ms: u64,
 }
 
 impl CopilotConfig {
@@ -1126,6 +1131,8 @@ impl Default for CopilotConfig {
             nudge_ttl_ms: 12_000,
             target_latency_ms: 5_000,
             history_grounding: true,
+            live_partials: true,
+            partial_debounce_ms: 250,
         }
     }
 }
@@ -1640,6 +1647,8 @@ mod tests {
         assert_eq!(config.copilot.nudge_ttl_ms, 12_000);
         assert_eq!(config.copilot.target_latency_ms, 5_000);
         assert!(config.copilot.history_grounding);
+        assert!(config.copilot.live_partials);
+        assert_eq!(config.copilot.partial_debounce_ms, 250);
         assert_eq!(config.search.engine, "builtin");
         assert!(!config.daily_notes.enabled);
         assert_eq!(config.dictation.backend, "whisper");
@@ -1671,6 +1680,8 @@ mod tests {
             nudge_ttl_ms = 9000
             target_latency_ms = 3500
             history_grounding = false
+            live_partials = false
+            partial_debounce_ms = 400
             "#,
         )
         .unwrap();
@@ -1683,6 +1694,8 @@ mod tests {
         assert_eq!(parsed.copilot.nudge_ttl_ms, 9_000);
         assert_eq!(parsed.copilot.target_latency_ms, 3_500);
         assert!(!parsed.copilot.history_grounding);
+        assert!(!parsed.copilot.live_partials);
+        assert_eq!(parsed.copilot.partial_debounce_ms, 400);
     }
 
     #[test]

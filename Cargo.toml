@@ -76,6 +76,7 @@ nnnoiseless = "0.5"
 
 # Channels (for streaming audio)
 crossbeam-channel = "0.5"
+crossbeam-queue = "0.3"
 
 # Speaker diarization (native, no Python). Use the crates.io release so the
 # manifest stays `cargo publish`-able. The only known upstream bug (i16→f32

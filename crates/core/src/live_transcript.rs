@@ -1,5 +1,6 @@
 use crate::config::Config;
 use crate::error::{LiveTranscriptError, MinutesError, TranscribeError};
+use crate::live_partials::{LivePartialPublisher, SupersessionReason};
 use crate::pid;
 use crate::streaming::AudioStream;
 use crate::streaming_whisper::StreamingWhisper;
@@ -602,6 +603,21 @@ fn normalize_live_transcript_text(text: &str) -> Option<String> {
     }
 }
 
+fn supersede_partial_after_finalize(
+    publisher: Option<&mut LivePartialPublisher>,
+    line_count_before: usize,
+    line_count_after: usize,
+) {
+    if let Some(publisher) = publisher {
+        let reason = if line_count_after > line_count_before {
+            SupersessionReason::Finalized
+        } else {
+            SupersessionReason::Discarded
+        };
+        publisher.supersede_current(reason);
+    }
+}
+
 fn live_text_part(line: &str) -> &str {
     line.find("] ")
         .map(|index| &line[index + 2..])
@@ -632,6 +648,20 @@ pub fn run(
     stop_flag: Arc<AtomicBool>,
     config: &Config,
     existing_context_session_id: Option<String>,
+) -> Result<(usize, f64, PathBuf), MinutesError> {
+    run_with_partials(stop_flag, config, existing_context_session_id, None)
+}
+
+/// Run standalone live transcription with an optional ephemeral in-process
+/// partial stream. The publisher is owned by the audio/VAD loop and uses only
+/// lock-free, non-blocking operations; durable finals continue through the
+/// unchanged writer path.
+#[cfg(feature = "whisper")]
+pub fn run_with_partials(
+    stop_flag: Arc<AtomicBool>,
+    config: &Config,
+    existing_context_session_id: Option<String>,
+    partial_publisher: Option<LivePartialPublisher>,
 ) -> Result<(usize, f64, PathBuf), MinutesError> {
     let mark_precreated_session_failed = |error: &MinutesError| {
         if let Some(session_id) = existing_context_session_id.as_deref() {
@@ -689,7 +719,12 @@ pub fn run(
         )
     };
 
-    match run_inner(stop_flag, config, context_session_id.clone()) {
+    match run_inner(
+        stop_flag,
+        config,
+        context_session_id.clone(),
+        partial_publisher,
+    ) {
         Ok((lines, duration, path)) => {
             // The writer is closed now. Keep the liveness lock until the fixed
             // scratch files have moved so a new session cannot truncate them,
@@ -751,6 +786,7 @@ fn run_inner(
     stop_flag: Arc<AtomicBool>,
     config: &Config,
     context_session_id: Option<String>,
+    mut partial_publisher: Option<LivePartialPublisher>,
 ) -> Result<(usize, f64, PathBuf), MinutesError> {
     let mut whisper_ctx: Option<whisper_rs::WhisperContext> = None;
 
@@ -886,6 +922,7 @@ fn run_inner(
         if stop_flag.load(Ordering::Relaxed) {
             // Finalize any in-progress utterance
             if utterance_samples > 0 {
+                let line_count_before = writer.line_count;
                 #[cfg(feature = "parakeet")]
                 finalize_on_exit(
                     &mut writer,
@@ -911,6 +948,11 @@ fn run_inner(
                     &mut streaming,
                     &mut whisper_ctx,
                     "standalone",
+                );
+                supersede_partial_after_finalize(
+                    partial_publisher.as_mut(),
+                    line_count_before,
+                    writer.line_count,
                 );
             }
             break;
@@ -919,6 +961,7 @@ fn run_inner(
         // Check for stop sentinel (from `minutes stop`)
         if pid::check_and_clear_sentinel() {
             if utterance_samples > 0 {
+                let line_count_before = writer.line_count;
                 #[cfg(feature = "parakeet")]
                 finalize_on_exit(
                     &mut writer,
@@ -944,6 +987,11 @@ fn run_inner(
                     &mut streaming,
                     &mut whisper_ctx,
                     "standalone",
+                );
+                supersede_partial_after_finalize(
+                    partial_publisher.as_mut(),
+                    line_count_before,
+                    writer.line_count,
                 );
             }
             break;
@@ -971,6 +1019,9 @@ fn run_inner(
                             samples_discarded = utterance_samples,
                             "discarding partial utterance across device reconnect"
                         );
+                        if let Some(publisher) = partial_publisher.as_mut() {
+                            publisher.supersede_current(SupersessionReason::Discarded);
+                        }
                     }
                     streaming.reset();
                     #[cfg(target_os = "macos")]
@@ -984,6 +1035,7 @@ fn run_inner(
                 Err(e) => {
                     tracing::error!("live transcript reconnect failed: {}", e);
                     if utterance_samples > 0 {
+                        let line_count_before = writer.line_count;
                         #[cfg(feature = "parakeet")]
                         finalize_on_exit(
                             &mut writer,
@@ -1009,6 +1061,11 @@ fn run_inner(
                             &mut streaming,
                             &mut whisper_ctx,
                             "standalone",
+                        );
+                        supersede_partial_after_finalize(
+                            partial_publisher.as_mut(),
+                            line_count_before,
+                            writer.line_count,
                         );
                     }
                     break;
@@ -1042,6 +1099,9 @@ fn run_inner(
                                 samples_discarded = utterance_samples,
                                 "discarding partial utterance across stream reconnect"
                             );
+                            if let Some(publisher) = partial_publisher.as_mut() {
+                                publisher.supersede_current(SupersessionReason::Discarded);
+                            }
                         }
                         streaming.reset();
                         #[cfg(target_os = "macos")]
@@ -1055,6 +1115,7 @@ fn run_inner(
                     Err(e) => {
                         tracing::error!("reconnect after disconnect failed: {}", e);
                         if utterance_samples > 0 {
+                            let line_count_before = writer.line_count;
                             #[cfg(feature = "parakeet")]
                             finalize_on_exit(
                                 &mut writer,
@@ -1081,12 +1142,19 @@ fn run_inner(
                                 &mut whisper_ctx,
                                 "standalone",
                             );
+                            supersede_partial_after_finalize(
+                                partial_publisher.as_mut(),
+                                line_count_before,
+                                writer.line_count,
+                            );
                         }
                         break;
                     }
                 }
             }
         };
+
+        let audio_received_at = Instant::now();
 
         // Write raw audio to WAV
         writer.write_audio(&chunk.samples);
@@ -1096,6 +1164,9 @@ fn run_inner(
         if vad_result.speaking {
             was_speaking = true;
             utterance_samples += chunk.samples.len();
+            if let Some(publisher) = partial_publisher.as_mut() {
+                publisher.begin_utterance(audio_received_at);
+            }
 
             if apple_live_enabled {
                 #[cfg(target_os = "macos")]
@@ -1108,15 +1179,24 @@ fn run_inner(
                     parakeet_utterance_samples.extend_from_slice(&chunk.samples);
                 }
             } else if let Ok(whisper_ctx) = ensure_live_whisper_ctx(&mut whisper_ctx, config) {
-                if let Some(_sr) = streaming.feed(&chunk.samples, whisper_ctx) {
-                    // Intentionally not emitted in event-bus v0. Partial
-                    // revisions are high-volume and need a gated v1 contract.
+                if let Some(sr) = streaming.feed(&chunk.samples, whisper_ctx) {
+                    if let (Some(publisher), Some(text)) = (
+                        partial_publisher.as_mut(),
+                        normalize_live_transcript_text(&sr.text),
+                    ) {
+                        let _ = publisher
+                            .try_publish(text, writer.start_time.elapsed().as_millis() as u64);
+                        // A full ring drops here. Do not log, wait, retry,
+                        // allocate another queue, or touch the durable event
+                        // path from this thread.
+                    }
                 }
             }
 
             // Force-finalize if max utterance reached
             if utterance_samples >= max_utterance_samples {
                 tracing::info!("max utterance duration reached, force-finalizing");
+                let line_count_before = writer.line_count;
                 #[cfg(feature = "parakeet")]
                 let write_ok = finalize_live_utterance(
                     &mut writer,
@@ -1143,6 +1223,11 @@ fn run_inner(
                     &mut whisper_ctx,
                     "standalone",
                 );
+                supersede_partial_after_finalize(
+                    partial_publisher.as_mut(),
+                    line_count_before,
+                    writer.line_count,
+                );
                 if !write_ok {
                     tracing::error!("JSONL write failed — stopping session to prevent data loss");
                     break;
@@ -1152,6 +1237,7 @@ fn run_inner(
             }
         } else if was_speaking && utterance_samples > 0 {
             // Speech just ended — finalize the utterance
+            let line_count_before = writer.line_count;
             #[cfg(feature = "parakeet")]
             let write_ok = finalize_live_utterance(
                 &mut writer,
@@ -1177,6 +1263,11 @@ fn run_inner(
                 &mut streaming,
                 &mut whisper_ctx,
                 "standalone",
+            );
+            supersede_partial_after_finalize(
+                partial_publisher.as_mut(),
+                line_count_before,
+                writer.line_count,
             );
             if !write_ok {
                 tracing::error!("JSONL write failed — stopping session to prevent data loss");

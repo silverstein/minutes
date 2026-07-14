@@ -6,6 +6,7 @@
 
 mod battle_card;
 mod control;
+mod latency;
 mod ollama_provider;
 mod policy;
 mod provider;
@@ -17,8 +18,9 @@ pub use battle_card::{BattleCard, BattleCardError};
 pub use control::{
     clear_session_controls, copilot_pause_path, copilot_pid_path, copilot_status_path,
     copilot_stop_path, create_session_guard, read_session_status, request_pause, request_resume,
-    request_stop, write_session_status, CopilotSessionStatus,
+    request_stop, write_session_status, CopilotEvidenceMode, CopilotSessionStatus,
 };
+pub use latency::{LatencyRecord, PartialLatencySeed};
 pub use ollama_provider::OllamaCopilotModel;
 pub use policy::NudgePolicy;
 pub use provider::{

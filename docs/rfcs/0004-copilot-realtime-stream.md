@@ -9,11 +9,21 @@ accelerators consume the same versioned stream.
 
 ## Product Boundary
 
-The copilot is an optional, failure-isolated consumer of the Agent Event Bus.
-It does not own audio capture or transcription, and a provider outage must never
-stop or degrade recording. The first implementation consumes the already-shipped
-`live.utterance.final` event through the stable sequence cursor described in
-[RFC 0003](0003-agent-event-bus-v0.md).
+The copilot is an optional, failure-isolated consumer. Its authoritative lane
+continues to consume the already-shipped `live.utterance.final` event through
+the stable sequence cursor described in
+[RFC 0003](0003-agent-event-bus-v0.md). When the CLI explicitly owns a
+standalone live session in the same process, an additional ephemeral partial
+lane reduces coaching latency. A provider outage must never stop or degrade
+recording.
+
+The partial lane is a small, preallocated lock-free ring. The audio/VAD
+producer calls a non-blocking push; a full ring drops the hypothesis. It never
+waits, locks, performs I/O, or appends an event. Finalization and discard are
+published as atomic supersession watermarks on the same in-process channel, so
+they remain observable even when the data ring is saturated. The durable
+event log, final payload, JSONL transcript, and line-count contract are
+unchanged.
 
 The portable fast lane is Ollama. `fast_provider = "auto-local"` resolves to
 Ollama on every platform. Apple Foundation Models may implement the same
@@ -31,42 +41,45 @@ does not change that persisted envelope and does not add a producer in this PR.
 
 ## Transcript Stream
 
-The normalized transcript contract supports both revisioned partials and finals,
-even though the first engine implementation consumes finals only:
+The normalized in-process partial carries a session epoch, utterance sequence,
+and a revision monotonic within that utterance:
 
 ```jsonc
 {
   "v": 1,
-  "session_id": "optional-capture-session-id",
-  "revision": 4826,
-  "stability": "final",
-  "replaces_revision": null,
-  "source": "system",
+  "session_epoch": 7,
+  "utterance_sequence": 12,
+  "revision": 3,
+  "is_final": false,
   "speaker": null,
-  "speaker_verified": false,
   "text": "Could you send the rollout plan by Friday?",
   "offset_ms": 91342,
-  "duration_ms": 3840,
-  "created_ts": "2026-07-13T20:05:04.412Z"
+  "audio_received_at": "process-monotonic instant",
+  "partial_published_at": "process-monotonic instant"
 }
 ```
 
 Rules:
 
-- `revision` is monotonic within the stream. For the v0 Agent Event Bus bridge,
-  the event envelope's monotonic `seq` is the evidence revision.
-- `stability` is `partial` or `final`. A partial may be replaced by a newer
-  revision. A final is stable evidence and is never edited in place.
-- `replaces_revision` identifies the partial revision replaced by this object.
-  It is absent for an append-only final from the current producer.
+- `revision` is monotonic within an `utterance_sequence`; gaps are allowed when
+  the producer drops partials on overflow.
+- Every accepted newer revision supersedes the older revision, including short
+  corrections such as “Approve” to “Reject.”
 - A consumer must not append every partial as if it were new speech. It replaces
   the older revision in its local view.
+- A final or discard advances an atomic `superseded_through` watermark. The
+  runner cancels matching work and filters any already-queued nudge before a
+  surface can render it.
+- `session_epoch` is a process-local monotonic counter incremented at copilot
+  session start. A result from an older epoch is stale even if its provider
+  ignores cancellation.
 - `speaker` is not trustworthy merely because it is present. A named speaker may
   be shown or passed to a model only when `speaker_verified` is true based on an
   independent identity source. Otherwise surfaces and prompts use “the other
-  speaker.” The current `live.utterance.final` bridge always sets this false.
-- Partial production, volume limits, and producer changes are deferred. The
-  first implementation consumes `live.utterance.final` only.
+  speaker.” In-process partials carry `speaker: null`; the current
+  `live.utterance.final` bridge always sets verification false.
+- Partials never enter the Agent Event Bus, JSONL, promoted meeting artifact,
+  or any other durable store.
 
 ## Nudge Stream
 
@@ -140,8 +153,19 @@ Arming | Listening | Thinking | Nudge -> Degraded -> Listening | Off
 There is one fast request lane. When a materially newer transcript revision
 arrives, the engine cancels the current token, waits for that request to leave
 the lane, and then starts the newest queued request. It never overlaps two
-requests. Provider errors change copilot health/state only; they do not
-propagate into capture or transcript production.
+requests. Partial requests are debounced before entering the lane. Revision,
+retraction, and epoch checks run both after model completion and immediately
+before event delivery, so cooperative cancellation is an optimization rather
+than the correctness boundary. Provider errors change copilot health/state
+only; they do not propagate into capture or transcript production.
+
+## Latency Instrumentation
+
+The runner retains at most 64 process-local timelines covering
+audio-received, partial-published, trigger, context-ready, model-request,
+first-token, and nudge. `CopilotRunner` health/status exposes these records to
+the owning process. Status sidecar serialization explicitly omits them; they
+are never appended to the event log or transcript artifacts.
 
 ## Prompt and Execution Boundary
 
@@ -189,6 +213,8 @@ allow_cloud = false
 nudge_ttl_ms = 12000
 target_latency_ms = 5000
 history_grounding = true
+live_partials = true
+partial_debounce_ms = 250
 ```
 
 Semantics:
@@ -204,28 +230,34 @@ Semantics:
   copilot, not recording.
 - `history_grounding = false` omits the battle card but still permits live-only
   nudges.
+- `live_partials = true` applies only when the copilot owns a standalone
+  streaming Whisper session in-process. External capture and non-streaming
+  backends report `final_only` and continue using durable finals.
+- `partial_debounce_ms` bounds correction coalescing before a model request.
 
 ## First CLI Surface
 
 The first portable surface is:
 
 ```text
-minutes copilot start --goal "..." [--surface tui]
+minutes copilot start --goal "..." [--surface tui] [--live]
 minutes copilot status
 minutes copilot pause
 minutes copilot resume
 minutes copilot stop
 ```
 
-The foreground start process attaches through `read_events_since_seq`; it never
-polls the live transcript JSONL behind another process. Capture remains owned by
-its existing process. If a host cannot attach to the shared event cursor, it
-must say so clearly and stay degraded/off rather than silently switching data
-sources.
+Without `--live`, the foreground process attaches through
+`read_events_since_seq`; it never polls the live transcript JSONL behind
+another process and reports `final_only`. If `--live` is requested while
+another capture process is active, it also attaches `final_only` rather than
+pretending that cross-process partial delivery exists. With `--live` and no
+external capture, the same process owns standalone capture and the partial
+channel. A non-streaming backend or disabled `live_partials` toggle still runs
+that session `final_only`.
 
 ## Deferred Work
 
-- emitting partial transcript revisions
 - Apple Foundation Models provider implementation
 - cloud provider implementations and consent UI
 - Tauri HUD

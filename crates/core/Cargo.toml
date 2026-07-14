@@ -56,6 +56,7 @@ ureq = { workspace = true }
 fs2 = { workspace = true }
 schemars = { workspace = true }
 crossbeam-channel = { workspace = true, optional = true }
+crossbeam-queue = { workspace = true }
 pyannote-rs = { workspace = true, optional = true }
 ort = { workspace = true, optional = true }
 ndarray = { workspace = true, optional = true }

@@ -1386,7 +1386,7 @@ enum AppleSpeechAction {
 
 #[derive(Subcommand)]
 enum CopilotAction {
-    /// Attach to live.utterance.final events and render grounded nudges
+    /// Run grounded coaching; external capture attaches final-only
     Start {
         /// What outcome the copilot should help you achieve
         #[arg(long)]
@@ -1395,6 +1395,11 @@ enum CopilotAction {
         /// Presentation surface (defaults to [copilot].surface)
         #[arg(long, value_parser = ["tui", "stdout"])]
         surface: Option<String>,
+
+        /// Own a standalone live capture in this process, enabling ephemeral
+        /// partial coaching when the backend and config support it
+        #[arg(long)]
+        live: bool,
     },
     /// Show the active copilot session and provider health
     Status,
@@ -8424,10 +8429,16 @@ life (qmd://life/)
         .expect("copilot start must parse its portable surface");
         match parsed.command {
             Commands::Copilot {
-                action: CopilotAction::Start { goal, surface },
+                action:
+                    CopilotAction::Start {
+                        goal,
+                        surface,
+                        live,
+                    },
             } => {
                 assert_eq!(goal, "land the decision");
                 assert_eq!(surface.as_deref(), Some("stdout"));
+                assert!(!live);
             }
             _ => panic!("expected Copilot Start variant"),
         }
@@ -8436,6 +8447,27 @@ life (qmd://life/)
     #[test]
     fn copilot_start_requires_goal() {
         assert!(Cli::try_parse_from(["minutes", "copilot", "start"]).is_err());
+    }
+
+    #[test]
+    fn copilot_external_attach_and_non_streaming_backends_are_final_only() {
+        let mut config = Config::default();
+        assert_eq!(
+            copilot_evidence_mode(true, true, &config),
+            minutes_core::copilot::CopilotEvidenceMode::FinalOnly
+        );
+
+        config.live_transcript.backend = "parakeet".into();
+        assert_eq!(
+            copilot_evidence_mode(true, false, &config),
+            minutes_core::copilot::CopilotEvidenceMode::FinalOnly
+        );
+
+        config.live_transcript.backend = "whisper".into();
+        assert_eq!(
+            copilot_evidence_mode(true, false, &config),
+            minutes_core::copilot::CopilotEvidenceMode::InProcessPartials
+        );
     }
 
     #[test]
@@ -8639,9 +8671,11 @@ fn cmd_get(slug_or_path: &str, json: bool, compact_json: bool, config: &Config) 
 
 fn cmd_copilot(action: CopilotAction, config: &Config) -> Result<()> {
     match action {
-        CopilotAction::Start { goal, surface } => {
-            cmd_copilot_start(&goal, surface.as_deref(), config)
-        }
+        CopilotAction::Start {
+            goal,
+            surface,
+            live,
+        } => cmd_copilot_start(&goal, surface.as_deref(), live, config),
         CopilotAction::Status => cmd_copilot_status(),
         CopilotAction::Pause => cmd_copilot_pause(),
         CopilotAction::Resume => cmd_copilot_resume(),
@@ -8649,14 +8683,22 @@ fn cmd_copilot(action: CopilotAction, config: &Config) -> Result<()> {
     }
 }
 
-fn cmd_copilot_start(goal: &str, surface: Option<&str>, config: &Config) -> Result<()> {
+fn cmd_copilot_start(
+    goal: &str,
+    surface: Option<&str>,
+    own_live_capture: bool,
+    config: &Config,
+) -> Result<()> {
     use minutes_core::copilot::{
-        BattleCard, CopilotRequest, CopilotRunner, CopilotSessionStatus, CopilotState,
-        CopilotUtterance, NudgePolicy, OllamaCopilotModel, RunnerEvent, TranscriptUpdateKind,
+        BattleCard, CopilotEvidenceMode, CopilotRequest, CopilotRunner, CopilotSessionStatus,
+        CopilotState, CopilotUtterance, NudgePolicy, OllamaCopilotModel, PartialLatencySeed,
+        RunnerEvent, TranscriptUpdateKind,
     };
+    use minutes_core::live_partials::{self, LivePartialEvent, DEFAULT_PARTIAL_CHANNEL_CAPACITY};
     use std::collections::VecDeque;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
+    use std::time::Instant;
 
     let goal = goal.trim();
     if goal.is_empty() {
@@ -8684,13 +8726,41 @@ fn cmd_copilot_start(goal: &str, surface: Option<&str>, config: &Config) -> Resu
     })?;
     minutes_core::copilot::clear_session_controls()?;
 
-    let capture_attachment = copilot_capture_attachment();
+    let external_capture = copilot_external_capture_active();
+    let in_process_live = own_live_capture && !external_capture;
+    #[cfg(not(feature = "whisper"))]
+    if in_process_live {
+        anyhow::bail!(
+            "in-process copilot live capture requires the whisper feature; external attachment remains final_only"
+        );
+    }
+    let evidence_mode = copilot_evidence_mode(own_live_capture, external_capture, config);
+    let capture_attachment = if in_process_live {
+        if evidence_mode == CopilotEvidenceMode::InProcessPartials {
+            "Capture is owned by this copilot process; ephemeral partials are connected in memory."
+                .to_string()
+        } else {
+            "Capture is owned by this copilot process; backend/config capability is final_only."
+                .to_string()
+        }
+    } else {
+        copilot_capture_attachment()
+    };
     eprintln!(
         "Copilot arming with Ollama model '{}'...",
         config.copilot.fast_model
     );
     eprintln!("{capture_attachment}");
-    eprintln!("Transcript source: Agent Event Bus sequence cursor (live.utterance.final only).");
+    eprintln!("Evidence mode: {}", evidence_mode.as_str());
+    if own_live_capture && external_capture {
+        eprintln!(
+            "An external capture process is already active; attached honestly in final_only mode."
+        );
+    } else if evidence_mode == CopilotEvidenceMode::FinalOnly {
+        eprintln!(
+            "Transcript source: Agent Event Bus sequence cursor (live.utterance.final only)."
+        );
+    }
     if !config.copilot.enabled {
         eprintln!(
             "[copilot].enabled is false; this explicit start activates only this foreground session."
@@ -8712,14 +8782,59 @@ fn cmd_copilot_start(goal: &str, surface: Option<&str>, config: &Config) -> Resu
     };
 
     let model = Arc::new(OllamaCopilotModel::from_config(&config.copilot));
-    let runner = CopilotRunner::start(model, NudgePolicy::new(config.copilot.nudge_ttl_ms));
+    let runner = CopilotRunner::start_with_debounce(
+        model,
+        NudgePolicy::new(config.copilot.nudge_ttl_ms),
+        Duration::from_millis(config.copilot.partial_debounce_ms),
+    );
+    let session_epoch = runner.session_epoch();
     let stop = Arc::new(AtomicBool::new(false));
     let stop_for_signal = stop.clone();
     ctrlc::set_handler(move || {
         stop_for_signal.store(true, Ordering::Release);
     })?;
 
+    let (partial_publisher, mut partial_subscriber) =
+        if evidence_mode == CopilotEvidenceMode::InProcessPartials {
+            let (publisher, subscriber) =
+                live_partials::channel(session_epoch, DEFAULT_PARTIAL_CHANNEL_CAPACITY);
+            (Some(publisher), Some(subscriber))
+        } else {
+            (None, None)
+        };
+
+    #[cfg(feature = "whisper")]
+    let (capture_result_rx, capture_thread) = if in_process_live {
+        let (result_tx, result_rx) = std::sync::mpsc::channel();
+        let capture_stop = Arc::clone(&stop);
+        let capture_config = config.clone();
+        let thread = std::thread::Builder::new()
+            .name("copilot-live-capture".into())
+            .spawn(move || {
+                let result = minutes_core::live_transcript::run_with_partials(
+                    capture_stop,
+                    &capture_config,
+                    None,
+                    partial_publisher,
+                );
+                let _ = result_tx.send(result);
+            })?;
+        (Some(result_rx), Some(thread))
+    } else {
+        (None, None)
+    };
+    #[cfg(not(feature = "whisper"))]
+    type LiveCaptureResult = Result<(usize, f64, PathBuf), minutes_core::MinutesError>;
+    #[cfg(not(feature = "whisper"))]
+    let capture_result_rx: Option<std::sync::mpsc::Receiver<LiveCaptureResult>> = None;
+    #[cfg(not(feature = "whisper"))]
+    let capture_thread: Option<std::thread::JoinHandle<()>> = None;
+    #[cfg(not(feature = "whisper"))]
+    drop(partial_publisher);
+
     let mut cursor = minutes_core::events::latest_event_seq();
+    let mut next_evidence_revision = cursor;
+    let mut latest_partial_identity_seen = None;
     let mut utterances: VecDeque<CopilotUtterance> = VecDeque::new();
     let mut paused = false;
     let mut last_status_write = std::time::Instant::now() - Duration::from_secs(2);
@@ -8729,6 +8844,7 @@ fn cmd_copilot_start(goal: &str, surface: Option<&str>, config: &Config) -> Resu
         goal: goal.into(),
         surface: surface.into(),
         cursor,
+        evidence_mode,
         capture_attachment: capture_attachment.clone(),
         health: runner.health(),
         updated_ts: chrono::Utc::now(),
@@ -8736,6 +8852,7 @@ fn cmd_copilot_start(goal: &str, surface: Option<&str>, config: &Config) -> Resu
     minutes_core::copilot::write_session_status(&status)?;
 
     eprintln!("Copilot listening. Press Ctrl-C or run `minutes copilot stop` to stop.");
+    let mut capture_failure = None;
 
     while !stop.load(Ordering::Acquire) {
         if minutes_core::copilot::copilot_stop_path().exists() {
@@ -8751,6 +8868,109 @@ fn cmd_copilot_start(goal: &str, surface: Option<&str>, config: &Config) -> Resu
             } else {
                 runner.resume();
                 eprintln!("Copilot resumed.");
+            }
+        }
+
+        if let Some(result_rx) = capture_result_rx.as_ref() {
+            match result_rx.try_recv() {
+                Ok(Ok((lines, duration, path))) => {
+                    eprintln!(
+                        "In-process live capture ended: {lines} utterances in {duration:.0}s ({})",
+                        path.display()
+                    );
+                    break;
+                }
+                Ok(Err(error)) => {
+                    capture_failure = Some(anyhow::anyhow!(error));
+                    break;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    capture_failure = Some(anyhow::anyhow!(
+                        "in-process live capture worker exited without a result"
+                    ));
+                    break;
+                }
+            }
+        }
+
+        if let Some(subscriber) = partial_subscriber.as_mut() {
+            if let Some(identity) = subscriber.latest_identity() {
+                if latest_partial_identity_seen != Some(identity) {
+                    runner.supersede_partial_revision(session_epoch, identity.0, identity.1);
+                    latest_partial_identity_seen = Some(identity);
+                }
+            }
+
+            while let Some(partial_event) = subscriber.try_recv() {
+                match partial_event {
+                    LivePartialEvent::Superseded(signal) => {
+                        runner.retract_partials(
+                            signal.session_epoch,
+                            signal.through_utterance_sequence,
+                        );
+                        utterances.retain(|utterance| {
+                            utterance.update_kind == TranscriptUpdateKind::Final
+                                || utterance.utterance_sequence > signal.through_utterance_sequence
+                        });
+                    }
+                    LivePartialEvent::Partial(partial) => {
+                        if !subscriber.is_current(&partial) {
+                            continue;
+                        }
+                        let trigger_at = Instant::now();
+                        utterances.retain(|utterance| {
+                            utterance.update_kind == TranscriptUpdateKind::Final
+                                || utterance.utterance_sequence != partial.utterance_sequence
+                        });
+                        let duration_ms = partial
+                            .partial_published_at
+                            .saturating_duration_since(partial.audio_received_at)
+                            .as_millis()
+                            .min(u64::MAX as u128) as u64;
+                        utterances.push_back(CopilotUtterance {
+                            utterance_sequence: partial.utterance_sequence,
+                            revision: partial.revision,
+                            update_kind: TranscriptUpdateKind::Partial,
+                            source: "in-process-live".into(),
+                            text: partial.text,
+                            speaker: partial.speaker,
+                            speaker_verified: false,
+                            offset_ms: partial.offset_ms,
+                            duration_ms,
+                        });
+                        while utterances.len() > 24
+                            || utterances.iter().map(|item| item.text.len()).sum::<usize>() > 6_000
+                        {
+                            utterances.pop_front();
+                        }
+
+                        next_evidence_revision = next_evidence_revision.saturating_add(1);
+                        let request = CopilotRequest {
+                            goal: goal.into(),
+                            session_epoch,
+                            evidence_revision: next_evidence_revision,
+                            evidence_utterance_sequence: partial.utterance_sequence,
+                            evidence_utterance_revision: partial.revision,
+                            update_kind: TranscriptUpdateKind::Partial,
+                            utterances: utterances.iter().cloned().collect(),
+                            battle_card: battle_card.clone(),
+                        };
+                        let context_ready_at = Instant::now();
+                        let _ = runner.submit_with_latency(
+                            request,
+                            PartialLatencySeed {
+                                session_epoch,
+                                utterance_sequence: partial.utterance_sequence,
+                                utterance_revision: partial.revision,
+                                audio_received_at: partial.audio_received_at,
+                                partial_published_at: partial.partial_published_at,
+                                trigger_at,
+                                context_ready_at,
+                            },
+                        );
+                    }
+                }
             }
         }
 
@@ -8772,6 +8992,7 @@ fn cmd_copilot_start(goal: &str, surface: Option<&str>, config: &Config) -> Resu
             }
 
             utterances.push_back(CopilotUtterance {
+                utterance_sequence: envelope.seq,
                 revision: envelope.seq,
                 update_kind: TranscriptUpdateKind::Final,
                 source,
@@ -8790,9 +9011,13 @@ fn cmd_copilot_start(goal: &str, surface: Option<&str>, config: &Config) -> Resu
                 utterances.pop_front();
             }
 
+            next_evidence_revision = next_evidence_revision.saturating_add(1).max(envelope.seq);
             let request = CopilotRequest {
                 goal: goal.into(),
-                evidence_revision: envelope.seq,
+                session_epoch,
+                evidence_revision: next_evidence_revision,
+                evidence_utterance_sequence: envelope.seq,
+                evidence_utterance_revision: 1,
                 update_kind: TranscriptUpdateKind::Final,
                 utterances: utterances.iter().cloned().collect(),
                 battle_card: battle_card.clone(),
@@ -8809,6 +9034,7 @@ fn cmd_copilot_start(goal: &str, surface: Option<&str>, config: &Config) -> Resu
                     );
                 }
                 RunnerEvent::RequestCancelled { .. }
+                | RunnerEvent::EvidenceRetracted { .. }
                 | RunnerEvent::StateChanged(_)
                 | RunnerEvent::Model(_) => {}
             }
@@ -8819,7 +9045,11 @@ fn cmd_copilot_start(goal: &str, surface: Option<&str>, config: &Config) -> Resu
             status.cursor = cursor;
             status.health = runner.health();
             status.updated_ts = chrono::Utc::now();
-            status.capture_attachment = copilot_capture_attachment();
+            status.capture_attachment = if in_process_live {
+                capture_attachment.clone()
+            } else {
+                copilot_capture_attachment()
+            };
             if let Err(error) = minutes_core::copilot::write_session_status(&status) {
                 tracing::warn!(error = %error, "failed to update copilot status sidecar");
             }
@@ -8829,6 +9059,12 @@ fn cmd_copilot_start(goal: &str, surface: Option<&str>, config: &Config) -> Resu
         std::thread::sleep(Duration::from_millis(200));
     }
 
+    stop.store(true, Ordering::Release);
+    if let Some(thread) = capture_thread {
+        if thread.join().is_err() && capture_failure.is_none() {
+            capture_failure = Some(anyhow::anyhow!("in-process live capture worker panicked"));
+        }
+    }
     runner.stop();
     status.active = false;
     status.pid = None;
@@ -8838,7 +9074,14 @@ fn cmd_copilot_start(goal: &str, surface: Option<&str>, config: &Config) -> Resu
     minutes_core::copilot::write_session_status(&status)?;
     minutes_core::copilot::clear_session_controls()?;
     drop(session_guard);
-    eprintln!("Copilot stopped. Capture was not changed.");
+    if in_process_live {
+        eprintln!("Copilot stopped. Its in-process live capture was finalized.");
+    } else {
+        eprintln!("Copilot stopped. External capture was not changed.");
+    }
+    if let Some(error) = capture_failure {
+        return Err(error);
+    }
     Ok(())
 }
 
@@ -8875,6 +9118,30 @@ fn render_copilot_nudge(nudge: &minutes_core::copilot::Nudge, surface: &str) -> 
     }
     std::io::stdout().flush()?;
     Ok(())
+}
+
+fn copilot_external_capture_active() -> bool {
+    minutes_core::pid::inspect_pid_file(&minutes_core::pid::pid_path()).is_active()
+        || minutes_core::pid::inspect_pid_file(&minutes_core::pid::live_transcript_pid_path())
+            .is_active()
+}
+
+fn copilot_evidence_mode(
+    own_live_capture: bool,
+    external_capture: bool,
+    config: &Config,
+) -> minutes_core::copilot::CopilotEvidenceMode {
+    if own_live_capture
+        && !external_capture
+        && config.copilot.live_partials
+        && config
+            .effective_live_transcript_backend()
+            .eq_ignore_ascii_case("whisper")
+    {
+        minutes_core::copilot::CopilotEvidenceMode::InProcessPartials
+    } else {
+        minutes_core::copilot::CopilotEvidenceMode::FinalOnly
+    }
 }
 
 fn copilot_capture_attachment() -> String {
@@ -8920,11 +9187,13 @@ fn cmd_copilot_status() -> Result<()> {
     }
     println!("Goal: {}", status.goal);
     println!("Surface: {}", status.surface);
+    println!("Evidence mode: {}", status.evidence_mode.as_str());
     println!(
         "Provider: {} / {}",
         status.health.provider, status.health.model
     );
     println!("Evidence cursor: {}", status.cursor);
+    println!("Latency records: in_memory_only (available from the active CopilotRunner status)");
     println!("{}", status.capture_attachment);
     if let Some(error) = status.health.last_error {
         println!("Degraded: {error}");

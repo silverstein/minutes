@@ -113,6 +113,8 @@ explicit `minutes copilot start` may start a foreground session when
 | `nudge_ttl_ms` | `12000` | Lifetime of a rendered nudge in milliseconds. |
 | `target_latency_ms` | `5000` | Fast request timeout/latency target; timeout degrades only the copilot. |
 | `history_grounding` | `true` | Preload a bounded battle card from unrestricted graph, structured intent, and FTS data. |
+| `live_partials` | `true` | Enable ephemeral partial coaching when `minutes copilot start --live` owns a streaming Whisper session in-process. External capture remains `final_only`. |
+| `partial_debounce_ms` | `250` | Coalesce rapid partial corrections before starting the single model lane. |
 
 Ollama defaults to `http://localhost:11434`. Set `OLLAMA_HOST` to use another
 local endpoint. Meeting text and history are passed as delimited untrusted data,

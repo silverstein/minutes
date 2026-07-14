@@ -7987,6 +7987,10 @@
     }
 
     async function toggleCoachSurface() {
+      // In-flight guard: ignore clicks while a start/stop is pending so rapid
+      // clicking can't stack concurrent invokes (QA find: repeated Coach
+      // clicks piled up and hung the webview).
+      if (copilotTransition) return;
       const stopping = !!copilotSnapshot.active;
       copilotTransition = stopping ? 'Stopping…' : 'Arming…';
       renderCoachControls();

@@ -15238,16 +15238,17 @@ pub fn cmd_start_copilot_surface(
         .unwrap_or(DEFAULT_COPILOT_GOAL)
         .to_string();
     let config = Config::load();
+    // Provider selection belongs to the engine router (run_copilot_surface calls
+    // route_fast_model over [Ollama, AppleFM] candidates with health probes).
+    // The only pre-gate kept here is the explicit cloud opt-in; everything else
+    // — auto-local, ollama, apple-fm — flows to the router, which degrades or
+    // errors with an honest message. A literal `!= "ollama"` gate here rejected
+    // the DEFAULT auto-local config with a self-contradictory error (QA find).
     let provider = config.copilot.resolved_fast_provider();
-    if provider != "ollama" {
-        if provider == "cloud" && !config.copilot.allow_cloud {
-            return Err(
-                "Cloud Coach is disabled. Contract v1 uses the local Ollama provider.".into(),
-            );
-        }
-        return Err(format!(
-            "Coach provider '{provider}' is not available in contract v1; use auto-local or ollama."
-        ));
+    if provider == "cloud" && !config.copilot.allow_cloud {
+        return Err(
+            "Cloud Coach is disabled. Contract v1 uses the local Ollama provider.".into(),
+        );
     }
 
     if state

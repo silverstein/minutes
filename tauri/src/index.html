@@ -5177,6 +5177,35 @@
         transition: none;
       }
     }
+  
+    /* --- QA polish (Mat): AI-model group border-on-border + How-it-works clip --- */
+    .coach-section-heading {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 16px;
+      overflow: visible;
+    }
+    .coach-info-button {
+      flex: 0 0 auto;
+      align-self: flex-start;
+      white-space: nowrap;
+    }
+    #settings-coach-models {
+      display: block;
+      border: 0;
+      border-top: 1px solid var(--border);
+      padding: 14px 0 0;
+      margin: 14px 0 0;
+      min-inline-size: 0;
+    }
+    #settings-coach-models > legend.about-controls-copy {
+      float: none;
+      padding: 0;
+      margin: 0 0 10px;
+    }
+    #settings-coach-models .coach-model-grid { margin-top: 0; }
+
   </style>
 </head>
 

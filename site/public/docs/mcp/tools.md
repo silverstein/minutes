@@ -3,9 +3,9 @@
 > Generated file. Do not edit by hand.
 > Source: manifest.json + crates/mcp/src/index.ts
 > Regenerate: node scripts/generate_llms_txt.mjs
-> Last generated: 2026-07-13
+> Last generated: 2026-07-14
 
-Minutes exposes 31 tools, 8 resources, and 6 prompt templates through the MCP server.
+Minutes exposes 35 tools, 8 resources, and 6 prompt templates through the MCP server.
 
 ## Install
 
@@ -21,6 +21,40 @@ Minutes exposes 31 tools, 8 resources, and 6 prompt templates through the MCP se
 ```
 
 ## Tools
+
+### Real-time Coach
+
+<a id="tool-start-copilot"></a>
+
+#### `start_copilot`
+
+Start the independent real-time copilot for a goal and observe its CLI nudge stream
+
+Reference URL: https://useminutes.app/docs/mcp/tools#tool-start-copilot
+
+<a id="tool-stop-copilot"></a>
+
+#### `stop_copilot`
+
+Stop the active real-time copilot without changing recording or live transcription
+
+Reference URL: https://useminutes.app/docs/mcp/tools#tool-stop-copilot
+
+<a id="tool-copilot-status"></a>
+
+#### `copilot_status`
+
+Read current copilot session and provider health from the CLI status surface
+
+Reference URL: https://useminutes.app/docs/mcp/tools#tool-copilot-status
+
+<a id="tool-read-copilot-nudges"></a>
+
+#### `read_copilot_nudges`
+
+Read observed copilot nudges incrementally by cursor or time window
+
+Reference URL: https://useminutes.app/docs/mcp/tools#tool-read-copilot-nudges
 
 ### Recording
 

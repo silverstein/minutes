@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-07-13",
+  "generatedAt": "2026-07-14",
   "installCommand": "npx minutes-mcp",
   "documentationUrl": "https://useminutes.app/for-agents",
   "supportUrl": "https://github.com/silverstein/minutes/discussions",
@@ -185,6 +185,34 @@
       "group": "Live and dictation",
       "anchorId": "tool-read-live-transcript",
       "docsUrl": "https://useminutes.app/docs/mcp/tools#tool-read-live-transcript"
+    },
+    {
+      "name": "start_copilot",
+      "description": "Start the independent real-time copilot for a goal and observe its CLI nudge stream",
+      "group": "Real-time Coach",
+      "anchorId": "tool-start-copilot",
+      "docsUrl": "https://useminutes.app/docs/mcp/tools#tool-start-copilot"
+    },
+    {
+      "name": "stop_copilot",
+      "description": "Stop the active real-time copilot without changing recording or live transcription",
+      "group": "Real-time Coach",
+      "anchorId": "tool-stop-copilot",
+      "docsUrl": "https://useminutes.app/docs/mcp/tools#tool-stop-copilot"
+    },
+    {
+      "name": "copilot_status",
+      "description": "Read current copilot session and provider health from the CLI status surface",
+      "group": "Real-time Coach",
+      "anchorId": "tool-copilot-status",
+      "docsUrl": "https://useminutes.app/docs/mcp/tools#tool-copilot-status"
+    },
+    {
+      "name": "read_copilot_nudges",
+      "description": "Read observed copilot nudges incrementally by cursor or time window",
+      "group": "Real-time Coach",
+      "anchorId": "tool-read-copilot-nudges",
+      "docsUrl": "https://useminutes.app/docs/mcp/tools#tool-read-copilot-nudges"
     },
     {
       "name": "open_dashboard",

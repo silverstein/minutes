@@ -2,11 +2,11 @@
 
 > Generated file. Do not edit by hand.
 > Source: crates/core thiserror definitions
-> Last generated: 2026-07-13
+> Last generated: 2026-07-14
 
 This is the generated public catalog of stable Minutes core errors. It intentionally favors actionable, user-facing errors over generic wrapper variants.
 
-- Visible actionable errors: 58
+- Visible actionable errors: 59
 - Hidden low-signal wrappers: 16
 
 # CaptureError
@@ -64,6 +64,18 @@ Exact message:
 Source: `crates/core/src/error.rs`
 
 Reference URL: https://useminutes.app/docs/errors#error-captureerror-alreadyrecording
+
+<a id="error-captureerror-captureownerbusy"></a>
+
+## `CaptureError::CaptureOwnerBusy`
+
+Exact message:
+
+> another Minutes process is starting or stopping capture; this process did not open a second microphone
+
+Source: `crates/core/src/error.rs`
+
+Reference URL: https://useminutes.app/docs/errors#error-captureerror-captureownerbusy
 
 <a id="error-captureerror-notrecording"></a>
 

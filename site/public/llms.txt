@@ -2,9 +2,9 @@
 
 > Generated file. Do not edit by hand.
 > Source: manifest.json + crates/mcp/src/index.ts + site/lib/skills-catalog.json
-> Last generated: 2026-07-13
+> Last generated: 2026-07-14
 
-Minutes is an open-source meeting corpus you own. Record, transcribe, search, and query every meeting and voice memo on your own disk. No cloud, no vendor to outlive. Output is structured markdown in `~/meetings/` that Claude Desktop, Claude Code, Codex, Gemini CLI, Cursor, OpenCode, Pi, and any MCP-compatible client read from the same folder, without a proprietary SDK or API key. Ten years from now, `grep` still works on your corpus.
+Minutes is the private, owned conversation-memory layer. Record meetings, voice memos, and dictation; transcribe them on your own machine; and get structured markdown in `~/meetings/` that Claude Desktop, Claude Code, Codex, Gemini CLI, Cursor, OpenCode, Pi, and any MCP-compatible client read from the same folder — no proprietary SDK, no API key. Nothing is uploaded: when a cloud memory tool gets acquired or subpoenaed, your recordings aren't theirs to hand over. No vendor to outlive — ten years from now, `grep` still works on your corpus.
 
 ## Key Facts
 
@@ -18,7 +18,7 @@ Minutes is an open-source meeting corpus you own. Record, transcribe, search, an
 
 ## For AI Agents
 
-minutes exposes a standard MCP server with 31 tools, 8 resources, and 6 prompt templates. Any MCP-compatible client can use it as a conversation memory layer.
+minutes exposes a standard MCP server with 35 tools, 8 resources, and 6 prompt templates. Any MCP-compatible client can use it as a conversation memory layer.
 
 ## Choose Your Surface
 
@@ -69,6 +69,10 @@ Recommended install:
 - `get_meeting_insights` — Query structured meeting insights (decisions, commitments, questions) with confidence filtering Docs: https://useminutes.app/docs/mcp/tools#tool-get-meeting-insights
 - `start_live_transcript` — Start a live transcript session for real-time meeting transcription Docs: https://useminutes.app/docs/mcp/tools#tool-start-live-transcript
 - `read_live_transcript` — Read utterances from the active live transcript with optional cursor or time window Docs: https://useminutes.app/docs/mcp/tools#tool-read-live-transcript
+- `start_copilot` — Start the independent real-time copilot for a goal and observe its CLI nudge stream Docs: https://useminutes.app/docs/mcp/tools#tool-start-copilot
+- `stop_copilot` — Stop the active real-time copilot without changing recording or live transcription Docs: https://useminutes.app/docs/mcp/tools#tool-stop-copilot
+- `copilot_status` — Read current copilot session and provider health from the CLI status surface Docs: https://useminutes.app/docs/mcp/tools#tool-copilot-status
+- `read_copilot_nudges` — Read observed copilot nudges incrementally by cursor or time window Docs: https://useminutes.app/docs/mcp/tools#tool-read-copilot-nudges
 - `open_dashboard` — Open the Meeting Intelligence Dashboard in the browser — visual overview of conversation memory Docs: https://useminutes.app/docs/mcp/tools#tool-open-dashboard
 - `ingest_meeting` — Extract facts from a meeting and update the knowledge base (person profiles, log, index) Docs: https://useminutes.app/docs/mcp/tools#tool-ingest-meeting
 - `knowledge_status` — Show the current state of the knowledge base — configuration, adapter, people count, log entries Docs: https://useminutes.app/docs/mcp/tools#tool-knowledge-status

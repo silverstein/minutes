@@ -1,11 +1,11 @@
 {
-  "generatedAt": "2026-07-13",
-  "visibleCount": 58,
+  "generatedAt": "2026-07-14",
+  "visibleCount": 59,
   "hiddenCount": 16,
   "groups": [
     {
       "enumName": "CaptureError",
-      "count": 7,
+      "count": 8,
       "entries": [
         {
           "id": "captureerror-devicenotfound-target-os-macos",
@@ -50,6 +50,17 @@
           "hidden": false,
           "anchorId": "error-captureerror-alreadyrecording",
           "docsUrl": "https://useminutes.app/docs/errors#error-captureerror-alreadyrecording"
+        },
+        {
+          "id": "captureerror-captureownerbusy",
+          "enumName": "CaptureError",
+          "variant": "CaptureOwnerBusy",
+          "cfg": null,
+          "message": "another Minutes process is starting or stopping capture; this process did not open a second microphone",
+          "sourceFile": "crates/core/src/error.rs",
+          "hidden": false,
+          "anchorId": "error-captureerror-captureownerbusy",
+          "docsUrl": "https://useminutes.app/docs/errors#error-captureerror-captureownerbusy"
         },
         {
           "id": "captureerror-notrecording",

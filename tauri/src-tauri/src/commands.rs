@@ -10132,11 +10132,26 @@ pub fn cmd_set_screen_share_hidden(
         .map_err(|e| format!("Failed to save config: {}", e))?;
 
     state.screen_share_hidden.store(hidden, Ordering::Relaxed);
-    for (_, window) in app.webview_windows() {
-        window.set_content_protected(hidden).ok();
-    }
+    apply_screen_share_content_protection(&app, hidden);
 
     Ok(())
+}
+
+const COPILOT_HUD_WINDOW_LABEL: &str = "copilot-hud";
+
+pub(crate) fn content_protection_for_window(label: &str, globally_hidden: bool) -> bool {
+    label == COPILOT_HUD_WINDOW_LABEL || globally_hidden
+}
+
+/// Apply the user's global screen-share preference without weakening the
+/// Coach HUD. Coaching advice is always private, even when the user chooses to
+/// make the rest of Minutes visible for a demo or recording.
+pub(crate) fn apply_screen_share_content_protection(app: &tauri::AppHandle, globally_hidden: bool) {
+    for (label, window) in app.webview_windows() {
+        window
+            .set_content_protected(content_protection_for_window(&label, globally_hidden))
+            .ok();
+    }
 }
 
 #[tauri::command]
@@ -14222,8 +14237,8 @@ fn show_copilot_hud(app: &tauri::AppHandle) -> Result<(), String> {
         window.destroy().ok();
     }
 
-    let width = 440.0;
-    let height = 176.0;
+    let width = 500.0;
+    let height = 224.0;
     // Sit above the dictation pill if both optional surfaces happen to be
     // active, rather than covering the existing overlay.
     let inset_y = 112.0;
@@ -14261,7 +14276,10 @@ fn show_copilot_hud(app: &tauri::AppHandle) -> Result<(), String> {
     .decorations(false)
     .transparent(true)
     .shadow(false)
-    .content_protected(Config::load().privacy.hide_from_screen_share)
+    // Coach advice is inherently private. This deliberately does not honor
+    // `privacy.hide_from_screen_share`; the global toggle may expose other
+    // Minutes windows, but it must never expose this HUD.
+    .content_protected(true)
     .always_on_top(true)
     .focused(false)
     .focusable(false)

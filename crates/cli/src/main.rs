@@ -995,7 +995,8 @@ enum Commands {
         since_seq: Option<u64>,
     },
 
-    /// Run the portable real-time meeting copilot over the Agent Event Bus
+    /// Get private, real-time meeting coaching
+    #[command(visible_alias = "coach")]
     Copilot {
         #[command(subcommand)]
         action: CopilotAction,
@@ -1386,24 +1387,26 @@ enum AppleSpeechAction {
 
 #[derive(Subcommand)]
 enum CopilotAction {
-    /// Attach to live.utterance.final events and render grounded nudges
+    /// Turn Coach on for the current meeting
     Start {
-        /// What outcome the copilot should help you achieve
+        /// What you want help with in this meeting
         #[arg(long)]
         goal: String,
 
-        /// Presentation surface (defaults to [copilot].surface)
+        /// How to show suggestions (defaults to the choice in config.toml)
         #[arg(long, value_parser = ["tui", "stdout"])]
         surface: Option<String>,
     },
-    /// Show the active copilot session and provider health
+    /// Show what Coach is doing in plain language
     Status,
-    /// Pause model requests while leaving the event-stream attachment alive
+    /// Pause suggestions without affecting the recording
     Pause,
-    /// Resume a paused copilot session
+    /// Resume suggestions
     Resume,
-    /// Stop the active copilot session
+    /// Stop Coach without affecting the recording
     Stop,
+    /// Set up the private AI Coach needs
+    Setup,
 }
 
 #[derive(Subcommand)]
@@ -7593,6 +7596,24 @@ mod tests {
         })
     }
 
+    fn ready_copilot_selection(resolution: CopilotModelResolution) -> CopilotModelSelection {
+        match resolution {
+            CopilotModelResolution::Ready(selection) => selection,
+            CopilotModelResolution::SetupNeeded { .. } => {
+                panic!("expected Coach to be ready")
+            }
+        }
+    }
+
+    fn copilot_setup_state(
+        resolution: CopilotModelResolution,
+    ) -> minutes_core::copilot::CopilotSetupNeeded {
+        match resolution {
+            CopilotModelResolution::Ready(_) => panic!("expected Coach setup guidance"),
+            CopilotModelResolution::SetupNeeded { state, .. } => state,
+        }
+    }
+
     #[test]
     fn shell_quote_arg_leaves_slugs_bare_and_quotes_spaces() {
         assert_eq!(shell_quote_arg("jun-rei"), "jun-rei");
@@ -8489,18 +8510,32 @@ life (qmd://life/)
     }
 
     #[test]
+    fn coach_alias_exposes_one_command_setup() {
+        let parsed = Cli::try_parse_from(["minutes", "coach", "setup"])
+            .expect("the plain-language Coach setup command must parse");
+        assert!(matches!(
+            parsed.command,
+            Commands::Copilot {
+                action: CopilotAction::Setup
+            }
+        ));
+    }
+
+    #[test]
     fn copilot_auto_local_selects_apple_only_after_healthy_construction() {
         use minutes_core::copilot::ModelHealthStatus;
 
         let config = minutes_core::config::CopilotConfig::default();
-        let selection = select_copilot_model_with_factory(&config, "apple-fm", |provider| {
-            assert_eq!(provider, "apple-fm");
-            Ok(selection_test_model(
-                "apple-fm",
-                ModelHealthStatus::Available,
-            ))
-        })
-        .unwrap();
+        let selection = ready_copilot_selection(
+            select_copilot_model_with_factory(&config, "apple-fm", |provider| {
+                assert_eq!(provider, "apple-fm");
+                Ok(selection_test_model(
+                    "apple-fm",
+                    ModelHealthStatus::Available,
+                ))
+            })
+            .unwrap(),
+        );
 
         assert_eq!(selection.model.provider_name(), "apple-fm");
         assert!(selection.detail.contains("auto-local selected apple-fm"));
@@ -8511,7 +8546,7 @@ life (qmd://life/)
         use minutes_core::copilot::ModelHealthStatus;
 
         let config = minutes_core::config::CopilotConfig::default();
-        let selection =
+        let selection = ready_copilot_selection(
             select_copilot_model_with_factory(&config, "apple-fm", |provider| match provider {
                 "apple-fm" => Ok(selection_test_model(
                     "apple-fm",
@@ -8520,7 +8555,8 @@ life (qmd://life/)
                 "ollama" => Ok(selection_test_model("ollama", ModelHealthStatus::Available)),
                 provider => anyhow::bail!("unexpected provider {provider}"),
             })
-            .unwrap();
+            .unwrap(),
+        );
 
         assert_eq!(selection.model.provider_name(), "ollama");
         assert!(selection.detail.contains("apple-fm unavailable"));
@@ -8528,24 +8564,92 @@ life (qmd://life/)
     }
 
     #[test]
-    fn copilot_start_explicit_unavailable_apple_errors_clearly() {
+    fn copilot_start_explicit_unavailable_model_returns_setup_guidance() {
         use minutes_core::copilot::ModelHealthStatus;
 
         let mut config = minutes_core::config::CopilotConfig::default();
         config.fast_provider = "apple-fm".into();
-        let error = select_copilot_model_with_factory(&config, "apple-fm", |_| {
-            Ok(selection_test_model(
-                "apple-fm",
-                ModelHealthStatus::Unavailable,
-            ))
-        })
-        .err()
-        .expect("explicit unavailable apple-fm must fail")
-        .to_string();
+        let state = copilot_setup_state(
+            select_copilot_model_with_factory(&config, "apple-fm", |_| {
+                Ok(selection_test_model(
+                    "apple-fm",
+                    ModelHealthStatus::Unavailable,
+                ))
+            })
+            .expect("an unavailable model is a setup state, not an error"),
+        );
 
-        assert!(error.contains("explicit apple-fm"));
-        assert!(error.contains("Unavailable"));
-        assert!(error.contains("auto-local"));
+        assert_eq!(state.action.command, "minutes coach setup");
+        assert!(state.message.contains("run privately on your Mac"));
+    }
+
+    #[test]
+    fn copilot_start_with_no_local_model_returns_guided_setup_not_error() {
+        use minutes_core::copilot::ModelHealthStatus;
+
+        let config = minutes_core::config::CopilotConfig::default();
+        let state = copilot_setup_state(
+            select_copilot_model_with_factory(&config, "apple-fm", |provider| {
+                Ok(selection_test_model(
+                    match provider {
+                        "apple-fm" => "apple-fm",
+                        "ollama" => "ollama",
+                        _ => unreachable!(),
+                    },
+                    ModelHealthStatus::Unavailable,
+                ))
+            })
+            .expect("no-model first run must return guidance"),
+        );
+        let output = format_copilot_setup_needed(&state);
+
+        assert!(output.contains("small on-device AI model"));
+        assert!(output.contains("minutes coach setup"));
+        assert!(output.contains("Then start Coach again"));
+    }
+
+    #[test]
+    fn copilot_start_with_reachable_private_model_is_ready() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        with_temp_home(|_| {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                let mut request = [0_u8; 2048];
+                let count = stream.read(&mut request).unwrap();
+                let request = String::from_utf8_lossy(&request[..count]);
+                assert!(request.starts_with("GET /api/tags "));
+                let body = r#"{"models":[]}"#;
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                )
+                .unwrap();
+                stream.flush().unwrap();
+            });
+
+            let original_ollama_host = std::env::var_os("OLLAMA_HOST");
+            std::env::set_var("OLLAMA_HOST", format!("http://{address}"));
+            let mut config = minutes_core::config::CopilotConfig::default();
+            config.fast_provider = "ollama".into();
+            let selection = ready_copilot_selection(select_copilot_model(&config).unwrap());
+            if let Some(value) = original_ollama_host {
+                std::env::set_var("OLLAMA_HOST", value);
+            } else {
+                std::env::remove_var("OLLAMA_HOST");
+            }
+
+            assert_eq!(selection.model.provider_name(), "ollama");
+            server.join().unwrap();
+        });
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -8581,7 +8685,7 @@ life (qmd://life/)
             std::env::set_var("OLLAMA_HOST", format!("http://{address}"));
             let config = minutes_core::config::CopilotConfig::default();
             assert_eq!(config.resolved_fast_provider(), "ollama");
-            let selection = select_copilot_model(&config).unwrap();
+            let selection = ready_copilot_selection(select_copilot_model(&config).unwrap());
             if let Some(value) = original_ollama_host {
                 std::env::set_var("OLLAMA_HOST", value);
             } else {
@@ -8593,6 +8697,64 @@ life (qmd://life/)
             assert!(selection.detail.contains("using ollama"));
             server.join().unwrap();
         });
+    }
+
+    #[test]
+    fn coach_user_surfaces_use_plain_language() {
+        use minutes_core::copilot::{
+            CopilotInputMode, CopilotSessionStatus, CopilotState, Nudge, NudgeKind,
+        };
+
+        let setup_output =
+            format_copilot_setup_needed(&minutes_core::copilot::CopilotSetupNeeded::private_ai());
+        let mut status = CopilotSessionStatus::default();
+        status.active = true;
+        status.goal = "Agree on next steps".into();
+        status.capture_attachment = "Coach is listening to the current recording.".into();
+        status.input_mode = CopilotInputMode::FinalOnly;
+        status.health.state = CopilotState::Degraded;
+        status.health.provider = "apple-fm".into();
+        status.health.last_error = Some(
+            "apple-fm provider failed at utterance epoch; ollama final_only fallback failed".into(),
+        );
+        let status_output = format_copilot_status(&status);
+        let nudge = Nudge {
+            v: 1,
+            id: "nudge-1".into(),
+            kind: NudgeKind::Ask,
+            text: "Ask who owns the next step.".into(),
+            source_chip: "next-step owner".into(),
+            evidence_revision: 42,
+            created_ts: chrono::Utc::now(),
+            ttl_ms: 12_000,
+            supersedes: None,
+        };
+        let nudge_output = format_copilot_nudge(&nudge, false);
+        let outputs = [setup_output, status_output.clone(), nudge_output];
+        let forbidden = [
+            "final_only",
+            "auto-local",
+            "apple-fm",
+            "ollama",
+            "contract v1",
+            "provider",
+            "utterance",
+            "epoch",
+        ];
+
+        for output in outputs {
+            let lower = output.to_ascii_lowercase();
+            for term in forbidden {
+                assert!(
+                    !lower.contains(term),
+                    "user-facing Coach output contains {term:?}: {output:?}"
+                );
+            }
+        }
+        assert!(status_output.contains("Coach status:"));
+        assert!(status_output.contains("Coach will keep trying"));
+        assert!(status_output.contains("Using your local AI model."));
+        assert!(status_output.contains("Coaching on completed sentences (a bit slower)."));
     }
 
     #[test]
@@ -8803,12 +8965,28 @@ fn cmd_copilot(action: CopilotAction, config: &Config) -> Result<()> {
         CopilotAction::Pause => cmd_copilot_pause(),
         CopilotAction::Resume => cmd_copilot_resume(),
         CopilotAction::Stop => cmd_copilot_stop(),
+        CopilotAction::Setup => cmd_copilot_setup(&config.copilot),
     }
 }
 
 struct CopilotModelSelection {
     model: std::sync::Arc<dyn minutes_core::copilot::CopilotModel>,
     detail: String,
+}
+
+enum CopilotModelResolution {
+    Ready(CopilotModelSelection),
+    SetupNeeded {
+        state: minutes_core::copilot::CopilotSetupNeeded,
+        diagnostic: String,
+    },
+}
+
+fn copilot_setup_needed(diagnostic: impl Into<String>) -> CopilotModelResolution {
+    CopilotModelResolution::SetupNeeded {
+        state: minutes_core::copilot::CopilotSetupNeeded::private_ai(),
+        diagnostic: diagnostic.into(),
+    }
 }
 
 fn compact_provider_detail(detail: &str) -> String {
@@ -8846,7 +9024,7 @@ fn select_copilot_model_with_factory<F>(
     config: &minutes_core::config::CopilotConfig,
     resolved_provider: &str,
     mut factory: F,
-) -> Result<CopilotModelSelection>
+) -> Result<CopilotModelResolution>
 where
     F: FnMut(&str) -> Result<std::sync::Arc<dyn minutes_core::copilot::CopilotModel>>,
 {
@@ -8854,17 +9032,13 @@ where
     let auto_local = configured_provider.is_empty() || configured_provider == "auto-local";
 
     if resolved_provider == "cloud" && !config.allow_cloud {
-        anyhow::bail!(
-            "cloud copilot is disabled ([copilot].allow_cloud = false); use an on-device provider"
-        );
+        anyhow::bail!("Coach cannot use the selected online AI. Choose private AI in config.toml");
     }
     if resolved_provider == "cloud" {
-        anyhow::bail!("cloud copilot is not implemented in contract v1");
+        anyhow::bail!("Online AI is not ready in this version. Choose private AI in config.toml");
     }
     if !matches!(resolved_provider, "apple-fm" | "ollama") {
-        anyhow::bail!(
-            "unsupported copilot provider '{resolved_provider}'; use auto-local, apple-fm, or ollama"
-        );
+        anyhow::bail!("Coach does not recognize the AI choice in config.toml");
     }
 
     match checked_copilot_model(resolved_provider, &mut factory) {
@@ -8879,36 +9053,39 @@ where
             } else {
                 format!("explicit configuration selected {resolved_provider} ({health_detail})")
             };
-            Ok(CopilotModelSelection { model, detail })
+            Ok(CopilotModelResolution::Ready(CopilotModelSelection {
+                model,
+                detail,
+            }))
         }
         Err(apple_error) if auto_local && resolved_provider == "apple-fm" => {
-            let (model, ollama_health) = checked_copilot_model("ollama", &mut factory).map_err(
-                |ollama_error| {
-                    anyhow::anyhow!(
-                        "auto-local could not start a healthy provider: apple-fm {apple_error}; ollama fallback {ollama_error}"
-                    )
-                },
-            )?;
-            Ok(CopilotModelSelection {
-                model,
-                detail: format!(
-                    "apple-fm unavailable ({apple_error}); using ollama ({})",
-                    compact_provider_detail(&ollama_health.detail)
-                ),
-            })
+            match checked_copilot_model("ollama", &mut factory) {
+                Ok((model, ollama_health)) => Ok(CopilotModelResolution::Ready(
+                    CopilotModelSelection {
+                        model,
+                        detail: format!(
+                            "apple-fm unavailable ({apple_error}); using ollama ({})",
+                            compact_provider_detail(&ollama_health.detail)
+                        ),
+                    },
+                )),
+                Err(ollama_error) => Ok(copilot_setup_needed(format!(
+                    "auto-local found no usable model: apple-fm {apple_error}; ollama {ollama_error}"
+                ))),
+            }
         }
-        Err(error) if resolved_provider == "apple-fm" => anyhow::bail!(
-            "explicit apple-fm copilot provider is unavailable or unhealthy ({error}); use fast_provider = \"auto-local\" or \"ollama\""
-        ),
-        Err(error) => anyhow::bail!(
-            "copilot provider 'ollama' is unavailable or unhealthy ({error}); start Ollama and ensure the configured model is installed"
-        ),
+        Err(error) if resolved_provider == "apple-fm" => Ok(copilot_setup_needed(format!(
+            "configured apple-fm model is unavailable or unhealthy: {error}"
+        ))),
+        Err(error) => Ok(copilot_setup_needed(format!(
+            "configured ollama model is unavailable or unhealthy: {error}"
+        ))),
     }
 }
 
 fn select_copilot_model(
     config: &minutes_core::config::CopilotConfig,
-) -> Result<CopilotModelSelection> {
+) -> Result<CopilotModelResolution> {
     use minutes_core::copilot::{AppleFoundationCopilotModel, OllamaCopilotModel};
     use std::sync::Arc;
 
@@ -8931,43 +9108,48 @@ fn cmd_copilot_start(goal: &str, surface: Option<&str>, config: &Config) -> Resu
 
     let goal = goal.trim();
     if goal.is_empty() {
-        anyhow::bail!("--goal must not be empty");
+        anyhow::bail!("Tell Coach what you want help with using --goal \"...\"");
     }
     let surface = surface.unwrap_or(config.copilot.surface.as_str());
     if !matches!(surface, "tui" | "stdout") {
-        anyhow::bail!("unsupported copilot surface '{surface}'; use tui or stdout");
+        anyhow::bail!(
+            "Coach does not recognize that display choice. Use tui or stdout in config.toml"
+        );
     }
 
-    let selection = select_copilot_model(&config.copilot)?;
+    let selection = match select_copilot_model(&config.copilot)? {
+        CopilotModelResolution::Ready(selection) => selection,
+        CopilotModelResolution::SetupNeeded { state, diagnostic } => {
+            tracing::debug!(%diagnostic, "Coach needs first-run setup");
+            let status = CopilotSessionStatus {
+                goal: goal.into(),
+                surface: surface.into(),
+                setup_needed: Some(state.clone()),
+                ..CopilotSessionStatus::default()
+            };
+            minutes_core::copilot::write_session_status(&status)?;
+            eprintln!("{}", format_copilot_setup_needed(&state));
+            return Ok(());
+        }
+    };
     let model = selection.model;
-    eprintln!("Copilot provider: {}", selection.detail);
 
     let session_guard = minutes_core::copilot::create_session_guard().map_err(|error| {
-        anyhow::anyhow!("a copilot session is already active or could not be locked: {error}")
+        tracing::debug!(%error, "Coach session lock failed");
+        anyhow::anyhow!("Coach is already running. Stop it before starting another session")
     })?;
     minutes_core::copilot::clear_session_controls()?;
 
     let capture_attachment = copilot_capture_attachment();
-    eprintln!(
-        "Copilot arming with {} model '{}'...",
-        model.provider_name(),
-        model.model_name()
-    );
-    eprintln!("{capture_attachment}");
-    eprintln!("Transcript source: Agent Event Bus sequence cursor (live.utterance.final only).");
-    if !config.copilot.enabled {
-        eprintln!(
-            "[copilot].enabled is false; this explicit start activates only this foreground session."
-        );
+    if capture_attachment == COACH_WAITING_FOR_RECORDING {
+        eprintln!("{capture_attachment}");
     }
 
     let battle_card = if config.copilot.history_grounding {
         match BattleCard::assemble(config, goal) {
             Ok(card) => card,
             Err(error) => {
-                eprintln!(
-                    "Copilot history grounding is degraded: {error}. Continuing with live evidence only."
-                );
+                tracing::debug!(%error, "Coach could not load saved meeting context; continuing with the live meeting");
                 BattleCard::empty()
             }
         }
@@ -8994,12 +9176,12 @@ fn cmd_copilot_start(goal: &str, surface: Option<&str>, config: &Config) -> Resu
         cursor,
         capture_attachment: capture_attachment.clone(),
         provider_selection: selection.detail,
+        setup_needed: None,
+        input_mode: minutes_core::copilot::CopilotInputMode::FinalOnly,
         health: runner.health(),
         updated_ts: chrono::Utc::now(),
     };
     minutes_core::copilot::write_session_status(&status)?;
-
-    eprintln!("Copilot listening. Press Ctrl-C or run `minutes copilot stop` to stop.");
 
     while !stop.load(Ordering::Acquire) {
         if minutes_core::copilot::copilot_stop_path().exists() {
@@ -9011,10 +9193,10 @@ fn cmd_copilot_start(goal: &str, surface: Option<&str>, config: &Config) -> Resu
             paused = pause_requested;
             if paused {
                 runner.pause();
-                eprintln!("Copilot paused; capture and the event cursor remain attached.");
+                eprintln!("Coach is paused. Your recording continues.");
             } else {
                 runner.resume();
-                eprintln!("Copilot resumed.");
+                eprintln!("Coach is listening again.");
             }
         }
 
@@ -9068,9 +9250,8 @@ fn cmd_copilot_start(goal: &str, surface: Option<&str>, config: &Config) -> Resu
             match event {
                 RunnerEvent::Nudge(nudge) => render_copilot_nudge(&nudge, surface)?,
                 RunnerEvent::Degraded { error } => {
-                    eprintln!(
-                        "Copilot degraded: {error}. Recording/live capture continues unaffected."
-                    );
+                    tracing::debug!(%error, "Coach suggestion failed");
+                    eprintln!("{}.", CopilotState::Degraded.user_message());
                 }
                 RunnerEvent::RequestCancelled { .. }
                 | RunnerEvent::StateChanged(_)
@@ -9085,7 +9266,7 @@ fn cmd_copilot_start(goal: &str, surface: Option<&str>, config: &Config) -> Resu
             status.updated_ts = chrono::Utc::now();
             status.capture_attachment = copilot_capture_attachment();
             if let Err(error) = minutes_core::copilot::write_session_status(&status) {
-                tracing::warn!(error = %error, "failed to update copilot status sidecar");
+                tracing::debug!(error = %error, "failed to update copilot status sidecar");
             }
             last_status_write = std::time::Instant::now();
         }
@@ -9102,7 +9283,7 @@ fn cmd_copilot_start(goal: &str, surface: Option<&str>, config: &Config) -> Resu
     minutes_core::copilot::write_session_status(&status)?;
     minutes_core::copilot::clear_session_controls()?;
     drop(session_guard);
-    eprintln!("Copilot stopped. Capture was not changed.");
+    eprintln!("Coach stopped. Your recording was not changed.");
     Ok(())
 }
 
@@ -9113,117 +9294,219 @@ fn render_copilot_nudge(nudge: &minutes_core::copilot::Nudge, surface: &str) -> 
         return Ok(());
     }
 
-    let terminal = std::io::stdout().is_terminal();
-    if terminal {
-        println!(
-            "\n\x1b[1;36m┌ {:?}\x1b[0m  \x1b[2m{} · {}s\x1b[0m",
-            nudge.kind,
-            nudge.source_chip,
-            nudge.ttl_ms / 1_000
-        );
-        println!("\x1b[1m│ {}\x1b[0m", nudge.text);
-        println!(
-            "\x1b[2m└ evidence revision {}{}\x1b[0m",
-            nudge.evidence_revision,
-            nudge
-                .supersedes
-                .as_deref()
-                .map(|id| format!(" · supersedes {id}"))
-                .unwrap_or_default()
-        );
-    } else {
-        println!(
-            "[{:?}] {} — {} (evidence r{}, ttl {}ms)",
-            nudge.kind, nudge.text, nudge.source_chip, nudge.evidence_revision, nudge.ttl_ms
-        );
-    }
+    println!(
+        "{}",
+        format_copilot_nudge(nudge, std::io::stdout().is_terminal())
+    );
     std::io::stdout().flush()?;
     Ok(())
 }
+
+fn copilot_nudge_label(kind: minutes_core::copilot::NudgeKind) -> &'static str {
+    use minutes_core::copilot::NudgeKind;
+
+    match kind {
+        NudgeKind::Say => "Try saying",
+        NudgeKind::Ask => "Ask",
+        NudgeKind::Clarify => "Clarify",
+        NudgeKind::Hold => "Give it a moment",
+        NudgeKind::Watch => "Keep an eye on",
+    }
+}
+
+fn format_copilot_nudge(nudge: &minutes_core::copilot::Nudge, terminal: bool) -> String {
+    let label = copilot_nudge_label(nudge.kind);
+    if terminal {
+        format!(
+            "\n\x1b[1;36m┌ {label}\x1b[0m  \x1b[2m{}\x1b[0m\n\x1b[1m│ {}\x1b[0m\n\x1b[2m└ Based on what was just said\x1b[0m",
+            nudge.source_chip, nudge.text
+        )
+    } else {
+        format!("{label}: {} — Based on: {}", nudge.text, nudge.source_chip)
+    }
+}
+
+fn format_copilot_setup_needed(setup: &minutes_core::copilot::CopilotSetupNeeded) -> String {
+    format!(
+        "{}\n\n{}:\n  {}\n\nThen start Coach again.",
+        setup.message, setup.action.label, setup.action.command
+    )
+}
+
+const COACH_WAITING_FOR_RECORDING: &str = "Coach is waiting for a recording to start.";
 
 fn copilot_capture_attachment() -> String {
     let recording = minutes_core::pid::inspect_pid_file(&minutes_core::pid::pid_path());
     let live = minutes_core::pid::inspect_pid_file(&minutes_core::pid::live_transcript_pid_path());
     if recording.is_active() {
-        return match recording.pid() {
-            Some(pid) if pid != std::process::id() => format!(
-                "Attached to the shared event cursor; capture remains owned by recording PID {pid}."
-            ),
-            Some(pid) => format!(
-                "Attached to the shared event cursor for recording PID {pid}."
-            ),
-            None => "Attached to the shared event cursor; another process owns capture (PID hidden by the platform lock).".into(),
-        };
+        return "Coach is listening to the current recording.".into();
     }
     if live.is_active() {
-        return match live.pid() {
-            Some(pid) if pid != std::process::id() => format!(
-                "Attached to the shared event cursor; live transcript remains owned by PID {pid}."
-            ),
-            Some(pid) => format!(
-                "Attached to the shared event cursor for live transcript PID {pid}."
-            ),
-            None => "Attached to the shared event cursor; another process owns live transcript capture (PID hidden by the platform lock).".into(),
-        };
+        return "Coach is listening to the live meeting.".into();
     }
-    "Attached to the shared event cursor; waiting for a recording/live process to emit live.utterance.final. No transcript JSONL fallback is used.".into()
+    COACH_WAITING_FOR_RECORDING.into()
 }
 
 fn cmd_copilot_status() -> Result<()> {
-    let status = minutes_core::copilot::read_session_status();
-    if !status.active {
-        println!("Copilot: Off");
-        if let Some(error) = status.health.last_error {
-            println!("Last error: {error}");
-        }
-        return Ok(());
+    let mut status = minutes_core::copilot::read_session_status();
+    if status.active {
+        status.capture_attachment = copilot_capture_attachment();
     }
-    println!("Copilot: {:?}", status.health.state);
-    if let Some(pid) = status.pid {
-        println!("PID: {pid}");
-    }
-    println!("Goal: {}", status.goal);
-    println!("Surface: {}", status.surface);
-    println!(
-        "Provider: {} / {}",
-        status.health.provider, status.health.model
-    );
-    if !status.provider_selection.is_empty() {
-        println!("Provider selection: {}", status.provider_selection);
-    }
-    println!("Evidence cursor: {}", status.cursor);
-    println!("{}", status.capture_attachment);
-    if let Some(error) = status.health.last_error {
-        println!("Degraded: {error}");
-    }
+    println!("{}", format_copilot_status(&status));
     Ok(())
+}
+
+fn format_copilot_status(status: &minutes_core::copilot::CopilotSessionStatus) -> String {
+    let mut lines = vec![format!("Coach status: {}.", status.user_summary())];
+    if let Some(setup) = &status.setup_needed {
+        lines.push(String::new());
+        lines.push(format_copilot_setup_needed(setup));
+        return lines.join("\n");
+    }
+    if !status.active {
+        return lines.join("\n");
+    }
+    if !status.goal.trim().is_empty() {
+        lines.push(format!("Meeting goal: {}", status.goal));
+    }
+    if let Some(message) = status.user_model_summary() {
+        lines.push(message.into());
+    }
+    if let Some(message) = status.input_mode.user_message() {
+        lines.push(message.into());
+    }
+    if !status.capture_attachment.trim().is_empty() {
+        lines.push(status.capture_attachment.clone());
+    }
+    lines.join("\n")
 }
 
 fn cmd_copilot_pause() -> Result<()> {
     if !minutes_core::copilot::read_session_status().active {
-        anyhow::bail!("no active copilot session to pause");
+        anyhow::bail!("Coach is not running");
     }
     minutes_core::copilot::request_pause()?;
-    eprintln!("Pause requested. Capture continues unchanged.");
+    eprintln!("Coach will pause. Your recording continues.");
     Ok(())
 }
 
 fn cmd_copilot_resume() -> Result<()> {
     if !minutes_core::copilot::read_session_status().active {
-        anyhow::bail!("no active copilot session to resume");
+        anyhow::bail!("Coach is not running");
     }
     minutes_core::copilot::request_resume()?;
-    eprintln!("Resume requested.");
+    eprintln!("Coach will start listening again.");
     Ok(())
 }
 
 fn cmd_copilot_stop() -> Result<()> {
     if !minutes_core::copilot::read_session_status().active {
-        eprintln!("Copilot is already off.");
+        eprintln!("Coach is already off.");
         return Ok(());
     }
     minutes_core::copilot::request_stop()?;
-    eprintln!("Stop requested. Capture continues unchanged.");
+    eprintln!("Coach will stop. Your recording continues.");
+    Ok(())
+}
+
+fn cmd_copilot_setup(config: &minutes_core::config::CopilotConfig) -> Result<()> {
+    use minutes_core::copilot::{CopilotModel, ModelHealthStatus, OllamaCopilotModel};
+    use std::process::Command;
+
+    if minutes_core::copilot::apple_fm_is_available() {
+        clear_copilot_setup_needed()?;
+        eprintln!("Coach is ready to use.");
+        return Ok(());
+    }
+
+    eprintln!("Setting up Coach's private AI. This may take a minute...");
+    let private_ai_installed = Command::new("ollama")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success());
+    if !private_ai_installed {
+        #[cfg(target_os = "macos")]
+        run_copilot_setup_step(
+            "brew",
+            &["install", "ollama"],
+            "Coach could not install its private AI. Make sure Homebrew is installed, then try again",
+        )?;
+        #[cfg(not(target_os = "macos"))]
+        anyhow::bail!(
+            "Automatic Coach setup is not available on this computer yet. Visit https://github.com/silverstein/minutes/discussions for setup help"
+        );
+    }
+
+    let model = OllamaCopilotModel::from_config(config);
+    if model.health().status != ModelHealthStatus::Available {
+        #[cfg(target_os = "macos")]
+        run_copilot_setup_step(
+            "brew",
+            &["services", "start", "ollama"],
+            "Coach could not start its private AI. Restart your Mac, then run `minutes coach setup` again",
+        )?;
+
+        eprintln!("Starting the private AI...");
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while std::time::Instant::now() < deadline {
+            if model.health().status == ModelHealthStatus::Available {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(500));
+        }
+        if model.health().status != ModelHealthStatus::Available {
+            anyhow::bail!(
+                "Coach's private AI did not start. Restart your Mac, then run `minutes coach setup` again"
+            );
+        }
+    }
+
+    eprintln!("Downloading the small private AI model...");
+    run_copilot_setup_step(
+        "ollama",
+        &["pull", config.fast_model.as_str()],
+        "Coach could not download its private AI model. Check your internet connection, then try again",
+    )?;
+    model.prewarm().map_err(|error| {
+        tracing::debug!(%error, "Coach private AI prewarm failed after setup");
+        anyhow::anyhow!(
+            "Coach finished setup but could not start. Restart your Mac, then try again"
+        )
+    })?;
+    clear_copilot_setup_needed()?;
+    eprintln!("Coach is ready to use.");
+    Ok(())
+}
+
+fn clear_copilot_setup_needed() -> Result<()> {
+    let mut status = minutes_core::copilot::read_session_status();
+    status.setup_needed = None;
+    status.health.last_error = None;
+    status.updated_ts = chrono::Utc::now();
+    minutes_core::copilot::write_session_status(&status)?;
+    Ok(())
+}
+
+fn run_copilot_setup_step(program: &str, args: &[&str], user_error: &str) -> Result<()> {
+    tracing::debug!(program, ?args, "running Coach setup step");
+    let output = std::process::Command::new(program)
+        .args(args)
+        .output()
+        .map_err(|error| {
+            tracing::debug!(program, ?args, %error, "Coach setup step could not start");
+            anyhow::anyhow!(user_error.to_string())
+        })?;
+    if !output.status.success() {
+        tracing::debug!(
+            program,
+            ?args,
+            status = ?output.status,
+            stdout = %String::from_utf8_lossy(&output.stdout),
+            stderr = %String::from_utf8_lossy(&output.stderr),
+            "Coach setup step failed"
+        );
+        anyhow::bail!(user_error.to_string());
+    }
     Ok(())
 }
 

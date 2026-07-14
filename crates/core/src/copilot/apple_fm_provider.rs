@@ -91,6 +91,7 @@ impl AppleFoundationCopilotModel {
         )
     }
 
+    #[cfg(not(target_os = "macos"))]
     fn unavailable_error() -> ModelError {
         ModelError::new(
             ModelErrorKind::Unavailable,

@@ -32,8 +32,9 @@ pub use provider::{
 };
 pub use runner::{CopilotRunner, RunnerEvent, SubmitOutcome};
 pub use types::{
-    CopilotHealth, CopilotRequest, CopilotState, CopilotUtterance, Nudge, NudgeDraft, NudgeKind,
-    TranscriptUpdateKind, COPILOT_CONTRACT_VERSION,
+    CopilotHealth, CopilotInputMode, CopilotRequest, CopilotSetupAction, CopilotSetupActionKind,
+    CopilotSetupKind, CopilotSetupNeeded, CopilotState, CopilotUtterance, Nudge, NudgeDraft,
+    NudgeKind, TranscriptUpdateKind, COPILOT_CONTRACT_VERSION,
 };
 
 /// Whether the Apple Foundation Models copilot lane is genuinely usable in

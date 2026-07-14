@@ -90,6 +90,12 @@ jobs:
       - name: Build core (no whisper)
         run: cargo build -p minutes-core --no-default-features
 
+      - name: Build copilot core + CLI (cross-platform)
+        # PR #9 gate: compiles the local-socket transport as a Unix domain
+        # socket on macOS/Linux and a named pipe on Windows, together with the
+        # CLI attachment and measured model router.
+        run: cargo build -p minutes-core -p minutes-cli --no-default-features
+
       - name: Build core with diarization (cross-platform)
         run: cargo build -p minutes-core --no-default-features --features diarize
 
@@ -131,6 +137,16 @@ jobs:
         run: cargo test -p minutes-core --no-default-features --lib -- --test-threads=1
         timeout-minutes: 3
 
+      - name: Copilot attach, routing, and window-contract tests
+        # On Windows this executes the real named-pipe connect/reconnect path.
+        # On Unix it also asserts owner-only socket/discovery permissions.
+        run: "cargo test -p minutes-core --no-default-features --lib copilot:: -- --test-threads=1"
+        timeout-minutes: 4
+
+      - name: Copilot CLI contract tests
+        run: cargo test -p minutes-cli --no-default-features -- copilot --test-threads=1
+        timeout-minutes: 4
+
       - name: Diarization unit tests (cross-platform)
         run: cargo test -p minutes-core --no-default-features --features diarize --lib -- diarize --test-threads=1
         timeout-minutes: 3
@@ -148,6 +164,10 @@ jobs:
       - name: Format check (macOS only)
         if: runner.os == 'macOS'
         run: cargo fmt --all -- --check
+
+      - name: Check desktop capture-relay integration (macOS)
+        if: runner.os == 'macOS'
+        run: cargo check -p minutes-app --tests
 
   install:
     name: Install CLI (${{ matrix.os }})
@@ -224,6 +244,12 @@ jobs:
             cmake build-essential pkg-config \
             libasound2-dev libpipewire-0.3-dev libspa-0.2-dev
 
+      - name: Install Linux desktop check deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+
       # Per-image cache scope (ImageOS + ImageVersion); see the test job comment.
       # These are runner-injected vars absent from the ${{ env }} context, so we
       # expose the value as a step output for the cache key below.
@@ -246,6 +272,9 @@ jobs:
 
       - name: Verify binary runs
         run: ./target/debug/minutes --version
+
+      - name: Check Linux desktop capture-relay + window contract
+        run: cargo check -p minutes-app --tests
 
   desktop_windows:
     name: Desktop App Installer (windows-latest)
@@ -293,6 +322,11 @@ jobs:
       - name: Install Tauri CLI
         run: cargo install tauri-cli --version "2.10.1" --locked
 
+      - name: Check Windows desktop capture-relay + window contract
+        # Compiles Tauri's owner side against the Windows named-pipe relay
+        # before the slower installer build.
+        run: cargo check -p minutes-app --tests
+
       - name: Build Windows NSIS installer (unsigned)
         working-directory: tauri/src-tauri
         run: cargo tauri build --ci --bundles nsis --no-sign
@@ -333,6 +367,10 @@ jobs:
       - name: TypeScript check
         working-directory: crates/mcp
         run: npx tsc --noEmit
+
+      - name: MCP capture-relay attach tests
+        working-directory: crates/mcp
+        run: npx vitest run src/captureRelay.test.ts
 
       # Regression guard for issue #149: v0.13.0 shipped an MCPB bundle
       # that Claude Desktop 1.3109.0 refused to unzip because the bundle

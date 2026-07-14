@@ -11,6 +11,14 @@ pub enum ModelHealthStatus {
     NotImplemented,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelPrivacyClass {
+    OnDevice,
+    LocalService,
+    Cloud,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelHealth {
     pub provider: String,
@@ -100,6 +108,19 @@ pub trait CopilotModel: Send + Sync + 'static {
         ))
     }
     fn health(&self) -> ModelHealth;
+
+    /// Privacy boundary used by automatic routing. Providers fail closed to a
+    /// local service unless they explicitly declare another boundary.
+    fn privacy_class(&self) -> ModelPrivacyClass {
+        ModelPrivacyClass::LocalService
+    }
+
+    /// Usable context capacity for the configured model. The fast lane keeps
+    /// prompts compact, but routing must still reject a model that cannot hold
+    /// the current policy/evidence budget.
+    fn context_window_tokens(&self) -> usize {
+        4_096
+    }
 }
 
 /// Trait-shaped placeholder for an explicitly configured future cloud lane.
@@ -142,6 +163,14 @@ impl CopilotModel for CloudCopilotModel {
     fn health(&self) -> ModelHealth {
         stub_health("cloud", &self.model)
     }
+
+    fn privacy_class(&self) -> ModelPrivacyClass {
+        ModelPrivacyClass::Cloud
+    }
+
+    fn context_window_tokens(&self) -> usize {
+        128_000
+    }
 }
 
 /// Trait-shaped placeholder for a future macOS acceleration. This type is
@@ -183,6 +212,10 @@ impl CopilotModel for AppleFoundationCopilotModel {
 
     fn health(&self) -> ModelHealth {
         stub_health("apple-fm", &self.model)
+    }
+
+    fn privacy_class(&self) -> ModelPrivacyClass {
+        ModelPrivacyClass::OnDevice
     }
 }
 

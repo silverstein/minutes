@@ -108,6 +108,13 @@ impl CopilotModel for OllamaCopilotModel {
             checked_ts: Utc::now(),
         }
     }
+
+    fn context_window_tokens(&self) -> usize {
+        // Ollama models can override num_ctx at generation time, but the
+        // portable default is 8k. The copilot's bounded prompt remains below
+        // this and routing can compare it with other provider capacities.
+        8_192
+    }
 }
 
 fn nudge_draft_schema() -> serde_json::Value {

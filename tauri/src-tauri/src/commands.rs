@@ -14070,10 +14070,56 @@ fn run_live_session(app: tauri::AppHandle, active: Arc<AtomicBool>, stop_flag: A
     // was spawned; sync the tray to reflect the just-started session.
     crate::sync_tray_state(&app);
 
-    let result = minutes_core::live_transcript::run(
+    let relay_epoch = chrono::Utc::now().timestamp_millis().unsigned_abs().max(1);
+    let (partial_publisher, partial_subscriber) = minutes_core::live_partials::channel(
+        relay_epoch,
+        minutes_core::live_partials::DEFAULT_PARTIAL_CHANNEL_CAPACITY,
+    );
+    let _capture_relay = match minutes_core::copilot::CaptureRelayServer::start(
+        minutes_core::copilot::CopilotEvidenceMode::CaptureRelayPartials,
+        Some(partial_subscriber),
+    ) {
+        Ok(relay) => Some(relay),
+        Err(minutes_core::copilot::CaptureRelayError::AlreadyOwned(owner_pid)) => {
+            let message = format!(
+                "Another Minutes process (PID {owner_pid}) already owns capture. Live Transcript did not open a second microphone; follow the existing session instead."
+            );
+            if let Ok(workspace) = crate::context::create_workspace(&config) {
+                update_assistant_live_context(&workspace, false);
+            }
+            app.emit(
+                "live-transcript:error",
+                serde_json::json!({ "error": message }),
+            )
+            .ok();
+            return;
+        }
+        Err(minutes_core::copilot::CaptureRelayError::OwnershipBusy) => {
+            let message = "Another Minutes process is starting or stopping capture. Live Transcript did not open a second microphone; wait a moment and try again.";
+            if let Ok(workspace) = crate::context::create_workspace(&config) {
+                update_assistant_live_context(&workspace, false);
+            }
+            app.emit(
+                "live-transcript:error",
+                serde_json::json!({ "error": message }),
+            )
+            .ok();
+            return;
+        }
+        Err(error) => {
+            let warning = format!(
+                "Live coaching cannot attach to this transcript: {error}. Live transcription continues, but Minutes will not open a second microphone for coaching."
+            );
+            eprintln!("[live-transcript] {warning}");
+            app.emit("live-transcript:warning", warning.as_str()).ok();
+            None
+        }
+    };
+    let result = minutes_core::live_transcript::run_with_partials(
         stop_flag.clone(),
         &config,
         live_context_session_id.clone(),
+        Some(partial_publisher),
     );
 
     stop_flag.store(false, Ordering::Relaxed);
@@ -14248,6 +14294,14 @@ pub fn cmd_live_transcript_status(state: tauri::State<AppState>) -> serde_json::
     } else {
         0
     };
+    // The HUD consumes this contract before it becomes visible. Linux is
+    // intentionally reported as warning-required because Tao's content
+    // protection API is a documented no-op there; the compositor also owns
+    // focus/z-order policy. Windows and macOS use their native exclusion APIs.
+    let copilot_window_contract = minutes_core::copilot::evaluate_copilot_window_contract(
+        &minutes_core::copilot::current_window_environment(),
+        Config::load().privacy.hide_from_screen_share,
+    );
     serde_json::json!({
         "active": in_app_active || status.active,
         "line_count": status.line_count,
@@ -14255,6 +14309,7 @@ pub fn cmd_live_transcript_status(state: tauri::State<AppState>) -> serde_json::
         "audioLevel": audio_level,
         "source": status.source,
         "diagnostic": status.diagnostic,
+        "copilotWindowContract": copilot_window_contract,
     })
 }
 

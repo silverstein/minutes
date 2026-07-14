@@ -74,6 +74,11 @@ import {
   type CapabilityProbeResult,
 } from "./capabilities.js";
 import { downloadReleaseBinaryWithChecksum } from "./autoInstall.js";
+import {
+  attachCaptureRelay,
+  type CaptureRelayCursor,
+  type CaptureRelaySnapshot,
+} from "./captureRelay.js";
 
 crashTrace("imports-complete");
 
@@ -3410,6 +3415,15 @@ registerTool(
 
 // ── Tool: start_live_transcript ──────────────────────────────
 
+async function existingCaptureAttachmentMessage(kind: string): Promise<string> {
+  try {
+    const relay = await attachCaptureRelay();
+    return `${kind} already owns the microphone. MCP attached securely to owner PID ${relay.discovery.owner_pid} over the local ${relay.discovery.transport === "windows_named_pipe" ? "named pipe" : "Unix socket"}; Minutes did not open a second capture. Use read_live_transcript to follow along.`;
+  } catch (error: any) {
+    return `${kind} already owns the microphone, but its secure attachment relay is unavailable (${error?.message ?? String(error)}). Minutes did not open a second capture. Finalized transcript lines may still be available through read_live_transcript; restart or update the capture owner to restore live attachment.`;
+  }
+}
+
 registerTool(
   "start_live_transcript",
   "Start real-time transcription. If a recording is already running, it already includes a live transcript — use read_live_transcript to read it. Runs until stop is called.",
@@ -3426,7 +3440,7 @@ registerTool(
     const status = parseJsonOutput(statusOut);
     if (status.recording) {
       return {
-        content: [{ type: "text" as const, text: "Recording already in progress — it includes a live transcript. Use read_live_transcript to follow along." }],
+        content: [{ type: "text" as const, text: await existingCaptureAttachmentMessage("A recording") }],
       };
     }
 
@@ -3436,7 +3450,7 @@ registerTool(
       const ltParsed = parseJsonOutput(ltStatus);
       if (ltParsed?.active) {
         return {
-          content: [{ type: "text" as const, text: "Live transcript already running. Use read_live_transcript to read it, or minutes stop to end it." }],
+          content: [{ type: "text" as const, text: await existingCaptureAttachmentMessage("Live Transcript") }],
         };
       }
     } catch { /* no active session, proceed */ }
@@ -3493,9 +3507,14 @@ registerTool(
   {
     since: z.string().optional().describe("Line number (e.g., '42') or duration (e.g., '5m', '30s'). Omit to get all lines."),
     status_only: z.boolean().optional().default(false).describe("If true, return session status instead of transcript lines"),
+    relay_cursor: z.object({
+      session_id: z.string().optional(),
+      transcript_seq: z.number().int().nonnegative(),
+      nudge_seq: z.number().int().nonnegative(),
+    }).optional().describe("Transient relay cursor returned by a previous read. Reconnects without replaying already-seen transcript or nudge frames."),
   },
   { title: "Read Live Transcript", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-  async ({ since, status_only }) => {
+  async ({ since, status_only, relay_cursor }) => {
     if (!(await isCliAvailable())) {
       return { content: [{ type: "text" as const, text: CLI_INSTALL_MSG }] };
     }
@@ -3507,10 +3526,33 @@ registerTool(
       args.push("--since", since);
     }
 
+    let relay: CaptureRelaySnapshot | undefined;
+    try {
+      relay = await attachCaptureRelay(relay_cursor as CaptureRelayCursor | undefined);
+    } catch {
+      // A durable-only or inactive session is still readable. start_live_transcript
+      // reports attachment failures explicitly when another process owns capture.
+    }
+
     try {
       const { stdout } = await runMinutes(args, 10000);
       // For status queries, a message is helpful. For transcript reads, empty = no new lines.
       const fallback = status_only ? "No transcript data available." : "";
+      if (relay) {
+        const payload = {
+          durable: parseJsonOutput(stdout || fallback),
+          capture_relay: {
+            session_id: relay.discovery.session_id,
+            owner_pid: relay.discovery.owner_pid,
+            evidence_mode: relay.discovery.evidence_mode,
+            cursor: relay.cursor,
+            frames: relay.frames,
+          },
+        };
+        return {
+          content: [{ type: "text" as const, text: JSON.stringify(payload, null, 2) }],
+        };
+      }
       return {
         content: [{ type: "text" as const, text: stdout || fallback }],
       };

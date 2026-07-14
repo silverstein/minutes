@@ -339,9 +339,9 @@ pub struct SummarizationConfig {
 ///
 /// This is deliberately separate from [`SummarizationConfig`]: the copilot is
 /// a latency-bounded, failure-isolated event-stream consumer, while meeting
-/// summarization is a post-processing pipeline. `auto-local` resolves to
-/// Ollama on every supported platform; platform accelerators implement the
-/// provider trait without changing this portable default.
+/// summarization is a post-processing pipeline. `auto-local` is resolved from
+/// live provider probes at session start rather than a platform preference
+/// list.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CopilotConfig {
@@ -352,7 +352,7 @@ pub struct CopilotConfig {
     pub surface: String,
     /// Default per-session coaching policy. The CLI `--mode` flag overrides it.
     pub mode: String,
-    /// Fast-lane provider. `auto-local` resolves to `ollama` in contract v1.
+    /// Fast-lane provider. `auto-local` measures every eligible provider.
     pub fast_provider: String,
     /// Model name sent to the fast provider.
     pub fast_model: String,
@@ -376,10 +376,11 @@ pub struct CopilotConfig {
 }
 
 impl CopilotConfig {
-    /// Resolve the contract's platform-fair provider alias.
+    /// Normalize the configured routing request. Actual provider resolution is
+    /// performed from live health/latency/capacity probes at session start.
     pub fn resolved_fast_provider(&self) -> &str {
         match self.fast_provider.trim() {
-            "" | "auto-local" => "ollama",
+            "" | "auto-local" => "auto-local",
             provider => provider,
         }
     }
@@ -1651,7 +1652,7 @@ mod tests {
         assert_eq!(config.copilot.surface, "tui");
         assert_eq!(config.copilot.mode, "generic");
         assert_eq!(config.copilot.fast_provider, "auto-local");
-        assert_eq!(config.copilot.resolved_fast_provider(), "ollama");
+        assert_eq!(config.copilot.resolved_fast_provider(), "auto-local");
         assert_eq!(config.copilot.fast_model, "llama3.2");
         assert!(!config.copilot.allow_cloud);
         assert_eq!(config.copilot.nudge_ttl_ms, 12_000);

@@ -12,6 +12,7 @@ pub enum CopilotEvidenceMode {
     #[default]
     FinalOnly,
     InProcessPartials,
+    CaptureRelayPartials,
 }
 
 impl CopilotEvidenceMode {
@@ -19,6 +20,7 @@ impl CopilotEvidenceMode {
         match self {
             Self::FinalOnly => "final_only",
             Self::InProcessPartials => "in_process_partials",
+            Self::CaptureRelayPartials => "capture_relay_partials",
         }
     }
 }
@@ -30,6 +32,8 @@ pub struct CopilotSessionStatus {
     pub goal: String,
     pub surface: String,
     pub cursor: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_cursor: Option<super::RelayCursor>,
     #[serde(default)]
     pub evidence_mode: CopilotEvidenceMode,
     pub capture_attachment: String,
@@ -51,6 +55,7 @@ impl Default for CopilotSessionStatus {
             goal: String::new(),
             surface: "tui".into(),
             cursor: 0,
+            relay_cursor: None,
             evidence_mode: CopilotEvidenceMode::FinalOnly,
             capture_attachment: "not attached".into(),
             health: CopilotHealth {

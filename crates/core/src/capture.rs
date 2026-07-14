@@ -1495,6 +1495,34 @@ pub fn record_to_wav_with_lifecycle(
     use cpal::traits::DeviceTrait;
 
     let capture_plan = resolve_capture_plan(config)?;
+    // The capture owner exposes finalized live evidence over a transient local
+    // relay. Failure is non-fatal for recording, but it is never hidden: an
+    // attaching copilot will refuse to open a second microphone.
+    let _capture_relay = match crate::copilot::CaptureRelayServer::start(
+        crate::copilot::CopilotEvidenceMode::FinalOnly,
+        None,
+    ) {
+        Ok(relay) => Some(relay),
+        Err(crate::copilot::CaptureRelayError::AlreadyOwned(owner_pid)) => {
+            eprintln!(
+                "[minutes] Another Minutes process (PID {owner_pid}) already owns capture. This process did not open a second microphone."
+            );
+            return Err(CaptureError::AlreadyRecording(owner_pid));
+        }
+        Err(crate::copilot::CaptureRelayError::OwnershipBusy) => {
+            eprintln!(
+                "[minutes] Another Minutes process is starting or stopping capture. This process did not open a second microphone."
+            );
+            return Err(CaptureError::CaptureOwnerBusy);
+        }
+        Err(error) => {
+            eprintln!(
+                "[minutes] Live coaching attachment is unavailable for this recording: {error}. Recording continues; Minutes will not let another process silently open a second microphone."
+            );
+            tracing::warn!(error = %error, "capture attachment relay unavailable");
+            None
+        }
+    };
     #[cfg(feature = "streaming")]
     if let CapturePlan::Dual(plan) = capture_plan.clone() {
         return record_to_wav_dual_source(output_path, stop_flag, config, plan, started_context);

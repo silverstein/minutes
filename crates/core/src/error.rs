@@ -25,6 +25,11 @@ pub enum CaptureError {
     #[error("already recording (PID: {0})")]
     AlreadyRecording(u32),
 
+    #[error(
+        "another Minutes process is starting or stopping capture; this process did not open a second microphone"
+    )]
+    CaptureOwnerBusy,
+
     #[error("no recording in progress")]
     NotRecording,
 

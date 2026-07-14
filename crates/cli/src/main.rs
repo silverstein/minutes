@@ -8999,9 +8999,10 @@ fn cmd_copilot_start(
     config: &Config,
 ) -> Result<()> {
     use minutes_core::copilot::{
-        BattleCard, CopilotEvidenceMode, CopilotRequest, CopilotRunner, CopilotSessionStatus,
-        CopilotState, CopilotUtterance, DepthLaneConfig, MeetingMode, NudgePolicy,
-        OllamaCopilotModel, PartialLatencySeed, RepositoryGrounding, RunnerEvent, StrategyState,
+        BattleCard, CaptureAttachPlan, CaptureRelayClient, CopilotEvidenceMode, CopilotRequest,
+        CopilotRunner, CopilotSessionStatus, CopilotState, CopilotUtterance, DepthLaneConfig,
+        MeetingMode, NudgePolicy, OllamaCopilotModel, PartialLatencySeed, RelayCursor, RelayFrame,
+        RelayTranscriptUpdate, RepositoryGrounding, RunnerEvent, StrategyState,
         TranscriptUpdateKind,
     };
     use minutes_core::live_partials::{self, LivePartialEvent, DEFAULT_PARTIAL_CHANNEL_CAPACITY};
@@ -9023,17 +9024,54 @@ fn cmd_copilot_start(
         .parse::<MeetingMode>()
         .map_err(anyhow::Error::msg)?;
 
-    let provider = config.copilot.resolved_fast_provider();
-    if provider != "ollama" {
-        if provider == "cloud" && !config.copilot.allow_cloud {
-            anyhow::bail!(
-                "cloud copilot is disabled ([copilot].allow_cloud = false); contract v1 defaults to local Ollama"
-            );
+    let candidates: Vec<Arc<dyn minutes_core::copilot::CopilotModel>> = vec![
+        Arc::new(OllamaCopilotModel::from_config(&config.copilot)),
+        Arc::new(minutes_core::copilot::AppleFoundationCopilotModel::new(
+            "apple-foundation-model",
+        )),
+        Arc::new(minutes_core::copilot::CloudCopilotModel::new(
+            config.copilot.fast_model.clone(),
+        )),
+    ];
+    let requested_provider = match config.copilot.resolved_fast_provider() {
+        "auto-local" => None,
+        provider => Some(provider),
+    };
+    let (model, provider_selection) = match minutes_core::copilot::route_fast_model(
+        candidates,
+        requested_provider,
+        minutes_core::copilot::RoutingPolicy::local_first(
+            config.copilot.allow_cloud,
+            4_096,
+            config.copilot.target_latency_ms,
+        ),
+    ) {
+        minutes_core::copilot::FastModelRoute::Selected { model, detail, .. } => (model, detail),
+        minutes_core::copilot::FastModelRoute::SetupRequired { message, probes } => {
+            let mut status = CopilotSessionStatus {
+                capture_attachment: "No capture was opened because Copilot has no ready model."
+                    .into(),
+                updated_ts: chrono::Utc::now(),
+                ..CopilotSessionStatus::default()
+            };
+            status.health.provider = "setup-required".into();
+            status.health.model = config.copilot.fast_model.clone();
+            status.health.last_error = Some(message.clone());
+            minutes_core::copilot::write_session_status(&status)?;
+            eprintln!("{message}");
+            for probe in probes {
+                eprintln!(
+                    "  {} / {}: {} ({}ms, {} tokens)",
+                    probe.provider,
+                    probe.model,
+                    probe.detail,
+                    probe.measured_latency_ms,
+                    probe.context_window_tokens
+                );
+            }
+            return Ok(());
         }
-        anyhow::bail!(
-            "copilot provider '{provider}' is a contract stub in this release; use fast_provider = \"auto-local\" or \"ollama\""
-        );
-    }
+    };
 
     let session_guard = minutes_core::copilot::create_session_guard().map_err(|error| {
         anyhow::anyhow!("a copilot session is already active or could not be locked: {error}")
@@ -9048,7 +9086,25 @@ fn cmd_copilot_start(
             "in-process copilot live capture requires the whisper feature; external attachment remains final_only"
         );
     }
-    let evidence_mode = copilot_evidence_mode(own_live_capture, external_capture, config);
+    let mut relay_client = if external_capture {
+        match connect_capture_relay_with_retry(RelayCursor::default(), Duration::from_secs(2)) {
+            Ok(client) => Some(client),
+            Err(error) => {
+                let plan =
+                    minutes_core::copilot::plan_capture_attachment(true, false, own_live_capture);
+                let CaptureAttachPlan::RefuseDuplicate { message } = plan else {
+                    unreachable!("an active capture without a relay must be refused")
+                };
+                anyhow::bail!("{message} Attachment detail: {error}");
+            }
+        }
+    } else {
+        None
+    };
+    let evidence_mode = relay_client
+        .as_ref()
+        .map(|client| client.discovery().evidence_mode)
+        .unwrap_or_else(|| copilot_evidence_mode(own_live_capture, external_capture, config));
     let capture_attachment = if in_process_live {
         if evidence_mode == CopilotEvidenceMode::InProcessPartials {
             "Capture is owned by this copilot process; ephemeral partials are connected in memory."
@@ -9057,19 +9113,28 @@ fn cmd_copilot_start(
             "Capture is owned by this copilot process; backend/config capability is final_only."
                 .to_string()
         }
+    } else if let Some(client) = relay_client.as_ref() {
+        format!(
+            "Attached securely to capture owner PID {} over {}. The existing process keeps sole ownership of the microphone.",
+            client.discovery().owner_pid,
+            match client.discovery().transport {
+                minutes_core::copilot::RelayTransport::UnixSocket => "a local Unix socket",
+                minutes_core::copilot::RelayTransport::WindowsNamedPipe => "a local Windows named pipe",
+            }
+        )
     } else {
-        copilot_capture_attachment()
+        "No capture is active. Copilot is waiting for live final events and did not open the microphone. Use --own-live-capture to start capture explicitly.".into()
     };
     eprintln!(
-        "Copilot arming with Ollama model '{}'...",
-        config.copilot.fast_model
+        "Copilot arming with {} model '{}'...",
+        model.provider_name(),
+        model.model_name()
     );
+    eprintln!("Provider routing: {provider_selection}");
     eprintln!("{capture_attachment}");
     eprintln!("Evidence mode: {}", evidence_mode.as_str());
     if own_live_capture && external_capture {
-        eprintln!(
-            "An external capture process is already active; attached honestly in final_only mode."
-        );
+        eprintln!("An external capture process is already active; attached to it without opening another microphone.");
     } else if evidence_mode == CopilotEvidenceMode::FinalOnly {
         eprintln!(
             "Transcript source: Agent Event Bus sequence cursor (live.utterance.final only)."
@@ -9089,7 +9154,6 @@ fn cmd_copilot_start(
             as Arc<dyn minutes_core::copilot::GroundingSource>
     });
 
-    let model = Arc::new(OllamaCopilotModel::from_config(&config.copilot));
     let runner = CopilotRunner::start_with_depth(
         model,
         NudgePolicy::for_mode(config.copilot.nudge_ttl_ms, mode),
@@ -9160,6 +9224,7 @@ fn cmd_copilot_start(
         goal: goal.into(),
         surface: surface.into(),
         cursor,
+        relay_cursor: relay_client.as_ref().map(CaptureRelayClient::cursor),
         evidence_mode,
         capture_attachment: capture_attachment.clone(),
         health: runner.health(),
@@ -9171,6 +9236,12 @@ fn cmd_copilot_start(
         "Copilot listening in {mode} mode. Press Ctrl-C or run `minutes copilot stop` to stop."
     );
     let mut capture_failure = None;
+    let mut relay_reconnect_cursor = relay_client
+        .as_ref()
+        .map(CaptureRelayClient::cursor)
+        .unwrap_or_default();
+    let mut relay_reconnect_after = Instant::now();
+    let mut relay_shutdown = false;
 
     while !stop.load(Ordering::Acquire) {
         if minutes_core::copilot::copilot_stop_path().exists() {
@@ -9220,6 +9291,138 @@ fn cmd_copilot_start(
                     ));
                     break;
                 }
+            }
+        }
+
+        if relay_client.is_none()
+            && external_capture
+            && !relay_shutdown
+            && Instant::now() >= relay_reconnect_after
+        {
+            match CaptureRelayClient::connect(relay_reconnect_cursor.clone()) {
+                Ok(client) => {
+                    eprintln!(
+                        "Reattached to capture owner PID {} at transcript cursor {} / nudge cursor {}.",
+                        client.discovery().owner_pid,
+                        relay_reconnect_cursor.transcript_seq,
+                        relay_reconnect_cursor.nudge_seq
+                    );
+                    relay_client = Some(client);
+                }
+                Err(error) => {
+                    tracing::warn!(error = %error, "capture relay reconnect failed");
+                    relay_reconnect_after = Instant::now() + Duration::from_secs(1);
+                }
+            }
+        }
+
+        if let Some(client) = relay_client.as_mut() {
+            let mut relay_error = None;
+            loop {
+                match client.try_recv() {
+                    Ok(Some(RelayFrame::Transcript { update, .. })) => match update {
+                        RelayTranscriptUpdate::Superseded {
+                            through_utterance_sequence,
+                            ..
+                        } => {
+                            runner.retract_partials(session_epoch, through_utterance_sequence);
+                            utterances.retain(|utterance| {
+                                utterance.update_kind == TranscriptUpdateKind::Final
+                                    || utterance.utterance_sequence > through_utterance_sequence
+                            });
+                        }
+                        RelayTranscriptUpdate::Utterance {
+                            mut utterance,
+                            producer_latency_ms,
+                            ..
+                        } if utterance.update_kind == TranscriptUpdateKind::Partial => {
+                            let Some(text) = normalize_copilot_partial_text(&utterance.text) else {
+                                continue;
+                            };
+                            utterance.text = text;
+                            utterance.source = "capture-relay".into();
+                            let identity = (utterance.utterance_sequence, utterance.revision);
+                            if latest_partial_identity_seen != Some(identity) {
+                                runner.supersede_partial_revision(
+                                    session_epoch,
+                                    identity.0,
+                                    identity.1,
+                                );
+                                latest_partial_identity_seen = Some(identity);
+                            }
+                            utterances.retain(|existing| {
+                                existing.update_kind == TranscriptUpdateKind::Final
+                                    || existing.utterance_sequence != utterance.utterance_sequence
+                            });
+                            utterances.push_back(utterance.clone());
+                            trim_copilot_utterances(&mut utterances);
+
+                            next_evidence_revision = next_evidence_revision.saturating_add(1);
+                            let now = Instant::now();
+                            let audio_received_at = now
+                                .checked_sub(Duration::from_millis(producer_latency_ms))
+                                .unwrap_or(now);
+                            let request = CopilotRequest {
+                                goal: goal.into(),
+                                mode,
+                                session_epoch,
+                                evidence_revision: next_evidence_revision,
+                                evidence_utterance_sequence: utterance.utterance_sequence,
+                                evidence_utterance_revision: utterance.revision,
+                                update_kind: TranscriptUpdateKind::Partial,
+                                utterances: utterances.iter().cloned().collect(),
+                                battle_card: battle_card.clone(),
+                                strategy_state: StrategyState::empty(),
+                            };
+                            let _ = runner.submit_with_latency(
+                                request,
+                                PartialLatencySeed {
+                                    session_epoch,
+                                    utterance_sequence: utterance.utterance_sequence,
+                                    utterance_revision: utterance.revision,
+                                    audio_received_at,
+                                    partial_published_at: now,
+                                    trigger_at: now,
+                                    context_ready_at: Instant::now(),
+                                },
+                            );
+                        }
+                        RelayTranscriptUpdate::Utterance { .. } => {
+                            // Finals remain sourced from the existing durable
+                            // event cursor below. The relay mirror is only the
+                            // low-latency transport and reconnect cursor.
+                        }
+                    },
+                    Ok(Some(RelayFrame::Shutdown { reason })) => {
+                        eprintln!("Capture owner stopped: {reason}. Copilot is stopping too.");
+                        relay_shutdown = true;
+                        stop.store(true, Ordering::Release);
+                        break;
+                    }
+                    Ok(Some(RelayFrame::Gap {
+                        stream,
+                        requested_after,
+                        available_from,
+                    })) => {
+                        eprintln!(
+                            "Copilot reattached after missing some {stream} updates (cursor {requested_after}; replay starts at {available_from})."
+                        );
+                    }
+                    Ok(Some(_)) => {}
+                    Ok(None) => break,
+                    Err(error) => {
+                        relay_error = Some(error);
+                        break;
+                    }
+                }
+            }
+            relay_reconnect_cursor = client.cursor();
+            if let Some(error) = relay_error {
+                eprintln!(
+                    "Capture attachment was interrupted ({error}). Reconnecting without opening another microphone..."
+                );
+                relay_client = None;
+                relay_reconnect_after = Instant::now() + Duration::from_millis(250);
             }
         }
 
@@ -9386,6 +9589,11 @@ fn cmd_copilot_start(
                         continue;
                     }
                     render_copilot_nudge(&nudge, surface)?;
+                    if external_capture || in_process_live {
+                        if let Err(error) = CaptureRelayClient::publish_nudge(nudge.clone()) {
+                            tracing::warn!(error = %error, "failed to publish nudge to capture relay");
+                        }
+                    }
                 }
                 RunnerEvent::Degraded { error } => {
                     eprintln!(
@@ -9411,9 +9619,10 @@ fn cmd_copilot_start(
         runner.tick(chrono::Utc::now());
         if last_status_write.elapsed() >= Duration::from_secs(1) {
             status.cursor = cursor;
+            status.relay_cursor = relay_client.as_ref().map(CaptureRelayClient::cursor);
             status.health = runner.health();
             status.updated_ts = chrono::Utc::now();
-            status.capture_attachment = if in_process_live {
+            status.capture_attachment = if in_process_live || external_capture {
                 capture_attachment.clone()
             } else {
                 copilot_capture_attachment()
@@ -9518,14 +9727,36 @@ fn copilot_nudge_is_fresh_for_render(
         })
 }
 
-#[cfg(feature = "whisper")]
 fn normalize_copilot_partial_text(text: &str) -> Option<String> {
-    minutes_core::live_transcript::normalize_live_transcript_text(text)
+    let text = text.trim();
+    (!text.is_empty()).then(|| text.to_string())
 }
 
-#[cfg(not(feature = "whisper"))]
-fn normalize_copilot_partial_text(_text: &str) -> Option<String> {
-    None
+fn trim_copilot_utterances(
+    utterances: &mut std::collections::VecDeque<minutes_core::copilot::CopilotUtterance>,
+) {
+    while utterances.len() > 24
+        || utterances.iter().map(|item| item.text.len()).sum::<usize>() > 6_000
+    {
+        utterances.pop_front();
+    }
+}
+
+fn connect_capture_relay_with_retry(
+    cursor: minutes_core::copilot::RelayCursor,
+    timeout: Duration,
+) -> Result<minutes_core::copilot::CaptureRelayClient, minutes_core::copilot::CaptureRelayError> {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        match minutes_core::copilot::CaptureRelayClient::connect(cursor.clone()) {
+            Ok(client) => return Ok(client),
+            Err(error) if std::time::Instant::now() < deadline => {
+                tracing::debug!(error = %error, "waiting for capture relay discovery");
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(error) => return Err(error),
+        }
+    }
 }
 
 fn copilot_external_capture_active() -> bool {
@@ -11539,7 +11770,40 @@ fn cmd_live(config: &Config) -> Result<()> {
         }
     });
 
-    match minutes_core::live_transcript::run(stop, config, live_context_session_id) {
+    let relay_epoch = chrono::Utc::now().timestamp_millis().unsigned_abs().max(1);
+    let (partial_publisher, partial_subscriber) = minutes_core::live_partials::channel(
+        relay_epoch,
+        minutes_core::live_partials::DEFAULT_PARTIAL_CHANNEL_CAPACITY,
+    );
+    let _capture_relay = match minutes_core::copilot::CaptureRelayServer::start(
+        minutes_core::copilot::CopilotEvidenceMode::CaptureRelayPartials,
+        Some(partial_subscriber),
+    ) {
+        Ok(relay) => Some(relay),
+        Err(minutes_core::copilot::CaptureRelayError::AlreadyOwned(owner_pid)) => {
+            anyhow::bail!(
+                "Another Minutes process (PID {owner_pid}) already owns capture. Live Transcript did not open a second microphone; use `minutes transcript` to follow the existing session."
+            );
+        }
+        Err(minutes_core::copilot::CaptureRelayError::OwnershipBusy) => {
+            anyhow::bail!(
+                "Another Minutes process is starting or stopping capture. Live Transcript did not open a second microphone; wait a moment and try again."
+            );
+        }
+        Err(error) => {
+            eprintln!(
+                "[minutes] Live coaching cannot attach to this transcript: {error}. Live transcription continues, but Minutes will not open a second microphone for coaching."
+            );
+            None
+        }
+    };
+
+    match minutes_core::live_transcript::run_with_partials(
+        stop,
+        config,
+        live_context_session_id,
+        Some(partial_publisher),
+    ) {
         Ok((lines, duration, path)) => {
             eprintln!("\nLive transcript complete:");
             eprintln!("  {} utterances in {:.0}s", lines, duration);

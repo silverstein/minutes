@@ -13,10 +13,13 @@ mod mode;
 mod ollama_provider;
 mod policy;
 mod provider;
+mod relay;
+mod routing;
 mod runner;
 mod strategy;
 mod topic;
 mod types;
+mod window_contract;
 
 pub use crate::ollama::CancelToken;
 pub use battle_card::{BattleCard, BattleCardError, GroundingSource, RepositoryGrounding};
@@ -33,8 +36,14 @@ pub use ollama_provider::OllamaCopilotModel;
 pub use policy::{CopilotFeedback, NudgePolicy, PolicySnapshot};
 pub use provider::{
     AppleFoundationCopilotModel, CloudCopilotModel, CopilotModel, ModelError, ModelErrorKind,
-    ModelEventSink, ModelHealth, ModelHealthStatus, ModelStreamEvent,
+    ModelEventSink, ModelHealth, ModelHealthStatus, ModelPrivacyClass, ModelStreamEvent,
 };
+pub use relay::{
+    capture_relay_discovery_path, plan_capture_attachment, CaptureAttachPlan, CaptureRelayClient,
+    CaptureRelayDiscovery, CaptureRelayError, CaptureRelayServer, RelayCursor, RelayFrame,
+    RelayTranscriptUpdate, RelayTransport,
+};
+pub use routing::{route_fast_model, FastModelRoute, ProviderProbe, RoutingPolicy};
 pub use runner::{
     CopilotRunner, DepthLaneConfig, DepthLaneSnapshot, FeedbackOutcome, RunnerEvent, SubmitOutcome,
 };
@@ -43,4 +52,8 @@ pub use topic::{is_decisive_final, keywords as topic_keywords, TopicShift, Topic
 pub use types::{
     CopilotHealth, CopilotRequest, CopilotState, CopilotUtterance, Nudge, NudgeDraft, NudgeKind,
     TranscriptUpdateKind, COPILOT_CONTRACT_VERSION,
+};
+pub use window_contract::{
+    current_window_environment, evaluate_copilot_window_contract, ContractSupport,
+    CopilotHudContractDecision, CopilotWindowCapabilities, WindowEnvironment, WindowPlatform,
 };

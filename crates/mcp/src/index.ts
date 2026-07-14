@@ -25,6 +25,8 @@
  *   - list_voices: List enrolled voice profiles for speaker identification
  *   - confirm_speaker: Confirm/correct speaker attribution in a meeting
  *   - get_meeting_insights: Query structured insights (decisions, commitments, etc.) with confidence filtering
+ *   - start_copilot / stop_copilot: Control the independent real-time copilot engine
+ *   - copilot_status / read_copilot_nudges: Observe copilot health and cursor-based nudges
  *
  * All tools use execFile (not exec) to shell out to the `minutes` CLI binary.
  * No shell interpolation — safe from injection.
@@ -54,8 +56,16 @@ import {
 import { z } from "zod";
 import { execFile, spawn } from "child_process";
 import { promisify } from "util";
-import { copyFileSync, existsSync, mkdirSync, readdirSync, realpathSync } from "fs";
-import { mkdir, readFile, rm, writeFile } from "fs/promises";
+import {
+  closeSync,
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  readdirSync,
+  realpathSync,
+} from "fs";
+import { mkdir, readFile, rm, stat, writeFile } from "fs/promises";
 import { delimiter, dirname, isAbsolute, join, relative, resolve } from "path";
 import { fileURLToPath } from "url";
 import { homedir } from "os";
@@ -593,6 +603,7 @@ if (CLI_CAPABILITIES.kind === "report") {
   crashTrace("cli-capabilities-unsupported");
 }
 const LIVE_EVENTS_SUPPORTED = hasFeature(CLI_CAPABILITIES, "events_since_seq");
+const COPILOT_SUPPORTED = hasFeature(CLI_CAPABILITIES, "copilot_realtime");
 
 // ── MCP server version ────────────────────────────────────────
 // Kept for capabilities handshake and user-facing log messages.
@@ -1001,7 +1012,72 @@ const LIVE_EVENTS_POLL_INTERVAL_MS = Math.max(
   Number.parseInt(process.env.MINUTES_MCP_EVENT_POLL_MS || "1000", 10) || 1000
 );
 
+export const LIVE_COPILOT_RESOURCE_URI = "minutes://live/copilot";
+const COPILOT_NUDGE_LOG_FILENAME = "mcp-copilot-nudges.jsonl";
+const COPILOT_STDERR_LOG_FILENAME = "mcp-copilot-stderr.log";
+const COPILOT_OBSERVER_SESSION_FILENAME = "mcp-copilot-session.json";
+const COPILOT_READ_DEFAULT_LIMIT = 50;
+const COPILOT_READ_MAX_LIMIT = 200;
+
 type JsonObject = Record<string, unknown>;
+
+export type CopilotStatusPayload = {
+  available: boolean;
+  active: boolean;
+  state: string;
+  pid: number | null;
+  goal: string | null;
+  surface: string | null;
+  provider: string | null;
+  model: string | null;
+  evidence_cursor: number;
+  capture_attachment: string | null;
+  last_error: string | null;
+  raw: string;
+  error?: string;
+};
+
+export type CopilotObserverSession = {
+  v: 1;
+  pid: number;
+  goal: string;
+  surface: "stdout" | "tui";
+  started_ts: string;
+};
+
+export type ObservedCopilotNudge = {
+  cursor: number;
+  format: "json" | "text" | "raw";
+  nudge: JsonObject;
+  raw: string;
+  observed_ts: string | null;
+  expires_at: string | null;
+  expired: boolean | null;
+};
+
+export type CopilotNudgeObservation = {
+  attached: boolean;
+  cursor: number;
+  session: CopilotObserverSession | null;
+  nudges: ObservedCopilotNudge[];
+  note: string;
+};
+
+export type LiveCopilotResourcePayload = {
+  v: 1;
+  resource: typeof LIVE_COPILOT_RESOURCE_URI;
+  available: boolean;
+  active: boolean;
+  state: string;
+  status: CopilotStatusPayload;
+  nudge_stream: {
+    attached: boolean;
+    cursor: number;
+    note: string;
+  };
+  latest_nudge: ObservedCopilotNudge | null;
+  current_nudge: ObservedCopilotNudge | null;
+};
 
 export type LiveEventsResourceOptions = {
   uri: string;
@@ -1105,6 +1181,299 @@ export function buildLiveEventsResourcePayload(
   };
 }
 
+function inactiveCopilotStatus(error?: string): CopilotStatusPayload {
+  return {
+    available: error === undefined,
+    active: false,
+    state: "Off",
+    pid: null,
+    goal: null,
+    surface: null,
+    provider: null,
+    model: null,
+    evidence_cursor: 0,
+    capture_attachment: null,
+    last_error: null,
+    raw: "Copilot: Off",
+    ...(error ? { error } : {}),
+  };
+}
+
+/** Parse the stable human-readable `minutes copilot status` surface. */
+export function parseCopilotStatusOutput(raw: string): CopilotStatusPayload {
+  const lines = raw
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const state = lines[0]?.match(/^Copilot:\s*(.+)$/)?.[1]?.trim() || "Off";
+  const fields = new Map<string, string>();
+  const attachmentLines: string[] = [];
+
+  for (const line of lines.slice(1)) {
+    const match = line.match(/^([^:]+):\s*(.*)$/);
+    if (match) {
+      fields.set(match[1], match[2]);
+    } else {
+      attachmentLines.push(line);
+    }
+  }
+
+  const pidRaw = fields.get("PID");
+  const cursorRaw = fields.get("Evidence cursor");
+  const providerRaw = fields.get("Provider") || "";
+  const providerSeparator = providerRaw.indexOf(" / ");
+  const pid = pidRaw && /^\d+$/.test(pidRaw) ? Number.parseInt(pidRaw, 10) : null;
+  const evidenceCursor = cursorRaw && /^\d+$/.test(cursorRaw)
+    ? Number.parseInt(cursorRaw, 10)
+    : 0;
+
+  return {
+    available: true,
+    active: state.toLowerCase() !== "off",
+    state,
+    pid: pid !== null && Number.isSafeInteger(pid) ? pid : null,
+    goal: fields.get("Goal") || null,
+    surface: fields.get("Surface") || null,
+    provider: providerSeparator >= 0
+      ? providerRaw.slice(0, providerSeparator).trim() || null
+      : providerRaw || null,
+    model: providerSeparator >= 0
+      ? providerRaw.slice(providerSeparator + 3).trim() || null
+      : null,
+    evidence_cursor: Number.isSafeInteger(evidenceCursor) ? evidenceCursor : 0,
+    capture_attachment: attachmentLines.join("\n") || null,
+    last_error: fields.get("Degraded") || fields.get("Last error") || null,
+    raw: raw.trim() || "Copilot: Off",
+  };
+}
+
+function isJsonObject(value: unknown): value is JsonObject {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isCopilotNudge(value: unknown): value is JsonObject {
+  if (!isJsonObject(value)) return false;
+  return (
+    value.v === 1 &&
+    typeof value.id === "string" &&
+    ["Say", "Ask", "Clarify", "Hold", "Watch"].includes(String(value.kind)) &&
+    typeof value.text === "string" &&
+    typeof value.source_chip === "string" &&
+    typeof value.evidence_revision === "number" &&
+    typeof value.created_ts === "string" &&
+    typeof value.ttl_ms === "number"
+  );
+}
+
+function nudgeExpiry(
+  createdTs: unknown,
+  ttlMs: unknown,
+  nowMs: number
+): { observedTs: string | null; expiresAt: string | null; expired: boolean | null } {
+  if (typeof createdTs !== "string" || typeof ttlMs !== "number" || ttlMs < 0) {
+    return { observedTs: null, expiresAt: null, expired: null };
+  }
+  const createdMs = Date.parse(createdTs);
+  if (!Number.isFinite(createdMs)) {
+    return { observedTs: null, expiresAt: null, expired: null };
+  }
+  const expiresMs = createdMs + ttlMs;
+  return {
+    observedTs: new Date(createdMs).toISOString(),
+    expiresAt: new Date(expiresMs).toISOString(),
+    expired: nowMs >= expiresMs,
+  };
+}
+
+/** Parse the CLI's stdout presentation stream without invoking inference. */
+export function parseCopilotNudgeLog(
+  raw: string,
+  nowMs: number = Date.now(),
+  latestObservedMs?: number
+): ObservedCopilotNudge[] {
+  const entries: ObservedCopilotNudge[] = [];
+  const lines = raw.split(/\r?\n/);
+  let lastNonEmptyIndex = -1;
+  for (let index = lines.length - 1; index >= 0; index--) {
+    if (lines[index].trim().length > 0) {
+      lastNonEmptyIndex = index;
+      break;
+    }
+  }
+
+  for (let index = 0; index < lines.length; index++) {
+    const line = lines[index].trim();
+    if (!line) continue;
+    const cursor = index + 1;
+
+    try {
+      const parsed: unknown = JSON.parse(line);
+      if (isCopilotNudge(parsed)) {
+        const expiry = nudgeExpiry(parsed.created_ts, parsed.ttl_ms, nowMs);
+        entries.push({
+          cursor,
+          format: "json",
+          nudge: parsed,
+          raw: line,
+          observed_ts: expiry.observedTs,
+          expires_at: expiry.expiresAt,
+          expired: expiry.expired,
+        });
+        continue;
+      }
+    } catch {
+      // The `tui` surface emits a compact human-readable line when detached.
+    }
+
+    const textMatch = line.match(
+      /^\[(Say|Ask|Clarify|Hold|Watch)\]\s+(.+)\s+—\s+(.+)\s+\(evidence r(\d+), ttl (\d+)ms\)$/
+    );
+    if (textMatch) {
+      const isLatest = index === lastNonEmptyIndex;
+      const observedMs = isLatest && latestObservedMs !== undefined ? latestObservedMs : null;
+      const ttlMs = Number.parseInt(textMatch[5], 10);
+      entries.push({
+        cursor,
+        format: "text",
+        nudge: {
+          v: 1,
+          kind: textMatch[1],
+          text: textMatch[2],
+          source_chip: textMatch[3],
+          evidence_revision: Number.parseInt(textMatch[4], 10),
+          ttl_ms: ttlMs,
+        },
+        raw: line,
+        observed_ts: observedMs === null ? null : new Date(observedMs).toISOString(),
+        expires_at: observedMs === null ? null : new Date(observedMs + ttlMs).toISOString(),
+        expired: observedMs === null ? null : nowMs >= observedMs + ttlMs,
+      });
+      continue;
+    }
+
+    entries.push({
+      cursor,
+      format: "raw",
+      nudge: { raw: line },
+      raw: line,
+      observed_ts: null,
+      expires_at: null,
+      expired: null,
+    });
+  }
+
+  return entries;
+}
+
+export function buildLiveCopilotResourcePayload(
+  status: CopilotStatusPayload,
+  observation: CopilotNudgeObservation
+): LiveCopilotResourcePayload {
+  const latestNudge = status.active && observation.attached
+    ? observation.nudges.at(-1) ?? null
+    : null;
+  return {
+    v: 1,
+    resource: LIVE_COPILOT_RESOURCE_URI,
+    available: status.available,
+    active: status.active,
+    state: status.state,
+    status,
+    nudge_stream: {
+      attached: observation.attached,
+      cursor: observation.cursor,
+      note: observation.note,
+    },
+    latest_nudge: latestNudge,
+    current_nudge: latestNudge?.expired === false ? latestNudge : null,
+  };
+}
+
+export type CopilotNudgeReadPage = {
+  cursor: number;
+  next_cursor: number;
+  cursor_reset: boolean;
+  has_more: boolean;
+  nudges: ObservedCopilotNudge[];
+};
+
+export function selectCopilotNudges(
+  observation: CopilotNudgeObservation,
+  options: { cursor?: number; since?: string; limit?: number },
+  nowMs: number = Date.now()
+): CopilotNudgeReadPage {
+  if (options.cursor !== undefined && options.since !== undefined) {
+    throw new Error("Use either cursor or since, not both.");
+  }
+
+  const limit = Math.min(
+    Math.max(options.limit ?? COPILOT_READ_DEFAULT_LIMIT, 1),
+    COPILOT_READ_MAX_LIMIT
+  );
+  let requestedCursor = options.cursor ?? 0;
+  let sinceMs: number | null = null;
+
+  if (options.since !== undefined) {
+    const since = options.since.trim();
+    if (/^\d+$/.test(since)) {
+      requestedCursor = Number.parseInt(since, 10);
+      if (!Number.isSafeInteger(requestedCursor)) {
+        throw new Error("since cursor must be a safe non-negative integer.");
+      }
+    } else {
+      const duration = since.match(/^(\d+)(ms|s|m|h)$/);
+      if (duration) {
+        const amount = Number.parseInt(duration[1], 10);
+        if (!Number.isSafeInteger(amount)) {
+          throw new Error("since duration is too large.");
+        }
+        const multiplier = duration[2] === "ms"
+          ? 1
+          : duration[2] === "s"
+            ? 1000
+            : duration[2] === "m"
+              ? 60_000
+              : 3_600_000;
+        sinceMs = nowMs - amount * multiplier;
+      } else {
+        const parsed = Date.parse(since);
+        if (!Number.isFinite(parsed)) {
+          throw new Error(
+            "since must be a cursor, duration such as '5m' or '30s', or an ISO timestamp."
+          );
+        }
+        sinceMs = parsed;
+      }
+    }
+  }
+
+  if (!Number.isSafeInteger(requestedCursor) || requestedCursor < 0) {
+    throw new Error("cursor must be a safe non-negative integer.");
+  }
+
+  const cursorReset = requestedCursor > observation.cursor;
+  const effectiveCursor = cursorReset ? 0 : requestedCursor;
+  const eligible = observation.nudges.filter((entry) => {
+    if (entry.cursor <= effectiveCursor) return false;
+    if (sinceMs === null) return true;
+    if (entry.observed_ts === null) return false;
+    return Date.parse(entry.observed_ts) >= sinceMs;
+  });
+  const nudges = eligible.slice(0, limit);
+  const hasMore = eligible.length > nudges.length;
+  const nextCursor = hasMore
+    ? nudges.at(-1)?.cursor ?? effectiveCursor
+    : observation.cursor;
+
+  return {
+    cursor: observation.cursor,
+    next_cursor: nextCursor,
+    cursor_reset: cursorReset,
+    has_more: hasMore,
+    nudges,
+  };
+}
+
 // ── Helper: run minutes CLI command (uses execFile, not exec) ──
 
 async function runMinutes(
@@ -1133,6 +1502,256 @@ function parseJsonOutput(stdout: string): any {
   } catch {
     return { raw: stdout };
   }
+}
+
+function copilotObserverPaths(minutesHome: string = join(homedir(), ".minutes")) {
+  return {
+    root: minutesHome,
+    nudges: join(minutesHome, COPILOT_NUDGE_LOG_FILENAME),
+    stderr: join(minutesHome, COPILOT_STDERR_LOG_FILENAME),
+    session: join(minutesHome, COPILOT_OBSERVER_SESSION_FILENAME),
+  };
+}
+
+async function readCopilotStatusFromCli(): Promise<CopilotStatusPayload> {
+  if (!(await isCliAvailable())) {
+    return inactiveCopilotStatus("Minutes CLI is not installed; copilot control requires the local CLI.");
+  }
+
+  try {
+    const { stdout } = await runMinutes(["copilot", "status"], 5000);
+    return parseCopilotStatusOutput(stdout);
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    return inactiveCopilotStatus(`Unable to read copilot status: ${message}`);
+  }
+}
+
+function parseCopilotObserverSession(raw: string): CopilotObserverSession | null {
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!isJsonObject(parsed)) return null;
+    if (
+      parsed.v !== 1 ||
+      typeof parsed.pid !== "number" ||
+      !Number.isSafeInteger(parsed.pid) ||
+      parsed.pid <= 0 ||
+      typeof parsed.goal !== "string" ||
+      (parsed.surface !== "stdout" && parsed.surface !== "tui") ||
+      typeof parsed.started_ts !== "string"
+    ) {
+      return null;
+    }
+    return parsed as CopilotObserverSession;
+  } catch {
+    return null;
+  }
+}
+
+function observerMatchesStatus(
+  session: CopilotObserverSession,
+  status: CopilotStatusPayload
+): boolean {
+  if (!status.active) return false;
+  if (status.pid !== null && session.pid !== status.pid) return false;
+  return session.goal === status.goal && session.surface === status.surface;
+}
+
+async function readCopilotNudgeObservation(
+  status: CopilotStatusPayload,
+  minutesHome: string = join(homedir(), ".minutes")
+): Promise<CopilotNudgeObservation> {
+  if (!status.active) {
+    return {
+      attached: false,
+      cursor: 0,
+      session: null,
+      nudges: [],
+      note: "Copilot is not active.",
+    };
+  }
+
+  const paths = copilotObserverPaths(minutesHome);
+  let session: CopilotObserverSession | null = null;
+  try {
+    session = parseCopilotObserverSession(await readFile(paths.session, "utf8"));
+  } catch {
+    // A copilot started directly from a terminal has no MCP observer sidecar.
+  }
+
+  if (!session || !observerMatchesStatus(session, status)) {
+    return {
+      attached: false,
+      cursor: 0,
+      session,
+      nudges: [],
+      note:
+        "Copilot is active, but this nudge stream is not attached. " +
+        "The session was started outside start_copilot (or belongs to a different process); state remains observable via copilot_status.",
+    };
+  }
+
+  try {
+    const [raw, fileStat] = await Promise.all([
+      readFile(paths.nudges, "utf8"),
+      stat(paths.nudges),
+    ]);
+    const nudges = parseCopilotNudgeLog(raw, Date.now(), fileStat.mtimeMs);
+    return {
+      attached: true,
+      cursor: nudges.at(-1)?.cursor ?? 0,
+      session,
+      nudges,
+      note: session.surface === "stdout"
+        ? "Attached to the real CLI stdout nudge stream."
+        : "Attached to the real CLI TUI text stream; use surface=stdout for complete structured nudge fields.",
+    };
+  } catch (error: unknown) {
+    const code = isJsonObject(error) && typeof error.code === "string" ? error.code : null;
+    if (code === "ENOENT") {
+      return {
+        attached: true,
+        cursor: 0,
+        session,
+        nudges: [],
+        note: "Attached to the real CLI nudge stream; no nudges have been emitted yet.",
+      };
+    }
+    return {
+      attached: false,
+      cursor: 0,
+      session,
+      nudges: [],
+      note: `Copilot is active, but its observation log could not be read: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
+}
+
+async function getLiveCopilotSnapshot(): Promise<LiveCopilotResourcePayload> {
+  const status = await readCopilotStatusFromCli();
+  const observation = await readCopilotNudgeObservation(status);
+  return buildLiveCopilotResourcePayload(status, observation);
+}
+
+async function readLiveCopilotResource(uri: URL): Promise<{
+  contents: Array<{ uri: string; mimeType: string; text: string }>;
+}> {
+  if (uri.href !== LIVE_COPILOT_RESOURCE_URI) {
+    throw new McpError(
+      ErrorCode.InvalidParams,
+      `Unsupported live copilot resource: ${uri.href}`
+    );
+  }
+  const payload = await getLiveCopilotSnapshot();
+  return {
+    contents: [{
+      uri: uri.href,
+      mimeType: "application/json",
+      text: JSON.stringify(payload, null, 2),
+    }],
+  };
+}
+
+async function liveCopilotFingerprint(): Promise<string> {
+  const payload = await getLiveCopilotSnapshot();
+  return JSON.stringify({
+    available: payload.available,
+    active: payload.active,
+    state: payload.state,
+    status: payload.status.raw,
+    attached: payload.nudge_stream.attached,
+    cursor: payload.nudge_stream.cursor,
+    latest: payload.latest_nudge?.raw ?? null,
+  });
+}
+
+async function spawnCopilotCli(
+  goal: string,
+  surface: "stdout" | "tui"
+): Promise<CopilotObserverSession> {
+  const paths = copilotObserverPaths();
+  await mkdir(paths.root, { recursive: true });
+  await Promise.all([
+    writeFile(paths.nudges, "", "utf8"),
+    writeFile(paths.stderr, "", "utf8"),
+  ]);
+
+  const stdoutFd = openSync(paths.nudges, "a");
+  const stderrFd = openSync(paths.stderr, "a");
+  let child: ReturnType<typeof spawn>;
+  try {
+    child = spawn(
+      MINUTES_BIN,
+      ["copilot", "start", "--goal", goal, "--surface", surface],
+      {
+        detached: true,
+        stdio: ["ignore", stdoutFd, stderrFd],
+        env: augmentedEnv({ RUST_LOG: "info" }),
+      }
+    );
+  } finally {
+    closeSync(stdoutFd);
+    closeSync(stderrFd);
+  }
+
+  await new Promise<void>((resolveSpawn, rejectSpawn) => {
+    child.once("spawn", resolveSpawn);
+    child.once("error", rejectSpawn);
+  });
+  if (!child.pid) {
+    throw new Error("Copilot process started without a process identifier.");
+  }
+
+  const session: CopilotObserverSession = {
+    v: 1,
+    pid: child.pid,
+    goal,
+    surface,
+    started_ts: new Date().toISOString(),
+  };
+  child.unref();
+  try {
+    await writeFile(paths.session, JSON.stringify(session, null, 2), "utf8");
+  } catch (error) {
+    try {
+      process.kill(session.pid, "SIGTERM");
+    } catch {
+      // The child may already have exited; preserve the original sidecar error.
+    }
+    throw error;
+  }
+  return session;
+}
+
+function processIsAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function readCopilotStderrTail(): Promise<string> {
+  try {
+    const raw = (await readFile(copilotObserverPaths().stderr, "utf8")).trim();
+    return raw.slice(-4000);
+  } catch {
+    return "";
+  }
+}
+
+async function waitForCopilotStatus(
+  predicate: (status: CopilotStatusPayload) => boolean,
+  timeoutMs: number
+): Promise<CopilotStatusPayload> {
+  const deadline = Date.now() + timeoutMs;
+  let status = await readCopilotStatusFromCli();
+  while (!predicate(status) && Date.now() < deadline) {
+    await new Promise((resolveWait) => setTimeout(resolveWait, 200));
+    status = await readCopilotStatusFromCli();
+  }
+  return status;
 }
 
 async function readEventsFromCli(args: string[]): Promise<unknown[]> {
@@ -1231,8 +1850,11 @@ async function readLiveEventsResource(uri: URL): Promise<{
 
 export type LiveEventsSubscriptionOptions = {
   pollIntervalMs?: number;
+  enableLiveEvents?: boolean;
+  enableCopilot?: boolean;
   latestEventSeq?: () => Promise<number>;
   readEventsSinceSeq?: (sinceSeq: number, limit: number) => Promise<unknown[]>;
+  copilotFingerprint?: () => Promise<string>;
   sendResourceUpdated?: (uri: string) => Promise<void>;
   onError?: (error: unknown) => void;
 };
@@ -1246,17 +1868,23 @@ export function registerLiveEventsSubscriptionHandlers(
   mcpServer: McpServer,
   options: LiveEventsSubscriptionOptions = {}
 ): LiveEventsSubscriptionController {
-  const subscriptions = new Set<string>();
+  const eventSubscriptions = new Set<string>();
+  const copilotSubscriptions = new Set<string>();
+  const enableLiveEvents = options.enableLiveEvents ?? true;
+  const enableCopilot = options.enableCopilot ?? false;
   const pollIntervalMs = options.pollIntervalMs ?? LIVE_EVENTS_POLL_INTERVAL_MS;
   const loadLatestSeq = options.latestEventSeq ?? latestEventSeqFromCli;
   const loadEventsSinceSeq = options.readEventsSinceSeq ?? readEventsSinceSeqFromCli;
+  const loadCopilotFingerprint = options.copilotFingerprint ?? liveCopilotFingerprint;
   const sendResourceUpdated = options.sendResourceUpdated ??
     ((uri: string) => mcpServer.server.sendResourceUpdated({ uri }));
   const onError = options.onError ?? ((error: unknown) => {
-    console.error(`[Minutes] live event subscription failed: ${error instanceof Error ? error.message : String(error)}`);
+    console.error(`[Minutes] live resource subscription failed: ${error instanceof Error ? error.message : String(error)}`);
   });
 
   let cursor = 0;
+  let eventCursorInitialized = false;
+  let copilotFingerprint: string | null = null;
   let pollTimer: NodeJS.Timeout | null = null;
   let pollInFlight = false;
 
@@ -1264,15 +1892,29 @@ export function registerLiveEventsSubscriptionHandlers(
     resources: { subscribe: true },
   });
 
-  async function ensurePollerStarted(): Promise<void> {
-    if (pollTimer) return;
-    try {
-      cursor = await loadLatestSeq();
-    } catch (error) {
-      onError(error);
-      cursor = 0;
+  async function initializeSubscribedResources(): Promise<void> {
+    if (eventSubscriptions.size > 0 && !eventCursorInitialized) {
+      try {
+        cursor = await loadLatestSeq();
+      } catch (error) {
+        onError(error);
+        cursor = 0;
+      }
+      eventCursorInitialized = true;
     }
+    if (copilotSubscriptions.size > 0 && copilotFingerprint === null) {
+      try {
+        copilotFingerprint = await loadCopilotFingerprint();
+      } catch (error) {
+        onError(error);
+        copilotFingerprint = "";
+      }
+    }
+  }
 
+  async function ensurePollerStarted(): Promise<void> {
+    await initializeSubscribedResources();
+    if (pollTimer) return;
     pollTimer = setInterval(() => {
       void pollOnce();
     }, pollIntervalMs);
@@ -1280,68 +1922,118 @@ export function registerLiveEventsSubscriptionHandlers(
   }
 
   function stopPollerIfIdle(): void {
-    if (subscriptions.size > 0 || !pollTimer) return;
+    if (eventSubscriptions.size > 0 || copilotSubscriptions.size > 0 || !pollTimer) return;
     clearInterval(pollTimer);
     pollTimer = null;
     pollInFlight = false;
+    eventCursorInitialized = false;
+    copilotFingerprint = null;
+  }
+
+  async function notifySubscriptions(subscriptions: Set<string>): Promise<void> {
+    await Promise.all([...subscriptions].map(async (uri) => {
+      try {
+        await sendResourceUpdated(uri);
+      } catch (error) {
+        onError(error);
+      }
+    }));
   }
 
   async function pollOnce(): Promise<void> {
-    if (pollInFlight || subscriptions.size === 0) return;
+    if (
+      pollInFlight ||
+      (eventSubscriptions.size === 0 && copilotSubscriptions.size === 0)
+    ) {
+      return;
+    }
     pollInFlight = true;
     try {
-      const events = await loadEventsSinceSeq(cursor, LIVE_EVENTS_DEFAULT_CURSOR_LIMIT);
-      const nextCursor = maxEventSeq(events, cursor);
-      if (nextCursor > cursor) {
-        cursor = nextCursor;
-        await Promise.all([...subscriptions].map(async (uri) => {
-          try {
-            await sendResourceUpdated(uri);
-          } catch (error) {
-            onError(error);
+      if (eventSubscriptions.size > 0) {
+        try {
+          const events = await loadEventsSinceSeq(cursor, LIVE_EVENTS_DEFAULT_CURSOR_LIMIT);
+          const nextCursor = maxEventSeq(events, cursor);
+          if (nextCursor > cursor) {
+            cursor = nextCursor;
+            await notifySubscriptions(eventSubscriptions);
           }
-        }));
+        } catch (error) {
+          onError(error);
+        }
       }
-    } catch (error) {
-      onError(error);
+
+      if (copilotSubscriptions.size > 0) {
+        try {
+          const nextFingerprint = await loadCopilotFingerprint();
+          if (copilotFingerprint !== null && nextFingerprint !== copilotFingerprint) {
+            copilotFingerprint = nextFingerprint;
+            await notifySubscriptions(copilotSubscriptions);
+          } else {
+            copilotFingerprint = nextFingerprint;
+          }
+        } catch (error) {
+          onError(error);
+        }
+      }
     } finally {
       pollInFlight = false;
     }
   }
 
-  function normalizeSubscriptionUri(rawUri: string): string {
-    const parsed = parseLiveEventsResourceUri(rawUri);
-    if (!parsed) {
-      throw new McpError(
-        ErrorCode.InvalidParams,
-        `Only ${LIVE_EVENTS_RESOURCE_URI} subscriptions are supported`
-      );
+  function normalizeSubscriptionUri(
+    rawUri: string
+  ): { kind: "events" | "copilot"; uri: string } {
+    if (enableLiveEvents) {
+      const parsed = parseLiveEventsResourceUri(rawUri);
+      if (parsed) {
+        return {
+          kind: "events",
+          uri: parsed.sinceSeq === null && parsed.limit === LIVE_EVENTS_DEFAULT_RECENT_LIMIT
+            ? LIVE_EVENTS_RESOURCE_URI
+            : parsed.uri,
+        };
+      }
     }
-    return parsed.sinceSeq === null && parsed.limit === LIVE_EVENTS_DEFAULT_RECENT_LIMIT
-      ? LIVE_EVENTS_RESOURCE_URI
-      : parsed.uri;
+    if (enableCopilot && rawUri === LIVE_COPILOT_RESOURCE_URI) {
+      return { kind: "copilot", uri: LIVE_COPILOT_RESOURCE_URI };
+    }
+    const supported = [
+      ...(enableLiveEvents ? [LIVE_EVENTS_RESOURCE_URI] : []),
+      ...(enableCopilot ? [LIVE_COPILOT_RESOURCE_URI] : []),
+    ];
+    throw new McpError(
+      ErrorCode.InvalidParams,
+      `Only live resource subscriptions are supported: ${supported.join(", ")}`
+    );
   }
 
   mcpServer.server.setRequestHandler(SubscribeRequestSchema, async (request) => {
-    const uri = normalizeSubscriptionUri(request.params.uri);
-    subscriptions.add(uri);
+    const subscription = normalizeSubscriptionUri(request.params.uri);
+    const subscriptions = subscription.kind === "events"
+      ? eventSubscriptions
+      : copilotSubscriptions;
+    subscriptions.add(subscription.uri);
     await ensurePollerStarted();
     return {};
   });
 
   mcpServer.server.setRequestHandler(UnsubscribeRequestSchema, async (request) => {
-    const uri = normalizeSubscriptionUri(request.params.uri);
-    subscriptions.delete(uri);
+    const subscription = normalizeSubscriptionUri(request.params.uri);
+    const subscriptions = subscription.kind === "events"
+      ? eventSubscriptions
+      : copilotSubscriptions;
+    subscriptions.delete(subscription.uri);
     stopPollerIfIdle();
     return {};
   });
 
   return {
     stop: () => {
-      subscriptions.clear();
+      eventSubscriptions.clear();
+      copilotSubscriptions.clear();
       stopPollerIfIdle();
     },
-    subscriptionCount: () => subscriptions.size,
+    subscriptionCount: () => eventSubscriptions.size + copilotSubscriptions.size,
   };
 }
 
@@ -2993,10 +3685,29 @@ if (LIVE_EVENTS_SUPPORTED) {
     },
     async (uri) => readLiveEventsResource(uri)
   );
-
-  registerLiveEventsSubscriptionHandlers(server);
 } else {
   crashTrace("live-events-resource-disabled", { reason: "missing events_since_seq CLI capability" });
+}
+
+if (COPILOT_SUPPORTED) {
+  server.resource(
+    "live_copilot",
+    LIVE_COPILOT_RESOURCE_URI,
+    {
+      description:
+        "Current copilot state and latest observed nudge. Subscribe for notifications/resources/updated or poll this URI; MCP only controls and observes the independent minutes copilot engine.",
+    },
+    async (uri) => readLiveCopilotResource(uri)
+  );
+} else {
+  crashTrace("live-copilot-resource-disabled", { reason: "missing copilot_realtime CLI capability" });
+}
+
+if (LIVE_EVENTS_SUPPORTED || COPILOT_SUPPORTED) {
+  registerLiveEventsSubscriptionHandlers(server, {
+    enableLiveEvents: LIVE_EVENTS_SUPPORTED,
+    enableCopilot: COPILOT_SUPPORTED,
+  });
 }
 
 server.resource(
@@ -3407,6 +4118,294 @@ registerTool(
     }
   }
 );
+
+// ── Tools: real-time copilot control + observation ──────────
+
+if (COPILOT_SUPPORTED) {
+  registerTool(
+    "start_copilot",
+    "Start the independent Minutes real-time copilot for a goal. This launches `minutes copilot start`; MCP does not run model inference, own capture, or need to stay connected for the engine to produce nudges. The stdout surface is recommended for complete structured nudge observation.",
+    {
+      goal: z
+        .string()
+        .trim()
+        .min(1)
+        .max(1000)
+        .describe("Outcome the copilot should help achieve, for example 'land owners and deadlines'."),
+      surface: z
+        .enum(["stdout", "tui"])
+        .optional()
+        .default("stdout")
+        .describe("CLI presentation surface. Use stdout for complete structured nudge reads; tui is compact text."),
+    },
+    { title: "Start Copilot", readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+    async ({ goal, surface }) => {
+      if (!(await isCliAvailable())) {
+        return { content: [{ type: "text" as const, text: CLI_INSTALL_MSG }] };
+      }
+
+      const before = await readCopilotStatusFromCli();
+      if (!before.available) {
+        return {
+          content: [{ type: "text" as const, text: before.error || "Copilot status is unavailable." }],
+          structuredContent: { status: before },
+          isError: true,
+        };
+      }
+      if (before.active) {
+        const snapshot = buildLiveCopilotResourcePayload(
+          before,
+          await readCopilotNudgeObservation(before)
+        );
+        return {
+          content: [{
+            type: "text" as const,
+            text: `Copilot is already active (${before.state})${before.goal ? ` for goal: ${before.goal}` : ""}. Use copilot_status or stop_copilot before starting a different session.`,
+          }],
+          structuredContent: snapshot,
+        };
+      }
+
+      try {
+        const observerSession = await spawnCopilotCli(goal, surface);
+        const status = await waitForCopilotStatus(
+          (candidate) => candidate.active || !processIsAlive(observerSession.pid),
+          5000
+        );
+        const observation = await readCopilotNudgeObservation(status);
+        const snapshot = buildLiveCopilotResourcePayload(status, observation);
+
+        if (status.active && observerMatchesStatus(observerSession, status)) {
+          return {
+            content: [{
+              type: "text" as const,
+              text:
+                `Copilot started (${status.state}) for goal: ${goal}. ` +
+                "The engine is an independent minutes CLI process; use read_copilot_nudges or minutes://live/copilot to observe it.",
+            }],
+            structuredContent: snapshot,
+          };
+        }
+
+        if (status.active) {
+          return {
+            content: [{
+              type: "text" as const,
+              text:
+                "A copilot session became active, but it belongs to a different process. " +
+                "No second engine was attached; use copilot_status to inspect the active session.",
+            }],
+            structuredContent: snapshot,
+          };
+        }
+
+        if (processIsAlive(observerSession.pid)) {
+          return {
+            content: [{
+              type: "text" as const,
+              text:
+                "Copilot start is still arming and has not published active status yet. " +
+                "The independent CLI process is running; use copilot_status to follow startup.",
+            }],
+            structuredContent: snapshot,
+          };
+        }
+
+        const stderr = await readCopilotStderrTail();
+        return {
+          content: [{
+            type: "text" as const,
+            text: `Copilot failed to start${stderr ? `: ${stderr}` : ". Check Minutes configuration and the local Ollama provider."}`,
+          }],
+          structuredContent: snapshot,
+          isError: true,
+        };
+      } catch (error: unknown) {
+        return {
+          content: [{
+            type: "text" as const,
+            text: `Failed to start copilot: ${error instanceof Error ? error.message : String(error)}`,
+          }],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  registerTool(
+    "stop_copilot",
+    "Request that the active Minutes copilot stop. This invokes `minutes copilot stop` and never stops recording or live transcription. Calling it while no copilot is active returns a calm not-active status.",
+    {},
+    { title: "Stop Copilot", readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    async () => {
+      if (!(await isCliAvailable())) {
+        return { content: [{ type: "text" as const, text: CLI_INSTALL_MSG }] };
+      }
+
+      const before = await readCopilotStatusFromCli();
+      if (!before.active) {
+        const snapshot = buildLiveCopilotResourcePayload(
+          before,
+          await readCopilotNudgeObservation(before)
+        );
+        return {
+          content: [{ type: "text" as const, text: "Copilot is not active; nothing was stopped." }],
+          structuredContent: snapshot,
+        };
+      }
+
+      try {
+        const { stdout, stderr } = await runMinutes(["copilot", "stop"], 5000);
+        const status = await waitForCopilotStatus((candidate) => !candidate.active, 3000);
+        if (!status.active) {
+          await rm(copilotObserverPaths().session, { force: true }).catch(() => {});
+        }
+        const snapshot = buildLiveCopilotResourcePayload(
+          status,
+          await readCopilotNudgeObservation(status)
+        );
+        return {
+          content: [{
+            type: "text" as const,
+            text: status.active
+              ? (stderr || stdout || "Copilot stop requested; the engine is still shutting down. Capture continues unchanged.")
+              : "Copilot stopped. Recording and live transcription were not changed.",
+          }],
+          structuredContent: snapshot,
+        };
+      } catch (error: unknown) {
+        return {
+          content: [{
+            type: "text" as const,
+            text: `Failed to request copilot stop: ${error instanceof Error ? error.message : String(error)}`,
+          }],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  registerTool(
+    "copilot_status",
+    "Read the current copilot session and provider health from `minutes copilot status`. This is observation only and returns a clear Off/not-active payload when no engine is running.",
+    {},
+    { title: "Copilot Status", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    async () => {
+      const snapshot = await getLiveCopilotSnapshot();
+      if (!snapshot.available) {
+        return {
+          content: [{
+            type: "text" as const,
+            text: snapshot.status.error || "Copilot status is unavailable.",
+          }],
+          structuredContent: snapshot,
+          isError: true,
+        };
+      }
+      return {
+        content: [{
+          type: "text" as const,
+          text: snapshot.active
+            ? `Copilot is ${snapshot.state}${snapshot.status.goal ? ` for goal: ${snapshot.status.goal}` : ""}. ${snapshot.nudge_stream.note}`
+            : "Copilot is not active (Off).",
+        }],
+        structuredContent: snapshot,
+      };
+    }
+  );
+
+  registerTool(
+    "read_copilot_nudges",
+    "Read nudges observed from the active real CLI copilot stream. Use cursor (or a numeric since value) for lossless delta reads; since also accepts durations such as '5m'/'30s' and ISO timestamps. MCP never generates nudges itself.",
+    {
+      cursor: z
+        .number()
+        .int()
+        .min(0)
+        .optional()
+        .describe("Return nudge lines after this zero-based observation cursor."),
+      since: z
+        .string()
+        .trim()
+        .min(1)
+        .max(64)
+        .optional()
+        .describe("Cursor string, duration such as '5m' or '30s', or ISO timestamp. Do not combine with cursor."),
+      limit: z
+        .number()
+        .int()
+        .min(1)
+        .max(COPILOT_READ_MAX_LIMIT)
+        .optional()
+        .default(COPILOT_READ_DEFAULT_LIMIT)
+        .describe("Maximum nudges to return (1-200)."),
+    },
+    { title: "Read Copilot Nudges", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    async ({ cursor, since, limit }) => {
+      const status = await readCopilotStatusFromCli();
+      if (!status.active) {
+        return {
+          content: [{
+            type: "text" as const,
+            text: "Copilot is not active. Start it with start_copilot before waiting for new nudges.",
+          }],
+          structuredContent: {
+            active: false,
+            state: status.state,
+            cursor: 0,
+            next_cursor: 0,
+            cursor_reset: false,
+            has_more: false,
+            nudges: [],
+          },
+        };
+      }
+
+      const observation = await readCopilotNudgeObservation(status);
+      if (!observation.attached) {
+        return {
+          content: [{ type: "text" as const, text: observation.note }],
+          structuredContent: {
+            active: true,
+            state: status.state,
+            attached: false,
+            cursor: 0,
+            next_cursor: 0,
+            cursor_reset: false,
+            has_more: false,
+            nudges: [],
+          },
+        };
+      }
+
+      try {
+        const page = selectCopilotNudges(observation, { cursor, since, limit });
+        const text = page.nudges.length > 0
+          ? JSON.stringify(page, null, 2)
+          : `Copilot is ${status.state}; no new nudges after cursor ${page.next_cursor}.`;
+        return {
+          content: [{ type: "text" as const, text }],
+          structuredContent: {
+            active: true,
+            state: status.state,
+            attached: true,
+            ...page,
+          },
+        };
+      } catch (error: unknown) {
+        return {
+          content: [{
+            type: "text" as const,
+            text: error instanceof Error ? error.message : String(error),
+          }],
+          isError: true,
+        };
+      }
+    }
+  );
+} else {
+  crashTrace("copilot-tools-disabled", { reason: "missing copilot_realtime CLI capability" });
+}
 
 // ── Tool: start_live_transcript ──────────────────────────────
 

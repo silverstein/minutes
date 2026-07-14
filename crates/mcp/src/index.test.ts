@@ -8,17 +8,23 @@ import { ResourceUpdatedNotificationSchema } from "@modelcontextprotocol/sdk/typ
 import { describe, expect, it } from "vitest";
 
 import {
+  buildLiveCopilotResourcePayload,
   buildLiveEventsResourcePayload,
   extractMarkdownSection,
+  LIVE_COPILOT_RESOURCE_URI,
   LIVE_EVENTS_RESOURCE_URI,
   meetingDetailPayload,
   meetingListItem,
   meetingSearchItem,
   MEETING_INSIGHT_KINDS,
+  parseCopilotNudgeLog,
+  parseCopilotStatusOutput,
   parseKnowledgeConfig,
   parseLiveEventsResourceUri,
   registerLiveEventsSubscriptionHandlers,
+  selectCopilotNudges,
   shouldRunMainEntry,
+  type CopilotNudgeObservation,
 } from "./index.js";
 
 describe("meeting insight contract", () => {
@@ -222,6 +228,129 @@ describe("shouldRunMainEntry", () => {
   });
 });
 
+describe("copilot MCP observation contract", () => {
+  const createdMs = Date.parse("2026-07-14T12:00:00.000Z");
+  const firstNudge = {
+    v: 1,
+    id: "nudge-41-1",
+    kind: "Ask",
+    text: "Ask who owns the rollout date.",
+    source_chip: "rollout date",
+    evidence_revision: 41,
+    created_ts: "2026-07-14T12:00:00.000Z",
+    ttl_ms: 12000,
+  };
+  const secondNudge = {
+    ...firstNudge,
+    id: "nudge-42-2",
+    kind: "Clarify",
+    text: "Clarify whether Friday means launch or handoff.",
+    evidence_revision: 42,
+    created_ts: "2026-07-14T12:00:05.000Z",
+    supersedes: "nudge-41-1",
+  };
+
+  it("parses active and inactive CLI status without treating Off as an error", () => {
+    expect(parseCopilotStatusOutput("Copilot: Off\nLast error: Ollama unavailable")).toMatchObject({
+      available: true,
+      active: false,
+      state: "Off",
+      last_error: "Ollama unavailable",
+    });
+
+    expect(parseCopilotStatusOutput([
+      "Copilot: Listening",
+      "PID: 4321",
+      "Goal: land the decision",
+      "Surface: stdout",
+      "Provider: ollama / llama3.2",
+      "Evidence cursor: 42",
+      "Attached to the shared event cursor; capture remains independently owned.",
+    ].join("\n"))).toMatchObject({
+      active: true,
+      state: "Listening",
+      pid: 4321,
+      goal: "land the decision",
+      surface: "stdout",
+      provider: "ollama",
+      model: "llama3.2",
+      evidence_cursor: 42,
+      capture_attachment:
+        "Attached to the shared event cursor; capture remains independently owned.",
+    });
+  });
+
+  it("parses JSON nudges with cursor and TTL metadata", () => {
+    const nudges = parseCopilotNudgeLog(
+      `${JSON.stringify(firstNudge)}\n${JSON.stringify(secondNudge)}\n`,
+      createdMs + 6000
+    );
+
+    expect(nudges).toHaveLength(2);
+    expect(nudges[0]).toMatchObject({ cursor: 1, format: "json", expired: false });
+    expect(nudges[1]).toMatchObject({
+      cursor: 2,
+      format: "json",
+      expired: false,
+      nudge: { id: "nudge-42-2", supersedes: "nudge-41-1" },
+    });
+  });
+
+  it("returns lossless cursor pages and resets a cursor from a prior session", () => {
+    const nudges = parseCopilotNudgeLog(
+      `${JSON.stringify(firstNudge)}\n${JSON.stringify(secondNudge)}\n`,
+      createdMs + 6000
+    );
+    const observation: CopilotNudgeObservation = {
+      attached: true,
+      cursor: 2,
+      session: null,
+      nudges,
+      note: "attached",
+    };
+
+    expect(selectCopilotNudges(observation, { cursor: 0, limit: 1 })).toMatchObject({
+      cursor: 2,
+      next_cursor: 1,
+      cursor_reset: false,
+      has_more: true,
+      nudges: [{ cursor: 1 }],
+    });
+    expect(selectCopilotNudges(observation, { cursor: 99 })).toMatchObject({
+      cursor: 2,
+      next_cursor: 2,
+      cursor_reset: true,
+      has_more: false,
+      nudges: [{ cursor: 1 }, { cursor: 2 }],
+    });
+    expect(
+      selectCopilotNudges(observation, { since: "2s" }, createdMs + 6000).nudges
+    ).toMatchObject([{ cursor: 2 }]);
+  });
+
+  it("exposes latest but never current advice after TTL expiry", () => {
+    const status = parseCopilotStatusOutput([
+      "Copilot: Nudge",
+      "PID: 4321",
+      "Goal: land the decision",
+      "Surface: stdout",
+      "Provider: ollama / llama3.2",
+      "Evidence cursor: 42",
+    ].join("\n"));
+    const nudges = parseCopilotNudgeLog(JSON.stringify(firstNudge), createdMs + 13000);
+    const payload = buildLiveCopilotResourcePayload(status, {
+      attached: true,
+      cursor: 1,
+      session: null,
+      nudges,
+      note: "attached",
+    });
+
+    expect(payload.latest_nudge).toMatchObject({ cursor: 1, expired: true });
+    expect(payload.current_nudge).toBeNull();
+  });
+});
+
 describe("live event MCP resource", () => {
   it("parses the base resource and cursor read URIs", () => {
     expect(parseLiveEventsResourceUri("minutes://events/live")).toMatchObject({
@@ -312,6 +441,43 @@ describe("live event MCP resource", () => {
       expect(updates).toEqual([LIVE_EVENTS_RESOURCE_URI]);
 
       await client.unsubscribeResource({ uri: LIVE_EVENTS_RESOURCE_URI });
+      expect(controller.subscriptionCount()).toBe(0);
+    } finally {
+      controller.stop();
+      await client.close();
+      await mcpServer.close();
+    }
+  });
+
+  it("routes copilot updates through the same subscription handler", async () => {
+    const mcpServer = new McpServer({ name: "minutes-copilot-test", version: "0.0.0" });
+    const updates: string[] = [];
+    let fingerprint = "off:0";
+    const controller = registerLiveEventsSubscriptionHandlers(mcpServer, {
+      pollIntervalMs: 5,
+      enableLiveEvents: false,
+      enableCopilot: true,
+      copilotFingerprint: async () => fingerprint,
+    });
+
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "copilot-test-client", version: "0.0.0" }, { capabilities: {} });
+    client.setNotificationHandler(ResourceUpdatedNotificationSchema, (notification) => {
+      updates.push(notification.params.uri);
+    });
+
+    try {
+      await Promise.all([
+        mcpServer.connect(serverTransport),
+        client.connect(clientTransport),
+      ]);
+      await client.subscribeResource({ uri: LIVE_COPILOT_RESOURCE_URI });
+      fingerprint = "listening:1";
+
+      await waitFor(() => updates.length > 0);
+      expect(updates).toEqual([LIVE_COPILOT_RESOURCE_URI]);
+
+      await client.unsubscribeResource({ uri: LIVE_COPILOT_RESOURCE_URI });
       expect(controller.subscriptionCount()).toBe(0);
     } finally {
       controller.stop();

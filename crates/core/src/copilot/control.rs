@@ -14,6 +14,11 @@ pub struct CopilotSessionStatus {
     pub surface: String,
     pub cursor: u64,
     pub capture_attachment: String,
+    /// Human-readable explanation of the provider actually selected. Kept
+    /// separate from `health.last_error` because an automatic fallback is a
+    /// healthy operating mode, not a degraded model request.
+    #[serde(default)]
+    pub provider_selection: String,
     pub health: CopilotHealth,
     pub updated_ts: DateTime<Utc>,
 }
@@ -27,6 +32,7 @@ impl Default for CopilotSessionStatus {
             surface: "tui".into(),
             cursor: 0,
             capture_attachment: "not attached".into(),
+            provider_selection: String::new(),
             health: CopilotHealth {
                 state: CopilotState::Off,
                 provider: String::new(),

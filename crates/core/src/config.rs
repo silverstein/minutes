@@ -366,12 +366,11 @@ pub struct CopilotConfig {
 }
 
 impl CopilotConfig {
-    /// Resolve the local provider alias using the current platform capability.
+    /// Resolve the local provider alias using the constructed provider's
+    /// current health. This fails closed for unsupported machines and builds
+    /// where Apple FM is still only a contract stub.
     pub fn resolved_fast_provider(&self) -> &str {
-        #[cfg(target_os = "macos")]
-        let apple_fm_available = crate::apple_fm::is_available();
-        #[cfg(not(target_os = "macos"))]
-        let apple_fm_available = false;
+        let apple_fm_available = crate::copilot::apple_fm_is_available();
         self.resolved_fast_provider_for(apple_fm_available)
     }
 
@@ -1706,6 +1705,9 @@ mod tests {
         let config = CopilotConfig::default();
         assert_eq!(config.resolved_fast_provider_for(true), "apple-fm");
         assert_eq!(config.resolved_fast_provider_for(false), "ollama");
+
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(config.resolved_fast_provider(), "ollama");
 
         let mut explicit_ollama = config.clone();
         explicit_ollama.fast_provider = "ollama".into();

@@ -7543,6 +7543,56 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
+    struct SelectionTestModel {
+        provider: &'static str,
+        health_status: minutes_core::copilot::ModelHealthStatus,
+    }
+
+    impl minutes_core::copilot::CopilotModel for SelectionTestModel {
+        fn provider_name(&self) -> &str {
+            self.provider
+        }
+
+        fn model_name(&self) -> &str {
+            "selection-test"
+        }
+
+        fn prewarm(&self) -> std::result::Result<(), minutes_core::copilot::ModelError> {
+            Ok(())
+        }
+
+        fn stream_structured(
+            &self,
+            _request: &minutes_core::copilot::CopilotRequest,
+            _cancel: &minutes_core::copilot::CancelToken,
+            _sink: &dyn minutes_core::copilot::ModelEventSink,
+        ) -> std::result::Result<minutes_core::copilot::NudgeDraft, minutes_core::copilot::ModelError>
+        {
+            unreachable!("provider-selection tests never submit a model request")
+        }
+
+        fn health(&self) -> minutes_core::copilot::ModelHealth {
+            minutes_core::copilot::ModelHealth {
+                provider: self.provider.into(),
+                model: self.model_name().into(),
+                status: self.health_status,
+                detail: format!("{} test health", self.provider),
+                checked_ts: chrono::Utc::now(),
+            }
+        }
+    }
+
+    fn selection_test_model(
+        provider: &'static str,
+        health_status: minutes_core::copilot::ModelHealthStatus,
+    ) -> std::sync::Arc<dyn minutes_core::copilot::CopilotModel> {
+        std::sync::Arc::new(SelectionTestModel {
+            provider,
+            health_status,
+        })
+    }
+
     #[test]
     fn shell_quote_arg_leaves_slugs_bare_and_quotes_spaces() {
         assert_eq!(shell_quote_arg("jun-rei"), "jun-rei");
@@ -8439,6 +8489,113 @@ life (qmd://life/)
     }
 
     #[test]
+    fn copilot_auto_local_selects_apple_only_after_healthy_construction() {
+        use minutes_core::copilot::ModelHealthStatus;
+
+        let config = minutes_core::config::CopilotConfig::default();
+        let selection = select_copilot_model_with_factory(&config, "apple-fm", |provider| {
+            assert_eq!(provider, "apple-fm");
+            Ok(selection_test_model(
+                "apple-fm",
+                ModelHealthStatus::Available,
+            ))
+        })
+        .unwrap();
+
+        assert_eq!(selection.model.provider_name(), "apple-fm");
+        assert!(selection.detail.contains("auto-local selected apple-fm"));
+    }
+
+    #[test]
+    fn copilot_start_auto_local_falls_back_from_apple_stub_to_ollama() {
+        use minutes_core::copilot::ModelHealthStatus;
+
+        let config = minutes_core::config::CopilotConfig::default();
+        let selection =
+            select_copilot_model_with_factory(&config, "apple-fm", |provider| match provider {
+                "apple-fm" => Ok(selection_test_model(
+                    "apple-fm",
+                    ModelHealthStatus::NotImplemented,
+                )),
+                "ollama" => Ok(selection_test_model("ollama", ModelHealthStatus::Available)),
+                provider => anyhow::bail!("unexpected provider {provider}"),
+            })
+            .unwrap();
+
+        assert_eq!(selection.model.provider_name(), "ollama");
+        assert!(selection.detail.contains("apple-fm unavailable"));
+        assert!(selection.detail.contains("using ollama"));
+    }
+
+    #[test]
+    fn copilot_start_explicit_unavailable_apple_errors_clearly() {
+        use minutes_core::copilot::ModelHealthStatus;
+
+        let mut config = minutes_core::config::CopilotConfig::default();
+        config.fast_provider = "apple-fm".into();
+        let error = select_copilot_model_with_factory(&config, "apple-fm", |_| {
+            Ok(selection_test_model(
+                "apple-fm",
+                ModelHealthStatus::Unavailable,
+            ))
+        })
+        .err()
+        .expect("explicit unavailable apple-fm must fail")
+        .to_string();
+
+        assert!(error.contains("explicit apple-fm"));
+        assert!(error.contains("Unavailable"));
+        assert!(error.contains("auto-local"));
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn copilot_start_auto_local_uses_reachable_ollama_off_macos() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        with_temp_home(|_| {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                let mut request = [0_u8; 2048];
+                let count = stream.read(&mut request).unwrap();
+                let request = String::from_utf8_lossy(&request[..count]);
+                assert!(request.starts_with("GET /api/tags "));
+                let body = r#"{"models":[]}"#;
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                )
+                .unwrap();
+                stream.flush().unwrap();
+            });
+
+            let original_ollama_host = std::env::var_os("OLLAMA_HOST");
+            std::env::set_var("OLLAMA_HOST", format!("http://{address}"));
+            let config = minutes_core::config::CopilotConfig::default();
+            assert_eq!(config.resolved_fast_provider(), "ollama");
+            let selection = select_copilot_model(&config).unwrap();
+            if let Some(value) = original_ollama_host {
+                std::env::set_var("OLLAMA_HOST", value);
+            } else {
+                std::env::remove_var("OLLAMA_HOST");
+            }
+
+            assert_eq!(selection.model.provider_name(), "ollama");
+            assert!(selection.detail.contains("apple-fm unavailable"));
+            assert!(selection.detail.contains("using ollama"));
+            server.join().unwrap();
+        });
+    }
+
+    #[test]
     fn transcribe_subcommand_parses_all_flags() {
         let parsed = Cli::try_parse_from([
             "minutes",
@@ -8649,11 +8806,124 @@ fn cmd_copilot(action: CopilotAction, config: &Config) -> Result<()> {
     }
 }
 
+struct CopilotModelSelection {
+    model: std::sync::Arc<dyn minutes_core::copilot::CopilotModel>,
+    detail: String,
+}
+
+fn compact_provider_detail(detail: &str) -> String {
+    detail.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn checked_copilot_model<F>(
+    provider: &str,
+    factory: &mut F,
+) -> std::result::Result<
+    (
+        std::sync::Arc<dyn minutes_core::copilot::CopilotModel>,
+        minutes_core::copilot::ModelHealth,
+    ),
+    String,
+>
+where
+    F: FnMut(&str) -> Result<std::sync::Arc<dyn minutes_core::copilot::CopilotModel>>,
+{
+    let model =
+        factory(provider).map_err(|error| format!("provider construction failed: {}", error))?;
+    let health = model.health();
+    if health.status == minutes_core::copilot::ModelHealthStatus::Available {
+        Ok((model, health))
+    } else {
+        Err(format!(
+            "{:?}: {}",
+            health.status,
+            compact_provider_detail(&health.detail)
+        ))
+    }
+}
+
+fn select_copilot_model_with_factory<F>(
+    config: &minutes_core::config::CopilotConfig,
+    resolved_provider: &str,
+    mut factory: F,
+) -> Result<CopilotModelSelection>
+where
+    F: FnMut(&str) -> Result<std::sync::Arc<dyn minutes_core::copilot::CopilotModel>>,
+{
+    let configured_provider = config.fast_provider.trim();
+    let auto_local = configured_provider.is_empty() || configured_provider == "auto-local";
+
+    if resolved_provider == "cloud" && !config.allow_cloud {
+        anyhow::bail!(
+            "cloud copilot is disabled ([copilot].allow_cloud = false); use an on-device provider"
+        );
+    }
+    if resolved_provider == "cloud" {
+        anyhow::bail!("cloud copilot is not implemented in contract v1");
+    }
+    if !matches!(resolved_provider, "apple-fm" | "ollama") {
+        anyhow::bail!(
+            "unsupported copilot provider '{resolved_provider}'; use auto-local, apple-fm, or ollama"
+        );
+    }
+
+    match checked_copilot_model(resolved_provider, &mut factory) {
+        Ok((model, health)) => {
+            let health_detail = compact_provider_detail(&health.detail);
+            let detail = if auto_local && resolved_provider == "ollama" {
+                format!(
+                    "apple-fm unavailable on this machine or build; using ollama ({health_detail})"
+                )
+            } else if auto_local {
+                format!("auto-local selected apple-fm ({health_detail})")
+            } else {
+                format!("explicit configuration selected {resolved_provider} ({health_detail})")
+            };
+            Ok(CopilotModelSelection { model, detail })
+        }
+        Err(apple_error) if auto_local && resolved_provider == "apple-fm" => {
+            let (model, ollama_health) = checked_copilot_model("ollama", &mut factory).map_err(
+                |ollama_error| {
+                    anyhow::anyhow!(
+                        "auto-local could not start a healthy provider: apple-fm {apple_error}; ollama fallback {ollama_error}"
+                    )
+                },
+            )?;
+            Ok(CopilotModelSelection {
+                model,
+                detail: format!(
+                    "apple-fm unavailable ({apple_error}); using ollama ({})",
+                    compact_provider_detail(&ollama_health.detail)
+                ),
+            })
+        }
+        Err(error) if resolved_provider == "apple-fm" => anyhow::bail!(
+            "explicit apple-fm copilot provider is unavailable or unhealthy ({error}); use fast_provider = \"auto-local\" or \"ollama\""
+        ),
+        Err(error) => anyhow::bail!(
+            "copilot provider 'ollama' is unavailable or unhealthy ({error}); start Ollama and ensure the configured model is installed"
+        ),
+    }
+}
+
+fn select_copilot_model(
+    config: &minutes_core::config::CopilotConfig,
+) -> Result<CopilotModelSelection> {
+    use minutes_core::copilot::{AppleFoundationCopilotModel, OllamaCopilotModel};
+    use std::sync::Arc;
+
+    let resolved_provider = config.resolved_fast_provider().to_string();
+    select_copilot_model_with_factory(config, &resolved_provider, |provider| match provider {
+        "apple-fm" => Ok(Arc::new(AppleFoundationCopilotModel::from_config(config))),
+        "ollama" => Ok(Arc::new(OllamaCopilotModel::from_config(config))),
+        provider => anyhow::bail!("no copilot provider constructor for '{provider}'"),
+    })
+}
+
 fn cmd_copilot_start(goal: &str, surface: Option<&str>, config: &Config) -> Result<()> {
     use minutes_core::copilot::{
-        AppleFoundationCopilotModel, BattleCard, CopilotModel, CopilotRequest, CopilotRunner,
-        CopilotSessionStatus, CopilotState, CopilotUtterance, NudgePolicy, OllamaCopilotModel,
-        RunnerEvent, TranscriptUpdateKind,
+        BattleCard, CopilotRequest, CopilotRunner, CopilotSessionStatus, CopilotState,
+        CopilotUtterance, NudgePolicy, RunnerEvent, TranscriptUpdateKind,
     };
     use std::collections::VecDeque;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -8668,20 +8938,9 @@ fn cmd_copilot_start(goal: &str, surface: Option<&str>, config: &Config) -> Resu
         anyhow::bail!("unsupported copilot surface '{surface}'; use tui or stdout");
     }
 
-    let provider = config.copilot.resolved_fast_provider();
-    if provider == "cloud" && !config.copilot.allow_cloud {
-        anyhow::bail!(
-            "cloud copilot is disabled ([copilot].allow_cloud = false); use an on-device provider"
-        );
-    }
-    let model: Arc<dyn CopilotModel> = match provider {
-        "ollama" => Arc::new(OllamaCopilotModel::from_config(&config.copilot)),
-        "apple-fm" => Arc::new(AppleFoundationCopilotModel::from_config(&config.copilot)),
-        "cloud" => anyhow::bail!("cloud copilot is not implemented in contract v1"),
-        provider => anyhow::bail!(
-            "unsupported copilot provider '{provider}'; use auto-local, apple-fm, or ollama"
-        ),
-    };
+    let selection = select_copilot_model(&config.copilot)?;
+    let model = selection.model;
+    eprintln!("Copilot provider: {}", selection.detail);
 
     let session_guard = minutes_core::copilot::create_session_guard().map_err(|error| {
         anyhow::anyhow!("a copilot session is already active or could not be locked: {error}")
@@ -8734,6 +8993,7 @@ fn cmd_copilot_start(goal: &str, surface: Option<&str>, config: &Config) -> Resu
         surface: surface.into(),
         cursor,
         capture_attachment: capture_attachment.clone(),
+        provider_selection: selection.detail,
         health: runner.health(),
         updated_ts: chrono::Utc::now(),
     };
@@ -8928,6 +9188,9 @@ fn cmd_copilot_status() -> Result<()> {
         "Provider: {} / {}",
         status.health.provider, status.health.model
     );
+    if !status.provider_selection.is_empty() {
+        println!("Provider selection: {}", status.provider_selection);
+    }
     println!("Evidence cursor: {}", status.cursor);
     println!("{}", status.capture_attachment);
     if let Some(error) = status.health.last_error {

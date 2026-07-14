@@ -35,3 +35,58 @@ pub use types::{
     CopilotHealth, CopilotRequest, CopilotState, CopilotUtterance, Nudge, NudgeDraft, NudgeKind,
     TranscriptUpdateKind, COPILOT_CONTRACT_VERSION,
 };
+
+/// Whether the Apple Foundation Models copilot lane is genuinely usable in
+/// this build and on this machine.
+///
+/// Going through the provider contract (rather than assuming every macOS host
+/// has a usable implementation) makes contract stubs fail closed: their
+/// health is `NotImplemented`, while unsupported machines report
+/// `Unavailable`. Only a constructed provider reporting `Available` may win
+/// `auto-local` selection.
+pub fn apple_fm_is_available() -> bool {
+    let model = AppleFoundationCopilotModel::new(APPLE_FM_COPILOT_MODEL);
+    model_health_is_available(&model.health())
+}
+
+fn model_health_is_available(health: &ModelHealth) -> bool {
+    health.status == ModelHealthStatus::Available
+}
+
+#[cfg(test)]
+mod availability_tests {
+    use super::*;
+    use chrono::Utc;
+
+    fn health(status: ModelHealthStatus) -> ModelHealth {
+        ModelHealth {
+            provider: "apple-fm".into(),
+            model: APPLE_FM_COPILOT_MODEL.into(),
+            status,
+            detail: "test capability".into(),
+            checked_ts: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn apple_fm_availability_fails_closed_for_stub_or_unhealthy_provider() {
+        assert!(model_health_is_available(&health(
+            ModelHealthStatus::Available
+        )));
+        assert!(!model_health_is_available(&health(
+            ModelHealthStatus::Degraded
+        )));
+        assert!(!model_health_is_available(&health(
+            ModelHealthStatus::Unavailable
+        )));
+        assert!(!model_health_is_available(&health(
+            ModelHealthStatus::NotImplemented
+        )));
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn apple_fm_availability_is_false_off_macos() {
+        assert!(!apple_fm_is_available());
+    }
+}

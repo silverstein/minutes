@@ -2399,10 +2399,9 @@ fn main() {
                                     .ok();
                             }
 
-                            // Apply to all existing windows
-                            for (_, win) in app.webview_windows() {
-                                win.set_content_protected(new_state).ok();
-                            }
+                            // Coach advice stays protected even when the global
+                            // preference exposes the rest of Minutes.
+                            commands::apply_screen_share_content_protection(app, new_state);
                         }
                         "check-for-updates" => {
                             let handle = app.clone();
@@ -2984,7 +2983,7 @@ mod tray_activity_tests {
             "WebviewUrl::App(\"copilot-hud.html\".into())",
             ".decorations(false)",
             ".transparent(true)",
-            ".content_protected(",
+            ".content_protected(true)",
             ".always_on_top(true)",
             ".focused(false)",
             ".focusable(false)",
@@ -3007,6 +3006,22 @@ mod tray_activity_tests {
         }
         assert!(hud.contains("id=\"nudge-text\""));
         assert!(hud.contains("@media (prefers-reduced-motion: reduce)"));
+    }
+
+    #[test]
+    fn copilot_hud_privacy_is_independent_of_the_global_toggle() {
+        assert!(crate::commands::content_protection_for_window(
+            "copilot-hud",
+            false
+        ));
+        assert!(crate::commands::content_protection_for_window(
+            "copilot-hud",
+            true
+        ));
+        assert!(!crate::commands::content_protection_for_window(
+            "main", false
+        ));
+        assert!(crate::commands::content_protection_for_window("main", true));
     }
 
     #[test]

@@ -13,6 +13,10 @@ export const ROUTING_FIXTURES: RoutingFixture[] = [
     expectedSkill: "minutes-cleanup",
   },
   {
+    utterance: "Start Coach for this meeting and help me land the next steps.",
+    expectedSkill: "minutes-copilot",
+  },
+  {
     utterance: "Can you debrief that call for me?",
     expectedSkill: "minutes-debrief",
   },

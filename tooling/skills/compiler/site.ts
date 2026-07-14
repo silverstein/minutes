@@ -16,7 +16,10 @@ function sortByCategoryThenName(
 }
 
 export function renderSiteSkillCatalog(skills: CanonicalSkillSource[]): string {
-  const missing = skills
+  const visibleSkills = skills.filter(
+    (skill) => skill.frontmatter.metadata?.site_visible !== false,
+  );
+  const missing = visibleSkills
     .filter((skill) => {
       const metadata = skill.frontmatter.metadata;
       return !metadata?.site_category || !metadata.site_example || !metadata.site_best_for;
@@ -28,7 +31,7 @@ export function renderSiteSkillCatalog(skills: CanonicalSkillSource[]): string {
     );
   }
 
-  const catalog = skills
+  const catalog = visibleSkills
     .map((skill) => {
       const metadata = skill.frontmatter.metadata!;
       const siteEntry: SkillSiteEntry = {

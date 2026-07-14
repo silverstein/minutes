@@ -8707,6 +8707,244 @@ life (qmd://life/)
     }
 
     #[test]
+    fn restricted_history_context_is_not_rendered_by_copilot_hud() {
+        use minutes_core::copilot::{
+            BattleCard, CopilotRequest, CopilotUtterance, MeetingMode, NudgeDraft, NudgeKind,
+            NudgePolicy, OpportunityKind, StrategyState, TranscriptUpdateKind,
+        };
+
+        const RESTRICTED_CANARY: &str = "RESTRICTED_BOARD_PRICING_CANARY";
+        let request = CopilotRequest {
+            goal: "Confirm public next steps".into(),
+            mode: MeetingMode::Decision,
+            session_epoch: 1,
+            evidence_revision: 1,
+            evidence_utterance_sequence: 1,
+            evidence_utterance_revision: 1,
+            update_kind: TranscriptUpdateKind::Final,
+            utterances: vec![CopilotUtterance {
+                utterance_sequence: 1,
+                revision: 1,
+                update_kind: TranscriptUpdateKind::Final,
+                source: "live.utterance.final".into(),
+                text: "Who owns the public follow-up?".into(),
+                speaker: None,
+                speaker_verified: false,
+                offset_ms: 0,
+                duration_ms: 100,
+            }],
+            // Even if an upstream caller accidentally retains hidden context,
+            // the renderer receives only the policy-approved Nudge contract.
+            battle_card: BattleCard {
+                rendered: RESTRICTED_CANARY.into(),
+                ..BattleCard::default()
+            },
+            strategy_state: StrategyState::empty(),
+        };
+        let nudge = NudgePolicy::new(12_000)
+            .accept(
+                NudgeDraft {
+                    kind: NudgeKind::Ask,
+                    text: "Ask who owns the public follow-up.".into(),
+                    source_chip: "public owner".into(),
+                    opportunity: OpportunityKind::NextStep,
+                    confidence: 100,
+                },
+                &request,
+                chrono::Utc::now(),
+            )
+            .unwrap();
+
+        for (surface, terminal) in [("tui", true), ("tui", false), ("stdout", false)] {
+            let mut output = Vec::new();
+            render_copilot_nudge_to(&nudge, surface, terminal, &mut output).unwrap();
+            let output = String::from_utf8(output).unwrap();
+            assert!(output.contains("public"));
+            assert!(!output.contains(RESTRICTED_CANARY));
+        }
+    }
+
+    struct SaturatedCopilotModel {
+        calls: AtomicUsize,
+        started: std::sync::mpsc::Sender<u64>,
+        release_first: Mutex<std::sync::mpsc::Receiver<()>>,
+    }
+
+    impl minutes_core::copilot::CopilotModel for SaturatedCopilotModel {
+        fn provider_name(&self) -> &str {
+            "test"
+        }
+
+        fn model_name(&self) -> &str {
+            "saturated"
+        }
+
+        fn prewarm(&self) -> std::result::Result<(), minutes_core::copilot::ModelError> {
+            Ok(())
+        }
+
+        fn stream_structured(
+            &self,
+            request: &minutes_core::copilot::CopilotRequest,
+            _cancel: &minutes_core::copilot::CancelToken,
+            _sink: &dyn minutes_core::copilot::ModelEventSink,
+        ) -> std::result::Result<minutes_core::copilot::NudgeDraft, minutes_core::copilot::ModelError>
+        {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            self.started.send(request.evidence_revision).unwrap();
+            if call == 0 {
+                self.release_first
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .recv()
+                    .unwrap();
+            }
+            Ok(minutes_core::copilot::NudgeDraft {
+                kind: minutes_core::copilot::NudgeKind::Hold,
+                text: String::new(),
+                source_chip: String::new(),
+                opportunity: minutes_core::copilot::OpportunityKind::General,
+                confidence: 100,
+            })
+        }
+
+        fn health(&self) -> minutes_core::copilot::ModelHealth {
+            minutes_core::copilot::ModelHealth {
+                provider: "test".into(),
+                model: "saturated".into(),
+                status: minutes_core::copilot::ModelHealthStatus::Available,
+                detail: "ok".into(),
+                checked_ts: chrono::Utc::now(),
+            }
+        }
+    }
+
+    fn contention_request(
+        session_epoch: u64,
+        revision: u64,
+    ) -> minutes_core::copilot::CopilotRequest {
+        use minutes_core::copilot::{
+            BattleCard, CopilotRequest, CopilotUtterance, MeetingMode, StrategyState,
+            TranscriptUpdateKind,
+        };
+
+        CopilotRequest {
+            goal: "Keep capture healthy".into(),
+            mode: MeetingMode::Generic,
+            session_epoch,
+            evidence_revision: revision,
+            evidence_utterance_sequence: revision,
+            evidence_utterance_revision: 1,
+            update_kind: TranscriptUpdateKind::Final,
+            utterances: vec![CopilotUtterance {
+                utterance_sequence: revision,
+                revision: 1,
+                update_kind: TranscriptUpdateKind::Final,
+                source: "live.utterance.final".into(),
+                text: format!("revision {revision}"),
+                speaker: None,
+                speaker_verified: false,
+                offset_ms: revision,
+                duration_ms: 1,
+            }],
+            battle_card: BattleCard::empty(),
+            strategy_state: StrategyState::empty(),
+        }
+    }
+
+    #[test]
+    fn saturated_copilot_sheds_work_without_delaying_capture_finalization() {
+        use minutes_core::copilot::{CopilotRunner, NudgePolicy, SubmitOutcome};
+
+        with_temp_home(|home| {
+            let wav_path = home.join("contention.wav");
+            let capture_stop = Arc::new(AtomicBool::new(false));
+            let capture_stop_worker = Arc::clone(&capture_stop);
+            let capture_path = wav_path.clone();
+            let (finalized_tx, finalized_rx) = std::sync::mpsc::channel();
+            let capture_worker = std::thread::spawn(move || {
+                let spec = hound::WavSpec {
+                    channels: 1,
+                    sample_rate: 16_000,
+                    bits_per_sample: 16,
+                    sample_format: hound::SampleFormat::Int,
+                };
+                let mut writer = hound::WavWriter::create(&capture_path, spec).unwrap();
+                writer.write_sample(1_i16).unwrap();
+                while !capture_stop_worker.load(Ordering::Acquire) {
+                    std::thread::yield_now();
+                }
+                writer.write_sample(2_i16).unwrap();
+                writer.finalize().unwrap();
+                finalized_tx.send(()).unwrap();
+            });
+
+            let (started_tx, started_rx) = std::sync::mpsc::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            let model = Arc::new(SaturatedCopilotModel {
+                calls: AtomicUsize::new(0),
+                started: started_tx,
+                release_first: Mutex::new(release_rx),
+            });
+            let runner = CopilotRunner::start(model, NudgePolicy::new(12_000));
+            let epoch = runner.session_epoch();
+            assert_eq!(
+                runner.submit(contention_request(epoch, 1)),
+                SubmitOutcome::Queued
+            );
+            assert_eq!(started_rx.recv_timeout(Duration::from_secs(1)).unwrap(), 1);
+
+            let submitted_at = std::time::Instant::now();
+            let dropped = (2..=128)
+                .filter(|revision| {
+                    runner.submit(contention_request(epoch, *revision))
+                        == SubmitOutcome::DroppedQueueFull
+                })
+                .count();
+            assert!(dropped > 0, "copilot must shed work when its queue is full");
+            assert!(
+                submitted_at.elapsed() < Duration::from_secs(1),
+                "nonblocking copilot submission must stay bounded under contention"
+            );
+
+            // The model is still blocked and its bounded queue is saturated.
+            // Capture finalization owns no copilot lock or queue and completes
+            // before the provider is released.
+            capture_stop.store(true, Ordering::Release);
+            finalized_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("capture must finalize while copilot remains saturated");
+            capture_worker.join().unwrap();
+            assert_eq!(hound::WavReader::open(&wav_path).unwrap().duration(), 2);
+
+            release_tx.send(()).unwrap();
+            let retry_deadline = std::time::Instant::now() + Duration::from_secs(1);
+            let mut revision = 129;
+            let queued_revision = loop {
+                let outcome = runner.submit(contention_request(epoch, revision));
+                if matches!(
+                    outcome,
+                    SubmitOutcome::Queued | SubmitOutcome::CancelledOlderRequest
+                ) {
+                    break revision;
+                }
+                assert!(
+                    std::time::Instant::now() < retry_deadline,
+                    "copilot worker did not free its bounded queue"
+                );
+                revision += 1;
+                std::thread::yield_now();
+            };
+            assert_eq!(
+                started_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+                queued_revision,
+                "copilot worker should resume with fresh work after shedding saturation"
+            );
+            runner.stop();
+        });
+    }
+
+    #[test]
     fn transcribe_subcommand_parses_all_flags() {
         let parsed = Cli::try_parse_from([
             "minutes",

@@ -245,6 +245,10 @@ fn append_section(output: &mut String, heading: &str, values: &[String]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::copilot::{
+        CopilotRequest, CopilotUtterance, MeetingMode, StrategyRefreshReason, StrategyRequest,
+        StrategyState, TranscriptUpdateKind,
+    };
     use std::ffi::OsString;
     use std::path::Path;
 
@@ -319,5 +323,58 @@ mod tests {
         assert!(!card.rendered.contains("SECRET"));
         assert!(!card.rendered.contains("Board Pricing"));
         assert!(card.rendered.len() <= BATTLE_CARD_CHAR_BUDGET);
+
+        let serialized_card = serde_json::to_string(&card).unwrap();
+        assert!(!serialized_card.contains("Alex Kim"));
+        assert!(!serialized_card.contains("SECRET"));
+        assert!(!serialized_card.contains("Board Pricing"));
+
+        let utterance = CopilotUtterance {
+            utterance_sequence: 1,
+            revision: 1,
+            update_kind: TranscriptUpdateKind::Final,
+            source: "live.utterance.final".into(),
+            text: "Can we confirm the public pricing deck owner?".into(),
+            speaker: None,
+            speaker_verified: false,
+            offset_ms: 0,
+            duration_ms: 100,
+        };
+        let fast_request = CopilotRequest {
+            goal: "Confirm the public pricing plan".into(),
+            mode: MeetingMode::Decision,
+            session_epoch: 1,
+            evidence_revision: 1,
+            evidence_utterance_sequence: 1,
+            evidence_utterance_revision: 1,
+            update_kind: TranscriptUpdateKind::Final,
+            utterances: vec![utterance.clone()],
+            battle_card: card.clone(),
+            strategy_state: StrategyState::empty(),
+        };
+        assert!(!fast_request.untrusted_payload().contains("SECRET"));
+
+        let depth_request = StrategyRequest {
+            goal: fast_request.goal.clone(),
+            mode: fast_request.mode,
+            evidence_revision: fast_request.evidence_revision,
+            reason: StrategyRefreshReason::Initial,
+            utterances: vec![utterance],
+            battle_card: card,
+            prior_state: StrategyState::empty(),
+        };
+        let depth_payload = depth_request.untrusted_payload();
+        assert!(!depth_payload.contains("Alex Kim"));
+        assert!(!depth_payload.contains("SECRET"));
+        assert!(!depth_payload.contains("Board Pricing"));
+
+        let strategy = StrategyState::from_draft(
+            depth_request.heuristic_draft(),
+            depth_request.evidence_revision,
+        );
+        let serialized_strategy = serde_json::to_string(&strategy).unwrap();
+        assert!(!serialized_strategy.contains("Alex Kim"));
+        assert!(!serialized_strategy.contains("SECRET"));
+        assert!(!serialized_strategy.contains("Board Pricing"));
     }
 }

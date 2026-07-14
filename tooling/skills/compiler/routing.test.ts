@@ -83,6 +83,7 @@ test("evaluateRoutingFixtures passes on the real Minutes skill corpus shape", ()
   const skills = [
     makeSkill("minutes-brief", ["brief me", "brief me on Sarah"]),
     makeSkill("minutes-cleanup", ["clean up recordings"]),
+    makeSkill("minutes-copilot", ["start Coach", "coach this live meeting"]),
     makeSkill("minutes-debrief", ["debrief that call"]),
     makeSkill("minutes-graph", ["show me everyone who mentioned X", "across all meetings"]),
     makeSkill("minutes-ideas", ["what ideas did I have?"]),

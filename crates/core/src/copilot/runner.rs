@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(test)]
 use std::sync::mpsc::Sender;
 use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -26,6 +26,22 @@ const DEPTH_CHANNEL_CAPACITY: usize = 16;
 
 fn next_session_epoch() -> u64 {
     NEXT_SESSION_EPOCH.fetch_add(1, Ordering::Relaxed)
+}
+
+/// Recover the protected copilot state after a worker panics while holding it.
+///
+/// Copilot is failure-isolated from recording, so poisoning its own bookkeeping
+/// must not turn one provider/worker panic into a permanent cascade of panics.
+fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|error| error.into_inner())
+}
+
+fn try_lock_unpoisoned<T>(mutex: &Mutex<T>) -> Option<MutexGuard<'_, T>> {
+    match mutex.try_lock() {
+        Ok(guard) => Some(guard),
+        Err(TryLockError::Poisoned(error)) => Some(error.into_inner()),
+        Err(TryLockError::WouldBlock) => None,
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -402,7 +418,7 @@ impl CopilotRunner {
         request: CopilotRequest,
         latency: Option<PartialLatencySeed>,
     ) -> SubmitOutcome {
-        let mut runtime = self.runtime.lock().unwrap();
+        let mut runtime = lock_unpoisoned(&self.runtime);
         if runtime.stopped {
             return SubmitOutcome::IgnoredAfterStop;
         }
@@ -413,7 +429,7 @@ impl CopilotRunner {
             return SubmitOutcome::IgnoredStaleSession;
         }
 
-        if let Ok(active_depth) = self.depth_cancel.try_lock() {
+        if let Some(active_depth) = try_lock_unpoisoned(&self.depth_cancel) {
             if let Some(cancel) = active_depth.as_ref() {
                 cancel.cancel();
             }
@@ -484,7 +500,7 @@ impl CopilotRunner {
     }
 
     pub fn session_epoch(&self) -> u64 {
-        self.runtime.lock().unwrap().session_epoch
+        lock_unpoisoned(&self.runtime).session_epoch
     }
 
     /// Start a new in-memory evidence epoch and cancel any prior session's
@@ -493,7 +509,7 @@ impl CopilotRunner {
     pub fn begin_session(&self) -> u64 {
         let epoch = next_session_epoch();
         {
-            let mut runtime = self.runtime.lock().unwrap();
+            let mut runtime = lock_unpoisoned(&self.runtime);
             if runtime.stopped {
                 return runtime.session_epoch;
             }
@@ -511,13 +527,13 @@ impl CopilotRunner {
                 CopilotState::Listening
             };
         }
-        if let Ok(active_depth) = self.depth_cancel.lock() {
-            if let Some(cancel) = active_depth.as_ref() {
-                cancel.cancel();
-            }
+        let active_depth = lock_unpoisoned(&self.depth_cancel);
+        if let Some(cancel) = active_depth.as_ref() {
+            cancel.cancel();
         }
+        drop(active_depth);
         {
-            let mut depth = self.depth_shared.lock().unwrap();
+            let mut depth = lock_unpoisoned(&self.depth_shared);
             depth.session_epoch = epoch;
             depth.snapshot = DepthLaneSnapshot::default();
             depth.battle_card = None;
@@ -535,7 +551,7 @@ impl CopilotRunner {
         utterance_sequence: u64,
         revision: u64,
     ) {
-        let mut runtime = self.runtime.lock().unwrap();
+        let mut runtime = lock_unpoisoned(&self.runtime);
         if runtime.stopped || runtime.session_epoch != session_epoch {
             return;
         }
@@ -559,7 +575,7 @@ impl CopilotRunner {
 
     pub fn retract_partials(&self, session_epoch: u64, through_utterance_sequence: u64) {
         {
-            let mut runtime = self.runtime.lock().unwrap();
+            let mut runtime = lock_unpoisoned(&self.runtime);
             if runtime.stopped || runtime.session_epoch != session_epoch {
                 return;
             }
@@ -598,7 +614,7 @@ impl CopilotRunner {
     }
 
     pub fn pause(&self) {
-        let mut runtime = self.runtime.lock().unwrap();
+        let mut runtime = lock_unpoisoned(&self.runtime);
         if runtime.stopped {
             return;
         }
@@ -613,7 +629,7 @@ impl CopilotRunner {
     }
 
     pub fn resume(&self) {
-        let mut runtime = self.runtime.lock().unwrap();
+        let mut runtime = lock_unpoisoned(&self.runtime);
         if runtime.stopped {
             return;
         }
@@ -625,7 +641,7 @@ impl CopilotRunner {
     }
 
     pub fn tick(&self, now: DateTime<Utc>) {
-        let mut runtime = self.runtime.lock().unwrap();
+        let mut runtime = lock_unpoisoned(&self.runtime);
         if runtime.state == CopilotState::Nudge
             && runtime
                 .nudge_expires_at
@@ -641,7 +657,7 @@ impl CopilotRunner {
         nudge_id: impl Into<String>,
         feedback: CopilotFeedback,
     ) -> FeedbackOutcome {
-        if self.runtime.lock().unwrap().stopped {
+        if lock_unpoisoned(&self.runtime).stopped {
             return FeedbackOutcome::IgnoredAfterStop;
         }
         match self.command_tx.try_send(RunnerCommand::Feedback {
@@ -655,7 +671,7 @@ impl CopilotRunner {
     }
 
     pub fn health(&self) -> CopilotHealth {
-        let runtime = self.runtime.lock().unwrap();
+        let runtime = lock_unpoisoned(&self.runtime);
         CopilotHealth {
             state: runtime.state,
             provider: runtime.provider.clone(),
@@ -675,9 +691,9 @@ impl CopilotRunner {
 
     pub fn try_recv(&self) -> Option<RunnerEvent> {
         loop {
-            let event = self.event_rx.lock().unwrap().try_recv().ok()?;
+            let event = lock_unpoisoned(&self.event_rx).try_recv().ok()?;
             if let RunnerEvent::Nudge(nudge) = &event {
-                let runtime = self.runtime.lock().unwrap();
+                let runtime = lock_unpoisoned(&self.runtime);
                 if !nudge_is_current(&runtime, nudge) {
                     continue;
                 }
@@ -690,9 +706,11 @@ impl CopilotRunner {
         let deadline = Instant::now() + timeout;
         loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
-            let event = self.event_rx.lock().unwrap().recv_timeout(remaining).ok()?;
+            let event = lock_unpoisoned(&self.event_rx)
+                .recv_timeout(remaining)
+                .ok()?;
             if let RunnerEvent::Nudge(nudge) = &event {
-                let runtime = self.runtime.lock().unwrap();
+                let runtime = lock_unpoisoned(&self.runtime);
                 if !nudge_is_current(&runtime, nudge) {
                     if Instant::now() >= deadline {
                         return None;
@@ -707,18 +725,18 @@ impl CopilotRunner {
     /// Bounded process-local instrumentation. These records are never appended
     /// to the event log or transcript artifacts.
     pub fn latency_records(&self) -> Vec<LatencyRecord> {
-        self.runtime.lock().unwrap().latency.records()
+        lock_unpoisoned(&self.runtime).latency.records()
     }
 
     /// Process-local slow-lane instrumentation used by status surfaces and
     /// deterministic eval. It is never appended to meeting artifacts.
     pub fn depth_snapshot(&self) -> DepthLaneSnapshot {
-        self.depth_shared.lock().unwrap().snapshot.clone()
+        lock_unpoisoned(&self.depth_shared).snapshot.clone()
     }
 
     pub fn stop(&self) {
         {
-            let mut runtime = self.runtime.lock().unwrap();
+            let mut runtime = lock_unpoisoned(&self.runtime);
             if runtime.stopped {
                 return;
             }
@@ -728,17 +746,17 @@ impl CopilotRunner {
                 cancel.cancel();
             }
         }
-        if let Ok(active_depth) = self.depth_cancel.lock() {
-            if let Some(cancel) = active_depth.as_ref() {
-                cancel.cancel();
-            }
+        let active_depth = lock_unpoisoned(&self.depth_cancel);
+        if let Some(cancel) = active_depth.as_ref() {
+            cancel.cancel();
         }
+        drop(active_depth);
         let _ = self.command_tx.try_send(RunnerCommand::Stop);
         let _ = self.depth_tx.try_send(DepthCommand::Stop);
-        if let Some(worker) = self.worker.lock().unwrap().take() {
+        if let Some(worker) = lock_unpoisoned(&self.worker).take() {
             let _ = worker.join();
         }
-        if let Some(worker) = self.depth_worker.lock().unwrap().take() {
+        if let Some(worker) = lock_unpoisoned(&self.depth_worker).take() {
             let _ = worker.join();
         }
     }
@@ -764,7 +782,7 @@ fn run_worker(context: FastWorkerContext) {
     } = context;
     let prewarm_result = model.prewarm();
     let (stopped, paused) = {
-        let runtime = runtime.lock().unwrap();
+        let runtime = lock_unpoisoned(&runtime);
         (runtime.stopped, runtime.paused)
     };
     if stopped {
@@ -804,7 +822,7 @@ fn run_worker(context: FastWorkerContext) {
             }
             RunnerCommand::BeginSession => {
                 policy.reset_session();
-                runtime.lock().unwrap().policy = policy.snapshot();
+                lock_unpoisoned(&runtime).policy = policy.snapshot();
                 emit_current_state(&runtime, &event_tx);
                 continue;
             }
@@ -845,7 +863,7 @@ fn run_worker(context: FastWorkerContext) {
                     Ok(RunnerCommand::InvalidatePartials) => policy.clear(),
                     Ok(RunnerCommand::BeginSession) => {
                         policy.reset_session();
-                        runtime.lock().unwrap().policy = policy.snapshot();
+                        lock_unpoisoned(&runtime).policy = policy.snapshot();
                     }
                     Ok(RunnerCommand::Stop) => {
                         should_stop = true;
@@ -877,7 +895,7 @@ fn run_worker(context: FastWorkerContext) {
                 RunnerCommand::InvalidatePartials => policy.clear(),
                 RunnerCommand::BeginSession => {
                     policy.reset_session();
-                    runtime.lock().unwrap().policy = policy.snapshot();
+                    lock_unpoisoned(&runtime).policy = policy.snapshot();
                 }
                 RunnerCommand::Stop => should_stop = true,
             }
@@ -893,7 +911,7 @@ fn run_worker(context: FastWorkerContext) {
         // A failed try_lock means the depth worker is publishing a new compact
         // snapshot. The fast lane proceeds immediately with its prior request
         // context; it never waits for retrieval or strategy.
-        if let Ok(depth) = depth_shared.try_lock() {
+        if let Some(depth) = try_lock_unpoisoned(&depth_shared) {
             if depth.session_epoch == request.session_epoch {
                 request.strategy_state = depth.snapshot.latest_strategy.clone();
                 if let Some(battle_card) = depth.battle_card.as_ref() {
@@ -903,7 +921,7 @@ fn run_worker(context: FastWorkerContext) {
         }
 
         {
-            let runtime = runtime.lock().unwrap();
+            let runtime = lock_unpoisoned(&runtime);
             if runtime.stopped {
                 break;
             }
@@ -914,7 +932,7 @@ fn run_worker(context: FastWorkerContext) {
 
         let cancel = CancelToken::new();
         {
-            let mut runtime = runtime.lock().unwrap();
+            let mut runtime = lock_unpoisoned(&runtime);
             runtime.current_request = Some(request.clone());
             runtime.current_cancel = Some(cancel.clone());
             runtime.state = CopilotState::Thinking;
@@ -933,7 +951,7 @@ fn run_worker(context: FastWorkerContext) {
         let stream_revision = request.evidence_revision;
         let stream_clock = Arc::clone(&clock);
         let stream_sink = move |event| {
-            stream_runtime.lock().unwrap().latency.mark_first_token(
+            lock_unpoisoned(&stream_runtime).latency.mark_first_token(
                 stream_epoch,
                 stream_revision,
                 stream_clock.monotonic_now(),
@@ -943,12 +961,12 @@ fn run_worker(context: FastWorkerContext) {
         let result = model.stream_structured(&request, &cancel, &stream_sink);
 
         {
-            let mut runtime = runtime.lock().unwrap();
+            let mut runtime = lock_unpoisoned(&runtime);
             runtime.current_request = None;
             runtime.current_cancel = None;
         }
 
-        let evidence_is_stale = !request_is_current(&runtime.lock().unwrap(), &request);
+        let evidence_is_stale = !request_is_current(&lock_unpoisoned(&runtime), &request);
         if cancel.is_cancelled()
             || evidence_is_stale
             || result
@@ -962,7 +980,7 @@ fn run_worker(context: FastWorkerContext) {
                     evidence_revision: request.evidence_revision,
                 },
             );
-            let state = if runtime.lock().unwrap().paused {
+            let state = if lock_unpoisoned(&runtime).paused {
                 CopilotState::Paused
             } else {
                 CopilotState::Listening
@@ -978,10 +996,10 @@ fn run_worker(context: FastWorkerContext) {
         match result {
             Ok(draft) => {
                 let accepted = policy.accept(draft, &request, clock.utc_now());
-                runtime.lock().unwrap().policy = policy.snapshot();
+                lock_unpoisoned(&runtime).policy = policy.snapshot();
                 if let Some(nudge) = accepted {
                     {
-                        let mut runtime = runtime.lock().unwrap();
+                        let mut runtime = lock_unpoisoned(&runtime);
                         if !request_is_current(&runtime, &request) {
                             policy.clear();
                             continue;
@@ -1028,7 +1046,7 @@ fn apply_feedback(
     }
     let snapshot = policy.snapshot();
     {
-        let mut runtime = runtime.lock().unwrap();
+        let mut runtime = lock_unpoisoned(runtime);
         runtime.policy = snapshot.clone();
         if feedback == CopilotFeedback::Dismissed && runtime.state == CopilotState::Nudge {
             runtime.state = CopilotState::Listening;
@@ -1060,7 +1078,7 @@ fn run_depth_worker(context: DepthWorkerContext) {
                 detector.reset();
                 last_strategy_at = None;
                 last_grounding_at = None;
-                let mut shared = shared.lock().unwrap();
+                let mut shared = lock_unpoisoned(&shared);
                 shared.snapshot = DepthLaneSnapshot::default();
                 shared.battle_card = None;
                 continue;
@@ -1070,7 +1088,7 @@ fn run_depth_worker(context: DepthWorkerContext) {
         if request.update_kind != TranscriptUpdateKind::Final {
             continue;
         }
-        if shared.lock().unwrap().session_epoch != request.session_epoch {
+        if lock_unpoisoned(&shared).session_epoch != request.session_epoch {
             continue;
         }
 
@@ -1087,7 +1105,7 @@ fn run_depth_worker(context: DepthWorkerContext) {
         let decisive = is_decisive_final(trigger_text);
         let now = clock.monotonic_now();
         if topic_shift.is_some() {
-            let mut state = shared.lock().unwrap();
+            let mut state = lock_unpoisoned(&shared);
             state.snapshot.topic_shifts = state.snapshot.topic_shifts.saturating_add(1);
             push_revision(
                 &mut state.snapshot.topic_shift_revisions,
@@ -1102,7 +1120,7 @@ fn run_depth_worker(context: DepthWorkerContext) {
             );
         }
         if decisive {
-            let mut state = shared.lock().unwrap();
+            let mut state = lock_unpoisoned(&shared);
             state.snapshot.decisive_finals = state.snapshot.decisive_finals.saturating_add(1);
         }
 
@@ -1116,7 +1134,7 @@ fn run_depth_worker(context: DepthWorkerContext) {
                 let query = grounding_query(&request);
                 match source.refresh(&query) {
                     Ok(card) => {
-                        let mut state = shared.lock().unwrap();
+                        let mut state = lock_unpoisoned(&shared);
                         if state.session_epoch != request.session_epoch {
                             continue;
                         }
@@ -1138,7 +1156,7 @@ fn run_depth_worker(context: DepthWorkerContext) {
                     }
                     Err(error) => {
                         let message = error.to_string();
-                        let mut state = shared.lock().unwrap();
+                        let mut state = lock_unpoisoned(&shared);
                         if state.session_epoch == request.session_epoch {
                             state.snapshot.last_grounding_error = Some(message.clone());
                             drop(state);
@@ -1171,7 +1189,7 @@ fn run_depth_worker(context: DepthWorkerContext) {
 
         if let Some(reason) = strategy_reason {
             let (prior_state, battle_card) = {
-                let state = shared.lock().unwrap();
+                let state = lock_unpoisoned(&shared);
                 (
                     state.snapshot.latest_strategy.clone(),
                     state
@@ -1190,13 +1208,13 @@ fn run_depth_worker(context: DepthWorkerContext) {
                 prior_state,
             };
             let cancel = CancelToken::new();
-            *active_cancel.lock().unwrap() = Some(cancel.clone());
+            *lock_unpoisoned(&active_cancel) = Some(cancel.clone());
             let result = model.refresh_strategy(&strategy_request, &cancel);
-            active_cancel.lock().unwrap().take();
+            lock_unpoisoned(&active_cancel).take();
             if !cancel.is_cancelled() {
                 match result {
                     Ok(strategy) => {
-                        let mut state = shared.lock().unwrap();
+                        let mut state = lock_unpoisoned(&shared);
                         if state.session_epoch != request.session_epoch {
                             continue;
                         }
@@ -1224,7 +1242,7 @@ fn run_depth_worker(context: DepthWorkerContext) {
                     }
                     Err(error) if error.kind == ModelErrorKind::Cancelled => {}
                     Err(error) => {
-                        let mut state = shared.lock().unwrap();
+                        let mut state = lock_unpoisoned(&shared);
                         if state.session_epoch == request.session_epoch {
                             state.snapshot.last_strategy_error = Some(error.message.clone());
                             drop(state);
@@ -1240,7 +1258,7 @@ fn run_depth_worker(context: DepthWorkerContext) {
             }
             last_strategy_at = Some(now);
         }
-        let mut state = shared.lock().unwrap();
+        let mut state = lock_unpoisoned(&shared);
         if state.session_epoch == request.session_epoch {
             state.snapshot.latest_processed_revision = Some(request.evidence_revision);
         }
@@ -1316,7 +1334,7 @@ fn set_state(
     error: Option<String>,
 ) {
     {
-        let mut runtime = runtime.lock().unwrap();
+        let mut runtime = lock_unpoisoned(runtime);
         runtime.state = state;
         runtime.last_error = error.clone();
         if state != CopilotState::Nudge {
@@ -1330,7 +1348,7 @@ fn set_state(
 }
 
 fn emit_current_state(runtime: &Arc<Mutex<RunnerRuntime>>, event_tx: &SyncSender<RunnerEvent>) {
-    let state = runtime.lock().unwrap().state;
+    let state = lock_unpoisoned(runtime).state;
     try_emit(event_tx, RunnerEvent::StateChanged(state));
 }
 
@@ -1465,7 +1483,7 @@ mod tests {
             let call = self.calls.fetch_add(1, Ordering::SeqCst);
             let _ = self.started.send(request.evidence_revision);
             if call == 0 {
-                self.release_first.lock().unwrap().recv().unwrap();
+                lock_unpoisoned(&self.release_first).recv().unwrap();
             }
             let text = request
                 .utterances
@@ -1646,6 +1664,45 @@ mod tests {
             battle_card: BattleCard::empty(),
             strategy_state: StrategyState::empty(),
         }
+    }
+
+    #[test]
+    fn poisoned_runtime_mutexes_self_heal_and_keep_coaching() {
+        let runner = CopilotRunner::start(Arc::new(StreamingModel), NudgePolicy::new(12_000));
+        let runtime = Arc::clone(&runner.runtime);
+        let poisoner = std::thread::spawn(move || {
+            let _runtime = lock_unpoisoned(&runtime);
+            panic!("simulate a copilot worker panic while holding runtime state");
+        });
+        assert!(poisoner.join().is_err());
+        let depth = Arc::clone(&runner.depth_shared);
+        let depth_poisoner = std::thread::spawn(move || {
+            let _depth = lock_unpoisoned(&depth);
+            panic!("simulate a depth worker panic while holding shared state");
+        });
+        assert!(depth_poisoner.join().is_err());
+        assert_eq!(runner.depth_snapshot(), DepthLaneSnapshot::default());
+
+        let epoch = runner.session_epoch();
+        assert_eq!(runner.submit(request(epoch, 1)), SubmitOutcome::Queued);
+
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let mut delivered = false;
+        while Instant::now() < deadline {
+            if matches!(
+                runner.recv_timeout(Duration::from_millis(25)),
+                Some(RunnerEvent::Nudge(_))
+            ) {
+                delivered = true;
+                break;
+            }
+        }
+        assert!(
+            delivered,
+            "the runner must keep operating after mutex poison"
+        );
+        assert_eq!(runner.health().latest_evidence_revision, Some(1));
+        runner.stop();
     }
 
     #[test]

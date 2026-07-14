@@ -107,3 +107,24 @@ test("renderSiteSkillCatalog throws when site metadata is missing", () => {
     /Missing site skill metadata/,
   );
 });
+
+test("renderSiteSkillCatalog omits explicitly hidden skills", () => {
+  const visible = makeSkill("minutes-visible");
+  const hidden = makeSkill("minutes-hidden", {
+    metadata: {
+      display_name: "Minutes Hidden",
+      short_description: "hidden short",
+      default_prompt: "Use hidden",
+      site_category: "Lifecycle",
+      site_example: "/minutes-hidden",
+      site_best_for: "hidden best",
+      site_visible: false,
+    },
+  });
+
+  const rendered = JSON.parse(renderSiteSkillCatalog([visible, hidden]));
+  assert.deepEqual(
+    rendered.map((skill: { name: string }) => skill.name),
+    ["minutes-visible"],
+  );
+});

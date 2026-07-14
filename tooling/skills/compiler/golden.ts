@@ -5,7 +5,12 @@ import { discoverCanonicalSkills } from "./discover.js";
 import { getHostConfig } from "../hosts/index.js";
 import { renderSkillForHost } from "./render.js";
 
-const PILOT_SKILLS = new Set(["minutes-brief", "minutes-prep", "minutes-debrief"]);
+const PILOT_SKILLS = new Set([
+  "minutes-brief",
+  "minutes-prep",
+  "minutes-debrief",
+  "minutes-copilot",
+]);
 
 function getRootDir(): string {
   return cwd().endsWith(path.join("tooling", "skills"))

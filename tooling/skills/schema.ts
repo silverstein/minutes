@@ -28,6 +28,7 @@ export interface CanonicalSkillFrontmatter {
     site_category?: string;
     site_example?: string;
     site_best_for?: string;
+    site_visible?: boolean;
   };
   assets?: {
     scripts?: string[];

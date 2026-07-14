@@ -41,6 +41,7 @@ Already organized by type — keep as-is. Plans are forward-looking implementati
 
 ## Root-Level Docs (do NOT move these)
 
+- **`docs/coach.md`** — Product guide for the live Coach copilot, controls, privacy, and graceful degradation
 - **`PLAN.md`** — Master project plan (architecture, vision, competitive landscape). Referenced as the "read this first" doc in CLAUDE.md.
 - **`README.md`** — Project landing page
 - **`CLAUDE.md`** — Developer guide (tool setup, build commands, architecture decisions, ecosystem integration)

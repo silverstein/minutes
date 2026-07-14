@@ -43,6 +43,30 @@ Use `Read` on the meeting file path. Extract from the transcript and frontmatter
 - **Key discussion points** (from `## Summary` or the transcript itself)
 - **Attendees** (from `attendees:` frontmatter)
 
+### Phase 2a: No-capture sensitive meetings (capture: none)
+
+If the frontmatter says `capture: none`, there is no transcript by design: the
+meeting was designated sensitive and the recorder never ran. The debrief IS the
+record. Switch to debrief-from-memory mode:
+
+1. Read what exists: the `## Markers` section (timestamped notes typed during
+   the meeting) and the frontmatter (`title`, `date`, `duration`,
+   `debrief:` state).
+2. Ask the user to recount the meeting: who was there, what was discussed,
+   decisions, action items. Use the markers as memory joggers.
+3. Write their account into the meeting file itself: fill `## Summary`,
+   `## Decisions`, and `## Action Items` sections (and the matching
+   frontmatter lists), then set the frontmatter `debrief:` key to `complete`.
+4. If the user says it was a test or accidental trigger, set `debrief:` to
+   `not-applicable` and leave the body untouched.
+5. **Sensitivity is binding, not advisory.** When `sensitivity: restricted`,
+   the account lives ONLY in this meeting file. Do not propagate any of it
+   into other notes, summaries, knowledge bases, or week-level rollups unless
+   the user explicitly asks.
+
+Skip Phases 2 and 2b (there is no transcript and no speaker attribution);
+continue with prep matching and the closing ritual as normal.
+
 ### Phase 2b: Check speaker attributions
 
 If the meeting has a `speaker_map:` field in frontmatter, check the confidence levels:

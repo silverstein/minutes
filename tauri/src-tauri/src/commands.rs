@@ -14823,6 +14823,13 @@ fn copilot_presentation_state(
 /// Build the Coach HUD with the same window contract as dictation: destroy a
 /// stale same-label WebView, anchor to the current monitor work area, keep the
 /// transparent undecorated surface above other windows, and never activate it.
+/// Coach HUD window size — single source of truth for the builder AND
+/// main.rs `window_base_size` (two desync bugs came from keeping these in
+/// separate files). The card is 492x211 inside; the margins exist so the
+/// 54px-blur card shadow fades out instead of hard-clipping into a square
+/// edge at the transparent window's rect (QA round 3).
+pub(crate) const COPILOT_HUD_SIZE: (f64, f64) = (572.0, 279.0);
+
 fn show_copilot_hud(app: &tauri::AppHandle) -> Result<(), String> {
     use tauri::WebviewUrl;
 
@@ -14830,8 +14837,7 @@ fn show_copilot_hud(app: &tauri::AppHandle) -> Result<(), String> {
         window.destroy().ok();
     }
 
-    let width = 500.0;
-    let height = 224.0;
+    let (width, height) = COPILOT_HUD_SIZE;
     // Sit above the dictation pill if both optional surfaces happen to be
     // active, rather than covering the existing overlay.
     let inset_y = 112.0;

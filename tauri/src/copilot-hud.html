@@ -88,7 +88,9 @@
     body {
       display: flex;
       align-items: flex-end;
-      padding: 10px 4px 3px;
+      /* Margins let the card shadow fade instead of clipping square at the
+         window rect; keep in sync with COPILOT_HUD_SIZE (card 492x211). */
+      padding: 24px 40px 44px;
       color: var(--text);
       font-family: 'Geist', -apple-system, BlinkMacSystemFont, sans-serif;
       -webkit-font-smoothing: antialiased;
@@ -592,6 +594,16 @@
   </main>
 
   <script>
+    // Drag the HUD from any non-interactive surface. data-tauri-drag-region
+    // only fires when the mousedown TARGET is the attributed element, and the
+    // card is fully covered by children — so drive startDragging explicitly.
+    // Window-server move: never takes key focus (non-activating preserved).
+    document.addEventListener('mousedown', (event) => {
+      if (event.button !== 0) return;
+      if (event.target.closest('button, a, input, [role="button"]')) return;
+      window.__TAURI__.window.getCurrentWindow().startDragging();
+    });
+
     const { invoke } = window.__TAURI__.core;
     const { listen } = window.__TAURI__.event;
     const hud = document.getElementById('hud');

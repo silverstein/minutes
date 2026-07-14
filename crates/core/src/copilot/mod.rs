@@ -4,6 +4,7 @@
 //! versioned nudges. It never owns capture, mutates transcript history, or
 //! exposes arbitrary tools to the fast model lane.
 
+mod apple_fm_provider;
 mod battle_card;
 mod control;
 mod ollama_provider;
@@ -13,6 +14,10 @@ mod runner;
 mod types;
 
 pub use crate::ollama::CancelToken;
+pub use apple_fm_provider::{
+    replay_gate_key as apple_fm_replay_gate_key, AppleFoundationCopilotModel,
+    APPLE_FM_COPILOT_MODEL, APPLE_FM_COPILOT_PROMPT_VERSION,
+};
 pub use battle_card::{BattleCard, BattleCardError};
 pub use control::{
     clear_session_controls, copilot_pause_path, copilot_pid_path, copilot_status_path,
@@ -22,8 +27,8 @@ pub use control::{
 pub use ollama_provider::OllamaCopilotModel;
 pub use policy::NudgePolicy;
 pub use provider::{
-    AppleFoundationCopilotModel, CloudCopilotModel, CopilotModel, ModelError, ModelErrorKind,
-    ModelEventSink, ModelHealth, ModelHealthStatus, ModelStreamEvent,
+    CloudCopilotModel, CopilotModel, ModelError, ModelErrorKind, ModelEventSink, ModelHealth,
+    ModelHealthStatus, ModelStreamEvent,
 };
 pub use runner::{CopilotRunner, RunnerEvent, SubmitOutcome};
 pub use types::{

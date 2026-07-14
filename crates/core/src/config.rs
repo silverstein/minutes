@@ -339,9 +339,9 @@ pub struct SummarizationConfig {
 ///
 /// This is deliberately separate from [`SummarizationConfig`]: the copilot is
 /// a latency-bounded, failure-isolated event-stream consumer, while meeting
-/// summarization is a post-processing pipeline. `auto-local` resolves to
-/// Ollama on every supported platform; platform accelerators implement the
-/// provider trait without changing this portable default.
+/// summarization is a post-processing pipeline. `auto-local` prefers Apple
+/// Foundation Models when the macOS 26+ on-device runtime is available and
+/// otherwise keeps Ollama as the portable fallback.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CopilotConfig {
@@ -350,7 +350,8 @@ pub struct CopilotConfig {
     pub enabled: bool,
     /// Default presentation surface (`tui` or `stdout`).
     pub surface: String,
-    /// Fast-lane provider. `auto-local` resolves to `ollama` in contract v1.
+    /// Fast-lane provider. `auto-local` prefers available Apple Foundation
+    /// Models on macOS and otherwise resolves to `ollama`.
     pub fast_provider: String,
     /// Model name sent to the fast provider.
     pub fast_model: String,
@@ -365,10 +366,22 @@ pub struct CopilotConfig {
 }
 
 impl CopilotConfig {
-    /// Resolve the contract's platform-fair provider alias.
+    /// Resolve the local provider alias using the current platform capability.
     pub fn resolved_fast_provider(&self) -> &str {
+        #[cfg(target_os = "macos")]
+        let apple_fm_available = crate::apple_fm::is_available();
+        #[cfg(not(target_os = "macos"))]
+        let apple_fm_available = false;
+        self.resolved_fast_provider_for(apple_fm_available)
+    }
+
+    /// Pure provider selection seam used by capability tests and hosts that
+    /// already have a current Apple FM availability result.
+    pub fn resolved_fast_provider_for(&self, apple_fm_available: bool) -> &str {
         match self.fast_provider.trim() {
+            "" | "auto-local" if apple_fm_available => "apple-fm",
             "" | "auto-local" => "ollama",
+            "apple" => "apple-fm",
             provider => provider,
         }
     }
@@ -1634,6 +1647,9 @@ mod tests {
         assert!(!config.copilot.enabled);
         assert_eq!(config.copilot.surface, "tui");
         assert_eq!(config.copilot.fast_provider, "auto-local");
+        assert_eq!(config.copilot.resolved_fast_provider_for(false), "ollama");
+        assert_eq!(config.copilot.resolved_fast_provider_for(true), "apple-fm");
+        #[cfg(not(target_os = "macos"))]
         assert_eq!(config.copilot.resolved_fast_provider(), "ollama");
         assert_eq!(config.copilot.fast_model, "llama3.2");
         assert!(!config.copilot.allow_cloud);
@@ -1683,6 +1699,21 @@ mod tests {
         assert_eq!(parsed.copilot.nudge_ttl_ms, 9_000);
         assert_eq!(parsed.copilot.target_latency_ms, 3_500);
         assert!(!parsed.copilot.history_grounding);
+    }
+
+    #[test]
+    fn copilot_auto_local_selects_apple_only_when_available() {
+        let config = CopilotConfig::default();
+        assert_eq!(config.resolved_fast_provider_for(true), "apple-fm");
+        assert_eq!(config.resolved_fast_provider_for(false), "ollama");
+
+        let mut explicit_ollama = config.clone();
+        explicit_ollama.fast_provider = "ollama".into();
+        assert_eq!(explicit_ollama.resolved_fast_provider_for(true), "ollama");
+
+        let mut explicit_apple = config;
+        explicit_apple.fast_provider = "apple".into();
+        assert_eq!(explicit_apple.resolved_fast_provider_for(false), "apple-fm");
     }
 
     #[test]

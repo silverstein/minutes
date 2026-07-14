@@ -128,48 +128,6 @@ impl CopilotModel for CloudCopilotModel {
     }
 }
 
-/// Trait-shaped placeholder for a future macOS acceleration. This type is
-/// available cross-platform so callers never make Apple FM the baseline.
-#[derive(Debug, Clone)]
-pub struct AppleFoundationCopilotModel {
-    model: String,
-}
-
-impl AppleFoundationCopilotModel {
-    pub fn new(model: impl Into<String>) -> Self {
-        Self {
-            model: model.into(),
-        }
-    }
-}
-
-impl CopilotModel for AppleFoundationCopilotModel {
-    fn provider_name(&self) -> &str {
-        "apple-fm"
-    }
-
-    fn model_name(&self) -> &str {
-        &self.model
-    }
-
-    fn prewarm(&self) -> Result<(), ModelError> {
-        Err(not_implemented("Apple Foundation Models"))
-    }
-
-    fn stream_structured(
-        &self,
-        _request: &CopilotRequest,
-        _cancel: &CancelToken,
-        _sink: &dyn ModelEventSink,
-    ) -> Result<NudgeDraft, ModelError> {
-        Err(not_implemented("Apple Foundation Models"))
-    }
-
-    fn health(&self) -> ModelHealth {
-        stub_health("apple-fm", &self.model)
-    }
-}
-
 fn not_implemented(provider: &str) -> ModelError {
     ModelError::new(
         ModelErrorKind::NotImplemented,

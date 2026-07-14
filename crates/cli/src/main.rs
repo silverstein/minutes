@@ -8651,8 +8651,9 @@ fn cmd_copilot(action: CopilotAction, config: &Config) -> Result<()> {
 
 fn cmd_copilot_start(goal: &str, surface: Option<&str>, config: &Config) -> Result<()> {
     use minutes_core::copilot::{
-        BattleCard, CopilotRequest, CopilotRunner, CopilotSessionStatus, CopilotState,
-        CopilotUtterance, NudgePolicy, OllamaCopilotModel, RunnerEvent, TranscriptUpdateKind,
+        AppleFoundationCopilotModel, BattleCard, CopilotModel, CopilotRequest, CopilotRunner,
+        CopilotSessionStatus, CopilotState, CopilotUtterance, NudgePolicy, OllamaCopilotModel,
+        RunnerEvent, TranscriptUpdateKind,
     };
     use std::collections::VecDeque;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -8668,16 +8669,19 @@ fn cmd_copilot_start(goal: &str, surface: Option<&str>, config: &Config) -> Resu
     }
 
     let provider = config.copilot.resolved_fast_provider();
-    if provider != "ollama" {
-        if provider == "cloud" && !config.copilot.allow_cloud {
-            anyhow::bail!(
-                "cloud copilot is disabled ([copilot].allow_cloud = false); contract v1 defaults to local Ollama"
-            );
-        }
+    if provider == "cloud" && !config.copilot.allow_cloud {
         anyhow::bail!(
-            "copilot provider '{provider}' is a contract stub in this release; use fast_provider = \"auto-local\" or \"ollama\""
+            "cloud copilot is disabled ([copilot].allow_cloud = false); use an on-device provider"
         );
     }
+    let model: Arc<dyn CopilotModel> = match provider {
+        "ollama" => Arc::new(OllamaCopilotModel::from_config(&config.copilot)),
+        "apple-fm" => Arc::new(AppleFoundationCopilotModel::from_config(&config.copilot)),
+        "cloud" => anyhow::bail!("cloud copilot is not implemented in contract v1"),
+        provider => anyhow::bail!(
+            "unsupported copilot provider '{provider}'; use auto-local, apple-fm, or ollama"
+        ),
+    };
 
     let session_guard = minutes_core::copilot::create_session_guard().map_err(|error| {
         anyhow::anyhow!("a copilot session is already active or could not be locked: {error}")
@@ -8686,8 +8690,9 @@ fn cmd_copilot_start(goal: &str, surface: Option<&str>, config: &Config) -> Resu
 
     let capture_attachment = copilot_capture_attachment();
     eprintln!(
-        "Copilot arming with Ollama model '{}'...",
-        config.copilot.fast_model
+        "Copilot arming with {} model '{}'...",
+        model.provider_name(),
+        model.model_name()
     );
     eprintln!("{capture_attachment}");
     eprintln!("Transcript source: Agent Event Bus sequence cursor (live.utterance.final only).");
@@ -8711,7 +8716,6 @@ fn cmd_copilot_start(goal: &str, surface: Option<&str>, config: &Config) -> Resu
         BattleCard::empty()
     };
 
-    let model = Arc::new(OllamaCopilotModel::from_config(&config.copilot));
     let runner = CopilotRunner::start(model, NudgePolicy::new(config.copilot.nudge_ttl_ms));
     let stop = Arc::new(AtomicBool::new(false));
     let stop_for_signal = stop.clone();

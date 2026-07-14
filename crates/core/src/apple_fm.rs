@@ -2,9 +2,10 @@
 //!
 //! Mirrors the `apple_speech` helper lifecycle: a small Swift helper is
 //! embedded at compile time, written under `~/.minutes/lib/`, compiled once
-//! with `swiftc`, and invoked as a subprocess with a JSON contract. The
-//! prompt is passed through a 0600 temp file (never argv) so transcript
-//! content cannot appear in the process list.
+//! with `swiftc`, and invoked as a subprocess with a JSON contract. One-shot
+//! summarization passes prompts through a 0600 temp file (never argv). The
+//! copilot adapter reuses the same binary in a long-lived NDJSON server mode,
+//! keeping its prewarmed session alive between nudges.
 //!
 //! Everything runs on-device: the Foundation Models framework is Apple's
 //! local Apple Intelligence model. No network traffic is involved at any
@@ -37,6 +38,21 @@ const GENERATION_TIMEOUT: Duration = Duration::from_secs(240);
 /// below the configured `chunk_max_tokens` so system prompt + output fit.
 pub const APPLE_FM_MAX_CHUNK_TOKENS: usize = 3000;
 
+/// Cached result of the helper capability probe.
+///
+/// `os_version` and `replay_gate_key` intentionally remain visible to the
+/// copilot adapter. Apple can change the on-device model with an OS update, so
+/// downstream replay evaluation must key results to both the prompt contract
+/// and the observed runtime rather than treating "Apple FM" as one immutable
+/// model.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppleFmAvailability {
+    pub available: bool,
+    pub detail: String,
+    pub os_version: Option<String>,
+    pub replay_gate_key: Option<String>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 #[cfg_attr(not(any(test, target_os = "macos")), allow(dead_code))]
@@ -45,10 +61,13 @@ struct CapabilityReport {
     kind: String,
     #[allow(dead_code)]
     schema_version: u32,
+    #[serde(default)]
+    os_version: String,
     runtime_supported: bool,
     availability: String,
-    #[allow(dead_code)]
     reason: Option<String>,
+    #[serde(default)]
+    replay_gate_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -94,35 +113,108 @@ fn resolve_helper() -> Option<PathBuf> {
 /// The probe result is cached per-process: availability doesn't change
 /// mid-run, and the pipeline may consult this several times per meeting.
 pub fn is_available() -> bool {
-    static AVAILABLE: OnceLock<bool> = OnceLock::new();
-    *AVAILABLE.get_or_init(probe_availability)
+    availability().available
 }
 
-fn probe_availability() -> bool {
+/// Return the cached capability report used by provider selection and health.
+pub fn availability() -> AppleFmAvailability {
+    static AVAILABILITY: OnceLock<AppleFmAvailability> = OnceLock::new();
+    AVAILABILITY.get_or_init(probe_availability_report).clone()
+}
+
+fn probe_availability_report() -> AppleFmAvailability {
     #[cfg(any(test, target_os = "macos"))]
     {
         let Some(helper) = resolve_helper() else {
-            return false;
+            return AppleFmAvailability {
+                available: false,
+                detail: "Apple Foundation Models helper is unavailable".into(),
+                os_version: None,
+                replay_gate_key: None,
+            };
         };
         let mut command = Command::new(&helper);
         command.arg("capabilities");
         let Some(output) = output_with_timeout(command, CAPABILITY_TIMEOUT) else {
             tracing::warn!("apple-fm capabilities probe timed out");
-            return false;
+            return AppleFmAvailability {
+                available: false,
+                detail: "Apple Foundation Models capability probe timed out".into(),
+                os_version: None,
+                replay_gate_key: None,
+            };
         };
         if !output.status.success() {
-            return false;
+            return AppleFmAvailability {
+                available: false,
+                detail: format!(
+                    "Apple Foundation Models capability probe failed: {}",
+                    String::from_utf8_lossy(&output.stderr).trim()
+                ),
+                os_version: None,
+                replay_gate_key: None,
+            };
         }
         match serde_json::from_slice::<CapabilityReport>(&output.stdout) {
-            Ok(report) => report.runtime_supported && report.availability == "available",
+            Ok(report) => {
+                let available =
+                    report.runtime_supported && report.availability.as_str() == "available";
+                let os_version = (!report.os_version.is_empty()).then_some(report.os_version);
+                let detail = if available {
+                    match os_version.as_deref() {
+                        Some(version) => {
+                            format!("Apple Foundation Models is available on macOS {version}")
+                        }
+                        None => "Apple Foundation Models is available".into(),
+                    }
+                } else {
+                    report.reason.unwrap_or_else(|| {
+                        "Apple Foundation Models is unavailable on this system".into()
+                    })
+                };
+                AppleFmAvailability {
+                    available,
+                    detail,
+                    os_version,
+                    replay_gate_key: report.replay_gate_key,
+                }
+            }
             Err(error) => {
                 tracing::warn!(%error, "apple-fm capabilities probe returned invalid JSON");
-                false
+                AppleFmAvailability {
+                    available: false,
+                    detail: format!(
+                        "Apple Foundation Models capability probe returned invalid JSON: {error}"
+                    ),
+                    os_version: None,
+                    replay_gate_key: None,
+                }
             }
         }
     }
     #[cfg(not(any(test, target_os = "macos")))]
-    false
+    {
+        AppleFmAvailability {
+            available: false,
+            detail:
+                "Apple Foundation Models requires macOS 26 or newer with Apple Intelligence enabled"
+                    .into(),
+            os_version: None,
+            replay_gate_key: None,
+        }
+    }
+}
+
+#[cfg(test)]
+fn probe_availability() -> bool {
+    probe_availability_report().available
+}
+
+/// Resolve the already-installed/compiled helper for the long-lived copilot
+/// transport. The process lifecycle itself stays in the macOS-only adapter.
+#[cfg(target_os = "macos")]
+pub(crate) fn copilot_helper_path() -> Option<PathBuf> {
+    resolve_helper()
 }
 
 /// Run one on-device generation: `system_prompt` becomes the session

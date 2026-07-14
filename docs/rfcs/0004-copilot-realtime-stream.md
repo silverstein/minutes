@@ -15,10 +15,11 @@ stop or degrade recording. The first implementation consumes the already-shipped
 `live.utterance.final` event through the stable sequence cursor described in
 [RFC 0003](0003-agent-event-bus-v0.md).
 
-The portable fast lane is Ollama. `fast_provider = "auto-local"` resolves to
-Ollama on every platform. Apple Foundation Models may implement the same
-provider trait as a macOS acceleration in a later change; they are not the
-baseline and are not part of this RFC's first implementation.
+The portable fast lane is Ollama. `fast_provider = "auto-local"` prefers Apple
+Foundation Models when the on-device model is available on macOS 26 or newer,
+and otherwise resolves to Ollama. Apple Foundation Models is an acceleration,
+not the baseline: non-macOS builds contain no Apple runtime symbols and retain
+the same Ollama behavior.
 
 ## Versioning
 
@@ -28,6 +29,12 @@ introduced within v1. Removing or changing the meaning of a field requires v2.
 
 The current event log remains the flat v1 envelope frozen by RFC 0003. Copilot
 does not change that persisted envelope and does not add a producer in this PR.
+
+Apple may update the on-device model with macOS releases. The Apple provider
+therefore exposes a replay-gate key containing the copilot prompt revision,
+helper protocol revision, and observed macOS runtime version. A later eval
+harness should require replay acceptance for previously unseen keys; the gate
+key is only the integration seam and does not claim an eval has run.
 
 ## Transcript Stream
 
@@ -196,7 +203,9 @@ Semantics:
 - `enabled` permits automatic activation by a host. An explicit
   `minutes copilot start` is an intentional one-session activation.
 - `surface` is `tui` by default; `stdout` is also a valid headless rendering.
-- `auto-local` resolves to `ollama` in v1.
+- `auto-local` resolves to `apple-fm` when a macOS 26+ Apple Intelligence
+  capability probe reports the on-device model available; otherwise it
+  resolves to `ollama`.
 - `allow_cloud = false` is a hard default. A cloud provider stub must not send
   data until a later implementation requires both a configured provider and
   explicit opt-in.
@@ -226,7 +235,6 @@ sources.
 ## Deferred Work
 
 - emitting partial transcript revisions
-- Apple Foundation Models provider implementation
 - cloud provider implementations and consent UI
 - Tauri HUD
 - a tool-enabled slow lane

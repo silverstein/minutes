@@ -13,11 +13,11 @@ use minutes_core::config::{ConsentMode, VALID_PARAKEET_MODELS};
 use minutes_core::markdown::ConsentBasis;
 use minutes_core::parakeet;
 use minutes_core::{CaptureMode, Config, ContentType};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 mod dashboard;
 mod demo_data;
-use std::io::{IsTerminal, Write};
+use std::io::{BufRead, BufReader, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -8570,6 +8570,89 @@ life (qmd://life/)
     }
 
     #[test]
+    fn copilot_alias_still_exposes_setup() {
+        let parsed = Cli::try_parse_from(["minutes", "copilot", "setup"])
+            .expect("the existing Copilot setup command must keep parsing");
+        assert!(matches!(
+            parsed.command,
+            Commands::Copilot {
+                action: CopilotAction::Setup
+            }
+        ));
+    }
+
+    #[test]
+    fn copilot_setup_decision_uses_mocked_probe_state_without_network() {
+        let cases = [
+            ((true, true, false, false), CopilotSetupAction::Ready),
+            ((true, false, false, false), CopilotSetupAction::PullModel),
+            ((false, false, false, true), CopilotSetupAction::StartOllama),
+            (
+                (false, false, true, false),
+                CopilotSetupAction::InstallWithBrew,
+            ),
+            (
+                (false, false, false, false),
+                CopilotSetupAction::DownloadGuidance,
+            ),
+            ((false, true, true, true), CopilotSetupAction::StartOllama),
+        ];
+
+        for ((api_reachable, model_present, brew_present, cli_present), expected) in cases {
+            assert_eq!(
+                decide_copilot_setup(api_reachable, model_present, brew_present, cli_present,),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn ollama_tags_detect_configured_model_and_latest_alias() {
+        let models = parse_ollama_model_tags(
+            r#"{
+                "models": [
+                    {"name": "llama3.2:latest", "model": "llama3.2:latest"},
+                    {"name": "qwen3:4b", "model": "qwen3:4b"}
+                ]
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(models, ["llama3.2:latest", "qwen3:4b"]);
+        assert!(ollama_model_is_present(&models, "llama3.2"));
+        assert!(ollama_model_is_present(&models, "llama3.2:latest"));
+        assert!(ollama_model_is_present(&models, "qwen3:4b"));
+        assert!(!ollama_model_is_present(&models, "qwen3:8b"));
+    }
+
+    #[test]
+    fn ollama_pull_progress_frames_parse_without_network() {
+        let downloading: OllamaPullFrame =
+            serde_json::from_str(r#"{"status":"pulling layers","completed":50,"total":100}"#)
+                .unwrap();
+        let success: OllamaPullFrame = serde_json::from_str(r#"{"status":"success"}"#).unwrap();
+
+        assert_eq!(downloading.status, "pulling layers");
+        assert_eq!(downloading.completed, Some(50));
+        assert_eq!(downloading.total, Some(100));
+        assert!(success.status.eq_ignore_ascii_case("success"));
+        assert!(success.error.is_none());
+    }
+
+    #[test]
+    fn ollama_download_guidance_is_plain_and_actionable() {
+        let guidance = ollama_download_guidance();
+
+        assert!(guidance.contains("free Ollama app"));
+        assert!(guidance.contains("https://ollama.com/download"));
+        assert!(guidance.contains("open it once"));
+        assert!(guidance.contains("minutes coach setup"));
+        assert!(!guidance.contains("Homebrew"));
+        assert!(!guidance.contains("provider"));
+        assert!(!guidance.contains("contract"));
+    }
+
+    #[test]
     fn copilot_start_with_no_local_model_returns_guided_setup_not_error() {
         let state = minutes_core::copilot::CopilotSetupNeeded::private_ai();
         let output = format_copilot_setup_needed(&state);
@@ -10192,15 +10275,394 @@ fn cmd_copilot_stop() -> Result<()> {
 }
 
 fn cmd_copilot_setup(config: &minutes_core::config::CopilotConfig) -> Result<()> {
+    let base_url = copilot_ollama_base_url();
+    let model_name = config.fast_model.trim();
+    if model_name.is_empty() {
+        anyhow::bail!(
+            "Coach's private AI model is blank in Settings. Set it to `llama3.2`, then run `minutes coach setup` again"
+        );
+    }
+
+    eprintln!("Checking Coach's private AI on this Mac...");
+    let initial_probe = probe_ollama_models(&base_url, OLLAMA_PROBE_TIMEOUT);
+
+    // Preserve setup for explicitly selected non-Ollama implementations. The
+    // Ollama API probe still happens first so an installed app is never
+    // mistaken for missing just because its CLI is not on PATH.
+    let requested_provider = match config.resolved_fast_provider() {
+        "auto-local" => None,
+        provider => Some(provider),
+    };
+    if requested_provider.is_some_and(|provider| provider != "ollama") {
+        return finish_copilot_setup(config);
+    }
+
+    let mut models = match initial_probe {
+        Ok(models) => models,
+        Err(error) => {
+            tracing::debug!(%error, %base_url, "Coach could not reach the Ollama API");
+            let cli_present = command_is_available("ollama");
+            let brew_present = command_is_available("brew");
+            match decide_copilot_setup(false, false, brew_present, cli_present) {
+                CopilotSetupAction::StartOllama => {
+                    eprintln!("Starting Coach's private AI...");
+                    start_ollama(cli_present, brew_present)?;
+                }
+                CopilotSetupAction::InstallWithBrew => {
+                    eprintln!("Installing the free private AI Coach uses...");
+                    run_copilot_setup_step(
+                        "brew",
+                        &["install", "ollama"],
+                        "Coach could not install Ollama. Download the free app at https://ollama.com/download, open it once, then run `minutes coach setup` again",
+                    )?;
+                    if !command_is_available("ollama") {
+                        anyhow::bail!(ollama_download_guidance());
+                    }
+                    eprintln!("Starting Coach's private AI...");
+                    start_ollama(true, true)?;
+                }
+                CopilotSetupAction::DownloadGuidance => {
+                    anyhow::bail!(ollama_download_guidance());
+                }
+                CopilotSetupAction::Ready | CopilotSetupAction::PullModel => {
+                    unreachable!("an unreachable API cannot be ready or pull a model")
+                }
+            }
+
+            wait_for_ollama(&base_url, OLLAMA_START_TIMEOUT).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Coach's private AI did not start. Open Ollama once, then run `minutes coach setup` again. If Ollama is not installed, download it at https://ollama.com/download"
+                )
+            })?
+        }
+    };
+
+    match decide_copilot_setup(
+        true,
+        ollama_model_is_present(&models, model_name),
+        false,
+        false,
+    ) {
+        CopilotSetupAction::Ready => {}
+        CopilotSetupAction::PullModel => {
+            eprintln!(
+                "Downloading {model_name} for Coach. It runs on your Mac, and nothing leaves your machine."
+            );
+            pull_ollama_model(&base_url, model_name)?;
+            models = wait_for_ollama(&base_url, Duration::from_secs(5)).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Coach downloaded {model_name}, but its private AI stopped responding. Open Ollama, then run `minutes coach setup` again"
+                )
+            })?;
+            if !ollama_model_is_present(&models, model_name) {
+                anyhow::bail!(
+                    "Coach could not find {model_name} after downloading it. Open Ollama, then run `minutes coach setup` again"
+                );
+            }
+        }
+        CopilotSetupAction::StartOllama
+        | CopilotSetupAction::InstallWithBrew
+        | CopilotSetupAction::DownloadGuidance => {
+            unreachable!("a reachable API only needs a model decision")
+        }
+    }
+
+    finish_copilot_setup(config)
+}
+
+const OLLAMA_DEFAULT_BASE_URL: &str = "http://localhost:11434";
+const OLLAMA_DOWNLOAD_URL: &str = "https://ollama.com/download";
+const OLLAMA_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+const OLLAMA_START_TIMEOUT: Duration = Duration::from_secs(30);
+const OLLAMA_SETUP_PREWARM_TIMEOUT: Duration = Duration::from_secs(120);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CopilotSetupAction {
+    Ready,
+    PullModel,
+    StartOllama,
+    InstallWithBrew,
+    DownloadGuidance,
+}
+
+fn decide_copilot_setup(
+    api_reachable: bool,
+    model_present: bool,
+    brew_present: bool,
+    cli_present: bool,
+) -> CopilotSetupAction {
+    if api_reachable {
+        if model_present {
+            CopilotSetupAction::Ready
+        } else {
+            CopilotSetupAction::PullModel
+        }
+    } else if cli_present {
+        CopilotSetupAction::StartOllama
+    } else if brew_present {
+        CopilotSetupAction::InstallWithBrew
+    } else {
+        CopilotSetupAction::DownloadGuidance
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct OllamaTagsResponse {
+    #[serde(default)]
+    models: Vec<OllamaTag>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OllamaTag {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    model: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct OllamaPullFrame {
+    #[serde(default)]
+    status: String,
+    completed: Option<u64>,
+    total: Option<u64>,
+    error: Option<String>,
+}
+
+fn copilot_ollama_base_url() -> String {
+    std::env::var("OLLAMA_HOST")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| OLLAMA_DEFAULT_BASE_URL.into())
+        .trim_end_matches('/')
+        .to_string()
+}
+
+fn ollama_probe_agent(timeout: Duration) -> ureq::Agent {
+    ureq::Agent::new_with_config(
+        ureq::config::Config::builder()
+            .timeout_global(Some(timeout))
+            .http_status_as_error(false)
+            .build(),
+    )
+}
+
+fn ollama_pull_agent() -> ureq::Agent {
+    ureq::Agent::new_with_config(
+        ureq::config::Config::builder()
+            .http_status_as_error(false)
+            .build(),
+    )
+}
+
+fn probe_ollama_models(
+    base_url: &str,
+    timeout: Duration,
+) -> std::result::Result<Vec<String>, String> {
+    let url = format!("{base_url}/api/tags");
+    let mut response = ollama_probe_agent(timeout)
+        .get(&url)
+        .call()
+        .map_err(|error| error.to_string())?;
+    if response.status().as_u16() != 200 {
+        let status = response.status().as_u16();
+        let body = response.body_mut().read_to_string().unwrap_or_default();
+        return Err(format!("Ollama HTTP {status}: {body}"));
+    }
+    let body = response
+        .body_mut()
+        .read_to_string()
+        .map_err(|error| error.to_string())?;
+    parse_ollama_model_tags(&body)
+}
+
+fn parse_ollama_model_tags(body: &str) -> std::result::Result<Vec<String>, String> {
+    let response: OllamaTagsResponse =
+        serde_json::from_str(body).map_err(|error| error.to_string())?;
+    let mut models = Vec::new();
+    for tag in response.models {
+        for name in [tag.name, tag.model] {
+            let name = name.trim();
+            if !name.is_empty() && !models.iter().any(|existing| existing == name) {
+                models.push(name.to_string());
+            }
+        }
+    }
+    Ok(models)
+}
+
+fn ollama_model_is_present(models: &[String], requested: &str) -> bool {
+    let requested = requested.trim();
+    models.iter().any(|available| {
+        let available = available.trim();
+        available == requested
+            || strip_latest_tag(available).eq_ignore_ascii_case(strip_latest_tag(requested))
+    })
+}
+
+fn strip_latest_tag(model: &str) -> &str {
+    model.strip_suffix(":latest").unwrap_or(model)
+}
+
+fn command_is_available(program: &str) -> bool {
+    std::process::Command::new(program)
+        .arg("--version")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok()
+}
+
+fn start_ollama(cli_present: bool, brew_present: bool) -> Result<()> {
+    if cli_present && brew_present {
+        let brew_start = run_copilot_setup_step(
+            "brew",
+            &["services", "start", "ollama"],
+            "Homebrew could not start Ollama",
+        );
+        if brew_start.is_ok() {
+            return Ok(());
+        }
+        tracing::debug!("Homebrew could not start Ollama; trying the Ollama app directly");
+    }
+
+    std::process::Command::new("ollama")
+        .arg("serve")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| {
+            tracing::debug!(%error, "Coach could not start Ollama directly");
+            anyhow::anyhow!(
+                "Coach could not start its private AI. Open Ollama once, then run `minutes coach setup` again"
+            )
+        })
+}
+
+fn wait_for_ollama(base_url: &str, timeout: Duration) -> Option<Vec<String>> {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if let Ok(models) = probe_ollama_models(base_url, OLLAMA_PROBE_TIMEOUT) {
+            return Some(models);
+        }
+        if std::time::Instant::now() >= deadline {
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+}
+
+fn pull_ollama_model(base_url: &str, model_name: &str) -> Result<()> {
+    let url = format!("{base_url}/api/pull");
+    let body = serde_json::json!({
+        "name": model_name,
+        "stream": true,
+    });
+    let mut response = ollama_pull_agent()
+        .post(&url)
+        .header("Content-Type", "application/json")
+        .send_json(&body)
+        .map_err(|error| {
+            tracing::debug!(%error, "Coach model download request failed");
+            anyhow::anyhow!(
+                "Coach could not download {model_name}. Check your internet connection, then run `minutes coach setup` again"
+            )
+        })?;
+    if response.status().as_u16() >= 400 {
+        let status = response.status().as_u16();
+        let response_body = response.body_mut().read_to_string().unwrap_or_default();
+        tracing::debug!(status, body = %response_body, "Coach model download failed");
+        anyhow::bail!(
+            "Coach could not download {model_name}. Check your internet connection, then run `minutes coach setup` again"
+        );
+    }
+
+    let mut response_body = response.into_body();
+    let reader = BufReader::new(response_body.as_reader());
+    let mut last_status = String::new();
+    let mut last_percent = None;
+    let mut succeeded = false;
+    for line in reader.lines() {
+        let line = line.map_err(|error| {
+            tracing::debug!(%error, "Coach model download stream ended unexpectedly");
+            anyhow::anyhow!(
+                "Coach's download was interrupted. Check your internet connection, then run `minutes coach setup` again"
+            )
+        })?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let frame: OllamaPullFrame = serde_json::from_str(&line).map_err(|error| {
+            tracing::debug!(%error, %line, "Coach received invalid Ollama download progress");
+            anyhow::anyhow!("Coach received an invalid response while downloading {model_name}")
+        })?;
+        if let Some(error) = frame
+            .error
+            .as_deref()
+            .filter(|error| !error.trim().is_empty())
+        {
+            tracing::debug!(%error, "Ollama rejected the Coach model download");
+            anyhow::bail!("Coach could not download {model_name}: {error}");
+        }
+        report_ollama_pull_progress(&frame, &mut last_status, &mut last_percent);
+        succeeded |= frame.status.eq_ignore_ascii_case("success");
+    }
+
+    if !succeeded {
+        anyhow::bail!(
+            "Coach's download ended before {model_name} was ready. Run `minutes coach setup` again"
+        );
+    }
+    Ok(())
+}
+
+fn report_ollama_pull_progress(
+    frame: &OllamaPullFrame,
+    last_status: &mut String,
+    last_percent: &mut Option<u64>,
+) {
+    let percent = frame
+        .completed
+        .zip(frame.total)
+        .filter(|(_, total)| *total > 0)
+        .map(|(completed, total)| completed.saturating_mul(100) / total);
+    let status_changed = !frame.status.is_empty() && frame.status != *last_status;
+    let percent_changed = percent.is_some_and(|percent| {
+        last_percent.is_none_or(|previous| percent == 100 || percent >= previous.saturating_add(5))
+    });
+    if status_changed || percent_changed {
+        if let Some(percent) = percent {
+            eprintln!("  {}: {percent}%", frame.status);
+        } else if !frame.status.is_empty() {
+            eprintln!("  {}", frame.status);
+        }
+        *last_status = frame.status.clone();
+        *last_percent = percent;
+    }
+}
+
+fn ollama_download_guidance() -> String {
+    format!(
+        "Coach needs the free Ollama app for its private AI. Download it at {OLLAMA_DOWNLOAD_URL}, open it once, then run `minutes coach setup` again. Coach runs on your Mac, and nothing leaves your machine."
+    )
+}
+
+fn finish_copilot_setup(config: &minutes_core::config::CopilotConfig) -> Result<()> {
     use minutes_core::copilot::{
         AppleFoundationCopilotModel, CloudCopilotModel, CopilotModel, FastModelRoute,
-        ModelHealthStatus, OllamaCopilotModel, RoutingPolicy,
+        OllamaCopilotModel, RoutingPolicy,
     };
-    use std::process::Command;
     use std::sync::Arc;
 
     let candidates: Vec<Arc<dyn CopilotModel>> = vec![
-        Arc::new(OllamaCopilotModel::from_config(config)),
+        Arc::new(OllamaCopilotModel::new(
+            copilot_ollama_base_url(),
+            config.fast_model.clone(),
+            OLLAMA_SETUP_PREWARM_TIMEOUT,
+        )),
         Arc::new(AppleFoundationCopilotModel::new("apple-foundation-model")),
         Arc::new(CloudCopilotModel::new(config.fast_model.clone())),
     ];
@@ -10231,63 +10693,9 @@ fn cmd_copilot_setup(config: &minutes_core::config::CopilotConfig) -> Result<()>
         }
     }
 
-    eprintln!("Setting up Coach's private AI. This may take a minute...");
-    let private_ai_installed = Command::new("ollama")
-        .arg("--version")
-        .output()
-        .is_ok_and(|output| output.status.success());
-    if !private_ai_installed {
-        #[cfg(target_os = "macos")]
-        run_copilot_setup_step(
-            "brew",
-            &["install", "ollama"],
-            "Coach could not install its private AI. Make sure Homebrew is installed, then try again",
-        )?;
-        #[cfg(not(target_os = "macos"))]
-        anyhow::bail!(
-            "Automatic Coach setup is not available on this computer yet. Visit https://github.com/silverstein/minutes/discussions for setup help"
-        );
-    }
-
-    let model = OllamaCopilotModel::from_config(config);
-    if model.health().status != ModelHealthStatus::Available {
-        #[cfg(target_os = "macos")]
-        run_copilot_setup_step(
-            "brew",
-            &["services", "start", "ollama"],
-            "Coach could not start its private AI. Restart your Mac, then run `minutes coach setup` again",
-        )?;
-
-        eprintln!("Starting the private AI...");
-        let deadline = std::time::Instant::now() + Duration::from_secs(30);
-        while std::time::Instant::now() < deadline {
-            if model.health().status == ModelHealthStatus::Available {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(500));
-        }
-        if model.health().status != ModelHealthStatus::Available {
-            anyhow::bail!(
-                "Coach's private AI did not start. Restart your Mac, then run `minutes coach setup` again"
-            );
-        }
-    }
-
-    eprintln!("Downloading the small private AI model...");
-    run_copilot_setup_step(
-        "ollama",
-        &["pull", config.fast_model.as_str()],
-        "Coach could not download its private AI model. Check your internet connection, then try again",
-    )?;
-    model.prewarm().map_err(|error| {
-        tracing::debug!(%error, "Coach private AI prewarm failed after setup");
-        anyhow::anyhow!(
-            "Coach finished setup but could not start. Restart your Mac, then try again"
-        )
-    })?;
-    clear_copilot_setup_needed()?;
-    eprintln!("Coach is ready to use.");
-    Ok(())
+    anyhow::bail!(
+        "Coach's private AI is installed but not ready. Open Ollama, then run `minutes coach setup` again"
+    )
 }
 
 fn clear_copilot_setup_needed() -> Result<()> {

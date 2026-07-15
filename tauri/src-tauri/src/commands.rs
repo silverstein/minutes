@@ -15252,9 +15252,7 @@ pub fn cmd_start_copilot_surface(
     // the DEFAULT auto-local config with a self-contradictory error (QA find).
     let provider = config.copilot.resolved_fast_provider();
     if provider == "cloud" && !config.copilot.allow_cloud {
-        return Err(
-            "Cloud Coach is disabled. Contract v1 uses the local Ollama provider.".into(),
-        );
+        return Err("Cloud Coach is disabled. Contract v1 uses the local Ollama provider.".into());
     }
 
     if state

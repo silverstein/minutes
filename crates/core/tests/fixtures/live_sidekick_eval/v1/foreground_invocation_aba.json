@@ -1,0 +1,108 @@
+{
+  "schema_version": 1,
+  "id": "foreground-invocation-aba",
+  "description": "Both foreground turns reuse an identifier while reducer invocation identity prevents stale publication.",
+  "content_origin": "synthetic",
+  "privacy": {
+    "generation_method": "behavior_first_from_scratch",
+    "source_material": "none",
+    "approved_role_tokens": ["USER"]
+  },
+  "matrix": {
+    "surfaces": ["terminal", "gui"],
+    "capture_modes": ["live", "recording"]
+  },
+  "initial_state": {
+    "user_role": "observer",
+    "posture": "on_demand"
+  },
+  "events": [
+    {
+      "at_ms": 0,
+      "kind": "capture_started",
+      "session_id": "SESSION_A",
+      "payload": {"capture_mode": "live", "capture_session_id": "CAPTURE_A"}
+    },
+    {
+      "at_ms": 10,
+      "kind": "user_message",
+      "session_id": "SESSION_A",
+      "payload": {"turn_id": "FOREGROUND_SHARED", "source_event_id": "USER_EVENT_A", "text": "review the current boundary"}
+    },
+    {
+      "at_ms": 20,
+      "kind": "posture_changed",
+      "session_id": "SESSION_A",
+      "payload": {"posture": "silent_watch", "source": "typed_user"}
+    },
+    {
+      "at_ms": 30,
+      "kind": "user_message",
+      "session_id": "SESSION_A",
+      "payload": {"turn_id": "FOREGROUND_SHARED", "source_event_id": "USER_EVENT_B", "text": "review the updated boundary"}
+    },
+    {
+      "at_ms": 40,
+      "kind": "foreground_completed",
+      "session_id": "SESSION_A",
+      "payload": {"turn_id": "FOREGROUND_SHARED", "invocation_from_event_index": 1}
+    },
+    {
+      "at_ms": 50,
+      "kind": "foreground_completed",
+      "session_id": "SESSION_A",
+      "payload": {"turn_id": "FOREGROUND_SHARED", "invocation_from_event_index": 3}
+    }
+  ],
+  "expectations": {
+    "ordered_actions": ["cancel_first_foreground", "reject_stale_completion", "publish_current_completion"],
+    "forbidden_actions": ["publish_first_completion", "reuse_first_invocation"],
+    "state_equals": {"foreground_active": false, "posture": "silent_watch"},
+    "required_source_kinds": ["user_statement"],
+    "required_source_event_ids": ["USER_EVENT_A", "USER_EVENT_B"],
+    "provenance_required": true,
+    "max_unsolicited_messages": 0,
+    "parity_group": "invocation-identity"
+  },
+  "execution": {
+    "status": "executable",
+    "target": "core_reducer",
+    "replays": [
+      {
+        "name": "reused-foreground-identifier",
+        "session_id": "SESSION_A",
+        "surface": "terminal",
+        "event_indexes": [0, 1, 2, 3, 4, 5],
+        "expected_reductions": [
+          {"accepted": true, "actions": [{"type": "live_transcript_attached", "capture_session_id": "CAPTURE_A"}], "rejection": null},
+          {"accepted": true, "actions": [
+            {"type": "acknowledge_foreground", "turn_id": "FOREGROUND_SHARED", "invocation": {"sequence": 1, "source_policy_generation": 0, "user_generation": 1}},
+            {"type": "request_read_only_foreground_inference", "turn_id": "FOREGROUND_SHARED", "invocation": {"sequence": 1, "source_policy_generation": 0, "user_generation": 1}, "source_event_id": "USER_EVENT_A", "text": "review the current boundary"}
+          ], "rejection": null},
+          {"accepted": true, "actions": [
+            {"type": "cancel_foreground", "turn_id": "FOREGROUND_SHARED", "invocation": {"sequence": 1, "source_policy_generation": 0, "user_generation": 1}, "reason": "posture_changed"},
+            {"type": "posture_updated", "posture": "silent_watch"}
+          ], "rejection": null},
+          {"accepted": true, "actions": [
+            {"type": "acknowledge_foreground", "turn_id": "FOREGROUND_SHARED", "invocation": {"sequence": 2, "source_policy_generation": 0, "user_generation": 3}},
+            {"type": "request_read_only_foreground_inference", "turn_id": "FOREGROUND_SHARED", "invocation": {"sequence": 2, "source_policy_generation": 0, "user_generation": 3}, "source_event_id": "USER_EVENT_B", "text": "review the updated boundary"}
+          ], "rejection": null},
+          {"accepted": false, "actions": [], "rejection": "stale_foreground_result"},
+          {"accepted": true, "actions": [{"type": "publish_foreground_response", "turn_id": "FOREGROUND_SHARED", "invocation": {"sequence": 2, "source_policy_generation": 0, "user_generation": 3}}], "rejection": null}
+        ],
+        "expected_state": {
+          "scope": "live_capture", "surface": "terminal_sidekick", "phase": "ready",
+          "user_role": {"value": "observer", "revision": 0, "supersedes_revision": null, "source_event_id": null},
+          "posture": "silent_watch", "capture_mode": "live", "capture_session_id": "CAPTURE_A",
+          "finalized_meeting_ref": null, "source_policy_generation": 0, "user_generation": 3,
+          "foreground_turn": null, "background_run": null,
+          "evidence": {
+            "USER_EVENT_A": {"id": "USER_EVENT_A", "source_kind": "user_statement", "capture_session_id": "CAPTURE_A", "finalized_meeting_ref": null},
+            "USER_EVENT_B": {"id": "USER_EVENT_B", "source_kind": "user_statement", "capture_session_id": "CAPTURE_A", "finalized_meeting_ref": null}
+          },
+          "speaker_corrections": {}
+        }
+      }
+    ]
+  }
+}

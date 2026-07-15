@@ -69,35 +69,73 @@
       {
         "name": "live",
         "session_id": "SESSION_A",
+        "surface": "terminal",
         "event_indexes": [0, 1],
         "expected_reductions": [
-          {"accepted": true, "action_types": ["live_transcript_attached"], "rejection": null},
-          {"accepted": true, "action_types": ["evidence_accepted"], "rejection": null}
+          {"accepted": true, "actions": [{"type": "live_transcript_attached", "capture_session_id": "CAPTURE_A"}], "rejection": null},
+          {"accepted": true, "actions": [{"type": "evidence_accepted", "evidence_id": "EVENT_A", "source_kind": "transcript_final"}], "rejection": null}
         ],
         "expected_state": {
           "scope": "live_capture", "surface": "terminal_sidekick", "phase": "ready",
           "user_role": {"value": "observer", "revision": 0, "supersedes_revision": null, "source_event_id": null},
           "posture": "on_demand", "capture_mode": "live", "capture_session_id": "CAPTURE_A",
           "finalized_meeting_ref": null, "source_policy_generation": 0, "user_generation": 0,
-          "foreground_turn_id": null, "background_run_id": null,
-          "evidence": {"EVENT_A": "transcript_final"}, "speaker_corrections": {}
+          "foreground_turn": null, "background_run": null,
+          "evidence": {"EVENT_A": {"id": "EVENT_A", "source_kind": "transcript_final", "capture_session_id": "CAPTURE_A", "finalized_meeting_ref": null}}, "speaker_corrections": {}
         }
       },
       {
         "name": "recording",
         "session_id": "SESSION_B",
+        "surface": "terminal",
         "event_indexes": [2, 3],
         "expected_reductions": [
-          {"accepted": true, "action_types": ["live_transcript_attached"], "rejection": null},
-          {"accepted": true, "action_types": ["evidence_accepted"], "rejection": null}
+          {"accepted": true, "actions": [{"type": "live_transcript_attached", "capture_session_id": "CAPTURE_B"}], "rejection": null},
+          {"accepted": true, "actions": [{"type": "evidence_accepted", "evidence_id": "EVENT_B", "source_kind": "transcript_final"}], "rejection": null}
         ],
         "expected_state": {
           "scope": "live_capture", "surface": "terminal_sidekick", "phase": "ready",
           "user_role": {"value": "observer", "revision": 0, "supersedes_revision": null, "source_event_id": null},
           "posture": "on_demand", "capture_mode": "recording", "capture_session_id": "CAPTURE_B",
           "finalized_meeting_ref": null, "source_policy_generation": 0, "user_generation": 0,
-          "foreground_turn_id": null, "background_run_id": null,
-          "evidence": {"EVENT_B": "transcript_final"}, "speaker_corrections": {}
+          "foreground_turn": null, "background_run": null,
+          "evidence": {"EVENT_B": {"id": "EVENT_B", "source_kind": "transcript_final", "capture_session_id": "CAPTURE_B", "finalized_meeting_ref": null}}, "speaker_corrections": {}
+        }
+      },
+      {
+        "name": "native-live",
+        "session_id": "SESSION_A",
+        "surface": "gui",
+        "event_indexes": [0, 1],
+        "expected_reductions": [
+          {"accepted": true, "actions": [{"type": "live_transcript_attached", "capture_session_id": "CAPTURE_A"}], "rejection": null},
+          {"accepted": true, "actions": [{"type": "evidence_accepted", "evidence_id": "EVENT_A", "source_kind": "transcript_final"}], "rejection": null}
+        ],
+        "expected_state": {
+          "scope": "live_capture", "surface": "native_recall", "phase": "ready",
+          "user_role": {"value": "observer", "revision": 0, "supersedes_revision": null, "source_event_id": null},
+          "posture": "on_demand", "capture_mode": "live", "capture_session_id": "CAPTURE_A",
+          "finalized_meeting_ref": null, "source_policy_generation": 0, "user_generation": 0,
+          "foreground_turn": null, "background_run": null,
+          "evidence": {"EVENT_A": {"id": "EVENT_A", "source_kind": "transcript_final", "capture_session_id": "CAPTURE_A", "finalized_meeting_ref": null}}, "speaker_corrections": {}
+        }
+      },
+      {
+        "name": "native-recording",
+        "session_id": "SESSION_B",
+        "surface": "gui",
+        "event_indexes": [2, 3],
+        "expected_reductions": [
+          {"accepted": true, "actions": [{"type": "live_transcript_attached", "capture_session_id": "CAPTURE_B"}], "rejection": null},
+          {"accepted": true, "actions": [{"type": "evidence_accepted", "evidence_id": "EVENT_B", "source_kind": "transcript_final"}], "rejection": null}
+        ],
+        "expected_state": {
+          "scope": "live_capture", "surface": "native_recall", "phase": "ready",
+          "user_role": {"value": "observer", "revision": 0, "supersedes_revision": null, "source_event_id": null},
+          "posture": "on_demand", "capture_mode": "recording", "capture_session_id": "CAPTURE_B",
+          "finalized_meeting_ref": null, "source_policy_generation": 0, "user_generation": 0,
+          "foreground_turn": null, "background_run": null,
+          "evidence": {"EVENT_B": {"id": "EVENT_B", "source_kind": "transcript_final", "capture_session_id": "CAPTURE_B", "finalized_meeting_ref": null}}, "speaker_corrections": {}
         }
       }
     ]

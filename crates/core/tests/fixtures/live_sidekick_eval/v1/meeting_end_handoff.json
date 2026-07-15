@@ -60,18 +60,19 @@
       {
         "name": "lifecycle-to-processing",
         "session_id": "SESSION_A",
+        "surface": "terminal",
         "event_indexes": [0, 1, 2],
         "expected_reductions": [
-          {"accepted": true, "action_types": ["live_transcript_attached"], "rejection": null},
-          {"accepted": true, "action_types": ["meeting_ended"], "rejection": null},
-          {"accepted": true, "action_types": ["final_transcript_processing"], "rejection": null}
+          {"accepted": true, "actions": [{"type": "live_transcript_attached", "capture_session_id": "CAPTURE_A"}], "rejection": null},
+          {"accepted": true, "actions": [{"type": "meeting_ended"}], "rejection": null},
+          {"accepted": true, "actions": [{"type": "final_transcript_processing"}], "rejection": null}
         ],
         "expected_state": {
           "scope": "live_capture", "surface": "terminal_sidekick", "phase": "processing",
           "user_role": {"value": "participant", "revision": 0, "supersedes_revision": null, "source_event_id": null},
           "posture": "decision_tracker", "capture_mode": "recording", "capture_session_id": "CAPTURE_A",
           "finalized_meeting_ref": null, "source_policy_generation": 0, "user_generation": 0,
-          "foreground_turn_id": null, "background_run_id": null,
+          "foreground_turn": null, "background_run": null,
           "evidence": {}, "speaker_corrections": {}
         }
       }

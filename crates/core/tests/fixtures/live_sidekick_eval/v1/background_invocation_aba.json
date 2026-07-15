@@ -1,0 +1,109 @@
+{
+  "schema_version": 1,
+  "id": "background-invocation-aba",
+  "description": "Both background runs reuse an identifier while reducer invocation identity prevents stale publication.",
+  "content_origin": "synthetic",
+  "privacy": {
+    "generation_method": "behavior_first_from_scratch",
+    "source_material": "none",
+    "approved_role_tokens": ["USER"]
+  },
+  "matrix": {
+    "surfaces": ["terminal", "gui"],
+    "capture_modes": ["live", "recording"]
+  },
+  "initial_state": {
+    "user_role": "participant",
+    "posture": "strategist"
+  },
+  "events": [
+    {
+      "at_ms": 0,
+      "kind": "capture_started",
+      "session_id": "SESSION_A",
+      "payload": {"capture_mode": "live", "capture_session_id": "CAPTURE_A"}
+    },
+    {
+      "at_ms": 10,
+      "kind": "background_started",
+      "session_id": "SESSION_A",
+      "payload": {"run_id": "BACKGROUND_SHARED"}
+    },
+    {
+      "at_ms": 20,
+      "kind": "user_message",
+      "session_id": "SESSION_A",
+      "payload": {"turn_id": "FOREGROUND_A", "source_event_id": "USER_EVENT_A", "text": "summarize the synthetic change"}
+    },
+    {
+      "at_ms": 30,
+      "kind": "foreground_completed",
+      "session_id": "SESSION_A",
+      "payload": {"turn_id": "FOREGROUND_A", "invocation_from_event_index": 2}
+    },
+    {
+      "at_ms": 40,
+      "kind": "background_started",
+      "session_id": "SESSION_A",
+      "payload": {"run_id": "BACKGROUND_SHARED"}
+    },
+    {
+      "at_ms": 50,
+      "kind": "background_completed",
+      "session_id": "SESSION_A",
+      "payload": {"run_id": "BACKGROUND_SHARED", "invocation_from_event_index": 1}
+    },
+    {
+      "at_ms": 60,
+      "kind": "background_completed",
+      "session_id": "SESSION_A",
+      "payload": {"run_id": "BACKGROUND_SHARED", "invocation_from_event_index": 4}
+    }
+  ],
+  "expectations": {
+    "ordered_actions": ["cancel_first_background", "reject_stale_completion", "publish_current_completion"],
+    "forbidden_actions": ["publish_first_completion", "reuse_first_invocation"],
+    "state_equals": {"background_active": false, "foreground_active": false},
+    "required_source_kinds": ["user_statement"],
+    "required_source_event_ids": ["USER_EVENT_A"],
+    "provenance_required": true,
+    "max_unsolicited_messages": 1,
+    "parity_group": "invocation-identity"
+  },
+  "execution": {
+    "status": "executable",
+    "target": "core_reducer",
+    "replays": [
+      {
+        "name": "reused-background-identifier",
+        "session_id": "SESSION_A",
+        "surface": "terminal",
+        "event_indexes": [0, 1, 2, 3, 4, 5, 6],
+        "expected_reductions": [
+          {"accepted": true, "actions": [{"type": "live_transcript_attached", "capture_session_id": "CAPTURE_A"}], "rejection": null},
+          {"accepted": true, "actions": [{"type": "background_invocation_registered", "run_id": "BACKGROUND_SHARED", "invocation": {"sequence": 1, "source_policy_generation": 0, "user_generation": 0}}], "rejection": null},
+          {"accepted": true, "actions": [
+            {"type": "cancel_background", "run_id": "BACKGROUND_SHARED", "invocation": {"sequence": 1, "source_policy_generation": 0, "user_generation": 0}, "reason": "typed_user_input"},
+            {"type": "acknowledge_foreground", "turn_id": "FOREGROUND_A", "invocation": {"sequence": 2, "source_policy_generation": 0, "user_generation": 1}},
+            {"type": "request_read_only_foreground_inference", "turn_id": "FOREGROUND_A", "invocation": {"sequence": 2, "source_policy_generation": 0, "user_generation": 1}, "source_event_id": "USER_EVENT_A", "text": "summarize the synthetic change"}
+          ], "rejection": null},
+          {"accepted": true, "actions": [{"type": "publish_foreground_response", "turn_id": "FOREGROUND_A", "invocation": {"sequence": 2, "source_policy_generation": 0, "user_generation": 1}}], "rejection": null},
+          {"accepted": true, "actions": [{"type": "background_invocation_registered", "run_id": "BACKGROUND_SHARED", "invocation": {"sequence": 3, "source_policy_generation": 0, "user_generation": 1}}], "rejection": null},
+          {"accepted": false, "actions": [], "rejection": "stale_background_result"},
+          {"accepted": true, "actions": [{"type": "publish_background_insight", "run_id": "BACKGROUND_SHARED", "invocation": {"sequence": 3, "source_policy_generation": 0, "user_generation": 1}}], "rejection": null}
+        ],
+        "expected_state": {
+          "scope": "live_capture", "surface": "terminal_sidekick", "phase": "ready",
+          "user_role": {"value": "participant", "revision": 0, "supersedes_revision": null, "source_event_id": null},
+          "posture": "strategist", "capture_mode": "live", "capture_session_id": "CAPTURE_A",
+          "finalized_meeting_ref": null, "source_policy_generation": 0, "user_generation": 1,
+          "foreground_turn": null, "background_run": null,
+          "evidence": {
+            "USER_EVENT_A": {"id": "USER_EVENT_A", "source_kind": "user_statement", "capture_session_id": "CAPTURE_A", "finalized_meeting_ref": null}
+          },
+          "speaker_corrections": {}
+        }
+      }
+    ]
+  }
+}

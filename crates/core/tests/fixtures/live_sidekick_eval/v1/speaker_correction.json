@@ -77,20 +77,25 @@
       {
         "name": "speaker-state",
         "session_id": "SESSION_A",
+        "surface": "terminal",
         "event_indexes": [0, 1, 2, 3],
         "expected_reductions": [
-          {"accepted": true, "action_types": ["live_transcript_attached"], "rejection": null},
-          {"accepted": true, "action_types": ["evidence_accepted"], "rejection": null},
-          {"accepted": true, "action_types": ["speaker_correction_updated"], "rejection": null},
-          {"accepted": true, "action_types": ["evidence_accepted"], "rejection": null}
+          {"accepted": true, "actions": [{"type": "live_transcript_attached", "capture_session_id": "CAPTURE_A"}], "rejection": null},
+          {"accepted": true, "actions": [{"type": "evidence_accepted", "evidence_id": "EVENT_A", "source_kind": "transcript_final"}], "rejection": null},
+          {"accepted": true, "actions": [{"type": "speaker_correction_updated", "source_label": "PARTICIPANT_A", "corrected_label": "ENGINEER_A", "revision": 1, "supersedes_revision": null}], "rejection": null},
+          {"accepted": true, "actions": [{"type": "evidence_accepted", "evidence_id": "EVENT_B", "source_kind": "transcript_final"}], "rejection": null}
         ],
         "expected_state": {
           "scope": "live_capture", "surface": "terminal_sidekick", "phase": "ready",
           "user_role": {"value": "participant", "revision": 0, "supersedes_revision": null, "source_event_id": null},
           "posture": "decision_tracker", "capture_mode": "live", "capture_session_id": "CAPTURE_A",
           "finalized_meeting_ref": null, "source_policy_generation": 0, "user_generation": 1,
-          "foreground_turn_id": null, "background_run_id": null,
-          "evidence": {"EVENT_A": "transcript_final", "EVENT_B": "transcript_final", "SPEAKER_EVENT_A": "user_statement"},
+          "foreground_turn": null, "background_run": null,
+          "evidence": {
+            "EVENT_A": {"id": "EVENT_A", "source_kind": "transcript_final", "capture_session_id": "CAPTURE_A", "finalized_meeting_ref": null},
+            "EVENT_B": {"id": "EVENT_B", "source_kind": "transcript_final", "capture_session_id": "CAPTURE_A", "finalized_meeting_ref": null},
+            "SPEAKER_EVENT_A": {"id": "SPEAKER_EVENT_A", "source_kind": "user_statement", "capture_session_id": "CAPTURE_A", "finalized_meeting_ref": null}
+          },
           "speaker_corrections": {"PARTICIPANT_A": {"corrected_label": "ENGINEER_A", "revision": 1, "supersedes_revision": null, "source_event_id": "SPEAKER_EVENT_A"}}
         }
       }

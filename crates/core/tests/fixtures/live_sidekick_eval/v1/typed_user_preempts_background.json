@@ -64,17 +64,16 @@
       {
         "name": "typed-user-preemption",
         "session_id": "SESSION_A",
+        "surface": "terminal",
         "event_indexes": [0, 1, 2, 3],
         "expected_reductions": [
-          {"accepted": true, "action_types": ["live_transcript_attached"], "rejection": null},
-          {"accepted": true, "action_types": ["background_invocation_registered"], "action_invocations": [
-            {"type": "background_invocation_registered", "invocation": {"sequence": 1, "source_policy_generation": 0, "user_generation": 0}}
-          ], "rejection": null},
-          {"accepted": true, "action_types": ["evidence_accepted"], "rejection": null},
-          {"accepted": true, "action_types": ["cancel_background", "acknowledge_foreground", "request_read_only_foreground_inference"], "action_invocations": [
-            {"type": "cancel_background", "invocation": {"sequence": 1, "source_policy_generation": 0, "user_generation": 0}},
-            {"type": "acknowledge_foreground", "invocation": {"sequence": 2, "source_policy_generation": 0, "user_generation": 1}},
-            {"type": "request_read_only_foreground_inference", "invocation": {"sequence": 2, "source_policy_generation": 0, "user_generation": 1}}
+          {"accepted": true, "actions": [{"type": "live_transcript_attached", "capture_session_id": "CAPTURE_A"}], "rejection": null},
+          {"accepted": true, "actions": [{"type": "background_invocation_registered", "run_id": "BACKGROUND_A", "invocation": {"sequence": 1, "source_policy_generation": 0, "user_generation": 0}}], "rejection": null},
+          {"accepted": true, "actions": [{"type": "evidence_accepted", "evidence_id": "EVENT_A", "source_kind": "transcript_final"}], "rejection": null},
+          {"accepted": true, "actions": [
+            {"type": "cancel_background", "run_id": "BACKGROUND_A", "invocation": {"sequence": 1, "source_policy_generation": 0, "user_generation": 0}, "reason": "typed_user_input"},
+            {"type": "acknowledge_foreground", "turn_id": "FOREGROUND_A", "invocation": {"sequence": 2, "source_policy_generation": 0, "user_generation": 1}},
+            {"type": "request_read_only_foreground_inference", "turn_id": "FOREGROUND_A", "invocation": {"sequence": 2, "source_policy_generation": 0, "user_generation": 1}, "source_event_id": "USER_EVENT_A", "text": "what changed"}
           ], "rejection": null}
         ],
         "expected_state": {
@@ -82,8 +81,11 @@
           "user_role": {"value": "participant", "revision": 0, "supersedes_revision": null, "source_event_id": null},
           "posture": "strategist", "capture_mode": "live", "capture_session_id": "CAPTURE_A",
           "finalized_meeting_ref": null, "source_policy_generation": 0, "user_generation": 1,
-          "foreground_turn_id": "FOREGROUND_A", "background_run_id": null,
-          "evidence": {"EVENT_A": "transcript_final", "USER_EVENT_A": "user_statement"}, "speaker_corrections": {}
+          "foreground_turn": {"id": "FOREGROUND_A", "source_event_id": "USER_EVENT_A", "invocation": {"sequence": 2, "source_policy_generation": 0, "user_generation": 1}}, "background_run": null,
+          "evidence": {
+            "EVENT_A": {"id": "EVENT_A", "source_kind": "transcript_final", "capture_session_id": "CAPTURE_A", "finalized_meeting_ref": null},
+            "USER_EVENT_A": {"id": "USER_EVENT_A", "source_kind": "user_statement", "capture_session_id": "CAPTURE_A", "finalized_meeting_ref": null}
+          }, "speaker_corrections": {}
         }
       }
     ]

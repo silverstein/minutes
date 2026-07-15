@@ -23,8 +23,11 @@ serialized Rust state. Events use this stable envelope:
 `session_id` is omitted only for surface-routing requests that are not yet
 attached to a capture. Schema v1 requires explicit stable synthetic IDs in
 every executable payload: adapters do not infer capture IDs, source event IDs,
-or background run IDs from surrounding fields. Expectations use action-kind
-strings plus structured state, provenance, cadence, and parity assertions.
+or background run IDs from surrounding fields. Completion events reference a
+prior reducer-issued invocation by replay event index; adapters may not invent
+or accept a literal invocation identity. Expectations compare complete action
+payloads and complete state, including evidence provenance, rather than only
+action kinds.
 
 ## Execution truth
 
@@ -38,10 +41,13 @@ Every fixture has an `execution` classification validated by CI:
 
 The current v1 corpus contains:
 
-- 4 executable core-reducer fixtures;
+- 8 executable core-reducer fixtures;
 - 4 executable core-reducer projections;
 - 1 executable canonical skill-routing fixture;
 - 5 contract-only future-orchestration fixtures.
+
+Those 12 reducer fixtures contain 15 deterministic replays. Capture-mode
+parity is exercised on both terminal and GUI surfaces.
 
 The Rust integration test adapts only explicitly selected event indexes to the
 public reducer API, replays each case twice, compares the two results, then
@@ -72,5 +78,22 @@ projection, and contract-only counts instead of implying that all fixtures ran.
 
 Before publishing a new fixture batch, a privacy reviewer must also run the
 optional local-only overlap gate against an authorized private corpus. The
-command reports only pass/fail counts, thresholds, and fixture IDs. It never
-prints matching text or corpus hashes.
+command emits exactly one aggregate line. It never prints fixture IDs, private
+paths, matching text, corpus names, or hashes. This review is intentionally
+local-only and refuses to run when the `CI` environment variable is set.
+
+```text
+python3 scripts/check_live_sidekick_fixture_privacy.py \
+  --private-overlap-only \
+  --aggregate-only \
+  --acknowledge-private-corpus-authorization \
+  --private-corpus-dir <authorized-root-one> \
+  --private-corpus-dir <authorized-root-two> \
+  --ngram-size 7 \
+  --overlap-threshold 0
+```
+
+Private roots are read through no-follow file descriptors. Only allowlisted
+regular UTF-8 text files under the size cap are scanned; symlinks, file races,
+oversized inputs, malformed text, and unreadable files fail the aggregate
+review closed.

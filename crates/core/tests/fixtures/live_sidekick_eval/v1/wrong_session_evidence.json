@@ -59,19 +59,20 @@
       {
         "name": "wrong-assistance-session",
         "session_id": "SESSION_A",
+        "surface": "terminal",
         "event_indexes": [0, 1, 2, 3],
         "expected_reductions": [
-          {"accepted": true, "action_types": ["live_transcript_attached"], "rejection": null},
-          {"accepted": false, "action_types": [], "rejection": "wrong_assistance_session"},
-          {"accepted": false, "action_types": [], "rejection": "wrong_assistance_session"},
-          {"accepted": false, "action_types": [], "rejection": "wrong_assistance_session"}
+          {"accepted": true, "actions": [{"type": "live_transcript_attached", "capture_session_id": "CAPTURE_A"}], "rejection": null},
+          {"accepted": false, "actions": [], "rejection": "wrong_assistance_session"},
+          {"accepted": false, "actions": [], "rejection": "wrong_assistance_session"},
+          {"accepted": false, "actions": [], "rejection": "wrong_assistance_session"}
         ],
         "expected_state": {
           "scope": "live_capture", "surface": "terminal_sidekick", "phase": "ready",
           "user_role": {"value": "observer", "revision": 0, "supersedes_revision": null, "source_event_id": null},
           "posture": "strategist", "capture_mode": "live", "capture_session_id": "CAPTURE_A",
           "finalized_meeting_ref": null, "source_policy_generation": 0, "user_generation": 0,
-          "foreground_turn_id": null, "background_run_id": null,
+          "foreground_turn": null, "background_run": null,
           "evidence": {}, "speaker_corrections": {}
         }
       }

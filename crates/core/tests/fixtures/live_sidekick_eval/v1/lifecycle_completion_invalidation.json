@@ -1,0 +1,125 @@
+{
+  "schema_version": 1,
+  "id": "lifecycle-completion-invalidation",
+  "description": "Meeting lifecycle transitions cancel current foreground work and reject both late completions.",
+  "content_origin": "synthetic",
+  "privacy": {
+    "generation_method": "behavior_first_from_scratch",
+    "source_material": "none",
+    "approved_role_tokens": ["USER"]
+  },
+  "matrix": {
+    "surfaces": ["terminal", "gui"],
+    "capture_modes": ["live", "recording"]
+  },
+  "initial_state": {
+    "user_role": "participant",
+    "posture": "on_demand"
+  },
+  "events": [
+    {
+      "at_ms": 0,
+      "kind": "capture_started",
+      "session_id": "SESSION_A",
+      "payload": {"capture_mode": "recording", "capture_session_id": "CAPTURE_A"}
+    },
+    {
+      "at_ms": 10,
+      "kind": "user_message",
+      "session_id": "SESSION_A",
+      "payload": {"turn_id": "FOREGROUND_LIVE", "source_event_id": "USER_EVENT_LIVE", "text": "summarize the current section"}
+    },
+    {
+      "at_ms": 20,
+      "kind": "capture_stopped",
+      "session_id": "SESSION_A",
+      "payload": {"capture_session_id": "CAPTURE_A"}
+    },
+    {
+      "at_ms": 30,
+      "kind": "foreground_completed",
+      "session_id": "SESSION_A",
+      "payload": {"turn_id": "FOREGROUND_LIVE", "invocation_from_event_index": 1}
+    },
+    {
+      "at_ms": 40,
+      "kind": "processing_started",
+      "session_id": "SESSION_A",
+      "payload": {"capture_session_id": "CAPTURE_A", "stage": "transcribing"}
+    },
+    {
+      "at_ms": 50,
+      "kind": "user_message",
+      "session_id": "SESSION_A",
+      "payload": {"turn_id": "FOREGROUND_PROCESSING", "source_event_id": "USER_EVENT_PROCESSING", "text": "report the processing boundary"}
+    },
+    {
+      "at_ms": 60,
+      "kind": "meeting_finalized",
+      "session_id": "SESSION_A",
+      "payload": {"capture_session_id": "CAPTURE_A", "meeting_ref": "MEETING_A"}
+    },
+    {
+      "at_ms": 70,
+      "kind": "foreground_completed",
+      "session_id": "SESSION_A",
+      "payload": {"turn_id": "FOREGROUND_PROCESSING", "invocation_from_event_index": 5}
+    }
+  ],
+  "expectations": {
+    "ordered_actions": ["cancel_live_completion", "enter_processing", "cancel_processing_completion", "attach_finalized_meeting"],
+    "forbidden_actions": ["publish_late_live_completion", "publish_late_processing_completion"],
+    "state_equals": {"phase": "finalized", "foreground_active": false},
+    "required_source_kinds": ["user_statement"],
+    "required_source_event_ids": ["USER_EVENT_LIVE", "USER_EVENT_PROCESSING"],
+    "provenance_required": true,
+    "max_unsolicited_messages": 0,
+    "parity_group": "lifecycle-invalidation"
+  },
+  "execution": {
+    "status": "executable",
+    "target": "core_reducer",
+    "replays": [
+      {
+        "name": "late-completions-across-lifecycle",
+        "session_id": "SESSION_A",
+        "surface": "terminal",
+        "event_indexes": [0, 1, 2, 3, 4, 5, 6, 7],
+        "expected_reductions": [
+          {"accepted": true, "actions": [{"type": "live_transcript_attached", "capture_session_id": "CAPTURE_A"}], "rejection": null},
+          {"accepted": true, "actions": [
+            {"type": "acknowledge_foreground", "turn_id": "FOREGROUND_LIVE", "invocation": {"sequence": 1, "source_policy_generation": 0, "user_generation": 1}},
+            {"type": "request_read_only_foreground_inference", "turn_id": "FOREGROUND_LIVE", "invocation": {"sequence": 1, "source_policy_generation": 0, "user_generation": 1}, "source_event_id": "USER_EVENT_LIVE", "text": "summarize the current section"}
+          ], "rejection": null},
+          {"accepted": true, "actions": [
+            {"type": "cancel_foreground", "turn_id": "FOREGROUND_LIVE", "invocation": {"sequence": 1, "source_policy_generation": 0, "user_generation": 1}, "reason": "meeting_ended"},
+            {"type": "meeting_ended"}
+          ], "rejection": null},
+          {"accepted": false, "actions": [], "rejection": "stale_foreground_result"},
+          {"accepted": true, "actions": [{"type": "final_transcript_processing"}], "rejection": null},
+          {"accepted": true, "actions": [
+            {"type": "acknowledge_foreground", "turn_id": "FOREGROUND_PROCESSING", "invocation": {"sequence": 2, "source_policy_generation": 0, "user_generation": 2}},
+            {"type": "request_read_only_foreground_inference", "turn_id": "FOREGROUND_PROCESSING", "invocation": {"sequence": 2, "source_policy_generation": 0, "user_generation": 2}, "source_event_id": "USER_EVENT_PROCESSING", "text": "report the processing boundary"}
+          ], "rejection": null},
+          {"accepted": true, "actions": [
+            {"type": "cancel_foreground", "turn_id": "FOREGROUND_PROCESSING", "invocation": {"sequence": 2, "source_policy_generation": 0, "user_generation": 2}, "reason": "lifecycle_changed"},
+            {"type": "finalized_meeting_attached", "meeting_ref": "MEETING_A"}
+          ], "rejection": null},
+          {"accepted": false, "actions": [], "rejection": "stale_foreground_result"}
+        ],
+        "expected_state": {
+          "scope": "finalized_meeting", "surface": "terminal_sidekick", "phase": "finalized",
+          "user_role": {"value": "participant", "revision": 0, "supersedes_revision": null, "source_event_id": null},
+          "posture": "on_demand", "capture_mode": "recording", "capture_session_id": "CAPTURE_A",
+          "finalized_meeting_ref": "MEETING_A", "source_policy_generation": 0, "user_generation": 2,
+          "foreground_turn": null, "background_run": null,
+          "evidence": {
+            "USER_EVENT_LIVE": {"id": "USER_EVENT_LIVE", "source_kind": "user_statement", "capture_session_id": "CAPTURE_A", "finalized_meeting_ref": null},
+            "USER_EVENT_PROCESSING": {"id": "USER_EVENT_PROCESSING", "source_kind": "user_statement", "capture_session_id": "CAPTURE_A", "finalized_meeting_ref": null}
+          },
+          "speaker_corrections": {}
+        }
+      }
+    ]
+  }
+}

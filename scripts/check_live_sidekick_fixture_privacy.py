@@ -9,10 +9,15 @@ or corpus hashes.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
+import os
 import re
+import secrets
+import stat
 import sys
+import unicodedata
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
@@ -66,6 +71,9 @@ MAX_TEXT_FIELD_CHARS = 1_000
 MAX_UNIQUE_WORDS_PER_FIXTURE = 220
 DEFAULT_NGRAM_SIZE = 5
 DEFAULT_OVERLAP_THRESHOLD = 0
+DEFAULT_PRIVATE_NGRAM_SIZE = 7
+DEFAULT_PRIVATE_MAX_FILE_BYTES = 4 * 1024 * 1024
+DEFAULT_PRIVATE_EXTENSIONS = ("md", "txt")
 
 
 PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
@@ -302,11 +310,15 @@ def check_fixture_dir(fixture_dir: Path) -> tuple[list[FixtureDocument], list[Fi
     return documents, findings
 
 
+def _iter_normalized_ngrams(text: str, size: int) -> Iterator[tuple[str, ...]]:
+    normalized = unicodedata.normalize("NFKC", text).casefold()
+    words = re.findall(r"[^\W_]+", normalized, flags=re.UNICODE)
+    for index in range(max(0, len(words) - size + 1)):
+        yield tuple(words[index : index + size])
+
+
 def _normalized_ngrams(text: str, size: int) -> set[tuple[str, ...]]:
-    words = WORD_RE.findall(text.lower())
-    if len(words) < size:
-        return set()
-    return {tuple(words[index : index + size]) for index in range(len(words) - size + 1)}
+    return set(_iter_normalized_ngrams(text, size))
 
 
 def _fixture_ngrams(document: FixtureDocument, size: int) -> set[tuple[str, ...]]:
@@ -316,36 +328,170 @@ def _fixture_ngrams(document: FixtureDocument, size: int) -> set[tuple[str, ...]
     return result
 
 
-def _private_corpus_ngrams(directory: Path, size: int) -> tuple[set[tuple[str, ...]], int]:
-    ngrams: set[tuple[str, ...]] = set()
-    unreadable = 0
-    for path in sorted(item for item in directory.rglob("*") if item.is_file()):
+def _digest_ngram(ngram: tuple[str, ...], key: bytes) -> bytes:
+    return hashlib.blake2b(
+        "\x1f".join(ngram).encode("utf-8"), key=key, digest_size=16
+    ).digest()
+
+
+def _digest_ngrams(text: str, size: int, key: bytes) -> set[bytes]:
+    # The private path never materializes raw n-grams as a collection. Each
+    # generated tuple is keyed and digested before the iterator advances.
+    return {_digest_ngram(ngram, key) for ngram in _iter_normalized_ngrams(text, size)}
+
+
+def _read_private_text(path: Path, max_file_bytes: int) -> tuple[str | None, str | None]:
+    """Read one regular file without following or racing a symlink.
+
+    The status is deliberately aggregate-only (``rejected`` or ``unreadable``)
+    so callers cannot accidentally expose a private path or parsing detail.
+    """
+
+    try:
+        before = path.lstat()
+    except OSError:
+        return None, "unreadable"
+    if (
+        stat.S_ISLNK(before.st_mode)
+        or not stat.S_ISREG(before.st_mode)
+        or before.st_size > max_file_bytes
+    ):
+        return None, "rejected"
+
+    flags = os.O_RDONLY
+    flags |= getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError:
+        return None, "unreadable"
+    try:
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_size > max_file_bytes
+            or (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)
+        ):
+            return None, "rejected"
+        chunks: list[bytes] = []
+        remaining = max_file_bytes + 1
+        while remaining:
+            chunk = os.read(descriptor, min(64 * 1024, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        raw = b"".join(chunks)
+        if len(raw) > max_file_bytes:
+            return None, "rejected"
         try:
-            # Bound each read so an accidental media file cannot exhaust memory.
-            with path.open("r", encoding="utf-8", errors="ignore") as handle:
-                text = handle.read(4 * 1024 * 1024)
-        except OSError:
-            unreadable += 1
+            return raw.decode("utf-8", errors="strict"), None
+        except UnicodeError:
+            return None, "unreadable"
+    except OSError:
+        return None, "unreadable"
+    finally:
+        os.close(descriptor)
+
+
+@dataclass(frozen=True)
+class PrivateCorpusSummary:
+    digests: set[bytes]
+    roots: int
+    files_scanned: int
+    files_rejected: int
+    unreadable: int
+    configuration_failures: int
+
+
+def _scan_private_corpora(
+    directories: Sequence[Path],
+    extensions: set[str],
+    ngram_size: int,
+    max_file_bytes: int,
+    key: bytes,
+) -> PrivateCorpusSummary:
+    digests: set[bytes] = set()
+    files_scanned = 0
+    files_rejected = 0
+    unreadable = 0
+    configuration_failures = 0
+
+    for requested_root in directories:
+        if not requested_root.is_absolute() or requested_root.is_symlink():
+            configuration_failures += 1
             continue
-        ngrams.update(_normalized_ngrams(text, size))
-    return ngrams, unreadable
+        try:
+            root = requested_root.resolve(strict=True)
+        except OSError:
+            configuration_failures += 1
+            continue
+        if not root.is_dir():
+            configuration_failures += 1
+            continue
+
+        def record_walk_error(_: OSError) -> None:
+            nonlocal unreadable
+            unreadable += 1
+
+        for current, directory_names, file_names in os.walk(
+            root, followlinks=False, onerror=record_walk_error
+        ):
+            current_path = Path(current)
+            safe_directories: list[str] = []
+            for name in directory_names:
+                candidate = current_path / name
+                if candidate.is_symlink():
+                    files_rejected += 1
+                else:
+                    safe_directories.append(name)
+            directory_names[:] = safe_directories
+
+            for name in file_names:
+                path = current_path / name
+                if path.suffix.lower().lstrip(".") not in extensions:
+                    continue
+                text, failure = _read_private_text(path, max_file_bytes)
+                if failure == "rejected":
+                    files_rejected += 1
+                    continue
+                if failure == "unreadable" or text is None:
+                    unreadable += 1
+                    continue
+                files_scanned += 1
+                digests.update(_digest_ngrams(text, ngram_size, key))
+
+    return PrivateCorpusSummary(
+        digests=digests,
+        roots=len(directories),
+        files_scanned=files_scanned,
+        files_rejected=files_rejected,
+        unreadable=unreadable,
+        configuration_failures=configuration_failures,
+    )
 
 
 def check_private_overlap(
     documents: Iterable[FixtureDocument],
-    private_corpus_dir: Path,
+    private_corpus_dirs: Sequence[Path],
     ngram_size: int,
     threshold: int,
-) -> tuple[dict[str, int], int]:
-    if not private_corpus_dir.is_dir():
-        return {}, 1
-    corpus_ngrams, unreadable = _private_corpus_ngrams(private_corpus_dir, ngram_size)
-    overlaps: dict[str, int] = {}
+    extensions: set[str],
+    max_file_bytes: int,
+) -> tuple[int, PrivateCorpusSummary]:
+    key = secrets.token_bytes(32)
+    corpus = _scan_private_corpora(
+        private_corpus_dirs, extensions, ngram_size, max_file_bytes, key
+    )
+    fixtures_with_overlap = 0
     for document in documents:
-        count = len(_fixture_ngrams(document, ngram_size) & corpus_ngrams)
+        fixture_digests: set[bytes] = set()
+        for _, value in _iter_strings(document.data):
+            fixture_digests.update(_digest_ngrams(value, ngram_size, key))
+        count = len(fixture_digests & corpus.digests)
         if count > threshold:
-            overlaps[document.fixture_id] = count
-    return overlaps, unreadable
+            fixtures_with_overlap += 1
+    return fixtures_with_overlap, corpus
 
 
 def _print_structural_summary(documents: Sequence[FixtureDocument], findings: Sequence[Finding]) -> None:
@@ -364,19 +510,29 @@ def _print_structural_summary(documents: Sequence[FixtureDocument], findings: Se
 
 def _print_overlap_summary(
     documents: Sequence[FixtureDocument],
-    overlaps: dict[str, int],
-    unreadable: int,
+    fixtures_with_overlap: int,
+    corpus: PrivateCorpusSummary,
     ngram_size: int,
     threshold: int,
+    structural_failures: int,
 ) -> None:
-    failed_ids = sorted(overlaps)
-    outcome = "pass" if not failed_ids and unreadable == 0 else "fail"
-    print(
-        f"overlap={outcome} fixtures={len(documents)} failed={len(failed_ids)} "
-        f"unreadable={unreadable} ngram_size={ngram_size} threshold={threshold}"
+    outcome = (
+        "pass"
+        if fixtures_with_overlap == 0
+        and corpus.files_rejected == 0
+        and corpus.unreadable == 0
+        and corpus.configuration_failures == 0
+        and structural_failures == 0
+        else "fail"
     )
-    if failed_ids:
-        print(f"overlap_fixture_ids={','.join(failed_ids)}")
+    print(
+        f"private_overlap={outcome} roots={corpus.roots} "
+        f"files_scanned={corpus.files_scanned} files_rejected={corpus.files_rejected} "
+        f"unreadable={corpus.unreadable} configuration_failures={corpus.configuration_failures} "
+        f"fixtures_scanned={len(documents)} fixtures_with_overlap={fixtures_with_overlap} "
+        f"structural_failures={structural_failures} ngram_size={ngram_size} "
+        f"threshold={threshold}"
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -393,17 +549,98 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--private-corpus-dir",
         type=Path,
-        help="optional local-only corpus for normalized n-gram overlap checking",
+        action="append",
+        default=[],
+        help="authorized local-only corpus root; repeat for multiple roots",
     )
-    parser.add_argument("--ngram-size", type=int, default=DEFAULT_NGRAM_SIZE)
+    parser.add_argument("--ngram-size", type=int)
     parser.add_argument(
         "--overlap-threshold", type=int, default=DEFAULT_OVERLAP_THRESHOLD
+    )
+    parser.add_argument(
+        "--private-overlap-only",
+        action="store_true",
+        help="emit only one aggregate private-overlap result",
+    )
+    parser.add_argument(
+        "--aggregate-only",
+        action="store_true",
+        help="required with --private-overlap-only; never emit per-fixture findings",
+    )
+    parser.add_argument(
+        "--acknowledge-private-corpus-authorization",
+        action="store_true",
+        help="confirm authorization to read the explicitly supplied local roots",
+    )
+    parser.add_argument(
+        "--include-extension",
+        action="append",
+        default=[],
+        help="allowlisted text extension without a dot; defaults to md and txt",
+    )
+    parser.add_argument(
+        "--private-max-file-bytes",
+        type=int,
+        default=DEFAULT_PRIVATE_MAX_FILE_BYTES,
     )
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.ngram_size is None:
+        args.ngram_size = (
+            DEFAULT_PRIVATE_NGRAM_SIZE
+            if args.private_overlap_only
+            else DEFAULT_NGRAM_SIZE
+        )
+
+    if args.private_overlap_only:
+        if (
+            not args.aggregate_only
+            or not args.acknowledge_private_corpus_authorization
+            or not args.private_corpus_dir
+            or os.environ.get("CI")
+            or args.private_max_file_bytes <= 0
+            or args.ngram_size < DEFAULT_PRIVATE_NGRAM_SIZE
+            or args.overlap_threshold < 0
+        ):
+            print("private_overlap=fail configuration_failures=1")
+            return 2
+        extensions = {
+            value.lower().lstrip(".")
+            for value in (args.include_extension or DEFAULT_PRIVATE_EXTENSIONS)
+            if value and value.strip(".")
+        }
+        if not extensions:
+            print("private_overlap=fail configuration_failures=1")
+            return 2
+        documents, findings = check_fixture_dir(args.fixture_dir)
+        fixtures_with_overlap, corpus = check_private_overlap(
+            documents,
+            args.private_corpus_dir,
+            args.ngram_size,
+            args.overlap_threshold,
+            extensions,
+            args.private_max_file_bytes,
+        )
+        _print_overlap_summary(
+            documents,
+            fixtures_with_overlap,
+            corpus,
+            args.ngram_size,
+            args.overlap_threshold,
+            len(findings),
+        )
+        failed = (
+            bool(findings)
+            or fixtures_with_overlap > 0
+            or corpus.files_rejected > 0
+            or corpus.unreadable > 0
+            or corpus.configuration_failures > 0
+        )
+        return 1 if failed else 0
+
     if args.ngram_size < 3:
         print("configuration=fail rule=ngram_size_minimum")
         return 2
@@ -415,21 +652,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     _print_structural_summary(documents, findings)
     failed = bool(findings)
 
-    if args.private_corpus_dir is not None:
-        overlaps, unreadable = check_private_overlap(
-            documents,
-            args.private_corpus_dir,
-            args.ngram_size,
-            args.overlap_threshold,
-        )
-        _print_overlap_summary(
-            documents,
-            overlaps,
-            unreadable,
-            args.ngram_size,
-            args.overlap_threshold,
-        )
-        failed = failed or bool(overlaps) or unreadable > 0
+    if args.private_corpus_dir:
+        print("private_overlap=fail configuration_failures=1")
+        return 2
 
     return 1 if failed else 0
 

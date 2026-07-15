@@ -62,6 +62,7 @@ EXECUTION_KEYS = {
 REPLAY_KEYS = {
     "name",
     "session_id",
+    "surface",
     "event_indexes",
     "expected_reductions",
     "expected_state",
@@ -88,6 +89,7 @@ SOURCE_KINDS = {
     "user_statement",
 }
 EVENT_KINDS = {
+    "background_completed",
     "background_started",
     "capture_started",
     "capture_stopped",
@@ -96,9 +98,11 @@ EVENT_KINDS = {
     "foreground_completed",
     "foreground_started",
     "meeting_finalized",
+    "meeting_artifact_observed",
     "posture_changed",
     "processing_started",
     "provider_capability_changed",
+    "repository_result_observed",
     "role_changed",
     "screen_disclosed",
     "screen_inspected",
@@ -113,13 +117,17 @@ EVENT_KINDS = {
 EXECUTION_STATUSES = {"executable", "executable_projection", "contract_only"}
 EXECUTION_TARGETS = {"core_reducer", "skill_routing", "future_orchestration"}
 CORE_REDUCER_EVENT_KINDS = {
+    "background_completed",
     "background_started",
     "capture_started",
     "capture_stopped",
     "coach_nudge",
+    "foreground_completed",
+    "meeting_artifact_observed",
     "meeting_finalized",
     "posture_changed",
     "processing_started",
+    "repository_result_observed",
     "role_changed",
     "screen_disclosed",
     "source_policy_invalidated",
@@ -131,14 +139,16 @@ CORE_REDUCER_EVENT_KINDS = {
 # Exact payload shape is part of schema v1. Optional fields are allowed only
 # where the product contract explicitly models their absence.
 EVENT_PAYLOAD_KEYS: dict[str, tuple[set[str], set[str]]] = {
+    "background_completed": ({"invocation_from_event_index", "run_id"}, set()),
     "background_started": ({"run_id"}, {"source_policy_generation"}),
     "capture_started": ({"capture_mode", "capture_session_id"}, set()),
     "capture_stopped": ({"capture_session_id"}, {"final_live_event_id"}),
     "coach_nudge": ({"capture_session_id", "event_id", "text"}, set()),
     "focus_changed": ({"focus_generation"}, set()),
-    "foreground_completed": ({"turn_id"}, set()),
+    "foreground_completed": ({"invocation_from_event_index", "turn_id"}, set()),
     "foreground_started": ({"inference_call", "turn_id"}, set()),
     "meeting_finalized": ({"capture_session_id", "meeting_ref"}, set()),
+    "meeting_artifact_observed": ({"event_id", "finalized_meeting_ref"}, set()),
     "posture_changed": ({"posture", "source"}, set()),
     "processing_started": ({"capture_session_id", "stage"}, set()),
     "provider_capability_changed": (
@@ -151,6 +161,7 @@ EVENT_PAYLOAD_KEYS: dict[str, tuple[set[str], set[str]]] = {
         },
         set(),
     ),
+    "repository_result_observed": ({"event_id", "finalized_meeting_ref"}, set()),
     "role_changed": ({"role", "source", "source_event_id"}, set()),
     "screen_disclosed": ({"capture_session_id", "event_id", "opaque_ref"}, set()),
     "screen_inspected": ({"event_id", "turn_id"}, set()),
@@ -175,6 +186,7 @@ PAYLOAD_STRING_FIELDS = {
     "capture_session_id",
     "corrected_speaker",
     "event_id",
+    "finalized_meeting_ref",
     "final_live_event_id",
     "from_speaker",
     "meeting_ref",
@@ -189,7 +201,11 @@ PAYLOAD_STRING_FIELDS = {
     "to_speaker",
     "turn_id",
 }
-PAYLOAD_INTEGER_FIELDS = {"focus_generation", "source_policy_generation"}
+PAYLOAD_INTEGER_FIELDS = {
+    "focus_generation",
+    "invocation_from_event_index",
+    "source_policy_generation",
+}
 PAYLOAD_BOOLEAN_FIELDS = {
     "ambient_filesystem_denied",
     "arbitrary_writes_denied",
@@ -344,6 +360,12 @@ def _validate_execution(
                 findings.append(
                     Finding(fixture, f"{path}.session_id", "nonempty_string_required")
                 )
+            surface = replay.get("surface")
+            declared_surfaces = data.get("matrix", {}).get("surfaces", [])
+            if surface not in SURFACES or surface not in declared_surfaces:
+                findings.append(
+                    Finding(fixture, f"{path}.surface", "replay_surface_not_declared")
+                )
             indexes = replay.get("event_indexes")
             if (
                 not isinstance(indexes, list)
@@ -377,6 +399,58 @@ def _validate_execution(
                                     "event_not_supported_by_core_reducer_runner",
                                 )
                             )
+                        if event_kind in {"foreground_completed", "background_completed"}:
+                            payload = data["events"][event_index].get("payload", {})
+                            source_index = payload.get("invocation_from_event_index")
+                            if (
+                                not isinstance(source_index, int)
+                                or isinstance(source_index, bool)
+                                or source_index < 0
+                                or source_index >= event_index
+                            ):
+                                findings.append(
+                                    Finding(
+                                        fixture,
+                                        f"$.events[{event_index}].payload.invocation_from_event_index",
+                                        "invocation_reference_must_point_backward",
+                                    )
+                                )
+                            elif source_index not in indexes:
+                                findings.append(
+                                    Finding(
+                                        fixture,
+                                        f"$.events[{event_index}].payload.invocation_from_event_index",
+                                        "invocation_reference_must_be_in_replay",
+                                    )
+                                )
+                            elif 0 <= source_index < event_count:
+                                source_event = data["events"][source_index]
+                                expected_source_kind = (
+                                    "user_message"
+                                    if event_kind == "foreground_completed"
+                                    else "background_started"
+                                )
+                                id_field = (
+                                    "turn_id"
+                                    if event_kind == "foreground_completed"
+                                    else "run_id"
+                                )
+                                if source_event.get("kind") != expected_source_kind:
+                                    findings.append(
+                                        Finding(
+                                            fixture,
+                                            f"$.events[{event_index}].payload.invocation_from_event_index",
+                                            "invocation_reference_wrong_event_kind",
+                                        )
+                                    )
+                                elif source_event.get("payload", {}).get(id_field) != payload.get(id_field):
+                                    findings.append(
+                                        Finding(
+                                            fixture,
+                                            f"$.events[{event_index}].payload.{id_field}",
+                                            "invocation_reference_id_mismatch",
+                                        )
+                                    )
             reductions = replay.get("expected_reductions")
             if not isinstance(reductions, list):
                 findings.append(
@@ -386,6 +460,44 @@ def _validate_execution(
                 findings.append(
                     Finding(fixture, f"{path}.expected_reductions", "one_per_event_required")
                 )
+            elif isinstance(reductions, list):
+                for reduction_index, reduction in enumerate(reductions):
+                    reduction_path = f"{path}.expected_reductions[{reduction_index}]"
+                    _expect_keys(
+                        findings,
+                        fixture,
+                        reduction_path,
+                        reduction,
+                        {"accepted", "actions", "rejection"},
+                    )
+                    if not isinstance(reduction, dict):
+                        continue
+                    if not isinstance(reduction.get("accepted"), bool):
+                        findings.append(
+                            Finding(fixture, f"{reduction_path}.accepted", "boolean_required")
+                        )
+                    if not isinstance(reduction.get("actions"), list) or not all(
+                        isinstance(action, dict) for action in reduction.get("actions", [])
+                    ):
+                        findings.append(
+                            Finding(fixture, f"{reduction_path}.actions", "action_array_required")
+                        )
+                    if reduction.get("accepted") is False and reduction.get("actions") != []:
+                        findings.append(
+                            Finding(
+                                fixture,
+                                f"{reduction_path}.actions",
+                                "rejected_reduction_actions_must_be_empty",
+                            )
+                        )
+                    if reduction.get("accepted") is True and reduction.get("rejection") is not None:
+                        findings.append(
+                            Finding(
+                                fixture,
+                                f"{reduction_path}.rejection",
+                                "accepted_reduction_rejection_must_be_null",
+                            )
+                        )
             if not isinstance(replay.get("expected_state"), dict):
                 findings.append(Finding(fixture, f"{path}.expected_state", "object_required"))
     elif target == "skill_routing":

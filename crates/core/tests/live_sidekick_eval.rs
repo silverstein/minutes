@@ -1,12 +1,25 @@
 use minutes_core::live_sidekick::{
-    AssistanceEvent, AssistancePosture, AssistanceSurface, BackgroundRunId, CaptureMode,
-    CaptureSessionId, EvidenceId, EvidenceSourceKind, ForegroundTurnId, LiveAssistanceSession,
-    LiveAssistanceSessionId, MeetingRef, Reduction, UntrustedEvidence, UserRole,
+    AssistanceAction, AssistanceEvent, AssistancePosture, AssistanceSurface, BackgroundRunId,
+    CaptureMode, CaptureSessionId, EvidenceId, EvidenceSourceKind, ForegroundTurnId,
+    InvocationIdentity, LiveAssistanceSession, LiveAssistanceSessionId, MeetingRef, Reduction,
+    UntrustedEvidence, UserRole,
 };
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+
+#[derive(Debug, Clone)]
+enum IssuedInvocation {
+    Foreground {
+        turn_id: ForegroundTurnId,
+        invocation: InvocationIdentity,
+    },
+    Background {
+        run_id: BackgroundRunId,
+        invocation: InvocationIdentity,
+    },
+}
 
 fn fixtures_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/live_sidekick_eval/v1")
@@ -65,7 +78,22 @@ fn parse_capture_mode(value: &str) -> Result<CaptureMode, String> {
     }
 }
 
-fn translate_event(event: &Value) -> Result<AssistanceEvent, String> {
+fn invocation_source_index(event: &Value) -> Result<usize, String> {
+    event
+        .get("payload")
+        .and_then(|payload| payload.get("invocation_from_event_index"))
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "missing invocation_from_event_index".to_string())
+        .and_then(|value| {
+            usize::try_from(value)
+                .map_err(|_| "invocation_from_event_index exceeds platform usize".to_string())
+        })
+}
+
+fn translate_event(
+    event: &Value,
+    issued: &BTreeMap<usize, IssuedInvocation>,
+) -> Result<AssistanceEvent, String> {
     let kind = required_str(event, "kind")?;
     let session_id = LiveAssistanceSessionId::new(required_str(event, "session_id")?);
     let payload = event
@@ -140,6 +168,59 @@ fn translate_event(event: &Value) -> Result<AssistanceEvent, String> {
             session_id,
             run_id: BackgroundRunId::new(payload_str(event, "run_id")?),
         }),
+        "foreground_completed" => {
+            let turn_id = ForegroundTurnId::new(payload_str(event, "turn_id")?);
+            let source_index = invocation_source_index(event)?;
+            let invocation = match issued.get(&source_index) {
+                Some(IssuedInvocation::Foreground {
+                    turn_id: issued_turn,
+                    invocation,
+                }) if issued_turn == &turn_id => *invocation,
+                Some(_) => return Err("foreground invocation reference did not match turn".into()),
+                None => return Err("foreground invocation reference was not issued".into()),
+            };
+            Ok(AssistanceEvent::ForegroundCompleted {
+                session_id,
+                turn_id,
+                invocation,
+            })
+        }
+        "background_completed" => {
+            let run_id = BackgroundRunId::new(payload_str(event, "run_id")?);
+            let source_index = invocation_source_index(event)?;
+            let invocation = match issued.get(&source_index) {
+                Some(IssuedInvocation::Background {
+                    run_id: issued_run,
+                    invocation,
+                }) if issued_run == &run_id => *invocation,
+                Some(_) => return Err("background invocation reference did not match run".into()),
+                None => return Err("background invocation reference was not issued".into()),
+            };
+            Ok(AssistanceEvent::BackgroundCompleted {
+                session_id,
+                run_id,
+                invocation,
+            })
+        }
+        "meeting_artifact_observed" | "repository_result_observed" => {
+            let source_kind = if kind == "meeting_artifact_observed" {
+                EvidenceSourceKind::MeetingArtifact
+            } else {
+                EvidenceSourceKind::RepositoryResult
+            };
+            Ok(AssistanceEvent::EvidenceObserved {
+                session_id,
+                evidence: UntrustedEvidence {
+                    id: EvidenceId::new(payload_str(event, "event_id")?),
+                    source_kind,
+                    capture_session_id: None,
+                    finalized_meeting_ref: Some(MeetingRef::new(payload_str(
+                        event,
+                        "finalized_meeting_ref",
+                    )?)),
+                },
+            })
+        }
         "source_policy_invalidated" => Ok(AssistanceEvent::SourcePolicyInvalidated {
             session_id,
             new_generation: payload
@@ -165,46 +246,41 @@ fn translate_event(event: &Value) -> Result<AssistanceEvent, String> {
 }
 
 fn reduction_summary(reduction: Reduction) -> Value {
-    let action_invocations = reduction
-        .actions
-        .iter()
-        .filter_map(|action| {
-            let serialized = serde_json::to_value(action).expect("action serialization");
-            serialized.get("invocation").map(|invocation| {
-                json!({
-                    "type": serialized.get("type").expect("tagged action type"),
-                    "invocation": invocation,
-                })
-            })
-        })
-        .collect::<Vec<_>>();
-    let action_types = reduction
-        .actions
-        .iter()
-        .map(|action| {
-            serde_json::to_value(action)
-                .expect("action serialization")
-                .get("type")
-                .and_then(Value::as_str)
-                .expect("tagged action type")
-                .to_string()
-        })
-        .collect::<Vec<_>>();
-    let mut summary = json!({
-        "accepted": reduction.accepted,
-        "action_types": action_types,
-        "rejection": reduction.rejection,
-    });
-    if !action_invocations.is_empty() {
-        summary
-            .as_object_mut()
-            .expect("reduction summary object")
-            .insert(
-                "action_invocations".to_string(),
-                Value::Array(action_invocations),
-            );
+    serde_json::to_value(reduction).expect("reduction serialization")
+}
+
+fn remember_invocation(
+    event_index: usize,
+    reduction: &Reduction,
+    issued: &mut BTreeMap<usize, IssuedInvocation>,
+) {
+    for action in &reduction.actions {
+        match action {
+            AssistanceAction::RequestReadOnlyForegroundInference {
+                turn_id,
+                invocation,
+                ..
+            } => {
+                issued.insert(
+                    event_index,
+                    IssuedInvocation::Foreground {
+                        turn_id: turn_id.clone(),
+                        invocation: *invocation,
+                    },
+                );
+            }
+            AssistanceAction::BackgroundInvocationRegistered { run_id, invocation } => {
+                issued.insert(
+                    event_index,
+                    IssuedInvocation::Background {
+                        run_id: run_id.clone(),
+                        invocation: *invocation,
+                    },
+                );
+            }
+            _ => {}
+        }
     }
-    summary
 }
 
 fn session_summary(session: &LiveAssistanceSession) -> Value {
@@ -214,7 +290,7 @@ fn session_summary(session: &LiveAssistanceSession) -> Value {
         .map(|(id, evidence)| {
             (
                 id.as_str(),
-                serde_json::to_value(evidence.source_kind).expect("evidence kind serialization"),
+                serde_json::to_value(evidence).expect("evidence serialization"),
             )
         })
         .collect();
@@ -244,8 +320,8 @@ fn session_summary(session: &LiveAssistanceSession) -> Value {
         "finalized_meeting_ref": session.finalized_meeting_ref.as_ref().map(MeetingRef::as_str),
         "source_policy_generation": session.source_policy_generation,
         "user_generation": session.user_generation,
-        "foreground_turn_id": session.foreground_turn.as_ref().map(|turn| turn.id.as_str()),
-        "background_run_id": session.background_run.as_ref().map(|run| run.id.as_str()),
+        "foreground_turn": session.foreground_turn,
+        "background_run": session.background_run,
         "evidence": evidence,
         "speaker_corrections": corrections,
     })
@@ -254,13 +330,7 @@ fn session_summary(session: &LiveAssistanceSession) -> Value {
 fn run_replay(fixture: &Value, replay: &Value) -> Result<Value, String> {
     let replay_name = required_str(replay, "name")?;
     let reducer_session_id = required_str(replay, "session_id")?;
-    let surface = fixture
-        .get("matrix")
-        .and_then(|matrix| matrix.get("surfaces"))
-        .and_then(Value::as_array)
-        .and_then(|items| items.first())
-        .and_then(Value::as_str)
-        .ok_or_else(|| "fixture has no surface".to_string())?;
+    let surface = required_str(replay, "surface")?;
     let initial = fixture
         .get("initial_state")
         .ok_or_else(|| "fixture has no initial_state".to_string())?;
@@ -279,6 +349,7 @@ fn run_replay(fixture: &Value, replay: &Value) -> Result<Value, String> {
         .and_then(Value::as_array)
         .ok_or_else(|| format!("replay {replay_name} has no event indexes"))?;
     let mut reductions = Vec::with_capacity(indexes.len());
+    let mut issued = BTreeMap::new();
     for raw_index in indexes {
         let index = raw_index
             .as_u64()
@@ -287,9 +358,11 @@ fn run_replay(fixture: &Value, replay: &Value) -> Result<Value, String> {
         let event = events
             .get(index)
             .ok_or_else(|| format!("replay {replay_name} event index {index} is out of range"))?;
-        let translated = translate_event(event)
+        let translated = translate_event(event, &issued)
             .map_err(|error| format!("replay {replay_name} event {index}: {error}"))?;
-        reductions.push(reduction_summary(session.reduce(translated)));
+        let reduction = session.reduce(translated);
+        remember_invocation(index, &reduction, &mut issued);
+        reductions.push(reduction_summary(reduction));
     }
     Ok(json!({"reductions": reductions, "state": session_summary(&session)}))
 }
@@ -341,13 +414,75 @@ fn executable_core_reducer_fixtures_are_expected_and_deterministic() {
         executed.insert(fixture_id.to_string(), Value::Object(fixture_results));
     }
 
-    assert_eq!(executed.len(), 8, "executable reducer fixture count changed; update the schema contract and CI documentation intentionally");
+    assert_eq!(executed.len(), 12, "executable reducer fixture count changed; update the schema contract and CI documentation intentionally");
     let replay_count: usize = executed
         .values()
         .map(|value| value.as_object().map_or(0, Map::len))
         .sum();
     assert_eq!(
-        replay_count, 9,
+        replay_count, 15,
         "deterministic reducer replay count changed unexpectedly"
+    );
+}
+
+#[test]
+fn completion_adapters_require_prior_matching_reducer_identity() {
+    let foreground = json!({
+        "kind": "foreground_completed",
+        "session_id": "SESSION_A",
+        "payload": {
+            "turn_id": "FOREGROUND_A",
+            "invocation_from_event_index": 1
+        }
+    });
+    assert_eq!(
+        translate_event(&foreground, &BTreeMap::new()).unwrap_err(),
+        "foreground invocation reference was not issued"
+    );
+
+    let invocation = InvocationIdentity {
+        sequence: 7,
+        source_policy_generation: 2,
+        user_generation: 3,
+    };
+    let mut issued = BTreeMap::new();
+    issued.insert(
+        1,
+        IssuedInvocation::Background {
+            run_id: BackgroundRunId::new("BACKGROUND_A"),
+            invocation,
+        },
+    );
+    assert_eq!(
+        translate_event(&foreground, &issued).unwrap_err(),
+        "foreground invocation reference did not match turn"
+    );
+
+    issued.insert(
+        1,
+        IssuedInvocation::Foreground {
+            turn_id: ForegroundTurnId::new("FOREGROUND_A"),
+            invocation,
+        },
+    );
+    assert!(matches!(
+        translate_event(&foreground, &issued),
+        Ok(AssistanceEvent::ForegroundCompleted {
+            invocation: actual,
+            ..
+        }) if actual == invocation
+    ));
+
+    let background = json!({
+        "kind": "background_completed",
+        "session_id": "SESSION_A",
+        "payload": {
+            "run_id": "BACKGROUND_A",
+            "invocation_from_event_index": 1
+        }
+    });
+    assert_eq!(
+        translate_event(&background, &issued).unwrap_err(),
+        "background invocation reference did not match run"
     );
 }

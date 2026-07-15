@@ -1,0 +1,127 @@
+{
+  "schema_version": 1,
+  "id": "finalized-evidence-provenance",
+  "description": "Evidence provenance rejects duplicate identifiers, mismatched meeting references, and late capture-bound input.",
+  "content_origin": "synthetic",
+  "privacy": {
+    "generation_method": "behavior_first_from_scratch",
+    "source_material": "none",
+    "approved_role_tokens": ["USER", "FACILITATOR"]
+  },
+  "matrix": {
+    "surfaces": ["terminal", "gui"],
+    "capture_modes": ["live", "recording"]
+  },
+  "initial_state": {
+    "user_role": "observer",
+    "posture": "on_demand"
+  },
+  "events": [
+    {
+      "at_ms": 0,
+      "kind": "capture_started",
+      "session_id": "SESSION_A",
+      "payload": {"capture_mode": "live", "capture_session_id": "CAPTURE_A"}
+    },
+    {
+      "at_ms": 10,
+      "kind": "transcript_final",
+      "session_id": "SESSION_A",
+      "payload": {"capture_session_id": "CAPTURE_A", "event_id": "EVENT_SHARED", "speaker": "FACILITATOR", "text": "the synthetic section is complete"}
+    },
+    {
+      "at_ms": 20,
+      "kind": "screen_disclosed",
+      "session_id": "SESSION_A",
+      "payload": {"capture_session_id": "CAPTURE_A", "event_id": "EVENT_SHARED", "opaque_ref": "SCREEN_REF_A"}
+    },
+    {
+      "at_ms": 30,
+      "kind": "capture_stopped",
+      "session_id": "SESSION_A",
+      "payload": {"capture_session_id": "CAPTURE_A"}
+    },
+    {
+      "at_ms": 40,
+      "kind": "processing_started",
+      "session_id": "SESSION_A",
+      "payload": {"capture_session_id": "CAPTURE_A", "stage": "transcribing"}
+    },
+    {
+      "at_ms": 50,
+      "kind": "meeting_finalized",
+      "session_id": "SESSION_A",
+      "payload": {"capture_session_id": "CAPTURE_A", "meeting_ref": "MEETING_A"}
+    },
+    {
+      "at_ms": 60,
+      "kind": "meeting_artifact_observed",
+      "session_id": "SESSION_A",
+      "payload": {"event_id": "ARTIFACT_A", "finalized_meeting_ref": "MEETING_A"}
+    },
+    {
+      "at_ms": 70,
+      "kind": "repository_result_observed",
+      "session_id": "SESSION_A",
+      "payload": {"event_id": "REPOSITORY_WRONG", "finalized_meeting_ref": "MEETING_B"}
+    },
+    {
+      "at_ms": 80,
+      "kind": "screen_disclosed",
+      "session_id": "SESSION_A",
+      "payload": {"capture_session_id": "CAPTURE_A", "event_id": "LATE_SCREEN", "opaque_ref": "SCREEN_REF_B"}
+    },
+    {
+      "at_ms": 90,
+      "kind": "meeting_artifact_observed",
+      "session_id": "SESSION_A",
+      "payload": {"event_id": "ARTIFACT_A", "finalized_meeting_ref": "MEETING_A"}
+    }
+  ],
+  "expectations": {
+    "ordered_actions": ["accept_live_transcript", "reject_duplicate_identifier", "attach_finalized_meeting", "accept_bound_artifact"],
+    "forbidden_actions": ["accept_wrong_meeting_reference", "accept_late_screen", "accept_duplicate_artifact"],
+    "state_equals": {"phase": "finalized", "evidence_count": 2},
+    "required_source_kinds": ["transcript_final", "meeting_artifact"],
+    "required_source_event_ids": ["EVENT_SHARED", "ARTIFACT_A"],
+    "provenance_required": true,
+    "max_unsolicited_messages": 0,
+    "parity_group": "evidence-provenance"
+  },
+  "execution": {
+    "status": "executable",
+    "target": "core_reducer",
+    "replays": [
+      {
+        "name": "finalized-evidence-boundaries",
+        "session_id": "SESSION_A",
+        "surface": "terminal",
+        "event_indexes": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
+        "expected_reductions": [
+          {"accepted": true, "actions": [{"type": "live_transcript_attached", "capture_session_id": "CAPTURE_A"}], "rejection": null},
+          {"accepted": true, "actions": [{"type": "evidence_accepted", "evidence_id": "EVENT_SHARED", "source_kind": "transcript_final"}], "rejection": null},
+          {"accepted": false, "actions": [], "rejection": "duplicate_evidence"},
+          {"accepted": true, "actions": [{"type": "meeting_ended"}], "rejection": null},
+          {"accepted": true, "actions": [{"type": "final_transcript_processing"}], "rejection": null},
+          {"accepted": true, "actions": [{"type": "finalized_meeting_attached", "meeting_ref": "MEETING_A"}], "rejection": null},
+          {"accepted": true, "actions": [{"type": "evidence_accepted", "evidence_id": "ARTIFACT_A", "source_kind": "meeting_artifact"}], "rejection": null},
+          {"accepted": false, "actions": [], "rejection": "wrong_finalized_meeting"},
+          {"accepted": false, "actions": [], "rejection": "invalid_transition"},
+          {"accepted": false, "actions": [], "rejection": "duplicate_evidence"}
+        ],
+        "expected_state": {
+          "scope": "finalized_meeting", "surface": "terminal_sidekick", "phase": "finalized",
+          "user_role": {"value": "observer", "revision": 0, "supersedes_revision": null, "source_event_id": null},
+          "posture": "on_demand", "capture_mode": "live", "capture_session_id": "CAPTURE_A",
+          "finalized_meeting_ref": "MEETING_A", "source_policy_generation": 0, "user_generation": 0,
+          "foreground_turn": null, "background_run": null,
+          "evidence": {
+            "ARTIFACT_A": {"id": "ARTIFACT_A", "source_kind": "meeting_artifact", "capture_session_id": null, "finalized_meeting_ref": "MEETING_A"},
+            "EVENT_SHARED": {"id": "EVENT_SHARED", "source_kind": "transcript_final", "capture_session_id": "CAPTURE_A", "finalized_meeting_ref": null}
+          },
+          "speaker_corrections": {}
+        }
+      }
+    ]
+  }
+}

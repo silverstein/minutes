@@ -66,15 +66,15 @@
       {
         "name": "policy-bound-state",
         "session_id": "SESSION_A",
+        "surface": "terminal",
         "event_indexes": [0, 1, 2, 3],
         "expected_reductions": [
-          {"accepted": true, "action_types": ["live_transcript_attached"], "rejection": null},
-          {"accepted": true, "action_types": ["background_invocation_registered"], "action_invocations": [
-            {"type": "background_invocation_registered", "invocation": {"sequence": 1, "source_policy_generation": 0, "user_generation": 0}}
-          ], "rejection": null},
-          {"accepted": true, "action_types": ["evidence_accepted"], "rejection": null},
-          {"accepted": true, "action_types": ["cancel_background", "policy_bound_state_cleared"], "action_invocations": [
-            {"type": "cancel_background", "invocation": {"sequence": 1, "source_policy_generation": 0, "user_generation": 0}}
+          {"accepted": true, "actions": [{"type": "live_transcript_attached", "capture_session_id": "CAPTURE_A"}], "rejection": null},
+          {"accepted": true, "actions": [{"type": "background_invocation_registered", "run_id": "BACKGROUND_A", "invocation": {"sequence": 1, "source_policy_generation": 0, "user_generation": 0}}], "rejection": null},
+          {"accepted": true, "actions": [{"type": "evidence_accepted", "evidence_id": "EVENT_A", "source_kind": "transcript_final"}], "rejection": null},
+          {"accepted": true, "actions": [
+            {"type": "cancel_background", "run_id": "BACKGROUND_A", "invocation": {"sequence": 1, "source_policy_generation": 0, "user_generation": 0}, "reason": "source_policy_changed"},
+            {"type": "policy_bound_state_cleared", "new_generation": 2}
           ], "rejection": null}
         ],
         "expected_state": {
@@ -82,7 +82,7 @@
           "user_role": {"value": "observer", "revision": 0, "supersedes_revision": null, "source_event_id": null},
           "posture": "strategist", "capture_mode": "live", "capture_session_id": "CAPTURE_A",
           "finalized_meeting_ref": null, "source_policy_generation": 2, "user_generation": 0,
-          "foreground_turn_id": null, "background_run_id": null,
+          "foreground_turn": null, "background_run": null,
           "evidence": {}, "speaker_corrections": {}
         }
       }

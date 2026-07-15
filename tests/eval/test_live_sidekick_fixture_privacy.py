@@ -11,10 +11,12 @@ import contextlib
 import importlib.util
 import io
 import json
+import os
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -79,7 +81,7 @@ class LiveSidekickFixturePrivacyTests(unittest.TestCase):
 
     def test_repository_fixtures_are_synthetic_and_clean(self) -> None:
         documents, findings = CHECKER.check_fixture_dir(FIXTURE_DIR)
-        self.assertEqual(len(documents), 14)
+        self.assertEqual(len(documents), 18)
         self.assertEqual(findings, [])
 
     def test_required_scenarios_are_present(self) -> None:
@@ -98,6 +100,10 @@ class LiveSidekickFixturePrivacyTests(unittest.TestCase):
             "wrong_session_evidence.json",
             "provider_capability_denied.json",
             "policy_invalidation.json",
+            "foreground_invocation_aba.json",
+            "background_invocation_aba.json",
+            "lifecycle_completion_invalidation.json",
+            "finalized_evidence_provenance.json",
         }
         self.assertEqual({path.name for path in FIXTURE_DIR.glob("*.json")}, expected)
 
@@ -165,8 +171,47 @@ class LiveSidekickFixturePrivacyTests(unittest.TestCase):
             with contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(CHECKER.main([str(path)]), 1)
 
-    def test_private_overlap_output_never_echoes_text_paths_or_hashes(self) -> None:
-        shared_text = "alpha beta gamma delta epsilon zeta"
+    def test_private_digest_path_does_not_materialize_raw_ngram_set(self) -> None:
+        with mock.patch.object(
+            CHECKER,
+            "_normalized_ngrams",
+            side_effect=AssertionError("raw n-gram set must not be used"),
+        ):
+            digests = CHECKER._digest_ngrams(
+                "one two three four five six seven eight", 7, b"k" * 32
+            )
+        self.assertEqual(len(digests), 2)
+
+    def test_private_reader_uses_no_follow_descriptor_when_available(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "control.md"
+            path.write_text("one two three four five six seven", encoding="utf-8")
+            real_open = os.open
+            with mock.patch.object(CHECKER.os, "open", wraps=real_open) as opened:
+                text, failure = CHECKER._read_private_text(path, 1024)
+            self.assertIsNone(failure)
+            self.assertEqual(text, "one two three four five six seven")
+            flags = opened.call_args.args[1]
+            if hasattr(os, "O_NOFOLLOW"):
+                self.assertNotEqual(flags & os.O_NOFOLLOW, 0)
+
+    def private_args(self, fixture_dir: Path, *corpus_dirs: Path) -> list[str]:
+        args = [
+            str(fixture_dir),
+            "--private-overlap-only",
+            "--aggregate-only",
+            "--acknowledge-private-corpus-authorization",
+            "--ngram-size",
+            "7",
+            "--overlap-threshold",
+            "0",
+        ]
+        for corpus_dir in corpus_dirs:
+            args.extend(["--private-corpus-dir", str(corpus_dir)])
+        return args
+
+    def test_private_overlap_output_is_aggregate_only(self) -> None:
+        shared_text = "alpha beta gamma delta epsilon zeta eta theta"
         with tempfile.TemporaryDirectory() as fixture_temp, tempfile.TemporaryDirectory() as corpus_temp:
             fixture_dir = Path(fixture_temp)
             corpus_dir = Path(corpus_temp)
@@ -177,26 +222,102 @@ class LiveSidekickFixturePrivacyTests(unittest.TestCase):
 
             output = io.StringIO()
             with contextlib.redirect_stdout(output):
-                result = CHECKER.main(
-                    [
-                        str(fixture_dir),
-                        "--private-corpus-dir",
-                        str(corpus_dir),
-                        "--ngram-size",
-                        "5",
-                        "--overlap-threshold",
-                        "0",
-                    ]
-                )
+                result = CHECKER.main(self.private_args(fixture_dir, corpus_dir))
 
             rendered = output.getvalue()
             self.assertEqual(result, 1)
-            self.assertIn("overlap=fail", rendered)
-            self.assertIn("temporary-synthetic-control", rendered)
+            self.assertEqual(len(rendered.strip().splitlines()), 1)
+            self.assertIn("private_overlap=fail", rendered)
+            self.assertIn("fixtures_with_overlap=1", rendered)
+            self.assertNotIn("temporary-synthetic-control", rendered)
             self.assertNotIn(shared_text, rendered)
             self.assertNotIn(str(corpus_dir), rendered)
             self.assertNotIn("private.txt", rendered)
             self.assertNotRegex(rendered, r"\b[a-f0-9]{32,}\b")
+
+    def test_private_overlap_supports_multiple_roots_and_text_allowlist(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as fixture_temp,
+            tempfile.TemporaryDirectory() as first_temp,
+            tempfile.TemporaryDirectory() as second_temp,
+        ):
+            fixture_dir = Path(fixture_temp)
+            first = Path(first_temp)
+            second = Path(second_temp)
+            (fixture_dir / "control.json").write_text(
+                json.dumps(synthetic_fixture("synthetic words remain distinct here")),
+                encoding="utf-8",
+            )
+            (first / "one.md").write_text("private corpus one stays separate", encoding="utf-8")
+            (second / "two.txt").write_text("private corpus two stays separate", encoding="utf-8")
+            (second / "ignored.wav").write_bytes(b"synthetic words remain distinct here")
+
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                result = CHECKER.main(self.private_args(fixture_dir, first, second))
+
+            self.assertEqual(result, 0)
+            self.assertEqual(len(output.getvalue().strip().splitlines()), 1)
+            self.assertIn("private_overlap=pass", output.getvalue())
+            self.assertIn("roots=2", output.getvalue())
+            self.assertIn("files_scanned=2", output.getvalue())
+
+    def test_private_overlap_rejects_symlinks_invalid_utf8_and_oversize_files(self) -> None:
+        with tempfile.TemporaryDirectory() as fixture_temp, tempfile.TemporaryDirectory() as corpus_temp:
+            fixture_dir = Path(fixture_temp)
+            corpus_dir = Path(corpus_temp)
+            (fixture_dir / "control.json").write_text(
+                json.dumps(synthetic_fixture()), encoding="utf-8"
+            )
+            (corpus_dir / "invalid.md").write_bytes(b"\xff\xfe")
+            (corpus_dir / "large.txt").write_text("0123456789", encoding="utf-8")
+            (corpus_dir / "link.md").symlink_to(corpus_dir / "invalid.md")
+
+            output = io.StringIO()
+            args = self.private_args(fixture_dir, corpus_dir) + [
+                "--private-max-file-bytes",
+                "4",
+            ]
+            with contextlib.redirect_stdout(output):
+                result = CHECKER.main(args)
+
+            self.assertEqual(result, 1)
+            self.assertEqual(len(output.getvalue().strip().splitlines()), 1)
+            self.assertIn("private_overlap=fail", output.getvalue())
+            self.assertIn("files_rejected=2", output.getvalue())
+            self.assertIn("unreadable=1", output.getvalue())
+            self.assertNotIn(str(corpus_dir), output.getvalue())
+
+    def test_private_overlap_requires_authorization_and_refuses_ci(self) -> None:
+        with tempfile.TemporaryDirectory() as fixture_temp, tempfile.TemporaryDirectory() as corpus_temp:
+            fixture_dir = Path(fixture_temp)
+            corpus_dir = Path(corpus_temp)
+            (fixture_dir / "control.json").write_text(
+                json.dumps(synthetic_fixture()), encoding="utf-8"
+            )
+
+            missing_authorization = self.private_args(fixture_dir, corpus_dir)
+            missing_authorization.remove("--acknowledge-private-corpus-authorization")
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(CHECKER.main(missing_authorization), 2)
+            self.assertEqual(output.getvalue().strip(), "private_overlap=fail configuration_failures=1")
+
+            output = io.StringIO()
+            with mock.patch.dict(os.environ, {"CI": "true"}):
+                with contextlib.redirect_stdout(output):
+                    self.assertEqual(CHECKER.main(self.private_args(fixture_dir, corpus_dir)), 2)
+            self.assertEqual(output.getvalue().strip(), "private_overlap=fail configuration_failures=1")
+
+            weak_ngram = self.private_args(fixture_dir, corpus_dir)
+            weak_ngram[weak_ngram.index("7")] = "6"
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(CHECKER.main(weak_ngram), 2)
+            self.assertEqual(
+                output.getvalue().strip(),
+                "private_overlap=fail configuration_failures=1",
+            )
 
 
 if __name__ == "__main__":

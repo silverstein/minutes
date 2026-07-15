@@ -27,6 +27,10 @@ def load_control() -> dict[str, object]:
     return json.loads((FIXTURE_DIR / "typed_user_preempts_background.json").read_text())
 
 
+def load_completion_control() -> dict[str, object]:
+    return json.loads((FIXTURE_DIR / "foreground_invocation_aba.json").read_text())
+
+
 class LiveSidekickFixtureSchemaTests(unittest.TestCase):
     def findings_for(self, data: dict[str, object]) -> set[str]:
         with tempfile.TemporaryDirectory() as temporary:
@@ -37,7 +41,7 @@ class LiveSidekickFixtureSchemaTests(unittest.TestCase):
 
     def test_repository_corpus_is_schema_valid(self) -> None:
         documents, findings = SCHEMA.validate_fixture_dir(FIXTURE_DIR)
-        self.assertEqual(len(documents), 14)
+        self.assertEqual(len(documents), 18)
         self.assertEqual(findings, [])
 
     def test_unknown_schema_version_fails_closed(self) -> None:
@@ -101,6 +105,81 @@ class LiveSidekickFixtureSchemaTests(unittest.TestCase):
         wrong_type = load_control()
         wrong_type["events"][0]["payload"]["capture_session_id"] = 7
         self.assertIn("nonempty_string_required", self.findings_for(wrong_type))
+
+    def test_replay_surface_is_explicit_and_declared(self) -> None:
+        missing = load_control()
+        del missing["execution"]["replays"][0]["surface"]
+        rules = self.findings_for(missing)
+        self.assertIn("required_key_missing", rules)
+        self.assertIn("replay_surface_not_declared", rules)
+
+        undeclared = load_control()
+        undeclared["execution"]["replays"][0]["surface"] = "coach"
+        self.assertIn("replay_surface_not_declared", self.findings_for(undeclared))
+
+    def test_reduction_contract_requires_full_actions(self) -> None:
+        summarized = load_control()
+        summarized["execution"]["replays"][0]["expected_reductions"][0] = {
+            "accepted": True,
+            "action_types": ["live_transcript_attached"],
+            "rejection": None,
+        }
+        rules = self.findings_for(summarized)
+        self.assertIn("required_key_missing", rules)
+        self.assertIn("unknown_key", rules)
+
+        rejected_with_action = load_control()
+        rejected_with_action["execution"]["replays"][0]["expected_reductions"][0] = {
+            "accepted": False,
+            "actions": [{"type": "meeting_ended"}],
+            "rejection": "invalid_transition",
+        }
+        self.assertIn(
+            "rejected_reduction_actions_must_be_empty",
+            self.findings_for(rejected_with_action),
+        )
+
+    def test_completion_invocation_reference_must_point_backward(self) -> None:
+        data = load_completion_control()
+        data["events"][4]["payload"]["invocation_from_event_index"] = 5
+        self.assertIn(
+            "invocation_reference_must_point_backward", self.findings_for(data)
+        )
+
+        negative = load_completion_control()
+        negative["events"][4]["payload"]["invocation_from_event_index"] = -1
+        self.assertIn(
+            "invocation_reference_must_point_backward", self.findings_for(negative)
+        )
+
+    def test_completion_invocation_reference_must_be_replayed(self) -> None:
+        data = load_completion_control()
+        replay = data["execution"]["replays"][0]
+        del replay["event_indexes"][1]
+        del replay["expected_reductions"][1]
+        self.assertIn(
+            "invocation_reference_must_be_in_replay", self.findings_for(data)
+        )
+
+    def test_completion_invocation_reference_kind_and_id_are_exact(self) -> None:
+        wrong_kind = load_completion_control()
+        wrong_kind["events"][4]["payload"]["invocation_from_event_index"] = 2
+        self.assertIn(
+            "invocation_reference_wrong_event_kind", self.findings_for(wrong_kind)
+        )
+
+        wrong_id = load_completion_control()
+        wrong_id["events"][4]["payload"]["turn_id"] = "FOREGROUND_OTHER"
+        self.assertIn("invocation_reference_id_mismatch", self.findings_for(wrong_id))
+
+    def test_completion_cannot_supply_literal_invocation_identity(self) -> None:
+        data = load_completion_control()
+        data["events"][4]["payload"]["invocation"] = {
+            "sequence": 1,
+            "source_policy_generation": 0,
+            "user_generation": 1,
+        }
+        self.assertIn("unknown_key", self.findings_for(data))
 
 
 if __name__ == "__main__":

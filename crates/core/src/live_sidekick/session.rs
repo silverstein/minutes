@@ -92,6 +92,55 @@ impl AssistancePosture {
     }
 }
 
+/// What Minutes has actually proved about one provider invocation profile.
+///
+/// These are capability facts, not provider-brand guesses. Native Recall may
+/// start an inference only when every required isolation and lifecycle fact is
+/// true. Screen input is separate because a safe text-only provider remains a
+/// valid Native Recall route.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ProviderCapabilities {
+    pub cancellation: bool,
+    pub bounded_input: bool,
+    pub bounded_output: bool,
+    pub arbitrary_writes_denied: bool,
+    pub arbitrary_shell_denied: bool,
+    pub ambient_filesystem_reads_denied: bool,
+    pub unapproved_tools_denied: bool,
+    pub routing_disclosure: RoutingDisclosure,
+    pub screen_disclosure: ScreenDisclosureCapability,
+}
+
+impl ProviderCapabilities {
+    pub fn supports_native_recall(self) -> bool {
+        self.cancellation
+            && self.bounded_input
+            && self.bounded_output
+            && self.arbitrary_writes_denied
+            && self.arbitrary_shell_denied
+            && self.ambient_filesystem_reads_denied
+            && self.unapproved_tools_denied
+            && self.routing_disclosure != RoutingDisclosure::Unavailable
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum RoutingDisclosure {
+    VerifiedLoopback,
+    AgentControlled,
+    #[default]
+    Unavailable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ScreenDisclosureCapability {
+    ExactSessionExplicit,
+    #[default]
+    Unavailable,
+}
+
 /// The capture entry point. Both variants have identical normalized live
 /// evidence semantics; `Recording` only promises an additional durable-media
 /// lifecycle outside this reducer.
@@ -217,6 +266,11 @@ pub struct LiveAssistanceSession {
     pub finalized_meeting_ref: Option<MeetingRef>,
     pub source_policy_generation: u64,
     pub user_generation: u64,
+    /// Proven invocation-profile facts for the currently selected provider.
+    /// `None` and the all-false default are both unproven and fail closed for
+    /// Native Recall.
+    #[serde(default)]
+    pub provider_capabilities: Option<ProviderCapabilities>,
     pub foreground_turn: Option<ForegroundTurn>,
     pub background_run: Option<BackgroundRun>,
     /// Immutable evidence provenance keyed by an event ID that is unique
@@ -256,6 +310,7 @@ impl LiveAssistanceSession {
             finalized_meeting_ref: None,
             source_policy_generation: 0,
             user_generation: 0,
+            provider_capabilities: None,
             foreground_turn: None,
             background_run: None,
             evidence: BTreeMap::new(),
@@ -263,6 +318,27 @@ impl LiveAssistanceSession {
             next_invocation_sequence: default_next_invocation_sequence(),
             next_correction_revision: default_next_correction_revision(),
         }
+    }
+
+    /// Construct an on-demand session for an already-finalized meeting.
+    /// Historical Recall has no capture lifecycle to replay, so this explicit
+    /// constructor binds the exact meeting reference without inventing a fake
+    /// capture session.
+    pub fn new_finalized(
+        id: LiveAssistanceSessionId,
+        surface: AssistanceSurface,
+        user_role: UserRole,
+        posture: AssistancePosture,
+        meeting_ref: MeetingRef,
+    ) -> Result<Self, RejectionReason> {
+        if !id.is_valid() || !meeting_ref.is_valid() {
+            return Err(RejectionReason::InvalidValue);
+        }
+        let mut session = Self::new(id, surface, user_role, posture);
+        session.scope = AssistanceScope::FinalizedMeeting;
+        session.phase = AssistancePhase::Finalized;
+        session.finalized_meeting_ref = Some(meeting_ref);
+        Ok(session)
     }
 
     /// Apply one already-ordered event. The returned action order is part of
@@ -326,6 +402,9 @@ impl LiveAssistanceSession {
                 invocation,
                 ..
             } => self.foreground_completed(turn_id, invocation),
+            AssistanceEvent::ProviderCapabilitiesChanged { capabilities, .. } => {
+                self.provider_capabilities_changed(capabilities)
+            }
             AssistanceEvent::SourcePolicyInvalidated { new_generation, .. } => {
                 self.policy_invalidated(new_generation)
             }
@@ -429,6 +508,9 @@ impl LiveAssistanceSession {
     ) -> Reduction {
         if !self.accepts_user_control() {
             return Reduction::rejected(RejectionReason::InvalidTransition);
+        }
+        if self.surface == AssistanceSurface::NativeRecall && !self.native_recall_provider_ready() {
+            return Reduction::rejected(RejectionReason::ProviderCapabilitiesInsufficient);
         }
         if !turn_id.is_valid() || !source_event_id.is_valid() || text.trim().is_empty() {
             return Reduction::rejected(RejectionReason::InvalidValue);
@@ -585,6 +667,9 @@ impl LiveAssistanceSession {
         {
             return Reduction::rejected(RejectionReason::BackgroundNotAllowed);
         }
+        if self.surface == AssistanceSurface::NativeRecall && !self.native_recall_provider_ready() {
+            return Reduction::rejected(RejectionReason::ProviderCapabilitiesInsufficient);
+        }
         if self.background_run.is_some() {
             return Reduction::rejected(RejectionReason::BackgroundAlreadyRunning);
         }
@@ -658,6 +743,37 @@ impl LiveAssistanceSession {
             turn_id,
             invocation,
         }])
+    }
+
+    fn provider_capabilities_changed(&mut self, capabilities: ProviderCapabilities) -> Reduction {
+        if self.provider_capabilities == Some(capabilities) {
+            return Reduction::rejected(RejectionReason::NoStateChange);
+        }
+        let pristine_initial_binding = self.provider_capabilities.is_none()
+            && self.phase == AssistancePhase::Idle
+            && self.evidence.is_empty()
+            && self.foreground_turn.is_none()
+            && self.background_run.is_none();
+        let new_generation = if pristine_initial_binding {
+            self.source_policy_generation
+        } else {
+            let Some(generation) = self.source_policy_generation.checked_add(1) else {
+                return Reduction::rejected(RejectionReason::GenerationExhausted);
+            };
+            generation
+        };
+        let mut actions = self.cancel_in_flight(InvalidationReason::ProviderCapabilitiesChanged);
+        self.source_policy_generation = new_generation;
+        self.provider_capabilities = Some(capabilities);
+        self.evidence.clear();
+        self.speaker_corrections.clear();
+        self.user_role.source_event_id = None;
+        actions.push(AssistanceAction::ProviderCapabilitiesUpdated {
+            capabilities,
+            native_recall_ready: capabilities.supports_native_recall(),
+            new_generation,
+        });
+        Reduction::accepted(actions)
     }
 
     fn policy_invalidated(&mut self, new_generation: u64) -> Reduction {
@@ -795,6 +911,11 @@ impl LiveAssistanceSession {
         self.phase != AssistancePhase::Idle
     }
 
+    pub fn native_recall_provider_ready(&self) -> bool {
+        self.provider_capabilities
+            .is_some_and(ProviderCapabilities::supports_native_recall)
+    }
+
     fn accepts_evidence(&self, source_kind: EvidenceSourceKind) -> bool {
         // Capture-bound visual/utterance evidence is live-lifecycle only.
         // Finalized sessions accept only evidence that can be rebound to the
@@ -881,6 +1002,10 @@ pub enum AssistanceEvent {
         turn_id: ForegroundTurnId,
         invocation: InvocationIdentity,
     },
+    ProviderCapabilitiesChanged {
+        session_id: LiveAssistanceSessionId,
+        capabilities: ProviderCapabilities,
+    },
     SourcePolicyInvalidated {
         session_id: LiveAssistanceSessionId,
         new_generation: u64,
@@ -912,6 +1037,7 @@ impl AssistanceEvent {
             | Self::BackgroundStarted { session_id, .. }
             | Self::BackgroundCompleted { session_id, .. }
             | Self::ForegroundCompleted { session_id, .. }
+            | Self::ProviderCapabilitiesChanged { session_id, .. }
             | Self::SourcePolicyInvalidated { session_id, .. }
             | Self::CaptureStopped { session_id, .. }
             | Self::ProcessingStarted { session_id, .. }
@@ -925,6 +1051,7 @@ impl AssistanceEvent {
 pub enum InvalidationReason {
     TypedUserInput,
     SourcePolicyChanged,
+    ProviderCapabilitiesChanged,
     PostureChanged,
     Correction,
     MeetingEnded,
@@ -976,6 +1103,11 @@ pub enum AssistanceAction {
         run_id: BackgroundRunId,
         invocation: InvocationIdentity,
     },
+    ProviderCapabilitiesUpdated {
+        capabilities: ProviderCapabilities,
+        native_recall_ready: bool,
+        new_generation: u64,
+    },
     RoleUpdated {
         role: UserRole,
         revision: u64,
@@ -1015,6 +1147,7 @@ pub enum RejectionReason {
     DuplicateTurn,
     BackgroundNotAllowed,
     BackgroundAlreadyRunning,
+    ProviderCapabilitiesInsufficient,
     StaleBackgroundResult,
     StaleForegroundResult,
     PolicyGenerationNotAdvanced,
@@ -1050,6 +1183,20 @@ impl Reduction {
 mod tests {
     use super::*;
 
+    fn proven_native_recall_provider() -> ProviderCapabilities {
+        ProviderCapabilities {
+            cancellation: true,
+            bounded_input: true,
+            bounded_output: true,
+            arbitrary_writes_denied: true,
+            arbitrary_shell_denied: true,
+            ambient_filesystem_reads_denied: true,
+            unapproved_tools_denied: true,
+            routing_disclosure: RoutingDisclosure::AgentControlled,
+            screen_disclosure: ScreenDisclosureCapability::Unavailable,
+        }
+    }
+
     fn session(mode: CaptureMode) -> LiveAssistanceSession {
         let mut session = LiveAssistanceSession::new(
             "assist-1".into(),
@@ -1057,6 +1204,11 @@ mod tests {
             UserRole::Observer,
             AssistancePosture::Strategist,
         );
+        let capabilities = session.reduce(AssistanceEvent::ProviderCapabilitiesChanged {
+            session_id: "assist-1".into(),
+            capabilities: proven_native_recall_provider(),
+        });
+        assert!(capabilities.accepted);
         let reduction = session.reduce(AssistanceEvent::CaptureStarted {
             session_id: "assist-1".into(),
             capture_session_id: "capture-1".into(),
@@ -1794,5 +1946,188 @@ mod tests {
             },
             RejectionReason::StaleForegroundResult,
         );
+    }
+
+    #[test]
+    fn native_recall_fails_closed_until_provider_capabilities_are_proven() {
+        let mut session = LiveAssistanceSession::new(
+            "assist-1".into(),
+            AssistanceSurface::NativeRecall,
+            UserRole::Observer,
+            AssistancePosture::OnDemand,
+        );
+        assert!(
+            session
+                .reduce(AssistanceEvent::CaptureStarted {
+                    session_id: "assist-1".into(),
+                    capture_session_id: "capture-1".into(),
+                    mode: CaptureMode::Live,
+                })
+                .accepted
+        );
+        assert_rejected_unchanged(
+            &mut session,
+            AssistanceEvent::UserMessage {
+                session_id: "assist-1".into(),
+                turn_id: "turn-unproven".into(),
+                source_event_id: "user-unproven".into(),
+                text: "What changed?".into(),
+            },
+            RejectionReason::ProviderCapabilitiesInsufficient,
+        );
+
+        let incomplete = ProviderCapabilities {
+            cancellation: true,
+            bounded_input: true,
+            ..ProviderCapabilities::default()
+        };
+        let bound = session.reduce(AssistanceEvent::ProviderCapabilitiesChanged {
+            session_id: "assist-1".into(),
+            capabilities: incomplete,
+        });
+        assert_eq!(session.source_policy_generation, 1);
+        assert_eq!(
+            bound.actions,
+            vec![AssistanceAction::ProviderCapabilitiesUpdated {
+                capabilities: incomplete,
+                native_recall_ready: false,
+                new_generation: 1,
+            }]
+        );
+        assert_rejected_unchanged(
+            &mut session,
+            AssistanceEvent::UserMessage {
+                session_id: "assist-1".into(),
+                turn_id: "turn-incomplete".into(),
+                source_event_id: "user-incomplete".into(),
+                text: "What changed?".into(),
+            },
+            RejectionReason::ProviderCapabilitiesInsufficient,
+        );
+
+        let proven = proven_native_recall_provider();
+        let rebound = session.reduce(AssistanceEvent::ProviderCapabilitiesChanged {
+            session_id: "assist-1".into(),
+            capabilities: proven,
+        });
+        assert_eq!(session.source_policy_generation, 2);
+        assert_eq!(
+            rebound.actions.last(),
+            Some(&AssistanceAction::ProviderCapabilitiesUpdated {
+                capabilities: proven,
+                native_recall_ready: true,
+                new_generation: 2,
+            })
+        );
+        assert!(
+            session
+                .reduce(AssistanceEvent::UserMessage {
+                    session_id: "assist-1".into(),
+                    turn_id: "turn-proven".into(),
+                    source_event_id: "user-proven".into(),
+                    text: "What changed?".into(),
+                })
+                .accepted
+        );
+    }
+
+    #[test]
+    fn provider_capability_change_cancels_inflight_work_and_invalidates_policy_state() {
+        let mut session = session(CaptureMode::Recording);
+        let (invocation, _) = ask(
+            &mut session,
+            "turn-1",
+            "user-event-1",
+            "Summarize the decision.",
+        );
+        assert!(!session.evidence.is_empty());
+
+        let unavailable = ProviderCapabilities::default();
+        let reduction = session.reduce(AssistanceEvent::ProviderCapabilitiesChanged {
+            session_id: "assist-1".into(),
+            capabilities: unavailable,
+        });
+        assert_eq!(session.source_policy_generation, 1);
+        assert!(session.foreground_turn.is_none());
+        assert!(session.evidence.is_empty());
+        assert_eq!(
+            reduction.actions,
+            vec![
+                AssistanceAction::CancelForeground {
+                    turn_id: "turn-1".into(),
+                    invocation,
+                    reason: InvalidationReason::ProviderCapabilitiesChanged,
+                },
+                AssistanceAction::ProviderCapabilitiesUpdated {
+                    capabilities: unavailable,
+                    native_recall_ready: false,
+                    new_generation: 1,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn finalized_sessions_bind_an_exact_meeting_without_fake_capture_state() {
+        assert_eq!(
+            LiveAssistanceSession::new_finalized(
+                " ".into(),
+                AssistanceSurface::NativeRecall,
+                UserRole::Observer,
+                AssistancePosture::OnDemand,
+                "meeting-a".into(),
+            ),
+            Err(RejectionReason::InvalidValue)
+        );
+
+        let mut session = LiveAssistanceSession::new_finalized(
+            "assist-final".into(),
+            AssistanceSurface::NativeRecall,
+            UserRole::DecisionMaker,
+            AssistancePosture::OnDemand,
+            "meeting-a".into(),
+        )
+        .unwrap();
+        assert_eq!(session.scope, AssistanceScope::FinalizedMeeting);
+        assert_eq!(session.phase, AssistancePhase::Finalized);
+        assert!(session.capture_session_id.is_none());
+        assert_eq!(
+            session.finalized_meeting_ref.as_ref().unwrap().as_str(),
+            "meeting-a"
+        );
+
+        let capabilities = session.reduce(AssistanceEvent::ProviderCapabilitiesChanged {
+            session_id: "assist-final".into(),
+            capabilities: proven_native_recall_provider(),
+        });
+        assert!(capabilities.accepted);
+        let question = session.reduce(AssistanceEvent::UserMessage {
+            session_id: "assist-final".into(),
+            turn_id: "turn-final".into(),
+            source_event_id: "user-final".into(),
+            text: "What was decided?".into(),
+        });
+        assert!(question.accepted);
+        assert_eq!(
+            session
+                .evidence
+                .get(&EvidenceId::new("user-final"))
+                .and_then(|evidence| evidence.finalized_meeting_ref.as_ref())
+                .map(MeetingRef::as_str),
+            Some("meeting-a")
+        );
+    }
+
+    #[test]
+    fn older_serialized_sessions_default_to_unproven_provider_capabilities() {
+        let session = session(CaptureMode::Live);
+        let mut value = serde_json::to_value(session).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("provider_capabilities");
+        let restored: LiveAssistanceSession = serde_json::from_value(value).unwrap();
+        assert_eq!(restored.provider_capabilities, None);
+        assert!(!restored.native_recall_provider_ready());
     }
 }

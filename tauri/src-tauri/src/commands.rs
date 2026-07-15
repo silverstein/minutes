@@ -6323,6 +6323,10 @@ pub fn cmd_cancel_call_end_countdown(
 
 #[tauri::command]
 pub fn cmd_stop_recording(state: tauri::State<AppState>) -> Result<(), String> {
+    // Coach is meaningless without the meeting it coaches; stopping the
+    // recording tears Coach (and its HUD) down too, so it can't orphan on
+    // screen or loop on a stale transcript.
+    stop_copilot_if_active(&state);
     request_stop(&state.recording, &state.stop_flag)
 }
 
@@ -15333,6 +15337,17 @@ pub fn cmd_start_copilot_surface(
     Ok(current_copilot_hud(&state.copilot_hud))
 }
 
+/// Stop the Coach surface if running: set the stop flag + request the runner to
+/// end, which drops CopilotActiveGuard and destroys the HUD. Called when the
+/// recording/live session Coach is attached to stops, so Coach never orphans on
+/// screen or loops on a stale transcript. No-op when Coach is inactive.
+fn stop_copilot_if_active(state: &AppState) {
+    if state.copilot_active.load(Ordering::SeqCst) {
+        state.copilot_stop_flag.store(true, Ordering::SeqCst);
+        let _ = minutes_core::copilot::request_stop();
+    }
+}
+
 #[tauri::command]
 pub fn cmd_stop_copilot_surface(
     state: tauri::State<AppState>,
@@ -15661,6 +15676,8 @@ pub fn cmd_start_live_transcript(
 
 #[tauri::command]
 pub fn cmd_stop_live_transcript(state: tauri::State<AppState>) -> Result<(), String> {
+    // Stopping Live also stops Coach + destroys its HUD (see cmd_stop_recording).
+    stop_copilot_if_active(&state);
     if state.live_transcript_active.load(Ordering::Relaxed) {
         state
             .live_transcript_stop_flag

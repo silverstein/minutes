@@ -304,6 +304,14 @@
     }
 
     .controls { gap: 6px; }
+    #close-coach {
+      font-size: 18px;
+      line-height: 1;
+      padding: 2px 7px;
+      min-width: 26px;
+      opacity: 0.75;
+    }
+    #close-coach:hover { opacity: 1; }
 
     button {
       position: relative;
@@ -563,6 +571,7 @@
         <button id="dismiss" type="button" title="Dismiss this suggestion" disabled>
           <span id="dismiss-label">Dismiss</span>
         </button>
+        <button id="close-coach" type="button" title="Turn Coach off and close this panel" aria-label="Turn Coach off">&times;</button>
       </div>
     </header>
 
@@ -620,6 +629,7 @@
     const pauseButton = document.getElementById('pause');
     const pauseLabel = document.getElementById('pause-label');
     const dismissButton = document.getElementById('dismiss');
+    const closeButton = document.getElementById('close-coach');
     const dismissLabel = document.getElementById('dismiss-label');
     const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
 
@@ -891,6 +901,18 @@
         dismissLabel.textContent = 'Dismiss';
       } finally {
         dismissButton.removeAttribute('aria-busy');
+      }
+    });
+
+    // Close = turn Coach off entirely and destroy this HUD (distinct from
+    // Dismiss, which only clears the current nudge). Stopping the surface drops
+    // the runner guard which destroys this window.
+    closeButton.addEventListener('click', async () => {
+      closeButton.disabled = true;
+      try {
+        await invoke('cmd_stop_copilot_surface');
+      } catch (_error) {
+        closeButton.disabled = false;
       }
     });
 

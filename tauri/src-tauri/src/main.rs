@@ -25,6 +25,11 @@ mod commands;
 mod context;
 mod palette_dispatch;
 mod pty;
+// The pure reducer bridge lands before its commands/provider adapter so its
+// race tests can be reviewed independently. Remove this allowance when the
+// next slice wires AppState and the event sink.
+#[cfg_attr(not(test), allow(dead_code))]
+mod recall_orchestration;
 mod secret_store;
 mod shortcut_manager;
 mod text_insertion;

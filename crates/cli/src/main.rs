@@ -1430,7 +1430,11 @@ enum CopilotAction {
         #[arg(long)]
         fixtures: Option<PathBuf>,
 
-        /// Use the deterministic virtual clock instead of sleeping to transcript offsets
+        /// Evaluate the real coaching prompt against this Ollama model
+        #[arg(long)]
+        model: Option<String>,
+
+        /// Replay fixture order without sleeping to transcript offsets
         #[arg(long)]
         accelerated: bool,
 
@@ -8523,6 +8527,8 @@ life (qmd://life/)
             "eval",
             "--fixtures",
             "/tmp/copilot-fixtures",
+            "--model",
+            "qwen3.5:4b-mlx",
             "--accelerated",
             "--json",
         ])
@@ -8532,16 +8538,49 @@ life (qmd://life/)
                 action:
                     CopilotAction::Eval {
                         fixtures,
+                        model,
                         accelerated,
                         json,
                     },
             } => {
                 assert_eq!(fixtures, Some(PathBuf::from("/tmp/copilot-fixtures")));
+                assert_eq!(model.as_deref(), Some("qwen3.5:4b-mlx"));
                 assert!(accelerated);
                 assert!(json);
             }
             _ => panic!("expected Copilot Eval variant"),
         }
+    }
+
+    #[test]
+    fn coach_model_eval_scoring_helpers_are_deterministic() {
+        use minutes_core::copilot::eval::OpportunityLabel;
+        use minutes_core::copilot::{NudgeDraft, NudgeKind, OpportunityKind};
+
+        assert_eq!(model_eval_percentile(&[40, 10, 30, 20], 0.50), Some(20));
+        assert_eq!(model_eval_percentile(&[40, 10, 30, 20], 0.95), Some(40));
+        assert_eq!(model_eval_percentile(&[], 0.50), None);
+        assert_eq!(model_eval_rate(0, 0).rate, 1.0);
+
+        let labels = vec![OpportunityLabel {
+            id: "pricing-owner".into(),
+            start_ms: 500,
+            end_ms: 2_000,
+            kind: Some(NudgeKind::Ask),
+            match_any: vec!["finance approver".into(), "pricing owner".into()],
+        }];
+        let draft = NudgeDraft {
+            kind: NudgeKind::Ask,
+            text: "Who is the finance approver for this offer?".into(),
+            source_chip: "transcript".into(),
+            opportunity: OpportunityKind::Decision,
+            confidence: 92,
+        };
+        assert_eq!(
+            match_model_eval_opportunity(&labels, 1_200, &draft),
+            Some("pricing-owner")
+        );
+        assert_eq!(match_model_eval_opportunity(&labels, 2_500, &draft), None);
     }
 
     #[test]
@@ -9430,16 +9469,22 @@ fn cmd_copilot(action: CopilotAction, config: &mut Config) -> Result<()> {
         CopilotAction::Feedback { nudge_id, rating } => cmd_copilot_feedback(&nudge_id, &rating),
         CopilotAction::Eval {
             fixtures,
+            model,
             accelerated,
             json,
-        } => cmd_copilot_eval(fixtures.as_deref(), accelerated, json),
+        } => cmd_copilot_eval(fixtures.as_deref(), model.as_deref(), accelerated, json),
         CopilotAction::Setup { model, retune } => {
             cmd_copilot_setup(config, model.as_deref(), retune)
         }
     }
 }
 
-fn cmd_copilot_eval(fixtures: Option<&Path>, accelerated: bool, json: bool) -> Result<()> {
+fn cmd_copilot_eval(
+    fixtures: Option<&Path>,
+    model: Option<&str>,
+    accelerated: bool,
+    json: bool,
+) -> Result<()> {
     use minutes_core::copilot::eval::{
         builtin_fixtures, load_fixtures_dir, render_report_table, run_suite, EvalOptions,
         ReplayMode,
@@ -9449,6 +9494,15 @@ fn cmd_copilot_eval(fixtures: Option<&Path>, accelerated: bool, json: bool) -> R
         Some(path) => load_fixtures_dir(path)?,
         None => builtin_fixtures()?,
     };
+    if let Some(model) = model.map(str::trim).filter(|model| !model.is_empty()) {
+        let report = run_ollama_model_eval(&fixtures, model, accelerated)?;
+        if json {
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        } else {
+            print_ollama_model_eval(&report);
+        }
+        return Ok(());
+    }
     let report = run_suite(
         &fixtures,
         EvalOptions {
@@ -9477,6 +9531,334 @@ fn cmd_copilot_eval(fixtures: Option<&Path>, accelerated: bool, json: bool) -> R
         anyhow::bail!("copilot eval baseline failed");
     }
     Ok(())
+}
+
+#[derive(Debug, Serialize)]
+struct OllamaModelEvalRate {
+    numerator: usize,
+    denominator: usize,
+    rate: f64,
+}
+
+#[derive(Debug, Serialize)]
+struct OllamaModelEvalLatency {
+    samples: usize,
+    p50_ms: Option<u64>,
+    p95_ms: Option<u64>,
+}
+
+#[derive(Debug, Serialize)]
+struct OllamaModelEvalQuality {
+    useful_nudge_precision: OllamaModelEvalRate,
+    opportunity_recall: OllamaModelEvalRate,
+    no_nudge_quality: OllamaModelEvalRate,
+}
+
+#[derive(Debug, Serialize)]
+struct OllamaModelEvalSample {
+    fixture_id: String,
+    evidence_utterance_sequence: u64,
+    evidence_time_ms: u64,
+    ttft_ms: Option<u64>,
+    total_ms: u64,
+    schema_valid: bool,
+    visible_after_policy: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    matched_opportunity: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    draft: Option<minutes_core::copilot::NudgeDraft>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct OllamaModelEvalReport {
+    suite_version: u32,
+    mode: &'static str,
+    provider: &'static str,
+    model: String,
+    fixtures: usize,
+    requests: usize,
+    schema_valid: OllamaModelEvalRate,
+    visible_nudges: usize,
+    quality: OllamaModelEvalQuality,
+    ttft: OllamaModelEvalLatency,
+    total: OllamaModelEvalLatency,
+    samples: Vec<OllamaModelEvalSample>,
+}
+
+fn run_ollama_model_eval(
+    fixtures: &[minutes_core::copilot::eval::EvalFixture],
+    model_name: &str,
+    accelerated: bool,
+) -> Result<OllamaModelEvalReport> {
+    use minutes_core::copilot::eval::EVAL_SUITE_VERSION;
+    use minutes_core::copilot::{
+        BattleCard, CancelToken, CopilotModel, CopilotRequest, CopilotUtterance, ModelStreamEvent,
+        NudgePolicy, OllamaCopilotModel, StrategyState, StrategyStateDraft, TranscriptUpdateKind,
+    };
+    use std::collections::BTreeSet;
+    use std::sync::{Arc, Mutex};
+
+    let model = OllamaCopilotModel::new(
+        copilot_ollama_base_url(),
+        model_name,
+        Duration::from_secs(600),
+    );
+    model
+        .prewarm()
+        .map_err(|error| anyhow::anyhow!("could not warm Ollama model {model_name}: {error}"))?;
+
+    let mut samples = Vec::new();
+    let mut schema_valid = 0usize;
+    let mut visible_nudges = 0usize;
+    let mut useful_nudges = 0usize;
+    let mut matched_opportunities = BTreeSet::new();
+    let mut visible_evidence = Vec::<(String, u64)>::new();
+    let mut ttft_samples = Vec::new();
+    let mut total_samples = Vec::new();
+
+    for (fixture_index, fixture) in fixtures.iter().enumerate() {
+        let mut policy = NudgePolicy::for_mode(12_000, fixture.mode);
+        let mut previous_evidence_ms = 0u64;
+        for (utterance_index, evidence) in fixture.transcript.iter().enumerate() {
+            let evidence_time_ms = evidence.offset_ms.saturating_add(evidence.duration_ms);
+            if !accelerated && previous_evidence_ms > 0 {
+                std::thread::sleep(Duration::from_millis(
+                    evidence_time_ms.saturating_sub(previous_evidence_ms),
+                ));
+            }
+            previous_evidence_ms = evidence_time_ms;
+
+            let evidence_revision = (utterance_index + 1) as u64;
+            let utterances = fixture.transcript[..=utterance_index]
+                .iter()
+                .map(|utterance| CopilotUtterance {
+                    utterance_sequence: utterance.utterance_sequence,
+                    revision: utterance.utterance_sequence,
+                    update_kind: TranscriptUpdateKind::Final,
+                    source: utterance.source.clone(),
+                    text: utterance.final_text.clone(),
+                    speaker: None,
+                    speaker_verified: false,
+                    offset_ms: utterance.offset_ms,
+                    duration_ms: utterance.duration_ms,
+                })
+                .collect();
+            let strategy_state = fixture
+                .labels
+                .strategy
+                .as_ref()
+                .map(|expected| {
+                    StrategyState::from_draft(
+                        StrategyStateDraft {
+                            open_threads: expected.open_threads.clone(),
+                            unmet_goal_items: expected.unmet_goal_items.clone(),
+                            unresolved_objections: expected.unresolved_objections.clone(),
+                            steer_toward: expected.steer_toward.clone(),
+                        },
+                        evidence_revision,
+                    )
+                })
+                .unwrap_or_else(StrategyState::empty);
+            let request = CopilotRequest {
+                goal: fixture.goal.clone(),
+                mode: fixture.mode,
+                session_epoch: (fixture_index + 1) as u64,
+                evidence_revision,
+                evidence_utterance_sequence: evidence.utterance_sequence,
+                evidence_utterance_revision: evidence.utterance_sequence,
+                update_kind: TranscriptUpdateKind::Final,
+                utterances,
+                battle_card: BattleCard::empty(),
+                strategy_state,
+            };
+
+            let first_token = Arc::new(Mutex::new(None::<std::time::Instant>));
+            let first_token_sink = Arc::clone(&first_token);
+            let started = std::time::Instant::now();
+            let sink = move |event: ModelStreamEvent| {
+                if matches!(event, ModelStreamEvent::TextDelta(ref text) if !text.is_empty()) {
+                    first_token_sink
+                        .lock()
+                        .unwrap()
+                        .get_or_insert_with(std::time::Instant::now);
+                }
+            };
+            let result = model.stream_structured(&request, &CancelToken::new(), &sink);
+            let completed = std::time::Instant::now();
+            let total_ms = duration_ms(completed.duration_since(started));
+            let ttft_ms = first_token
+                .lock()
+                .unwrap()
+                .map(|observed| duration_ms(observed.duration_since(started)));
+            total_samples.push(total_ms);
+            if let Some(ttft_ms) = ttft_ms {
+                ttft_samples.push(ttft_ms);
+            }
+
+            let mut sample = OllamaModelEvalSample {
+                fixture_id: fixture.id.clone(),
+                evidence_utterance_sequence: evidence.utterance_sequence,
+                evidence_time_ms,
+                ttft_ms,
+                total_ms,
+                schema_valid: false,
+                visible_after_policy: false,
+                matched_opportunity: None,
+                draft: None,
+                error: None,
+            };
+            match result {
+                Ok(draft) => {
+                    schema_valid = schema_valid.saturating_add(1);
+                    sample.schema_valid = true;
+                    sample.draft = Some(draft.clone());
+                    let now = chrono::Utc
+                        .with_ymd_and_hms(2026, 1, 1, 0, 0, 0)
+                        .single()
+                        .expect("fixed eval date is valid")
+                        + chrono::Duration::milliseconds(
+                            evidence_time_ms.min(i64::MAX as u64) as i64
+                        );
+                    if policy.accept(draft.clone(), &request, now).is_some() {
+                        sample.visible_after_policy = true;
+                        visible_nudges = visible_nudges.saturating_add(1);
+                        visible_evidence.push((fixture.id.clone(), evidence_time_ms));
+                        if let Some(label_id) = match_model_eval_opportunity(
+                            &fixture.labels.opportunities,
+                            evidence_time_ms,
+                            &draft,
+                        ) {
+                            useful_nudges = useful_nudges.saturating_add(1);
+                            let qualified = format!("{}:{label_id}", fixture.id);
+                            matched_opportunities.insert(qualified);
+                            sample.matched_opportunity = Some(label_id.to_string());
+                        }
+                    }
+                }
+                Err(error) => sample.error = Some(error.to_string()),
+            }
+            samples.push(sample);
+        }
+    }
+
+    let opportunity_count = fixtures
+        .iter()
+        .map(|fixture| fixture.labels.opportunities.len())
+        .sum();
+    let no_opportunity_count = fixtures
+        .iter()
+        .map(|fixture| fixture.labels.no_opportunity_ranges.len())
+        .sum();
+    let clean_no_opportunity_ranges = fixtures
+        .iter()
+        .flat_map(|fixture| {
+            fixture.labels.no_opportunity_ranges.iter().map(|range| {
+                !visible_evidence.iter().any(|(fixture_id, evidence_ms)| {
+                    fixture_id == &fixture.id
+                        && *evidence_ms >= range.start_ms
+                        && *evidence_ms <= range.end_ms
+                })
+            })
+        })
+        .filter(|clean| *clean)
+        .count();
+    let requests = samples.len();
+
+    Ok(OllamaModelEvalReport {
+        suite_version: EVAL_SUITE_VERSION,
+        mode: if accelerated {
+            "accelerated"
+        } else {
+            "real_time"
+        },
+        provider: "ollama",
+        model: model_name.into(),
+        fixtures: fixtures.len(),
+        requests,
+        schema_valid: model_eval_rate(schema_valid, requests),
+        visible_nudges,
+        quality: OllamaModelEvalQuality {
+            useful_nudge_precision: model_eval_rate(useful_nudges, visible_nudges),
+            opportunity_recall: model_eval_rate(matched_opportunities.len(), opportunity_count),
+            no_nudge_quality: model_eval_rate(clean_no_opportunity_ranges, no_opportunity_count),
+        },
+        ttft: model_eval_latency(&ttft_samples),
+        total: model_eval_latency(&total_samples),
+        samples,
+    })
+}
+
+fn match_model_eval_opportunity<'a>(
+    labels: &'a [minutes_core::copilot::eval::OpportunityLabel],
+    evidence_time_ms: u64,
+    draft: &minutes_core::copilot::NudgeDraft,
+) -> Option<&'a str> {
+    let text = draft.text.to_ascii_lowercase();
+    labels
+        .iter()
+        .find(|label| {
+            evidence_time_ms >= label.start_ms
+                && evidence_time_ms <= label.end_ms
+                && label.kind.is_none_or(|kind| kind == draft.kind)
+                && label
+                    .match_any
+                    .iter()
+                    .any(|needle| text.contains(&needle.to_ascii_lowercase()))
+        })
+        .map(|label| label.id.as_str())
+}
+
+fn model_eval_rate(numerator: usize, denominator: usize) -> OllamaModelEvalRate {
+    OllamaModelEvalRate {
+        numerator,
+        denominator,
+        rate: if denominator == 0 {
+            1.0
+        } else {
+            numerator as f64 / denominator as f64
+        },
+    }
+}
+
+fn model_eval_latency(samples: &[u64]) -> OllamaModelEvalLatency {
+    OllamaModelEvalLatency {
+        samples: samples.len(),
+        p50_ms: model_eval_percentile(samples, 0.50),
+        p95_ms: model_eval_percentile(samples, 0.95),
+    }
+}
+
+fn model_eval_percentile(samples: &[u64], percentile: f64) -> Option<u64> {
+    if samples.is_empty() {
+        return None;
+    }
+    let mut sorted = samples.to_vec();
+    sorted.sort_unstable();
+    let rank = (percentile.clamp(0.0, 1.0) * sorted.len() as f64).ceil() as usize;
+    sorted.get(rank.saturating_sub(1)).copied()
+}
+
+fn print_ollama_model_eval(report: &OllamaModelEvalReport) {
+    println!("Coach model eval | ollama/{}", report.model);
+    println!(
+        "schema valid: {}/{} ({:.1}%)",
+        report.schema_valid.numerator,
+        report.schema_valid.denominator,
+        report.schema_valid.rate * 100.0
+    );
+    println!(
+        "visible nudges: {} | useful precision: {:.1}% | opportunity recall: {:.1}% | no-nudge quality: {:.1}%",
+        report.visible_nudges,
+        report.quality.useful_nudge_precision.rate * 100.0,
+        report.quality.opportunity_recall.rate * 100.0,
+        report.quality.no_nudge_quality.rate * 100.0,
+    );
+    println!(
+        "TTFT p50/p95: {:?}/{:?} ms | total p50/p95: {:?}/{:?} ms",
+        report.ttft.p50_ms, report.ttft.p95_ms, report.total.p50_ms, report.total.p95_ms,
+    );
 }
 
 struct LiveCaptureGuard {

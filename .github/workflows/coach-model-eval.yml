@@ -1,0 +1,86 @@
+name: Coach model freshness
+
+on:
+  schedule:
+    - cron: "17 9 1 * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  evaluate-small-models:
+    runs-on: macos-latest
+    timeout-minutes: 180
+    env:
+      CARGO_TERM_COLOR: always
+      HOMEBREW_NO_AUTO_UPDATE: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install and start Ollama
+        shell: bash
+        run: |
+          brew install ollama
+          ollama serve >"$RUNNER_TEMP/ollama.log" 2>&1 &
+          for attempt in {1..60}; do
+            if curl --fail --silent http://localhost:11434/api/tags >/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          cat "$RUNNER_TEMP/ollama.log"
+          exit 1
+
+      - name: Build the Coach eval CLI
+        run: cargo build -p minutes-cli --no-default-features --release
+
+      - name: Evaluate small-tier candidates
+        run: |
+          python3 scripts/coach_model_eval.py \
+            --minutes-bin target/release/minutes \
+            --small-only \
+            --output coach-model-report.md
+
+      - name: Upload full report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coach-model-freshness-${{ github.run_id }}
+          path: |
+            coach-model-report.md
+            ${{ runner.temp }}/ollama.log
+          if-no-files-found: warn
+          retention-days: 90
+
+      - name: Open or update the monthly human-review issue
+        if: always() && hashFiles('coach-model-report.md') != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          month=$(date -u +%Y-%m)
+          title="Coach model freshness report $month"
+          python3 - <<'PY'
+          from pathlib import Path
+
+          report = Path("coach-model-report.md").read_text(encoding="utf-8")
+          suffix = "\n\n_Full report and runner log are attached to this workflow run._\n"
+          Path("issue-body.md").write_text(report[:60000] + suffix, encoding="utf-8")
+          PY
+          issue_number=$(gh issue list \
+            --repo "$GITHUB_REPOSITORY" \
+            --state all \
+            --limit 100 \
+            --json number,title \
+            --jq ".[] | select(.title == \"$title\") | .number" | head -n 1)
+          if [[ -n "$issue_number" ]]; then
+            gh issue reopen "$issue_number" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || true
+            gh issue edit "$issue_number" --repo "$GITHUB_REPOSITORY" --body-file issue-body.md
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body-file issue-body.md
+          fi

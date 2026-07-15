@@ -169,6 +169,61 @@ pub fn recording_health_for_system_audio_probe_failure(
     }
 }
 
+pub const NATIVE_CALL_MICROPHONE_RECOVERY_CODE: &str = "native-call-microphone-stem-recovery";
+pub const NATIVE_CALL_SYSTEM_RECOVERY_CODE: &str = "native-call-system-stem-recovery";
+pub const NATIVE_CALL_CAPTURE_WARNING_CODE: &str = "native-call-capture-warning";
+
+/// Describe a native call recovered from only one usable PCM stem.
+///
+/// `surviving_source` is the audio that will actually be transcribed. Keeping
+/// that convention consistent makes the frontmatter useful to both people and
+/// automated recovery tooling.
+pub fn recording_health_for_native_call_stem_recovery(
+    surviving_source: CaptureSource,
+) -> RecordingHealth {
+    let (code, message) = match surviving_source {
+        CaptureSource::System => (
+            NATIVE_CALL_MICROPHONE_RECOVERY_CODE,
+            "Microphone audio was missing or silent; the probable cause is microphone device selection or permission. This transcript contains call/remote audio only.",
+        ),
+        CaptureSource::Voice => (
+            NATIVE_CALL_SYSTEM_RECOVERY_CODE,
+            "Call/remote audio was missing or silent. This transcript contains local microphone audio only.",
+        ),
+        CaptureSource::Both | CaptureSource::Backend => (
+            NATIVE_CALL_CAPTURE_WARNING_CODE,
+            "Native call capture was degraded, but recoverable audio was preserved.",
+        ),
+    };
+
+    RecordingHealth {
+        voice_stem_active_ratio: None,
+        system_stem_active_ratio: None,
+        system_dominant_ratio: None,
+        capture_warnings: vec![CaptureWarning {
+            kind: FailureKind::Other { code: code.into() },
+            source: surviving_source,
+            message: message.into(),
+            diagnostic_confidence: DiagnosticConfidence::Inferred,
+        }],
+        diarization_path: Some(DiarizationPath::None),
+    }
+}
+
+pub fn append_native_call_capture_warning(
+    health: &mut RecordingHealth,
+    message: impl Into<String>,
+) {
+    health.capture_warnings.push(CaptureWarning {
+        kind: FailureKind::Other {
+            code: NATIVE_CALL_CAPTURE_WARNING_CODE.into(),
+        },
+        source: CaptureSource::Both,
+        message: message.into(),
+        diagnostic_confidence: DiagnosticConfidence::Inferred,
+    });
+}
+
 /// Check if the whisper model is downloaded and ready.
 pub fn model_status(config: &Config) -> HealthItem {
     if config.transcription.engine == "parakeet" {

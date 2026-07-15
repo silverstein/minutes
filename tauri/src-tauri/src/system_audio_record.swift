@@ -4,11 +4,23 @@ import Dispatch
 import Foundation
 import ScreenCaptureKit
 
+private func availableMicrophones() -> [AVCaptureDevice] {
+    AVCaptureDevice.DiscoverySession(
+        deviceTypes: [.microphone],
+        mediaType: .audio,
+        position: .unspecified
+    ).devices
+}
+
 @available(macOS 15.0, *)
 final class NativeCallRecorder: NSObject, SCRecordingOutputDelegate, SCStreamOutput {
     private var stream: SCStream?
     private var recordingOutput: SCRecordingOutput?
     private let outputURL: URL
+    private let requestedMicrophoneName: String?
+    private var selectedMicrophoneID: String?
+    private var selectedMicrophoneName: String?
+    private var microphoneSelectionEvent: [String: Any]?
     private let sampleQueue = DispatchQueue(label: "minutes.system-audio.samples")
     private var monitorTimer: DispatchSourceTimer?
     private var lastSystemAudioSampleAt: Date?
@@ -31,8 +43,13 @@ final class NativeCallRecorder: NSObject, SCRecordingOutputDelegate, SCStreamOut
     // follow-on to #216).
     private var finalizeStart: Date?
 
-    init(outputURL: URL) {
+    init(outputURL: URL, requestedMicrophoneName: String?) {
         self.outputURL = outputURL
+        self.requestedMicrophoneName = requestedMicrophoneName
+    }
+
+    deinit {
+        NotificationCenter.default.removeObserver(self)
     }
 
     func start() async throws {
@@ -64,8 +81,45 @@ final class NativeCallRecorder: NSObject, SCRecordingOutputDelegate, SCStreamOut
         configuration.excludesCurrentProcessAudio = true
         configuration.showsCursor = false
 
-        if let microphone = AVCaptureDevice.default(for: .audio) {
+        let microphone: AVCaptureDevice?
+        if let requestedMicrophoneName {
+            microphone = availableMicrophones().first {
+                $0.localizedName == requestedMicrophoneName
+            } ?? AVCaptureDevice.default(for: .audio)
+            if microphone?.localizedName == requestedMicrophoneName {
+                microphoneSelectionEvent = [
+                    "event": "microphone_selected",
+                    "name": requestedMicrophoneName,
+                    "configured": true,
+                ]
+            } else {
+                // The Rust parent preflights the same exact-name lookup. This
+                // branch covers the device disappearing in the small race
+                // between preflight and stream configuration. It must be
+                // reported only after `ready` because the first stdout line is
+                // the helper protocol handshake.
+                microphoneSelectionEvent = [
+                    "event": "microphone_fallback",
+                    "name": requestedMicrophoneName,
+                    "message": "configured mic not found, using default",
+                ]
+            }
+        } else {
+            microphone = AVCaptureDevice.default(for: .audio)
+        }
+
+        if let microphone {
             configuration.microphoneCaptureDeviceID = microphone.uniqueID
+            selectedMicrophoneID = microphone.uniqueID
+            selectedMicrophoneName = microphone.localizedName
+            if requestedMicrophoneName != nil {
+                NotificationCenter.default.addObserver(
+                    self,
+                    selector: #selector(microphoneWasDisconnected(_:)),
+                    name: AVCaptureDevice.wasDisconnectedNotification,
+                    object: microphone
+                )
+            }
         }
 
         let stream = SCStream(filter: filter, configuration: configuration, delegate: nil)
@@ -95,6 +149,22 @@ final class NativeCallRecorder: NSObject, SCRecordingOutputDelegate, SCStreamOut
 
         self.stream = stream
         self.recordingOutput = recordingOutput
+    }
+
+    @objc private func microphoneWasDisconnected(_ notification: Notification) {
+        guard let device = notification.object as? AVCaptureDevice,
+              device.uniqueID == selectedMicrophoneID else {
+            return
+        }
+        let payload: [String: Any] = [
+            "event": "microphone_disconnected",
+            "name": selectedMicrophoneName ?? device.localizedName,
+        ]
+        if let data = try? JSONSerialization.data(withJSONObject: payload),
+           let json = String(data: data, encoding: .utf8) {
+            print(json)
+            fflush(stdout)
+        }
     }
 
     func stop() async {
@@ -363,6 +433,15 @@ final class NativeCallRecorder: NSObject, SCRecordingOutputDelegate, SCStreamOut
         print("ready")
         fflush(stdout)
 
+        // Never emit device-selection status before `ready`: Rust treats the
+        // first stdout line as a strict readiness handshake.
+        if let microphoneSelectionEvent,
+           let data = try? JSONSerialization.data(withJSONObject: microphoneSelectionEvent),
+           let json = String(data: data, encoding: .utf8) {
+            print(json)
+            fflush(stdout)
+        }
+
         // Report stem paths so the Rust side knows where to find them
         let stemInfo: [String: Any] = [
             "event": "stems",
@@ -423,13 +502,37 @@ struct NativeCallRecordMain {
             exit(1)
         }
 
+        if CommandLine.arguments.count == 2,
+           CommandLine.arguments[1] == "--list-microphones" {
+            let payload: [String: Any] = [
+                "devices": availableMicrophones().map(\.localizedName)
+            ]
+            do {
+                let data = try JSONSerialization.data(withJSONObject: payload)
+                FileHandle.standardOutput.write(data)
+                FileHandle.standardOutput.write(Data("\n".utf8))
+                exit(0)
+            } catch {
+                fputs("failed to serialize microphone inventory: \(error)\n", stderr)
+                exit(1)
+            }
+        }
+
         guard CommandLine.arguments.count >= 2 else {
-            fputs("usage: system_audio_record <output.mov>\n", stderr)
+            fputs("usage: system_audio_record <output.mov> [--microphone-name <exact name>]\n", stderr)
             exit(1)
         }
 
         let outputURL = URL(fileURLWithPath: CommandLine.arguments[1])
-        let recorder = NativeCallRecorder(outputURL: outputURL)
+        var requestedMicrophoneName: String?
+        if let flagIndex = CommandLine.arguments.firstIndex(of: "--microphone-name"),
+           CommandLine.arguments.indices.contains(flagIndex + 1) {
+            requestedMicrophoneName = CommandLine.arguments[flagIndex + 1]
+        }
+        let recorder = NativeCallRecorder(
+            outputURL: outputURL,
+            requestedMicrophoneName: requestedMicrophoneName
+        )
 
         signal(SIGTERM, SIG_IGN)
         let stopSource = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)

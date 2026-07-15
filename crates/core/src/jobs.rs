@@ -195,9 +195,15 @@ pub fn queue_live_capture_with_recording_health(
     recording_health: Option<crate::markdown::RecordingHealth>,
 ) -> std::io::Result<ProcessingJob> {
     let job_id = next_job_id();
-    let old_screen_dir = crate::screen::screens_dir_for(current_wav);
+    let old_screen_anchor = native_stem_group_for_survivor(current_wav)
+        .map(|group| group.anchor)
+        .unwrap_or_else(|| current_wav.to_path_buf());
+    let old_screen_dir = crate::screen::screens_dir_for(&old_screen_anchor);
     let audio_path = move_capture_into_job(&job_id, current_wav)?;
-    let new_screen_dir = crate::screen::screens_dir_for(&audio_path);
+    let new_screen_anchor = native_stem_group_for_survivor(&audio_path)
+        .map(|group| group.anchor)
+        .unwrap_or_else(|| audio_path.clone());
+    let new_screen_dir = crate::screen::screens_dir_for(&new_screen_anchor);
     let job = ProcessingJob {
         id: job_id,
         mode,
@@ -228,8 +234,7 @@ pub fn queue_live_capture_with_recording_health(
     };
     if let Err(error) = write_job(&job) {
         if audio_path.exists() {
-            fs::rename(&audio_path, current_wav).ok();
-            move_stems_with_audio(&audio_path, current_wav).ok();
+            move_capture_artifacts(&audio_path, current_wav).ok();
         }
         if new_screen_dir.exists() {
             if old_screen_dir.exists() {
@@ -280,12 +285,100 @@ pub fn job_capture_path(job_id: &str) -> PathBuf {
 }
 
 fn job_capture_path_for_source(job_id: &str, source: &Path) -> PathBuf {
+    if let Some(role) = native_stem_role(source) {
+        return jobs_dir().join(format!("{}.{}.wav", job_id, role));
+    }
     let ext = source
         .extension()
         .and_then(|value| value.to_str())
         .filter(|value| !value.is_empty())
         .unwrap_or("wav");
     jobs_dir().join(format!("{}.{}", job_id, ext))
+}
+
+#[derive(Debug, Clone)]
+struct NativeStemGroup {
+    anchor: PathBuf,
+    voice: PathBuf,
+    system: PathBuf,
+}
+
+fn native_stem_role(path: &Path) -> Option<&'static str> {
+    let name = path.file_name()?.to_str()?;
+    if name.ends_with(".voice.wav") {
+        Some("voice")
+    } else if name.ends_with(".system.wav") {
+        Some("system")
+    } else {
+        None
+    }
+}
+
+fn native_stem_group_for_survivor(path: &Path) -> Option<NativeStemGroup> {
+    let role = native_stem_role(path)?;
+    let name = path.file_name()?.to_str()?;
+    let suffix = format!(".{role}.wav");
+    let base = name.strip_suffix(&suffix)?;
+    let dir = path.parent()?;
+    Some(NativeStemGroup {
+        anchor: dir.join(format!("{base}.mov")),
+        voice: dir.join(format!("{base}.voice.wav")),
+        system: dir.join(format!("{base}.system.wav")),
+    })
+}
+
+fn move_native_stem_group(src_primary: &Path, dest_primary: &Path) -> std::io::Result<()> {
+    if !src_primary.exists() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("native-call survivor is missing: {}", src_primary.display()),
+        ));
+    }
+    let src = native_stem_group_for_survivor(src_primary).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("not a native-call stem path: {}", src_primary.display()),
+        )
+    })?;
+    let dest = native_stem_group_for_survivor(dest_primary).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("not a native-call destination: {}", dest_primary.display()),
+        )
+    })?;
+    let pairs = [
+        (src.anchor, dest.anchor),
+        (src.voice, dest.voice),
+        (src.system, dest.system),
+    ];
+    let mut moved = Vec::new();
+    for (source, destination) in pairs {
+        if !source.exists() {
+            continue;
+        }
+        if let Err(error) = fs::rename(&source, &destination) {
+            for (rollback_source, rollback_destination) in moved.into_iter().rev() {
+                fs::rename(rollback_destination, rollback_source).ok();
+            }
+            return Err(error);
+        }
+        moved.push((source, destination));
+    }
+    Ok(())
+}
+
+fn move_capture_artifacts(src_audio: &Path, dest_audio: &Path) -> std::io::Result<()> {
+    if native_stem_role(src_audio).is_some() {
+        return move_native_stem_group(src_audio, dest_audio);
+    }
+
+    fs::rename(src_audio, dest_audio)?;
+    if let Err(error) = move_stems_with_audio(src_audio, dest_audio) {
+        fs::rename(dest_audio, src_audio).ok();
+        move_stems_with_audio(dest_audio, src_audio).ok();
+        return Err(error);
+    }
+    Ok(())
 }
 
 pub fn create_worker_guard() -> Result<PidGuard, crate::error::PidError> {
@@ -308,27 +401,51 @@ pub fn worker_active() -> bool {
 }
 
 pub fn move_capture_into_job(job_id: &str, current_wav: &Path) -> std::io::Result<PathBuf> {
+    move_capture_into_job_with_screen_mover(job_id, current_wav, |source, destination| {
+        fs::rename(source, destination)
+    })
+}
+
+fn move_capture_into_job_with_screen_mover(
+    job_id: &str,
+    current_wav: &Path,
+    mut move_screen_dir: impl FnMut(&Path, &Path) -> std::io::Result<()>,
+) -> std::io::Result<PathBuf> {
     let dest = job_capture_path_for_source(job_id, current_wav);
     if let Some(parent) = dest.parent() {
         fs::create_dir_all(parent)?;
     }
-    fs::rename(current_wav, &dest)?;
-    if let Err(error) = move_stems_with_audio(current_wav, &dest) {
-        fs::rename(&dest, current_wav).ok();
-        move_stems_with_audio(&dest, current_wav).ok();
-        return Err(error);
-    }
+    move_capture_artifacts(current_wav, &dest)?;
 
-    let old_screen_dir = crate::screen::screens_dir_for(current_wav);
+    let screen_source = native_stem_group_for_survivor(current_wav)
+        .map(|group| group.anchor)
+        .unwrap_or_else(|| current_wav.to_path_buf());
+    let screen_dest = native_stem_group_for_survivor(&dest)
+        .map(|group| group.anchor)
+        .unwrap_or_else(|| dest.clone());
+    let old_screen_dir = crate::screen::screens_dir_for(&screen_source);
     if old_screen_dir.exists() {
-        let new_screen_dir = crate::screen::screens_dir_for(&dest);
-        if let Some(parent) = new_screen_dir.parent() {
-            fs::create_dir_all(parent)?;
+        let new_screen_dir = crate::screen::screens_dir_for(&screen_dest);
+        let screen_move_result = (|| -> std::io::Result<()> {
+            if let Some(parent) = new_screen_dir.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            if new_screen_dir.exists() {
+                fs::remove_dir_all(&new_screen_dir)?;
+            }
+            move_screen_dir(&old_screen_dir, &new_screen_dir)
+        })();
+        if let Err(error) = screen_move_result {
+            if let Err(rollback_error) = move_capture_artifacts(&dest, current_wav) {
+                tracing::error!(
+                    source = %dest.display(),
+                    destination = %current_wav.display(),
+                    error = %rollback_error,
+                    "failed to roll capture artifacts back after screen-directory move failure"
+                );
+            }
+            return Err(error);
         }
-        if new_screen_dir.exists() {
-            fs::remove_dir_all(&new_screen_dir).ok();
-        }
-        fs::rename(old_screen_dir, new_screen_dir)?;
     }
 
     Ok(dest)
@@ -1036,10 +1153,19 @@ where
 
 pub fn remove_capture_artifacts(job: &ProcessingJob) {
     let audio_path = PathBuf::from(&job.audio_path);
-    if audio_path.exists() {
+    let screen_anchor = native_stem_group_for_survivor(&audio_path)
+        .map(|group| group.anchor)
+        .unwrap_or_else(|| audio_path.clone());
+    if let Some(group) = native_stem_group_for_survivor(&audio_path) {
+        for path in [group.anchor, group.voice, group.system] {
+            if path.exists() {
+                fs::remove_file(path).ok();
+            }
+        }
+    } else if audio_path.exists() {
         fs::remove_file(&audio_path).ok();
     }
-    let screens_dir = crate::screen::screens_dir_for(&audio_path);
+    let screens_dir = crate::screen::screens_dir_for(&screen_anchor);
     if screens_dir.exists() {
         fs::remove_dir_all(screens_dir).ok();
     }
@@ -1053,6 +1179,20 @@ fn terminal_state_for_artifact(artifact: &pipeline::TranscriptArtifact) -> JobSt
     }
 }
 
+fn apply_transcript_artifact_metadata(
+    job: &mut ProcessingJob,
+    artifact: &pipeline::TranscriptArtifact,
+) {
+    job.output_path = Some(artifact.write_result.path.display().to_string());
+    job.title = Some(artifact.write_result.title.clone());
+    job.word_count = Some(artifact.write_result.word_count);
+    // Core-only `.mov` recovery discovers degradation after the job was
+    // queued, so the artifact is authoritative. Persist it back to the job;
+    // the desktop completion notice reads this field rather than reparsing
+    // Markdown (#463).
+    job.recording_health = artifact.frontmatter.recording_health.clone();
+}
+
 /// Move the captured audio alongside the output markdown so users can reprocess later.
 /// e.g. ~/meetings/2026-04-02-standup.md → ~/meetings/2026-04-02-standup.wav
 /// or, for native call captures, ~/meetings/2026-04-02-call.mov.
@@ -1063,6 +1203,56 @@ fn preserve_audio_alongside_output(job: &ProcessingJob, config: &Config) {
     let output = PathBuf::from(output_path);
     let audio_src = PathBuf::from(&job.audio_path);
     if !audio_src.exists() {
+        return;
+    }
+    if let Some(role) = native_stem_role(&audio_src) {
+        let audio_dest = output.with_extension(format!("{role}.wav"));
+        let Some(src_group) = native_stem_group_for_survivor(&audio_src) else {
+            return;
+        };
+        let Some(dest_group) = native_stem_group_for_survivor(&audio_dest) else {
+            return;
+        };
+        let source_screens_dir = crate::screen::screens_dir_for(&src_group.anchor);
+        let preserved_anchor = dest_group.anchor.clone();
+        for (src, dest) in [
+            (src_group.anchor, dest_group.anchor),
+            (src_group.voice, dest_group.voice),
+            (src_group.system, dest_group.system),
+        ] {
+            if !src.exists() {
+                continue;
+            }
+            if let Err(rename_error) = fs::rename(&src, &dest) {
+                if let Err(copy_error) = fs::copy(&src, &dest) {
+                    tracing::warn!(
+                        src = %src.display(),
+                        dest = %dest.display(),
+                        error = %copy_error,
+                        "failed to preserve native-call artifact (rename: {rename_error})"
+                    );
+                    continue;
+                }
+                fs::remove_file(&src).ok();
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(&dest, fs::Permissions::from_mode(0o600)).ok();
+            }
+        }
+        if !config.screen_context.keep_after_summary && source_screens_dir.exists() {
+            fs::remove_dir_all(source_screens_dir).ok();
+        }
+        update_job_state(&job.id, |j| {
+            j.audio_path = audio_dest.display().to_string();
+        })
+        .ok();
+        tracing::info!(
+            path = %preserved_anchor.display(),
+            survivor = %audio_dest.display(),
+            "preserved native-call capture group alongside transcript"
+        );
         return;
     }
     let audio_dest = match audio_src.extension().filter(|ext| !ext.is_empty()) {
@@ -1281,9 +1471,7 @@ where
             let Some(review_job) = update_job_state(&job.id, |job| {
                 job.state = terminal_state;
                 job.stage = terminal_state.default_stage();
-                job.output_path = Some(artifact.write_result.path.display().to_string());
-                job.title = Some(artifact.write_result.title.clone());
-                job.word_count = Some(artifact.write_result.word_count);
+                apply_transcript_artifact_metadata(job, &artifact);
                 job.finished_at = Some(Local::now());
                 job.owner_pid = None;
                 job.error = Some(
@@ -1319,9 +1507,7 @@ where
         let Some(updated_job) = update_job_state(&job.id, |job| {
             job.state = JobState::TranscriptOnly;
             job.stage = JobState::TranscriptOnly.default_stage();
-            job.output_path = Some(artifact.write_result.path.display().to_string());
-            job.title = Some(artifact.write_result.title.clone());
-            job.word_count = Some(artifact.write_result.word_count);
+            apply_transcript_artifact_metadata(job, &artifact);
         })?
         else {
             sync_processing_status();
@@ -1380,6 +1566,7 @@ where
                     job.output_path = Some(result.path.display().to_string());
                     job.title = Some(result.title.clone());
                     job.word_count = Some(result.word_count);
+                    job.recording_health = artifact.frontmatter.recording_health.clone();
                     job.finished_at = Some(Local::now());
                     job.owner_pid = None;
                 })?
@@ -1570,6 +1757,116 @@ mod tests {
             assert!(moved_stems.system.exists());
             assert!(!stems.voice.exists());
             assert!(!stems.system.exists());
+        });
+    }
+
+    #[test]
+    fn queueing_surviving_native_stem_keeps_and_preserves_capture_group() {
+        with_temp_home(|tmp| {
+            let native_dir = tmp.path().join(".minutes/native-captures");
+            fs::create_dir_all(&native_dir).unwrap();
+            let anchor = native_dir.join("2026-07-15-120148-call.mov");
+            let voice = native_dir.join("2026-07-15-120148-call.voice.wav");
+            let system = native_dir.join("2026-07-15-120148-call.system.wav");
+            fs::write(&anchor, b"mov-anchor").unwrap();
+            fs::write(&voice, b"silent-mic-placeholder").unwrap();
+            fs::write(&system, b"recoverable-system-audio").unwrap();
+
+            let mut job = queue_live_capture(
+                CaptureMode::Meeting,
+                Some("Recovered native call".into()),
+                &system,
+                None,
+                None,
+                Some(Local::now()),
+                Some(Local::now()),
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+            let queued_system = PathBuf::from(&job.audio_path);
+            assert!(queued_system
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.ends_with(".system.wav")));
+            let queued_group = native_stem_group_for_survivor(&queued_system).unwrap();
+            assert!(
+                queued_group.anchor.exists(),
+                ".mov anchor must follow survivor"
+            );
+            assert!(
+                queued_group.voice.exists(),
+                "silent mic stem must remain recoverable"
+            );
+            assert!(
+                queued_group.system.exists(),
+                "surviving stem must be queued"
+            );
+            assert!(!anchor.exists());
+            assert!(!voice.exists());
+            assert!(!system.exists());
+
+            let output_path = tmp.path().join("meetings/recovered.md");
+            fs::create_dir_all(output_path.parent().unwrap()).unwrap();
+            fs::write(&output_path, "# recovered").unwrap();
+            job.output_path = Some(output_path.display().to_string());
+            preserve_audio_alongside_output(&job, &Config::default());
+
+            let preserved_anchor = output_path.with_extension("mov");
+            let preserved_stems = crate::capture::stem_paths_for(&preserved_anchor).unwrap();
+            assert!(preserved_anchor.exists());
+            assert!(preserved_stems.voice.exists());
+            assert!(preserved_stems.system.exists());
+            assert!(!queued_group.anchor.exists());
+            assert!(!queued_group.voice.exists());
+            assert!(!queued_group.system.exists());
+        });
+    }
+
+    #[test]
+    fn screen_move_failure_rolls_surviving_native_group_back_before_queue() {
+        with_temp_home(|tmp| {
+            let native_dir = tmp.path().join(".minutes/native-captures");
+            fs::create_dir_all(&native_dir).unwrap();
+            let anchor = native_dir.join("screen-rollback.mov");
+            let voice = native_dir.join("screen-rollback.voice.wav");
+            let system = native_dir.join("screen-rollback.system.wav");
+            fs::write(&anchor, b"mov-anchor").unwrap();
+            fs::write(&voice, b"silent-mic-placeholder").unwrap();
+            fs::write(&system, b"recoverable-system-audio").unwrap();
+            let old_screens = crate::screen::screens_dir_for(&anchor);
+            fs::create_dir_all(&old_screens).unwrap();
+            fs::write(old_screens.join("source.png"), b"source").unwrap();
+
+            let job_id = "screen-move-failure";
+            let queued_system = job_capture_path_for_source(job_id, &system);
+            let queued_group = native_stem_group_for_survivor(&queued_system).unwrap();
+            let error = move_capture_into_job_with_screen_mover(
+                job_id,
+                &system,
+                |_source, _destination| {
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        "injected screen move failure",
+                    ))
+                },
+            )
+            .expect_err("injected screen move must fail the queue operation");
+
+            assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+            assert!(anchor.exists(), ".mov anchor must roll back");
+            assert!(voice.exists(), "voice stem must roll back");
+            assert!(system.exists(), "surviving system stem must roll back");
+            assert!(!queued_group.anchor.exists());
+            assert!(!queued_group.voice.exists());
+            assert!(!queued_group.system.exists());
+            assert!(old_screens.join("source.png").exists());
+            assert!(
+                !job_path(job_id).exists(),
+                "no manifest may exist for a rolled-back queue"
+            );
         });
     }
 
@@ -1886,6 +2183,7 @@ mod tests {
                 filter_diagnosis: Some("silence strip removed ALL audio".into()),
             },
             transcript: String::new(),
+            diarization_audio_path: None,
         };
 
         assert_eq!(
@@ -2275,6 +2573,80 @@ mod tests {
             owner_pid: None,
             retry_count: 0,
         }
+    }
+
+    fn make_test_artifact(
+        id: &str,
+        status: OutputStatus,
+        recording_health: Option<crate::markdown::RecordingHealth>,
+    ) -> pipeline::TranscriptArtifact {
+        pipeline::TranscriptArtifact {
+            write_result: WriteResult {
+                path: PathBuf::from(format!("/tmp/{id}.md")),
+                title: format!("title-{id}"),
+                word_count: 42,
+                content_type: ContentType::Meeting,
+            },
+            frontmatter: Frontmatter {
+                title: format!("title-{id}"),
+                r#type: ContentType::Meeting,
+                date: Local::now(),
+                duration: "5m".into(),
+                source: None,
+                status: Some(status),
+                tags: vec![],
+                attendees: vec![],
+                attendees_raw: None,
+                calendar_event: None,
+                people: vec![],
+                entities: crate::markdown::EntityLinks::default(),
+                device: None,
+                captured_at: None,
+                context: None,
+                action_items: vec![],
+                decisions: vec![],
+                intents: vec![],
+                recorded_by: None,
+                capture: None,
+                sensitivity: None,
+                debrief: None,
+                consent: None,
+                consent_notice: None,
+                visibility: None,
+                speaker_map: vec![],
+                name_corrections: Vec::new(),
+                recording_health,
+                speaker_mapping: None,
+                processing_warnings: Vec::new(),
+                template: None,
+                filter_diagnosis: None,
+            },
+            transcript: "[0:00] recovered call audio".into(),
+            diarization_audio_path: None,
+        }
+    }
+
+    #[test]
+    fn legacy_recovery_job_persists_artifact_health_for_completion_notice() {
+        let health = crate::health::recording_health_for_native_call_stem_recovery(
+            crate::diarize::CaptureSource::System,
+        );
+        let artifact = make_test_artifact(
+            "legacy-recovered-mov",
+            OutputStatus::Degraded,
+            Some(health.clone()),
+        );
+        let mut job = make_test_job("legacy-recovered-mov", JobState::Transcribing);
+        assert!(job.recording_health.is_none());
+
+        apply_transcript_artifact_metadata(&mut job, &artifact);
+
+        assert_eq!(job.recording_health, Some(health));
+        assert!(job
+            .recording_health
+            .as_ref()
+            .and_then(|health| health.capture_warnings.first())
+            .is_some_and(|warning| warning.message.contains("call/remote audio only")));
     }
 
     #[test]

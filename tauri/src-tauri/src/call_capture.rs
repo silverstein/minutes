@@ -1,3 +1,4 @@
+use std::ffi::OsString;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -45,6 +46,91 @@ pub struct NativeCallCaptureSession {
     /// takes longer than 15s, the helper was SIGKILLed, and the .mov was
     /// truncated with no `moov` box.
     last_progress: Arc<Mutex<Instant>>,
+    capture_warnings: Arc<Mutex<Vec<String>>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum MicrophoneSelection {
+    Configured(String),
+    ConfiguredMissing(String),
+    Default,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum MicrophoneStartupStatus {
+    Selected(String),
+    Fallback(String),
+}
+
+const MICROPHONE_STARTUP_STATUS_TIMEOUT: Duration = Duration::from_secs(2);
+
+fn finish_microphone_startup_handshake(
+    status_expected: bool,
+    status_rx: &mpsc::Receiver<MicrophoneStartupStatus>,
+    capture_warnings: &Arc<Mutex<Vec<String>>>,
+    timeout: Duration,
+) {
+    if !status_expected {
+        return;
+    }
+
+    match status_rx.recv_timeout(timeout) {
+        Ok(MicrophoneStartupStatus::Selected(name)) => {
+            tracing::info!(
+                microphone = name,
+                "native call capture is using configured microphone"
+            );
+        }
+        Ok(MicrophoneStartupStatus::Fallback(name)) => {
+            let message = format!("configured mic not found, using default: '{}'.", name);
+            tracing::warn!(
+                microphone = name,
+                "configured mic disappeared before native call capture started; using default"
+            );
+            if let Ok(mut warnings) = capture_warnings.lock() {
+                if !warnings.contains(&message) {
+                    warnings.push(message);
+                }
+            }
+        }
+        Err(error) => {
+            let message = format!(
+                "Configured microphone selection was not acknowledged before capture start ({error}); verify the selected input."
+            );
+            tracing::warn!(error = %error, "native call microphone startup status timed out");
+            if let Ok(mut warnings) = capture_warnings.lock() {
+                warnings.push(message);
+            }
+        }
+    }
+}
+
+fn resolve_microphone_selection(
+    configured: Option<&str>,
+    available_names: &[String],
+) -> MicrophoneSelection {
+    let configured = configured.map(str::trim).filter(|name| !name.is_empty());
+    match configured {
+        Some(name) if available_names.iter().any(|candidate| candidate == name) => {
+            MicrophoneSelection::Configured(name.to_string())
+        }
+        Some(name) => MicrophoneSelection::ConfiguredMissing(name.to_string()),
+        None => MicrophoneSelection::Default,
+    }
+}
+
+fn native_call_helper_args(output_path: &Path, selection: &MicrophoneSelection) -> Vec<OsString> {
+    let mut args = vec![output_path.as_os_str().to_os_string()];
+    if let MicrophoneSelection::Configured(name) = selection {
+        args.push(OsString::from("--microphone-name"));
+        args.push(OsString::from(name));
+    }
+    args
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct MicrophoneInventory {
+    devices: Vec<String>,
 }
 
 /// Absolute ceiling on `stop()` after SIGTERM is sent. The helper has to be
@@ -108,6 +194,13 @@ impl NativeCallCaptureSession {
                 call_audio_level: 0,
                 last_update: chrono::Local::now().to_rfc3339(),
             })
+    }
+
+    pub fn capture_warning(&self) -> Option<String> {
+        self.capture_warnings
+            .lock()
+            .ok()
+            .and_then(|warnings| (!warnings.is_empty()).then(|| warnings.join(" ")))
     }
 
     /// Send SIGKILL after a timeout, but reap once more first so a helper
@@ -239,7 +332,9 @@ pub fn availability() -> CallCaptureAvailability {
 }
 
 #[cfg(target_os = "macos")]
-pub fn start_native_call_capture() -> Result<NativeCallCaptureSession, String> {
+pub fn start_native_call_capture(
+    configured_microphone: Option<&str>,
+) -> Result<NativeCallCaptureSession, String> {
     if let Some(major) = macos_major_version() {
         if major < 15 {
             return Err(format!(
@@ -251,6 +346,36 @@ pub fn start_native_call_capture() -> Result<NativeCallCaptureSession, String> {
 
     let helper = find_native_call_helper_binary()
         .ok_or_else(|| "native call helper binary is unavailable".to_string())?;
+    let mut capture_warnings = Vec::new();
+    let microphone_selection = if configured_microphone
+        .map(str::trim)
+        .is_some_and(|name| !name.is_empty())
+    {
+        match list_native_call_microphones(&helper) {
+            Ok(inventory) => {
+                resolve_microphone_selection(configured_microphone, &inventory.devices)
+            }
+            Err(error) => {
+                let name = configured_microphone.unwrap_or_default().trim();
+                tracing::warn!(
+                    configured_microphone = name,
+                    error = %error,
+                    "could not enumerate native-call microphones; using default"
+                );
+                MicrophoneSelection::ConfiguredMissing(name.to_string())
+            }
+        }
+    } else {
+        MicrophoneSelection::Default
+    };
+    if let MicrophoneSelection::ConfiguredMissing(name) = &microphone_selection {
+        let message = format!("configured mic not found, using default: '{}'.", name);
+        tracing::warn!(
+            configured_microphone = name,
+            "configured mic not found, using default"
+        );
+        capture_warnings.push(message);
+    }
     let output_path = native_call_output_path()?;
     let health = Arc::new(Mutex::new(CallSourceHealth {
         backend: "screencapturekit-helper".into(),
@@ -260,8 +385,9 @@ pub fn start_native_call_capture() -> Result<NativeCallCaptureSession, String> {
         call_audio_level: 0,
         last_update: chrono::Local::now().to_rfc3339(),
     }));
-    let mut child = Command::new(helper)
-        .arg(&output_path)
+    let mut command = Command::new(&helper);
+    command.args(native_call_helper_args(&output_path, &microphone_selection));
+    let mut child = command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -273,11 +399,16 @@ pub fn start_native_call_capture() -> Result<NativeCallCaptureSession, String> {
         .take()
         .ok_or_else(|| "native call helper did not expose stdout".to_string())?;
     let (tx, rx) = mpsc::channel();
+    let (microphone_status_tx, microphone_status_rx) = mpsc::channel();
+    let microphone_status_expected =
+        matches!(microphone_selection, MicrophoneSelection::Configured(_));
     let stem_paths: Arc<Mutex<Option<StemPaths>>> = Arc::new(Mutex::new(None));
     let last_progress: Arc<Mutex<Instant>> = Arc::new(Mutex::new(Instant::now()));
     let health_for_thread = Arc::clone(&health);
     let stems_for_thread = Arc::clone(&stem_paths);
     let progress_for_thread = Arc::clone(&last_progress);
+    let capture_warnings = Arc::new(Mutex::new(capture_warnings));
+    let warnings_for_thread = Arc::clone(&capture_warnings);
     std::thread::spawn(move || {
         let mut reader = BufReader::new(stdout);
         let mut line = String::new();
@@ -369,6 +500,37 @@ pub fn start_native_call_capture() -> Result<NativeCallCaptureSession, String> {
                             }
                         }
                     }
+                    Some("microphone_selected") => {
+                        if let Some(name) = value.get("name").and_then(|value| value.as_str()) {
+                            let _ = microphone_status_tx
+                                .send(MicrophoneStartupStatus::Selected(name.to_string()));
+                        }
+                    }
+                    Some("microphone_disconnected") => {
+                        let name = value
+                            .get("name")
+                            .and_then(|value| value.as_str())
+                            .unwrap_or("configured microphone");
+                        let message = format!(
+                            "Configured microphone '{}' disconnected during capture; ScreenCaptureKit continued with its default behavior.",
+                            name
+                        );
+                        tracing::warn!(
+                            microphone = name,
+                            "configured microphone disconnected during native call capture"
+                        );
+                        if let Ok(mut warnings) = warnings_for_thread.lock() {
+                            warnings.push(message);
+                        }
+                    }
+                    Some("microphone_fallback") => {
+                        let name = value
+                            .get("name")
+                            .and_then(|value| value.as_str())
+                            .unwrap_or("configured microphone");
+                        let _ = microphone_status_tx
+                            .send(MicrophoneStartupStatus::Fallback(name.to_string()));
+                    }
                     _ => {}
                 }
             }
@@ -376,13 +538,26 @@ pub fn start_native_call_capture() -> Result<NativeCallCaptureSession, String> {
     });
 
     match rx.recv_timeout(Duration::from_secs(10)) {
-        Ok(Ok(line)) if line == "ready" => Ok(NativeCallCaptureSession {
-            child,
-            output_path,
-            health,
-            stem_paths,
-            last_progress,
-        }),
+        Ok(Ok(line)) if line == "ready" => {
+            // A configured-device helper emits exactly one selected/fallback
+            // status immediately after `ready`. Wait for that acknowledged
+            // second phase before returning so the capture-start notice cannot
+            // race the stdout reader (#463).
+            finish_microphone_startup_handshake(
+                microphone_status_expected,
+                &microphone_status_rx,
+                &capture_warnings,
+                MICROPHONE_STARTUP_STATUS_TIMEOUT,
+            );
+            Ok(NativeCallCaptureSession {
+                child,
+                output_path,
+                health,
+                stem_paths,
+                last_progress,
+                capture_warnings,
+            })
+        }
         Ok(Ok(line)) => {
             let _ = child.kill();
             Err(format!(
@@ -402,8 +577,27 @@ pub fn start_native_call_capture() -> Result<NativeCallCaptureSession, String> {
 }
 
 #[cfg(not(target_os = "macos"))]
-pub fn start_native_call_capture() -> Result<NativeCallCaptureSession, String> {
+pub fn start_native_call_capture(
+    _configured_microphone: Option<&str>,
+) -> Result<NativeCallCaptureSession, String> {
     Err("native call capture is unsupported on this platform".into())
+}
+
+#[cfg(target_os = "macos")]
+fn list_native_call_microphones(helper: &Path) -> Result<MicrophoneInventory, String> {
+    let output = Command::new(helper)
+        .arg("--list-microphones")
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|error| format!("failed to enumerate native-call microphones: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "native call helper microphone enumeration exited with {}",
+            output.status
+        ));
+    }
+    serde_json::from_slice(&output.stdout)
+        .map_err(|error| format!("invalid native-call microphone inventory: {error}"))
 }
 
 #[cfg(target_os = "macos")]
@@ -438,7 +632,16 @@ fn find_native_call_helper_binary() -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_macos_major_version;
+    use super::{
+        finish_microphone_startup_handshake, native_call_helper_args, parse_macos_major_version,
+        resolve_microphone_selection, MicrophoneSelection, MicrophoneStartupStatus,
+    };
+    use std::{
+        ffi::OsString,
+        path::Path,
+        sync::{mpsc, Arc, Mutex},
+        time::Duration,
+    };
 
     #[test]
     fn parses_major_version_from_product_version() {
@@ -446,5 +649,75 @@ mod tests {
         assert_eq!(parse_macos_major_version("14.7"), Some(14));
         assert_eq!(parse_macos_major_version(""), None);
         assert_eq!(parse_macos_major_version("not-a-version"), None);
+    }
+
+    #[test]
+    fn selects_exact_configured_microphone_when_present() {
+        let available = vec![
+            "MacBook Pro Microphone".to_string(),
+            "Studio Display Microphone".to_string(),
+        ];
+        assert_eq!(
+            resolve_microphone_selection(Some("Studio Display Microphone"), &available),
+            MicrophoneSelection::Configured("Studio Display Microphone".into())
+        );
+    }
+
+    #[test]
+    fn reports_configured_microphone_missing_before_defaulting() {
+        let available = vec!["MacBook Pro Microphone".to_string()];
+        assert_eq!(
+            resolve_microphone_selection(Some("Studio Display Microphone"), &available),
+            MicrophoneSelection::ConfiguredMissing("Studio Display Microphone".into())
+        );
+    }
+
+    #[test]
+    fn uses_default_when_no_microphone_is_configured() {
+        let available = vec!["MacBook Pro Microphone".to_string()];
+        assert_eq!(
+            resolve_microphone_selection(None, &available),
+            MicrophoneSelection::Default
+        );
+    }
+
+    #[test]
+    fn configured_microphone_is_passed_to_native_helper() {
+        let args = native_call_helper_args(
+            Path::new("/tmp/call.mov"),
+            &MicrophoneSelection::Configured("Studio Display Microphone".into()),
+        );
+        assert_eq!(
+            args,
+            vec![
+                OsString::from("/tmp/call.mov"),
+                OsString::from("--microphone-name"),
+                OsString::from("Studio Display Microphone"),
+            ]
+        );
+
+        let default_args =
+            native_call_helper_args(Path::new("/tmp/call.mov"), &MicrophoneSelection::Default);
+        assert_eq!(default_args, vec![OsString::from("/tmp/call.mov")]);
+    }
+
+    #[test]
+    fn actual_start_fallback_is_visible_before_session_return() {
+        let warnings = Arc::new(Mutex::new(Vec::new()));
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(10));
+            tx.send(MicrophoneStartupStatus::Fallback(
+                "Studio Display Microphone".into(),
+            ))
+            .unwrap();
+        });
+
+        finish_microphone_startup_handshake(true, &rx, &warnings, Duration::from_secs(1));
+
+        assert_eq!(
+            warnings.lock().unwrap().as_slice(),
+            ["configured mic not found, using default: 'Studio Display Microphone'."]
+        );
     }
 }

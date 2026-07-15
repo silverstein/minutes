@@ -377,7 +377,15 @@ pub(crate) enum SourceAwareDiarizationPlan {
     SilentSystemStem(StemPaths),
 }
 
-pub(crate) fn stem_has_audio(path: &Path) -> bool {
+/// Return true when a WAV stem contains detectable signal in any one-second
+/// window. The whole file is scanned for silent captures so callers do not
+/// confuse a full-duration digital-silence stem with usable audio.
+///
+/// This is public so the desktop's native-call queue and the core pipeline use
+/// exactly the same signal classifier. A file-size check is insufficient: a
+/// disconnected/default microphone can produce a correctly sized WAV whose
+/// samples are all digital silence (#463).
+pub fn stem_has_audio(path: &Path) -> bool {
     let Ok(reader) = hound::WavReader::open(path) else {
         return false;
     };
@@ -564,6 +572,25 @@ fn probe_stem_observed_signal<T>(
 }
 
 pub(crate) fn discover_stem_plan(audio_path: &Path) -> Option<SourceAwareDiarizationPlan> {
+    // A signal-aware native-call queue may hand the surviving system stem to
+    // the background worker directly (#463). Preserve the established
+    // system-stem-only diarization path instead of treating that WAV as an
+    // unrelated single-source recording.
+    if audio_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.ends_with(".system.wav"))
+        && stem_has_audio(audio_path)
+    {
+        tracing::warn!(
+            system = %audio_path.display(),
+            "processing surviving native-call system stem with system-only diarization"
+        );
+        return Some(SourceAwareDiarizationPlan::SystemStemOnly(
+            audio_path.to_path_buf(),
+        ));
+    }
+
     let stem = audio_path.file_stem()?.to_str()?;
     let dir = audio_path.parent()?;
     let voice = dir.join(format!("{}.voice.wav", stem));
@@ -1387,6 +1414,18 @@ fn diarize_system_stem_with_full_audio_fallback(
 ) -> Option<DiarizationResult> {
     if let Some(result) = run_engine(system_stem, config, resolved_engine) {
         return Some(result);
+    }
+
+    // Single-stem native-call recovery deliberately passes the survivor as
+    // both paths. Retrying the same PCM is pointless, and—more importantly—
+    // callers must never substitute the known-broken dual-track `.mov` after
+    // recovery selected a safe stem (#463).
+    if system_stem == audio_path {
+        tracing::warn!(
+            system_stem = %system_stem.display(),
+            "system-stem-only diarization failed; keeping the transcript unlabeled"
+        );
+        return None;
     }
 
     tracing::warn!(
@@ -3578,6 +3617,24 @@ mod tests {
     }
 
     #[test]
+    fn discover_stem_plan_keeps_system_only_path_for_direct_survivor() {
+        let dir = tempfile::tempdir().unwrap();
+        let system = dir.path().join("job-463.system.wav");
+        write_i16_wav(&system, 16_000, 1, 16_000, |frame, _| {
+            if frame % 16 < 8 {
+                8_000
+            } else {
+                -8_000
+            }
+        });
+
+        assert!(matches!(
+            discover_stem_plan(&system),
+            Some(SourceAwareDiarizationPlan::SystemStemOnly(path)) if path == system
+        ));
+    }
+
+    #[test]
     fn system_stem_only_falls_back_to_full_audio_when_engine_fails() {
         let config = Config::default();
         let system_stem = Path::new("/tmp/call.system.wav");
@@ -3618,6 +3675,27 @@ mod tests {
             vec![system_stem.to_path_buf(), audio.to_path_buf()]
         );
         assert_eq!(result.unwrap().segments[0].speaker, "SPEAKER_0");
+    }
+
+    #[test]
+    fn recovered_system_stem_engine_failure_never_reopens_original_mov() {
+        let config = Config::default();
+        let system_stem = Path::new("/tmp/call.system.wav");
+        let mut attempted_paths = Vec::new();
+
+        let result = diarize_system_stem_with_full_audio_fallback(
+            system_stem,
+            system_stem,
+            &config,
+            "test-engine",
+            |path, _config, _engine| {
+                attempted_paths.push(path.to_path_buf());
+                None
+            },
+        );
+
+        assert!(result.is_none());
+        assert_eq!(attempted_paths, vec![system_stem.to_path_buf()]);
     }
 
     #[test]

@@ -2737,7 +2737,7 @@ fn preserve_failed_capture_path(path: &std::path::Path, config: &Config) -> Opti
 #[derive(Debug, Clone)]
 struct NativeCallProcessingInput {
     path: PathBuf,
-    recovery_warning: Option<String>,
+    recovery_health: Option<minutes_core::markdown::RecordingHealth>,
 }
 
 fn file_has_bytes(path: &Path) -> bool {
@@ -2749,24 +2749,18 @@ fn viable_native_call_stem(path: &Path) -> bool {
         .is_ok_and(|metadata| metadata.len() >= min_viable_stem_bytes(path))
 }
 
-fn native_call_recovery_health(
+fn native_call_capture_warning_health(
     message: impl Into<String>,
-    source: minutes_core::diarize::CaptureSource,
 ) -> minutes_core::markdown::RecordingHealth {
-    minutes_core::markdown::RecordingHealth {
+    let mut health = minutes_core::markdown::RecordingHealth {
         voice_stem_active_ratio: None,
         system_stem_active_ratio: None,
         system_dominant_ratio: None,
-        capture_warnings: vec![minutes_core::markdown::CaptureWarning {
-            kind: minutes_core::diarize::FailureKind::Other {
-                code: "native-call-stem-recovery".into(),
-            },
-            source,
-            message: message.into(),
-            diagnostic_confidence: minutes_core::diarize::DiagnosticConfidence::Inferred,
-        }],
+        capture_warnings: Vec::new(),
         diarization_path: Some(minutes_core::markdown::DiarizationPath::None),
-    }
+    };
+    minutes_core::health::append_native_call_capture_warning(&mut health, message);
+    health
 }
 
 fn native_call_processing_input(output_path: &Path) -> io::Result<NativeCallProcessingInput> {
@@ -2774,8 +2768,15 @@ fn native_call_processing_input(output_path: &Path) -> io::Result<NativeCallProc
     let stems = minutes_core::capture::stem_paths_for(output_path);
     let voice = stems.as_ref().map(|stems| stems.voice.as_path());
     let system = stems.as_ref().map(|stems| stems.system.as_path());
-    let voice_viable = voice.is_some_and(viable_native_call_stem);
-    let system_viable = system.is_some_and(viable_native_call_stem);
+    // Size catches abort-at-start fragments; the shared core signal probe
+    // catches full-duration digital silence. The latter is the #463 gap: a
+    // 74-minute all-null mic WAV easily passed the former check.
+    let voice_viable = voice.is_some_and(|path| {
+        viable_native_call_stem(path) && minutes_core::diarize::stem_has_audio(path)
+    });
+    let system_viable = system.is_some_and(|path| {
+        viable_native_call_stem(path) && minutes_core::diarize::stem_has_audio(path)
+    });
 
     if voice_viable && system_viable {
         if !primary_has_bytes {
@@ -2787,15 +2788,15 @@ fn native_call_processing_input(output_path: &Path) -> io::Result<NativeCallProc
             std::fs::write(output_path, b"minutes native-call stem anchor")?;
             return Ok(NativeCallProcessingInput {
                 path: output_path.to_path_buf(),
-                recovery_warning: Some(
-                    "Native call capture did not produce a usable .mov container; processing recovered PCM stems instead.".into(),
-                ),
+                recovery_health: Some(native_call_capture_warning_health(
+                    "Native call capture did not produce a usable .mov container; processing recovered PCM stems instead.",
+                )),
             });
         }
 
         return Ok(NativeCallProcessingInput {
             path: output_path.to_path_buf(),
-            recovery_warning: None,
+            recovery_health: None,
         });
     }
 
@@ -2803,8 +2804,10 @@ fn native_call_processing_input(output_path: &Path) -> io::Result<NativeCallProc
         let voice = voice.expect("voice path present when viable");
         return Ok(NativeCallProcessingInput {
             path: voice.to_path_buf(),
-            recovery_warning: Some(
-                "Native call capture did not produce a usable system-audio stem; processing the local microphone stem only.".into(),
+            recovery_health: Some(
+                minutes_core::health::recording_health_for_native_call_stem_recovery(
+                    minutes_core::diarize::CaptureSource::Voice,
+                ),
             ),
         });
     }
@@ -2813,27 +2816,27 @@ fn native_call_processing_input(output_path: &Path) -> io::Result<NativeCallProc
         let system = system.expect("system path present when viable");
         return Ok(NativeCallProcessingInput {
             path: system.to_path_buf(),
-            recovery_warning: Some(
-                "Native call capture did not produce a usable microphone stem; processing the system-audio stem only.".into(),
+            recovery_health: Some(
+                minutes_core::health::recording_health_for_native_call_stem_recovery(
+                    minutes_core::diarize::CaptureSource::System,
+                ),
             ),
-        });
-    }
-
-    if primary_has_bytes {
-        return Ok(NativeCallProcessingInput {
-            path: output_path.to_path_buf(),
-            recovery_warning: None,
         });
     }
 
     Err(io::Error::new(
         io::ErrorKind::NotFound,
         format!(
-            "native call capture did not produce a usable .mov or PCM stem under {}",
+            "native call capture did not produce a usable PCM stem under {}{}",
             output_path
                 .parent()
                 .map(|path| path.display().to_string())
-                .unwrap_or_else(|| "<unknown>".into())
+                .unwrap_or_else(|| "<unknown>".into()),
+            if primary_has_bytes {
+                "; the .mov was preserved but its dual-track decode is unsafe"
+            } else {
+                ""
+            }
         ),
     ))
 }
@@ -2854,30 +2857,18 @@ fn queue_native_call_capture_for_processing(
     let input = native_call_processing_input(output_path).map_err(|error| {
         format!("failed to prepare native call capture for processing: {error}")
     })?;
-    let warning = match (extra_warning, input.recovery_warning) {
-        (Some(extra), Some(recovery)) => Some(format!("{extra} {recovery}")),
-        (Some(extra), None) => Some(extra),
-        (None, Some(recovery)) => Some(recovery),
-        (None, None) => None,
-    };
-    let source = if input
-        .path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .is_some_and(|name| name.ends_with(".system.wav"))
-    {
-        minutes_core::diarize::CaptureSource::System
-    } else if input
-        .path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .is_some_and(|name| name.ends_with(".voice.wav"))
-    {
-        minutes_core::diarize::CaptureSource::Voice
-    } else {
-        minutes_core::diarize::CaptureSource::Both
-    };
-    let recording_health = warning.map(|message| native_call_recovery_health(message, source));
+    let mut recording_health = input.recovery_health;
+    if let Some(extra_warning) = extra_warning {
+        let health = recording_health
+            .get_or_insert_with(|| native_call_capture_warning_health(extra_warning.clone()));
+        if health
+            .capture_warnings
+            .iter()
+            .all(|warning| warning.message != extra_warning)
+        {
+            minutes_core::health::append_native_call_capture_warning(health, extra_warning);
+        }
+    }
     let (consent, consent_notice) = if mode == CaptureMode::Meeting {
         minutes_core::notes::load_consent()
     } else {
@@ -2900,6 +2891,18 @@ fn queue_native_call_capture_for_processing(
         recording_health,
     )
     .map_err(|error| error.to_string())
+}
+
+fn combine_native_call_warnings(
+    capture_warning: Option<String>,
+    operational_warning: Option<String>,
+) -> Option<String> {
+    match (capture_warning, operational_warning) {
+        (Some(capture), Some(operational)) => Some(format!("{capture} {operational}")),
+        (Some(capture), None) => Some(capture),
+        (None, Some(operational)) => Some(operational),
+        (None, None) => None,
+    }
 }
 
 /// Copy `src` to `dest` with two invariants beyond `std::fs::copy`:
@@ -3175,13 +3178,23 @@ fn start_native_call_recording(
         minutes_core::pid::remove().ok();
         return Err(error.to_string());
     }
-    let mut session = match call_capture::start_native_call_capture() {
-        Ok(session) => session,
-        Err(error) => {
-            minutes_core::pid::remove().ok();
-            return Err(error);
-        }
-    };
+    // Config written through Settings is already canonical, but older/manual
+    // TOML may still contain the picker decoration (sample rate/channels).
+    // ScreenCaptureKit resolves AVCaptureDevice.localizedName exactly, so
+    // normalize at this boundary as well.
+    let configured_microphone = config
+        .recording
+        .device
+        .as_deref()
+        .and_then(minutes_core::capture::canonicalize_input_device_setting);
+    let mut session =
+        match call_capture::start_native_call_capture(configured_microphone.as_deref()) {
+            Ok(session) => session,
+            Err(error) => {
+                minutes_core::pid::remove().ok();
+                return Err(error);
+            }
+        };
     let output_path = session.output_path().to_path_buf();
     let recording_started_at = chrono::Local::now();
     let context_session_id = minutes_core::desktop_context::maybe_start_capture_session(
@@ -3196,6 +3209,18 @@ fn start_native_call_recording(
     stop_flag.store(false, Ordering::Relaxed);
     sync_processing_indicator(processing, processing_stage);
     set_latest_output(latest_output, None);
+    if let Some(warning) = session.capture_warning() {
+        set_latest_output(
+            latest_output,
+            Some(OutputNotice {
+                kind: "warning".into(),
+                title: "Using default microphone".into(),
+                path: output_path.display().to_string(),
+                detail: warning,
+                job_id: None,
+            }),
+        );
+    }
     if let Ok(mut health) = call_capture_health.lock() {
         *health = Some(session.source_health());
     }
@@ -3256,7 +3281,10 @@ fn start_native_call_recording(
                     recording_finished_at,
                     context_session_id.clone(),
                     None,
-                    Some("Native call capture helper exited before normal stop.".into()),
+                    combine_native_call_warnings(
+                        session.capture_warning(),
+                        Some("Native call capture helper exited before normal stop.".into()),
+                    ),
                 ) {
                     Ok(job) => {
                         processing.store(true, Ordering::Relaxed);
@@ -3357,9 +3385,12 @@ fn start_native_call_recording(
             recording_finished_at,
             context_session_id.clone(),
             None,
-            Some(format!(
-                "Native call capture finalization reported an error: {error}."
-            )),
+            combine_native_call_warnings(
+                session.capture_warning(),
+                Some(format!(
+                    "Native call capture finalization reported an error: {error}."
+                )),
+            ),
         );
 
         match queue_result {
@@ -3496,7 +3527,7 @@ fn start_native_call_recording(
         recording_finished_at,
         context_session_id.clone(),
         calendar_event,
-        None,
+        session.capture_warning(),
     ) {
         Ok(job) => {
             processing.store(true, Ordering::Relaxed);
@@ -4067,7 +4098,20 @@ fn output_notice_from_job(job: &minutes_core::jobs::ProcessingJob) -> Option<Out
                     .clone()
                     .unwrap_or_else(|| "Processed recording".into()),
                 path: path.clone(),
-                detail: "Saved meeting markdown".into(),
+                detail: job
+                    .recording_health
+                    .as_ref()
+                    .map(|health| {
+                        health
+                            .capture_warnings
+                            .iter()
+                            .map(|warning| warning.message.as_str())
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    })
+                    .filter(|warnings| !warnings.is_empty())
+                    .map(|warnings| format!("Saved meeting markdown. {warnings}"))
+                    .unwrap_or_else(|| "Saved meeting markdown".into()),
                 job_id: None,
             })
         }
@@ -5230,9 +5274,10 @@ fn recovery_title(path: &std::path::Path, fallback: &str) -> String {
 }
 
 /// A dual-source capture writes `<name>.voice.wav` / `<name>.system.wav`
-/// sidecars next to the primary `<name>.wav`. Those stems are processed as part
-/// of the primary, never on their own, so they must not appear as independent
-/// recovery items when their primary is present: otherwise "Retry all" would
+/// sidecars next to the primary `<name>.wav` or native-call `<name>.mov`.
+/// Those stems are processed as part of the primary, never on their own, so
+/// they must not appear as independent recovery items when their primary is
+/// present: otherwise "Retry all" would
 /// enqueue them as standalone jobs that race (and break) the primary's job. An
 /// orphaned stem with no primary still surfaces so the user can see it.
 fn is_dual_source_stem_with_primary(path: &Path) -> bool {
@@ -5244,7 +5289,11 @@ fn is_dual_source_stem_with_primary(path: &Path) -> bool {
     };
     [".voice.wav", ".system.wav"].iter().any(|suffix| {
         name.strip_suffix(suffix)
-            .map(|base| dir.join(format!("{}.wav", base)).exists())
+            .map(|base| {
+                ["wav", "mov"]
+                    .iter()
+                    .any(|extension| dir.join(format!("{base}.{extension}")).exists())
+            })
             .unwrap_or(false)
     })
 }
@@ -12371,23 +12420,40 @@ mod tests {
         }
     }
 
+    fn write_signal_wav(path: &Path, audible: bool) {
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: 48_000,
+            bits_per_sample: 32,
+            sample_format: hound::SampleFormat::Float,
+        };
+        let mut writer = hound::WavWriter::create(path, spec).expect("create signal wav");
+        for frame in 0..48_000 {
+            let sample = if audible {
+                (frame as f32 * 440.0 * std::f32::consts::TAU / 48_000.0).sin() * 0.2
+            } else {
+                -0.000_028
+            };
+            writer.write_sample(sample).expect("write signal sample");
+        }
+        writer.finalize().expect("finalize signal wav");
+    }
+
     #[test]
     fn native_call_processing_input_uses_voice_stem_when_system_missing() {
         let dir = TempDir::new().unwrap();
         let mov = dir.path().join("2026-05-19-120148-call.mov");
         std::fs::write(&mov, b"mov").unwrap();
         let voice = dir.path().join("2026-05-19-120148-call.voice.wav");
-        write_test_wav(&voice, 48_000, 200_000);
+        write_signal_wav(&voice, true);
 
         let input = native_call_processing_input(&mov).expect("processing input");
 
         assert_eq!(input.path, voice);
-        assert!(
-            input
-                .recovery_warning
-                .as_deref()
-                .is_some_and(|warning| warning.contains("system-audio stem")),
-            "warning should explain the missing system side"
+        let health = input.recovery_health.expect("recovery health");
+        assert_eq!(
+            health.capture_warnings[0].source,
+            minutes_core::diarize::CaptureSource::Voice
         );
     }
 
@@ -12397,8 +12463,8 @@ mod tests {
         let mov = dir.path().join("2026-05-19-120148-call.mov");
         let voice = dir.path().join("2026-05-19-120148-call.voice.wav");
         let system = dir.path().join("2026-05-19-120148-call.system.wav");
-        write_test_wav(&voice, 48_000, 200_000);
-        write_test_wav(&system, 48_000, 200_000);
+        write_signal_wav(&voice, true);
+        write_signal_wav(&system, true);
 
         let input = native_call_processing_input(&mov).expect("processing input");
 
@@ -12407,12 +12473,63 @@ mod tests {
             input.path.exists(),
             "missing .mov should be recreated as a stem anchor"
         );
+        assert!(input.recovery_health.is_some());
+    }
+
+    #[test]
+    fn native_call_processing_input_selects_system_for_full_size_digital_silence_mic() {
+        let dir = TempDir::new().unwrap();
+        let mov = dir.path().join("2026-05-19-120148-call.mov");
+        let voice = dir.path().join("2026-05-19-120148-call.voice.wav");
+        let system = dir.path().join("2026-05-19-120148-call.system.wav");
+        std::fs::write(&mov, b"mov").unwrap();
+        write_signal_wav(&voice, false);
+        write_signal_wav(&system, true);
+
+        let input = native_call_processing_input(&mov).expect("system stem should recover");
+        assert_eq!(input.path, system);
+        let health = input.recovery_health.expect("recovery health");
+        assert!(matches!(
+            &health.capture_warnings[0].kind,
+            minutes_core::diarize::FailureKind::Other { code }
+                if code == minutes_core::health::NATIVE_CALL_MICROPHONE_RECOVERY_CODE
+        ));
+    }
+
+    #[test]
+    fn native_call_processing_input_selects_voice_for_full_size_digital_silence_system() {
+        let dir = TempDir::new().unwrap();
+        let mov = dir.path().join("2026-05-19-120148-call.mov");
+        let voice = dir.path().join("2026-05-19-120148-call.voice.wav");
+        let system = dir.path().join("2026-05-19-120148-call.system.wav");
+        std::fs::write(&mov, b"mov").unwrap();
+        write_signal_wav(&voice, true);
+        write_signal_wav(&system, false);
+
+        let input = native_call_processing_input(&mov).expect("voice stem should recover");
+        assert_eq!(input.path, voice);
+        let health = input.recovery_health.expect("recovery health");
+        assert!(matches!(
+            &health.capture_warnings[0].kind,
+            minutes_core::diarize::FailureKind::Other { code }
+                if code == minutes_core::health::NATIVE_CALL_SYSTEM_RECOVERY_CODE
+        ));
+    }
+
+    #[test]
+    fn native_call_processing_input_rejects_both_digitally_silent_stems() {
+        let dir = TempDir::new().unwrap();
+        let mov = dir.path().join("2026-05-19-120148-call.mov");
+        let voice = dir.path().join("2026-05-19-120148-call.voice.wav");
+        let system = dir.path().join("2026-05-19-120148-call.system.wav");
+        std::fs::write(&mov, b"mov").unwrap();
+        write_signal_wav(&voice, false);
+        write_signal_wav(&system, false);
+
+        let error = native_call_processing_input(&mov).expect_err("no usable stem");
         assert!(
-            input
-                .recovery_warning
-                .as_deref()
-                .is_some_and(|warning| warning.contains("recovered PCM stems")),
-            "warning should explain stem-anchor recovery"
+            error.to_string().contains("usable PCM stem"),
+            "unexpected error: {error}"
         );
     }
 
@@ -13861,6 +13978,51 @@ mod tests {
     }
 
     #[test]
+    fn legacy_recovered_mov_notice_becomes_honest_after_job_health_persists() {
+        let health = minutes_core::health::recording_health_for_native_call_stem_recovery(
+            minutes_core::diarize::CaptureSource::System,
+        );
+        let mut job = minutes_core::jobs::ProcessingJob {
+            id: "job-recovered-system".into(),
+            title: Some("Recovered call".into()),
+            mode: CaptureMode::Meeting,
+            content_type: ContentType::Meeting,
+            state: minutes_core::jobs::JobState::Complete,
+            stage: minutes_core::jobs::JobState::Complete.default_stage(),
+            output_path: Some("/tmp/recovered.md".into()),
+            audio_path: "/tmp/recovered.system.wav".into(),
+            error: None,
+            created_at: chrono::Local::now(),
+            started_at: None,
+            finished_at: Some(chrono::Local::now()),
+            notice_dismissed_at: None,
+            recording_started_at: None,
+            recording_finished_at: None,
+            context_session_id: None,
+            user_notes: None,
+            pre_context: None,
+            calendar_event: None,
+            template_slug: None,
+            word_count: Some(8_329),
+            owner_pid: None,
+            retry_count: 0,
+            consent: None,
+            consent_notice: None,
+            recording_health: None,
+        };
+
+        let stale_notice = output_notice_from_job(&job).expect("legacy completion notice");
+        assert_eq!(stale_notice.detail, "Saved meeting markdown");
+
+        // Core persists this field from the recovered artifact before the
+        // desktop reads the terminal job.
+        job.recording_health = Some(health);
+        let notice = output_notice_from_job(&job).expect("recovered completion notice");
+        assert_eq!(notice.kind, "saved");
+        assert!(notice.detail.contains("call/remote audio only"));
+    }
+
+    #[test]
     fn startup_retryable_notices_do_not_surface_stale_failure_details() {
         let job = minutes_core::jobs::ProcessingJob {
             id: "job-failed".into(),
@@ -14257,6 +14419,29 @@ mod tests {
             assert_eq!(items.len(), 2);
             assert!(items.iter().any(|item| item.kind == "watch-failed"));
             assert!(items.iter().any(|item| item.kind == "preserved-capture"));
+        });
+    }
+
+    #[test]
+    fn scan_recovery_items_groups_native_call_mov_with_surviving_stems() {
+        with_temp_home(|home| {
+            let output_dir = home.join("meetings");
+            let failed_captures = output_dir.join("failed-captures");
+            std::fs::create_dir_all(&failed_captures).unwrap();
+            let mov = failed_captures.join("recovered-call.mov");
+            let voice = failed_captures.join("recovered-call.voice.wav");
+            let system = failed_captures.join("recovered-call.system.wav");
+            std::fs::write(&mov, "mov anchor").unwrap();
+            std::fs::write(&voice, "silent mic stem retained for diagnostics").unwrap();
+            std::fs::write(&system, "surviving system stem").unwrap();
+            let config = Config {
+                output_dir,
+                ..Config::default()
+            };
+
+            let items = scan_recovery_items(&config);
+            assert_eq!(items.len(), 1, "stems must stay grouped with the .mov");
+            assert_eq!(PathBuf::from(&items[0].path), mov);
         });
     }
 

@@ -1,0 +1,88 @@
+schema_version = 1
+
+# Current defaults mirror COPILOT_MODEL_TIERS in crates/core/src/config.rs.
+# Apple Silicon uses Ollama's MLX/NVFP4 builds; other machines use the
+# registry's portable GGUF tags.
+
+[[candidates]]
+tier = "beast"
+role = "current"
+tag = "qwen3.5:35b-a3b-nvfp4"
+platform = "apple_silicon"
+small_ci = false
+source = "Minutes July 2026 head-to-head benchmark winner"
+
+[[candidates]]
+tier = "beast"
+role = "current"
+tag = "qwen3.5:35b-a3b"
+platform = "portable"
+small_ci = false
+source = "Portable fallback for the approved Qwen 35B A3B tier"
+
+[[candidates]]
+tier = "strong"
+role = "current"
+tag = "gemma4:26b-mlx"
+platform = "apple_silicon"
+small_ci = false
+source = "Minutes July 2026 head-to-head benchmark winner"
+
+[[candidates]]
+tier = "strong"
+role = "current"
+tag = "gemma4:26b"
+platform = "portable"
+small_ci = false
+source = "Portable fallback for the approved Gemma 26B tier"
+
+[[candidates]]
+tier = "mainstream"
+role = "current"
+tag = "qwen3.5:9b-mlx"
+platform = "apple_silicon"
+small_ci = true
+source = "Minutes July 2026 head-to-head benchmark winner"
+
+[[candidates]]
+tier = "mainstream"
+role = "current"
+tag = "qwen3.5:9b"
+platform = "portable"
+small_ci = true
+source = "Portable fallback for the approved Qwen 9B tier"
+
+[[candidates]]
+tier = "modest"
+role = "current"
+tag = "qwen3.5:4b-mlx"
+platform = "apple_silicon"
+small_ci = true
+source = "Minutes July 2026 head-to-head benchmark winner"
+
+[[candidates]]
+tier = "modest"
+role = "current"
+tag = "qwen3.5:4b"
+platform = "portable"
+small_ci = true
+source = "Portable fallback for the approved Qwen 4B tier"
+
+# Challengers are human-maintained. Add newly released Ollama tags here after
+# confirming that the tag exists; the monthly job never promotes one itself.
+
+[[candidates]]
+tier = "mainstream"
+role = "challenger"
+tag = "gemma4:latest"
+platform = "any"
+small_ci = true
+source = "Schema-valid dense E4B candidate from the July 2026 benchmark"
+
+[[candidates]]
+tier = "mainstream"
+role = "challenger"
+tag = "gemma4:12b-qat"
+platform = "any"
+small_ci = true
+source = "Mat's schema-valid interim model from the July 2026 benchmark"

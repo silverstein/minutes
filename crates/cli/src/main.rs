@@ -1430,7 +1430,11 @@ enum CopilotAction {
         #[arg(long)]
         fixtures: Option<PathBuf>,
 
-        /// Use the deterministic virtual clock instead of sleeping to transcript offsets
+        /// Evaluate the real coaching prompt against this Ollama model
+        #[arg(long)]
+        model: Option<String>,
+
+        /// Replay fixture order without sleeping to transcript offsets
         #[arg(long)]
         accelerated: bool,
 
@@ -1439,7 +1443,15 @@ enum CopilotAction {
         json: bool,
     },
     /// Set up the private AI Coach needs
-    Setup,
+    Setup {
+        /// Force a specific Ollama model instead of the hardware recommendation
+        #[arg(long, conflicts_with = "retune")]
+        model: Option<String>,
+
+        /// Re-run hardware selection even when a custom model is configured
+        #[arg(long)]
+        retune: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -2007,7 +2019,7 @@ fn main() -> Result<()> {
             follow,
             since_seq,
         } => cmd_events(limit, event_type, since, follow, since_seq, &config),
-        Commands::Copilot { action } => cmd_copilot(action, &config),
+        Commands::Copilot { action } => cmd_copilot(action, &mut config),
         Commands::AgentAnnotate {
             agent_id,
             tools,
@@ -8515,6 +8527,8 @@ life (qmd://life/)
             "eval",
             "--fixtures",
             "/tmp/copilot-fixtures",
+            "--model",
+            "qwen3.5:4b-mlx",
             "--accelerated",
             "--json",
         ])
@@ -8524,16 +8538,49 @@ life (qmd://life/)
                 action:
                     CopilotAction::Eval {
                         fixtures,
+                        model,
                         accelerated,
                         json,
                     },
             } => {
                 assert_eq!(fixtures, Some(PathBuf::from("/tmp/copilot-fixtures")));
+                assert_eq!(model.as_deref(), Some("qwen3.5:4b-mlx"));
                 assert!(accelerated);
                 assert!(json);
             }
             _ => panic!("expected Copilot Eval variant"),
         }
+    }
+
+    #[test]
+    fn coach_model_eval_scoring_helpers_are_deterministic() {
+        use minutes_core::copilot::eval::OpportunityLabel;
+        use minutes_core::copilot::{NudgeDraft, NudgeKind, OpportunityKind};
+
+        assert_eq!(model_eval_percentile(&[40, 10, 30, 20], 0.50), Some(20));
+        assert_eq!(model_eval_percentile(&[40, 10, 30, 20], 0.95), Some(40));
+        assert_eq!(model_eval_percentile(&[], 0.50), None);
+        assert_eq!(model_eval_rate(0, 0).rate, 1.0);
+
+        let labels = vec![OpportunityLabel {
+            id: "pricing-owner".into(),
+            start_ms: 500,
+            end_ms: 2_000,
+            kind: Some(NudgeKind::Ask),
+            match_any: vec!["finance approver".into(), "pricing owner".into()],
+        }];
+        let draft = NudgeDraft {
+            kind: NudgeKind::Ask,
+            text: "Who is the finance approver for this offer?".into(),
+            source_chip: "transcript".into(),
+            opportunity: OpportunityKind::Decision,
+            confidence: 92,
+        };
+        assert_eq!(
+            match_model_eval_opportunity(&labels, 1_200, &draft),
+            Some("pricing-owner")
+        );
+        assert_eq!(match_model_eval_opportunity(&labels, 2_500, &draft), None);
     }
 
     #[test]
@@ -8564,7 +8611,10 @@ life (qmd://life/)
         assert!(matches!(
             parsed.command,
             Commands::Copilot {
-                action: CopilotAction::Setup
+                action: CopilotAction::Setup {
+                    model: None,
+                    retune: false
+                }
             }
         ));
     }
@@ -8576,9 +8626,96 @@ life (qmd://life/)
         assert!(matches!(
             parsed.command,
             Commands::Copilot {
-                action: CopilotAction::Setup
+                action: CopilotAction::Setup {
+                    model: None,
+                    retune: false
+                }
             }
         ));
+    }
+
+    #[test]
+    fn coach_setup_parses_model_and_retune_controls() {
+        let forced = Cli::try_parse_from([
+            "minutes",
+            "coach",
+            "setup",
+            "--model",
+            "custom/coach:latest",
+        ])
+        .unwrap();
+        assert!(matches!(
+            forced.command,
+            Commands::Copilot {
+                action: CopilotAction::Setup {
+                    model: Some(ref model),
+                    retune: false
+                }
+            } if model == "custom/coach:latest"
+        ));
+
+        let retune = Cli::try_parse_from(["minutes", "coach", "setup", "--retune"]).unwrap();
+        assert!(matches!(
+            retune.command,
+            Commands::Copilot {
+                action: CopilotAction::Setup {
+                    model: None,
+                    retune: true
+                }
+            }
+        ));
+        assert!(Cli::try_parse_from([
+            "minutes",
+            "coach",
+            "setup",
+            "--retune",
+            "--model",
+            "qwen3.5:4b"
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn coach_setup_override_detection_preserves_only_explicit_custom_models() {
+        let mut config = Config::default();
+        assert_eq!(
+            configured_copilot_model_override(&config, None, false),
+            None
+        );
+
+        config.copilot.fast_model = "llama3.2:latest".into();
+        assert_eq!(
+            configured_copilot_model_override(&config, None, false),
+            None
+        );
+
+        config.copilot.fast_model = "gemma4:26b-mlx".into();
+        assert_eq!(
+            configured_copilot_model_override(&config, None, false),
+            None
+        );
+
+        config.copilot.fast_model = "custom/coach:latest".into();
+        assert_eq!(
+            configured_copilot_model_override(&config, None, false).as_deref(),
+            Some("custom/coach:latest")
+        );
+        assert_eq!(configured_copilot_model_override(&config, None, true), None);
+        assert_eq!(
+            configured_copilot_model_override(&config, Some("forced:tag"), false).as_deref(),
+            Some("forced:tag")
+        );
+    }
+
+    #[test]
+    fn coach_hardware_parsers_are_deterministic() {
+        assert_eq!(
+            parse_linux_meminfo_bytes("MemTotal:       16384000 kB\nMemFree: 10 kB"),
+            Some(16_777_216_000)
+        );
+        assert_eq!(parse_linux_meminfo_bytes("MemFree: 10 kB"), None);
+        assert!(is_apple_silicon_brand("Apple M4 Max"));
+        assert!(!is_apple_silicon_brand("Intel(R) Core(TM) i9"));
     }
 
     #[test]
@@ -9317,7 +9454,7 @@ fn cmd_get(slug_or_path: &str, json: bool, compact_json: bool, config: &Config) 
     Ok(())
 }
 
-fn cmd_copilot(action: CopilotAction, config: &Config) -> Result<()> {
+fn cmd_copilot(action: CopilotAction, config: &mut Config) -> Result<()> {
     match action {
         CopilotAction::Start {
             goal,
@@ -9332,14 +9469,22 @@ fn cmd_copilot(action: CopilotAction, config: &Config) -> Result<()> {
         CopilotAction::Feedback { nudge_id, rating } => cmd_copilot_feedback(&nudge_id, &rating),
         CopilotAction::Eval {
             fixtures,
+            model,
             accelerated,
             json,
-        } => cmd_copilot_eval(fixtures.as_deref(), accelerated, json),
-        CopilotAction::Setup => cmd_copilot_setup(&config.copilot),
+        } => cmd_copilot_eval(fixtures.as_deref(), model.as_deref(), accelerated, json),
+        CopilotAction::Setup { model, retune } => {
+            cmd_copilot_setup(config, model.as_deref(), retune)
+        }
     }
 }
 
-fn cmd_copilot_eval(fixtures: Option<&Path>, accelerated: bool, json: bool) -> Result<()> {
+fn cmd_copilot_eval(
+    fixtures: Option<&Path>,
+    model: Option<&str>,
+    accelerated: bool,
+    json: bool,
+) -> Result<()> {
     use minutes_core::copilot::eval::{
         builtin_fixtures, load_fixtures_dir, render_report_table, run_suite, EvalOptions,
         ReplayMode,
@@ -9349,6 +9494,15 @@ fn cmd_copilot_eval(fixtures: Option<&Path>, accelerated: bool, json: bool) -> R
         Some(path) => load_fixtures_dir(path)?,
         None => builtin_fixtures()?,
     };
+    if let Some(model) = model.map(str::trim).filter(|model| !model.is_empty()) {
+        let report = run_ollama_model_eval(&fixtures, model, accelerated)?;
+        if json {
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        } else {
+            print_ollama_model_eval(&report);
+        }
+        return Ok(());
+    }
     let report = run_suite(
         &fixtures,
         EvalOptions {
@@ -9377,6 +9531,334 @@ fn cmd_copilot_eval(fixtures: Option<&Path>, accelerated: bool, json: bool) -> R
         anyhow::bail!("copilot eval baseline failed");
     }
     Ok(())
+}
+
+#[derive(Debug, Serialize)]
+struct OllamaModelEvalRate {
+    numerator: usize,
+    denominator: usize,
+    rate: f64,
+}
+
+#[derive(Debug, Serialize)]
+struct OllamaModelEvalLatency {
+    samples: usize,
+    p50_ms: Option<u64>,
+    p95_ms: Option<u64>,
+}
+
+#[derive(Debug, Serialize)]
+struct OllamaModelEvalQuality {
+    useful_nudge_precision: OllamaModelEvalRate,
+    opportunity_recall: OllamaModelEvalRate,
+    no_nudge_quality: OllamaModelEvalRate,
+}
+
+#[derive(Debug, Serialize)]
+struct OllamaModelEvalSample {
+    fixture_id: String,
+    evidence_utterance_sequence: u64,
+    evidence_time_ms: u64,
+    ttft_ms: Option<u64>,
+    total_ms: u64,
+    schema_valid: bool,
+    visible_after_policy: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    matched_opportunity: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    draft: Option<minutes_core::copilot::NudgeDraft>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct OllamaModelEvalReport {
+    suite_version: u32,
+    mode: &'static str,
+    provider: &'static str,
+    model: String,
+    fixtures: usize,
+    requests: usize,
+    schema_valid: OllamaModelEvalRate,
+    visible_nudges: usize,
+    quality: OllamaModelEvalQuality,
+    ttft: OllamaModelEvalLatency,
+    total: OllamaModelEvalLatency,
+    samples: Vec<OllamaModelEvalSample>,
+}
+
+fn run_ollama_model_eval(
+    fixtures: &[minutes_core::copilot::eval::EvalFixture],
+    model_name: &str,
+    accelerated: bool,
+) -> Result<OllamaModelEvalReport> {
+    use minutes_core::copilot::eval::EVAL_SUITE_VERSION;
+    use minutes_core::copilot::{
+        BattleCard, CancelToken, CopilotModel, CopilotRequest, CopilotUtterance, ModelStreamEvent,
+        NudgePolicy, OllamaCopilotModel, StrategyState, StrategyStateDraft, TranscriptUpdateKind,
+    };
+    use std::collections::BTreeSet;
+    use std::sync::{Arc, Mutex};
+
+    let model = OllamaCopilotModel::new(
+        copilot_ollama_base_url(),
+        model_name,
+        Duration::from_secs(600),
+    );
+    model
+        .prewarm()
+        .map_err(|error| anyhow::anyhow!("could not warm Ollama model {model_name}: {error}"))?;
+
+    let mut samples = Vec::new();
+    let mut schema_valid = 0usize;
+    let mut visible_nudges = 0usize;
+    let mut useful_nudges = 0usize;
+    let mut matched_opportunities = BTreeSet::new();
+    let mut visible_evidence = Vec::<(String, u64)>::new();
+    let mut ttft_samples = Vec::new();
+    let mut total_samples = Vec::new();
+
+    for (fixture_index, fixture) in fixtures.iter().enumerate() {
+        let mut policy = NudgePolicy::for_mode(12_000, fixture.mode);
+        let mut previous_evidence_ms = 0u64;
+        for (utterance_index, evidence) in fixture.transcript.iter().enumerate() {
+            let evidence_time_ms = evidence.offset_ms.saturating_add(evidence.duration_ms);
+            if !accelerated && previous_evidence_ms > 0 {
+                std::thread::sleep(Duration::from_millis(
+                    evidence_time_ms.saturating_sub(previous_evidence_ms),
+                ));
+            }
+            previous_evidence_ms = evidence_time_ms;
+
+            let evidence_revision = (utterance_index + 1) as u64;
+            let utterances = fixture.transcript[..=utterance_index]
+                .iter()
+                .map(|utterance| CopilotUtterance {
+                    utterance_sequence: utterance.utterance_sequence,
+                    revision: utterance.utterance_sequence,
+                    update_kind: TranscriptUpdateKind::Final,
+                    source: utterance.source.clone(),
+                    text: utterance.final_text.clone(),
+                    speaker: None,
+                    speaker_verified: false,
+                    offset_ms: utterance.offset_ms,
+                    duration_ms: utterance.duration_ms,
+                })
+                .collect();
+            let strategy_state = fixture
+                .labels
+                .strategy
+                .as_ref()
+                .map(|expected| {
+                    StrategyState::from_draft(
+                        StrategyStateDraft {
+                            open_threads: expected.open_threads.clone(),
+                            unmet_goal_items: expected.unmet_goal_items.clone(),
+                            unresolved_objections: expected.unresolved_objections.clone(),
+                            steer_toward: expected.steer_toward.clone(),
+                        },
+                        evidence_revision,
+                    )
+                })
+                .unwrap_or_else(StrategyState::empty);
+            let request = CopilotRequest {
+                goal: fixture.goal.clone(),
+                mode: fixture.mode,
+                session_epoch: (fixture_index + 1) as u64,
+                evidence_revision,
+                evidence_utterance_sequence: evidence.utterance_sequence,
+                evidence_utterance_revision: evidence.utterance_sequence,
+                update_kind: TranscriptUpdateKind::Final,
+                utterances,
+                battle_card: BattleCard::empty(),
+                strategy_state,
+            };
+
+            let first_token = Arc::new(Mutex::new(None::<std::time::Instant>));
+            let first_token_sink = Arc::clone(&first_token);
+            let started = std::time::Instant::now();
+            let sink = move |event: ModelStreamEvent| {
+                if matches!(event, ModelStreamEvent::TextDelta(ref text) if !text.is_empty()) {
+                    first_token_sink
+                        .lock()
+                        .unwrap()
+                        .get_or_insert_with(std::time::Instant::now);
+                }
+            };
+            let result = model.stream_structured(&request, &CancelToken::new(), &sink);
+            let completed = std::time::Instant::now();
+            let total_ms = duration_ms(completed.duration_since(started));
+            let ttft_ms = first_token
+                .lock()
+                .unwrap()
+                .map(|observed| duration_ms(observed.duration_since(started)));
+            total_samples.push(total_ms);
+            if let Some(ttft_ms) = ttft_ms {
+                ttft_samples.push(ttft_ms);
+            }
+
+            let mut sample = OllamaModelEvalSample {
+                fixture_id: fixture.id.clone(),
+                evidence_utterance_sequence: evidence.utterance_sequence,
+                evidence_time_ms,
+                ttft_ms,
+                total_ms,
+                schema_valid: false,
+                visible_after_policy: false,
+                matched_opportunity: None,
+                draft: None,
+                error: None,
+            };
+            match result {
+                Ok(draft) => {
+                    schema_valid = schema_valid.saturating_add(1);
+                    sample.schema_valid = true;
+                    sample.draft = Some(draft.clone());
+                    let now = chrono::Utc
+                        .with_ymd_and_hms(2026, 1, 1, 0, 0, 0)
+                        .single()
+                        .expect("fixed eval date is valid")
+                        + chrono::Duration::milliseconds(
+                            evidence_time_ms.min(i64::MAX as u64) as i64
+                        );
+                    if policy.accept(draft.clone(), &request, now).is_some() {
+                        sample.visible_after_policy = true;
+                        visible_nudges = visible_nudges.saturating_add(1);
+                        visible_evidence.push((fixture.id.clone(), evidence_time_ms));
+                        if let Some(label_id) = match_model_eval_opportunity(
+                            &fixture.labels.opportunities,
+                            evidence_time_ms,
+                            &draft,
+                        ) {
+                            useful_nudges = useful_nudges.saturating_add(1);
+                            let qualified = format!("{}:{label_id}", fixture.id);
+                            matched_opportunities.insert(qualified);
+                            sample.matched_opportunity = Some(label_id.to_string());
+                        }
+                    }
+                }
+                Err(error) => sample.error = Some(error.to_string()),
+            }
+            samples.push(sample);
+        }
+    }
+
+    let opportunity_count = fixtures
+        .iter()
+        .map(|fixture| fixture.labels.opportunities.len())
+        .sum();
+    let no_opportunity_count = fixtures
+        .iter()
+        .map(|fixture| fixture.labels.no_opportunity_ranges.len())
+        .sum();
+    let clean_no_opportunity_ranges = fixtures
+        .iter()
+        .flat_map(|fixture| {
+            fixture.labels.no_opportunity_ranges.iter().map(|range| {
+                !visible_evidence.iter().any(|(fixture_id, evidence_ms)| {
+                    fixture_id == &fixture.id
+                        && *evidence_ms >= range.start_ms
+                        && *evidence_ms <= range.end_ms
+                })
+            })
+        })
+        .filter(|clean| *clean)
+        .count();
+    let requests = samples.len();
+
+    Ok(OllamaModelEvalReport {
+        suite_version: EVAL_SUITE_VERSION,
+        mode: if accelerated {
+            "accelerated"
+        } else {
+            "real_time"
+        },
+        provider: "ollama",
+        model: model_name.into(),
+        fixtures: fixtures.len(),
+        requests,
+        schema_valid: model_eval_rate(schema_valid, requests),
+        visible_nudges,
+        quality: OllamaModelEvalQuality {
+            useful_nudge_precision: model_eval_rate(useful_nudges, visible_nudges),
+            opportunity_recall: model_eval_rate(matched_opportunities.len(), opportunity_count),
+            no_nudge_quality: model_eval_rate(clean_no_opportunity_ranges, no_opportunity_count),
+        },
+        ttft: model_eval_latency(&ttft_samples),
+        total: model_eval_latency(&total_samples),
+        samples,
+    })
+}
+
+fn match_model_eval_opportunity<'a>(
+    labels: &'a [minutes_core::copilot::eval::OpportunityLabel],
+    evidence_time_ms: u64,
+    draft: &minutes_core::copilot::NudgeDraft,
+) -> Option<&'a str> {
+    let text = draft.text.to_ascii_lowercase();
+    labels
+        .iter()
+        .find(|label| {
+            evidence_time_ms >= label.start_ms
+                && evidence_time_ms <= label.end_ms
+                && label.kind.is_none_or(|kind| kind == draft.kind)
+                && label
+                    .match_any
+                    .iter()
+                    .any(|needle| text.contains(&needle.to_ascii_lowercase()))
+        })
+        .map(|label| label.id.as_str())
+}
+
+fn model_eval_rate(numerator: usize, denominator: usize) -> OllamaModelEvalRate {
+    OllamaModelEvalRate {
+        numerator,
+        denominator,
+        rate: if denominator == 0 {
+            1.0
+        } else {
+            numerator as f64 / denominator as f64
+        },
+    }
+}
+
+fn model_eval_latency(samples: &[u64]) -> OllamaModelEvalLatency {
+    OllamaModelEvalLatency {
+        samples: samples.len(),
+        p50_ms: model_eval_percentile(samples, 0.50),
+        p95_ms: model_eval_percentile(samples, 0.95),
+    }
+}
+
+fn model_eval_percentile(samples: &[u64], percentile: f64) -> Option<u64> {
+    if samples.is_empty() {
+        return None;
+    }
+    let mut sorted = samples.to_vec();
+    sorted.sort_unstable();
+    let rank = (percentile.clamp(0.0, 1.0) * sorted.len() as f64).ceil() as usize;
+    sorted.get(rank.saturating_sub(1)).copied()
+}
+
+fn print_ollama_model_eval(report: &OllamaModelEvalReport) {
+    println!("Coach model eval | ollama/{}", report.model);
+    println!(
+        "schema valid: {}/{} ({:.1}%)",
+        report.schema_valid.numerator,
+        report.schema_valid.denominator,
+        report.schema_valid.rate * 100.0
+    );
+    println!(
+        "visible nudges: {} | useful precision: {:.1}% | opportunity recall: {:.1}% | no-nudge quality: {:.1}%",
+        report.visible_nudges,
+        report.quality.useful_nudge_precision.rate * 100.0,
+        report.quality.opportunity_recall.rate * 100.0,
+        report.quality.no_nudge_quality.rate * 100.0,
+    );
+    println!(
+        "TTFT p50/p95: {:?}/{:?} ms | total p50/p95: {:?}/{:?} ms",
+        report.ttft.p50_ms, report.ttft.p95_ms, report.total.p50_ms, report.total.p95_ms,
+    );
 }
 
 struct LiveCaptureGuard {
@@ -10274,27 +10756,32 @@ fn cmd_copilot_stop() -> Result<()> {
     Ok(())
 }
 
-fn cmd_copilot_setup(config: &minutes_core::config::CopilotConfig) -> Result<()> {
+fn cmd_copilot_setup(config: &mut Config, forced_model: Option<&str>, retune: bool) -> Result<()> {
+    use minutes_core::config::{
+        decide_copilot_model, CopilotModelDecision, CopilotModelProbeResult,
+    };
+
     let base_url = copilot_ollama_base_url();
-    let model_name = config.fast_model.trim();
-    if model_name.is_empty() {
-        anyhow::bail!(
-            "Coach's private AI model is blank in Settings. Set it to `llama3.2`, then run `minutes coach setup` again"
-        );
+    let forced_model = forced_model.map(str::trim);
+    if forced_model.is_some_and(str::is_empty) {
+        anyhow::bail!("Choose a model tag after `--model`.");
     }
 
-    eprintln!("Checking Coach's private AI on this Mac...");
+    eprintln!("Checking Coach's private AI on this computer...");
     let initial_probe = probe_ollama_models(&base_url, OLLAMA_PROBE_TIMEOUT);
 
     // Preserve setup for explicitly selected non-Ollama implementations. The
     // Ollama API probe still happens first so an installed app is never
     // mistaken for missing just because its CLI is not on PATH.
-    let requested_provider = match config.resolved_fast_provider() {
+    let requested_provider = match config.copilot.resolved_fast_provider() {
         "auto-local" => None,
         provider => Some(provider),
     };
-    if requested_provider.is_some_and(|provider| provider != "ollama") {
-        return finish_copilot_setup(config);
+    if forced_model.is_none()
+        && !retune
+        && requested_provider.is_some_and(|provider| provider != "ollama")
+    {
+        return finish_copilot_setup(&config.copilot);
     }
 
     let mut models = match initial_probe {
@@ -10337,37 +10824,103 @@ fn cmd_copilot_setup(config: &minutes_core::config::CopilotConfig) -> Result<()>
         }
     };
 
-    match decide_copilot_setup(
-        true,
-        ollama_model_is_present(&models, model_name),
-        false,
-        false,
-    ) {
-        CopilotSetupAction::Ready => {}
-        CopilotSetupAction::PullModel => {
-            eprintln!(
-                "Downloading {model_name} for Coach. It runs on your Mac, and nothing leaves your machine."
-            );
-            pull_ollama_model(&base_url, model_name)?;
-            models = wait_for_ollama(&base_url, Duration::from_secs(5)).ok_or_else(|| {
-                anyhow::anyhow!(
-                    "Coach downloaded {model_name}, but its private AI stopped responding. Open Ollama, then run `minutes coach setup` again"
-                )
-            })?;
-            if !ollama_model_is_present(&models, model_name) {
+    if forced_model.is_some() || retune {
+        config.copilot.fast_provider = "ollama".into();
+    }
+    let user_override = configured_copilot_model_override(config, forced_model, retune);
+    let hardware = if user_override.is_none() {
+        let hardware = detect_coach_hardware()?;
+        eprintln!(
+            "Found {} GB of memory{}.",
+            hardware.ram_gb,
+            if hardware.apple_silicon {
+                " and Apple silicon"
+            } else {
+                ""
+            }
+        );
+        hardware
+    } else {
+        CoachHardware {
+            ram_gb: 0,
+            apple_silicon: false,
+        }
+    };
+    let mut probe_results = Vec::<CopilotModelProbeResult>::new();
+
+    loop {
+        match decide_copilot_model(
+            hardware.ram_gb,
+            hardware.apple_silicon,
+            user_override.as_deref(),
+            &probe_results,
+        ) {
+            CopilotModelDecision::UserOverride { model_tag } => {
+                eprintln!("Keeping your chosen Coach model, {model_tag}.");
+                ensure_copilot_model_installed(&base_url, &model_tag, &mut models)?;
+                let probe =
+                    probe_copilot_model(&base_url, &model_tag, config.copilot.target_latency_ms)?;
+                if !probe.within_budget {
+                    eprintln!(
+                        "Your chosen model is ready, though its test took {} ms (first response {} ms).",
+                        probe.total_ms, probe.ttft_ms
+                    );
+                }
+                persist_copilot_model(config, &model_tag)?;
+                return finish_copilot_setup(&config.copilot);
+            }
+            CopilotModelDecision::ProbeManifest {
+                tier,
+                model_tag,
+                approx_download_gb,
+            } => {
+                eprintln!(
+                    "Your computer can run a stronger private AI. Setting up the {tier} model (~{approx_download_gb} GB download)…"
+                );
+                ensure_copilot_model_installed(&base_url, model_tag, &mut models)?;
+                eprintln!("Checking how quickly {model_tag} can coach...");
+                let probe = match probe_copilot_model(
+                    &base_url,
+                    model_tag,
+                    config.copilot.target_latency_ms,
+                ) {
+                    Ok(probe) => probe,
+                    Err(error) => {
+                        tracing::debug!(%error, %model_tag, "Coach manifest model probe failed");
+                        eprintln!("That model could not complete Coach's response test. Trying a smaller one...");
+                        probe_results.push(CopilotModelProbeResult {
+                            model_tag: model_tag.into(),
+                            within_budget: false,
+                        });
+                        continue;
+                    }
+                };
+                eprintln!(
+                    "  First response: {} ms; complete nudge: {} ms.",
+                    probe.ttft_ms, probe.total_ms
+                );
+                probe_results.push(CopilotModelProbeResult {
+                    model_tag: model_tag.into(),
+                    within_budget: probe.within_budget,
+                });
+                if !probe.within_budget {
+                    eprintln!("That model was slower than Coach's target. Trying a smaller one...");
+                }
+            }
+            CopilotModelDecision::SelectedManifest {
+                tier, model_tag, ..
+            } => {
+                persist_copilot_model(config, model_tag)?;
+                eprintln!("Coach selected the {tier} model for this computer.");
+                return finish_copilot_setup(&config.copilot);
+            }
+            CopilotModelDecision::NoManifestModelWithinBudget => {
                 anyhow::bail!(
-                    "Coach could not find {model_name} after downloading it. Open Ollama, then run `minutes coach setup` again"
+                    "None of the reviewed Coach models met the response-time target on this computer. Use `minutes coach setup --model <tag>` to keep a model you choose."
                 );
             }
         }
-        CopilotSetupAction::StartOllama
-        | CopilotSetupAction::InstallWithBrew
-        | CopilotSetupAction::DownloadGuidance => {
-            unreachable!("a reachable API only needs a model decision")
-        }
     }
-
-    finish_copilot_setup(config)
 }
 
 const OLLAMA_DEFAULT_BASE_URL: &str = "http://localhost:11434";
@@ -10375,6 +10928,273 @@ const OLLAMA_DOWNLOAD_URL: &str = "https://ollama.com/download";
 const OLLAMA_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 const OLLAMA_START_TIMEOUT: Duration = Duration::from_secs(30);
 const OLLAMA_SETUP_PREWARM_TIMEOUT: Duration = Duration::from_secs(120);
+const COACH_INSTANT_TTFT_MS: u64 = 1_500;
+const BYTES_PER_GIB: u64 = 1024 * 1024 * 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CoachHardware {
+    ram_gb: u64,
+    apple_silicon: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CoachLatencyProbe {
+    ttft_ms: u64,
+    total_ms: u64,
+    within_budget: bool,
+}
+
+fn configured_copilot_model_override(
+    config: &Config,
+    forced_model: Option<&str>,
+    retune: bool,
+) -> Option<String> {
+    use minutes_core::config::{copilot_manifest_contains, LEGACY_COPILOT_MODEL};
+
+    if let Some(model) = forced_model
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+    {
+        return Some(model.to_string());
+    }
+    if retune {
+        return None;
+    }
+    let configured = config.copilot.fast_model.trim();
+    let is_legacy = strip_latest_tag(configured).eq_ignore_ascii_case(LEGACY_COPILOT_MODEL);
+    (!configured.is_empty() && !is_legacy && !copilot_manifest_contains(configured))
+        .then(|| configured.to_string())
+}
+
+fn detect_coach_hardware() -> Result<CoachHardware> {
+    let total_bytes = detect_total_memory_bytes()?;
+    if total_bytes == 0 {
+        anyhow::bail!("Coach could not determine this computer's memory.");
+    }
+    Ok(CoachHardware {
+        ram_gb: total_bytes.div_ceil(BYTES_PER_GIB),
+        apple_silicon: detect_apple_silicon()?,
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn sysctl_value(name: &str) -> Result<String> {
+    let output = std::process::Command::new("/usr/sbin/sysctl")
+        .args(["-n", name])
+        .stdin(std::process::Stdio::null())
+        .output()?;
+    if !output.status.success() {
+        anyhow::bail!("sysctl {name} failed");
+    }
+    Ok(String::from_utf8(output.stdout)?.trim().to_string())
+}
+
+#[cfg(target_os = "macos")]
+fn detect_total_memory_bytes() -> Result<u64> {
+    sysctl_value("hw.memsize")?
+        .parse::<u64>()
+        .map_err(Into::into)
+}
+
+#[cfg(target_os = "macos")]
+fn detect_apple_silicon() -> Result<bool> {
+    Ok(is_apple_silicon_brand(&sysctl_value(
+        "machdep.cpu.brand_string",
+    )?))
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn is_apple_silicon_brand(brand: &str) -> bool {
+    brand.trim().starts_with("Apple M")
+}
+
+#[cfg(target_os = "linux")]
+fn detect_total_memory_bytes() -> Result<u64> {
+    parse_linux_meminfo_bytes(&std::fs::read_to_string("/proc/meminfo")?)
+        .ok_or_else(|| anyhow::anyhow!("/proc/meminfo did not contain MemTotal"))
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn parse_linux_meminfo_bytes(contents: &str) -> Option<u64> {
+    let kib = contents.lines().find_map(|line| {
+        let value = line.strip_prefix("MemTotal:")?.trim();
+        value.split_whitespace().next()?.parse::<u64>().ok()
+    })?;
+    kib.checked_mul(1024)
+}
+
+#[cfg(target_os = "linux")]
+fn detect_apple_silicon() -> Result<bool> {
+    Ok(false)
+}
+
+#[cfg(windows)]
+fn detect_total_memory_bytes() -> Result<u64> {
+    use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+
+    let mut status: MEMORYSTATUSEX = unsafe { std::mem::zeroed() };
+    status.dwLength = std::mem::size_of::<MEMORYSTATUSEX>() as u32;
+    if unsafe { GlobalMemoryStatusEx(&mut status) } == 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    Ok(status.ullTotalPhys)
+}
+
+#[cfg(windows)]
+fn detect_apple_silicon() -> Result<bool> {
+    Ok(false)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+fn detect_total_memory_bytes() -> Result<u64> {
+    anyhow::bail!("Coach hardware detection is not available on this platform")
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+fn detect_apple_silicon() -> Result<bool> {
+    Ok(false)
+}
+
+fn ensure_copilot_model_installed(
+    base_url: &str,
+    model_name: &str,
+    models: &mut Vec<String>,
+) -> Result<()> {
+    match decide_copilot_setup(
+        true,
+        ollama_model_is_present(models, model_name),
+        false,
+        false,
+    ) {
+        CopilotSetupAction::Ready => Ok(()),
+        CopilotSetupAction::PullModel => {
+            eprintln!(
+                "Downloading {model_name} for Coach. It runs on your computer, and nothing leaves your machine."
+            );
+            pull_ollama_model(base_url, model_name)?;
+            *models = wait_for_ollama(base_url, Duration::from_secs(5)).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Coach downloaded {model_name}, but its private AI stopped responding. Open Ollama, then run `minutes coach setup` again"
+                )
+            })?;
+            if !ollama_model_is_present(models, model_name) {
+                anyhow::bail!(
+                    "Coach could not find {model_name} after downloading it. Open Ollama, then run `minutes coach setup` again"
+                );
+            }
+            Ok(())
+        }
+        CopilotSetupAction::StartOllama
+        | CopilotSetupAction::InstallWithBrew
+        | CopilotSetupAction::DownloadGuidance => {
+            unreachable!("a reachable API only needs a model decision")
+        }
+    }
+}
+
+fn probe_copilot_model(
+    base_url: &str,
+    model_name: &str,
+    target_latency_ms: u64,
+) -> Result<CoachLatencyProbe> {
+    use minutes_core::copilot::{
+        BattleCard, CancelToken, CopilotModel, CopilotRequest, CopilotUtterance, MeetingMode,
+        ModelStreamEvent, OllamaCopilotModel, StrategyState, StrategyStateDraft,
+        TranscriptUpdateKind,
+    };
+    use std::sync::{Arc, Mutex};
+
+    let model = OllamaCopilotModel::new(base_url, model_name, OLLAMA_SETUP_PREWARM_TIMEOUT);
+    model
+        .prewarm()
+        .map_err(|error| anyhow::anyhow!("Coach could not warm {model_name}: {error}"))?;
+
+    let utterances = [
+        "We need to choose the enterprise price today: $120k flat or $90k plus usage.",
+        "Procurement says anything above $100k needs CFO approval and adds six weeks.",
+        "The remaining decision is the $90k first-year offer and who gets approval before Thursday.",
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(index, text)| CopilotUtterance {
+        utterance_sequence: (index + 1) as u64,
+        revision: (index + 1) as u64,
+        update_kind: TranscriptUpdateKind::Final,
+        source: "coach.setup.probe".into(),
+        text: text.into(),
+        speaker: None,
+        speaker_verified: false,
+        offset_ms: index as u64 * 10_000,
+        duration_ms: 9_000,
+    })
+    .collect();
+    let request = CopilotRequest {
+        goal: "Leave with a pricing decision, an owner, and a dated follow-up.".into(),
+        mode: MeetingMode::Decision,
+        session_epoch: 1,
+        evidence_revision: 3,
+        evidence_utterance_sequence: 3,
+        evidence_utterance_revision: 3,
+        update_kind: TranscriptUpdateKind::Final,
+        utterances,
+        battle_card: BattleCard {
+            rendered: "Procurement needs a named owner before Thursday.".into(),
+            ..BattleCard::default()
+        },
+        strategy_state: StrategyState::from_draft(
+            StrategyStateDraft {
+                open_threads: vec!["Choose the enterprise price.".into()],
+                unmet_goal_items: vec!["No owner or follow-up date is agreed.".into()],
+                unresolved_objections: vec!["$120k exceeds the budget envelope.".into()],
+                steer_toward: vec!["Close the price, owner, and date.".into()],
+            },
+            3,
+        ),
+    };
+
+    let first_token = Arc::new(Mutex::new(None::<std::time::Instant>));
+    let first_token_sink = Arc::clone(&first_token);
+    let started = std::time::Instant::now();
+    let sink = move |event: ModelStreamEvent| {
+        if matches!(event, ModelStreamEvent::TextDelta(ref text) if !text.is_empty()) {
+            let mut observed = first_token_sink.lock().unwrap();
+            observed.get_or_insert_with(std::time::Instant::now);
+        }
+    };
+    model
+        .stream_structured(&request, &CancelToken::new(), &sink)
+        .map_err(|error| {
+            anyhow::anyhow!("Coach model {model_name} failed its response test: {error}")
+        })?;
+    let completed = std::time::Instant::now();
+    let total_ms = duration_ms(completed.duration_since(started));
+    let ttft_ms = first_token
+        .lock()
+        .unwrap()
+        .map(|observed| duration_ms(observed.duration_since(started)))
+        .unwrap_or(total_ms);
+    let total_budget_ms = target_latency_ms.max(250);
+    let ttft_budget_ms = total_budget_ms.min(COACH_INSTANT_TTFT_MS);
+    Ok(CoachLatencyProbe {
+        ttft_ms,
+        total_ms,
+        within_budget: ttft_ms <= ttft_budget_ms && total_ms <= total_budget_ms,
+    })
+}
+
+fn duration_ms(duration: Duration) -> u64 {
+    duration.as_millis().min(u128::from(u64::MAX)) as u64
+}
+
+fn persist_copilot_model(config: &mut Config, model_name: &str) -> Result<()> {
+    config.copilot.fast_model = model_name.into();
+    config.save().map_err(|error| {
+        anyhow::anyhow!(
+            "Coach selected {model_name}, but could not save it to {}: {error}",
+            Config::config_path().display()
+        )
+    })
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CopilotSetupAction {

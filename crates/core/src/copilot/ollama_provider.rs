@@ -54,11 +54,7 @@ impl CopilotModel for OllamaCopilotModel {
         cancel: &CancelToken,
         sink: &dyn ModelEventSink,
     ) -> Result<NudgeDraft, ModelError> {
-        let stream_request = OllamaStreamRequest {
-            messages: fast_lane_messages(request),
-            format: Some(nudge_draft_schema()),
-            temperature: Some(0.2),
-        };
+        let stream_request = fast_lane_stream_request(request);
         let response = self
             .adapter
             .stream_chat(&stream_request, cancel, |text| {
@@ -79,6 +75,7 @@ impl CopilotModel for OllamaCopilotModel {
             messages: strategy_lane_messages(request),
             format: Some(strategy_state_schema()),
             temperature: Some(0.1),
+            think: Some(false),
         };
         let response = self
             .adapter
@@ -116,6 +113,18 @@ fn fast_lane_messages(request: &CopilotRequest) -> Vec<OllamaChatMessage> {
         OllamaChatMessage::new("system", request.trusted_system_prompt()),
         OllamaChatMessage::new("user", request.untrusted_payload()),
     ]
+}
+
+fn fast_lane_stream_request(request: &CopilotRequest) -> OllamaStreamRequest {
+    OllamaStreamRequest {
+        messages: fast_lane_messages(request),
+        format: Some(nudge_draft_schema()),
+        temperature: Some(0.2),
+        // Ollama 0.32 enables hidden reasoning by default for Qwen 3.5. The
+        // real-time lane cannot surface it and must not spend its latency
+        // budget generating it.
+        think: Some(false),
+    }
 }
 
 fn strategy_lane_messages(request: &StrategyRequest) -> Vec<OllamaChatMessage> {
@@ -268,6 +277,34 @@ mod tests {
             parse_nudge_draft(&format!("```json\n{json}\n```")).unwrap(),
             expected
         );
+    }
+
+    #[test]
+    fn parses_fenced_benchmark_nudge_with_float_and_unknown_opportunity() {
+        let raw = r#"```json
+{
+  "kind": "Ask",
+  "text": "Who owns finance approval before Thursday?",
+  "source_chip": "transcript",
+  "opportunity": "Assign owner and date to close pricing decision.",
+  "confidence": 0.95
+}
+```"#;
+
+        let draft = parse_nudge_draft(raw).unwrap();
+        assert_eq!(draft.kind, NudgeKind::Ask);
+        assert_eq!(draft.confidence, 95);
+        assert_eq!(draft.opportunity, super::super::OpportunityKind::General);
+    }
+
+    #[test]
+    fn fast_lane_explicitly_disables_ollama_thinking() {
+        let request = adversarial_request();
+        let stream_request = fast_lane_stream_request(&request);
+
+        assert_eq!(stream_request.think, Some(false));
+        assert_eq!(stream_request.temperature, Some(0.2));
+        assert!(stream_request.format.is_some());
     }
 
     #[test]

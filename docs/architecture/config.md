@@ -109,7 +109,7 @@ explicit `minutes copilot start` may start a foreground session when
 | `surface` | `"tui"` | Default CLI surface: `"tui"` or newline-delimited JSON with `"stdout"`. |
 | `mode` | `"generic"` | Default session policy: `sales`, `discovery`, `interview`, `negotiation`, `difficult-conversation`, `decision`, or `generic`; `--mode` overrides it. |
 | `fast_provider` | `"auto-local"` | Fast-lane provider request. `"auto-local"` probes eligible local providers at session start and selects a healthy model within the routing policy; Apple Foundation Models remains a provider stub until the separate native fast-follow lands. |
-| `fast_model` | `"llama3.2"` | Ollama model used for structured nudges. |
+| `fast_model` | `"qwen3.5:4b"` | Ollama model used for structured nudges. `minutes coach setup` replaces manifest defaults with the strongest hardware-fit model that passes its latency probe. |
 | `allow_cloud` | `false` | Cloud opt-in gate. Cloud adapters are intentionally not implemented in the first copilot release. |
 | `meeting_goal` | unset | Optional default outcome Coach should optimize for. |
 | `arming_behavior` | `"ask-each-meeting"` | Desktop behavior at recording start: `"automatic"`, `"ask-each-meeting"`, or `"off"` (manual starts remain available). |

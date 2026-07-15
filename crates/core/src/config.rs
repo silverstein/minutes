@@ -389,6 +389,151 @@ pub struct CopilotConfig {
     pub grounding_refresh_secs: u64,
 }
 
+/// The former one-size-fits-all Coach default. Setup treats this as an
+/// unselected legacy value so upgrades are retuned instead of preserving it as
+/// a user override.
+pub const LEGACY_COPILOT_MODEL: &str = "llama3.2";
+
+/// Portable fallback used before hardware-aware setup has run. It is also the
+/// lowest manifest model, so setup is free to replace it with a stronger tier.
+pub const DEFAULT_COPILOT_MODEL: &str = "qwen3.5:4b";
+
+/// One hardware tier in the reviewed Coach model manifest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CopilotModelTier {
+    pub name: &'static str,
+    pub min_ram_gb: u64,
+    pub apple_silicon_model: &'static str,
+    pub portable_model: &'static str,
+    pub approx_download_gb: u64,
+    pub notes: &'static str,
+}
+
+impl CopilotModelTier {
+    pub fn model_for(self, apple_silicon: bool) -> &'static str {
+        if apple_silicon {
+            self.apple_silicon_model
+        } else {
+            self.portable_model
+        }
+    }
+}
+
+/// Reviewed July 2026 Coach defaults, ordered strongest-first. The RAM
+/// thresholds intentionally sit above each model artifact's working set so
+/// higher tiers retain at least 25% headroom for transcription, Minutes, and a
+/// meeting workload. The modest tier is the no-smaller-model fallback.
+pub const COPILOT_MODEL_TIERS: &[CopilotModelTier] = &[
+    CopilotModelTier {
+        name: "beast",
+        min_ram_gb: 64,
+        apple_silicon_model: "qwen3.5:35b-a3b-nvfp4",
+        portable_model: "qwen3.5:35b-a3b",
+        approx_download_gb: 22,
+        notes: "highest-quality sparse model for high-memory machines",
+    },
+    CopilotModelTier {
+        name: "strong",
+        min_ram_gb: 32,
+        apple_silicon_model: "gemma4:26b-mlx",
+        portable_model: "gemma4:26b",
+        approx_download_gb: 18,
+        notes: "complete coaching nudges with a sparse active working set",
+    },
+    CopilotModelTier {
+        name: "mainstream",
+        min_ram_gb: 16,
+        apple_silicon_model: "qwen3.5:9b-mlx",
+        portable_model: "qwen3.5:9b",
+        approx_download_gb: 9,
+        notes: "focused single-question coaching for mainstream machines",
+    },
+    CopilotModelTier {
+        name: "modest",
+        min_ram_gb: 0,
+        apple_silicon_model: "qwen3.5:4b-mlx",
+        portable_model: DEFAULT_COPILOT_MODEL,
+        approx_download_gb: 4,
+        notes: "smallest reviewed model; used when no higher tier fits",
+    },
+];
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CopilotModelProbeResult {
+    pub model_tag: String,
+    pub within_budget: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CopilotModelDecision {
+    UserOverride {
+        model_tag: String,
+    },
+    ProbeManifest {
+        tier: &'static str,
+        model_tag: &'static str,
+        approx_download_gb: u64,
+    },
+    SelectedManifest {
+        tier: &'static str,
+        model_tag: &'static str,
+        approx_download_gb: u64,
+    },
+    NoManifestModelWithinBudget,
+}
+
+/// Pure setup decision: preserve an explicit override, otherwise start at the
+/// strongest RAM tier and step down past every failed latency probe.
+pub fn decide_copilot_model(
+    ram_gb: u64,
+    apple_silicon: bool,
+    user_override: Option<&str>,
+    probe_results: &[CopilotModelProbeResult],
+) -> CopilotModelDecision {
+    if let Some(model_tag) = user_override.map(str::trim).filter(|tag| !tag.is_empty()) {
+        return CopilotModelDecision::UserOverride {
+            model_tag: model_tag.to_string(),
+        };
+    }
+
+    let first_fitting = COPILOT_MODEL_TIERS
+        .iter()
+        .position(|tier| ram_gb >= tier.min_ram_gb)
+        .unwrap_or(COPILOT_MODEL_TIERS.len() - 1);
+    for tier in &COPILOT_MODEL_TIERS[first_fitting..] {
+        let model_tag = tier.model_for(apple_silicon);
+        match probe_results
+            .iter()
+            .find(|probe| probe.model_tag.eq_ignore_ascii_case(model_tag))
+        {
+            Some(probe) if probe.within_budget => {
+                return CopilotModelDecision::SelectedManifest {
+                    tier: tier.name,
+                    model_tag,
+                    approx_download_gb: tier.approx_download_gb,
+                };
+            }
+            Some(_) => continue,
+            None => {
+                return CopilotModelDecision::ProbeManifest {
+                    tier: tier.name,
+                    model_tag,
+                    approx_download_gb: tier.approx_download_gb,
+                };
+            }
+        }
+    }
+    CopilotModelDecision::NoManifestModelWithinBudget
+}
+
+pub fn copilot_manifest_contains(model_tag: &str) -> bool {
+    let model_tag = model_tag.trim();
+    COPILOT_MODEL_TIERS.iter().any(|tier| {
+        tier.apple_silicon_model.eq_ignore_ascii_case(model_tag)
+            || tier.portable_model.eq_ignore_ascii_case(model_tag)
+    })
+}
+
 /// Recording-start behavior for desktop Coach hosts.
 ///
 /// `Off` keeps manual Coach starts available; it only suppresses automatic
@@ -1171,7 +1316,7 @@ impl Default for CopilotConfig {
             surface: "tui".into(),
             mode: "generic".into(),
             fast_provider: "auto-local".into(),
-            fast_model: "llama3.2".into(),
+            fast_model: DEFAULT_COPILOT_MODEL.into(),
             allow_cloud: false,
             meeting_goal: None,
             arming_behavior: CopilotArmingBehavior::AskEachMeeting,
@@ -1694,7 +1839,7 @@ mod tests {
         assert_eq!(config.copilot.mode, "generic");
         assert_eq!(config.copilot.fast_provider, "auto-local");
         assert_eq!(config.copilot.resolved_fast_provider(), "auto-local");
-        assert_eq!(config.copilot.fast_model, "llama3.2");
+        assert_eq!(config.copilot.fast_model, DEFAULT_COPILOT_MODEL);
         assert!(!config.copilot.allow_cloud);
         assert_eq!(
             config.copilot.arming_behavior,
@@ -1723,6 +1868,118 @@ mod tests {
         assert_eq!(config.consent.mode, ConsentMode::Remind);
         assert!(config.consent.default_basis.is_none());
         assert!(config.consent.disclosure_script.contains("Minutes"));
+    }
+
+    #[test]
+    fn copilot_model_manifest_selects_every_ram_and_platform_tier() {
+        let cases = [
+            (128, true, "beast", "qwen3.5:35b-a3b-nvfp4"),
+            (64, true, "beast", "qwen3.5:35b-a3b-nvfp4"),
+            (63, true, "strong", "gemma4:26b-mlx"),
+            (32, true, "strong", "gemma4:26b-mlx"),
+            (31, true, "mainstream", "qwen3.5:9b-mlx"),
+            (16, true, "mainstream", "qwen3.5:9b-mlx"),
+            (15, true, "modest", "qwen3.5:4b-mlx"),
+            (4, true, "modest", "qwen3.5:4b-mlx"),
+            (128, false, "beast", "qwen3.5:35b-a3b"),
+            (48, false, "strong", "gemma4:26b"),
+            (24, false, "mainstream", "qwen3.5:9b"),
+            (8, false, "modest", "qwen3.5:4b"),
+        ];
+
+        for (ram_gb, apple_silicon, expected_tier, expected_model) in cases {
+            assert_eq!(
+                decide_copilot_model(ram_gb, apple_silicon, None, &[]),
+                CopilotModelDecision::ProbeManifest {
+                    tier: expected_tier,
+                    model_tag: expected_model,
+                    approx_download_gb: COPILOT_MODEL_TIERS
+                        .iter()
+                        .find(|tier| tier.name == expected_tier)
+                        .unwrap()
+                        .approx_download_gb,
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn copilot_model_decision_steps_down_after_slow_probes() {
+        let slow_beast = CopilotModelProbeResult {
+            model_tag: "qwen3.5:35b-a3b-nvfp4".into(),
+            within_budget: false,
+        };
+        assert!(matches!(
+            decide_copilot_model(128, true, None, std::slice::from_ref(&slow_beast)),
+            CopilotModelDecision::ProbeManifest {
+                tier: "strong",
+                model_tag: "gemma4:26b-mlx",
+                ..
+            }
+        ));
+
+        let probes = [
+            slow_beast,
+            CopilotModelProbeResult {
+                model_tag: "gemma4:26b-mlx".into(),
+                within_budget: false,
+            },
+            CopilotModelProbeResult {
+                model_tag: "qwen3.5:9b-mlx".into(),
+                within_budget: true,
+            },
+        ];
+        assert!(matches!(
+            decide_copilot_model(128, true, None, &probes),
+            CopilotModelDecision::SelectedManifest {
+                tier: "mainstream",
+                model_tag: "qwen3.5:9b-mlx",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn copilot_model_decision_never_clobbers_user_override() {
+        assert_eq!(
+            decide_copilot_model(
+                128,
+                true,
+                Some("custom/private-coach:latest"),
+                &[CopilotModelProbeResult {
+                    model_tag: "custom/private-coach:latest".into(),
+                    within_budget: false,
+                }],
+            ),
+            CopilotModelDecision::UserOverride {
+                model_tag: "custom/private-coach:latest".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn copilot_model_decision_reports_when_every_tier_is_slow() {
+        let probes = COPILOT_MODEL_TIERS
+            .iter()
+            .map(|tier| CopilotModelProbeResult {
+                model_tag: tier.apple_silicon_model.into(),
+                within_budget: false,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            decide_copilot_model(128, true, None, &probes),
+            CopilotModelDecision::NoManifestModelWithinBudget
+        );
+    }
+
+    #[test]
+    fn copilot_manifest_excludes_disqualified_legacy_model() {
+        assert!(!copilot_manifest_contains(LEGACY_COPILOT_MODEL));
+        for tier in COPILOT_MODEL_TIERS {
+            assert!(copilot_manifest_contains(tier.apple_silicon_model));
+            assert!(copilot_manifest_contains(tier.portable_model));
+        }
     }
 
     #[test]

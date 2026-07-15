@@ -2,7 +2,7 @@ use super::{
     BattleCard, LatencyRecord, MeetingMode, OpportunityKind, PolicySnapshot, StrategyState,
 };
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use serde::{de, Deserialize, Deserializer, Serialize};
 
 pub const COPILOT_CONTRACT_VERSION: u32 = 1;
 
@@ -71,14 +71,99 @@ pub struct NudgeDraft {
     pub kind: NudgeKind,
     pub text: String,
     pub source_chip: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_opportunity_lenient")]
     pub opportunity: OpportunityKind,
-    #[serde(default = "default_confidence")]
+    #[serde(
+        default = "default_confidence",
+        deserialize_with = "deserialize_confidence"
+    )]
     pub confidence: u8,
 }
 
 fn default_confidence() -> u8 {
     100
+}
+
+fn deserialize_opportunity_lenient<'de, D>(deserializer: D) -> Result<OpportunityKind, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    Ok(match value.trim().to_ascii_lowercase().as_str() {
+        "pain" => OpportunityKind::Pain,
+        "objection" => OpportunityKind::Objection,
+        "next_step" => OpportunityKind::NextStep,
+        "evidence" => OpportunityKind::Evidence,
+        "decision" => OpportunityKind::Decision,
+        "leverage" => OpportunityKind::Leverage,
+        "rapport" => OpportunityKind::Rapport,
+        "clarity" => OpportunityKind::Clarity,
+        "safety" => OpportunityKind::Safety,
+        "general" => OpportunityKind::General,
+        _ => OpportunityKind::default(),
+    })
+}
+
+fn deserialize_confidence<'de, D>(deserializer: D) -> Result<u8, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct ConfidenceVisitor;
+
+    impl de::Visitor<'_> for ConfidenceVisitor {
+        type Value = u8;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("an integer from 0 to 100, a normalized float, or a numeric string")
+        }
+
+        fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            u8::try_from(value)
+                .ok()
+                .filter(|value| *value <= 100)
+                .ok_or_else(|| E::custom("confidence integer must be between 0 and 100"))
+        }
+
+        fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            u64::try_from(value)
+                .map_err(|_| E::custom("confidence integer must be between 0 and 100"))
+                .and_then(|value| self.visit_u64(value))
+        }
+
+        fn visit_f64<E>(self, value: f64) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            if !value.is_finite() || !(0.0..=1.0).contains(&value) {
+                return Err(E::custom(
+                    "confidence float must be normalized between 0.0 and 1.0",
+                ));
+            }
+            Ok((value * 100.0).round().clamp(0.0, 100.0) as u8)
+        }
+
+        fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            let value = value.trim();
+            if let Ok(integer) = value.parse::<u64>() {
+                return self.visit_u64(integer);
+            }
+            value
+                .parse::<f64>()
+                .map_err(|_| E::custom("confidence string must be numeric"))
+                .and_then(|value| self.visit_f64(value))
+        }
+    }
+
+    deserializer.deserialize_any(ConfidenceVisitor)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -398,6 +483,42 @@ mod tests {
         let final_request = request(12, TranscriptUpdateKind::Final, "hello there");
         assert!(tiny.materially_newer_than(&old));
         assert!(final_request.materially_newer_than(&tiny));
+    }
+
+    #[test]
+    fn nudge_draft_accepts_benchmark_confidence_forms() {
+        for (confidence, expected) in [("87", 87), ("0.92", 92), ("\"95\"", 95), ("\"0.955\"", 96)]
+        {
+            let json = format!(
+                r#"{{"kind":"Ask","text":"Who owns this?","source_chip":"transcript","opportunity":"decision","confidence":{confidence}}}"#
+            );
+            let draft: NudgeDraft = serde_json::from_str(&json).unwrap();
+            assert_eq!(draft.confidence, expected, "confidence input {confidence}");
+        }
+    }
+
+    #[test]
+    fn nudge_draft_unknown_opportunity_falls_back_to_general() {
+        let draft: NudgeDraft = serde_json::from_str(
+            r#"{"kind":"Ask","text":"Who owns this?","source_chip":"transcript","opportunity":"Assign owner and date","confidence":0.95}"#,
+        )
+        .unwrap();
+
+        assert_eq!(draft.opportunity, OpportunityKind::General);
+        assert_eq!(draft.confidence, 95);
+    }
+
+    #[test]
+    fn nudge_draft_rejects_out_of_range_confidence() {
+        for confidence in ["101", "-1", "1.01", "\"not-a-number\""] {
+            let json = format!(
+                r#"{{"kind":"Ask","text":"Who owns this?","source_chip":"transcript","opportunity":"decision","confidence":{confidence}}}"#
+            );
+            assert!(
+                serde_json::from_str::<NudgeDraft>(&json).is_err(),
+                "confidence input {confidence} must be rejected"
+            );
+        }
     }
 
     #[test]

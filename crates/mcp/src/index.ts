@@ -15,6 +15,7 @@
  *   - activity_summary: Summarize meeting-adjacent desktop context for a session/path/window
  *   - search_context: Search app and captured window-title desktop context
  *   - get_moment: Show the local rewind around a linked artifact, session, or timestamp
+ *   - get_screen_context: Retrieve bounded, session-linked screen images
  *   - consistency_report: Flag conflicting decisions and stale commitments
  *   - get_person_profile: Rich relationship profile for a person (graph index)
  *   - track_commitments: List open/stale commitments, filter by person
@@ -2837,6 +2838,81 @@ registerDocsAppTool(
       content: [{ type: "text" as const, text }],
       structuredContent: { ...(parsed as any), view: "context", kind: "get_moment" },
       _meta: { ui: { resourceUri: UI_RESOURCE_URI }, view: "context", kind: "get_moment" },
+    };
+  }
+);
+
+// ── Tool: consistency_report ───────────────────────────────
+
+// ── Tool: get_screen_context ───────────────────────────────
+// Direct image content is returned only for paths that the CLI resolved from
+// ScreenshotRef events and that this process independently canonicalizes under
+// ~/.minutes/screens. This is intentionally not a generic local-file tool.
+
+if (hasFeature(CLI_CAPABILITIES, "screen_context"))
+registerDocsAppTool(
+  server,
+  "get_screen_context",
+  {
+    description: "Retrieve up to three verified PNG screenshots linked to a Minutes context session, optionally nearest a timestamp.",
+    inputSchema: {
+      session_id: z.string().optional().describe("Explicit Minutes context session id"),
+      path: z.string().optional().describe("Linked meeting, audio, or live-transcript artifact path"),
+      at: z.string().optional().describe("Nearest-image anchor timestamp (RFC3339)"),
+      limit: z.number().int().min(1).max(3).optional().default(1).describe("Maximum verified images (1-3)"),
+    },
+    annotations: { title: "Get Screen Context", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    _meta: { ui: { resourceUri: UI_RESOURCE_URI } },
+  },
+  async ({ session_id, path, at, limit }) => {
+    if (!(await isCliAvailable())) {
+      return { content: [{ type: "text" as const, text: `Screen-context retrieval requires the full CLI.\n\n${CLI_INSTALL_MSG}` }] };
+    }
+
+    const args = ["context", "screen", "--json", "--limit", String(limit)];
+    if (session_id) args.push("--session", session_id);
+    if (path) args.push("--path", path);
+    if (at) args.push("--at", at);
+
+    const { stdout, stderr } = await runMinutes(args);
+    const parsed = parseJsonOutput(stdout);
+    if (!parsed || typeof parsed !== "object") {
+      return { content: [{ type: "text" as const, text: stderr || stdout }] };
+    }
+
+    const status = (parsed as any).status || {};
+    const images = Array.isArray((parsed as any).images) ? (parsed as any).images.slice(0, 3) : [];
+    const reason = typeof (parsed as any).reason === "string" ? (parsed as any).reason : "";
+    const text = [
+      `Screen context state: ${status.state || "unknown"}`,
+      `Verified images delivered: ${images.length}`,
+      reason,
+      "An image must be inspected before making any visual claim; app/window metadata alone is not sight.",
+    ].filter(Boolean).join("\n");
+
+    const content: Array<
+      | { type: "text"; text: string }
+      | { type: "image"; data: string; mimeType: string }
+    > = [{ type: "text", text }];
+    const screenRoot = join(homedir(), ".minutes", "screens");
+    for (const image of images) {
+      if (!image || typeof image.path !== "string") continue;
+      const resolved = validatePathInDirectory(image.path, screenRoot, [".png"]);
+      const metadata = await stat(resolved);
+      if (metadata.size > 10 * 1024 * 1024) {
+        throw new Error("Screen-context image exceeds the 10 MiB delivery limit");
+      }
+      content.push({
+        type: "image",
+        data: (await readFile(resolved)).toString("base64"),
+        mimeType: "image/png",
+      });
+    }
+
+    return {
+      content,
+      structuredContent: { ...(parsed as any), view: "context", kind: "get_screen_context" },
+      _meta: { ui: { resourceUri: UI_RESOURCE_URI }, view: "context", kind: "get_screen_context" },
     };
   }
 );

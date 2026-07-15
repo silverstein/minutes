@@ -59,18 +59,22 @@ pub fn session_tracking_enabled(settings: &DesktopContextConfig) -> bool {
 
 pub fn maybe_start_capture_session(
     settings: &DesktopContextConfig,
+    screen_context_enabled: bool,
     mode: CaptureMode,
     title: Option<String>,
     started_at: DateTime<Local>,
 ) -> Option<String> {
-    if !session_tracking_enabled(settings) {
+    // Screen capture and desktop metadata are separate opt-in features, but
+    // both need the same canonical session identity. A screen-only user must
+    // not lose screenshot linkage merely because desktop_context is off.
+    if !session_tracking_enabled(settings) && !screen_context_enabled {
         return None;
     }
 
     match context_store::start_capture_session(mode, title, started_at) {
         Ok(session) => Some(session.id),
         Err(error) => {
-            tracing::warn!(error = %error, mode = ?mode, "failed to create desktop context session for capture");
+            tracing::warn!(error = %error, mode = ?mode, "failed to create context session for capture");
             None
         }
     }
@@ -940,11 +944,26 @@ mod tests {
     fn desktop_context_disabled_capture_session_does_not_touch_store() {
         let session = maybe_start_capture_session(
             &DesktopContextConfig::default(),
+            false,
             CaptureMode::Meeting,
             Some("test".into()),
             Local::now(),
         );
         assert!(session.is_none());
+    }
+
+    #[test]
+    fn screen_only_capture_still_gets_a_context_session() {
+        with_temp_home(|_| {
+            let session = maybe_start_capture_session(
+                &DesktopContextConfig::default(),
+                true,
+                CaptureMode::Meeting,
+                Some("screen-only".into()),
+                Local::now(),
+            );
+            assert!(session.is_some());
+        });
     }
 
     #[test]

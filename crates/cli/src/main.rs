@@ -1472,6 +1472,44 @@ enum TemplateCmd {
 
 #[derive(Subcommand)]
 enum ContextAction {
+    /// Report observed desktop and screen-context state for the current session
+    Status {
+        /// Explicit context session id
+        #[arg(long)]
+        session: Option<String>,
+
+        /// Artifact path already linked to a context session
+        #[arg(long)]
+        path: Option<PathBuf>,
+
+        /// Output raw JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Retrieve verified screenshots linked to a context session
+    Screen {
+        /// Explicit context session id
+        #[arg(long)]
+        session: Option<String>,
+
+        /// Artifact path already linked to a context session
+        #[arg(long)]
+        path: Option<PathBuf>,
+
+        /// Select the nearest screenshot around this RFC3339 timestamp
+        #[arg(long)]
+        at: Option<String>,
+
+        /// Maximum screenshots to return (1-3)
+        #[arg(short, long, default_value = "1")]
+        limit: usize,
+
+        /// Output raw JSON
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Summarize desktop context for a session, artifact, or explicit time window
     ActivitySummary {
         /// Explicit context session id
@@ -2495,6 +2533,7 @@ fn cmd_record(
     }
     let context_session_id = minutes_core::desktop_context::maybe_start_capture_session(
         &config.desktop_context,
+        config.screen_context.enabled,
         capture_mode,
         title.clone(),
         recording_started_at,
@@ -5924,6 +5963,7 @@ fn build_capability_report() -> CapabilityReport {
     features.insert("activity_summary".into(), true);
     features.insert("search_context".into(), true);
     features.insert("get_moment".into(), true);
+    features.insert("screen_context".into(), true);
 
     // Stable surfaces. Listed explicitly so consumers can probe for
     // them without relying on version-string inference.
@@ -11883,6 +11923,24 @@ fn cmd_insights(
 
 fn cmd_context(action: ContextAction) -> Result<()> {
     match action {
+        ContextAction::Status {
+            session,
+            path,
+            json,
+        } => cmd_context_status(session.as_deref(), path.as_deref(), json),
+        ContextAction::Screen {
+            session,
+            path,
+            at,
+            limit,
+            json,
+        } => cmd_context_screen(
+            session.as_deref(),
+            path.as_deref(),
+            at.as_deref(),
+            limit,
+            json,
+        ),
         ContextAction::ActivitySummary {
             session,
             path,
@@ -11942,6 +12000,82 @@ fn resolve_context_session(
         )?);
     }
     Ok(None)
+}
+
+fn resolve_context_session_or_latest(
+    session: Option<&str>,
+    path: Option<&Path>,
+) -> Result<Option<minutes_core::context_store::ContextSession>> {
+    match resolve_context_session(session, path)? {
+        Some(session) => Ok(Some(session)),
+        None if session.is_some() || path.is_some() => {
+            anyhow::bail!("the requested context session or linked path was not found")
+        }
+        None => Ok(minutes_core::context_store::latest_context_session()?),
+    }
+}
+
+fn cmd_context_status(session: Option<&str>, path: Option<&Path>, json: bool) -> Result<()> {
+    let session = resolve_context_session_or_latest(session, path)?;
+    let status = if let Some(session) = &session {
+        minutes_core::context_store::screen_context_status_for_session(&session.id)?
+            .unwrap_or_default()
+    } else {
+        minutes_core::context_store::ScreenContextStatus::default()
+    };
+    let output = serde_json::json!({
+        "session": session,
+        "screen_context": status,
+        "desktop_context": {
+            "configured": minutes_core::config::Config::load().desktop_context.enabled,
+            "note": "Desktop context contains app/window metadata, not screen pixels."
+        }
+    });
+    if !json {
+        eprintln!(
+            "Screen context: {} ({} successful captures)",
+            serde_json::to_string(&status.state)?.trim_matches('"'),
+            status.successful_capture_count
+        );
+    }
+    println!("{}", serde_json::to_string_pretty(&output)?);
+    Ok(())
+}
+
+fn cmd_context_screen(
+    session: Option<&str>,
+    path: Option<&Path>,
+    at: Option<&str>,
+    limit: usize,
+    json: bool,
+) -> Result<()> {
+    let anchor = at.map(parse_rfc3339_local).transpose()?;
+    let explicitly_selected = session.is_some() || path.is_some();
+    let resolved = if let Some(session) = resolve_context_session(session, path)? {
+        Some(session)
+    } else if explicitly_selected {
+        anyhow::bail!("the requested context session or linked path was not found");
+    } else if let Some(anchor) = anchor {
+        minutes_core::context_store::get_session_covering_time(anchor)?
+    } else {
+        minutes_core::context_store::latest_context_session()?
+    };
+    let Some(session) = resolved else {
+        anyhow::bail!("no context session is available");
+    };
+    let output = minutes_core::context_store::get_screen_context(&session.id, anchor, limit)?;
+    if !json {
+        eprintln!(
+            "Screen context: {} — {} verified image(s)",
+            serde_json::to_string(&output.status.state)?.trim_matches('"'),
+            output.images.len()
+        );
+        if let Some(reason) = &output.reason {
+            eprintln!("  {reason}");
+        }
+    }
+    println!("{}", serde_json::to_string_pretty(&output)?);
+    Ok(())
 }
 
 fn summarize_counts(values: impl Iterator<Item = Option<String>>) -> Vec<ContextCount> {

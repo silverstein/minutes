@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-07-14",
+  "generatedAt": "2026-07-15",
   "installCommand": "npx minutes-mcp",
   "documentationUrl": "https://useminutes.app/for-agents",
   "supportUrl": "https://github.com/silverstein/minutes/discussions",
@@ -73,6 +73,13 @@
       "group": "Search and recall",
       "anchorId": "tool-get-moment",
       "docsUrl": "https://useminutes.app/docs/mcp/tools#tool-get-moment"
+    },
+    {
+      "name": "get_screen_context",
+      "description": "Retrieve bounded, verified screenshots linked to a Minutes context session",
+      "group": "Search and recall",
+      "anchorId": "tool-get-screen-context",
+      "docsUrl": "https://useminutes.app/docs/mcp/tools#tool-get-screen-context"
     },
     {
       "name": "process_audio",

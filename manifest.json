@@ -3,7 +3,7 @@
   "name": "minutes",
   "display_name": "Minutes Conversation Memory",
   "description": "The private, owned conversation-memory layer for AI. Record, transcribe, and search every meeting, voice memo, and dictation entirely on your own machine — nothing uploaded — then let any AI you connect recall it. Plain-markdown output you keep forever; no cloud, no API key, no vendor to outlive.",
-  "long_description": "Minutes is the private, owned conversation-memory layer. Record meetings, voice memos, and dictation; transcribe them on your own machine; and get structured markdown in `~/meetings/` that Claude Desktop, Claude Code, Codex, Gemini CLI, Cursor, OpenCode, Pi, and any MCP-compatible client read from the same folder — no proprietary SDK, no API key. Nothing is uploaded: when a cloud memory tool gets acquired or subpoenaed, your recordings aren't theirs to hand over. No vendor to outlive — ten years from now, `grep` still works on your corpus.\n\n31 tools • 7 resources • Interactive MCP App dashboard • Prompt templates\n\nWhat you get:\n• On-device transcription (whisper.cpp or parakeet.cpp) and optional on-device summarization (Apple Foundation Models on macOS 26+) — your audio never leaves the machine.\n• A native chat panel that recalls your meetings, with token streaming and read-only search of your own corpus.\n• Dictation that types straight at your cursor, on the same local engine.\n• Live sessions that promote into diarized, summarized meetings when you stop.\n• Consent provenance in every file, and sensitivity gating agents must respect.\n• Diarized speaker labels, structured action items and decisions, and a cross-meeting relationship graph — all queryable via MCP.",
+  "long_description": "Minutes is the private, owned conversation-memory layer. Record meetings, voice memos, and dictation; transcribe them on your own machine; and get structured markdown in `~/meetings/` that Claude Desktop, Claude Code, Codex, Gemini CLI, Cursor, OpenCode, Pi, and any MCP-compatible client read from the same folder — no proprietary SDK, no API key. Nothing is uploaded: when a cloud memory tool gets acquired or subpoenaed, your recordings aren't theirs to hand over. No vendor to outlive — ten years from now, `grep` still works on your corpus.\n\n36 tools • 7 resources • Interactive MCP App dashboard • Prompt templates\n\nWhat you get:\n• On-device transcription (whisper.cpp or parakeet.cpp) and optional on-device summarization (Apple Foundation Models on macOS 26+) — your audio never leaves the machine.\n• A native chat panel that recalls your meetings, with token streaming and read-only search of your own corpus.\n• Dictation that types straight at your cursor, on the same local engine.\n• Live sessions that promote into diarized, summarized meetings when you stop.\n• Consent provenance in every file, and sensitivity gating agents must respect.\n• Diarized speaker labels, structured action items and decisions, and a cross-meeting relationship graph — all queryable via MCP.",
   "version": "0.21.0",
   "author": {
     "name": "Mat Silverstein",
@@ -78,6 +78,10 @@
     {
       "name": "get_moment",
       "description": "Show the local desktop-context rewind around a linked artifact, session, or timestamp"
+    },
+    {
+      "name": "get_screen_context",
+      "description": "Retrieve bounded, verified screenshots linked to a Minutes context session"
     },
     {
       "name": "process_audio",

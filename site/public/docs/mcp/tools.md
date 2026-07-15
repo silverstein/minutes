@@ -3,9 +3,9 @@
 > Generated file. Do not edit by hand.
 > Source: manifest.json + crates/mcp/src/index.ts
 > Regenerate: node scripts/generate_llms_txt.mjs
-> Last generated: 2026-07-14
+> Last generated: 2026-07-15
 
-Minutes exposes 35 tools, 8 resources, and 6 prompt templates through the MCP server.
+Minutes exposes 36 tools, 8 resources, and 6 prompt templates through the MCP server.
 
 ## Install
 
@@ -139,6 +139,14 @@ Reference URL: https://useminutes.app/docs/mcp/tools#tool-search-context
 Show the local desktop-context rewind around a linked artifact, session, or timestamp
 
 Reference URL: https://useminutes.app/docs/mcp/tools#tool-get-moment
+
+<a id="tool-get-screen-context"></a>
+
+#### `get_screen_context`
+
+Retrieve bounded, verified screenshots linked to a Minutes context session
+
+Reference URL: https://useminutes.app/docs/mcp/tools#tool-get-screen-context
 
 <a id="tool-research-topic"></a>
 

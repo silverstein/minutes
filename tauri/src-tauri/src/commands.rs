@@ -3199,6 +3199,7 @@ fn start_native_call_recording(
     let recording_started_at = chrono::Local::now();
     let context_session_id = minutes_core::desktop_context::maybe_start_capture_session(
         &config.desktop_context,
+        config.screen_context.enabled,
         mode,
         requested_title.clone(),
         recording_started_at,
@@ -5614,6 +5615,7 @@ pub fn start_recording(
     set_latest_output(&latest_output, None);
     let context_session_id = minutes_core::desktop_context::maybe_start_capture_session(
         &config.desktop_context,
+        config.screen_context.enabled,
         mode,
         requested_title.clone(),
         recording_started_at,
@@ -8693,8 +8695,16 @@ context doesn't cover:
 - `list_processing_jobs`, `get_status`, `list_voices`, `knowledge_status`, `qmd_collection_status` — status/inventory checks
 - `read_live_transcript` — read an in-progress recording or live-transcript session
 - `activity_summary`, `search_context`, `get_moment` — desktop-context lookups (app focus, window titles)
+- `get_screen_context` — retrieve up to three verified screenshots linked to the selected Minutes session
 
 Prefer these over guessing when the inline context is missing something concrete and answerable.
+
+## Visual claims
+
+Screen screenshots and desktop app/window metadata are separate. Call `get_screen_context` only when \
+the user's question depends on visible content; screenshots are never attached automatically. Never \
+say you can see the screen or describe a slide unless this turn actually received a specific image. \
+Configured, waiting, unavailable, degraded, stopped, and cleaned states do not prove visual awareness.
 
 ## What you don't have
 
@@ -8731,6 +8741,41 @@ fn build_recall_chat_prompt(history: &[(String, String)], enriched_message: &str
 
     prompt.push_str(enriched_message);
     prompt
+}
+
+fn current_screen_context_prompt() -> String {
+    let Ok(Some(session)) = minutes_core::context_store::latest_active_context_session() else {
+        return String::new();
+    };
+    let Ok(Some(status)) =
+        minutes_core::context_store::screen_context_status_for_session(&session.id)
+    else {
+        return String::new();
+    };
+    if status.state == minutes_core::context_store::ScreenContextState::Off {
+        return String::new();
+    }
+    let state = serde_json::to_string(&status.state)
+        .unwrap_or_else(|_| "\"unknown\"".into())
+        .trim_matches('"')
+        .to_string();
+    format!(
+        "Current screen-context state (metadata only; no image has been inspected):\n\
+- session_id: {}\n\
+- state: {}\n\
+- successful_captures: {}\n\
+- last_successful_capture_at: {}\n\
+Use the bounded read-only get_screen_context tool only if the question depends on pixels. If this \
+provider cannot call that tool, say image retrieval is unavailable in this provider instead of \
+claiming visual awareness.\n\n",
+        session.id,
+        state,
+        status.successful_capture_count,
+        status
+            .last_successful_capture_at
+            .map(|timestamp| timestamp.to_rfc3339())
+            .unwrap_or_else(|| "none".into()),
+    )
 }
 
 struct RecallChatProcessIo {
@@ -9071,7 +9116,11 @@ pub async fn cmd_recall_chat_send(
     // answers in the excerpts below" guidance still applies to them, so it's
     // still useful context — just no longer claiming zero tool access, since
     // claude's chat session does have a pre-approved read-only allow-list.
-    let enriched_message = format!("{}User question: {}", meeting_context, message);
+    let screen_context = current_screen_context_prompt();
+    let enriched_message = format!(
+        "{}{}User question: {}",
+        meeting_context, screen_context, message
+    );
 
     // ── Step 2: build prompt with history ─────────────────────────────────────
     let history_snapshot: Vec<(String, String)> = {
@@ -10952,6 +11001,15 @@ mod tests {
 
         assert!(!cancel_recall_chat_turn(&state.recall_chat_turn));
         assert!(state.recall_chat_turn.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn recall_chat_contract_exposes_bounded_screen_tool_and_visual_claim_rule() {
+        assert!(CHAT_WORKSPACE_CLAUDE_MD.contains("`get_screen_context`"));
+        assert!(CHAT_WORKSPACE_CLAUDE_MD.contains("screenshots are never attached automatically"));
+        assert!(CHAT_WORKSPACE_CLAUDE_MD
+            .contains("unless this turn actually received a specific image"));
+        assert!(CHAT_WORKSPACE_CLAUDE_MD.contains("desktop app/window metadata are separate"));
     }
 
     #[test]

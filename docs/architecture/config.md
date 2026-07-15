@@ -363,6 +363,17 @@ This section is intentionally narrow:
 - it only affects screenshots during an active recording
 - it is off by default
 - it is not a general ambient desktop-capture mode
+- it is independent of `[desktop_context]`, which stores app/window metadata
+- screenshots are retrieved on demand with `minutes context screen` or the
+  read-only MCP `get_screen_context` tool; they are not attached to every query
+- assistants must not claim they can see the screen unless they opened or were
+  delivered a specific returned image
+
+Use `minutes context status --json` to inspect the observed runtime state. Use
+`minutes context screen --session <id> --at <rfc3339-time> --limit 1 --json` to
+retrieve bounded, verified PNG paths nearest a meeting moment. A limit above
+three is rejected. When `keep_after_summary` is false, cleanup removes both the
+PNG files and their readable context-store references.
 
 ### `[desktop_context]` — meeting-adjacent app/window context
 

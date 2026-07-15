@@ -2,13 +2,13 @@
 
 > Generated file. Do not edit by hand.
 > Source: manifest.json + crates/mcp/src/index.ts + site/lib/skills-catalog.json
-> Last generated: 2026-07-14
+> Last generated: 2026-07-15
 
 ## Product
 
 Minutes is the private, owned conversation-memory layer. Record meetings, voice memos, and dictation; transcribe them on your own machine; and get structured markdown in `~/meetings/` that Claude Desktop, Claude Code, Codex, Gemini CLI, Cursor, OpenCode, Pi, and any MCP-compatible client read from the same folder — no proprietary SDK, no API key. Nothing is uploaded: when a cloud memory tool gets acquired or subpoenaed, your recordings aren't theirs to hand over. No vendor to outlive — ten years from now, `grep` still works on your corpus.
 
-31 tools • 7 resources • Interactive MCP App dashboard • Prompt templates
+36 tools • 7 resources • Interactive MCP App dashboard • Prompt templates
 
 What you get:
 • On-device transcription (whisper.cpp or parakeet.cpp) and optional on-device summarization (Apple Foundation Models on macOS 26+) — your audio never leaves the machine.
@@ -70,6 +70,7 @@ What you get:
 - `activity_summary` — Summarize meeting-adjacent desktop context for a linked artifact, context session, or time window Docs: https://useminutes.app/docs/mcp/tools#tool-activity-summary
 - `search_context` — Search desktop-context events across app focus and captured window titles, including opted-in browser titles Docs: https://useminutes.app/docs/mcp/tools#tool-search-context
 - `get_moment` — Show the local desktop-context rewind around a linked artifact, session, or timestamp Docs: https://useminutes.app/docs/mcp/tools#tool-get-moment
+- `get_screen_context` — Retrieve bounded, verified screenshots linked to a Minutes context session Docs: https://useminutes.app/docs/mcp/tools#tool-get-screen-context
 - `process_audio` — Process an audio file through the transcription pipeline Docs: https://useminutes.app/docs/mcp/tools#tool-process-audio
 - `add_note` — Add a timestamped note to the current recording or an existing meeting Docs: https://useminutes.app/docs/mcp/tools#tool-add-note
 - `consistency_report` — Flag conflicting decisions and stale commitments Docs: https://useminutes.app/docs/mcp/tools#tool-consistency-report

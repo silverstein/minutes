@@ -205,6 +205,7 @@ function categorizeTool(name) {
       "activity_summary",
       "search_context",
       "get_moment",
+      "get_screen_context",
       "research_topic",
     ]),
     "People and relationships": new Set(["get_person_profile", "relationship_map", "track_commitments", "consistency_report"]),

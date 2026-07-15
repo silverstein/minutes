@@ -1160,6 +1160,19 @@ fn record_to_wav_dual_source(
 
     let (live_tx, sidecar_handle) = start_live_sidecar(config, &stop_flag);
 
+    // Screen context is an independent evidence lane. Start it before opening
+    // either audio stream so a slow or blocked microphone/system-audio setup
+    // cannot leave an opted-in session falsely reporting `off`.
+    let screen_context_session_id = started_context
+        .as_ref()
+        .and_then(|context| context.session_id.clone());
+    let _screen_handle = start_screen_capture_if_enabled(
+        config,
+        output_path,
+        &stop_flag,
+        screen_context_session_id.as_deref(),
+    );
+
     let mut voice_stream = Some(AudioStream::start(plan.voice_override.as_deref())?);
     let (system_tx, system_backend_rx) = crossbeam_channel::bounded(64);
     let mut system_backend = crate::system_audio_backend::system_audio_backend_for_config(
@@ -1195,8 +1208,6 @@ fn record_to_wav_dual_source(
         "using dual-source audio input devices"
     );
     emit_recording_started(started_context);
-
-    let _screen_handle = start_screen_capture_if_enabled(config, output_path, &stop_flag);
 
     let preflight_intent = config
         .recording
@@ -1568,6 +1579,19 @@ pub fn record_to_wav_with_lifecycle(
     // so agents can see what's being discussed during the recording.
     let (live_tx, sidecar_handle) = start_live_sidecar(config, &stop_flag);
 
+    // Screen context is independent of microphone readiness. Start it before
+    // building the audio stream so permission prompts or a slow device cannot
+    // strand the observed state at `off` after the recording session starts.
+    let screen_context_session_id = started_context
+        .as_ref()
+        .and_then(|context| context.session_id.clone());
+    let _screen_handle = start_screen_capture_if_enabled(
+        config,
+        output_path,
+        &stop_flag,
+        screen_context_session_id.as_deref(),
+    );
+
     // Build initial stream (wrapped in Option for reconnection)
     let mut stream = Some(build_capture_stream(
         &device,
@@ -1590,9 +1614,6 @@ pub fn record_to_wav_with_lifecycle(
         crate::device_monitor::DeviceMonitor::new(&device_name)
     };
     let mut current_device_name = device_name;
-
-    // Start screen context capture if enabled (with permission check)
-    let _screen_handle = start_screen_capture_if_enabled(config, output_path, &stop_flag);
 
     // Safety guard for auto-stop on silence, time cap, disk space
     let preflight_intent = config
@@ -1791,23 +1812,98 @@ fn start_screen_capture_if_enabled(
     config: &crate::config::Config,
     output_path: &Path,
     stop_flag: &Arc<AtomicBool>,
+    context_session_id: Option<&str>,
 ) -> Option<crate::screen::ScreenCaptureHandle> {
+    if let Some(session_id) = context_session_id {
+        match crate::context_store::initialize_screen_context(
+            session_id,
+            config.screen_context.enabled,
+            config.screen_context.interval_secs,
+            config.screen_context.keep_after_summary,
+        ) {
+            Ok(status) => {
+                crate::screen::write_current_session_status(&status).ok();
+            }
+            Err(error) => {
+                tracing::warn!(session_id, error = %error, "failed to initialize screen context state");
+            }
+        }
+    }
+
     if !config.screen_context.enabled {
         return None;
     }
 
     if !crate::screen::check_screen_permission() {
+        if let Some(session_id) = context_session_id {
+            if let Ok(status) = crate::context_store::mark_screen_context_unavailable(
+                session_id,
+                "Screen Recording permission is unavailable",
+            ) {
+                crate::screen::write_current_session_status(&status).ok();
+            }
+        }
         report_screen_permission_failure(output_path);
         return None;
     }
 
     let screen_dir = crate::screen::screens_dir_for(output_path);
-    match crate::screen::start_capture(
+    let event_sink = context_session_id.map(|session_id| {
+        let session_id = session_id.to_string();
+        std::sync::Arc::new(move |event| {
+            let update = match event {
+                crate::screen::ScreenCaptureEvent::Captured {
+                    path,
+                    observed_at,
+                    capture_index,
+                    elapsed_seconds,
+                    byte_size,
+                } => crate::context_store::record_screen_capture_success(
+                    &session_id,
+                    &path,
+                    observed_at,
+                    capture_index,
+                    elapsed_seconds,
+                    byte_size,
+                ),
+                crate::screen::ScreenCaptureEvent::Failed { observed_at, error } => {
+                    crate::context_store::record_screen_capture_failure(
+                        &session_id,
+                        observed_at,
+                        &error,
+                    )
+                }
+                crate::screen::ScreenCaptureEvent::Stopped { observed_at } => {
+                    crate::context_store::mark_screen_context_stopped(&session_id, observed_at)
+                }
+            };
+            match update {
+                Ok(status) => {
+                    crate::screen::write_current_session_status(&status).ok();
+                }
+                Err(error) => {
+                    tracing::warn!(session_id, error = %error, "failed to persist screen capture event");
+                }
+            }
+        }) as crate::screen::ScreenCaptureEventSink
+    });
+    match crate::screen::start_capture_with_events(
         &screen_dir,
-        std::time::Duration::from_secs(config.screen_context.interval_secs),
+        std::time::Duration::from_secs(config.screen_context.interval_secs.max(1)),
         Arc::clone(stop_flag),
+        event_sink,
     ) {
         Ok(handle) => {
+            if let Some(session_id) = context_session_id {
+                match crate::context_store::mark_screen_context_waiting(session_id, &screen_dir) {
+                    Ok(status) => {
+                        crate::screen::write_current_session_status(&status).ok();
+                    }
+                    Err(error) => {
+                        tracing::warn!(session_id, error = %error, "failed to link screen capture directory");
+                    }
+                }
+            }
             eprintln!(
                 "[minutes] Screen context capture enabled (every {}s)",
                 config.screen_context.interval_secs
@@ -1815,6 +1911,15 @@ fn start_screen_capture_if_enabled(
             Some(handle)
         }
         Err(e) => {
+            if let Some(session_id) = context_session_id {
+                if let Ok(status) = crate::context_store::record_screen_capture_failure(
+                    session_id,
+                    chrono::Local::now(),
+                    &e.to_string(),
+                ) {
+                    crate::screen::write_current_session_status(&status).ok();
+                }
+            }
             tracing::warn!(
                 "screen capture init failed: {} — continuing without screen context",
                 e

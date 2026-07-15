@@ -15,6 +15,7 @@ describe("parseCapabilityReport", () => {
       features: {
         activity_summary: true,
         search_context: true,
+        screen_context: true,
         parakeet: false,
       },
     });
@@ -23,6 +24,7 @@ describe("parseCapabilityReport", () => {
     expect(report?.version).toBe("0.14.0");
     expect(report?.api_version).toBe(1);
     expect(report?.features.activity_summary).toBe(true);
+    expect(report?.features.screen_context).toBe(true);
     expect(report?.features.parakeet).toBe(false);
   });
 

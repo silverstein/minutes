@@ -3,6 +3,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use chrono::{DateTime, Local};
+
 // ──────────────────────────────────────────────────────────────
 // Screen context capture.
 //
@@ -66,6 +68,38 @@ pub fn start_capture(
     interval: Duration,
     stop_flag: Arc<AtomicBool>,
 ) -> std::io::Result<ScreenCaptureHandle> {
+    start_capture_with_events(output_dir, interval, stop_flag, None)
+}
+
+#[derive(Debug, Clone)]
+pub enum ScreenCaptureEvent {
+    Captured {
+        path: PathBuf,
+        observed_at: DateTime<Local>,
+        capture_index: u32,
+        elapsed_seconds: u64,
+        byte_size: u64,
+    },
+    Failed {
+        observed_at: DateTime<Local>,
+        error: String,
+    },
+    Stopped {
+        observed_at: DateTime<Local>,
+    },
+}
+
+pub type ScreenCaptureEventSink = Arc<dyn Fn(ScreenCaptureEvent) + Send + Sync + 'static>;
+
+/// Start capture with a lightweight event callback. The callback runs only
+/// after the platform screenshot command has returned, so context-store work
+/// never blocks the OS capture operation itself.
+pub fn start_capture_with_events(
+    output_dir: &Path,
+    interval: Duration,
+    stop_flag: Arc<AtomicBool>,
+    event_sink: Option<ScreenCaptureEventSink>,
+) -> std::io::Result<ScreenCaptureHandle> {
     std::fs::create_dir_all(output_dir)?;
 
     // Set directory permissions to 0700 (owner-only)
@@ -106,6 +140,11 @@ pub fn start_capture(
                     captures = 0,
                     "screen capture stopped (before first capture)"
                 );
+                if let Some(sink) = &event_sink {
+                    sink(ScreenCaptureEvent::Stopped {
+                        observed_at: Local::now(),
+                    });
+                }
                 return;
             }
             std::thread::sleep(Duration::from_millis(250));
@@ -116,8 +155,15 @@ pub fn start_capture(
             let filename = format!("screen-{:04}-{:04}s.png", index, elapsed);
             let path = dir.join(&filename);
 
+            let capture_index = index;
             if let Err(e) = capture_screenshot(&path) {
                 tracing::warn!("screen capture failed: {}", e);
+                if let Some(sink) = &event_sink {
+                    sink(ScreenCaptureEvent::Failed {
+                        observed_at: Local::now(),
+                        error: e.to_string(),
+                    });
+                }
                 // Don't break — transient failures (e.g., screen locked) are OK
             } else {
                 // Set file permissions to 0600 (owner-only)
@@ -127,6 +173,15 @@ pub fn start_capture(
                     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).ok();
                 }
                 tracing::debug!(file = %filename, "screen captured");
+                if let Some(sink) = &event_sink {
+                    sink(ScreenCaptureEvent::Captured {
+                        path: path.clone(),
+                        observed_at: Local::now(),
+                        capture_index,
+                        elapsed_seconds: elapsed,
+                        byte_size: path.metadata().map(|metadata| metadata.len()).unwrap_or(0),
+                    });
+                }
                 index += 1;
             }
 
@@ -141,12 +196,71 @@ pub fn start_capture(
         }
 
         tracing::info!(captures = index, "screen capture stopped");
+        if let Some(sink) = &event_sink {
+            sink(ScreenCaptureEvent::Stopped {
+                observed_at: Local::now(),
+            });
+        }
     });
 
     Ok(ScreenCaptureHandle {
         stop: own_stop,
         thread: Some(handle),
     })
+}
+
+pub const CURRENT_SESSION_FILE: &str = "CURRENT_SESSION.md";
+
+/// Write the small dynamic state breadcrumb consumed by PTY assistants. It
+/// deliberately contains no image bytes or transcript text; the CLI remains
+/// the authoritative bounded retrieval path.
+pub fn write_current_session_status(
+    status: &crate::context_store::ScreenContextStatus,
+) -> std::io::Result<PathBuf> {
+    let workspace = crate::config::Config::minutes_dir().join("assistant");
+    std::fs::create_dir_all(&workspace)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&workspace, std::fs::Permissions::from_mode(0o700))?;
+    }
+
+    let path = workspace.join(CURRENT_SESSION_FILE);
+    let session_id = status
+        .context_session_id
+        .as_deref()
+        .unwrap_or("unavailable");
+    let last_capture = status
+        .last_successful_capture_at
+        .map(|timestamp| timestamp.to_rfc3339())
+        .unwrap_or_else(|| "none".into());
+    let error = status.most_recent_error.as_deref().unwrap_or("none");
+    let state = serde_json::to_string(&status.state)
+        .unwrap_or_else(|_| "\"unknown\"".into())
+        .trim_matches('"')
+        .to_string();
+    let content = format!(
+        "# Current Minutes Session\n\n\
+- Context session: `{session_id}`\n\
+- Screen context state: `{state}`\n\
+- Successful captures: {}\n\
+- Last successful capture: `{last_capture}`\n\
+- Most recent error: `{error}`\n\
+- Updated: `{}`\n\n\
+Screen images and desktop app/window metadata are separate evidence lanes. Run \
+`minutes context status --json` to refresh state and `minutes context screen \
+--session {session_id} --limit 1 --json` to retrieve a verified image. Never \
+claim to see screen contents until a specific returned image has been opened.\n",
+        status.successful_capture_count,
+        Local::now().to_rfc3339(),
+    );
+    std::fs::write(&path, content)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(path)
 }
 
 /// Maximum number of screenshots per recording session.
@@ -347,5 +461,42 @@ mod tests {
         );
         assert!(!external_stop.load(Ordering::Relaxed));
         assert!(list_screenshots(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn current_session_breadcrumb_is_metadata_only_and_requires_image_inspection() {
+        let _lock = crate::test_home_env_lock();
+        let home = tempfile::tempdir().unwrap();
+        let original_home = std::env::var_os("HOME");
+        #[cfg(windows)]
+        let original_userprofile = std::env::var_os("USERPROFILE");
+        std::env::set_var("HOME", home.path());
+        #[cfg(windows)]
+        std::env::set_var("USERPROFILE", home.path());
+
+        let status = crate::context_store::ScreenContextStatus {
+            context_session_id: Some("ctx-test".into()),
+            state: crate::context_store::ScreenContextState::Capturing,
+            successful_capture_count: 2,
+            ..crate::context_store::ScreenContextStatus::default()
+        };
+        let path = write_current_session_status(&status).unwrap();
+        let content = std::fs::read_to_string(path).unwrap();
+        assert!(content.contains("Screen context state: `capturing`"));
+        assert!(content.contains("minutes context screen"));
+        assert!(content.contains("Never claim to see screen contents"));
+        assert!(!content.contains(".png"));
+
+        if let Some(home) = original_home {
+            std::env::set_var("HOME", home);
+        } else {
+            std::env::remove_var("HOME");
+        }
+        #[cfg(windows)]
+        if let Some(profile) = original_userprofile {
+            std::env::set_var("USERPROFILE", profile);
+        } else {
+            std::env::remove_var("USERPROFILE");
+        }
     }
 }

@@ -244,6 +244,20 @@ pub fn queue_live_capture_with_recording_health(
         }
         return Err(error);
     }
+    if new_screen_dir.exists() {
+        if let Some(session_id) = job.context_session_id.as_deref() {
+            if let Err(error) =
+                crate::context_store::relink_screen_context_directory(session_id, &new_screen_dir)
+            {
+                tracing::warn!(
+                    session_id,
+                    directory = %new_screen_dir.display(),
+                    error = %error,
+                    "failed to relink moved screen context directory"
+                );
+            }
+        }
+    }
     maybe_mark_context_session_processing(&job, &audio_path);
     Ok(job)
 }
@@ -1169,6 +1183,11 @@ pub fn remove_capture_artifacts(job: &ProcessingJob) {
     if screens_dir.exists() {
         fs::remove_dir_all(screens_dir).ok();
     }
+    if let Some(session_id) = job.context_session_id.as_deref() {
+        if let Ok(status) = crate::context_store::cleanup_screen_context(session_id) {
+            crate::screen::write_current_session_status(&status).ok();
+        }
+    }
 }
 
 fn terminal_state_for_artifact(artifact: &pipeline::TranscriptArtifact) -> JobState {
@@ -1365,6 +1384,7 @@ fn job_context(job: &ProcessingJob) -> BackgroundPipelineContext {
         recorded_at: job.recording_started_at.or(job.recording_finished_at),
         requested_title: job.title.clone(),
         recording_health: job.recording_health.clone(),
+        context_session_id: job.context_session_id.clone(),
         template,
     }
 }

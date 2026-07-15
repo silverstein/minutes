@@ -572,7 +572,7 @@ command = "npx"
 args = ["minutes-mcp"]
 ```
 
-All 35 tools are available in Vibe as `minutes_*` (e.g. `minutes_start_recording`, `minutes_search_meetings`).
+All 36 tools are available in Vibe as `minutes_*` (e.g. `minutes_start_recording`, `minutes_search_meetings`).
 
 ### Claude Code (Plugin)
 
@@ -1200,6 +1200,21 @@ agent = "claude"          # CLI launched by the Tauri AI Assistant
 agent_args = []           # Optional extra args, e.g. ["--dangerously-skip-permissions"]
 ```
 
+When screen context is enabled, Minutes records its observed state separately
+from desktop app/window metadata. Inspect the current state without exposing an
+image, or retrieve up to three verified PNGs nearest a meeting moment:
+
+```bash
+minutes context status --json
+minutes context screen --session <context-session-id> --at <rfc3339-time> --limit 1 --json
+```
+
+MCP clients can request the same bounded images with `get_screen_context`.
+Images are never attached to every prompt automatically, and an assistant
+should only claim it can see the screen after it has opened or received a
+specific returned image. Unless `keep_after_summary = true`, Minutes deletes
+the PNGs and their readable references after summarization.
+
 ## Architecture
 
 ```
@@ -1210,7 +1225,7 @@ minutes/
 ├── crates/reader/        Lightweight read-only meeting parser (no audio deps)
 ├── crates/assets/        Bundled assets (demo.wav)
 ├── crates/sdk/           TypeScript SDK — `npm install minutes-sdk` (query meetings programmatically)
-├── crates/mcp/           MCP server — 35 tools + 8 resources + interactive dashboard
+├── crates/mcp/           MCP server — 36 tools + 8 resources + interactive dashboard
 │   └── ui/               MCP App dashboard (vanilla TS → single-file HTML)
 ├── tauri/                Menu bar app — system tray, recording UI, singleton AI Assistant
 └── .claude/plugins/minutes/   Claude Code plugin — 19 skills + 1 agent + 2 hooks

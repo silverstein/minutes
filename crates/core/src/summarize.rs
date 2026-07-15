@@ -990,6 +990,7 @@ const CHAT_ALLOWED_MCP_TOOLS: &[&str] = &[
     "activity_summary",
     "search_context",
     "get_moment",
+    "get_screen_context",
     "consistency_report",
     "get_person_profile",
     "research_topic",
@@ -3581,6 +3582,7 @@ PARTICIPANTS:
             .expect("--allowedTools must be present");
         assert!(allowed_tools.contains("mcp__minutes__search_meetings"));
         assert!(allowed_tools.contains("mcp__minutes__get_meeting"));
+        assert!(allowed_tools.contains("mcp__minutes__get_screen_context"));
         assert!(!allowed_tools.contains("start_recording"));
         assert!(!allowed_tools.contains("add_note"));
         assert!(!allowed_tools.contains("open_dashboard"));

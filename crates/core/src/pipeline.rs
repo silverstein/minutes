@@ -1375,6 +1375,9 @@ pub struct BackgroundPipelineContext {
     pub recorded_at: Option<DateTime<Local>>,
     pub requested_title: Option<String>,
     pub recording_health: Option<crate::markdown::RecordingHealth>,
+    /// Canonical context session for desktop and screen evidence captured
+    /// alongside this recording.
+    pub context_session_id: Option<String>,
     /// Optional template applied to summarization. Recorded in frontmatter
     /// so Phase 2 reprocessing knows which template produced this file.
     pub template: Option<crate::template::Template>,
@@ -1988,11 +1991,20 @@ where
         );
     }
 
-    if !screen_files.is_empty()
-        && !config.screen_context.keep_after_summary
-        && std::fs::remove_dir_all(&screen_dir).is_ok()
-    {
-        tracing::info!(dir = %screen_dir.display(), "screen captures cleaned up");
+    if !config.screen_context.keep_after_summary {
+        if let Some(session_id) = context.context_session_id.as_deref() {
+            match crate::context_store::cleanup_screen_context(session_id) {
+                Ok(status) => {
+                    crate::screen::write_current_session_status(&status).ok();
+                    tracing::info!(session_id, "screen captures and retrieval refs cleaned up");
+                }
+                Err(error) => {
+                    tracing::warn!(session_id, error = %error, "failed to clean screen context");
+                }
+            }
+        } else if screen_dir.exists() && std::fs::remove_dir_all(&screen_dir).is_ok() {
+            tracing::info!(dir = %screen_dir.display(), "screen captures cleaned up");
+        }
     }
 
     let attendees = merge_attendees(&artifact.frontmatter.attendees, &summary_participants);
@@ -2601,8 +2613,8 @@ where
     }
 
     // Clean up screen captures (runs regardless of summarization setting — fixes race)
-    if !screen_files.is_empty()
-        && !config.screen_context.keep_after_summary
+    if !config.screen_context.keep_after_summary
+        && screen_dir.exists()
         && std::fs::remove_dir_all(&screen_dir).is_ok()
     {
         tracing::info!(dir = %screen_dir.display(), "screen captures cleaned up");

@@ -2,7 +2,7 @@ use crate::config::Config;
 use crate::markdown::ContentType;
 use crate::pid::CaptureMode;
 use chrono::{DateTime, Local};
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
@@ -40,6 +40,8 @@ pub enum ContextStoreError {
         value: String,
         source: chrono::ParseError,
     },
+    #[error("invalid context request: {0}")]
+    InvalidRequest(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -175,6 +177,73 @@ pub enum ContextLinkKind {
     LiveTranscriptWav,
     ScreenshotDirectory,
     PreservedCapture,
+}
+
+pub const MAX_SCREEN_CONTEXT_IMAGES: usize = 3;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ScreenContextState {
+    #[default]
+    Off,
+    Configured,
+    PermissionUnavailable,
+    WaitingForFirstCapture,
+    Capturing,
+    CaptureDegraded,
+    Stopped,
+    Cleaned,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ScreenContextRetention {
+    #[default]
+    Ephemeral,
+    Retained,
+    Cleaned,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ScreenContextStatus {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_session_id: Option<String>,
+    pub state: ScreenContextState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub configured_interval_secs: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_started_at: Option<DateTime<Local>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_stopped_at: Option<DateTime<Local>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_attempt_at: Option<DateTime<Local>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_successful_capture_at: Option<DateTime<Local>>,
+    #[serde(default)]
+    pub successful_capture_count: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub most_recent_error: Option<String>,
+    pub retention: ScreenContextRetention,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScreenContextImage {
+    pub path: String,
+    pub captured_at: DateTime<Local>,
+    pub distance_seconds: i64,
+    pub byte_size: u64,
+    pub exists: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScreenContextResult {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<ContextSession>,
+    pub status: ScreenContextStatus,
+    #[serde(default)]
+    pub images: Vec<ScreenContextImage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 impl ContextLinkKind {
@@ -995,6 +1064,9 @@ pub fn mark_capture_session_discarded(
     session_id: &str,
     ended_at: Option<DateTime<Local>>,
 ) -> Result<(), ContextStoreError> {
+    if let Ok(status) = cleanup_screen_context(session_id) {
+        crate::screen::write_current_session_status(&status).ok();
+    }
     update_session_state(
         session_id,
         ContextSessionState::Discarded,
@@ -1067,6 +1139,468 @@ pub fn mark_live_transcript_failed(
         None,
         json!({ "diagnostic": diagnostic }),
     )
+}
+
+fn screen_status_from_session(session: &ContextSession) -> ScreenContextStatus {
+    session
+        .metadata
+        .get("screen_context")
+        .cloned()
+        .and_then(|value| serde_json::from_value(value).ok())
+        .unwrap_or_else(|| ScreenContextStatus {
+            context_session_id: Some(session.id.clone()),
+            ..ScreenContextStatus::default()
+        })
+}
+
+pub fn screen_context_status_for_session(
+    session_id: &str,
+) -> Result<Option<ScreenContextStatus>, ContextStoreError> {
+    Ok(get_session(session_id)?.map(|session| screen_status_from_session(&session)))
+}
+
+pub fn set_screen_context_status(
+    session_id: &str,
+    mut status: ScreenContextStatus,
+) -> Result<ScreenContextStatus, ContextStoreError> {
+    let conn = open_db()?;
+    let Some(session) = get_session_with_conn(&conn, session_id)? else {
+        return Err(ContextStoreError::InvalidRequest(format!(
+            "unknown context session '{session_id}'"
+        )));
+    };
+    status.context_session_id = Some(session_id.to_string());
+    update_session_state_with_conn(
+        &conn,
+        session_id,
+        session.state,
+        None,
+        None,
+        None,
+        json!({ "screen_context": status }),
+    )?;
+    Ok(status)
+}
+
+pub fn latest_context_session() -> Result<Option<ContextSession>, ContextStoreError> {
+    let conn = open_db()?;
+    let mut stmt = conn.prepare(
+        "SELECT id, session_type, state, capture_mode, content_type, title, started_at, ended_at, metadata_json
+         FROM context_sessions
+         ORDER BY started_at DESC
+         LIMIT 1",
+    )?;
+    let mut rows = stmt.query([])?;
+    if let Some(row) = rows.next()? {
+        Ok(Some(row_to_session(row)?))
+    } else {
+        Ok(None)
+    }
+}
+
+pub fn latest_active_context_session() -> Result<Option<ContextSession>, ContextStoreError> {
+    let conn = open_db()?;
+    let mut stmt = conn.prepare(
+        "SELECT id, session_type, state, capture_mode, content_type, title, started_at, ended_at, metadata_json
+         FROM context_sessions
+         WHERE state = ?1
+         ORDER BY started_at DESC
+         LIMIT 1",
+    )?;
+    let mut rows = stmt.query(params![ContextSessionState::Active.as_str()])?;
+    if let Some(row) = rows.next()? {
+        Ok(Some(row_to_session(row)?))
+    } else {
+        Ok(None)
+    }
+}
+
+pub fn initialize_screen_context(
+    session_id: &str,
+    enabled: bool,
+    interval_secs: u64,
+    keep_after_summary: bool,
+) -> Result<ScreenContextStatus, ContextStoreError> {
+    set_screen_context_status(
+        session_id,
+        ScreenContextStatus {
+            context_session_id: Some(session_id.to_string()),
+            state: if enabled {
+                ScreenContextState::Configured
+            } else {
+                ScreenContextState::Off
+            },
+            configured_interval_secs: enabled.then_some(interval_secs),
+            retention: if keep_after_summary {
+                ScreenContextRetention::Retained
+            } else {
+                ScreenContextRetention::Ephemeral
+            },
+            ..ScreenContextStatus::default()
+        },
+    )
+}
+
+pub fn mark_screen_context_waiting(
+    session_id: &str,
+    directory: &Path,
+) -> Result<ScreenContextStatus, ContextStoreError> {
+    let canonical = directory.canonicalize()?;
+    upsert_link(
+        session_id,
+        ContextLinkKind::ScreenshotDirectory,
+        &canonical.display().to_string(),
+        json!({}),
+    )?;
+    let mut status = screen_context_status_for_session(session_id)?.ok_or_else(|| {
+        ContextStoreError::InvalidRequest(format!("unknown context session '{session_id}'"))
+    })?;
+    status.state = ScreenContextState::WaitingForFirstCapture;
+    status.worker_started_at = Some(Local::now());
+    status.worker_stopped_at = None;
+    status.most_recent_error = None;
+    set_screen_context_status(session_id, status)
+}
+
+pub fn mark_screen_context_unavailable(
+    session_id: &str,
+    error: &str,
+) -> Result<ScreenContextStatus, ContextStoreError> {
+    let mut status = screen_context_status_for_session(session_id)?.ok_or_else(|| {
+        ContextStoreError::InvalidRequest(format!("unknown context session '{session_id}'"))
+    })?;
+    status.state = ScreenContextState::PermissionUnavailable;
+    status.last_attempt_at = Some(Local::now());
+    status.most_recent_error = Some(error.to_string());
+    set_screen_context_status(session_id, status)
+}
+
+pub fn record_screen_capture_success(
+    session_id: &str,
+    path: &Path,
+    observed_at: DateTime<Local>,
+    capture_index: u32,
+    elapsed_seconds: u64,
+    byte_size: u64,
+) -> Result<ScreenContextStatus, ContextStoreError> {
+    let canonical = path.canonicalize()?;
+    append_event(
+        session_id,
+        NewContextEvent {
+            observed_at,
+            source: ContextEventSource::ScreenshotRef,
+            app_name: None,
+            bundle_id: None,
+            window_title: None,
+            url: None,
+            domain: None,
+            artifact_path: Some(canonical.display().to_string()),
+            privacy_scope: ContextPrivacyScope::Normal,
+            metadata: json!({
+                "capture_index": capture_index,
+                "elapsed_seconds": elapsed_seconds,
+                "byte_size": byte_size,
+            }),
+        },
+    )?;
+    let mut status = screen_context_status_for_session(session_id)?.ok_or_else(|| {
+        ContextStoreError::InvalidRequest(format!("unknown context session '{session_id}'"))
+    })?;
+    status.state = ScreenContextState::Capturing;
+    status.last_attempt_at = Some(observed_at);
+    status.last_successful_capture_at = Some(observed_at);
+    status.successful_capture_count = status.successful_capture_count.saturating_add(1);
+    status.most_recent_error = None;
+    set_screen_context_status(session_id, status)
+}
+
+pub fn record_screen_capture_failure(
+    session_id: &str,
+    observed_at: DateTime<Local>,
+    error: &str,
+) -> Result<ScreenContextStatus, ContextStoreError> {
+    let mut status = screen_context_status_for_session(session_id)?.ok_or_else(|| {
+        ContextStoreError::InvalidRequest(format!("unknown context session '{session_id}'"))
+    })?;
+    status.state = ScreenContextState::CaptureDegraded;
+    status.last_attempt_at = Some(observed_at);
+    status.most_recent_error = Some(error.to_string());
+    set_screen_context_status(session_id, status)
+}
+
+pub fn mark_screen_context_stopped(
+    session_id: &str,
+    stopped_at: DateTime<Local>,
+) -> Result<ScreenContextStatus, ContextStoreError> {
+    let mut status = screen_context_status_for_session(session_id)?.ok_or_else(|| {
+        ContextStoreError::InvalidRequest(format!("unknown context session '{session_id}'"))
+    })?;
+    if status.state != ScreenContextState::Cleaned
+        && status.state != ScreenContextState::PermissionUnavailable
+        && status.state != ScreenContextState::Off
+    {
+        status.state = ScreenContextState::Stopped;
+    }
+    status.worker_stopped_at = Some(stopped_at);
+    set_screen_context_status(session_id, status)
+}
+
+pub fn relink_screen_context_directory(
+    session_id: &str,
+    new_directory: &Path,
+) -> Result<(), ContextStoreError> {
+    let new_directory = new_directory.canonicalize()?;
+    let canonical_root = screen_root().canonicalize()?;
+    if !new_directory.starts_with(&canonical_root) {
+        return Err(ContextStoreError::InvalidRequest(format!(
+            "screen directory is outside {}",
+            canonical_root.display()
+        )));
+    }
+    let new_target = new_directory.display().to_string();
+    let mut conn = open_db()?;
+    let tx = conn.transaction()?;
+    let old_target: Option<String> = tx
+        .query_row(
+            "SELECT target FROM context_links
+             WHERE session_id = ?1 AND kind = ?2
+             ORDER BY linked_at DESC LIMIT 1",
+            params![session_id, ContextLinkKind::ScreenshotDirectory.as_str()],
+            |row| row.get(0),
+        )
+        .optional()?;
+
+    if let Some(old_target) = old_target {
+        tx.execute(
+            "UPDATE context_links SET target = ?3, linked_at = ?4
+             WHERE session_id = ?1 AND kind = ?2 AND target = ?5",
+            params![
+                session_id,
+                ContextLinkKind::ScreenshotDirectory.as_str(),
+                new_target,
+                timestamp_to_db(Local::now()),
+                old_target,
+            ],
+        )?;
+
+        let mut stmt = tx.prepare(
+            "SELECT id, artifact_path FROM context_events
+             WHERE session_id = ?1 AND source = ?2 AND artifact_path IS NOT NULL",
+        )?;
+        let rows = stmt
+            .query_map(
+                params![session_id, ContextEventSource::ScreenshotRef.as_str()],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+            )?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(stmt);
+        let old_directory = PathBuf::from(old_target);
+        for (id, old_path) in rows {
+            let relative = Path::new(&old_path)
+                .strip_prefix(&old_directory)
+                .map_err(|_| {
+                    ContextStoreError::InvalidRequest(format!(
+                        "screenshot ref is outside its linked directory: {old_path}"
+                    ))
+                })?;
+            let new_path = new_directory.join(relative).display().to_string();
+            tx.execute(
+                "UPDATE context_events SET artifact_path = ?2 WHERE id = ?1",
+                params![id, new_path],
+            )?;
+        }
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+fn screen_root() -> PathBuf {
+    Config::minutes_dir().join("screens")
+}
+
+fn canonical_screen_file(
+    path: &Path,
+    linked_directories: &[PathBuf],
+) -> Result<PathBuf, ContextStoreError> {
+    if path.extension().and_then(|value| value.to_str()) != Some("png") {
+        return Err(ContextStoreError::InvalidRequest(
+            "screen context only supports PNG artifacts".into(),
+        ));
+    }
+    let canonical = path.canonicalize()?;
+    let canonical_root = screen_root().canonicalize()?;
+    if !canonical.starts_with(&canonical_root) {
+        return Err(ContextStoreError::InvalidRequest(format!(
+            "screen artifact is outside {}",
+            canonical_root.display()
+        )));
+    }
+    if !linked_directories
+        .iter()
+        .any(|directory| canonical.starts_with(directory))
+    {
+        return Err(ContextStoreError::InvalidRequest(
+            "screen artifact is not linked to the selected session".into(),
+        ));
+    }
+    Ok(canonical)
+}
+
+pub fn get_screen_context(
+    session_id: &str,
+    anchor: Option<DateTime<Local>>,
+    limit: usize,
+) -> Result<ScreenContextResult, ContextStoreError> {
+    if limit == 0 || limit > MAX_SCREEN_CONTEXT_IMAGES {
+        return Err(ContextStoreError::InvalidRequest(format!(
+            "screen image limit must be between 1 and {MAX_SCREEN_CONTEXT_IMAGES}"
+        )));
+    }
+    let Some(session) = get_session(session_id)? else {
+        return Err(ContextStoreError::InvalidRequest(format!(
+            "unknown context session '{session_id}'"
+        )));
+    };
+    let status = screen_status_from_session(&session);
+    let linked_directories = list_links_for_session(session_id)?
+        .into_iter()
+        .filter(|link| link.kind == ContextLinkKind::ScreenshotDirectory)
+        .filter_map(|link| PathBuf::from(link.target).canonicalize().ok())
+        .collect::<Vec<_>>();
+
+    let mut events = list_events_for_session(session_id, None, None)?
+        .into_iter()
+        .filter(|event| event.source == ContextEventSource::ScreenshotRef)
+        .collect::<Vec<_>>();
+    if let Some(anchor) = anchor {
+        let (mut before, mut after): (Vec<_>, Vec<_>) = events
+            .into_iter()
+            .partition(|event| event.observed_at <= anchor);
+        before.sort_by_key(|event| std::cmp::Reverse(event.observed_at));
+        after.sort_by_key(|event| event.observed_at);
+        events = Vec::with_capacity(before.len() + after.len());
+        if !before.is_empty() {
+            events.push(before.remove(0));
+        }
+        if !after.is_empty() {
+            events.push(after.remove(0));
+        }
+        before.extend(after);
+        before.sort_by_key(|event| (event.observed_at - anchor).num_seconds().unsigned_abs());
+        events.extend(before);
+    } else {
+        events.sort_by_key(|event| std::cmp::Reverse(event.observed_at));
+    }
+
+    let reference_time = anchor.unwrap_or_else(Local::now);
+    let mut images = Vec::new();
+    for event in events {
+        let Some(path) = event.artifact_path.as_deref() else {
+            continue;
+        };
+        let canonical = match canonical_screen_file(Path::new(path), &linked_directories) {
+            Ok(path) => path,
+            Err(_) => continue,
+        };
+        let byte_size = canonical.metadata()?.len();
+        images.push(ScreenContextImage {
+            path: canonical.display().to_string(),
+            captured_at: event.observed_at,
+            distance_seconds: (event.observed_at - reference_time).num_seconds(),
+            byte_size,
+            exists: true,
+        });
+        if images.len() == limit {
+            break;
+        }
+    }
+
+    let reason = if images.is_empty() {
+        Some(
+            match status.state {
+                ScreenContextState::Off => "screen context is disabled for this session",
+                ScreenContextState::Configured | ScreenContextState::WaitingForFirstCapture => {
+                    "screen context is waiting for its first successful capture"
+                }
+                ScreenContextState::PermissionUnavailable => {
+                    "screen context permission is unavailable"
+                }
+                ScreenContextState::Cleaned => "screen context was cleaned after summarization",
+                ScreenContextState::CaptureDegraded => {
+                    "screen capture is degraded and no readable image is available"
+                }
+                ScreenContextState::Capturing | ScreenContextState::Stopped => {
+                    "no verified readable screenshot is available"
+                }
+            }
+            .to_string(),
+        )
+    } else {
+        None
+    };
+
+    Ok(ScreenContextResult {
+        session: Some(session),
+        status,
+        images,
+        reason,
+    })
+}
+
+pub fn cleanup_screen_context(session_id: &str) -> Result<ScreenContextStatus, ContextStoreError> {
+    let links = list_links_for_session(session_id)?;
+    let canonical_root = screen_root().canonicalize().ok();
+    let mut cleanup_error = None;
+    for link in links
+        .iter()
+        .filter(|link| link.kind == ContextLinkKind::ScreenshotDirectory)
+    {
+        let directory = PathBuf::from(&link.target);
+        let allowed = directory
+            .canonicalize()
+            .ok()
+            .zip(canonical_root.as_ref())
+            .map(|(candidate, root)| candidate.starts_with(root))
+            .unwrap_or(false);
+        if allowed && directory.exists() {
+            if let Err(error) = std::fs::remove_dir_all(&directory) {
+                cleanup_error = Some(error);
+            }
+        }
+    }
+
+    let mut conn = open_db()?;
+    let tx = conn.transaction()?;
+    tx.execute(
+        "DELETE FROM context_events WHERE session_id = ?1 AND source = ?2",
+        params![session_id, ContextEventSource::ScreenshotRef.as_str()],
+    )?;
+    tx.execute(
+        "DELETE FROM context_links WHERE session_id = ?1 AND kind = ?2",
+        params![session_id, ContextLinkKind::ScreenshotDirectory.as_str()],
+    )?;
+    let session = get_session_with_conn(&tx, session_id)?.ok_or_else(|| {
+        ContextStoreError::InvalidRequest(format!("unknown context session '{session_id}'"))
+    })?;
+    let mut status = screen_status_from_session(&session);
+    status.state = ScreenContextState::Cleaned;
+    status.retention = ScreenContextRetention::Cleaned;
+    status.worker_stopped_at.get_or_insert_with(Local::now);
+    update_session_state_with_conn(
+        &tx,
+        session_id,
+        session.state,
+        None,
+        None,
+        None,
+        json!({ "screen_context": status }),
+    )?;
+    tx.commit()?;
+
+    if let Some(error) = cleanup_error {
+        tracing::warn!(session_id, error = %error, "screen files could not be fully removed; retrieval references were cleaned");
+    }
+    Ok(status)
 }
 
 #[cfg(test)]
@@ -1201,6 +1735,143 @@ mod tests {
             )
             .unwrap();
             assert_eq!(window_events.len(), 2);
+        });
+    }
+
+    #[test]
+    fn screen_context_links_retrieves_nearest_image_and_cleans_honestly() {
+        with_temp_home(|_| {
+            let started_at = Local::now();
+            let session = start_capture_session(CaptureMode::Meeting, None, started_at).unwrap();
+            let initial = initialize_screen_context(&session.id, true, 30, false).unwrap();
+            assert_eq!(initial.state, ScreenContextState::Configured);
+
+            let directory = screen_root().join("current");
+            std::fs::create_dir_all(&directory).unwrap();
+            mark_screen_context_waiting(&session.id, &directory).unwrap();
+
+            let first = directory.join("screen-0000-0030s.png");
+            let second = directory.join("screen-0001-0060s.png");
+            std::fs::write(&first, b"png-one").unwrap();
+            std::fs::write(&second, b"png-two").unwrap();
+            record_screen_capture_success(
+                &session.id,
+                &first,
+                started_at + Duration::seconds(30),
+                0,
+                30,
+                7,
+            )
+            .unwrap();
+            record_screen_capture_success(
+                &session.id,
+                &second,
+                started_at + Duration::seconds(60),
+                1,
+                60,
+                7,
+            )
+            .unwrap();
+
+            let result =
+                get_screen_context(&session.id, Some(started_at + Duration::seconds(45)), 2)
+                    .unwrap();
+            assert_eq!(result.status.state, ScreenContextState::Capturing);
+            assert_eq!(result.images.len(), 2);
+            assert!(result.images[0].path.ends_with("screen-0000-0030s.png"));
+            assert!(result.images[1].path.ends_with("screen-0001-0060s.png"));
+            assert_eq!(result.images[0].distance_seconds, -15);
+            assert_eq!(result.images[1].distance_seconds, 15);
+
+            let cleaned = cleanup_screen_context(&session.id).unwrap();
+            assert_eq!(cleaned.state, ScreenContextState::Cleaned);
+            assert_eq!(cleaned.retention, ScreenContextRetention::Cleaned);
+            assert!(!directory.exists());
+            let after = get_screen_context(&session.id, None, 1).unwrap();
+            assert!(after.images.is_empty());
+            assert_eq!(
+                after.reason.as_deref(),
+                Some("screen context was cleaned after summarization")
+            );
+            assert!(list_links_for_session(&session.id)
+                .unwrap()
+                .into_iter()
+                .all(|link| link.kind != ContextLinkKind::ScreenshotDirectory));
+        });
+    }
+
+    #[test]
+    fn screen_context_rejects_unbounded_image_requests() {
+        with_temp_home(|_| {
+            let session = start_capture_session(CaptureMode::Meeting, None, Local::now()).unwrap();
+            let error =
+                get_screen_context(&session.id, None, MAX_SCREEN_CONTEXT_IMAGES + 1).unwrap_err();
+            assert!(error.to_string().contains("between 1 and 3"));
+        });
+    }
+
+    #[test]
+    fn screen_context_never_returns_an_unlinked_image() {
+        with_temp_home(|home| {
+            let started_at = Local::now();
+            let session = start_capture_session(CaptureMode::Meeting, None, started_at).unwrap();
+            initialize_screen_context(&session.id, true, 30, true).unwrap();
+            let linked = screen_root().join("linked");
+            std::fs::create_dir_all(&linked).unwrap();
+            mark_screen_context_waiting(&session.id, &linked).unwrap();
+
+            let outside = home.path().join("private.png");
+            std::fs::write(&outside, b"not-session-linked").unwrap();
+            append_event(
+                &session.id,
+                NewContextEvent {
+                    observed_at: started_at,
+                    source: ContextEventSource::ScreenshotRef,
+                    app_name: None,
+                    bundle_id: None,
+                    window_title: None,
+                    url: None,
+                    domain: None,
+                    artifact_path: Some(outside.display().to_string()),
+                    privacy_scope: ContextPrivacyScope::Normal,
+                    metadata: json!({}),
+                },
+            )
+            .unwrap();
+
+            let result = get_screen_context(&session.id, None, 1).unwrap();
+            assert!(result.images.is_empty());
+        });
+    }
+
+    #[test]
+    fn screen_context_relinks_refs_when_job_moves_capture_directory() {
+        with_temp_home(|_| {
+            let started_at = Local::now();
+            let session = start_capture_session(CaptureMode::Meeting, None, started_at).unwrap();
+            initialize_screen_context(&session.id, true, 30, true).unwrap();
+            let old_directory = screen_root().join("current");
+            let new_directory = screen_root().join("job-123");
+            std::fs::create_dir_all(&old_directory).unwrap();
+            mark_screen_context_waiting(&session.id, &old_directory).unwrap();
+            let old_image = old_directory.join("screen-0000-0030s.png");
+            std::fs::write(&old_image, b"png").unwrap();
+            record_screen_capture_success(
+                &session.id,
+                &old_image,
+                started_at + Duration::seconds(30),
+                0,
+                30,
+                3,
+            )
+            .unwrap();
+
+            std::fs::rename(&old_directory, &new_directory).unwrap();
+            relink_screen_context_directory(&session.id, &new_directory).unwrap();
+            let result = get_screen_context(&session.id, None, 1).unwrap();
+            assert_eq!(result.images.len(), 1);
+            assert!(result.images[0].path.contains("job-123"));
+            assert!(!result.images[0].path.contains("/current/"));
         });
     }
 

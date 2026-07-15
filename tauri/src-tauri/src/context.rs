@@ -415,6 +415,11 @@ pub fn generate_assistant_context(config: &Config) -> Result<String, String> {
     md.push_str("- `minutes live` / `minutes stop` — start/stop live transcript (real-time)\n");
     md.push_str("- `minutes transcript --since 5m` — read last 5 minutes of live transcript\n");
     md.push_str("- `minutes transcript --status` — check if a live session is active\n");
+    md.push_str(
+        "- `minutes context status --json` — check observed screen and desktop-context state\n",
+    );
+    md.push_str("- `minutes context screen --limit 1 --json` — retrieve the latest verified session-linked screenshot\n");
+    md.push_str("- `minutes context screen --at <RFC3339> --limit 1 --json` — retrieve the nearest screenshot for a moment\n");
     md.push_str("- `minutes note \"text\"` — add a timestamped note to current recording\n");
     md.push_str("- `minutes process <file>` — process an audio file\n");
     md.push_str("- `minutes qmd status` — check QMD collection status\n");
@@ -439,6 +444,15 @@ pub fn generate_assistant_context(config: &Config) -> Result<String, String> {
     md.push_str("These can be unified by symlinking or configuring output_dir in config.toml.\n\n");
     md.push_str("**Daily Notes** — Minutes can append session summaries to daily notes.\n");
     md.push_str("Configure in ~/.config/minutes/config.toml under [daily_notes].\n");
+
+    md.push_str("\n## Live Screen and Desktop Context\n\n");
+    md.push_str("Minutes has two separate opt-in evidence lanes:\n");
+    md.push_str(
+        "- `screen_context` captures periodic PNG screenshots only during an active recording.\n",
+    );
+    md.push_str("- `desktop_context` captures app focus and opted-in window/browser title metadata; it does not contain screen pixels.\n\n");
+    md.push_str("If `CURRENT_SESSION.md` exists, read it when the user references the screen, asks whether a live feed is visible, or requests presentation-aware live coaching. Refresh stale or missing state with `minutes context status --json`. Retrieve only the bounded image needed with `minutes context screen --limit 1 --json` or anchor it with `--at <RFC3339>`.\n\n");
+    md.push_str("Never say ‘I can see’, describe a slide, or infer visible content unless you actually opened a specific image returned by the screen-context command. Configured, waiting, unavailable, degraded, stopped, and cleaned states are not visual awareness. If only desktop context is available, report app/window metadata precisely and say that no image was inspected. Do not inspect or describe unrelated private material visible elsewhere on the screen.\n");
 
     md.push_str("\n## Active Meeting Focus\n\n");
     md.push_str(&format!(
@@ -637,6 +651,19 @@ mod tests {
         assert!(content.contains("Do not assume the user always wants short bullet points"));
         assert!(content.contains("conversational, narrative, or report-style answer"));
         assert!(content.contains("Never attribute a statement to a named person"));
+    }
+
+    #[test]
+    fn assistant_context_explains_honest_live_screen_retrieval() {
+        let config = Config::default();
+        let content = generate_assistant_context(&config).expect("assistant context");
+
+        assert!(content.contains("## Live Screen and Desktop Context"));
+        assert!(content.contains("CURRENT_SESSION.md"));
+        assert!(content.contains("minutes context status --json"));
+        assert!(content.contains("minutes context screen --limit 1 --json"));
+        assert!(content.contains("unless you actually opened a specific image"));
+        assert!(content.contains("does not contain screen pixels"));
     }
 
     #[test]

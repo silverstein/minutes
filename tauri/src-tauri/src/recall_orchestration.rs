@@ -12,9 +12,28 @@ use minutes_core::live_sidekick::{
     LiveAssistanceSessionId, MeetingRef, ProviderAttestationId, ProviderBinding, ProviderBindingId,
     ProviderIsolationProfile, RejectionReason, UserRole,
 };
-use serde::Serialize;
+use serde::{Serialize, Serializer};
 
 const RECALL_ENVELOPE_SCHEMA_VERSION: u8 = 2;
+const JS_MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
+
+fn is_opaque_wire_id(value: &str) -> bool {
+    (1..=256).contains(&value.len())
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_graphic() && !byte.is_ascii_whitespace())
+}
+
+fn is_client_request_id(value: &str) -> bool {
+    (8..=128).contains(&value.len())
+        && value
+            .split('-')
+            .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_alphanumeric()))
+}
+
+fn is_wire_counter(value: u64, minimum: u64) -> bool {
+    value >= minimum && value <= JS_MAX_SAFE_INTEGER
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RecallSource {
@@ -51,10 +70,34 @@ pub struct RecallInvocation {
     pub source_binding_id: String,
     pub assistance_session_id: LiveAssistanceSessionId,
     pub foreground_turn_id: ForegroundTurnId,
+    #[serde(serialize_with = "serialize_invocation_identity")]
     pub invocation: InvocationIdentity,
     pub focus_generation: u64,
     pub provider: RecallProviderDispatch,
     pub client_request_id: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RecallInvocationIdentityWire {
+    sequence: u64,
+    source_policy_generation: u64,
+    user_generation: u64,
+}
+
+fn serialize_invocation_identity<S>(
+    invocation: &InvocationIdentity,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    RecallInvocationIdentityWire {
+        sequence: invocation.sequence,
+        source_policy_generation: invocation.source_policy_generation,
+        user_generation: invocation.user_generation,
+    }
+    .serialize(serializer)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -195,13 +238,14 @@ impl RecallOrchestration {
         source: RecallSource,
         focus_generation: u64,
     ) -> Result<Self, RecallOrchestrationError> {
-        if process_epoch.trim().is_empty()
-            || source_binding_id.trim().is_empty()
+        if !is_opaque_wire_id(&process_epoch)
+            || !is_opaque_wire_id(&source_binding_id)
             || source.key().trim().is_empty()
+            || !is_opaque_wire_id(assistance_session_id.as_str())
         {
             return Err(RecallOrchestrationError::InvalidSource);
         }
-        if focus_generation == 0 {
+        if !is_wire_counter(focus_generation, 1) {
             return Err(RecallOrchestrationError::InvalidGeneration);
         }
 
@@ -267,16 +311,26 @@ impl RecallOrchestration {
         &mut self,
         binding: ProviderBinding,
     ) -> Result<RecallTransition, RecallOrchestrationError> {
+        if !is_opaque_wire_id(binding.binding_id().as_str())
+            || !is_opaque_wire_id(binding.attestation_id().as_str())
+        {
+            return Err(RecallOrchestrationError::InvalidSource);
+        }
+        if !is_wire_counter(binding.generation(), 1) {
+            return Err(RecallOrchestrationError::InvalidGeneration);
+        }
+        if self.session.source_policy_generation >= JS_MAX_SAFE_INTEGER {
+            return Err(RecallOrchestrationError::InvalidGeneration);
+        }
         let prepared_terminal = self.prepare_active_terminal(
             RecallStreamEventKind::Retracted,
             RecallTerminalReason::ProviderChanged,
         )?;
-        let result = self
-            .session
-            .reduce(AssistanceEvent::ProviderBindingChanged {
-                session_id: self.session.id.clone(),
-                binding,
-            });
+        let mut candidate = self.session.clone();
+        let result = candidate.reduce(AssistanceEvent::ProviderBindingChanged {
+            session_id: self.session.id.clone(),
+            binding,
+        });
         if result.accepted {
             let terminal = if action_cancelled_foreground(&result.actions) {
                 Some(self.commit_terminal(
@@ -285,6 +339,7 @@ impl RecallOrchestration {
             } else {
                 None
             };
+            self.session = candidate;
             Ok(RecallTransition {
                 effects: ordered_effects(result.actions, terminal),
             })
@@ -302,14 +357,15 @@ impl RecallOrchestration {
         source_event_id: EvidenceId,
         text: String,
     ) -> Result<RecallBegin, RecallOrchestrationError> {
-        if client_request_id.trim().is_empty() {
+        if !is_client_request_id(client_request_id) || !is_opaque_wire_id(turn_id.as_str()) {
             return Err(RecallOrchestrationError::InvalidSource);
         }
         let prepared_terminal = self.prepare_active_terminal(
             RecallStreamEventKind::Retracted,
             RecallTerminalReason::Superseded,
         )?;
-        let result = self.session.reduce(AssistanceEvent::UserMessage {
+        let mut candidate = self.session.clone();
+        let result = candidate.reduce(AssistanceEvent::UserMessage {
             session_id: self.session.id.clone(),
             turn_id: turn_id.clone(),
             source_event_id,
@@ -331,8 +387,14 @@ impl RecallOrchestration {
         });
         let invocation = invocation.ok_or(RecallOrchestrationError::MissingInvocationAction)?;
 
-        let provider = self
-            .session
+        if !is_wire_counter(invocation.sequence, 1)
+            || !is_wire_counter(invocation.source_policy_generation, 0)
+            || !is_wire_counter(invocation.user_generation, 0)
+        {
+            return Err(RecallOrchestrationError::InvalidGeneration);
+        }
+
+        let provider = candidate
             .provider_binding
             .as_ref()
             .map(RecallProviderDispatch::from)
@@ -355,6 +417,7 @@ impl RecallOrchestration {
             provider,
             client_request_id: client_request_id.to_owned(),
         };
+        self.session = candidate;
         self.stream_authority = Some(token.clone());
         self.stream_event_sequence = 0;
         self.stream_closed = false;
@@ -446,7 +509,7 @@ impl RecallOrchestration {
             .stream_event_sequence
             .checked_add(1)
             .ok_or(CompletionRejection::InvalidEventSequence)?;
-        if next == u64::MAX {
+        if next >= JS_MAX_SAFE_INTEGER {
             return Err(CompletionRejection::InvalidEventSequence);
         }
         self.stream_event_sequence = next;
@@ -516,6 +579,9 @@ impl RecallOrchestration {
             .stream_event_sequence
             .checked_add(1)
             .ok_or(CompletionRejection::InvalidEventSequence)?;
+        if next > JS_MAX_SAFE_INTEGER {
+            return Err(CompletionRejection::InvalidEventSequence);
+        }
         Ok(RecallStreamEnvelope {
             authority: token.clone(),
             event_sequence: next,
@@ -628,6 +694,9 @@ impl RecallOrchestration {
         &mut self,
         new_generation: u64,
     ) -> Result<RecallTransition, RecallOrchestrationError> {
+        if !is_wire_counter(new_generation, 1) {
+            return Err(RecallOrchestrationError::InvalidGeneration);
+        }
         let prepared_terminal = self.prepare_active_terminal(
             RecallStreamEventKind::Retracted,
             RecallTerminalReason::SourcePolicyChanged,
@@ -652,6 +721,9 @@ impl RecallOrchestration {
             .source_policy_generation
             .checked_add(1)
             .ok_or(RecallOrchestrationError::InvalidGeneration)?;
+        if !is_wire_counter(new_generation, 1) {
+            return Err(RecallOrchestrationError::InvalidGeneration);
+        }
         let prepared_terminal = self.prepare_active_terminal(
             RecallStreamEventKind::Retracted,
             RecallTerminalReason::FocusChanged,
@@ -689,8 +761,10 @@ impl RecallOrchestration {
         new_focus_generation: u64,
     ) -> Result<RecallTransition, RecallOrchestrationError> {
         if meeting_ref.trim().is_empty()
-            || new_source_binding_id.trim().is_empty()
+            || !is_opaque_wire_id(&new_source_binding_id)
             || new_focus_generation <= self.focus_generation
+            || !is_wire_counter(new_focus_generation, 1)
+            || self.session.source_policy_generation >= JS_MAX_SAFE_INTEGER
         {
             return Err(RecallOrchestrationError::InvalidGeneration);
         }
@@ -862,6 +936,77 @@ mod tests {
                 RejectionReason::ProviderCapabilitiesInsufficient
             ))
         );
+    }
+
+    #[test]
+    fn frontend_wire_rejects_unrepresentable_authority_without_mutation() {
+        assert!(matches!(
+            RecallOrchestration::new(
+                LiveAssistanceSessionId::new("recall-session-a"),
+                "process-epoch-a".into(),
+                "source-binding-a".into(),
+                RecallSource::Live {
+                    context_session_id: "context session with spaces".into(),
+                    mode: CaptureMode::Live,
+                },
+                JS_MAX_SAFE_INTEGER + 1,
+            ),
+            Err(RecallOrchestrationError::InvalidGeneration)
+        ));
+
+        let mut session = live_session();
+        assert_eq!(
+            session.bind_provider(binding(
+                JS_MAX_SAFE_INTEGER + 1,
+                ProviderIsolationProfile::AgentControlledText,
+            )),
+            Err(RecallOrchestrationError::InvalidGeneration)
+        );
+        assert!(session.session().provider_binding.is_none());
+
+        session
+            .bind_provider(binding(1, ProviderIsolationProfile::AgentControlledText))
+            .unwrap();
+        let before = session.session().clone();
+        assert_eq!(
+            session.begin_foreground(
+                "invalid request id",
+                ForegroundTurnId::new("turn-a"),
+                EvidenceId::new("user-a"),
+                "Question".into(),
+            ),
+            Err(RecallOrchestrationError::InvalidSource)
+        );
+        assert_eq!(session.session(), &before);
+    }
+
+    #[test]
+    fn invocation_wire_shape_is_camel_case_at_the_frontend_boundary() {
+        let mut session = live_session();
+        let token = start_turn(&mut session);
+        let wire = serde_json::to_value(token).unwrap();
+
+        assert_eq!(wire["schemaVersion"], 2);
+        assert_eq!(wire["invocation"]["sequence"], 1);
+        assert_eq!(wire["invocation"]["sourcePolicyGeneration"], 1);
+        assert_eq!(wire["invocation"]["userGeneration"], 1);
+        assert!(wire["invocation"].get("source_policy_generation").is_none());
+        assert!(wire["invocation"].get("user_generation").is_none());
+    }
+
+    #[test]
+    fn rust_serialization_matches_the_node_v2_envelope_golden() {
+        let mut session = live_session();
+        let _ = start_turn(&mut session);
+        let transition = session.retire_for_focus_change().unwrap();
+        let terminal = terminal_effect(&transition.effects).unwrap();
+        let actual = serde_json::to_value(terminal).unwrap();
+        let expected: serde_json::Value = serde_json::from_str(include_str!(
+            "../../src/scripts/fixtures/recall-envelope-v2.json"
+        ))
+        .unwrap();
+
+        assert_eq!(actual, expected);
     }
 
     #[test]
@@ -1109,7 +1254,7 @@ mod tests {
     fn live_chunks_reserve_the_last_sequence_for_a_terminal_tombstone() {
         let mut session = live_session();
         let token = start_turn(&mut session);
-        session.stream_event_sequence = u64::MAX - 1;
+        session.stream_event_sequence = JS_MAX_SAFE_INTEGER - 1;
 
         assert_eq!(
             session.next_stream_event(&token, RecallStreamEventKind::Text, "too late"),
@@ -1118,7 +1263,7 @@ mod tests {
 
         let transition = session.cancel_foreground(&token).unwrap();
         let terminal = terminal_effect(&transition.effects).expect("reserved terminal slot");
-        assert_eq!(terminal.event_sequence, u64::MAX);
+        assert_eq!(terminal.event_sequence, JS_MAX_SAFE_INTEGER);
         assert_eq!(terminal.event_kind, RecallStreamEventKind::Cancelled);
     }
 

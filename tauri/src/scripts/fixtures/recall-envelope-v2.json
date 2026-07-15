@@ -1,0 +1,27 @@
+{
+  "authority": {
+    "schemaVersion": 2,
+    "processEpoch": "process-epoch-a",
+    "sourceBindingId": "source-binding-live-a",
+    "assistanceSessionId": "recall-session-a",
+    "foregroundTurnId": "turn-a",
+    "invocation": {
+      "sequence": 1,
+      "sourcePolicyGeneration": 1,
+      "userGeneration": 1
+    },
+    "focusGeneration": 7,
+    "provider": {
+      "bindingId": "binding-1",
+      "generation": 1,
+      "attestationId": "attestation-1",
+      "profile": "agent_controlled_text"
+    },
+    "clientRequestId": "client-a"
+  },
+  "eventSequence": 1,
+  "eventKind": "retracted",
+  "payload": {
+    "reason": "focus_changed"
+  }
+}

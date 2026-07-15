@@ -460,6 +460,15 @@ Portable skill text must branch honestly on host capability. If a host cannot
 provide evented, preemptible monitoring, it stays on-demand and offers Coach
 for continuous nudges.
 
+The in-app terminal remains a separate, explicitly powerful surface rather
+than a hidden Native Recall mode. Native chat is the protected default. The
+first terminal activation must explain that the configured coding agent uses
+its normal host permissions, can read files, and can execute commands. Minutes
+does not auto-inject transcript or screen bytes into that terminal, does not
+silently add permission-bypass flags, and does not describe the surface as
+least-privilege. The UI label is `Terminal agent (power user)`, not `developer
+mode`. A user who declines the authority disclosure stays in Native Recall.
+
 Narrow `minutes-copilot` routing to explicit Coach/HUD lifecycle language.
 Ambiguous requests ask which surface the user wants.
 
@@ -472,9 +481,25 @@ Coach nudges can appear in Native Recall as separately labeled, collapsible
 evidence cards. They do not become chat history unless the user asks about one.
 Recall does not pause, resume, or stop Coach implicitly.
 
-### 7. Provider capabilities
+### 7. Provider bindings and capabilities
 
-Add a typed `ProviderCapabilities` contract. Native live Recall requires:
+Native provider admission uses a typed, process-ephemeral `ProviderBinding`,
+not a caller-assembled boolean bag. Each accepted binding carries:
+
+- an opaque binding identity,
+- a monotonic host generation,
+- an attestation identity,
+- and a Minutes-defined isolation profile from which capability facts are
+  derived.
+
+Stale or equal generations are rejected. Any newer nonterminal generation is
+accepted so a coalesced revocation cannot leave older authority active. The
+terminal generation and source-policy overflow both fail closed. Restarted
+sessions are unproven until the host re-attests. A non-pristine binding change
+cancels active work, clears policy-bound history and visible source state, then
+publishes the new route in that exact order.
+
+Native live Recall requires the derived profile to prove:
 
 - no arbitrary writes,
 - no arbitrary shell,
@@ -502,6 +527,31 @@ Image disclosure is:
 - provider-destination labeled,
 - retention aware,
 - and separately provenance tagged.
+
+Direct image input must be capability-probed rather than inferred from a
+provider name. When a configured provider lacks a proven direct local-image
+transport, Minutes does not enable broad filesystem `Read` merely to show it a
+screenshot. The cross-platform fallback is a one-turn MCP capability served by
+the signed Minutes process itself:
+
+1. The host resolves exactly one image with
+   `get_screen_context(session_id, anchor, 1)` and verifies its session link,
+   canonical root, byte bound, and SHA-256.
+2. Minutes creates an opaque, short-lived receipt under a fixed private runtime
+   root. Arbitrary paths are never provider input.
+3. A helper mode of the current signed Minutes executable exposes one MCP image
+   tool for that receipt and no other meeting, filesystem, shell, or mutation
+   tool.
+4. Native Recall launches the provider with a strict MCP configuration that
+   contains only that helper. The prompt labels screenshot text as untrusted
+   evidence.
+5. The receipt and copied image are removed after completion, cancellation,
+   policy invalidation, or timeout. A cleanup failure changes the visible state
+   to degraded and is retried; it never claims the screen was cleaned.
+
+Until this route is established and the model actually inspects the returned
+image, the UI may say `Screen available` but never `Screen included` or make a
+visual claim.
 
 Screen disabled, permission denied, waiting, available, included, stopped, and
 cleaned are distinct states.

@@ -175,15 +175,26 @@ context fails closed before prompt assembly or provider invocation.
 
 Every native GUI turn binds to:
 
+- one process epoch that is never restored,
+- one opaque exact-source binding,
 - one live-assistance session ID,
 - one foreground turn ID,
 - one focus generation,
 - one source-policy generation,
-- and a provider capability record.
+- one complete provider binding and attestation snapshot,
+- and one reducer-issued invocation identity.
 
-Late events from an old turn or old focus cannot appear in the current chat.
-Switching meetings cancels or isolates in-flight work and invalidates
-incompatible history.
+The immutable authority envelope is identical on provider dispatch, status,
+every streamed chunk, error, retraction, cancellation acknowledgement, and
+completion. The backend owns a contiguous per-turn event sequence. The host
+rechecks the complete envelope immediately before provider spawn and before
+any event reaches the frontend; the frontend independently rejects malformed,
+duplicate, skipped, reordered, or stale envelopes. A completion is publishable
+only after the reducer returns `PublishForegroundResponse`.
+
+Late events from an old process, source, turn, focus, policy, or provider
+binding cannot appear in the current chat. Switching meetings cancels or
+isolates in-flight work and invalidates incompatible history.
 
 Source-policy invalidation preserves only harmless generic preference state:
 the selected role value and assistance posture may survive across fresh calls,
@@ -306,17 +317,25 @@ remain available, but the assistant may not claim the final debrief is ready.
 
 ### Final artifact ready
 
-The live-assistance session rebinds from capture session ID to finalized meeting
-path through a trusted mapping. The UI offers recap, debrief, decisions, and
-follow-up. The session retains safe corrections and posture state for the
-transition.
+The host performs one atomic handoff from the prior exact capture session to a
+verified finalized meeting capability. The reducer rotates source-policy
+generation, cancels in-flight work, clears source-bound evidence and speaker
+corrections, and returns the old capture ID, new finalized reference, and new
+generation in one accepted action set. Only then does the host rotate its
+opaque source binding and focus generation. The UI offers recap, debrief,
+decisions, and follow-up. Only generic role value and posture may carry across;
+history, caches, screen grants, source-event links, and other meeting-bound
+state are cleared.
 
 ### Restart
 
-The first release keeps live GUI conversation content in memory only. After an
-app restart, Minutes says the prior live chat was not retained while the
-finalized meeting remains available. Persistent chat requires a separate
-opt-in retention design.
+The first release keeps live GUI conversation content and orchestration state
+in memory only. In-flight turns and runs are omitted even from diagnostic
+session serialization, provider proof is process-ephemeral, and every provider
+event carries a non-restored process epoch. The host never hydrates a live
+orchestration manager after restart. Minutes says the prior live chat was not
+retained while the finalized meeting remains available. Persistent chat
+requires a separate opt-in retention design.
 
 ## Shared architecture
 
@@ -427,9 +446,12 @@ Features are enabled from proven capabilities rather than agent name.
 Native Recall can remain a fresh non-interactive inference call per turn. Replace
 the global tuple history and global in-flight turn with the session manager.
 
-Every Tauri command and frontend event carries `session_id` and `turn_id`.
-The UI ignores or routes late chunks that do not match the visible session and
-turn.
+Every Tauri command and frontend event carries the complete v2 authority
+envelope: process epoch, opaque source binding, assistance session, foreground
+turn, reducer invocation identity, focus generation, complete provider binding
+snapshot, client request ID, typed event kind, and backend-owned contiguous
+event sequence. Session and turn IDs alone are not sufficient because callers
+can reuse identifiers across a focus, provider, or process ABA cycle.
 
 The GUI first release supports safe foreground chat. Evented strategist mode
 then consumes the shared scheduler. It must not launch a shell loop or silently
@@ -513,6 +535,13 @@ Unsupported providers either use a host-prefetched no-tool inference path or
 are unavailable for native live mode. They remain available in the explicitly
 powerful terminal surface if the user chose that surface.
 
+Provider selection and prompt dispatch are one authority transaction. The
+reducer-issued request is wrapped with the exact binding ID, binding generation,
+attestation ID, and isolation profile that authorized it. A queued request must
+compare that snapshot to current process-local provider state immediately
+before spawn. If the route changed, the old prompt is never sent, even though a
+later completion would also be rejected.
+
 ### 8. Screen evidence
 
 Consume the screen-awareness contract from `minutes-id3j`. The session stores
@@ -538,16 +567,22 @@ the signed Minutes process itself:
    `get_screen_context(session_id, anchor, 1)` and verifies its session link,
    canonical root, byte bound, and SHA-256.
 2. Minutes creates an opaque, short-lived receipt under a fixed private runtime
-   root. Arbitrary paths are never provider input.
+   root. The receipt is bound to the exact invocation, process epoch, source,
+   focus, source-policy generation, provider destination, image hash, and
+   expiry. Arbitrary paths are never provider input.
 3. A helper mode of the current signed Minutes executable exposes one MCP image
    tool for that receipt and no other meeting, filesystem, shell, or mutation
-   tool.
+   tool. Successful delivery atomically consumes the receipt exactly once;
+   rereads fail even while cleanup is pending.
 4. Native Recall launches the provider with a strict MCP configuration that
    contains only that helper. The prompt labels screenshot text as untrusted
    evidence.
-5. The receipt and copied image are removed after completion, cancellation,
-   policy invalidation, or timeout. A cleanup failure changes the visible state
-   to degraded and is retried; it never claims the screen was cleaned.
+5. Completion, cancellation, focus/provider/policy change, timeout, and process
+   shutdown revoke helper authority before best-effort file deletion. Startup
+   sweeps orphaned receipts before enabling any new grant. A cleanup failure
+   changes the visible state to degraded, blocks new screen grants, and is
+   retried; authorization remains revoked independently of deletion and the UI
+   never claims the screen was cleaned.
 
 Until this route is established and the model actually inspects the returned
 image, the UI may say `Screen available` but never `Screen included` or make a

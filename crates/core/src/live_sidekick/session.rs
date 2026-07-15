@@ -385,7 +385,12 @@ pub struct LiveAssistanceSession {
     /// from this session instead of preserving the previous proof.
     #[serde(default)]
     pub authority_exhausted: bool,
+    /// In-flight work is process-local authority. A serialized session may be
+    /// useful for diagnostics, but restoring it must never make an old provider
+    /// callback publishable in a new process.
+    #[serde(skip, default)]
     pub foreground_turn: Option<ForegroundTurn>,
+    #[serde(skip, default)]
     pub background_run: Option<BackgroundRun>,
     /// Immutable evidence provenance keyed by an event ID that is unique
     /// within the retained source-policy generation.
@@ -518,6 +523,11 @@ impl LiveAssistanceSession {
                 invocation,
                 ..
             } => self.foreground_completed(turn_id, invocation),
+            AssistanceEvent::ForegroundCancelled {
+                turn_id,
+                invocation,
+                ..
+            } => self.foreground_cancelled(turn_id, invocation),
             AssistanceEvent::ProviderBindingChanged { binding, .. } => {
                 self.provider_binding_changed(binding)
             }
@@ -861,6 +871,33 @@ impl LiveAssistanceSession {
         }])
     }
 
+    fn foreground_cancelled(
+        &mut self,
+        turn_id: ForegroundTurnId,
+        invocation: InvocationIdentity,
+    ) -> Reduction {
+        if !turn_id.is_valid() || !invocation.is_valid() {
+            return Reduction::rejected(RejectionReason::InvalidValue);
+        }
+        let Some(turn) = self.foreground_turn.as_ref() else {
+            return Reduction::rejected(RejectionReason::StaleForegroundResult);
+        };
+        if turn.id != turn_id
+            || turn.invocation != invocation
+            || invocation.source_policy_generation != self.source_policy_generation
+            || invocation.user_generation != self.user_generation
+            || !self.accepts_user_control()
+        {
+            return Reduction::rejected(RejectionReason::StaleForegroundResult);
+        }
+        self.foreground_turn = None;
+        Reduction::accepted(vec![AssistanceAction::CancelForeground {
+            turn_id,
+            invocation,
+            reason: InvalidationReason::UserCancelled,
+        }])
+    }
+
     fn provider_binding_changed(&mut self, binding: ProviderBinding) -> Reduction {
         if self.surface != AssistanceSurface::NativeRecall {
             return Reduction::rejected(RejectionReason::ProviderBindingNotApplicable);
@@ -1004,11 +1041,23 @@ impl LiveAssistanceSession {
         ) {
             return Reduction::rejected(RejectionReason::InvalidTransition);
         }
+        let Some(new_generation) = self.source_policy_generation.checked_add(1) else {
+            return Reduction::rejected(RejectionReason::GenerationExhausted);
+        };
         let mut actions = self.cancel_in_flight(InvalidationReason::LifecycleChanged);
         self.scope = AssistanceScope::FinalizedMeeting;
         self.phase = AssistancePhase::Finalized;
         self.finalized_meeting_ref = Some(meeting_ref.clone());
-        actions.push(AssistanceAction::FinalizedMeetingAttached { meeting_ref });
+        self.source_policy_generation = new_generation;
+        self.evidence.clear();
+        self.speaker_corrections.clear();
+        self.user_role.source_event_id = None;
+        actions.push(AssistanceAction::PolicyBoundStateCleared { new_generation });
+        actions.push(AssistanceAction::FinalizedMeetingAttached {
+            prior_capture_session_id: capture_session_id,
+            meeting_ref,
+            new_generation,
+        });
         Reduction::accepted(actions)
     }
 
@@ -1167,6 +1216,11 @@ pub enum AssistanceEvent {
         turn_id: ForegroundTurnId,
         invocation: InvocationIdentity,
     },
+    ForegroundCancelled {
+        session_id: LiveAssistanceSessionId,
+        turn_id: ForegroundTurnId,
+        invocation: InvocationIdentity,
+    },
     ProviderBindingChanged {
         session_id: LiveAssistanceSessionId,
         binding: ProviderBinding,
@@ -1202,6 +1256,7 @@ impl AssistanceEvent {
             | Self::BackgroundStarted { session_id, .. }
             | Self::BackgroundCompleted { session_id, .. }
             | Self::ForegroundCompleted { session_id, .. }
+            | Self::ForegroundCancelled { session_id, .. }
             | Self::ProviderBindingChanged { session_id, .. }
             | Self::SourcePolicyInvalidated { session_id, .. }
             | Self::CaptureStopped { session_id, .. }
@@ -1215,6 +1270,7 @@ impl AssistanceEvent {
 #[serde(rename_all = "snake_case")]
 pub enum InvalidationReason {
     TypedUserInput,
+    UserCancelled,
     SourcePolicyChanged,
     ProviderCapabilitiesChanged,
     PostureChanged,
@@ -1295,7 +1351,9 @@ pub enum AssistanceAction {
     MeetingEnded,
     FinalTranscriptProcessing,
     FinalizedMeetingAttached {
+        prior_capture_session_id: CaptureSessionId,
         meeting_ref: MeetingRef,
+        new_generation: u64,
     },
 }
 
@@ -1639,12 +1697,18 @@ mod tests {
         });
         assert_eq!(
             finalized.actions,
-            vec![AssistanceAction::FinalizedMeetingAttached {
-                meeting_ref: "meeting-1".into(),
-            }]
+            vec![
+                AssistanceAction::PolicyBoundStateCleared { new_generation: 1 },
+                AssistanceAction::FinalizedMeetingAttached {
+                    prior_capture_session_id: "capture-1".into(),
+                    meeting_ref: "meeting-1".into(),
+                    new_generation: 1,
+                },
+            ]
         );
         assert_eq!(session.scope, AssistanceScope::FinalizedMeeting);
         assert_eq!(session.phase, AssistancePhase::Finalized);
+        assert_eq!(session.source_policy_generation, 1);
     }
 
     #[test]
@@ -1710,6 +1774,38 @@ mod tests {
                 invocation: second_invocation,
             }]
         );
+    }
+
+    #[test]
+    fn explicit_foreground_cancel_requires_the_current_invocation_identity() {
+        let mut session = session(CaptureMode::Live);
+        let (invocation, _) = ask(&mut session, "turn-1", "user-1", "Question?");
+        assert_rejected_unchanged(
+            &mut session,
+            AssistanceEvent::ForegroundCancelled {
+                session_id: "assist-1".into(),
+                turn_id: "turn-1".into(),
+                invocation: InvocationIdentity {
+                    sequence: invocation.sequence + 1,
+                    ..invocation
+                },
+            },
+            RejectionReason::StaleForegroundResult,
+        );
+        let cancelled = session.reduce(AssistanceEvent::ForegroundCancelled {
+            session_id: "assist-1".into(),
+            turn_id: "turn-1".into(),
+            invocation,
+        });
+        assert_eq!(
+            cancelled.actions,
+            vec![AssistanceAction::CancelForeground {
+                turn_id: "turn-1".into(),
+                invocation,
+                reason: InvalidationReason::UserCancelled,
+            }]
+        );
+        assert!(session.foreground_turn.is_none());
     }
 
     #[test]
@@ -2481,14 +2577,34 @@ mod tests {
 
     #[test]
     fn serialized_sessions_require_fresh_provider_reattestation() {
-        let session = session(CaptureMode::Live);
+        let mut session = session(CaptureMode::Live);
         assert!(session.native_recall_provider_ready());
+        let (old_invocation, question) = ask(
+            &mut session,
+            "turn-before-restart",
+            "user-before-restart",
+            "What changed?",
+        );
+        assert!(question.accepted);
         let value = serde_json::to_value(session).unwrap();
         assert!(value.get("provider_binding").is_none());
+        assert!(value.get("foreground_turn").is_none());
+        assert!(value.get("background_run").is_none());
         let mut restored: LiveAssistanceSession = serde_json::from_value(value).unwrap();
         assert_eq!(restored.provider_binding, None);
         assert_eq!(restored.provider_binding_generation(), 0);
+        assert!(restored.foreground_turn.is_none());
+        assert!(restored.background_run.is_none());
         assert!(!restored.native_recall_provider_ready());
+        assert_rejected_unchanged(
+            &mut restored,
+            AssistanceEvent::ForegroundCompleted {
+                session_id: "assist-1".into(),
+                turn_id: "turn-before-restart".into(),
+                invocation: old_invocation,
+            },
+            RejectionReason::StaleForegroundResult,
+        );
         assert_rejected_unchanged(
             &mut restored,
             AssistanceEvent::UserMessage {

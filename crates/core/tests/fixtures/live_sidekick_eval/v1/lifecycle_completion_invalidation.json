@@ -70,8 +70,8 @@
     "ordered_actions": ["cancel_live_completion", "enter_processing", "cancel_processing_completion", "attach_finalized_meeting"],
     "forbidden_actions": ["publish_late_live_completion", "publish_late_processing_completion"],
     "state_equals": {"phase": "finalized", "foreground_active": false},
-    "required_source_kinds": ["user_statement"],
-    "required_source_event_ids": ["USER_EVENT_LIVE", "USER_EVENT_PROCESSING"],
+    "required_source_kinds": [],
+    "required_source_event_ids": [],
     "provenance_required": true,
     "max_unsolicited_messages": 0,
     "parity_group": "lifecycle-invalidation"
@@ -103,7 +103,8 @@
           ], "rejection": null},
           {"accepted": true, "actions": [
             {"type": "cancel_foreground", "turn_id": "FOREGROUND_PROCESSING", "invocation": {"sequence": 2, "source_policy_generation": 0, "user_generation": 2}, "reason": "lifecycle_changed"},
-            {"type": "finalized_meeting_attached", "meeting_ref": "MEETING_A"}
+            {"type": "policy_bound_state_cleared", "new_generation": 1},
+            {"type": "finalized_meeting_attached", "prior_capture_session_id": "CAPTURE_A", "meeting_ref": "MEETING_A", "new_generation": 1}
           ], "rejection": null},
           {"accepted": false, "actions": [], "rejection": "stale_foreground_result"}
         ],
@@ -111,12 +112,9 @@
           "scope": "finalized_meeting", "surface": "terminal_sidekick", "phase": "finalized",
           "user_role": {"value": "participant", "revision": 0, "supersedes_revision": null, "source_event_id": null},
           "posture": "on_demand", "capture_mode": "recording", "capture_session_id": "CAPTURE_A",
-          "finalized_meeting_ref": "MEETING_A", "source_policy_generation": 0, "user_generation": 2, "provider_capabilities": null,
+          "finalized_meeting_ref": "MEETING_A", "source_policy_generation": 1, "user_generation": 2, "provider_capabilities": null,
           "foreground_turn": null, "background_run": null,
-          "evidence": {
-            "USER_EVENT_LIVE": {"id": "USER_EVENT_LIVE", "source_kind": "user_statement", "capture_session_id": "CAPTURE_A", "finalized_meeting_ref": null},
-            "USER_EVENT_PROCESSING": {"id": "USER_EVENT_PROCESSING", "source_kind": "user_statement", "capture_session_id": "CAPTURE_A", "finalized_meeting_ref": null}
-          },
+          "evidence": {},
           "speaker_corrections": {}
         }
       }

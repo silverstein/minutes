@@ -81,9 +81,9 @@
   "expectations": {
     "ordered_actions": ["accept_live_transcript", "reject_duplicate_identifier", "attach_finalized_meeting", "accept_bound_artifact"],
     "forbidden_actions": ["accept_wrong_meeting_reference", "accept_late_screen", "accept_duplicate_artifact"],
-    "state_equals": {"phase": "finalized", "evidence_count": 2},
-    "required_source_kinds": ["transcript_final", "meeting_artifact"],
-    "required_source_event_ids": ["EVENT_SHARED", "ARTIFACT_A"],
+    "state_equals": {"phase": "finalized", "evidence_count": 1},
+    "required_source_kinds": ["meeting_artifact"],
+    "required_source_event_ids": ["ARTIFACT_A"],
     "provenance_required": true,
     "max_unsolicited_messages": 0,
     "parity_group": "evidence-provenance"
@@ -103,7 +103,10 @@
           {"accepted": false, "actions": [], "rejection": "duplicate_evidence"},
           {"accepted": true, "actions": [{"type": "meeting_ended"}], "rejection": null},
           {"accepted": true, "actions": [{"type": "final_transcript_processing"}], "rejection": null},
-          {"accepted": true, "actions": [{"type": "finalized_meeting_attached", "meeting_ref": "MEETING_A"}], "rejection": null},
+          {"accepted": true, "actions": [
+            {"type": "policy_bound_state_cleared", "new_generation": 1},
+            {"type": "finalized_meeting_attached", "prior_capture_session_id": "CAPTURE_A", "meeting_ref": "MEETING_A", "new_generation": 1}
+          ], "rejection": null},
           {"accepted": true, "actions": [{"type": "evidence_accepted", "evidence_id": "ARTIFACT_A", "source_kind": "meeting_artifact"}], "rejection": null},
           {"accepted": false, "actions": [], "rejection": "wrong_finalized_meeting"},
           {"accepted": false, "actions": [], "rejection": "invalid_transition"},
@@ -113,11 +116,10 @@
           "scope": "finalized_meeting", "surface": "terminal_sidekick", "phase": "finalized",
           "user_role": {"value": "observer", "revision": 0, "supersedes_revision": null, "source_event_id": null},
           "posture": "on_demand", "capture_mode": "live", "capture_session_id": "CAPTURE_A",
-          "finalized_meeting_ref": "MEETING_A", "source_policy_generation": 0, "user_generation": 0, "provider_capabilities": null,
+          "finalized_meeting_ref": "MEETING_A", "source_policy_generation": 1, "user_generation": 0, "provider_capabilities": null,
           "foreground_turn": null, "background_run": null,
           "evidence": {
-            "ARTIFACT_A": {"id": "ARTIFACT_A", "source_kind": "meeting_artifact", "capture_session_id": null, "finalized_meeting_ref": "MEETING_A"},
-            "EVENT_SHARED": {"id": "EVENT_SHARED", "source_kind": "transcript_final", "capture_session_id": "CAPTURE_A", "finalized_meeting_ref": null}
+            "ARTIFACT_A": {"id": "ARTIFACT_A", "source_kind": "meeting_artifact", "capture_session_id": null, "finalized_meeting_ref": "MEETING_A"}
           },
           "speaker_corrections": {}
         }

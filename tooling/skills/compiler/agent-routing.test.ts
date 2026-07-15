@@ -44,7 +44,7 @@ test("buildAgentRoutingPrompt includes the utterance and available skills", () =
   assert.match(prompt, /User request: What did we discuss about pricing\?/);
   assert.match(prompt, /minutes-search:/);
   assert.match(prompt, /minutes-brief:/);
-  assert.match(prompt, /Respond in exactly one line using this format: SKILL:/);
+  assert.match(prompt, /SKILL: <skill-id> or CLARIFY/);
 });
 
 test("extractSkillChoice accepts JSON output", () => {
@@ -53,6 +53,7 @@ test("extractSkillChoice accepts JSON output", () => {
     new Set(["minutes-search"]),
   );
   assert.equal(parsed.skill, "minutes-search");
+  assert.equal(parsed.clarify, false);
   assert.equal(parsed.reason, null);
 });
 
@@ -62,6 +63,7 @@ test("extractSkillChoice accepts SKILL line output", () => {
     new Set(["minutes-brief"]),
   );
   assert.equal(parsed.skill, "minutes-brief");
+  assert.equal(parsed.clarify, false);
 });
 
 test("extractSkillChoice finds SKILL markers inside noisy output", () => {
@@ -70,6 +72,14 @@ test("extractSkillChoice finds SKILL markers inside noisy output", () => {
     new Set(["minutes-brief"]),
   );
   assert.equal(parsed.skill, "minutes-brief");
+  assert.equal(parsed.clarify, false);
+});
+
+test("extractSkillChoice accepts clarification output", () => {
+  const parsed = extractSkillChoice("CLARIFY", new Set(["minutes-copilot"]));
+  assert.equal(parsed.skill, null);
+  assert.equal(parsed.clarify, true);
+  assert.equal(parsed.reason, null);
 });
 
 test("extractSkillChoice rejects unknown skills", () => {
@@ -78,6 +88,7 @@ test("extractSkillChoice rejects unknown skills", () => {
     new Set(["minutes-brief"]),
   );
   assert.equal(parsed.skill, null);
+  assert.equal(parsed.clarify, false);
   assert.equal(parsed.reason, "unparseable_output");
 });
 

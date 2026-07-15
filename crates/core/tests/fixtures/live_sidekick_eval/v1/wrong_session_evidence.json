@@ -1,0 +1,55 @@
+{
+  "schema_version": 1,
+  "id": "wrong-session-evidence",
+  "description": "Evidence from another capture is rejected before prompt assembly.",
+  "content_origin": "synthetic",
+  "privacy": {
+    "generation_method": "behavior_first_from_scratch",
+    "source_material": "none",
+    "approved_role_tokens": ["FACILITATOR"]
+  },
+  "matrix": {
+    "surfaces": ["terminal", "gui", "coach"],
+    "capture_modes": ["live", "recording"]
+  },
+  "initial_state": {
+    "user_role": "observer",
+    "posture": "strategist"
+  },
+  "events": [
+    {
+      "at_ms": 0,
+      "kind": "capture_started",
+      "session_id": "SESSION_A",
+      "payload": {"capture_mode": "live"}
+    },
+    {
+      "at_ms": 10,
+      "kind": "transcript_final",
+      "session_id": "SESSION_B",
+      "payload": {"event_id": "EVENT_B", "speaker": "FACILITATOR", "text": "unrelated session evidence"}
+    },
+    {
+      "at_ms": 20,
+      "kind": "screen_disclosed",
+      "session_id": "SESSION_B",
+      "payload": {"event_id": "SCREEN_EVENT_B", "opaque_ref": "SCREEN_REF_B"}
+    },
+    {
+      "at_ms": 30,
+      "kind": "coach_nudge",
+      "session_id": "SESSION_B",
+      "payload": {"event_id": "COACH_EVENT_B", "text": "unrelated session nudge"}
+    }
+  ],
+  "expectations": {
+    "ordered_actions": ["reject_wrong_session_transcript", "reject_wrong_session_screen", "reject_wrong_session_coach_nudge"],
+    "forbidden_actions": ["assemble_prompt_from_wrong_session", "publish_wrong_session_claim"],
+    "state_equals": {"active_session_id": "SESSION_A", "accepted_wrong_session_events": 0},
+    "required_source_kinds": [],
+    "required_source_event_ids": [],
+    "provenance_required": true,
+    "max_unsolicited_messages": 0,
+    "parity_group": "wrong-session-rejection"
+  }
+}

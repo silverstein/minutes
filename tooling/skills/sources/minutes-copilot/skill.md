@@ -1,16 +1,20 @@
 ---
 name: minutes-copilot
-description: Start and control Minutes Coach, the real-time meeting copilot HUD, with an explicit meeting goal. Use when the user says "coach me during this meeting", "start Coach", "start the copilot", "open the coaching HUD", "help me live in this call", "pause Coach", "resume Coach", "Coach status", or "stop Coach". This skill is only a thin control surface over the real Minutes copilot CLI or available first-party MCP controls; it never reads, tails, or reimplements the transcript stream.
+description: Start and control Minutes Coach, the separate real-time copilot HUD, with an explicit meeting goal. Use only for explicit Coach or HUD lifecycle requests such as "start Minutes Coach", "open the Coach HUD", "pause Minutes Coach", "resume Minutes Coach", "Minutes Coach status", or "stop Minutes Coach". Do not use for requests that explicitly ask the current terminal agent to watch or strategize; those belong to minutes-live-sidekick. An ambiguous request such as "coach me live" requires one short surface clarification and must not automatically start Coach.
 triggers:
-  - coach this live meeting
   - start Coach
-  - start the copilot
-  - open the coaching HUD
-  - help me live in this call
+  - start Minutes Coach
+  - open the Coach HUD
+  - start the coaching HUD
+  - start the copilot HUD
   - pause Coach
+  - pause Minutes Coach
   - resume Coach
+  - resume Minutes Coach
   - Coach status
+  - Minutes Coach status
   - stop Coach
+  - stop Minutes Coach
 phase: lifecycle
 user_invocable: true
 metadata:
@@ -38,6 +42,8 @@ tests:
 # /minutes-copilot
 
 Use the real Minutes copilot runtime to start or control Coach. Do not build a transcript reader, event poller, prompt loop, or shell tailer in this skill.
+
+If the user explicitly asks **you or the current terminal agent** to watch, advise, or strategize, use `/minutes-live-sidekick` instead. If the user says only "coach me live" or otherwise leaves the surface ambiguous, ask exactly: "Do you want me in this terminal to be your sidekick, or should I open the Minutes Coach HUD?" Do not start Coach while clarifying.
 
 ## Start Coach
 

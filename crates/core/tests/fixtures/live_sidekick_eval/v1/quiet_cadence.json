@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "id": "quiet-cadence",
+  "description": "Routine evidence movement stays silent while one material decision yields one insight.",
+  "content_origin": "synthetic",
+  "privacy": {
+    "generation_method": "behavior_first_from_scratch",
+    "source_material": "none",
+    "approved_role_tokens": ["FACILITATOR", "REVIEWER"]
+  },
+  "matrix": {
+    "surfaces": ["terminal", "gui", "coach"],
+    "capture_modes": ["live", "recording"]
+  },
+  "initial_state": {
+    "user_role": "observer",
+    "posture": "strategist"
+  },
+  "events": [
+    {
+      "at_ms": 0,
+      "kind": "transcript_final",
+      "session_id": "SESSION_A",
+      "payload": {"event_id": "EVENT_A", "speaker": "FACILITATOR", "text": "the agenda is open"}
+    },
+    {
+      "at_ms": 20,
+      "kind": "transcript_final",
+      "session_id": "SESSION_A",
+      "payload": {"event_id": "EVENT_B", "speaker": "REVIEWER", "text": "the routine status is unchanged"}
+    },
+    {
+      "at_ms": 40,
+      "kind": "transcript_final",
+      "session_id": "SESSION_A",
+      "payload": {
+        "event_id": "EVENT_C",
+        "speaker": "FACILITATOR",
+        "text": "the group selected the second interface and assigned a reviewer"
+      }
+    }
+  ],
+  "expectations": {
+    "ordered_actions": ["suppress_routine_chatter", "publish_material_insight"],
+    "forbidden_actions": ["emit_watching_message", "emit_rearmed_message", "publish_duplicate_insight"],
+    "state_equals": {"published_background_insights": 1},
+    "required_source_kinds": ["transcript_final"],
+    "required_source_event_ids": ["EVENT_C"],
+    "provenance_required": true,
+    "max_unsolicited_messages": 1,
+    "parity_group": "quiet-cadence"
+  }
+}

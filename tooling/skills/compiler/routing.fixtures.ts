@@ -1,6 +1,7 @@
 export interface RoutingFixture {
   utterance: string;
-  expectedSkill: string;
+  expectedSkill: string | null;
+  expectedOutcome?: "skill" | "clarify";
 }
 
 export const ROUTING_FIXTURES: RoutingFixture[] = [
@@ -13,8 +14,23 @@ export const ROUTING_FIXTURES: RoutingFixture[] = [
     expectedSkill: "minutes-cleanup",
   },
   {
-    utterance: "Start Coach for this meeting and help me land the next steps.",
+    utterance: "Start Minutes Coach for this meeting and help me land the next steps.",
     expectedSkill: "minutes-copilot",
+  },
+  {
+    utterance: "Open the Coach HUD for this meeting.",
+    expectedSkill: "minutes-copilot",
+    expectedOutcome: "skill",
+  },
+  {
+    utterance: "You be my strategist during this meeting.",
+    expectedSkill: "minutes-live-sidekick",
+    expectedOutcome: "skill",
+  },
+  {
+    utterance: "Coach me live.",
+    expectedSkill: null,
+    expectedOutcome: "clarify",
   },
   {
     utterance: "Can you debrief that call for me?",

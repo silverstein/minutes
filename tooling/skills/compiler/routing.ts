@@ -19,13 +19,16 @@ export interface RoutingMatch {
 export interface RoutingDecision {
   utterance: string;
   normalizedUtterance: string;
+  outcome: "skill" | "clarify" | "none";
   match: RoutingMatch | null;
   ambiguous: RoutingMatch[];
 }
 
 export interface RoutingFixtureFailure {
   utterance: string;
-  expectedSkill: string;
+  expectedSkill: string | null;
+  expectedOutcome: "skill" | "clarify";
+  actualOutcome: "skill" | "clarify" | "none";
   actualSkill: string | null;
   matchedTrigger: string | null;
   ambiguousSkills: string[];
@@ -50,6 +53,39 @@ export function normalizeRoutingText(raw: string): string {
     .replace(/[^a-z0-9]+/g, " ")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+function requiresLiveAssistanceSurfaceClarification(normalized: string): boolean {
+  const tokens = normalized.split(" ");
+  const requestsCoaching =
+    normalized.includes("coach me") ||
+    normalized.includes("coach this") ||
+    normalized.includes("coaching me") ||
+    normalized.includes("help me live");
+  const isLiveContext = tokens.some((token) =>
+    ["live", "meeting", "call"].includes(token),
+  );
+  if (!requestsCoaching || !isLiveContext) return false;
+
+  const explicitHudSurface = [
+    "minutes coach",
+    "coach hud",
+    "coaching hud",
+    "copilot hud",
+  ].some((phrase) => normalized.includes(phrase));
+  const explicitTerminalSurface = [
+    "terminal",
+    "agent",
+    "codex",
+    "claude",
+    "opencode",
+    "sidekick",
+    "strategist",
+    "watch the live transcript",
+    "watch this meeting",
+  ].some((phrase) => normalized.includes(phrase));
+
+  return !explicitHudSurface && !explicitTerminalSurface;
 }
 
 function tokenizeRoutingText(raw: string): string[] {
@@ -136,6 +172,17 @@ export function routeUtteranceToSkill(
 ): RoutingDecision {
   const utteranceTokens = tokenizeRoutingText(utterance);
   const normalizedUtterance = utteranceTokens.join(" ");
+
+  if (requiresLiveAssistanceSurfaceClarification(normalizedUtterance)) {
+    return {
+      utterance,
+      normalizedUtterance,
+      outcome: "clarify",
+      match: null,
+      ambiguous: [],
+    };
+  }
+
   const candidates: RoutingMatch[] = [];
 
   for (const skill of skills) {
@@ -162,6 +209,7 @@ export function routeUtteranceToSkill(
     return {
       utterance,
       normalizedUtterance,
+      outcome: "none",
       match: null,
       ambiguous: [],
     };
@@ -177,6 +225,7 @@ export function routeUtteranceToSkill(
   return {
     utterance,
     normalizedUtterance,
+    outcome: "skill",
     match: top,
     ambiguous,
   };
@@ -192,14 +241,18 @@ export function evaluateRoutingFixtures(
     const decision = routeUtteranceToSkill(skills, fixture.utterance);
     const matchedSkill = decision.match?.skillId ?? null;
     const ambiguousSkills = decision.ambiguous.map((match) => match.skillId);
+    const expectedOutcome = fixture.expectedOutcome ?? "skill";
 
     if (
+      decision.outcome !== expectedOutcome ||
       matchedSkill !== fixture.expectedSkill ||
       ambiguousSkills.length > 0
     ) {
       failures.push({
         utterance: fixture.utterance,
         expectedSkill: fixture.expectedSkill,
+        expectedOutcome,
+        actualOutcome: decision.outcome,
         actualSkill: matchedSkill,
         matchedTrigger: decision.match?.trigger ?? null,
         ambiguousSkills,

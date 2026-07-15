@@ -30,6 +30,7 @@ pub mod knowledge;
 pub mod knowledge_extract;
 pub mod live_partials;
 pub mod live_session;
+pub mod live_sidekick;
 pub mod logging;
 pub mod macos_permissions;
 pub mod markdown;

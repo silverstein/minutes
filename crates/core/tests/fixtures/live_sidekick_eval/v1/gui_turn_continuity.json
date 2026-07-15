@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "id": "gui-turn-continuity",
+  "description": "Minutes-owned state survives fresh model calls and isolates a meeting switch.",
+  "content_origin": "synthetic",
+  "privacy": {
+    "generation_method": "behavior_first_from_scratch",
+    "source_material": "none",
+    "approved_role_tokens": ["USER", "REVIEWER", "ENGINEER_A"]
+  },
+  "matrix": {
+    "surfaces": ["gui"],
+    "capture_modes": ["live", "recording"]
+  },
+  "initial_state": {
+    "user_role": "observer",
+    "posture": "on_demand"
+  },
+  "events": [
+    {
+      "at_ms": 0,
+      "kind": "role_changed",
+      "session_id": "SESSION_A",
+      "payload": {"role": "technical_responder", "source": "typed_user"}
+    },
+    {
+      "at_ms": 10,
+      "kind": "posture_changed",
+      "session_id": "SESSION_A",
+      "payload": {"posture": "strategist", "source": "typed_user"}
+    },
+    {
+      "at_ms": 20,
+      "kind": "speaker_corrected",
+      "session_id": "SESSION_A",
+      "payload": {"from_speaker": "REVIEWER", "to_speaker": "ENGINEER_A", "source": "typed_user"}
+    },
+    {
+      "at_ms": 30,
+      "kind": "foreground_started",
+      "session_id": "SESSION_A",
+      "payload": {"turn_id": "FOREGROUND_A", "inference_call": "fresh"}
+    },
+    {
+      "at_ms": 40,
+      "kind": "foreground_started",
+      "session_id": "SESSION_A",
+      "payload": {"turn_id": "FOREGROUND_B", "inference_call": "fresh"}
+    },
+    {
+      "at_ms": 50,
+      "kind": "focus_changed",
+      "session_id": "SESSION_B",
+      "payload": {"focus_generation": 2}
+    }
+  ],
+  "expectations": {
+    "ordered_actions": ["hydrate_session_state", "dispatch_fresh_inference", "isolate_previous_focus"],
+    "forbidden_actions": ["reuse_global_history", "deliver_old_focus_chunk"],
+    "state_equals": {"active_session_id": "SESSION_B", "focus_generation": 2, "old_history_visible": false},
+    "required_source_kinds": ["user_statement"],
+    "required_source_event_ids": [],
+    "provenance_required": true,
+    "max_unsolicited_messages": 0,
+    "parity_group": "gui-continuity"
+  }
+}

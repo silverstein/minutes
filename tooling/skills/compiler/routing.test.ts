@@ -79,11 +79,57 @@ test("routeUtteranceToSkill reports ambiguity on equal top matches", () => {
   );
 });
 
+test("live-assistance routing keeps explicit surfaces distinct and leaves ambiguous language for clarification", () => {
+  const skills = [
+    makeSkill("minutes-copilot", [
+      "start Minutes Coach",
+      "open the Coach HUD",
+      "pause Minutes Coach",
+    ]),
+    makeSkill("minutes-live-sidekick", [
+      "you be my meeting sidekick",
+      "you be my strategist during this meeting",
+      "you watch this meeting",
+    ]),
+  ];
+
+  const hud = routeUtteranceToSkill(skills, "Open the Coach HUD for this meeting.");
+  assert.equal(hud.match?.skillId, "minutes-copilot");
+
+  const terminal = routeUtteranceToSkill(
+    skills,
+    "You be my strategist during this meeting.",
+  );
+  assert.equal(terminal.match?.skillId, "minutes-live-sidekick");
+
+  const ambiguous = routeUtteranceToSkill(skills, "Coach me live.");
+  assert.equal(ambiguous.match, null);
+  assert.equal(ambiguous.outcome, "clarify");
+  assert.deepEqual(ambiguous.ambiguous, []);
+
+  assert.equal(
+    routeUtteranceToSkill(skills, "Coach me during this meeting.").outcome,
+    "clarify",
+  );
+  assert.equal(
+    routeUtteranceToSkill(skills, "Help me live in this call.").outcome,
+    "clarify",
+  );
+});
+
 test("evaluateRoutingFixtures passes on the real Minutes skill corpus shape", () => {
   const skills = [
     makeSkill("minutes-brief", ["brief me", "brief me on Sarah"]),
     makeSkill("minutes-cleanup", ["clean up recordings"]),
-    makeSkill("minutes-copilot", ["start Coach", "coach this live meeting"]),
+    makeSkill("minutes-copilot", [
+      "start Coach",
+      "start Minutes Coach",
+      "open the Coach HUD",
+    ]),
+    makeSkill("minutes-live-sidekick", [
+      "you be my meeting sidekick",
+      "you be my strategist during this meeting",
+    ]),
     makeSkill("minutes-debrief", ["debrief that call"]),
     makeSkill("minutes-graph", ["show me everyone who mentioned X", "across all meetings"]),
     makeSkill("minutes-ideas", ["what ideas did I have?"]),

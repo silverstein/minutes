@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "id": "role-correction",
+  "description": "A typed role correction changes future assistance without stale scripts.",
+  "content_origin": "synthetic",
+  "privacy": {
+    "generation_method": "behavior_first_from_scratch",
+    "source_material": "none",
+    "approved_role_tokens": ["USER", "FACILITATOR"]
+  },
+  "matrix": {
+    "surfaces": ["terminal", "gui"],
+    "capture_modes": ["live", "recording"]
+  },
+  "initial_state": {
+    "user_role": "observer",
+    "posture": "strategist"
+  },
+  "events": [
+    {
+      "at_ms": 0,
+      "kind": "role_changed",
+      "session_id": "SESSION_A",
+      "payload": {"role": "technical_responder", "source": "typed_user"}
+    },
+    {
+      "at_ms": 30,
+      "kind": "transcript_final",
+      "session_id": "SESSION_A",
+      "payload": {
+        "event_id": "EVENT_A",
+        "speaker": "FACILITATOR",
+        "text": "the next section covers system boundaries"
+      }
+    }
+  ],
+  "expectations": {
+    "ordered_actions": ["update_user_role", "prepare_technical_boundary_context"],
+    "forbidden_actions": ["offer_presenter_script", "restore_inferred_role"],
+    "state_equals": {"user_role": "technical_responder"},
+    "required_source_kinds": ["user_statement", "transcript_final"],
+    "required_source_event_ids": ["EVENT_A"],
+    "provenance_required": true,
+    "max_unsolicited_messages": 1,
+    "parity_group": "role-correction"
+  }
+}

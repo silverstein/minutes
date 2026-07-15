@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "id": "routing-disambiguation",
+  "description": "Explicit surface language routes directly while ambiguous language asks one question.",
+  "content_origin": "synthetic",
+  "privacy": {
+    "generation_method": "behavior_first_from_scratch",
+    "source_material": "none",
+    "approved_role_tokens": ["USER"]
+  },
+  "matrix": {
+    "surfaces": ["terminal", "gui", "coach"],
+    "capture_modes": ["live", "recording"]
+  },
+  "initial_state": {
+    "user_role": "participant",
+    "posture": "on_demand"
+  },
+  "events": [
+    {
+      "at_ms": 0,
+      "kind": "surface_request",
+      "payload": {"request_id": "REQUEST_A", "text": "open the coach hud"}
+    },
+    {
+      "at_ms": 10,
+      "kind": "surface_request",
+      "payload": {"request_id": "REQUEST_B", "text": "you are the terminal agent, watch and be my strategist"}
+    },
+    {
+      "at_ms": 20,
+      "kind": "surface_request",
+      "payload": {"request_id": "REQUEST_C", "text": "coach me live"}
+    }
+  ],
+  "expectations": {
+    "ordered_actions": ["route_to_coach_hud", "route_to_terminal_sidekick", "ask_surface_clarification"],
+    "forbidden_actions": ["guess_ambiguous_surface", "merge_surface_authority"],
+    "state_equals": {"clarification_question_count": 1},
+    "required_source_kinds": ["user_statement"],
+    "required_source_event_ids": [],
+    "provenance_required": true,
+    "max_unsolicited_messages": 0,
+    "parity_group": "surface-routing"
+  }
+}

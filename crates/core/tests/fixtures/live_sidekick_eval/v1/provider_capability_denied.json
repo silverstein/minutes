@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "id": "provider-capability-denied",
+  "description": "Native live mode fails closed when a provider cannot prove required restrictions.",
+  "content_origin": "synthetic",
+  "privacy": {
+    "generation_method": "behavior_first_from_scratch",
+    "source_material": "none",
+    "approved_role_tokens": ["USER"]
+  },
+  "matrix": {
+    "surfaces": ["gui"],
+    "capture_modes": ["live", "recording"]
+  },
+  "initial_state": {
+    "user_role": "participant",
+    "posture": "on_demand"
+  },
+  "events": [
+    {
+      "at_ms": 0,
+      "kind": "provider_capability_changed",
+      "session_id": "SESSION_A",
+      "payload": {
+        "provider_id": "PROVIDER_A",
+        "cancellation": false,
+        "arbitrary_writes_denied": false,
+        "ambient_filesystem_denied": false,
+        "unapproved_tools_denied": false
+      }
+    },
+    {
+      "at_ms": 10,
+      "kind": "user_message",
+      "session_id": "SESSION_A",
+      "payload": {"turn_id": "FOREGROUND_A", "text": "summarize the current discussion"}
+    }
+  ],
+  "expectations": {
+    "ordered_actions": ["acknowledge_user", "deny_native_live_provider", "offer_prefetched_no_tool_path"],
+    "forbidden_actions": ["invoke_unrestricted_native_provider", "silently_expand_provider_authority"],
+    "state_equals": {"native_provider_enabled": false},
+    "required_source_kinds": ["user_statement"],
+    "required_source_event_ids": [],
+    "provenance_required": true,
+    "max_unsolicited_messages": 0,
+    "parity_group": "provider-capability-gate"
+  }
+}

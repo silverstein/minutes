@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "id": "meeting-end-handoff",
+  "description": "Meeting end stops monitoring and reports processing without claiming a final artifact.",
+  "content_origin": "synthetic",
+  "privacy": {
+    "generation_method": "behavior_first_from_scratch",
+    "source_material": "none",
+    "approved_role_tokens": ["USER", "FACILITATOR"]
+  },
+  "matrix": {
+    "surfaces": ["terminal", "gui"],
+    "capture_modes": ["live", "recording"]
+  },
+  "initial_state": {
+    "user_role": "participant",
+    "posture": "decision_tracker"
+  },
+  "events": [
+    {
+      "at_ms": 0,
+      "kind": "capture_stopped",
+      "session_id": "SESSION_A",
+      "payload": {"final_live_event_id": "EVENT_A"}
+    },
+    {
+      "at_ms": 10,
+      "kind": "processing_started",
+      "session_id": "SESSION_A",
+      "payload": {"stage": "transcribing"}
+    },
+    {
+      "at_ms": 20,
+      "kind": "user_message",
+      "session_id": "SESSION_A",
+      "payload": {"turn_id": "FOREGROUND_A", "text": "is the final debrief ready"}
+    }
+  ],
+  "expectations": {
+    "ordered_actions": ["stop_live_monitoring", "report_processing_state", "defer_final_debrief"],
+    "forbidden_actions": ["claim_final_artifact_ready", "continue_background_monitoring"],
+    "state_equals": {"phase": "processing", "live_monitoring": false},
+    "required_source_kinds": ["user_statement"],
+    "required_source_event_ids": ["EVENT_A"],
+    "provenance_required": true,
+    "max_unsolicited_messages": 1,
+    "parity_group": "meeting-end-handoff"
+  }
+}

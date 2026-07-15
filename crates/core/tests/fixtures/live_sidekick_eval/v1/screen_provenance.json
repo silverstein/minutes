@@ -1,0 +1,55 @@
+{
+  "schema_version": 1,
+  "id": "screen-provenance",
+  "description": "A visual claim requires an exact disclosed and inspected image event.",
+  "content_origin": "synthetic",
+  "privacy": {
+    "generation_method": "behavior_first_from_scratch",
+    "source_material": "none",
+    "approved_role_tokens": ["USER"]
+  },
+  "matrix": {
+    "surfaces": ["terminal", "gui"],
+    "capture_modes": ["live", "recording"]
+  },
+  "initial_state": {
+    "user_role": "observer",
+    "posture": "on_demand"
+  },
+  "events": [
+    {
+      "at_ms": 0,
+      "kind": "screen_state_changed",
+      "session_id": "SESSION_A",
+      "payload": {"state": "available", "opaque_ref": "SCREEN_REF_A"}
+    },
+    {
+      "at_ms": 10,
+      "kind": "screen_requested",
+      "session_id": "SESSION_A",
+      "payload": {"source": "typed_user", "text": "what is visible"}
+    },
+    {
+      "at_ms": 20,
+      "kind": "screen_disclosed",
+      "session_id": "SESSION_A",
+      "payload": {"event_id": "SCREEN_EVENT_A", "opaque_ref": "SCREEN_REF_A"}
+    },
+    {
+      "at_ms": 30,
+      "kind": "screen_inspected",
+      "session_id": "SESSION_A",
+      "payload": {"event_id": "SCREEN_EVENT_A", "turn_id": "FOREGROUND_A"}
+    }
+  ],
+  "expectations": {
+    "ordered_actions": ["show_disclosure_destination", "inspect_screen_image", "answer_visual_question"],
+    "forbidden_actions": ["claim_visual_detail_before_inspection", "treat_desktop_metadata_as_image"],
+    "state_equals": {"screen_state": "included", "inspected_event_id": "SCREEN_EVENT_A"},
+    "required_source_kinds": ["screen_image", "user_statement"],
+    "required_source_event_ids": ["SCREEN_EVENT_A"],
+    "provenance_required": true,
+    "max_unsolicited_messages": 0,
+    "parity_group": "screen-provenance"
+  }
+}

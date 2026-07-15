@@ -20,8 +20,10 @@ export interface AgentRoutingOptions {
 
 export interface AgentRoutingResult {
   utterance: string;
-  expectedSkill: string;
+  expectedSkill: string | null;
+  expectedOutcome: "skill" | "clarify";
   actualSkill: string | null;
+  actualOutcome: "skill" | "clarify" | null;
   status:
     | "passed"
     | "mismatch"
@@ -133,9 +135,10 @@ export function buildAgentRoutingPrompt(
 
   return [
     "You are evaluating which Minutes skill should handle a user request.",
-    "Choose exactly one skill from the provided list.",
+    "Choose exactly one skill from the provided list, unless the request is ambiguous about which product surface the user wants.",
+    "In particular, a generic request for live coaching without saying whether the current terminal agent or the Minutes Coach HUD should help requires clarification.",
     "Do not explain your reasoning.",
-    'Respond in exactly one line using this format: SKILL: <skill-id>',
+    'Respond in exactly one line using either: SKILL: <skill-id> or CLARIFY',
     "",
     "Available skills:",
     skillLines,
@@ -147,31 +150,38 @@ export function buildAgentRoutingPrompt(
 export function extractSkillChoice(
   rawOutput: string,
   validSkillIds: Set<string>,
-): { skill: string | null; reason: string | null } {
+): { skill: string | null; clarify: boolean; reason: string | null } {
   const trimmed = rawOutput.trim();
   if (trimmed.length === 0) {
-    return { skill: null, reason: "empty_output" };
+    return { skill: null, clarify: false, reason: "empty_output" };
   }
 
   try {
-    const parsed = JSON.parse(trimmed) as { skill?: unknown };
+    const parsed = JSON.parse(trimmed) as { skill?: unknown; action?: unknown };
     if (typeof parsed.skill === "string" && validSkillIds.has(parsed.skill)) {
-      return { skill: parsed.skill, reason: null };
+      return { skill: parsed.skill, clarify: false, reason: null };
+    }
+    if (parsed.action === "clarify") {
+      return { skill: null, clarify: true, reason: null };
     }
   } catch {
     // Fall through to text parsing.
   }
 
+  if (/^CLARIFY\.?$/i.test(trimmed)) {
+    return { skill: null, clarify: true, reason: null };
+  }
+
   const skillLine = trimmed.match(/SKILL:\s*([a-z0-9-]+)/i);
   if (skillLine && validSkillIds.has(skillLine[1])) {
-    return { skill: skillLine[1], reason: null };
+    return { skill: skillLine[1], clarify: false, reason: null };
   }
 
   if (validSkillIds.has(trimmed)) {
-    return { skill: trimmed, reason: null };
+    return { skill: trimmed, clarify: false, reason: null };
   }
 
-  return { skill: null, reason: "unparseable_output" };
+  return { skill: null, clarify: false, reason: "unparseable_output" };
 }
 
 async function buildAgentInvocation(
@@ -348,6 +358,7 @@ export async function evaluateAgentRouting(
   const results: AgentRoutingResult[] = [];
 
   for (const fixture of options.fixtures) {
+    const expectedOutcome = fixture.expectedOutcome ?? "skill";
     const prompt = buildAgentRoutingPrompt(skills, fixture.utterance);
     const invocation = await buildAgentInvocation(options.agent, prompt, repoRoot);
     const raw = await runCommand(invocation, options.timeoutMs);
@@ -362,7 +373,9 @@ export async function evaluateAgentRouting(
       results.push({
         utterance: fixture.utterance,
         expectedSkill: fixture.expectedSkill,
+        expectedOutcome,
         actualSkill: null,
+        actualOutcome: null,
         status: "unavailable",
         stdout,
         stderr: raw.stderr,
@@ -376,7 +389,9 @@ export async function evaluateAgentRouting(
       results.push({
         utterance: fixture.utterance,
         expectedSkill: fixture.expectedSkill,
+        expectedOutcome,
         actualSkill: null,
+        actualOutcome: null,
         status: "command_error",
         stdout,
         stderr: raw.stderr,
@@ -388,10 +403,27 @@ export async function evaluateAgentRouting(
 
     const parsed = extractSkillChoice(stdout, validSkillIds);
     if (!parsed.skill) {
+      if (parsed.clarify) {
+        results.push({
+          utterance: fixture.utterance,
+          expectedSkill: fixture.expectedSkill,
+          expectedOutcome,
+          actualSkill: null,
+          actualOutcome: "clarify",
+          status: expectedOutcome === "clarify" ? "passed" : "mismatch",
+          stdout,
+          stderr: raw.stderr,
+          exitCode: raw.exitCode,
+          command: invocation.command,
+        });
+        continue;
+      }
       results.push({
         utterance: fixture.utterance,
         expectedSkill: fixture.expectedSkill,
+        expectedOutcome,
         actualSkill: null,
+        actualOutcome: null,
         status: "parse_error",
         stdout,
         stderr: raw.stderr,
@@ -404,8 +436,13 @@ export async function evaluateAgentRouting(
     results.push({
       utterance: fixture.utterance,
       expectedSkill: fixture.expectedSkill,
+      expectedOutcome,
       actualSkill: parsed.skill,
-      status: parsed.skill === fixture.expectedSkill ? "passed" : "mismatch",
+      actualOutcome: "skill",
+      status:
+        expectedOutcome === "skill" && parsed.skill === fixture.expectedSkill
+          ? "passed"
+          : "mismatch",
       stdout,
       stderr: raw.stderr,
       exitCode: raw.exitCode,
@@ -451,6 +488,7 @@ async function main(): Promise<void> {
       preview.push({
         utterance: fixture.utterance,
         expectedSkill: fixture.expectedSkill,
+        expectedOutcome: fixture.expectedOutcome ?? "skill",
         command: invocation.command,
       });
       if (invocation.outputFile) {

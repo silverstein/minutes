@@ -1,5 +1,5 @@
 ---
-description: Start and control Minutes Coach, the real-time meeting copilot HUD, with an explicit meeting goal. Use when the user says "coach me during this meeting", "start Coach", "start the copilot", "open the coaching HUD", "help me live in this call", "pause Coach", "resume Coach", "Coach status", or "stop Coach". This skill is only a thin control surface over the real Minutes copilot CLI or available first-party MCP controls; it never reads, tails, or reimplements the transcript stream.
+description: Start and control Minutes Coach, the separate real-time copilot HUD, with an explicit meeting goal. Use only for explicit Coach or HUD lifecycle requests such as "start Minutes Coach", "open the Coach HUD", "pause Minutes Coach", "resume Minutes Coach", "Minutes Coach status", or "stop Minutes Coach". Do not use for requests that explicitly ask the current terminal agent to watch or strategize; those belong to minutes-live-sidekick. An ambiguous request such as "coach me live" requires one short surface clarification and must not automatically start Coach.
 ---
 
 Load the `minutes-copilot` skill and follow it exactly for this request.

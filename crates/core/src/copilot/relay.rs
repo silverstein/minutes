@@ -267,13 +267,17 @@ impl CaptureRelayServer {
     ) -> Result<Self, CaptureRelayError> {
         std::fs::create_dir_all(dir)?;
         let discovery_path = capture_relay_discovery_path_in(dir);
+        // Discovery is the platform-independent authority for refusing a live
+        // owner. Check before locking so Windows lock error kinds cannot change
+        // the public result, then re-check after acquiring the lock to close the
+        // check/lock TOCTOU window. The retained lock still serializes claims and
+        // makes a crashed owner's stale discovery reclaimable.
+        if let Some(owner_pid) = live_fresh_owner_pid(&discovery_path) {
+            return Err(CaptureRelayError::AlreadyOwned(owner_pid));
+        }
         let owner_lock = acquire_owner_lock(dir, &discovery_path)?;
-        if let Some(existing) = read_discovery(&discovery_path) {
-            if crate::pid::is_process_alive(existing.owner_pid)
-                && existing.heartbeat_is_fresh(Utc::now())
-            {
-                return Err(CaptureRelayError::AlreadyOwned(existing.owner_pid));
-            }
+        if let Some(owner_pid) = live_fresh_owner_pid(&discovery_path) {
+            return Err(CaptureRelayError::AlreadyOwned(owner_pid));
         }
 
         let session_id = random_hex(16)?;
@@ -920,15 +924,22 @@ fn acquire_owner_lock(
     set_owner_only_permissions(&path)?;
     match fs2::FileExt::try_lock_exclusive(&file) {
         Ok(()) => Ok(file),
-        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-            if let Some(owner_pid) = read_discovery(discovery_path).map(|item| item.owner_pid) {
+        Err(_) => {
+            if let Some(owner_pid) = live_fresh_owner_pid(discovery_path) {
                 Err(CaptureRelayError::AlreadyOwned(owner_pid))
             } else {
                 Err(CaptureRelayError::OwnershipBusy)
             }
         }
-        Err(error) => Err(CaptureRelayError::Io(error)),
     }
+}
+
+fn live_fresh_owner_pid(discovery_path: &Path) -> Option<u32> {
+    read_discovery(discovery_path).and_then(|discovery| {
+        (crate::pid::is_process_alive(discovery.owner_pid)
+            && discovery.heartbeat_is_fresh(Utc::now()))
+        .then_some(discovery.owner_pid)
+    })
 }
 
 fn random_hex(bytes: usize) -> Result<String, CaptureRelayError> {
@@ -1203,6 +1214,46 @@ mod tests {
         first.shutdown("first owner stopped");
         let replacement = CaptureRelayServer::start_for_test(dir.path());
         assert!(replacement.is_ok());
+    }
+
+    #[test]
+    fn contended_owner_lock_uses_live_discovery_for_error_classification() {
+        let dir = TempDir::new().unwrap();
+        let _first = CaptureRelayServer::start_for_test(dir.path()).unwrap();
+        let discovery_path = capture_relay_discovery_path_in(dir.path());
+
+        let second_lock = acquire_owner_lock(dir.path(), &discovery_path);
+        assert!(matches!(
+            second_lock,
+            Err(CaptureRelayError::AlreadyOwned(owner_pid))
+                if owner_pid == std::process::id()
+        ));
+    }
+
+    #[test]
+    fn stale_discovery_is_reclaimed_when_the_owner_lock_is_available() {
+        let dir = TempDir::new().unwrap();
+        let discovery_path = capture_relay_discovery_path_in(dir.path());
+        let stale_at = Utc::now() - chrono::Duration::seconds(10);
+        let stale_discovery = CaptureRelayDiscovery {
+            v: RELAY_PROTOCOL_VERSION,
+            session_id: "stale-session".into(),
+            transport: current_transport(),
+            endpoint: relay_endpoint(dir.path(), "stale-session"),
+            owner_pid: std::process::id(),
+            evidence_mode: CopilotEvidenceMode::InProcessPartials,
+            auth_token: "stale-token".into(),
+            started_at: stale_at,
+            heartbeat_at: stale_at,
+        };
+        write_discovery(&discovery_path, &stale_discovery).unwrap();
+
+        let replacement = CaptureRelayServer::start_for_test(dir.path()).unwrap();
+        assert_ne!(
+            replacement.discovery().session_id,
+            stale_discovery.session_id
+        );
+        assert_eq!(replacement.discovery().owner_pid, std::process::id());
     }
 
     #[test]

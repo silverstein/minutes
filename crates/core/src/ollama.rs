@@ -54,6 +54,9 @@ pub struct OllamaStreamRequest {
     /// Ollama accepts either `"json"` or a JSON schema object here.
     pub format: Option<serde_json::Value>,
     pub temperature: Option<f32>,
+    /// Thinking-capable models default this on in current Ollama releases.
+    /// Latency-sensitive callers must explicitly disable it.
+    pub think: Option<bool>,
 }
 
 impl OllamaStreamRequest {
@@ -62,6 +65,7 @@ impl OllamaStreamRequest {
             messages,
             format: None,
             temperature: None,
+            think: None,
         }
     }
 }
@@ -199,6 +203,9 @@ impl OllamaAdapter {
         }
         if let Some(temperature) = request.temperature {
             body["options"] = serde_json::json!({ "temperature": temperature });
+        }
+        if let Some(think) = request.think {
+            body["think"] = serde_json::Value::Bool(think);
         }
 
         let mut response = self
@@ -347,7 +354,8 @@ mod tests {
             "llama3.2",
             Duration::from_secs(2),
         );
-        let request = OllamaStreamRequest::chat(vec![OllamaChatMessage::new("user", "hello")]);
+        let mut request = OllamaStreamRequest::chat(vec![OllamaChatMessage::new("user", "hello")]);
+        request.think = Some(false);
         let mut chunks = Vec::new();
         let result = adapter
             .stream_chat(&request, &CancelToken::new(), |chunk| {
@@ -364,6 +372,7 @@ mod tests {
         let request_json: serde_json::Value = serde_json::from_str(request_body).unwrap();
         assert_eq!(request_json["model"], "llama3.2");
         assert_eq!(request_json["stream"], true);
+        assert_eq!(request_json["think"], false);
         server.join().unwrap();
     }
 }

@@ -3401,6 +3401,7 @@ dependencies = [
  "tracing-subscriber",
  "ureq 3.2.0",
  "walkdir",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

@@ -8,8 +8,12 @@ use super::{CopilotEvidenceMode, CopilotUtterance, Nudge, TranscriptUpdateKind};
 use crate::events::MinutesEvent;
 use crate::live_partials::{LivePartialEvent, LivePartialSubscriber, SupersessionReason};
 use chrono::{DateTime, Utc};
-use interprocess::local_socket::{
-    prelude::*, GenericFilePath, Listener, ListenerNonblockingMode, ListenerOptions, Stream,
+use interprocess::{
+    local_socket::{
+        prelude::*, ConnectOptions, GenericFilePath, Listener, ListenerNonblockingMode,
+        ListenerOptions, Stream,
+    },
+    ConnectWaitMode,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
@@ -26,6 +30,9 @@ const OWNER_LOCK_FILE: &str = "capture-relay.lock";
 const UNIX_SOCKET_FILE: &str = "capture-relay.sock";
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(1);
 const HEARTBEAT_STALE_AFTER: Duration = Duration::from_secs(5);
+const ESTABLISHMENT_RETRY_TIMEOUT: Duration = Duration::from_secs(1);
+const ESTABLISHMENT_RETRY_DELAY: Duration = Duration::from_millis(25);
+const ESTABLISHMENT_RETRY_LIMIT: u8 = 20;
 const FRAME_CAPACITY: usize = 512;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -407,10 +414,56 @@ impl Drop for CaptureRelayServer {
 }
 
 pub struct CaptureRelayClient {
+    discovery_path: PathBuf,
     discovery: CaptureRelayDiscovery,
     reader: BufReader<Stream>,
     pending_line: String,
     cursor: RelayCursor,
+    // The attach acknowledgement is internal. Establishment completes only
+    // after a frame has been delivered to the caller through `try_recv`.
+    established: bool,
+    establishment_retry: EstablishmentRetry,
+}
+
+#[derive(Clone, Copy)]
+struct EstablishmentRetry {
+    deadline: Option<Instant>,
+    attempts_remaining: u8,
+}
+
+impl EstablishmentRetry {
+    fn new() -> Self {
+        Self {
+            deadline: None,
+            attempts_remaining: ESTABLISHMENT_RETRY_LIMIT,
+        }
+    }
+
+    fn started(self) -> bool {
+        self.deadline.is_some()
+    }
+
+    fn remaining(self) -> Option<Duration> {
+        self.deadline
+            .map(|deadline| deadline.saturating_duration_since(Instant::now()))
+    }
+
+    fn wait_before_retry(&mut self) -> bool {
+        if self.attempts_remaining == 0 {
+            return false;
+        }
+        let deadline = self
+            .deadline
+            .get_or_insert_with(|| Instant::now() + ESTABLISHMENT_RETRY_TIMEOUT);
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return false;
+        }
+
+        thread::sleep(ESTABLISHMENT_RETRY_DELAY.min(remaining));
+        self.attempts_remaining -= 1;
+        Instant::now() < *deadline
+    }
 }
 
 impl CaptureRelayClient {
@@ -419,6 +472,29 @@ impl CaptureRelayClient {
     }
 
     fn connect_from(discovery_path: &Path, cursor: RelayCursor) -> Result<Self, CaptureRelayError> {
+        let mut establishment_retry = EstablishmentRetry::new();
+        loop {
+            match Self::connect_once(discovery_path, cursor.clone(), establishment_retry) {
+                Ok(client) => return Ok(client),
+                Err(error)
+                    if is_unexpected_eof(&error)
+                        || (establishment_retry.started()
+                            && is_retryable_establishment_error(&error)) =>
+                {
+                    if !establishment_retry.wait_before_retry() {
+                        return Err(error);
+                    }
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    fn connect_once(
+        discovery_path: &Path,
+        cursor: RelayCursor,
+        establishment_retry: EstablishmentRetry,
+    ) -> Result<Self, CaptureRelayError> {
         let discovery = read_discovery(discovery_path).ok_or(CaptureRelayError::NotFound)?;
         validate_discovery(&discovery)?;
         let name = discovery
@@ -426,7 +502,13 @@ impl CaptureRelayClient {
             .as_str()
             .to_fs_name::<GenericFilePath>()
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
-        let mut stream = Stream::connect(name)?;
+        let mut stream = match establishment_retry.remaining() {
+            Some(timeout) => ConnectOptions::new()
+                .name(name)
+                .wait_mode(ConnectWaitMode::Timeout(timeout))
+                .connect_sync()?,
+            None => Stream::connect(name)?,
+        };
         write_json_line(
             &mut stream,
             &ClientHello {
@@ -453,6 +535,7 @@ impl CaptureRelayClient {
         }
         reader.get_ref().set_nonblocking(true)?;
         Ok(Self {
+            discovery_path: discovery_path.to_path_buf(),
             discovery: discovery.clone(),
             reader,
             pending_line: String::new(),
@@ -460,6 +543,8 @@ impl CaptureRelayClient {
                 session_id: Some(discovery.session_id),
                 ..cursor
             },
+            established: false,
+            establishment_retry,
         })
     }
 
@@ -472,23 +557,51 @@ impl CaptureRelayClient {
     }
 
     pub fn try_recv(&mut self) -> Result<Option<RelayFrame>, CaptureRelayError> {
-        match self.reader.read_line(&mut self.pending_line) {
-            Ok(0) => Err(CaptureRelayError::Io(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "capture relay closed the connection",
-            ))),
-            Ok(_) if !self.pending_line.ends_with('\n') => Ok(None),
-            Ok(_) => {
-                let line = std::mem::take(&mut self.pending_line);
-                let frame: RelayFrame = serde_json::from_str(line.trim_end()).map_err(|error| {
-                    CaptureRelayError::InvalidData(format!("invalid relay frame: {error}"))
-                })?;
-                self.observe_cursor(&frame);
-                Ok(Some(frame))
+        loop {
+            match self.reader.read_line(&mut self.pending_line) {
+                Ok(0) if !self.established => {
+                    self.reconnect_during_establishment(connection_closed_error())?;
+                }
+                Ok(0) => return Err(connection_closed_error()),
+                Ok(_) if !self.pending_line.ends_with('\n') => return Ok(None),
+                Ok(_) => {
+                    let line = std::mem::take(&mut self.pending_line);
+                    let frame: RelayFrame =
+                        serde_json::from_str(line.trim_end()).map_err(|error| {
+                            CaptureRelayError::InvalidData(format!("invalid relay frame: {error}"))
+                        })?;
+                    self.observe_cursor(&frame);
+                    self.established = true;
+                    return Ok(Some(frame));
+                }
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(None),
+                Err(error) if !self.established && error.kind() == io::ErrorKind::UnexpectedEof => {
+                    self.reconnect_during_establishment(CaptureRelayError::Io(error))?;
+                }
+                Err(error) => return Err(CaptureRelayError::Io(error)),
             }
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => Ok(None),
-            Err(error) => Err(CaptureRelayError::Io(error)),
         }
+    }
+
+    fn reconnect_during_establishment(
+        &mut self,
+        mut last_error: CaptureRelayError,
+    ) -> Result<(), CaptureRelayError> {
+        let discovery_path = self.discovery_path.clone();
+        let cursor = self.cursor.clone();
+        while self.establishment_retry.wait_before_retry() {
+            match Self::connect_once(&discovery_path, cursor.clone(), self.establishment_retry) {
+                Ok(client) => {
+                    *self = client;
+                    return Ok(());
+                }
+                Err(error) if is_retryable_establishment_error(&error) => {
+                    last_error = error;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Err(last_error)
     }
 
     pub fn publish_nudge(nudge: Nudge) -> Result<u64, CaptureRelayError> {
@@ -542,6 +655,30 @@ impl CaptureRelayClient {
             _ => {}
         }
     }
+}
+
+fn connection_closed_error() -> CaptureRelayError {
+    CaptureRelayError::Io(io::Error::new(
+        io::ErrorKind::UnexpectedEof,
+        "capture relay closed the connection",
+    ))
+}
+
+fn is_unexpected_eof(error: &CaptureRelayError) -> bool {
+    matches!(error, CaptureRelayError::Io(error) if error.kind() == io::ErrorKind::UnexpectedEof)
+}
+
+fn is_retryable_establishment_error(error: &CaptureRelayError) -> bool {
+    matches!(
+        error,
+        CaptureRelayError::Io(error)
+            if !matches!(
+                error.kind(),
+                io::ErrorKind::InvalidInput
+                    | io::ErrorKind::PermissionDenied
+                    | io::ErrorKind::Unsupported
+            )
+    )
 }
 
 pub fn capture_relay_discovery_path() -> PathBuf {
@@ -1114,6 +1251,17 @@ mod tests {
         panic!("timed out waiting for relay frame");
     }
 
+    fn wait_for_error(client: &mut CaptureRelayClient) -> CaptureRelayError {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while Instant::now() < deadline {
+            match client.try_recv() {
+                Ok(_) => thread::sleep(Duration::from_millis(10)),
+                Err(error) => return error,
+            }
+        }
+        panic!("timed out waiting for relay error");
+    }
+
     #[test]
     fn connect_reconnect_replays_only_after_both_cursors() {
         let dir = TempDir::new().unwrap();
@@ -1149,6 +1297,36 @@ mod tests {
     }
 
     #[test]
+    fn repeated_reconnects_replay_each_cursor_advance() {
+        const RECONNECT_CYCLES: u64 = 40;
+
+        let dir = TempDir::new().unwrap();
+        let server = CaptureRelayServer::start_for_test(dir.path()).unwrap();
+        let discovery_path = capture_relay_discovery_path_in(dir.path());
+        let mut cursor = RelayCursor::default();
+
+        for seq in 1..=RECONNECT_CYCLES {
+            server.publish_transcript_for_test(utterance(&format!("transcript-{seq}")));
+            server.publish_nudge(nudge(&format!("nudge-{seq}")));
+
+            let mut client = CaptureRelayClient::connect_from(&discovery_path, cursor).unwrap();
+            wait_for_frame(
+                &mut client,
+                |frame| matches!(frame, RelayFrame::Transcript { seq: frame_seq, .. } if *frame_seq == seq),
+            );
+            wait_for_frame(
+                &mut client,
+                |frame| matches!(frame, RelayFrame::Nudge { seq: frame_seq, .. } if *frame_seq == seq),
+            );
+
+            cursor = client.cursor();
+            assert_eq!(cursor.transcript_seq, seq);
+            assert_eq!(cursor.nudge_seq, seq);
+            drop(client);
+        }
+    }
+
+    #[test]
     fn publishes_nudges_from_an_attached_process() {
         let dir = TempDir::new().unwrap();
         let _server = CaptureRelayServer::start_for_test(dir.path()).unwrap();
@@ -1178,6 +1356,7 @@ mod tests {
             matches!(frame, RelayFrame::Heartbeat { .. })
         });
         assert!(matches!(heartbeat, RelayFrame::Heartbeat { .. }));
+        assert!(client.established);
 
         server.shutdown("test owner stopped");
         let shutdown = wait_for_frame(&mut client, |frame| {
@@ -1189,6 +1368,10 @@ mod tests {
                 reason: "test owner stopped".into()
             }
         );
+        assert!(matches!(
+            wait_for_error(&mut client),
+            CaptureRelayError::Io(error) if error.kind() == io::ErrorKind::UnexpectedEof
+        ));
     }
 
     #[test]

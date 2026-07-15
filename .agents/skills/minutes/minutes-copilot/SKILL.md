@@ -9,6 +9,28 @@ Use the real Minutes copilot runtime to start or control Coach. Do not build a t
 
 If the user explicitly asks **you or the current terminal agent** to watch, advise, or strategize, use `/minutes-live-sidekick` instead. If the user says only "coach me live" or otherwise leaves the surface ambiguous, ask exactly: "Do you want me in this terminal to be your sidekick, or should I open the Minutes Coach HUD?" Do not start Coach while clarifying.
 
+## Verify Coach capability first
+
+After the request is routed to Coach, make this probe the first operational step. Run it before asking for a meeting goal and before invoking any MCP or CLI Coach control:
+
+```bash
+minutes copilot --help >/dev/null 2>&1
+```
+
+Treat only exit status `0` as supported. If the probe fails, stop this skill immediately. Do not ask for a goal, call a copilot MCP control, or run `minutes copilot start`, `status`, `pause`, `resume`, or `stop`.
+
+Return this exact guidance, preserving the commands that apply to the user's platform:
+
+```text
+Coach is unavailable because the installed Minutes CLI is missing or does not support `minutes copilot`. Upgrade to a Minutes CLI release that supports Coach, then try again:
+
+Homebrew: brew update && brew upgrade silverstein/tap/minutes
+Cargo (macOS/Linux): cargo install minutes-cli
+Cargo (Windows): cargo install minutes-cli --no-default-features
+
+I did not attempt to start or control Coach. Recording and transcription are unaffected.
+```
+
 ## Start Coach
 
 1. Get one concrete meeting goal. Use the user's stated goal; if none is present, ask exactly: "What outcome should Coach help you achieve in this meeting?"

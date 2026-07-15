@@ -591,11 +591,12 @@ claude plugin update minutes@minutes        # installs the new version into the 
 # Restart Claude Code to apply
 ```
 
-19 skills, 1 agent, 2 hooks:
+21 skills, 1 agent, 2 hooks:
 ```
 ├── Capture:      /minutes-record, note, list, recap, cleanup, verify, setup
 ├── Search:       /minutes-search
 ├── Lifecycle:    /minutes-brief, prep, debrief, weekly
+├── Live help:    /minutes-copilot, live-sidekick
 ├── Coaching:     /minutes-tag, mirror
 ├── Knowledge:    /minutes-ideas, lint, ingest
 ├── Intelligence: /minutes-graph
@@ -1228,7 +1229,7 @@ minutes/
 ├── crates/mcp/           MCP server — 36 tools + 8 resources + interactive dashboard
 │   └── ui/               MCP App dashboard (vanilla TS → single-file HTML)
 ├── tauri/                Menu bar app — system tray, recording UI, singleton AI Assistant
-└── .claude/plugins/minutes/   Claude Code plugin — 19 skills + 1 agent + 2 hooks
+└── .claude/plugins/minutes/   Claude Code plugin — 21 skills + 1 agent + 2 hooks
 ```
 
 Single `minutes-core` library shared by CLI, MCP server, and Tauri app. Zero code duplication.

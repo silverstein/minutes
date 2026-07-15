@@ -1,7 +1,7 @@
 {
   "name": "minutes",
   "version": "0.20.0",
-  "description": "Conversation memory for AI assistants — record, transcribe, search meetings and voice memos. 20 skills for the full meeting lifecycle: brief → prep → record → copilot → tag → debrief → mirror → weekly → graph → video-review.",
+  "description": "Conversation memory for AI assistants — record, transcribe, search meetings and voice memos. 21 skills for the full meeting lifecycle: brief → prep → record → Coach → live sidekick → tag → debrief → mirror → weekly → graph → video-review.",
   "skills": [
     { "name": "minutes-record", "path": "skills/minutes-record/SKILL.md" },
     { "name": "minutes-search", "path": "skills/minutes-search/SKILL.md" },

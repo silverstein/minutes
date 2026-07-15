@@ -34,7 +34,7 @@ What you get:
   - When: User works in Claude Code and wants meeting lifecycle skills and proactive hooks.
   - Install: `claude plugin marketplace add silverstein/minutes`
   - Best for: Best for workflow guidance, prep, debrief, and meeting coaching.
-  - Notes: 19 skills (brief, prep, debrief, graph, video review, and the rest of the meeting lifecycle) plus a meeting-analyst agent and SessionStart/PostToolUse hooks.
+  - Notes: 21 skills (including Coach, live sidekick, brief, prep, debrief, graph, and video review) plus a meeting-analyst agent and SessionStart/PostToolUse hooks.
 - Pi coding agent
   - When: User works in Pi or wants Minutes to use pi as an opt-in local summarization agent.
   - Install: `pi`

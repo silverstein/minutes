@@ -379,7 +379,7 @@ print(f'all {len(m[\"skills\"])} skills resolve')"
 python3 -c "
 import json, os
 m = json.load(open('.claude-plugin/marketplace.json'))
-src = m['plugins'][0]['source'].lstrip('./')
+src = os.path.normpath(m['plugins'][0]['source'])
 assert os.path.isdir(src), f'source path missing: {src}'
 print(f'marketplace source → {src} OK')"
 ```
@@ -421,8 +421,14 @@ gh release create plugin-vX.Y.Z \
   --target main \
   --title "Plugin vX.Y.Z: Short descriptive subtitle" \
   --notes-file notes-release-plugin-vX.Y.Z.md \
-  --discussion-category "Announcements"
+  --discussion-category "Announcements" \
+  --latest=false
 ```
+
+`--latest=false` is mandatory. The Tauri updater and MCP auto-install paths use
+GitHub's `releases/latest/download` surface, so a plugin-only release must never
+replace the latest binary release or redirect those consumers to a tag with no
+binary assets.
 
 Do **not** pass `--prerelease` unless the release is actually experimental. Plugin releases cut from main are real, deployed, shipping releases. Marking them as prerelease in GitHub's UI discourages users from updating because "Pre-release" reads as "not ready for production" even when it is.
 
@@ -442,9 +448,17 @@ Verify the release + discussion:
 ```bash
 gh release view plugin-vX.Y.Z --repo silverstein/minutes
 gh run list --limit 5        # confirm no binary release workflows fired
+
+# `releases/latest` must still resolve to a binary `v*` tag with updater metadata.
+LATEST_TAG="$(gh api repos/silverstein/minutes/releases/latest --jq .tag_name)"
+case "$LATEST_TAG" in
+  v*) printf 'binary latest: %s\n' "$LATEST_TAG" ;;
+  *) printf 'ERROR: releases/latest points to non-binary tag: %s\n' "$LATEST_TAG" >&2; exit 1 ;;
+esac
+gh api repos/silverstein/minutes/releases/latest --jq '.assets[].name' | grep -qx 'latest.json'
 ```
 
-The `gh run list` check is the belt-and-braces verification that the tag namespace worked. If you see `Release CLI Binaries` or `Release macOS` queued or running against the plugin tag, stop them immediately and investigate, because they're attempting to build binary artifacts from an unbumped Cargo.toml.
+The `gh run list` check is the belt-and-braces verification that the tag namespace worked. The API check proves the plugin release did not hijack the stable binary download and updater surface. If either check fails, stop and investigate. If you see `Release CLI Binaries` or `Release macOS` queued or running against the plugin tag, stop them immediately, because they're attempting to build binary artifacts from an unbumped Cargo.toml.
 
 ### What's explicitly NOT required for a plugin-only release
 

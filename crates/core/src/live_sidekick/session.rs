@@ -41,6 +41,8 @@ string_id!(ForegroundTurnId);
 string_id!(BackgroundRunId);
 string_id!(EvidenceId);
 string_id!(MeetingRef);
+string_id!(ProviderBindingId);
+string_id!(ProviderAttestationId);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -92,26 +94,129 @@ impl AssistancePosture {
     }
 }
 
-/// What Minutes has actually proved about one provider invocation profile.
+/// A provider isolation profile whose capability facts are defined by Minutes.
 ///
-/// These are capability facts, not provider-brand guesses. Native Recall may
-/// start an inference only when every required isolation and lifecycle fact is
-/// true. Screen input is separate because a safe text-only provider remains a
-/// valid Native Recall route.
+/// Adapters cannot assemble a trusted capability proof from independent
+/// booleans. They must identify the verified profile and the attestation that
+/// established it. The reducer still validates binding identity and monotonic
+/// generation before granting Native Recall authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderIsolationProfile {
+    VerifiedLoopbackText,
+    AgentControlledText,
+    AgentControlledExactSessionScreen,
+    Unavailable,
+}
+
+/// Process-local proof that one provider invocation route matches a known
+/// isolation profile. The binding and attestation identifiers are opaque: the
+/// host owns their verification, while the reducer owns freshness and scope.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderBinding {
+    binding_id: ProviderBindingId,
+    generation: u64,
+    attestation_id: ProviderAttestationId,
+    profile: ProviderIsolationProfile,
+}
+
+impl ProviderBinding {
+    pub fn new(
+        binding_id: ProviderBindingId,
+        generation: u64,
+        attestation_id: ProviderAttestationId,
+        profile: ProviderIsolationProfile,
+    ) -> Option<Self> {
+        if !binding_id.is_valid() || generation == 0 || !attestation_id.is_valid() {
+            return None;
+        }
+        Some(Self {
+            binding_id,
+            generation,
+            attestation_id,
+            profile,
+        })
+    }
+
+    pub fn binding_id(&self) -> &ProviderBindingId {
+        &self.binding_id
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    pub fn attestation_id(&self) -> &ProviderAttestationId {
+        &self.attestation_id
+    }
+
+    pub fn profile(&self) -> ProviderIsolationProfile {
+        self.profile
+    }
+
+    pub fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities::for_profile(self.profile)
+    }
+}
+
+/// Capability facts derived from a verified provider isolation profile.
+///
+/// Fields intentionally remain private so callers cannot manufacture a trusted
+/// bag of booleans. Native Recall may start inference only from a fresh
+/// `ProviderBinding` whose derived facts satisfy this contract.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct ProviderCapabilities {
-    pub cancellation: bool,
-    pub bounded_input: bool,
-    pub bounded_output: bool,
-    pub arbitrary_writes_denied: bool,
-    pub arbitrary_shell_denied: bool,
-    pub ambient_filesystem_reads_denied: bool,
-    pub unapproved_tools_denied: bool,
-    pub routing_disclosure: RoutingDisclosure,
-    pub screen_disclosure: ScreenDisclosureCapability,
+    cancellation: bool,
+    bounded_input: bool,
+    bounded_output: bool,
+    arbitrary_writes_denied: bool,
+    arbitrary_shell_denied: bool,
+    ambient_filesystem_reads_denied: bool,
+    unapproved_tools_denied: bool,
+    routing_disclosure: RoutingDisclosure,
+    screen_disclosure: ScreenDisclosureCapability,
 }
 
 impl ProviderCapabilities {
+    fn for_profile(profile: ProviderIsolationProfile) -> Self {
+        match profile {
+            ProviderIsolationProfile::VerifiedLoopbackText => Self {
+                cancellation: true,
+                bounded_input: true,
+                bounded_output: true,
+                arbitrary_writes_denied: true,
+                arbitrary_shell_denied: true,
+                ambient_filesystem_reads_denied: true,
+                unapproved_tools_denied: true,
+                routing_disclosure: RoutingDisclosure::VerifiedLoopback,
+                screen_disclosure: ScreenDisclosureCapability::Unavailable,
+            },
+            ProviderIsolationProfile::AgentControlledText => Self {
+                cancellation: true,
+                bounded_input: true,
+                bounded_output: true,
+                arbitrary_writes_denied: true,
+                arbitrary_shell_denied: true,
+                ambient_filesystem_reads_denied: true,
+                unapproved_tools_denied: true,
+                routing_disclosure: RoutingDisclosure::AgentControlled,
+                screen_disclosure: ScreenDisclosureCapability::Unavailable,
+            },
+            ProviderIsolationProfile::AgentControlledExactSessionScreen => Self {
+                cancellation: true,
+                bounded_input: true,
+                bounded_output: true,
+                arbitrary_writes_denied: true,
+                arbitrary_shell_denied: true,
+                ambient_filesystem_reads_denied: true,
+                unapproved_tools_denied: true,
+                routing_disclosure: RoutingDisclosure::AgentControlled,
+                screen_disclosure: ScreenDisclosureCapability::ExactSessionExplicit,
+            },
+            ProviderIsolationProfile::Unavailable => Self::default(),
+        }
+    }
+
     pub fn supports_native_recall(self) -> bool {
         self.cancellation
             && self.bounded_input
@@ -266,11 +371,20 @@ pub struct LiveAssistanceSession {
     pub finalized_meeting_ref: Option<MeetingRef>,
     pub source_policy_generation: u64,
     pub user_generation: u64,
-    /// Proven invocation-profile facts for the currently selected provider.
-    /// `None` and the all-false default are both unproven and fail closed for
-    /// Native Recall.
+    /// Process-local provider proof. It is deliberately never restored from a
+    /// serialized session; every process must re-attest before Native Recall
+    /// can invoke a provider.
+    #[serde(skip, default)]
+    pub provider_binding: Option<ProviderBinding>,
+    /// Monotonic freshness guard for provider events in this process. Like the
+    /// proof itself, it resets on process restore because prior queued events
+    /// cannot cross a process boundary.
+    #[serde(skip, default)]
+    provider_binding_generation: u64,
+    /// A source-policy counter overflow permanently removes inference authority
+    /// from this session instead of preserving the previous proof.
     #[serde(default)]
-    pub provider_capabilities: Option<ProviderCapabilities>,
+    pub authority_exhausted: bool,
     pub foreground_turn: Option<ForegroundTurn>,
     pub background_run: Option<BackgroundRun>,
     /// Immutable evidence provenance keyed by an event ID that is unique
@@ -310,7 +424,9 @@ impl LiveAssistanceSession {
             finalized_meeting_ref: None,
             source_policy_generation: 0,
             user_generation: 0,
-            provider_capabilities: None,
+            provider_binding: None,
+            provider_binding_generation: 0,
+            authority_exhausted: false,
             foreground_turn: None,
             background_run: None,
             evidence: BTreeMap::new(),
@@ -402,8 +518,8 @@ impl LiveAssistanceSession {
                 invocation,
                 ..
             } => self.foreground_completed(turn_id, invocation),
-            AssistanceEvent::ProviderCapabilitiesChanged { capabilities, .. } => {
-                self.provider_capabilities_changed(capabilities)
+            AssistanceEvent::ProviderBindingChanged { binding, .. } => {
+                self.provider_binding_changed(binding)
             }
             AssistanceEvent::SourcePolicyInvalidated { new_generation, .. } => {
                 self.policy_invalidated(new_generation)
@@ -745,11 +861,25 @@ impl LiveAssistanceSession {
         }])
     }
 
-    fn provider_capabilities_changed(&mut self, capabilities: ProviderCapabilities) -> Reduction {
-        if self.provider_capabilities == Some(capabilities) {
-            return Reduction::rejected(RejectionReason::NoStateChange);
+    fn provider_binding_changed(&mut self, binding: ProviderBinding) -> Reduction {
+        if self.surface != AssistanceSurface::NativeRecall {
+            return Reduction::rejected(RejectionReason::ProviderBindingNotApplicable);
         }
-        let pristine_initial_binding = self.provider_capabilities.is_none()
+        if self.authority_exhausted {
+            return Reduction::rejected(RejectionReason::GenerationExhausted);
+        }
+        if self.provider_binding_generation == u64::MAX {
+            return self.exhaust_provider_authority(self.provider_binding_generation);
+        }
+        if binding.generation() <= self.provider_binding_generation {
+            return Reduction::rejected(RejectionReason::ProviderBindingGenerationNotAdvanced);
+        }
+        // Reserve the terminal value so a proven binding can never make every
+        // later revocation numerically stale.
+        if binding.generation() == u64::MAX {
+            return self.exhaust_provider_authority(binding.generation());
+        }
+        let pristine_initial_binding = self.provider_binding.is_none()
             && self.phase == AssistancePhase::Idle
             && self.evidence.is_empty()
             && self.foreground_turn.is_none()
@@ -758,20 +888,48 @@ impl LiveAssistanceSession {
             self.source_policy_generation
         } else {
             let Some(generation) = self.source_policy_generation.checked_add(1) else {
-                return Reduction::rejected(RejectionReason::GenerationExhausted);
+                return self.exhaust_provider_authority(binding.generation());
             };
             generation
         };
+        let capabilities = binding.capabilities();
         let mut actions = self.cancel_in_flight(InvalidationReason::ProviderCapabilitiesChanged);
         self.source_policy_generation = new_generation;
-        self.provider_capabilities = Some(capabilities);
+        self.provider_binding_generation = binding.generation();
+        self.provider_binding = Some(binding.clone());
         self.evidence.clear();
         self.speaker_corrections.clear();
         self.user_role.source_event_id = None;
-        actions.push(AssistanceAction::ProviderCapabilitiesUpdated {
+        if !pristine_initial_binding {
+            actions.push(AssistanceAction::PolicyBoundStateCleared { new_generation });
+        }
+        actions.push(AssistanceAction::ProviderBindingUpdated {
+            binding: Some(binding),
             capabilities,
             native_recall_ready: capabilities.supports_native_recall(),
             new_generation,
+            authority_exhausted: false,
+        });
+        Reduction::accepted(actions)
+    }
+
+    fn exhaust_provider_authority(&mut self, incoming_binding_generation: u64) -> Reduction {
+        let mut actions = self.cancel_in_flight(InvalidationReason::ProviderCapabilitiesChanged);
+        self.provider_binding_generation = incoming_binding_generation;
+        self.provider_binding = None;
+        self.authority_exhausted = true;
+        self.evidence.clear();
+        self.speaker_corrections.clear();
+        self.user_role.source_event_id = None;
+        actions.push(AssistanceAction::PolicyBoundStateCleared {
+            new_generation: self.source_policy_generation,
+        });
+        actions.push(AssistanceAction::ProviderBindingUpdated {
+            binding: None,
+            capabilities: ProviderCapabilities::default(),
+            native_recall_ready: false,
+            new_generation: self.source_policy_generation,
+            authority_exhausted: true,
         });
         Reduction::accepted(actions)
     }
@@ -912,8 +1070,15 @@ impl LiveAssistanceSession {
     }
 
     pub fn native_recall_provider_ready(&self) -> bool {
-        self.provider_capabilities
-            .is_some_and(ProviderCapabilities::supports_native_recall)
+        !self.authority_exhausted
+            && self
+                .provider_binding
+                .as_ref()
+                .is_some_and(|binding| binding.capabilities().supports_native_recall())
+    }
+
+    pub fn provider_binding_generation(&self) -> u64 {
+        self.provider_binding_generation
     }
 
     fn accepts_evidence(&self, source_kind: EvidenceSourceKind) -> bool {
@@ -1002,9 +1167,9 @@ pub enum AssistanceEvent {
         turn_id: ForegroundTurnId,
         invocation: InvocationIdentity,
     },
-    ProviderCapabilitiesChanged {
+    ProviderBindingChanged {
         session_id: LiveAssistanceSessionId,
-        capabilities: ProviderCapabilities,
+        binding: ProviderBinding,
     },
     SourcePolicyInvalidated {
         session_id: LiveAssistanceSessionId,
@@ -1037,7 +1202,7 @@ impl AssistanceEvent {
             | Self::BackgroundStarted { session_id, .. }
             | Self::BackgroundCompleted { session_id, .. }
             | Self::ForegroundCompleted { session_id, .. }
-            | Self::ProviderCapabilitiesChanged { session_id, .. }
+            | Self::ProviderBindingChanged { session_id, .. }
             | Self::SourcePolicyInvalidated { session_id, .. }
             | Self::CaptureStopped { session_id, .. }
             | Self::ProcessingStarted { session_id, .. }
@@ -1103,10 +1268,12 @@ pub enum AssistanceAction {
         run_id: BackgroundRunId,
         invocation: InvocationIdentity,
     },
-    ProviderCapabilitiesUpdated {
+    ProviderBindingUpdated {
+        binding: Option<ProviderBinding>,
         capabilities: ProviderCapabilities,
         native_recall_ready: bool,
         new_generation: u64,
+        authority_exhausted: bool,
     },
     RoleUpdated {
         role: UserRole,
@@ -1148,6 +1315,8 @@ pub enum RejectionReason {
     BackgroundNotAllowed,
     BackgroundAlreadyRunning,
     ProviderCapabilitiesInsufficient,
+    ProviderBindingNotApplicable,
+    ProviderBindingGenerationNotAdvanced,
     StaleBackgroundResult,
     StaleForegroundResult,
     PolicyGenerationNotAdvanced,
@@ -1183,18 +1352,26 @@ impl Reduction {
 mod tests {
     use super::*;
 
-    fn proven_native_recall_provider() -> ProviderCapabilities {
-        ProviderCapabilities {
-            cancellation: true,
-            bounded_input: true,
-            bounded_output: true,
-            arbitrary_writes_denied: true,
-            arbitrary_shell_denied: true,
-            ambient_filesystem_reads_denied: true,
-            unapproved_tools_denied: true,
-            routing_disclosure: RoutingDisclosure::AgentControlled,
-            screen_disclosure: ScreenDisclosureCapability::Unavailable,
-        }
+    fn provider_binding(
+        binding_id: &str,
+        generation: u64,
+        profile: ProviderIsolationProfile,
+    ) -> ProviderBinding {
+        ProviderBinding::new(
+            binding_id.into(),
+            generation,
+            format!("attestation-{generation}").into(),
+            profile,
+        )
+        .unwrap()
+    }
+
+    fn proven_native_recall_provider(generation: u64) -> ProviderBinding {
+        provider_binding(
+            "agent-read-only",
+            generation,
+            ProviderIsolationProfile::AgentControlledText,
+        )
     }
 
     fn session(mode: CaptureMode) -> LiveAssistanceSession {
@@ -1204,9 +1381,9 @@ mod tests {
             UserRole::Observer,
             AssistancePosture::Strategist,
         );
-        let capabilities = session.reduce(AssistanceEvent::ProviderCapabilitiesChanged {
+        let capabilities = session.reduce(AssistanceEvent::ProviderBindingChanged {
             session_id: "assist-1".into(),
-            capabilities: proven_native_recall_provider(),
+            binding: proven_native_recall_provider(1),
         });
         assert!(capabilities.accepted);
         let reduction = session.reduce(AssistanceEvent::CaptureStarted {
@@ -1949,7 +2126,7 @@ mod tests {
     }
 
     #[test]
-    fn native_recall_fails_closed_until_provider_capabilities_are_proven() {
+    fn native_recall_fails_closed_until_a_fresh_provider_binding_is_proven() {
         let mut session = LiveAssistanceSession::new(
             "assist-1".into(),
             AssistanceSurface::NativeRecall,
@@ -1976,23 +2153,28 @@ mod tests {
             RejectionReason::ProviderCapabilitiesInsufficient,
         );
 
-        let incomplete = ProviderCapabilities {
-            cancellation: true,
-            bounded_input: true,
-            ..ProviderCapabilities::default()
-        };
-        let bound = session.reduce(AssistanceEvent::ProviderCapabilitiesChanged {
+        let unavailable = provider_binding(
+            "route-unavailable",
+            1,
+            ProviderIsolationProfile::Unavailable,
+        );
+        let bound = session.reduce(AssistanceEvent::ProviderBindingChanged {
             session_id: "assist-1".into(),
-            capabilities: incomplete,
+            binding: unavailable.clone(),
         });
         assert_eq!(session.source_policy_generation, 1);
         assert_eq!(
             bound.actions,
-            vec![AssistanceAction::ProviderCapabilitiesUpdated {
-                capabilities: incomplete,
-                native_recall_ready: false,
-                new_generation: 1,
-            }]
+            vec![
+                AssistanceAction::PolicyBoundStateCleared { new_generation: 1 },
+                AssistanceAction::ProviderBindingUpdated {
+                    binding: Some(unavailable),
+                    capabilities: ProviderCapabilities::default(),
+                    native_recall_ready: false,
+                    new_generation: 1,
+                    authority_exhausted: false,
+                },
+            ]
         );
         assert_rejected_unchanged(
             &mut session,
@@ -2005,18 +2187,21 @@ mod tests {
             RejectionReason::ProviderCapabilitiesInsufficient,
         );
 
-        let proven = proven_native_recall_provider();
-        let rebound = session.reduce(AssistanceEvent::ProviderCapabilitiesChanged {
+        let proven = proven_native_recall_provider(2);
+        let capabilities = proven.capabilities();
+        let rebound = session.reduce(AssistanceEvent::ProviderBindingChanged {
             session_id: "assist-1".into(),
-            capabilities: proven,
+            binding: proven.clone(),
         });
         assert_eq!(session.source_policy_generation, 2);
         assert_eq!(
             rebound.actions.last(),
-            Some(&AssistanceAction::ProviderCapabilitiesUpdated {
-                capabilities: proven,
+            Some(&AssistanceAction::ProviderBindingUpdated {
+                binding: Some(proven),
+                capabilities,
                 native_recall_ready: true,
                 new_generation: 2,
+                authority_exhausted: false,
             })
         );
         assert!(
@@ -2032,7 +2217,7 @@ mod tests {
     }
 
     #[test]
-    fn provider_capability_change_cancels_inflight_work_and_invalidates_policy_state() {
+    fn provider_binding_change_cancels_then_clears_then_publishes_capabilities() {
         let mut session = session(CaptureMode::Recording);
         let (invocation, _) = ask(
             &mut session,
@@ -2042,10 +2227,14 @@ mod tests {
         );
         assert!(!session.evidence.is_empty());
 
-        let unavailable = ProviderCapabilities::default();
-        let reduction = session.reduce(AssistanceEvent::ProviderCapabilitiesChanged {
+        let unavailable = provider_binding(
+            "route-unavailable",
+            2,
+            ProviderIsolationProfile::Unavailable,
+        );
+        let reduction = session.reduce(AssistanceEvent::ProviderBindingChanged {
             session_id: "assist-1".into(),
-            capabilities: unavailable,
+            binding: unavailable.clone(),
         });
         assert_eq!(session.source_policy_generation, 1);
         assert!(session.foreground_turn.is_none());
@@ -2058,12 +2247,184 @@ mod tests {
                     invocation,
                     reason: InvalidationReason::ProviderCapabilitiesChanged,
                 },
-                AssistanceAction::ProviderCapabilitiesUpdated {
-                    capabilities: unavailable,
+                AssistanceAction::PolicyBoundStateCleared { new_generation: 1 },
+                AssistanceAction::ProviderBindingUpdated {
+                    binding: Some(unavailable),
+                    capabilities: ProviderCapabilities::default(),
                     native_recall_ready: false,
                     new_generation: 1,
+                    authority_exhausted: false,
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn provider_binding_identity_and_generation_prevent_aba_reenable() {
+        let mut session = session(CaptureMode::Live);
+        assert_rejected_unchanged(
+            &mut session,
+            AssistanceEvent::ProviderBindingChanged {
+                session_id: "assist-1".into(),
+                binding: provider_binding(
+                    "delayed-route",
+                    1,
+                    ProviderIsolationProfile::AgentControlledText,
+                ),
+            },
+            RejectionReason::ProviderBindingGenerationNotAdvanced,
+        );
+
+        let replacement = provider_binding(
+            "replacement-route",
+            2,
+            ProviderIsolationProfile::AgentControlledText,
+        );
+        let changed = session.reduce(AssistanceEvent::ProviderBindingChanged {
+            session_id: "assist-1".into(),
+            binding: replacement.clone(),
+        });
+        assert!(changed.accepted);
+        assert_eq!(session.provider_binding.as_ref(), Some(&replacement));
+        assert_eq!(session.source_policy_generation, 1);
+
+        assert_rejected_unchanged(
+            &mut session,
+            AssistanceEvent::ProviderBindingChanged {
+                session_id: "assist-1".into(),
+                binding: proven_native_recall_provider(1),
+            },
+            RejectionReason::ProviderBindingGenerationNotAdvanced,
+        );
+    }
+
+    #[test]
+    fn newer_revocation_with_a_generation_gap_fails_closed() {
+        let mut session = session(CaptureMode::Live);
+        let unavailable = provider_binding(
+            "coalesced-revocation",
+            3,
+            ProviderIsolationProfile::Unavailable,
+        );
+        let reduction = session.reduce(AssistanceEvent::ProviderBindingChanged {
+            session_id: "assist-1".into(),
+            binding: unavailable.clone(),
+        });
+        assert!(reduction.accepted);
+        assert!(!session.native_recall_provider_ready());
+        assert_eq!(session.provider_binding.as_ref(), Some(&unavailable));
+        assert_eq!(session.provider_binding_generation(), 3);
+    }
+
+    #[test]
+    fn terminal_provider_binding_generation_cannot_preserve_or_restore_authority() {
+        let mut session = session(CaptureMode::Live);
+        let (invocation, _) = ask(&mut session, "turn-1", "user-event-1", "Question?");
+        session.provider_binding_generation = u64::MAX - 1;
+        let reduction = session.reduce(AssistanceEvent::ProviderBindingChanged {
+            session_id: "assist-1".into(),
+            binding: provider_binding(
+                "terminal-generation-route",
+                u64::MAX,
+                ProviderIsolationProfile::AgentControlledText,
+            ),
+        });
+        assert!(reduction.accepted);
+        assert!(session.authority_exhausted);
+        assert!(session.provider_binding.is_none());
+        assert!(!session.native_recall_provider_ready());
+        assert_eq!(
+            reduction.actions.first(),
+            Some(&AssistanceAction::CancelForeground {
+                turn_id: "turn-1".into(),
+                invocation,
+                reason: InvalidationReason::ProviderCapabilitiesChanged,
+            })
+        );
+        assert_rejected_unchanged(
+            &mut session,
+            AssistanceEvent::ProviderBindingChanged {
+                session_id: "assist-1".into(),
+                binding: provider_binding(
+                    "delayed-proven-route",
+                    2,
+                    ProviderIsolationProfile::AgentControlledText,
+                ),
+            },
+            RejectionReason::GenerationExhausted,
+        );
+    }
+
+    #[test]
+    fn provider_bindings_are_native_only_and_do_not_mutate_other_surfaces() {
+        for surface in [
+            AssistanceSurface::TerminalSidekick,
+            AssistanceSurface::CoachHud,
+        ] {
+            let mut session = LiveAssistanceSession::new(
+                "assist-1".into(),
+                surface,
+                UserRole::Observer,
+                AssistancePosture::OnDemand,
+            );
+            assert_rejected_unchanged(
+                &mut session,
+                AssistanceEvent::ProviderBindingChanged {
+                    session_id: "assist-1".into(),
+                    binding: proven_native_recall_provider(1),
+                },
+                RejectionReason::ProviderBindingNotApplicable,
+            );
+        }
+    }
+
+    #[test]
+    fn provider_revocation_at_policy_generation_exhaustion_fails_closed() {
+        let mut session = session(CaptureMode::Live);
+        let (invocation, _) = ask(&mut session, "turn-1", "user-event-1", "Question?");
+        session.source_policy_generation = u64::MAX;
+        let unavailable = provider_binding(
+            "route-unavailable",
+            2,
+            ProviderIsolationProfile::Unavailable,
+        );
+        let reduction = session.reduce(AssistanceEvent::ProviderBindingChanged {
+            session_id: "assist-1".into(),
+            binding: unavailable,
+        });
+        assert!(reduction.accepted);
+        assert!(session.authority_exhausted);
+        assert!(session.provider_binding.is_none());
+        assert!(!session.native_recall_provider_ready());
+        assert_eq!(
+            reduction.actions,
+            vec![
+                AssistanceAction::CancelForeground {
+                    turn_id: "turn-1".into(),
+                    invocation,
+                    reason: InvalidationReason::ProviderCapabilitiesChanged,
+                },
+                AssistanceAction::PolicyBoundStateCleared {
+                    new_generation: u64::MAX,
+                },
+                AssistanceAction::ProviderBindingUpdated {
+                    binding: None,
+                    capabilities: ProviderCapabilities::default(),
+                    native_recall_ready: false,
+                    new_generation: u64::MAX,
+                    authority_exhausted: true,
+                },
+            ]
+        );
+        assert_rejected_unchanged(
+            &mut session,
+            AssistanceEvent::UserMessage {
+                session_id: "assist-1".into(),
+                turn_id: "turn-2".into(),
+                source_event_id: "user-event-2".into(),
+                text: "Question?".into(),
+            },
+            RejectionReason::ProviderCapabilitiesInsufficient,
         );
     }
 
@@ -2096,9 +2457,9 @@ mod tests {
             "meeting-a"
         );
 
-        let capabilities = session.reduce(AssistanceEvent::ProviderCapabilitiesChanged {
+        let capabilities = session.reduce(AssistanceEvent::ProviderBindingChanged {
             session_id: "assist-final".into(),
-            capabilities: proven_native_recall_provider(),
+            binding: proven_native_recall_provider(1),
         });
         assert!(capabilities.accepted);
         let question = session.reduce(AssistanceEvent::UserMessage {
@@ -2119,15 +2480,32 @@ mod tests {
     }
 
     #[test]
-    fn older_serialized_sessions_default_to_unproven_provider_capabilities() {
+    fn serialized_sessions_require_fresh_provider_reattestation() {
         let session = session(CaptureMode::Live);
-        let mut value = serde_json::to_value(session).unwrap();
-        value
-            .as_object_mut()
-            .unwrap()
-            .remove("provider_capabilities");
-        let restored: LiveAssistanceSession = serde_json::from_value(value).unwrap();
-        assert_eq!(restored.provider_capabilities, None);
+        assert!(session.native_recall_provider_ready());
+        let value = serde_json::to_value(session).unwrap();
+        assert!(value.get("provider_binding").is_none());
+        let mut restored: LiveAssistanceSession = serde_json::from_value(value).unwrap();
+        assert_eq!(restored.provider_binding, None);
+        assert_eq!(restored.provider_binding_generation(), 0);
         assert!(!restored.native_recall_provider_ready());
+        assert_rejected_unchanged(
+            &mut restored,
+            AssistanceEvent::UserMessage {
+                session_id: "assist-1".into(),
+                turn_id: "turn-restored".into(),
+                source_event_id: "user-restored".into(),
+                text: "What changed?".into(),
+            },
+            RejectionReason::ProviderCapabilitiesInsufficient,
+        );
+        assert!(
+            restored
+                .reduce(AssistanceEvent::ProviderBindingChanged {
+                    session_id: "assist-1".into(),
+                    binding: proven_native_recall_provider(1),
+                })
+                .accepted
+        );
     }
 }

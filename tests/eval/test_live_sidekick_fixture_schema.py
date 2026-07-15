@@ -31,6 +31,10 @@ def load_completion_control() -> dict[str, object]:
     return json.loads((FIXTURE_DIR / "foreground_invocation_aba.json").read_text())
 
 
+def load_provider_control() -> dict[str, object]:
+    return json.loads((FIXTURE_DIR / "provider_capability_denied.json").read_text())
+
+
 class LiveSidekickFixtureSchemaTests(unittest.TestCase):
     def findings_for(self, data: dict[str, object]) -> set[str]:
         with tempfile.TemporaryDirectory() as temporary:
@@ -180,6 +184,30 @@ class LiveSidekickFixtureSchemaTests(unittest.TestCase):
             "user_generation": 1,
         }
         self.assertIn("unknown_key", self.findings_for(data))
+
+    def test_provider_binding_is_exact_and_complete(self) -> None:
+        missing = load_provider_control()
+        del missing["events"][0]["payload"]["attestation_id"]
+        self.assertIn("required_key_missing", self.findings_for(missing))
+
+        boolean_bag = load_provider_control()
+        boolean_bag["events"][0]["payload"]["cancellation"] = True
+        rules = self.findings_for(boolean_bag)
+        self.assertIn("unknown_key", rules)
+
+        legacy_alias = load_provider_control()
+        legacy_alias["events"][0]["kind"] = "provider_capability_changed"
+        rules = self.findings_for(legacy_alias)
+        self.assertIn("unsupported_event_kind", rules)
+
+        zero_generation = load_provider_control()
+        zero_generation["events"][0]["payload"]["binding_generation"] = 0
+        rules = self.findings_for(zero_generation)
+        self.assertIn("positive_integer_required", rules)
+
+        unsupported_enum = load_provider_control()
+        unsupported_enum["events"][0]["payload"]["isolation_profile"] = "assumed"
+        self.assertIn("unsupported_value", self.findings_for(unsupported_enum))
 
 
 if __name__ == "__main__":

@@ -70,7 +70,7 @@
           "scope": "live_capture", "surface": "terminal_sidekick", "phase": "ready",
           "user_role": {"value": "technical_responder", "revision": 1, "supersedes_revision": 0, "source_event_id": "ROLE_EVENT_A"},
           "posture": "strategist", "capture_mode": "live", "capture_session_id": "CAPTURE_A",
-          "finalized_meeting_ref": null, "source_policy_generation": 0, "user_generation": 1,
+          "finalized_meeting_ref": null, "source_policy_generation": 0, "user_generation": 1, "provider_capabilities": null,
           "foreground_turn": null, "background_run": null,
           "evidence": {
             "EVENT_A": {"id": "EVENT_A", "source_kind": "transcript_final", "capture_session_id": "CAPTURE_A", "finalized_meeting_ref": null},

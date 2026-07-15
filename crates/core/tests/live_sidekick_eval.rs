@@ -1,7 +1,8 @@
 use minutes_core::live_sidekick::{
     AssistanceAction, AssistanceEvent, AssistancePosture, AssistanceSurface, BackgroundRunId,
     CaptureMode, CaptureSessionId, EvidenceId, EvidenceSourceKind, ForegroundTurnId,
-    InvocationIdentity, LiveAssistanceSession, LiveAssistanceSessionId, MeetingRef, Reduction,
+    InvocationIdentity, LiveAssistanceSession, LiveAssistanceSessionId, MeetingRef,
+    ProviderAttestationId, ProviderBinding, ProviderBindingId, ProviderIsolationProfile, Reduction,
     UntrustedEvidence, UserRole,
 };
 use serde_json::{json, Map, Value};
@@ -75,6 +76,18 @@ fn parse_capture_mode(value: &str) -> Result<CaptureMode, String> {
         "live" => Ok(CaptureMode::Live),
         "recording" => Ok(CaptureMode::Recording),
         other => Err(format!("unsupported capture mode {other}")),
+    }
+}
+
+fn parse_provider_profile(value: &str) -> Result<ProviderIsolationProfile, String> {
+    match value {
+        "verified_loopback_text" => Ok(ProviderIsolationProfile::VerifiedLoopbackText),
+        "agent_controlled_text" => Ok(ProviderIsolationProfile::AgentControlledText),
+        "agent_controlled_exact_session_screen" => {
+            Ok(ProviderIsolationProfile::AgentControlledExactSessionScreen)
+        }
+        "unavailable" => Ok(ProviderIsolationProfile::Unavailable),
+        other => Err(format!("unsupported provider isolation profile {other}")),
     }
 }
 
@@ -202,6 +215,23 @@ fn translate_event(
                 invocation,
             })
         }
+        "provider_binding_changed" => {
+            let generation = payload
+                .get("binding_generation")
+                .and_then(Value::as_u64)
+                .ok_or_else(|| "missing binding_generation".to_string())?;
+            let binding = ProviderBinding::new(
+                ProviderBindingId::new(payload_str(event, "binding_id")?),
+                generation,
+                ProviderAttestationId::new(payload_str(event, "attestation_id")?),
+                parse_provider_profile(payload_str(event, "isolation_profile")?)?,
+            )
+            .ok_or_else(|| "invalid provider binding".to_string())?;
+            Ok(AssistanceEvent::ProviderBindingChanged {
+                session_id,
+                binding,
+            })
+        }
         "meeting_artifact_observed" | "repository_result_observed" => {
             let source_kind = if kind == "meeting_artifact_observed" {
                 EvidenceSourceKind::MeetingArtifact
@@ -309,7 +339,7 @@ fn session_summary(session: &LiveAssistanceSession) -> Value {
             )
         })
         .collect();
-    json!({
+    let mut summary = json!({
         "scope": session.scope,
         "surface": session.surface,
         "phase": session.phase,
@@ -320,11 +350,22 @@ fn session_summary(session: &LiveAssistanceSession) -> Value {
         "finalized_meeting_ref": session.finalized_meeting_ref.as_ref().map(MeetingRef::as_str),
         "source_policy_generation": session.source_policy_generation,
         "user_generation": session.user_generation,
+        "provider_capabilities": session.provider_binding.as_ref().map(ProviderBinding::capabilities),
         "foreground_turn": session.foreground_turn,
         "background_run": session.background_run,
         "evidence": evidence,
         "speaker_corrections": corrections,
-    })
+    });
+    if let Some(binding) = session.provider_binding.as_ref() {
+        summary
+            .as_object_mut()
+            .expect("session summary object")
+            .insert(
+                "provider_binding".into(),
+                serde_json::to_value(binding).expect("provider binding serialization"),
+            );
+    }
+    summary
 }
 
 fn run_replay(fixture: &Value, replay: &Value) -> Result<Value, String> {
@@ -414,13 +455,13 @@ fn executable_core_reducer_fixtures_are_expected_and_deterministic() {
         executed.insert(fixture_id.to_string(), Value::Object(fixture_results));
     }
 
-    assert_eq!(executed.len(), 12, "executable reducer fixture count changed; update the schema contract and CI documentation intentionally");
+    assert_eq!(executed.len(), 13, "executable reducer fixture count changed; update the schema contract and CI documentation intentionally");
     let replay_count: usize = executed
         .values()
         .map(|value| value.as_object().map_or(0, Map::len))
         .sum();
     assert_eq!(
-        replay_count, 15,
+        replay_count, 16,
         "deterministic reducer replay count changed unexpectedly"
     );
 }
@@ -485,4 +526,43 @@ fn completion_adapters_require_prior_matching_reducer_identity() {
         translate_event(&background, &issued).unwrap_err(),
         "background invocation reference did not match run"
     );
+}
+
+#[test]
+fn provider_binding_adapter_requires_identity_generation_and_attestation() {
+    let event = json!({
+        "kind": "provider_binding_changed",
+        "session_id": "SESSION_A",
+        "payload": {
+            "binding_id": "ROUTE_A",
+            "binding_generation": 4,
+            "attestation_id": "ATTESTATION_A",
+            "isolation_profile": "agent_controlled_exact_session_screen"
+        }
+    });
+    for field in [
+        "binding_id",
+        "binding_generation",
+        "attestation_id",
+        "isolation_profile",
+    ] {
+        let mut incomplete = event.clone();
+        incomplete["payload"]
+            .as_object_mut()
+            .expect("payload object")
+            .remove(field);
+        assert!(
+            translate_event(&incomplete, &BTreeMap::new()).is_err(),
+            "provider adapter accepted a binding without {field}"
+        );
+    }
+
+    assert!(matches!(
+        translate_event(&event, &BTreeMap::new()),
+        Ok(AssistanceEvent::ProviderBindingChanged { binding, .. })
+            if binding.binding_id().as_str() == "ROUTE_A"
+                && binding.generation() == 4
+                && binding.attestation_id().as_str() == "ATTESTATION_A"
+                && binding.profile() == ProviderIsolationProfile::AgentControlledExactSessionScreen
+    ));
 }

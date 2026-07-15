@@ -113,7 +113,7 @@
           "scope": "finalized_meeting", "surface": "terminal_sidekick", "phase": "finalized",
           "user_role": {"value": "observer", "revision": 0, "supersedes_revision": null, "source_event_id": null},
           "posture": "on_demand", "capture_mode": "live", "capture_session_id": "CAPTURE_A",
-          "finalized_meeting_ref": "MEETING_A", "source_policy_generation": 0, "user_generation": 0,
+          "finalized_meeting_ref": "MEETING_A", "source_policy_generation": 0, "user_generation": 0, "provider_capabilities": null,
           "foreground_turn": null, "background_run": null,
           "evidence": {
             "ARTIFACT_A": {"id": "ARTIFACT_A", "source_kind": "meeting_artifact", "capture_session_id": null, "finalized_meeting_ref": "MEETING_A"},

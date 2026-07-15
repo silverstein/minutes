@@ -41,13 +41,20 @@ Every fixture has an `execution` classification validated by CI:
 
 The current v1 corpus contains:
 
-- 8 executable core-reducer fixtures;
+- 9 executable core-reducer fixtures;
 - 4 executable core-reducer projections;
 - 1 executable canonical skill-routing fixture;
-- 5 contract-only future-orchestration fixtures.
+- 4 contract-only future-orchestration fixtures.
 
-Those 12 reducer fixtures contain 15 deterministic replays. Capture-mode
+Those 13 reducer fixtures contain 16 deterministic replays. Capture-mode
 parity is exercised on both terminal and GUI surfaces.
+
+The Native Recall provider replay binds an opaque route identity, monotonic
+generation, attestation identity, and Minutes-defined isolation profile. It
+proves that an unavailable route denies foreground and background inference, a
+fresh verified profile enables both paths, and a later attested downgrade
+cancels in-flight work while advancing and clearing provider-bound policy
+state. Raw capability booleans are not accepted as proof.
 
 The Rust integration test adapts only explicitly selected event indexes to the
 public reducer API, replays each case twice, compares the two results, then

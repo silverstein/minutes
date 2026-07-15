@@ -94,7 +94,7 @@
           "scope": "live_capture", "surface": "terminal_sidekick", "phase": "ready",
           "user_role": {"value": "observer", "revision": 0, "supersedes_revision": null, "source_event_id": null},
           "posture": "silent_watch", "capture_mode": "live", "capture_session_id": "CAPTURE_A",
-          "finalized_meeting_ref": null, "source_policy_generation": 0, "user_generation": 3,
+          "finalized_meeting_ref": null, "source_policy_generation": 0, "user_generation": 3, "provider_capabilities": null,
           "foreground_turn": null, "background_run": null,
           "evidence": {
             "USER_EVENT_A": {"id": "USER_EVENT_A", "source_kind": "user_statement", "capture_session_id": "CAPTURE_A", "finalized_meeting_ref": null},

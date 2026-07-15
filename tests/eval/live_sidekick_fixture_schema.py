@@ -101,7 +101,7 @@ EVENT_KINDS = {
     "meeting_artifact_observed",
     "posture_changed",
     "processing_started",
-    "provider_capability_changed",
+    "provider_binding_changed",
     "repository_result_observed",
     "role_changed",
     "screen_disclosed",
@@ -127,6 +127,7 @@ CORE_REDUCER_EVENT_KINDS = {
     "meeting_finalized",
     "posture_changed",
     "processing_started",
+    "provider_binding_changed",
     "repository_result_observed",
     "role_changed",
     "screen_disclosed",
@@ -151,14 +152,8 @@ EVENT_PAYLOAD_KEYS: dict[str, tuple[set[str], set[str]]] = {
     "meeting_artifact_observed": ({"event_id", "finalized_meeting_ref"}, set()),
     "posture_changed": ({"posture", "source"}, set()),
     "processing_started": ({"capture_session_id", "stage"}, set()),
-    "provider_capability_changed": (
-        {
-            "ambient_filesystem_denied",
-            "arbitrary_writes_denied",
-            "cancellation",
-            "provider_id",
-            "unapproved_tools_denied",
-        },
+    "provider_binding_changed": (
+        {"attestation_id", "binding_generation", "binding_id", "isolation_profile"},
         set(),
     ),
     "repository_result_observed": ({"event_id", "finalized_meeting_ref"}, set()),
@@ -185,13 +180,14 @@ EVENT_PAYLOAD_KEYS: dict[str, tuple[set[str], set[str]]] = {
 PAYLOAD_STRING_FIELDS = {
     "capture_session_id",
     "corrected_speaker",
+    "attestation_id",
+    "binding_id",
     "event_id",
     "finalized_meeting_ref",
     "final_live_event_id",
     "from_speaker",
     "meeting_ref",
     "opaque_ref",
-    "provider_id",
     "reason",
     "request_id",
     "run_id",
@@ -202,21 +198,23 @@ PAYLOAD_STRING_FIELDS = {
     "turn_id",
 }
 PAYLOAD_INTEGER_FIELDS = {
+    "binding_generation",
     "focus_generation",
     "invocation_from_event_index",
     "source_policy_generation",
 }
-PAYLOAD_BOOLEAN_FIELDS = {
-    "ambient_filesystem_denied",
-    "arbitrary_writes_denied",
-    "cancellation",
-    "unapproved_tools_denied",
-}
+PAYLOAD_BOOLEAN_FIELDS: set[str] = set()
 PAYLOAD_ENUMS = {
     "capture_mode": CAPTURE_MODES,
     "inference_call": {"fresh"},
     "posture": POSTURES,
     "role": USER_ROLES,
+    "isolation_profile": {
+        "agent_controlled_exact_session_screen",
+        "agent_controlled_text",
+        "unavailable",
+        "verified_loopback_text",
+    },
     "source": {"typed_user"},
     "speaker_confidence": {"inferred", "corrected_mapping"},
     "stage": {"transcribing"},
@@ -538,6 +536,8 @@ def _validate_payload_values(
         elif key in PAYLOAD_INTEGER_FIELDS:
             if not isinstance(value, int) or isinstance(value, bool) or value < 0:
                 findings.append(Finding(fixture, path, "nonnegative_integer_required"))
+            elif key == "binding_generation" and value == 0:
+                findings.append(Finding(fixture, path, "positive_integer_required"))
         elif key in PAYLOAD_BOOLEAN_FIELDS:
             if not isinstance(value, bool):
                 findings.append(Finding(fixture, path, "boolean_required"))

@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "id": "provider-capability-denied",
-  "description": "Native live mode fails closed when a provider cannot prove required restrictions.",
+  "description": "Native live mode rejects an unavailable attested route, enables a fresh proven binding, and cancels work after a newer downgrade.",
   "content_origin": "synthetic",
   "privacy": {
     "generation_method": "behavior_first_from_scratch",
@@ -14,42 +14,218 @@
   },
   "initial_state": {
     "user_role": "participant",
-    "posture": "on_demand"
+    "posture": "strategist"
   },
   "events": [
     {
       "at_ms": 0,
-      "kind": "provider_capability_changed",
+      "kind": "provider_binding_changed",
       "session_id": "SESSION_A",
       "payload": {
-        "provider_id": "PROVIDER_A",
-        "cancellation": false,
-        "arbitrary_writes_denied": false,
-        "ambient_filesystem_denied": false,
-        "unapproved_tools_denied": false
+        "binding_id": "ROUTE_UNAVAILABLE_A",
+        "binding_generation": 1,
+        "attestation_id": "ATTESTATION_A",
+        "isolation_profile": "unavailable"
       }
     },
     {
       "at_ms": 10,
+      "kind": "capture_started",
+      "session_id": "SESSION_A",
+      "payload": {"capture_mode": "live", "capture_session_id": "CAPTURE_A"}
+    },
+    {
+      "at_ms": 20,
       "kind": "user_message",
       "session_id": "SESSION_A",
-      "payload": {"turn_id": "FOREGROUND_A", "source_event_id": "USER_EVENT_A", "text": "summarize the current discussion"}
+      "payload": {"turn_id": "FOREGROUND_DENIED", "source_event_id": "USER_EVENT_DENIED", "text": "summarize the current discussion"}
+    },
+    {
+      "at_ms": 30,
+      "kind": "background_started",
+      "session_id": "SESSION_A",
+      "payload": {"run_id": "BACKGROUND_DENIED"}
+    },
+    {
+      "at_ms": 40,
+      "kind": "provider_binding_changed",
+      "session_id": "SESSION_A",
+      "payload": {
+        "binding_id": "ROUTE_PROVEN_A",
+        "binding_generation": 2,
+        "attestation_id": "ATTESTATION_B",
+        "isolation_profile": "agent_controlled_exact_session_screen"
+      }
+    },
+    {
+      "at_ms": 50,
+      "kind": "background_started",
+      "session_id": "SESSION_A",
+      "payload": {"run_id": "BACKGROUND_ALLOWED"}
+    },
+    {
+      "at_ms": 60,
+      "kind": "background_completed",
+      "session_id": "SESSION_A",
+      "payload": {"run_id": "BACKGROUND_ALLOWED", "invocation_from_event_index": 5}
+    },
+    {
+      "at_ms": 70,
+      "kind": "user_message",
+      "session_id": "SESSION_A",
+      "payload": {"turn_id": "FOREGROUND_ALLOWED", "source_event_id": "USER_EVENT_ALLOWED", "text": "summarize the proven boundary"}
+    },
+    {
+      "at_ms": 80,
+      "kind": "provider_binding_changed",
+      "session_id": "SESSION_A",
+      "payload": {
+        "binding_id": "ROUTE_UNAVAILABLE_B",
+        "binding_generation": 3,
+        "attestation_id": "ATTESTATION_C",
+        "isolation_profile": "unavailable"
+      }
+    },
+    {
+      "at_ms": 90,
+      "kind": "foreground_completed",
+      "session_id": "SESSION_A",
+      "payload": {"turn_id": "FOREGROUND_ALLOWED", "invocation_from_event_index": 7}
     }
   ],
   "expectations": {
-    "ordered_actions": ["acknowledge_user", "deny_native_live_provider", "offer_prefetched_no_tool_path"],
-    "forbidden_actions": ["invoke_unrestricted_native_provider", "silently_expand_provider_authority"],
-    "state_equals": {"native_provider_enabled": false},
-    "required_source_kinds": ["user_statement"],
+    "ordered_actions": ["deny_incomplete_foreground", "deny_incomplete_background", "enable_proven_provider", "run_proven_background", "run_proven_foreground", "cancel_on_downgrade", "clear_policy_bound_state"],
+    "forbidden_actions": ["invoke_incomplete_provider", "publish_downgraded_invocation", "retain_invalidated_evidence"],
+    "state_equals": {"native_provider_enabled": false, "source_policy_generation": 2, "evidence_count": 0},
+    "required_source_kinds": [],
     "required_source_event_ids": [],
     "provenance_required": true,
-    "max_unsolicited_messages": 0,
+    "max_unsolicited_messages": 1,
     "parity_group": "provider-capability-gate"
   },
   "execution": {
-    "status": "contract_only",
-    "target": "future_orchestration",
-    "reason": "provider capability negotiation lives above the current reducer boundary",
-    "deferred_capabilities": ["provider_capability_gate", "prefetched_no_tool_fallback"]
+    "status": "executable",
+    "target": "core_reducer",
+    "replays": [
+      {
+        "name": "native-provider-gate-and-downgrade",
+        "session_id": "SESSION_A",
+        "surface": "gui",
+        "event_indexes": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
+        "expected_reductions": [
+          {"accepted": true, "actions": [{
+            "type": "provider_binding_updated",
+            "binding": {
+              "binding_id": "ROUTE_UNAVAILABLE_A",
+              "generation": 1,
+              "attestation_id": "ATTESTATION_A",
+              "profile": "unavailable"
+            },
+            "capabilities": {
+              "cancellation": false,
+              "bounded_input": false,
+              "bounded_output": false,
+              "arbitrary_writes_denied": false,
+              "arbitrary_shell_denied": false,
+              "ambient_filesystem_reads_denied": false,
+              "unapproved_tools_denied": false,
+              "routing_disclosure": "unavailable",
+              "screen_disclosure": "unavailable"
+            },
+            "native_recall_ready": false,
+            "new_generation": 0,
+            "authority_exhausted": false
+          }], "rejection": null},
+          {"accepted": true, "actions": [{"type": "live_transcript_attached", "capture_session_id": "CAPTURE_A"}], "rejection": null},
+          {"accepted": false, "actions": [], "rejection": "provider_capabilities_insufficient"},
+          {"accepted": false, "actions": [], "rejection": "provider_capabilities_insufficient"},
+          {"accepted": true, "actions": [
+            {"type": "policy_bound_state_cleared", "new_generation": 1},
+            {
+              "type": "provider_binding_updated",
+              "binding": {
+                "binding_id": "ROUTE_PROVEN_A",
+                "generation": 2,
+                "attestation_id": "ATTESTATION_B",
+                "profile": "agent_controlled_exact_session_screen"
+              },
+              "capabilities": {
+                "cancellation": true,
+                "bounded_input": true,
+                "bounded_output": true,
+                "arbitrary_writes_denied": true,
+                "arbitrary_shell_denied": true,
+                "ambient_filesystem_reads_denied": true,
+                "unapproved_tools_denied": true,
+                "routing_disclosure": "agent_controlled",
+                "screen_disclosure": "exact_session_explicit"
+              },
+              "native_recall_ready": true,
+              "new_generation": 1,
+              "authority_exhausted": false
+            }
+          ], "rejection": null},
+          {"accepted": true, "actions": [{"type": "background_invocation_registered", "run_id": "BACKGROUND_ALLOWED", "invocation": {"sequence": 1, "source_policy_generation": 1, "user_generation": 0}}], "rejection": null},
+          {"accepted": true, "actions": [{"type": "publish_background_insight", "run_id": "BACKGROUND_ALLOWED", "invocation": {"sequence": 1, "source_policy_generation": 1, "user_generation": 0}}], "rejection": null},
+          {"accepted": true, "actions": [
+            {"type": "acknowledge_foreground", "turn_id": "FOREGROUND_ALLOWED", "invocation": {"sequence": 2, "source_policy_generation": 1, "user_generation": 1}},
+            {"type": "request_read_only_foreground_inference", "turn_id": "FOREGROUND_ALLOWED", "invocation": {"sequence": 2, "source_policy_generation": 1, "user_generation": 1}, "source_event_id": "USER_EVENT_ALLOWED", "text": "summarize the proven boundary"}
+          ], "rejection": null},
+          {"accepted": true, "actions": [
+            {"type": "cancel_foreground", "turn_id": "FOREGROUND_ALLOWED", "invocation": {"sequence": 2, "source_policy_generation": 1, "user_generation": 1}, "reason": "provider_capabilities_changed"},
+            {"type": "policy_bound_state_cleared", "new_generation": 2},
+            {
+              "type": "provider_binding_updated",
+              "binding": {
+                "binding_id": "ROUTE_UNAVAILABLE_B",
+                "generation": 3,
+                "attestation_id": "ATTESTATION_C",
+                "profile": "unavailable"
+              },
+              "capabilities": {
+                "cancellation": false,
+                "bounded_input": false,
+                "bounded_output": false,
+                "arbitrary_writes_denied": false,
+                "arbitrary_shell_denied": false,
+                "ambient_filesystem_reads_denied": false,
+                "unapproved_tools_denied": false,
+                "routing_disclosure": "unavailable",
+                "screen_disclosure": "unavailable"
+              },
+              "native_recall_ready": false,
+              "new_generation": 2,
+              "authority_exhausted": false
+            }
+          ], "rejection": null},
+          {"accepted": false, "actions": [], "rejection": "stale_foreground_result"}
+        ],
+        "expected_state": {
+          "scope": "live_capture", "surface": "native_recall", "phase": "ready",
+          "user_role": {"value": "participant", "revision": 0, "supersedes_revision": null, "source_event_id": null},
+          "posture": "strategist", "capture_mode": "live", "capture_session_id": "CAPTURE_A",
+          "finalized_meeting_ref": null, "source_policy_generation": 2, "user_generation": 1,
+          "provider_binding": {
+            "binding_id": "ROUTE_UNAVAILABLE_B",
+            "generation": 3,
+            "attestation_id": "ATTESTATION_C",
+            "profile": "unavailable"
+          },
+          "provider_capabilities": {
+            "cancellation": false,
+            "bounded_input": false,
+            "bounded_output": false,
+            "arbitrary_writes_denied": false,
+            "arbitrary_shell_denied": false,
+            "ambient_filesystem_reads_denied": false,
+            "unapproved_tools_denied": false,
+            "routing_disclosure": "unavailable",
+            "screen_disclosure": "unavailable"
+          },
+          "foreground_turn": null, "background_run": null,
+          "evidence": {}, "speaker_corrections": {}
+        }
+      }
+    ]
   }
 }

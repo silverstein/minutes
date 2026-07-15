@@ -15,6 +15,10 @@ macro_rules! string_id {
             pub fn as_str(&self) -> &str {
                 &self.0
             }
+
+            fn is_valid(&self) -> bool {
+                !self.0.trim().is_empty()
+            }
         }
 
         impl From<&str> for $name {
@@ -137,6 +141,26 @@ pub struct UntrustedEvidence {
     pub id: EvidenceId,
     pub source_kind: EvidenceSourceKind,
     pub capture_session_id: Option<CaptureSessionId>,
+    #[serde(default)]
+    pub finalized_meeting_ref: Option<MeetingRef>,
+}
+
+/// Reducer-issued identity for exactly one inference invocation.
+///
+/// Provider adapters must echo the complete value on completion. The
+/// monotonically increasing sequence prevents an old completion from being
+/// mistaken for a newer invocation when a caller reuses a turn or run ID.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InvocationIdentity {
+    pub sequence: u64,
+    pub source_policy_generation: u64,
+    pub user_generation: u64,
+}
+
+impl InvocationIdentity {
+    fn is_valid(self) -> bool {
+        self.sequence != 0
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -171,15 +195,13 @@ pub struct SpeakerCorrection {
 pub struct ForegroundTurn {
     pub id: ForegroundTurnId,
     pub source_event_id: EvidenceId,
-    pub source_policy_generation: u64,
-    pub user_generation: u64,
+    pub invocation: InvocationIdentity,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BackgroundRun {
     pub id: BackgroundRunId,
-    pub source_policy_generation: u64,
-    pub user_generation: u64,
+    pub invocation: InvocationIdentity,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -197,9 +219,22 @@ pub struct LiveAssistanceSession {
     pub user_generation: u64,
     pub foreground_turn: Option<ForegroundTurn>,
     pub background_run: Option<BackgroundRun>,
-    pub evidence: BTreeMap<EvidenceId, EvidenceSourceKind>,
+    /// Immutable evidence provenance keyed by an event ID that is unique
+    /// within the retained source-policy generation.
+    pub evidence: BTreeMap<EvidenceId, UntrustedEvidence>,
     pub speaker_corrections: BTreeMap<String, SpeakerCorrection>,
+    #[serde(default = "default_next_invocation_sequence")]
+    next_invocation_sequence: u64,
+    #[serde(default = "default_next_correction_revision")]
     next_correction_revision: u64,
+}
+
+const fn default_next_invocation_sequence() -> u64 {
+    1
+}
+
+const fn default_next_correction_revision() -> u64 {
+    1
 }
 
 impl LiveAssistanceSession {
@@ -225,7 +260,8 @@ impl LiveAssistanceSession {
             background_run: None,
             evidence: BTreeMap::new(),
             speaker_corrections: BTreeMap::new(),
-            next_correction_revision: 1,
+            next_invocation_sequence: default_next_invocation_sequence(),
+            next_correction_revision: default_next_correction_revision(),
         }
     }
 
@@ -234,6 +270,9 @@ impl LiveAssistanceSession {
     /// acknowledgement, and background publication is impossible after user
     /// generation changes.
     pub fn reduce(&mut self, event: AssistanceEvent) -> Reduction {
+        if !self.id.is_valid() || !event.session_id().is_valid() {
+            return Reduction::rejected(RejectionReason::InvalidValue);
+        }
         if event.session_id() != &self.id {
             return Reduction::rejected(RejectionReason::WrongAssistanceSession);
         }
@@ -257,7 +296,16 @@ impl LiveAssistanceSession {
                 ..
             } => self.role_corrected(role, source_event_id),
             AssistanceEvent::PostureChanged { posture, .. } => {
-                self.user_generation = self.user_generation.saturating_add(1);
+                if !self.accepts_user_control() {
+                    return Reduction::rejected(RejectionReason::InvalidTransition);
+                }
+                if self.posture == posture {
+                    return Reduction::rejected(RejectionReason::NoStateChange);
+                }
+                let Some(next_user_generation) = self.user_generation.checked_add(1) else {
+                    return Reduction::rejected(RejectionReason::GenerationExhausted);
+                };
+                self.user_generation = next_user_generation;
                 self.posture = posture;
                 let mut actions = self.cancel_in_flight(InvalidationReason::PostureChanged);
                 actions.push(AssistanceAction::PostureUpdated { posture });
@@ -270,12 +318,14 @@ impl LiveAssistanceSession {
                 ..
             } => self.speaker_corrected(source_label, corrected_label, source_event_id),
             AssistanceEvent::BackgroundStarted { run_id, .. } => self.background_started(run_id),
-            AssistanceEvent::BackgroundCompleted { run_id, .. } => {
-                self.background_completed(run_id)
-            }
-            AssistanceEvent::ForegroundCompleted { turn_id, .. } => {
-                self.foreground_completed(turn_id)
-            }
+            AssistanceEvent::BackgroundCompleted {
+                run_id, invocation, ..
+            } => self.background_completed(run_id, invocation),
+            AssistanceEvent::ForegroundCompleted {
+                turn_id,
+                invocation,
+                ..
+            } => self.foreground_completed(turn_id, invocation),
             AssistanceEvent::SourcePolicyInvalidated { new_generation, .. } => {
                 self.policy_invalidated(new_generation)
             }
@@ -301,6 +351,9 @@ impl LiveAssistanceSession {
         if self.phase != AssistancePhase::Idle {
             return Reduction::rejected(RejectionReason::InvalidTransition);
         }
+        if !capture_session_id.is_valid() {
+            return Reduction::rejected(RejectionReason::InvalidValue);
+        }
         self.capture_session_id = Some(capture_session_id.clone());
         self.capture_mode = Some(mode);
         self.scope = AssistanceScope::LiveCapture;
@@ -311,20 +364,57 @@ impl LiveAssistanceSession {
     }
 
     fn evidence_observed(&mut self, evidence: UntrustedEvidence) -> Reduction {
-        if self.phase == AssistancePhase::Idle {
+        if !self.accepts_evidence(evidence.source_kind) {
             return Reduction::rejected(RejectionReason::InvalidTransition);
         }
-        let missing_required_capture = evidence.source_kind.requires_capture_session()
-            && evidence.capture_session_id.is_none();
-        let mismatched_capture = evidence
-            .capture_session_id
-            .as_ref()
-            .is_some_and(|capture_id| Some(capture_id) != self.capture_session_id.as_ref());
-        if missing_required_capture || mismatched_capture {
-            return Reduction::rejected(RejectionReason::WrongCaptureSession);
+        if !evidence.id.is_valid()
+            || evidence
+                .capture_session_id
+                .as_ref()
+                .is_some_and(|capture_id| !capture_id.is_valid())
+            || evidence
+                .finalized_meeting_ref
+                .as_ref()
+                .is_some_and(|meeting_ref| !meeting_ref.is_valid())
+        {
+            return Reduction::rejected(RejectionReason::InvalidValue);
         }
-        self.evidence
-            .insert(evidence.id.clone(), evidence.source_kind);
+        if evidence.source_kind == EvidenceSourceKind::UserStatement {
+            return Reduction::rejected(RejectionReason::TypedUserEventRequired);
+        }
+        match self.phase {
+            AssistancePhase::Ready
+            | AssistancePhase::MeetingEnded
+            | AssistancePhase::Processing => {
+                let missing_required_capture = evidence.source_kind.requires_capture_session()
+                    && evidence.capture_session_id.is_none();
+                let mismatched_capture = evidence
+                    .capture_session_id
+                    .as_ref()
+                    .is_some_and(|capture_id| Some(capture_id) != self.capture_session_id.as_ref());
+                if missing_required_capture || mismatched_capture {
+                    return Reduction::rejected(RejectionReason::WrongCaptureSession);
+                }
+                if evidence.finalized_meeting_ref.is_some() {
+                    return Reduction::rejected(RejectionReason::WrongFinalizedMeeting);
+                }
+            }
+            AssistancePhase::Finalized => {
+                if evidence.capture_session_id.is_some() {
+                    return Reduction::rejected(RejectionReason::WrongCaptureSession);
+                }
+                if evidence.finalized_meeting_ref.as_ref() != self.finalized_meeting_ref.as_ref() {
+                    return Reduction::rejected(RejectionReason::WrongFinalizedMeeting);
+                }
+            }
+            AssistancePhase::Idle => {
+                return Reduction::rejected(RejectionReason::InvalidTransition);
+            }
+        }
+        if self.evidence.contains_key(&evidence.id) {
+            return Reduction::rejected(RejectionReason::DuplicateEvidence);
+        }
+        self.evidence.insert(evidence.id.clone(), evidence.clone());
         Reduction::accepted(vec![AssistanceAction::EvidenceAccepted {
             evidence_id: evidence.id,
             source_kind: evidence.source_kind,
@@ -337,8 +427,14 @@ impl LiveAssistanceSession {
         source_event_id: EvidenceId,
         text: String,
     ) -> Reduction {
-        if matches!(self.phase, AssistancePhase::Idle) {
+        if !self.accepts_user_control() {
             return Reduction::rejected(RejectionReason::InvalidTransition);
+        }
+        if !turn_id.is_valid() || !source_event_id.is_valid() || text.trim().is_empty() {
+            return Reduction::rejected(RejectionReason::InvalidValue);
+        }
+        if self.evidence.contains_key(&source_event_id) {
+            return Reduction::rejected(RejectionReason::DuplicateEvidence);
         }
         if self
             .foreground_turn
@@ -348,28 +444,38 @@ impl LiveAssistanceSession {
             return Reduction::rejected(RejectionReason::DuplicateTurn);
         }
 
-        self.user_generation = self.user_generation.saturating_add(1);
+        let Some(next_user_generation) = self.user_generation.checked_add(1) else {
+            return Reduction::rejected(RejectionReason::GenerationExhausted);
+        };
+        let Some((invocation, next_invocation_sequence)) =
+            self.next_invocation_identity(next_user_generation)
+        else {
+            return Reduction::rejected(RejectionReason::GenerationExhausted);
+        };
+        self.user_generation = next_user_generation;
+        self.next_invocation_sequence = next_invocation_sequence;
         let mut actions = self.cancel_background(InvalidationReason::TypedUserInput);
         if let Some(previous) = self.foreground_turn.take() {
             actions.push(AssistanceAction::CancelForeground {
                 turn_id: previous.id,
+                invocation: previous.invocation,
                 reason: InvalidationReason::TypedUserInput,
             });
         }
 
-        self.evidence
-            .insert(source_event_id.clone(), EvidenceSourceKind::UserStatement);
+        self.insert_user_statement(source_event_id.clone());
         self.foreground_turn = Some(ForegroundTurn {
             id: turn_id.clone(),
             source_event_id: source_event_id.clone(),
-            source_policy_generation: self.source_policy_generation,
-            user_generation: self.user_generation,
+            invocation,
         });
         actions.push(AssistanceAction::AcknowledgeForeground {
             turn_id: turn_id.clone(),
+            invocation,
         });
         actions.push(AssistanceAction::RequestReadOnlyForegroundInference {
             turn_id,
+            invocation,
             source_event_id,
             text,
         });
@@ -377,12 +483,29 @@ impl LiveAssistanceSession {
     }
 
     fn role_corrected(&mut self, role: UserRole, source_event_id: EvidenceId) -> Reduction {
-        self.user_generation = self.user_generation.saturating_add(1);
+        if !self.accepts_user_control() {
+            return Reduction::rejected(RejectionReason::InvalidTransition);
+        }
+        if !source_event_id.is_valid() {
+            return Reduction::rejected(RejectionReason::InvalidValue);
+        }
+        if self.user_role.value == role {
+            return Reduction::rejected(RejectionReason::InvalidCorrection);
+        }
+        if self.evidence.contains_key(&source_event_id) {
+            return Reduction::rejected(RejectionReason::DuplicateEvidence);
+        }
+        let Some(next_user_generation) = self.user_generation.checked_add(1) else {
+            return Reduction::rejected(RejectionReason::GenerationExhausted);
+        };
+        let Some((revision, next_correction_revision)) = self.next_correction_revision() else {
+            return Reduction::rejected(RejectionReason::GenerationExhausted);
+        };
+        self.user_generation = next_user_generation;
+        self.next_correction_revision = next_correction_revision;
         let mut actions = self.cancel_in_flight(InvalidationReason::Correction);
-        let revision = self.take_correction_revision();
         let supersedes_revision = Some(self.user_role.revision);
-        self.evidence
-            .insert(source_event_id.clone(), EvidenceSourceKind::UserStatement);
+        self.insert_user_statement(source_event_id.clone());
         self.user_role = SupersedingValue {
             value: role,
             revision,
@@ -403,9 +526,35 @@ impl LiveAssistanceSession {
         corrected_label: String,
         source_event_id: EvidenceId,
     ) -> Reduction {
-        self.user_generation = self.user_generation.saturating_add(1);
+        if !self.accepts_user_control() {
+            return Reduction::rejected(RejectionReason::InvalidTransition);
+        }
+        if !source_event_id.is_valid()
+            || source_label.trim().is_empty()
+            || corrected_label.trim().is_empty()
+        {
+            return Reduction::rejected(RejectionReason::InvalidValue);
+        }
+        if source_label == corrected_label
+            || self
+                .speaker_corrections
+                .get(&source_label)
+                .is_some_and(|prior| prior.corrected_label == corrected_label)
+        {
+            return Reduction::rejected(RejectionReason::InvalidCorrection);
+        }
+        if self.evidence.contains_key(&source_event_id) {
+            return Reduction::rejected(RejectionReason::DuplicateEvidence);
+        }
+        let Some(next_user_generation) = self.user_generation.checked_add(1) else {
+            return Reduction::rejected(RejectionReason::GenerationExhausted);
+        };
+        let Some((revision, next_correction_revision)) = self.next_correction_revision() else {
+            return Reduction::rejected(RejectionReason::GenerationExhausted);
+        };
+        self.user_generation = next_user_generation;
+        self.next_correction_revision = next_correction_revision;
         let mut actions = self.cancel_in_flight(InvalidationReason::Correction);
-        let revision = self.take_correction_revision();
         let supersedes_revision = self
             .speaker_corrections
             .get(&source_label)
@@ -417,8 +566,7 @@ impl LiveAssistanceSession {
             supersedes_revision,
             source_event_id: source_event_id.clone(),
         };
-        self.evidence
-            .insert(source_event_id, EvidenceSourceKind::UserStatement);
+        self.insert_user_statement(source_event_id);
         self.speaker_corrections
             .insert(source_label.clone(), correction);
         actions.push(AssistanceAction::SpeakerCorrectionUpdated {
@@ -440,46 +588,82 @@ impl LiveAssistanceSession {
         if self.background_run.is_some() {
             return Reduction::rejected(RejectionReason::BackgroundAlreadyRunning);
         }
+        if !run_id.is_valid() {
+            return Reduction::rejected(RejectionReason::InvalidValue);
+        }
+        let Some((invocation, next_invocation_sequence)) =
+            self.next_invocation_identity(self.user_generation)
+        else {
+            return Reduction::rejected(RejectionReason::GenerationExhausted);
+        };
+        self.next_invocation_sequence = next_invocation_sequence;
         self.background_run = Some(BackgroundRun {
-            id: run_id,
-            source_policy_generation: self.source_policy_generation,
-            user_generation: self.user_generation,
+            id: run_id.clone(),
+            invocation,
         });
-        Reduction::accepted(Vec::new())
+        Reduction::accepted(vec![AssistanceAction::BackgroundInvocationRegistered {
+            run_id,
+            invocation,
+        }])
     }
 
-    fn background_completed(&mut self, run_id: BackgroundRunId) -> Reduction {
+    fn background_completed(
+        &mut self,
+        run_id: BackgroundRunId,
+        invocation: InvocationIdentity,
+    ) -> Reduction {
+        if !run_id.is_valid() || !invocation.is_valid() {
+            return Reduction::rejected(RejectionReason::InvalidValue);
+        }
         let Some(run) = self.background_run.as_ref() else {
             return Reduction::rejected(RejectionReason::StaleBackgroundResult);
         };
         if run.id != run_id
-            || run.user_generation != self.user_generation
-            || run.source_policy_generation != self.source_policy_generation
+            || run.invocation != invocation
+            || invocation.user_generation != self.user_generation
+            || invocation.source_policy_generation != self.source_policy_generation
             || self.foreground_turn.is_some()
+            || self.phase != AssistancePhase::Ready
         {
             return Reduction::rejected(RejectionReason::StaleBackgroundResult);
         }
         self.background_run = None;
-        Reduction::accepted(vec![AssistanceAction::PublishBackgroundInsight { run_id }])
+        Reduction::accepted(vec![AssistanceAction::PublishBackgroundInsight {
+            run_id,
+            invocation,
+        }])
     }
 
-    fn foreground_completed(&mut self, turn_id: ForegroundTurnId) -> Reduction {
+    fn foreground_completed(
+        &mut self,
+        turn_id: ForegroundTurnId,
+        invocation: InvocationIdentity,
+    ) -> Reduction {
+        if !turn_id.is_valid() || !invocation.is_valid() {
+            return Reduction::rejected(RejectionReason::InvalidValue);
+        }
         let Some(turn) = self.foreground_turn.as_ref() else {
             return Reduction::rejected(RejectionReason::StaleForegroundResult);
         };
         if turn.id != turn_id
-            || turn.source_policy_generation != self.source_policy_generation
-            || turn.user_generation != self.user_generation
+            || turn.invocation != invocation
+            || invocation.source_policy_generation != self.source_policy_generation
+            || invocation.user_generation != self.user_generation
+            || !self.accepts_user_control()
         {
             return Reduction::rejected(RejectionReason::StaleForegroundResult);
         }
         self.foreground_turn = None;
         Reduction::accepted(vec![AssistanceAction::PublishForegroundResponse {
             turn_id,
+            invocation,
         }])
     }
 
     fn policy_invalidated(&mut self, new_generation: u64) -> Reduction {
+        if self.phase == AssistancePhase::Idle {
+            return Reduction::rejected(RejectionReason::InvalidTransition);
+        }
         if new_generation <= self.source_policy_generation {
             return Reduction::rejected(RejectionReason::PolicyGenerationNotAdvanced);
         }
@@ -487,6 +671,7 @@ impl LiveAssistanceSession {
         if let Some(turn) = self.foreground_turn.take() {
             actions.push(AssistanceAction::CancelForeground {
                 turn_id: turn.id,
+                invocation: turn.invocation,
                 reason: InvalidationReason::SourcePolicyChanged,
             });
         }
@@ -499,19 +684,25 @@ impl LiveAssistanceSession {
     }
 
     fn capture_stopped(&mut self, capture_session_id: CaptureSessionId) -> Reduction {
+        if !capture_session_id.is_valid() {
+            return Reduction::rejected(RejectionReason::InvalidValue);
+        }
         if !self.matches_capture(&capture_session_id) {
             return Reduction::rejected(RejectionReason::WrongCaptureSession);
         }
         if self.phase != AssistancePhase::Ready {
             return Reduction::rejected(RejectionReason::InvalidTransition);
         }
-        let mut actions = self.cancel_background(InvalidationReason::MeetingEnded);
+        let mut actions = self.cancel_in_flight(InvalidationReason::MeetingEnded);
         self.phase = AssistancePhase::MeetingEnded;
         actions.push(AssistanceAction::MeetingEnded);
         Reduction::accepted(actions)
     }
 
     fn processing_started(&mut self, capture_session_id: CaptureSessionId) -> Reduction {
+        if !capture_session_id.is_valid() {
+            return Reduction::rejected(RejectionReason::InvalidValue);
+        }
         if !self.matches_capture(&capture_session_id) {
             return Reduction::rejected(RejectionReason::WrongCaptureSession);
         }
@@ -527,6 +718,9 @@ impl LiveAssistanceSession {
         capture_session_id: CaptureSessionId,
         meeting_ref: MeetingRef,
     ) -> Reduction {
+        if !capture_session_id.is_valid() || !meeting_ref.is_valid() {
+            return Reduction::rejected(RejectionReason::InvalidValue);
+        }
         if !self.matches_capture(&capture_session_id) {
             return Reduction::rejected(RejectionReason::WrongCaptureSession);
         }
@@ -536,12 +730,12 @@ impl LiveAssistanceSession {
         ) {
             return Reduction::rejected(RejectionReason::InvalidTransition);
         }
+        let mut actions = self.cancel_in_flight(InvalidationReason::LifecycleChanged);
         self.scope = AssistanceScope::FinalizedMeeting;
         self.phase = AssistancePhase::Finalized;
         self.finalized_meeting_ref = Some(meeting_ref.clone());
-        Reduction::accepted(vec![AssistanceAction::FinalizedMeetingAttached {
-            meeting_ref,
-        }])
+        actions.push(AssistanceAction::FinalizedMeetingAttached { meeting_ref });
+        Reduction::accepted(actions)
     }
 
     fn matches_capture(&self, capture_session_id: &CaptureSessionId) -> bool {
@@ -554,6 +748,7 @@ impl LiveAssistanceSession {
             .map(|run| {
                 vec![AssistanceAction::CancelBackground {
                     run_id: run.id,
+                    invocation: run.invocation,
                     reason,
                 }]
             })
@@ -565,16 +760,77 @@ impl LiveAssistanceSession {
         if let Some(turn) = self.foreground_turn.take() {
             actions.push(AssistanceAction::CancelForeground {
                 turn_id: turn.id,
+                invocation: turn.invocation,
                 reason,
             });
         }
         actions
     }
 
-    fn take_correction_revision(&mut self) -> u64 {
+    fn next_invocation_identity(&self, user_generation: u64) -> Option<(InvocationIdentity, u64)> {
+        let sequence = self.next_invocation_sequence;
+        if sequence == 0 {
+            return None;
+        }
+        let next_sequence = sequence.checked_add(1)?;
+        Some((
+            InvocationIdentity {
+                sequence,
+                source_policy_generation: self.source_policy_generation,
+                user_generation,
+            },
+            next_sequence,
+        ))
+    }
+
+    fn next_correction_revision(&self) -> Option<(u64, u64)> {
         let revision = self.next_correction_revision;
-        self.next_correction_revision = self.next_correction_revision.saturating_add(1);
-        revision
+        if revision == 0 {
+            return None;
+        }
+        Some((revision, revision.checked_add(1)?))
+    }
+
+    fn accepts_user_control(&self) -> bool {
+        self.phase != AssistancePhase::Idle
+    }
+
+    fn accepts_evidence(&self, source_kind: EvidenceSourceKind) -> bool {
+        // Capture-bound visual/utterance evidence is live-lifecycle only.
+        // Finalized sessions accept only evidence that can be rebound to the
+        // exact finalized meeting reference in `evidence_observed`.
+        match self.phase {
+            AssistancePhase::Ready => true,
+            AssistancePhase::MeetingEnded | AssistancePhase::Processing => matches!(
+                source_kind,
+                EvidenceSourceKind::TranscriptFinal
+                    | EvidenceSourceKind::MeetingArtifact
+                    | EvidenceSourceKind::RepositoryResult
+            ),
+            AssistancePhase::Finalized => matches!(
+                source_kind,
+                EvidenceSourceKind::MeetingArtifact | EvidenceSourceKind::RepositoryResult
+            ),
+            AssistancePhase::Idle => false,
+        }
+    }
+
+    fn insert_user_statement(&mut self, source_event_id: EvidenceId) {
+        let evidence = UntrustedEvidence {
+            id: source_event_id.clone(),
+            source_kind: EvidenceSourceKind::UserStatement,
+            capture_session_id: if self.scope == AssistanceScope::LiveCapture {
+                self.capture_session_id.clone()
+            } else {
+                None
+            },
+            finalized_meeting_ref: if self.scope == AssistanceScope::FinalizedMeeting {
+                self.finalized_meeting_ref.clone()
+            } else {
+                None
+            },
+        };
+        self.evidence.insert(source_event_id, evidence);
     }
 }
 
@@ -618,10 +874,12 @@ pub enum AssistanceEvent {
     BackgroundCompleted {
         session_id: LiveAssistanceSessionId,
         run_id: BackgroundRunId,
+        invocation: InvocationIdentity,
     },
     ForegroundCompleted {
         session_id: LiveAssistanceSessionId,
         turn_id: ForegroundTurnId,
+        invocation: InvocationIdentity,
     },
     SourcePolicyInvalidated {
         session_id: LiveAssistanceSessionId,
@@ -670,6 +928,7 @@ pub enum InvalidationReason {
     PostureChanged,
     Correction,
     MeetingEnded,
+    LifecycleChanged,
 }
 
 /// Reducer outputs are deliberately limited to orchestration and read-only
@@ -687,25 +946,35 @@ pub enum AssistanceAction {
     },
     CancelBackground {
         run_id: BackgroundRunId,
+        invocation: InvocationIdentity,
         reason: InvalidationReason,
     },
     CancelForeground {
         turn_id: ForegroundTurnId,
+        invocation: InvocationIdentity,
         reason: InvalidationReason,
     },
     AcknowledgeForeground {
         turn_id: ForegroundTurnId,
+        invocation: InvocationIdentity,
     },
     RequestReadOnlyForegroundInference {
         turn_id: ForegroundTurnId,
+        invocation: InvocationIdentity,
         source_event_id: EvidenceId,
         text: String,
     },
+    BackgroundInvocationRegistered {
+        run_id: BackgroundRunId,
+        invocation: InvocationIdentity,
+    },
     PublishForegroundResponse {
         turn_id: ForegroundTurnId,
+        invocation: InvocationIdentity,
     },
     PublishBackgroundInsight {
         run_id: BackgroundRunId,
+        invocation: InvocationIdentity,
     },
     RoleUpdated {
         role: UserRole,
@@ -736,13 +1005,20 @@ pub enum AssistanceAction {
 pub enum RejectionReason {
     WrongAssistanceSession,
     WrongCaptureSession,
+    WrongFinalizedMeeting,
     InvalidTransition,
+    InvalidValue,
+    NoStateChange,
+    InvalidCorrection,
+    DuplicateEvidence,
+    TypedUserEventRequired,
     DuplicateTurn,
     BackgroundNotAllowed,
     BackgroundAlreadyRunning,
     StaleBackgroundResult,
     StaleForegroundResult,
     PolicyGenerationNotAdvanced,
+    GenerationExhausted,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -790,37 +1066,66 @@ mod tests {
         session
     }
 
+    fn start_background(session: &mut LiveAssistanceSession, run_id: &str) -> InvocationIdentity {
+        let reduction = session.reduce(AssistanceEvent::BackgroundStarted {
+            session_id: "assist-1".into(),
+            run_id: run_id.into(),
+        });
+        assert!(reduction.accepted);
+        session.background_run.as_ref().unwrap().invocation
+    }
+
+    fn ask(
+        session: &mut LiveAssistanceSession,
+        turn_id: &str,
+        source_event_id: &str,
+        text: &str,
+    ) -> (InvocationIdentity, Reduction) {
+        let reduction = session.reduce(AssistanceEvent::UserMessage {
+            session_id: "assist-1".into(),
+            turn_id: turn_id.into(),
+            source_event_id: source_event_id.into(),
+            text: text.into(),
+        });
+        let invocation = session.foreground_turn.as_ref().unwrap().invocation;
+        (invocation, reduction)
+    }
+
+    fn assert_rejected_unchanged(
+        session: &mut LiveAssistanceSession,
+        event: AssistanceEvent,
+        reason: RejectionReason,
+    ) {
+        let before = session.clone();
+        let reduction = session.reduce(event);
+        assert!(!reduction.accepted);
+        assert_eq!(reduction.rejection, Some(reason));
+        assert_eq!(*session, before, "rejected events must be state-atomic");
+    }
+
     #[test]
     fn typed_user_input_preempts_and_invalidates_background_work() {
         let mut session = session(CaptureMode::Live);
-        assert!(
-            session
-                .reduce(AssistanceEvent::BackgroundStarted {
-                    session_id: "assist-1".into(),
-                    run_id: "background-1".into(),
-                })
-                .accepted
-        );
+        let background_invocation = start_background(&mut session, "background-1");
 
-        let reduction = session.reduce(AssistanceEvent::UserMessage {
-            session_id: "assist-1".into(),
-            turn_id: "turn-1".into(),
-            source_event_id: "user-event-1".into(),
-            text: "What changed?".into(),
-        });
+        let (foreground_invocation, reduction) =
+            ask(&mut session, "turn-1", "user-event-1", "What changed?");
 
         assert_eq!(
             reduction.actions,
             vec![
                 AssistanceAction::CancelBackground {
                     run_id: "background-1".into(),
+                    invocation: background_invocation,
                     reason: InvalidationReason::TypedUserInput,
                 },
                 AssistanceAction::AcknowledgeForeground {
                     turn_id: "turn-1".into(),
+                    invocation: foreground_invocation,
                 },
                 AssistanceAction::RequestReadOnlyForegroundInference {
                     turn_id: "turn-1".into(),
+                    invocation: foreground_invocation,
                     source_event_id: "user-event-1".into(),
                     text: "What changed?".into(),
                 },
@@ -831,6 +1136,7 @@ mod tests {
         let late = session.reduce(AssistanceEvent::BackgroundCompleted {
             session_id: "assist-1".into(),
             run_id: "background-1".into(),
+            invocation: background_invocation,
         });
         assert_eq!(late.rejection, Some(RejectionReason::StaleBackgroundResult));
     }
@@ -849,17 +1155,18 @@ mod tests {
             Some(RejectionReason::WrongAssistanceSession)
         );
 
-        let wrong_capture = session.reduce(AssistanceEvent::EvidenceObserved {
-            session_id: "assist-1".into(),
-            evidence: UntrustedEvidence {
-                id: "transcript-1".into(),
-                source_kind: EvidenceSourceKind::TranscriptFinal,
-                capture_session_id: Some("capture-other".into()),
+        assert_rejected_unchanged(
+            &mut session,
+            AssistanceEvent::EvidenceObserved {
+                session_id: "assist-1".into(),
+                evidence: UntrustedEvidence {
+                    id: "transcript-1".into(),
+                    source_kind: EvidenceSourceKind::TranscriptFinal,
+                    capture_session_id: Some("capture-other".into()),
+                    finalized_meeting_ref: None,
+                },
             },
-        });
-        assert_eq!(
-            wrong_capture.rejection,
-            Some(RejectionReason::WrongCaptureSession)
+            RejectionReason::WrongCaptureSession,
         );
         assert!(session.evidence.is_empty());
     }
@@ -871,6 +1178,7 @@ mod tests {
             id: "transcript-1".into(),
             source_kind: EvidenceSourceKind::TranscriptFinal,
             capture_session_id: Some("capture-1".into()),
+            finalized_meeting_ref: None,
         };
         assert!(
             session
@@ -904,10 +1212,7 @@ mod tests {
         let corrected = &session.speaker_corrections["SPEAKER_A"];
         assert_eq!(corrected.corrected_label, "REVIEWER");
         assert_eq!(corrected.supersedes_revision, Some(first_revision));
-        assert_eq!(
-            session.evidence.get(&transcript.id),
-            Some(&EvidenceSourceKind::TranscriptFinal)
-        );
+        assert_eq!(session.evidence.get(&transcript.id), Some(&transcript));
     }
 
     #[test]
@@ -919,12 +1224,10 @@ mod tests {
                 id: "screen-1".into(),
                 source_kind: EvidenceSourceKind::ScreenImage,
                 capture_session_id: Some("capture-1".into()),
+                finalized_meeting_ref: None,
             },
         });
-        session.reduce(AssistanceEvent::BackgroundStarted {
-            session_id: "assist-1".into(),
-            run_id: "background-1".into(),
-        });
+        let background_invocation = start_background(&mut session, "background-1");
 
         let reduction = session.reduce(AssistanceEvent::SourcePolicyInvalidated {
             session_id: "assist-1".into(),
@@ -939,6 +1242,7 @@ mod tests {
             vec![
                 AssistanceAction::CancelBackground {
                     run_id: "background-1".into(),
+                    invocation: background_invocation,
                     reason: InvalidationReason::SourcePolicyChanged,
                 },
                 AssistanceAction::PolicyBoundStateCleared { new_generation: 2 },
@@ -1023,6 +1327,7 @@ mod tests {
                 id: "transcript-with-imperative".into(),
                 source_kind: EvidenceSourceKind::TranscriptFinal,
                 capture_session_id: Some("capture-1".into()),
+                finalized_meeting_ref: None,
             },
         });
         assert_eq!(
@@ -1031,6 +1336,463 @@ mod tests {
                 evidence_id: "transcript-with-imperative".into(),
                 source_kind: EvidenceSourceKind::TranscriptFinal,
             }]
+        );
+        assert_eq!(
+            session.evidence[&EvidenceId::from("transcript-with-imperative")].capture_session_id,
+            Some("capture-1".into())
+        );
+    }
+
+    #[test]
+    fn foreground_completion_identity_prevents_aba_publication_after_turn_id_reuse() {
+        let mut session = session(CaptureMode::Live);
+        let (first_invocation, _) = ask(&mut session, "turn-reused", "user-event-1", "First?");
+        assert!(
+            session
+                .reduce(AssistanceEvent::ForegroundCompleted {
+                    session_id: "assist-1".into(),
+                    turn_id: "turn-reused".into(),
+                    invocation: first_invocation,
+                })
+                .accepted
+        );
+
+        let (second_invocation, _) = ask(&mut session, "turn-reused", "user-event-2", "Second?");
+        assert_ne!(first_invocation, second_invocation);
+        assert_rejected_unchanged(
+            &mut session,
+            AssistanceEvent::ForegroundCompleted {
+                session_id: "assist-1".into(),
+                turn_id: "turn-reused".into(),
+                invocation: first_invocation,
+            },
+            RejectionReason::StaleForegroundResult,
+        );
+
+        let current = session.reduce(AssistanceEvent::ForegroundCompleted {
+            session_id: "assist-1".into(),
+            turn_id: "turn-reused".into(),
+            invocation: second_invocation,
+        });
+        assert_eq!(
+            current.actions,
+            vec![AssistanceAction::PublishForegroundResponse {
+                turn_id: "turn-reused".into(),
+                invocation: second_invocation,
+            }]
+        );
+    }
+
+    #[test]
+    fn background_completion_identity_prevents_aba_publication_after_run_id_reuse() {
+        let mut session = session(CaptureMode::Live);
+        let first_invocation = start_background(&mut session, "run-reused");
+        assert!(
+            session
+                .reduce(AssistanceEvent::BackgroundCompleted {
+                    session_id: "assist-1".into(),
+                    run_id: "run-reused".into(),
+                    invocation: first_invocation,
+                })
+                .accepted
+        );
+
+        let second_invocation = start_background(&mut session, "run-reused");
+        assert_ne!(first_invocation, second_invocation);
+        assert_rejected_unchanged(
+            &mut session,
+            AssistanceEvent::BackgroundCompleted {
+                session_id: "assist-1".into(),
+                run_id: "run-reused".into(),
+                invocation: first_invocation,
+            },
+            RejectionReason::StaleBackgroundResult,
+        );
+
+        assert!(
+            session
+                .reduce(AssistanceEvent::BackgroundCompleted {
+                    session_id: "assist-1".into(),
+                    run_id: "run-reused".into(),
+                    invocation: second_invocation,
+                })
+                .accepted
+        );
+    }
+
+    #[test]
+    fn lifecycle_cancels_live_work_and_rejects_disallowed_or_post_finalization_evidence() {
+        let mut session = session(CaptureMode::Recording);
+        let (invocation, _) = ask(&mut session, "turn-1", "user-event-1", "Still live?");
+        let stopped = session.reduce(AssistanceEvent::CaptureStopped {
+            session_id: "assist-1".into(),
+            capture_session_id: "capture-1".into(),
+        });
+        assert_eq!(
+            stopped.actions,
+            vec![
+                AssistanceAction::CancelForeground {
+                    turn_id: "turn-1".into(),
+                    invocation,
+                    reason: InvalidationReason::MeetingEnded,
+                },
+                AssistanceAction::MeetingEnded,
+            ]
+        );
+        assert_rejected_unchanged(
+            &mut session,
+            AssistanceEvent::ForegroundCompleted {
+                session_id: "assist-1".into(),
+                turn_id: "turn-1".into(),
+                invocation,
+            },
+            RejectionReason::StaleForegroundResult,
+        );
+
+        assert_rejected_unchanged(
+            &mut session,
+            AssistanceEvent::EvidenceObserved {
+                session_id: "assist-1".into(),
+                evidence: UntrustedEvidence {
+                    id: "screen-after-stop".into(),
+                    source_kind: EvidenceSourceKind::ScreenImage,
+                    capture_session_id: Some("capture-1".into()),
+                    finalized_meeting_ref: None,
+                },
+            },
+            RejectionReason::InvalidTransition,
+        );
+
+        assert!(
+            session
+                .reduce(AssistanceEvent::EvidenceObserved {
+                    session_id: "assist-1".into(),
+                    evidence: UntrustedEvidence {
+                        id: "late-final-utterance".into(),
+                        source_kind: EvidenceSourceKind::TranscriptFinal,
+                        capture_session_id: Some("capture-1".into()),
+                        finalized_meeting_ref: None,
+                    },
+                })
+                .accepted
+        );
+        assert!(
+            session
+                .reduce(AssistanceEvent::MeetingFinalized {
+                    session_id: "assist-1".into(),
+                    capture_session_id: "capture-1".into(),
+                    meeting_ref: "meeting-1".into(),
+                })
+                .accepted
+        );
+        assert_rejected_unchanged(
+            &mut session,
+            AssistanceEvent::EvidenceObserved {
+                session_id: "assist-1".into(),
+                evidence: UntrustedEvidence {
+                    id: "wrong-final-artifact".into(),
+                    source_kind: EvidenceSourceKind::MeetingArtifact,
+                    capture_session_id: None,
+                    finalized_meeting_ref: Some("meeting-other".into()),
+                },
+            },
+            RejectionReason::WrongFinalizedMeeting,
+        );
+        for (id, source_kind) in [
+            ("final-artifact", EvidenceSourceKind::MeetingArtifact),
+            (
+                "final-repository-result",
+                EvidenceSourceKind::RepositoryResult,
+            ),
+        ] {
+            let evidence = UntrustedEvidence {
+                id: id.into(),
+                source_kind,
+                capture_session_id: None,
+                finalized_meeting_ref: Some("meeting-1".into()),
+            };
+            assert!(
+                session
+                    .reduce(AssistanceEvent::EvidenceObserved {
+                        session_id: "assist-1".into(),
+                        evidence: evidence.clone(),
+                    })
+                    .accepted
+            );
+            assert_eq!(session.evidence[&evidence.id], evidence);
+        }
+        assert_rejected_unchanged(
+            &mut session,
+            AssistanceEvent::EvidenceObserved {
+                session_id: "assist-1".into(),
+                evidence: UntrustedEvidence {
+                    id: "post-final".into(),
+                    source_kind: EvidenceSourceKind::TranscriptFinal,
+                    capture_session_id: Some("capture-1".into()),
+                    finalized_meeting_ref: None,
+                },
+            },
+            RejectionReason::InvalidTransition,
+        );
+    }
+
+    #[test]
+    fn duplicate_evidence_ids_never_overwrite_immutable_provenance() {
+        let mut session = session(CaptureMode::Live);
+        let original = UntrustedEvidence {
+            id: "evidence-1".into(),
+            source_kind: EvidenceSourceKind::TranscriptFinal,
+            capture_session_id: Some("capture-1".into()),
+            finalized_meeting_ref: None,
+        };
+        assert!(
+            session
+                .reduce(AssistanceEvent::EvidenceObserved {
+                    session_id: "assist-1".into(),
+                    evidence: original.clone(),
+                })
+                .accepted
+        );
+        for duplicate in [
+            original.clone(),
+            UntrustedEvidence {
+                id: original.id.clone(),
+                source_kind: EvidenceSourceKind::RepositoryResult,
+                capture_session_id: None,
+                finalized_meeting_ref: None,
+            },
+        ] {
+            assert_rejected_unchanged(
+                &mut session,
+                AssistanceEvent::EvidenceObserved {
+                    session_id: "assist-1".into(),
+                    evidence: duplicate,
+                },
+                RejectionReason::DuplicateEvidence,
+            );
+        }
+        assert_eq!(session.evidence[&original.id], original);
+    }
+
+    #[test]
+    fn invalid_user_control_events_are_rejected_without_partial_state_changes() {
+        let mut session = session(CaptureMode::Live);
+        assert_rejected_unchanged(
+            &mut session,
+            AssistanceEvent::BackgroundStarted {
+                session_id: "assist-1".into(),
+                run_id: " ".into(),
+            },
+            RejectionReason::InvalidValue,
+        );
+        assert_rejected_unchanged(
+            &mut session,
+            AssistanceEvent::ForegroundCompleted {
+                session_id: "assist-1".into(),
+                turn_id: " ".into(),
+                invocation: InvocationIdentity {
+                    sequence: 1,
+                    source_policy_generation: 0,
+                    user_generation: 0,
+                },
+            },
+            RejectionReason::InvalidValue,
+        );
+        assert_rejected_unchanged(
+            &mut session,
+            AssistanceEvent::BackgroundCompleted {
+                session_id: "assist-1".into(),
+                run_id: "run-1".into(),
+                invocation: InvocationIdentity {
+                    sequence: 0,
+                    source_policy_generation: 0,
+                    user_generation: 0,
+                },
+            },
+            RejectionReason::InvalidValue,
+        );
+        assert_rejected_unchanged(
+            &mut session,
+            AssistanceEvent::PostureChanged {
+                session_id: "assist-1".into(),
+                posture: AssistancePosture::Strategist,
+            },
+            RejectionReason::NoStateChange,
+        );
+        assert_rejected_unchanged(
+            &mut session,
+            AssistanceEvent::RoleCorrected {
+                session_id: "assist-1".into(),
+                role: UserRole::Observer,
+                source_event_id: "role-noop".into(),
+            },
+            RejectionReason::InvalidCorrection,
+        );
+        assert_rejected_unchanged(
+            &mut session,
+            AssistanceEvent::SpeakerCorrected {
+                session_id: "assist-1".into(),
+                source_label: " ".into(),
+                corrected_label: "REVIEWER".into(),
+                source_event_id: "speaker-blank".into(),
+            },
+            RejectionReason::InvalidValue,
+        );
+        assert_rejected_unchanged(
+            &mut session,
+            AssistanceEvent::SpeakerCorrected {
+                session_id: "assist-1".into(),
+                source_label: "SPEAKER_A".into(),
+                corrected_label: "SPEAKER_A".into(),
+                source_event_id: "speaker-noop".into(),
+            },
+            RejectionReason::InvalidCorrection,
+        );
+
+        assert!(
+            session
+                .reduce(AssistanceEvent::SpeakerCorrected {
+                    session_id: "assist-1".into(),
+                    source_label: "SPEAKER_A".into(),
+                    corrected_label: "REVIEWER".into(),
+                    source_event_id: "speaker-valid".into(),
+                })
+                .accepted
+        );
+        assert_rejected_unchanged(
+            &mut session,
+            AssistanceEvent::RoleCorrected {
+                session_id: "assist-1".into(),
+                role: UserRole::Presenter,
+                source_event_id: "speaker-valid".into(),
+            },
+            RejectionReason::DuplicateEvidence,
+        );
+    }
+
+    #[test]
+    fn invalid_values_and_counter_exhaustion_are_state_atomic() {
+        let mut idle = LiveAssistanceSession::new(
+            "assist-1".into(),
+            AssistanceSurface::NativeRecall,
+            UserRole::Observer,
+            AssistancePosture::Strategist,
+        );
+        assert_rejected_unchanged(
+            &mut idle,
+            AssistanceEvent::CaptureStarted {
+                session_id: "assist-1".into(),
+                capture_session_id: "  ".into(),
+                mode: CaptureMode::Live,
+            },
+            RejectionReason::InvalidValue,
+        );
+
+        let mut session = session(CaptureMode::Live);
+        assert_rejected_unchanged(
+            &mut session,
+            AssistanceEvent::UserMessage {
+                session_id: "assist-1".into(),
+                turn_id: "turn-1".into(),
+                source_event_id: "user-event-1".into(),
+                text: "  ".into(),
+            },
+            RejectionReason::InvalidValue,
+        );
+
+        session.next_invocation_sequence = u64::MAX;
+        assert_rejected_unchanged(
+            &mut session,
+            AssistanceEvent::BackgroundStarted {
+                session_id: "assist-1".into(),
+                run_id: "run-1".into(),
+            },
+            RejectionReason::GenerationExhausted,
+        );
+        assert_rejected_unchanged(
+            &mut session,
+            AssistanceEvent::UserMessage {
+                session_id: "assist-1".into(),
+                turn_id: "turn-1".into(),
+                source_event_id: "user-event-1".into(),
+                text: "Question".into(),
+            },
+            RejectionReason::GenerationExhausted,
+        );
+
+        session.next_invocation_sequence = 1;
+        session.user_generation = u64::MAX;
+        assert_rejected_unchanged(
+            &mut session,
+            AssistanceEvent::PostureChanged {
+                session_id: "assist-1".into(),
+                posture: AssistancePosture::SilentWatch,
+            },
+            RejectionReason::GenerationExhausted,
+        );
+
+        session.user_generation = 0;
+        session.next_correction_revision = u64::MAX;
+        assert_rejected_unchanged(
+            &mut session,
+            AssistanceEvent::RoleCorrected {
+                session_id: "assist-1".into(),
+                role: UserRole::Presenter,
+                source_event_id: "role-event".into(),
+            },
+            RejectionReason::GenerationExhausted,
+        );
+    }
+
+    #[test]
+    fn policy_invalidation_rejections_are_atomic_and_old_foreground_cannot_publish() {
+        let mut idle = LiveAssistanceSession::new(
+            "assist-1".into(),
+            AssistanceSurface::NativeRecall,
+            UserRole::Observer,
+            AssistancePosture::Strategist,
+        );
+        assert_rejected_unchanged(
+            &mut idle,
+            AssistanceEvent::SourcePolicyInvalidated {
+                session_id: "assist-1".into(),
+                new_generation: 1,
+            },
+            RejectionReason::InvalidTransition,
+        );
+
+        let mut session = session(CaptureMode::Live);
+        assert_rejected_unchanged(
+            &mut session,
+            AssistanceEvent::SourcePolicyInvalidated {
+                session_id: "assist-1".into(),
+                new_generation: 0,
+            },
+            RejectionReason::PolicyGenerationNotAdvanced,
+        );
+        let (invocation, _) = ask(&mut session, "turn-1", "user-event-1", "Question?");
+        let invalidated = session.reduce(AssistanceEvent::SourcePolicyInvalidated {
+            session_id: "assist-1".into(),
+            new_generation: 1,
+        });
+        assert_eq!(session.source_policy_generation, 1);
+        assert!(session.foreground_turn.is_none());
+        assert_eq!(
+            invalidated.actions.first(),
+            Some(&AssistanceAction::CancelForeground {
+                turn_id: "turn-1".into(),
+                invocation,
+                reason: InvalidationReason::SourcePolicyChanged,
+            })
+        );
+        assert_rejected_unchanged(
+            &mut session,
+            AssistanceEvent::ForegroundCompleted {
+                session_id: "assist-1".into(),
+                turn_id: "turn-1".into(),
+                invocation,
+            },
+            RejectionReason::StaleForegroundResult,
         );
     }
 }

@@ -1,6 +1,6 @@
 # Plan — Live Assistance Across Terminal, Coach, and Recall
 
-Status: approved for staged implementation
+Status: approved design; foundational slices partially implemented
 
 Date: 2026-07-15
 
@@ -8,13 +8,34 @@ Planning baseline: fetched `origin/main` at `7557c8a`
 
 Related work:
 
-- `minutes-id3j`: session-linked screen awareness and bounded image retrieval
+- `minutes-id3j`: session-linked screen awareness and bounded image retrieval,
+  merged to `origin/main` at `8cd9345`
 - Conversation-trust program on the independent `feat/conversation-trust`
   worktree
 - Existing Coach runtime and deterministic synthetic copilot eval corpus
 - Existing deferred Recall thread work in `minutes-psx`
 - Existing agent-capability honesty work in `minutes-hdq` and
   `minutes-wq3`
+
+## Current implementation snapshot
+
+This plan intentionally describes the end state. As of this branch, only a
+foundation exists:
+
+| Area | Current state | Still required |
+| --- | --- | --- |
+| Core session | Hardened isolated reducer with invocation identities, full evidence bindings, phase/source guards, duplicate/blank rejection, in-flight cancellation, and focused tests | Focus generation, provider capabilities, bounded history, explicit attaching/invalidated phases, and Native Recall integration |
+| Public fixtures | Fourteen versioned specifications: 5 executable, 4 executable projections with named deferrals, and 5 contract-only; actual reducer and canonical-routing double-run harnesses are green | Implement the five contract-only orchestration scenarios and each projection's named deferred assertions as their product capabilities land |
+| Privacy and CI | Structural checker, local overlap mode, 16 privacy/schema controls, versioned schema gate, and independent required `live_sidekick_eval` CI job | Authorized private-corpus overlap was not run for this batch; per-batch review and attestation remain human publication requirements |
+| Terminal Sidekick | Canonical generated skill plus routing tests | Release/distribution confirmation and a proven evented/preemptible host adapter; unsupported hosts remain on-demand |
+| Coach | Existing independent product and eval runtime | Separately labeled evidence bridge into Recall, without lifecycle coupling |
+| Native Recall | Product and architecture requirements only | Session-scoped backend/frontend integration; no live-assistance GUI is implemented in this branch |
+| Screen evidence | Canonical status and bounded retrieval contract merged upstream; permission-unavailable behavior verified in the signed dev app | Rebase/integrate the contract here, add one-turn disclosure and provider labeling, then verify a real PNG after refreshing the Screen Recording grant |
+
+“Implemented” in this plan means code and a directly runnable check exist in
+this branch. Fixture execution status is taken only from the schema-validated
+`execution` classification; contract-only text is not counted as an implemented
+eval. A described GUI state is not counted as a rendered UI.
 
 Origin: live product dogfooding showed that a terminal agent can be a useful
 meeting strategist when it combines the live transcript, explicit user
@@ -164,6 +185,13 @@ Late events from an old turn or old focus cannot appear in the current chat.
 Switching meetings cancels or isolates in-flight work and invalidates
 incompatible history.
 
+Source-policy invalidation preserves only harmless generic preference state:
+the selected role value and assistance posture may survive across fresh calls,
+while the role's source-event reference, source-bound evidence, speaker
+corrections, incompatible history, and in-flight work are cleared. Preserving a
+role label must never preserve the meeting evidence that originally suggested
+it.
+
 ### Open-source fixture hygiene
 
 Committed fixtures are authored from scratch and have
@@ -186,6 +214,24 @@ by a fixture author who did not copy from the private source.
 ## User experience and visible state transitions
 
 No transition may be “nothing happens.”
+
+The states below are the required native design contract. They have not been
+implemented or visually validated in this branch. Before Slice C changes a
+frontend, the implementation owner must produce reviewable wireframes for
+idle, attaching, ready, responding, correction, disclosure, processing,
+finalized, restart, and every permission/error state. The review must define:
+
+- keyboard order, focus restoration, and cancellation behavior;
+- screen-reader names and live-region announcements;
+- contrast, reduced-motion, and status semantics that do not rely on color;
+- narrow-window, wrapping, truncation, and overflow behavior;
+- loading, timeout, denied-capability, stale-session, and retry states; and
+- exact user-facing copy for local/cloud routing and one-turn screen disclosure.
+
+Rendered UI is accepted only after click-testing the signed
+`~/Applications/Minutes Dev.app` on a real Mac with screenshots or a review
+record for each relevant state. Type checks and unit tests are necessary but
+cannot establish visual or accessibility quality.
 
 ### Idle
 
@@ -464,15 +510,23 @@ cleaned are distinct states.
 
 ### Fixture location and schema
 
-Create:
+The current foundation contains:
 
 - `crates/core/src/live_sidekick/session.rs`
-- `crates/core/src/live_sidekick/eval.rs`
+- `crates/core/tests/live_sidekick_eval.rs`
 - `crates/core/tests/fixtures/live_sidekick_eval/v1/README.md`
 - `crates/core/tests/fixtures/live_sidekick_eval/v1/*.json`
 - `docs/rfcs/0006-live-sidekick-session-and-eval.md`
 - `scripts/check_live_sidekick_fixture_privacy.py`
+- `tests/eval/live_sidekick_fixture_schema.py`
+- `tests/eval/live_sidekick_routing_eval.mjs`
 - `tests/eval/test_live_sidekick_fixture_privacy.py`
+- `tests/eval/test_live_sidekick_fixture_schema.py`
+
+The public schema stays decoupled from Rust serde types. The Python validator
+owns its versioned envelope and execution classifications; the Rust integration
+test adapts only declared core-reducer events; the JavaScript runner invokes the
+compiled canonical skill router.
 
 Each JSON fixture contains:
 
@@ -546,7 +600,7 @@ Speaker identities use role tokens only:
 14. `policy_invalidation.json`: sensitivity or focus change cancels in-flight
     output and clears incompatible history.
 
-### Deterministic harness
+### Deterministic harness and explicit deferrals
 
 Reuse the copilot eval philosophy:
 
@@ -559,13 +613,18 @@ Reuse the copilot eval philosophy:
 - explicit baseline,
 - and machine-readable action trace.
 
-The harness scores reducer and orchestration behavior, not model eloquence.
-Optional manual Claude/Codex/Gemini runs are gitignored. Only reviewed,
-non-sensitive aggregate results may be published.
+The implemented harness scores reducer and routing behavior, not model
+eloquence. Eight core-target fixtures run through nine declared reducer
+replays; one routing fixture runs three cases through the compiled canonical
+router. Every replay runs twice before its expected trace is checked. Five
+future-orchestration fixtures are explicitly contract-only, and four executable
+projections name the assertions they defer. Optional manual Claude/Codex/Gemini
+runs must remain gitignored. Only reviewed, non-sensitive aggregate results may
+be published.
 
 ### Leakage gate
 
-CI performs public structural checks:
+The structural checker implements these public checks:
 
 - `content_origin` must equal `synthetic`,
 - only approved role tokens may appear in speaker fields,
@@ -587,9 +646,11 @@ denylist and performs n-gram or MinHash overlap checks. It emits only:
 - and fixture IDs.
 
 It never prints matching private phrases, writes corpus hashes, or uploads an
-artifact. CI cannot prove non-overlap with a private corpus it does not possess;
-the local gate and human attestation are therefore mandatory before publishing
-new fixtures.
+artifact. The independent `live_sidekick_eval` CI job runs the public privacy,
+schema, routing, and reducer gates, and the aggregate CI gate depends on it.
+CI cannot prove non-overlap with a private corpus it does not possess. The
+local gate and human attestation are therefore mandatory before publishing new
+fixtures.
 
 The review workflow is:
 
@@ -611,9 +672,20 @@ Owned paths should be conflict-light:
 - new synthetic fixture directory,
 - new privacy checker and tests.
 
-Deliver the state reducer, priority contract, schema validation, deterministic
-replay, initial fixtures, and privacy gate without editing active
-`commands.rs`, `context.rs`, or screen-awareness files.
+Current status: **implemented for the isolated foundation, not integrated
+feature conformance**. The branch contains the hardened reducer, focused
+reducer tests, versioned behavior fixtures, scoped deterministic runners,
+RFC/plan, privacy tooling, and a required independent CI job.
+
+The reducer now rejects stale completions with generation-bearing invocation
+identities, retains immutable capture/finalized-meeting evidence bindings,
+enforces phase/source admission, rejects duplicate or blank inputs atomically,
+and cancels in-flight work on stop/finalization. Focus generation, provider
+capabilities, bounded history, explicit attaching/invalidated phases, and native
+integration remain deferred and are represented as projection deferrals or
+contract-only fixtures rather than false passes. Do not edit active
+`commands.rs`, `context.rs`, or screen-awareness files as part of this
+foundation.
 
 ### Slice B — terminal skill
 
@@ -630,7 +702,14 @@ Generated outputs must pass:
 Add routing cases for explicit HUD, explicit terminal sidekick, and ambiguous
 surface selection.
 
+Current status: **implemented in the repository, not proof of proactive host
+behavior**. Canonical and generated skill surfaces plus routing tests exist.
+The skill deliberately degrades to bounded on-demand reads unless its host can
+prove event delivery, cancellation, and foreground preemption.
+
 ### Slice C — native foreground session manager
+
+Current status: **deferred; no native GUI implementation in this branch**.
 
 After the conversation-trust lane lands, integrate the core session manager:
 
@@ -645,6 +724,8 @@ This slice does not add background strategist generation.
 
 ### Slice D — exact-session live attachment
 
+Current status: **deferred**.
+
 Attach Native Recall to exact-session finalized utterances through the shared
 evidence service. Add role/posture controls and capture-mode parity.
 
@@ -652,6 +733,8 @@ Bridge Coach nudges as separately labeled cards. Keep recording ownership and
 Coach lifecycle independent.
 
 ### Slice E — evented strategist mode
+
+Current status: **deferred**.
 
 Add opt-in background synthesis through the Minutes scheduler. Prove:
 
@@ -663,11 +746,18 @@ Add opt-in background synthesis through the Minutes scheduler. Prove:
 
 ### Slice F — screen disclosure
 
-After `minutes-id3j` provides canonical state and bounded retrieval, add
-one-turn GUI inclusion and terminal discovery. Validate provider destination,
-cleanup, wrong-session rejection, and provenance.
+Current status: **deferred**.
+
+The `minutes-id3j` screen-awareness contract is now merged upstream, but this
+branch has not integrated it into live assistance. Add one-turn GUI inclusion
+and terminal discovery after rebasing. Validate provider destination, cleanup,
+wrong-session rejection, and provenance. Signed-app dogfood has verified the
+permission-unavailable path; successful real-PNG retrieval still requires a
+refreshed Screen Recording grant and must not be reported as complete.
 
 ### Slice G — lifecycle handoff and dogfood
+
+Current status: **deferred**.
 
 Bind capture stop to processing state, then rebind to the finalized artifact.
 Exercise Live and Start Recording, terminal and GUI, supported and unsupported
@@ -696,7 +786,11 @@ Because Beads are local-only per clone, cross-machine coordination uses:
 - tmux handoff messages,
 - and clone-local Beads that reference the same plan path.
 
-## Acceptance matrix
+## Target acceptance matrix
+
+This matrix is the definition of integrated release readiness, not a statement
+of current branch coverage. The implementation snapshot above is authoritative
+about what can be exercised today.
 
 ### Core
 
@@ -758,6 +852,28 @@ Because Beads are local-only per clone, cross-machine coordination uses:
 Slice-specific deterministic tests run first. Before any Rust, Tauri, MCP,
 frontend, or release commit, follow `docs/checklists/pre-commit.md`.
 
+Checks that are available for the current foundation are:
+
+```bash
+cargo test -p minutes-core --lib live_sidekick --no-fail-fast
+python3 scripts/check_live_sidekick_fixture_privacy.py
+python3 -m unittest \
+  tests/eval/test_live_sidekick_fixture_privacy.py \
+  tests/eval/test_live_sidekick_fixture_schema.py
+python3 tests/eval/live_sidekick_fixture_schema.py
+cargo test -p minutes-core --no-default-features \
+  --test live_sidekick_eval -- --test-threads=1
+npm --prefix tooling/skills run build
+node tests/eval/live_sidekick_routing_eval.mjs
+```
+
+The independent `live_sidekick_eval` CI job runs these public privacy, schema,
+routing, and reducer gates; the aggregate CI gate depends on it. The schema
+output reports executable, projection, and contract-only counts so a green job
+cannot imply that future orchestration behavior ran. Current verified coverage
+is fourteen focused reducer tests, sixteen Python controls, eight core-target
+fixtures across nine double replays, and three routing cases replayed twice.
+
 UI changes require:
 
 - a signed `~/Applications/Minutes Dev.app`,
@@ -766,7 +882,7 @@ UI changes require:
 - keyboard and cancellation checks,
 - and screen-provider disclosure checks when images are in scope.
 
-The final integrated candidate must pass:
+The final integrated candidate must additionally pass:
 
 - pinned-toolchain formatting and clippy,
 - core and app tests,
@@ -778,6 +894,11 @@ The final integrated candidate must pass:
 - Live and Start Recording real-machine parity,
 - and an adversarial review that attempts prompt injection through transcript
   and screen evidence.
+
+Before UI acceptance, record what the user sees from click through completion
+for every state above. Any interval where the action has no acknowledgement,
+progress, result, or recoverable error is a UX failure even if the backend work
+eventually succeeds.
 
 ## Rollout
 

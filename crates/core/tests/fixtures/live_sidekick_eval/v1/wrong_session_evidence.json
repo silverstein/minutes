@@ -21,25 +21,25 @@
       "at_ms": 0,
       "kind": "capture_started",
       "session_id": "SESSION_A",
-      "payload": {"capture_mode": "live"}
+      "payload": {"capture_mode": "live", "capture_session_id": "CAPTURE_A"}
     },
     {
       "at_ms": 10,
       "kind": "transcript_final",
       "session_id": "SESSION_B",
-      "payload": {"event_id": "EVENT_B", "speaker": "FACILITATOR", "text": "unrelated session evidence"}
+      "payload": {"capture_session_id": "CAPTURE_B", "event_id": "EVENT_B", "speaker": "FACILITATOR", "text": "unrelated session evidence"}
     },
     {
       "at_ms": 20,
       "kind": "screen_disclosed",
       "session_id": "SESSION_B",
-      "payload": {"event_id": "SCREEN_EVENT_B", "opaque_ref": "SCREEN_REF_B"}
+      "payload": {"capture_session_id": "CAPTURE_B", "event_id": "SCREEN_EVENT_B", "opaque_ref": "SCREEN_REF_B"}
     },
     {
       "at_ms": 30,
       "kind": "coach_nudge",
       "session_id": "SESSION_B",
-      "payload": {"event_id": "COACH_EVENT_B", "text": "unrelated session nudge"}
+      "payload": {"capture_session_id": "CAPTURE_B", "event_id": "COACH_EVENT_B", "text": "unrelated session nudge"}
     }
   ],
   "expectations": {
@@ -51,5 +51,30 @@
     "provenance_required": true,
     "max_unsolicited_messages": 0,
     "parity_group": "wrong-session-rejection"
+  },
+  "execution": {
+    "status": "executable",
+    "target": "core_reducer",
+    "replays": [
+      {
+        "name": "wrong-assistance-session",
+        "session_id": "SESSION_A",
+        "event_indexes": [0, 1, 2, 3],
+        "expected_reductions": [
+          {"accepted": true, "action_types": ["live_transcript_attached"], "rejection": null},
+          {"accepted": false, "action_types": [], "rejection": "wrong_assistance_session"},
+          {"accepted": false, "action_types": [], "rejection": "wrong_assistance_session"},
+          {"accepted": false, "action_types": [], "rejection": "wrong_assistance_session"}
+        ],
+        "expected_state": {
+          "scope": "live_capture", "surface": "terminal_sidekick", "phase": "ready",
+          "user_role": {"value": "observer", "revision": 0, "supersedes_revision": null, "source_event_id": null},
+          "posture": "strategist", "capture_mode": "live", "capture_session_id": "CAPTURE_A",
+          "finalized_meeting_ref": null, "source_policy_generation": 0, "user_generation": 0,
+          "foreground_turn_id": null, "background_run_id": null,
+          "evidence": {}, "speaker_corrections": {}
+        }
+      }
+    ]
   }
 }

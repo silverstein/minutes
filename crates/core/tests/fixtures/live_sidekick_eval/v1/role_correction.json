@@ -19,15 +19,22 @@
   "events": [
     {
       "at_ms": 0,
+      "kind": "capture_started",
+      "session_id": "SESSION_A",
+      "payload": {"capture_mode": "live", "capture_session_id": "CAPTURE_A"}
+    },
+    {
+      "at_ms": 10,
       "kind": "role_changed",
       "session_id": "SESSION_A",
-      "payload": {"role": "technical_responder", "source": "typed_user"}
+      "payload": {"role": "technical_responder", "source": "typed_user", "source_event_id": "ROLE_EVENT_A"}
     },
     {
       "at_ms": 30,
       "kind": "transcript_final",
       "session_id": "SESSION_A",
       "payload": {
+        "capture_session_id": "CAPTURE_A",
         "event_id": "EVENT_A",
         "speaker": "FACILITATOR",
         "text": "the next section covers system boundaries"
@@ -39,9 +46,34 @@
     "forbidden_actions": ["offer_presenter_script", "restore_inferred_role"],
     "state_equals": {"user_role": "technical_responder"},
     "required_source_kinds": ["user_statement", "transcript_final"],
-    "required_source_event_ids": ["EVENT_A"],
+    "required_source_event_ids": ["ROLE_EVENT_A", "EVENT_A"],
     "provenance_required": true,
     "max_unsolicited_messages": 1,
     "parity_group": "role-correction"
+  },
+  "execution": {
+    "status": "executable_projection",
+    "target": "core_reducer",
+    "deferred_assertions": ["prepare_technical_boundary_context"],
+    "replays": [
+      {
+        "name": "role-state",
+        "session_id": "SESSION_A",
+        "event_indexes": [0, 1, 2],
+        "expected_reductions": [
+          {"accepted": true, "action_types": ["live_transcript_attached"], "rejection": null},
+          {"accepted": true, "action_types": ["role_updated"], "rejection": null},
+          {"accepted": true, "action_types": ["evidence_accepted"], "rejection": null}
+        ],
+        "expected_state": {
+          "scope": "live_capture", "surface": "terminal_sidekick", "phase": "ready",
+          "user_role": {"value": "technical_responder", "revision": 1, "supersedes_revision": 0, "source_event_id": "ROLE_EVENT_A"},
+          "posture": "strategist", "capture_mode": "live", "capture_session_id": "CAPTURE_A",
+          "finalized_meeting_ref": null, "source_policy_generation": 0, "user_generation": 1,
+          "foreground_turn_id": null, "background_run_id": null,
+          "evidence": {"EVENT_A": "transcript_final", "ROLE_EVENT_A": "user_statement"}, "speaker_corrections": {}
+        }
+      }
+    ]
   }
 }

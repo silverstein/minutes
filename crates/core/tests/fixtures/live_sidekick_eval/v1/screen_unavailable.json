@@ -26,7 +26,7 @@
       "at_ms": 50,
       "kind": "user_message",
       "session_id": "SESSION_A",
-      "payload": {"turn_id": "FOREGROUND_A", "text": "what is on the screen"}
+      "payload": {"turn_id": "FOREGROUND_A", "source_event_id": "USER_EVENT_A", "text": "what is on the screen"}
     }
   ],
   "expectations": {
@@ -38,5 +38,11 @@
     "provenance_required": true,
     "max_unsolicited_messages": 0,
     "parity_group": "screen-unavailable"
+  },
+  "execution": {
+    "status": "contract_only",
+    "target": "future_orchestration",
+    "reason": "screen availability state and fail-closed provider behavior are not implemented by the core reducer",
+    "deferred_capabilities": ["screen_availability_state", "visual_provider_fail_closed"]
   }
 }

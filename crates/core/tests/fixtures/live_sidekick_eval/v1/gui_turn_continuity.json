@@ -21,7 +21,7 @@
       "at_ms": 0,
       "kind": "role_changed",
       "session_id": "SESSION_A",
-      "payload": {"role": "technical_responder", "source": "typed_user"}
+      "payload": {"role": "technical_responder", "source": "typed_user", "source_event_id": "ROLE_EVENT_A"}
     },
     {
       "at_ms": 10,
@@ -33,7 +33,7 @@
       "at_ms": 20,
       "kind": "speaker_corrected",
       "session_id": "SESSION_A",
-      "payload": {"from_speaker": "REVIEWER", "to_speaker": "ENGINEER_A", "source": "typed_user"}
+      "payload": {"from_speaker": "REVIEWER", "to_speaker": "ENGINEER_A", "source": "typed_user", "source_event_id": "SPEAKER_EVENT_A"}
     },
     {
       "at_ms": 30,
@@ -63,5 +63,11 @@
     "provenance_required": true,
     "max_unsolicited_messages": 0,
     "parity_group": "gui-continuity"
+  },
+  "execution": {
+    "status": "contract_only",
+    "target": "future_orchestration",
+    "reason": "native session hydration and focus isolation are not implemented by the core reducer",
+    "deferred_capabilities": ["native_session_hydration", "focus_generation_isolation", "fresh_provider_call_continuity"]
   }
 }

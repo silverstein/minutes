@@ -33,7 +33,7 @@
       "at_ms": 10,
       "kind": "user_message",
       "session_id": "SESSION_A",
-      "payload": {"turn_id": "FOREGROUND_A", "text": "summarize the current discussion"}
+      "payload": {"turn_id": "FOREGROUND_A", "source_event_id": "USER_EVENT_A", "text": "summarize the current discussion"}
     }
   ],
   "expectations": {
@@ -45,5 +45,11 @@
     "provenance_required": true,
     "max_unsolicited_messages": 0,
     "parity_group": "provider-capability-gate"
+  },
+  "execution": {
+    "status": "contract_only",
+    "target": "future_orchestration",
+    "reason": "provider capability negotiation lives above the current reducer boundary",
+    "deferred_capabilities": ["provider_capability_gate", "prefetched_no_tool_fallback"]
   }
 }

@@ -6,10 +6,45 @@ This RFC defines the cross-surface session contract for live assistance and
 the version-one public evaluation corpus. It covers Terminal Sidekick, the
 Coach HUD, and Native Recall without collapsing them into one authority model.
 
-The GUI becomes session-aware. Minutes owns that continuity; a model process
-does not need to stay alive between turns. Public eval fixtures are synthetic
-from scratch. Redacting, obfuscating, anonymizing, or swapping names in a real
-meeting is not an acceptable way to create a committed fixture.
+The target GUI becomes session-aware. Minutes owns that continuity; a model
+process does not need to stay alive between turns. Public eval fixtures are
+synthetic from scratch. Redacting, obfuscating, anonymizing, or swapping names
+in a real meeting is not an acceptable way to create a committed fixture.
+
+## Implementation Status
+
+This RFC is the target contract, not a claim that every surface below exists.
+The current staged branch contains only these foundations:
+
+- an isolated, hardened core session reducer with typed identifiers,
+  generation-bearing invocation identities, immutable evidence provenance,
+  phase/source admission rules, duplicate and blank-value rejection, and
+  stop/finalization cancellation;
+- focused reducer tests for priority, stale completion, session isolation,
+  correction, invalidation, capture-mode, lifecycle, and evidence behavior;
+- fourteen synthetic JSON behavior fixtures with explicit executable,
+  executable-projection, or contract-only classifications;
+- a versioned schema validator, actual reducer and canonical-routing replay
+  runners, and double-run determinism checks;
+- a structural privacy checker plus sixteen Python privacy/schema tests,
+  including corpus checks and fail-closed negative controls;
+- an independent `live_sidekick_eval` CI job required by the aggregate CI gate;
+- generated Terminal Sidekick skill/routing definitions.
+
+The following remain deferred and are required before the corresponding RFC
+acceptance criteria can be claimed:
+
+- focus generation, provider capabilities, bounded history, explicit attaching
+  and invalidated phases, and native screen-disclosure state;
+- Native Recall session integration and any native live-assistance GUI;
+- evented strategist scheduling and foreground-preemption adapters; and
+- signed-app visual, accessibility, cancellation, and real-capture dogfood.
+
+The committed JSON files remain public **behavior specifications**, but their
+execution claims are now machine-enforced: five are fully executable, four are
+executable projections that name deferred assertions, and five are explicitly
+contract-only. Native Recall descriptions in this RFC are intended UX and
+engineering requirements, not documentation of a shipped interface.
 
 ## Motivation
 
@@ -185,9 +220,13 @@ The frontend displays only chunks that match the visible session, turn, and
 generations. Switching meetings cancels or isolates in-flight work. Late chunks
 from the old focus are discarded rather than appended to the new conversation.
 
-Role, posture, and explicit corrections persist across fresh calls within one
-session. Raw conversation is bounded in memory and invalidated when its source
-policy or meeting focus becomes incompatible.
+Role and posture values persist across fresh calls within one compatible
+session. A source-policy invalidation cancels in-flight work and clears
+source-bound evidence, speaker corrections, and the role's source-event
+reference. It may preserve the generic role value and posture because those
+preferences are not themselves meeting evidence. Raw conversation is bounded
+in memory and invalidated when its source policy or meeting focus becomes
+incompatible.
 
 ## Provider Capabilities
 
@@ -230,8 +269,10 @@ crates/core/tests/fixtures/live_sidekick_eval/v1/
 ```
 
 The documents are a public behavior schema, intentionally decoupled from Rust
-serde types in this slice. Future runners may adapt them to internal reducer
-types.
+serde types. A versioned Python validator checks the full envelope and explicit
+execution classification. The Rust runner adapts only declared core-reducer
+events, and the JavaScript runner sends declared routing cases through the
+compiled canonical router.
 
 The required envelope is:
 
@@ -285,7 +326,7 @@ names.
 
 ## V1 Scenario Set
 
-The committed suite covers:
+The committed behavior-specification set covers:
 
 1. capture-mode parity,
 2. typed-user preemption,
@@ -302,9 +343,22 @@ The committed suite covers:
 13. provider capability denial,
 14. source-policy invalidation.
 
-The deterministic runner uses a logical clock, scripted actions, fixed replay,
-no network, and a double-run equality assertion. It evaluates reducer and
-orchestration behavior rather than model eloquence.
+Execution status is explicit rather than inferred from presence in the corpus:
+
+- four fixtures fully execute against the core reducer;
+- four execute a named core-reducer projection and list their deferred
+  assertions;
+- one fully executes three cases through the compiled canonical skill router;
+- five remain contract-only for future GUI, provider, cadence, or screen
+  orchestration.
+
+The core runner executes eight fixtures across nine declared replays, runs each
+replay twice, compares the results for equality, then compares the normalized
+trace and final state to the fixture. The routing runner executes its three
+cases twice through the canonical router. Both are network-free and evaluate
+behavior rather than model eloquence. Contract-only scenarios never enter an
+executable runner, so their presence must not be presented as implementation
+proof.
 
 ## Fixture Privacy Policy
 
@@ -392,11 +446,43 @@ The publication boundary has four human steps:
 4. The reviewer attests that no real identity, transcript, distinctive phrase,
    or identifying combination was copied.
 
-CI runs the structural checker and its negative controls. CI cannot prove
-non-overlap with a private corpus that it does not possess, so local review and
+The independent `live_sidekick_eval` CI job runs structural privacy, privacy and
+schema controls, versioned schema validation, canonical routing replay, and
+actual core-reducer replay. The aggregate CI gate depends on that job even when
+ordinary Rust path filters would otherwise skip work. CI can never prove
+non-overlap with a private corpus that it does not possess; local review and
 attestation remain mandatory for each new fixture batch.
 
-## Acceptance Criteria
+For this staged batch, the public structural and execution gates pass. The
+optional authorized private-corpus overlap command was not run, so no private
+non-overlap attestation is claimed by this RFC update.
+
+Run the same public gates locally:
+
+```bash
+python3 scripts/check_live_sidekick_fixture_privacy.py
+python3 -m unittest \
+  tests/eval/test_live_sidekick_fixture_privacy.py \
+  tests/eval/test_live_sidekick_fixture_schema.py
+python3 tests/eval/live_sidekick_fixture_schema.py
+cargo test -p minutes-core --lib live_sidekick --no-fail-fast
+cargo test -p minutes-core --no-default-features \
+  --test live_sidekick_eval -- --test-threads=1
+npm --prefix tooling/skills run build
+node tests/eval/live_sidekick_routing_eval.mjs
+```
+
+These commands validate fourteen focused reducer tests, fourteen
+schema-valid/privacy-clean fixtures, sixteen Python controls, eight core-target
+fixtures across nine deterministic replays, and three routing cases replayed
+twice. They do **not** execute the five contract-only scenarios or the deferred
+assertions named by the four projections, and they do not prove Native Recall
+GUI behavior.
+
+## Target Acceptance Criteria
+
+These are release-conformance criteria for the integrated feature. They are not
+all satisfied by the current isolated reducer and behavior fixtures.
 
 The session implementation is conformant when:
 

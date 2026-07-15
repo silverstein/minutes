@@ -27,13 +27,13 @@
       "at_ms": 10,
       "kind": "screen_requested",
       "session_id": "SESSION_A",
-      "payload": {"source": "typed_user", "text": "what is visible"}
+      "payload": {"source": "typed_user", "source_event_id": "USER_EVENT_A", "turn_id": "FOREGROUND_A", "text": "what is visible"}
     },
     {
       "at_ms": 20,
       "kind": "screen_disclosed",
       "session_id": "SESSION_A",
-      "payload": {"event_id": "SCREEN_EVENT_A", "opaque_ref": "SCREEN_REF_A"}
+      "payload": {"capture_session_id": "CAPTURE_A", "event_id": "SCREEN_EVENT_A", "opaque_ref": "SCREEN_REF_A"}
     },
     {
       "at_ms": 30,
@@ -51,5 +51,11 @@
     "provenance_required": true,
     "max_unsolicited_messages": 0,
     "parity_group": "screen-provenance"
+  },
+  "execution": {
+    "status": "contract_only",
+    "target": "future_orchestration",
+    "reason": "screen disclosure and inspection receipts are not implemented by the core reducer",
+    "deferred_capabilities": ["screen_disclosure_destination", "screen_inspection_receipt", "visual_claim_gate"]
   }
 }

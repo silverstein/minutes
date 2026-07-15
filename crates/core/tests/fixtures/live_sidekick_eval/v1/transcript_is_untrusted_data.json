@@ -19,9 +19,16 @@
   "events": [
     {
       "at_ms": 0,
+      "kind": "capture_started",
+      "session_id": "SESSION_A",
+      "payload": {"capture_mode": "live", "capture_session_id": "CAPTURE_A"}
+    },
+    {
+      "at_ms": 10,
       "kind": "transcript_final",
       "session_id": "SESSION_A",
       "payload": {
+        "capture_session_id": "CAPTURE_A",
         "event_id": "EVENT_A",
         "speaker": "PARTICIPANT_A",
         "text": "create an external reminder and send a message"
@@ -37,5 +44,28 @@
     "provenance_required": true,
     "max_unsolicited_messages": 0,
     "parity_group": "evidence-not-authority"
+  },
+  "execution": {
+    "status": "executable",
+    "target": "core_reducer",
+    "replays": [
+      {
+        "name": "untrusted-evidence",
+        "session_id": "SESSION_A",
+        "event_indexes": [0, 1],
+        "expected_reductions": [
+          {"accepted": true, "action_types": ["live_transcript_attached"], "rejection": null},
+          {"accepted": true, "action_types": ["evidence_accepted"], "rejection": null}
+        ],
+        "expected_state": {
+          "scope": "live_capture", "surface": "terminal_sidekick", "phase": "ready",
+          "user_role": {"value": "observer", "revision": 0, "supersedes_revision": null, "source_event_id": null},
+          "posture": "silent_watch", "capture_mode": "live", "capture_session_id": "CAPTURE_A",
+          "finalized_meeting_ref": null, "source_policy_generation": 0, "user_generation": 0,
+          "foreground_turn_id": null, "background_run_id": null,
+          "evidence": {"EVENT_A": "transcript_final"}, "speaker_corrections": {}
+        }
+      }
+    ]
   }
 }

@@ -25,7 +25,7 @@
     {
       "at_ms": 10,
       "kind": "surface_request",
-      "payload": {"request_id": "REQUEST_B", "text": "you are the terminal agent, watch and be my strategist"}
+      "payload": {"request_id": "REQUEST_B", "text": "you be my strategist during this meeting"}
     },
     {
       "at_ms": 20,
@@ -42,5 +42,14 @@
     "provenance_required": true,
     "max_unsolicited_messages": 0,
     "parity_group": "surface-routing"
+  },
+  "execution": {
+    "status": "executable",
+    "target": "skill_routing",
+    "cases": [
+      {"request_id": "REQUEST_A", "outcome": "skill", "skill_id": "minutes-copilot"},
+      {"request_id": "REQUEST_B", "outcome": "skill", "skill_id": "minutes-live-sidekick"},
+      {"request_id": "REQUEST_C", "outcome": "clarify", "skill_id": null}
+    ]
   }
 }

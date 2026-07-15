@@ -19,24 +19,30 @@
   "events": [
     {
       "at_ms": 0,
-      "kind": "background_started",
+      "kind": "capture_started",
       "session_id": "SESSION_A",
-      "payload": {"turn_id": "BACKGROUND_A", "source_policy_generation": 1}
+      "payload": {"capture_mode": "live", "capture_session_id": "CAPTURE_A"}
     },
     {
       "at_ms": 10,
-      "kind": "transcript_final",
+      "kind": "background_started",
       "session_id": "SESSION_A",
-      "payload": {"event_id": "EVENT_A", "speaker": "REVIEWER", "text": "the current section is restricted"}
+      "payload": {"run_id": "BACKGROUND_A"}
     },
     {
-      "at_ms": 11,
+      "at_ms": 20,
+      "kind": "transcript_final",
+      "session_id": "SESSION_A",
+      "payload": {"capture_session_id": "CAPTURE_A", "event_id": "EVENT_A", "speaker": "REVIEWER", "text": "the current section is restricted"}
+    },
+    {
+      "at_ms": 30,
       "kind": "source_policy_invalidated",
       "session_id": "SESSION_A",
       "payload": {"source_policy_generation": 2, "reason": "sensitivity_changed"}
     },
     {
-      "at_ms": 12,
+      "at_ms": 40,
       "kind": "focus_changed",
       "session_id": "SESSION_B",
       "payload": {"focus_generation": 2}
@@ -51,5 +57,35 @@
     "provenance_required": true,
     "max_unsolicited_messages": 0,
     "parity_group": "policy-invalidation"
+  },
+  "execution": {
+    "status": "executable_projection",
+    "target": "core_reducer",
+    "deferred_assertions": ["isolate_previous_focus"],
+    "replays": [
+      {
+        "name": "policy-bound-state",
+        "session_id": "SESSION_A",
+        "event_indexes": [0, 1, 2, 3],
+        "expected_reductions": [
+          {"accepted": true, "action_types": ["live_transcript_attached"], "rejection": null},
+          {"accepted": true, "action_types": ["background_invocation_registered"], "action_invocations": [
+            {"type": "background_invocation_registered", "invocation": {"sequence": 1, "source_policy_generation": 0, "user_generation": 0}}
+          ], "rejection": null},
+          {"accepted": true, "action_types": ["evidence_accepted"], "rejection": null},
+          {"accepted": true, "action_types": ["cancel_background", "policy_bound_state_cleared"], "action_invocations": [
+            {"type": "cancel_background", "invocation": {"sequence": 1, "source_policy_generation": 0, "user_generation": 0}}
+          ], "rejection": null}
+        ],
+        "expected_state": {
+          "scope": "live_capture", "surface": "terminal_sidekick", "phase": "ready",
+          "user_role": {"value": "observer", "revision": 0, "supersedes_revision": null, "source_event_id": null},
+          "posture": "strategist", "capture_mode": "live", "capture_session_id": "CAPTURE_A",
+          "finalized_meeting_ref": null, "source_policy_generation": 2, "user_generation": 0,
+          "foreground_turn_id": null, "background_run_id": null,
+          "evidence": {}, "speaker_corrections": {}
+        }
+      }
+    ]
   }
 }

@@ -19,21 +19,27 @@
   "events": [
     {
       "at_ms": 0,
-      "kind": "capture_stopped",
+      "kind": "capture_started",
       "session_id": "SESSION_A",
-      "payload": {"final_live_event_id": "EVENT_A"}
+      "payload": {"capture_mode": "recording", "capture_session_id": "CAPTURE_A"}
     },
     {
       "at_ms": 10,
-      "kind": "processing_started",
+      "kind": "capture_stopped",
       "session_id": "SESSION_A",
-      "payload": {"stage": "transcribing"}
+      "payload": {"capture_session_id": "CAPTURE_A", "final_live_event_id": "EVENT_A"}
     },
     {
       "at_ms": 20,
+      "kind": "processing_started",
+      "session_id": "SESSION_A",
+      "payload": {"capture_session_id": "CAPTURE_A", "stage": "transcribing"}
+    },
+    {
+      "at_ms": 30,
       "kind": "user_message",
       "session_id": "SESSION_A",
-      "payload": {"turn_id": "FOREGROUND_A", "text": "is the final debrief ready"}
+      "payload": {"turn_id": "FOREGROUND_A", "source_event_id": "USER_EVENT_A", "text": "is the final debrief ready"}
     }
   ],
   "expectations": {
@@ -45,5 +51,30 @@
     "provenance_required": true,
     "max_unsolicited_messages": 1,
     "parity_group": "meeting-end-handoff"
+  },
+  "execution": {
+    "status": "executable_projection",
+    "target": "core_reducer",
+    "deferred_assertions": ["defer_final_debrief_until_finalized_artifact"],
+    "replays": [
+      {
+        "name": "lifecycle-to-processing",
+        "session_id": "SESSION_A",
+        "event_indexes": [0, 1, 2],
+        "expected_reductions": [
+          {"accepted": true, "action_types": ["live_transcript_attached"], "rejection": null},
+          {"accepted": true, "action_types": ["meeting_ended"], "rejection": null},
+          {"accepted": true, "action_types": ["final_transcript_processing"], "rejection": null}
+        ],
+        "expected_state": {
+          "scope": "live_capture", "surface": "terminal_sidekick", "phase": "processing",
+          "user_role": {"value": "participant", "revision": 0, "supersedes_revision": null, "source_event_id": null},
+          "posture": "decision_tracker", "capture_mode": "recording", "capture_session_id": "CAPTURE_A",
+          "finalized_meeting_ref": null, "source_policy_generation": 0, "user_generation": 0,
+          "foreground_turn_id": null, "background_run_id": null,
+          "evidence": {}, "speaker_corrections": {}
+        }
+      }
+    ]
   }
 }

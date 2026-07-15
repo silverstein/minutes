@@ -42,12 +42,28 @@ Already organized by type — keep as-is. Plans are forward-looking implementati
 ## Root-Level Docs (do NOT move these)
 
 - **`docs/coach.md`** — Product guide for the live Coach copilot, controls, privacy, and graceful degradation
+- **`docs/live-assistance.md`** — User-facing guide to Coach, Terminal Sidekick, and the planned session-aware Native Recall surface
 - **`PLAN.md`** — Master project plan (architecture, vision, competitive landscape). Referenced as the "read this first" doc in CLAUDE.md.
 - **`README.md`** — Project landing page
 - **`CLAUDE.md`** — Developer guide (tool setup, build commands, architecture decisions, ecosystem integration)
 - **`AGENTS.md`** — Agent-specific instructions
 - **`DESIGN.md`** — Design system (fonts, colors, spacing, visual direction)
 - **`CONTRIBUTING.md`** — Contributing guidelines
+
+## Live Assistance Design and Implementation Truth
+
+- [Live assistance surfaces](live-assistance.md) explains what users can choose
+  today and what remains staged or planned.
+- [Coach](coach.md) documents the existing first-party HUD.
+- [RFC 0006](rfcs/0006-live-sidekick-session-and-eval.md) defines the target
+  cross-surface session and public-fixture contract.
+- [Live assistance implementation plan](plans/live-assistance-orchestration-2026-07-15.md)
+  records the implemented/deferred boundary and required verification gates.
+- [Developing Coach and live assistance](development/copilot.md) documents
+  subsystem ownership and runnable checks.
+
+Do not infer feature completion from an accepted RFC or a committed fixture.
+The implementation snapshot in the plan is the current source of truth.
 
 ## Naming Conventions
 

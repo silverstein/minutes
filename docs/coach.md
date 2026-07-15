@@ -4,6 +4,24 @@ Coach is Minutes' optional real-time copilot. It listens to the same live eviden
 
 Coach is an additive consumer. Starting, pausing, stopping, or losing the model never stops an existing recording or changes the saved transcript.
 
+## Choose the right assistance surface
+
+Coach is not the terminal agent and it is not the Recall conversation panel.
+
+| Surface | Use it for | Current availability |
+| --- | --- | --- |
+| Coach HUD | Continuous, concise nudges against one explicit goal | Available through `minutes copilot`; Minutes owns its cadence and model runtime |
+| Terminal Sidekick | Ask your configured terminal agent to investigate, answer, strategize, or track decisions | The staged agent skill exists; continuous proactive behavior is available only when the host can prove event delivery, cancellation, and foreground priority |
+| Native Recall | A least-privilege in-app conversation attached to the active meeting | Session-aware live orchestration is planned, not implemented by the live-sidekick foundation branch |
+
+Say “start Minutes Coach” when you want this HUD. Say “you, the terminal agent,
+be my strategist during this meeting” when you want Terminal Sidekick. If the
+request is only “coach me live,” a supporting agent should ask which surface
+you mean instead of starting one by assumption.
+
+See [Live assistance surfaces](live-assistance.md) for Terminal Sidekick
+discovery, capability limits, and the native Recall roadmap.
+
 ## Start and stop
 
 Start a local Ollama model first if needed (the default model is `llama3.2`), then open the foreground HUD:
@@ -41,3 +59,5 @@ The `minutes-copilot` agent skill is a thin front door over these same controls:
 - **Bounded work.** Coach uses bounded nonblocking queues and drops its own stale/saturated work. Capture, diarization, and finalization do not wait on a model request.
 
 The versioned stream and privacy boundary are defined in [RFC 0004](rfcs/0004-copilot-realtime-stream.md). The deterministic quality harness is defined in [RFC 0005](rfcs/0005-copilot-eval.md).
+
+The cross-surface target contract is [RFC 0006](rfcs/0006-live-sidekick-session-and-eval.md). Its live-sidekick corpus has explicit executable, executable-projection, and contract-only classifications. It is separate from the existing Coach quality corpus and harness described by RFC 0005.

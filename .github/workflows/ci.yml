@@ -433,6 +433,55 @@ jobs:
       - name: Verify llms.txt and related agent docs are in sync with sources
         run: node scripts/generate_llms_txt.mjs --check
 
+  live_sidekick_eval:
+    name: Live Sidekick Privacy and Behavior Evals
+    # Intentionally independent of the Rust path filter. A fixture-, schema-,
+    # privacy-, or runner-only PR must not be able to skip this gate.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Public fixture privacy gate
+        run: python3 scripts/check_live_sidekick_fixture_privacy.py
+
+      - name: Privacy and schema negative controls
+        run: >-
+          python3 -m unittest
+          tests/eval/test_live_sidekick_fixture_privacy.py
+          tests/eval/test_live_sidekick_fixture_schema.py
+
+      - name: Validate versioned fixture schema and execution classifications
+        run: python3 tests/eval/live_sidekick_fixture_schema.py
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install and build canonical skill router
+        working-directory: tooling/skills
+        # This private compiler package intentionally has no lockfile or
+        # declared runtime dependencies. Pin the two build-only packages here
+        # and override its repo-local typeRoots so a clean runner is sufficient.
+        run: |
+          npm install --no-save --no-audit --no-fund \
+            typescript@5.9.3 @types/node@22.19.11
+          ./node_modules/.bin/tsc \
+            -p tsconfig.json --typeRoots node_modules/@types
+
+      - name: Replay routing fixture twice through canonical router
+        run: node tests/eval/live_sidekick_routing_eval.mjs
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install audio dev headers (Linux)
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libpipewire-0.3-dev libspa-0.2-dev
+
+      - name: Replay executable fixtures twice through actual core reducer
+        run: cargo test -p minutes-core --no-default-features --test live_sidekick_eval -- --test-threads=1
+        timeout-minutes: 8
+
   # Single aggregator gate, intended to be the ONLY required status check in
   # branch protection. The Rust matrix jobs (test / install / linux_full_build /
   # desktop_windows) are gated by `needs.changes.outputs.rust == 'true'`, so on a
@@ -457,6 +506,7 @@ jobs:
       - agents_sync
       - site_release_consistency
       - llms_sync
+      - live_sidekick_eval
     if: always()
     runs-on: ubuntu-latest
     steps:

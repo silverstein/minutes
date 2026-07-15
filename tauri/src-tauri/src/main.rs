@@ -1331,8 +1331,7 @@ fn is_content_change(kind: &notify::EventKind) -> bool {
     use notify::event::ModifyKind;
     !matches!(
         kind,
-        notify::EventKind::Access(_)
-            | notify::EventKind::Modify(ModifyKind::Metadata(_))
+        notify::EventKind::Access(_) | notify::EventKind::Modify(ModifyKind::Metadata(_))
     )
 }
 
@@ -1418,9 +1417,7 @@ fn spawn_meetings_refresh_watcher(app: &tauri::AppHandle, output_dir: std::path:
             // a row. Each emit drives a full list rebuild in the UI, so
             // without this drain the list visibly flashes once per raw event
             // instead of once per save.
-            while let Ok(Ok(_event)) =
-                rx.recv_timeout(std::time::Duration::from_millis(250))
-            {
+            while let Ok(Ok(_event)) = rx.recv_timeout(std::time::Duration::from_millis(250)) {
                 // drained, ignored
             }
             let _ = app_handle.emit("artifacts:changed", ());

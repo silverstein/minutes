@@ -1037,7 +1037,22 @@ fn run_fixture(fixture: &EvalFixture, mode: ReplayMode) -> Result<ReplayResult, 
                     |signal| matches!(signal, MockSignal::Completed(revision) if revision == call.evidence_revision),
                     format!("model completion for revision {}", call.evidence_revision),
                 )?;
-                wait_for_request_settled(&runner, call.evidence_revision)?;
+                let settled_state = wait_for_request_settled(&runner, call.evidence_revision)?;
+                // The worker publishes an accepted nudge immediately after it
+                // moves from Thinking to Nudge. Synchronize on that publication
+                // before the next fixture event can make the nudge stale. OS
+                // scheduling must not decide whether deterministic replay sees it.
+                if settled_state == CopilotState::Nudge {
+                    wait_for_nudge_published(
+                        &runner,
+                        &clock,
+                        &snapshots,
+                        &transcript,
+                        latest_revision,
+                        call.evidence_revision,
+                        &mut observations,
+                    )?;
+                }
                 drain_runner_events(
                     &runner,
                     &clock,
@@ -1199,7 +1214,7 @@ fn wait_for_signal(
 fn wait_for_request_settled(
     runner: &CopilotRunner,
     evidence_revision: u64,
-) -> Result<(), EvalError> {
+) -> Result<CopilotState, EvalError> {
     let deadline = Instant::now() + WORKER_TIMEOUT;
     while Instant::now() < deadline {
         let health = runner.health();
@@ -1213,13 +1228,50 @@ fn wait_for_request_settled(
                         .unwrap_or_else(|| "model request failed".into()),
                 ));
             }
-            return Ok(());
+            return Ok(health.state);
         }
         std::thread::yield_now();
     }
     Err(EvalError::RunnerStalled(format!(
         "runner settlement for revision {evidence_revision}"
     )))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn wait_for_nudge_published(
+    runner: &CopilotRunner,
+    clock: &LogicalClock,
+    snapshots: &BTreeMap<u64, RequestSnapshot>,
+    transcript: &BTreeMap<u64, CopilotUtterance>,
+    latest_revision: u64,
+    evidence_revision: u64,
+    observations: &mut Vec<NudgeObservation>,
+) -> Result<(), EvalError> {
+    let deadline = Instant::now() + WORKER_TIMEOUT;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(EvalError::RunnerStalled(format!(
+                "nudge publication for revision {evidence_revision}"
+            )));
+        }
+        let Some(event) = runner.recv_timeout(remaining) else {
+            return Err(EvalError::RunnerStalled(format!(
+                "nudge publication for revision {evidence_revision}"
+            )));
+        };
+        if record_runner_event(
+            event,
+            clock,
+            snapshots,
+            transcript,
+            latest_revision,
+            observations,
+        )? == Some(evidence_revision)
+        {
+            return Ok(());
+        }
+    }
 }
 
 fn apply_event_freshness(runner: &CopilotRunner, session_epoch: u64, event: &ExpandedEvent) {
@@ -1244,48 +1296,68 @@ fn drain_runner_events(
     observations: &mut Vec<NudgeObservation>,
 ) -> Result<(), EvalError> {
     while let Some(event) = runner.try_recv() {
-        match event {
-            RunnerEvent::Nudge(nudge) => {
-                let Some(snapshot) = snapshots.get(&nudge.evidence_revision) else {
-                    continue;
-                };
-                let grounded = nudge.grounded_partial_identity();
-                let stale_partial = grounded.is_some_and(|(sequence, revision)| {
-                    transcript.get(&sequence).is_none_or(|utterance| {
-                        utterance.update_kind != TranscriptUpdateKind::Partial
-                            || utterance.revision != revision
-                    })
-                });
-                observations.push(NudgeObservation {
-                    id: nudge.id,
-                    kind: nudge.kind,
-                    text: nudge.text,
-                    source_chip: nudge.source_chip,
-                    opportunity: nudge.opportunity,
-                    confidence: nudge.confidence,
-                    evidence_revision: nudge.evidence_revision,
-                    evidence_time_ms: snapshot.evidence_time_ms,
-                    delivered_at_ms: clock.elapsed_us() / 1_000,
-                    grounded_in_partial: grounded.is_some(),
-                    stale_at_delivery: latest_revision > nudge.evidence_revision || stale_partial,
-                    contradiction_after_revision: false,
-                    duplicate_or_nagging: false,
-                    matched_opportunity: None,
-                });
-            }
-            RunnerEvent::Degraded { error } => return Err(EvalError::RunnerDegraded(error)),
-            RunnerEvent::StateChanged(_)
-            | RunnerEvent::Model(_)
-            | RunnerEvent::RequestCancelled { .. }
-            | RunnerEvent::EvidenceRetracted { .. }
-            | RunnerEvent::TopicShiftDetected { .. }
-            | RunnerEvent::GroundingRefreshed { .. }
-            | RunnerEvent::StrategyUpdated { .. }
-            | RunnerEvent::PolicyAdjusted(_)
-            | RunnerEvent::DepthDegraded { .. } => {}
-        }
+        let _ = record_runner_event(
+            event,
+            clock,
+            snapshots,
+            transcript,
+            latest_revision,
+            observations,
+        )?;
     }
     Ok(())
+}
+
+fn record_runner_event(
+    event: RunnerEvent,
+    clock: &LogicalClock,
+    snapshots: &BTreeMap<u64, RequestSnapshot>,
+    transcript: &BTreeMap<u64, CopilotUtterance>,
+    latest_revision: u64,
+    observations: &mut Vec<NudgeObservation>,
+) -> Result<Option<u64>, EvalError> {
+    match event {
+        RunnerEvent::Nudge(nudge) => {
+            let Some(snapshot) = snapshots.get(&nudge.evidence_revision) else {
+                return Ok(None);
+            };
+            let evidence_revision = nudge.evidence_revision;
+            let grounded = nudge.grounded_partial_identity();
+            let stale_partial = grounded.is_some_and(|(sequence, revision)| {
+                transcript.get(&sequence).is_none_or(|utterance| {
+                    utterance.update_kind != TranscriptUpdateKind::Partial
+                        || utterance.revision != revision
+                })
+            });
+            observations.push(NudgeObservation {
+                id: nudge.id,
+                kind: nudge.kind,
+                text: nudge.text,
+                source_chip: nudge.source_chip,
+                opportunity: nudge.opportunity,
+                confidence: nudge.confidence,
+                evidence_revision,
+                evidence_time_ms: snapshot.evidence_time_ms,
+                delivered_at_ms: clock.elapsed_us() / 1_000,
+                grounded_in_partial: grounded.is_some(),
+                stale_at_delivery: latest_revision > evidence_revision || stale_partial,
+                contradiction_after_revision: false,
+                duplicate_or_nagging: false,
+                matched_opportunity: None,
+            });
+            Ok(Some(evidence_revision))
+        }
+        RunnerEvent::Degraded { error } => Err(EvalError::RunnerDegraded(error)),
+        RunnerEvent::StateChanged(_)
+        | RunnerEvent::Model(_)
+        | RunnerEvent::RequestCancelled { .. }
+        | RunnerEvent::EvidenceRetracted { .. }
+        | RunnerEvent::TopicShiftDetected { .. }
+        | RunnerEvent::GroundingRefreshed { .. }
+        | RunnerEvent::StrategyUpdated { .. }
+        | RunnerEvent::PolicyAdjusted(_)
+        | RunnerEvent::DepthDegraded { .. } => Ok(None),
+    }
 }
 
 fn wait_for_depth_processed(

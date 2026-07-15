@@ -100,9 +100,51 @@ pub enum RecallStreamEventKind {
     Retracted,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecallTerminalReason {
+    Completed,
+    UserCancelled,
+    Superseded,
+    ProviderChanged,
+    FocusChanged,
+    SourcePolicyChanged,
+    MeetingEnded,
+    LifecycleChanged,
+    ProviderFailed,
+    InternalFailure,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecallTerminalPayload {
+    pub reason: RecallTerminalReason,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecallTransition {
+    pub effects: Vec<RecallEffect>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecallEffect {
+    ReducerAction(AssistanceAction),
+    EmitTerminal(RecallStreamEnvelope<RecallTerminalPayload>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecallBegin {
+    pub invocation: RecallInvocation,
+    pub effects: Vec<RecallEffect>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CompletionDisposition {
-    Publish,
+    Publish(Box<RecallTransition>),
+    Failed {
+        transition: Box<RecallTransition>,
+        rejection: CompletionRejection,
+    },
     Retract(CompletionRejection),
 }
 
@@ -113,6 +155,8 @@ pub enum CompletionRejection {
     WrongFocus,
     WrongProviderBinding,
     InvalidEventSequence,
+    TerminalEventRequiresTransition,
+    StreamClosed,
     Reducer(RejectionReason),
     MissingPublishAction,
 }
@@ -123,6 +167,7 @@ pub enum RecallOrchestrationError {
     InvalidGeneration,
     Rejected(RejectionReason),
     MissingInvocationAction,
+    TerminalStream(CompletionRejection),
 }
 
 /// Process-local Native Recall session truth.
@@ -137,7 +182,9 @@ pub struct RecallOrchestration {
     source: RecallSource,
     focus_generation: u64,
     session: LiveAssistanceSession,
+    stream_authority: Option<RecallInvocation>,
     stream_event_sequence: u64,
+    stream_closed: bool,
 }
 
 impl RecallOrchestration {
@@ -198,7 +245,9 @@ impl RecallOrchestration {
             source,
             focus_generation,
             session,
+            stream_authority: None,
             stream_event_sequence: 0,
+            stream_closed: true,
         })
     }
 
@@ -217,7 +266,11 @@ impl RecallOrchestration {
     pub fn bind_provider(
         &mut self,
         binding: ProviderBinding,
-    ) -> Result<Vec<AssistanceAction>, RecallOrchestrationError> {
+    ) -> Result<RecallTransition, RecallOrchestrationError> {
+        let prepared_terminal = self.prepare_active_terminal(
+            RecallStreamEventKind::Retracted,
+            RecallTerminalReason::ProviderChanged,
+        )?;
         let result = self
             .session
             .reduce(AssistanceEvent::ProviderBindingChanged {
@@ -225,7 +278,16 @@ impl RecallOrchestration {
                 binding,
             });
         if result.accepted {
-            Ok(result.actions)
+            let terminal = if action_cancelled_foreground(&result.actions) {
+                Some(self.commit_terminal(
+                    prepared_terminal.ok_or(RecallOrchestrationError::MissingInvocationAction)?,
+                ))
+            } else {
+                None
+            };
+            Ok(RecallTransition {
+                effects: ordered_effects(result.actions, terminal),
+            })
         } else {
             Err(RecallOrchestrationError::Rejected(
                 result.rejection.expect("a rejected reduction has a reason"),
@@ -239,10 +301,14 @@ impl RecallOrchestration {
         turn_id: ForegroundTurnId,
         source_event_id: EvidenceId,
         text: String,
-    ) -> Result<(RecallInvocation, Vec<AssistanceAction>), RecallOrchestrationError> {
+    ) -> Result<RecallBegin, RecallOrchestrationError> {
         if client_request_id.trim().is_empty() {
             return Err(RecallOrchestrationError::InvalidSource);
         }
+        let prepared_terminal = self.prepare_active_terminal(
+            RecallStreamEventKind::Retracted,
+            RecallTerminalReason::Superseded,
+        )?;
         let result = self.session.reduce(AssistanceEvent::UserMessage {
             session_id: self.session.id.clone(),
             turn_id: turn_id.clone(),
@@ -271,28 +337,54 @@ impl RecallOrchestration {
             .as_ref()
             .map(RecallProviderDispatch::from)
             .ok_or(RecallOrchestrationError::MissingInvocationAction)?;
+        let prior_terminal = if action_cancelled_foreground(&result.actions) {
+            Some(self.commit_terminal(
+                prepared_terminal.ok_or(RecallOrchestrationError::MissingInvocationAction)?,
+            ))
+        } else {
+            None
+        };
+        let token = RecallInvocation {
+            schema_version: RECALL_ENVELOPE_SCHEMA_VERSION,
+            process_epoch: self.process_epoch.clone(),
+            source_binding_id: self.source_binding_id.clone(),
+            assistance_session_id: self.session.id.clone(),
+            foreground_turn_id: turn_id,
+            invocation,
+            focus_generation: self.focus_generation,
+            provider,
+            client_request_id: client_request_id.to_owned(),
+        };
+        self.stream_authority = Some(token.clone());
         self.stream_event_sequence = 0;
+        self.stream_closed = false;
 
-        Ok((
-            RecallInvocation {
-                schema_version: RECALL_ENVELOPE_SCHEMA_VERSION,
-                process_epoch: self.process_epoch.clone(),
-                source_binding_id: self.source_binding_id.clone(),
-                assistance_session_id: self.session.id.clone(),
-                foreground_turn_id: turn_id,
-                invocation,
-                focus_generation: self.focus_generation,
-                provider,
-                client_request_id: client_request_id.to_owned(),
-            },
-            result.actions,
-        ))
+        Ok(RecallBegin {
+            invocation: token,
+            effects: ordered_effects(result.actions, prior_terminal),
+        })
     }
 
     pub fn complete_foreground(&mut self, token: &RecallInvocation) -> CompletionDisposition {
         if let Err(rejection) = self.authorize_event(token) {
             return CompletionDisposition::Retract(rejection);
         }
+        let prepared_done = match self.prepare_terminal(
+            token,
+            RecallStreamEventKind::Done,
+            RecallTerminalReason::Completed,
+        ) {
+            Ok(terminal) => terminal,
+            Err(rejection) => return CompletionDisposition::Retract(rejection),
+        };
+        let prepared_error = match self.prepare_terminal(
+            token,
+            RecallStreamEventKind::Error,
+            RecallTerminalReason::InternalFailure,
+        ) {
+            Ok(terminal) => terminal,
+            Err(rejection) => return CompletionDisposition::Retract(rejection),
+        };
 
         let result = self.session.reduce(AssistanceEvent::ForegroundCompleted {
             session_id: self.session.id.clone(),
@@ -313,9 +405,18 @@ impl RecallOrchestration {
                 } if turn_id == &token.foreground_turn_id && invocation == &token.invocation
             )
         }) {
-            CompletionDisposition::Publish
+            let terminal = self.commit_terminal(prepared_done);
+            CompletionDisposition::Publish(Box::new(RecallTransition {
+                effects: ordered_effects(result.actions, Some(terminal)),
+            }))
         } else {
-            CompletionDisposition::Retract(CompletionRejection::MissingPublishAction)
+            let terminal = self.commit_terminal(prepared_error);
+            CompletionDisposition::Failed {
+                transition: Box::new(RecallTransition {
+                    effects: ordered_effects(result.actions, Some(terminal)),
+                }),
+                rejection: CompletionRejection::MissingPublishAction,
+            }
         }
     }
 
@@ -334,11 +435,20 @@ impl RecallOrchestration {
         event_kind: RecallStreamEventKind,
         payload: T,
     ) -> Result<RecallStreamEnvelope<T>, CompletionRejection> {
+        if !matches!(
+            event_kind,
+            RecallStreamEventKind::Status | RecallStreamEventKind::Text
+        ) {
+            return Err(CompletionRejection::TerminalEventRequiresTransition);
+        }
         self.authorize_event(token)?;
         let next = self
             .stream_event_sequence
             .checked_add(1)
             .ok_or(CompletionRejection::InvalidEventSequence)?;
+        if next == u64::MAX {
+            return Err(CompletionRejection::InvalidEventSequence);
+        }
         self.stream_event_sequence = next;
         Ok(RecallStreamEnvelope {
             authority: token.clone(),
@@ -349,6 +459,9 @@ impl RecallOrchestration {
     }
 
     fn authorize_event(&self, token: &RecallInvocation) -> Result<(), CompletionRejection> {
+        if self.stream_closed {
+            return Err(CompletionRejection::StreamClosed);
+        }
         if token.schema_version != RECALL_ENVELOPE_SCHEMA_VERSION
             || token.process_epoch != self.process_epoch
         {
@@ -368,6 +481,9 @@ impl RecallOrchestration {
         if RecallProviderDispatch::from(current_provider) != token.provider {
             return Err(CompletionRejection::WrongProviderBinding);
         }
+        if self.stream_authority.as_ref() != Some(token) {
+            return Err(CompletionRejection::StreamClosed);
+        }
         if self.session.foreground_turn.as_ref().is_none_or(|turn| {
             turn.id != token.foreground_turn_id || turn.invocation != token.invocation
         }) {
@@ -378,11 +494,76 @@ impl RecallOrchestration {
         Ok(())
     }
 
+    fn prepare_terminal(
+        &self,
+        token: &RecallInvocation,
+        event_kind: RecallStreamEventKind,
+        reason: RecallTerminalReason,
+    ) -> Result<RecallStreamEnvelope<RecallTerminalPayload>, CompletionRejection> {
+        if !matches!(
+            event_kind,
+            RecallStreamEventKind::Done
+                | RecallStreamEventKind::Cancelled
+                | RecallStreamEventKind::Retracted
+                | RecallStreamEventKind::Error
+        ) {
+            return Err(CompletionRejection::TerminalEventRequiresTransition);
+        }
+        if self.stream_closed || self.stream_authority.as_ref() != Some(token) {
+            return Err(CompletionRejection::StreamClosed);
+        }
+        let next = self
+            .stream_event_sequence
+            .checked_add(1)
+            .ok_or(CompletionRejection::InvalidEventSequence)?;
+        Ok(RecallStreamEnvelope {
+            authority: token.clone(),
+            event_sequence: next,
+            event_kind,
+            payload: RecallTerminalPayload { reason },
+        })
+    }
+
+    fn prepare_active_terminal(
+        &self,
+        event_kind: RecallStreamEventKind,
+        reason: RecallTerminalReason,
+    ) -> Result<Option<RecallStreamEnvelope<RecallTerminalPayload>>, RecallOrchestrationError> {
+        if self.session.foreground_turn.is_none() {
+            return Ok(None);
+        }
+        let authority =
+            self.stream_authority
+                .as_ref()
+                .ok_or(RecallOrchestrationError::TerminalStream(
+                    CompletionRejection::StreamClosed,
+                ))?;
+        self.prepare_terminal(authority, event_kind, reason)
+            .map(Some)
+            .map_err(RecallOrchestrationError::TerminalStream)
+    }
+
+    fn commit_terminal(
+        &mut self,
+        terminal: RecallStreamEnvelope<RecallTerminalPayload>,
+    ) -> RecallStreamEnvelope<RecallTerminalPayload> {
+        debug_assert_eq!(self.stream_authority.as_ref(), Some(&terminal.authority));
+        debug_assert!(!self.stream_closed);
+        self.stream_event_sequence = terminal.event_sequence;
+        self.stream_closed = true;
+        terminal
+    }
+
     pub fn cancel_foreground(
         &mut self,
         token: &RecallInvocation,
-    ) -> Result<Vec<AssistanceAction>, CompletionRejection> {
+    ) -> Result<RecallTransition, CompletionRejection> {
         self.authorize_event(token)?;
+        let prepared_terminal = self.prepare_terminal(
+            token,
+            RecallStreamEventKind::Cancelled,
+            RecallTerminalReason::UserCancelled,
+        )?;
         let result = self.session.reduce(AssistanceEvent::ForegroundCancelled {
             session_id: self.session.id.clone(),
             turn_id: token.foreground_turn_id.clone(),
@@ -393,27 +574,98 @@ impl RecallOrchestration {
                 result.rejection.expect("a rejected reduction has a reason"),
             ));
         }
-        self.stream_event_sequence = 0;
-        Ok(result.actions)
+        let terminal = self.commit_terminal(prepared_terminal);
+        Ok(RecallTransition {
+            effects: ordered_effects(result.actions, Some(terminal)),
+        })
     }
 
-    pub fn capture_stopped(&mut self) -> Result<Vec<AssistanceAction>, RecallOrchestrationError> {
+    pub fn fail_foreground(
+        &mut self,
+        token: &RecallInvocation,
+    ) -> Result<RecallTransition, CompletionRejection> {
+        self.authorize_event(token)?;
+        let prepared_terminal = self.prepare_terminal(
+            token,
+            RecallStreamEventKind::Error,
+            RecallTerminalReason::ProviderFailed,
+        )?;
+        let result = self.session.reduce(AssistanceEvent::ForegroundFailed {
+            session_id: self.session.id.clone(),
+            turn_id: token.foreground_turn_id.clone(),
+            invocation: token.invocation,
+        });
+        if !result.accepted {
+            return Err(CompletionRejection::Reducer(
+                result.rejection.expect("a rejected reduction has a reason"),
+            ));
+        }
+        let terminal = self.commit_terminal(prepared_terminal);
+        Ok(RecallTransition {
+            effects: ordered_effects(result.actions, Some(terminal)),
+        })
+    }
+
+    pub fn capture_stopped(&mut self) -> Result<RecallTransition, RecallOrchestrationError> {
         let RecallSource::Live {
             context_session_id, ..
         } = &self.source
         else {
             return Err(RecallOrchestrationError::InvalidSource);
         };
+        let prepared_terminal = self.prepare_active_terminal(
+            RecallStreamEventKind::Retracted,
+            RecallTerminalReason::MeetingEnded,
+        )?;
         let result = self.session.reduce(AssistanceEvent::CaptureStopped {
             session_id: self.session.id.clone(),
             capture_session_id: CaptureSessionId::new(context_session_id),
         });
-        accepted_actions(result)
+        accepted_transition(self, result, prepared_terminal)
     }
 
-    pub fn processing_started(
+    pub fn invalidate_source_policy(
         &mut self,
-    ) -> Result<Vec<AssistanceAction>, RecallOrchestrationError> {
+        new_generation: u64,
+    ) -> Result<RecallTransition, RecallOrchestrationError> {
+        let prepared_terminal = self.prepare_active_terminal(
+            RecallStreamEventKind::Retracted,
+            RecallTerminalReason::SourcePolicyChanged,
+        )?;
+        let result = self
+            .session
+            .reduce(AssistanceEvent::SourcePolicyInvalidated {
+                session_id: self.session.id.clone(),
+                new_generation,
+            });
+        accepted_transition(self, result, prepared_terminal)
+    }
+
+    /// Retire the current source before the manager replaces this orchestration
+    /// with a newly verified focus. The old per-turn envelope remains available
+    /// only as the returned retraction tombstone.
+    pub fn retire_for_focus_change(
+        &mut self,
+    ) -> Result<RecallTransition, RecallOrchestrationError> {
+        let new_generation = self
+            .session
+            .source_policy_generation
+            .checked_add(1)
+            .ok_or(RecallOrchestrationError::InvalidGeneration)?;
+        let prepared_terminal = self.prepare_active_terminal(
+            RecallStreamEventKind::Retracted,
+            RecallTerminalReason::FocusChanged,
+        )?;
+        let result = self
+            .session
+            .reduce(AssistanceEvent::SourcePolicyInvalidated {
+                session_id: self.session.id.clone(),
+                new_generation,
+            });
+        accepted_transition(self, result, prepared_terminal)
+    }
+
+    pub fn processing_started(&mut self) -> Result<RecallTransition, RecallOrchestrationError> {
         let RecallSource::Live {
             context_session_id, ..
         } = &self.source
@@ -424,7 +676,7 @@ impl RecallOrchestration {
             session_id: self.session.id.clone(),
             capture_session_id: CaptureSessionId::new(context_session_id),
         });
-        accepted_actions(result)
+        accepted_transition(self, result, None)
     }
 
     /// Atomically rebind live capture to a finalized artifact inside the host
@@ -435,7 +687,7 @@ impl RecallOrchestration {
         meeting_ref: String,
         new_source_binding_id: String,
         new_focus_generation: u64,
-    ) -> Result<Vec<AssistanceAction>, RecallOrchestrationError> {
+    ) -> Result<RecallTransition, RecallOrchestrationError> {
         if meeting_ref.trim().is_empty()
             || new_source_binding_id.trim().is_empty()
             || new_focus_generation <= self.focus_generation
@@ -449,20 +701,24 @@ impl RecallOrchestration {
             return Err(RecallOrchestrationError::InvalidSource);
         };
         let prior_capture_session_id = CaptureSessionId::new(context_session_id);
+        let prepared_terminal = self.prepare_active_terminal(
+            RecallStreamEventKind::Retracted,
+            RecallTerminalReason::LifecycleChanged,
+        )?;
         let result = self.session.reduce(AssistanceEvent::MeetingFinalized {
             session_id: self.session.id.clone(),
             capture_session_id: prior_capture_session_id.clone(),
             meeting_ref: MeetingRef::new(&meeting_ref),
         });
-        let actions = accepted_actions(result)?;
-        let has_atomic_handoff = actions.iter().any(|action| {
+        let transition = accepted_transition(self, result, prepared_terminal)?;
+        let has_atomic_handoff = transition.effects.iter().any(|effect| {
             matches!(
-                action,
-                AssistanceAction::FinalizedMeetingAttached {
+                effect,
+                RecallEffect::ReducerAction(AssistanceAction::FinalizedMeetingAttached {
                     prior_capture_session_id: action_capture,
                     meeting_ref: action_meeting,
                     new_generation,
-                } if action_capture == &prior_capture_session_id
+                }) if action_capture == &prior_capture_session_id
                     && action_meeting.as_str() == meeting_ref
                     && *new_generation == self.session.source_policy_generation
             )
@@ -473,15 +729,52 @@ impl RecallOrchestration {
         self.source = RecallSource::Finalized { meeting_ref };
         self.source_binding_id = new_source_binding_id;
         self.focus_generation = new_focus_generation;
-        Ok(actions)
+        Ok(transition)
     }
 }
 
-fn accepted_actions(
+fn action_cancelled_foreground(actions: &[AssistanceAction]) -> bool {
+    actions
+        .iter()
+        .any(|action| matches!(action, AssistanceAction::CancelForeground { .. }))
+}
+
+fn ordered_effects(
+    actions: Vec<AssistanceAction>,
+    mut terminal: Option<RecallStreamEnvelope<RecallTerminalPayload>>,
+) -> Vec<RecallEffect> {
+    let mut effects = Vec::with_capacity(actions.len() + usize::from(terminal.is_some()));
+    for action in actions {
+        let closes_foreground = matches!(action, AssistanceAction::CancelForeground { .. });
+        effects.push(RecallEffect::ReducerAction(action));
+        if closes_foreground {
+            if let Some(event) = terminal.take() {
+                effects.push(RecallEffect::EmitTerminal(event));
+            }
+        }
+    }
+    if let Some(event) = terminal {
+        effects.push(RecallEffect::EmitTerminal(event));
+    }
+    effects
+}
+
+fn accepted_transition(
+    orchestration: &mut RecallOrchestration,
     result: minutes_core::live_sidekick::Reduction,
-) -> Result<Vec<AssistanceAction>, RecallOrchestrationError> {
+    prepared_terminal: Option<RecallStreamEnvelope<RecallTerminalPayload>>,
+) -> Result<RecallTransition, RecallOrchestrationError> {
     if result.accepted {
-        Ok(result.actions)
+        let terminal = if action_cancelled_foreground(&result.actions) {
+            Some(orchestration.commit_terminal(
+                prepared_terminal.ok_or(RecallOrchestrationError::MissingInvocationAction)?,
+            ))
+        } else {
+            None
+        };
+        Ok(RecallTransition {
+            effects: ordered_effects(result.actions, terminal),
+        })
     } else {
         Err(RecallOrchestrationError::Rejected(
             result.rejection.expect("a rejected reduction has a reason"),
@@ -504,6 +797,25 @@ mod tests {
             profile,
         )
         .unwrap()
+    }
+
+    fn terminal_effect(
+        effects: &[RecallEffect],
+    ) -> Option<&RecallStreamEnvelope<RecallTerminalPayload>> {
+        effects.iter().find_map(|effect| match effect {
+            RecallEffect::EmitTerminal(terminal) => Some(terminal),
+            RecallEffect::ReducerAction(_) => None,
+        })
+    }
+
+    fn reducer_actions(effects: &[RecallEffect]) -> Vec<&AssistanceAction> {
+        effects
+            .iter()
+            .filter_map(|effect| match effect {
+                RecallEffect::ReducerAction(action) => Some(action),
+                RecallEffect::EmitTerminal(_) => None,
+            })
+            .collect()
     }
 
     fn live_session() -> RecallOrchestration {
@@ -532,7 +844,7 @@ mod tests {
                 "What changed?".into(),
             )
             .unwrap()
-            .0
+            .invocation
     }
 
     #[test]
@@ -559,15 +871,16 @@ mod tests {
         assert_eq!(token.schema_version, 2);
         assert_eq!(token.focus_generation, 7);
         assert_eq!(token.provider.generation, 1);
+        let CompletionDisposition::Publish(transition) = session.complete_foreground(&token) else {
+            panic!("accepted completion must publish");
+        };
+        let terminal = terminal_effect(&transition.effects).expect("completion must close");
+        assert_eq!(terminal.event_kind, RecallStreamEventKind::Done);
+        assert_eq!(terminal.event_sequence, 1);
+        assert_eq!(terminal.payload.reason, RecallTerminalReason::Completed);
         assert_eq!(
             session.complete_foreground(&token),
-            CompletionDisposition::Publish
-        );
-        assert_eq!(
-            session.complete_foreground(&token),
-            CompletionDisposition::Retract(CompletionRejection::Reducer(
-                RejectionReason::StaleForegroundResult
-            ))
+            CompletionDisposition::Retract(CompletionRejection::StreamClosed)
         );
     }
 
@@ -581,22 +894,38 @@ mod tests {
             CompletionDisposition::Retract(CompletionRejection::WrongFocus)
         );
         stale.focus_generation = session.focus_generation();
-        assert_eq!(
+        assert!(matches!(
             session.complete_foreground(&stale),
-            CompletionDisposition::Publish
-        );
+            CompletionDisposition::Publish(_)
+        ));
     }
 
     #[test]
     fn provider_change_retracts_old_completion() {
         let mut session = live_session();
         let token = start_turn(&mut session);
-        session
+        let transition = session
             .bind_provider(binding(2, ProviderIsolationProfile::Unavailable))
             .unwrap();
+        let terminal = terminal_effect(&transition.effects)
+            .expect("provider change must retract the active turn");
+        assert_eq!(terminal.event_kind, RecallStreamEventKind::Retracted);
+        assert_eq!(
+            terminal.payload.reason,
+            RecallTerminalReason::ProviderChanged
+        );
+        assert!(matches!(
+            transition.effects.as_slice(),
+            [
+                RecallEffect::ReducerAction(AssistanceAction::CancelForeground { .. }),
+                RecallEffect::EmitTerminal(_),
+                RecallEffect::ReducerAction(AssistanceAction::PolicyBoundStateCleared { .. }),
+                RecallEffect::ReducerAction(AssistanceAction::ProviderBindingUpdated { .. })
+            ]
+        ));
         assert_eq!(
             session.complete_foreground(&token),
-            CompletionDisposition::Retract(CompletionRejection::WrongProviderBinding)
+            CompletionDisposition::Retract(CompletionRejection::StreamClosed)
         );
     }
 
@@ -645,16 +974,20 @@ mod tests {
                 .unwrap(),
             chunk
         );
-        session
+        let transition = session
             .bind_provider(binding(2, ProviderIsolationProfile::Unavailable))
             .unwrap();
         assert_eq!(
+            terminal_effect(&transition.effects).map(|event| event.event_sequence),
+            Some(2)
+        );
+        assert_eq!(
             session.authorize_dispatch(&token),
-            Err(CompletionRejection::WrongProviderBinding)
+            Err(CompletionRejection::StreamClosed)
         );
         assert_eq!(
             session.next_stream_event(&token, RecallStreamEventKind::Text, "late chunk"),
-            Err(CompletionRejection::WrongProviderBinding)
+            Err(CompletionRejection::StreamClosed)
         );
     }
 
@@ -669,19 +1002,170 @@ mod tests {
             .next_stream_event(&token, RecallStreamEventKind::Text, "answer")
             .unwrap();
         assert_eq!((first.event_sequence, second.event_sequence), (1, 2));
-        let actions = session.cancel_foreground(&token).unwrap();
-        assert!(actions.iter().any(|action| matches!(
-            action,
-            AssistanceAction::CancelForeground {
-                reason: minutes_core::live_sidekick::InvalidationReason::UserCancelled,
-                ..
-            }
-        )));
+        let transition = session.cancel_foreground(&token).unwrap();
+        assert!(reducer_actions(&transition.effects)
+            .iter()
+            .any(|action| matches!(
+                **action,
+                AssistanceAction::CancelForeground {
+                    reason: minutes_core::live_sidekick::InvalidationReason::UserCancelled,
+                    ..
+                }
+            )));
+        let terminal = terminal_effect(&transition.effects).expect("cancel must close");
+        assert_eq!(terminal.event_sequence, 3);
+        assert_eq!(terminal.event_kind, RecallStreamEventKind::Cancelled);
+        assert_eq!(terminal.payload.reason, RecallTerminalReason::UserCancelled);
         assert_eq!(
             session.next_stream_event(&token, RecallStreamEventKind::Text, "late"),
-            Err(CompletionRejection::Reducer(
-                RejectionReason::StaleForegroundResult
-            ))
+            Err(CompletionRejection::StreamClosed)
+        );
+    }
+
+    #[test]
+    fn provider_failure_mints_error_then_permanently_closes() {
+        let mut session = live_session();
+        let token = start_turn(&mut session);
+        let text = session
+            .next_stream_event(&token, RecallStreamEventKind::Text, "partial")
+            .unwrap();
+        let transition = session.fail_foreground(&token).unwrap();
+        let terminal = terminal_effect(&transition.effects).expect("failure must close");
+        assert_eq!((text.event_sequence, terminal.event_sequence), (1, 2));
+        assert_eq!(terminal.event_kind, RecallStreamEventKind::Error);
+        assert_eq!(
+            terminal.payload.reason,
+            RecallTerminalReason::ProviderFailed
+        );
+        assert_eq!(
+            session.next_stream_event(&token, RecallStreamEventKind::Text, "late"),
+            Err(CompletionRejection::StreamClosed)
+        );
+    }
+
+    #[test]
+    fn focus_and_source_policy_invalidation_each_mint_one_retraction() {
+        let mut focus_session = live_session();
+        let focus_token = start_turn(&mut focus_session);
+        focus_session
+            .next_stream_event(&focus_token, RecallStreamEventKind::Text, "partial")
+            .unwrap();
+        let focus_transition = focus_session.retire_for_focus_change().unwrap();
+        let focus_terminal = terminal_effect(&focus_transition.effects).unwrap();
+        assert_eq!(focus_terminal.event_sequence, 2);
+        assert_eq!(focus_terminal.event_kind, RecallStreamEventKind::Retracted);
+        assert_eq!(
+            focus_terminal.payload.reason,
+            RecallTerminalReason::FocusChanged
+        );
+
+        let mut policy_session = live_session();
+        let _ = start_turn(&mut policy_session);
+        let next_generation = policy_session.session().source_policy_generation + 1;
+        let policy_transition = policy_session
+            .invalidate_source_policy(next_generation)
+            .unwrap();
+        let policy_terminal = terminal_effect(&policy_transition.effects).unwrap();
+        assert_eq!(policy_terminal.event_sequence, 1);
+        assert_eq!(
+            policy_terminal.payload.reason,
+            RecallTerminalReason::SourcePolicyChanged
+        );
+        assert!(matches!(
+            policy_transition.effects.as_slice(),
+            [
+                RecallEffect::ReducerAction(AssistanceAction::CancelForeground { .. }),
+                RecallEffect::EmitTerminal(_),
+                RecallEffect::ReducerAction(AssistanceAction::PolicyBoundStateCleared { .. })
+            ]
+        ));
+    }
+
+    #[test]
+    fn terminal_kinds_cannot_be_minted_before_their_reducer_transition() {
+        let mut session = live_session();
+        let token = start_turn(&mut session);
+        for kind in [
+            RecallStreamEventKind::Done,
+            RecallStreamEventKind::Cancelled,
+            RecallStreamEventKind::Retracted,
+            RecallStreamEventKind::Error,
+        ] {
+            assert_eq!(
+                session.next_stream_event(&token, kind, "too early"),
+                Err(CompletionRejection::TerminalEventRequiresTransition)
+            );
+        }
+        assert_eq!(
+            session
+                .next_stream_event(&token, RecallStreamEventKind::Text, "allowed")
+                .unwrap()
+                .event_sequence,
+            1
+        );
+    }
+
+    #[test]
+    fn live_chunks_reserve_the_last_sequence_for_a_terminal_tombstone() {
+        let mut session = live_session();
+        let token = start_turn(&mut session);
+        session.stream_event_sequence = u64::MAX - 1;
+
+        assert_eq!(
+            session.next_stream_event(&token, RecallStreamEventKind::Text, "too late"),
+            Err(CompletionRejection::InvalidEventSequence)
+        );
+
+        let transition = session.cancel_foreground(&token).unwrap();
+        let terminal = terminal_effect(&transition.effects).expect("reserved terminal slot");
+        assert_eq!(terminal.event_sequence, u64::MAX);
+        assert_eq!(terminal.event_kind, RecallStreamEventKind::Cancelled);
+    }
+
+    #[test]
+    fn a_new_user_turn_retracts_the_prior_stream_before_replacement() {
+        let mut session = live_session();
+        let first = start_turn(&mut session);
+        session
+            .next_stream_event(&first, RecallStreamEventKind::Text, "partial")
+            .unwrap();
+        let begin = session
+            .begin_foreground(
+                "client-b",
+                ForegroundTurnId::new("turn-b"),
+                EvidenceId::new("user-b"),
+                "New question".into(),
+            )
+            .unwrap();
+        assert!(reducer_actions(&begin.effects)
+            .iter()
+            .any(|action| matches!(**action, AssistanceAction::CancelForeground { .. })));
+        let second = begin.invocation.clone();
+        let prior_terminal =
+            terminal_effect(&begin.effects).expect("replacement must retract the prior stream");
+        assert_eq!(prior_terminal.event_sequence, 2);
+        assert_eq!(prior_terminal.event_kind, RecallStreamEventKind::Retracted);
+        assert_eq!(
+            prior_terminal.payload.reason,
+            RecallTerminalReason::Superseded
+        );
+        assert!(matches!(
+            begin.effects.as_slice(),
+            [
+                RecallEffect::ReducerAction(AssistanceAction::CancelForeground { .. }),
+                RecallEffect::EmitTerminal(_),
+                RecallEffect::ReducerAction(AssistanceAction::AcknowledgeForeground { .. }),
+                RecallEffect::ReducerAction(
+                    AssistanceAction::RequestReadOnlyForegroundInference { .. }
+                )
+            ]
+        ));
+        assert_eq!(
+            session
+                .next_stream_event(&second, RecallStreamEventKind::Text, "fresh")
+                .unwrap()
+                .event_sequence,
+            1
         );
     }
 
@@ -712,24 +1196,62 @@ mod tests {
     #[test]
     fn finalization_rotates_source_and_focus_authority() {
         let mut session = live_session();
-        let old_token = start_turn(&mut session);
-        session.capture_stopped().unwrap();
+        let live_token = start_turn(&mut session);
+        let stopped = session.capture_stopped().unwrap();
+        assert_eq!(
+            terminal_effect(&stopped.effects).map(|terminal| terminal.payload.reason),
+            Some(RecallTerminalReason::MeetingEnded)
+        );
+        assert_eq!(
+            session.complete_foreground(&live_token),
+            CompletionDisposition::Retract(CompletionRejection::StreamClosed)
+        );
         session.processing_started().unwrap();
-        let actions = session
+        let processing_token = session
+            .begin_foreground(
+                "client-processing",
+                ForegroundTurnId::new("turn-processing"),
+                EvidenceId::new("user-processing"),
+                "Summarize before attachment".into(),
+            )
+            .unwrap()
+            .invocation;
+        session
+            .next_stream_event(
+                &processing_token,
+                RecallStreamEventKind::Text,
+                "partial processing answer",
+            )
+            .unwrap();
+        let transition = session
             .finalize(
                 "/private/meetings/final.md".into(),
                 "source-binding-final-a".into(),
                 8,
             )
             .unwrap();
-        assert!(actions.iter().any(|action| matches!(
-            action,
-            AssistanceAction::PolicyBoundStateCleared { new_generation: 2 }
-        )));
+        assert!(matches!(
+            transition.effects.as_slice(),
+            [
+                RecallEffect::ReducerAction(AssistanceAction::CancelForeground { .. }),
+                RecallEffect::EmitTerminal(_),
+                RecallEffect::ReducerAction(AssistanceAction::PolicyBoundStateCleared {
+                    new_generation: 2
+                }),
+                RecallEffect::ReducerAction(AssistanceAction::FinalizedMeetingAttached { .. })
+            ]
+        ));
+        let terminal = terminal_effect(&transition.effects).expect("finalization retracts stream");
+        assert_eq!(terminal.event_sequence, 2);
+        assert_eq!(terminal.event_kind, RecallStreamEventKind::Retracted);
+        assert_eq!(
+            terminal.payload.reason,
+            RecallTerminalReason::LifecycleChanged
+        );
         assert_eq!(session.focus_generation(), 8);
         assert_eq!(
-            session.complete_foreground(&old_token),
-            CompletionDisposition::Retract(CompletionRejection::WrongSource)
+            session.complete_foreground(&processing_token),
+            CompletionDisposition::Retract(CompletionRejection::StreamClosed)
         );
         assert!(session.session().evidence.is_empty());
     }

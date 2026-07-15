@@ -528,6 +528,11 @@ impl LiveAssistanceSession {
                 invocation,
                 ..
             } => self.foreground_cancelled(turn_id, invocation),
+            AssistanceEvent::ForegroundFailed {
+                turn_id,
+                invocation,
+                ..
+            } => self.foreground_failed(turn_id, invocation),
             AssistanceEvent::ProviderBindingChanged { binding, .. } => {
                 self.provider_binding_changed(binding)
             }
@@ -898,6 +903,33 @@ impl LiveAssistanceSession {
         }])
     }
 
+    fn foreground_failed(
+        &mut self,
+        turn_id: ForegroundTurnId,
+        invocation: InvocationIdentity,
+    ) -> Reduction {
+        if !turn_id.is_valid() || !invocation.is_valid() {
+            return Reduction::rejected(RejectionReason::InvalidValue);
+        }
+        let Some(turn) = self.foreground_turn.as_ref() else {
+            return Reduction::rejected(RejectionReason::StaleForegroundResult);
+        };
+        if turn.id != turn_id
+            || turn.invocation != invocation
+            || invocation.source_policy_generation != self.source_policy_generation
+            || invocation.user_generation != self.user_generation
+            || !self.accepts_user_control()
+        {
+            return Reduction::rejected(RejectionReason::StaleForegroundResult);
+        }
+        self.foreground_turn = None;
+        Reduction::accepted(vec![AssistanceAction::CancelForeground {
+            turn_id,
+            invocation,
+            reason: InvalidationReason::ProviderFailed,
+        }])
+    }
+
     fn provider_binding_changed(&mut self, binding: ProviderBinding) -> Reduction {
         if self.surface != AssistanceSurface::NativeRecall {
             return Reduction::rejected(RejectionReason::ProviderBindingNotApplicable);
@@ -1221,6 +1253,11 @@ pub enum AssistanceEvent {
         turn_id: ForegroundTurnId,
         invocation: InvocationIdentity,
     },
+    ForegroundFailed {
+        session_id: LiveAssistanceSessionId,
+        turn_id: ForegroundTurnId,
+        invocation: InvocationIdentity,
+    },
     ProviderBindingChanged {
         session_id: LiveAssistanceSessionId,
         binding: ProviderBinding,
@@ -1257,6 +1294,7 @@ impl AssistanceEvent {
             | Self::BackgroundCompleted { session_id, .. }
             | Self::ForegroundCompleted { session_id, .. }
             | Self::ForegroundCancelled { session_id, .. }
+            | Self::ForegroundFailed { session_id, .. }
             | Self::ProviderBindingChanged { session_id, .. }
             | Self::SourcePolicyInvalidated { session_id, .. }
             | Self::CaptureStopped { session_id, .. }
@@ -1271,6 +1309,7 @@ impl AssistanceEvent {
 pub enum InvalidationReason {
     TypedUserInput,
     UserCancelled,
+    ProviderFailed,
     SourcePolicyChanged,
     ProviderCapabilitiesChanged,
     PostureChanged,
@@ -1803,6 +1842,26 @@ mod tests {
                 turn_id: "turn-1".into(),
                 invocation,
                 reason: InvalidationReason::UserCancelled,
+            }]
+        );
+        assert!(session.foreground_turn.is_none());
+    }
+
+    #[test]
+    fn provider_failure_retires_the_exact_foreground_invocation() {
+        let mut session = session(CaptureMode::Live);
+        let (invocation, _) = ask(&mut session, "turn-1", "user-1", "Question?");
+        let failed = session.reduce(AssistanceEvent::ForegroundFailed {
+            session_id: "assist-1".into(),
+            turn_id: "turn-1".into(),
+            invocation,
+        });
+        assert_eq!(
+            failed.actions,
+            vec![AssistanceAction::CancelForeground {
+                turn_id: "turn-1".into(),
+                invocation,
+                reason: InvalidationReason::ProviderFailed,
             }]
         );
         assert!(session.foreground_turn.is_none());

@@ -253,6 +253,45 @@ test("missing MCP_SERVER_VERSION declaration fails with a clear message", async 
   assert.match(result.stderr, /MCP_SERVER_VERSION.*not found/);
 });
 
+test("commented-out MCP_SERVER_VERSION declaration does not satisfy extraction", async (t) => {
+  const root = await makeRepo(t);
+  await writeFixture(
+    root,
+    "crates/mcp/src/index.ts",
+    `// const MCP_SERVER_VERSION = "${mainVersion}";\n`,
+  );
+
+  const result = runChecker(root);
+  assert.equal(result.status, 1, result.stderr || result.stdout);
+  assert.match(result.stderr, /MCP_SERVER_VERSION.*not found/);
+});
+
+test("string containing an MCP_SERVER_VERSION declaration does not satisfy extraction", async (t) => {
+  const root = await makeRepo(t);
+  await writeFixture(
+    root,
+    "crates/mcp/src/index.ts",
+    `const example = 'const MCP_SERVER_VERSION = "${mainVersion}"';\n`,
+  );
+
+  const result = runChecker(root);
+  assert.equal(result.status, 1, result.stderr || result.stdout);
+  assert.match(result.stderr, /MCP_SERVER_VERSION.*not found/);
+});
+
+test("live exported MCP_SERVER_VERSION declaration satisfies extraction", async (t) => {
+  const root = await makeRepo(t);
+  await writeFixture(
+    root,
+    "crates/mcp/src/index.ts",
+    `export const MCP_SERVER_VERSION = "${mainVersion}";\n`,
+  );
+
+  const result = runChecker(root, "--json");
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.equal(parseReport(result).ok, true);
+});
+
 test("release mode rejects minutes-sdk ranges while default mode ignores them", async (t) => {
   for (const rangePrefix of ["^", "~"]) {
     const root = await makeRepo(t);

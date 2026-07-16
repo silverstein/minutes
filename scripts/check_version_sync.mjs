@@ -93,7 +93,10 @@ function cliMinutesCoreVersion(text) {
 }
 
 function mcpServerVersion(text) {
-  const declaration = /\bconst\s+MCP_SERVER_VERSION\s*=\s*"([^"]+)"/.exec(text);
+  const declaration =
+    /^[\t ]*(?:export[\t ]+)?const[\t ]+MCP_SERVER_VERSION[\t ]*=[\t ]*"([^"\r\n]+)"[\t ]*;?[\t ]*$/m.exec(
+      text,
+    );
   if (!declaration) {
     throw new Error('declaration `const MCP_SERVER_VERSION = "X.Y.Z"` not found');
   }

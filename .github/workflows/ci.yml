@@ -414,6 +414,23 @@ jobs:
         working-directory: crates/mcp
         run: npx tsc --noEmit
 
+  version_sync:
+    name: Version Sync
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Verify version policy
+        run: node scripts/check_version_sync.mjs
+
+      - name: Test version policy checker
+        run: node --test scripts/check_version_sync.test.mjs
+
   skills_compiler:
     name: Skills Compiler
     runs-on: ubuntu-latest
@@ -536,6 +553,7 @@ jobs:
       - desktop_windows
       - mcp
       - mcp_lockfile_check
+      - version_sync
       - skills_compiler
       - agents_sync
       - site_release_consistency

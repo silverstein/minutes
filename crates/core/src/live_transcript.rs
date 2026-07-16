@@ -1,3 +1,5 @@
+#[cfg(feature = "whisper")]
+use crate::bounded_inference::{try_send_drop_newest, EnqueueResult, QueueCounters};
 use crate::config::Config;
 use crate::error::{LiveTranscriptError, MinutesError, TranscribeError};
 use crate::live_partials::{LivePartialPublisher, SupersessionReason};
@@ -14,7 +16,7 @@ use serde_json::json;
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -1822,24 +1824,20 @@ fn lock_ignore_poison<'a, T>(mutex: &'a Mutex<T>) -> std::sync::MutexGuard<'a, T
 fn enqueue_sidecar_utterance(
     job_tx: &std::sync::mpsc::SyncSender<Vec<f32>>,
     samples: Vec<f32>,
-    pending: &AtomicU64,
-    dropped: &AtomicU64,
+    counters: &QueueCounters,
 ) {
     if samples.is_empty() {
         return;
     }
-    match job_tx.try_send(samples) {
-        Ok(()) => {
-            pending.fetch_add(1, Ordering::Relaxed);
-        }
-        Err(std::sync::mpsc::TrySendError::Full(_)) => {
-            let total = dropped.fetch_add(1, Ordering::Relaxed) + 1;
+    match try_send_drop_newest(job_tx, samples, counters) {
+        EnqueueResult::Queued | EnqueueResult::Disconnected => {}
+        EnqueueResult::DroppedFull => {
+            let total = counters.dropped.load(Ordering::Relaxed);
             tracing::warn!(
                 dropped_utterances = total,
                 "live sidecar transcription backlog full — dropping utterance audio"
             );
         }
-        Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {}
     }
 }
 
@@ -2472,12 +2470,11 @@ fn run_sidecar_inner_mpsc(
     // bounded queue, and a backlogged engine costs us utterances (counted in
     // the status file) instead of the whole session.
     let (job_tx, job_rx) = std::sync::mpsc::sync_channel::<Vec<f32>>(SIDECAR_UTTERANCE_QUEUE_CAP);
-    let pending_utterances = Arc::new(AtomicU64::new(0));
-    let dropped_utterances = Arc::new(AtomicU64::new(0));
+    let queue_counters = Arc::new(QueueCounters::default());
     let worker = {
         let writer = Arc::clone(&writer);
         let config = config.clone();
-        let pending = Arc::clone(&pending_utterances);
+        let counters = Arc::clone(&queue_counters);
         let stop_flag = Arc::clone(&stop_flag);
         std::thread::Builder::new()
             .name("live-sidecar-transcribe".into())
@@ -2493,7 +2490,7 @@ fn run_sidecar_inner_mpsc(
                     // supersedes the live transcript; drain instead of
                     // transcribing so stop stays responsive.
                     if stop_flag.load(Ordering::Relaxed) {
-                        pending.fetch_sub(1, Ordering::Relaxed);
+                        counters.pending.fetch_sub(1, Ordering::Relaxed);
                         continue;
                     }
                     let result = transcribe_utterance_for_sidecar(
@@ -2502,7 +2499,7 @@ fn run_sidecar_inner_mpsc(
                         &mut whisper_ctx,
                         &mut parakeet_enabled,
                     );
-                    pending.fetch_sub(1, Ordering::Relaxed);
+                    counters.pending.fetch_sub(1, Ordering::Relaxed);
                     if let Some((text, duration_secs)) = result {
                         if let Some(w) = lock_ignore_poison(&writer).as_mut() {
                             w.write_utterance(&text, duration_secs);
@@ -2524,8 +2521,8 @@ fn run_sidecar_inner_mpsc(
             Ok(mut guard) => {
                 if let Some(w) = guard.as_mut() {
                     w.set_backlog_stats(
-                        pending_utterances.load(Ordering::Relaxed),
-                        dropped_utterances.load(Ordering::Relaxed),
+                        queue_counters.pending.load(Ordering::Relaxed),
+                        queue_counters.dropped.load(Ordering::Relaxed),
                     );
                     w.maybe_write_heartbeat();
                 }
@@ -2538,12 +2535,7 @@ fn run_sidecar_inner_mpsc(
             Err(std::sync::TryLockError::WouldBlock) => {}
         }
         if stop_flag.load(Ordering::Relaxed) {
-            enqueue_sidecar_utterance(
-                &job_tx,
-                std::mem::take(&mut utterance),
-                &pending_utterances,
-                &dropped_utterances,
-            );
+            enqueue_sidecar_utterance(&job_tx, std::mem::take(&mut utterance), &queue_counters);
             break;
         }
 
@@ -2551,12 +2543,7 @@ fn run_sidecar_inner_mpsc(
             Ok(s) => s,
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                enqueue_sidecar_utterance(
-                    &job_tx,
-                    std::mem::take(&mut utterance),
-                    &pending_utterances,
-                    &dropped_utterances,
-                );
+                enqueue_sidecar_utterance(&job_tx, std::mem::take(&mut utterance), &queue_counters);
                 break;
             }
         };
@@ -2577,21 +2564,11 @@ fn run_sidecar_inner_mpsc(
 
             if utterance.len() >= max_utterance_samples {
                 tracing::info!("sidecar: max utterance duration, force-finalizing");
-                enqueue_sidecar_utterance(
-                    &job_tx,
-                    std::mem::take(&mut utterance),
-                    &pending_utterances,
-                    &dropped_utterances,
-                );
+                enqueue_sidecar_utterance(&job_tx, std::mem::take(&mut utterance), &queue_counters);
                 was_speaking = false;
             }
         } else if was_speaking && !utterance.is_empty() {
-            enqueue_sidecar_utterance(
-                &job_tx,
-                std::mem::take(&mut utterance),
-                &pending_utterances,
-                &dropped_utterances,
-            );
+            enqueue_sidecar_utterance(&job_tx, std::mem::take(&mut utterance), &queue_counters);
             was_speaking = false;
         }
     }
@@ -3030,31 +3007,29 @@ mod tests {
     #[test]
     fn sidecar_utterance_queue_drops_newest_when_full_and_counts() {
         let (tx, _rx) = std::sync::mpsc::sync_channel::<Vec<f32>>(2);
-        let pending = AtomicU64::new(0);
-        let dropped = AtomicU64::new(0);
+        let counters = QueueCounters::default();
 
-        enqueue_sidecar_utterance(&tx, vec![0.1; 1600], &pending, &dropped);
-        enqueue_sidecar_utterance(&tx, vec![0.1; 1600], &pending, &dropped);
+        enqueue_sidecar_utterance(&tx, vec![0.1; 1600], &counters);
+        enqueue_sidecar_utterance(&tx, vec![0.1; 1600], &counters);
         // Queue full — this one must be dropped, not block the caller.
-        enqueue_sidecar_utterance(&tx, vec![0.1; 1600], &pending, &dropped);
+        enqueue_sidecar_utterance(&tx, vec![0.1; 1600], &counters);
         // Empty utterances are a no-op either way.
-        enqueue_sidecar_utterance(&tx, Vec::new(), &pending, &dropped);
+        enqueue_sidecar_utterance(&tx, Vec::new(), &counters);
 
-        assert_eq!(pending.load(Ordering::Relaxed), 2);
-        assert_eq!(dropped.load(Ordering::Relaxed), 1);
+        assert_eq!(counters.pending.load(Ordering::Relaxed), 2);
+        assert_eq!(counters.dropped.load(Ordering::Relaxed), 1);
     }
 
     #[test]
     fn sidecar_utterance_queue_disconnected_worker_is_silent() {
         let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<f32>>(2);
         drop(rx);
-        let pending = AtomicU64::new(0);
-        let dropped = AtomicU64::new(0);
+        let counters = QueueCounters::default();
 
-        enqueue_sidecar_utterance(&tx, vec![0.1; 1600], &pending, &dropped);
+        enqueue_sidecar_utterance(&tx, vec![0.1; 1600], &counters);
 
-        assert_eq!(pending.load(Ordering::Relaxed), 0);
-        assert_eq!(dropped.load(Ordering::Relaxed), 0);
+        assert_eq!(counters.pending.load(Ordering::Relaxed), 0);
+        assert_eq!(counters.dropped.load(Ordering::Relaxed), 0);
     }
 
     #[test]

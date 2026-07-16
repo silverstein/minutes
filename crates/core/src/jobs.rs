@@ -1354,7 +1354,7 @@ fn refresh_qmd_collection(config: &Config) {
     let Some(collection) = config.search.qmd_collection.as_ref() else {
         return;
     };
-    let status = std::process::Command::new("qmd")
+    let status = crate::engine_process::command("qmd")
         .args(["update", "-c", collection])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -1402,6 +1402,39 @@ pub fn process_pending_jobs<F>(config: &Config, mut on_job_update: F) -> Result<
 where
     F: FnMut(&ProcessingJob),
 {
+    let mut transcribe = |audio_path: &Path,
+                          content_type: ContentType,
+                          title: Option<&str>,
+                          config: &Config,
+                          context: &BackgroundPipelineContext,
+                          existing_output_path: Option<&Path>| {
+        pipeline::transcribe_to_artifact(
+            audio_path,
+            content_type,
+            title,
+            config,
+            context,
+            existing_output_path,
+        )
+    };
+    process_pending_jobs_with_transcriber(config, &mut on_job_update, &mut transcribe)
+}
+
+type JobTranscriber<'a> = dyn FnMut(
+        &Path,
+        ContentType,
+        Option<&str>,
+        &Config,
+        &BackgroundPipelineContext,
+        Option<&Path>,
+    ) -> Result<pipeline::TranscriptArtifact, MinutesError>
+    + 'a;
+
+fn process_pending_jobs_with_transcriber(
+    config: &Config,
+    on_job_update: &mut dyn FnMut(&ProcessingJob),
+    transcribe: &mut JobTranscriber<'_>,
+) -> Result<(), MinutesError> {
     let _guard = create_worker_guard()?;
 
     while let Some(job) = next_pending_job() {
@@ -1430,7 +1463,7 @@ where
         // C++-static-teardown abort during process exit; the two together
         // are what stop SIGABRT from reaching the UI (issue #229).
         let transcribe_outcome = catch_unwind(AssertUnwindSafe(|| {
-            pipeline::transcribe_to_artifact(
+            transcribe(
                 &audio_path,
                 job.content_type,
                 job.title.as_deref(),
@@ -1665,6 +1698,210 @@ mod tests {
             std::env::remove_var("USERPROFILE");
         }
         result
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    enum FakeProcessingOutcome {
+        NoSpeech,
+        WorkerCrash,
+        ProcessingTimeout,
+        FailedTranscription,
+    }
+
+    fn create_sample_bearing_wav(path: &Path) {
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: 16_000,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut writer = hound::WavWriter::create(path, spec).unwrap();
+        for sample in 0..1_600_i16 {
+            writer.write_sample(sample.saturating_mul(4)).unwrap();
+        }
+        writer.finalize().unwrap();
+    }
+
+    fn fake_no_speech_artifact(audio_path: &Path) -> pipeline::TranscriptArtifact {
+        let write_result = WriteResult {
+            path: audio_path.with_extension("md"),
+            title: "Capture reliability fixture".into(),
+            word_count: 0,
+            content_type: ContentType::Meeting,
+        };
+        pipeline::TranscriptArtifact {
+            write_result,
+            frontmatter: Frontmatter {
+                title: "Capture reliability fixture".into(),
+                r#type: ContentType::Meeting,
+                date: Local::now(),
+                duration: "0m".into(),
+                source: None,
+                status: Some(OutputStatus::NoSpeech),
+                tags: vec![],
+                attendees: vec![],
+                attendees_raw: None,
+                calendar_event: None,
+                people: vec![],
+                entities: crate::markdown::EntityLinks::default(),
+                device: None,
+                captured_at: None,
+                context: None,
+                action_items: vec![],
+                decisions: vec![],
+                intents: vec![],
+                recorded_by: None,
+                capture: None,
+                sensitivity: None,
+                debrief: None,
+                consent: None,
+                consent_notice: None,
+                visibility: None,
+                speaker_map: vec![],
+                name_corrections: vec![],
+                recording_health: None,
+                speaker_mapping: None,
+                processing_warnings: vec![],
+                template: None,
+                filter_diagnosis: Some("fake engine found no speech".into()),
+            },
+            transcript: String::new(),
+            diarization_audio_path: None,
+        }
+    }
+
+    #[test]
+    fn stop_deadline_preserves_sample_bearing_wav_for_every_processing_failure_outcome() {
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let test_thread = std::thread::spawn(move || {
+            with_temp_home(|dir| {
+                let mut config = Config {
+                    output_dir: dir.path().join("output"),
+                    ..Config::default()
+                };
+                config.summarization.engine = "none".into();
+                config.diarization.engine = "none".into();
+
+                for outcome in [
+                    FakeProcessingOutcome::NoSpeech,
+                    FakeProcessingOutcome::WorkerCrash,
+                    FakeProcessingOutcome::ProcessingTimeout,
+                    FakeProcessingOutcome::FailedTranscription,
+                ] {
+                    let current_wav = dir.path().join(format!("current-{outcome:?}.wav"));
+                    create_sample_bearing_wav(&current_wav);
+
+                    let stop_started = std::time::Instant::now();
+                    let queued = queue_live_capture(
+                        CaptureMode::Meeting,
+                        Some(format!("{outcome:?}")),
+                        &current_wav,
+                        None,
+                        None,
+                        None,
+                        Some(Local::now()),
+                        None,
+                        None,
+                        None,
+                    )
+                    .unwrap();
+                    assert!(
+                        stop_started.elapsed() < std::time::Duration::from_secs(1),
+                        "stop-to-queue deadline exceeded for {outcome:?}"
+                    );
+                    assert!(
+                        !current_wav.exists(),
+                        "capture must move atomically into the queue"
+                    );
+
+                    let mut transcribe =
+                        move |audio_path: &Path,
+                              _: ContentType,
+                              _: Option<&str>,
+                              _: &Config,
+                              _: &BackgroundPipelineContext,
+                              _: Option<&Path>| {
+                            match outcome {
+                                FakeProcessingOutcome::NoSpeech => {
+                                    Ok(fake_no_speech_artifact(audio_path))
+                                }
+                                FakeProcessingOutcome::WorkerCrash => {
+                                    let (output, timed_out) =
+                                        crate::engine_process::output_with_timeout(
+                                            crate::engine_process::aborted_fixture_command(),
+                                            std::time::Duration::from_secs(2),
+                                        )
+                                        .unwrap();
+                                    assert!(!timed_out);
+                                    assert!(!output.status.success());
+                                    panic!("fake engine aborted");
+                                }
+                                FakeProcessingOutcome::ProcessingTimeout => {
+                                    let (_, timed_out) =
+                                        crate::engine_process::output_with_timeout(
+                                            crate::engine_process::blocked_fixture_command(),
+                                            std::time::Duration::from_millis(150),
+                                        )
+                                        .unwrap();
+                                    assert!(timed_out);
+                                    Err(TranscribeError::TranscriptionFailed(
+                                        "fake engine processing timeout".into(),
+                                    )
+                                    .into())
+                                }
+                                FakeProcessingOutcome::FailedTranscription => {
+                                    Err(TranscribeError::TranscriptionFailed(
+                                        "fake engine returned an error".into(),
+                                    )
+                                    .into())
+                                }
+                            }
+                        };
+                    let mut on_job_update = |_: &ProcessingJob| {};
+                    process_pending_jobs_with_transcriber(
+                        &config,
+                        &mut on_job_update,
+                        &mut transcribe,
+                    )
+                    .unwrap();
+
+                    let finalized = load_job(&queued.id).expect("terminal job remains inspectable");
+                    let expected_state = match outcome {
+                        FakeProcessingOutcome::NoSpeech => JobState::NeedsReview,
+                        _ => JobState::Failed,
+                    };
+                    assert_eq!(finalized.state, expected_state, "outcome {outcome:?}");
+
+                    let preserved_wav = PathBuf::from(&finalized.audio_path);
+                    assert!(preserved_wav.exists(), "WAV lost for {outcome:?}");
+                    let mut reader = hound::WavReader::open(&preserved_wav).unwrap();
+                    assert!(
+                        reader.duration() > 0,
+                        "WAV header has no samples for {outcome:?}"
+                    );
+                    assert!(
+                        reader
+                            .samples::<i16>()
+                            .next()
+                            .transpose()
+                            .unwrap()
+                            .is_some(),
+                        "WAV contains no readable sample for {outcome:?}"
+                    );
+                }
+            });
+            done_tx.send(()).unwrap();
+        });
+
+        match done_rx.recv_timeout(std::time::Duration::from_secs(8)) {
+            Ok(()) => test_thread.join().unwrap(),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                test_thread.join().unwrap();
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                panic!("capture stop/failure suite exceeded its hard deadline")
+            }
+        }
     }
 
     #[test]

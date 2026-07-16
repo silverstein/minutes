@@ -133,7 +133,7 @@ pub fn request_input_monitoring() -> bool {
 
 /// Open System Settings to the Input Monitoring pane.
 pub fn open_input_monitoring_settings() {
-    let _ = std::process::Command::new("open")
+    let _ = crate::engine_process::command("open")
         .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent")
         .spawn();
 }

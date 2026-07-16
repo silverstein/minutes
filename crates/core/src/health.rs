@@ -437,7 +437,7 @@ pub fn screen_recording_status(config: &Config) -> HealthItem {
     {
         // Mirrors capture_screenshot's tool order (scrot, then gnome-screenshot).
         let tool = ["scrot", "gnome-screenshot"].into_iter().find(|tool| {
-            std::process::Command::new(tool)
+            crate::engine_process::command(tool)
                 .arg("--version")
                 .output()
                 .is_ok()
@@ -487,7 +487,7 @@ pub fn calendar_status(config: &Config) -> HealthItem {
     }
     #[cfg(target_os = "macos")]
     {
-        let mut cmd = std::process::Command::new("osascript");
+        let mut cmd = crate::engine_process::command("osascript");
         cmd.arg("-e")
             .arg(r#"tell application "Calendar" to get name of every calendar"#);
         let output = crate::calendar::output_with_timeout(cmd, std::time::Duration::from_secs(10))

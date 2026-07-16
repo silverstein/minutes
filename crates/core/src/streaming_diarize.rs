@@ -17,7 +17,7 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{Child, ChildStdin, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
@@ -45,7 +45,7 @@ impl StreamingDiarizeSidecar {
     /// Spawn the sidecar binary against `model` (a Sortformer `.onnx`). The
     /// child's stderr is inherited so its logs surface in the parent's logs.
     pub fn spawn(bin: &Path, model: &Path) -> std::io::Result<Self> {
-        let mut child = Command::new(bin)
+        let mut child = crate::engine_process::command(bin)
             .arg("--model")
             .arg(model)
             .stdin(Stdio::piped())

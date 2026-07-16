@@ -72,7 +72,7 @@ pub fn parse_macos_version(version: &str) -> Option<MacOsVersion> {
 
 #[cfg(all(target_os = "macos", feature = "streaming"))]
 fn current_macos_version() -> Option<MacOsVersion> {
-    let output = std::process::Command::new("sw_vers")
+    let output = crate::engine_process::command("sw_vers")
         .arg("-productVersion")
         .output()
         .ok()?;

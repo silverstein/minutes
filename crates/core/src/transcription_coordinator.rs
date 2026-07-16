@@ -492,7 +492,7 @@ pub fn benchmark_parakeet(
     let direct_elapsed_ms = started.elapsed().as_millis() as u64;
 
     let helper_started = std::time::Instant::now();
-    let mut helper_command = std::process::Command::new(helper_binary);
+    let mut helper_command = crate::engine_process::command(helper_binary);
     helper_command
         .arg("parakeet-helper")
         .args(["--binary", binary])

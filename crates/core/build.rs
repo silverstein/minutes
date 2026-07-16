@@ -1,6 +1,9 @@
 use std::fs;
 use std::path::PathBuf;
-use std::process::Command;
+
+#[allow(dead_code)]
+#[path = "src/engine_process.rs"]
+mod engine_process;
 
 fn main() {
     stage_calendar_helper();
@@ -36,7 +39,7 @@ fn stage_calendar_helper() {
     println!("cargo:rerun-if-changed={}", source.display());
     println!("cargo:rerun-if-changed={}", info_plist.display());
 
-    let output = Command::new("swiftc")
+    let output = engine_process::command("swiftc")
         .arg("-O")
         .args(["-Xlinker", "-sectcreate"])
         .args(["-Xlinker", "__TEXT"])

@@ -1468,7 +1468,7 @@ fn decode_with_ffmpeg(path: &Path) -> Result<Vec<f32>, TranscribeError> {
 
     let ffmpeg = crate::ffmpeg::resolve_ffmpeg()
         .map_err(|e| TranscribeError::TranscriptionFailed(format!("ffmpeg not available: {e}")))?;
-    let output = std::process::Command::new(&ffmpeg)
+    let output = crate::engine_process::command(&ffmpeg)
         .args([
             "-i",
             path.to_str().unwrap_or(""),
@@ -2218,7 +2218,7 @@ fn transcribe_with_parakeet(
         && std::env::var_os("MINUTES_PARAKEET_HELPER_ACTIVE").is_none();
     let parsed = if helper_allowed {
         if let Some(helper_path) = resolve_minutes_parakeet_helper() {
-            let mut helper_command = std::process::Command::new(helper_path);
+            let mut helper_command = crate::engine_process::command(helper_path);
             helper_command
                 .arg("parakeet-helper")
                 .args(["--binary", resolved_binary_str])
@@ -2537,7 +2537,7 @@ fn build_parakeet_command(
     config: &Config,
     hints: &DecodeHints,
 ) -> std::process::Command {
-    let mut command = std::process::Command::new(binary);
+    let mut command = crate::engine_process::command(binary);
     command.arg(model_str);
     for audio_arg in audio_args {
         command.arg(audio_arg);
@@ -2600,79 +2600,6 @@ fn estimate_wav_secs(path: &Path) -> Option<f64> {
     Some(reader.duration() as f64 / spec.sample_rate as f64)
 }
 
-/// Run a command to completion like `Command::output()`, but kill the child
-/// if it exceeds `timeout`. Pipes are drained on dedicated threads so a child
-/// that fills stdout/stderr can't deadlock against the wait loop. Returns the
-/// output plus whether the child was killed by the timeout.
-#[cfg(feature = "parakeet")]
-fn output_with_timeout(
-    mut command: std::process::Command,
-    timeout: std::time::Duration,
-) -> std::io::Result<(std::process::Output, bool)> {
-    use std::io::Read;
-
-    let mut child = command
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()?;
-
-    let mut stdout_pipe = child.stdout.take();
-    let stdout_handle = std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        if let Some(ref mut pipe) = stdout_pipe {
-            let _ = pipe.read_to_end(&mut buf);
-        }
-        buf
-    });
-    let mut stderr_pipe = child.stderr.take();
-    let stderr_handle = std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        if let Some(ref mut pipe) = stderr_pipe {
-            let _ = pipe.read_to_end(&mut buf);
-        }
-        buf
-    });
-
-    let deadline = std::time::Instant::now() + timeout;
-    let status = loop {
-        match child.try_wait()? {
-            Some(status) => break status,
-            None => {
-                if std::time::Instant::now() >= deadline {
-                    let _ = child.kill();
-                    let status = child.wait()?;
-                    // Don't join the drain threads here: if the child spawned
-                    // helpers that inherited the pipe fds, read_to_end won't
-                    // see EOF until they exit. The caller discards output on
-                    // timeout anyway; let the drains finish detached.
-                    drop(stdout_handle);
-                    drop(stderr_handle);
-                    return Ok((
-                        std::process::Output {
-                            status,
-                            stdout: Vec::new(),
-                            stderr: Vec::new(),
-                        },
-                        true,
-                    ));
-                }
-                std::thread::sleep(std::time::Duration::from_millis(50));
-            }
-        }
-    };
-
-    let stdout = stdout_handle.join().unwrap_or_default();
-    let stderr = stderr_handle.join().unwrap_or_default();
-    Ok((
-        std::process::Output {
-            status,
-            stdout,
-            stderr,
-        },
-        false,
-    ))
-}
-
 #[cfg(feature = "parakeet")]
 #[allow(clippy::too_many_arguments)]
 fn run_parakeet_command_with_cpu_fallback(
@@ -2704,13 +2631,14 @@ fn run_parakeet_command_with_cpu_fallback(
             config,
             hints,
         );
-        let (output, timed_out) = output_with_timeout(command, timeout).map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                TranscribeError::ParakeetNotFound
-            } else {
-                TranscribeError::ParakeetFailed(format!("spawn error: {}", e))
-            }
-        })?;
+        let (output, timed_out) = crate::engine_process::output_with_timeout(command, timeout)
+            .map_err(|e| {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    TranscribeError::ParakeetNotFound
+                } else {
+                    TranscribeError::ParakeetFailed(format!("spawn error: {}", e))
+                }
+            })?;
 
         if timed_out {
             tracing::error!(

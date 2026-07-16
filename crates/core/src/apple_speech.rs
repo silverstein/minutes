@@ -13,9 +13,6 @@ use std::time::Instant;
 #[cfg(target_os = "macos")]
 use crate::calendar::output_with_timeout;
 #[cfg(target_os = "macos")]
-use std::process::Command;
-
-#[cfg(target_os = "macos")]
 const HELPER_SOURCE: &str = include_str!("../resources/apple-speech-helper.swift");
 #[cfg(target_os = "macos")]
 const HELPER_TIMEOUT: Duration = Duration::from_secs(30);
@@ -980,7 +977,7 @@ fn missing_terms(text: &str, terms: &[String]) -> Vec<String> {
 
 #[cfg(target_os = "macos")]
 fn run_helper_capabilities(helper: &Path) -> Result<AppleSpeechCapabilityReport> {
-    let mut command = Command::new(helper);
+    let mut command = crate::engine_process::command(helper);
     command.arg("capabilities");
     let output = output_with_timeout(command, HELPER_TIMEOUT).ok_or_else(|| {
         MinutesError::Io(std::io::Error::new(
@@ -1010,7 +1007,7 @@ fn run_helper_transcription(
     mode: AppleSpeechMode,
     ensure_assets: bool,
 ) -> Result<AppleSpeechTranscriptionResult> {
-    let mut command = Command::new(helper);
+    let mut command = crate::engine_process::command(helper);
     command
         .arg("transcribe")
         .args(["--mode", mode.as_helper_arg()])
@@ -1090,7 +1087,7 @@ fn ensure_helper_installed() -> Result<PathBuf> {
 
 #[cfg(target_os = "macos")]
 fn compile_helper(source_path: &Path, bin_path: &Path) -> Result<()> {
-    let output = Command::new("xcrun")
+    let output = crate::engine_process::command("xcrun")
         .arg("swiftc")
         .arg("-parse-as-library")
         .arg("-O")
@@ -1099,7 +1096,7 @@ fn compile_helper(source_path: &Path, bin_path: &Path) -> Result<()> {
         .arg(bin_path)
         .output()
         .or_else(|_| {
-            Command::new("swiftc")
+            crate::engine_process::command("swiftc")
                 .arg("-parse-as-library")
                 .arg("-O")
                 .arg(source_path)

@@ -1,0 +1,4 @@
+# Workspace fallback. `minutes-core` has a stricter package-local config in
+# `crates/core/clippy.toml`; keeping the workspace list empty avoids applying
+# engine-boundary policy to unrelated CLI and desktop process launches.
+disallowed-methods = []

@@ -17,5 +17,9 @@
     "golden:write": "node dist/compiler/golden.js --write",
     "doctor": "node dist/compiler/doctor.js",
     "ci": "npm run build && npm run test && npm run check && npm run golden && npm run compile:dry"
+  },
+  "devDependencies": {
+    "@types/node": "22.19.11",
+    "typescript": "5.9.3"
   }
 }

@@ -27,7 +27,7 @@ jobs:
         run: |
           brew install ollama
           ollama serve >"$RUNNER_TEMP/ollama.log" 2>&1 &
-          for attempt in {1..60}; do
+          for _ in {1..60}; do
             if curl --fail --silent http://localhost:11434/api/tags >/dev/null; then
               exit 0
             fi

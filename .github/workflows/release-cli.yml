@@ -52,6 +52,11 @@ jobs:
         if: runner.os == 'macOS'
         run: echo "CXXFLAGS=-I$(xcrun --show-sdk-path)/usr/include/c++/v1" >> "$GITHUB_ENV"
 
+      - name: Resolve runner image for cache scope
+        id: runner-image
+        shell: bash
+        run: echo "scope=${ImageOS:-noimage}-${ImageVersion:-noversion}" >> "$GITHUB_OUTPUT"
+
       - name: Cache cargo
         uses: actions/cache@v4
         with:
@@ -59,10 +64,10 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          # Scope by ImageOS so a runner-image rotation does not restore a stale
+          # Scope by runner image so a runner-image rotation does not restore a stale
           # target/ cache with toolchain paths the new image no longer ships
           # (e.g. macOS 15 -> macOS 26 Xcode change). See ci.yml.
-          key: ${{ runner.os }}-${{ env.ImageOS }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-${{ steps.runner-image.outputs.scope }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Clean stale Windows native build cache
         if: runner.os == 'Windows'

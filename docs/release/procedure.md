@@ -4,25 +4,23 @@
 
 ### 1. Version bump (every source must match)
 ```bash
-# Bump in: Cargo.toml, crates/cli/Cargo.toml, tauri/src-tauri/tauri.conf.json,
-#          crates/mcp/package.json, crates/sdk/package.json, manifest.json
-# Also: manifest.mcpb.json  (Claude listing copy; its runtime `version` MUST equal
-#       manifest.json. Only display_name/description/long_description may differ.
-#       The MCP Server CI job's bundle guard fails on version drift here.)
-# Also: crates/mcp/src/index.ts  (const MCP_SERVER_VERSION = "X.Y.Z")
-# Also: the minutes-core dep version in crates/cli/Cargo.toml
-# Also: crates/sdk/package-lock.json AND crates/mcp/package-lock.json
-#       (the package's own "version" field appears twice: at the top and under
-#       packages[""]. `npm version` syncs these; a hand-edited package.json does not.)
-# Then regenerate derived files (pre-push hooks + CI enforce these):
-#   node scripts/sync_site_release_version.mjs   # site/lib/release.ts
-#   node scripts/generate_llms_txt.mjs           # site/public/llms.txt + llms-full.txt
-#   cargo check                                  # refreshes Cargo.lock workspace versions
-# Verify the primary sources:
-grep version Cargo.toml tauri/src-tauri/tauri.conf.json crates/mcp/package.json \
-  crates/sdk/package.json manifest.json manifest.mcpb.json && \
-  grep MCP_SERVER_VERSION crates/mcp/src/index.ts
+# Preview the complete Domain-1 patch without touching this checkout, then apply it.
+node scripts/bump-version.mjs --dry-run X.Y.Z
+node scripts/bump-version.mjs X.Y.Z
+
+# Keep the generated LLM documentation current, then run the public verifier.
+node scripts/generate_llms_txt.mjs
+node scripts/check_version_sync.mjs
 ```
+
+The bump command updates every Domain-1 source, regenerates both npm lockfiles,
+refreshes only the three Minutes workspace entries in `Cargo.lock`, regenerates
+`site/lib/release.ts`, and verifies the result in a temporary git worktree before
+applying one patch to the real checkout. It never changes the independently
+versioned plugin metadata, `whisper-guard`, or the Tauri crate's own version.
+
+For a plugin-only release, update the plugin trio with the same transactional
+flow: `node scripts/bump-version.mjs --plugin X.Y.Z` (add `--dry-run` to preview).
 
 **Independent-cadence crates.** `crates/whisper-guard/Cargo.toml` is published to crates.io on its own cadence — it does NOT need to match the main version. Check whether it has unreleased changes before tagging the main release:
 ```bash

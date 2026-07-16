@@ -431,6 +431,9 @@ jobs:
       - name: Test version policy checker
         run: node --test scripts/check_version_sync.test.mjs
 
+      - name: Test transactional version bump
+        run: node --test scripts/bump_version.test.mjs
+
   design_tokens:
     name: Design Tokens
     runs-on: ubuntu-latest

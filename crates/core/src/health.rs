@@ -437,7 +437,7 @@ pub fn screen_recording_status(config: &Config) -> HealthItem {
     {
         // Mirrors capture_screenshot's tool order (scrot, then gnome-screenshot).
         let tool = ["scrot", "gnome-screenshot"].into_iter().find(|tool| {
-            std::process::Command::new(tool)
+            crate::engine_process::command(tool)
                 .arg("--version")
                 .output()
                 .is_ok()

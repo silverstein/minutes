@@ -2241,7 +2241,7 @@ pub fn select_input_device(
 #[cfg(target_os = "macos")]
 pub fn get_macos_default_input_name() -> Option<String> {
     // Try AppleScript to get the system-level default input device
-    let output = std::process::Command::new("system_profiler")
+    let output = crate::engine_process::command("system_profiler")
         .args(["SPAudioDataType", "-json"])
         .output()
         .ok()?;
@@ -2300,7 +2300,7 @@ fn detect_call_app_from_processes(
 }
 
 fn running_process_names() -> Vec<String> {
-    let output = std::process::Command::new("ps")
+    let output = crate::engine_process::command("ps")
         .args(["-eo", "comm="])
         .output();
 
@@ -2630,7 +2630,7 @@ fn send_desktop_notification(body: &str) {
             "display notification \"{}\" with title \"Minutes\" sound name \"Submarine\"",
             body.replace('\\', "\\\\").replace('"', "\\\"")
         );
-        match std::process::Command::new("osascript")
+        match crate::engine_process::command("osascript")
             .args(["-e", &script])
             .output()
         {
@@ -2658,7 +2658,7 @@ fn send_device_change_notification(old_device: &str, new_device: &str) {
             "display notification \"{}\" with title \"Minutes\" sound name \"Blow\"",
             body.replace('\\', "\\\\").replace('"', "\\\"")
         );
-        match std::process::Command::new("osascript")
+        match crate::engine_process::command("osascript")
             .args(["-e", &script])
             .output()
         {

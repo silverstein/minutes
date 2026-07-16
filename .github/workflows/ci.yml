@@ -159,7 +159,9 @@ jobs:
 
       - name: Clippy (macOS only — full workspace)
         if: runner.os == 'macOS'
-        run: cargo clippy --all --no-default-features -- -D warnings
+        run: |
+          cargo clippy --all --no-default-features -- -D warnings
+          cargo clippy -p minutes-core --no-default-features --features parakeet -- -D warnings
 
       - name: Format check (macOS only)
         if: runner.os == 'macOS'

@@ -22,9 +22,6 @@ use std::time::Duration;
 
 #[cfg(any(test, target_os = "macos"))]
 use crate::calendar::output_with_timeout;
-#[cfg(any(test, target_os = "macos"))]
-use std::process::Command;
-
 #[cfg(target_os = "macos")]
 const HELPER_SOURCE: &str = include_str!("../resources/apple-fm-helper.swift");
 /// Capability probes are near-instant; generation gets a generous local budget.
@@ -104,7 +101,7 @@ fn probe_availability() -> bool {
         let Some(helper) = resolve_helper() else {
             return false;
         };
-        let mut command = Command::new(&helper);
+        let mut command = crate::engine_process::command(&helper);
         command.arg("capabilities");
         let Some(output) = output_with_timeout(command, CAPABILITY_TIMEOUT) else {
             tracing::warn!("apple-fm capabilities probe timed out");
@@ -150,7 +147,7 @@ pub fn generate(system_prompt: &str, prompt: &str) -> Result<String, Box<dyn std
         input_file.write_all(payload.to_string().as_bytes())?;
         input_file.flush()?;
 
-        let mut command = Command::new(&helper);
+        let mut command = crate::engine_process::command(&helper);
         command
             .arg("generate")
             .arg("--input-file")
@@ -211,7 +208,7 @@ fn ensure_helper_installed() -> crate::error::Result<PathBuf> {
         _ => true,
     };
     if needs_compile {
-        let output = Command::new("xcrun")
+        let output = crate::engine_process::command("xcrun")
             .arg("swiftc")
             .arg("-parse-as-library")
             .arg("-O")
@@ -220,7 +217,7 @@ fn ensure_helper_installed() -> crate::error::Result<PathBuf> {
             .arg(&bin_path)
             .output()
             .or_else(|_| {
-                Command::new("swiftc")
+                crate::engine_process::command("swiftc")
                     .arg("-parse-as-library")
                     .arg("-O")
                     .arg(&source_path)

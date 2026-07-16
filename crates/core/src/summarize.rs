@@ -804,7 +804,7 @@ pub fn detect_agent_cli() -> Option<String> {
         let resolved = resolve_agent_path(cmd);
         // resolve_agent_path returns the bare name if not found — check if we got a real path
         if (resolved != *cmd || std::path::Path::new(&resolved).exists())
-            && std::process::Command::new(&resolved)
+            && crate::engine_process::command(&resolved)
                 .arg("--version")
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
@@ -1700,7 +1700,7 @@ fn summarize_with_agent_impl_timeout(
     } else {
         std::process::Stdio::null()
     };
-    let mut child = std::process::Command::new(&invocation.cmd)
+    let mut child = crate::engine_process::command(&invocation.cmd)
         .args(&invocation.args)
         .stdin(stdin_stdio)
         .stdout(std::process::Stdio::piped())
@@ -2584,7 +2584,7 @@ fn run_title_refinement_via_agent(
     } else {
         std::process::Stdio::null()
     };
-    let mut child = std::process::Command::new(&invocation.cmd)
+    let mut child = crate::engine_process::command(&invocation.cmd)
         .args(&invocation.args)
         .stdin(stdin_stdio)
         .stdout(std::process::Stdio::piped())
@@ -2906,7 +2906,7 @@ fn run_speaker_mapping_via_agent(
     } else {
         std::process::Stdio::null()
     };
-    let mut command = std::process::Command::new(&invocation.cmd);
+    let mut command = crate::engine_process::command(&invocation.cmd);
     command
         .args(&invocation.args)
         .stdin(stdin_stdio)

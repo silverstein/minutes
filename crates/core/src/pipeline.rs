@@ -875,7 +875,7 @@ fn prepare_transcription_input(
         }
     })?;
 
-    let output = std::process::Command::new(&ffmpeg)
+    let output = crate::engine_process::command(&ffmpeg)
         .args([
             "-y",
             "-i",
@@ -4970,7 +4970,7 @@ pub fn run_post_record_hook(config: &Config, transcript_path: &Path) {
         let path = transcript_path.display().to_string();
         std::thread::spawn(move || {
             tracing::info!(command = %cmd, path = %path, "running post_record hook");
-            match std::process::Command::new("sh")
+            match crate::engine_process::command("sh")
                 .arg("-c")
                 .arg(format!("{} \"$1\"", cmd))
                 .arg("--")
@@ -7409,7 +7409,7 @@ mod tests {
 
         // Replicate the exact invocation from run_post_record_hook
         let cmd = config.hooks.post_record.as_ref().unwrap();
-        let output = std::process::Command::new("sh")
+        let output = crate::engine_process::command("sh")
             .arg("-c")
             .arg(format!("{} \"$1\"", cmd))
             .arg("--")
@@ -7518,7 +7518,7 @@ mod prepare_transcription_input_tests {
         let Ok(ffmpeg) = crate::ffmpeg::resolve_ffmpeg() else {
             return false;
         };
-        std::process::Command::new(ffmpeg)
+        crate::engine_process::command(ffmpeg)
             .arg("-version")
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())

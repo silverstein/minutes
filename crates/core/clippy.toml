@@ -1,0 +1,3 @@
+disallowed-methods = [
+  { path = "std::process::Command::new", reason = "construct child processes through crate::engine_process::command so subprocess policy remains auditable" },
+]

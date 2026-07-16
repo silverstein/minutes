@@ -10,7 +10,6 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct DecodeHintEvalCase {
@@ -1121,7 +1120,7 @@ fn materialize_eval_audio_path(
             case.id, error
         )))
     })?;
-    let ffmpeg = Command::new(&ffmpeg_path)
+    let ffmpeg = crate::engine_process::command(&ffmpeg_path)
         .arg("-hide_banner")
         .arg("-loglevel")
         .arg("error")

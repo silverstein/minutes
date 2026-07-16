@@ -248,7 +248,7 @@ pub fn calendar_access_status() -> CalendarAccess {
         let Some(helper) = find_calendar_helper() else {
             return CalendarAccess::Unknown;
         };
-        let mut cmd = Command::new(&helper);
+        let mut cmd = crate::engine_process::command(&helper);
         cmd.arg("--status");
         let Some(output) = output_with_timeout(cmd, SUBPROCESS_TIMEOUT) else {
             return CalendarAccess::Unknown;
@@ -370,7 +370,7 @@ fn calendar_integration_enabled() -> bool {
 /// `pgrep -x Calendar` is ~1ms and does not trigger any TCC prompts.
 #[cfg(target_os = "macos")]
 fn is_calendar_app_running() -> bool {
-    Command::new("pgrep")
+    crate::engine_process::command("pgrep")
         .args(["-x", "Calendar"])
         .output()
         .map(|out| out.status.success() && !out.stdout.is_empty())
@@ -470,7 +470,7 @@ return output"#
         .replace("__MINUTE__", &center.minute().to_string())
         .replace("__SECOND__", &center.second().to_string());
 
-    let mut cmd = Command::new("osascript");
+    let mut cmd = crate::engine_process::command("osascript");
     cmd.arg("-e").arg(script);
     let output = match output_with_timeout(cmd, SUBPROCESS_TIMEOUT) {
         Some(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
@@ -542,7 +542,7 @@ fn dedup_events(events: &mut Vec<CalendarEvent>) {
 fn query_via_eventkit(lookahead_minutes: u32) -> Option<Vec<CalendarEvent>> {
     let helper = find_calendar_helper()?;
 
-    let mut cmd = Command::new(&helper);
+    let mut cmd = crate::engine_process::command(&helper);
     cmd.arg(lookahead_minutes.to_string());
     let output = output_with_timeout(cmd, SUBPROCESS_TIMEOUT)?;
 
@@ -581,7 +581,7 @@ fn query_overlap_via_eventkit_with_helper(
         "querying calendar overlap via EventKit helper"
     );
 
-    let mut cmd = Command::new(helper);
+    let mut cmd = crate::engine_process::command(helper);
     cmd.arg(EVENTKIT_OVERLAP_LOOKAHEAD_MINUTES.to_string())
         .arg(EVENTKIT_OVERLAP_LOOKBACK_MINUTES.to_string());
     if let Some(reference_epoch_seconds) = reference_epoch_seconds {
@@ -698,7 +698,7 @@ return output"#,
         minutes = lookahead_minutes
     );
 
-    let mut cmd = Command::new("osascript");
+    let mut cmd = crate::engine_process::command("osascript");
     cmd.arg("-e").arg(&script);
     let output = match output_with_timeout(cmd, SUBPROCESS_TIMEOUT) {
         Some(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),

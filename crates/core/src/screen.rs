@@ -29,7 +29,7 @@ pub fn check_screen_permission() -> bool {
     {
         // Capture a 1x1 test screenshot to check permission
         let test_path = std::env::temp_dir().join("minutes-screen-test.png");
-        let result = std::process::Command::new("screencapture")
+        let result = crate::engine_process::command("screencapture")
             .args(["-x", "-R", "0,0,1,1", "-t", "png"])
             .arg(&test_path)
             .output();
@@ -277,7 +277,7 @@ fn capture_screenshot(path: &Path) -> std::io::Result<()> {
     // macOS: screencapture to temp file, then resize with sips
     #[cfg(target_os = "macos")]
     {
-        let output = std::process::Command::new("screencapture")
+        let output = crate::engine_process::command("screencapture")
             .args(["-x", "-C", "-t", "png"])
             .arg(path)
             .output()?;
@@ -290,7 +290,7 @@ fn capture_screenshot(path: &Path) -> std::io::Result<()> {
         }
 
         // Downscale to reduce file size (Retina screenshots are 3-8 MB)
-        let _ = std::process::Command::new("sips")
+        let _ = crate::engine_process::command("sips")
             .args([
                 "--resampleWidth",
                 &TARGET_WIDTH.to_string(),
@@ -305,13 +305,13 @@ fn capture_screenshot(path: &Path) -> std::io::Result<()> {
     // Linux: try scrot, fall back to gnome-screenshot
     #[cfg(target_os = "linux")]
     {
-        let result = std::process::Command::new("scrot").arg(path).output();
+        let result = crate::engine_process::command("scrot").arg(path).output();
 
         match result {
             Ok(output) if output.status.success() => {}
             _ => {
                 // Fall back to gnome-screenshot
-                let output = std::process::Command::new("gnome-screenshot")
+                let output = crate::engine_process::command("gnome-screenshot")
                     .args(["--file"])
                     .arg(path)
                     .output()?;

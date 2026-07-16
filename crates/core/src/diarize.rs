@@ -297,7 +297,7 @@ fn preprocess_audio(audio_path: &Path) -> (std::path::PathBuf, Option<std::path:
         }
     };
 
-    match std::process::Command::new(&ffmpeg)
+    match crate::engine_process::command(&ffmpeg)
         .args([
             "-y",
             "-i",
@@ -2631,7 +2631,7 @@ except Exception as e:
     sys.exit(1)
 "#;
 
-    let output = std::process::Command::new(&python)
+    let output = crate::engine_process::command(&python)
         .args(["-c", script, audio_path.to_str().unwrap_or("")])
         .output()?;
 
@@ -2664,7 +2664,7 @@ except Exception as e:
 /// Find the Python interpreter.
 fn find_python() -> Result<String, Box<dyn std::error::Error>> {
     for candidate in &["python3", "python"] {
-        let result = std::process::Command::new(candidate)
+        let result = crate::engine_process::command(candidate)
             .args(["--version"])
             .output();
         if let Ok(output) = result {

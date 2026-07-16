@@ -15,7 +15,7 @@ mod imp {
     use std::os::unix::net::UnixStream;
     use std::panic::{catch_unwind, AssertUnwindSafe};
     use std::path::{Path, PathBuf};
-    use std::process::{Child, Command, Stdio};
+    use std::process::{Child, Stdio};
     use std::sync::{Arc, Mutex, OnceLock};
     use std::thread;
     use std::time::{Duration, Instant};
@@ -478,7 +478,7 @@ mod imp {
             }
             let _ = fs::remove_file(&spec.socket_path);
 
-            let mut command = Command::new(&spec.server_binary);
+            let mut command = crate::engine_process::command(&spec.server_binary);
             command
                 .arg(&spec.socket_path)
                 .arg(&spec.model_path)
@@ -878,7 +878,7 @@ mod imp {
     }
 
     fn query_binary_version(binary: &Path) -> String {
-        let output = Command::new(binary)
+        let output = crate::engine_process::command(binary)
             .arg("--version")
             .stderr(Stdio::piped())
             .stdout(Stdio::piped())
@@ -1462,7 +1462,7 @@ mod imp {
         fn manager_drop_reaps_running_child_after_panic() {
             let minutes_dir = TempDir::new().unwrap();
             let script = make_temp_script("#!/bin/sh\nsleep 30\n");
-            let child = Command::new(&script).spawn().unwrap();
+            let child = crate::engine_process::command(&script).spawn().unwrap();
             let pid = child.id();
 
             let result = std::panic::catch_unwind(AssertUnwindSafe(|| {

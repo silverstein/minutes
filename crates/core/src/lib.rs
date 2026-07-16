@@ -1,6 +1,10 @@
+#![warn(clippy::disallowed_methods)]
+
 pub mod apple_fm;
 pub mod apple_speech;
 pub mod autoresearch;
+#[cfg(any(test, all(feature = "streaming", feature = "whisper")))]
+pub(crate) mod bounded_inference;
 pub mod calendar;
 pub mod capture;
 pub mod config;
@@ -13,6 +17,7 @@ pub mod device_monitor;
 pub mod diarize;
 pub mod dictation_cleanup;
 pub mod dictation_memory;
+pub(crate) mod engine_process;
 /// Person entity-resolution clustering (issue #385, class 3): suggestion-only
 /// grouping of name-variant fragments. Never merges.
 pub(crate) mod entity_cluster;

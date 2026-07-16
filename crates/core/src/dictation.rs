@@ -1059,9 +1059,9 @@ fn process_utterance(
 #[cfg(target_os = "macos")]
 fn write_to_clipboard(text: &str) -> Result<(), String> {
     use std::io::Write;
-    use std::process::{Command, Stdio};
+    use std::process::Stdio;
 
-    let mut child = Command::new("pbcopy")
+    let mut child = crate::engine_process::command("pbcopy")
         .stdin(Stdio::piped())
         .spawn()
         .map_err(|e| format!("failed to spawn pbcopy: {}", e))?;
@@ -1083,9 +1083,9 @@ fn write_to_clipboard(text: &str) -> Result<(), String> {
 #[cfg(target_os = "windows")]
 fn write_to_clipboard(text: &str) -> Result<(), String> {
     use std::io::Write;
-    use std::process::{Command, Stdio};
+    use std::process::Stdio;
 
-    let mut child = Command::new("clip")
+    let mut child = crate::engine_process::command("clip")
         .stdin(Stdio::piped())
         .spawn()
         .map_err(|e| format!("failed to spawn clip.exe: {}", e))?;
@@ -1106,7 +1106,7 @@ fn write_to_clipboard(text: &str) -> Result<(), String> {
 #[cfg(target_os = "linux")]
 fn write_to_clipboard(text: &str) -> Result<(), String> {
     use std::io::Write;
-    use std::process::{Command, Stdio};
+    use std::process::Stdio;
 
     let candidates = linux_clipboard_write_candidates();
     let mut errors = Vec::new();
@@ -1116,7 +1116,7 @@ fn write_to_clipboard(text: &str) -> Result<(), String> {
             continue;
         }
 
-        let mut child = Command::new(program)
+        let mut child = crate::engine_process::command(program)
             .args(args)
             .stdin(Stdio::piped())
             .spawn()

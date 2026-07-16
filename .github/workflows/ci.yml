@@ -355,14 +355,7 @@ jobs:
 
       - name: Install MCP dependencies
         working-directory: crates/mcp
-        # npm/cli#4828: `npm install` sometimes skips platform-specific
-        # optional deps (rollup's Linux binary in our case) when the
-        # lockfile was generated on a different OS. Delete the lockfile
-        # so Linux-host npm re-resolves optional deps cleanly. Safe in CI
-        # because we don't commit the regenerated lockfile back.
-        run: |
-          rm -f package-lock.json
-          npm install
+        run: npm ci
 
       - name: TypeScript check
         working-directory: crates/mcp
@@ -395,6 +388,31 @@ jobs:
 
       - name: Handshake smoke test
         run: ./scripts/smoke_mcpb_handshake.sh minutes.mcpb
+
+  # The lockfile is generated from a clean tree with Node 22/npm 10 so its v3
+  # package graph retains every platform-specific optional dependency.
+  mcp_lockfile_check:
+    name: MCP Lockfile (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install MCP dependencies
+        working-directory: crates/mcp
+        run: npm ci
+
+      - name: TypeScript check
+        working-directory: crates/mcp
+        run: npx tsc --noEmit
 
   site_release_consistency:
     name: Site Release Link Consistency
@@ -503,6 +521,7 @@ jobs:
       - linux_full_build
       - desktop_windows
       - mcp
+      - mcp_lockfile_check
       - agents_sync
       - site_release_consistency
       - llms_sync

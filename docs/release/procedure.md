@@ -64,41 +64,34 @@ Every release shows up in followers' GitHub feeds — this is free awareness. Wr
 ### 6. Push the release commit to `main` and wait for CI to go green
 ```bash
 git push origin main
-# Phase 1 refuses to run until this exact HEAD is pushed. Watch CI before publishing.
+# The release preflight and pin step require this exact HEAD to be pushed.
 gh run list --branch main --limit 3
 gh run watch $(gh run list --branch main --limit 1 --json databaseId --jq '.[0].databaseId')
 ```
-**Why this step exists**: Phase 1 publishes `minutes-sdk`, so the version bump must
-already be committed, pushed, and green. The release script verifies the clean
-`main` checkout, pushed HEAD, and normal version-sync policy; the maintainer
-confirms that HEAD's CI run is green before starting Phase 1.
+**Why this step exists**: registry publishing is authorized by the immutable
+release tag, so the version bump and exact dependency pin must be reviewed and
+green before that tag exists. The release script verifies the clean `main`
+checkout, pushed HEAD, and version-sync policy.
 
-### 7. Phase 1: validate and publish `minutes-sdk`
+### 7. Optional Phase 1 local pack-and-test preflight
 ```bash
-node scripts/release.mjs phase1 X.Y.Z
+node scripts/release.mjs phase1 X.Y.Z --dry-run
 ```
 
-Phase 1 packs the SDK, tests MCP against that exact tarball, and records the
-tarball's SHA-512 integrity in `.minutes-release-state.json`. It publishes the
-SDK only if the registry does not already contain the version; a retry skips an
-existing package only when its registry integrity matches. It then polls for
-exact-version visibility, avoiding the v0.19.0/v0.20 registry-lag failure where
-MCP was published before npm could resolve its SDK dependency.
-
-If polling times out, stop. The SDK-published/MCP-unpublished state is safe and
-supported: check it with `node scripts/release.mjs status`, then rerun Phase 1
-later. Do not edit package inputs or manually publish MCP.
+This credential-free preflight packs the SDK and tests MCP against that exact
+tarball. It does not publish. The tag workflow repeats the package builds and
+owns all registry mutations, so Phase 1 is useful before the irreversible tag
+but is no longer required for authentication or publish ordering.
 
 ### 8. Phase 2: commit MCP's exact SDK pin
 ```bash
 node scripts/release.mjs phase2 X.Y.Z
 ```
 
-Phase 2 verifies the published SDK again, pins
-`crates/mcp/package.json` to the exact version, regenerates the MCP lockfile,
-and refuses to continue unless those are the only two changed files. It creates
-the commit `release: pin minutes-sdk X.Y.Z for mcp` itself. Push that commit and
-wait for CI on the new exact HEAD:
+Phase 2 pins `crates/mcp/package.json` to the exact SDK version, regenerates the
+MCP lockfile, and refuses to continue unless those are the only two changed
+files. It creates the commit `release: pin minutes-sdk X.Y.Z for mcp` itself.
+Push that commit and wait for CI on the new exact HEAD:
 
 ```bash
 git push origin main
@@ -106,8 +99,9 @@ gh run list --branch main --limit 3
 gh run watch $(gh run list --branch main --limit 1 --json databaseId --jq '.[0].databaseId')
 ```
 
-Do not amend the Phase-2 commit or edit release inputs after this point. Phase 3
-will reproduce the SDK tarball from this HEAD and compare it with Phase 1.
+Do not amend the Phase-2 commit or edit release inputs after this point. The
+tag-triggered registry workflow checks out this exact commit and reruns
+`check_version_sync.mjs --release` before either publish job can start.
 
 ### 9. Create the GitHub release as a DRAFT
 ```bash
@@ -118,42 +112,47 @@ This stages the notes without announcing the release. Keep it as a draft while
 the tag-triggered workflows build and attach artifacts. Creating the draft does
 not create or push the local annotated tag used by the committed release flow.
 
-### 10. Phase 3: verify provenance, create the tag, and publish `minutes-mcp`
+### 10. Create and push the release tag
 ```bash
 node scripts/release.mjs tag X.Y.Z
 # Run the exact tag-push command printed by the script, for example:
 git push origin vX.Y.Z
 ```
 
-Phase 3 requires a clean, pushed HEAD and green CI, runs
-`check_version_sync.mjs --release` to enforce the exact pin, and proves that
-`npm pack` for the SDK still matches the Phase-1 integrity. It creates an
-annotated local tag but never pushes it. Finally it publishes MCP idempotently,
-using the same registry-integrity rule as the SDK.
+The tag command requires a clean, pushed HEAD and green CI, enforces the exact
+pin, and creates an annotated local tag without pushing it. It has no registry
+credentials and does not publish packages.
 
 If `gh` is unavailable, Phase 3 refuses to proceed unless
 `--skip-ci-check` is supplied explicitly. Use that escape hatch only after
 manually confirming CI is green on `git rev-parse HEAD`.
 
-Pushing the printed tag command fires the three artifact workflows. Each starts
-with a `release_readiness` job that reruns the exact-pin release policy before
-any artifact build can begin.
+Pushing the printed tag command fires the three artifact workflows and
+`release-publish.yml`. The registry workflow publishes `minutes-sdk`, waits for
+its exact version and integrity to be visible, then publishes `minutes-mcp`. In
+parallel it publishes `minutes-core`, waits for its crates.io API visibility,
+then publishes `minutes-cli`. Every publish is idempotent for safe workflow
+reruns. See [Trusted publishing setup](trusted-publishing.md) for the one-time
+registry configuration.
 
-### 11. Wait for release assets, then publish the draft
+### 11. Wait for release assets and registry publishes, then publish the draft
 
 ```bash
 gh run list --workflow="Release CLI Binaries" --limit 1
 gh run list --workflow="Release macOS" --limit 1
 gh run list --workflow="Release Windows Desktop" --limit 1
+gh run list --workflow="Release Registry Packages" --limit 1
 
-# After all three are green and their assets are attached:
+# After all four are green, registry versions are visible, and assets are attached:
 gh release edit vX.Y.Z --draft=false
 ```
 
-The workflows attach the CLI binaries, DMG, Windows installers, updater files
-(`latest.json`, `Minutes.app.tar.gz`), and `SHA256SUMS.txt`. Publishing the draft
-is the announcement moment: it appears in followers' feeds and becomes
-"latest". If an artifact workflow fails, do not move or replace the tag; follow
+The artifact workflows attach the CLI binaries, DMG, Windows installers,
+updater files (`latest.json`, `Minutes.app.tar.gz`), and `SHA256SUMS.txt`. The
+registry workflow summary lists all four published or integrity-verified
+versions. Publishing the draft is the announcement moment: it appears in
+followers' feeds and becomes "latest". If any release workflow fails, do not
+move or replace the tag; rerun an idempotent job where appropriate, or follow
 the immutable-tag recovery policy in `channels.md` and cut a new patch release.
 
 ### 12. Build and upload .mcpb
@@ -163,9 +162,9 @@ the immutable-tag recovery policy in `channels.md` and cut a new patch release.
 gh release upload vX.Y.Z minutes.mcpb --clobber
 ```
 
-There are no manual npm publish commands after the tag. The three release-script
-phases own SDK-before-MCP ordering, exact dependency pinning, provenance checks,
-and idempotent retries.
+There are no manual npm publish commands. `release-publish.yml` owns
+SDK-before-MCP ordering, exact-integrity checks, OIDC provenance, and idempotent
+retries.
 
 ### 13. Publish independent-cadence crates (whisper-guard) if bumped
 Skip this step if Step 1 showed no changes to `crates/whisper-guard/` since the last whisper-guard publish.
@@ -178,31 +177,28 @@ sleep 30 && curl -s https://crates.io/api/v1/crates/whisper-guard | jq '.crate.m
 ```
 whisper-guard is a standalone MIT crate consumed outside this repo (currently 277+ downloads). Bump independently of the main release; do NOT couple to the Minutes version. If you skip the publish, the crates.io users miss the fix and you create silent drift between repo state and published artifact.
 
-### 14. Publish minutes-core and minutes-cli to crates.io
+### 14. Verify minutes-core and minutes-cli on crates.io
 
 As of #79 the workspace has no git dependencies (cpal is on crates.io 0.18.1 with `windows-core` pinned to 0.61.2; pyannote-rs is on crates.io 0.3.4), so these crates can be published again. They were last on crates.io at v0.9.4 and now publish at the main release version (currently 0.18.5).
 
-Publish in dependency order, `minutes-core` before `minutes-cli`, because `minutes-cli` depends on the crates.io version of `minutes-core`. whisper-guard (Step 13) must already be published at the version `minutes-core` requires.
+The trusted-publishing workflow publishes in dependency order,
+`minutes-core` before `minutes-cli`, because `minutes-cli` depends on the
+crates.io version of `minutes-core`. whisper-guard (Step 13) must already be
+published at the version `minutes-core` requires.
 
 ```bash
-# core first; cli depends on it. dry-run each before the real publish.
-cd crates/core
-cargo publish --dry-run
-cargo publish
-# wait for the index to pick up core so cli can resolve it
-sleep 45 && curl -s https://crates.io/api/v1/crates/minutes-core | jq '.crate.max_stable_version'
-
-cd ../cli
-cargo publish --dry-run
-cargo publish
-sleep 30 && curl -s https://crates.io/api/v1/crates/minutes-cli | jq '.crate.max_stable_version'
+gh run view $(gh run list --workflow="Release Registry Packages" --limit 1 --json databaseId --jq '.[0].databaseId')
+curl -sS -H 'User-Agent: minutes-release-verify (https://github.com/silverstein/minutes)' \
+  https://crates.io/api/v1/crates/minutes-core/X.Y.Z | jq -r '.version.num'
+curl -sS -H 'User-Agent: minutes-release-verify (https://github.com/silverstein/minutes)' \
+  https://crates.io/api/v1/crates/minutes-cli/X.Y.Z | jq -r '.version.num'
 ```
 
 Notes:
 - `cargo publish` reads each crate's `version =` dependency fields (not the local `path =`), which already point at the crates.io versions, so no manifest edits are needed.
-- Publishing is irreversible: you can only yank, never replace a version. Always run the `--dry-run` first.
+- Publishing is irreversible: you can only yank, never replace a version. Never move a failed release tag to replace published crate contents.
 - This revives `cargo install minutes-cli` for users who do not use Homebrew.
-- If `minutes-core` fails to publish with a missing-dependency error, confirm whisper-guard at the required version is already indexed (Step 13).
+- If the workflow's `minutes-core` publish fails with a missing-dependency error, confirm whisper-guard at the required version is already indexed (Step 13), then rerun `release-publish.yml` for the same tag.
 
 ### 15. Refresh the landing page copy, then redeploy
 Before deploying, make sure the site matches what just shipped:

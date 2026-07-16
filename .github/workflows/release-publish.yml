@@ -1,0 +1,345 @@
+name: Release Registry Packages
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to publish, for example v0.23.0"
+        required: true
+        type: string
+
+permissions: {}
+
+env:
+  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+
+jobs:
+  release_readiness:
+    name: Release readiness
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.release-version.outputs.version }}
+    steps:
+      - name: Check out release tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22.14.0"
+
+      - name: Verify committed release invariants
+        run: node scripts/check_version_sync.mjs --release
+
+      - name: Verify tag and expose release version
+        id: release-version
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag_commit="$(git rev-parse --verify "refs/tags/${RELEASE_TAG}^{commit}")"
+          head_commit="$(git rev-parse HEAD)"
+          if [ "$tag_commit" != "$head_commit" ]; then
+            echo "ERROR: checkout HEAD ($head_commit) does not match ${RELEASE_TAG} ($tag_commit)" >&2
+            exit 1
+          fi
+          version="$(node -p "require('./crates/sdk/package.json').version")"
+          if [ "${RELEASE_TAG}" != "v${version}" ]; then
+            echo "ERROR: ${RELEASE_TAG} does not match the committed package version v${version}" >&2
+            exit 1
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+  publish_npm:
+    name: Publish npm packages
+    needs: release_readiness
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Check out release tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+
+      - name: Setup Node.js for npm trusted publishing
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22.14.0"
+          registry-url: https://registry.npmjs.org
+
+      # npm 11.5.1 is the first release that supports OIDC trusted publishing.
+      # Pin it so a future npm release cannot change release behavior unexpectedly.
+      - name: Install OIDC-capable npm
+        run: npm install -g npm@11.5.1
+
+      - name: Pack and check minutes-sdk
+        id: sdk
+        working-directory: crates/sdk
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci
+          npm run build
+
+          pack_json="$(mktemp)"
+          npm pack --json > "$pack_json"
+          mapfile -t pack < <(node - "$pack_json" <<'NODE'
+          const [pack] = require(process.argv[2]);
+          if (!pack?.filename || !pack?.integrity) throw new Error("npm pack did not return filename and integrity");
+          console.log(pack.filename);
+          console.log(pack.integrity);
+          NODE
+          )
+          package_name="$(node -p "require('./package.json').name")"
+          version="$(node -p "require('./package.json').version")"
+          rm -f "${pack[0]}" "$pack_json"
+
+          {
+            echo "package_name=${package_name}"
+            echo "version=${version}"
+            echo "integrity=${pack[1]}"
+          } >> "$GITHUB_OUTPUT"
+          node ../../scripts/registry_poll.mjs npm-check "$package_name" "$version" "${pack[1]}" >> "$GITHUB_OUTPUT"
+
+      - name: Publish minutes-sdk with npm OIDC
+        if: steps.sdk.outputs.already != 'true'
+        working-directory: crates/sdk
+        env:
+          PACKAGE_NAME: ${{ steps.sdk.outputs.package_name }}
+          PACKAGE_VERSION: ${{ steps.sdk.outputs.version }}
+          PACKAGE_INTEGRITY: ${{ steps.sdk.outputs.integrity }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          publish_log="$(mktemp)"
+          set +e
+          npm publish --access public 2>&1 | tee "$publish_log"
+          publish_status="${PIPESTATUS[0]}"
+          set -e
+          rm -f "$publish_log"
+          if [ "$publish_status" -eq 0 ]; then
+            exit 0
+          fi
+
+          # A concurrent rerun may have published after the initial 404. It is
+          # safe only when the now-visible tarball has the exact local integrity.
+          check="$(node ../../scripts/registry_poll.mjs npm-check "$PACKAGE_NAME" "$PACKAGE_VERSION" "$PACKAGE_INTEGRITY")"
+          if [ "$check" = "already=true" ]; then
+            echo "$PACKAGE_NAME@$PACKAGE_VERSION appeared concurrently with matching integrity; continuing."
+            exit 0
+          fi
+          exit "$publish_status"
+
+      - name: Wait for minutes-sdk registry visibility
+        run: >-
+          node scripts/registry_poll.mjs npm-poll
+          "${{ steps.sdk.outputs.package_name }}"
+          "${{ steps.sdk.outputs.version }}"
+          "${{ steps.sdk.outputs.integrity }}"
+
+      - name: Pack and check minutes-mcp
+        id: mcp
+        working-directory: crates/mcp
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci
+          npm run build
+
+          pack_json="$(mktemp)"
+          npm pack --json > "$pack_json"
+          mapfile -t pack < <(node - "$pack_json" <<'NODE'
+          const [pack] = require(process.argv[2]);
+          if (!pack?.filename || !pack?.integrity) throw new Error("npm pack did not return filename and integrity");
+          console.log(pack.filename);
+          console.log(pack.integrity);
+          NODE
+          )
+          package_name="$(node -p "require('./package.json').name")"
+          version="$(node -p "require('./package.json').version")"
+          rm -f "${pack[0]}" "$pack_json"
+
+          {
+            echo "package_name=${package_name}"
+            echo "version=${version}"
+            echo "integrity=${pack[1]}"
+          } >> "$GITHUB_OUTPUT"
+          node ../../scripts/registry_poll.mjs npm-check "$package_name" "$version" "${pack[1]}" >> "$GITHUB_OUTPUT"
+
+      - name: Publish minutes-mcp with npm OIDC
+        if: steps.mcp.outputs.already != 'true'
+        working-directory: crates/mcp
+        env:
+          PACKAGE_NAME: ${{ steps.mcp.outputs.package_name }}
+          PACKAGE_VERSION: ${{ steps.mcp.outputs.version }}
+          PACKAGE_INTEGRITY: ${{ steps.mcp.outputs.integrity }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          publish_log="$(mktemp)"
+          set +e
+          npm publish --access public 2>&1 | tee "$publish_log"
+          publish_status="${PIPESTATUS[0]}"
+          set -e
+          rm -f "$publish_log"
+          if [ "$publish_status" -eq 0 ]; then
+            exit 0
+          fi
+
+          check="$(node ../../scripts/registry_poll.mjs npm-check "$PACKAGE_NAME" "$PACKAGE_VERSION" "$PACKAGE_INTEGRITY")"
+          if [ "$check" = "already=true" ]; then
+            echo "$PACKAGE_NAME@$PACKAGE_VERSION appeared concurrently with matching integrity; continuing."
+            exit 0
+          fi
+          exit "$publish_status"
+
+      - name: Wait for minutes-mcp registry visibility
+        run: >-
+          node scripts/registry_poll.mjs npm-poll
+          "${{ steps.mcp.outputs.package_name }}"
+          "${{ steps.mcp.outputs.version }}"
+          "${{ steps.mcp.outputs.integrity }}"
+
+  publish_crates:
+    name: Publish crates.io packages
+    needs: release_readiness
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Check out release tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Linux build dependencies
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev cmake
+
+      - name: Authenticate to crates.io with OIDC
+        id: crates-auth
+        uses: rust-lang/crates-io-auth-action@v1
+
+      # whisper-guard is intentionally absent: it has an independent crates.io
+      # cadence and is published only by its dedicated maintainer procedure.
+      - name: Publish minutes-core then minutes-cli
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.crates-auth.outputs.token }}
+          VERSION: ${{ needs.release_readiness.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          publish_crate() {
+            local crate="$1"
+            local publish_log
+            local publish_status
+            publish_log="$(mktemp)"
+
+            set +e
+            cargo publish -p "$crate" 2>&1 | tee "$publish_log"
+            publish_status="${PIPESTATUS[0]}"
+            set -e
+
+            if [ "$publish_status" -eq 0 ]; then
+              rm -f "$publish_log"
+              return 0
+            fi
+            if grep -Fqi "already uploaded" "$publish_log"; then
+              echo "$crate@$VERSION is already uploaded; treating this rerun as successful."
+              rm -f "$publish_log"
+              return 0
+            fi
+            rm -f "$publish_log"
+            return "$publish_status"
+          }
+
+          poll_crate() {
+            local crate="$1"
+            local body
+            local curl_status
+            local delay
+            local http_status
+            local visible_version
+            body="$(mktemp)"
+
+            for delay in 0 5 10 20 40 60 60 60 45; do
+              if [ "$delay" -gt 0 ]; then
+                echo "Waiting ${delay}s for $crate@$VERSION to become visible on crates.io."
+                sleep "$delay"
+              fi
+
+              set +e
+              http_status="$(curl --silent --show-error --output "$body" --write-out '%{http_code}' \
+                --header 'User-Agent: minutes-release-publish (https://github.com/silverstein/minutes)' \
+                "https://crates.io/api/v1/crates/$crate/$VERSION")"
+              curl_status="$?"
+              set -e
+
+              if [ "$curl_status" -eq 0 ] && [ "$http_status" = "200" ]; then
+                visible_version="$(python3 - "$body" <<'PY'
+          import json
+          import sys
+
+          with open(sys.argv[1], encoding="utf-8") as response:
+              print(json.load(response)["version"]["num"])
+          PY
+          )"
+                if [ "$visible_version" != "$VERSION" ]; then
+                  echo "ERROR: crates.io returned $visible_version while waiting for $crate@$VERSION" >&2
+                  rm -f "$body"
+                  return 1
+                fi
+                echo "crates.io confirms $crate@$VERSION."
+                rm -f "$body"
+                return 0
+              fi
+
+              if [ "$curl_status" -eq 0 ] && [ "$http_status" != "404" ] && [[ "$http_status" != 5* ]]; then
+                echo "ERROR: crates.io lookup for $crate@$VERSION returned HTTP $http_status" >&2
+                rm -f "$body"
+                return 1
+              fi
+            done
+
+            echo "ERROR: $crate@$VERSION did not become visible before the crates.io polling timeout" >&2
+            rm -f "$body"
+            return 1
+          }
+
+          publish_crate minutes-core
+          poll_crate minutes-core
+          publish_crate minutes-cli
+          poll_crate minutes-cli
+
+  summary:
+    name: Registry publish summary
+    needs: [publish_npm, publish_crates, release_readiness]
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Write release summary
+        env:
+          VERSION: ${{ needs.release_readiness.outputs.version }}
+        run: |
+          {
+            echo "## Registry publishing complete"
+            echo
+            echo "The workflow published or integrity-verified all tag artifacts:"
+            echo
+            echo "- npm: \`minutes-sdk@$VERSION\`"
+            echo "- npm: \`minutes-mcp@$VERSION\`"
+            echo "- crates.io: \`minutes-core@$VERSION\`"
+            echo "- crates.io: \`minutes-cli@$VERSION\`"
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -1,5 +1,12 @@
 # Minutes — Project Plan
 
+> **Status note (2026-07-16):** this is the historical master plan — the
+> founding architecture and phasing, last substantively updated 2026-04-24.
+> It is NOT a live status tracker. Current truth lives in:
+> - beads (`bd ready`, `bd list --status in_progress`) for active work
+> - `docs/plans/` for feature plans, `docs/rfcs/` for accepted designs
+> - `git log` for what actually shipped
+
 > **Name**: `minutes`
 > **Tagline**: Every meeting, every idea, every voice note — searchable by your AI
 > **Domain**: useminutes.app (primary) + useminutes.app (desktop landing page)

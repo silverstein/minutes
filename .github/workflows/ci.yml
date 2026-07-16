@@ -59,7 +59,7 @@ jobs:
 
       - name: Set CXXFLAGS for whisper.cpp (macOS)
         if: runner.os == 'macOS'
-        run: echo "CXXFLAGS=-I$(xcrun --show-sdk-path)/usr/include/c++/v1" >> $GITHUB_ENV
+        run: echo "CXXFLAGS=-I$(xcrun --show-sdk-path)/usr/include/c++/v1" >> "$GITHUB_ENV"
 
       # Scope every cache to the exact runner image (ImageOS + ImageVersion).
       # When `macos-latest` rotated from macOS 15 to macOS 26 the old target/ cache

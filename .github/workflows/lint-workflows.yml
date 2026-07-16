@@ -1,0 +1,39 @@
+name: Lint workflows
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+env:
+  ACTIONLINT_IMAGE: rhysd/actionlint:1.7.7@sha256:1d74bfc9fd1963af8f89a7c22afaaafd42f49aad711a09951d02cb996398f61d
+
+jobs:
+  actionlint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Lint workflows
+        run: >-
+          docker run --rm
+          --volume "$GITHUB_WORKSPACE:/repo"
+          --workdir /repo
+          "$ACTIONLINT_IMAGE"
+          .github/workflows/*.yml
+
+      - name: Verify broken workflow is rejected
+        run: |
+          if docker run --rm \
+            --volume "$GITHUB_WORKSPACE:/repo" \
+            --workdir /repo \
+            "$ACTIONLINT_IMAGE" \
+            tests/fixtures/workflows/broken.yml
+          then
+            echo "actionlint unexpectedly accepted the broken workflow fixture" >&2
+            exit 1
+          fi

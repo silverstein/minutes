@@ -364,7 +364,8 @@ function collectViolations(root, tokens) {
   }
 
   function checkTailwind(file, source) {
-    const pattern = /\b(text|bg|border|fill|stroke|outline|shadow)-\[([^\]\r\n]+)\]/gi;
+    const pattern =
+      /\b(text|bg|border|fill|stroke|outline|shadow|ring|ring-offset|caret|accent|divide|decoration|placeholder|from|via|to)-\[([^\]\r\n]+)\]/gi;
     for (const match of source.matchAll(pattern)) {
       const literals = extractColorLiterals(match[2]);
       for (const literal of literals) {

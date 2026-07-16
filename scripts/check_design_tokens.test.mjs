@@ -89,6 +89,21 @@ test("Tailwind arbitrary color class fails", async (t) => {
   assertViolation(runChecker(root), "text", "#ff0000");
 });
 
+test("Tailwind ring/caret/gradient arbitrary colors fail", async (t) => {
+  const root = await makeRepo(t);
+  await writeFixture(
+    root,
+    "site/app/page.tsx",
+    'export const Page = () => (\n' +
+      '  <p className="ring-[#ff0000] caret-[rgb(1,2,3)] from-[#123456]">bad</p>\n' +
+      ");\n",
+  );
+  const result = runChecker(root);
+  assertViolation(result, "ring", "#ff0000");
+  assertViolation(result, "caret", "rgb(1,2,3)");
+  assertViolation(result, "from", "#123456");
+});
+
 test("TSX style-object color fails", async (t) => {
   const root = await makeRepo(t);
   await writeFixture(

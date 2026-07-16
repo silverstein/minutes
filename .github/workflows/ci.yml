@@ -431,11 +431,49 @@ jobs:
       - name: Test version policy checker
         run: node --test scripts/check_version_sync.test.mjs
 
+      - name: Test optional Git hook setup
+        run: node --test scripts/setup_hooks.test.mjs
+
       - name: Test transactional version bump
         run: node --test scripts/bump_version.test.mjs
 
       - name: Test committed release flow
         run: node --test scripts/release.test.mjs
+
+  design_tokens:
+    name: Design Tokens
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Fetch pull request base baseline
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        shell: bash
+        run: |
+          git fetch --no-tags --depth=1 origin "$BASE_SHA"
+          if git cat-file -e "$BASE_SHA:design/token-baseline.json"; then
+            git show "$BASE_SHA:design/token-baseline.json" > "$RUNNER_TEMP/design-token-base.json"
+            echo "DESIGN_TOKEN_BASELINE=$RUNNER_TEMP/design-token-base.json" >> "$GITHUB_ENV"
+          fi
+
+      - name: Verify design-token policy
+        shell: bash
+        run: |
+          if [[ -n "${DESIGN_TOKEN_BASELINE:-}" ]]; then
+            node scripts/check_design_tokens.mjs --base-baseline "$DESIGN_TOKEN_BASELINE"
+          else
+            node scripts/check_design_tokens.mjs
+          fi
+
+      - name: Test design-token checker
+        run: node --test scripts/check_design_tokens.test.mjs
 
   skills_compiler:
     name: Skills Compiler
@@ -560,6 +598,7 @@ jobs:
       - mcp
       - mcp_lockfile_check
       - version_sync
+      - design_tokens
       - skills_compiler
       - agents_sync
       - site_release_consistency

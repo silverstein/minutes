@@ -22,6 +22,8 @@ versioned plugin metadata, `whisper-guard`, or the Tauri crate's own version.
 For a plugin-only release, update the plugin trio with the same transactional
 flow: `node scripts/bump-version.mjs --plugin X.Y.Z` (add `--dry-run` to preview).
 
+CI enforces these checks. The pre-push hooks are optional local fast feedback — enable them with `scripts/setup-hooks.sh`. They can be bypassed with `git push --no-verify`, so a successful local push is never a substitute for green CI.
+
 **Independent-cadence crates.** `crates/whisper-guard/Cargo.toml` is published to crates.io on its own cadence — it does NOT need to match the main version. Check whether it has unreleased changes before tagging the main release:
 ```bash
 PUBLISHED=$(curl -s https://crates.io/api/v1/crates/whisper-guard | jq -r '.crate.max_stable_version')

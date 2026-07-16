@@ -396,6 +396,23 @@ jobs:
       - name: Handshake smoke test
         run: ./scripts/smoke_mcpb_handshake.sh minutes.mcpb
 
+  version_sync:
+    name: Version Sync
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Verify version policy
+        run: node scripts/check_version_sync.mjs
+
+      - name: Test version policy checker
+        run: node --test scripts/check_version_sync.test.mjs
+
   site_release_consistency:
     name: Site Release Link Consistency
     runs-on: ubuntu-latest
@@ -503,6 +520,7 @@ jobs:
       - linux_full_build
       - desktop_windows
       - mcp
+      - version_sync
       - agents_sync
       - site_release_consistency
       - llms_sync

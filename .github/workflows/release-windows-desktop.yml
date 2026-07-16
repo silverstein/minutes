@@ -14,8 +14,23 @@ env:
   TAURI_CLI_VERSION: "2.10.1"
 
 jobs:
+  release_readiness:
+    name: Release readiness
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Verify committed release invariants
+        run: node scripts/check_version_sync.mjs --release
+
   windows-desktop:
     name: Build Windows desktop installer
+    needs: release_readiness
     runs-on: windows-latest
 
     steps:

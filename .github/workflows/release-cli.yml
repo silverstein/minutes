@@ -13,8 +13,23 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  release_readiness:
+    name: Release readiness
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Verify committed release invariants
+        run: node scripts/check_version_sync.mjs --release
+
   build:
     name: Build (${{ matrix.target }})
+    needs: release_readiness
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -100,7 +115,7 @@ jobs:
 
   checksums:
     name: Publish CLI checksums
-    needs: build
+    needs: [release_readiness, build]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
     steps:

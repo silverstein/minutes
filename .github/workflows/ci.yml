@@ -434,6 +434,9 @@ jobs:
       - name: Test transactional version bump
         run: node --test scripts/bump_version.test.mjs
 
+      - name: Test committed release flow
+        run: node --test scripts/release.test.mjs
+
   skills_compiler:
     name: Skills Compiler
     runs-on: ubuntu-latest

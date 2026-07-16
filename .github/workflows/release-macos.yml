@@ -22,8 +22,26 @@ env:
   RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
 
 jobs:
+  release_readiness:
+    name: Release readiness
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out release ref
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Verify committed release invariants
+        run: node scripts/check_version_sync.mjs --release
+
   macos-release:
     name: Build signed + notarized Minutes.app
+    needs: release_readiness
     runs-on: macos-latest
 
     steps:

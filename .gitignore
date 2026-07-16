@@ -86,6 +86,9 @@ tauri/src-tauri/resources/
 # Release note drafts (local working docs; release body is copied into GitHub)
 notes-release-v*.md
 
+# Resumable local release orchestration state
+/.minutes-release-state.json
+
 # Local scratch
 tmp/
 docs/assets/demo*

@@ -26,7 +26,7 @@ flow: `node scripts/bump-version.mjs --plugin X.Y.Z` (add `--dry-run` to preview
 ```bash
 PUBLISHED=$(curl -s https://crates.io/api/v1/crates/whisper-guard | jq -r '.crate.max_stable_version')
 LAST_PUBLISH_COMMIT=$(git log --grep="whisper-guard $PUBLISHED" --format="%H" | head -1)
-git log "$LAST_PUBLISH_COMMIT"..HEAD -- crates/whisper-guard/   # any commits → bump + publish in Step 11.5
+git log "$LAST_PUBLISH_COMMIT"..HEAD -- crates/whisper-guard/   # any commits → bump + publish in Step 13
 ```
 
 ### 2. Manifest sync
@@ -57,54 +57,115 @@ Every release shows up in followers' GitHub feeds — this is free awareness. Wr
 - Summarize what shipped and why it matters (not commit messages — outcomes)
 - Include install instructions (cargo install, DMG, npx)
 - Match the voice of past releases (see v0.8.0, v0.8.1 for examples)
-- Save to a temp file: `notes.md`
+- Save to the gitignored local file `notes-release-vX.Y.Z.md`
 
-### 6. Push commits to `main` and wait for CI to go green
+### 6. Push the release commit to `main` and wait for CI to go green
 ```bash
 git push origin main
-# Watch CI — do NOT tag or publish until the CI workflow succeeds on this commit.
+# Phase 1 refuses to run until this exact HEAD is pushed. Watch CI before publishing.
 gh run list --branch main --limit 3
 gh run watch $(gh run list --branch main --limit 1 --json databaseId --jq '.[0].databaseId')
 ```
-**Why this step exists**: if you tag first and CI breaks (e.g. a Windows cross-platform build failure), you've already published the version to the public GitHub feed, npm, and brew. Moving a tag after the fact is messy — force-pushing the tag drops the GitHub release to draft, requires re-publishing, and leaves the npm package / brew formula pointing at a different commit than the release tag. Catch the failure *before* any of that happens.
+**Why this step exists**: Phase 1 publishes `minutes-sdk`, so the version bump must
+already be committed, pushed, and green. The release script verifies the clean
+`main` checkout, pushed HEAD, and normal version-sync policy; the maintainer
+confirms that HEAD's CI run is green before starting Phase 1.
 
-### 7. Create the GitHub release as a DRAFT
+### 7. Phase 1: validate and publish `minutes-sdk`
 ```bash
-gh release create vX.Y.Z -t "vX.Y.Z: Short Title" -F notes.md --target main --draft
+node scripts/release.mjs phase1 X.Y.Z
 ```
-This stages the release with its notes, but does **not** create the git tag yet: GitHub creates the tag only when a draft is published. The three release workflows (`Release CLI Binaries`, `Release macOS`, `Release Windows Desktop`) trigger on `push: tags`, so they do NOT run while the release is a draft. The draft also does not announce in subscribers' feeds or mark "latest".
 
-Do NOT `git tag` locally. The safety here is step 6: it already confirmed `main` CI is green on the exact commit `--target` points to, so publishing cannot announce a commit that failed CI.
+Phase 1 packs the SDK, tests MCP against that exact tarball, and records the
+tarball's SHA-512 integrity in `.minutes-release-state.json`. It publishes the
+SDK only if the registry does not already contain the version; a retry skips an
+existing package only when its registry integrity matches. It then polls for
+exact-version visibility, avoiding the v0.19.0/v0.20 registry-lag failure where
+MCP was published before npm could resolve its SDK dependency.
 
-### 8. Publish the release (creates the tag and triggers the binary workflows)
+If polling times out, stop. The SDK-published/MCP-unpublished state is safe and
+supported: check it with `node scripts/release.mjs status`, then rerun Phase 1
+later. Do not edit package inputs or manually publish MCP.
+
+### 8. Phase 2: commit MCP's exact SDK pin
 ```bash
-gh release edit vX.Y.Z --draft=false
+node scripts/release.mjs phase2 X.Y.Z
 ```
-Publishing creates the `vX.Y.Z` tag at the target commit, which fires the three release workflows. `Release macOS` verifies the release exists before uploading, so the release must be published first (you cannot build the binaries against a draft with these triggers). This is also the moment the version shows up in followers' feeds and becomes "latest".
 
-### 9. Wait for the release workflows to upload assets
+Phase 2 verifies the published SDK again, pins
+`crates/mcp/package.json` to the exact version, regenerates the MCP lockfile,
+and refuses to continue unless those are the only two changed files. It creates
+the commit `release: pin minutes-sdk X.Y.Z for mcp` itself. Push that commit and
+wait for CI on the new exact HEAD:
+
+```bash
+git push origin main
+gh run list --branch main --limit 3
+gh run watch $(gh run list --branch main --limit 1 --json databaseId --jq '.[0].databaseId')
+```
+
+Do not amend the Phase-2 commit or edit release inputs after this point. Phase 3
+will reproduce the SDK tarball from this HEAD and compare it with Phase 1.
+
+### 9. Create the GitHub release as a DRAFT
+```bash
+gh release create vX.Y.Z -t "vX.Y.Z: Short Title" -F notes-release-vX.Y.Z.md --target "$(git rev-parse HEAD)" --draft
+```
+
+This stages the notes without announcing the release. Keep it as a draft while
+the tag-triggered workflows build and attach artifacts. Creating the draft does
+not create or push the local annotated tag used by the committed release flow.
+
+### 10. Phase 3: verify provenance, create the tag, and publish `minutes-mcp`
+```bash
+node scripts/release.mjs tag X.Y.Z
+# Run the exact tag-push command printed by the script, for example:
+git push origin vX.Y.Z
+```
+
+Phase 3 requires a clean, pushed HEAD and green CI, runs
+`check_version_sync.mjs --release` to enforce the exact pin, and proves that
+`npm pack` for the SDK still matches the Phase-1 integrity. It creates an
+annotated local tag but never pushes it. Finally it publishes MCP idempotently,
+using the same registry-integrity rule as the SDK.
+
+If `gh` is unavailable, Phase 3 refuses to proceed unless
+`--skip-ci-check` is supplied explicitly. Use that escape hatch only after
+manually confirming CI is green on `git rev-parse HEAD`.
+
+Pushing the printed tag command fires the three artifact workflows. Each starts
+with a `release_readiness` job that reruns the exact-pin release policy before
+any artifact build can begin.
+
+### 11. Wait for release assets, then publish the draft
+
 ```bash
 gh run list --workflow="Release CLI Binaries" --limit 1
 gh run list --workflow="Release macOS" --limit 1
 gh run list --workflow="Release Windows Desktop" --limit 1
-```
-They attach the CLI binaries, DMG, Windows installers, updater files (`latest.json`, `Minutes.app.tar.gz`), and `SHA256SUMS.txt`. If one fails, fix on `main`, delete the tag and release (`gh release delete vX.Y.Z --cleanup-tag --yes`), and re-run from step 7 at the new commit. Because main CI was green before the tag, failures here are usually packaging or signing, not code.
 
-### 10. Build and upload .mcpb
+# After all three are green and their assets are attached:
+gh release edit vX.Y.Z --draft=false
+```
+
+The workflows attach the CLI binaries, DMG, Windows installers, updater files
+(`latest.json`, `Minutes.app.tar.gz`), and `SHA256SUMS.txt`. Publishing the draft
+is the announcement moment: it appears in followers' feeds and becomes
+"latest". If an artifact workflow fails, do not move or replace the tag; follow
+the immutable-tag recovery policy in `channels.md` and cut a new patch release.
+
+### 12. Build and upload .mcpb
 ```bash
 ./scripts/pack_mcpb.sh   # use this, not `mcpb pack .`; it swaps manifest.mcpb.json's Claude listing into the bundle
 ./scripts/check_mcpb_bundle.sh minutes.mcpb   # same guard CI runs; catches manifest drift before upload
 gh release upload vX.Y.Z minutes.mcpb --clobber
 ```
 
-### 11. Publish npm packages
-```bash
-cd crates/sdk && npm publish --access public --registry https://registry.npmjs.org
-cd crates/mcp && npm publish --access public --registry https://registry.npmjs.org
-```
-**IMPORTANT**: `crates/mcp/package.json` must depend on `"minutes-sdk": "^X.Y.Z"` (npm version), NOT `"file:../sdk"` (local path). Check before publishing. If 2FA blocks publish, use a granular access token with "Bypass 2FA" enabled.
+There are no manual npm publish commands after the tag. The three release-script
+phases own SDK-before-MCP ordering, exact dependency pinning, provenance checks,
+and idempotent retries.
 
-### 11.5. Publish independent-cadence crates (whisper-guard) if bumped
+### 13. Publish independent-cadence crates (whisper-guard) if bumped
 Skip this step if Step 1 showed no changes to `crates/whisper-guard/` since the last whisper-guard publish.
 ```bash
 cd crates/whisper-guard
@@ -115,11 +176,11 @@ sleep 30 && curl -s https://crates.io/api/v1/crates/whisper-guard | jq '.crate.m
 ```
 whisper-guard is a standalone MIT crate consumed outside this repo (currently 277+ downloads). Bump independently of the main release; do NOT couple to the Minutes version. If you skip the publish, the crates.io users miss the fix and you create silent drift between repo state and published artifact.
 
-### 11.6. Publish minutes-core and minutes-cli to crates.io
+### 14. Publish minutes-core and minutes-cli to crates.io
 
 As of #79 the workspace has no git dependencies (cpal is on crates.io 0.18.1 with `windows-core` pinned to 0.61.2; pyannote-rs is on crates.io 0.3.4), so these crates can be published again. They were last on crates.io at v0.9.4 and now publish at the main release version (currently 0.18.5).
 
-Publish in dependency order, `minutes-core` before `minutes-cli`, because `minutes-cli` depends on the crates.io version of `minutes-core`. whisper-guard (Step 11.5) must already be published at the version `minutes-core` requires.
+Publish in dependency order, `minutes-core` before `minutes-cli`, because `minutes-cli` depends on the crates.io version of `minutes-core`. whisper-guard (Step 13) must already be published at the version `minutes-core` requires.
 
 ```bash
 # core first; cli depends on it. dry-run each before the real publish.
@@ -139,9 +200,9 @@ Notes:
 - `cargo publish` reads each crate's `version =` dependency fields (not the local `path =`), which already point at the crates.io versions, so no manifest edits are needed.
 - Publishing is irreversible: you can only yank, never replace a version. Always run the `--dry-run` first.
 - This revives `cargo install minutes-cli` for users who do not use Homebrew.
-- If `minutes-core` fails to publish with a missing-dependency error, confirm whisper-guard at the required version is already indexed (Step 11.5).
+- If `minutes-core` fails to publish with a missing-dependency error, confirm whisper-guard at the required version is already indexed (Step 13).
 
-### 12. Refresh the landing page copy, then redeploy
+### 15. Refresh the landing page copy, then redeploy
 Before deploying, make sure the site matches what just shipped:
 
 1. **Regenerate the stat line** (version, tool count, CLI count, test count):
@@ -161,7 +222,7 @@ Before deploying, make sure the site matches what just shipped:
 
 **Check before deploying**: `cat .vercel/project.json` should show `"projectName": "useminutes.app"` with `"framework": "nextjs"`. If it's pointing at a different project (e.g. `rx-vip/minutes`), the build produces an empty static tree (no `index.html`, no SSR functions) and the deploy aliases return 404. Fix the link before building.
 
-### 13. Update Homebrew tap formula if CLI changed
+### 16. Update Homebrew tap formula if CLI changed
 The formula lives at `silverstein/homebrew-tap` → `Formula/minutes.rb`. Update the `tag:` to the new version:
 ```bash
 # Fetch current SHA, update via GitHub API

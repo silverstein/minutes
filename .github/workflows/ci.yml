@@ -59,7 +59,7 @@ jobs:
 
       - name: Set CXXFLAGS for whisper.cpp (macOS)
         if: runner.os == 'macOS'
-        run: echo "CXXFLAGS=-I$(xcrun --show-sdk-path)/usr/include/c++/v1" >> $GITHUB_ENV
+        run: echo "CXXFLAGS=-I$(xcrun --show-sdk-path)/usr/include/c++/v1" >> "$GITHUB_ENV"
 
       # Scope every cache to the exact runner image (ImageOS + ImageVersion).
       # When `macos-latest` rotated from macOS 15 to macOS 26 the old target/ cache
@@ -414,6 +414,25 @@ jobs:
         working-directory: crates/mcp
         run: npx tsc --noEmit
 
+  skills_compiler:
+    name: Skills Compiler
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install skill compiler dependencies
+        working-directory: tooling/skills
+        run: npm ci
+
+      - name: Verify canonical skills and generated mirrors
+        working-directory: tooling/skills
+        run: npm run ci
+
   site_release_consistency:
     name: Site Release Link Consistency
     runs-on: ubuntu-latest
@@ -478,14 +497,9 @@ jobs:
 
       - name: Install and build canonical skill router
         working-directory: tooling/skills
-        # This private compiler package intentionally has no lockfile or
-        # declared runtime dependencies. Pin the two build-only packages here
-        # and override its repo-local typeRoots so a clean runner is sufficient.
         run: |
-          npm install --no-save --no-audit --no-fund \
-            typescript@5.9.3 @types/node@22.19.11
-          ./node_modules/.bin/tsc \
-            -p tsconfig.json --typeRoots node_modules/@types
+          npm ci
+          npm run build
 
       - name: Replay routing fixture twice through canonical router
         run: node tests/eval/live_sidekick_routing_eval.mjs
@@ -522,6 +536,7 @@ jobs:
       - desktop_windows
       - mcp
       - mcp_lockfile_check
+      - skills_compiler
       - agents_sync
       - site_release_consistency
       - llms_sync

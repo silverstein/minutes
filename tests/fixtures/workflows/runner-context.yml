@@ -1,0 +1,14 @@
+# INTENTIONALLY BROKEN: runner-context negative fixture. Keep this expression intact.
+# This lives outside .github/workflows so GitHub never attempts to run it.
+name: Broken runner-context fixture
+
+on: push
+
+jobs:
+  broken:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/example
+          key: ${{ runner.os }}-${{ env.ImageOS }}-cache

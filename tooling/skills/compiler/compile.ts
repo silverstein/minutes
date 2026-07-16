@@ -12,14 +12,22 @@ import { renderSiteSkillCatalog } from "./site.js";
 interface CompileOptions {
   dryRun: boolean;
   hosts: HostName[];
+  repoRoot: string | null;
 }
 
 function parseArgs(argv: string[]): CompileOptions {
   const dryRun = argv.includes("--dry-run");
   const hostValues: string[] = [];
+  let repoRoot: string | null = null;
   for (let i = 0; i < argv.length; i += 1) {
     if (argv[i] === "--host" && argv[i + 1]) {
       hostValues.push(argv[i + 1]);
+      i += 1;
+    } else if (argv[i] === "--root") {
+      if (!argv[i + 1]) {
+        throw new Error('Missing value for "--root"');
+      }
+      repoRoot = path.resolve(argv[i + 1]);
       i += 1;
     }
   }
@@ -34,7 +42,7 @@ function parseArgs(argv: string[]): CompileOptions {
     }
   }
 
-  return { dryRun, hosts };
+  return { dryRun, hosts, repoRoot };
 }
 
 async function compareOrWrite(
@@ -64,9 +72,11 @@ async function compareOrWrite(
 
 async function main(): Promise<void> {
   const options = parseArgs(process.argv.slice(2));
-  const rootDir = cwd().endsWith(path.join("tooling", "skills"))
-    ? cwd()
-    : path.join(cwd(), "tooling", "skills");
+  const rootDir = options.repoRoot
+    ? path.join(options.repoRoot, "tooling", "skills")
+    : cwd().endsWith(path.join("tooling", "skills"))
+      ? cwd()
+      : path.join(cwd(), "tooling", "skills");
   const skills = await discoverCanonicalSkills(rootDir);
 
   const changes: Array<{ host: string; path: string; kind: string }> = [];

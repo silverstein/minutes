@@ -1,0 +1,10 @@
+# Comment-only fixture: ${{ env.ImageOS }} and ${{ env['ImageVersion'] }} must not be treated as uses.
+name: Runner-context comment-only fixture
+
+on: push
+
+jobs:
+  valid:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "No forbidden runner context expressions"

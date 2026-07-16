@@ -1,0 +1,15 @@
+# INTENTIONALLY BROKEN: actionlint negative fixture. Keep these errors intact.
+# This lives outside .github/workflows so GitHub never attempts to run it.
+name: Broken workflow fixture
+
+on: push
+
+jobs:
+  broken:
+    runs-on: ubuntu-latest
+    needs: missing-job
+    steps:
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/example
+          key: ${{ runner.os }}-${{ env.ImageOS }}-cache

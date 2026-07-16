@@ -8,6 +8,10 @@
 - Generated/sync'd files: `site/lib/release.ts` is generated from `manifest.json` by `scripts/sync_site_release_version.mjs`. Version bumps in `manifest.json` require running that script — CI's `Site Release Link Consistency` job will fail otherwise.
 - Rust toolchain pin: `rust-toolchain.toml` at repo root pins the rustc/clippy/rustfmt version (currently `1.95.0`). CI's `dtolnay/rust-toolchain@stable` action installs latest stable as the system default, but rustup's cargo proxy reads the pin file and routes invocations through the pinned toolchain. **Locally this works only if cargo runs through the rustup proxy** — verify with `command -v cargo` matching `rustup which cargo` (typically `~/.cargo/bin/cargo`; `CARGO_HOME` overrides relocate it). If you have Homebrew rust installed and `which cargo` resolves to `/opt/homebrew/bin/cargo`, the pin is ignored and you'll hit the same lints CI does — the exact failure mode that caused PR #206's tag delay (commits 4954de2, 21cd699 are both clippy-fix-only commits from this drift). Fix: prepend rustup's bin dir to PATH in your shell (`export PATH="$(dirname "$(rustup which cargo)"):$PATH"` in your shell rc), or `brew uninstall rust`. The build scripts (`scripts/build.sh`, `scripts/install-dev-app.sh`) detect via `rustup which cargo` so script-driven builds are immune; only interactive `cargo` calls need the shell PATH fix.
 
+## Local hooks (optional)
+
+CI enforces the version-sync and generated-skills checks. The pre-push hooks are optional local fast feedback — enable them with `scripts/setup-hooks.sh`. They can be bypassed with `git push --no-verify`, so green CI remains authoritative.
+
 | Area | When to check | How to verify |
 |------|---------------|---------------|
 | **Manifest tools sync** | Any new/renamed/removed MCP tool | Compare `manifest.json` tools array against `server.tool()` and `registerAppTool()` calls in `crates/mcp/src/index.ts` |

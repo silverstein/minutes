@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+hook_dir="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+repo_root="$(git -C "$hook_dir/.." rev-parse --show-toplevel)"
+
+cd "$repo_root"
+
+node scripts/check_version_sync.mjs
+
+if [[ -d tooling/skills/node_modules && -d tooling/skills/dist ]]; then
+  npm --prefix tooling/skills run check
+else
+  echo "skipping skills check (enable: cd tooling/skills && npm ci && npm run build)"
+fi

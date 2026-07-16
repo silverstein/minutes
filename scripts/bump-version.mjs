@@ -366,9 +366,11 @@ async function main() {
     return;
   }
 
+  // Untracked files are ignored: the bump patch only ever touches tracked
+  // sources, so scratch files must not block a release bump.
   const { stdout: status } = await exec(
     "git",
-    ["status", "--porcelain=v1", "--untracked-files=all"],
+    ["status", "--porcelain=v1", "--untracked-files=no"],
     { cwd: root },
   );
   if (status !== "") {

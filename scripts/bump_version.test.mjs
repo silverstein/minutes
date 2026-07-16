@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import {
+  appendFile,
   chmod,
   mkdir,
   mkdtemp,
@@ -279,14 +280,22 @@ test("real run updates every Domain-1 source and passes the checker", async (t) 
   );
 });
 
-test("dirty tree is refused", async (t) => {
+test("dirty tree (tracked modification) is refused", async (t) => {
   const { root, tools } = await makeRepo(t);
-  await writeFixture(root, "untracked.txt", "dirty\n");
+  await appendFile(path.join(root, "manifest.json"), "\n");
   const result = runBump(root, tools, nextVersion);
 
   assert.equal(result.status, 1);
   assert.match(result.stderr, /working tree is dirty/);
   assert.equal(await readVersion(root, "Cargo.toml"), undefined);
+});
+
+test("untracked files do not block a bump", async (t) => {
+  const { root, tools } = await makeRepo(t);
+  await writeFixture(root, "untracked.txt", "scratch\n");
+  const result = runBump(root, tools, "--dry-run", nextVersion);
+
+  assert.equal(result.status, 0);
 });
 
 test("invalid semantic versions are refused", async (t) => {

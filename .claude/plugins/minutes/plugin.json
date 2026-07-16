@@ -23,7 +23,9 @@
     { "name": "minutes-graph", "path": "skills/minutes-graph/SKILL.md" },
     { "name": "minutes-video-review", "path": "skills/minutes-video-review/SKILL.md" },
     { "name": "minutes-copilot", "path": "skills/minutes-copilot/SKILL.md" },
-    { "name": "minutes-live-sidekick", "path": "skills/minutes-live-sidekick/SKILL.md" }
+    { "name": "minutes-live-sidekick", "path": "skills/minutes-live-sidekick/SKILL.md" },
+    { "name": "minutes-release-notes", "path": "skills/minutes-release-notes/SKILL.md" },
+    { "name": "minutes-seo-wave", "path": "skills/minutes-seo-wave/SKILL.md" }
   ],
   "agents": [
     { "name": "meeting-analyst", "path": "agents/meeting-analyst.md" }

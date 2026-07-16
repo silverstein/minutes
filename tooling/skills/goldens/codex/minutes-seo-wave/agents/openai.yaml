@@ -1,0 +1,4 @@
+interface:
+  display_name: "Minutes SEO Wave"
+  short_description: "Ship a researched, internally linked SEO page wave without duplicating or overstating claims."
+  default_prompt: "Build one evidence-backed SEO content wave for Minutes and return the page checklist plus shipped-wave retro."

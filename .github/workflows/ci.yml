@@ -396,6 +396,25 @@ jobs:
       - name: Handshake smoke test
         run: ./scripts/smoke_mcpb_handshake.sh minutes.mcpb
 
+  skills_compiler:
+    name: Skills Compiler
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install skill compiler dependencies
+        working-directory: tooling/skills
+        run: npm ci
+
+      - name: Verify canonical skills and generated mirrors
+        working-directory: tooling/skills
+        run: npm run ci
+
   site_release_consistency:
     name: Site Release Link Consistency
     runs-on: ubuntu-latest
@@ -460,14 +479,9 @@ jobs:
 
       - name: Install and build canonical skill router
         working-directory: tooling/skills
-        # This private compiler package intentionally has no lockfile or
-        # declared runtime dependencies. Pin the two build-only packages here
-        # and override its repo-local typeRoots so a clean runner is sufficient.
         run: |
-          npm install --no-save --no-audit --no-fund \
-            typescript@5.9.3 @types/node@22.19.11
-          ./node_modules/.bin/tsc \
-            -p tsconfig.json --typeRoots node_modules/@types
+          npm ci
+          npm run build
 
       - name: Replay routing fixture twice through canonical router
         run: node tests/eval/live_sidekick_routing_eval.mjs
@@ -503,6 +517,7 @@ jobs:
       - linux_full_build
       - desktop_windows
       - mcp
+      - skills_compiler
       - agents_sync
       - site_release_consistency
       - llms_sync

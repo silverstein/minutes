@@ -248,3 +248,24 @@ For more details, see README.md and docs/QUICKSTART.md.
 - If push fails, resolve and retry until it succeeds
 
 <!-- END BEADS INTEGRATION -->
+
+## Proven Decisions (do not re-litigate)
+
+Three decisions with incident history behind them. Each has a primary control
+in code/tests — these lines are pointers, not the enforcement.
+
+- **A wrong rewrite or merge is worse than none.** Applies to speaker names,
+  entity resolution, and any automated identity/text rewriting: only
+  high-confidence results may rewrite user-visible data; uncertain results stay
+  anonymous/unmerged. Proven by the "Every Name, Right" epic
+  (docs/plans/every-name-right-2026-06-11.md, the #385 fix series) and enforced
+  by the proper-name regression evals.
+- **Recording must never be degraded by an optional consumer.** Copilot
+  streams, live sidecars, coaching surfaces, and any other listener are
+  failure-isolated from capture: if they wedge or die, recording and WAV
+  preservation continue. Defined in RFC 0004 (copilot-realtime-stream,
+  failure-isolation boundary); enforced by the capture-reliability invariant
+  suites in minutes-core (consumer isolation, stop-deadline WAV preservation).
+- **Auto-update stays off** until a hosted release manifest and rollback UX
+  exist. Decision record: docs/investigations/auto-update-evaluation.md. Do not
+  wire updaters into the desktop app before those preconditions are met.

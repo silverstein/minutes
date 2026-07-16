@@ -324,3 +324,24 @@ node test/mcp_tools_test.mjs                        # 8 MCP integration tests
 - **Portable skills**: `.agents/skills/minutes/` mirrors all 18 skills for Codex, Gemini, and other AGENTS-aware agents, while `.opencode/skills/` + `.opencode/commands/` gives OpenCode native skill discovery and `/minutes-*` slash commands. Both use `$MINUTES_SKILLS_ROOT` instead of `${CLAUDE_PLUGIN_ROOT}` and keep CLI-only speaker confirmation (no desktop app references). Runtime helpers at `_runtime/hooks/lib/` must stay in sync with `.claude/plugins/minutes/hooks/lib/`.
 - **Desktop assistant**: Tauri AI Assistant is a singleton session that can switch focus into a selected meeting without spawning parallel assistant workspaces
 - **Live coaching**: Tauri Live Mode toggle starts real-time transcription; the assistant workspace `CLAUDE.md` and `AGENTS.md` auto-update so the connected Recall session, Claude Desktop/Code, or any other agent can read the live JSONL file and coach mid-meeting. There is no dedicated transcript/coaching panel in Tauri v1; the coaching happens through the assistant chat surface.
+
+## Proven Decisions (do not re-litigate)
+
+Three decisions with incident history behind them. Each has a primary control
+in code/tests — these lines are pointers, not the enforcement.
+
+- **A wrong rewrite or merge is worse than none.** Applies to speaker names,
+  entity resolution, and any automated identity/text rewriting: only
+  high-confidence results may rewrite user-visible data; uncertain results stay
+  anonymous/unmerged. Proven by the "Every Name, Right" epic
+  (docs/plans/every-name-right-2026-06-11.md, the #385 fix series) and enforced
+  by the proper-name regression evals.
+- **Recording must never be degraded by an optional consumer.** Copilot
+  streams, live sidecars, coaching surfaces, and any other listener are
+  failure-isolated from capture: if they wedge or die, recording and WAV
+  preservation continue. Defined in RFC 0004 (copilot-realtime-stream,
+  failure-isolation boundary); enforced by the capture-reliability invariant
+  suites in minutes-core (consumer isolation, stop-deadline WAV preservation).
+- **Auto-update stays off** until a hosted release manifest and rollback UX
+  exist. Decision record: docs/investigations/auto-update-evaluation.md. Do not
+  wire updaters into the desktop app before those preconditions are met.

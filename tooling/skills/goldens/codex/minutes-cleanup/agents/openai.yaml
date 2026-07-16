@@ -1,0 +1,4 @@
+interface:
+  display_name: "Minutes Cleanup"
+  short_description: "Manage old recordings — find large files, archive old meetings, delete processed originals."
+  default_prompt: "Use Minutes Cleanup for this task."

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Minutes Setup"
+  short_description: "Guided first-time setup for Minutes — download whisper model, create directories, configure audio input."
+  default_prompt: "Use Minutes Setup for this task."

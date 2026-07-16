@@ -5,13 +5,6 @@ import { discoverCanonicalSkills } from "./discover.js";
 import { getHostConfig } from "../hosts/index.js";
 import { renderSkillForHost } from "./render.js";
 
-const PILOT_SKILLS = new Set([
-  "minutes-brief",
-  "minutes-prep",
-  "minutes-debrief",
-  "minutes-copilot",
-]);
-
 function getRootDir(): string {
   return cwd().endsWith(path.join("tooling", "skills"))
     ? cwd()
@@ -48,10 +41,11 @@ async function main(): Promise<void> {
   const rootDir = getRootDir();
   const goldenRoot = path.join(rootDir, "goldens");
   const skills = await discoverCanonicalSkills(rootDir);
-  const targets = skills.filter((skill) => PILOT_SKILLS.has(skill.id));
   const drifts: string[] = [];
 
-  for (const skill of targets) {
+  // Full-skill snapshots remain well below the 2 MB repository-size threshold,
+  // so every canonical skill participates in golden drift detection.
+  for (const skill of skills) {
     for (const hostName of ["claude", "codex", "opencode"] as const) {
       const artifact = renderSkillForHost(skill, getHostConfig(hostName));
       const bodyPath = path.join(goldenRoot, hostName, skill.id, "SKILL.md");
@@ -79,7 +73,7 @@ async function main(): Promise<void> {
   console.log(
     JSON.stringify({
       status: writeMode ? "written" : "ok",
-      pilotCount: targets.length,
+      skillCount: skills.length,
     }),
   );
 }

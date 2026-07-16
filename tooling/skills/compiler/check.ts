@@ -8,6 +8,7 @@ import { renderSkillForHost } from "./render.js";
 import { validateSkillAssets } from "./validate.js";
 import { renderClaudePluginManifest } from "./plugin.js";
 import { renderSiteSkillCatalog } from "./site.js";
+import { findUnownedGeneratedArtifacts } from "./ownership.js";
 
 interface CheckFailure {
   skill: string;
@@ -158,6 +159,21 @@ async function main(): Promise<void> {
         message: `Missing generated runtime helper: ${runtimePath}`,
       });
     }
+  }
+
+  const repoRoot = path.join(rootDir, "..", "..");
+  const unownedArtifacts = await findUnownedGeneratedArtifacts(repoRoot, skills);
+  for (const artifactPath of unownedArtifacts) {
+    const host = artifactPath.startsWith(".claude/")
+      ? "claude"
+      : artifactPath.startsWith(".agents/")
+        ? "codex"
+        : "opencode";
+    failures.push({
+      skill: "generated-artifact-ownership",
+      host,
+      message: `Unowned generated artifact: ${artifactPath}. Delete it or restore its canonical source.`,
+    });
   }
 
   if (failures.length > 0) {

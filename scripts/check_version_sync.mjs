@@ -5,12 +5,15 @@ import path from "node:path";
 
 function parseArgs(argv) {
   let json = false;
+  let release = false;
   let root;
 
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
     if (argument === "--json") {
       json = true;
+    } else if (argument === "--release") {
+      release = true;
     } else if (argument === "--root") {
       if (index + 1 >= argv.length) {
         throw new Error("--root requires a directory argument");
@@ -25,6 +28,7 @@ function parseArgs(argv) {
   const scriptRoot = path.resolve(path.dirname(process.argv[1]), "..");
   return {
     json,
+    release,
     root: root === undefined ? scriptRoot : path.resolve(root),
   };
 }
@@ -42,6 +46,18 @@ function requireVersion(value, description) {
     throw new Error(`${description} is missing or is not a string`);
   }
   return value;
+}
+
+const numericSemverIdentifier = "(?:0|[1-9]\\d*)";
+const prereleaseSemverIdentifier = `(?:${numericSemverIdentifier}|\\d*[A-Za-z-][0-9A-Za-z-]*)`;
+const exactSemverPattern = new RegExp(
+  `^${numericSemverIdentifier}\\.${numericSemverIdentifier}\\.${numericSemverIdentifier}` +
+    `(?:-${prereleaseSemverIdentifier}(?:\\.${prereleaseSemverIdentifier})*)?` +
+    "(?:\\+[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?$",
+);
+
+function isExactSemver(value) {
+  return exactSemverPattern.test(value);
 }
 
 function tomlSectionValue(text, section, key) {
@@ -221,16 +237,54 @@ function collectDomains(root) {
   return { domain1, domain2 };
 }
 
-function jsonReport(domain1, domain2) {
+function collectRelease(root) {
+  const sdkVersion = source("crates/sdk/package.json", ".version", () =>
+    requireVersion(readJson(root, "crates/sdk/package.json").version, ".version"),
+  );
+  const dependency = source(
+    "crates/mcp/package.json",
+    '.dependencies["minutes-sdk"]',
+    () =>
+      requireVersion(
+        readJson(root, "crates/mcp/package.json").dependencies?.["minutes-sdk"],
+        '.dependencies["minutes-sdk"]',
+      ),
+  );
+  const expected = sdkVersion.error === null ? sdkVersion.value : null;
+
+  let reason = dependency.error;
+  if (reason === null && !isExactSemver(dependency.value)) {
+    reason = "must be an exact semantic version";
+  } else if (reason === null && dependency.value !== expected) {
+    reason = `does not equal crates/sdk/package.json [.version] = ${expected ?? "<unknown>"}`;
+  }
+
+  const evaluatedDependency = {
+    ...dependency,
+    ok: expected !== null && reason === null,
+    reason,
+  };
+  return {
+    expected,
+    sources: [evaluatedDependency],
+    ok: sdkVersion.error === null && evaluatedDependency.ok,
+  };
+}
+
+function jsonReport(domains) {
   const publicDomain = (domain) => ({
     expected: domain.expected,
     sources: domain.sources.map(({ file, key, value, ok }) => ({ file, key, value, ok })),
   });
-  return {
-    ok: domain1.ok && domain2.ok,
-    domain1: publicDomain(domain1),
-    domain2: publicDomain(domain2),
+  const report = {
+    ok: domains.domain1.ok && domains.domain2.ok && (domains.release?.ok ?? true),
+    domain1: publicDomain(domains.domain1),
+    domain2: publicDomain(domains.domain2),
   };
+  if (domains.release !== undefined) {
+    report.release = publicDomain(domains.release);
+  }
+  return report;
 }
 
 function printHumanReport(report, domains) {
@@ -238,6 +292,9 @@ function printHumanReport(report, domains) {
     console.log("Version sync check passed.");
     console.log(`Domain 1 (main release): ${domains.domain1.expected}`);
     console.log(`Domain 2 (plugin lockstep): ${domains.domain2.expected}`);
+    if (domains.release !== undefined) {
+      console.log(`Release (minutes-sdk dependency): ${domains.release.expected}`);
+    }
     return;
   }
 
@@ -245,14 +302,18 @@ function printHumanReport(report, domains) {
   for (const [name, label] of [
     ["domain1", "Domain 1 (main release)"],
     ["domain2", "Domain 2 (plugin lockstep)"],
+    ...(domains.release === undefined ? [] : [["release", "Release (minutes-sdk dependency)"]]),
   ]) {
     const domain = domains[name];
     if (domain.ok) continue;
     const expected = domain.expected ?? "<unknown>";
-    console.error(`${label} failed; expected ${expected}:`);
+    const expectation =
+      name === "release" ? `exact semantic version ${expected}` : expected;
+    console.error(`${label} failed; expected ${expectation}:`);
     for (const item of domain.sources.filter((candidate) => !candidate.ok)) {
       const found = item.error === null ? item.value : `<error: ${item.error}>`;
-      console.error(`  ${item.file} [${item.key}] = ${found} (expected ${expected})`);
+      const detail = item.reason ?? `expected ${expected}`;
+      console.error(`  ${item.file} [${item.key}] = ${found} (${detail})`);
     }
   }
 }
@@ -266,7 +327,10 @@ try {
 }
 
 const domains = collectDomains(options.root);
-const report = jsonReport(domains.domain1, domains.domain2);
+if (options.release) {
+  domains.release = collectRelease(options.root);
+}
+const report = jsonReport(domains);
 
 if (options.json) {
   console.log(JSON.stringify(report, null, 2));

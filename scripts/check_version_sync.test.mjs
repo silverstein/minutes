@@ -35,7 +35,11 @@ async function makeRepo(t) {
     `[package]\nname = "minutes-cli"\nversion.workspace = true\n\n[dependencies]\nminutes-core = { path = "../core", version = "${mainVersion}", default-features = false }\n`,
   );
   await writeJson(root, "tauri/src-tauri/tauri.conf.json", { version: mainVersion });
-  await writeJson(root, "crates/mcp/package.json", { name: "minutes-mcp", version: mainVersion });
+  await writeJson(root, "crates/mcp/package.json", {
+    name: "minutes-mcp",
+    version: mainVersion,
+    dependencies: { "minutes-sdk": mainVersion },
+  });
   await writeJson(root, "crates/sdk/package.json", { name: "minutes-sdk", version: mainVersion });
   await writeJson(root, "manifest.json", { version: mainVersion });
   await writeJson(root, "manifest.mcpb.json", { version: mainVersion });
@@ -247,4 +251,77 @@ test("missing MCP_SERVER_VERSION declaration fails with a clear message", async 
   assert.equal(result.status, 1, result.stderr || result.stdout);
   assert.match(result.stderr, /crates\/mcp\/src\/index\.ts \[MCP_SERVER_VERSION\]/);
   assert.match(result.stderr, /MCP_SERVER_VERSION.*not found/);
+});
+
+test("release mode rejects minutes-sdk ranges while default mode ignores them", async (t) => {
+  for (const rangePrefix of ["^", "~"]) {
+    const root = await makeRepo(t);
+    const dependency = `${rangePrefix}${mainVersion}`;
+    await mutateJson(
+      root,
+      "crates/mcp/package.json",
+      (value) => (value.dependencies["minutes-sdk"] = dependency),
+    );
+
+    const defaultResult = runChecker(root, "--json");
+    assert.equal(defaultResult.status, 0, defaultResult.stderr || defaultResult.stdout);
+    assert.equal(Object.hasOwn(parseReport(defaultResult), "release"), false);
+
+    const releaseResult = runChecker(root, "--release", "--json");
+    assert.equal(releaseResult.status, 1, releaseResult.stderr || releaseResult.stdout);
+    const report = parseReport(releaseResult);
+    assert.equal(report.ok, false);
+    assert.equal(report.release.expected, mainVersion);
+    assert.deepEqual(report.release.sources, [
+      {
+        file: "crates/mcp/package.json",
+        key: '.dependencies["minutes-sdk"]',
+        value: dependency,
+        ok: false,
+      },
+    ]);
+  }
+});
+
+test("release mode rejects an exact minutes-sdk version that does not match the SDK", async (t) => {
+  const root = await makeRepo(t);
+  await mutateJson(
+    root,
+    "crates/mcp/package.json",
+    (value) => (value.dependencies["minutes-sdk"] = changedVersion),
+  );
+
+  const result = runChecker(root, "--release", "--json");
+  assert.equal(result.status, 1, result.stderr || result.stdout);
+  const report = parseReport(result);
+  assert.equal(report.release.expected, mainVersion);
+  assert.equal(report.release.sources[0].value, changedVersion);
+  assert.equal(report.release.sources[0].ok, false);
+});
+
+test("release mode accepts an exact minutes-sdk version equal to the SDK", async (t) => {
+  const root = await makeRepo(t);
+
+  const result = runChecker(root, "--release", "--json");
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  const report = parseReport(result);
+  assert.equal(report.ok, true);
+  assert.equal(report.release.expected, mainVersion);
+  assert.equal(report.release.sources[0].value, mainVersion);
+  assert.equal(report.release.sources[0].ok, true);
+});
+
+test("release mode rejects a file minutes-sdk dependency", async (t) => {
+  const root = await makeRepo(t);
+  await mutateJson(
+    root,
+    "crates/mcp/package.json",
+    (value) => (value.dependencies["minutes-sdk"] = "file:../sdk"),
+  );
+
+  const result = runChecker(root, "--release", "--json");
+  assert.equal(result.status, 1, result.stderr || result.stdout);
+  const report = parseReport(result);
+  assert.equal(report.release.sources[0].value, "file:../sdk");
+  assert.equal(report.release.sources[0].ok, false);
 });

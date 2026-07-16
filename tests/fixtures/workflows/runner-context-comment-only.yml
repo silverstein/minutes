@@ -1,0 +1,10 @@
+# Comment-only fixture: ${{ env.ImageOS }} must not be treated as an expression use.
+name: Runner-context comment-only fixture
+
+on: push
+
+jobs:
+  valid:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "No forbidden runner context expressions"

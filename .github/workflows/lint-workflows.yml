@@ -26,6 +26,9 @@ jobs:
           "$ACTIONLINT_IMAGE"
           .github/workflows/*.yml
 
+      - name: Check runner context expressions
+        run: node scripts/check_workflow_runner_context.mjs
+
       - name: Verify broken workflow is rejected
         run: |
           if docker run --rm \
@@ -37,3 +40,14 @@ jobs:
             echo "actionlint unexpectedly accepted the broken workflow fixture" >&2
             exit 1
           fi
+
+      - name: Verify runner context checks
+        run: |
+          if node scripts/check_workflow_runner_context.mjs \
+            tests/fixtures/workflows/runner-context.yml
+          then
+            echo "runner-context check unexpectedly accepted the broken fixture" >&2
+            exit 1
+          fi
+          node scripts/check_workflow_runner_context.mjs \
+            tests/fixtures/workflows/runner-context-comment-only.yml

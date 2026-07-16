@@ -1,0 +1,14 @@
+# INTENTIONALLY BROKEN: doubled braces inside a string must not end the expression.
+# This lives outside .github/workflows so GitHub never attempts to run it.
+name: Broken format-braces runner-context fixture
+
+on: push
+
+jobs:
+  broken:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/example
+          key: ${{ format('{{{0}}}', env.ImageOS) }}-cache

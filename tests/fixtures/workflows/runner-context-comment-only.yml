@@ -1,4 +1,4 @@
-# Comment-only fixture: ${{ env.ImageOS }} must not be treated as an expression use.
+# Comment-only fixture: ${{ env.ImageOS }} and ${{ env['ImageVersion'] }} must not be treated as uses.
 name: Runner-context comment-only fixture
 
 on: push

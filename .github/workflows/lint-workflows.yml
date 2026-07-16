@@ -24,7 +24,6 @@ jobs:
           --volume "$GITHUB_WORKSPACE:/repo"
           --workdir /repo
           "$ACTIONLINT_IMAGE"
-          .github/workflows/*.yml
 
       - name: Check runner context expressions
         run: node scripts/check_workflow_runner_context.mjs
@@ -47,6 +46,18 @@ jobs:
             tests/fixtures/workflows/runner-context.yml
           then
             echo "runner-context check unexpectedly accepted the broken fixture" >&2
+            exit 1
+          fi
+          if node scripts/check_workflow_runner_context.mjs \
+            tests/fixtures/workflows/runner-context-indexed.yaml
+          then
+            echo "runner-context check unexpectedly accepted indexed access" >&2
+            exit 1
+          fi
+          if node scripts/check_workflow_runner_context.mjs \
+            tests/fixtures/workflows/runner-context-format-braces.yml
+          then
+            echo "runner-context check unexpectedly accepted format braces" >&2
             exit 1
           fi
           node scripts/check_workflow_runner_context.mjs \

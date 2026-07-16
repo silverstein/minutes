@@ -298,13 +298,13 @@ function parseNulList(output) {
 function assertChangedFiles(actualFiles, expectedFiles, mode) {
   const actual = new Set(actualFiles);
   const expected = new Set(expectedFiles);
-  const missing = [...expected].filter((file) => !actual.has(file));
+  // Only unexpected files are fatal. A subset is legitimate: when repairing a
+  // committed partial bump, sources already at the target version produce no
+  // diff. The temp-worktree checker run still proves the domain ends
+  // synchronized, so "missing" files cannot hide drift.
   const unexpected = [...actual].filter((file) => !expected.has(file));
-  if (missing.length || unexpected.length) {
-    const details = [
-      missing.length ? `missing: ${missing.join(", ")}` : null,
-      unexpected.length ? `unexpected: ${unexpected.join(", ")}` : null,
-    ].filter(Boolean);
+  if (unexpected.length) {
+    const details = [`unexpected: ${unexpected.join(", ")}`];
     throw new Error(`${mode} bump produced the wrong file set (${details.join("; ")})`);
   }
 }
@@ -362,8 +362,26 @@ async function main() {
   const existingVersion = await currentVersion(root, options.plugin);
 
   if (existingVersion === options.version) {
-    console.log(`${mode} version is already at ${options.version}; nothing to do.`);
-    return;
+    // No-op only when the whole domain is already synchronized — a partially
+    // applied bump (canonical source at target, other sources behind) must
+    // fall through and be repaired by the normal bump flow.
+    let domainSynchronized = true;
+    try {
+      await exec(
+        process.execPath,
+        [path.join(root, "scripts", "check_version_sync.mjs"), "--root", root],
+        { cwd: root },
+      );
+    } catch {
+      domainSynchronized = false;
+    }
+    if (domainSynchronized) {
+      console.log(`${mode} version is already at ${options.version}; nothing to do.`);
+      return;
+    }
+    console.log(
+      `${mode} version is already at ${options.version} but the domain is not synchronized; re-applying the bump.`,
+    );
   }
 
   // Untracked files are ignored: the bump patch only ever touches tracked

@@ -320,6 +320,26 @@ test("re-running the current version is an idempotent no-op", async (t) => {
   await assertSnapshot(root, before);
 });
 
+test("a committed partial bump is repaired, not treated as a no-op", async (t) => {
+  const { root, tools } = await makeRepo(t);
+  const first = runBump(root, tools, nextVersion);
+  assert.equal(first.status, 0, first.stderr || first.stdout);
+
+  // Regress one non-canonical source and commit it: canonical version still
+  // matches the target, so a naive no-op check would accept the drift.
+  const manifestPath = path.join(root, "manifest.json");
+  const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+  manifest.version = "0.0.1";
+  await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+  spawnSync("git", ["commit", "-am", "regress manifest"], { cwd: root });
+
+  const repair = runBump(root, tools, nextVersion);
+  assert.equal(repair.status, 0, repair.stderr || repair.stdout);
+  assert.match(repair.stdout, /not synchronized; re-applying/);
+  const repaired = JSON.parse(await readFile(manifestPath, "utf8"));
+  assert.equal(repaired.version, nextVersion);
+});
+
 test("tool failure leaves the real tree byte-identical", async (t) => {
   const { root, tools } = await makeRepo(t);
   const before = await trackedSnapshot(root);

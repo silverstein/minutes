@@ -149,8 +149,32 @@ impl Default for PaletteConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct VoiceConfig {
+    /// Whether voice matching/identification is enabled at all.
     pub enabled: bool,
+    /// Cosine-similarity threshold for matching an embedding to a profile.
     pub match_threshold: f32,
+    /// Whether to write per-meeting `.embeddings` sidecars (512-d identity
+    /// vectors, stored locally at 0600). Needed for backfill/enrollment from
+    /// history. Local-only; never transmitted.
+    pub store_meeting_embeddings: bool,
+    /// Whether to passively capture candidate voiceprints from high-confidence
+    /// speaker confirmations. Candidates are quarantined and NEVER affect
+    /// matching until explicitly promoted. Off by default (biometric-safe):
+    /// only manual enrollment and explicit confirm-with-save create trusted
+    /// samples unless the user turns this on.
+    pub passive_candidate_capture: bool,
+    /// How many days to retain unpromoted passive candidates before they are
+    /// swept. Only meaningful when `passive_candidate_capture` is enabled.
+    pub candidate_retention_days: u32,
+    /// Whether restricted/sensitive meetings may contribute to voice learning.
+    /// Off by default: a restricted meeting's embedding is a biometric
+    /// derivative of restricted content and inherits its sensitivity, so it is
+    /// excluded from passive capture and backfill unless explicitly opted in.
+    pub restricted_meetings_eligible: bool,
+    /// Whether to retain embeddings for non-self (other-participant) speakers.
+    /// Off by default: Minutes keeps a one-way identity vector for *you* and
+    /// your explicitly enrolled people, not for every voice it hears.
+    pub retain_non_self_embeddings: bool,
 }
 
 impl Default for VoiceConfig {
@@ -158,6 +182,15 @@ impl Default for VoiceConfig {
         Self {
             enabled: true,
             match_threshold: 0.65,
+            // Current behavior: sidecars are written (local, 0600) so
+            // enrollment-from-history works.
+            store_meeting_embeddings: true,
+            // Biometric-safe defaults: no passive capture, restricted meetings
+            // and non-self voices excluded, until the user opts in.
+            passive_candidate_capture: false,
+            candidate_retention_days: 30,
+            restricted_meetings_eligible: false,
+            retain_non_self_embeddings: false,
         }
     }
 }
@@ -1803,6 +1836,18 @@ fn append_palette_section(raw: &str, palette: &PaletteConfig) -> String {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn voice_privacy_defaults_are_biometric_safe() {
+        let v = VoiceConfig::default();
+        // Enrollment-from-history needs local sidecars; kept on by default.
+        assert!(v.store_meeting_embeddings);
+        // Everything biometric-sensitive is off until the user opts in.
+        assert!(!v.passive_candidate_capture);
+        assert!(!v.restricted_meetings_eligible);
+        assert!(!v.retain_non_self_embeddings);
+        assert_eq!(v.candidate_retention_days, 30);
+    }
 
     #[test]
     fn default_config_is_valid() {

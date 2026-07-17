@@ -457,13 +457,36 @@ impl CapturePlan {
         }
     }
 
-    fn system_audio_ready(&self) -> bool {
+    /// `is_system_audio_device_name` only recognizes name patterns (BlackHole,
+    /// `.monitor`, etc). On PipeWire, a real speaker/headphone sink (including
+    /// Bluetooth A2DP sinks) is also a valid system-audio route — it has no
+    /// special name, but `categorize_device` already knows how to spot it via
+    /// the Duplex (supports_input && supports_output) shape. Without this,
+    /// `detect_loopback_device()` picks a PipeWire sink as the call route but
+    /// this check then rejects it, blocking every PipeWire call recording
+    /// that isn't routed through a virtual/monitor device.
+    fn system_audio_ready(&self, host: &cpal::Host) -> bool {
         match self {
-            Self::Single(plan) => is_system_audio_device_name(&plan.device_name),
+            Self::Single(plan) => is_system_audio_route(host, &plan.device_name),
             #[cfg(feature = "streaming")]
-            Self::Dual(plan) => is_system_audio_device_name(&plan.call_device_name),
+            Self::Dual(plan) => is_system_audio_route(host, &plan.call_device_name),
         }
     }
+}
+
+fn is_system_audio_route(host: &cpal::Host, name: &str) -> bool {
+    use cpal::traits::DeviceTrait;
+
+    if is_system_audio_device_name(name) {
+        return true;
+    }
+    if !is_pipewire_host(host.id()) {
+        return false;
+    }
+    let Some(device) = find_device_on_host(host, name) else {
+        return false;
+    };
+    device.supports_output()
 }
 
 const MISSING_DUAL_SOURCE_LOOPBACK_MESSAGE: &str =
@@ -2574,7 +2597,7 @@ pub fn preflight_recording_with_native_call_capture(
         config,
     )?;
 
-    preflight.system_audio_ready = capture_plan.system_audio_ready();
+    preflight.system_audio_ready = capture_plan.system_audio_ready(host);
     if preflight.intent == RecordingIntent::Call {
         if preflight.system_audio_ready {
             preflight.blocking_reason = None;
@@ -2973,6 +2996,30 @@ mod tests {
             mov_stems.system,
             Path::new("/tmp/meetings/2026-04-01-standup.system.wav")
         );
+    }
+
+    #[test]
+    fn is_system_audio_route_matches_known_name_regardless_of_host() {
+        // Fast path: a BlackHole-style name is recognized without needing to
+        // touch the pipewire-duplex fallback (and thus without needing a real
+        // cpal Host/device for the name to resolve on).
+        let host = cached_default_host();
+        assert!(is_system_audio_route(host, "BlackHole 2ch"));
+    }
+
+    #[test]
+    fn is_system_audio_route_rejects_unknown_name_on_non_pipewire_host() {
+        // Regression guard for the bug where a PipeWire Bluetooth/real
+        // speaker sink picked by detect_loopback_device() (via
+        // categorize_device's is_pipewire+Duplex check) was then rejected by
+        // this function because it only knew name patterns. On a host that
+        // ISN'T pipewire, an arbitrary device name must still be rejected —
+        // this function should not blanket-accept unknown names just because
+        // the pipewire fallback branch exists.
+        assert!(!is_system_audio_route(
+            cached_default_host(),
+            "__minutes_test_device_that_should_never_exist_12345__"
+        ));
     }
 
     #[test]

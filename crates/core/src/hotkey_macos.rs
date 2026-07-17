@@ -408,6 +408,10 @@ fn run_event_tap(
         if source.is_null() {
             let message = "Could not start native hotkey run loop.";
             tracing::error!("{}", message);
+            // The tap was already registered by CGEventTapCreate above, so
+            // invalidate it (not just CFRelease) on this error path too, or it
+            // leaks into the system tap table like the teardown case (#488).
+            ffi::CFMachPortInvalidate(tap);
             ffi::CFRelease(tap as *const std::ffi::c_void);
             let _ = Box::from_raw(context_ptr as *mut TapContext);
             status_callback(HotkeyMonitorStatus::Failed(message.to_string()));

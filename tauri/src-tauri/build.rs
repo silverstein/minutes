@@ -11,6 +11,33 @@ fn main() {
     tauri_build::build()
 }
 
+/// Deployment target (`-target <arch>-apple-macos<min>`) for a bundled Swift
+/// helper.
+///
+/// `swiftc` ignores `MACOSX_DEPLOYMENT_TARGET` (unlike clang/ld), so without an
+/// explicit `-target` it stamps each helper's minimum-OS (`LC_BUILD_VERSION
+/// minos`) from the host SDK. On the `macos-latest` release runner that is a
+/// newer macOS than most users run, so dyld refuses to load the helper on
+/// older systems (issue #494: 0.22.0's `system_audio_record` was stamped minos
+/// 26.0 and crashed on macOS 15). Pin an explicit minimum instead.
+///
+/// The minimum is per-helper, set to the oldest macOS each one actually
+/// compiles against: `mic_check` uses only long-stable APIs (11.0);
+/// `system_audio_record` calls `AVCaptureDevice.DeviceType.microphone` and
+/// `calendar-events` calls `EKEventStore.requestFullAccessToEvents`, both
+/// macOS 14 APIs used unguarded, so those pin to 14.0. Their macOS-15-only
+/// paths (ScreenCaptureKit recording) remain weak-linked behind `@available` /
+/// `#available` guards, so the binaries load on 14+ and run on 15+.
+fn swift_deployment_target(min_macos: &str) -> String {
+    let target = std::env::var("TARGET").unwrap_or_default();
+    let arch = if target.starts_with("aarch64") {
+        "arm64"
+    } else {
+        "x86_64"
+    };
+    format!("{arch}-apple-macos{min_macos}")
+}
+
 /// Below this size the staged sidecar cannot be a real CLI binary (the real
 /// one is tens of MB; the placeholder is ~52 bytes).
 const MIN_REAL_CLI_SIDECAR_BYTES: u64 = 1_000_000;
@@ -128,6 +155,7 @@ fn compile_mic_check_helper() {
     std::fs::create_dir_all(&bin_dir).expect("failed to create helper bin dir");
 
     let output = Command::new("swiftc")
+        .args(["-target", &swift_deployment_target("11.0")])
         .arg(&source)
         .arg("-o")
         .arg(&binary)
@@ -165,6 +193,7 @@ fn compile_system_audio_helper() {
 
     let output = Command::new("swiftc")
         .args(["-parse-as-library"])
+        .args(["-target", &swift_deployment_target("14.0")])
         .arg(&source)
         .arg("-o")
         .arg(&binary)
@@ -220,6 +249,7 @@ fn compile_calendar_helper() {
     // NSCalendarsFullAccessUsageDescription string on the EventKit prompt.
     let output = Command::new("swiftc")
         .arg("-O")
+        .args(["-target", &swift_deployment_target("14.0")])
         .args(["-Xlinker", "-sectcreate"])
         .args(["-Xlinker", "__TEXT"])
         .args(["-Xlinker", "__info_plist"])

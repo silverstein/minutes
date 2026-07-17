@@ -88,6 +88,10 @@ mod ffi {
 
         pub fn CGEventTapEnable(tap: CFMachPortRef, enable: bool);
         pub fn CGEventTapIsEnabled(tap: CFMachPortRef) -> bool;
+        // Removes the tap's Mach port from the system event-tap table.
+        // Disabling + CFRelease alone leaves the port registered as a
+        // disabled orphan (issue #488), so this must run at teardown.
+        pub fn CFMachPortInvalidate(port: CFMachPortRef);
 
         pub fn CFMachPortCreateRunLoopSource(
             allocator: CFAllocatorRef,
@@ -433,9 +437,15 @@ fn run_event_tap(
             }
         }
 
-        // Clean up
+        // Clean up. CFMachPortInvalidate removes the tap from the system
+        // event-tap table; CGEventTapEnable(false) + CFRelease alone leaves it
+        // registered as a disabled orphan, so repeated create/teardown cycles
+        // (the input-monitoring probe, hotkey re-registration) accumulate until
+        // the 512-entry tap table is exhausted and Screen Recording /
+        // screenshots break system-wide (issue #488).
         ffi::CGEventTapEnable(tap, false);
         ffi::CFRunLoopRemoveSource(run_loop, source, ffi::kCFRunLoopCommonModes);
+        ffi::CFMachPortInvalidate(tap);
         ffi::CFRelease(source as *const std::ffi::c_void);
         ffi::CFRelease(tap as *const std::ffi::c_void);
         let _ = Box::from_raw(context_ptr as *mut TapContext);

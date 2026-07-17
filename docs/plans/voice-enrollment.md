@@ -1,8 +1,8 @@
 # Plan: First-Class Voice Enrollment for Minutes
 
-Status: DRAFT for review (Fable-authored; codex adversarial review pending)
+Status: APPROVED — product decisions locked 2026-07-17 (codex adversarial review folded in, see §12). Implementation sequenced AFTER conversation-trust (minutes:2) merges (§11).
 Date: 2026-07-17
-Related issues: #490 (Recall copy), #491 (configured name ignored on solo captures), #492 (onboarding "test recording" isn't enrollment + no desktop enroll path)
+Related issues: #490 (Recall copy — SHIPPED, PR #503), #491 (configured name ignored on solo captures), #492 (onboarding "test recording" isn't enrollment + no desktop enroll path)
 
 ## 1. Thesis
 
@@ -77,12 +77,12 @@ Design consequences:
 - **Phase 1 (next release, MVP):** `embed_solo_clip` primitive; G2 model-version-safe matching; desktop active enrollment (multi-sample) + status + delete/rename in Settings; onboarding rework (#492) with honest copy + optional enrollment; fix #491 self-anchoring for solo captures; #490 copy fix rides along (trivial). Privacy messaging.
 - **Phase 2 (fast-follow):** passive/confirm-once enrollment hook + toggle; existing-user backfill from sidecars; "test my voice"; MCP enroll tool; household/multi-user UI; merge duplicate profiles.
 
-## 10. Open questions for Mat
+## 10. Decisions (LOCKED 2026-07-17)
 
-1. **G1 build decision:** ship `diarize` on by default in the desktop bundle (accepting the ~34MB model download as a first-run step), or keep it opt-in and make voice ID a "download to enable" feature? First-class strongly implies default-on.
-2. **Passive-enrollment default aggressiveness:** confirm-gated-on (safe, Otter-like — my recommendation) vs auto-learn-silently (Fireflies-like, riskier). 
-3. **Active enrollment ask:** how much friction is acceptable — one 30s free-speech sample (lowest friction) vs 3× short prompts (more robust)? Research favors the latter; onboarding conversion favors the former. Recommendation: one ~20-30s sample at onboarding, offer "improve it" (more samples) later.
-4. Scope for next release: Phase 1 only, or pull passive-enroll (Phase 2) forward since the blend primitive already exists?
+1. **G1 build decision — SPLIT default-on / opt-in (decided).** The `diarize` feature + ~34MB models ship **default-on** in the desktop bundle, with the model download as a **background** first-run step that never blocks the user's first recording (offline → defer, enable later from Settings). Rationale: diarization also powers speaker labels ("who said what") in every transcript, so it earns the happy path independent of enrollment, and onboarding is the natural moment to offer enrollment. **BUT the persistent biometric voiceprint is explicit opt-in** — diarization (ephemeral SPEAKER_X labels) is not biometric; a stored voiceprint is. Minutes never creates a voiceprint without an explicit user action ("Teach Minutes your voice — stays on this Mac"), offered prominently but skippably at onboarding. This keeps voice ID first-class while giving the regulated/privacy-sensitive beachhead a defensible "no biometric template without explicit consent" posture.
+2. **Active enrollment ask — one ~20–30s sample, improve later (decided).** Onboarding records a single ~20–30s free-speech sample, quality-gated (reject low-SNR/inconsistent/multimodal clips per the sharpened `embed_solo_clip`), then offers "improve accuracy" (additional samples) later in Settings. Lowest onboarding friction / best conversion; the quality gate protects the voiceprint. (The 3× short-prompt path becomes the optional "improve" flow, not the default.)
+3. **Phase 1 scope — full safe foundation (decided).** Build the complete safe architecture in Phase 1 (immutable `voice_samples` schema + versioned sidecar envelope + model-version-safe matching-with-evidence + granular privacy settings + delete-all-voice-data) plus active enrollment. Bigger than a quick MVP, correct for a biometric feature; Phase 2 (candidate capture → promotion, backfill) drops in cleanly on top. See re-phasing under §12.
+4. **Passive-enrollment aggressiveness — resolved by the review (not a separate call).** Passive learning is **quarantined candidate capture, default OFF**, promoted only via the multi-condition policy and gated on the adversarial FAR/FRR eval (§12). It does not ship in Phase 1. No "auto-learn silently" mode.
 
 ## 12. Codex adversarial review — architecture revisions (FOLDED IN, supersedes where noted)
 

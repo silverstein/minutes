@@ -579,6 +579,9 @@
       display: flex;
       flex-direction: column;
       gap: 10px;
+      /* Recall/chat content must be selectable + copyable (overrides body user-select: none) */
+      -webkit-user-select: text;
+      user-select: text;
     }
 
     /* "Jump to latest" pill — shown only when the user has scrolled up and new

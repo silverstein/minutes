@@ -34,6 +34,65 @@ impl MacPermissionStatus {
     }
 }
 
+/// Caching decision class for a native hotkey-monitor probe status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(any(test, target_os = "macos")), allow(dead_code))]
+pub(crate) enum ProbeOutcome {
+    /// The event tap started successfully for this process.
+    Active,
+    /// The event tap definitively could not start for this process.
+    HardFailure,
+    /// The probe was inconclusive and may succeed on a later attempt.
+    Transient,
+}
+
+/// Classify a `probe_hotkey_monitor` status string into a caching decision class.
+#[cfg_attr(not(any(test, target_os = "macos")), allow(dead_code))]
+pub(crate) fn classify_probe_status(status: &str) -> ProbeOutcome {
+    match status {
+        "active" => ProbeOutcome::Active,
+        "failed" | "spawn-failed" => ProbeOutcome::HardFailure,
+        // Timeouts, in-progress/stopped probes, and future statuses are
+        // inconclusive. Fail toward no false restart banner.
+        _ => ProbeOutcome::Transient,
+    }
+}
+
+#[cfg_attr(not(any(test, target_os = "macos")), allow(dead_code))]
+const RUNTIME_ISSUE_BANNER: &str = "macOS reports Input Monitoring as granted, but this running process could not start the native event tap. Restart Minutes and confirm the enabled System Settings entry matches this app copy.";
+
+/// Resolve the runtime issue by retrying transient probe outcomes.
+///
+/// `probe` receives the zero-based attempt index so callers can increase the
+/// probe timeout. `on_retry` runs between attempts. Active and hard-failure
+/// outcomes return immediately; exhausting transient attempts is inconclusive
+/// and therefore returns no restart banner.
+#[cfg_attr(not(any(test, target_os = "macos")), allow(dead_code))]
+pub(crate) fn resolve_runtime_issue<P, R>(
+    max_attempts: u32,
+    mut probe: P,
+    mut on_retry: R,
+) -> Option<&'static str>
+where
+    P: FnMut(u32) -> ProbeOutcome,
+    R: FnMut(u32),
+{
+    let mut attempt = 0;
+    while attempt < max_attempts {
+        match probe(attempt) {
+            ProbeOutcome::Active => return None,
+            ProbeOutcome::HardFailure => return Some(RUNTIME_ISSUE_BANNER),
+            ProbeOutcome::Transient => {
+                attempt += 1;
+                if attempt < max_attempts {
+                    on_retry(attempt);
+                }
+            }
+        }
+    }
+    None
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MacPermissionRow {
@@ -278,7 +337,7 @@ pub fn automation_row() -> MacPermissionRow {
 
 #[cfg(target_os = "macos")]
 mod platform {
-    use super::MacPermissionStatus;
+    use super::{classify_probe_status, resolve_runtime_issue, MacPermissionStatus};
     use objc2_av_foundation::{AVAuthorizationStatus, AVCaptureDevice, AVMediaTypeAudio};
     use std::time::Duration;
 
@@ -330,25 +389,30 @@ mod platform {
 
     pub fn input_monitoring_runtime_issue() -> Option<&'static str> {
         // Probe once per process, then cache. Whether this running app copy can
-        // start an event tap is fixed for the process lifetime (a "granted but
-        // unusable" state is only cleared by restarting Minutes), so there is
-        // no reason to re-probe. Re-probing meant the 15s permission monitor
-        // created and tore down a real kCGHIDEventTap every 15 seconds; before
-        // #488's teardown fix that leaked taps until the system tap table was
-        // exhausted and keyboard/mouse input froze system-wide. Probing once
-        // preserves the diagnostic while removing the churn entirely.
+        // definitively start an event tap is fixed for the process lifetime (a
+        // "granted but unusable" state is only cleared by restarting Minutes),
+        // so there is no reason to periodically re-probe. Re-probing meant the
+        // 15s permission monitor created and tore down a real kCGHIDEventTap
+        // every 15 seconds; before #488's teardown fix that leaked taps until
+        // the system tap table was exhausted and keyboard/mouse input froze
+        // system-wide. Transient outcomes now retry within this single
+        // memoized call before caching the no-banner result, preserving the
+        // #500 diagnostic without restoring the churn.
         static RUNTIME_ISSUE: std::sync::OnceLock<Option<&'static str>> =
             std::sync::OnceLock::new();
         *RUNTIME_ISSUE.get_or_init(|| {
-            let probe = crate::hotkey_macos::probe_hotkey_monitor(
-                crate::hotkey_macos::KEYCODE_FN,
-                Duration::from_millis(250),
-            );
-            if probe.status == "active" {
-                None
-            } else {
-                Some("macOS reports Input Monitoring as granted, but this running process could not start the native event tap. Restart Minutes and confirm the enabled System Settings entry matches this app copy.")
-            }
+            resolve_runtime_issue(
+                3,
+                |attempt| {
+                    let timeout = Duration::from_millis(400 + 200 * u64::from(attempt));
+                    let probe = crate::hotkey_macos::probe_hotkey_monitor(
+                        crate::hotkey_macos::KEYCODE_FN,
+                        timeout,
+                    );
+                    classify_probe_status(&probe.status)
+                },
+                |_| std::thread::sleep(Duration::from_millis(150)),
+            )
         })
     }
 
@@ -402,6 +466,79 @@ mod platform {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn classify_probe_status_distinguishes_definitive_and_transient_outcomes() {
+        assert_eq!(classify_probe_status("active"), ProbeOutcome::Active);
+        assert_eq!(classify_probe_status("failed"), ProbeOutcome::HardFailure);
+        assert_eq!(
+            classify_probe_status("spawn-failed"),
+            ProbeOutcome::HardFailure
+        );
+        for status in ["timeout", "starting", "stopped", "some-unknown"] {
+            assert_eq!(classify_probe_status(status), ProbeOutcome::Transient);
+        }
+    }
+
+    #[test]
+    fn resolve_runtime_issue_retries_only_transient_outcomes() {
+        use std::cell::Cell;
+
+        let probe_calls = Cell::new(0);
+        let result = resolve_runtime_issue(
+            3,
+            |_| {
+                probe_calls.set(probe_calls.get() + 1);
+                ProbeOutcome::Active
+            },
+            |_| panic!("active outcome must not retry"),
+        );
+        assert_eq!(result, None);
+        assert_eq!(probe_calls.get(), 1);
+
+        let probe_calls = Cell::new(0);
+        let outcomes = [ProbeOutcome::Transient, ProbeOutcome::Active];
+        let result = resolve_runtime_issue(
+            3,
+            |attempt| {
+                probe_calls.set(probe_calls.get() + 1);
+                outcomes[attempt as usize]
+            },
+            |_| {},
+        );
+        assert_eq!(result, None);
+        assert_eq!(probe_calls.get(), 2);
+
+        let probe_calls = Cell::new(0);
+        let result = resolve_runtime_issue(
+            3,
+            |_| {
+                probe_calls.set(probe_calls.get() + 1);
+                ProbeOutcome::HardFailure
+            },
+            |_| panic!("hard failure must not retry"),
+        );
+        assert_eq!(result, Some(RUNTIME_ISSUE_BANNER));
+        assert_eq!(probe_calls.get(), 1);
+
+        let outcomes = [ProbeOutcome::Transient, ProbeOutcome::HardFailure];
+        let result = resolve_runtime_issue(3, |attempt| outcomes[attempt as usize], |_| {});
+        assert_eq!(result, Some(RUNTIME_ISSUE_BANNER));
+
+        let probe_calls = Cell::new(0);
+        let retry_calls = Cell::new(0);
+        let result = resolve_runtime_issue(
+            3,
+            |_| {
+                probe_calls.set(probe_calls.get() + 1);
+                ProbeOutcome::Transient
+            },
+            |_| retry_calls.set(retry_calls.get() + 1),
+        );
+        assert_eq!(result, None);
+        assert_eq!(probe_calls.get(), 3);
+        assert_eq!(retry_calls.get(), 2);
+    }
 
     #[test]
     fn granted_status_is_runtime_granted() {

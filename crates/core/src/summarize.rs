@@ -2879,6 +2879,10 @@ fn run_speaker_mapping_prompt(
                 .map(|s| s.to_string())
                 .ok_or_else(|| "No text in response".into())
         }
+        "apple" | "apple-fm" => crate::apple_fm::generate(
+            "You map anonymous speaker labels to attendee names.",
+            prompt,
+        ),
         other => Err(format!("Unknown engine: {}", other).into()),
     }
 }

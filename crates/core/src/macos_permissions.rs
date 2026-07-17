@@ -329,15 +329,27 @@ mod platform {
     }
 
     pub fn input_monitoring_runtime_issue() -> Option<&'static str> {
-        let probe = crate::hotkey_macos::probe_hotkey_monitor(
-            crate::hotkey_macos::KEYCODE_FN,
-            Duration::from_millis(250),
-        );
-        if probe.status == "active" {
-            None
-        } else {
-            Some("macOS reports Input Monitoring as granted, but this running process could not start the native event tap. Restart Minutes and confirm the enabled System Settings entry matches this app copy.")
-        }
+        // Probe once per process, then cache. Whether this running app copy can
+        // start an event tap is fixed for the process lifetime (a "granted but
+        // unusable" state is only cleared by restarting Minutes), so there is
+        // no reason to re-probe. Re-probing meant the 15s permission monitor
+        // created and tore down a real kCGHIDEventTap every 15 seconds; before
+        // #488's teardown fix that leaked taps until the system tap table was
+        // exhausted and keyboard/mouse input froze system-wide. Probing once
+        // preserves the diagnostic while removing the churn entirely.
+        static RUNTIME_ISSUE: std::sync::OnceLock<Option<&'static str>> =
+            std::sync::OnceLock::new();
+        *RUNTIME_ISSUE.get_or_init(|| {
+            let probe = crate::hotkey_macos::probe_hotkey_monitor(
+                crate::hotkey_macos::KEYCODE_FN,
+                Duration::from_millis(250),
+            );
+            if probe.status == "active" {
+                None
+            } else {
+                Some("macOS reports Input Monitoring as granted, but this running process could not start the native event tap. Restart Minutes and confirm the enabled System Settings entry matches this app copy.")
+            }
+        })
     }
 
     pub fn accessibility_status() -> MacPermissionStatus {

@@ -503,7 +503,7 @@ parakeet_binary = "/Users/you/.local/bin/parakeet"  # Prefer an absolute path fo
 # parakeet_sidecar_enabled auto-enables when example-server (copied above) resolves; set true/false to force
 parakeet_boost_limit = 25        # Experimental: top graph-derived boost phrases (0 disables)
 parakeet_boost_score = 2.0       # Experimental tuning for parakeet.cpp --boost-score
-parakeet_fp16 = true             # Default on macOS Apple Silicon: ~35% faster transcription with lower GPU memory (see docs/designs/parakeet-perf-2026-04-14.md)
+parakeet_fp16 = true             # Default on macOS Apple Silicon: ~35% faster transcription with lower GPU memory (see docs/designs/parakeet-perf-2026-04-14.md). If fp16 crashes MPSGraph on your machine, Minutes auto-falls-back to fp32; set false to skip the retry (see Troubleshooting → fp16 MPSGraph crash)
 parakeet_vocab = "tdt-600m.tokenizer.vocab"  # Safer when multiple Parakeet models are installed
 ```
 
@@ -572,6 +572,28 @@ Only `tdt-ctc-110m` and `tdt-600m` are supported. Check your config.
 ### "Expected parakeet model in ~/.minutes/models/parakeet/"
 Run `minutes setup --parakeet` to install the recommended Parakeet model plus
 native VAD weights, or follow the manual download steps above.
+
+### fp16 MPSGraph crash on Apple Silicon (auto-handled)
+
+On some Apple Silicon + model combinations the fp16 GPU path crashes inside
+Apple's MPSGraph with an operand type-mismatch, e.g.:
+
+```
+'mps.add' op requires the same element type for all operands and results
+... original module failed verification
+```
+
+This is an upstream `parakeet.cpp` / Apple MPSGraph limitation (an fp16 kernel
+mixing f16 and f32 tensors), **not** a Minutes bug and **not** a broken machine.
+Minutes detects the crash signature, persists an fp16 blacklist fingerprint at
+`~/.minutes/parakeet-fp16-blacklist.json`, and **auto-retries in fp32** — so
+transcription keeps working with no action required (see
+`crates/core/src/parakeet_sidecar.rs`, `FP16_CRASH_SIGNATURES`).
+
+To skip the crash-and-retry on every run, set `parakeet_fp16 = false` in
+config.toml. fp32 is slightly slower and uses more GPU memory but is otherwise
+identical in output. To re-test fp16 after an OS/model update, set
+`parakeet_fp16_blacklist_reset = true` once (it clears the persisted fingerprint).
 
 ### CMake 4.x atomics error (build)
 

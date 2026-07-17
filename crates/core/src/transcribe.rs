@@ -2729,35 +2729,76 @@ fn loud_once(gate: &AtomicBool) -> bool {
     !gate.swap(true, Ordering::Relaxed)
 }
 
+/// Classify a helper non-zero exit as either an argv/clap contract mismatch
+/// (the issue #163 failure mode) or an ordinary runtime outcome.
+///
+/// The distinction matters because the two demand opposite responses. A
+/// contract mismatch — `transcribe.rs` builds a flag the `ParakeetHelper` clap
+/// struct in `crates/cli/src/main.rs` doesn't accept — makes the helper reject
+/// *every* invocation, so the fast host-process path is silently dead and a
+/// maintainer must go re-sync the flags. clap signals this by exiting with code
+/// 2 and printing a `usage:` / `unexpected argument` / `required arguments`
+/// diagnostic. An ordinary runtime outcome — the helper parsed its args, ran,
+/// and simply produced nothing usable (silence, or a clip below the word
+/// minimum) — exits 1 with an `anyhow` `Error: ...` line and is usually benign.
+/// Only the former should send anyone hunting for flag drift.
+#[cfg(feature = "parakeet")]
+fn helper_failure_is_argv_mismatch(status: &std::process::ExitStatus, stderr: &str) -> bool {
+    if status.code() == Some(2) {
+        return true;
+    }
+    let lower = stderr.to_ascii_lowercase();
+    lower.contains("unexpected argument")
+        || lower.contains("following required arguments")
+        || lower.contains("usage:")
+}
+
 /// Log the FIRST helper-subprocess non-zero exit per process at warn level
 /// before falling back to direct invocation. Subsequent failures are
 /// silenced (debug only) to avoid log spam during a recording.
 ///
-/// The motivation is issue #163: when `transcribe.rs` and the
-/// `ParakeetHelper` clap struct in `crates/cli/src/main.rs` disagree about
-/// what flags exist, the helper rejects every invocation and the code
-/// silently falls back to spawning parakeet directly. Without this warning,
-/// that kind of regression hides for arbitrary durations because the
-/// fallback path is functional. Loud first occurrence forces the failure
-/// onto someone's screen instead of into the void.
+/// The message is tailored to the failure class (see
+/// [`helper_failure_is_argv_mismatch`]). An argv/clap contract mismatch is the
+/// issue #163 regression — the fast host-process path is dead for every
+/// utterance until the flags are re-synced — so that case points explicitly at
+/// the two structs to reconcile. A plain "ran but produced no usable transcript"
+/// exit is usually benign (silence / below word minimum) and must NOT masquerade
+/// as an argv bug, or it sends maintainers chasing a phantom flag drift. Either
+/// way the loud first occurrence forces the failure onto someone's screen
+/// instead of into the void.
 #[cfg(feature = "parakeet")]
 fn log_parakeet_helper_failure_once(status: &std::process::ExitStatus, stderr: &str) {
     static GATE: AtomicBool = AtomicBool::new(false);
     let last_line = stderr.lines().last().unwrap_or("").trim();
+    let argv_mismatch = helper_failure_is_argv_mismatch(status, stderr);
     if loud_once(&GATE) {
-        tracing::warn!(
-            exit_status = ?status,
-            stderr_tail = %last_line,
-            "parakeet-helper exited non-zero; falling back to direct subprocess. \
-             This message is logged once per process; subsequent failures will \
-             be debug-level. If you see this, check that every argv flag in \
-             transcribe::transcribe_with_parakeet is also accepted by the \
-             ParakeetHelper clap struct in crates/cli/src/main.rs (issue #163)."
-        );
+        if argv_mismatch {
+            tracing::warn!(
+                exit_status = ?status,
+                stderr_tail = %last_line,
+                "parakeet-helper rejected its arguments; falling back to direct \
+                 subprocess. This is an argv/clap contract drift: every flag built \
+                 in transcribe::transcribe_with_parakeet must be accepted by the \
+                 ParakeetHelper clap struct in crates/cli/src/main.rs (issue #163). \
+                 The fast host-process path stays dead until they are re-synced. \
+                 Logged once per process; subsequent failures are debug-level."
+            );
+        } else {
+            tracing::warn!(
+                exit_status = ?status,
+                stderr_tail = %last_line,
+                "parakeet-helper ran but returned no usable transcript; falling \
+                 back to direct subprocess. This is usually benign (silence or a \
+                 clip below the word minimum), NOT an argv mismatch. Investigate \
+                 only if it persists on audio with clear speech. Logged once per \
+                 process; subsequent failures are debug-level."
+            );
+        }
     } else {
         tracing::debug!(
             exit_status = ?status,
             stderr_tail = %last_line,
+            argv_mismatch,
             "parakeet-helper exited non-zero (suppressed; first occurrence already logged)"
         );
     }
@@ -3339,6 +3380,40 @@ pub fn warmup_parakeet(config: &Config) -> Result<ParakeetWarmupStats, Transcrib
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Exit-code classification for the parakeet helper fallback. Building a
+    /// real `ExitStatus` needs the Unix `from_raw` extension (raw wait status =
+    /// `code << 8`), so these are unix + parakeet gated.
+    #[cfg(all(unix, feature = "parakeet"))]
+    mod parakeet_helper_failure_classification {
+        use super::super::helper_failure_is_argv_mismatch;
+        use std::os::unix::process::ExitStatusExt;
+        use std::process::ExitStatus;
+
+        fn exit(code: i32) -> ExitStatus {
+            ExitStatus::from_raw(code << 8)
+        }
+
+        #[test]
+        fn clap_usage_error_code_two_is_argv_mismatch() {
+            let stderr = "error: unexpected argument '--fp16' found\n\nUsage: minutes parakeet-helper --binary <BINARY> ...";
+            assert!(helper_failure_is_argv_mismatch(&exit(2), stderr));
+        }
+
+        #[test]
+        fn missing_required_arg_is_argv_mismatch_even_if_code_is_one() {
+            // Some clap configurations surface required-arg errors on exit 1.
+            let stderr = "error: the following required arguments were not provided:\n  --model-id <MODEL_ID>";
+            assert!(helper_failure_is_argv_mismatch(&exit(1), stderr));
+        }
+
+        #[test]
+        fn no_text_runtime_error_is_not_argv_mismatch() {
+            // The helper parsed args and ran; the clip just had no usable speech.
+            let stderr = "Error: transcription produced no text (below 3 word minimum)";
+            assert!(!helper_failure_is_argv_mismatch(&exit(1), stderr));
+        }
+    }
 
     #[test]
     #[cfg(feature = "whisper")]

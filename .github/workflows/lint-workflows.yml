@@ -28,6 +28,9 @@ jobs:
       - name: Check runner context expressions
         run: node scripts/check_workflow_runner_context.mjs
 
+      - name: Check signed acceptance trust boundary
+        run: node scripts/check_signed_acceptance_policy.mjs
+
       - name: Verify broken workflow is rejected
         run: |
           if docker run --rm \
@@ -62,3 +65,12 @@ jobs:
           fi
           node scripts/check_workflow_runner_context.mjs \
             tests/fixtures/workflows/runner-context-comment-only.yml
+
+      - name: Verify unsafe signed acceptance is rejected
+        run: |
+          if node scripts/check_signed_acceptance_policy.mjs \
+            tests/fixtures/workflows/unsafe-signed-acceptance.yml
+          then
+            echo "signed acceptance policy unexpectedly accepted the unsafe fixture" >&2
+            exit 1
+          fi

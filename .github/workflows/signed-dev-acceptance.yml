@@ -1,0 +1,231 @@
+name: Signed macOS Dev Acceptance
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_sha:
+        description: Full SHA protected by the matching acceptance-<sha> tag
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: signed-dev-acceptance
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_BUILD_JOBS: "2"
+  MACOSX_DEPLOYMENT_TARGET: "11.0"
+  TAURI_CLI_VERSION: "2.10.1"
+
+jobs:
+  authorize-candidate:
+    name: Authorize exact protected candidate
+    if: github.ref == 'refs/heads/main' && github.actor == 'silverstein'
+    runs-on: ubuntu-latest
+    outputs:
+      candidate_sha: ${{ steps.authorize.outputs.candidate_sha }}
+    steps:
+      - name: Bind the request to its protected acceptance tag
+        id: authorize
+        env:
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "candidate_sha must be a full lowercase commit SHA" >&2
+            exit 1
+          fi
+          tag="acceptance-$CANDIDATE_SHA"
+          remote="https://github.com/${GITHUB_REPOSITORY}.git"
+          resolved="$(git ls-remote --refs "$remote" "refs/tags/$tag" | awk '{print $1}')"
+          if [ "$resolved" != "$CANDIDATE_SHA" ]; then
+            echo "Protected tag $tag does not resolve exactly to $CANDIDATE_SHA" >&2
+            exit 1
+          fi
+          echo "candidate_sha=$CANDIDATE_SHA" >> "$GITHUB_OUTPUT"
+
+  build-unsigned:
+    name: Build candidate without signing secrets
+    needs: authorize-candidate
+    runs-on: macos-latest
+    timeout-minutes: 90
+    steps:
+      - name: Check out exact protected candidate
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: refs/tags/acceptance-${{ needs.authorize-candidate.outputs.candidate_sha }}
+          fetch-depth: 1
+
+      - name: Verify exact candidate checkout
+        env:
+          CANDIDATE_SHA: ${{ needs.authorize-candidate.outputs.candidate_sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
+          printf '%s\n' "$CANDIDATE_SHA" > candidate-sha.txt
+
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --version "${TAURI_CLI_VERSION}" --locked
+
+      - name: Build isolated app without credential access
+        env:
+          MINUTES_BUILD_FEATURES: parakeet,metal
+        run: ./scripts/install-dev-app.sh --target-only
+
+      - name: Package unsigned candidate and signing metadata
+        run: |
+          set -euo pipefail
+          app="target/release/bundle/macos/Minutes Dev.app"
+          test -d "$app"
+          ditto -c -k --sequesterRsrc --keepParent "$app" minutes-dev-unsigned.zip
+          shasum -a 256 minutes-dev-unsigned.zip > minutes-dev-unsigned.zip.sha256
+          cp -f tauri/src-tauri/entitlements.plist outer-entitlements.plist
+          cp -f tauri/src-tauri/minutes-cli.entitlements cli-entitlements.plist
+
+      - name: Upload unsigned candidate
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: minutes-dev-unsigned-${{ needs.authorize-candidate.outputs.candidate_sha }}
+          path: |
+            minutes-dev-unsigned.zip
+            minutes-dev-unsigned.zip.sha256
+            candidate-sha.txt
+            outer-entitlements.plist
+            cli-entitlements.plist
+          if-no-files-found: error
+          retention-days: 1
+
+  sign-reviewed-artifact:
+    name: Sign reviewed inert app artifact
+    needs:
+      - authorize-candidate
+      - build-unsigned
+    runs-on: macos-latest
+    timeout-minutes: 20
+    environment: signed-dev-acceptance
+    steps:
+      - name: Download exact unsigned candidate
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: minutes-dev-unsigned-${{ needs.authorize-candidate.outputs.candidate_sha }}
+          path: payload
+
+      - name: Verify artifact provenance before unlocking the identity
+        env:
+          CANDIDATE_SHA: ${{ needs.authorize-candidate.outputs.candidate_sha }}
+        run: |
+          set -euo pipefail
+          test "$(cat payload/candidate-sha.txt)" = "$CANDIDATE_SHA"
+          (cd payload && shasum -a 256 -c minutes-dev-unsigned.zip.sha256)
+          mkdir signed
+          ditto -x -k payload/minutes-dev-unsigned.zip signed
+          app="signed/Minutes Dev.app"
+          test -d "$app"
+          if find "$app" -type l -print -quit | grep -q .; then
+            echo "Unsigned app contains a symbolic link; refusing to sign" >&2
+            exit 1
+          fi
+
+      - name: Import Developer ID identity into an ephemeral keychain
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          set -euo pipefail
+          for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY; do
+            if [ -z "${!name}" ]; then
+              echo "Missing required signing secret: ${name}" >&2
+              exit 1
+            fi
+          done
+          keychain="$RUNNER_TEMP/minutes-dev-acceptance.keychain-db"
+          certificate="$RUNNER_TEMP/minutes-dev-acceptance.p12"
+          keychain_password="$(openssl rand -hex 24)"
+          python3 - "$certificate" <<'PY'
+          import base64
+          import os
+          import pathlib
+          import sys
+
+          pathlib.Path(sys.argv[1]).write_bytes(
+              base64.b64decode(os.environ["APPLE_CERTIFICATE"], validate=True)
+          )
+          PY
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security import "$certificate" -k "$keychain" \
+            -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$keychain_password" "$keychain" >/dev/null
+          security list-keychains -d user -s "$keychain"
+          security find-identity -v -p codesigning "$keychain" \
+            | grep -Fq "$APPLE_SIGNING_IDENTITY"
+          echo "MINUTES_ACCEPTANCE_KEYCHAIN=$keychain" >> "$GITHUB_ENV"
+          echo "MINUTES_DEV_SIGNING_IDENTITY=$APPLE_SIGNING_IDENTITY" >> "$GITHUB_ENV"
+
+      # Candidate code is never executed after the identity is unlocked. This
+      # fixed workflow signs only files from the reviewed, provenance-bound app.
+      - name: Sign nested executables and outer app inside-out
+        run: |
+          set -euo pipefail
+          app="signed/Minutes Dev.app"
+          sidecar="$app/Contents/MacOS/minutes"
+          while IFS= read -r nested_executable; do
+            if [ "$nested_executable" = "$sidecar" ]; then
+              codesign --force --options runtime --timestamp \
+                --entitlements payload/cli-entitlements.plist \
+                --sign "$MINUTES_DEV_SIGNING_IDENTITY" "$nested_executable"
+            else
+              codesign --force --options runtime --timestamp \
+                --sign "$MINUTES_DEV_SIGNING_IDENTITY" "$nested_executable"
+            fi
+          done < <(find "$app/Contents/MacOS" -maxdepth 1 -type f \
+            \( -perm -100 -o -perm -010 -o -perm -001 \))
+          codesign --force --options runtime --timestamp \
+            --entitlements payload/outer-entitlements.plist \
+            --sign "$MINUTES_DEV_SIGNING_IDENTITY" "$app"
+
+      - name: Verify exact Team identity and package sealed app
+        env:
+          CANDIDATE_SHA: ${{ needs.authorize-candidate.outputs.candidate_sha }}
+        run: |
+          set -euo pipefail
+          app="signed/Minutes Dev.app"
+          codesign --verify --deep --strict --verbose=4 "$app"
+          team_id="$(codesign -dv --verbose=4 "$app" 2>&1 | awk -F= '/^TeamIdentifier=/{print $2}')"
+          identifier="$(codesign -dv --verbose=4 "$app" 2>&1 | awk -F= '/^Identifier=/{print $2}')"
+          test "$team_id" = "63TMLKT8HN"
+          test "$identifier" = "com.useminutes.desktop.dev"
+          printf 'candidate=%s\nteam_id=%s\nidentifier=%s\n' \
+            "$CANDIDATE_SHA" "$team_id" "$identifier" \
+            > signed-dev-provenance.txt
+          ditto -c -k --sequesterRsrc --keepParent "$app" minutes-dev-signed.zip
+          shasum -a 256 minutes-dev-signed.zip > minutes-dev-signed.zip.sha256
+
+      - name: Remove ephemeral signing material
+        if: always()
+        run: |
+          if [ -n "${MINUTES_ACCEPTANCE_KEYCHAIN:-}" ]; then
+            security delete-keychain "$MINUTES_ACCEPTANCE_KEYCHAIN" || true
+          fi
+          rm -f "$RUNNER_TEMP/minutes-dev-acceptance.p12"
+
+      - name: Upload short-lived signed acceptance artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: minutes-dev-signed-${{ needs.authorize-candidate.outputs.candidate_sha }}
+          path: |
+            minutes-dev-signed.zip
+            minutes-dev-signed.zip.sha256
+            signed-dev-provenance.txt
+          if-no-files-found: error
+          retention-days: 1

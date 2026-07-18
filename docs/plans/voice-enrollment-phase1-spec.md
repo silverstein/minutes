@@ -1,7 +1,14 @@
 # Voice Enrollment — Phase 1 Implementation Spec (ready-to-dispatch)
 
-Status: READY. Companion to `voice-enrollment.md` (approved plan; decisions locked 2026-07-17).
-**Sequencing gate:** every work unit that touches `pipeline.rs`, `diarize.rs`, `lib.rs`, `commands.rs`, `index.html`, or `crates/mcp/src/index.ts` is BLOCKED until the conversation-trust integration (minutes:2) merges to `main`. Units touching only `voice.rs`, `config.rs` (new keys), and new files can start earlier (see "Early-start eligible"). Dispatch each unit via `/arbitrage` (codex implements to the acceptance command; Fable specs + reviews).
+Status: IN PROGRESS. Companion to `voice-enrollment.md` (approved plan; decisions locked 2026-07-17).
+
+**Progress (2026-07-18):**
+- ✅ **WU1 done** — immutable `voice_samples` schema + derived active profile, merged in #505 (commit f3cf81f). 7 tests green.
+- ✅ **WU5-config done** — the `[voice]` privacy keys with biometric-safe defaults, merged in #506 (commit 230e431).
+- ⚠️ **WU2 is NOT clean early-start** (correction to the note below): `load_audio` + `l2_normalize` are **private in `diarize.rs`** (which the trust branches DO modify), and `embed_solo_clip` produces a real ONNX embedding whose tests need the diarization models (not Linux-CI-runnable). Do WU2 **after** trust merges, adding one shared `pub` helper in `diarize.rs` that reuses `load_audio` — no duplication, properly tested. Do not force it early.
+- Everything else (WU3/WU4/WU6/WU7/WU8) remains blocked on the trust merge as written.
+
+**Sequencing gate:** every work unit that touches `pipeline.rs`, `diarize.rs`, `lib.rs`, `commands.rs`, `index.html`, or `crates/mcp/src/index.ts` is BLOCKED until the conversation-trust integration (minutes:2) merges to `main`. NOTE: `config.rs` is also heavily changed by the trust branches (TranscriptionConfig + Config loading methods), but the `VoiceConfig` struct region is clear — that is why WU5-config was safe. Dispatch each unit via `/arbitrage` (codex implements to the acceptance command; Fable specs + reviews).
 
 Grounding (verified against `crates/core/src/voice.rs` @ origin/main):
 - `voice_profiles(person_slug PK, name, embedding BLOB, enrolled_at, updated_at, sample_count, source, model_version)` — one **mutable blended vector per slug** (the centroid-only schema the review rejects).

@@ -81,10 +81,10 @@ The pipeline is the product, not the meeting. The same transcribe → summarize 
 │  ┌──────────┐  ├─▶│Transcribe │──▶│ Diarize   │──▶│ Summarize    │ │
 │  │ Watch     │  │  │           │   │ (optional)│   │              │ │
 │  │ Folder    │──┘  │whisper.cpp│   │ pyannote /│   │ Claude /     │ │
-│  │           │     │/ parakeet │   │ sherpa-   │   │ Ollama /     │ │
-│  │ Voice     │     │(local,    │   │ onnx      │   │ OpenAI /     │ │
-│  │ Memos,    │     │ Apple Si  │   │ (skip for │   │ any LLM      │ │
-│  │ any .m4a/ │     │ optimized)│   │  memos)   │   │ (pluggable)  │ │
+│  │           │     │Parakeet   │   │ sherpa-   │   │ Ollama /     │ │
+│  │ Voice     │     │retained → │   │ onnx      │   │ OpenAI /     │ │
+│  │ Memos,    │     │ Whisper   │   │ (skip for │   │ any LLM      │ │
+│  │ any .m4a/ │     │ fallback  │   │  memos)   │   │ (pluggable)  │ │
 │  │ .wav file │     │           │   │           │   │              │ │
 │  └──────────┘     └───────────┘   └───────────┘   └──────┬───────┘ │
 │                                                          │           │
@@ -169,7 +169,7 @@ The pipeline is the product, not the meeting. The same transcribe → summarize 
 | Component | Technology | Rationale |
 |-----------|-----------|-----------|
 | **Audio engine** | Rust | Cross-platform, fast, memory-safe. Single binary. |
-| **Transcription** | whisper.cpp (default) or parakeet.cpp (opt-in) | Local, Apple Silicon optimized. Parakeet: lower WER, multilingual. |
+| **Transcription** | whisper.cpp | Local and private. Retained Parakeet preferences currently resolve to Whisper until the helper accepts a secure byte transport. |
 | **Diarization** | pyannote (subprocess) or sherpa-onnx (native) | Pluggable: pyannote for best quality, sherpa-onnx for no-Python mode |
 | **Menu bar app** | Tauri v2 | Rust backend + web frontend, ~10MB vs Electron's 150MB |
 | **CLI** | Rust (clap) | Same binary as engine, zero extra deps |
@@ -199,7 +199,7 @@ Single `minutes-core` library crate with internal module boundaries. Thin `minut
 crates/core/src/
 ├── lib.rs              # Re-exports public API
 ├── capture.rs          # Audio capture (BlackHole/cpal)
-├── transcribe.rs       # whisper-rs + audio format conversion (symphonia: m4a/mp3/ogg → WAV)
+├── transcribe.rs       # whisper-rs + bounded WAV decode / ffmpeg compressed-audio decode
 ├── pipeline.rs         # Orchestrates capture → transcribe → [diarize] → [summarize] → write
 ├── watch.rs            # Folder watcher (notify + settle delay + dedup)
 ├── search.rs           # Walk-dir + regex search (builtin engine)
@@ -219,7 +219,7 @@ crates/cli/src/
 - **Simple pipeline function** — `pipeline::process()` calls each step with if-guards for optional steps (diarize, summarize). No trait-based step abstraction. Explicit > clever.
 - **Per-module error enums** — `CaptureError`, `TranscribeError`, `WatchError`, etc. unified at crate level via `MinutesError` with `#[from]` conversions. CLI matches for user-facing messages.
 - **Config::default()** — compiled-in defaults, config file optional. `minutes record` works without a config file if BlackHole is installed and model is downloaded.
-- **Audio format conversion** — prefers `ffmpeg` when available (matches whisper-cli's pipeline, critical for non-English audio). Falls back to `symphonia` (pure Rust, in-process) when ffmpeg isn't installed. Silero VAD + post-transcription dedup provide additional protection against hallucination loops.
+- **Audio format conversion** — bounded WAV decode runs in-process; the named compressed formats require `ffmpeg` and are streamed as capped 16 kHz mono PCM. There is no Symphonia fallback because safe container probing cannot be bounded before attacker-declared tables are allocated. Silero VAD + post-transcription dedup provide additional protection against hallucination loops.
 
 ---
 
@@ -1001,7 +1001,7 @@ Phase 1 is split into two milestones to de-risk the hardest part (audio capture)
 | P1a.1 | Rust project scaffold (cargo workspace: `core`, `cli`) | **DONE** |
 | P1a.2 | Audio capture via BlackHole virtual audio device + `cpal` crate (NOT ScreenCaptureKit — see note below) | **DONE** |
 | P1a.3 | WAV file writing (capture → save to temp .wav, clean up temp WAV after transcription) | **DONE** |
-| P1a.4 | whisper.cpp integration via `whisper-rs` crate (batch transcription of .wav → text). **Audio format conversion**: use `symphonia` crate to decode .m4a/.mp3/.ogg → WAV before transcription (whisper-rs only reads WAV natively). Handle empty transcripts: save markdown with `[No speech detected]` marker + `status: no-speech` in frontmatter. Minimum word threshold: 10 (configurable). | **DONE** |
+| P1a.4 | whisper.cpp integration via `whisper-rs` crate (batch transcription of .wav → text). **Audio format conversion**: bounded in-process WAV decoding plus required `ffmpeg` decoding for the named compressed formats into capped 16 kHz mono PCM. Handle empty transcripts: save markdown with `[No speech detected]` marker + `status: no-speech` in frontmatter. Minimum word threshold: 10 (configurable). | **DONE** |
 | P1a.5 | Markdown output with YAML frontmatter (title, date, duration, raw transcript). **File permissions: `0600`** (owner read/write only — transcripts contain sensitive content). | **DONE** |
 | P1a.6 | CLI interface: `minutes record` (start), `minutes stop` (stop + transcribe + save), **`minutes status`** (is recording in progress? duration so far?). See IPC Protocol below. | **DONE** |
 | P1a.7 | Config file (`~/.config/minutes/config.toml` — output dir, whisper model path, search engine, watch settings) | **DONE** |

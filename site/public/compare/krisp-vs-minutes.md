@@ -13,7 +13,7 @@ Krisp has real on-device credentials: its noise cancellation processes audio loc
 
 **Krisp** (hybrid): capture + denoise on-device (genuinely local) → transcribe on-device for English, Krisp servers for 15 other languages → AI notes in the cloud (Microsoft Azure) → transcripts/recordings stored in Krisp Cloud (US servers) once notes are enabled; on-device storage is an Enterprise feature. SOC 2 Type II, HIPAA BAA available (its security page references a legacy "Business tier"; pricing lists BAA under Enterprise), published DPA.
 
-**Minutes** (all local): capture device audio → transcribe + diarize on-device (whisper.cpp/parakeet.cpp + pyannote) → markdown on your disk, 0600 permissions. The private configuration is the only configuration.
+**Minutes** (all local): capture device audio → transcribe + diarize on-device (sealed local whisper.cpp + pyannote) → markdown on your disk, 0600 permissions. The private configuration is the only configuration.
 
 ## At a glance
 

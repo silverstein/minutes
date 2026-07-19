@@ -2,7 +2,9 @@
 
 pub mod apple_fm;
 pub mod apple_speech;
+pub(crate) mod audio_budget;
 pub mod autoresearch;
+pub(crate) mod bounded_child;
 #[cfg(any(test, all(feature = "streaming", feature = "whisper")))]
 pub(crate) mod bounded_inference;
 pub mod calendar;
@@ -60,6 +62,8 @@ pub mod retention;
 // Shared mono-downmix + decimation resampler (used by capture and streaming)
 pub(crate) mod resample;
 pub mod screen;
+#[cfg(any(target_os = "macos", target_os = "windows", all(test, unix)))]
+pub(crate) mod sealed_audio;
 pub mod search;
 pub mod search_index;
 pub mod sensitive;

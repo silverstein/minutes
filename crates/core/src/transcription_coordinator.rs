@@ -241,6 +241,15 @@ pub fn transcribe_path_for_content_with_hints(
     transcribe_request(&request, config)
 }
 
+pub(crate) fn transcribe_authorized_path_for_content_with_hints(
+    input: &crate::pipeline::AuthorizedProcessAudioInput,
+    content_type: ContentType,
+    config: &Config,
+    decode_hints: transcribe::DecodeHints,
+) -> Result<TranscribeResult, TranscribeError> {
+    transcribe::transcribe_authorized_with_hints(input, content_type, config, &decode_hints)
+}
+
 pub fn parakeet_guide_url() -> &'static str {
     "https://github.com/silverstein/minutes/blob/main/docs/architecture/parakeet.md"
 }
@@ -256,7 +265,23 @@ fn sidecar_state_label(config: &Config, effective: bool, binary_found: bool) -> 
         Some(true) => "forced on",
         Some(false) => "forced off",
     };
-    if effective && binary_found {
+    if !crate::pipeline::private_audio_processing_supported() {
+        format!(
+            "unavailable ({mode}); Parakeet private-audio processing is unavailable on this platform"
+        )
+    } else if !crate::pipeline::parakeet_private_audio_transport_supported() {
+        format!(
+            "unavailable ({mode}); Parakeet's pathname-only CLI cannot receive sealed private audio on this platform, so transcription uses Whisper"
+        )
+    } else if !crate::pipeline::private_audio_processing_available() {
+        format!(
+            "unavailable ({mode}); secure private-audio storage is not available at runtime, so transcription uses Whisper"
+        )
+    } else if !crate::parakeet_sidecar::private_audio_transport_available() {
+        format!(
+            "unavailable ({mode}); secure direct subprocess protects private audio until exact descriptor transport is implemented"
+        )
+    } else if effective && binary_found {
         format!("warm server ({mode})")
     } else if effective {
         format!("{mode}, but example-server is missing; falling back to cold per-utterance runs")
@@ -290,9 +315,32 @@ pub fn parakeet_backend_status(config: &Config) -> ParakeetBackendStatus {
         parakeet::resolve_tokenizer_file(config, &model, &config.transcription.parakeet_vocab);
     let metadata = parakeet::read_install_metadata(config, &model);
     let mut issues = Vec::new();
+    let private_audio_supported = crate::pipeline::private_audio_processing_supported();
+    let parakeet_transport_supported =
+        crate::pipeline::parakeet_private_audio_transport_supported();
+    let private_audio_available =
+        private_audio_supported && crate::pipeline::private_audio_processing_available();
 
     if !compiled {
         issues.push("Parakeet support is not compiled into this build".to_string());
+    }
+    if !private_audio_supported {
+        issues.push(
+            "secure private-audio processing is unavailable on this platform; Parakeet is disabled and transcription falls back to Whisper"
+                .to_string(),
+        );
+    }
+    if private_audio_supported && !parakeet_transport_supported {
+        issues.push(
+            "Parakeet's pathname-only CLI cannot receive Minutes' secure normalized audio on this platform; transcription uses Whisper"
+                .to_string(),
+        );
+    }
+    if private_audio_supported && parakeet_transport_supported && !private_audio_available {
+        issues.push(
+            "secure private-audio storage is unavailable at runtime; Parakeet is disabled and transcription falls back to Whisper"
+                .to_string(),
+        );
     }
     if !VALID_PARAKEET_MODELS.contains(&model.as_str()) {
         issues.push(format!(
@@ -317,7 +365,15 @@ pub fn parakeet_backend_status(config: &Config) -> ParakeetBackendStatus {
     // status assembly is cold-path (settings/health), so the repeat lookup is
     // accepted for clarity over threading a resolved path through.
     let sidecar_binary_found = crate::parakeet_sidecar::resolve_server_binary(&binary).is_some();
-    if config.transcription.parakeet_sidecar_enabled == Some(true) && !sidecar_binary_found {
+    if config.transcription.parakeet_sidecar_enabled == Some(true)
+        && !crate::parakeet_sidecar::private_audio_transport_available()
+    {
+        issues.push(if private_audio_supported && parakeet_transport_supported {
+            "warm sidecar requested but its pathname-only protocol cannot receive Minutes' private-audio capability; using the secure direct subprocess".to_string()
+        } else {
+            "warm sidecar requested, but no secure Parakeet private-audio transport is available on this platform; using Whisper".to_string()
+        });
+    } else if config.transcription.parakeet_sidecar_enabled == Some(true) && !sidecar_binary_found {
         issues.push(
             "sidecar forced on in config but example-server could not be resolved; live transcription will run the cold per-utterance path".to_string(),
         );
@@ -338,6 +394,9 @@ pub fn parakeet_backend_status(config: &Config) -> ParakeetBackendStatus {
         sidecar_enabled: sidecar_effective,
         sidecar_binary_found,
         ready: compiled
+            && private_audio_supported
+            && parakeet_transport_supported
+            && private_audio_available
             && VALID_PARAKEET_MODELS.contains(&model.as_str())
             && resolved_binary.is_some()
             && resolved_model.is_some()
@@ -383,11 +442,21 @@ pub fn parakeet_health_item(config: &Config) -> HealthItem {
             metadata_suffix
         )
     } else {
-        format!(
-            "Parakeet not ready: {}. Run `{}` for the guided install path.",
-            status.issues.join(", "),
-            status.setup_command
-        )
+        if !crate::pipeline::private_audio_processing_supported()
+            || !crate::pipeline::parakeet_private_audio_transport_supported()
+            || !crate::pipeline::private_audio_processing_available()
+        {
+            format!(
+                "Parakeet not ready: {}. Whisper remains active on this platform.",
+                status.issues.join(", ")
+            )
+        } else {
+            format!(
+                "Parakeet not ready: {}. Run `{}` for the guided install path.",
+                status.issues.join(", "),
+                status.setup_command
+            )
+        }
     };
 
     HealthItem {
@@ -420,6 +489,21 @@ fn parakeet_warmup_selected(config: &Config) -> bool {
 pub fn warmup_active_backend(config: &Config) -> Result<BackendWarmupResult, TranscribeError> {
     if !parakeet_warmup_selected(config) {
         return Err(TranscribeError::EngineNotAvailable("parakeet".into()));
+    }
+    if !crate::pipeline::private_audio_processing_supported() {
+        return Err(TranscribeError::EngineNotAvailable(
+            "parakeet-private-audio".into(),
+        ));
+    }
+    if !crate::pipeline::parakeet_private_audio_transport_supported() {
+        return Err(TranscribeError::EngineNotAvailable(
+            "parakeet-private-audio-transport".into(),
+        ));
+    }
+    if !crate::pipeline::private_audio_processing_available() {
+        return Err(TranscribeError::EngineNotAvailable(
+            "parakeet-private-audio-runtime".into(),
+        ));
     }
 
     #[cfg(feature = "parakeet")]
@@ -475,6 +559,10 @@ pub fn benchmark_parakeet(
     vad_threshold: f32,
     config: &Config,
 ) -> Result<ParakeetBenchmarkReport, String> {
+    let capability = crate::pipeline::parakeet_capability(true);
+    if !capability.selectable {
+        return Err(format!("Parakeet {}", capability.unavailable_reason()));
+    }
     let started = std::time::Instant::now();
     let direct = transcribe::run_parakeet_cli_structured(
         binary,
@@ -550,7 +638,7 @@ pub fn benchmark_parakeet(
 
 #[cfg(test)]
 mod tests {
-    use super::parakeet_warmup_selected;
+    use super::{parakeet_warmup_selected, sidecar_state_label};
     use crate::Config;
 
     #[test]
@@ -569,5 +657,118 @@ mod tests {
         config.live_transcript.backend = "apple-speech".into();
 
         assert!(!parakeet_warmup_selected(&config));
+    }
+
+    #[test]
+    fn sidecar_status_is_honest_when_forced_on_without_exact_transport() {
+        let mut config = Config::default();
+        config.transcription.parakeet_sidecar_enabled = Some(true);
+
+        let label = sidecar_state_label(&config, false, true);
+        assert!(label.contains("unavailable (forced on)"));
+        if crate::pipeline::parakeet_private_audio_transport_supported() {
+            assert!(label.contains("secure direct subprocess"));
+        } else {
+            assert!(label.contains("transcription uses Whisper"));
+        }
+        assert!(!label.contains("warm server"));
+    }
+
+    #[test]
+    #[cfg(all(target_os = "linux", feature = "parakeet"))]
+    fn linux_pathname_transport_failure_keeps_whisper_active_without_setup_advice() {
+        crate::pipeline::with_private_audio_processing_available_for_test(false, || {
+            let mut config = Config::default();
+            config.transcription.engine = "parakeet".into();
+
+            let status = super::parakeet_backend_status(&config);
+            assert!(!status.ready);
+            assert!(status
+                .issues
+                .iter()
+                .any(|issue| issue.contains("pathname-only CLI")));
+
+            let health = super::parakeet_health_item(&config);
+            assert_eq!(health.state, "attention");
+            assert!(health.detail.contains("Whisper remains active"));
+            assert!(!health.detail.contains("Run `minutes setup"));
+
+            assert!(matches!(
+                super::warmup_active_backend(&config),
+                Err(crate::error::TranscribeError::EngineNotAvailable(reason))
+                    if reason == "parakeet-private-audio-transport"
+            ));
+        });
+    }
+
+    #[test]
+    fn capability_layers_keep_runtime_unavailability_distinct_from_transport() {
+        let capability = crate::pipeline::ParakeetCapability::from_layers(true, true, true, false);
+        assert!(!capability.selectable);
+        assert!(capability.unavailable_reason().contains("at runtime"));
+    }
+
+    #[cfg(feature = "parakeet")]
+    #[test]
+    fn benchmark_rejects_unavailable_transport_before_launching_helpers() {
+        let error = super::benchmark_parakeet(
+            std::path::Path::new("missing-helper"),
+            "missing-parakeet",
+            std::path::Path::new("missing-model"),
+            std::path::Path::new("missing-audio"),
+            std::path::Path::new("missing-vocab"),
+            "tdt-ctc-110m",
+            false,
+            None,
+            0.5,
+            &Config::default(),
+        )
+        .expect_err("benchmark must fail at the shared capability gate");
+
+        assert!(error.contains("cannot receive secure private audio"));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn windows_status_never_claims_parakeet_ready_without_secure_transport() {
+        let mut config = Config::default();
+        config.transcription.parakeet_sidecar_enabled = Some(true);
+        let status = super::parakeet_backend_status(&config);
+        assert!(!status.ready);
+        assert!(!status.sidecar.contains("secure direct subprocess"));
+        assert!(status
+            .issues
+            .iter()
+            .any(|issue| issue.contains("pathname-only CLI")
+                && issue.contains("transcription uses Whisper")));
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn macos_status_discloses_proof_bound_parakeet_fallback() {
+        let mut config = Config::default();
+        config.transcription.parakeet_sidecar_enabled = Some(true);
+        let status = super::parakeet_backend_status(&config);
+        assert!(!status.ready);
+        assert!(status.sidecar.contains("transcription uses Whisper"));
+        assert!(!status.sidecar.contains("secure direct subprocess"));
+        assert!(status.issues.iter().any(|issue| {
+            issue.contains("pathname-only CLI") && issue.contains("transcription uses Whisper")
+        }));
+        assert!(status.issues.iter().any(|issue| {
+            issue.contains("warm sidecar requested") && issue.contains("using Whisper")
+        }));
+
+        let health = super::parakeet_health_item(&config);
+        assert_eq!(health.state, "attention");
+        assert!(health.detail.contains("Whisper remains active"));
+        assert!(!health.detail.contains("Run `minutes setup"));
+
+        config.transcription.engine = "parakeet".into();
+        assert!(matches!(
+            super::warmup_active_backend(&config),
+            Err(crate::error::TranscribeError::EngineNotAvailable(reason))
+                if reason == "parakeet-private-audio-transport"
+        ));
     }
 }

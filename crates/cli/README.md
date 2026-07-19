@@ -85,7 +85,7 @@ Works with Obsidian, Logseq, grep, or any markdown tool.
 | Transcription | whisper.cpp, local, multiple model sizes |
 | Speaker diarization | pyannote-rs (native Rust, ~34MB models) |
 | Voice activity detection | Silero VAD (prevents hallucination loops) |
-| Audio formats | m4a, mp3, wav, ogg, webm (ffmpeg or symphonia) |
+| Audio formats | wav directly; m4a, mp3, ogg, webm, mp4, mov, and aac with ffmpeg |
 | GPU acceleration | Metal, CoreML (macOS), CUDA (Linux/Windows), ROCm/HIP, Vulkan |
 | Phone voice memos | Folder watcher + iCloud/Dropbox/Syncthing |
 | MCP server | 15 tools + 7 resources for Claude/Cursor/Windsurf |

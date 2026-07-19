@@ -24,7 +24,7 @@ const comparisonRows = [
   {
     label: "Where transcription runs",
     competitor: "On-device by default; optional cloud models (recommended on Intel Macs)",
-    minutes: "On-device always (whisper.cpp or parakeet.cpp) — there is no cloud path",
+    minutes: "On-device always (sealed local whisper.cpp) — there is no cloud path",
   },
   {
     label: "AI formatting / summarization",

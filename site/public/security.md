@@ -7,7 +7,7 @@ Cloud notetakers answer the security question with policies: encryption in trans
 ## The pipeline — every step on your device
 
 1. **Capture** — mic (cpal) and system audio (native macOS capture in the desktop app, or a loopback device), recorded on your machine
-2. **Transcribe** — whisper.cpp or parakeet.cpp, running on your CPU/GPU
+2. **Transcribe** — sealed local whisper.cpp, running on your CPU/GPU
 3. **Diarize** — pyannote ONNX models, local; speaker labels never computed in a cloud
 4. **Store** — markdown + YAML frontmatter on your own disk, 0600 owner-only permissions
 

@@ -3600,6 +3600,35 @@
       padding: 28px 8px;
     }
 
+    .recovery-bulk-errors {
+      margin: 14px 20px 0;
+      padding: 12px;
+      border: 1px solid var(--orange-border);
+      border-radius: 12px;
+      background: var(--orange-tint-soft);
+      color: var(--text);
+      font-size: var(--text-xs);
+      line-height: 1.45;
+    }
+
+    .recovery-bulk-errors[hidden] {
+      display: none;
+    }
+
+    .recovery-bulk-error + .recovery-bulk-error {
+      margin-top: 10px;
+      padding-top: 10px;
+      border-top: 1px solid var(--orange-border);
+    }
+
+    .recovery-bulk-error-path {
+      margin-top: 3px;
+      color: var(--text-tertiary);
+      font-family: var(--font-mono);
+      font-size: var(--text-meta);
+      word-break: break-all;
+    }
+
     .recovery-list {
       display: grid;
       gap: 12px;
@@ -5684,6 +5713,7 @@
           <button class="btn btn-secondary btn-sm" id="btn-recovery-close">Close</button>
         </div>
       </div>
+      <div class="recovery-bulk-errors" id="recovery-bulk-errors" role="status" aria-live="polite" hidden></div>
       <div class="recovery-scroll" id="recovery-scroll">
         <div class="recovery-empty">No recovery items right now.</div>
       </div>
@@ -5933,8 +5963,8 @@
             <select id="settings-live-backend" class="settings-field">
               <option value="inherit">Inherit main transcription engine</option>
               <option value="whisper">Whisper — built-in, broad language support</option>
-              <option value="parakeet">Parakeet — lower WER, fast on Apple Silicon</option>
-              <option value="apple-speech">Apple Speech — experimental standalone live transcript</option>
+              <option value="parakeet" disabled>Parakeet — unavailable</option>
+              <option value="apple-speech" disabled>Apple Speech — unavailable, using Whisper</option>
             </select>
             <div class="about-controls-meta" id="settings-live-backend-detail">Standalone live transcript currently inherits your main transcription engine.</div>
           </div>
@@ -5981,9 +6011,10 @@
             <div class="about-controls-copy">Engine</div>
             <select id="settings-transcription-engine" class="settings-field">
               <option value="whisper">Whisper — broad language support, built-in</option>
-              <option value="parakeet">Parakeet — lower WER, fast on Apple Silicon</option>
+              <option value="parakeet" disabled>Parakeet — unavailable</option>
+              <option value="apple-speech" disabled>Apple Speech — unavailable, using Whisper</option>
             </select>
-            <div class="about-controls-meta" id="settings-transcription-engine-detail">Whisper and Parakeet control batch, recording, and recording-sidecar transcription. Standalone live transcript has its own backend setting above.</div>
+            <div class="about-controls-meta" id="settings-transcription-engine-detail">The main engine controls batch, recording, and recording-sidecar transcription. Standalone live transcript has its own backend setting above.</div>
           </div>
         </div>
         <div class="about-controls" id="settings-whisper-section">
@@ -6011,9 +6042,9 @@
             </select>
             <div class="settings-section-inline settings-section-inline-tight">
               <div class="about-controls-meta" id="settings-parakeet-status">Checking Parakeet backend…</div>
-              <button class="btn btn-secondary btn-sm" id="btn-open-parakeet-guide">Open Setup Guide</button>
+              <button class="btn btn-secondary btn-sm" id="btn-open-parakeet-guide">Technical Details</button>
             </div>
-            <div class="about-controls-meta" id="settings-parakeet-detail">Runs locally with a Parakeet backend binary plus model assets. See <code>minutes setup --parakeet</code>.</div>
+            <div class="about-controls-meta" id="settings-parakeet-detail">Parakeet cannot currently receive Minutes' secure private audio; retained preferences resolve to Whisper.</div>
           </div>
         </div>
         <div class="about-controls">
@@ -6852,6 +6883,7 @@
     const recoveryScroll = document.getElementById('recovery-scroll');
     const recoverySubtitle = document.getElementById('recovery-subtitle');
     const recoveryRetryAllButton = document.getElementById('btn-recovery-retry-all');
+    const recoveryBulkErrors = document.getElementById('recovery-bulk-errors');
     const recordButton = document.getElementById('btn-record');
     const liveButton = document.getElementById('btn-live');
     const quickThoughtButton = document.getElementById('btn-quick-thought');
@@ -6904,6 +6936,8 @@
     let processingJobs = [];
     let readinessItems = [];
     let recoveryItems = [];
+    let recoveryLoadGeneration = 0;
+    let recoveryLoadPromise = null;
     let inputModalResolver = null;
     let inputModalPreviousFocus = null;
     let retryingAllRecovery = false;
@@ -7060,10 +7094,6 @@
       const watchStep = root.querySelector('#step-watch-artifact');
       const watchStatus = root.querySelector('#step-watch-artifact-status');
 
-      if (!activation.hasModel && activation.nextAction === 'setup-parakeet') {
-        setText(modelStatus, 'Needs setup');
-      }
-
       if (activation.hasModel || milestones.modelReadyAt) {
         modelStep?.classList.add('done');
         setText(modelStatus, 'Done');
@@ -7105,7 +7135,15 @@
         .replaceAll("'", '&#39;');
     }
 
-    function describeParakeetStatus(status) {
+    function describeParakeetStatus(status, selectable, unavailableReason) {
+      if (!selectable) {
+        return {
+          summary: 'Parakeet is unavailable; Whisper remains active.',
+          detail: unavailableReason
+            ? `Parakeet is ${unavailableReason}. Existing Parakeet preferences are retained but resolve to Whisper.`
+            : 'The current Parakeet process cannot receive secure private audio. Existing preferences are retained but resolve to Whisper.',
+        };
+      }
       if (!status) {
         return {
           summary: 'Parakeet status unavailable.',
@@ -7131,15 +7169,15 @@
       };
     }
 
-    function renderParakeetSettingsStatus(status) {
+    function renderParakeetSettingsStatus(status, selectable, unavailableReason) {
       const summaryEl = document.getElementById('settings-parakeet-status');
       const detailEl = document.getElementById('settings-parakeet-detail');
       const guideBtn = document.getElementById('btn-open-parakeet-guide');
-      const view = describeParakeetStatus(status);
+      const view = describeParakeetStatus(status, selectable, unavailableReason);
       if (summaryEl) summaryEl.textContent = view.summary;
       if (detailEl) detailEl.textContent = view.detail;
       if (guideBtn) {
-        guideBtn.textContent = status?.ready ? 'View Guide' : 'Open Setup Guide';
+        guideBtn.textContent = selectable && status?.ready ? 'View Guide' : 'Technical Details';
         guideBtn.dataset.guideUrl = status?.guideUrl || '';
       }
     }
@@ -7214,10 +7252,13 @@
         return `Standalone live transcript currently inherits ${backendLabel(resolvedBackend)} from the main transcription engine. Fallback order: ${fallbackText}. Recording-sidecar live and batch transcription stay on ${batchLabel}.`;
       }
       if (selectedBackend === 'apple-speech') {
-        return `Standalone live transcript will try Apple Speech first. Fallback order: ${fallbackText}. Recording-sidecar live and batch transcription remain on ${batchLabel}.`;
+        return `The retained Apple Speech preference cannot receive secure private audio yet, so standalone live transcript resolves to ${backendLabel(resolvedBackend)}. Fallback order: ${fallbackText}. Recording-sidecar live and batch transcription remain on ${batchLabel}.`;
       }
       if (selectedBackend === 'parakeet') {
-        return `Standalone live transcript will use Parakeet when available. Fallback order: ${fallbackText}. Recording-sidecar live and batch transcription remain on ${batchLabel}.`;
+        if (resolvedBackend !== 'parakeet') {
+          return `The retained Parakeet preference is unavailable, so standalone live transcript resolves to ${backendLabel(resolvedBackend)}. Fallback order: ${fallbackText}. Recording-sidecar live and batch transcription remain on ${batchLabel}.`;
+        }
+        return `Standalone live transcript uses Parakeet. Fallback order: ${fallbackText}. Recording-sidecar live and batch transcription remain on ${batchLabel}.`;
       }
       return `Standalone live transcript will use Whisper. Fallback order: ${fallbackText}. Recording-sidecar live and batch transcription remain on ${batchLabel}.`;
     }
@@ -8108,9 +8149,34 @@
           : 'Retry all';
     }
 
+    function renderRecoveryBulkFailures(failures) {
+      const items = Array.isArray(failures) ? failures : [];
+      recoveryBulkErrors.replaceChildren();
+      recoveryBulkErrors.hidden = items.length === 0;
+      if (!items.length) return;
+
+      const heading = document.createElement('div');
+      heading.className = 'recovery-item-title';
+      heading.textContent = `${items.length} item${items.length === 1 ? '' : 's'} need individual attention`;
+      recoveryBulkErrors.appendChild(heading);
+      for (const failure of items) {
+        const row = document.createElement('div');
+        row.className = 'recovery-bulk-error';
+        const detail = document.createElement('div');
+        detail.textContent = failure?.error || 'This item could not be queued.';
+        const path = document.createElement('div');
+        path.className = 'recovery-bulk-error-path';
+        path.textContent = failure?.path || '';
+        row.appendChild(detail);
+        if (failure?.path) row.appendChild(path);
+        recoveryBulkErrors.appendChild(row);
+      }
+    }
+
     async function retryAllRecoveryItems() {
       if (retryingAllRecovery || !recoveryItems.length) return;
       retryingAllRecovery = true;
+      renderRecoveryBulkFailures([]);
       updateRecoveryRetryAllButton();
       let closeAfterSuccess = false;
       let delayReset = false;
@@ -8118,12 +8184,11 @@
       try {
         const result = await invoke('cmd_retry_all_recovery');
         const queuedCount = Number(result?.queued || 0);
-        if (result?.failed?.length) {
-          console.error('Retry all recovery failures:', result.failed);
-        }
+        const failures = Array.isArray(result?.failed) ? result.failed : [];
+        renderRecoveryBulkFailures(failures);
         await loadRecoveryItems();
         startFastPoll();
-        if (queuedCount > 0) {
+        if (queuedCount > 0 && failures.length === 0) {
           closeAfterSuccess = true;
           recoveryRetryAllButton.hidden = false;
           recoveryRetryAllButton.disabled = true;
@@ -8133,6 +8198,12 @@
             retryingAllRecovery = false;
             updateRecoveryRetryAllButton();
           }, 450);
+        } else if (queuedCount > 0) {
+          delayReset = true;
+          recoveryRetryAllButton.hidden = false;
+          recoveryRetryAllButton.disabled = true;
+          recoveryRetryAllButton.textContent = `Queued ${queuedCount}; ${failures.length} need attention`;
+          window.setTimeout(updateRecoveryRetryAllButton, 1600);
         } else {
           delayReset = true;
           recoveryRetryAllButton.hidden = false;
@@ -8142,6 +8213,7 @@
         }
       } catch (e) {
         console.error('Retry all recovery:', e);
+        renderRecoveryBulkFailures([{ path: '', error: String(e) }]);
         delayReset = true;
         recoveryRetryAllButton.hidden = false;
         recoveryRetryAllButton.disabled = true;
@@ -8237,10 +8309,29 @@
       };
     }
 
+    function withUiDeadline(promise, label, timeoutMs = 5000) {
+      // This only bounds how long the UI waits; the backend owns the stronger
+      // safety boundary. Its single-flight lease stays with any non-cancellable
+      // worker until that worker really exits, so a timeout cannot fan out more
+      // blocked File Provider/device tasks.
+      return Promise.race([
+        promise,
+        new Promise((_, reject) => window.setTimeout(
+          () => reject(new Error(`${label} is taking longer than expected. The background check is still limited to one worker.`)),
+          timeoutMs
+        ))
+      ]);
+    }
+
     async function loadReadinessItems() {
+      readinessScroll.replaceChildren();
+      const checking = document.createElement('div');
+      checking.className = 'readiness-item-detail';
+      checking.textContent = 'Checking readiness in the background...';
+      readinessScroll.appendChild(checking);
       const [itemsResult, permissionRowsResult, restartSafetyResult] = await Promise.allSettled([
-        invoke('cmd_permission_center'),
-        invoke('cmd_macos_permission_rows'),
+        withUiDeadline(invoke('cmd_permission_center'), 'Readiness inventory'),
+        withUiDeadline(invoke('cmd_macos_permission_rows'), 'macOS permission checks'),
         invoke('cmd_permission_restart_safety')
       ]);
 
@@ -8249,6 +8340,12 @@
         items = itemsResult.value;
       } else if (itemsResult.status === 'rejected') {
         console.error('Readiness items:', itemsResult.reason);
+        items.push({
+          label: 'Readiness inventory',
+          state: 'attention',
+          detail: `Readiness checks are unavailable right now: ${String(itemsResult.reason)}`,
+          optional: false
+        });
       }
 
       let restartSafety = null;
@@ -8263,6 +8360,12 @@
         permissionItems = permissionRowsResult.value.map(row => permissionRowToReadinessItem(row, restartSafety));
       } else if (permissionRowsResult.status === 'rejected') {
         console.error('macOS permission rows:', permissionRowsResult.reason);
+        permissionItems.push({
+          label: 'macOS permission checks',
+          state: 'attention',
+          detail: `Permission checks are unavailable right now: ${String(permissionRowsResult.reason)}`,
+          optional: false
+        });
       }
 
       readinessItems = [...permissionItems, ...items];
@@ -8355,19 +8458,21 @@
       readinessScroll.appendChild(list);
     }
 
-    async function loadRecoveryItems() {
-      try {
-        recoveryItems = await invoke('cmd_recovery_items');
-      } catch (e) {
-        console.error('Recovery items:', e);
-        recoveryItems = [];
-      }
-
-      recoveryCount.textContent = recoveryItems.length;
-      recoveryButton.classList.toggle('active', recoveryItems.length > 0);
+    function renderRecoveryItemsResult(items, recoveryLoadError, generation) {
+      if (generation !== recoveryLoadGeneration) return;
+      recoveryItems = Array.isArray(items) ? items : [];
+      recoveryCount.textContent = recoveryLoadError ? '!' : recoveryItems.length;
+      recoveryButton.classList.toggle('active', recoveryLoadError !== null || recoveryItems.length > 0);
       updateRecoveryRetryAllButton();
 
       recoveryScroll.replaceChildren();
+      if (recoveryLoadError) {
+        const unavailable = document.createElement('div');
+        unavailable.className = 'recovery-empty';
+        unavailable.textContent = `Recovery inventory is unavailable right now: ${recoveryLoadError}`;
+        recoveryScroll.appendChild(unavailable);
+        return;
+      }
       if (!recoveryItems.length) {
         const empty = document.createElement('div');
         empty.className = 'recovery-empty';
@@ -8410,8 +8515,22 @@
 
         const retry = document.createElement('button');
         retry.className = 'btn btn-secondary btn-sm';
-        retry.textContent = item.retry_type === 'memo' ? 'Retry as Memo' : 'Retry as Meeting';
+        const needsFfmpeg = item.kind === 'watch-needs-ffmpeg' || item.kind === 'watch-failed-needs-ffmpeg';
+        const isWatchRoot = item.kind === 'watch-root-preserved';
+        retry.textContent = needsFfmpeg
+          ? 'Install ffmpeg first'
+          : isWatchRoot ? 'Restart watcher'
+          : item.retry_type === 'memo' ? 'Retry as Memo' : 'Retry as Meeting';
+        retry.disabled = needsFfmpeg || isWatchRoot;
+        if (needsFfmpeg) {
+          retry.title = item.kind === 'watch-failed-needs-ffmpeg'
+            ? 'Install ffmpeg, then restart the watcher. This failed import remains preserved in Recovery Center.'
+            : 'Install ffmpeg, then restart the watcher. Your original file is untouched.';
+        } else if (isWatchRoot) {
+          retry.title = 'Finish copying the file, then restart the folder watcher. Recovery Center will not process a watch-root file independently.';
+        }
         retry.addEventListener('click', async () => {
+          if (needsFfmpeg || isWatchRoot) return;
           try {
             await invoke('cmd_retry_recovery', {
               path: item.path,
@@ -8423,6 +8542,7 @@
             startFastPoll();
           } catch (e) {
             console.error('Retry recovery:', e);
+            renderRecoveryBulkFailures([{ path: item.path, error: String(e) }]);
           }
         });
 
@@ -8461,6 +8581,45 @@
       }
 
       recoveryScroll.appendChild(list);
+    }
+
+    async function loadRecoveryItems() {
+      const generation = ++recoveryLoadGeneration;
+      recoveryCount.textContent = '…';
+      recoveryScroll.replaceChildren();
+      const checking = document.createElement('div');
+      checking.className = 'recovery-empty';
+      checking.textContent = 'Checking for recovery items in the background...';
+      recoveryScroll.appendChild(checking);
+
+      // `Promise.race` bounds the UI wait but does not cancel Tauri's blocking
+      // worker. Keep observing the authoritative request: if a cold File
+      // Provider returns after five seconds, paint that eventual result rather
+      // than leaving Recovery unusable for the rest of the app session. The
+      // generation check prevents an older completion from overwriting a newer
+      // explicit refresh.
+      let backendSettled = false;
+      const request = recoveryLoadPromise || invoke('cmd_recovery_items');
+      recoveryLoadPromise = request;
+      request.then((items) => {
+        backendSettled = true;
+        if (recoveryLoadPromise === request) recoveryLoadPromise = null;
+        renderRecoveryItemsResult(items, null, generation);
+      }).catch((error) => {
+        backendSettled = true;
+        if (recoveryLoadPromise === request) recoveryLoadPromise = null;
+        console.error('Recovery items:', error);
+        renderRecoveryItemsResult([], String(error), generation);
+      });
+
+      try {
+        await withUiDeadline(request, 'Recovery inventory');
+      } catch (error) {
+        if (!backendSettled) {
+          console.error('Recovery items:', error);
+          renderRecoveryItemsResult([], String(error), generation);
+        }
+      }
     }
 
     // ── Device picker ──
@@ -8831,6 +8990,7 @@
     });
 
     recoveryButton.addEventListener('click', () => {
+      loadRecoveryItems();
       recoveryOverlay.classList.add('active');
     });
     recoveryRetryAllButton.addEventListener('click', retryAllRecoveryItems);
@@ -9744,10 +9904,15 @@
       }
       let meetings = [];
       try {
-        meetings = await invoke('cmd_list_meetings', { limit: 30 });
+        meetings = await withUiDeadline(
+          invoke('cmd_list_meetings', { limit: 30 }),
+          'Meeting inventory'
+        );
+        setSearchError(null);
         renderMeetings(meetings);
       } catch (e) {
         console.error('Load:', e);
+        setSearchError(e);
         renderMeetings([]);
         return;
       }
@@ -9871,8 +10036,6 @@
 
     function setupOnboarding(root) {
       applyActivationState(root, currentSetup?.activation || activationState);
-      const setupEngine = currentSetup?.engine || 'whisper';
-      const parakeet = currentSetup?.parakeet || null;
 
       root.querySelectorAll('.model-btn').forEach(btn => {
         btn.addEventListener('click', async () => {
@@ -9939,30 +10102,6 @@
         });
       });
 
-      const parakeetGuideBtn = root.querySelector('#btn-open-parakeet-guide-onboarding');
-      if (parakeetGuideBtn) {
-        parakeetGuideBtn.addEventListener('click', async () => {
-          try {
-            await invoke('cmd_open_file', { path: (parakeet && parakeet.guideUrl) || 'https://github.com/silverstein/minutes/blob/main/docs/architecture/parakeet.md' });
-          } catch (e) {
-            console.error('open parakeet guide:', e);
-          }
-        });
-      }
-
-      const switchToWhisperBtn = root.querySelector('#btn-switch-to-whisper-onboarding');
-      if (switchToWhisperBtn) {
-        switchToWhisperBtn.addEventListener('click', async () => {
-          try {
-            await invoke('cmd_set_setting', { section: 'transcription', key: 'engine', value: 'whisper' });
-            await checkSetup();
-            loadSettings();
-          } catch (e) {
-            console.error('switch to whisper:', e);
-          }
-        });
-      }
-
       root.querySelector('#btn-start-first-recording').addEventListener('click', async () => {
         try {
           setFooterCaptureMode(true, 'starting');
@@ -9977,22 +10116,8 @@
     }
 
     function renderSetupEmptyState() {
-      const batchSetup = currentSetup?.batch_transcription || null;
-      const setupEngine = batchSetup?.resolved_backend || currentSetup?.engine || 'whisper';
-      const parakeet = currentSetup?.parakeet || null;
-      const parakeetIssues = (parakeet?.issues || []).map(issue => `<li>${escapeHtml(issue)}</li>`).join('');
       const standaloneLiveNote = renderStandaloneLiveNote(currentSetup);
-      const modelStepBody = setupEngine === 'parakeet'
-        ? `
-                <p>Minutes is set to use Parakeet, which needs the local <code>parakeet</code> binary plus converted model assets.</p>
-                ${parakeetIssues ? `<ul class="onboarding-list">${parakeetIssues}</ul>` : ''}
-                <div class="model-options">
-                  <button class="btn btn-primary btn-sm" id="btn-open-parakeet-guide-onboarding">Open Parakeet setup guide</button>
-                  <button class="btn btn-secondary btn-sm" id="btn-switch-to-whisper-onboarding">Use Whisper instead</button>
-                </div>
-                <div class="about-controls-meta">${escapeHtml(parakeet?.setupCommand || 'minutes setup --parakeet')}<\/div>
-                ${standaloneLiveNote}`
-        : `
+      const modelStepBody = `
                 <p>Choose a model size:</p>
                 <div class="model-options">
                   <button class="btn btn-secondary btn-sm model-btn" data-model="tiny">Tiny (75 MB, fast)</button>
@@ -10014,7 +10139,7 @@
             <div class="onboarding-step" id="step-model">
               <div class="step-header">
                 <span class="step-num">1</span>
-                <span class="step-title">${setupEngine === 'parakeet' ? 'Set up Parakeet locally' : 'Download speech model'}</span>
+                <span class="step-title">Download speech model</span>
                 <span class="step-status" id="step-model-status"></span>
               </div>
               <div class="step-body" id="step-model-body">
@@ -10408,43 +10533,58 @@
         }
         // Engine selector
         const eng = s.transcription.engine || 'whisper';
+        const resolvedBatchEngine = s.transcription.resolved_engine || eng;
         const liveTranscript = s.live_transcript || {};
         const liveBackend = liveTranscript.backend || 'inherit';
         const resolvedLiveBackend = liveTranscript.resolved_backend || eng;
         const liveFallbackOrder = liveTranscript.fallback_order || [resolvedLiveBackend];
-        const liveMentionsParakeet = liveBackend === 'parakeet' || liveBackend === 'apple-speech' || liveFallbackOrder.includes('parakeet');
-        const parakeetCompiled = s.transcription.parakeet_compiled || false;
+        const liveMentionsParakeet = liveBackend === 'parakeet' || liveFallbackOrder.includes('parakeet');
+        const parakeetSelectable = s.transcription.parakeet_selectable === true;
+        const parakeetUnavailableReason = s.transcription.parakeet_unavailable_reason || '';
         const parakeetStatus = s.transcription.parakeet_status || null;
         const appleSpeechStatus = s.transcription.apple_speech_status || null;
         const engineSelect = document.getElementById('settings-transcription-engine');
         const parakeetOpt = engineSelect.querySelector('option[value="parakeet"]');
+        const engineAppleOpt = engineSelect.querySelector('option[value="apple-speech"]');
         const engineDetail = document.getElementById('settings-transcription-engine-detail');
         const liveBackendSelect = document.getElementById('settings-live-backend');
         const liveBackendDetail = document.getElementById('settings-live-backend-detail');
         const liveParakeetOpt = liveBackendSelect ? liveBackendSelect.querySelector('option[value="parakeet"]') : null;
         const liveAppleOpt = liveBackendSelect ? liveBackendSelect.querySelector('option[value="apple-speech"]') : null;
         if (parakeetOpt) {
-          parakeetOpt.disabled = !parakeetCompiled;
-          parakeetOpt.textContent = parakeetCompiled
-            ? 'Parakeet — local backend, best quality on Apple Silicon'
-            : 'Parakeet — unavailable in this build';
+          parakeetOpt.disabled = !parakeetSelectable;
+          parakeetOpt.textContent = parakeetSelectable
+            ? 'Parakeet — local backend'
+            : (eng === 'parakeet' ? 'Parakeet — unavailable, using Whisper' : 'Parakeet — unavailable');
         }
         if (engineDetail) {
-          engineDetail.textContent = 'Whisper and Parakeet control batch, recording, and recording-sidecar transcription. Standalone live transcript has its own backend setting above.';
+          engineDetail.textContent = eng === 'parakeet' && !parakeetSelectable
+            ? `Parakeet is ${parakeetUnavailableReason || 'unavailable'}; this retained preference resolves to Whisper for batch, recording, and recording-sidecar transcription.`
+            : (eng === 'apple-speech'
+              ? 'Apple Speech cannot accept sealed audio yet; this retained preference resolves to Whisper for batch, recording, and recording-sidecar transcription.'
+              : 'The main engine controls batch, recording, and recording-sidecar transcription. Standalone live transcript has its own backend setting above.');
+        }
+        if (engineAppleOpt) {
+          engineAppleOpt.disabled = true;
+          engineAppleOpt.textContent = eng === 'apple-speech'
+            ? 'Apple Speech — unavailable, using Whisper'
+            : 'Apple Speech — unavailable';
         }
         engineSelect.value = eng;
         if (liveParakeetOpt) {
-          liveParakeetOpt.disabled = !parakeetCompiled;
-          liveParakeetOpt.textContent = parakeetCompiled
-            ? 'Parakeet — lower WER, fast on Apple Silicon'
-            : 'Parakeet — unavailable in this build';
+          liveParakeetOpt.disabled = !parakeetSelectable;
+          liveParakeetOpt.textContent = parakeetSelectable
+            ? 'Parakeet — local backend'
+            : (liveBackend === 'parakeet' ? 'Parakeet — unavailable, using Whisper' : 'Parakeet — unavailable');
         }
         if (liveAppleOpt) {
           const appleSelectable = Boolean(appleSpeechStatus && appleSpeechStatus.selectable);
-          liveAppleOpt.disabled = !appleSelectable && liveBackend !== 'apple-speech';
+          liveAppleOpt.disabled = !appleSelectable;
           liveAppleOpt.textContent = appleSelectable
             ? 'Apple Speech — experimental standalone live transcript'
-            : 'Apple Speech — unavailable on this Mac';
+            : (liveBackend === 'apple-speech'
+              ? 'Apple Speech — unavailable, using Whisper'
+              : 'Apple Speech — unavailable');
         }
         if (liveBackendSelect) {
           liveBackendSelect.value = liveBackend;
@@ -10454,14 +10594,17 @@
             liveBackend,
             resolvedLiveBackend,
             liveFallbackOrder,
-            eng,
+            resolvedBatchEngine,
           );
         }
-        document.getElementById('settings-whisper-section').classList.toggle('is-hidden', eng !== 'whisper');
+        const batchUsesWhisper = resolvedBatchEngine === 'whisper';
+        document.getElementById('settings-whisper-section').classList.toggle('is-hidden', !batchUsesWhisper);
         document.getElementById('settings-parakeet-section').classList.toggle('is-hidden', !(eng === 'parakeet' || liveMentionsParakeet));
         document.getElementById('settings-parakeet-model').value = s.transcription.parakeet_model || 'tdt-ctc-110m';
-        renderParakeetSettingsStatus(parakeetStatus);
-        warmParakeetIfSelected(eng === 'parakeet' || resolvedLiveBackend === 'parakeet' ? 'parakeet' : eng);
+        renderParakeetSettingsStatus(parakeetStatus, parakeetSelectable, parakeetUnavailableReason);
+        if (parakeetSelectable) {
+          warmParakeetIfSelected(eng === 'parakeet' || resolvedLiveBackend === 'parakeet' ? 'parakeet' : eng);
+        }
         document.getElementById('settings-whisper-model').value = s.transcription.model;
         const dl = s.transcription.downloaded_models || [];
         const selectedModel = s.transcription.model;

@@ -532,13 +532,14 @@ fn apple_speech_status_view() -> serde_json::Value {
     match minutes_core::apple_speech::probe_capabilities() {
         Ok(report) => serde_json::json!({
             "supported": report.runtime_supported,
-            "selectable": report.runtime_supported
-                && report.speech_transcriber.is_available.unwrap_or(false),
+            "selectable": false,
+            "unavailable_reason": minutes_core::pipeline::apple_speech_unavailable_reason(),
             "report": report,
         }),
         Err(error) => serde_json::json!({
             "supported": false,
             "selectable": false,
+            "unavailable_reason": minutes_core::pipeline::apple_speech_unavailable_reason(),
             "error": error.to_string(),
         }),
     }
@@ -548,15 +549,14 @@ fn live_transcript_fallback_order_view(config: &Config) -> Vec<String> {
     let resolved = config.effective_live_transcript_backend();
     let parakeet_ready = parakeet_status_view(config).ready;
     match resolved {
-        "apple-speech" => {
-            let mut order = vec!["apple-speech".to_string()];
+        "apple-speech" => vec!["whisper".to_string()],
+        "parakeet" => {
             if parakeet_ready {
-                order.push("parakeet".to_string());
+                vec!["parakeet".to_string(), "whisper".to_string()]
+            } else {
+                vec!["whisper".to_string()]
             }
-            order.push("whisper".to_string());
-            order
         }
-        "parakeet" => vec!["parakeet".to_string(), "whisper".to_string()],
         _ => vec!["whisper".to_string()],
     }
 }
@@ -593,53 +593,41 @@ fn whisper_model_readiness(
     (model_file.exists(), selected_model, model_file)
 }
 
-fn apple_speech_selectable() -> bool {
-    match minutes_core::apple_speech::probe_capabilities() {
-        Ok(report) => {
-            report.runtime_supported && report.speech_transcriber.is_available.unwrap_or(false)
-        }
-        Err(_) => false,
-    }
-}
-
 fn batch_transcription_readiness_view(config: &Config) -> SurfaceReadinessView {
+    let (ready, model_name, model_file) =
+        whisper_model_readiness(config, &config.transcription.model);
     if config.transcription.engine == "parakeet" {
-        let status = parakeet_status_view(config);
-        let detail = if status.ready {
-            let tokenizer_label = status
-                .tokenizer_label
-                .clone()
-                .unwrap_or_else(|| "unknown".to_string());
+        let capability = minutes_core::pipeline::parakeet_capability(cfg!(feature = "parakeet"));
+        let detail = if ready {
             format!(
-                "Batch and recording transcription use Parakeet. Model: {}. Tokenizer: {}. Sidecar: {}.",
-                status.model,
-                tokenizer_label,
-                status.sidecar
+                "Parakeet is retained in configuration but {}. Batch and recording transcription resolve to Whisper; {} is installed at {}.",
+                capability.unavailable_reason(),
+                model_name,
+                model_file.display()
             )
         } else {
             format!(
-                "Batch and recording transcription need Parakeet setup: {}. Run: {}",
-                status.issues.join(", "),
-                status.setup_command
+                "Parakeet is retained in configuration but {}. Batch and recording transcription resolve to Whisper and need model {} at {}.",
+                capability.unavailable_reason(),
+                model_name,
+                model_file.display()
             )
         };
         return SurfaceReadinessView {
             configured_backend: "parakeet".into(),
-            resolved_backend: "parakeet".into(),
-            ready: status.ready,
-            model_name: status.model,
+            resolved_backend: "whisper".into(),
+            ready,
+            model_name,
             detail,
-            next_action: if status.ready {
+            next_action: if ready {
                 "none".into()
             } else {
-                "setup-parakeet".into()
+                "download-model".into()
             },
-            fallback_order: vec!["parakeet".into()],
+            fallback_order: vec!["whisper".into()],
         };
     }
 
-    let (ready, model_name, model_file) =
-        whisper_model_readiness(config, &config.transcription.model);
     SurfaceReadinessView {
         configured_backend: config.transcription.engine.clone(),
         resolved_backend: "whisper".into(),
@@ -671,7 +659,6 @@ fn standalone_live_readiness_view(config: &Config) -> SurfaceReadinessView {
     let configured_backend = config.standalone_live_backend_setting().to_string();
     let resolved_backend = config.effective_live_transcript_backend().to_string();
     let fallback_order = live_transcript_fallback_order_view(config);
-    let parakeet = parakeet_status_view(config);
     let live_whisper_model = if config.live_transcript.model.trim().is_empty() {
         config.transcription.model.as_str()
     } else {
@@ -679,55 +666,47 @@ fn standalone_live_readiness_view(config: &Config) -> SurfaceReadinessView {
     };
     let (whisper_ready, whisper_model_name, whisper_model_file) =
         whisper_model_readiness(config, live_whisper_model);
-    let apple_selectable = apple_speech_selectable();
 
     match resolved_backend.as_str() {
-        "parakeet" => SurfaceReadinessView {
-            configured_backend,
-            resolved_backend,
-            ready: parakeet.ready,
-            model_name: parakeet.model.clone(),
-            detail: if parakeet.ready {
-                format!(
-                    "Standalone live transcript uses Parakeet. Fallback order: {}.",
-                    fallback_order.join(" -> ")
-                )
-            } else {
-                format!(
-                    "Standalone live transcript needs Parakeet setup: {}. Fallback order: {}.",
-                    parakeet.issues.join(", "),
-                    fallback_order.join(" -> ")
-                )
-            },
-            next_action: if parakeet.ready {
-                "none".into()
-            } else {
-                "setup-parakeet".into()
-            },
-            fallback_order,
-        },
+        "parakeet" => {
+            let capability =
+                minutes_core::pipeline::parakeet_capability(cfg!(feature = "parakeet"));
+            SurfaceReadinessView {
+                configured_backend,
+                resolved_backend: "whisper".into(),
+                ready: whisper_ready,
+                model_name: whisper_model_name.clone(),
+                detail: if whisper_ready {
+                    format!(
+                        "Parakeet is retained in configuration but {}. Standalone live transcript resolves to Whisper; {} is installed at {}.",
+                        capability.unavailable_reason(),
+                        whisper_model_name,
+                        whisper_model_file.display()
+                    )
+                } else {
+                    format!(
+                        "Parakeet is retained in configuration but {}. Standalone live transcript resolves to Whisper and needs model {} at {}.",
+                        capability.unavailable_reason(),
+                        whisper_model_name,
+                        whisper_model_file.display()
+                    )
+                },
+                next_action: if whisper_ready {
+                    "none".into()
+                } else {
+                    "download-model".into()
+                },
+                fallback_order,
+            }
+        }
         "apple-speech" => {
-            let ready = apple_selectable || parakeet.ready || whisper_ready;
-            let (detail, next_action) = if apple_selectable {
+            let (detail, next_action) = if whisper_ready {
                 (
                     format!(
-                        "Standalone live transcript can use Apple Speech directly. Fallback order: {}.",
-                        fallback_order.join(" -> ")
-                    ),
-                    "none".into(),
-                )
-            } else if parakeet.ready {
-                (
-                    format!(
-                        "Apple Speech is unavailable on this Mac, but standalone live transcript can run through Parakeet fallback. Fallback order: {}.",
-                        fallback_order.join(" -> ")
-                    ),
-                    "none".into(),
-                )
-            } else if whisper_ready {
-                (
-                    format!(
-                        "Apple Speech is unavailable on this Mac, but standalone live transcript can still run through Whisper fallback. Fallback order: {}.",
+                        "Apple Speech is retained in configuration but {}. Standalone live transcript resolves to sealed local Whisper; {} is installed at {}. Fallback order: {}.",
+                        minutes_core::pipeline::apple_speech_unavailable_reason(),
+                        whisper_model_name,
+                        whisper_model_file.display(),
                         fallback_order.join(" -> ")
                     ),
                     "none".into(),
@@ -735,7 +714,9 @@ fn standalone_live_readiness_view(config: &Config) -> SurfaceReadinessView {
             } else {
                 (
                     format!(
-                        "Apple Speech is unavailable on this Mac and no fallback backend is ready. Install a Whisper model at {} or set up Parakeet. Fallback order: {}.",
+                        "Apple Speech is retained in configuration but {}. Install Whisper model {} at {}. Fallback order: {}.",
+                        minutes_core::pipeline::apple_speech_unavailable_reason(),
+                        whisper_model_name,
                         whisper_model_file.display(),
                         fallback_order.join(" -> ")
                     ),
@@ -744,9 +725,9 @@ fn standalone_live_readiness_view(config: &Config) -> SurfaceReadinessView {
             };
             SurfaceReadinessView {
                 configured_backend,
-                resolved_backend,
-                ready,
-                model_name: "apple-speech".into(),
+                resolved_backend: "whisper".into(),
+                ready: whisper_ready,
+                model_name: whisper_model_name,
                 detail,
                 next_action,
                 fallback_order,
@@ -1508,6 +1489,87 @@ pub struct RecoveryRetryAllResult {
     pub failed: Vec<RecoveryRetryFailure>,
 }
 
+/// Bounds a filesystem/device inventory to one non-cancellable blocking task.
+///
+/// Tokio cannot abort a `spawn_blocking` closure after it starts. A cold File
+/// Provider directory can therefore occupy a worker indefinitely. Without an
+/// admission guard, repeated UI events could create hundreds of blocked tasks
+/// and starve unrelated work. Each inventory surface owns exactly one of these
+/// process-wide guards: while its leader is running, callers receive an
+/// explicit busy error. Completed snapshots are deliberately not replayed:
+/// filesystem/device truth can change immediately, and a bare cached JSON
+/// value cannot honestly distinguish stale evidence from a fresh check.
+struct JsonInventorySingleFlight {
+    active: AtomicBool,
+}
+
+impl JsonInventorySingleFlight {
+    const fn new() -> Self {
+        Self {
+            active: AtomicBool::new(false),
+        }
+    }
+
+    fn admit(&'static self) -> JsonInventoryAdmission {
+        if self
+            .active
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            return JsonInventoryAdmission::Leader(JsonInventoryLease { owner: self });
+        }
+        JsonInventoryAdmission::Busy
+    }
+}
+
+enum JsonInventoryAdmission {
+    Leader(JsonInventoryLease),
+    Busy,
+}
+
+struct JsonInventoryLease {
+    owner: &'static JsonInventorySingleFlight,
+}
+
+impl Drop for JsonInventoryLease {
+    fn drop(&mut self) {
+        self.owner.active.store(false, Ordering::Release);
+    }
+}
+
+async fn run_json_inventory<F>(
+    inventory: &'static JsonInventorySingleFlight,
+    label: &'static str,
+    task: F,
+) -> Result<serde_json::Value, String>
+where
+    F: FnOnce() -> Result<serde_json::Value, String> + Send + 'static,
+{
+    match inventory.admit() {
+        JsonInventoryAdmission::Busy => Err(format!(
+            "{label} is still checking. Minutes limited this check to one background worker; try again after the current check finishes."
+        )),
+        JsonInventoryAdmission::Leader(lease) => {
+            let joined = tauri::async_runtime::spawn_blocking(move || {
+                // The lease remains owned by the non-cancellable worker even
+                // when the invoking webview future is dropped.
+                let _lease = lease;
+                task()
+            })
+            .await;
+            match joined {
+                Ok(result) => result,
+                Err(error) => Err(format!("{label} stopped unexpectedly: {error}")),
+            }
+        }
+    }
+}
+
+static MEETING_INVENTORY: JsonInventorySingleFlight = JsonInventorySingleFlight::new();
+static PERMISSION_CENTER_INVENTORY: JsonInventorySingleFlight = JsonInventorySingleFlight::new();
+static MACOS_PERMISSION_INVENTORY: JsonInventorySingleFlight = JsonInventorySingleFlight::new();
+static RECOVERY_INVENTORY: JsonInventorySingleFlight = JsonInventorySingleFlight::new();
+
 fn activation_state_path() -> PathBuf {
     Config::minutes_dir().join("activation-state.json")
 }
@@ -2030,7 +2092,7 @@ pub fn load_activation_progress(config: &Config) -> Arc<Mutex<ActivationProgress
 }
 
 fn activation_phase(
-    engine: &str,
+    _engine: &str,
     progress: &ActivationProgress,
     has_model: bool,
     has_saved_artifact: bool,
@@ -2038,14 +2100,7 @@ fn activation_phase(
     processing: bool,
 ) -> (&'static str, &'static str) {
     if !has_model {
-        return (
-            "needs-model",
-            if engine == "parakeet" {
-                "setup-parakeet"
-            } else {
-                "download-model"
-            },
-        );
+        return ("needs-model", "download-model");
     }
     if progress.first_recording_started_at.is_none() {
         return ("ready-for-first-recording", "start-first-recording");
@@ -2768,77 +2823,45 @@ fn native_call_processing_input(output_path: &Path) -> io::Result<NativeCallProc
     let stems = minutes_core::capture::stem_paths_for(output_path);
     let voice = stems.as_ref().map(|stems| stems.voice.as_path());
     let system = stems.as_ref().map(|stems| stems.system.as_path());
-    // Size catches abort-at-start fragments; the shared core signal probe
-    // catches full-duration digital silence. The latter is the #463 gap: a
-    // 74-minute all-null mic WAV easily passed the former check.
-    let voice_viable = voice.is_some_and(|path| {
-        viable_native_call_stem(path) && minutes_core::diarize::stem_has_audio(path)
-    });
-    let system_viable = system.is_some_and(|path| {
-        viable_native_call_stem(path) && minutes_core::diarize::stem_has_audio(path)
-    });
-
-    if voice_viable && system_viable {
-        if !primary_has_bytes {
-            // `prepare_transcription_input` only needs the .mov path as the
-            // stem-discovery anchor; tests already use a one-byte .mov stub.
-            // If ScreenCaptureKit failed to materialize the container but the
-            // PCM stems are good, create that anchor instead of stranding both
-            // stems in native-captures.
-            std::fs::write(output_path, b"minutes native-call stem anchor")?;
-            return Ok(NativeCallProcessingInput {
-                path: output_path.to_path_buf(),
-                recovery_health: Some(native_call_capture_warning_health(
-                    "Native call capture did not produce a usable .mov container; processing recovered PCM stems instead.",
-                )),
-            });
-        }
-
-        return Ok(NativeCallProcessingInput {
-            path: output_path.to_path_buf(),
-            recovery_health: None,
-        });
-    }
-
-    if voice_viable {
-        let voice = voice.expect("voice path present when viable");
-        return Ok(NativeCallProcessingInput {
-            path: voice.to_path_buf(),
-            recovery_health: Some(
-                minutes_core::health::recording_health_for_native_call_stem_recovery(
-                    minutes_core::diarize::CaptureSource::Voice,
-                ),
+    // The capture-stop path must persist a job promptly even for a multi-hour
+    // call. It performs only a constant-time finalized-size check. Full typed
+    // signal/validity classification runs in the background pipeline before
+    // any `.mov` decode, where failure leaves the queued capture recoverable.
+    let voice_viable = voice.is_some_and(viable_native_call_stem);
+    let system_viable = system.is_some_and(viable_native_call_stem);
+    if !voice_viable && !system_viable {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!(
+                "native call capture did not produce a finalized PCM stem under {}{}",
+                output_path
+                    .parent()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|| "<unknown>".into()),
+                if primary_has_bytes {
+                    "; the .mov was preserved but its dual-track decode is unsafe"
+                } else {
+                    ""
+                }
             ),
-        });
+        ));
     }
 
-    if system_viable {
-        let system = system.expect("system path present when viable");
-        return Ok(NativeCallProcessingInput {
-            path: system.to_path_buf(),
-            recovery_health: Some(
-                minutes_core::health::recording_health_for_native_call_stem_recovery(
-                    minutes_core::diarize::CaptureSource::System,
-                ),
-            ),
-        });
-    }
+    let recovery_health = if !primary_has_bytes {
+        // The .mov is the grouping anchor that lets the queue move primary and
+        // both stems together. The worker never decodes this synthetic anchor.
+        std::fs::write(output_path, b"minutes native-call stem anchor")?;
+        Some(native_call_capture_warning_health(
+            "Native call capture did not produce a usable .mov container; processing recovered PCM stems instead.",
+        ))
+    } else {
+        None
+    };
 
-    Err(io::Error::new(
-        io::ErrorKind::NotFound,
-        format!(
-            "native call capture did not produce a usable PCM stem under {}{}",
-            output_path
-                .parent()
-                .map(|path| path.display().to_string())
-                .unwrap_or_else(|| "<unknown>".into()),
-            if primary_has_bytes {
-                "; the .mov was preserved but its dual-track decode is unsafe"
-            } else {
-                ""
-            }
-        ),
-    ))
+    Ok(NativeCallProcessingInput {
+        path: output_path.to_path_buf(),
+        recovery_health,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4956,6 +4979,16 @@ fn audio_input_status() -> ReadinessItem {
     }
 }
 
+fn compressed_audio_status() -> ReadinessItem {
+    let item = minutes_core::health::ffmpeg_status();
+    ReadinessItem {
+        label: item.label,
+        state: item.state,
+        detail: item.detail,
+        optional: item.optional,
+    }
+}
+
 fn call_capture_status() -> ReadinessItem {
     match call_capture::availability() {
         call_capture::CallCaptureAvailability::Available { backend } => ReadinessItem {
@@ -5265,6 +5298,11 @@ fn is_hidden_or_system_file(path: &std::path::Path) -> bool {
         .unwrap_or(false)
 }
 
+fn is_recovery_regular_file(path: &Path) -> bool {
+    path.symlink_metadata()
+        .is_ok_and(|metadata| metadata.file_type().is_file())
+}
+
 fn recovery_title(path: &std::path::Path, fallback: &str) -> String {
     path.file_stem()
         .and_then(|stem| stem.to_str())
@@ -5299,12 +5337,66 @@ fn is_dual_source_stem_with_primary(path: &Path) -> bool {
     })
 }
 
-fn scan_recovery_items(config: &Config) -> Vec<RecoveryItem> {
+fn recovery_directory_entries(
+    path: &Path,
+    allow_missing: bool,
+    label: &str,
+) -> Result<Vec<std::fs::DirEntry>, String> {
+    let entries = match std::fs::read_dir(path) {
+        Ok(entries) => entries,
+        Err(error) if allow_missing && error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(Vec::new())
+        }
+        Err(error) => {
+            return Err(format!(
+                "Recovery inventory could not read {label} at {}: {error}",
+                path.display()
+            ))
+        }
+    };
+    entries
+        .map(|entry| {
+            entry.map_err(|error| {
+                format!(
+                    "Recovery inventory could not enumerate {label} at {}: {error}",
+                    path.display()
+                )
+            })
+        })
+        .collect()
+}
+
+/// Returns `None` only for a non-regular entry or an entry that was removed by
+/// its owning watcher after enumeration. Permission/I/O failures are surfaced
+/// so Recovery never paints a partial inventory as a proven empty one.
+fn recovery_regular_file_metadata(path: &Path) -> Result<Option<std::fs::Metadata>, String> {
+    match path.symlink_metadata() {
+        Ok(metadata) if metadata.file_type().is_file() => Ok(Some(metadata)),
+        Ok(_) => Ok(None),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(format!(
+            "Recovery inventory could not inspect {}: {error}",
+            path.display()
+        )),
+    }
+}
+
+fn scan_recovery_items(config: &Config) -> Result<Vec<RecoveryItem>, String> {
+    scan_recovery_items_with_ffmpeg_availability(
+        config,
+        minutes_core::ffmpeg::resolve_launchable_ffmpeg().is_ok(),
+    )
+}
+
+fn scan_recovery_items_with_ffmpeg_availability(
+    config: &Config,
+    ffmpeg_available: bool,
+) -> Result<Vec<RecoveryItem>, String> {
     let mut found: Vec<(SystemTime, RecoveryItem)> = Vec::new();
 
     let current_wav = minutes_core::pid::current_wav_path();
-    if current_wav.exists() && !minutes_core::pid::status().recording {
-        if let Ok(metadata) = current_wav.metadata() {
+    if let Some(metadata) = recovery_regular_file_metadata(&current_wav)? {
+        if !minutes_core::pid::status().recording {
             let modified = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
             found.push((
                 modified,
@@ -5321,18 +5413,11 @@ fn scan_recovery_items(config: &Config) -> Vec<RecoveryItem> {
     }
 
     let failed_captures = config.output_dir.join("failed-captures");
-    if let Ok(entries) = std::fs::read_dir(&failed_captures) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_file()
-                && !is_hidden_or_system_file(&path)
-                && !is_dual_source_stem_with_primary(&path)
-            {
-                let modified = entry
-                    .metadata()
-                    .ok()
-                    .and_then(|m| m.modified().ok())
-                    .unwrap_or(SystemTime::UNIX_EPOCH);
+    for entry in recovery_directory_entries(&failed_captures, true, "failed captures")? {
+        let path = entry.path();
+        if let Some(metadata) = recovery_regular_file_metadata(&path)? {
+            if !is_hidden_or_system_file(&path) && !is_dual_source_stem_with_primary(&path) {
+                let modified = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
                 found.push((
                     modified,
                     RecoveryItem {
@@ -5351,27 +5436,123 @@ fn scan_recovery_items(config: &Config) -> Vec<RecoveryItem> {
     }
 
     for watch_path in &config.watch.paths {
-        let failed_dir = watch_path.join("failed");
-        if let Ok(entries) = std::fs::read_dir(&failed_dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_file()
-                    && !is_hidden_or_system_file(&path)
-                    && !is_dual_source_stem_with_primary(&path)
+        // Any configured audio left in the watch root remains visible, even
+        // when the decoder is missing or a no-replace move failed. This scan is
+        // metadata-only: the folder watcher remains the sole mutating owner,
+        // and retry is refused below. The command boundary runs this possibly
+        // blocking File Provider enumeration through a single bounded worker.
+        // #510 owns future generation-bound processing state.
+        let is_lazy_default_inbox = *watch_path == Config::minutes_dir().join("inbox");
+        for entry in recovery_directory_entries(
+            watch_path,
+            is_lazy_default_inbox,
+            "configured watch folder",
+        )? {
+            let path = entry.path();
+            if let Some(metadata) = recovery_regular_file_metadata(&path)? {
+                if !is_hidden_or_system_file(&path)
+                    && minutes_core::watch::has_valid_extension(&path, config)
                 {
-                    let modified = entry
-                        .metadata()
-                        .ok()
-                        .and_then(|m| m.modified().ok())
-                        .unwrap_or(SystemTime::UNIX_EPOCH);
+                    let modified = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+                    let needs_ffmpeg = minutes_core::watch::compressed_audio_requires_ffmpeg(&path)
+                        && !ffmpeg_available;
                     found.push((
                         modified,
                         RecoveryItem {
-                            kind: "watch-failed".into(),
-                            title: recovery_title(&path, "Failed watched file"),
+                            kind: if needs_ffmpeg {
+                                "watch-needs-ffmpeg"
+                            } else {
+                                "watch-root-preserved"
+                            }
+                            .into(),
+                            title: recovery_title(
+                                &path,
+                                if needs_ffmpeg {
+                                    "Compressed import needs ffmpeg"
+                                } else {
+                                    "Unprocessed watched file"
+                                },
+                            ),
                             path: path.display().to_string(),
-                            detail: "A watched audio file failed to process and is waiting for manual retry.".into(),
+                            detail: if needs_ffmpeg {
+                                format!(
+                                    "{} The original audio remains untouched in the watch folder. After installing ffmpeg, restart the watcher.",
+                                    minutes_core::watch::compressed_audio_ffmpeg_guidance()
+                                )
+                            } else {
+                                "The original audio remains in the configured watch folder. It may still be pending, or Minutes could not move it after a processing failure. It is shown here so it cannot become invisible."
+                                    .into()
+                            },
                             retry_type: config.watch.r#type.clone(),
+                            modified_at: system_time_to_rfc3339(modified),
+                        },
+                    ));
+                }
+            }
+        }
+
+        let failed_dir = watch_path.join("failed");
+        for entry in recovery_directory_entries(&failed_dir, true, "watch failed folder")? {
+            let path = entry.path();
+            if let Some(metadata) = recovery_regular_file_metadata(&path)? {
+                if !is_hidden_or_system_file(&path)
+                    && !is_dual_source_stem_with_primary(&path)
+                    && !path
+                        .extension()
+                        .and_then(|extension| extension.to_str())
+                        .is_some_and(|extension| extension.eq_ignore_ascii_case("json"))
+                {
+                    match watch_root_owns_file(&path, config) {
+                        Ok(true) => {
+                            tracing::warn!(
+                                path = %path.display(),
+                                "hiding failed-folder alias still owned by configured watch root"
+                            );
+                            continue;
+                        }
+                        Ok(false) => {}
+                        Err(error) => {
+                            return Err(format!(
+                                "Recovery inventory could not prove watch-root ownership for {}: {error}",
+                                path.display()
+                            ));
+                        }
+                    }
+                    let modified = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+                    let needs_ffmpeg = minutes_core::watch::compressed_audio_requires_ffmpeg(&path)
+                        && !ffmpeg_available;
+                    // Listing Recovery Center remains metadata-only and never
+                    // launches ffmpeg. Decoder availability is enforced when
+                    // the user retries the item.
+                    let retry_type = config.watch.r#type.as_str();
+                    found.push((
+                        modified,
+                        RecoveryItem {
+                            kind: if needs_ffmpeg {
+                                "watch-failed-needs-ffmpeg"
+                            } else {
+                                "watch-failed"
+                            }
+                            .into(),
+                            title: recovery_title(
+                                &path,
+                                if needs_ffmpeg {
+                                    "Compressed import needs ffmpeg"
+                                } else {
+                                    "Failed watched file"
+                                },
+                            ),
+                            path: path.display().to_string(),
+                            detail: if needs_ffmpeg {
+                                format!(
+                                    "{} This previously failed import remains preserved in the watch folder's failed directory.",
+                                    minutes_core::watch::compressed_audio_ffmpeg_guidance()
+                                )
+                            } else {
+                                "A watched audio file failed to process and is waiting for manual retry."
+                                    .into()
+                            },
+                            retry_type: retry_type.into(),
                             modified_at: system_time_to_rfc3339(modified),
                         },
                     ));
@@ -5391,11 +5572,11 @@ fn scan_recovery_items(config: &Config) -> Vec<RecoveryItem> {
         .collect();
 
     found.sort_by_key(|(modified, _)| Reverse(*modified));
-    found
+    Ok(found
         .into_iter()
         .map(|(_, item)| item)
         .filter(|item| !active_paths.contains(&PathBuf::from(&item.path)))
-        .collect()
+        .collect())
 }
 
 /// Handles that `start_recording` clears at the end of a session. Keeps the
@@ -6918,8 +7099,7 @@ fn meeting_has_prep(attendees: &[String], prep_slugs: &std::collections::HashSet
     })
 }
 
-#[tauri::command]
-pub fn cmd_list_meetings(limit: Option<usize>) -> serde_json::Value {
+fn list_meetings_value(limit: usize) -> Result<serde_json::Value, String> {
     let config = Config::load();
     let prep_slugs = scan_prep_slugs();
     let filters = minutes_core::search::SearchFilters {
@@ -6931,23 +7111,29 @@ pub fn cmd_list_meetings(limit: Option<usize>) -> serde_json::Value {
         recorded_by: None,
         include_restricted: true,
     };
-    match minutes_core::search::search("", &config, &filters) {
-        Ok(results) => {
-            let limited: Vec<_> = results.into_iter().take(limit.unwrap_or(20)).collect();
-            let enriched: Vec<serde_json::Value> = limited
-                .iter()
-                .map(|r| {
-                    let mut val = serde_json::to_value(r).unwrap_or(serde_json::json!({}));
-                    // Read frontmatter to check for lifecycle badges
-                    let badges = compute_lifecycle_badges(&r.path, &prep_slugs);
-                    val["badges"] = serde_json::json!(badges);
-                    val
-                })
-                .collect();
-            serde_json::json!(enriched)
-        }
-        Err(_) => serde_json::json!([]),
-    }
+    let results = minutes_core::search::search("", &config, &filters)
+        .map_err(|error| format!("Meeting inventory failed: {error}"))?;
+    let limited: Vec<_> = results.into_iter().take(limit).collect();
+    let enriched: Result<Vec<serde_json::Value>, String> = limited
+        .iter()
+        .map(|result| {
+            let mut value = serde_json::to_value(result)
+                .map_err(|error| format!("Meeting inventory could not be encoded: {error}"))?;
+            let badges = compute_lifecycle_badges(&result.path, &prep_slugs);
+            value["badges"] = serde_json::json!(badges);
+            Ok(value)
+        })
+        .collect();
+    Ok(serde_json::json!(enriched?))
+}
+
+#[tauri::command]
+pub async fn cmd_list_meetings(limit: Option<usize>) -> Result<serde_json::Value, String> {
+    let requested_limit = limit.unwrap_or(20).clamp(1, 100);
+    run_json_inventory(&MEETING_INVENTORY, "Meeting inventory", move || {
+        list_meetings_value(requested_limit)
+    })
+    .await
 }
 
 /// Compute lifecycle badge strings for a meeting artifact.
@@ -7519,11 +7705,11 @@ pub fn cmd_set_dictation_shortcut(
     Ok(current_dictation_shortcut_settings(&state))
 }
 
-#[tauri::command]
-pub fn cmd_permission_center() -> serde_json::Value {
+fn permission_center_value() -> Result<serde_json::Value, String> {
     let config = Config::load();
     let items = vec![
         model_status(&config),
+        compressed_audio_status(),
         audio_input_status(),
         call_capture_status(),
         calendar_status(&config),
@@ -7531,13 +7717,33 @@ pub fn cmd_permission_center() -> serde_json::Value {
         output_dir_status(&config),
         vault_status(&config),
     ];
-    serde_json::to_value(items).unwrap_or(serde_json::json!([]))
+    serde_json::to_value(items)
+        .map_err(|error| format!("Readiness inventory could not be encoded: {error}"))
 }
 
 #[tauri::command]
-pub fn cmd_macos_permission_rows() -> serde_json::Value {
+pub async fn cmd_permission_center() -> Result<serde_json::Value, String> {
+    run_json_inventory(
+        &PERMISSION_CENTER_INVENTORY,
+        "Readiness inventory",
+        permission_center_value,
+    )
+    .await
+}
+
+fn macos_permission_rows_value() -> Result<serde_json::Value, String> {
     serde_json::to_value(minutes_core::macos_permissions::permission_rows())
-        .unwrap_or(serde_json::json!([]))
+        .map_err(|error| format!("Permission checks could not be encoded: {error}"))
+}
+
+#[tauri::command]
+pub async fn cmd_macos_permission_rows() -> Result<serde_json::Value, String> {
+    run_json_inventory(
+        &MACOS_PERMISSION_INVENTORY,
+        "macOS permission checks",
+        macos_permission_rows_value,
+    )
+    .await
 }
 
 #[tauri::command]
@@ -7577,10 +7783,20 @@ pub fn cmd_desktop_capabilities() -> DesktopCapabilities {
     }
 }
 
-#[tauri::command]
-pub fn cmd_recovery_items() -> serde_json::Value {
+fn recovery_items_value() -> Result<serde_json::Value, String> {
     let config = Config::load();
-    serde_json::to_value(scan_recovery_items(&config)).unwrap_or(serde_json::json!([]))
+    serde_json::to_value(scan_recovery_items(&config)?)
+        .map_err(|error| format!("Recovery inventory could not be encoded: {error}"))
+}
+
+#[tauri::command]
+pub async fn cmd_recovery_items() -> Result<serde_json::Value, String> {
+    run_json_inventory(
+        &RECOVERY_INVENTORY,
+        "Recovery inventory",
+        recovery_items_value,
+    )
+    .await
 }
 
 fn recovery_retry_mode(retry_type: &str) -> Result<CaptureMode, String> {
@@ -7589,6 +7805,101 @@ fn recovery_retry_mode(retry_type: &str) -> Result<CaptureMode, String> {
         "memo" => Ok(CaptureMode::QuickThought),
         other => Err(format!("Unsupported recovery type: {}", other)),
     }
+}
+
+fn recovery_retry_decoder_preflight(audio_path: &Path) -> Result<(), String> {
+    if minutes_core::watch::compressed_audio_requires_ffmpeg(audio_path) {
+        minutes_core::ffmpeg::resolve_launchable_ffmpeg().map_err(|error| {
+            format!(
+                "{} The original file remains preserved at {}. Decoder check: {}",
+                minutes_core::watch::compressed_audio_ffmpeg_guidance(),
+                audio_path.display(),
+                error
+            )
+        })?;
+    }
+    Ok(())
+}
+
+fn watch_root_owns_file(audio_path: &Path, config: &Config) -> Result<bool, String> {
+    let Some(parent) = audio_path.parent() else {
+        return Ok(false);
+    };
+    for watch_root in &config.watch.paths {
+        if parent == watch_root
+            || matches!(
+                (
+                    std::fs::canonicalize(parent),
+                    std::fs::canonicalize(watch_root),
+                ),
+                (Ok(parent), Ok(watch_root)) if parent == watch_root
+            )
+        {
+            return Ok(true);
+        }
+
+        let entries = match std::fs::read_dir(watch_root) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(format!(
+                    "could not verify configured watch-root ownership at {}: {}",
+                    watch_root.display(),
+                    error
+                ))
+            }
+        };
+        for entry in entries {
+            let entry = entry.map_err(|error| {
+                format!(
+                    "could not verify an entry in configured watch root {}: {}",
+                    watch_root.display(),
+                    error
+                )
+            })?;
+            let root_file = entry.path();
+            if !is_recovery_regular_file(&root_file) {
+                continue;
+            }
+            match minutes_core::watch::same_regular_file_identity(audio_path, &root_file) {
+                Ok(true) => return Ok(true),
+                Ok(false) => {}
+                Err(error) => {
+                    return Err(format!(
+                        "could not prove {} is independent of watch-root file {}: {}",
+                        audio_path.display(),
+                        root_file.display(),
+                        error
+                    ))
+                }
+            }
+        }
+    }
+    Ok(false)
+}
+
+/// Watch-root files remain visible for recovery but are exclusively owned by
+/// the folder watcher. Recovery must never become a second mutating consumer:
+/// the file may still be growing, and its JSON sidecar may arrive later.
+fn recovery_retry_watch_root_guard(
+    audio_path: &Path,
+    item_kind: Option<&str>,
+    config: &Config,
+) -> Result<(), String> {
+    let owned_by_watch_root = watch_root_owns_file(audio_path, config).map_err(|error| {
+        format!(
+            "Recovery Center refused to claim {} because watch-root ownership could not be proven safely: {}",
+            audio_path.display(),
+            error
+        )
+    })?;
+    if item_kind == Some("watch-root-preserved") || owned_by_watch_root {
+        return Err(format!(
+            "This audio is still in the configured watch folder at {}. Finish copying it, then restart the folder watcher; Recovery Center will not process or move it independently.",
+            audio_path.display()
+        ));
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -7601,17 +7912,39 @@ pub fn cmd_retry_all_recovery(
     }
 
     let config = Config::load();
-    let items = scan_recovery_items(&config);
+    let items = scan_recovery_items(&config)?;
     let mut queued = 0;
     let mut first_job = None;
     let mut failed = Vec::new();
 
     for item in items {
         let audio_path = PathBuf::from(&item.path);
-        if !audio_path.exists() {
+        if !is_recovery_regular_file(&audio_path) {
             failed.push(RecoveryRetryFailure {
                 path: item.path,
                 error: "Recovery item no longer exists.".into(),
+            });
+            continue;
+        }
+
+        if item.kind == "watch-needs-ffmpeg" || item.kind == "watch-failed-needs-ffmpeg" {
+            let location = if item.kind == "watch-failed-needs-ffmpeg" {
+                "The previously failed import remains preserved in Recovery Center."
+            } else {
+                "Minutes has left the original audio untouched in the watch folder."
+            };
+            failed.push(RecoveryRetryFailure {
+                path: item.path,
+                error: format!("Install ffmpeg, then restart the watcher. {location}"),
+            });
+            continue;
+        }
+
+        if let Err(error) = recovery_retry_watch_root_guard(&audio_path, Some(&item.kind), &config)
+        {
+            failed.push(RecoveryRetryFailure {
+                path: item.path,
+                error,
             });
             continue;
         }
@@ -7626,7 +7959,6 @@ pub fn cmd_retry_all_recovery(
                 continue;
             }
         };
-
         // Queue the recovery file IN PLACE. The worker processes it where it
         // lives; on success `preserve_audio_alongside_output` moves it out of
         // the recovery folder, and on failure the worker leaves it there so it
@@ -7687,9 +8019,11 @@ pub fn cmd_retry_recovery(
     }
 
     let audio_path = PathBuf::from(&path);
-    if !audio_path.exists() {
+    if !is_recovery_regular_file(&audio_path) {
         return Err(format!("Recovery item not found: {}", path));
     }
+    let config = Config::load();
+    recovery_retry_watch_root_guard(&audio_path, None, &config)?;
 
     // Don't run the pipeline in place on a file that "Retry all" already
     // queued: a stale single-retry click on the same item would otherwise
@@ -7711,6 +8045,7 @@ pub fn cmd_retry_recovery(
             ))
         }
     };
+    recovery_retry_decoder_preflight(&audio_path)?;
 
     // Run pipeline on a background thread so the UI stays responsive
     let processing = state.processing.clone();
@@ -10177,6 +10512,10 @@ pub fn cmd_get_settings() -> serde_json::Value {
         })
         .map(|s| s.to_string())
         .collect();
+    let batch_readiness = batch_transcription_readiness_view(&config);
+    let live_readiness = standalone_live_readiness_view(&config);
+    let parakeet_capability =
+        minutes_core::pipeline::parakeet_capability(cfg!(feature = "parakeet"));
 
     serde_json::json!({
         "config_path": path.display().to_string(),
@@ -10185,6 +10524,7 @@ pub fn cmd_get_settings() -> serde_json::Value {
         },
         "transcription": {
             "engine": config.transcription.engine,
+            "resolved_engine": batch_readiness.resolved_backend,
             "model": config.transcription.model,
             "downloaded_models": downloaded_models,
             "language": config.transcription.language,
@@ -10196,6 +10536,8 @@ pub fn cmd_get_settings() -> serde_json::Value {
                 Some(false) => "false",
             },
             "parakeet_compiled": cfg!(feature = "parakeet"),
+            "parakeet_selectable": parakeet_capability.selectable,
+            "parakeet_unavailable_reason": parakeet_capability.unavailable_reason(),
             "parakeet_status": parakeet_status_view(&config),
             "apple_speech_status": apple_speech_status_view(),
         },
@@ -10279,8 +10621,8 @@ pub fn cmd_get_settings() -> serde_json::Value {
         },
         "live_transcript": {
             "backend": config.standalone_live_backend_setting(),
-            "resolved_backend": config.effective_live_transcript_backend(),
-            "fallback_order": live_transcript_fallback_order_view(&config),
+            "resolved_backend": live_readiness.resolved_backend,
+            "fallback_order": live_readiness.fallback_order,
             "model": config.live_transcript.model,
             "max_utterance_secs": config.live_transcript.max_utterance_secs,
             "save_wav": config.live_transcript.save_wav,
@@ -10398,6 +10740,32 @@ pub async fn cmd_warm_parakeet() -> Result<serde_json::Value, String> {
     }
 }
 
+fn reject_unselectable_parakeet(value: &str, setting: &str) -> Result<(), String> {
+    if !value.eq_ignore_ascii_case("parakeet") {
+        return Ok(());
+    }
+
+    let capability = minutes_core::pipeline::parakeet_capability(cfg!(feature = "parakeet"));
+    if capability.selectable {
+        Ok(())
+    } else {
+        Err(format!(
+            "Parakeet cannot be selected as the {setting}: {}. Use Whisper; an existing Parakeet preference is retained but resolves to Whisper.",
+            capability.unavailable_reason()
+        ))
+    }
+}
+
+fn reject_unselectable_apple_speech(value: &str, setting: &str) -> Result<(), String> {
+    if !value.eq_ignore_ascii_case("apple-speech") {
+        return Ok(());
+    }
+    Err(format!(
+        "Apple Speech cannot be selected as the {setting}: {}. Use Whisper; an existing Apple Speech preference is retained but resolves to Whisper.",
+        minutes_core::pipeline::apple_speech_unavailable_reason()
+    ))
+}
+
 #[tauri::command]
 pub fn cmd_set_setting(section: String, key: String, value: String) -> Result<String, String> {
     let mut config = Config::load();
@@ -10405,17 +10773,14 @@ pub fn cmd_set_setting(section: String, key: String, value: String) -> Result<St
     match (section.as_str(), key.as_str()) {
         // Transcription
         ("transcription", "engine") => {
-            if value == "apple-speech" {
-                return Err(
-                    "apple-speech is experimental and only applies to standalone live transcript today; configure it via CLI or the config file, not desktop settings".into(),
-                );
-            }
+            reject_unselectable_apple_speech(&value, "transcription engine")?;
             if !["whisper", "parakeet"].contains(&value.as_str()) {
                 return Err(format!(
                     "unknown transcription engine '{}'. Valid: whisper, parakeet",
                     value
                 ));
             }
+            reject_unselectable_parakeet(&value, "transcription engine")?;
             config.transcription.engine = value.clone();
         }
         ("transcription", "model") => config.transcription.model = value.clone(),
@@ -10577,6 +10942,8 @@ pub fn cmd_set_setting(section: String, key: String, value: String) -> Result<St
                     value
                 ));
             }
+            reject_unselectable_apple_speech(&value, "dictation backend")?;
+            reject_unselectable_parakeet(&value, "dictation backend")?;
             config.dictation.backend = value.clone();
         }
         ("dictation", "model") => {
@@ -10618,6 +10985,8 @@ pub fn cmd_set_setting(section: String, key: String, value: String) -> Result<St
                     VALID_LIVE_TRANSCRIPT_BACKENDS.join(", ")
                 ));
             }
+            reject_unselectable_apple_speech(&value, "live transcript backend")?;
+            reject_unselectable_parakeet(&value, "live transcript backend")?;
             config.live_transcript.backend = value.clone();
         }
         ("live_transcript", "shortcut_enabled") => {
@@ -12497,8 +12866,22 @@ mod tests {
         writer.finalize().expect("finalize signal wav");
     }
 
+    fn write_long_low_rate_signal_wav(path: &Path) {
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: 1,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut writer = hound::WavWriter::create(path, spec).expect("create long signal wav");
+        for _ in 0..(2 * 60 * 60 + 1) {
+            writer.write_sample(2_000_i16).expect("write sample");
+        }
+        writer.finalize().expect("finalize long signal wav");
+    }
+
     #[test]
-    fn native_call_processing_input_uses_voice_stem_when_system_missing() {
+    fn native_call_processing_input_queues_group_anchor_when_system_missing() {
         let dir = TempDir::new().unwrap();
         let mov = dir.path().join("2026-05-19-120148-call.mov");
         std::fs::write(&mov, b"mov").unwrap();
@@ -12507,12 +12890,9 @@ mod tests {
 
         let input = native_call_processing_input(&mov).expect("processing input");
 
-        assert_eq!(input.path, voice);
-        let health = input.recovery_health.expect("recovery health");
-        assert_eq!(
-            health.capture_warnings[0].source,
-            minutes_core::diarize::CaptureSource::Voice
-        );
+        assert_eq!(input.path, mov);
+        assert!(input.recovery_health.is_none());
+        assert!(voice.exists());
     }
 
     #[test]
@@ -12535,7 +12915,22 @@ mod tests {
     }
 
     #[test]
-    fn native_call_processing_input_selects_system_for_full_size_digital_silence_mic() {
+    fn native_call_processing_input_accepts_paired_stems_past_two_hours() {
+        let dir = TempDir::new().unwrap();
+        let mov = dir.path().join("2026-05-19-120148-call.mov");
+        let voice = dir.path().join("2026-05-19-120148-call.voice.wav");
+        let system = dir.path().join("2026-05-19-120148-call.system.wav");
+        write_long_low_rate_signal_wav(&voice);
+        write_long_low_rate_signal_wav(&system);
+
+        let input = native_call_processing_input(&mov)
+            .expect("capture classifier must use the four-hour transcription budget");
+        assert_eq!(input.path, mov);
+        assert!(mov.exists());
+    }
+
+    #[test]
+    fn native_call_processing_input_defers_digital_silence_classification() {
         let dir = TempDir::new().unwrap();
         let mov = dir.path().join("2026-05-19-120148-call.mov");
         let voice = dir.path().join("2026-05-19-120148-call.voice.wav");
@@ -12544,18 +12939,15 @@ mod tests {
         write_signal_wav(&voice, false);
         write_signal_wav(&system, true);
 
-        let input = native_call_processing_input(&mov).expect("system stem should recover");
-        assert_eq!(input.path, system);
-        let health = input.recovery_health.expect("recovery health");
-        assert!(matches!(
-            &health.capture_warnings[0].kind,
-            minutes_core::diarize::FailureKind::Other { code }
-                if code == minutes_core::health::NATIVE_CALL_MICROPHONE_RECOVERY_CODE
-        ));
+        let input = native_call_processing_input(&mov).expect("capture group should queue");
+        assert_eq!(input.path, mov);
+        assert!(input.recovery_health.is_none());
+        assert!(voice.exists());
+        assert!(system.exists());
     }
 
     #[test]
-    fn native_call_processing_input_selects_voice_for_full_size_digital_silence_system() {
+    fn native_call_processing_input_keeps_anchor_for_one_silent_stem() {
         let dir = TempDir::new().unwrap();
         let mov = dir.path().join("2026-05-19-120148-call.mov");
         let voice = dir.path().join("2026-05-19-120148-call.voice.wav");
@@ -12564,18 +12956,15 @@ mod tests {
         write_signal_wav(&voice, true);
         write_signal_wav(&system, false);
 
-        let input = native_call_processing_input(&mov).expect("voice stem should recover");
-        assert_eq!(input.path, voice);
-        let health = input.recovery_health.expect("recovery health");
-        assert!(matches!(
-            &health.capture_warnings[0].kind,
-            minutes_core::diarize::FailureKind::Other { code }
-                if code == minutes_core::health::NATIVE_CALL_SYSTEM_RECOVERY_CODE
-        ));
+        let input = native_call_processing_input(&mov).expect("capture group should queue");
+        assert_eq!(input.path, mov);
+        assert!(input.recovery_health.is_none());
+        assert!(voice.exists());
+        assert!(system.exists());
     }
 
     #[test]
-    fn native_call_processing_input_rejects_both_digitally_silent_stems() {
+    fn native_call_processing_input_queues_both_digitally_silent_stems_for_worker_validation() {
         let dir = TempDir::new().unwrap();
         let mov = dir.path().join("2026-05-19-120148-call.mov");
         let voice = dir.path().join("2026-05-19-120148-call.voice.wav");
@@ -12584,11 +12973,26 @@ mod tests {
         write_signal_wav(&voice, false);
         write_signal_wav(&system, false);
 
-        let error = native_call_processing_input(&mov).expect_err("no usable stem");
-        assert!(
-            error.to_string().contains("usable PCM stem"),
-            "unexpected error: {error}"
-        );
+        let input = native_call_processing_input(&mov).expect("finalized stems should queue");
+        assert_eq!(input.path, mov);
+    }
+
+    #[test]
+    fn native_call_processing_input_defers_invalid_stem_to_background_worker() {
+        let dir = TempDir::new().unwrap();
+        let mov = dir.path().join("2026-05-19-120148-call.mov");
+        let voice = dir.path().join("2026-05-19-120148-call.voice.wav");
+        let system = dir.path().join("2026-05-19-120148-call.system.wav");
+        std::fs::write(&mov, b"mov").unwrap();
+        std::fs::write(&voice, vec![b'x'; 200_000]).unwrap();
+        write_signal_wav(&system, true);
+
+        let input = native_call_processing_input(&mov)
+            .expect("finalized capture group should queue without a full synchronous scan");
+        assert_eq!(input.path, mov);
+        assert!(mov.exists());
+        assert!(voice.exists());
+        assert!(system.exists());
     }
 
     /// Malformed WAV files (non-`fmt `-first chunk, zero byte_rate, or
@@ -12801,22 +13205,22 @@ mod tests {
             )
             .unwrap_err();
 
-            assert!(error.contains("standalone live transcript"));
+            assert!(error.contains("cannot be selected"));
+            assert!(error.contains("secure private audio"));
         });
     }
 
     #[test]
-    fn desktop_settings_accept_live_transcript_backend_selection() {
+    fn desktop_settings_reject_new_apple_speech_live_selection() {
         with_temp_home(|_| {
-            cmd_set_setting(
+            let error = cmd_set_setting(
                 "live_transcript".into(),
                 "backend".into(),
                 "apple-speech".into(),
             )
-            .unwrap();
-
-            let config = Config::load();
-            assert_eq!(config.live_transcript.backend, "apple-speech");
+            .unwrap_err();
+            assert!(error.contains("cannot be selected"));
+            assert!(error.contains("resolves to Whisper"));
         });
     }
 
@@ -12831,19 +13235,35 @@ mod tests {
     }
 
     #[test]
-    fn desktop_settings_accept_dictation_backend_selection() {
+    fn desktop_settings_reject_unselectable_dictation_backends() {
         with_temp_home(|_| {
-            cmd_set_setting("dictation".into(), "backend".into(), "apple-speech".into()).unwrap();
+            let apple =
+                cmd_set_setting("dictation".into(), "backend".into(), "apple-speech".into())
+                    .unwrap_err();
+            assert!(apple.contains("cannot be selected"));
+            assert!(apple.contains("resolves to Whisper"));
 
-            let config = Config::load();
-            assert_eq!(config.dictation.backend, "apple-speech");
-            assert_eq!(config.transcription.engine, "whisper");
+            let error = cmd_set_setting("dictation".into(), "backend".into(), "parakeet".into())
+                .unwrap_err();
+            assert!(error.contains("cannot be selected"));
+            assert!(error.contains("resolves to Whisper"));
+        });
+    }
 
-            cmd_set_setting("dictation".into(), "backend".into(), "parakeet".into()).unwrap();
+    #[test]
+    fn desktop_settings_reject_new_parakeet_batch_and_live_selections() {
+        with_temp_home(|_| {
+            let batch = cmd_set_setting("transcription".into(), "engine".into(), "parakeet".into())
+                .unwrap_err();
+            assert!(batch.contains("Use Whisper"));
 
-            let config = Config::load();
-            assert_eq!(config.dictation.backend, "parakeet");
-            assert_eq!(config.transcription.engine, "whisper");
+            let live = cmd_set_setting(
+                "live_transcript".into(),
+                "backend".into(),
+                "parakeet".into(),
+            )
+            .unwrap_err();
+            assert!(live.contains("Use Whisper"));
         });
     }
 
@@ -12873,7 +13293,7 @@ mod tests {
     }
 
     #[test]
-    fn primary_setup_surface_switches_to_live_parakeet_when_batch_is_ready() {
+    fn retained_live_parakeet_resolves_to_ready_whisper_without_setup_loop() {
         let dir = TempDir::new().unwrap();
         let mut config = Config::default();
         config.transcription.engine = "whisper".into();
@@ -12908,9 +13328,65 @@ mod tests {
         let primary = primary_setup_surface(&batch_setup, &standalone_live_setup);
 
         assert!(!batch_setup.needs_setup);
-        assert!(standalone_live_setup.needs_setup);
-        assert_eq!(primary.engine, "parakeet");
-        assert_eq!(primary.activation.next_action, "setup-parakeet");
+        assert!(!standalone_live_setup.needs_setup);
+        assert_eq!(standalone_live_setup.engine, "whisper");
+        assert_eq!(
+            standalone_live_setup.activation.next_action,
+            "start-first-recording"
+        );
+        assert_eq!(live_readiness.configured_backend, "parakeet");
+        assert_eq!(live_readiness.fallback_order, vec!["whisper"]);
+        assert_eq!(primary.engine, "whisper");
+    }
+
+    #[test]
+    fn retained_live_apple_speech_resolves_to_sealed_whisper() {
+        let dir = TempDir::new().unwrap();
+        let mut config = Config::default();
+        config.transcription.model_path = dir.path().to_path_buf();
+        config.live_transcript.backend = "apple-speech".into();
+
+        let whisper_model = model_file_for_config(&config);
+        std::fs::create_dir_all(whisper_model.parent().unwrap()).unwrap();
+        std::fs::write(&whisper_model, b"model").unwrap();
+
+        let readiness = standalone_live_readiness_view(&config);
+        assert_eq!(readiness.configured_backend, "apple-speech");
+        assert_eq!(readiness.resolved_backend, "whisper");
+        assert!(readiness.ready);
+        assert_eq!(readiness.next_action, "none");
+        assert_eq!(readiness.fallback_order, vec!["whisper"]);
+        assert!(readiness.detail.contains("secure private audio"));
+        assert!(readiness.detail.contains("sealed local Whisper"));
+
+        let status = apple_speech_status_view();
+        assert_eq!(status["selectable"], false);
+        assert!(status["unavailable_reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("secure private audio")));
+    }
+
+    #[test]
+    fn retained_batch_parakeet_resolves_to_whisper_download_flow() {
+        let dir = TempDir::new().unwrap();
+        let mut config = Config::default();
+        config.transcription.engine = "parakeet".into();
+        config.transcription.model_path = dir.path().to_path_buf();
+
+        let readiness = batch_transcription_readiness_view(&config);
+
+        assert_eq!(readiness.configured_backend, "parakeet");
+        assert_eq!(readiness.resolved_backend, "whisper");
+        assert_eq!(readiness.next_action, "download-model");
+        assert_eq!(readiness.fallback_order, vec!["whisper"]);
+        assert!(readiness.detail.contains("retained in configuration"));
+        assert!(!readiness.detail.contains("setup Parakeet"));
+
+        let html = include_str!("../../src/index.html");
+        assert!(
+            html.contains("const resolvedBatchEngine = s.transcription.resolved_engine || eng;")
+        );
+        assert!(html.contains("liveFallbackOrder,\n            resolvedBatchEngine,"));
     }
 
     #[test]
@@ -13359,12 +13835,12 @@ mod tests {
     }
 
     #[test]
-    fn activation_phase_guides_parakeet_user_to_setup_flow_first() {
+    fn activation_phase_never_sends_retained_parakeet_into_setup_loop() {
         let progress = ActivationProgress::default();
         let (phase, action) = activation_phase("parakeet", &progress, false, false, false, false);
 
         assert_eq!(phase, "needs-model");
-        assert_eq!(action, "setup-parakeet");
+        assert_eq!(action, "download-model");
     }
 
     #[test]
@@ -13459,10 +13935,17 @@ mod tests {
             status.tokenizer_label.as_deref(),
             Some("tdt-ctc-110m.tokenizer.vocab")
         );
+        assert!(!status.ready);
         if cfg!(feature = "parakeet") {
-            assert!(status.ready);
+            assert!(
+                status
+                    .issues
+                    .iter()
+                    .any(|issue| issue.contains("secure normalized audio")),
+                "expected unavailable transport issue, got {:?}",
+                status.issues
+            );
         } else {
-            assert!(!status.ready);
             assert!(
                 status
                     .issues
@@ -13861,6 +14344,7 @@ mod tests {
 
     #[test]
     fn list_documents_merges_assistant_and_meeting_sources_by_recency() {
+        let _guard = test_guard();
         let home = dirs::home_dir().expect("home dir");
         let temp = tempfile::Builder::new()
             .prefix("minutes-documents-test-")
@@ -14450,6 +14934,23 @@ mod tests {
     }
 
     #[test]
+    fn permission_center_surfaces_compressed_audio_dependency() {
+        let value = permission_center_value().expect("readiness inventory");
+        let items = value.as_array().expect("readiness items");
+        let ffmpeg = items
+            .iter()
+            .find(|item| item["label"] == "Compressed audio imports")
+            .expect("compressed-audio readiness item");
+        assert!(matches!(
+            ffmpeg["state"].as_str(),
+            Some("ready" | "attention")
+        ));
+        assert!(ffmpeg["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("ffmpeg")));
+    }
+
+    #[test]
     fn scan_recovery_items_finds_failed_capture_and_watch_file() {
         with_temp_home(|home| {
             let watch_dir = home.join("watch");
@@ -14460,8 +14961,14 @@ mod tests {
             std::fs::create_dir_all(&failed_captures).unwrap();
 
             let failed_watch = failed_dir.join("idea.m4a");
+            let failed_watch_sidecar = failed_watch.with_extension("json");
             let failed_capture = failed_captures.join("capture.wav");
             std::fs::write(&failed_watch, "watch").unwrap();
+            std::fs::write(
+                &failed_watch_sidecar,
+                r#"{"device":"Phone","source":"voice-memos"}"#,
+            )
+            .unwrap();
             std::fs::write(&failed_capture, "capture").unwrap();
 
             let config = Config {
@@ -14473,11 +14980,359 @@ mod tests {
                 ..Config::default()
             };
 
-            let items = scan_recovery_items(&config);
+            let items = scan_recovery_items_with_ffmpeg_availability(&config, true).unwrap();
             assert_eq!(items.len(), 2);
-            assert!(items.iter().any(|item| item.kind == "watch-failed"));
+            assert!(items.iter().any(|item| {
+                item.kind == "watch-failed" && item.path == failed_watch.display().to_string()
+            }));
+            assert!(
+                failed_watch_sidecar.exists(),
+                "Recovery Center inventory must not consume paired metadata"
+            );
             assert!(items.iter().any(|item| item.kind == "preserved-capture"));
         });
+    }
+
+    #[test]
+    fn scan_recovery_items_marks_preserved_m4a_as_needing_ffmpeg() {
+        with_temp_home(|home| {
+            let watch_dir = home.join("watch");
+            let failed_dir = watch_dir.join("failed");
+            std::fs::create_dir_all(&failed_dir).unwrap();
+            let failed_watch = failed_dir.join("iphone-voice-memo.m4a");
+            std::fs::write(&failed_watch, "synthetic m4a").unwrap();
+            std::fs::write(
+                failed_watch.with_extension("json"),
+                r#"{"device":"iPhone","source":"voice-memos","captured_at":"2026-07-19T10:00:00Z"}"#,
+            )
+            .unwrap();
+            let config = Config {
+                watch: minutes_core::config::WatchConfig {
+                    paths: vec![watch_dir],
+                    ..Config::default().watch
+                },
+                ..Config::default()
+            };
+
+            let items = scan_recovery_items_with_ffmpeg_availability(&config, false).unwrap();
+            assert_eq!(items.len(), 1);
+            assert_eq!(items[0].kind, "watch-failed-needs-ffmpeg");
+            assert_eq!(items[0].title, "iphone voice memo");
+            assert!(items[0].detail.contains("brew install ffmpeg"));
+            assert!(items[0].detail.contains("failed directory"));
+            assert_eq!(PathBuf::from(&items[0].path), failed_watch);
+            let previous_ffmpeg = std::env::var_os("MINUTES_FFMPEG");
+            std::env::set_var("MINUTES_FFMPEG", home.join("missing-ffmpeg"));
+            let preflight = recovery_retry_decoder_preflight(&failed_watch);
+            if let Some(previous) = previous_ffmpeg {
+                std::env::set_var("MINUTES_FFMPEG", previous);
+            } else {
+                std::env::remove_var("MINUTES_FFMPEG");
+            }
+            let error = preflight.expect_err("missing ffmpeg must keep Recovery open");
+            assert!(error.contains("brew install ffmpeg"));
+            assert!(error.contains(&failed_watch.display().to_string()));
+            assert!(failed_watch.exists());
+        });
+    }
+
+    #[test]
+    fn scan_recovery_items_surfaces_compressed_file_left_in_watch_root() {
+        with_temp_home(|home| {
+            let watch_dir = home.join("watch");
+            std::fs::create_dir_all(&watch_dir).unwrap();
+            let original = watch_dir.join("new-voice-memo.m4a");
+            let sidecar = original.with_extension("json");
+            std::fs::write(&original, "synthetic m4a").unwrap();
+            std::fs::write(&sidecar, r#"{"device":"Phone","source":"voice-memos"}"#).unwrap();
+
+            let config = Config {
+                watch: minutes_core::config::WatchConfig {
+                    paths: vec![watch_dir],
+                    ..Config::default().watch
+                },
+                ..Config::default()
+            };
+
+            let items = scan_recovery_items_with_ffmpeg_availability(&config, false).unwrap();
+            assert_eq!(items.len(), 1);
+            assert_eq!(items[0].kind, "watch-needs-ffmpeg");
+            assert_eq!(PathBuf::from(&items[0].path), original);
+            assert!(items[0].detail.contains("restart the watcher"));
+            assert!(items[0].detail.contains("original audio"));
+            assert!(original.exists(), "scan must not consume the source");
+            assert!(sidecar.exists(), "scan must not consume source metadata");
+            assert!(!config.watch.paths[0].join("failed").exists());
+            assert!(!config.watch.paths[0].join("processed").exists());
+        });
+    }
+
+    #[test]
+    fn recovery_scan_surfaces_root_audio_after_decode_or_atomic_move_failure() {
+        with_temp_home(|home| {
+            let watch_dir = home.join("watch");
+            std::fs::create_dir_all(&watch_dir).unwrap();
+            let rejected_compressed = watch_dir.join("decode-rejected.m4a");
+            let rejected_sidecar = rejected_compressed.with_extension("json");
+            let failed_wav_move = watch_dir.join("move-unsupported.wav");
+            std::fs::write(&rejected_compressed, b"exact compressed bytes").unwrap();
+            std::fs::write(&rejected_sidecar, b"exact sidecar bytes").unwrap();
+            std::fs::write(&failed_wav_move, b"exact wav bytes").unwrap();
+            let config = Config {
+                watch: minutes_core::config::WatchConfig {
+                    paths: vec![watch_dir],
+                    ..Config::default().watch
+                },
+                ..Config::default()
+            };
+
+            // This is the durable postcondition when ffmpeg launched but
+            // rejected the input and the filesystem then refused the atomic
+            // move. Recovery inventory must not depend on ffmpeg being absent.
+            let items = scan_recovery_items_with_ffmpeg_availability(&config, true).unwrap();
+
+            assert_eq!(items.len(), 2);
+            for path in [&rejected_compressed, &failed_wav_move] {
+                assert!(items.iter().any(|item| {
+                    item.kind == "watch-root-preserved"
+                        && PathBuf::from(&item.path) == *path
+                        && item.detail.contains("cannot become invisible")
+                }));
+            }
+            assert_eq!(
+                std::fs::read(&rejected_compressed).unwrap(),
+                b"exact compressed bytes"
+            );
+            assert_eq!(
+                std::fs::read(&rejected_sidecar).unwrap(),
+                b"exact sidecar bytes"
+            );
+            assert_eq!(std::fs::read(&failed_wav_move).unwrap(), b"exact wav bytes");
+        });
+    }
+
+    #[test]
+    fn live_watcher_root_and_hard_link_alias_are_never_independently_retryable() {
+        with_temp_home(|home| {
+            let watch_dir = home.join("watch");
+            let failed_dir = watch_dir.join("failed");
+            std::fs::create_dir_all(&failed_dir).unwrap();
+            let growing_audio = watch_dir.join("still-copying.m4a");
+            let late_sidecar = growing_audio.with_extension("json");
+            let failed_alias = failed_dir.join("retry-alias.m4a");
+            std::fs::write(&growing_audio, b"partial-").unwrap();
+            std::fs::write(&late_sidecar, b"late metadata").unwrap();
+            std::fs::hard_link(&growing_audio, &failed_alias).unwrap();
+
+            let lock_path = minutes_core::watch::lock_path();
+            std::fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
+            std::fs::write(&lock_path, std::process::id().to_string()).unwrap();
+            let config = Config {
+                watch: minutes_core::config::WatchConfig {
+                    paths: vec![watch_dir.clone()],
+                    ..Config::default().watch
+                },
+                ..Config::default()
+            };
+            let items = scan_recovery_items_with_ffmpeg_availability(&config, true).unwrap();
+            assert_eq!(
+                items.len(),
+                1,
+                "the growing source remains visible while its failed alias is deduplicated"
+            );
+            assert_eq!(items[0].kind, "watch-root-preserved");
+            assert_eq!(PathBuf::from(&items[0].path), growing_audio);
+
+            use std::io::Write as _;
+            let mut writer = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&growing_audio)
+                .unwrap();
+            writer.write_all(b"more").unwrap();
+            writer.flush().unwrap();
+
+            let individual = recovery_retry_watch_root_guard(&growing_audio, None, &config);
+            let alias_individual = recovery_retry_watch_root_guard(&failed_alias, None, &config);
+            let batch = recovery_retry_watch_root_guard(
+                &growing_audio,
+                Some(items[0].kind.as_str()),
+                &config,
+            );
+            assert!(individual.is_err(), "individual retry must not claim it");
+            assert!(
+                alias_individual.is_err(),
+                "individual retry must reject a hard-link alias"
+            );
+            assert!(batch.is_err(), "Retry All must not queue it");
+            assert_eq!(std::fs::read(&growing_audio).unwrap(), b"partial-more");
+            assert_eq!(std::fs::read(&failed_alias).unwrap(), b"partial-more");
+            assert_eq!(std::fs::read(&late_sidecar).unwrap(), b"late metadata");
+            assert!(!watch_dir.join("processed/still-copying.m4a").exists());
+            assert!(!watch_dir.join("failed/still-copying.m4a").exists());
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn recovery_scan_surfaces_root_import_when_resolved_ffmpeg_cannot_launch() {
+        use std::os::unix::fs::PermissionsExt;
+
+        with_temp_home(|home| {
+            let watch_dir = home.join("watch");
+            std::fs::create_dir_all(&watch_dir).unwrap();
+            let original = watch_dir.join("preserved-voice-memo.m4a");
+            let sidecar = original.with_extension("json");
+            std::fs::write(&original, b"synthetic original bytes").unwrap();
+            std::fs::write(&sidecar, r#"{"device":"Phone","source":"voice-memos"}"#).unwrap();
+
+            let invalid_ffmpeg = home.join("ffmpeg");
+            std::fs::write(&invalid_ffmpeg, b"MZ\x90\0synthetic foreign image").unwrap();
+            std::fs::set_permissions(&invalid_ffmpeg, std::fs::Permissions::from_mode(0o700))
+                .unwrap();
+            let previous_ffmpeg = std::env::var_os("MINUTES_FFMPEG");
+            std::env::set_var("MINUTES_FFMPEG", &invalid_ffmpeg);
+
+            let config = Config {
+                watch: minutes_core::config::WatchConfig {
+                    paths: vec![watch_dir],
+                    ..Config::default().watch
+                },
+                ..Config::default()
+            };
+            let items = scan_recovery_items(&config).unwrap();
+
+            if let Some(previous_ffmpeg) = previous_ffmpeg {
+                std::env::set_var("MINUTES_FFMPEG", previous_ffmpeg);
+            } else {
+                std::env::remove_var("MINUTES_FFMPEG");
+            }
+            assert_eq!(items.len(), 1);
+            assert_eq!(items[0].kind, "watch-needs-ffmpeg");
+            assert_eq!(PathBuf::from(&items[0].path), original);
+            assert!(items[0].detail.contains("installing ffmpeg"));
+            assert!(original.exists());
+            assert!(sidecar.exists());
+        });
+    }
+
+    #[test]
+    fn recovery_root_scan_respects_configured_watch_extensions() {
+        with_temp_home(|home| {
+            let watch_dir = home.join("watch");
+            std::fs::create_dir_all(&watch_dir).unwrap();
+            std::fs::write(watch_dir.join("not-enabled.m4a"), "synthetic m4a").unwrap();
+            let config = Config {
+                watch: minutes_core::config::WatchConfig {
+                    paths: vec![watch_dir],
+                    extensions: vec!["wav".into()],
+                    ..Config::default().watch
+                },
+                ..Config::default()
+            };
+
+            assert!(scan_recovery_items_with_ffmpeg_availability(&config, false)
+                .unwrap()
+                .is_empty());
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn recovery_scan_ignores_symlinks_without_probing_targets() {
+        with_temp_home(|home| {
+            let watch_dir = home.join("watch");
+            let failed_dir = watch_dir.join("failed");
+            std::fs::create_dir_all(&failed_dir).unwrap();
+            let outside = home.join("outside.m4a");
+            std::fs::write(&outside, b"outside audio").unwrap();
+            std::os::unix::fs::symlink(&outside, failed_dir.join("linked.m4a")).unwrap();
+            let config = Config {
+                watch: minutes_core::config::WatchConfig {
+                    paths: vec![watch_dir],
+                    ..Config::default().watch
+                },
+                ..Config::default()
+            };
+
+            assert!(scan_recovery_items_with_ffmpeg_availability(&config, true)
+                .unwrap()
+                .is_empty());
+        });
+    }
+
+    #[test]
+    fn startup_inventory_commands_remain_async() {
+        fn assert_json_future<F>(_: F)
+        where
+            F: std::future::Future<Output = Result<serde_json::Value, String>>,
+        {
+        }
+
+        assert_json_future(cmd_permission_center());
+        assert_json_future(cmd_macos_permission_rows());
+        assert_json_future(cmd_recovery_items());
+        assert_json_future(cmd_list_meetings(Some(30)));
+    }
+
+    #[test]
+    fn filesystem_inventory_admission_is_single_flight_without_stale_cache() {
+        let inventory = Box::leak(Box::new(JsonInventorySingleFlight::new()));
+        let first = match inventory.admit() {
+            JsonInventoryAdmission::Leader(lease) => lease,
+            _ => panic!("first caller must own the worker lease"),
+        };
+        assert!(matches!(inventory.admit(), JsonInventoryAdmission::Busy));
+        drop(first);
+
+        let second = match inventory.admit() {
+            JsonInventoryAdmission::Leader(lease) => lease,
+            _ => panic!("completion must reopen exactly one leader slot"),
+        };
+        assert!(matches!(inventory.admit(), JsonInventoryAdmission::Busy));
+        drop(second);
+        assert!(!inventory.active.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn recovery_inventory_fails_closed_when_configured_watch_folder_is_missing() {
+        with_temp_home(|home| {
+            let missing_watch = home.join("missing-custom-watch-folder");
+            let config = Config {
+                watch: minutes_core::config::WatchConfig {
+                    paths: vec![missing_watch.clone()],
+                    ..Config::default().watch
+                },
+                ..Config::default()
+            };
+
+            let error = scan_recovery_items_with_ffmpeg_availability(&config, true)
+                .expect_err("missing configured folder must not paint a false empty inventory");
+            assert!(error.contains("configured watch folder"));
+            assert!(error.contains(&missing_watch.display().to_string()));
+        });
+    }
+
+    #[test]
+    fn recovery_ui_renders_bulk_failures_instead_of_console_only() {
+        let html = include_str!("../../src/index.html");
+        assert!(html.contains("id=\"recovery-bulk-errors\""));
+        assert!(html.contains("renderRecoveryBulkFailures(failures)"));
+        assert!(html.contains("need individual attention"));
+        assert!(html.contains("watch-failed-needs-ffmpeg"));
+        assert!(html.contains("This failed import remains preserved in Recovery Center"));
+        assert!(html.contains("watch-root-preserved"));
+        assert!(html.contains("retry.disabled = needsFfmpeg || isWatchRoot"));
+        assert!(html.contains("Recovery inventory is unavailable right now"));
+        assert!(html.contains("Readiness checks are unavailable right now"));
+        assert!(html.contains("background check is still limited to one worker"));
+        assert_eq!(
+            html.matches(
+                "value=\"apple-speech\" disabled>Apple Speech — unavailable, using Whisper"
+            )
+            .count(),
+            2,
+            "batch and standalone-live selectors must both fail closed before settings load"
+        );
     }
 
     #[test]
@@ -14497,7 +15352,7 @@ mod tests {
                 ..Config::default()
             };
 
-            let items = scan_recovery_items(&config);
+            let items = scan_recovery_items(&config).unwrap();
             assert_eq!(items.len(), 1, "stems must stay grouped with the .mov");
             assert_eq!(PathBuf::from(&items[0].path), mov);
         });
@@ -16397,20 +17252,6 @@ pub(crate) fn dictation_pid_active() -> bool {
         .is_some()
 }
 
-fn dictation_record_engine_id(config: &Config) -> String {
-    match config.dictation.backend.as_str() {
-        "whisper" | "" => format!("whisper:{}", config.dictation.model),
-        backend => backend.to_string(),
-    }
-}
-
-fn dictation_record_engine_descriptor(config: &Config) -> Option<String> {
-    match config.dictation.backend.as_str() {
-        "whisper" | "" => Some(config.dictation.model.clone()),
-        backend => Some(backend.to_string()),
-    }
-}
-
 pub fn capture_pending_dictation_target(app: &tauri::AppHandle) {
     let Some(state) = app.try_state::<AppState>() else {
         return;
@@ -16487,7 +17328,6 @@ fn dictation_target_context(
 }
 
 fn record_dictation_memory(
-    config: &Config,
     result: &minutes_core::dictation::DictationResult,
     insertion: &crate::text_insertion::TextInsertionResult,
 ) {
@@ -16496,8 +17336,8 @@ fn record_dictation_memory(
             raw_text: result.raw_text.clone(),
             cleaned_text: result.text.clone(),
             duration_secs: result.duration_secs,
-            engine_id: dictation_record_engine_id(config),
-            engine_descriptor_version: dictation_record_engine_descriptor(config),
+            engine_id: result.engine_id.clone(),
+            engine_descriptor_version: result.engine_descriptor_version.clone(),
             vocabulary_mode: None,
             vocabulary_used: Vec::new(),
             destination: result.destination.clone(),
@@ -16893,7 +17733,7 @@ fn start_dictation_session(
                         release_started_at,
                         insert_started_at,
                     );
-                    record_dictation_memory(&config_for_results, &result, &insertion);
+                    record_dictation_memory(&result, &insertion);
                 } else {
                     dictation_focus_debug(
                         "before_copy_restore",
@@ -16921,7 +17761,7 @@ fn start_dictation_session(
                         release_started_at,
                         insert_started_at,
                     );
-                    record_dictation_memory(&config_for_results, &result, &insertion);
+                    record_dictation_memory(&result, &insertion);
                 }
             },
         );

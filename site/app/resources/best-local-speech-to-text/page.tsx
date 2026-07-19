@@ -15,7 +15,7 @@ const tools = [
     name: "Minutes",
     bestFor: "Meetings, voice memos, and conversation memory for AI agents",
     detail:
-      "Open source (MIT), free. Records and transcribes on-device (whisper.cpp or parakeet.cpp), diarizes speakers, and writes markdown with action items that Claude and other MCP clients can query. macOS menu bar app + CLI.",
+      "Open source (MIT), free. Records and transcribes on-device with sealed local whisper.cpp, diarizes speakers, and writes markdown with action items that Claude and other MCP clients can query. macOS menu bar app + CLI.",
     license: "Open source, free",
   },
   {

@@ -14,7 +14,7 @@ Every tool here transcribes on your own hardware — your audio never touches a 
 
 ## The tools, by job
 
-- **Minutes** (open source, free) — meetings, voice memos, and conversation memory for AI agents. On-device transcription (whisper.cpp or parakeet.cpp), speaker diarization, markdown output with action items, MCP server for Claude and other agents. macOS menu bar app + CLI. https://github.com/silverstein/minutes
+- **Minutes** (open source, free) — meetings, voice memos, and conversation memory for AI agents. On-device transcription with sealed local whisper.cpp, speaker diarization, markdown output with action items, MCP server for Claude and other agents. macOS menu bar app + CLI. https://github.com/silverstein/minutes
 - **MacWhisper** (freemium, one-time Pro) — the most polished drag-and-drop Whisper GUI on macOS: batch files, system audio, subtitle export. Closed source.
 - **superwhisper** (freemium, subscription) — dictation with per-app formatting modes. Local models by default, optional cloud. macOS, Windows, iOS. Closed source.
 - **Buzz** (open source, free) — cross-platform Whisper GUI (Windows/Mac/Linux): import, transcribe, translate, export. Reliable and genuinely free. https://github.com/chidiwilliams/buzz

@@ -25,7 +25,7 @@
 | P1a.1 | 10/10 | Cargo workspace: core (lib) + cli (bin) + tauri (app). 13 modules. |
 | P1a.2 | 10/10 | Real audio capture via cpal. Mic + BlackHole support. |
 | P1a.3 | 10/10 | WAV writing via hound. Temp cleanup on completion. |
-| P1a.4 | 10/10 | Whisper.cpp + symphonia. Real transcription. m4a/mp3/ogg/wav. |
+| P1a.4 | 10/10 | Whisper.cpp + bounded hound/ffmpeg decoding. Real transcription. m4a/mp3/ogg/wav. |
 | P1a.5 | 10/10 | Markdown writer. YAML frontmatter, 0600 perms, collision handling. |
 | P1a.6 | 10/10 | CLI: 9 commands (record, stop, status, search, list, process, setup, logs, devices). |
 | P1a.7 | 10/10 | Config with compiled-in defaults. TOML override. Partial merge. |

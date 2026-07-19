@@ -580,7 +580,7 @@ fn render_markdown(
     transcript: &str,
     summary: Option<&str>,
     user_notes: Option<&str>,
-    retry_audio_path: &Path,
+    retry_audio_path: Option<&Path>,
 ) -> Result<String, MarkdownError> {
     let yaml = serde_yaml::to_string(frontmatter)
         .map_err(|e| MarkdownError::SerializationError(e.to_string()))?;
@@ -598,14 +598,16 @@ fn render_markdown(
         if let Some(diagnosis) = &frontmatter.filter_diagnosis {
             content.push_str(&format!("**Diagnosis**: {}\n\n", diagnosis));
         }
-        content.push_str(&format!(
-            "**Retry audio**: `{}`\n\n",
-            retry_audio_path.display()
-        ));
-        content.push_str(&format!(
-            "To retry after adjusting your transcription settings:\n`minutes process {}`\n\n",
-            retry_audio_path.display()
-        ));
+        if let Some(retry_audio_path) = retry_audio_path {
+            content.push_str(&format!(
+                "**Retry audio**: `{}`\n\n",
+                retry_audio_path.display()
+            ));
+            content.push_str(&format!(
+                "To retry after adjusting your transcription settings:\n`minutes process {}`\n\n",
+                retry_audio_path.display()
+            ));
+        }
     }
 
     if let Some(notes) = user_notes {
@@ -646,6 +648,48 @@ pub fn write_with_retry_path(
     retry_audio_path: Option<&Path>,
     config: &Config,
 ) -> Result<WriteResult, MarkdownError> {
+    write_with_retry_policy(
+        frontmatter,
+        transcript,
+        summary,
+        user_notes,
+        retry_audio_path,
+        false,
+        config,
+    )
+}
+
+/// Write markdown without embedding an audio retry path.
+///
+/// Descriptor-authorized processing uses this variant so a no-speech artifact
+/// cannot disclose either the proof-bound processing path or its ambient source.
+pub(crate) fn write_without_retry_path(
+    frontmatter: &Frontmatter,
+    transcript: &str,
+    summary: Option<&str>,
+    user_notes: Option<&str>,
+    config: &Config,
+) -> Result<WriteResult, MarkdownError> {
+    write_with_retry_policy(
+        frontmatter,
+        transcript,
+        summary,
+        user_notes,
+        None,
+        true,
+        config,
+    )
+}
+
+fn write_with_retry_policy(
+    frontmatter: &Frontmatter,
+    transcript: &str,
+    summary: Option<&str>,
+    user_notes: Option<&str>,
+    retry_audio_path: Option<&Path>,
+    omit_retry_path: bool,
+    config: &Config,
+) -> Result<WriteResult, MarkdownError> {
     let output_dir = match frontmatter.r#type {
         ContentType::Memo => config.output_dir.join("memos"),
         ContentType::Meeting => config.output_dir.clone(),
@@ -663,12 +707,17 @@ pub fn write_with_retry_path(
         frontmatter.recorded_by.as_deref(),
     );
     let path = resolve_collision(&output_dir, &slug);
+    let retry_audio_path = if omit_retry_path {
+        None
+    } else {
+        Some(retry_audio_path.unwrap_or(&path))
+    };
     let content = render_markdown(
         frontmatter,
         transcript,
         summary,
         user_notes,
-        retry_audio_path.unwrap_or(&path),
+        retry_audio_path,
     )?;
 
     // Write file with appropriate permissions
@@ -713,12 +762,56 @@ pub fn rewrite_with_retry_path(
     user_notes: Option<&str>,
     retry_audio_path: Option<&Path>,
 ) -> Result<WriteResult, MarkdownError> {
+    rewrite_with_retry_policy(
+        path,
+        frontmatter,
+        transcript,
+        summary,
+        user_notes,
+        retry_audio_path,
+        false,
+    )
+}
+
+/// Rewrite markdown without embedding an audio retry path.
+pub(crate) fn rewrite_without_retry_path(
+    path: &Path,
+    frontmatter: &Frontmatter,
+    transcript: &str,
+    summary: Option<&str>,
+    user_notes: Option<&str>,
+) -> Result<WriteResult, MarkdownError> {
+    rewrite_with_retry_policy(
+        path,
+        frontmatter,
+        transcript,
+        summary,
+        user_notes,
+        None,
+        true,
+    )
+}
+
+fn rewrite_with_retry_policy(
+    path: &Path,
+    frontmatter: &Frontmatter,
+    transcript: &str,
+    summary: Option<&str>,
+    user_notes: Option<&str>,
+    retry_audio_path: Option<&Path>,
+    omit_retry_path: bool,
+) -> Result<WriteResult, MarkdownError> {
+    let retry_audio_path = if omit_retry_path {
+        None
+    } else {
+        Some(retry_audio_path.unwrap_or(path))
+    };
     let content = render_markdown(
         frontmatter,
         transcript,
         summary,
         user_notes,
-        retry_audio_path.unwrap_or(path),
+        retry_audio_path,
     )?;
     let tmp = path.with_extension("md.tmp");
     fs::write(&tmp, content)?;
@@ -2169,5 +2262,25 @@ mod tests {
         assert!(content.contains("no_speech filter"));
         assert!(content.contains(audio.display().to_string().as_str()));
         assert!(content.contains("minutes process"));
+    }
+
+    #[test]
+    fn authorized_no_speech_output_omits_every_retry_path() {
+        let dir = TempDir::new().unwrap();
+        let config = Config {
+            output_dir: dir.path().to_path_buf(),
+            ..Config::default()
+        };
+        let fm = Frontmatter {
+            status: Some(OutputStatus::NoSpeech),
+            filter_diagnosis: Some("synthetic authorized audio contained no speech".into()),
+            ..test_frontmatter()
+        };
+
+        let result = write_without_retry_path(&fm, "", None, None, &config).unwrap();
+        let content = fs::read_to_string(&result.path).unwrap();
+        assert!(content.contains("No speech detected"));
+        assert!(!content.contains("minutes process"));
+        assert!(!content.contains(result.path.display().to_string().as_str()));
     }
 }

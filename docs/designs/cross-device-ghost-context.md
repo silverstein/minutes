@@ -16,7 +16,7 @@ Minutes becomes ambient memory — every thought you have, anywhere, on any devi
 
 ### Core Components (7)
 
-1. **Duration-based routing in watch.rs** — Probe audio duration via symphonia, route <120s as `ContentType::Memo` (skips diarization), >=120s as `ContentType::Meeting`
+1. **Duration-based routing in watch.rs** — Read WAV duration with the bounded parser and route <120s as `ContentType::Memo` (skips diarization), >=120s as `ContentType::Meeting`; compressed Voice Memos require the bounded ffmpeg decoder, fail closed with actionable setup guidance when it is unavailable, and otherwise use a bounded ffmpeg duration probe (falling back to the configured type only when that installed decoder rejects the probe)
 2. **Apple Shortcut (.shortcut file)** — "Save to Minutes" on iPhone share sheet, saves to iCloud Drive inbox
 3. **Sidecar JSON metadata ingestion** — Optional JSON alongside audio with `captured_at`, `device`, `source` fields
 4. **Sync folder inbox** — iCloud Drive (macOS default), Dropbox, Google Drive, Syncthing, or any folder sync. Configurable in `minutes setup`
@@ -44,7 +44,7 @@ iCloud Drive sync (5-30s)
   └── audio.json (sidecar, optional)
        │
        ▼
-watch.rs → audio_duration() → symphonia probe
+watch.rs → bounded WAV parser or required ffmpeg duration probe (missing decoder fails closed; invalid probe uses configured type)
        │
   ┌────┴────┐
   │<120s    │>=120s

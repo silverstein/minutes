@@ -4,7 +4,7 @@
 
 ## Project Overview
 
-**Minutes** — open-source, privacy-first conversation memory layer for AI assistants. Captures any audio (meetings, voice memos, brain dumps), transcribes locally with whisper.cpp or parakeet.cpp, diarizes speakers, and outputs searchable markdown with structured action items and decisions. Built with Rust + Tauri v2 + Node.js (MCP).
+**Minutes** — open-source, privacy-first conversation memory layer for AI assistants. Captures meetings, voice memos, and brain dumps, transcribes locally with whisper.cpp, diarizes speakers, and outputs searchable markdown with structured action items and decisions. Built with Rust + Tauri v2 + Node.js (MCP).
 
 **Four input modes, one pipeline:**
 - **Live recording**: `minutes record` / `minutes stop` — for meetings, calls, conversations
@@ -182,7 +182,7 @@ minutes/
 │   ├── core/src/              # 34 Rust modules — the engine
 │   │   ├── capture.rs         # Audio capture (cpal), device categorization, loopback detection
 │   │   ├── resample.rs        # Shared mono-downmix + 16kHz decimation resampler (used by capture + streaming)
-│   │   ├── transcribe.rs      # Transcription: whisper.cpp (default) or parakeet.cpp (opt-in). Delegates to whisper-guard for anti-hallucination, optional nnnoiseless denoise
+│   │   ├── transcribe.rs      # Batch transcription: whisper.cpp. Retained Parakeet config resolves to Whisper until secure transport exists
 │   │   ├── diarize.rs         # Speaker diarization + attribution types (pyannote-rs, or energy-based from per-source stems)
 │   │   ├── summarize.rs       # LLM summarization + speaker mapping (ureq HTTP client)
 │   │   ├── voice.rs           # Voice profile storage and matching (voices.db, enrollment, cosine similarity)
@@ -268,14 +268,13 @@ node test/mcp_tools_test.mjs                        # 8 MCP integration tests
 
 - **Rust** for the engine — single 6.7MB binary, cross-platform, fast
 - **whisper-rs** (whisper.cpp) for transcription (default) — local, Apple Silicon optimized, params match whisper-cli defaults (best_of=5, entropy/logprob thresholds)
-- **parakeet.cpp** for transcription (opt-in) — NVIDIA FastConformer via subprocess, Metal GPU acceleration on Apple Silicon. Lower WER than Whisper at equivalent model sizes. Requires `--features parakeet` at build time. See `docs/architecture/parakeet.md` for setup
-- **ffmpeg preferred for audio decoding** — shells out to ffmpeg for m4a/mp3/ogg when available (identical to whisper-cli's pipeline). Falls back to symphonia (pure Rust) when ffmpeg isn't installed. This matters for non-English audio — symphonia's AAC decoder produces subtly different samples that trigger whisper hallucination loops (issue #21).
+- **parakeet.cpp selection is retained but unavailable** — legacy Parakeet config remains parseable, but batch selection resolves to Whisper until secure byte transport exists. See `docs/architecture/parakeet.md` for the dormant contract.
+- **ffmpeg required for compressed audio decoding** — shells out to ffmpeg for the named compressed formats (m4a/mp3/ogg/webm/mp4/mov/aac) and consumes bounded 16 kHz mono PCM. There is deliberately no in-process Symphonia fallback because its container probing can allocate attacker-declared tables before resource limits run. WAV uses the bounded in-process decoder.
 - **Silero VAD** (via whisper-rs) — ML-based voice activity detection integrated directly into whisper's transcription params. Prevents hallucination loops by skipping silence segments. Auto-downloaded during `minutes setup`.
 - **whisper-guard** crate — standalone anti-hallucination toolkit extracted from minutes-core. 6-layer defense: Silero VAD gating, no_speech probability filtering (>80% = skip), consecutive segment dedup (3+ similar collapsed), interleaved A/B/A/B pattern detection, foreign-script hallucination detection, language-agnostic noise marker collapse (`[Śmiech]`, `[music]`, `[risas]`, etc.), trailing noise trimming. Publishable to crates.io independently.
 - **nnnoiseless** (optional) — pure Rust RNNoise port for noise reduction. Behind `denoise` feature flag, controlled by `config.transcription.noise_reduction`. Processes at 48kHz with first-frame priming. Batch path only (not streaming).
 - **pyannote-rs** for speaker diarization — native Rust, ONNX models (~34MB), no Python. Works in CLI, Tauri desktop app, and via MCP. Behind the `diarize` Cargo feature flag.
 - **Speaker attribution** — confidence-aware system mapping SPEAKER_X labels to real names. Four levels: L0 (deterministic 1-on-1 via calendar+identity), L1 (LLM suggestions capped at Medium confidence), L2 (voice enrollment in `voices.db`), L3 (confirmed-only learning). Wrong names are worse than anonymous — only High-confidence attributions rewrite transcript labels. `speaker_map` in YAML frontmatter is the canonical attribution data. Voice profiles stored in `~/.minutes/voices.db` (separate from `graph.db` which wipes on rebuild).
-- **symphonia** for audio format conversion — m4a/mp3/ogg → WAV, pure Rust (fallback when ffmpeg unavailable)
 - **Windowed-sinc resampler** (32-tap Hann) — alias-free 44100→16000 downsampling for WAV inputs
 - **ureq** for HTTP — pure Rust, no secrets in process args (replaced curl)
 - **fs2 flock** for PID files — atomic check-and-write, prevents TOCTOU races
@@ -287,7 +286,7 @@ node test/mcp_tools_test.mjs                        # 8 MCP integration tests
 
 ## Key Patterns
 
-- All audio processing is local (whisper.cpp or parakeet.cpp + pyannote-rs + Silero VAD). ffmpeg recommended but optional.
+- All audio processing is local (whisper.cpp + pyannote-rs + Silero VAD). WAV decoding is in-process; importing M4A, MP3, OGG, WebM, MP4, MOV, or AAC requires local ffmpeg.
 - Claude summarizes via MCP when the user asks (no API key needed)
 - Optional automated summarization fully on-device via Apple Foundation Models (macOS 26+, `engine = "apple"`; preferred by `"auto"` when available — see docs/architecture/apple-foundation-models.md), via Ollama (local), Mistral, or cloud LLMs
 - Config at `~/.config/minutes/config.toml` (optional, compiled defaults work)

@@ -15,11 +15,11 @@ Both apps capture audio locally and neither drops a bot into your call. The diff
 
 **Granola** (leaves your device): mic capture (on-device) → transcribe in the cloud (Deepgram / AssemblyAI) → enhance notes in the cloud (OpenAI / Anthropic) → store transcripts + notes on Granola's servers (AWS, US only). Audio is deleted after transcription, but the transcripts and notes live in Granola's US cloud; no EU data residency yet.
 
-**Minutes** (stays on device): mic capture (on-device) → transcribe on-device (whisper.cpp / parakeet.cpp) → store transcripts + notes as markdown on your own disk. Nothing is uploaded; there is no vendor cloud to trust, breach, or subpoena.
+**Minutes** (stays on device): mic capture (on-device) → transcribe on-device with sealed local whisper.cpp → store transcripts + notes as markdown on your own disk. Nothing is uploaded; there is no vendor cloud to trust, breach, or subpoena.
 
 ## At a glance
 
-- Where audio is transcribed — Granola: cloud (Deepgram, AssemblyAI); Minutes: on-device (whisper.cpp / parakeet.cpp)
+- Where audio is transcribed — Granola: cloud (Deepgram, AssemblyAI); Minutes: on-device (sealed local whisper.cpp)
 - Where transcripts and notes live — Granola: Granola's servers (AWS, US only); Minutes: your own disk, as markdown
 - Audio retention — Granola: streamed to the cloud, then deleted after transcription; Minutes: never uploaded
 - EU data residency — Granola: not available yet; Minutes: moot, data never leaves your machine

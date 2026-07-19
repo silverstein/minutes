@@ -842,11 +842,11 @@ enum Commands {
         #[arg(long)]
         diarization: bool,
 
-        /// Download parakeet.cpp model for alternative transcription engine
+        /// Compatibility flag: reports that secure Parakeet transport is unavailable; installs nothing
         #[arg(long)]
         parakeet: bool,
 
-        /// Parakeet model to download: tdt-ctc-110m, tdt-600m
+        /// Historical Parakeet model identifier retained for compatibility; currently no download occurs
         #[arg(long, default_value = "tdt-600m")]
         parakeet_model: String,
 
@@ -5630,6 +5630,7 @@ fn cmd_parakeet_helper(
     vad_threshold: f32,
     config: &Config,
 ) -> Result<()> {
+    ensure_parakeet_cli_selectable()?;
     let resolved_binary = minutes_core::parakeet::resolve_parakeet_binary(
         binary,
         minutes_core::parakeet::ResolveParakeetBinaryMode::WarnAndFallback,
@@ -5682,9 +5683,7 @@ fn cmd_parakeet_helper(
     _vad_threshold: f32,
     _config: &Config,
 ) -> Result<()> {
-    anyhow::bail!(
-        "Parakeet helper is not compiled in. Rebuild with `cargo build --features parakeet`."
-    );
+    ensure_parakeet_cli_selectable()
 }
 
 #[cfg(feature = "parakeet")]
@@ -5700,6 +5699,7 @@ fn cmd_parakeet_benchmark(
     vad_threshold: f32,
     config: &Config,
 ) -> Result<()> {
+    ensure_parakeet_cli_selectable()?;
     let helper_bin = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("minutes"));
     let report = minutes_core::transcription_coordinator::benchmark_parakeet(
         &helper_bin,
@@ -5732,9 +5732,19 @@ fn cmd_parakeet_benchmark(
     _vad_threshold: f32,
     _config: &Config,
 ) -> Result<()> {
-    anyhow::bail!(
-        "Parakeet benchmark is not compiled in. Rebuild with `cargo build --features parakeet`."
-    );
+    ensure_parakeet_cli_selectable()
+}
+
+fn ensure_parakeet_cli_selectable() -> Result<()> {
+    let capability = minutes_core::pipeline::parakeet_capability(cfg!(feature = "parakeet"));
+    if capability.selectable {
+        Ok(())
+    } else {
+        anyhow::bail!(
+            "Parakeet cannot receive secure private audio with the installed pathname-only helper ({}). Whisper remains active; rebuilding or installing model assets does not bypass the secure private-audio transport requirement.",
+            capability.unavailable_reason()
+        )
+    }
 }
 
 fn cmd_autoresearch_decode_hints(
@@ -6316,9 +6326,9 @@ fn cmd_setup(model: &str, list: bool, diarization: bool) -> Result<()> {
             "  parakeet-tdt-0.6b-v3-int8  ~670 MB   (in-process, no Python; `minutes setup --sherpa` downloads + enables it)"
         );
         eprintln!();
-        eprintln!("Parakeet.cpp models (alternative subprocess engine, --parakeet):");
-        eprintln!("  tdt-ctc-110m  ~220 MB   (English, fast)");
-        eprintln!("  tdt-600m      ~1.2 GB   (multilingual v3, 25 EU languages, best quality)");
+        eprintln!("Parakeet.cpp (currently unavailable in Minutes):");
+        eprintln!("  --parakeet is retained for CLI compatibility but installs nothing until");
+        eprintln!("  the subprocess supports Minutes' sealed private-audio transport.");
         return Ok(());
     }
 
@@ -6562,11 +6572,9 @@ fn cmd_setup_diarization() -> Result<()> {
     Ok(())
 }
 
-/// Set up a parakeet.cpp model for alternative transcription.
-///
-/// Parakeet models are distributed as .nemo files on HuggingFace and must be
-/// converted to safetensors format using parakeet.cpp's convert_nemo.py script.
-/// This command prints the steps needed and checks for existing files.
+/// Reject the retained Parakeet setup command until a secure byte transport
+/// exists. The historical installer remains below the shared gate so a future
+/// transport can re-enable it without silently changing the CLI contract.
 fn cmd_setup_parakeet(model: &str) -> Result<()> {
     let valid_models = VALID_PARAKEET_MODELS;
     if !valid_models.contains(&model) {
@@ -6576,6 +6584,11 @@ fn cmd_setup_parakeet(model: &str) -> Result<()> {
             valid_models.join(", ")
         );
     }
+
+    // Reject before creating install directories or writing metadata. The
+    // pathname-only Parakeet process cannot consume Minutes' private-audio
+    // capability, so installing assets cannot make the backend selectable.
+    ensure_parakeet_cli_selectable()?;
 
     let config = Config::default();
     let model_dir = parakeet::install_dir(&config, model);
@@ -7640,6 +7653,22 @@ mod tests {
     }
 
     #[test]
+    fn parakeet_setup_and_hidden_tools_report_transport_unavailable() {
+        let helper_error = ensure_parakeet_cli_selectable()
+            .expect_err("Parakeet must not be exposed without secure transport");
+        assert!(helper_error
+            .to_string()
+            .contains("cannot receive secure private audio"));
+        assert!(helper_error.to_string().contains("Whisper remains active"));
+
+        let setup_error = cmd_setup_parakeet("tdt-ctc-110m")
+            .expect_err("setup must refuse before writing install assets");
+        assert!(setup_error
+            .to_string()
+            .contains("installing model assets does not bypass"));
+    }
+
+    #[test]
     fn format_merge_command_uses_first_slug_as_canonical() {
         let slugs = vec![
             "junrei".to_string(),
@@ -8623,8 +8652,9 @@ life (qmd://life/)
         assert_eq!(match_model_eval_opportunity(&labels, 2_500, &draft), None);
     }
 
+    #[cfg(feature = "whisper")]
     #[test]
-    fn copilot_external_attach_and_non_streaming_backends_are_final_only() {
+    fn copilot_evidence_mode_uses_runtime_resolved_live_backend() {
         let mut config = Config::default();
         assert_eq!(
             copilot_evidence_mode(true, true, &config),
@@ -8634,13 +8664,30 @@ life (qmd://life/)
         config.live_transcript.backend = "parakeet".into();
         assert_eq!(
             copilot_evidence_mode(true, false, &config),
-            minutes_core::copilot::CopilotEvidenceMode::FinalOnly
+            minutes_core::copilot::CopilotEvidenceMode::InProcessPartials
+        );
+
+        config.live_transcript.backend = "apple-speech".into();
+        assert_eq!(
+            copilot_evidence_mode(true, false, &config),
+            minutes_core::copilot::CopilotEvidenceMode::InProcessPartials
         );
 
         config.live_transcript.backend = "whisper".into();
         assert_eq!(
             copilot_evidence_mode(true, false, &config),
             minutes_core::copilot::CopilotEvidenceMode::InProcessPartials
+        );
+    }
+
+    #[cfg(not(feature = "whisper"))]
+    #[test]
+    fn copilot_evidence_mode_is_final_only_without_compiled_live_backend() {
+        let mut config = Config::default();
+        config.live_transcript.backend = "whisper".into();
+        assert_eq!(
+            copilot_evidence_mode(true, false, &config),
+            minutes_core::copilot::CopilotEvidenceMode::FinalOnly
         );
     }
 
@@ -10679,14 +10726,23 @@ fn copilot_evidence_mode(
     if own_live_capture
         && !external_capture
         && config.copilot.live_partials
-        && config
-            .effective_live_transcript_backend()
-            .eq_ignore_ascii_case("whisper")
+        && copilot_runtime_has_live_partials(config)
     {
         minutes_core::copilot::CopilotEvidenceMode::InProcessPartials
     } else {
         minutes_core::copilot::CopilotEvidenceMode::FinalOnly
     }
+}
+
+#[cfg(feature = "whisper")]
+fn copilot_runtime_has_live_partials(config: &Config) -> bool {
+    minutes_core::live_transcript::resolved_standalone_backend(config)
+        .eq_ignore_ascii_case("whisper")
+}
+
+#[cfg(not(feature = "whisper"))]
+fn copilot_runtime_has_live_partials(_config: &Config) -> bool {
+    false
 }
 
 fn copilot_nudge_label(kind: minutes_core::copilot::NudgeKind) -> &'static str {
@@ -13034,11 +13090,8 @@ fn cmd_dictate(stdout: bool, note_only: bool, config: &Config) -> Result<()> {
                     raw_text: result.raw_text.clone(),
                     cleaned_text: result.text.clone(),
                     duration_secs: result.duration_secs,
-                    engine_id: match config.dictation.backend.as_str() {
-                        "whisper" | "" => format!("whisper:{}", config.dictation.model),
-                        backend => backend.to_string(),
-                    },
-                    engine_descriptor_version: Some(config.dictation.model.clone()),
+                    engine_id: result.engine_id.clone(),
+                    engine_descriptor_version: result.engine_descriptor_version.clone(),
                     vocabulary_mode: None,
                     vocabulary_used: Vec::new(),
                     destination: result.destination.clone(),
@@ -13529,11 +13582,6 @@ fn cmd_live(config: &Config) -> Result<()> {
     }
 
     eprintln!("Starting live transcript session...");
-    if config.transcription.engine == "apple-speech" {
-        eprintln!(
-            "[minutes] Apple Speech experimental live path selected. If unavailable or weak, Minutes will fall back to Parakeet or Whisper for this session."
-        );
-    }
     eprintln!("Press Ctrl-C or run `minutes stop` to end.\n");
 
     let stop = Arc::new(AtomicBool::new(false));

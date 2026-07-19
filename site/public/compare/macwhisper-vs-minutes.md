@@ -12,7 +12,7 @@ Both transcribe locally on your Mac, and both can run Whisper or Parakeet models
 ## At a glance
 
 - Core job — MacWhisper: file in, transcript out (batch, subtitles, YouTube and media-file URLs); Minutes: capture conversations, diarize, keep a structured archive
-- Transcription — both on-device; both support Whisper and Parakeet engines
+- Transcription — both on-device; MacWhisper supports Whisper and Parakeet, while Minutes currently uses sealed local Whisper and retains Parakeet only as a future preference pending secure byte transport
 - Optional cloud AI — MacWhisper: BYO API keys (or fully local via Ollama/LM Studio); Minutes: explicit opt-in only (Claude via MCP, local LLM, or BYO-key cloud — off by default)
 - Output — MacWhisper: per-file exports (txt/srt/vtt/md/pdf/docx); Minutes: markdown corpus with YAML frontmatter, action items, decisions
 - Speakers — MacWhisper: automatic speaker recognition (Pro); Minutes: diarization + confidence-aware attribution that learns names

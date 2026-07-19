@@ -21,7 +21,7 @@ So `minutes record --device "MacBook Pro Microphone"` always wins over `[recordi
 
 | key | default | meaning |
 |---|---|---|
-| `engine` | `"whisper"` | `"whisper"` (default) or `"parakeet"` |
+| `engine` | `"whisper"` | `"whisper"` (default), or a retained `"parakeet"` preference. Parakeet is not currently selectable on any platform, so retained values resolve visibly to Whisper. |
 | `model` | `"base"` | Whisper model: `tiny` / `base` / `small` / `medium` / `large-v3` |
 | `parakeet_model` | `"tdt-ctc-110m"` | Parakeet model: `tdt-ctc-110m` or `tdt-600m` |
 | `language` | auto-detect | BCP-47 tag (e.g. `"en"`, `"es"`) to force a specific language |
@@ -29,8 +29,8 @@ So `minutes record --device "MacBook Pro Microphone"` always wins over `[recordi
 | `vad_model` | `"silero-v6.2.0"` | Silero VAD model name; empty string disables |
 | `min_words` | `3` | Drop utterances with fewer than this many words |
 | `parakeet_binary` | `"parakeet"` | PATH lookup or absolute path to the parakeet binary |
-| `parakeet_sidecar_enabled` | auto | Warm sidecar: auto-enables when parakeet is the engine and `example-server` resolves. `true`/`"on"` forces on, `"off"` forces off. A legacy bool `false` is treated as auto (pre-0.18.8 saves wrote it into every config) (#295) |
-| `parakeet_fp16` | `true` | GPU fp16 inference for lower memory use |
+| `parakeet_sidecar_enabled` | auto | Records future warm-sidecar intent. The current pathname-only process cannot receive Minutes' anonymous/sealed private-audio capability, so Linux, macOS, and Windows all use Whisper. Auto/`true` cannot bypass this gate; `"off"` forces off. A legacy bool `false` is treated as auto (pre-0.18.8 saves wrote it into every config) (#295). |
+| `parakeet_fp16` | `false` | Reserved for a future supported GPU transport; currently not forwarded on Linux |
 | `parakeet_boost_limit` / `parakeet_boost_score` | `0` / `2.0` | Knowledge-graph phrase boosting; 0 = off |
 | `name_correction` | `"off"` | Post-pass name correction against attendees and vocabulary. Values: `"off"` or `"conservative"`; off by default. |
 
@@ -242,7 +242,7 @@ retention, nothing is deleted automatically unless `auto_cleanup` is enabled.
 
 | key | default | meaning |
 |---|---|---|
-| `backend` | `"whisper"` | Final transcription backend: `"whisper"`, experimental `"apple-speech"` on macOS when DictationTranscriber is available, or opt-in `"parakeet"` when Parakeet is installed/compiled |
+| `backend` | `"whisper"` | Final transcription backend. Retained `"apple-speech"` and `"parakeet"` values currently resolve to sealed Whisper because their pathname-only helpers lack a secure private-audio transport. |
 | `destination` | `"clipboard"` | `"clipboard"`, `"file"`, or `"command"` |
 | `destination_file` | unset | Target file when `destination = "file"` |
 | `destination_command` | unset | Shell command when `destination = "command"` |

@@ -12,7 +12,7 @@ superwhisper and Minutes agree on the thing this category usually gets wrong: yo
 ## At a glance
 
 - Core job — superwhisper: speak, get clean formatted text where you're typing; Minutes: capture conversations, transcribe and diarize them, keep a searchable markdown record
-- Where transcription runs — superwhisper: on-device by default, optional cloud models (recommended on Intel Macs); Minutes: on-device always (whisper.cpp / parakeet.cpp), no cloud path
+- Where transcription runs — superwhisper: on-device by default, optional cloud models (recommended on Intel Macs); Minutes: on-device always (sealed local whisper.cpp), no cloud path
 - AI formatting — superwhisper: predefined and custom modes using local or cloud models; Minutes: optional and explicit (Claude via MCP or a local LLM you configure)
 - Durable output — superwhisper: text inserted into the app you're using; Minutes: markdown files with YAML frontmatter, action items, and decisions
 - Meetings and speakers — superwhisper: meeting recording and file transcription; Minutes: diarized speakers, confidence-aware attribution, action items, meeting lifecycle

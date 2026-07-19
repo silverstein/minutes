@@ -1,6 +1,155 @@
 use crate::config::Config;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
+#[cfg(feature = "diarize")]
+use zeroize::Zeroize;
+
+const DIARIZATION_WORKER_DEADLINE: Duration = Duration::from_secs(15 * 60);
+const MAX_DIARIZATION_SECONDS: u64 = 2 * 60 * 60;
+const MAX_DIARIZATION_SAMPLES: usize = 16_000 * MAX_DIARIZATION_SECONDS as usize;
+#[cfg(feature = "diarize")]
+const MAX_DIARIZATION_SEGMENTS: usize = 100_000;
+#[cfg(feature = "diarize")]
+const MAX_SPEAKER_TEMPLATES: usize = 64;
+#[cfg(feature = "diarize")]
+const MAX_EMBEDDING_SECONDS: usize = 60;
+static DIARIZATION_WORKER_ACTIVE: AtomicBool = AtomicBool::new(false);
+#[cfg(test)]
+static DIARIZATION_GLOBAL_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn max_diarization_source_frames(sample_rate: u32) -> std::io::Result<u64> {
+    (sample_rate as u64)
+        .checked_mul(MAX_DIARIZATION_SECONDS)
+        .ok_or_else(|| std::io::Error::other("diarization source duration budget overflowed"))
+}
+
+fn check_diarization_source_frame(frame_count: u64, sample_rate: u32) -> std::io::Result<()> {
+    if frame_count > max_diarization_source_frames(sample_rate)? {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::OutOfMemory,
+            "decoded audio exceeds the diarization duration budget",
+        ));
+    }
+    Ok(())
+}
+
+struct DiarizationWorkerLease(&'static AtomicBool);
+
+impl DiarizationWorkerLease {
+    fn acquire(active: &'static AtomicBool) -> Result<Self, &'static str> {
+        active
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map(|_| Self(active))
+            .map_err(|_| "a previous diarization worker is still active")
+    }
+}
+
+impl Drop for DiarizationWorkerLease {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum DiarizationWorkerError {
+    Busy,
+    Panicked,
+    TimedOut,
+}
+
+#[derive(Clone)]
+struct DiarizationCancellation {
+    cancelled: std::sync::Arc<AtomicBool>,
+    deadline: Instant,
+}
+
+impl DiarizationCancellation {
+    fn new(duration: Duration) -> Self {
+        Self {
+            cancelled: std::sync::Arc::new(AtomicBool::new(false)),
+            deadline: Instant::now() + duration,
+        }
+    }
+
+    fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Release);
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Acquire) || Instant::now() >= self.deadline
+    }
+
+    fn check(&self) -> std::io::Result<()> {
+        if self.is_cancelled() {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "diarization deadline exceeded",
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn remaining(&self) -> Duration {
+        self.deadline.saturating_duration_since(Instant::now())
+    }
+}
+
+fn run_bounded_diarization_worker<T, F>(
+    deadline: Duration,
+    work: F,
+) -> Result<T, DiarizationWorkerError>
+where
+    T: Send + 'static,
+    F: FnOnce(DiarizationCancellation) -> T + Send + 'static,
+{
+    // Unit tests exercise several public entry points concurrently. Serialize
+    // their use of the production-global lease so unrelated test scheduling
+    // cannot turn an expected source-aware result into a synthetic Busy result.
+    #[cfg(test)]
+    let _test_guard = DIARIZATION_GLOBAL_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    run_bounded_diarization_worker_with_active(&DIARIZATION_WORKER_ACTIVE, deadline, work)
+}
+
+fn run_bounded_diarization_worker_with_active<T, F>(
+    active: &'static AtomicBool,
+    deadline: Duration,
+    work: F,
+) -> Result<T, DiarizationWorkerError>
+where
+    T: Send + 'static,
+    F: FnOnce(DiarizationCancellation) -> T + Send + 'static,
+{
+    let lease =
+        DiarizationWorkerLease::acquire(active).map_err(|_| DiarizationWorkerError::Busy)?;
+    let cancellation = DiarizationCancellation::new(deadline);
+    let worker_cancellation = cancellation.clone();
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let _lease = lease;
+        let result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| work(worker_cancellation)));
+        let _ = sender.send(result);
+    });
+    match receiver.recv_timeout(deadline) {
+        Ok(Ok(value)) if !cancellation.is_cancelled() => Ok(value),
+        Ok(Ok(_)) => {
+            cancellation.cancel();
+            Err(DiarizationWorkerError::TimedOut)
+        }
+        Ok(Err(_)) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            Err(DiarizationWorkerError::Panicked)
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            cancellation.cancel();
+            Err(DiarizationWorkerError::TimedOut)
+        }
+    }
+}
 
 // ──────────────────────────────────────────────────────────────
 // Speaker diarization.
@@ -95,7 +244,7 @@ pub enum CaptureSource {
     Backend,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ObservedSignal {
     pub frames_captured: usize,
     pub max_rms: f32,
@@ -110,9 +259,8 @@ pub enum DiagnosticConfidence {
 }
 
 type EnergyWindow = (f64, f32);
-type StemEnergyWindows = (Vec<EnergyWindow>, Vec<EnergyWindow>);
 const STEM_PROBE_SECS: usize = 5;
-const STEM_PROBE_RMS_FLOOR: f32 = 0.001;
+pub const STEM_PROBE_RMS_FLOOR: f32 = 0.001;
 const PRIMARY_DEGRADED_MIN_DURATION_SECS: f64 = 60.0;
 const DEGRADED_ML_FALLBACK_MIN_DURATION_SECS: f64 = 120.0;
 
@@ -283,84 +431,158 @@ pub fn models_installed(config: &Config) -> bool {
     dir.join(SEGMENTATION_MODEL).exists() && dir.join(emb.filename).exists()
 }
 
-/// Pre-process audio to 16kHz mono WAV via ffmpeg (if available).
-/// Returns (effective_path, temp_path_to_cleanup).
+/// Pre-process audio to 16kHz mono PCM via ffmpeg (if available).
+/// Returns the effective path plus an RAII capability that keeps the private
+/// temporary output alive for the diarization worker.
 /// pyannote-rs works best with 16kHz mono s16 WAV. Live recordings from cpal
-/// are often 44.1kHz F32, which the symphonia fallback can struggle with.
-fn preprocess_audio(audio_path: &Path) -> (std::path::PathBuf, Option<std::path::PathBuf>) {
-    let temp_path = std::env::temp_dir().join("minutes-diarize-preprocessed.wav");
+/// are often 44.1kHz F32 and need a bounded conversion before native loading.
+fn ffmpeg_preprocess_command(ffmpeg: &Path, input: &str) -> crate::bounded_child::BoundedCommand {
+    let mut command = crate::bounded_child::BoundedCommand::new(ffmpeg);
+    command.args([
+        "-i",
+        input,
+        "-ar",
+        "16000",
+        "-ac",
+        "1",
+        "-sample_fmt",
+        "s16",
+        "-c:a",
+        "pcm_s16le",
+        "-f",
+        "s16le",
+        "pipe:1",
+    ]);
+    command
+}
+
+fn preprocess_audio(
+    audio_path: &Path,
+    cancellation: &DiarizationCancellation,
+) -> Result<
+    (
+        std::path::PathBuf,
+        Option<crate::pipeline::PrivateAudioTempFile>,
+    ),
+    String,
+> {
+    cancellation.check().map_err(|error| error.to_string())?;
+    // Never pipe an authorized capability through an ordinary post-exec
+    // child. On Linux, exec resets dumpability and a same-UID process can
+    // inspect the child's pipe descriptors through procfs. Native diarization
+    // decodes the admitted WAV capability with the bounded streaming reader,
+    // so retain that stronger boundary even when ffmpeg is installed.
+    match crate::pipeline::authorized_audio_stdin(audio_path) {
+        Ok(Some(_)) => {
+            cancellation.check().map_err(|error| error.to_string())?;
+            return Ok((audio_path.to_path_buf(), None));
+        }
+        Ok(None) => {}
+        Err(error) => {
+            return Err(format!(
+                "authorized audio unavailable for diarization preprocessing: {error}"
+            ));
+        }
+    }
     let ffmpeg = match crate::ffmpeg::resolve_ffmpeg() {
         Ok(path) => path,
         Err(error) => {
             tracing::debug!(error = %error, "ffmpeg not available for preprocessing, using original audio");
-            return (audio_path.to_path_buf(), None);
+            return Ok((audio_path.to_path_buf(), None));
         }
     };
+    let mut raw_pcm = match crate::pipeline::PrivateAudioTempFile::new(
+        "minutes-diarize-preprocessed-pcm-",
+        ".s16le",
+    ) {
+        Ok(temp_file) => temp_file,
+        Err(error) => {
+            tracing::debug!(%error, "private diarization temp file unavailable");
+            return Ok((audio_path.to_path_buf(), None));
+        }
+    };
+    let ffmpeg_input = audio_path.to_str().unwrap_or("");
+    let mut command = ffmpeg_preprocess_command(&ffmpeg, ffmpeg_input);
 
-    match crate::engine_process::command(&ffmpeg)
-        .args([
-            "-y",
-            "-i",
-            audio_path.to_str().unwrap_or(""),
-            "-ar",
-            "16000",
-            "-ac",
-            "1",
-            "-sample_fmt",
-            "s16",
-            temp_path.to_str().unwrap_or(""),
-        ])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-    {
-        Ok(status) if status.success() => {
+    let max_output_bytes =
+        (MAX_DIARIZATION_SAMPLES as u64).saturating_mul(std::mem::size_of::<i16>() as u64);
+    cancellation.check().map_err(|error| error.to_string())?;
+    let remaining = cancellation.remaining();
+    if remaining.is_zero() {
+        return Err("diarization deadline exceeded".into());
+    }
+    match crate::pipeline::output_with_authorized_audio_stdin_to_private_file_with_budget(
+        &mut command,
+        None,
+        &mut raw_pcm,
+        max_output_bytes,
+        remaining,
+    ) {
+        Ok(output) if output.status.success() => {
+            cancellation.check().map_err(|error| error.to_string())?;
+            let temp_file = crate::pipeline::private_pcm_s16le_mono_to_wav(&raw_pcm, 16_000)
+                .map_err(|error| format!("diarization PCM could not be wrapped as WAV: {error}"))?;
             tracing::info!(ffmpeg = %ffmpeg.display(), "audio preprocessed to 16kHz mono via ffmpeg");
-            (temp_path.clone(), Some(temp_path))
+            Ok((temp_file.processing_path(), Some(temp_file)))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::TimedOut => {
+            Err("diarization deadline exceeded during preprocessing".into())
         }
         _ => {
+            cancellation.check().map_err(|error| error.to_string())?;
             tracing::debug!("ffmpeg not available for preprocessing, using original audio");
-            (audio_path.to_path_buf(), None)
+            Ok((audio_path.to_path_buf(), None))
         }
     }
 }
 
 pub fn audio_duration_secs(audio_path: &Path) -> Result<f64, String> {
-    use symphonia::core::io::MediaSourceStream;
-    use symphonia::core::probe::Hint;
-
-    let file = std::fs::File::open(audio_path)
-        .map_err(|error| format!("failed to open audio {}: {error}", audio_path.display()))?;
-    let mss = MediaSourceStream::new(Box::new(file), Default::default());
-
-    let mut hint = Hint::new();
-    if let Some(ext) = audio_path.extension().and_then(|ext| ext.to_str()) {
-        hint.with_extension(ext);
+    if crate::pipeline::is_reserved_private_audio_path(audio_path) {
+        return Err("private audio tokens require the typed authorized entry point".into());
+    }
+    if audio_path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("wav"))
+    {
+        let reader = hound::WavReader::open(audio_path).map_err(|error| {
+            format!(
+                "failed to open audio {}: {error}",
+                crate::pipeline::private_audio_diagnostic_label(audio_path)
+            )
+        })?;
+        return wav_duration_secs(reader);
     }
 
-    let probed = symphonia::default::get_probe()
-        .format(&hint, mss, &Default::default(), &Default::default())
-        .map_err(|error| format!("failed to probe audio {}: {error}", audio_path.display()))?;
+    // Symphonia 0.5.5 can allocate attacker-declared container tables during
+    // probing, before the decoded-audio budget is able to run. Keep duration
+    // inspection on the bounded WAV parser; callers must first convert ambient
+    // compressed input through the bounded ffmpeg path.
+    Err("safe audio duration probing requires bounded WAV input".into())
+}
 
-    let track = probed
-        .format
-        .default_track()
-        .ok_or_else(|| format!("audio {} has no default track", audio_path.display()))?;
-    let params = &track.codec_params;
-    let n_frames = params
-        .n_frames
-        .ok_or_else(|| format!("audio {} has no frame count", audio_path.display()))?;
-    let sample_rate = params
-        .sample_rate
-        .ok_or_else(|| format!("audio {} has no sample rate", audio_path.display()))?;
+pub(crate) fn audio_duration_secs_authorized(
+    input: &crate::pipeline::AuthorizedProcessAudioInput,
+) -> Result<f64, String> {
+    input
+        .verify_pipeline_binding()
+        .map_err(|error| error.to_string())?;
+    if input.format_extension() != "wav" {
+        return Err("authorized private duration currently supports bounded WAV input only".into());
+    }
+    let reader = crate::pipeline::authorized_audio_stdin(input.processing_path())
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "authorized private audio capability is unavailable".to_string())?;
+    let reader = hound::WavReader::new(reader).map_err(|error| error.to_string())?;
+    wav_duration_secs(reader)
+}
+
+fn wav_duration_secs<R: std::io::Read>(reader: hound::WavReader<R>) -> Result<f64, String> {
+    let sample_rate = reader.spec().sample_rate;
     if sample_rate == 0 {
-        return Err(format!(
-            "audio {} has zero sample rate",
-            audio_path.display()
-        ));
+        return Err("audio has zero sample rate".into());
     }
-
-    Ok(n_frames as f64 / sample_rate as f64)
+    Ok(reader.duration() as f64 / sample_rate as f64)
 }
 
 /// Paths to per-source audio stems from a multi-source call capture.
@@ -377,28 +599,118 @@ pub(crate) enum SourceAwareDiarizationPlan {
     SilentSystemStem(StemPaths),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct InvalidStemSibling {
+    pub source: CaptureSource,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CheckedStemPlan {
+    pub plan: Option<SourceAwareDiarizationPlan>,
+    pub invalid_sibling: Option<InvalidStemSibling>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ExistingStemState {
+    Signal,
+    Silence,
+    Invalid(String),
+}
+
+enum BoundedSourceAwareAttempt {
+    NoPlan,
+    FullStems {
+        stems: StemPaths,
+        result: Option<DiarizationResult>,
+    },
+    SystemStemOnly {
+        system_stem: std::path::PathBuf,
+        result: Option<DiarizationResult>,
+    },
+    SilentSystemStem {
+        stems: StemPaths,
+        observed_signal: ObservedSignal,
+    },
+}
+
+/// Typed result for the capture-critical whole-stem signal scan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StemSignal {
+    Signal,
+    Silence,
+    Invalid(String),
+}
+
+/// Capture-critical classifier that keeps invalid/resource failure distinct
+/// from digital silence. Callers deciding whether to preserve or queue a
+/// recording must use this typed result rather than a lossy bool.
+pub fn classify_stem_signal(path: &Path) -> StemSignal {
+    if !path.exists() {
+        return StemSignal::Silence;
+    }
+    let cancellation = DiarizationCancellation::new(DIARIZATION_WORKER_DEADLINE);
+    match stem_has_audio_with_cancellation(path, &cancellation) {
+        Ok(true) => StemSignal::Signal,
+        Ok(false) => StemSignal::Silence,
+        Err(error) => StemSignal::Invalid(error),
+    }
+}
+
 /// Return true when a WAV stem contains detectable signal in any one-second
-/// window. The whole file is scanned for silent captures so callers do not
-/// confuse a full-duration digital-silence stem with usable audio.
-///
-/// This is public so the desktop's native-call queue and the core pipeline use
-/// exactly the same signal classifier. A file-size check is insufficient: a
-/// disconnected/default microphone can produce a correctly sized WAV whose
-/// samples are all digital silence (#463).
+/// window. Non-critical legacy callers use this convenience projection; any
+/// preservation decision must use `classify_stem_signal` so an invalid or
+/// over-budget input is not confused with digital silence.
 pub fn stem_has_audio(path: &Path) -> bool {
-    let Ok(reader) = hound::WavReader::open(path) else {
-        return false;
-    };
+    // This classifier is part of the capture-preservation gate. It must not
+    // share the single ML-diarization lease: a previous meeting still being
+    // diarized is not evidence that a newly captured stem is silent. The
+    // synchronous scanner below is independently deadline-, duration-, and
+    // memory-bounded, so it remains safe without turning lease contention into
+    // a false negative.
+    let cancellation = DiarizationCancellation::new(DIARIZATION_WORKER_DEADLINE);
+    stem_has_audio_with_cancellation(path, &cancellation).unwrap_or(false)
+}
+
+fn stem_has_audio_with_cancellation(
+    path: &Path,
+    cancellation: &DiarizationCancellation,
+) -> Result<bool, String> {
+    cancellation.check().map_err(|error| error.to_string())?;
+    if crate::pipeline::is_reserved_private_audio_path(path) {
+        return Ok(false);
+    }
+    match crate::pipeline::authorized_audio_stdin(path) {
+        Ok(Some(file)) => hound::WavReader::new(file)
+            .map_err(|error| error.to_string())
+            .and_then(|reader| stem_reader_has_audio(reader, cancellation)),
+        Ok(None) => hound::WavReader::open(path)
+            .map_err(|error| error.to_string())
+            .and_then(|reader| stem_reader_has_audio(reader, cancellation)),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+fn stem_reader_has_audio<R: std::io::Read>(
+    reader: hound::WavReader<R>,
+    cancellation: &DiarizationCancellation,
+) -> Result<bool, String> {
     let spec = reader.spec();
     if spec.sample_rate == 0 || spec.channels == 0 {
-        return false;
+        return Ok(false);
     }
+    let budget = crate::audio_budget::AudioWorkBudget::new();
+    budget
+        .validate_stream(spec.sample_rate, usize::from(spec.channels))
+        .map_err(|error| error.to_string())?;
 
     match spec.sample_format {
         hound::SampleFormat::Float => probe_stem_samples(
             reader.into_samples::<f32>(),
             spec.sample_rate,
             spec.channels,
+            budget,
+            cancellation,
             |sample| sample,
         ),
         hound::SampleFormat::Int => {
@@ -408,20 +720,39 @@ pub fn stem_has_audio(path: &Path) -> bool {
                 reader.into_samples::<i32>(),
                 spec.sample_rate,
                 spec.channels,
+                budget,
+                cancellation,
                 move |sample| sample as f32 / max_value,
             )
         }
     }
 }
 
+#[cfg(test)]
 fn stem_probe_observed_signal(path: &Path) -> ObservedSignal {
-    let Ok(reader) = hound::WavReader::open(path) else {
-        return ObservedSignal {
-            frames_captured: 0,
-            max_rms: 0.0,
-            avg_rms: 0.0,
-        };
-    };
+    let cancellation = DiarizationCancellation::new(DIARIZATION_WORKER_DEADLINE);
+    stem_probe_observed_signal_with_cancellation(path, &cancellation)
+}
+
+fn stem_probe_observed_signal_with_cancellation(
+    path: &Path,
+    cancellation: &DiarizationCancellation,
+) -> ObservedSignal {
+    match crate::pipeline::authorized_audio_stdin(path) {
+        Ok(Some(file)) => hound::WavReader::new(file)
+            .map(|reader| stem_reader_observed_signal(reader, cancellation))
+            .unwrap_or_default(),
+        Ok(None) => hound::WavReader::open(path)
+            .map(|reader| stem_reader_observed_signal(reader, cancellation))
+            .unwrap_or_default(),
+        Err(_) => ObservedSignal::default(),
+    }
+}
+
+fn stem_reader_observed_signal<R: std::io::Read>(
+    reader: hound::WavReader<R>,
+    cancellation: &DiarizationCancellation,
+) -> ObservedSignal {
     let spec = reader.spec();
     if spec.sample_rate == 0 || spec.channels == 0 {
         return ObservedSignal {
@@ -430,12 +761,21 @@ fn stem_probe_observed_signal(path: &Path) -> ObservedSignal {
             avg_rms: 0.0,
         };
     }
+    let budget = crate::audio_budget::AudioWorkBudget::new();
+    if budget
+        .validate_stream(spec.sample_rate, usize::from(spec.channels))
+        .is_err()
+    {
+        return ObservedSignal::default();
+    }
 
     match spec.sample_format {
         hound::SampleFormat::Float => probe_stem_observed_signal(
             reader.into_samples::<f32>(),
             spec.sample_rate,
             spec.channels,
+            budget,
+            cancellation,
             |sample| sample,
         ),
         hound::SampleFormat::Int => {
@@ -445,6 +785,8 @@ fn stem_probe_observed_signal(path: &Path) -> ObservedSignal {
                 reader.into_samples::<i32>(),
                 spec.sample_rate,
                 spec.channels,
+                budget,
+                cancellation,
                 move |sample| sample as f32 / max_value,
             )
         }
@@ -455,39 +797,65 @@ fn probe_stem_samples<T>(
     samples: impl Iterator<Item = Result<T, hound::Error>>,
     sample_rate: u32,
     channels: u16,
+    budget: crate::audio_budget::AudioWorkBudget,
+    cancellation: &DiarizationCancellation,
     normalize: impl Fn(T) -> f32,
-) -> bool {
+) -> Result<bool, String> {
     let channels = channels as usize;
     let window_frames = sample_rate as usize;
     if window_frames == 0 || channels == 0 {
-        return false;
+        return Ok(false);
     }
 
-    // Scan the WHOLE stem in 1-second RMS windows and return true as soon as
-    // any window clears the floor. This intentionally does not stop after a
+    // Scan the WHOLE stem in 1-second RMS windows. This intentionally does not stop after a
     // fixed opening probe: a far-field / AEC-equipped mic (USB conference
     // speakerphones, e.g. Jabra Speak2) can open quiet while the far end
     // speaks first, so a short opening window misreads a stem that has real
     // speech later as "empty" and discards a fully recoverable recording
-    // (#280). Early-return keeps the common case (signal near the start) fast;
-    // only a genuinely silent stem is read to the end.
+    // (#280). A positive classification is returned only after the decoder
+    // reaches EOF cleanly, so an authenticated-reader error later in the stem
+    // cannot turn a partial prefix into trusted audio.
     let mut channel_index = 0usize;
-    let mut frame_sum = 0.0_f32;
+    let mut frame_sum = 0.0_f64;
     let mut window_frames_read = 0usize;
     let mut window_sum_sq = 0.0_f64;
+    let mut observed_signal = false;
+    // Signal classification is capture-critical, not optional diarization.
+    // Align it with the four-hour transcription budget so a valid long call
+    // cannot be reclassified as digital silence at the two-hour diarization
+    // ceiling.
+    let max_frames =
+        crate::audio_budget::max_source_frames(sample_rate).map_err(|error| error.to_string())?;
+    let mut frames_read = 0_u64;
 
     for sample in samples {
-        let Ok(sample) = sample else {
-            continue;
-        };
+        let sample = sample.map_err(|error| error.to_string())?;
+        let sample = normalize(sample);
+        if !sample.is_finite() {
+            return Err("non-finite WAV sample rejected during stem analysis".into());
+        }
 
-        frame_sum += normalize(sample);
+        frame_sum += sample as f64;
         channel_index += 1;
         if channel_index < channels {
             continue;
         }
 
-        let mono = frame_sum / channels as f32;
+        frames_read = frames_read
+            .checked_add(1)
+            .ok_or_else(|| "stem frame count overflowed".to_string())?;
+        if frames_read > max_frames {
+            return Err("stem audio exceeds the capture signal duration budget".into());
+        }
+        if frames_read & 0x0fff == 0 {
+            budget.check_deadline().map_err(|error| error.to_string())?;
+            cancellation.check().map_err(|error| error.to_string())?;
+        }
+
+        let mono = (frame_sum / channels as f64) as f32;
+        if !mono.is_finite() {
+            return Err("non-finite mono sample rejected during stem analysis".into());
+        }
         window_sum_sq += (mono as f64) * (mono as f64);
         window_frames_read += 1;
         channel_index = 0;
@@ -496,7 +864,7 @@ fn probe_stem_samples<T>(
         if window_frames_read >= window_frames {
             let rms = (window_sum_sq / window_frames_read as f64).sqrt() as f32;
             if rms > STEM_PROBE_RMS_FLOOR {
-                return true;
+                observed_signal = true;
             }
             window_frames_read = 0;
             window_sum_sq = 0.0;
@@ -505,21 +873,31 @@ fn probe_stem_samples<T>(
 
     if window_frames_read > 0 {
         let rms = (window_sum_sq / window_frames_read as f64).sqrt() as f32;
-        return rms > STEM_PROBE_RMS_FLOOR;
+        observed_signal |= rms > STEM_PROBE_RMS_FLOOR;
     }
 
-    false
+    if channel_index != 0 {
+        return Err("WAV ended inside an interleaved frame".into());
+    }
+    cancellation.check().map_err(|error| error.to_string())?;
+    Ok(observed_signal)
 }
 
 fn probe_stem_observed_signal<T>(
     mut samples: impl Iterator<Item = Result<T, hound::Error>>,
     sample_rate: u32,
     channels: u16,
+    budget: crate::audio_budget::AudioWorkBudget,
+    cancellation: &DiarizationCancellation,
     normalize: impl Fn(T) -> f32,
 ) -> ObservedSignal {
     let channels = channels as usize;
-    let max_frames = sample_rate as usize * STEM_PROBE_SECS;
-    let max_samples = max_frames * channels;
+    let Some(max_frames) = (sample_rate as usize).checked_mul(STEM_PROBE_SECS) else {
+        return ObservedSignal::default();
+    };
+    let Some(max_samples) = max_frames.checked_mul(channels) else {
+        return ObservedSignal::default();
+    };
     if max_frames == 0 || channels == 0 {
         return ObservedSignal {
             frames_captured: 0,
@@ -531,7 +909,7 @@ fn probe_stem_observed_signal<T>(
     let mut samples_read = 0usize;
     let mut frames_read = 0usize;
     let mut channel_index = 0usize;
-    let mut frame_sum = 0.0_f32;
+    let mut frame_sum = 0.0_f64;
     let mut sum_sq = 0.0_f64;
     let mut max_abs = 0.0_f32;
 
@@ -541,19 +919,31 @@ fn probe_stem_observed_signal<T>(
         };
         samples_read += 1;
         let Ok(sample) = sample else {
-            continue;
+            return ObservedSignal::default();
         };
 
-        frame_sum += normalize(sample);
+        let sample = normalize(sample);
+        if !sample.is_finite() {
+            return ObservedSignal::default();
+        }
+        frame_sum += sample as f64;
         channel_index += 1;
         if channel_index < channels {
             continue;
         }
 
-        let mono = frame_sum / channels as f32;
+        let mono = (frame_sum / channels as f64) as f32;
+        if !mono.is_finite() {
+            return ObservedSignal::default();
+        }
         max_abs = max_abs.max(mono.abs());
         sum_sq += (mono as f64) * (mono as f64);
         frames_read += 1;
+        if frames_read & 0x0fff == 0
+            && (budget.check_deadline().is_err() || cancellation.check().is_err())
+        {
+            return ObservedSignal::default();
+        }
         channel_index = 0;
         frame_sum = 0.0;
     }
@@ -572,6 +962,42 @@ fn probe_stem_observed_signal<T>(
 }
 
 pub(crate) fn discover_stem_plan(audio_path: &Path) -> Option<SourceAwareDiarizationPlan> {
+    // Discovery feeds transcription selection before ML diarization starts.
+    // Keep it independent from the ML worker lease for the same reason as
+    // `stem_has_audio`: Busy must never be interpreted as missing/silent stems
+    // and reopen an unsafe native-call container fallback.
+    let cancellation = DiarizationCancellation::new(DIARIZATION_WORKER_DEADLINE);
+    discover_stem_plan_with_cancellation(audio_path, &cancellation)
+}
+
+/// Capture-processing variant of stem discovery. Invalid or over-budget WAV
+/// input is distinct from silence so the background worker fails recoverably
+/// instead of reopening the known-broken native `.mov` container.
+pub(crate) fn discover_stem_plan_checked(audio_path: &Path) -> Result<CheckedStemPlan, String> {
+    let cancellation = DiarizationCancellation::new(DIARIZATION_WORKER_DEADLINE);
+    discover_stem_plan_checked_with_cancellation(audio_path, &cancellation)
+}
+
+fn discover_stem_plan_with_cancellation(
+    audio_path: &Path,
+    cancellation: &DiarizationCancellation,
+) -> Option<SourceAwareDiarizationPlan> {
+    match discover_stem_plan_checked_with_cancellation(audio_path, cancellation) {
+        Ok(checked) => checked.plan,
+        Err(error) => {
+            tracing::warn!(error = %error, "stem discovery failed closed");
+            None
+        }
+    }
+}
+
+fn discover_stem_plan_checked_with_cancellation(
+    audio_path: &Path,
+    cancellation: &DiarizationCancellation,
+) -> Result<CheckedStemPlan, String> {
+    if cancellation.check().is_err() {
+        return Err("stem discovery deadline expired".into());
+    }
     // A signal-aware native-call queue may hand the surviving system stem to
     // the background worker directly (#463). Preserve the established
     // system-stem-only diarization path instead of treating that WAV as an
@@ -580,67 +1006,171 @@ pub(crate) fn discover_stem_plan(audio_path: &Path) -> Option<SourceAwareDiariza
         .file_name()
         .and_then(|name| name.to_str())
         .is_some_and(|name| name.ends_with(".system.wav"))
-        && stem_has_audio(audio_path)
     {
-        tracing::warn!(
-            system = %audio_path.display(),
-            "processing surviving native-call system stem with system-only diarization"
-        );
-        return Some(SourceAwareDiarizationPlan::SystemStemOnly(
-            audio_path.to_path_buf(),
-        ));
+        return match existing_stem_state_with_cancellation(audio_path, cancellation) {
+            ExistingStemState::Signal => {
+                tracing::warn!(
+                    system = %crate::pipeline::private_audio_diagnostic_label(audio_path),
+                    "processing surviving native-call system stem with system-only diarization"
+                );
+                Ok(CheckedStemPlan {
+                    plan: Some(SourceAwareDiarizationPlan::SystemStemOnly(
+                        audio_path.to_path_buf(),
+                    )),
+                    invalid_sibling: None,
+                })
+            }
+            ExistingStemState::Silence => Ok(CheckedStemPlan {
+                plan: None,
+                invalid_sibling: None,
+            }),
+            ExistingStemState::Invalid(reason) => Err(reason),
+        };
     }
 
-    let stem = audio_path.file_stem()?.to_str()?;
-    let dir = audio_path.parent()?;
+    let Some(stem) = audio_path.file_stem().and_then(|stem| stem.to_str()) else {
+        return Ok(CheckedStemPlan {
+            plan: None,
+            invalid_sibling: None,
+        });
+    };
+    let Some(dir) = audio_path.parent() else {
+        return Ok(CheckedStemPlan {
+            plan: None,
+            invalid_sibling: None,
+        });
+    };
     let voice = dir.join(format!("{}.voice.wav", stem));
     let system = dir.join(format!("{}.system.wav", stem));
 
-    let voice_ok = stem_has_audio(&voice);
-    let system_ok = stem_has_audio(&system);
+    let voice_state = existing_stem_state_with_cancellation(&voice, cancellation);
+    let system_state = existing_stem_state_with_cancellation(&system, cancellation);
 
-    match (voice_ok, system_ok) {
-        (true, true) => {
+    match (voice_state, system_state) {
+        (ExistingStemState::Signal, ExistingStemState::Signal) => {
             tracing::info!(
                 voice = %voice.display(),
                 system = %system.display(),
                 "discovered per-source audio stems"
             );
-            Some(SourceAwareDiarizationPlan::FullStems(StemPaths {
-                voice,
-                system,
-            }))
+            Ok(CheckedStemPlan {
+                plan: Some(SourceAwareDiarizationPlan::FullStems(StemPaths {
+                    voice,
+                    system,
+                })),
+                invalid_sibling: None,
+            })
         }
-        (false, true) => {
+        (ExistingStemState::Silence, ExistingStemState::Signal) => {
             tracing::warn!(
                 system = %system.display(),
                 voice = %voice.display(),
                 "voice stem missing or empty; falling back to system-stem-only diarization"
             );
-            Some(SourceAwareDiarizationPlan::SystemStemOnly(system))
+            Ok(CheckedStemPlan {
+                plan: Some(SourceAwareDiarizationPlan::SystemStemOnly(system)),
+                invalid_sibling: None,
+            })
         }
-        (true, false) => {
+        (ExistingStemState::Signal, ExistingStemState::Silence) => {
             if system.exists() {
                 tracing::warn!(
                     voice = %voice.display(),
                     system = %system.display(),
                     "system stem exists but has no detected audio"
                 );
-                Some(SourceAwareDiarizationPlan::SilentSystemStem(StemPaths {
-                    voice,
-                    system,
-                }))
+                Ok(CheckedStemPlan {
+                    plan: Some(SourceAwareDiarizationPlan::SilentSystemStem(StemPaths {
+                        voice,
+                        system,
+                    })),
+                    invalid_sibling: None,
+                })
             } else {
                 tracing::warn!(
                     voice = %voice.display(),
                     system = %system.display(),
                     "system stem missing; skipping source-aware diarization"
                 );
-                None
+                Ok(CheckedStemPlan {
+                    plan: None,
+                    invalid_sibling: None,
+                })
             }
         }
-        (false, false) => None,
+        (ExistingStemState::Invalid(reason), ExistingStemState::Signal) => {
+            tracing::warn!(voice = %voice.display(), system = %system.display(), %reason, "voice stem is invalid; recovering valid system stem");
+            Ok(CheckedStemPlan {
+                plan: Some(SourceAwareDiarizationPlan::SystemStemOnly(system)),
+                invalid_sibling: Some(InvalidStemSibling {
+                    source: CaptureSource::Voice,
+                    reason,
+                }),
+            })
+        }
+        (ExistingStemState::Signal, ExistingStemState::Invalid(reason)) => {
+            tracing::warn!(voice = %voice.display(), system = %system.display(), %reason, "system stem is invalid; recovering valid voice stem");
+            Ok(CheckedStemPlan {
+                plan: Some(SourceAwareDiarizationPlan::SilentSystemStem(StemPaths {
+                    voice,
+                    system,
+                })),
+                invalid_sibling: Some(InvalidStemSibling {
+                    source: CaptureSource::System,
+                    reason,
+                }),
+            })
+        }
+        (voice_state, system_state) => {
+            let invalid = [
+                (CaptureSource::Voice, voice_state),
+                (CaptureSource::System, system_state),
+            ]
+            .into_iter()
+            .filter_map(|(source, state)| match state {
+                ExistingStemState::Invalid(reason) => Some(format!("{source:?}: {reason}")),
+                ExistingStemState::Signal | ExistingStemState::Silence => None,
+            })
+            .collect::<Vec<_>>();
+            if invalid.is_empty() {
+                Ok(CheckedStemPlan {
+                    plan: None,
+                    invalid_sibling: None,
+                })
+            } else {
+                Err(format!(
+                    "native call has no valid survivor; invalid stems: {}",
+                    invalid.join("; ")
+                ))
+            }
+        }
     }
+}
+
+fn existing_stem_state_with_cancellation(
+    path: &Path,
+    cancellation: &DiarizationCancellation,
+) -> ExistingStemState {
+    match existing_stem_has_audio_with_cancellation(path, cancellation) {
+        Ok(true) => ExistingStemState::Signal,
+        Ok(false) => ExistingStemState::Silence,
+        Err(reason) => ExistingStemState::Invalid(reason),
+    }
+}
+
+fn existing_stem_has_audio_with_cancellation(
+    path: &Path,
+    cancellation: &DiarizationCancellation,
+) -> Result<bool, String> {
+    let metadata = match path.metadata() {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error.to_string()),
+    };
+    if metadata.len() == 0 {
+        return Ok(false);
+    }
+    stem_has_audio_with_cancellation(path, cancellation)
 }
 
 /// Discover stem files alongside an audio file.
@@ -655,62 +1185,197 @@ pub fn discover_stems(audio_path: &Path) -> Option<StemPaths> {
 
 /// Compute RMS energy per time window from a WAV file.
 /// Returns a vec of (start_secs, rms) tuples, one per window.
-fn compute_energy_windows(wav_path: &Path, window_secs: f64) -> Result<Vec<(f64, f32)>, String> {
+struct SensitiveEnergyWindows(Vec<EnergyWindow>);
+
+impl SensitiveEnergyWindows {
+    fn as_slice(&self) -> &[EnergyWindow] {
+        &self.0
+    }
+}
+
+impl Drop for SensitiveEnergyWindows {
+    fn drop(&mut self) {
+        for (start, rms) in &mut self.0 {
+            *start = 0.0;
+            *rms = 0.0;
+        }
+        self.0.clear();
+    }
+}
+
+fn compute_energy_windows(
+    wav_path: &Path,
+    window_secs: f64,
+    cancellation: &DiarizationCancellation,
+) -> Result<SensitiveEnergyWindows, String> {
+    cancellation.check().map_err(|error| error.to_string())?;
     let reader = hound::WavReader::open(wav_path)
         .map_err(|e| format!("failed to open stem {}: {}", wav_path.display(), e))?;
     let spec = reader.spec();
-    let sample_rate = spec.sample_rate as f64;
-    let window_samples = (sample_rate * window_secs) as usize;
+    let sample_rate = spec.sample_rate;
+    let channels = usize::from(spec.channels);
+    let budget = crate::audio_budget::AudioWorkBudget::new();
+    budget
+        .validate_stream(sample_rate, channels)
+        .map_err(|error| error.to_string())?;
+    if !window_secs.is_finite() || window_secs <= 0.0 {
+        return Err("window duration must be finite and positive".into());
+    }
+    let window_frames = (sample_rate as f64 * window_secs) as usize;
 
-    if window_samples == 0 {
+    if window_frames == 0 {
         return Err("window too small".into());
     }
+    if spec.bits_per_sample == 0 || spec.bits_per_sample > 32 {
+        return Err("WAV bit depth exceeds the diarization resource budget".into());
+    }
 
-    let samples: Vec<f32> = match spec.sample_format {
-        hound::SampleFormat::Float => reader
-            .into_samples::<f32>()
-            .filter_map(|s| s.ok())
-            .collect(),
+    match spec.sample_format {
+        hound::SampleFormat::Float => compute_energy_windows_from_samples(
+            reader.into_samples::<f32>(),
+            sample_rate,
+            channels,
+            window_frames,
+            window_secs,
+            budget,
+            cancellation,
+            |sample| sample,
+        ),
         hound::SampleFormat::Int => {
             let bits = spec.bits_per_sample;
             let max_val = (1i64 << (bits - 1)) as f32;
-            reader
-                .into_samples::<i32>()
-                .filter_map(|s| s.ok())
-                .map(|s| s as f32 / max_val)
-                .collect()
+            compute_energy_windows_from_samples(
+                reader.into_samples::<i32>(),
+                sample_rate,
+                channels,
+                window_frames,
+                window_secs,
+                budget,
+                cancellation,
+                move |sample| sample as f32 / max_val,
+            )
         }
-    };
+    }
+    .map_err(|error| format!("failed to decode stem {}: {error}", wav_path.display()))
+}
 
-    // Mix to mono if multi-channel
-    let channels = spec.channels as usize;
-    let mono: Vec<f32> = if channels > 1 {
-        samples
-            .chunks(channels)
-            .map(|chunk| chunk.iter().sum::<f32>() / channels as f32)
-            .collect()
-    } else {
-        samples
-    };
+#[allow(clippy::too_many_arguments)]
+fn compute_energy_windows_from_samples<T>(
+    samples: impl Iterator<Item = Result<T, hound::Error>>,
+    sample_rate: u32,
+    channels: usize,
+    window_frames: usize,
+    window_secs: f64,
+    budget: crate::audio_budget::AudioWorkBudget,
+    cancellation: &DiarizationCancellation,
+    normalize: impl Fn(T) -> f32,
+) -> Result<SensitiveEnergyWindows, String> {
+    let max_frames =
+        max_diarization_source_frames(sample_rate).map_err(|error| error.to_string())?;
+    let max_windows = max_frames
+        .checked_add(window_frames as u64 - 1)
+        .ok_or_else(|| "stem energy window count overflowed".to_string())?
+        / window_frames as u64;
+    let max_windows = usize::try_from(max_windows)
+        .map_err(|_| "stem energy window count overflowed".to_string())?;
+    let mut windows = SensitiveEnergyWindows(Vec::new());
+    let mut channel_index = 0_usize;
+    let mut frame_sum = 0.0_f64;
+    let mut frames_read = 0_u64;
+    let mut window_frames_read = 0_usize;
+    let mut window_sum_sq = 0.0_f64;
 
-    let mut windows = Vec::new();
-    for (i, chunk) in mono.chunks(window_samples).enumerate() {
-        let sum_sq: f64 = chunk.iter().map(|&s| (s as f64) * (s as f64)).sum();
-        let rms = (sum_sq / chunk.len() as f64).sqrt() as f32;
-        let start = i as f64 * window_secs;
-        windows.push((start, rms));
+    for sample in samples {
+        let sample = normalize(sample.map_err(|error| error.to_string())?);
+        if !sample.is_finite() {
+            return Err("non-finite WAV sample rejected during stem analysis".into());
+        }
+        frame_sum += sample as f64;
+        channel_index += 1;
+        if channel_index < channels {
+            continue;
+        }
+
+        frames_read = frames_read
+            .checked_add(1)
+            .ok_or_else(|| "stem frame count overflowed".to_string())?;
+        check_diarization_source_frame(frames_read, sample_rate)
+            .map_err(|error| error.to_string())?;
+        if frames_read & 0x0fff == 0 {
+            budget.check_deadline().map_err(|error| error.to_string())?;
+            cancellation.check().map_err(|error| error.to_string())?;
+        }
+
+        let mono = (frame_sum / channels as f64) as f32;
+        if !mono.is_finite() {
+            return Err("non-finite mono sample rejected during stem analysis".into());
+        }
+        window_sum_sq += mono as f64 * mono as f64;
+        window_frames_read += 1;
+        channel_index = 0;
+        frame_sum = 0.0;
+
+        if window_frames_read == window_frames {
+            push_energy_window(
+                &mut windows.0,
+                max_windows,
+                window_secs,
+                window_sum_sq,
+                window_frames_read,
+            )?;
+            window_frames_read = 0;
+            window_sum_sq = 0.0;
+        }
     }
 
+    if channel_index != 0 {
+        return Err("WAV ended inside an interleaved frame".into());
+    }
+    if window_frames_read > 0 {
+        push_energy_window(
+            &mut windows.0,
+            max_windows,
+            window_secs,
+            window_sum_sq,
+            window_frames_read,
+        )?;
+    }
+    cancellation.check().map_err(|error| error.to_string())?;
     Ok(windows)
+}
+
+fn push_energy_window(
+    windows: &mut Vec<EnergyWindow>,
+    max_windows: usize,
+    window_secs: f64,
+    sum_sq: f64,
+    frame_count: usize,
+) -> Result<(), String> {
+    if windows.len() >= max_windows {
+        return Err("stem energy window budget exceeded".into());
+    }
+    if windows.len() == windows.capacity() {
+        let remaining = max_windows - windows.len();
+        windows
+            .try_reserve(remaining.min(1024))
+            .map_err(|_| "stem energy window allocation failed".to_string())?;
+    }
+    let rms = (sum_sq / frame_count as f64).sqrt() as f32;
+    if !rms.is_finite() {
+        return Err("non-finite stem RMS rejected".into());
+    }
+    windows.push((windows.len() as f64 * window_secs, rms));
+    Ok(())
 }
 
 fn read_stem_energy_windows(
     stems: &StemPaths,
     window_secs: f64,
-) -> Result<StemEnergyWindows, String> {
-    let voice_energy = compute_energy_windows(&stems.voice, window_secs)
+    cancellation: &DiarizationCancellation,
+) -> Result<(SensitiveEnergyWindows, SensitiveEnergyWindows), String> {
+    let voice_energy = compute_energy_windows(&stems.voice, window_secs, cancellation)
         .map_err(|error| format!("failed to read voice stem: {error}"))?;
-    let system_energy = compute_energy_windows(&stems.system, window_secs)
+    let system_energy = compute_energy_windows(&stems.system, window_secs, cancellation)
         .map_err(|error| format!("failed to read system stem: {error}"))?;
     Ok((voice_energy, system_energy))
 }
@@ -1056,9 +1721,31 @@ fn diarization_from_energy_windows(
 /// Compares energy levels between voice and system stems per time window,
 /// assigning "SPEAKER_0" (you) or "SPEAKER_1" (remote) to each window.
 pub fn diarize_from_stems(stems: &StemPaths, config: &Config) -> Option<DiarizationResult> {
+    let stems = stems.clone();
+    let config = config.clone();
+    match run_bounded_diarization_worker(DIARIZATION_WORKER_DEADLINE, move |cancellation| {
+        diarize_from_stems_inner(&stems, &config, &cancellation)
+    }) {
+        Ok(result) => result,
+        Err(error) => {
+            tracing::warn!(?error, "bounded stem diarization worker failed");
+            None
+        }
+    }
+}
+
+fn diarize_from_stems_inner(
+    stems: &StemPaths,
+    config: &Config,
+    cancellation: &DiarizationCancellation,
+) -> Option<DiarizationResult> {
     let window_secs = 1.0; // 1-second energy windows
 
-    let (voice_energy, system_energy) = match read_stem_energy_windows(stems, window_secs) {
+    let (voice_energy, system_energy) = match read_stem_energy_windows(
+        stems,
+        window_secs,
+        cancellation,
+    ) {
         Ok(energies) => energies,
         Err(error) => {
             tracing::warn!(error = %error, "failed to read source-aware stems, falling back to ML diarization");
@@ -1068,8 +1755,8 @@ pub fn diarize_from_stems(stems: &StemPaths, config: &Config) -> Option<Diarizat
 
     let stem_correlation_threshold = config.diarization.stem_correlation_threshold;
     let Some(result) = diarization_from_energy_windows(
-        &voice_energy,
-        &system_energy,
+        voice_energy.as_slice(),
+        system_energy.as_slice(),
         window_secs,
         stem_correlation_threshold,
     ) else {
@@ -1113,50 +1800,23 @@ fn run_diarization_engine(
 ) -> Option<DiarizationResult> {
     tracing::info!(
         engine = %resolved_engine,
-        file = %audio_path.display(),
+        file = %crate::pipeline::private_audio_diagnostic_label(audio_path),
         "running diarization"
     );
 
-    // Pre-process: resample to 16kHz mono via ffmpeg if available.
-    // pyannote-rs/symphonia can struggle with 44.1kHz F32 WAVs from live capture.
-    // This matches how transcribe.rs preprocesses audio for whisper.
-    let (effective_path, temp_file) = preprocess_audio(audio_path);
-
-    // Run diarization in a separate thread so we can detect panics and
-    // keep the main pipeline from getting stuck on ONNX inference issues.
-    let effective_path_owned = effective_path.clone();
+    // Run diarization in a single leased worker. A timed-out ONNX call cannot
+    // be forcibly cancelled safely, so its lease stays active until it really
+    // exits; callers fail closed instead of accumulating detached workers.
+    let source_path = audio_path.to_path_buf();
     #[allow(unused_variables)] // config_clone is used only when the diarize feature is enabled
     let config_clone = config.clone();
     let engine_owned = resolved_engine.to_string();
-    let handle = std::thread::spawn(move || -> Result<DiarizationResult, String> {
-        let result = match engine_owned.as_str() {
-            #[cfg(feature = "diarize")]
-            "pyannote-rs" => diarize_with_pyannote_rs(&effective_path_owned, &config_clone),
-            #[cfg(not(feature = "diarize"))]
-            "pyannote-rs" => {
-                Err("pyannote-rs engine requires the 'diarize' feature. Rebuild with: cargo build --features diarize".into())
-            }
-            "pyannote" => diarize_with_pyannote(&effective_path_owned),
-            other => Err(format!("unknown diarization engine: {}", other).into()),
-        };
-        result.map_err(|e| e.to_string())
+    let result = run_bounded_diarization_worker(DIARIZATION_WORKER_DEADLINE, move |cancellation| {
+        run_diarization_engine_inner(&source_path, &config_clone, &engine_owned, &cancellation)
     });
 
-    let result = match handle.join() {
-        Ok(r) => Some(r),
-        Err(_) => {
-            tracing::error!("diarization thread panicked");
-            None
-        }
-    };
-
-    // Clean up preprocessed temp file
-    if let Some(ref temp) = temp_file {
-        std::fs::remove_file(temp).ok();
-    }
-
     match result {
-        Some(Ok(result)) => {
+        Ok(Ok(result)) => {
             tracing::info!(
                 speakers = result.num_speakers,
                 segments = result.segments.len(),
@@ -1164,12 +1824,54 @@ fn run_diarization_engine(
             );
             Some(result)
         }
-        Some(Err(e)) => {
+        Ok(Err(e)) => {
             tracing::error!(error = %e, "diarization failed, continuing without speaker labels");
             None
         }
-        None => None,
+        Err(DiarizationWorkerError::Busy) => {
+            tracing::error!("diarization skipped because a previous worker is still active");
+            None
+        }
+        Err(DiarizationWorkerError::TimedOut) => {
+            tracing::error!("diarization exceeded its bounded deadline; worker remains isolated");
+            None
+        }
+        Err(DiarizationWorkerError::Panicked) => {
+            tracing::error!("diarization thread panicked");
+            None
+        }
     }
+}
+
+#[allow(unused_variables)] // config is consumed only by feature-gated native inference.
+fn run_diarization_engine_inner(
+    source_path: &Path,
+    config: &Config,
+    engine: &str,
+    cancellation: &DiarizationCancellation,
+) -> Result<DiarizationResult, String> {
+    // Preprocessing belongs to the same lease and deadline as decode and
+    // inference. Keep its private capability alive through the entire worker,
+    // including after a caller-side timeout.
+    let preprocessed = if engine == "pyannote" {
+        Ok((source_path.to_path_buf(), None))
+    } else {
+        preprocess_audio(source_path, cancellation)
+    };
+    let (effective_path, _temp_file) =
+        preprocessed.map_err(|error| format!("diarization preprocessing failed: {error}"))?;
+    cancellation.check().map_err(|error| error.to_string())?;
+    let result = match engine {
+        #[cfg(feature = "diarize")]
+        "pyannote-rs" => diarize_with_pyannote_rs(&effective_path, config, cancellation),
+        #[cfg(not(feature = "diarize"))]
+        "pyannote-rs" => {
+            Err("pyannote-rs engine requires the 'diarize' feature. Rebuild with: cargo build --features diarize".into())
+        }
+        "pyannote" => diarize_with_pyannote(&effective_path, cancellation),
+        other => Err(format!("unknown diarization engine: {other}").into()),
+    };
+    result.map_err(|error| error.to_string())
 }
 
 fn remap_diarization_labels(
@@ -1330,13 +2032,78 @@ fn has_meaningful_system_stem_labels(result: &DiarizationResult) -> bool {
     meaningful_speaker_count_excluding(result, &["SPEAKER_0", "SPEAKER_1"]) >= 1
 }
 
-fn diarize_from_source_aware_stems(
+fn run_bounded_source_aware_attempt(
+    audio_path: &Path,
+    config: &Config,
+    resolved_engine: Option<&str>,
+) -> BoundedSourceAwareAttempt {
+    let audio_path = audio_path.to_path_buf();
+    let config = config.clone();
+    let resolved_engine = resolved_engine.map(str::to_owned);
+    match run_bounded_diarization_worker(DIARIZATION_WORKER_DEADLINE, move |cancellation| {
+        match discover_stem_plan_with_cancellation(&audio_path, &cancellation) {
+            Some(SourceAwareDiarizationPlan::FullStems(stems)) => {
+                let result = diarize_from_source_aware_stems_inner(
+                    &stems,
+                    &config,
+                    resolved_engine.as_deref(),
+                    &cancellation,
+                );
+                BoundedSourceAwareAttempt::FullStems { stems, result }
+            }
+            Some(SourceAwareDiarizationPlan::SystemStemOnly(system_stem)) => {
+                let result = resolved_engine.as_deref().and_then(|engine| {
+                    run_diarization_engine_inner(
+                        &system_stem,
+                        &config,
+                        engine,
+                        &cancellation,
+                    )
+                    .map_err(|error| {
+                        tracing::warn!(
+                            error = %error,
+                            system_stem = %system_stem.display(),
+                            "system-stem-only diarization failed inside bounded source-aware worker"
+                        );
+                    })
+                    .ok()
+                });
+                BoundedSourceAwareAttempt::SystemStemOnly {
+                    system_stem,
+                    result,
+                }
+            }
+            Some(SourceAwareDiarizationPlan::SilentSystemStem(stems)) => {
+                let observed_signal =
+                    stem_probe_observed_signal_with_cancellation(&stems.system, &cancellation);
+                BoundedSourceAwareAttempt::SilentSystemStem {
+                    stems,
+                    observed_signal,
+                }
+            }
+            None => BoundedSourceAwareAttempt::NoPlan,
+        }
+    }) {
+        Ok(attempt) => attempt,
+        Err(error) => {
+            tracing::warn!(?error, "bounded source-aware diarization worker failed");
+            BoundedSourceAwareAttempt::NoPlan
+        }
+    }
+}
+
+fn diarize_from_source_aware_stems_inner(
     stems: &StemPaths,
     config: &Config,
     resolved_engine: Option<&str>,
+    cancellation: &DiarizationCancellation,
 ) -> Option<DiarizationResult> {
     let window_secs = 1.0;
-    let (voice_energy, system_energy) = match read_stem_energy_windows(stems, window_secs) {
+    let (voice_energy, system_energy) = match read_stem_energy_windows(
+        stems,
+        window_secs,
+        cancellation,
+    ) {
         Ok(energies) => energies,
         Err(error) => {
             tracing::warn!(error = %error, "failed to read source-aware stems, falling back to ML diarization");
@@ -1345,8 +2112,8 @@ fn diarize_from_source_aware_stems(
     };
 
     let stem_result = diarization_from_energy_windows(
-        &voice_energy,
-        &system_energy,
+        voice_energy.as_slice(),
+        system_energy.as_slice(),
         window_secs,
         config.diarization.stem_correlation_threshold,
     )?;
@@ -1356,20 +2123,29 @@ fn diarize_from_source_aware_stems(
             .segments
             .iter()
             .all(|segment| segment.speaker == "SPEAKER_0");
-    let non_collapsed_stem_result =
-        diarization_from_energy_windows(&voice_energy, &system_energy, window_secs, 2.0);
+    let non_collapsed_stem_result = diarization_from_energy_windows(
+        voice_energy.as_slice(),
+        system_energy.as_slice(),
+        window_secs,
+        2.0,
+    );
 
     let Some(resolved_engine) = resolved_engine else {
         return Some(stem_result);
     };
 
-    let Some(remote_result) = run_diarization_engine(&stems.system, config, resolved_engine) else {
-        tracing::warn!(
-            system_stem = %stems.system.display(),
-            "system-stem diarization failed, keeping stem-only attribution"
-        );
-        return Some(stem_result);
-    };
+    let remote_result =
+        match run_diarization_engine_inner(&stems.system, config, resolved_engine, cancellation) {
+            Ok(result) => result,
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    system_stem = %stems.system.display(),
+                    "system-stem diarization failed, keeping stem-only attribution"
+                );
+                return Some(stem_result);
+            }
+        };
 
     let remapped_remote = remap_diarization_labels(&remote_result, 2);
     if !has_meaningful_remote_structure(&remapped_remote) {
@@ -1405,6 +2181,7 @@ fn diarize_from_source_aware_stems(
     Some(merged)
 }
 
+#[cfg(test)]
 fn diarize_system_stem_with_full_audio_fallback(
     system_stem: &Path,
     audio_path: &Path,
@@ -1422,15 +2199,15 @@ fn diarize_system_stem_with_full_audio_fallback(
     // recovery selected a safe stem (#463).
     if system_stem == audio_path {
         tracing::warn!(
-            system_stem = %system_stem.display(),
+            system_stem = %crate::pipeline::private_audio_diagnostic_label(system_stem),
             "system-stem-only diarization failed; keeping the transcript unlabeled"
         );
         return None;
     }
 
     tracing::warn!(
-        system_stem = %system_stem.display(),
-        audio = %audio_path.display(),
+        system_stem = %crate::pipeline::private_audio_diagnostic_label(system_stem),
+        audio = %crate::pipeline::private_audio_diagnostic_label(audio_path),
         "system-stem-only diarization failed, falling back to full-audio ML diarization"
     );
     run_engine(audio_path, config, resolved_engine)
@@ -1535,21 +2312,28 @@ fn dominant_ratio_degraded(result: &DiarizationResult) -> bool {
         && result.voice_dominant_ratio > result.system_dominant_ratio
 }
 
+#[cfg(test)]
 fn silent_system_stem_degraded_capture(system_stem: &Path) -> DegradedCapture {
+    silent_system_stem_degraded_capture_from_signal(stem_probe_observed_signal(system_stem))
+}
+
+fn silent_system_stem_degraded_capture_from_signal(
+    observed_signal: ObservedSignal,
+) -> DegradedCapture {
     DegradedCapture {
         failure_kind: FailureKind::Silent,
         capture_backend: "cpal".into(),
         capture_source: CaptureSource::System,
         voice_active_ratio: Some(1.0),
         system_active_ratio: Some(0.0),
-        observed_signal: stem_probe_observed_signal(system_stem),
+        observed_signal,
         diagnostic_confidence: DiagnosticConfidence::Inferred,
     }
 }
 
 fn degraded_capture_for_silent_system_stem(
     audio_path: &Path,
-    system_stem: &Path,
+    observed_signal: ObservedSignal,
     ctx: DiarizationContext<'_>,
 ) -> Option<DegradedCapture> {
     if ctx.purpose != DiarizationPurpose::PrimaryMeeting {
@@ -1564,7 +2348,9 @@ fn degraded_capture_for_silent_system_stem(
         return None;
     }
 
-    Some(silent_system_stem_degraded_capture(system_stem))
+    Some(silent_system_stem_degraded_capture_from_signal(
+        observed_signal,
+    ))
 }
 
 fn degraded_capture_for_primary_result(
@@ -1685,6 +2471,10 @@ pub fn diarize_with_context(
     config: &Config,
     ctx: DiarizationContext<'_>,
 ) -> DiarizationOutcome {
+    if crate::pipeline::is_reserved_private_audio_path(audio_path) {
+        tracing::warn!("private audio token rejected by ordinary diarization entry point");
+        return DiarizationOutcome::NotConfigured;
+    }
     let engine = &config.diarization.engine;
 
     if engine == "none" {
@@ -1693,69 +2483,13 @@ pub fn diarize_with_context(
 
     let resolved_engine = resolve_diarization_engine(config);
 
-    // Check for per-source stems alongside the audio file.
-    // If stems exist, prefer source-aware attribution and opportunistically
-    // refine remote/system windows with ML diarization.
-    if let Some(plan) = discover_stem_plan(audio_path) {
-        match plan {
-            SourceAwareDiarizationPlan::FullStems(stems) => {
-                if let Some(result) =
-                    diarize_from_source_aware_stems(&stems, config, resolved_engine)
-                {
-                    if let Some(reason) =
-                        degraded_capture_for_primary_result(audio_path, &result, ctx)
-                    {
-                        if let Some(recovered) = degraded_voice_stem_ml_fallback(
-                            audio_path,
-                            &stems.voice,
-                            config,
-                            resolved_engine,
-                            &reason,
-                            ctx,
-                        ) {
-                            return DiarizationOutcome::Result(recovered);
-                        }
-                        tracing::warn!(
-                            failure_kind = ?reason.failure_kind,
-                            system_dominant_ratio = result.system_dominant_ratio,
-                            voice_dominant_ratio = result.voice_dominant_ratio,
-                            "source-aware diarization degraded; leaving primary transcript unlabeled"
-                        );
-                        return DiarizationOutcome::Skipped { reason };
-                    }
-                    return DiarizationOutcome::Result(result);
-                }
-                if let Some(resolved_engine) = resolved_engine {
-                    tracing::warn!(
-                        system_stem = %stems.system.display(),
-                        "source-aware stem diarization failed, falling back to system-stem ML diarization"
-                    );
-                    if let Some(result) =
-                        run_diarization_engine(&stems.system, config, resolved_engine)
-                    {
-                        return DiarizationOutcome::Result(result);
-                    }
-                }
-                // Stem attribution failed, fall through to full-audio ML diarization
-                tracing::warn!("source-aware stem diarization failed, falling back to ML engine");
-            }
-            SourceAwareDiarizationPlan::SystemStemOnly(system_stem) => {
-                if let Some(resolved_engine) = resolved_engine {
-                    return match diarize_system_stem_with_full_audio_fallback(
-                        &system_stem,
-                        audio_path,
-                        config,
-                        resolved_engine,
-                        run_diarization_engine,
-                    ) {
-                        Some(result) => DiarizationOutcome::Result(result),
-                        None => DiarizationOutcome::NotConfigured,
-                    };
-                }
-            }
-            SourceAwareDiarizationPlan::SilentSystemStem(stems) => {
-                if let Some(reason) =
-                    degraded_capture_for_silent_system_stem(audio_path, &stems.system, ctx)
+    // Stem discovery, complete streaming RMS analysis, and optional system-stem
+    // inference share one lease and deadline. No attacker-sized decode happens
+    // before the bounded worker is active.
+    match run_bounded_source_aware_attempt(audio_path, config, resolved_engine) {
+        BoundedSourceAwareAttempt::FullStems { stems, result } => {
+            if let Some(result) = result {
+                if let Some(reason) = degraded_capture_for_primary_result(audio_path, &result, ctx)
                 {
                     if let Some(recovered) = degraded_voice_stem_ml_fallback(
                         audio_path,
@@ -1769,25 +2503,116 @@ pub fn diarize_with_context(
                     }
                     tracing::warn!(
                         failure_kind = ?reason.failure_kind,
-                        voice = %stems.voice.display(),
-                        system = %stems.system.display(),
-                        "system stem is silent; leaving primary transcript unlabeled"
+                        system_dominant_ratio = result.system_dominant_ratio,
+                        voice_dominant_ratio = result.voice_dominant_ratio,
+                        "source-aware diarization degraded; leaving primary transcript unlabeled"
                     );
                     return DiarizationOutcome::Skipped { reason };
                 }
+                return DiarizationOutcome::Result(result);
+            }
+            if let Some(resolved_engine) = resolved_engine {
                 tracing::warn!(
-                    voice = %stems.voice.display(),
-                    system = %stems.system.display(),
-                    "system stem is silent outside primary guard; skipping source-aware diarization"
+                    system_stem = %stems.system.display(),
+                    "source-aware stem diarization failed, falling back to system-stem ML diarization"
                 );
+                if let Some(result) = run_diarization_engine(&stems.system, config, resolved_engine)
+                {
+                    return DiarizationOutcome::Result(result);
+                }
+            }
+            // Stem attribution failed, fall through to full-audio ML diarization.
+            tracing::warn!("source-aware stem diarization failed, falling back to ML engine");
+        }
+        BoundedSourceAwareAttempt::SystemStemOnly {
+            system_stem,
+            result,
+        } => {
+            if let Some(result) = result {
+                return DiarizationOutcome::Result(result);
+            }
+            if let Some(resolved_engine) = resolved_engine {
+                if system_stem == audio_path {
+                    tracing::warn!(
+                        system_stem = %crate::pipeline::private_audio_diagnostic_label(&system_stem),
+                        "system-stem-only diarization failed; keeping the transcript unlabeled"
+                    );
+                    return DiarizationOutcome::NotConfigured;
+                }
+                tracing::warn!(
+                    system_stem = %crate::pipeline::private_audio_diagnostic_label(&system_stem),
+                    audio = %crate::pipeline::private_audio_diagnostic_label(audio_path),
+                    "system-stem-only diarization failed, falling back to full-audio ML diarization"
+                );
+                return match run_diarization_engine(audio_path, config, resolved_engine) {
+                    Some(result) => DiarizationOutcome::Result(result),
+                    None => DiarizationOutcome::NotConfigured,
+                };
             }
         }
+        BoundedSourceAwareAttempt::SilentSystemStem {
+            stems,
+            observed_signal,
+        } => {
+            if let Some(reason) =
+                degraded_capture_for_silent_system_stem(audio_path, observed_signal, ctx)
+            {
+                if let Some(recovered) = degraded_voice_stem_ml_fallback(
+                    audio_path,
+                    &stems.voice,
+                    config,
+                    resolved_engine,
+                    &reason,
+                    ctx,
+                ) {
+                    return DiarizationOutcome::Result(recovered);
+                }
+                tracing::warn!(
+                    failure_kind = ?reason.failure_kind,
+                    voice = %stems.voice.display(),
+                    system = %stems.system.display(),
+                    "system stem is silent; leaving primary transcript unlabeled"
+                );
+                return DiarizationOutcome::Skipped { reason };
+            }
+            tracing::warn!(
+                voice = %stems.voice.display(),
+                system = %stems.system.display(),
+                "system stem is silent outside primary guard; skipping source-aware diarization"
+            );
+        }
+        BoundedSourceAwareAttempt::NoPlan => {}
     }
 
     let Some(resolved_engine) = resolved_engine else {
         return DiarizationOutcome::NotConfigured;
     };
     match run_diarization_engine(audio_path, config, resolved_engine) {
+        Some(result) => DiarizationOutcome::Result(result),
+        None => DiarizationOutcome::NotConfigured,
+    }
+}
+
+/// Diarize an exact proof/descriptor-bound audio capability without looking
+/// for sibling stems in the descriptor-path namespace. The live capability is
+/// reverified here and supplies its own opaque processing token; callers
+/// cannot assert proof-bound authority by passing an arbitrary pathname.
+pub(crate) fn diarize_proof_bound_audio(
+    input: &crate::pipeline::AuthorizedProcessAudioInput,
+    config: &Config,
+    _ctx: DiarizationContext<'_>,
+) -> DiarizationOutcome {
+    if let Err(error) = input.verify_pipeline_binding() {
+        tracing::warn!(error = %error, "authorized diarization capability failed revalidation");
+        return DiarizationOutcome::NotConfigured;
+    }
+    if config.diarization.engine == "none" {
+        return DiarizationOutcome::NotConfigured;
+    }
+    let Some(resolved_engine) = resolve_diarization_engine(config) else {
+        return DiarizationOutcome::NotConfigured;
+    };
+    match run_diarization_engine(input.processing_path(), config, resolved_engine) {
         Some(result) => DiarizationOutcome::Result(result),
         None => DiarizationOutcome::NotConfigured,
     }
@@ -2031,12 +2856,96 @@ fn parse_timestamp(ts: &str) -> Option<f64> {
 // ── Native diarization via pyannote-rs ──────────────────────
 
 #[cfg(feature = "diarize")]
+struct OrtInferenceDeadline {
+    options: std::sync::Arc<ort::session::run_options::RunOptions>,
+    finished: Option<std::sync::mpsc::SyncSender<()>>,
+}
+
+#[cfg(feature = "diarize")]
+impl OrtInferenceDeadline {
+    fn new(cancellation: DiarizationCancellation) -> Result<Self, Box<dyn std::error::Error>> {
+        let options = std::sync::Arc::new(ort::session::run_options::RunOptions::new()?);
+        let watchdog_options = std::sync::Arc::clone(&options);
+        let (finished, receiver) = std::sync::mpsc::sync_channel(1);
+        std::thread::spawn(move || loop {
+            let wait = cancellation.remaining().min(Duration::from_millis(100));
+            match receiver.recv_timeout(wait) {
+                Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    if cancellation.is_cancelled() {
+                        let _ = watchdog_options.terminate();
+                        break;
+                    }
+                }
+            }
+        });
+        Ok(Self {
+            options,
+            finished: Some(finished),
+        })
+    }
+
+    fn options(&self) -> &ort::session::run_options::RunOptions {
+        &self.options
+    }
+}
+
+#[cfg(feature = "diarize")]
+impl Drop for OrtInferenceDeadline {
+    fn drop(&mut self) {
+        if let Some(finished) = self.finished.take() {
+            let _ = finished.send(());
+        }
+    }
+}
+
+#[cfg(feature = "diarize")]
+struct BoundedEmbeddingExtractor {
+    session: ort::session::Session,
+}
+
+#[cfg(feature = "diarize")]
+impl BoundedEmbeddingExtractor {
+    fn new(model_path: &Path) -> Result<Self, Box<dyn std::error::Error>> {
+        use ort::session::builder::GraphOptimizationLevel;
+        let session = ort::session::Session::builder()?
+            .with_optimization_level(GraphOptimizationLevel::Level3)?
+            .with_intra_threads(1)?
+            .with_inter_threads(1)?
+            .commit_from_file(model_path)?;
+        Ok(Self { session })
+    }
+
+    fn compute(
+        &mut self,
+        samples: &[i16],
+        options: &ort::session::run_options::RunOptions,
+    ) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
+        use ndarray::Axis;
+        use ort::value::Tensor;
+
+        let mut samples_f32 = zeroize::Zeroizing::new(vec![0.0_f32; samples.len()]);
+        knf_rs::convert_integer_to_float_audio(samples, &mut samples_f32);
+        let features = knf_rs::compute_fbank(&samples_f32)?.insert_axis(Axis(0));
+        let outputs = self.session.run_with_options(
+            ort::inputs!["feats" => Tensor::from_array(features)?],
+            options,
+        )?;
+        let embedding = outputs
+            .get("embs")
+            .ok_or("embedding model output is missing")?
+            .try_extract_tensor::<f32>()?;
+        Ok(embedding.1.to_vec())
+    }
+}
+
+#[cfg(feature = "diarize")]
 fn diarize_with_pyannote_rs(
     audio_path: &Path,
     config: &Config,
+    cancellation: &DiarizationCancellation,
 ) -> Result<DiarizationResult, Box<dyn std::error::Error>> {
-    use pyannote_rs::EmbeddingExtractor;
-
+    cancellation.check()?;
     let model_dir = &config.diarization.model_path;
     let seg_model = model_dir.join(SEGMENTATION_MODEL);
     let emb_info = embedding_model_for_config(config);
@@ -2057,11 +2966,13 @@ fn diarize_with_pyannote_rs(
         .into());
     }
 
-    let (mut f32_samples, mut i16_samples, sample_rate) = load_audio(audio_path)?;
+    let inference_deadline = OrtInferenceDeadline::new(cancellation.clone())?;
+    let (f32_samples, sample_rate) = load_audio(audio_path, cancellation)?;
+    let mut f32_samples = zeroize::Zeroizing::new(f32_samples);
+    cancellation.check()?;
 
     tracing::info!(
         f32_samples = f32_samples.len(),
-        i16_samples = i16_samples.len(),
         sample_rate = sample_rate,
         "audio loaded for diarization"
     );
@@ -2070,7 +2981,12 @@ fn diarize_with_pyannote_rs(
     // normalized f32 input. We bypass pyannote_rs::get_segments because it
     // casts i16 to f32 without dividing by 32768, feeding the model values
     // in [-32768, 32767] when it expects [-1.0, 1.0].
-    let mut speech_segments = segment_speech(&f32_samples, sample_rate, &seg_model)?;
+    let mut speech_segments = segment_speech(
+        &f32_samples,
+        sample_rate,
+        &seg_model,
+        inference_deadline.options(),
+    )?;
 
     // If the model found no speech, the audio may be too quiet (e.g. MacBook
     // built-in mic with peaks as low as 0.0004). Normalize to a usable level
@@ -2086,15 +3002,16 @@ fn diarize_with_pyannote_rs(
                 gain = format!("{:.1}x", gain),
                 "no speech detected — retrying with normalized audio"
             );
-            for s in &mut f32_samples {
+            for s in f32_samples.iter_mut() {
                 *s = (*s * gain).clamp(-1.0, 1.0);
             }
-            i16_samples = f32_samples
-                .iter()
-                .map(|&s| (s.clamp(-1.0, 1.0) * 32767.0) as i16)
-                .collect();
-
-            speech_segments = segment_speech(&f32_samples, sample_rate, &seg_model)?;
+            cancellation.check()?;
+            speech_segments = segment_speech(
+                &f32_samples,
+                sample_rate,
+                &seg_model,
+                inference_deadline.options(),
+            )?;
         }
     }
 
@@ -2110,7 +3027,7 @@ fn diarize_with_pyannote_rs(
     // only stores the first segment's embedding per speaker, which causes
     // over-segmentation (one person → multiple speakers) as the reference
     // embedding becomes unrepresentative over time.
-    let mut extractor = EmbeddingExtractor::new(&emb_model)?;
+    let mut extractor = BoundedEmbeddingExtractor::new(&emb_model)?;
     let threshold = config.diarization.threshold;
 
     // Merge adjacent speech segments that are separated by short gaps.
@@ -2134,7 +3051,17 @@ fn diarize_with_pyannote_rs(
     let min_embed_samples = (sample_rate as f64 * 1.5) as usize;
 
     for seg in &speech_segments {
-        let seg_i16 = &i16_samples[seg.start_sample..seg.end_sample];
+        cancellation.check()?;
+        let embed_end = seg.end_sample.min(
+            seg.start_sample
+                .saturating_add(sample_rate as usize * MAX_EMBEDDING_SECONDS),
+        );
+        let seg_i16 = zeroize::Zeroizing::new(
+            f32_samples[seg.start_sample..embed_end]
+                .iter()
+                .map(|&sample| (sample.clamp(-1.0, 1.0) * 32767.0) as i16)
+                .collect::<Vec<_>>(),
+        );
 
         // Skip too-short segments for clustering; they still appear in the
         // transcript but inherit the nearest speaker label.
@@ -2143,7 +3070,7 @@ fn diarize_with_pyannote_rs(
             continue;
         }
 
-        let raw_embedding: Vec<f32> = extractor.compute(seg_i16)?.collect();
+        let raw_embedding = extractor.compute(seg_i16.as_slice(), inference_deadline.options())?;
 
         // L2-normalize so every segment contributes equally to the
         // average direction, regardless of the model's output magnitude.
@@ -2172,6 +3099,9 @@ fn diarize_with_pyannote_rs(
                 id
             }
             None => {
+                if speaker_templates.len() >= MAX_SPEAKER_TEMPLATES {
+                    return Err("diarization speaker-template budget exceeded".into());
+                }
                 let id = speaker_templates.len();
                 speaker_templates.push((embedding, 1));
                 id
@@ -2414,6 +3344,7 @@ fn segment_speech(
     samples: &[f32],
     sample_rate: u32,
     model_path: &Path,
+    run_options: &ort::session::run_options::RunOptions,
 ) -> Result<Vec<SpeechSegment>, Box<dyn std::error::Error>> {
     use ndarray::{Array1, ArrayViewD, Axis, IxDyn};
     use ort::session::builder::GraphOptimizationLevel;
@@ -2436,21 +3367,22 @@ fn segment_speech(
     let frame_start: usize = 721;
     let window_size = (sample_rate as usize) * 10;
 
-    // Pad to fill the last window
-    let mut padded = samples.to_vec();
-    let remainder = padded.len() % window_size;
-    if remainder != 0 {
-        padded.extend(vec![0.0f32; window_size - remainder]);
-    }
-
     let mut result = Vec::new();
     let mut is_speeching = false;
     let mut offset = frame_start;
     let mut start_offset = 0usize;
+    let mut final_window = zeroize::Zeroizing::new(vec![0.0f32; window_size]);
 
-    for window_start in (0..padded.len()).step_by(window_size) {
-        let window_end = (window_start + window_size).min(padded.len());
-        let window = &padded[window_start..window_end];
+    for window_start in (0..samples.len()).step_by(window_size) {
+        let window_end = (window_start + window_size).min(samples.len());
+        let window = if window_end - window_start == window_size {
+            &samples[window_start..window_end]
+        } else {
+            final_window.zeroize();
+            final_window[..window_end - window_start]
+                .copy_from_slice(&samples[window_start..window_end]);
+            final_window.as_slice()
+        };
 
         let array = Array1::from_iter(window.iter().copied());
         let array = array.view().insert_axis(Axis(0)).insert_axis(Axis(1));
@@ -2458,7 +3390,7 @@ fn segment_speech(
         let inputs = ort::inputs![ort::value::TensorRef::from_array_view(array.into_dyn())
             .map_err(|e| format!("tensor prep: {e:?}"))?];
 
-        let ort_outs = session.run(inputs)?;
+        let ort_outs = session.run_with_options(inputs, run_options)?;
         let ort_out = ort_outs
             .get("output")
             .ok_or("segmentation model missing 'output' tensor")?;
@@ -2496,6 +3428,9 @@ fn segment_speech(
                         start_sample: si,
                         end_sample: ei,
                     });
+                    if result.len() > MAX_DIARIZATION_SEGMENTS {
+                        return Err("diarization segment budget exceeded".into());
+                    }
                     is_speeching = false;
                 }
                 offset += frame_size;
@@ -2515,92 +3450,120 @@ fn segment_speech(
             start_sample: si,
             end_sample: ei,
         });
+        if result.len() > MAX_DIARIZATION_SEGMENTS {
+            return Err("diarization segment budget exceeded".into());
+        }
     }
 
     Ok(result)
 }
 
-/// Load audio file as both f32 (for segmentation) and i16 (for embedding extraction).
-///
-/// Returns `(f32_samples, i16_samples, sample_rate)` where f32 is normalised
-/// to [-1.0, 1.0] and i16 mirrors the same waveform in PCM scale.
 #[cfg(feature = "diarize")]
-#[allow(clippy::type_complexity)]
-fn load_audio(audio_path: &Path) -> Result<(Vec<f32>, Vec<i16>, u32), Box<dyn std::error::Error>> {
-    use symphonia::core::audio::SampleBuffer;
-    use symphonia::core::codecs::DecoderOptions;
-    use symphonia::core::formats::FormatOptions;
-    use symphonia::core::io::MediaSourceStream;
-    use symphonia::core::meta::MetadataOptions;
-    use symphonia::core::probe::Hint;
-
-    let file = std::fs::File::open(audio_path)?;
-    let mss = MediaSourceStream::new(Box::new(file), Default::default());
-
-    let mut hint = Hint::new();
-    if let Some(ext) = audio_path.extension().and_then(|e| e.to_str()) {
-        hint.with_extension(ext);
+fn load_wav_audio<R: std::io::Read>(
+    reader: R,
+    cancellation: &DiarizationCancellation,
+) -> Result<(Vec<f32>, u32), Box<dyn std::error::Error>> {
+    let reader = hound::WavReader::new(reader)?;
+    let spec = reader.spec();
+    let sample_rate = spec.sample_rate;
+    let channels = usize::from(spec.channels);
+    let budget = crate::audio_budget::AudioWorkBudget::new();
+    budget.validate_stream(sample_rate, channels)?;
+    if spec.bits_per_sample == 0 || spec.bits_per_sample > 32 {
+        return Err("WAV bit depth exceeds the diarization resource budget".into());
     }
-
-    let probed = symphonia::default::get_probe().format(
-        &hint,
-        mss,
-        &FormatOptions::default(),
-        &MetadataOptions::default(),
+    let max_source_frames = max_diarization_source_frames(sample_rate)?;
+    let mut resampler = crate::audio_budget::StreamingMonoResampler::new(
+        sample_rate,
+        crate::audio_budget::CANONICAL_SAMPLE_RATE,
+        budget,
+        MAX_DIARIZATION_SAMPLES,
     )?;
-
-    let mut format = probed.format;
-
-    let track = format.default_track().ok_or("no audio track found")?;
-    let track_id = track.id;
-    let sample_rate = track.codec_params.sample_rate.ok_or("no sample rate")?;
-    let channels = track.codec_params.channels.map(|c| c.count()).unwrap_or(1);
-
-    let mut decoder =
-        symphonia::default::get_codecs().make(&track.codec_params, &DecoderOptions::default())?;
-
-    let mut all_samples: Vec<f32> = Vec::new();
-
-    loop {
-        let packet = match format.next_packet() {
-            Ok(p) => p,
-            Err(symphonia::core::errors::Error::IoError(ref e))
-                if e.kind() == std::io::ErrorKind::UnexpectedEof =>
-            {
-                break;
-            }
-            Err(e) => return Err(e.into()),
-        };
-
-        if packet.track_id() != track_id {
-            continue;
+    let mut channel_index = 0_usize;
+    let mut frame_sum = 0.0_f64;
+    let mut frames_read = 0_u64;
+    let mut accept_sample = |sample: f32| -> Result<(), Box<dyn std::error::Error>> {
+        if !sample.is_finite() {
+            return Err("non-finite WAV sample rejected at diarization decode boundary".into());
         }
-
-        let decoded = decoder.decode(&packet)?;
-        let spec = *decoded.spec();
-        let num_frames = decoded.capacity();
-
-        let mut sample_buf = SampleBuffer::<f32>::new(num_frames as u64, spec);
-        sample_buf.copy_interleaved_ref(decoded);
-
-        let samples = sample_buf.samples();
-
-        if channels > 1 {
-            for chunk in samples.chunks(channels) {
-                let mono: f32 = chunk.iter().sum::<f32>() / channels as f32;
-                all_samples.push(mono);
+        frame_sum += sample as f64;
+        channel_index += 1;
+        if channel_index == channels {
+            frames_read = frames_read
+                .checked_add(1)
+                .ok_or("decoded audio frame count overflowed")?;
+            if frames_read > max_source_frames {
+                return Err("decoded audio exceeds the diarization duration budget".into());
             }
-        } else {
-            all_samples.extend_from_slice(samples);
+            let mono = (frame_sum / channels as f64) as f32;
+            if !mono.is_finite() {
+                return Err(
+                    "non-finite mono sample rejected at diarization decode boundary".into(),
+                );
+            }
+            resampler.push_mono_sample_with_cancel(mono, || cancellation.check())?;
+            channel_index = 0;
+            frame_sum = 0.0;
+        }
+        Ok(())
+    };
+    match spec.sample_format {
+        hound::SampleFormat::Float => {
+            for sample in reader.into_samples::<f32>() {
+                accept_sample(sample?)?;
+            }
+        }
+        hound::SampleFormat::Int => {
+            let max_value = (1_i64 << (spec.bits_per_sample - 1)) as f32;
+            for sample in reader.into_samples::<i32>() {
+                accept_sample(sample? as f32 / max_value)?;
+            }
         }
     }
+    if channel_index != 0 {
+        return Err("WAV ended inside an interleaved frame".into());
+    }
+    if frames_read == 0 {
+        return Err("decoded audio is empty".into());
+    }
+    cancellation.check()?;
+    let mut canonical = zeroize::Zeroizing::new(resampler.finish()?);
+    cancellation.check()?;
+    Ok((
+        std::mem::take(&mut *canonical),
+        crate::audio_budget::CANONICAL_SAMPLE_RATE,
+    ))
+}
 
-    let i16_samples: Vec<i16> = all_samples
-        .iter()
-        .map(|&s| (s.clamp(-1.0, 1.0) * 32767.0) as i16)
-        .collect();
-
-    Ok((all_samples, i16_samples, sample_rate))
+/// Load bounded mono f32 audio for segmentation without an interleaved packet
+/// copy. Per-segment i16 embedding input is derived only when needed so a
+/// second full-length plaintext copy is never retained.
+#[cfg(feature = "diarize")]
+fn load_audio(
+    audio_path: &Path,
+    cancellation: &DiarizationCancellation,
+) -> Result<(Vec<f32>, u32), Box<dyn std::error::Error>> {
+    let extension = audio_path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or_default();
+    match crate::pipeline::authorized_audio_stdin(audio_path)? {
+        Some(reader) => {
+            if !extension.eq_ignore_ascii_case("wav") {
+                return Err(
+                    "authorized private diarization currently supports bounded WAV input only"
+                        .into(),
+                );
+            }
+            load_wav_audio(reader, cancellation)
+        }
+        None if extension.eq_ignore_ascii_case("wav") => {
+            load_wav_audio(std::fs::File::open(audio_path)?, cancellation)
+        }
+        None => Err(
+            "safe diarization preprocessing requires ffmpeg to produce bounded WAV input".into(),
+        ),
+    }
 }
 
 // ── Legacy Python subprocess diarization ────────────────────
@@ -2608,10 +3571,19 @@ fn load_audio(audio_path: &Path) -> Result<(Vec<f32>, Vec<i16>, u32), Box<dyn st
 /// Run pyannote diarization via Python subprocess.
 fn diarize_with_pyannote(
     audio_path: &Path,
+    cancellation: &DiarizationCancellation,
 ) -> Result<DiarizationResult, Box<dyn std::error::Error>> {
-    let python = find_python()?;
+    cancellation.check()?;
+    if crate::pipeline::authorized_audio_stdin(audio_path)?.is_some() {
+        return Err(
+            "legacy Python diarization is unavailable for authorized anonymous audio".into(),
+        );
+    }
+    let python = find_python(cancellation)?;
 
-    // Security: pass audio path as sys.argv[1], never interpolate into source code.
+    // Security: pass the already-named ordinary source as argv and never
+    // interpolate it into source. Authorized anonymous inputs were rejected
+    // above, so this child never creates a named raw-audio staging copy.
     let script = r#"
 import json, sys
 try:
@@ -2631,9 +3603,29 @@ except Exception as e:
     sys.exit(1)
 "#;
 
-    let output = crate::engine_process::command(&python)
-        .args(["-c", script, audio_path.to_str().unwrap_or("")])
-        .output()?;
+    let python_input = audio_path.to_str().unwrap_or("");
+    let mut command = crate::bounded_child::BoundedCommand::new(&python);
+    command.args(["-c", script, python_input]);
+    let remaining = cancellation.remaining();
+    if remaining.is_zero() {
+        return Err("diarization deadline exceeded".into());
+    }
+    let run = crate::bounded_child::run(
+        &mut command,
+        None,
+        crate::bounded_child::StdoutTarget::Capture {
+            max_bytes: 16 * 1024 * 1024,
+        },
+        crate::bounded_child::ChildBudget {
+            wall_clock: remaining,
+            stderr_tail: 256 * 1024,
+        },
+    )?;
+    if run.timed_out {
+        return Err("diarization deadline exceeded during Python inference".into());
+    }
+    cancellation.check()?;
+    let output = run.output;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -2662,14 +3654,41 @@ except Exception as e:
 }
 
 /// Find the Python interpreter.
-fn find_python() -> Result<String, Box<dyn std::error::Error>> {
-    for candidate in &["python3", "python"] {
-        let result = crate::engine_process::command(candidate)
-            .args(["--version"])
-            .output();
-        if let Ok(output) = result {
-            if output.status.success() {
-                return Ok(candidate.to_string());
+fn find_python(
+    cancellation: &DiarizationCancellation,
+) -> Result<String, Box<dyn std::error::Error>> {
+    find_python_with_candidates(
+        cancellation,
+        &["python3".to_string(), "python".to_string()],
+        Duration::from_secs(3),
+    )
+}
+
+fn find_python_with_candidates(
+    cancellation: &DiarizationCancellation,
+    candidates: &[String],
+    per_probe_timeout: Duration,
+) -> Result<String, Box<dyn std::error::Error>> {
+    for candidate in candidates {
+        cancellation.check()?;
+        let remaining = cancellation.remaining().min(per_probe_timeout);
+        if remaining.is_zero() {
+            break;
+        }
+        let mut command = crate::bounded_child::BoundedCommand::new(candidate);
+        command.arg("--version");
+        let run = crate::bounded_child::run(
+            &mut command,
+            None,
+            crate::bounded_child::StdoutTarget::Capture { max_bytes: 4096 },
+            crate::bounded_child::ChildBudget {
+                wall_clock: remaining,
+                stderr_tail: 4096,
+            },
+        );
+        if let Ok(run) = run {
+            if !run.timed_out && run.output.status.success() {
+                return Ok(candidate.clone());
             }
         }
     }
@@ -2679,6 +3698,305 @@ fn find_python() -> Result<String, Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    static DIARIZATION_WORKER_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    static DIARIZATION_WORKER_TEST_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+    #[cfg(unix)]
+    #[test]
+    fn python_probe_bounds_hostile_output_and_wall_clock() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let candidate = dir.path().join("hostile-python");
+        std::fs::write(
+            &candidate,
+            "#!/bin/sh\nwhile :; do printf '0123456789abcdef0123456789abcdef\\n'; done\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&candidate, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let cancellation = DiarizationCancellation::new(Duration::from_secs(2));
+        let started = Instant::now();
+        let result = find_python_with_candidates(
+            &cancellation,
+            &[candidate.to_string_lossy().into_owned()],
+            Duration::from_millis(100),
+        );
+        assert!(result.is_err());
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "hostile Python probe exceeded its bounded retirement window"
+        );
+    }
+
+    #[test]
+    fn timed_out_diarization_worker_retains_the_global_lease_until_exit() {
+        let _serial = DIARIZATION_WORKER_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let result = run_bounded_diarization_worker_with_active(
+            &DIARIZATION_WORKER_TEST_ACTIVE,
+            Duration::from_millis(5),
+            |_| {
+                std::thread::sleep(Duration::from_millis(75));
+                7_u8
+            },
+        );
+        assert_eq!(result, Err(DiarizationWorkerError::TimedOut));
+        assert_eq!(
+            run_bounded_diarization_worker_with_active(
+                &DIARIZATION_WORKER_TEST_ACTIVE,
+                Duration::from_millis(5),
+                |_| 9_u8,
+            ),
+            Err(DiarizationWorkerError::Busy)
+        );
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        while DIARIZATION_WORKER_TEST_ACTIVE.load(Ordering::Acquire)
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::yield_now();
+        }
+        assert_eq!(
+            run_bounded_diarization_worker_with_active(
+                &DIARIZATION_WORKER_TEST_ACTIVE,
+                Duration::from_secs(1),
+                |_| 11_u8,
+            ),
+            Ok(11)
+        );
+    }
+
+    #[test]
+    fn timed_out_worker_receives_cooperative_cancellation() {
+        let _serial = DIARIZATION_WORKER_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let result = run_bounded_diarization_worker_with_active(
+            &DIARIZATION_WORKER_TEST_ACTIVE,
+            Duration::from_millis(5),
+            |cancellation| {
+                while cancellation.check().is_ok() {
+                    std::thread::yield_now();
+                }
+                13_u8
+            },
+        );
+        assert_eq!(result, Err(DiarizationWorkerError::TimedOut));
+
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while DIARIZATION_WORKER_TEST_ACTIVE.load(Ordering::Acquire) && Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        assert_eq!(
+            run_bounded_diarization_worker_with_active(
+                &DIARIZATION_WORKER_TEST_ACTIVE,
+                Duration::from_secs(1),
+                |_| 17_u8,
+            ),
+            Ok(17)
+        );
+    }
+
+    #[test]
+    fn cancelled_deadline_preempts_both_diarization_child_paths() {
+        let cancellation = DiarizationCancellation::new(Duration::ZERO);
+        let synthetic = Path::new("/synthetic/ordinary.wav");
+        let preprocess_error = preprocess_audio(synthetic, &cancellation)
+            .err()
+            .expect("preprocessing must check the shared deadline before child setup");
+        assert!(preprocess_error.contains("deadline exceeded"));
+        let python_error = diarize_with_pyannote(synthetic, &cancellation)
+            .expect_err("legacy Python must check the shared deadline before child setup");
+        assert!(python_error.to_string().contains("deadline exceeded"));
+    }
+
+    #[test]
+    #[cfg(all(
+        feature = "diarize",
+        any(target_os = "linux", target_os = "macos", windows)
+    ))]
+    fn authorized_diarization_input_bypasses_child_preprocessing() {
+        let mut audio =
+            crate::pipeline::PrivateAudioTempFile::new("minutes-diarize-bypass-", ".wav").unwrap();
+        crate::transcribe::write_wav_16k_mono_to_writer(
+            audio.prepare_for_write().unwrap(),
+            &[0.25; 320],
+        )
+        .unwrap();
+        audio.finish_write().unwrap();
+
+        let cancellation = DiarizationCancellation::new(Duration::from_secs(60));
+        let (effective, temporary) = preprocess_audio(audio.as_path(), &cancellation).unwrap();
+        assert_eq!(effective, audio.as_path());
+        assert!(temporary.is_none());
+        let (samples, sample_rate) = load_audio(audio.as_path(), &cancellation).unwrap();
+        assert_eq!(sample_rate, 16_000);
+        assert_eq!(samples.len(), 320);
+    }
+
+    #[test]
+    fn ffmpeg_preprocess_has_no_silent_duration_cutoff() {
+        let command = ffmpeg_preprocess_command(Path::new("ffmpeg"), "meeting.flac");
+        let args: Vec<String> = command
+            .get_args()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect();
+
+        assert_eq!(args.last().map(String::as_str), Some("pipe:1"));
+        assert!(!args.iter().any(|argument| argument == "-t"));
+        assert!(!args.iter().any(|argument| argument == "7200"));
+    }
+
+    #[test]
+    fn ffmpeg_preprocess_stream_builds_parseable_bounded_wav() {
+        let Ok(ffmpeg) = crate::ffmpeg::resolve_ffmpeg() else {
+            eprintln!("skipping: ffmpeg not available");
+            return;
+        };
+        let available = crate::engine_process::command(ffmpeg)
+            .arg("-version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false);
+        if !available {
+            eprintln!("skipping: ffmpeg is not launchable");
+            return;
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("stereo-48k.wav");
+        write_i16_wav(&source, 48_000, 2, 48_000, |frame, channel| {
+            let phase = ((frame + usize::from(channel) * 11) % 200) as i16;
+            (phase - 100) * 120
+        });
+
+        let cancellation = DiarizationCancellation::new(Duration::from_secs(60));
+        let (effective, retained) = preprocess_audio(&source, &cancellation)
+            .expect("real ffmpeg preprocessing must complete");
+        let retained = retained.expect("ffmpeg output must remain capability-owned");
+        assert!(crate::pipeline::is_reserved_private_audio_path(&effective));
+        assert!(
+            !effective.exists(),
+            "preprocessed PCM must have no plaintext path"
+        );
+
+        let reader = crate::pipeline::authorized_audio_stdin(&effective)
+            .unwrap()
+            .expect("preprocessed WAV capability must resolve");
+        let mut wav = hound::WavReader::new(reader)
+            .expect("preprocessed FFmpeg stream must have an exact WAV length");
+        assert_eq!(wav.spec().channels, 1);
+        assert_eq!(wav.spec().sample_rate, 16_000);
+        assert_eq!(wav.spec().bits_per_sample, 16);
+        assert_eq!(wav.duration(), 16_000);
+        let mut samples = 0_u32;
+        for sample in wav.samples::<i16>() {
+            sample.expect("every preprocessed sample must decode");
+            samples += 1;
+        }
+        assert_eq!(samples, 16_000);
+        drop(wav);
+        drop(retained);
+    }
+
+    #[cfg(feature = "diarize")]
+    #[test]
+    fn high_rate_diarization_duration_budget_is_rate_aware_without_allocation() {
+        for sample_rate in [44_100_u32, 48_000_u32] {
+            let source_limit = max_diarization_source_frames(sample_rate).unwrap();
+            assert_eq!(source_limit, sample_rate as u64 * MAX_DIARIZATION_SECONDS);
+            assert!(check_diarization_source_frame(source_limit, sample_rate).is_ok());
+            assert!(check_diarization_source_frame(source_limit + 1, sample_rate).is_err());
+
+            let canonical_limit = (source_limit as u128 * 16_000_u128) / sample_rate as u128;
+            assert_eq!(canonical_limit, MAX_DIARIZATION_SAMPLES as u128);
+        }
+    }
+
+    #[cfg(feature = "diarize")]
+    #[test]
+    fn high_rate_diarization_wav_streams_directly_to_canonical_output() {
+        for sample_rate in [44_100_u32, 48_000_u32] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join(format!("{sample_rate}.wav"));
+            write_i16_wav(
+                &path,
+                sample_rate,
+                2,
+                sample_rate as usize,
+                |frame, channel| {
+                    let phase = (frame % 100) as i16;
+                    if channel == 0 {
+                        phase * 100
+                    } else {
+                        phase * 50
+                    }
+                },
+            );
+
+            let cancellation = DiarizationCancellation::new(Duration::from_secs(30));
+            let (samples, output_rate) =
+                load_wav_audio(std::fs::File::open(path).unwrap(), &cancellation).unwrap();
+            assert_eq!(output_rate, 16_000);
+            assert_eq!(samples.len(), 16_000);
+            assert!(samples.iter().all(|sample| sample.is_finite()));
+        }
+    }
+
+    #[cfg(feature = "diarize")]
+    #[test]
+    fn diarization_decode_rejects_non_finite_float_wav_at_same_and_resampled_rates() {
+        for sample_rate in [16_000_u32, 48_000_u32] {
+            for hostile in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+                let mut wav = std::io::Cursor::new(Vec::new());
+                let spec = hound::WavSpec {
+                    channels: 1,
+                    sample_rate,
+                    bits_per_sample: 32,
+                    sample_format: hound::SampleFormat::Float,
+                };
+                {
+                    let mut writer = hound::WavWriter::new(&mut wav, spec).unwrap();
+                    writer.write_sample(0.25_f32).unwrap();
+                    writer.write_sample(hostile).unwrap();
+                    writer.write_sample(0.5_f32).unwrap();
+                    writer.finalize().unwrap();
+                }
+
+                let cancellation = DiarizationCancellation::new(Duration::from_secs(30));
+                let error = load_wav_audio(wav.into_inner().as_slice(), &cancellation)
+                    .expect_err("non-finite PCM must fail before inference")
+                    .to_string();
+                assert!(error.contains("non-finite"), "unexpected error: {error}");
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn legacy_pyannote_fails_closed_for_authorized_anonymous_audio() {
+        use std::io::Write;
+
+        let mut audio =
+            crate::pipeline::PrivateAudioTempFile::new("minutes-pyannote-authorized-", ".wav")
+                .unwrap();
+        audio
+            .prepare_for_write()
+            .unwrap()
+            .write_all(b"authorized anonymous audio")
+            .unwrap();
+        audio.finish_write().unwrap();
+
+        let cancellation = DiarizationCancellation::new(Duration::from_secs(60));
+        let error = diarize_with_pyannote(audio.as_path(), &cancellation)
+            .expect_err("legacy Python must not create a named staging copy")
+            .to_string();
+        assert!(error.contains("unavailable for authorized anonymous audio"));
+        assert!(!error.contains(audio.as_path().to_string_lossy().as_ref()));
+    }
 
     fn write_i16_wav(
         path: &Path,
@@ -2751,6 +4069,62 @@ mod tests {
     }
 
     #[test]
+    fn capture_stem_discovery_does_not_treat_busy_ml_worker_as_silence() {
+        let _test_guard = DIARIZATION_GLOBAL_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(!DIARIZATION_WORKER_ACTIVE.swap(true, Ordering::AcqRel));
+        struct ResetWorkerFlag;
+        impl Drop for ResetWorkerFlag {
+            fn drop(&mut self) {
+                DIARIZATION_WORKER_ACTIVE.store(false, Ordering::Release);
+            }
+        }
+        let _reset = ResetWorkerFlag;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("audible-while-ml-busy.wav");
+        write_active_wav(&path);
+
+        assert!(
+            stem_has_audio(&path),
+            "ML lease contention is not evidence that a capture stem is silent"
+        );
+
+        let primary = dir.path().join("call.mov");
+        std::fs::write(&primary, b"synthetic primary").unwrap();
+        write_active_wav(&dir.path().join("call.voice.wav"));
+        write_active_wav(&dir.path().join("call.system.wav"));
+        assert!(matches!(
+            discover_stem_plan(&primary),
+            Some(SourceAwareDiarizationPlan::FullStems(_))
+        ));
+    }
+
+    #[test]
+    fn stem_has_audio_rejects_signal_prefix_followed_by_decoder_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("truncated-after-signal.wav");
+        let mut wav = Vec::new();
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&40_u32.to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16_u32.to_le_bytes());
+        wav.extend_from_slice(&1_u16.to_le_bytes());
+        wav.extend_from_slice(&1_u16.to_le_bytes());
+        wav.extend_from_slice(&1_u32.to_le_bytes());
+        wav.extend_from_slice(&2_u32.to_le_bytes());
+        wav.extend_from_slice(&2_u16.to_le_bytes());
+        wav.extend_from_slice(&16_u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&4_u32.to_le_bytes());
+        wav.extend_from_slice(&30_000_i16.to_le_bytes());
+        std::fs::write(&path, wav).unwrap();
+
+        assert!(!stem_has_audio(&path));
+    }
+
+    #[test]
     fn stem_has_audio_detects_speech_after_a_quiet_opening() {
         // #280: a far-field / AEC-equipped mic (USB conference speakerphone)
         // can open quiet while the far end speaks first, then carry real
@@ -2797,6 +4171,37 @@ mod tests {
         });
 
         assert!(stem_has_audio(&path));
+    }
+
+    #[test]
+    fn capture_signal_classifier_accepts_audible_stem_past_two_hours() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("three-hour-call.voice.wav");
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: 1,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut writer = hound::WavWriter::create(&path, spec).unwrap();
+        for _ in 0..(2 * 60 * 60 + 1) {
+            writer.write_sample(2_000_i16).unwrap();
+        }
+        writer.finalize().unwrap();
+
+        assert_eq!(classify_stem_signal(&path), StemSignal::Signal);
+    }
+
+    #[test]
+    fn capture_signal_classifier_keeps_invalid_distinct_from_silence() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("corrupt.voice.wav");
+        std::fs::write(&path, vec![b'x'; 64 * 1024]).unwrap();
+
+        assert!(matches!(
+            classify_stem_signal(&path),
+            StemSignal::Invalid(_)
+        ));
     }
 
     #[test]
@@ -3680,7 +5085,7 @@ mod tests {
     #[test]
     fn recovered_system_stem_engine_failure_never_reopens_original_mov() {
         let config = Config::default();
-        let system_stem = Path::new("/tmp/call.system.wav");
+        let system_stem = Path::new("/minutes-private-audio/secret-capability.system.wav");
         let mut attempted_paths = Vec::new();
 
         let result = diarize_system_stem_with_full_audio_fallback(
@@ -3696,6 +5101,11 @@ mod tests {
 
         assert!(result.is_none());
         assert_eq!(attempted_paths, vec![system_stem.to_path_buf()]);
+        assert_eq!(
+            crate::pipeline::private_audio_diagnostic_label(system_stem),
+            "private-audio",
+            "proof-bound diarization diagnostics must not expose the capability token"
+        );
     }
 
     #[test]

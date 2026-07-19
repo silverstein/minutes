@@ -17,7 +17,7 @@ const pipeline = [
   },
   {
     step: "Transcribe",
-    detail: "whisper.cpp or parakeet.cpp, running on your CPU/GPU",
+    detail: "sealed local whisper.cpp, running on your CPU/GPU",
   },
   {
     step: "Diarize",

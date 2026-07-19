@@ -7,12 +7,12 @@
 //! killed and reaped.
 
 use std::ffi::OsStr;
-#[cfg(any(test, feature = "parakeet"))]
+#[cfg(test)]
 use std::io::{self, Read};
 use std::process::Command;
-#[cfg(any(test, feature = "parakeet"))]
+#[cfg(test)]
 use std::process::{Output, Stdio};
-#[cfg(any(test, feature = "parakeet"))]
+#[cfg(test)]
 use std::time::{Duration, Instant};
 
 /// Construct a child process through the repository's audited boundary.
@@ -27,7 +27,7 @@ pub(crate) fn command<S: AsRef<OsStr>>(program: S) -> Command {
 /// pipe buffer cannot deadlock the child. The boolean is true only when the
 /// timeout path killed the process. Its returned status is obtained from
 /// `Child::wait`, which is also the guarantee that the child was reaped.
-#[cfg(any(test, feature = "parakeet"))]
+#[cfg(test)]
 pub(crate) fn output_with_timeout(
     command: Command,
     timeout: Duration,
@@ -36,7 +36,7 @@ pub(crate) fn output_with_timeout(
     Ok((output, timed_out))
 }
 
-#[cfg(any(test, feature = "parakeet"))]
+#[cfg(test)]
 fn output_with_timeout_impl(
     mut command: Command,
     timeout: Duration,

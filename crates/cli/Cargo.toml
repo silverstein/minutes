@@ -18,8 +18,8 @@ path = "src/main.rs"
 [features]
 default = ["whisper", "diarize"]
 whisper = ["minutes-core/whisper"]
-diarize = ["minutes-core/diarize", "dep:pyannote-rs", "dep:ort", "dep:symphonia"]
-parakeet = ["minutes-core/parakeet"]
+diarize = ["minutes-core/diarize", "dep:pyannote-rs", "dep:ort"]
+parakeet = ["whisper", "minutes-core/parakeet"]
 # Opt-in sherpa-onnx + parakeet-v3 transcription engine (off by default).
 # `minutes setup --sherpa` works without this feature (path helpers are ungated);
 # this feature compiles the actual engine so `engine = "sherpa"` transcribes.
@@ -55,7 +55,6 @@ pyannote-rs = { workspace = true, optional = true }
 # This constraint is respected even by `cargo install minutes-cli` from crates.io.
 # Remove once pyannote-rs ships a fix (tracked: thewh1teagle/pyannote-rs#27).
 ort = { version = "=2.0.0-rc.10", optional = true }
-symphonia = { workspace = true, optional = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

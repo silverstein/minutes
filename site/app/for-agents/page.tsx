@@ -573,9 +573,9 @@ export default function ForAgentsPage() {
         <div className="space-y-4 text-[15px] leading-7 text-[var(--text-secondary)]">
           <p>
             Minutes records meetings and voice memos, transcribes them locally
-            with whisper.cpp or Parakeet, and saves structured markdown. Speakers
-            are identified with pyannote-rs. No audio leaves the machine unless
-            you explicitly choose a cloud summarization backend.
+            with sealed whisper.cpp, and saves structured markdown. Speakers are
+            identified with pyannote-rs. No audio leaves the machine unless you
+            explicitly choose a cloud summarization backend.
           </p>
           <p>
             Output goes to{" "}

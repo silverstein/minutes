@@ -1,4 +1,5 @@
 #[cfg(all(feature = "parakeet", unix))]
+#[allow(dead_code)] // Secure transport is disabled; retain internals for tests/future byte transport.
 mod imp {
     use crate::config::Config;
     use crate::error::TranscribeError;
@@ -40,7 +41,7 @@ mod imp {
     ];
 
     #[derive(Debug, Clone)]
-    pub struct SidecarLaunchSpec {
+    pub(crate) struct SidecarLaunchSpec {
         pub server_binary: PathBuf,
         pub version_binary: PathBuf,
         pub socket_path: PathBuf,
@@ -76,7 +77,7 @@ mod imp {
     }
 
     #[derive(Debug, Clone, Serialize)]
-    pub struct SidecarRequest {
+    pub(crate) struct SidecarRequest {
         pub request_id: String,
         pub audio_path: String,
         pub decoder: String,
@@ -90,7 +91,7 @@ mod imp {
     }
 
     #[derive(Debug, Clone)]
-    pub struct SidecarTranscriptResult {
+    pub(crate) struct SidecarTranscriptResult {
         pub transcript: ParakeetCliTranscript,
         pub elapsed_ms: u64,
         pub first_request_on_process: bool,
@@ -116,7 +117,7 @@ mod imp {
     }
 
     #[derive(Debug, Clone)]
-    pub struct SidecarError {
+    pub(crate) struct SidecarError {
         message: String,
     }
 
@@ -229,7 +230,7 @@ mod imp {
     }
 
     #[derive(Debug)]
-    pub struct ParakeetSidecarManager {
+    pub(crate) struct ParakeetSidecarManager {
         state: SidecarState,
         request_counter: u64,
         timeouts: SidecarTimeouts,
@@ -267,7 +268,7 @@ mod imp {
             manager
         }
 
-        pub fn transcribe(
+        pub(crate) fn transcribe(
             &mut self,
             spec: SidecarLaunchSpec,
             request: SidecarRequest,
@@ -316,7 +317,7 @@ mod imp {
             }
         }
 
-        pub fn ensure_started(
+        pub(crate) fn ensure_started(
             &mut self,
             mut spec: SidecarLaunchSpec,
             config: &Config,
@@ -1148,7 +1149,7 @@ mod imp {
         format!("minutes-{}", manager.request_counter)
     }
 
-    pub fn build_launch_spec(
+    pub(crate) fn build_launch_spec(
         config: &Config,
         model_path: &Path,
         vocab_path: &Path,
@@ -1187,7 +1188,7 @@ mod imp {
         })
     }
 
-    pub fn build_request(
+    pub(crate) fn build_request(
         manager: &mut ParakeetSidecarManager,
         config: &Config,
         wav_path: &Path,
@@ -1248,7 +1249,7 @@ mod imp {
         MANAGER.get_or_init(|| Mutex::new(ParakeetSidecarManager::default()))
     }
 
-    pub fn transcribe_via_global_sidecar(
+    pub(crate) fn transcribe_via_global_sidecar(
         config: &Config,
         model_path: &Path,
         vocab_path: &Path,
@@ -1257,6 +1258,11 @@ mod imp {
         audio_duration_secs: f64,
         hints: &crate::transcribe::DecodeHints,
     ) -> Result<SidecarTranscriptResult, SidecarError> {
+        if !super::private_audio_transport_available() {
+            return Err(SidecarError::new(format!(
+                "{LOG_PREFIX} secure private-audio transport is unavailable"
+            )));
+        }
         let spec = build_launch_spec(config, model_path, vocab_path, vad_path)?;
         let manager = global_manager();
         let mut guard = manager
@@ -1266,12 +1272,17 @@ mod imp {
         guard.transcribe(spec, request, config, audio_duration_secs)
     }
 
-    pub fn warmup_global_sidecar(
+    pub(crate) fn warmup_global_sidecar(
         config: &Config,
         model_path: &Path,
         vocab_path: &Path,
         vad_path: Option<&Path>,
     ) -> Result<bool, SidecarError> {
+        if !super::private_audio_transport_available() {
+            return Err(SidecarError::new(format!(
+                "{LOG_PREFIX} secure private-audio transport is unavailable"
+            )));
+        }
         let spec = build_launch_spec(config, model_path, vocab_path, vad_path)?;
         let manager = global_manager();
         let mut guard = manager
@@ -1533,15 +1544,16 @@ mod imp {
 pub use imp::*;
 
 #[cfg(not(all(feature = "parakeet", unix)))]
+#[allow(dead_code)] // Shape retained for cross-platform callers and feature checks.
 mod imp_stub {
     use crate::config::Config;
     use std::path::Path;
 
     #[derive(Debug, Clone)]
-    pub struct SidecarLaunchSpec;
+    pub(crate) struct SidecarLaunchSpec;
 
     #[derive(Debug, Clone)]
-    pub struct SidecarRequest;
+    pub(crate) struct SidecarRequest;
 
     // Stub shape mirrors the real `SidecarTranscriptResult` from the unix
     // imp module so non-unix builds (e.g. Windows with `--features parakeet`)
@@ -1550,7 +1562,7 @@ mod imp_stub {
     // unreachable at runtime on these platforms.
     #[cfg(feature = "parakeet")]
     #[derive(Debug, Clone)]
-    pub struct SidecarTranscriptResult {
+    pub(crate) struct SidecarTranscriptResult {
         pub transcript: crate::transcribe::ParakeetCliTranscript,
         pub elapsed_ms: u64,
         pub first_request_on_process: bool,
@@ -1559,10 +1571,10 @@ mod imp_stub {
 
     #[cfg(not(feature = "parakeet"))]
     #[derive(Debug, Clone)]
-    pub struct SidecarTranscriptResult;
+    pub(crate) struct SidecarTranscriptResult;
 
     #[derive(Debug, Clone)]
-    pub struct SidecarError {
+    pub(crate) struct SidecarError {
         message: String,
     }
 
@@ -1574,7 +1586,7 @@ mod imp_stub {
 
     impl std::error::Error for SidecarError {}
 
-    pub fn build_launch_spec(
+    pub(crate) fn build_launch_spec(
         _config: &Config,
         _model_path: &Path,
         _vocab_path: &Path,
@@ -1589,7 +1601,7 @@ mod imp_stub {
         None
     }
 
-    pub fn transcribe_via_global_sidecar(
+    pub(crate) fn transcribe_via_global_sidecar(
         _config: &Config,
         _model_path: &Path,
         _vocab_path: &Path,
@@ -1603,7 +1615,7 @@ mod imp_stub {
         })
     }
 
-    pub fn warmup_global_sidecar(
+    pub(crate) fn warmup_global_sidecar(
         _config: &Config,
         _model_path: &Path,
         _vocab_path: &Path,
@@ -1620,24 +1632,41 @@ mod imp_stub {
 #[cfg(not(all(feature = "parakeet", unix)))]
 pub use imp_stub::*;
 
+/// Whether the warm server can receive the exact private-audio capability.
+///
+/// The current server protocol accepts only a pathname. Minutes now keeps raw
+/// transcription audio anonymous/sealed, so Unix needs descriptor passing
+/// (for example `SCM_RIGHTS`) before the already-running server can consume
+/// it without reopening mutable ambient authority. Windows has no supported
+/// server implementation. Keep this explicit so config and status surfaces
+/// cannot promise a backend that transcription deliberately bypasses.
+pub const fn private_audio_transport_available() -> bool {
+    false
+}
+
 /// Effective warm-sidecar decision (#295).
 ///
-/// Settings capture intent; this resolves the implementation:
-/// - explicit `parakeet_sidecar_enabled = true|false` in config.toml wins;
+/// Settings capture intent; this resolves the currently usable implementation:
+/// - explicit `false` in config.toml disables the server;
+/// - explicit `true` requests it but cannot override an unavailable secure
+///   private-audio transport;
 /// - `None` (default) = auto: on when this build has parakeet compiled in,
 ///   parakeet is the selected engine for batch or standalone live, and the
-///   `example-server` binary resolves. Everything that branches on the
-///   sidecar must call this, never the raw config field.
+///   `example-server` binary resolves;
+/// - every mode remains off until `private_audio_transport_available()` is
+///   true. Everything that branches on the sidecar must call this, never the
+///   raw config field.
 pub fn sidecar_enabled_effective(config: &crate::config::Config) -> bool {
-    match config.transcription.parakeet_sidecar_enabled {
-        Some(explicit) => explicit,
-        None => {
-            cfg!(feature = "parakeet")
-                && (config.transcription.engine == "parakeet"
-                    || config.effective_live_transcript_backend() == "parakeet")
-                && sidecar_binary_resolves_cached(&config.transcription.parakeet_binary)
+    private_audio_transport_available()
+        && match config.transcription.parakeet_sidecar_enabled {
+            Some(explicit) => explicit,
+            None => {
+                cfg!(feature = "parakeet")
+                    && (config.transcription.engine == "parakeet"
+                        || config.effective_live_transcript_backend() == "parakeet")
+                    && sidecar_binary_resolves_cached(&config.transcription.parakeet_binary)
+            }
         }
-    }
 }
 
 /// Positive-result cache for the auto decision's binary probe.
@@ -1697,11 +1726,11 @@ mod effective_tests {
     }
 
     #[test]
-    fn explicit_true_wins_even_without_binary() {
+    fn explicit_true_cannot_override_missing_private_audio_transport() {
         let mut config = Config::default();
         config.transcription.engine = "whisper".into();
         config.transcription.parakeet_sidecar_enabled = Some(true);
-        assert!(sidecar_enabled_effective(&config));
+        assert!(!sidecar_enabled_effective(&config));
     }
 
     #[test]
@@ -1734,6 +1763,9 @@ mod effective_tests {
         std::env::set_var("MINUTES_PARAKEET_SERVER_BINARY", &fake);
         let resolved_on = sidecar_enabled_effective(&config);
         std::env::remove_var("MINUTES_PARAKEET_SERVER_BINARY");
-        assert!(resolved_on, "auto should enable when binary resolves");
+        assert!(
+            !resolved_on,
+            "binary resolution cannot bypass the missing exact-audio transport"
+        );
     }
 }

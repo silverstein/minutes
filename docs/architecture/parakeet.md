@@ -1,9 +1,9 @@
-# Parakeet Engine Setup
+# Parakeet Integration Reference
 
-Minutes supports [parakeet.cpp](https://github.com/Frikallo/parakeet.cpp) as an alternative
-transcription engine. Parakeet uses NVIDIA's FastConformer architecture and achieves lower
-word error rates than Whisper at equivalent model sizes, with dramatically faster inference
-on Apple Silicon via Metal GPU acceleration.
+Minutes retains an experimental [parakeet.cpp](https://github.com/Frikallo/parakeet.cpp)
+integration, but it is not currently selectable on any platform. Parakeet uses
+NVIDIA's FastConformer architecture; the performance figures below describe the
+historical benchmark environment, not an available Minutes runtime option.
 
 ## Why Parakeet?
 
@@ -27,56 +27,68 @@ Today, `engine = "parakeet"` is wired for these paths:
 - recording-sidecar live transcription during `minutes record`
 - standalone live transcription (`minutes live` and desktop Live Mode) — see RFC 0002
 
-Both live paths route each VAD-gated utterance through the Parakeet path. If
-the sidecar is effective (auto-on when `example-server` resolves, or forced with `parakeet_sidecar_enabled = true`), they reuse the warm `example-server` socket;
-otherwise they fall back to the Parakeet subprocess path for each utterance.
-The standalone live path additionally warms the sidecar at session start so the
-first utterance does not pay the subprocess-spawn + model-load cost.
+The code retains those integration paths, but the current pathname-only
+Parakeet CLI is not selectable on any platform. macOS securely normalizes
+audio into an authenticated encrypted spool that the CLI cannot consume.
+Linux can inherit an anonymous descriptor, but ordinary `execve` resets child
+dumpability and leaves that descriptor race-openable through `/proc/<pid>/fd`
+to a hostile same-UID process. Windows stores normalized audio as authenticated
+ciphertext, but the Parakeet subprocess has no supported byte transport into
+that sealed capability.
+Batch, live, and dictation requests therefore fall back to in-process Whisper
+instead of creating a visible plaintext file or exposing a raw descriptor.
 
-Parakeet also participates in the experimental Apple Speech standalone-live
-path as the **first runtime fallback**. If `engine = "apple-speech"` is set for
-`minutes live` and Apple Speech cannot run or fails mid-session, Minutes tries
-a ready Parakeet backend before falling back to Whisper. Apple Speech itself is
-still configured separately and remains standalone-live-only; this note is just
-about the fallback order behind that path. See [`docs/architecture/apple-speech.md`](apple-speech.md)
-for the current Apple Speech scope and desktop-settings limitation.
+The warm server's pathname-only protocol likewise cannot receive Minutes'
+anonymous/sealed private-audio capability without reopening mutable ambient
+authority. Auto and explicit-on configuration report the sidecar as
+unavailable instead of warming a server that private transcription would
+bypass. Exact byte/stdin transfer or an acknowledged post-exec descriptor
+isolation protocol remains the requirement for removing the fallback.
 
-Strongly recommended for live use: install `example-server` (the sidecar then auto-enables; `parakeet_sidecar_enabled = true` forces it) and
-ensure `example-server` is discoverable (either on `PATH` or via
-`MINUTES_PARAKEET_SERVER_BINARY`). Without the warm sidecar, every live
-utterance incurs full subprocess startup, which makes live mode visibly slow.
+Parakeet is eligible for standalone-live fallback only when the current build,
+platform, transport, and runtime storage probe all report it ready. No current
+platform satisfies the Parakeet transport requirement. A retained Parakeet
+preference therefore resolves to Whisper. Apple Speech also currently resolves
+to Whisper because its pathname-only helper has the same private-audio
+transport gap. See [`docs/architecture/apple-speech.md`](apple-speech.md).
+
+All live utterances that request Parakeet use Whisper until parakeet.cpp accepts
+a byte stream or a post-exec helper proves descriptor isolation. Installing
+`example-server` or forcing `parakeet_sidecar_enabled = true` does not bypass
+the private-audio safety gate.
 
 Dictation remains Whisper by default because its overlay depends on fast
-mid-utterance partials. You can opt into Parakeet for final utterance
-transcription with:
+mid-utterance partials. A retained `backend = "parakeet"` preference is accepted
+only as configuration history and resolves to Whisper; the settings UI does
+not allow a new Parakeet selection until secure transport exists.
 
 ```toml
 [dictation]
 backend = "parakeet"
 ```
 
-In that mode, Whisper still powers progressive partial text while Parakeet is
-used at VAD-finalization when the installed/compiled backend is ready. If
-Parakeet is unavailable or fails for an utterance, dictation falls back to
-Whisper for that utterance.
+With that retained value, Whisper powers both progressive partial text and
+VAD-finalization. A future transport-capable Parakeet integration may take over
+finalization only after the shared capability gate reports it selectable.
 
-If Parakeet support is not compiled into the current build, Minutes logs a
-warning and falls back to Whisper for live and dictation paths.
+Minutes logs the unavailable secure-transport reason and resolves Parakeet
+preferences to Whisper for batch, live, and dictation paths.
 
-Note: both live paths still require the `whisper` Cargo feature to be compiled
-in. Whisper is the runtime fallback when Parakeet fails mid-session (warmup
-error, sidecar unreachable, transcription failure), so builds with
-`--features parakeet` and `--no-default-features` (no whisper) cannot run
-`minutes live` — the session errors out immediately. Whisper is a default
-feature, so this only matters for unusual build configurations.
+The `parakeet` Cargo feature implies `whisper` in minutes-core and each host
+crate. This keeps the runtime fallback executable even in
+`--no-default-features --features parakeet` builds; a supported Parakeet build
+cannot silently degrade to placeholder text or fail live startup merely because
+Whisper was omitted from the feature list.
 
-## Fastest Path on Apple Silicon
+## macOS source-build reference (runtime remains Whisper)
 
-If you want the shortest path from "I have a Mac" to "Minutes is using
-Parakeet locally on Metal," do this. Steps 1–3 are shell commands; step 4
-is a manual download + conversion (the CLI prints these instructions but
-does not run them automatically); step 5 writes a config file — do not paste
-the TOML block into the shell.
+The steps below document how the historical Metal benchmark environment was
+built. They do **not** make Parakeet selectable in the current Minutes app:
+macOS normalizes audio into an authenticated encrypted spool, while
+parakeet.cpp accepts only a pathname. Minutes keeps using Whisper until an
+exact byte or inherited-descriptor transport is implemented. Installing these
+assets is useful only for development of that future transport and should not
+be presented to packaged-app users as setup they need to complete.
 
 Prerequisites first (see [Prerequisites](#prerequisites) for details):
 - Full Xcode installed (Command Line Tools alone is not enough — Metal needs
@@ -107,25 +119,24 @@ cd parakeet.cpp
 # Configure with the maintainer's two opt-out flags (AXIOM_INSTALL=OFF,
 # PARAKEET_INSTALL=OFF). They short-circuit the install(EXPORT) export-set
 # strictness error and work on any CMake version. PARAKEET_BUILD_SERVER_EXAMPLE
-# turns on the warm-sidecar binary that live mode reuses across utterances.
+# can build the optional server for future exact-descriptor transport work;
+# current Unix builds use the supervised direct subprocess for private audio.
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
   -DAXIOM_INSTALL=OFF \
   -DPARAKEET_INSTALL=OFF \
-  -DPARAKEET_BUILD_SERVER_EXAMPLE=ON \
+  -DPARAKEET_BUILD_SERVER_EXAMPLE=OFF \
   -DAXIOM_BUILD_TESTS=OFF \
   -DAXIOM_BUILD_EXAMPLES=OFF
 cmake --build build -j
 
-# Install both binaries. Locations differ by generator: Ninja puts them in
-# build/bin/, Unix Makefiles (the default when ninja isn't installed) puts
-# parakeet in build/ and example-server in build/examples/server/. The find
-# expression handles either layout.
+# Install the Parakeet binary. Locations differ by generator: Ninja puts it in
+# build/bin/, while Unix Makefiles put it in build/.
 mkdir -p ~/.local/bin
-find build -type f -perm -u+x \( -name parakeet -o -name example-server \) \
+find build -type f -perm -u+x -name parakeet \
   -exec cp {} ~/.local/bin/ \;
-ls -lh ~/.local/bin/parakeet ~/.local/bin/example-server
+ls -lh ~/.local/bin/parakeet
 
-# Sanity check: both binaries should link Metal, MPS, MPSGraph, and Accelerate.
+# Sanity check: the binary should link Metal, MPS, MPSGraph, and Accelerate.
 otool -L ~/.local/bin/parakeet | grep -E 'Metal|Accelerate'
 
 # 2. Build the Minutes CLI WITH the parakeet feature, then install it
@@ -136,17 +147,16 @@ rm -f ~/.local/bin/minutes && cp target/release/minutes ~/.local/bin/minutes
 # Make sure ~/.local/bin is on PATH (add to ~/.zshrc if it isn't):
 #   export PATH="$HOME/.local/bin:$PATH"
 
-# 3. Install Silero VAD weights + sanity-check the parakeet binary on PATH.
-#    `minutes setup --parakeet` only installs the bundled VAD weights and
-#    resolves your parakeet binary location. It does NOT download or convert
-#    the .nemo model — that's step 4. The brew formula CLI (whisper-only)
-#    can run this command; it prints a feature-flag warning but the setup
-#    itself completes correctly.
-minutes setup --parakeet
+# 3. Stop here for the current macOS runtime. Do not run
+#    `minutes setup --parakeet`: the command now refuses before installing
+#    assets because macOS cannot securely transport sealed audio to the
+#    pathname-only Parakeet process. The remaining conversion steps are only
+#    a developer reference for future transport work, not product setup.
 ```
 
-4. Download and convert the multilingual `tdt-600m` model. This is the
-   manual step the CLI prints instructions for. The `.nemo` file is publicly
+4. Optional developer reference: download and convert the multilingual
+   `tdt-600m` model manually. This recipe is now developer reference only; the
+   current CLI rejects setup on every platform. The `.nemo` file is publicly
    curl-able from HuggingFace — no `huggingface_hub` dependency needed — and
    conversion needs a small Python venv with `torch`, `safetensors`,
    `packaging`, and `numpy`. (`packaging` is a transitive dep `safetensors`
@@ -194,13 +204,12 @@ engine = "parakeet"
 parakeet_model = "tdt-600m"
 parakeet_binary = "/Users/<you>/.local/bin/parakeet"
 parakeet_vocab = "tdt-600m.tokenizer.vocab"
-# The warm example-server sidecar auto-enables when step 1's example-server
-# copy resolves. No key needed; set parakeet_sidecar_enabled = true/false
-# only to force it on or off.
+# `parakeet_sidecar_enabled` may record future warm-server intent, but the
+# current pathname-only server is safety-gated off for private audio.
 parakeet_fp16 = true
 ```
 
-That gives you the validated multilingual path:
+That reproduces the Parakeet model and binary used by the historical benchmark:
 - `tdt-600m`
 - local `parakeet.cpp`
 - local Metal GPU acceleration on Apple Silicon
@@ -209,32 +218,15 @@ If you want the smaller English-only model instead, set
 `parakeet_model = "tdt-ctc-110m"` and
 `parakeet_vocab = "tdt-ctc-110m.tokenizer.vocab"` in the same file.
 
-Minutes will continue to run locally either way.
+Minutes continues to transcribe with Whisper on macOS either way.
 
-## Important macOS note for desktop users
+## Current macOS desktop behavior
 
-If you launch Minutes from Finder, Spotlight, or the Dock, the app may not see
-the same `PATH` as your shell.
-
-That means this can work in Terminal:
-
-```bash
-which parakeet
-```
-
-but the desktop app can still fail with "parakeet binary not found."
-
-For the desktop app, prefer an **absolute path** in `config.toml`:
-
-```toml
-[transcription]
-parakeet_binary = "/Users/you/.local/bin/parakeet"
-```
-
-Common macOS install locations:
-- `/opt/homebrew/bin/parakeet`
-- `/usr/local/bin/parakeet`
-- `/Users/you/.local/bin/parakeet`
+The desktop app disables Parakeet on macOS because its pathname-only process
+cannot receive Minutes' sealed audio. A retained `engine = "parakeet"`
+preference resolves visibly to Whisper. Changing `PATH` or setting an absolute
+`parakeet_binary` does not make the engine selectable; those settings matter
+only to historical benchmark/source-build work outside the current app path.
 
 ## Prerequisites
 
@@ -268,19 +260,22 @@ tar xf cmake-3.31.12-macos-universal.tar.gz
 export PATH="$HOME/.local/opt/cmake-3.31.12-macos-universal/CMake.app/Contents/bin:$PATH"
 ```
 
-### Linux / Windows (parakeet.cpp, CPU only)
+### Linux source-build reference (runtime remains Whisper)
 
 parakeet.cpp does not yet have CUDA support (WIP in the axiom tensor library).
-CPU-only builds work but lose the speed advantage. Monitor the
+Linux CPU-only builds work but lose the speed advantage. Minutes currently
+falls back to Whisper on Linux, macOS, and Windows until a secure process
+transport is implemented. Monitor the
 [parakeet.cpp repo](https://github.com/Frikallo/parakeet.cpp) for CUDA updates.
 
 ### Linux with an NVIDIA GPU (NeMo wrapper, CUDA)
 
 If you have an NVIDIA GPU on Linux, NVIDIA's [NeMo toolkit](https://github.com/NVIDIA/NeMo)
-supports Parakeet natively with full CUDA acceleration. The `parakeet_binary`
-config key accepts any executable that follows the parakeet.cpp CLI contract,
-so you can point it at a small Python wrapper around NeMo and get GPU-backed
-transcription without waiting on parakeet.cpp CUDA support.
+supports Parakeet natively with full CUDA acceleration. The historical Minutes
+benchmark path accepted executables following the parakeet.cpp CLI contract,
+including the wrapper below. Current Minutes releases reject that pathname-only
+contract at the shared private-audio gate, so this is developer reference only
+and does not enable GPU-backed transcription in the app.
 
 This approach was contributed by [@ed0c](https://github.com/silverstein/minutes/issues/122).
 Tested on an RTX 3090 with CUDA 13.2: a 68-minute French meeting transcribes
@@ -334,7 +329,7 @@ for result in output:
 EOF
 ```
 
-**3. Point Minutes at it**
+**3. Retained configuration reference (does not activate Parakeet)**
 
 In `~/.config/minutes/config.toml`:
 
@@ -346,11 +341,15 @@ parakeet_model = "tdt-600m"
 parakeet_vocab = "tdt-600m.tokenizer.vocab"
 ```
 
-**Known limitation: per-chunk model reload**
+Current Minutes still resolves this preference to Whisper. Compiling the
+feature, installing model assets, or changing the binary path does not bypass
+the secure-transport requirement.
 
-Minutes invokes the parakeet binary once per audio chunk, so the NeMo
-wrapper reloads the model from disk cache on every call (about 4 to 5
-seconds of overhead per chunk). For long recordings this adds up. A
+**Historical limitation: per-chunk model reload**
+
+The historical benchmark invoked the parakeet binary once per audio chunk, so
+the NeMo wrapper reloaded the model from disk cache on every call (about 4 to 5
+seconds of overhead per chunk). For long recordings this added up. A
 persistent daemon that keeps the model resident in VRAM eliminates the
 reload cost; see [#122](https://github.com/silverstein/minutes/issues/122)
 if you want to help land one.
@@ -371,26 +370,21 @@ cd parakeet.cpp
 #     Disable the install(EXPORT "AxiomTargets") rule that breaks on any
 #     modern CMake. The parakeet.cpp maintainer added these as the supported
 #     escape hatch (see CMakeLists.txt:96-100).
-#   PARAKEET_BUILD_SERVER_EXAMPLE=ON
-#     Builds example-server, the warm sidecar binary live mode talks to.
-#     Off by default; without it live transcription respawns per utterance.
+#   PARAKEET_BUILD_SERVER_EXAMPLE=OFF
+#     The current pathname-only server is safety-gated off for private audio.
+#     Live transcription uses the supervised direct subprocess per utterance.
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
   -DAXIOM_INSTALL=OFF \
   -DPARAKEET_INSTALL=OFF \
-  -DPARAKEET_BUILD_SERVER_EXAMPLE=ON \
+  -DPARAKEET_BUILD_SERVER_EXAMPLE=OFF \
   -DAXIOM_BUILD_TESTS=OFF \
   -DAXIOM_BUILD_EXAMPLES=OFF
 cmake --build build -j
 
-# Binary layout depends on the generator CMake picked. Ninja:
-#   build/bin/parakeet
-#   build/bin/example-server
-# Unix Makefiles (default when Ninja isn't installed):
-#   build/parakeet
-#   build/examples/server/example-server
-# This find handles either:
+# Binary layout depends on the generator CMake picked: Ninja uses
+# build/bin/parakeet; Unix Makefiles use build/parakeet. This finds either:
 mkdir -p ~/.local/bin
-find build -type f -perm -u+x \( -name parakeet -o -name example-server \) \
+find build -type f -perm -u+x -name parakeet \
   -exec cp {} ~/.local/bin/ \;
 
 # Verify Metal + Accelerate linkage on Apple Silicon
@@ -401,13 +395,14 @@ If `cmake --build` fails with `Neither lock free instructions nor -latomic
 found`, you're on CMake 4.x — install CMake 3.31.x and reconfigure. See
 [Troubleshooting](#cmake-4x-atomics-error-build).
 
-## Install Models
+## Install Models (reference only; runtime remains Whisper)
 
 Parakeet models are distributed as `.nemo` files on HuggingFace and must be
 converted to safetensors format. There is currently one model-install path:
-manual download + conversion. `minutes setup --parakeet` is a helper that
-installs the native Silero VAD weights and prints the manual recipe — it
-does not download or convert the `.nemo` itself.
+manual download + conversion. Current Minutes builds stop before creating
+directories or installing assets because no platform can prove a secure
+Parakeet process transport. The commands below remain developer reference for
+future transport work; use Whisper today.
 
 ### Step 1 — Silero VAD weights + binary resolution (one command)
 
@@ -417,10 +412,10 @@ minutes setup --parakeet                                      # Multilingual v3 
 minutes setup --parakeet --parakeet-model tdt-ctc-110m         # English-only compact
 ```
 
-This installs `~/.minutes/models/parakeet/silero_vad_v5.safetensors` (1.2 MB)
-and prints a `parakeet` binary resolution line. It runs to completion on a
-whisper-only CLI (e.g. the Homebrew Formula build) — you'll see a feature-flag
-warning, but the VAD weights and binary check still complete.
+Current builds reject this setup before installing partial assets. A future
+transport-enabled build may install
+`~/.minutes/models/parakeet/silero_vad_v5.safetensors` and print a binary
+resolution line.
 
 ### Step 2 — Python environment for the conversion script
 
@@ -489,7 +484,12 @@ store each model in its own directory and use model-specific filenames such
 as `tdt-ctc-110m/tdt-ctc-110m.tokenizer.vocab` and
 `tdt-600m/tdt-600m.tokenizer.vocab` so model switches stay deterministic.
 
-## Configure Minutes
+## Configure Minutes (future transport reference)
+
+The configuration below is retained for future transport development and
+benchmarks. Current Linux, macOS, and Windows builds keep Whisper selected; do
+not configure Parakeet or troubleshoot its binary/model paths as an end-user
+setup path.
 
 ### Config file
 
@@ -499,19 +499,19 @@ Edit `~/.config/minutes/config.toml`:
 [transcription]
 engine = "parakeet"              # "whisper" (default) or "parakeet"
 parakeet_model = "tdt-600m"      # "tdt-ctc-110m" (English) or "tdt-600m" (multilingual v3)
-parakeet_binary = "/Users/you/.local/bin/parakeet"  # Prefer an absolute path for desktop app launches
-# parakeet_sidecar_enabled auto-enables when example-server (copied above) resolves; set true/false to force
+parakeet_binary = "/home/you/.local/bin/parakeet"  # Prefer an absolute path for desktop app launches
+# parakeet_sidecar_enabled records intent but cannot bypass the transport gate
 parakeet_boost_limit = 25        # Experimental: top graph-derived boost phrases (0 disables)
 parakeet_boost_score = 2.0       # Experimental tuning for parakeet.cpp --boost-score
-parakeet_fp16 = true             # Default on macOS Apple Silicon: ~35% faster transcription with lower GPU memory (see docs/designs/parakeet-perf-2026-04-14.md). If fp16 crashes MPSGraph on your machine, Minutes auto-falls-back to fp32; set false to skip the retry (see Troubleshooting → fp16 MPSGraph crash)
+parakeet_fp16 = false            # Reserved/inert today
 parakeet_vocab = "tdt-600m.tokenizer.vocab"  # Safer when multiple Parakeet models are installed
 ```
 
-### Tauri Desktop App
+### Tauri Desktop App on Linux
 
-Settings > Transcription > Engine dropdown. Select "Parakeet", then choose the
-model. On macOS, Finder-launched apps may not inherit your shell `PATH`, so
-desktop users should usually configure `parakeet_binary` as an absolute path.
+Settings > Transcription > Engine shows Parakeet as unavailable and keeps
+Whisper active. Compiling the feature or installing assets does not bypass the
+secure-transport gate.
 
 ## Language Support
 
@@ -524,7 +524,8 @@ For languages outside this list, use Whisper (99 languages supported).
 
 ## Building Minutes with Parakeet Support
 
-The `parakeet` Cargo feature must be enabled at build time:
+The `parakeet` Cargo feature can still be enabled for development and transport
+work. These commands build that dormant integration path:
 
 ```bash
 # CLI only
@@ -537,43 +538,41 @@ TAURI_FEATURES="parakeet" cargo tauri build --bundles app
 cargo build --release -p minutes-cli --features parakeet
 ```
 
-For local macOS builds in this repo, prefer the helper scripts because they keep the CLI and desktop app aligned on the same feature set:
-
-```bash
-MINUTES_BUILD_FEATURES=parakeet,metal ./scripts/build.sh
-MINUTES_BUILD_FEATURES=parakeet,metal ./scripts/install-dev-app.sh
-```
-
 Note: The `parakeet` feature is opt-in and not included in the default build.
-Whisper is always compiled in (it's the default feature). Both engines can coexist
-in the same binary — the config file selects the offline/batch path plus both
-live transcription paths (`minutes record` sidecar and standalone `minutes live`).
-Dictation still uses Whisper. See [Scope](#scope).
+Enabling it also enables Whisper because Whisper is the required runtime
+fallback. Current capability resolution keeps Whisper active for batch, live,
+and dictation. See [Scope](#scope).
 
 ## Switching Back to Whisper
 
-Change `engine = "whisper"` in config.toml, or use the Tauri settings UI.
-No rebuild needed — both engines are compiled in when the `parakeet` feature is enabled.
+Use `engine = "whisper"` in config.toml or the Tauri settings UI. Retained
+Parakeet preferences already resolve to Whisper without a rebuild.
 
 ## Troubleshooting
 
-### "parakeet binary not found"
+### "parakeet binary not found" (Linux)
 The `parakeet` executable is not in your PATH. Either:
 - Add its location to PATH: `export PATH="$PATH:/path/to/parakeet.cpp/build/bin"`
 - Or set the full path in config: `parakeet_binary = "/path/to/parakeet"`
 
-On macOS desktop builds, the second option is more reliable because Finder /
-Spotlight / Dock launches may not inherit the same shell `PATH` that Terminal
-sees.
+This developer advice does not make Parakeet selectable: all current platforms
+use Whisper because secure process transport is unavailable, not because a
+binary path needs repair.
 
 ### "unknown parakeet model"
 Only `tdt-ctc-110m` and `tdt-600m` are supported. Check your config.
 
-### "Expected parakeet model in ~/.minutes/models/parakeet/"
-Run `minutes setup --parakeet` to install the recommended Parakeet model plus
-native VAD weights, or follow the manual download steps above.
+### "Expected parakeet model in ~/.minutes/models/parakeet/" (Linux)
+This message belongs to the dormant developer integration. Current builds
+reject `minutes setup --parakeet` before creating directories or installing
+assets because model setup cannot repair the missing secure process transport.
+Use Whisper for production transcription.
 
-### fp16 MPSGraph crash on Apple Silicon (auto-handled)
+### Historical source-build note: fp16 MPSGraph crash on Apple Silicon
+
+This section documents the historical benchmark/source-build environment. It
+is not a fix for current Minutes on macOS, which uses Whisper because secure
+Parakeet transport is unavailable.
 
 On some Apple Silicon + model combinations the fp16 GPU path crashes inside
 Apple's MPSGraph with an operand type-mismatch, e.g.:

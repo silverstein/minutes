@@ -79,6 +79,9 @@ pub enum TranscribeError {
     #[error("transcription failed: {0}")]
     TranscriptionFailed(String),
 
+    #[error("compressed audio decoder unavailable: {0}")]
+    CompressedDecoderUnavailable(String),
+
     #[error("engine '{0}' not compiled in — rebuild with: cargo build --features {0}")]
     EngineNotAvailable(String),
 

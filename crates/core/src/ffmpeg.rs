@@ -1,8 +1,12 @@
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use thiserror::Error;
 
 const FFMPEG_ENV_VAR: &str = "MINUTES_FFMPEG";
+const FFMPEG_PROBE_DEADLINE: Duration = Duration::from_secs(3);
+const FFMPEG_PROBE_OUTPUT_LIMIT: u64 = 256 * 1024;
+const FFMPEG_PROBE_STDERR_LIMIT: usize = 64 * 1024;
 
 /// Error returned when Minutes cannot resolve an executable `ffmpeg` binary.
 #[derive(Debug, Error)]
@@ -31,6 +35,71 @@ impl ResolveFfmpegError {
 /// 3. common macOS/Linux install locations
 pub fn resolve_ffmpeg() -> Result<PathBuf, ResolveFfmpegError> {
     resolve_ffmpeg_with_candidates(default_known_ffmpeg_candidates())
+}
+
+/// Resolve ffmpeg and prove that the selected image can start and report an
+/// ffmpeg version banner through the same bounded child boundary used for
+/// decoding.
+///
+/// Metadata-only resolution is intentionally retained for callers that are
+/// about to launch ffmpeg themselves. Readiness surfaces and watcher preflight
+/// use this stronger check so a corrupt, foreign, or otherwise non-launchable
+/// image cannot be reported as available while an import is left stranded.
+/// This is not a codec/demuxer capability certification; each input remains
+/// fail-closed at the actual bounded decode boundary.
+pub fn resolve_launchable_ffmpeg() -> Result<PathBuf, ResolveFfmpegError> {
+    let path = resolve_ffmpeg()?;
+    verify_ffmpeg_launch(&path).map_err(|detail| {
+        ResolveFfmpegError::new(format!(
+            "ffmpeg was found at '{}' but could not be used: {detail}",
+            path.display()
+        ))
+    })?;
+    Ok(path)
+}
+
+fn verify_ffmpeg_launch(path: &Path) -> Result<(), String> {
+    let mut command = crate::bounded_child::BoundedCommand::new(path);
+    command.arg("-version");
+    let run = crate::bounded_child::run(
+        &mut command,
+        None,
+        crate::bounded_child::StdoutTarget::Capture {
+            max_bytes: FFMPEG_PROBE_OUTPUT_LIMIT,
+        },
+        crate::bounded_child::ChildBudget {
+            wall_clock: FFMPEG_PROBE_DEADLINE,
+            stderr_tail: FFMPEG_PROBE_STDERR_LIMIT,
+        },
+    )
+    .map_err(|error| format!("the bounded launch probe failed: {error}"))?;
+
+    if run.timed_out {
+        return Err("the bounded launch probe timed out".into());
+    }
+    if !run.output.status.success() {
+        let stderr = String::from_utf8_lossy(&run.output.stderr);
+        return Err(format!(
+            "the launch probe exited unsuccessfully{}",
+            stderr
+                .lines()
+                .last()
+                .filter(|line| !line.trim().is_empty())
+                .map(|line| format!(": {}", line.trim()))
+                .unwrap_or_default()
+        ));
+    }
+
+    let stdout = String::from_utf8_lossy(&run.output.stdout);
+    let stderr = String::from_utf8_lossy(&run.output.stderr);
+    if !stdout.lines().chain(stderr.lines()).any(|line| {
+        line.trim_start()
+            .to_ascii_lowercase()
+            .starts_with("ffmpeg version")
+    }) {
+        return Err("the launch probe did not report an ffmpeg version banner".into());
+    }
+    Ok(())
 }
 
 fn resolve_ffmpeg_with_candidates(
@@ -184,5 +253,25 @@ mod tests {
 
         restore_env_var("PATH", old_path);
         restore_env_var(FFMPEG_ENV_VAR, old_override);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn metadata_approved_foreign_image_fails_bounded_launch_probe() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _env_lock = crate::test_home_env_lock();
+        let temp = tempfile::TempDir::new().unwrap();
+        let foreign_image = temp.path().join("ffmpeg");
+        fs::write(&foreign_image, b"MZ\x90\0synthetic foreign image").unwrap();
+        fs::set_permissions(&foreign_image, fs::Permissions::from_mode(0o700)).unwrap();
+        let old_override = set_env_var(FFMPEG_ENV_VAR, foreign_image.as_os_str());
+
+        assert_eq!(resolve_ffmpeg().unwrap(), foreign_image);
+        let error = resolve_launchable_ffmpeg().unwrap_err().to_string();
+
+        restore_env_var(FFMPEG_ENV_VAR, old_override);
+        assert!(error.contains("could not be used"));
+        assert!(error.contains("bounded launch probe failed"));
     }
 }

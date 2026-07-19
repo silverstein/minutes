@@ -49,7 +49,7 @@ brew trust silverstein/tap
 
 # Any platform — from source (requires Rust + cmake; Windows also needs LLVM)
 cargo install minutes-cli                          # macOS/Linux
-cargo install minutes-cli --no-default-features    # Windows (see install notes below)
+cargo install minutes-cli --no-default-features --features whisper  # Windows without diarization
 
 # MCP server only — no Rust needed (Claude Code, Codex, OpenCode, Gemini CLI, Claude Desktop, etc.)
 npx minutes-mcp
@@ -91,8 +91,8 @@ The README is now the product overview and install guide, not the only home for 
 Audio → Transcribe → Diarize → Summarize → Structured Markdown → Relationship Graph
          (local)     (local)     (LLM)       (decisions,            (people, commitments,
         whisper.cpp  pyannote-rs Claude/       action items,          topics, scores)
-        /parakeet    (native)    Ollama/       people, entities)      SQLite index
-                                Mistral/OpenAI
+        (retained    (native)    Ollama/       people, entities)      SQLite index
+        Parakeet → Whisper)      Mistral/OpenAI
 ```
 
 Everything runs locally. Your audio never leaves your machine (unless you opt into cloud LLM summarization). Speakers are identified via native diarization. The relationship graph indexes people, commitments, and topics across all meetings for instant queries.
@@ -161,7 +161,7 @@ minutes note "Logan agreed"                       # LLM weights your notes heavi
 
 ### Process voice memos
 ```bash
-minutes process ~/Downloads/voice-memo.m4a        # Any audio format
+minutes process ~/Downloads/voice-memo.m4a        # WAV, M4A, MP3, OGG, WebM, MP4, MOV, or AAC
 minutes process ~/.minutes/native-captures/2026-05-19-120148-call.voice.wav --type meeting
 minutes watch                                     # Auto-process new files in inbox
 ```
@@ -201,14 +201,14 @@ minutes consistency                                # Flag contradicting decision
 minutes live                                     # Start real-time transcription
 minutes stop                                     # Stop live session
 ```
-Streams local transcription to a JSONL file in real time — any AI agent can read it mid-meeting for live coaching. When the session stops, the default `[live_transcript] promote_on_stop = "process"` preserves the raw WAV/JSONL pair and runs the normal diarization and summarization pipeline to create a meeting; use `"preserve"` to keep only the timestamped source pair or `"off"` for the legacy overwrite-prone fixed slot. Depending on your build and config, live mode can run on Whisper, Parakeet, or the experimental Apple Speech standalone-live path. Apple Speech currently applies to standalone live transcript (`minutes live`) and opt-in dictation finalization, not recording-sidecar or batch transcription, and it falls back to a ready Parakeet backend before Whisper if Apple Speech is unavailable or fails mid-session in live mode. See [docs/architecture/apple-speech.md](docs/architecture/apple-speech.md) for the current Apple Speech scope. The MCP `read_live_transcript` tool provides delta reads (by line cursor or wall-clock duration). Works with Claude Code, Codex, OpenCode, Gemini CLI, or any agent that reads files. The Tauri desktop app has a Live Mode toggle that starts this with one click.
+Streams local transcription to a JSONL file in real time — any AI agent can read it mid-meeting for live coaching. When the session stops, the default `[live_transcript] promote_on_stop = "process"` preserves the raw WAV/JSONL pair and runs the normal diarization and summarization pipeline to create a meeting; use `"preserve"` to keep only the timestamped source pair or `"off"` for the legacy overwrite-prone fixed slot. Live mode currently runs on sealed local Whisper. Existing Apple Speech and Parakeet preferences are retained but resolve to Whisper until their pathname-only helpers gain a secure byte transport; Minutes will not create a named plaintext WAV just to invoke them. See [docs/architecture/apple-speech.md](docs/architecture/apple-speech.md) and [docs/architecture/parakeet.md](docs/architecture/parakeet.md) for current scope. The MCP `read_live_transcript` tool provides delta reads (by line cursor or wall-clock duration). Works with Claude Code, Codex, OpenCode, Gemini CLI, or any agent that reads files. The Tauri desktop app has a Live Mode toggle that starts this with one click.
 
 ### Dictation mode
 ```bash
 minutes dictate                                  # Speak → text appears as you talk
 minutes dictate --stdout                         # Output to stdout instead of clipboard
 ```
-Text streams progressively as you speak (partial results every 2 seconds). By default it accumulates across pauses and writes the combined text to clipboard + daily note when dictation ends. Set `[dictation] accumulate = false` to keep the older per-pause behavior. The default backend is local Whisper; on supported macOS builds, `[dictation] backend = "apple-speech"` tries Apple DictationTranscriber for final utterances, and `[dictation] backend = "parakeet"` tries the installed Parakeet backend for final utterances. Both opt-in paths keep Whisper partials and fallback. Linux clipboard output works through `wl-clipboard` on Wayland or `xclip` / `xsel` on X11; desktop auto-paste only attempts X11 paste automation when `xdotool` is available. Local engines, no cloud.
+Text streams progressively as you speak (partial results every 2 seconds). By default it accumulates across pauses and writes the combined text to clipboard + daily note when dictation ends. Set `[dictation] accumulate = false` to keep the older per-pause behavior. Dictation runs on sealed local Whisper. Retained `[dictation] backend = "apple-speech"` and `"parakeet"` preferences currently resolve to Whisper because their pathname-only helpers cannot receive Minutes' secure private audio. Linux clipboard output works through `wl-clipboard` on Wayland or `xclip` / `xsel` on X11; desktop auto-paste only attempts X11 paste automation when `xdotool` is available. Local engines, no cloud.
 
 ### Command palette (desktop app)
 Press `⌘⇧K` from anywhere on macOS to open a keyboard-first palette of every Minutes command. Start a recording, drop a note into the active session, jump to the latest meeting, search transcripts, or rename the meeting open in your assistant — all without leaving the keyboard. Backed by a single typed command registry in `minutes-core`, so visibility follows real backend state: stop-recording only appears while you're recording, mid-recording dictation rows are hidden, and the list re-fetches automatically when state changes.
@@ -439,7 +439,7 @@ If your phone workflow also saves a `.json` file alongside the audio (same name,
 
 This adds `device` and `captured_at` to the meeting's frontmatter. Works with any automation tool (Apple Shortcuts, Tasker, etc.).
 
-Supports `.m4a`, `.mp3`, `.wav`, `.ogg`, `.webm`. Format conversion is automatic — uses [ffmpeg](https://ffmpeg.org/) when available (recommended for non-English audio), falls back to [symphonia](https://github.com/pdeljanov/Symphonia).
+Supports `.m4a`, `.mp3`, `.wav`, `.ogg`, `.webm`. WAV is decoded in process; compressed formats require [ffmpeg](https://ffmpeg.org/) so decoding stays inside a bounded child process.
 
 If a desktop call capture leaves a raw file under `~/.minutes/native-captures/`, process that audio file directly with `minutes process <path> --type meeting`. For compatibility, `minutes import <audio-file>` also routes to the same meeting-processing path; `minutes import granola` remains the Granola history importer.
 
@@ -782,14 +782,18 @@ winget install LLVM.LLVM
 [Environment]::SetEnvironmentVariable("LIBCLANG_PATH", "C:\Program Files\LLVM\bin", "User")
 # Restart your terminal after setting LIBCLANG_PATH
 
+# Compressed imports require ffmpeg.exe. Add its bin directory to PATH, or:
+[Environment]::SetEnvironmentVariable("MINUTES_FFMPEG", "C:\path\to\ffmpeg.exe", "User")
+
 # Full build (includes speaker diarization):
 cargo install --path crates/cli
 
 # Without speaker diarization:
-cargo install --path crates/cli --no-default-features
+cargo install --path crates/cli --no-default-features --features whisper
 ```
 
-> **Note:** If diarization fails to compile on Windows, use `--no-default-features`.
+> **Note:** If diarization fails to compile on Windows, use
+> `--no-default-features --features whisper` so transcription remains enabled.
 > This is a [known upstream issue](https://github.com/silverstein/minutes/issues/27)
 > with `pyannote-rs`'s ONNX Runtime dependency. Everything except speaker labels works without it.
 
@@ -813,7 +817,7 @@ cargo install --path crates/cli
 - `clang`, `libclang-dev` — bindgen (used by `whisper-rs` and `pipewire-sys`)
 - `libasound2-dev` — cpal's ALSA backend
 - `libpipewire-0.3-dev`, `libspa-0.2-dev` — cpal's PipeWire backend (compiled unconditionally on Linux)
-- `ffmpeg` — preferred audio decoder for `.m4a`/`.mp3`/`.ogg` (falls back to pure-Rust symphonia if absent)
+- `ffmpeg` — required bounded decoder for `.m4a`/`.mp3`/`.ogg`; WAV is decoded directly
 
 **Other distros** (best-effort — Debian/Ubuntu is the validated path; please [open an issue](https://github.com/silverstein/minutes/issues) if any package name is wrong on your distro):
 
@@ -926,11 +930,13 @@ minutes setup --model small   # Recommended (466MB, good accuracy)
 minutes setup --model tiny    # Fastest (75MB, but misses quiet audio)
 minutes setup --model base    # Middle ground (141MB)
 
-# Install ffmpeg for best transcription quality (strongly recommended for non-English audio)
+# Install ffmpeg for non-WAV audio formats such as m4a/mp3/ogg/flac
 brew install ffmpeg           # macOS
 # apt install ffmpeg          # Linux
-# Without ffmpeg, symphonia handles m4a/mp3 decoding — works for English but may
-# produce loops on non-English audio. ffmpeg is optional but recommended.
+# Windows: install ffmpeg.exe and add it to PATH, or set MINUTES_FFMPEG
+# to its full path (for example C:\path\to\ffmpeg.exe).
+# Without ffmpeg, Minutes fails compressed input closed and explains how to retry;
+# WAV processing remains available.
 
 # Enable speaker diarization (optional, ~34MB ONNX models)
 minutes setup --diarization
@@ -946,19 +952,10 @@ minutes setup --sherpa        # downloads the int8 ONNX model (~670MB) + sets en
 # macOS sherpa builds are self-contained (static). On Linux/Windows, run from the
 # repo (cargo run) rather than copying the binary out of target/ — details in the doc.
 
-# Alternative: use Parakeet engine (opt-in, local GPU via parakeet.cpp)
-# Requires (1) parakeet.cpp installed (https://github.com/Frikallo/parakeet.cpp)
-# AND (2) a Minutes CLI compiled with `--features parakeet`. The downloadable
-# DMG and tagged CLI release binaries include the feature; the Homebrew Formula
-# CLI (`brew install silverstein/tap/minutes`) and bare `cargo install minutes-cli`
-# do not. See docs/architecture/parakeet.md for the source-build walkthrough.
-#
-# Note: `minutes setup --parakeet` installs the bundled Silero VAD weights
-# (~1.2 MB) and prints a manual recipe for downloading + converting the
-# tdt-600m .nemo from HuggingFace (the resulting safetensors file is ~2.3 GB).
-# The `.nemo` download and `convert_nemo.py` step are still manual.
-minutes setup --parakeet                          # Multilingual v3 setup (tdt-600m)
-minutes setup --parakeet --parakeet-model tdt-ctc-110m  # English-only compact (tdt-ctc-110m)
+# Parakeet preferences currently resolve to Whisper on every platform. The
+# pathname-only parakeet.cpp helper cannot safely receive Minutes' sealed
+# private audio, so setup and selection fail closed until a secure byte
+# transport lands. See docs/architecture/parakeet.md for technical status.
 
 # Enroll your voice for automatic speaker identification
 minutes enroll              # Records 10s of your voice
@@ -1124,18 +1121,18 @@ Optional — minutes works out of the box.
 # Or: $XDG_CONFIG_HOME/minutes/config.toml when XDG_CONFIG_HOME is set
 
 [transcription]
-engine = "whisper"        # "whisper" (default), "parakeet" (opt-in, lower WER), or "apple-speech" (experimental)
+engine = "whisper"        # "whisper" is the executable private-audio backend
 model = "small"           # whisper: tiny (75MB), base, small (466MB), medium, large-v3 (3.1GB)
 # language = "ur"          # Force transcription language (ISO 639-1 code, e.g. "en", "ur", "es", "zh")
                           # Default: auto-detect. Set this for similar-sounding languages (Urdu/Hindi, etc.)
-# engine = "apple-speech"  # Experimental: standalone `minutes live` only. Configure via config file or CLI, not desktop settings.
-#                         # If Apple Speech cannot run, standalone live falls back to a ready Parakeet backend, then Whisper.
-#                         # See docs/architecture/apple-speech.md for current scope and limitations.
+# engine = "apple-speech"  # Retained for compatibility, but currently resolves to Whisper until secure byte transport lands.
+#                          # See docs/architecture/apple-speech.md for current scope and limitations.
+# engine = "parakeet"      # Retained for compatibility, but currently resolves to Whisper until secure byte transport lands.
 # parakeet_model = "tdt-600m"                    # parakeet: tdt-ctc-110m (English), tdt-600m (multilingual v3)
 # parakeet_binary = "parakeet"                   # Path to parakeet.cpp binary (or name in PATH)
 # parakeet_boost_limit = 25                      # Experimental: boost top graph-derived phrases (0 disables)
 # parakeet_boost_score = 2.0                     # Experimental tuning for parakeet.cpp --boost-score
-# parakeet_fp16 = true                           # Default on macOS Apple Silicon: ~35% faster transcription with lower GPU memory (see docs/designs/parakeet-perf-2026-04-14.md)
+# parakeet_fp16 = false                          # Retained legacy setting; inert while Parakeet batch selection resolves to Whisper
 # parakeet_vocab = "tdt-600m.tokenizer.vocab"      # Safer when multiple Parakeet models are installed
 # vad_model = "silero-v6.2.0"     # Silero VAD model (auto-downloaded by setup). Empty = disable.
                                    # Prevents whisper hallucination loops on non-English/noisy audio.
@@ -1261,7 +1258,7 @@ const meetings = await listMeetings("~/meetings", 20);
 const results = await searchMeetings("~/meetings", "pricing");
 ```
 
-**Built with:** Rust, [whisper.cpp](https://github.com/ggerganov/whisper.cpp) (transcription), [pyannote-rs](https://github.com/pyannote/pyannote-rs) (speaker diarization), [Silero VAD](https://github.com/snakers4/silero-vad) (voice activity detection), [symphonia](https://github.com/pdeljanov/Symphonia) (audio decoding), [cpal](https://github.com/RustAudio/cpal) (audio capture), [Tauri v2](https://v2.tauri.app/) (desktop app), [ureq](https://github.com/algesten/ureq) (HTTP). Optional: [ffmpeg](https://ffmpeg.org/) (recommended for non-English audio decoding).
+**Built with:** Rust, [whisper.cpp](https://github.com/ggerganov/whisper.cpp) (transcription), [pyannote-rs](https://github.com/pdeljanov/pyannote-rs) (speaker diarization), [Silero VAD](https://github.com/snakers4/silero-vad) (voice activity detection), [hound](https://github.com/ruuda/hound) (bounded WAV decoding), [cpal](https://github.com/RustAudio/cpal) (audio capture), [Tauri v2](https://v2.tauri.app/) (desktop app), [ureq](https://github.com/algesten/ureq) (HTTP), and [ffmpeg](https://ffmpeg.org/) (bounded compressed-audio decoding).
 
 ## Star History
 

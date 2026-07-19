@@ -6,7 +6,7 @@ user_invocable: true
 
 # /minutes-record
 
-Record audio from the microphone, transcribe it locally (whisper.cpp or parakeet.cpp), and save as searchable markdown.
+Record audio from the microphone, transcribe it locally with whisper.cpp, and save as searchable markdown.
 
 ## How it works
 
@@ -27,7 +27,7 @@ minutes stop
 ```
 This sends a signal to the recording process, which then:
 1. Stops audio capture
-2. Transcribes the audio locally via whisper.cpp or parakeet.cpp (no cloud, no data leaves the machine)
+2. Transcribes the audio locally via whisper.cpp (no cloud, no data leaves the machine)
 3. Saves the transcript as a markdown file in `~/meetings/`
 4. Prints the output path and word count as JSON
 
@@ -68,16 +68,14 @@ minutes setup --model small
 ```
 This downloads a ~466MB model. For faster but lower quality: `--model tiny` (75MB). For best quality: `--model large-v3` (3.1GB).
 
-**Parakeet (opt-in, lower WER, fast on Apple Silicon):**
-```bash
-minutes setup --parakeet                           # English (tdt-ctc-110m, ~220MB)
-minutes setup --parakeet --parakeet-model tdt-600m  # Multilingual v3 (~1.2GB)
-```
-Requires both parakeet.cpp installed AND a Minutes CLI compiled with `--features parakeet`. The downloadable DMG and tagged CLI release binaries include the feature; the Homebrew Formula CLI (`brew install silverstein/tap/minutes`) and bare `cargo install minutes-cli` do not. If `minutes setup --parakeet` reports `WARNING: this minutes binary was compiled WITHOUT the parakeet feature`, rebuild from source with the flag. See `docs/architecture/parakeet.md` for the full walkthrough.
+Parakeet preferences currently resolve to Whisper on every platform. The
+pathname-only helper cannot safely receive Minutes' sealed private audio, so
+setup and selection fail closed until a secure byte transport lands. Do not
+send users through the Parakeet setup guide as a recording prerequisite.
 
 ## Gotchas
 
-- **"model not found"** → Run `minutes setup --model small` (whisper) or `minutes setup --parakeet` (parakeet). This is the most common first-run error.
+- **"model not found"** → Run `minutes setup --model small`. This is the most common first-run error.
 - **"already recording"** → Run `minutes stop` first, or `minutes status` to check. If the PID file is stale (process crashed), `minutes stop` will clean it up.
 - **No audio captured / empty transcript** → Check that the right input device is selected in System Settings > Sound. On MacBooks, the default mic works for in-person conversations but won't capture system audio.
 - **For Zoom/Meet/Teams audio** → You need BlackHole to capture system audio. See `references/audio-devices.md` in this skill folder for the full setup guide.

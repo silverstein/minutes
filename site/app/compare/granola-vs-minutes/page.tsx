@@ -19,7 +19,7 @@ const comparisonRows = [
   {
     label: "Where audio is transcribed",
     competitor: "Cloud providers (Deepgram, AssemblyAI)",
-    minutes: "On your device (whisper.cpp or parakeet.cpp)",
+    minutes: "On your device (sealed local whisper.cpp)",
   },
   {
     label: "Where transcripts and notes live",
@@ -105,7 +105,7 @@ const architecture = {
       },
       {
         label: "Transcribe",
-        detail: "on-device — whisper.cpp / parakeet.cpp",
+        detail: "on-device — sealed local whisper.cpp",
         offDevice: false,
       },
       {

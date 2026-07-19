@@ -1729,9 +1729,9 @@ mod tests {
             word_count: 0,
             content_type: ContentType::Meeting,
         };
-        pipeline::TranscriptArtifact {
+        pipeline::TranscriptArtifact::ambient_for_test(
             write_result,
-            frontmatter: Frontmatter {
+            Frontmatter {
                 title: "Capture reliability fixture".into(),
                 r#type: ContentType::Meeting,
                 date: Local::now(),
@@ -1765,9 +1765,8 @@ mod tests {
                 template: None,
                 filter_diagnosis: Some("fake engine found no speech".into()),
             },
-            transcript: String::new(),
-            diarization_audio_path: None,
-        }
+            String::new(),
+        )
     }
 
     #[test]
@@ -2398,14 +2397,14 @@ mod tests {
 
     #[test]
     fn no_speech_artifacts_require_review_and_preserve_capture() {
-        let artifact = pipeline::TranscriptArtifact {
-            write_result: WriteResult {
+        let artifact = pipeline::TranscriptArtifact::ambient_for_test(
+            WriteResult {
                 path: PathBuf::from("/tmp/review.md"),
                 title: "Untitled Recording".into(),
                 word_count: 0,
                 content_type: ContentType::Meeting,
             },
-            frontmatter: Frontmatter {
+            Frontmatter {
                 title: "Untitled Recording".into(),
                 r#type: ContentType::Meeting,
                 date: Local::now(),
@@ -2439,9 +2438,8 @@ mod tests {
                 template: None,
                 filter_diagnosis: Some("silence strip removed ALL audio".into()),
             },
-            transcript: String::new(),
-            diarization_audio_path: None,
-        };
+            String::new(),
+        );
 
         assert_eq!(
             terminal_state_for_artifact(&artifact),
@@ -2837,14 +2835,14 @@ mod tests {
         status: OutputStatus,
         recording_health: Option<crate::markdown::RecordingHealth>,
     ) -> pipeline::TranscriptArtifact {
-        pipeline::TranscriptArtifact {
-            write_result: WriteResult {
+        pipeline::TranscriptArtifact::ambient_for_test(
+            WriteResult {
                 path: PathBuf::from(format!("/tmp/{id}.md")),
                 title: format!("title-{id}"),
                 word_count: 42,
                 content_type: ContentType::Meeting,
             },
-            frontmatter: Frontmatter {
+            Frontmatter {
                 title: format!("title-{id}"),
                 r#type: ContentType::Meeting,
                 date: Local::now(),
@@ -2878,9 +2876,8 @@ mod tests {
                 template: None,
                 filter_diagnosis: None,
             },
-            transcript: "[0:00] recovered call audio".into(),
-            diarization_audio_path: None,
-        }
+            "[0:00] recovered call audio".into(),
+        )
     }
 
     #[test]

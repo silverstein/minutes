@@ -1,6 +1,6 @@
 {
-  "generatedAt": "2026-07-17",
-  "visibleCount": 59,
+  "generatedAt": "2026-07-19",
+  "visibleCount": 60,
   "hiddenCount": 16,
   "groups": [
     {
@@ -99,7 +99,7 @@
     },
     {
       "enumName": "TranscribeError",
-      "count": 10,
+      "count": 11,
       "entries": [
         {
           "id": "transcribeerror-modelnotfound",
@@ -177,6 +177,17 @@
           "hidden": false,
           "anchorId": "error-transcribeerror-transcriptionfailed",
           "docsUrl": "https://useminutes.app/docs/errors#error-transcribeerror-transcriptionfailed"
+        },
+        {
+          "id": "transcribeerror-compresseddecoderunavailable",
+          "enumName": "TranscribeError",
+          "variant": "CompressedDecoderUnavailable",
+          "cfg": null,
+          "message": "compressed audio decoder unavailable: {0}",
+          "sourceFile": "crates/core/src/error.rs",
+          "hidden": false,
+          "anchorId": "error-transcribeerror-compresseddecoderunavailable",
+          "docsUrl": "https://useminutes.app/docs/errors#error-transcribeerror-compresseddecoderunavailable"
         },
         {
           "id": "transcribeerror-enginenotavailable",

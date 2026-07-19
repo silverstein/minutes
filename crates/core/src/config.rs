@@ -198,8 +198,10 @@ impl Default for VoiceConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TranscriptionConfig {
-    /// Transcription engine: "whisper" (default), "parakeet", or
-    /// "apple-speech" (experimental live-transcript-only path on macOS 26+).
+    /// Transcription engine preference: "whisper" (default), "parakeet", or
+    /// "apple-speech". Retained Parakeet and Apple Speech values currently
+    /// resolve to Whisper on every platform because their pathname-only
+    /// helpers cannot receive Minutes' secure private-audio capability.
     pub engine: String,
     pub model: String,
     pub model_path: PathBuf,
@@ -270,10 +272,15 @@ pub struct TranscriptionConfig {
     pub parakeet_fp16: bool,
     /// Warm Parakeet example-server sidecar: `None` (default) = auto.
     ///
-    /// Auto enables the sidecar when parakeet is the selected engine (batch or
-    /// live) AND the `example-server` binary resolves; otherwise the cold
-    /// per-utterance subprocess path is used. Explicit `true`/`false` in
-    /// config.toml overrides auto in either direction (#295). Use
+    /// Auto can enable the sidecar when parakeet is selected and the
+    /// `example-server` binary resolves, but the current pathname-only server
+    /// protocol cannot receive Minutes' anonymous/sealed private-audio
+    /// capability. Linux descriptor inheritance is also unavailable because
+    /// ordinary exec resets child dumpability and exposes a race through
+    /// `/proc/<pid>/fd`. Every platform therefore reports Parakeet unavailable
+    /// and falls back to Whisper until the CLI can receive sealed bytes/stdin
+    /// or acknowledges a post-exec descriptor-isolation protocol. Explicit `true`
+    /// records intent but cannot bypass that safety gate (#295). Use
     /// `parakeet_sidecar::sidecar_enabled_effective()` to read the decision;
     /// never branch on this raw field.
     ///
@@ -1084,8 +1091,10 @@ pub struct LiveTranscriptConfig {
     ///
     /// - `"inherit"` (default): follow `transcription.engine`
     /// - `"whisper"`: force Whisper for standalone live transcript
-    /// - `"parakeet"`: force Parakeet for standalone live transcript
-    /// - `"apple-speech"`: experimental macOS standalone-live-only path
+    /// - `"parakeet"`: retain Parakeet intent; currently resolves to Whisper
+    ///   because no secure private-audio process transport is available
+    /// - `"apple-speech"`: retain Apple Speech intent; currently resolves to
+    ///   Whisper because no secure private-audio process transport is available
     pub backend: String,
     /// Whisper model to use for live transcription.
     /// Empty string means "use the dictation model".
@@ -1301,7 +1310,10 @@ impl Default for TranscriptionConfig {
             sherpa_model_dir: String::new(),
             parakeet_boost_limit: 0,
             parakeet_boost_score: 2.0,
-            parakeet_fp16: true,
+            // Reserved for a future supported GPU transport. Current Linux
+            // Parakeet dispatch never forwards --fp16, and macOS Parakeet is
+            // safety-gated off until it can receive sealed audio directly.
+            parakeet_fp16: false,
             parakeet_sidecar_enabled: None,
             parakeet_fp16_blacklist_reset: false,
             parakeet_vocab: "tdt-600m.tokenizer.vocab".into(),
@@ -1417,8 +1429,9 @@ impl Config {
     /// `live_transcript.backend = "inherit"` follows `transcription.engine`,
     /// except for the legacy `transcription.engine = "apple-speech"` case,
     /// which older configs used to express the standalone-live-only Apple
-    /// experiment. We keep honoring that value here so non-Tauri consumers
-    /// preserve behavior even before the migration has rewritten the file.
+    /// experiment. We retain that preference here so non-Tauri consumers keep
+    /// the user's intent even though runtime selection currently resolves it to
+    /// sealed Whisper.
     pub fn effective_live_transcript_backend(&self) -> &str {
         let backend = self.live_transcript.backend.trim();
         // Case-insensitive: engine/backend matching is case-insensitive
@@ -1740,13 +1753,11 @@ pub fn openai_compatible_base_url_is_local(base_url: &str) -> bool {
     } else {
         host_port.split(':').next().unwrap_or(host_port)
     };
-
     matches!(
         host.to_ascii_lowercase().as_str(),
         "localhost" | "127.0.0.1" | "0.0.0.0" | "::1"
     )
 }
-
 /// Return `true` iff the raw TOML text contains a top-level `[section]`
 /// header. This is a deliberately primitive text check — we cannot use
 /// `toml::from_str` to answer this question because serde's `#[serde(default)]`
@@ -1871,7 +1882,7 @@ mod tests {
         assert_eq!(config.transcription.parakeet_model, "tdt-600m");
         assert_eq!(config.transcription.parakeet_boost_limit, 0);
         assert_eq!(config.transcription.parakeet_boost_score, 2.0);
-        assert!(config.transcription.parakeet_fp16);
+        assert!(!config.transcription.parakeet_fp16);
         assert!(config.transcription.parakeet_sidecar_enabled.is_none());
         assert_eq!(
             config.transcription.parakeet_vocab,

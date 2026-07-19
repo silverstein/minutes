@@ -105,7 +105,7 @@ const architecture = {
       },
       {
         label: "Transcribe + diarize",
-        detail: "on-device — whisper.cpp / parakeet.cpp + pyannote",
+        detail: "on-device — sealed local whisper.cpp + pyannote",
         offDevice: false,
       },
       {

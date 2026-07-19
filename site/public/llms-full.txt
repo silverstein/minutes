@@ -2,7 +2,7 @@
 
 > Generated file. Do not edit by hand.
 > Source: manifest.json + crates/mcp/src/index.ts + site/lib/skills-catalog.json
-> Last generated: 2026-07-17
+> Last generated: 2026-07-19
 
 ## Product
 
@@ -11,7 +11,7 @@ Minutes is the private, owned conversation-memory layer. Record meetings, voice 
 36 tools • 7 resources • Interactive MCP App dashboard • Prompt templates
 
 What you get:
-• On-device transcription (whisper.cpp or parakeet.cpp) and optional on-device summarization (Apple Foundation Models on macOS 26+) — your audio never leaves the machine.
+• On-device transcription with sealed local whisper.cpp and optional on-device summarization (Apple Foundation Models on macOS 26+) — your audio never leaves the machine. Retained Parakeet and Apple Speech preferences resolve to Whisper until those helpers support secure byte transport.
 • A native chat panel that recalls your meetings, with token streaming and read-only search of your own corpus.
 • Dictation that types straight at your cursor, on the same local engine.
 • Live sessions that promote into diarized, summarized meetings when you stop.

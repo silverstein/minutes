@@ -24,7 +24,7 @@ const featureGrid = [
     label: "For developers",
     title: "Local and inspectable",
     description:
-      "whisper.cpp or parakeet.cpp transcription, diarized markdown, YAML frontmatter, and a plain-files workflow that still works with grep and git.",
+      "sealed local whisper.cpp transcription, diarized markdown, YAML frontmatter, and a plain-files workflow that still works with grep and git.",
   },
   {
     label: "For meetings",
@@ -275,7 +275,7 @@ const cloudFlow: HomeFlowStep[] = [
 
 const minutesFlow: HomeFlowStep[] = [
   { label: "Capture from your mic", detail: "device audio, on your Mac" },
-  { label: "Transcribe", detail: "on-device — whisper.cpp / parakeet.cpp" },
+  { label: "Transcribe", detail: "on-device — sealed local whisper.cpp" },
   { label: "Store transcripts + notes", detail: "your disk — markdown in ~/meetings" },
 ];
 
@@ -549,8 +549,6 @@ export default function Home() {
 
         <p className="mt-4 text-[13px] text-[var(--text-secondary)]">
           Download, install, done. First launch downloads a speech model. Run
-          <span className="mx-1 font-mono text-[var(--text)]">minutes setup --parakeet</span>
-          for the multilingual Parakeet backend, or
           <span className="mx-1 font-mono text-[var(--text)]">minutes setup --demo</span>
           to try the pipeline on five bundled fixture meetings.
         </p>
@@ -708,9 +706,9 @@ export default function Home() {
                                 Ollama`}
         </pre>
         <p className="mt-5 max-w-[660px] text-[15px] leading-7 text-[var(--text-secondary)]">
-          Transcription is local via whisper.cpp or parakeet.cpp. Parakeet is
-          multilingual by default with native VAD. Live transcription falls
-          back cleanly through Apple Speech, Parakeet, and Whisper.
+          Transcription runs locally through sealed whisper.cpp. Existing
+          Parakeet and Apple Speech preferences resolve to Whisper until those
+          helpers can accept secure audio bytes without a named plaintext file.
           Summarization is optional — Claude can do it conversationally when
           you ask, using your existing subscription. No API keys are required
           to get useful output.

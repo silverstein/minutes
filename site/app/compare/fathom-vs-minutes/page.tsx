@@ -24,7 +24,7 @@ const comparisonRows = [
   {
     label: "Where audio is processed",
     competitor: "Fathom's cloud; AI via Anthropic, OpenAI, and Google",
-    minutes: "On your device (whisper.cpp or parakeet.cpp); audio is never uploaded",
+    minutes: "On your device (sealed local whisper.cpp); audio is never uploaded",
   },
   {
     label: "Where recordings live",
@@ -100,7 +100,7 @@ const architecture = {
       },
       {
         label: "Transcribe + diarize",
-        detail: "on-device — whisper.cpp / parakeet.cpp + pyannote",
+        detail: "on-device — sealed local whisper.cpp + pyannote",
         offDevice: false,
       },
       {

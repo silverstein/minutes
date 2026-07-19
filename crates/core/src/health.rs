@@ -172,6 +172,7 @@ pub fn recording_health_for_system_audio_probe_failure(
 pub const NATIVE_CALL_MICROPHONE_RECOVERY_CODE: &str = "native-call-microphone-stem-recovery";
 pub const NATIVE_CALL_SYSTEM_RECOVERY_CODE: &str = "native-call-system-stem-recovery";
 pub const NATIVE_CALL_CAPTURE_WARNING_CODE: &str = "native-call-capture-warning";
+pub const NATIVE_CALL_INVALID_STEM_CODE: &str = "native-call-invalid-stem";
 
 /// Describe a native call recovered from only one usable PCM stem.
 ///
@@ -224,9 +225,38 @@ pub fn append_native_call_capture_warning(
     });
 }
 
-/// Check if the whisper model is downloaded and ready.
+pub fn append_native_call_invalid_stem_warning(
+    health: &mut RecordingHealth,
+    invalid_source: CaptureSource,
+    reason: &str,
+) {
+    let source_label = match invalid_source {
+        CaptureSource::Voice => "Microphone",
+        CaptureSource::System => "Call/remote",
+        CaptureSource::Both | CaptureSource::Backend => "Native call",
+    };
+    health.capture_warnings.push(CaptureWarning {
+        kind: FailureKind::Other {
+            code: NATIVE_CALL_INVALID_STEM_CODE.into(),
+        },
+        source: invalid_source,
+        message: format!(
+            "{source_label} audio was invalid or corrupt and was not used; the valid sibling stem was preserved and transcribed. Validation detail: {reason}"
+        ),
+        diagnostic_confidence: DiagnosticConfidence::High,
+    });
+}
+
+/// Check whether the model for the effective batch backend is ready.
+///
+/// Retained Parakeet and Apple Speech preferences resolve to Whisper while
+/// their private-audio transport gates are closed. Health must describe that
+/// configured/resolved split while checking the model runtime will load.
 pub fn model_status(config: &Config) -> HealthItem {
-    if config.transcription.engine == "parakeet" {
+    let configured_parakeet = config.transcription.engine.eq_ignore_ascii_case("parakeet");
+    if configured_parakeet
+        && crate::pipeline::parakeet_capability(cfg!(feature = "parakeet")).selectable
+    {
         return crate::transcription_coordinator::parakeet_health_item(config);
     }
 
@@ -237,17 +267,46 @@ pub fn model_status(config: &Config) -> HealthItem {
         .join(format!("ggml-{}.bin", model_name));
     let exists = model_file.exists();
 
+    let retained_backend = if configured_parakeet
+        && crate::transcribe::effective_batch_engine(config) == "whisper"
+    {
+        Some(format!(
+            "Parakeet (retained preference); Parakeet {}",
+            crate::pipeline::parakeet_capability(cfg!(feature = "parakeet")).unavailable_reason()
+        ))
+    } else if config
+        .transcription
+        .engine
+        .eq_ignore_ascii_case("apple-speech")
+        && crate::transcribe::effective_batch_engine(config) == "whisper"
+    {
+        Some("Apple Speech (retained preference); its pathname-only helper cannot accept sealed private audio".into())
+    } else {
+        None
+    };
+    let detail = match (retained_backend, exists) {
+        (Some(retained), true) => format!(
+            "Configured backend: {retained}. Resolved backend: Whisper. Whisper model {} is installed at {}.",
+            model_name,
+            model_file.display()
+        ),
+        (Some(retained), false) => format!(
+            "Configured backend: {retained}. Resolved backend: Whisper and model {} is not installed at {}. Run `minutes setup --model {}` to download it.",
+            model_name,
+            model_file.display(),
+            model_name
+        ),
+        (None, true) => format!("{} is installed at {}.", model_name, model_file.display()),
+        (None, false) => format!(
+            "{} is not installed yet. Run `minutes setup` to download it.",
+            model_name
+        ),
+    };
+
     HealthItem {
         label: "Speech model".into(),
         state: if exists { "ready" } else { "attention" }.into(),
-        detail: if exists {
-            format!("{} is installed at {}.", model_name, model_file.display())
-        } else {
-            format!(
-                "{} is not installed yet. Run `minutes setup` to download it.",
-                model_name
-            )
-        },
+        detail,
         optional: false,
     }
 }
@@ -294,20 +353,19 @@ pub fn vad_model_status(config: &Config) -> HealthItem {
 
 /// Check if ffmpeg is available for audio decoding.
 pub fn ffmpeg_status() -> HealthItem {
-    let resolved = crate::ffmpeg::resolve_ffmpeg();
+    let resolved = crate::ffmpeg::resolve_launchable_ffmpeg();
     let available = resolved.is_ok();
 
     HealthItem {
-        label: "ffmpeg".into(),
+        label: "Compressed audio imports".into(),
         state: if available { "ready" } else { "attention" }.into(),
         detail: match resolved {
             Ok(path) => format!(
-                "Installed at {}. Used for high-quality audio decoding of m4a/mp3/ogg files.",
+                "ffmpeg launched successfully at {}. Minutes will use this bounded decoder for compressed imports, but each file's container and codec are still validated at decode time and may be rejected if unsupported. WAV is decoded directly without launching ffmpeg.",
                 path.display()
             ),
             Err(error) => format!(
-                "{} Non-English audio in m4a/mp3/ogg format may produce poor transcriptions.",
-                error
+                "{error} ffmpeg is required for compressed audio imports. Configured watch folders keep original audio and sidecars untouched and show them in Recovery Center; one-off watchers keep originals in place and print restart guidance. WAV imports remain available."
             ),
         },
         optional: true,
@@ -668,6 +726,53 @@ mod tests {
     }
 
     #[test]
+    fn missing_ffmpeg_health_is_actionable_and_honest_about_compressed_imports() {
+        let _env_lock = crate::test_home_env_lock();
+        let previous = std::env::var_os("MINUTES_FFMPEG");
+        std::env::set_var(
+            "MINUTES_FFMPEG",
+            std::env::temp_dir().join("minutes-definitely-missing-ffmpeg"),
+        );
+        let item = ffmpeg_status();
+        if let Some(previous) = previous {
+            std::env::set_var("MINUTES_FFMPEG", previous);
+        } else {
+            std::env::remove_var("MINUTES_FFMPEG");
+        }
+
+        assert_eq!(item.label, "Compressed audio imports");
+        assert_eq!(item.state, "attention");
+        assert!(item.detail.contains("ffmpeg is required"));
+        assert!(item.detail.contains("Recovery Center"));
+        assert!(item.detail.contains("WAV imports remain available"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_launchable_ffmpeg_health_fails_closed() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _env_lock = crate::test_home_env_lock();
+        let temp = tempfile::TempDir::new().unwrap();
+        let invalid_ffmpeg = temp.path().join("ffmpeg");
+        std::fs::write(&invalid_ffmpeg, b"MZ\x90\0synthetic foreign image").unwrap();
+        std::fs::set_permissions(&invalid_ffmpeg, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let previous = std::env::var_os("MINUTES_FFMPEG");
+        std::env::set_var("MINUTES_FFMPEG", &invalid_ffmpeg);
+
+        let item = ffmpeg_status();
+
+        if let Some(previous) = previous {
+            std::env::set_var("MINUTES_FFMPEG", previous);
+        } else {
+            std::env::remove_var("MINUTES_FFMPEG");
+        }
+        assert_eq!(item.state, "attention");
+        assert!(item.detail.contains("could not be used"));
+        assert!(item.detail.contains("Recovery Center"));
+    }
+
+    #[test]
     fn screen_recording_health_is_ready_when_disabled() {
         let config = Config::default();
         assert!(
@@ -761,19 +866,32 @@ mod tests {
     }
 
     #[test]
-    fn test_parakeet_model_status_missing_assets() {
+    fn retained_parakeet_health_checks_resolved_whisper_model() {
         let mut config = Config::default();
         config.transcription.engine = "parakeet".into();
         let tmp = tempfile::TempDir::new().unwrap();
         config.transcription.model_path = tmp.path().to_path_buf();
         let status = model_status(&config);
         assert_eq!(status.state, "attention");
-        assert!(status.detail.contains("Parakeet not ready"));
+        assert!(status.detail.contains("Configured backend: Parakeet"));
+        assert!(status.detail.contains("Resolved backend: Whisper"));
+        assert!(status.detail.contains("minutes setup --model"));
+
+        let whisper_model = config
+            .transcription
+            .model_path
+            .join(format!("ggml-{}.bin", config.transcription.model));
+        std::fs::write(&whisper_model, b"model").unwrap();
+        let status = model_status(&config);
+        assert_eq!(status.state, "ready");
+        assert!(!status.optional);
+        assert!(status.detail.contains("Configured backend: Parakeet"));
+        assert!(status.detail.contains("Resolved backend: Whisper"));
     }
 
     #[test]
     #[cfg(feature = "parakeet")]
-    fn test_parakeet_model_status_ready_with_metadata() {
+    fn test_parakeet_assets_with_metadata_still_report_transport_block_honestly() {
         let tmp = tempfile::TempDir::new().unwrap();
         let mut config = Config::default();
         config.transcription.engine = "parakeet".into();
@@ -797,10 +915,20 @@ mod tests {
         std::fs::write(&tokenizer, b"tokenizer").unwrap();
         crate::parakeet::write_install_metadata(&config, "tdt-ctc-110m", &model, &tokenizer)
             .unwrap();
+        std::fs::write(
+            config
+                .transcription
+                .model_path
+                .join(format!("ggml-{}.bin", config.transcription.model)),
+            b"whisper-model",
+        )
+        .unwrap();
 
         let status = model_status(&config);
         assert_eq!(status.state, "ready");
-        assert!(status.detail.contains("Metadata:"));
+        assert!(status.detail.contains("Resolved backend: Whisper"));
+        assert!(status.detail.contains("Whisper model"));
+        assert!(!status.detail.contains("Run `minutes setup"));
     }
 
     #[test]

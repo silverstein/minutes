@@ -24,7 +24,7 @@ const comparisonRows = [
   {
     label: "Where transcription runs",
     competitor: "On-device (Whisper, Parakeet, and other local models)",
-    minutes: "On-device (whisper.cpp or parakeet.cpp)",
+    minutes: "On-device (sealed local whisper.cpp)",
   },
   {
     label: "Optional cloud AI",
@@ -100,7 +100,7 @@ export default function MacwhisperVsMinutesPage() {
         "It's open source (MIT) and free — the entire pipeline is auditable Rust, which matters if 'local' is a compliance requirement rather than a preference.",
       ]}
       workflowSection={[
-        "The overlap is real: both record meetings, both transcribe locally, both can use Whisper or Parakeet engines. The divergence is what happens after transcription. MacWhisper's output is a document you export and move somewhere; its center of gravity is the file. Minutes' output is an entry in a corpus — ~/meetings accumulates, search spans months, and MCP tools answer questions like 'what did we decide about pricing in April' across everything.",
+        "The overlap is real: both record meetings and transcribe locally. MacWhisper offers Whisper and Parakeet engines; Minutes currently uses sealed local Whisper while its retained Parakeet preference waits for secure byte transport. The deeper divergence is what happens after transcription. MacWhisper's output is a document you export and move somewhere; its center of gravity is the file. Minutes' output is an entry in a corpus — ~/meetings accumulates, search spans months, and MCP tools answer questions like 'what did we decide about pricing in April' across everything.",
         "A fair test: open your transcription tool's output folder. If it's a pile of exports you rarely revisit, either tool works and MacWhisper is more polished. If you wish that pile were a queryable memory, that wish is the entire reason Minutes exists.",
       ]}
       chooseSection={[

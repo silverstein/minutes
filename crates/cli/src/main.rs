@@ -907,6 +907,10 @@ enum Commands {
         /// Overrides the [recording] device setting in config.toml.
         #[arg(short = 'D', long)]
         device: Option<String>,
+
+        /// Check dictation model readiness without opening the microphone.
+        #[arg(long, hide = true)]
+        preflight: bool,
     },
 
     /// List available audio input devices
@@ -1962,6 +1966,7 @@ fn main() -> Result<()> {
             note_only,
             language,
             device,
+            preflight,
         } => {
             if let Some(lang) = language {
                 config.transcription.language = Some(lang);
@@ -1969,7 +1974,11 @@ fn main() -> Result<()> {
             if let Some(dev) = device {
                 config.recording.device = Some(dev);
             }
-            cmd_dictate(stdout, note_only, &config)
+            if preflight {
+                cmd_dictate_preflight(&config)
+            } else {
+                cmd_dictate(stdout, note_only, &config)
+            }
         }
         Commands::Devices => cmd_devices(),
         Commands::Sources => cmd_sources(),
@@ -7618,6 +7627,23 @@ mod tests {
         result
     }
 
+    #[cfg(feature = "whisper")]
+    #[test]
+    fn dictation_model_missing_message_includes_exact_repair_command() {
+        let event = minutes_core::dictation::DictationEvent::ModelMissing {
+            model: "small".into(),
+            expected_path: "/tmp/models/ggml-small.bin".into(),
+            setup_command: "rm \"/tmp/models/ggml-small.bin\" && minutes setup --model small"
+                .into(),
+        };
+
+        let message = dictation_model_missing_message(&event).unwrap();
+        assert!(message.contains("Dictation model not installed: small"));
+        assert!(message.contains("Expected: /tmp/models/ggml-small.bin"));
+        assert!(message
+            .contains("Fix: rm \"/tmp/models/ggml-small.bin\" && minutes setup --model small"));
+    }
+
     fn attr(
         label: &str,
         name: &str,
@@ -12933,9 +12959,41 @@ fn cmd_demo(config: &Config) -> Result<()> {
 }
 
 #[cfg(feature = "whisper")]
+fn dictation_model_missing_message(
+    event: &minutes_core::dictation::DictationEvent,
+) -> Option<String> {
+    let minutes_core::dictation::DictationEvent::ModelMissing {
+        model,
+        expected_path,
+        setup_command,
+    } = event
+    else {
+        return None;
+    };
+    Some(format!(
+        "Dictation model not installed: {model}\nExpected: {expected_path}\nFix: {setup_command}"
+    ))
+}
+
+fn cmd_dictate_preflight(_config: &Config) -> Result<()> {
+    #[cfg(feature = "whisper")]
+    {
+        minutes_core::dictation::preflight_model(_config)
+            .map_err(|event| anyhow::anyhow!(dictation_model_missing_message(&event).unwrap()))
+    }
+
+    #[cfg(not(feature = "whisper"))]
+    Err(anyhow::anyhow!(
+        "`minutes dictate` requires the `whisper` feature. Reinstall without `--no-default-features` to use local dictation."
+    ))
+}
+
+#[cfg(feature = "whisper")]
 fn cmd_dictate(stdout: bool, note_only: bool, config: &Config) -> Result<()> {
     use std::sync::atomic::AtomicBool;
     use std::sync::Arc;
+
+    cmd_dictate_preflight(config)?;
 
     let permission_preflight = minutes_core::capture::preflight_microphone_only();
     if let Some(reason) = &permission_preflight.blocking_reason {
@@ -13007,6 +13065,11 @@ fn cmd_dictate(stdout: bool, note_only: bool, config: &Config) -> Result<()> {
                     }
                 }
                 DictationEvent::Error => eprintln!("[minutes] Transcription failed — audio saved"),
+                event @ DictationEvent::ModelMissing { .. } => {
+                    if let Some(message) = dictation_model_missing_message(&event) {
+                        eprintln!("[minutes] {message}");
+                    }
+                }
                 DictationEvent::Cancelled => eprintln!("[minutes] Dictation cancelled"),
                 DictationEvent::Yielded => {
                     eprintln!("[minutes] Recording started — yielding dictation")

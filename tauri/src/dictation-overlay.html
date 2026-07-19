@@ -227,6 +227,31 @@
       transition: opacity 180ms ease, transform 180ms ease;
     }
 
+    .recovery-button {
+      appearance: none;
+      border: 1px solid var(--accent-ring);
+      border-radius: 999px;
+      background: var(--accent-ring);
+      color: var(--text);
+      cursor: pointer;
+      flex-shrink: 0;
+      font: 600 var(--text-sm) 'Geist', sans-serif;
+      padding: 0.32rem 0.7rem;
+    }
+
+    .recovery-button:hover {
+      background: var(--accent-glow);
+    }
+
+    .recovery-button:disabled {
+      cursor: default;
+      opacity: 0.55;
+    }
+
+    .recovery-button.hidden {
+      display: none;
+    }
+
     /* Waveform */
     .waveform {
       display: flex;
@@ -287,6 +312,7 @@
       -webkit-line-clamp: 2;
       -webkit-box-orient: vertical;
       padding-top: 8px;
+      white-space: pre-line;
     }
 
     .text-content.placeholder {
@@ -360,6 +386,7 @@
     <div class="status-row" id="status-row">
       <div class="spinner" id="indicator"></div>
       <span class="label" id="label">Loading model...</span>
+      <button class="recovery-button hidden" id="download-button" type="button">Download</button>
       <div class="waveform" id="waveform" style="display:none">
         <div class="bar" style="height:4px"></div>
         <div class="bar" style="height:4px"></div>
@@ -383,6 +410,7 @@
     const pill = document.getElementById('pill');
     const indicator = document.getElementById('indicator');
     const label = document.getElementById('label');
+    const downloadButton = document.getElementById('download-button');
     const waveform = document.getElementById('waveform');
     const timer = document.getElementById('timer');
     const textRow = document.getElementById('text-row');
@@ -409,6 +437,8 @@
     let insertionMessage = '';
     let earlyInsertionFallback = false;
     let dismissTimer = null;
+    let modelMissingDetails = null;
+    let modelDownloadInProgress = false;
 
     Object.assign(cues.start, { volume: 0.18 });
     Object.assign(cues.stop, { volume: 0.16 });
@@ -523,6 +553,35 @@
       waveform.classList.toggle('processing', processing);
     }
 
+    function canDownloadMissingModel(details) {
+      return Boolean(details)
+        && ['tiny', 'base', 'small', 'medium', 'large-v3'].includes(details.model)
+        && !details.setupCommand?.startsWith('rm ');
+    }
+
+    function renderModelMissing() {
+      const details = modelMissingDetails;
+      pill.classList.add('error');
+      setIndicator('error');
+      label.textContent = 'Dictation model not installed';
+      waveform.style.display = 'none';
+      timer.style.display = 'none';
+      showExpanded(true);
+      const modelSummary = details
+        ? `${details.model}${details.sizeHint ? ` • ${details.sizeHint}` : ''}`
+        : 'Required speech model is missing';
+      const interrupted = details?.setupCommand?.startsWith('rm ');
+      setTextContent(
+        interrupted
+          ? `Previous download interrupted. Fix: ${details.setupCommand}`
+          : `${modelSummary}\nFix: ${details?.setupCommand || 'Open Minutes settings to install it.'}`,
+        false
+      );
+      downloadButton.classList.toggle('hidden', !canDownloadMissingModel(details));
+      downloadButton.disabled = modelDownloadInProgress;
+      downloadButton.textContent = modelDownloadInProgress ? 'Downloading…' : 'Download';
+    }
+
     function isTerminalState(state) {
       return state === 'typed'
         || state === 'pasted'
@@ -548,6 +607,11 @@
       }, ms);
     }
 
+    listen('dictation:model-missing', (e) => {
+      modelMissingDetails = e.payload || null;
+      if (lastState === 'model-missing') renderModelMissing();
+    });
+
     // Listen for state changes from Tauri backend
     listen('dictation:state', (e) => {
       const state = e.payload;
@@ -569,7 +633,7 @@
           playCue('complete');
           terminalCuePlayed = true;
         }
-        if (state === 'error' && !terminalCuePlayed) {
+        if ((state === 'error' || state === 'model-missing') && !terminalCuePlayed) {
           playCue('error');
           terminalCuePlayed = true;
         }
@@ -579,8 +643,12 @@
       pill.classList.remove('error');
       stopTimer();
       hideSilenceBar();
+      silentSince = null;
       soften(label);
       setWaveformProcessing(false);
+      if (state !== 'model-missing') {
+        downloadButton.classList.add('hidden');
+      }
 
       switch (state) {
         case 'loading':
@@ -690,10 +758,85 @@
           scheduleDismiss(4000);
           break;
 
+        case 'model-missing':
+          renderModelMissing();
+          break;
+
         case 'cancelled':
         case 'yielded':
           dismiss();
           break;
+      }
+    });
+
+    listen('download-model', (e) => {
+      const progress = e.payload || {};
+      if (!modelMissingDetails || progress.model !== modelMissingDetails.model) return;
+      if (progress.status === 'downloading') {
+        modelDownloadInProgress = true;
+        downloadButton.disabled = true;
+        downloadButton.textContent = 'Downloading…';
+        label.textContent = `Downloading ${modelMissingDetails.model}…`;
+        const progressLabel = Number.isFinite(progress.percent)
+          ? `${progress.percent}% downloaded`
+          : 'Download in progress';
+        setTextContent(
+          `${progressLabel}${modelMissingDetails.sizeHint ? ` • ${modelMissingDetails.sizeHint}` : ''}`,
+          false
+        );
+      } else if (progress.status === 'complete') {
+        modelDownloadInProgress = false;
+        setIndicator('success');
+        label.textContent = 'Model ready — press fn to dictate';
+        setTextContent(`${modelMissingDetails.model} installed successfully.`, false);
+        downloadButton.classList.add('hidden');
+        scheduleDismiss(4500);
+      } else if (progress.status === 'failed') {
+        modelDownloadInProgress = false;
+        pill.classList.add('error');
+        setIndicator('error');
+        label.textContent = 'Model download failed';
+        setTextContent(
+          `${progress.message || 'Download failed.'}\nFix: ${modelMissingDetails.setupCommand}`,
+          false
+        );
+        downloadButton.disabled = false;
+        downloadButton.textContent = 'Retry';
+      }
+    });
+
+    downloadButton.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      if (modelDownloadInProgress || !canDownloadMissingModel(modelMissingDetails)) return;
+      modelDownloadInProgress = true;
+      renderModelMissing();
+      label.textContent = `Downloading ${modelMissingDetails.model}…`;
+      setIndicator('spinner');
+      pill.classList.remove('error');
+      try {
+        await window.__TAURI__.core.invoke('cmd_download_model', {
+          model: modelMissingDetails.model,
+        });
+        modelDownloadInProgress = false;
+        setIndicator('success');
+        label.textContent = 'Model ready — press fn to dictate';
+        setTextContent(`${modelMissingDetails.model} installed successfully.`, false);
+        downloadButton.classList.add('hidden');
+        scheduleDismiss(4500);
+      } catch (error) {
+        modelDownloadInProgress = false;
+        pill.classList.add('error');
+        setIndicator('error');
+        const message = String(error);
+        label.textContent = message.includes('already in progress')
+          ? 'A model download is already in progress'
+          : 'Model download failed';
+        setTextContent(
+          `${message}\nFix: ${modelMissingDetails.setupCommand}`,
+          false
+        );
+        downloadButton.disabled = false;
+        downloadButton.textContent = 'Retry';
       }
     });
 

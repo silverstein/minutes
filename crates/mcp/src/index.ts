@@ -3870,6 +3870,22 @@ server.resource(
 
 // ── Tool: start_dictation ──────────────────────────────────
 
+export interface DictationModelMissingError {
+  model: string;
+  expectedPath: string;
+  setupCommand: string;
+}
+
+export function parseDictationModelMissingError(
+  stderr: string
+): DictationModelMissingError | null {
+  const model = stderr.match(/Dictation model not installed:\s*([^\r\n]+)/)?.[1]?.trim();
+  const expectedPath = stderr.match(/Expected:\s*([^\r\n]+)/)?.[1]?.trim();
+  const setupCommand = stderr.match(/Fix:\s*([^\r\n]+)/)?.[1]?.trim();
+  if (!model || !expectedPath || !setupCommand) return null;
+  return { model, expectedPath, setupCommand };
+}
+
 registerTool(
   "start_dictation",
   "Start dictation mode. Speak naturally — text accumulates across pauses and the combined result is written when dictation ends. Runs until stop_dictation is called or silence timeout.",
@@ -3907,6 +3923,49 @@ registerTool(
               "(recording delegates to the Minutes desktop app when it's running).",
           },
         ],
+        isError: true,
+      };
+    }
+
+    try {
+      await execFileAsync(MINUTES_BIN, ["dictate", "--preflight"], {
+        timeout: 5000,
+        env: augmentedEnv(),
+      });
+    } catch (error: any) {
+      const stderr = typeof error?.stderr === "string" ? error.stderr : "";
+      const missing = parseDictationModelMissingError(stderr);
+      if (missing) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text:
+                `Dictation model '${missing.model}' is not installed. ` +
+                `Expected it at ${missing.expectedPath}.\n\nFix: ${missing.setupCommand}`,
+            },
+          ],
+          structuredContent: {
+            status: "error",
+            code: "MODEL_MISSING",
+            model: missing.model,
+            expectedPath: missing.expectedPath,
+            setupCommand: missing.setupCommand,
+          },
+          isError: true,
+        };
+      }
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `Dictation could not pass startup checks: ${stderr.trim() || error?.message || error}`,
+          },
+        ],
+        structuredContent: {
+          status: "error",
+          code: "DICTATION_PREFLIGHT_FAILED",
+        },
         isError: true,
       };
     }

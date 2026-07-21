@@ -271,6 +271,17 @@ Reads from `~/.granola-archivist/output/`. Meetings are converted to Minutes' ma
 npx granola-to-minutes export    # Export to ~/meetings/
 ```
 
+## Importing an existing text archive
+
+Have years of transcripts and notes from other tools? Import them all at once:
+
+```bash
+minutes import text --dir /path/to/archive --dry-run    # Preview
+minutes import text --dir /path/to/archive              # Import
+```
+
+Recursively imports `.md`, `.markdown`, and `.txt` files, inferring titles and dates from frontmatter, headings, filenames, or file timestamps. Conversion is local and deterministic, with no AI or network calls, and re-runs skip anything already imported. When it finishes, run `minutes ingest --all` to build the knowledge base over the imported archive.
+
 ## Output format
 
 Meetings save as markdown with structured YAML frontmatter:

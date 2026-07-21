@@ -3398,6 +3398,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "symphonia",
+ "tempfile",
  "tracing",
  "tracing-subscriber",
  "ureq 3.2.0",

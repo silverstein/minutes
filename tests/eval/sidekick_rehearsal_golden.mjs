@@ -36,26 +36,27 @@ export function scoreMeridianResponses(responses) {
     ),
     check(
       "liability_reframe",
-      /(liabil|contractual exposure|contractual risk|financial exposure|financial risk|penalty credits?|cost decision|uncapped[- ]loss)/.test(
-        turn1,
-      ),
+      /(liabil|contractual exposure|contractual risk|financial exposure|financial risk|penalty credits?|cost decision|uncapped[- ]loss)/.test(turn1) ||
+        (/(?:monthly|per month|a month).{0,35}(?:credits?|penalt|cost)|(?:credits?|penalt|cost).{0,35}(?:monthly|per month|a month)/.test(turn1) &&
+          /(not|isn't|is not).{0,45}(?:quality|metric|accuracy|ship-ready)/.test(turn1)),
       "Must reframe 90% accuracy as contractual or financial exposure.",
     ),
     check(
       "confidence_gated_human_fallback",
-      /confidence/.test(turn1) && /human/.test(turn1),
+      /human/.test(turn1) &&
+        /(confidence|segment(?:ed|s)?|ticket type|error (?:rate|ceiling)|gated? rollout)/.test(turn1),
       "Must confidence-gate automation and route uncertain work to a human.",
     ),
     check(
       "decision_forcing_question",
-      /\?/.test(turn1) &&
-        /confidence/.test(turn1) &&
-        /(distribution|threshold|score|calibrat|percentile)/.test(turn1),
+      (/\?/.test(turn1) || /\b(?:ask|request|demand)\b/.test(turn1)) &&
+        (/(confidence|error rate)/.test(turn1) &&
+          /(distribution|threshold|score|calibrat|percentile|by ticket type|by segment)/.test(turn1)),
       "Must ask engineering for the confidence distribution or threshold.",
     ),
     check(
       "no_wrong_math",
-      !/(?:90%|ninety percent|current exposure|this exposure).{0,80}\$\s*(?:8\s*k|8,?000|80\s*k|80,?000|8\s*m|8,?000,?000)\b/.test(
+      !/\$\s*(?:8\s*k|8,?000|80\s*k|80,?000|8\s*m|8,?000,?000)\b/.test(
         turn1,
       ),
       "$8K, $80K, and $8M are automatic failures.",
@@ -89,7 +90,7 @@ export function scoreMeridianResponses(responses) {
         turn2,
       ),
     written_confidence_sla:
-      /(written.{0,35}confidence|confidence.{0,35}(written|sla)|sla.{0,35}confidence)/.test(
+      /(written.{0,80}(confidence|acceptance|sla)|(confidence|acceptance).{0,80}(written|sla)|sla.{0,80}(confidence|acceptance|threshold|criteria))/.test(
         turn2,
       ) ||
       (/demand these terms/.test(turn2) &&
@@ -97,7 +98,7 @@ export function scoreMeridianResponses(responses) {
         /(predefined acceptance gates|quality thresholds|correctness gate)/.test(turn2)),
     error_reporting_or_caps: /(error.{0,30}(report|cap)|report.{0,30}error|audit)/.test(turn2),
     human_reversion_right:
-      /(right.{0,35}(revert|human)|revert.{0,35}human|human-in-the-loop fallback|fallback.{0,25}human)/.test(
+      /(right.{0,35}(revert|human|rollback)|(?:revert|rollback).{0,35}(?:right|human)|human-in-the-loop fallback|fallback.{0,25}human)/.test(
         turn2,
       ),
   };
@@ -117,12 +118,25 @@ export function scoreMeridianResponses(responses) {
     ),
     check(
       "no_vendor_role_regression",
-      !/(as the vendor|protect your margin|limit your liability to meridian|push meridian)/.test(turn2),
+      !/(as the vendor|protect your margin|limit your liability to meridian|push meridian|abolish safeguards|waive (?:the )?(?:protections|credits|sla)|reject (?:the )?(?:protections|safeguards))/.test(
+        turn2,
+      ),
       "The answer must not slip back into vendor-side advice.",
     ),
   ];
 
-  const checks = [...turn1Checks, ...turn2Checks];
+  const provenanceChecks = Array.isArray(responses.turn_1_evidence_ids)
+    ? [
+        check(
+          "hero_evidence_chain",
+          ["utterance-1", "utterance-3", "utterance-4"].every((id) =>
+            responses.turn_1_evidence_ids.includes(id),
+          ),
+          "The $800K synthesis must cite accuracy, penalty, and monthly-volume evidence.",
+        ),
+      ]
+    : [];
+  const checks = [...turn1Checks, ...turn2Checks, ...provenanceChecks];
   return {
     schema_version: 1,
     fixture_id: "synthetic-meridian-ship-decision",

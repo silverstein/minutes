@@ -5272,7 +5272,7 @@
       <div class="audio-viz" id="audio-viz"></div>
       <div class="recording-actions">
         <button class="btn btn-secondary btn-sm coach-toggle" id="btn-coach-recording" type="button" aria-pressed="false">Coach</button>
-        <button class="btn btn-secondary btn-sm sidekick-toggle" id="btn-sidekick-recording" type="button" aria-pressed="false" title="Interactive preview: open Codex Fast with this meeting's live transcript and screen context">Codex Sidekick</button>
+        <button class="btn btn-secondary btn-sm sidekick-toggle" id="btn-sidekick-recording" type="button" aria-pressed="false" title="Open the persistent meeting strategist">Sidekick</button>
         <button class="btn btn-secondary btn-sm" id="btn-note-inline" title="Add a note">Add Note</button>
         <button class="btn btn-danger btn-sm" id="btn-stop">Stop Recording</button>
       </div>
@@ -5293,7 +5293,7 @@
       <div class="live-utterances" id="live-utterances">0 utterances</div>
       <div class="live-actions">
         <button class="btn btn-secondary btn-sm coach-toggle" id="btn-coach-live" type="button" aria-pressed="false">Coach</button>
-        <button class="btn btn-secondary btn-sm sidekick-toggle" id="btn-sidekick-live" type="button" aria-pressed="false" title="Interactive preview: open Codex Fast with this meeting's live transcript and screen context">Codex Sidekick</button>
+        <button class="btn btn-secondary btn-sm sidekick-toggle" id="btn-sidekick-live" type="button" aria-pressed="false" title="Open the persistent meeting strategist">Sidekick</button>
         <button class="btn btn-secondary btn-sm" id="btn-stop-live">Stop Live</button>
       </div>
     </div>
@@ -8037,18 +8037,18 @@
         ? 'Opening…'
         : sidekickSessionOpen
           ? 'Sidekick Open'
-          : 'Codex Sidekick';
+          : 'Sidekick';
       sidekickButtons.forEach((button) => {
         button.textContent = text;
         button.disabled = sidekickLaunching;
         button.classList.toggle('is-active', sidekickSessionOpen);
         button.setAttribute('aria-pressed', sidekickSessionOpen ? 'true' : 'false');
         button.setAttribute('aria-label', sidekickSessionOpen
-          ? 'Return to the open Codex Sidekick session'
-          : 'Open Codex Sidekick for this live meeting');
+          ? 'Return to the open Sidekick session'
+          : 'Open Sidekick for this live meeting');
         button.title = sidekickSessionOpen
-          ? 'Return to the interactive Codex Sidekick preview'
-          : "Interactive preview: open Codex Fast with this meeting's live transcript and screen context";
+          ? 'Return to the persistent Sidekick session'
+          : "Open the persistent meeting strategist with live transcript and exact-session screen context";
       });
     }
 
@@ -8056,53 +8056,12 @@
       if (sidekickLaunching) return;
       sidekickLaunching = true;
       renderSidekickControls();
-
-      // Sidekick deliberately uses the existing interactive terminal surface,
-      // regardless of the user's usual Recall chat/terminal preference.
-      recallDevMode = true;
-      localStorage.setItem('minutes.recallDevMode', 'true');
-      setSettingsToggle('settings-recall-dev-mode', true);
-      if (recallModeToggleBtn) {
-        recallModeToggleBtn.classList.add('active');
-        recallModeToggleBtn.title = 'Switch to chat (native mode)';
-      }
-
       try {
-        // Recall may have restored the user's ordinary terminal assistant when
-        // the app launched. A deliberate Sidekick click should not fail with
-        // an opaque slot-collision message: identify that session and offer a
-        // one-click replacement while preserving an already-running Sidekick.
-        // Ask the backend every time. During startup the restored PTY can be
-        // alive before the webview receives recall:expand, so recallPtyAlive
-        // alone is not authoritative and used to let the Sidekick click race
-        // into an opaque "another assistant session" failure.
-        let existingSession = null;
-        try {
-          existingSession = await invoke('cmd_terminal_info', { sessionId: SESSION_ID });
-        } catch (_) { /* the spawn path remains the source of truth */ }
-
-        if (existingSession?.running) {
-          recallPtyAlive = true;
-          const existingTitle = existingSession.title || 'Minutes Assistant';
-
-          if (existingTitle !== 'Codex Sidekick') {
-            const { ask } = window.__TAURI__.dialog;
-            const replace = await ask(
-              `Recall is currently running “${existingTitle}”. End it and open Codex Sidekick for this meeting?`,
-              { title: 'Replace Recall session?', kind: 'warning' },
-            );
-            if (!replace) return;
-            await invoke('cmd_pty_kill', { sessionId: SESSION_ID });
-            recallPtyAlive = false;
-            sidekickSessionOpen = false;
-            recallEndBtn.classList.remove('active');
-            recallExitBanner.classList.remove('active');
-            if (recallTerminal) recallTerminal.clear();
-          }
-        }
-
-        const opened = await openRecall('sidekick');
-        sidekickSessionOpen = Boolean(opened);
+        const opened = await invoke('cmd_start_native_sidekick', { goal: null });
+        sidekickSessionOpen = Boolean(opened?.active);
+      } catch (error) {
+        sidekickSessionOpen = false;
+        showCoachError(error);
       } finally {
         sidekickLaunching = false;
         renderSidekickControls();
@@ -8110,6 +8069,10 @@
     }
 
     sidekickButtons.forEach(button => button.addEventListener('click', openCodexSidekick));
+    listen('sidekick:state', (event) => {
+      sidekickSessionOpen = Boolean(event.payload?.active);
+      renderSidekickControls();
+    });
 
     function setHotkeyStatus(text, isError = false) {
       if (!hotkeyStatus) return;

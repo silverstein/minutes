@@ -59,6 +59,27 @@ test("correlates app-server requests and assembles streamed turn output", async 
   await client.interruptTurn({ threadId, turnId: turn.turnId });
 });
 
+test("exposes a nonblocking turn handle so foreground work can preempt background work", async (t) => {
+  const client = new CodexAppServerClient({
+    command: process.execPath,
+    args: ["-e", fakeServer],
+    requestTimeoutMs: 2_000,
+    experimentalApi: true,
+  });
+  t.after(() => client.close());
+
+  await client.start();
+  const { threadId } = await client.startThread({ ephemeral: true });
+  const deltas = [];
+  client.on("turn-delta", (event) => deltas.push(event.delta));
+
+  const active = await client.startTurn({ threadId, input: "evidence" });
+  assert.equal(active.turnId, "turn-1");
+  const completed = await active.completion;
+  assert.equal(completed.text, '{"decision":"silent"}');
+  assert.deepEqual(deltas, ['{"decision":', '"silent"}']);
+});
+
 test("fails closed when the server emits invalid JSON and exits", async () => {
   const client = new CodexAppServerClient({
     command: process.execPath,

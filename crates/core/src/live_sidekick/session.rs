@@ -16,7 +16,7 @@ macro_rules! string_id {
                 &self.0
             }
 
-            fn is_valid(&self) -> bool {
+            pub(crate) fn is_valid(&self) -> bool {
                 !self.0.trim().is_empty()
             }
         }
@@ -158,7 +158,7 @@ pub struct InvocationIdentity {
 }
 
 impl InvocationIdentity {
-    fn is_valid(self) -> bool {
+    pub(crate) fn is_valid(self) -> bool {
         self.sequence != 0
     }
 }
@@ -319,13 +319,25 @@ impl LiveAssistanceSession {
             } => self.speaker_corrected(source_label, corrected_label, source_event_id),
             AssistanceEvent::BackgroundStarted { run_id, .. } => self.background_started(run_id),
             AssistanceEvent::BackgroundCompleted {
-                run_id, invocation, ..
-            } => self.background_completed(run_id, invocation),
+                run_id,
+                invocation,
+                candidate,
+                ..
+            } => self.background_completed(run_id, invocation, candidate),
             AssistanceEvent::ForegroundCompleted {
                 turn_id,
                 invocation,
+                candidate,
                 ..
-            } => self.foreground_completed(turn_id, invocation),
+            } => self.foreground_completed(turn_id, invocation, candidate),
+            AssistanceEvent::BackgroundFailed {
+                run_id, invocation, ..
+            } => self.background_failed(run_id, invocation),
+            AssistanceEvent::ForegroundFailed {
+                turn_id,
+                invocation,
+                ..
+            } => self.foreground_failed(turn_id, invocation),
             AssistanceEvent::SourcePolicyInvalidated { new_generation, .. } => {
                 self.policy_invalidated(new_generation)
             }
@@ -611,6 +623,7 @@ impl LiveAssistanceSession {
         &mut self,
         run_id: BackgroundRunId,
         invocation: InvocationIdentity,
+        candidate: InterventionCandidate,
     ) -> Reduction {
         if !run_id.is_valid() || !invocation.is_valid() {
             return Reduction::rejected(RejectionReason::InvalidValue);
@@ -628,16 +641,24 @@ impl LiveAssistanceSession {
             return Reduction::rejected(RejectionReason::StaleBackgroundResult);
         }
         self.background_run = None;
-        Reduction::accepted(vec![AssistanceAction::PublishBackgroundInsight {
-            run_id,
-            invocation,
-        }])
+        match self.validate_candidate(&candidate, true) {
+            Ok(()) => Reduction::accepted(vec![AssistanceAction::PublishBackgroundInsight {
+                run_id,
+                invocation,
+                candidate,
+            }]),
+            Err(reason) => Reduction::accepted(vec![AssistanceAction::SuppressCandidate {
+                invocation,
+                reason,
+            }]),
+        }
     }
 
     fn foreground_completed(
         &mut self,
         turn_id: ForegroundTurnId,
         invocation: InvocationIdentity,
+        candidate: InterventionCandidate,
     ) -> Reduction {
         if !turn_id.is_valid() || !invocation.is_valid() {
             return Reduction::rejected(RejectionReason::InvalidValue);
@@ -654,10 +675,89 @@ impl LiveAssistanceSession {
             return Reduction::rejected(RejectionReason::StaleForegroundResult);
         }
         self.foreground_turn = None;
-        Reduction::accepted(vec![AssistanceAction::PublishForegroundResponse {
-            turn_id,
+        match self.validate_candidate(&candidate, false) {
+            Ok(()) => Reduction::accepted(vec![AssistanceAction::PublishForegroundResponse {
+                turn_id,
+                invocation,
+                candidate,
+            }]),
+            Err(reason) => Reduction::accepted(vec![AssistanceAction::SuppressCandidate {
+                invocation,
+                reason,
+            }]),
+        }
+    }
+
+    fn background_failed(
+        &mut self,
+        run_id: BackgroundRunId,
+        invocation: InvocationIdentity,
+    ) -> Reduction {
+        let Some(run) = self.background_run.as_ref() else {
+            return Reduction::rejected(RejectionReason::StaleBackgroundResult);
+        };
+        if run.id != run_id || run.invocation != invocation {
+            return Reduction::rejected(RejectionReason::StaleBackgroundResult);
+        }
+        self.background_run = None;
+        Reduction::accepted(vec![AssistanceAction::SuppressCandidate {
             invocation,
+            reason: CandidateSuppressionReason::BackendFailure,
         }])
+    }
+
+    fn foreground_failed(
+        &mut self,
+        turn_id: ForegroundTurnId,
+        invocation: InvocationIdentity,
+    ) -> Reduction {
+        let Some(turn) = self.foreground_turn.as_ref() else {
+            return Reduction::rejected(RejectionReason::StaleForegroundResult);
+        };
+        if turn.id != turn_id || turn.invocation != invocation {
+            return Reduction::rejected(RejectionReason::StaleForegroundResult);
+        }
+        self.foreground_turn = None;
+        Reduction::accepted(vec![AssistanceAction::SuppressCandidate {
+            invocation,
+            reason: CandidateSuppressionReason::BackendFailure,
+        }])
+    }
+
+    fn validate_candidate(
+        &self,
+        candidate: &InterventionCandidate,
+        background: bool,
+    ) -> Result<(), CandidateSuppressionReason> {
+        if candidate.confidence > 100
+            || (candidate.decision == InterventionDecision::Speak
+                && candidate
+                    .text
+                    .as_deref()
+                    .is_none_or(|text| text.trim().is_empty()))
+            || (candidate.decision == InterventionDecision::Silent && candidate.text.is_some())
+        {
+            return Err(CandidateSuppressionReason::InvalidCandidate);
+        }
+        if candidate
+            .evidence_ids
+            .iter()
+            .any(|id| !self.evidence.contains_key(id))
+            || candidate.visual_evidence_ids.iter().any(|id| {
+                self.evidence
+                    .get(id)
+                    .is_none_or(|evidence| evidence.source_kind != EvidenceSourceKind::ScreenImage)
+            })
+        {
+            return Err(CandidateSuppressionReason::UnsupportedProvenance);
+        }
+        if candidate.decision == InterventionDecision::Silent {
+            return Err(CandidateSuppressionReason::ModelChoseSilence);
+        }
+        if background && candidate.confidence < MINIMUM_PROACTIVE_CONFIDENCE {
+            return Err(CandidateSuppressionReason::BelowInterventionThreshold);
+        }
+        Ok(())
     }
 
     fn policy_invalidated(&mut self, new_generation: u64) -> Reduction {
@@ -834,6 +934,46 @@ impl LiveAssistanceSession {
     }
 }
 
+const MINIMUM_PROACTIVE_CONFIDENCE: u8 = 70;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InterventionDecision {
+    Silent,
+    Speak,
+}
+
+/// A backend proposal. Minutes still validates provenance and decides whether
+/// anything is allowed to reach the user.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InterventionCandidate {
+    pub decision: InterventionDecision,
+    pub kind: Option<String>,
+    pub text: Option<String>,
+    pub evidence_ids: Vec<EvidenceId>,
+    pub visual_evidence_ids: Vec<EvidenceId>,
+    pub confidence: u8,
+}
+
+impl InterventionCandidate {
+    /// Parse an untrusted backend proposal. Publication remains impossible
+    /// until the reducer validates this candidate against active identity,
+    /// policy, confidence, and evidence provenance.
+    pub fn from_backend_json(text: &str) -> Result<Self, serde_json::Error> {
+        serde_json::from_str(text)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CandidateSuppressionReason {
+    ModelChoseSilence,
+    BelowInterventionThreshold,
+    UnsupportedProvenance,
+    InvalidCandidate,
+    BackendFailure,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AssistanceEvent {
@@ -875,8 +1015,20 @@ pub enum AssistanceEvent {
         session_id: LiveAssistanceSessionId,
         run_id: BackgroundRunId,
         invocation: InvocationIdentity,
+        candidate: InterventionCandidate,
     },
     ForegroundCompleted {
+        session_id: LiveAssistanceSessionId,
+        turn_id: ForegroundTurnId,
+        invocation: InvocationIdentity,
+        candidate: InterventionCandidate,
+    },
+    BackgroundFailed {
+        session_id: LiveAssistanceSessionId,
+        run_id: BackgroundRunId,
+        invocation: InvocationIdentity,
+    },
+    ForegroundFailed {
         session_id: LiveAssistanceSessionId,
         turn_id: ForegroundTurnId,
         invocation: InvocationIdentity,
@@ -912,6 +1064,8 @@ impl AssistanceEvent {
             | Self::BackgroundStarted { session_id, .. }
             | Self::BackgroundCompleted { session_id, .. }
             | Self::ForegroundCompleted { session_id, .. }
+            | Self::BackgroundFailed { session_id, .. }
+            | Self::ForegroundFailed { session_id, .. }
             | Self::SourcePolicyInvalidated { session_id, .. }
             | Self::CaptureStopped { session_id, .. }
             | Self::ProcessingStarted { session_id, .. }
@@ -971,10 +1125,16 @@ pub enum AssistanceAction {
     PublishForegroundResponse {
         turn_id: ForegroundTurnId,
         invocation: InvocationIdentity,
+        candidate: InterventionCandidate,
     },
     PublishBackgroundInsight {
         run_id: BackgroundRunId,
         invocation: InvocationIdentity,
+        candidate: InterventionCandidate,
+    },
+    SuppressCandidate {
+        invocation: InvocationIdentity,
+        reason: CandidateSuppressionReason,
     },
     RoleUpdated {
         role: UserRole,
@@ -1075,6 +1235,17 @@ mod tests {
         session.background_run.as_ref().unwrap().invocation
     }
 
+    fn candidate() -> InterventionCandidate {
+        InterventionCandidate {
+            decision: InterventionDecision::Speak,
+            kind: Some("insight".into()),
+            text: Some("Material grounded guidance.".into()),
+            evidence_ids: Vec::new(),
+            visual_evidence_ids: Vec::new(),
+            confidence: 90,
+        }
+    }
+
     fn ask(
         session: &mut LiveAssistanceSession,
         turn_id: &str,
@@ -1137,6 +1308,7 @@ mod tests {
             session_id: "assist-1".into(),
             run_id: "background-1".into(),
             invocation: background_invocation,
+            candidate: candidate(),
         });
         assert_eq!(late.rejection, Some(RejectionReason::StaleBackgroundResult));
     }
@@ -1353,6 +1525,7 @@ mod tests {
                     session_id: "assist-1".into(),
                     turn_id: "turn-reused".into(),
                     invocation: first_invocation,
+                    candidate: candidate(),
                 })
                 .accepted
         );
@@ -1365,6 +1538,7 @@ mod tests {
                 session_id: "assist-1".into(),
                 turn_id: "turn-reused".into(),
                 invocation: first_invocation,
+                candidate: candidate(),
             },
             RejectionReason::StaleForegroundResult,
         );
@@ -1373,12 +1547,14 @@ mod tests {
             session_id: "assist-1".into(),
             turn_id: "turn-reused".into(),
             invocation: second_invocation,
+            candidate: candidate(),
         });
         assert_eq!(
             current.actions,
             vec![AssistanceAction::PublishForegroundResponse {
                 turn_id: "turn-reused".into(),
                 invocation: second_invocation,
+                candidate: candidate(),
             }]
         );
     }
@@ -1393,6 +1569,7 @@ mod tests {
                     session_id: "assist-1".into(),
                     run_id: "run-reused".into(),
                     invocation: first_invocation,
+                    candidate: candidate(),
                 })
                 .accepted
         );
@@ -1405,6 +1582,7 @@ mod tests {
                 session_id: "assist-1".into(),
                 run_id: "run-reused".into(),
                 invocation: first_invocation,
+                candidate: candidate(),
             },
             RejectionReason::StaleBackgroundResult,
         );
@@ -1415,9 +1593,55 @@ mod tests {
                     session_id: "assist-1".into(),
                     run_id: "run-reused".into(),
                     invocation: second_invocation,
+                    candidate: candidate(),
                 })
                 .accepted
         );
+    }
+
+    #[test]
+    fn minutes_suppresses_silent_low_confidence_and_unsupported_candidates() {
+        let mut session = session(CaptureMode::Live);
+        for (index, candidate, reason) in [
+            (
+                1,
+                InterventionCandidate {
+                    decision: InterventionDecision::Silent,
+                    text: None,
+                    ..candidate()
+                },
+                CandidateSuppressionReason::ModelChoseSilence,
+            ),
+            (
+                2,
+                InterventionCandidate {
+                    confidence: 42,
+                    ..candidate()
+                },
+                CandidateSuppressionReason::BelowInterventionThreshold,
+            ),
+            (
+                3,
+                InterventionCandidate {
+                    evidence_ids: vec!["invented-evidence".into()],
+                    ..candidate()
+                },
+                CandidateSuppressionReason::UnsupportedProvenance,
+            ),
+        ] {
+            let run_id = format!("run-{index}");
+            let invocation = start_background(&mut session, &run_id);
+            let reduced = session.reduce(AssistanceEvent::BackgroundCompleted {
+                session_id: "assist-1".into(),
+                run_id: run_id.into(),
+                invocation,
+                candidate,
+            });
+            assert_eq!(
+                reduced.actions,
+                vec![AssistanceAction::SuppressCandidate { invocation, reason }]
+            );
+        }
     }
 
     #[test]
@@ -1445,6 +1669,7 @@ mod tests {
                 session_id: "assist-1".into(),
                 turn_id: "turn-1".into(),
                 invocation,
+                candidate: candidate(),
             },
             RejectionReason::StaleForegroundResult,
         );
@@ -1595,6 +1820,7 @@ mod tests {
                     source_policy_generation: 0,
                     user_generation: 0,
                 },
+                candidate: candidate(),
             },
             RejectionReason::InvalidValue,
         );
@@ -1608,6 +1834,7 @@ mod tests {
                     source_policy_generation: 0,
                     user_generation: 0,
                 },
+                candidate: candidate(),
             },
             RejectionReason::InvalidValue,
         );
@@ -1791,6 +2018,7 @@ mod tests {
                 session_id: "assist-1".into(),
                 turn_id: "turn-1".into(),
                 invocation,
+                candidate: candidate(),
             },
             RejectionReason::StaleForegroundResult,
         );

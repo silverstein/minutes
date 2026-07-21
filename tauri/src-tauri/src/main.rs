@@ -6,7 +6,9 @@ use std::collections::HashMap;
 #[cfg(target_os = "macos")]
 use std::ffi::{c_char, c_void};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+#[cfg(target_os = "macos")]
+use std::sync::OnceLock;
+use std::sync::{Arc, Mutex};
 use tauri::{
     menu::{Menu, MenuItem, SubmenuBuilder},
     tray::TrayIconBuilder,
@@ -21,6 +23,7 @@ mod call_capture;
 mod call_detect;
 #[cfg(target_os = "macos")]
 mod cli_setup;
+mod codex_reasoning_backend;
 mod commands;
 mod context;
 mod palette_dispatch;
@@ -1753,6 +1756,7 @@ fn main() {
                 .skip_initial_state("meeting-prompt")
                 .skip_initial_state("dictation-overlay")
                 .skip_initial_state("copilot-hud")
+                .skip_initial_state("native-sidekick")
                 .build(),
         )
         .manage(commands::AppState {
@@ -1785,6 +1789,10 @@ fn main() {
             copilot_paused: copilot_paused.clone(),
             copilot_hud: copilot_hud.clone(),
             copilot_critical_notifications_enabled: copilot_critical_notifications_enabled.clone(),
+            sidekick_active: Arc::new(AtomicBool::new(false)),
+            sidekick_stop_flag: Arc::new(AtomicBool::new(false)),
+            sidekick_control: Arc::new(Mutex::new(None)),
+            sidekick_snapshot: Arc::new(Mutex::new(commands::NativeSidekickSnapshot::off())),
             live_shortcut_enabled: {
                 let cfg = minutes_core::config::Config::load();
                 Arc::new(AtomicBool::new(cfg.live_transcript.shortcut_enabled))
@@ -2606,6 +2614,20 @@ fn main() {
                         commands::close_palette_window(&app_handle);
                     }
                 }
+                tauri::WindowEvent::CloseRequested { .. }
+                    if window.label() == "native-sidekick" =>
+                {
+                    let state = window.app_handle().state::<commands::AppState>();
+                    state.sidekick_stop_flag.store(true, Ordering::SeqCst);
+                    if let Some(sender) = state
+                        .sidekick_control
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .as_ref()
+                    {
+                        let _ = sender.send(commands::NativeSidekickControl::Stop);
+                    };
+                }
                 // Track macOS system appearance changes via the main
                 // window's ThemeChanged event. Tao registers an
                 // `AppleInterfaceThemeChangedNotification` observer on
@@ -2739,6 +2761,10 @@ fn main() {
             commands::cmd_dismiss_copilot_nudge,
             commands::cmd_copilot_surface_status,
             commands::cmd_set_copilot_critical_notifications,
+            commands::cmd_start_native_sidekick,
+            commands::cmd_native_sidekick_send,
+            commands::cmd_stop_native_sidekick,
+            commands::cmd_native_sidekick_status,
             commands::cmd_live_shortcut_settings,
             commands::cmd_set_live_shortcut,
             commands::cmd_install_update,

@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Minutes Sidekick</title>
+  <script src="scripts/ui-zoom.js"></script>
+  <link rel="stylesheet" href="styles/ui-zoom-tokens.css">
+  <style>
+    @font-face { font-family: Geist; src: url('fonts/Geist-Regular.woff2') format('woff2'); font-weight: 400; }
+    @font-face { font-family: Geist; src: url('fonts/Geist-Medium.woff2') format('woff2'); font-weight: 600; }
+    @font-face { font-family: 'Geist Mono'; src: url('fonts/GeistMono-Regular.woff2') format('woff2'); }
+    * { box-sizing: border-box; }
+    :root {
+      color-scheme: dark;
+      --bg: #11110f; --panel: #181815; --raised: #20201c; --line: rgba(245,241,231,.12);
+      --text: #f4f0e7; --muted: #aaa49a; --accent: #78dc8d; --blue: #8fc5e8;
+    }
+    @media (prefers-color-scheme: light) {
+      :root { color-scheme: light; --bg: #f4f0e8; --panel: #fbf8f2; --raised: #eee9df; --line: rgba(26,25,22,.13); --text: #1b1a17; --muted: #6a655d; --accent: #306b3f; --blue: #315f7b; }
+    }
+    html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; background: var(--bg); color: var(--text); font-family: Geist, -apple-system, sans-serif; }
+    body { display: grid; grid-template-rows: auto minmax(0,1fr) auto; }
+    header { display: grid; grid-template-columns: minmax(0,1fr) auto; align-items: center; gap: 12px; padding: 18px 20px 14px; border-bottom: 1px solid var(--line); background: color-mix(in srgb, var(--panel) 94%, transparent); }
+    .brand { display: flex; align-items: center; gap: 11px; min-width: 0; }
+    .mark { display: flex; align-items: end; gap: 2px; width: 30px; height: 30px; padding: 7px; border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent); border-radius: 10px 10px 7px 7px; background: color-mix(in srgb, var(--accent) 12%, transparent); }
+    .mark i { width: 3px; border-radius: 3px; background: var(--accent); }
+    .mark i:nth-child(1) { height: 7px; opacity: .55; } .mark i:nth-child(2) { height: 14px; } .mark i:nth-child(3) { height: 10px; opacity: .75; }
+    h1 { margin: 0; font-size: 17px; letter-spacing: -.02em; }
+    .meta { display: flex; align-items: center; gap: 7px; min-width: 0; margin-top: 3px; color: var(--muted); font: 11px 'Geist Mono', monospace; text-transform: uppercase; letter-spacing: .045em; }
+    .dot { width: 6px; height: 6px; flex: 0 0 auto; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 13%, transparent); }
+    [data-state="thinking"] .dot, [data-state="arming"] .dot { background: var(--blue); animation: pulse 1.2s ease-in-out infinite; }
+    [data-state="degraded"] .dot { background: #f09187; }
+    @keyframes pulse { 50% { opacity: .35; transform: scale(.8); } }
+    .provider { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    button { border: 1px solid var(--line); background: transparent; color: var(--muted); border-radius: 999px; min-height: 32px; padding: 0 12px; cursor: pointer; font: 600 12px Geist, sans-serif; }
+    button:hover { color: var(--text); background: color-mix(in srgb, var(--raised) 70%, transparent); }
+    main { overflow-y: auto; padding: 22px 20px 28px; scroll-behavior: smooth; }
+    .empty { min-height: 100%; display: grid; place-content: center; text-align: center; color: var(--muted); padding: 30px; }
+    .empty strong { display: block; margin-bottom: 7px; color: var(--text); font-size: 20px; letter-spacing: -.025em; }
+    .empty span { max-width: 370px; font-size: 14px; line-height: 1.5; }
+    .stream { display: flex; flex-direction: column; gap: 15px; }
+    .message { max-width: 91%; animation: arrive 180ms ease-out both; }
+    .message.user { align-self: flex-end; }
+    .message.sidekick { align-self: flex-start; }
+    @keyframes arrive { from { opacity: 0; transform: translateY(5px); } }
+    .label { margin: 0 0 5px 4px; color: var(--muted); font: 10px 'Geist Mono', monospace; letter-spacing: .05em; text-transform: uppercase; }
+    .bubble { padding: 12px 14px; border: 1px solid var(--line); border-radius: 16px 16px 7px 16px; background: var(--raised); font-size: 15px; line-height: 1.45; white-space: pre-wrap; }
+    .sidekick .bubble { border-radius: 16px 16px 16px 7px; background: color-mix(in srgb, var(--accent) 7%, var(--panel)); }
+    .foot { margin: 5px 4px 0; color: var(--muted); font: 10px 'Geist Mono', monospace; }
+    footer { padding: 12px 16px 16px; border-top: 1px solid var(--line); background: var(--panel); }
+    .status { min-height: 17px; margin: 0 5px 8px; color: var(--muted); font-size: 12px; }
+    form { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 9px; }
+    textarea { width: 100%; min-height: 44px; max-height: 110px; resize: none; border: 1px solid var(--line); border-radius: 14px; outline: none; padding: 11px 13px; background: var(--bg); color: var(--text); font: 14px/1.4 Geist, sans-serif; }
+    textarea:focus { border-color: color-mix(in srgb, var(--accent) 60%, transparent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 10%, transparent); }
+    .send { align-self: end; min-width: 72px; height: 44px; border-color: color-mix(in srgb, var(--accent) 48%, transparent); background: color-mix(in srgb, var(--accent) 13%, transparent); color: var(--text); }
+    .send:disabled { opacity: .45; cursor: default; }
+  </style>
+</head>
+<body data-state="arming">
+  <header>
+    <div class="brand">
+      <span class="mark" aria-hidden="true"><i></i><i></i><i></i></span>
+      <div style="min-width:0">
+        <h1>Sidekick</h1>
+        <div class="meta"><span class="dot"></span><span id="state">Arming</span><span>·</span><span class="provider" id="provider">Codex app-server</span><span id="screen"></span></div>
+      </div>
+    </div>
+    <button id="stop" type="button">End</button>
+  </header>
+  <main id="messages">
+    <div class="empty" id="empty"><div><strong>Your strategist is joining.</strong><span>It will stay quiet until there is a decision, contradiction, risk, or opening worth surfacing. Ask it anything while the meeting continues.</span></div></div>
+    <div class="stream" id="stream"></div>
+  </main>
+  <footer>
+    <div class="status" id="detail">Starting a private persistent reasoning session…</div>
+    <form id="form">
+      <textarea id="input" rows="1" placeholder="Ask for strategy, a calculation, what to say next…" aria-label="Message Sidekick"></textarea>
+      <button class="send" id="send" type="submit">Send</button>
+    </form>
+  </footer>
+  <script>
+    const { invoke } = window.__TAURI__.core;
+    const { listen } = window.__TAURI__.event;
+    const stream = document.getElementById('stream');
+    const empty = document.getElementById('empty');
+    const scroller = document.getElementById('messages');
+    const input = document.getElementById('input');
+    const send = document.getElementById('send');
+    let rendered = 0;
+
+    function appendMessage(message) {
+      const item = document.createElement('article');
+      item.className = `message ${message.role}`;
+      const label = document.createElement('div');
+      label.className = 'label';
+      label.textContent = message.role === 'user' ? 'You' : (message.kind || 'Sidekick');
+      const bubble = document.createElement('div');
+      bubble.className = 'bubble';
+      bubble.textContent = message.text;
+      item.append(label, bubble);
+      if (message.latencyMs) {
+        const foot = document.createElement('div');
+        foot.className = 'foot';
+        foot.textContent = `${(message.latencyMs / 1000).toFixed(1)}s · grounded answer`;
+        item.append(foot);
+      }
+      stream.append(item);
+    }
+
+    function render(snapshot) {
+      document.body.dataset.state = snapshot.state || 'off';
+      document.getElementById('state').textContent = snapshot.state || 'off';
+      document.getElementById('provider').textContent = [snapshot.provider, snapshot.privacy].filter(Boolean).join(' · ');
+      document.getElementById('screen').textContent = snapshot.screenAvailable ? '· screen' : '';
+      document.getElementById('detail').textContent = snapshot.detail || '';
+      send.disabled = !snapshot.active || snapshot.state === 'arming';
+      while (rendered < snapshot.messages.length) appendMessage(snapshot.messages[rendered++]);
+      empty.hidden = rendered > 0;
+      requestAnimationFrame(() => { scroller.scrollTop = scroller.scrollHeight; });
+    }
+
+    document.getElementById('form').addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const message = input.value.trim();
+      if (!message) return;
+      input.value = '';
+      await invoke('cmd_native_sidekick_send', { message });
+    });
+    input.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter' && !event.shiftKey) {
+        event.preventDefault();
+        document.getElementById('form').requestSubmit();
+      }
+    });
+    document.getElementById('stop').addEventListener('click', async () => {
+      await invoke('cmd_stop_native_sidekick');
+      window.__TAURI__.window.getCurrentWindow().close();
+    });
+
+    listen('sidekick:state', (event) => render(event.payload));
+    invoke('cmd_native_sidekick_status').then(render);
+    input.focus();
+  </script>
+</body>
+</html>

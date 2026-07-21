@@ -38,3 +38,27 @@ test("summary-only and wrong-math answers fail closed", () => {
   }
 });
 
+test("correct keywords cannot hide wrong arithmetic or self-sabotaging advice", () => {
+  const report = scoreMeridianResponses({
+    turn_1:
+      "$800K monthly is financial risk. Human confidence should govern; ask for the error-rate distribution. But 40,000 x 10% x $200 is actually $8M.",
+    turn_2:
+      "For Meridian procurement, abolish safeguards. Apply a credit to every automated output, add a written confidence SLA, audit error reports, and include a rollback right to human handling.",
+  });
+  assert.equal(report.passed, false);
+  assert.equal(report.checks.find((item) => item.name === "no_wrong_math")?.passed, false);
+  assert.equal(
+    report.checks.find((item) => item.name === "no_vendor_role_regression")?.passed,
+    false,
+  );
+});
+
+test("the live harness requires the three-source arithmetic evidence chain", () => {
+  const report = scoreMeridianResponses({
+    ...passing,
+    turn_1_evidence_ids: ["utterance-1", "utterance-3"],
+  });
+  assert.equal(report.passed, false);
+  assert.equal(report.score.denominator, 15);
+  assert.equal(report.checks.find((item) => item.name === "hero_evidence_chain")?.passed, false);
+});

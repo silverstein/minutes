@@ -55,6 +55,12 @@ export class CodexAppServerClient extends EventEmitter {
     cwd = process.cwd(),
     env = process.env,
     requestTimeoutMs = DEFAULT_TIMEOUT_MS,
+    clientInfo = {
+      name: "minutes-sidekick-eval",
+      title: "Minutes Sidekick Eval",
+      version: "0.1.0",
+    },
+    experimentalApi = false,
   } = {}) {
     super();
     this.command = command;
@@ -62,6 +68,8 @@ export class CodexAppServerClient extends EventEmitter {
     this.cwd = cwd;
     this.env = env;
     this.requestTimeoutMs = requestTimeoutMs;
+    this.clientInfo = clientInfo;
+    this.experimentalApi = experimentalApi;
     this.child = null;
     this.stdin = null;
     this.nextRequestId = 1;
@@ -100,11 +108,10 @@ export class CodexAppServerClient extends EventEmitter {
     });
 
     const initialized = await this.request("initialize", {
-      clientInfo: {
-        name: "minutes-sidekick-eval",
-        title: "Minutes Sidekick Eval",
-        version: "0.1.0",
-      },
+      clientInfo: this.clientInfo,
+      ...(this.experimentalApi
+        ? { capabilities: { experimentalApi: true } }
+        : {}),
     });
     this.notify("initialized", {});
     return initialized;
@@ -136,7 +143,7 @@ export class CodexAppServerClient extends EventEmitter {
     return { threadId, result };
   }
 
-  async runTurn({ threadId, input, outputSchema, ...overrides }) {
+  async startTurn({ threadId, input, outputSchema, ...overrides }) {
     const startedAt = performance.now();
     const result = await this.request("turn/start", {
       threadId,
@@ -148,16 +155,22 @@ export class CodexAppServerClient extends EventEmitter {
     if (!turnId) throw new Error("turn/start response did not include turn.id");
 
     const turn = this.#turn(turnId);
-    if (turn.completed) return this.#turnResult(turn, startedAt);
+    const completion = turn.completed
+      ? Promise.resolve(this.#turnResult(turn, startedAt))
+      : new Promise((resolve, reject) => {
+          const timer = setTimeout(() => {
+            turn.waiters.delete(waiter);
+            reject(new Error(`turn ${turnId} timed out after ${this.requestTimeoutMs} ms`));
+          }, this.requestTimeoutMs);
+          const waiter = { resolve, reject, timer, startedAt };
+          turn.waiters.add(waiter);
+        });
+    return { turnId, completion };
+  }
 
-    return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        turn.waiters.delete(waiter);
-        reject(new Error(`turn ${turnId} timed out after ${this.requestTimeoutMs} ms`));
-      }, this.requestTimeoutMs);
-      const waiter = { resolve, reject, timer, startedAt };
-      turn.waiters.add(waiter);
-    });
+  async runTurn(params) {
+    const turn = await this.startTurn(params);
+    return turn.completion;
   }
 
   steerTurn({ threadId, turnId, input }) {
@@ -222,6 +235,12 @@ export class CodexAppServerClient extends EventEmitter {
       const turn = this.#turn(params.turnId);
       if (turn.firstDeltaAt === null) turn.firstDeltaAt = performance.now();
       turn.text += params.delta ?? "";
+      this.emit("turn-delta", {
+        threadId: params.threadId ?? null,
+        turnId: params.turnId,
+        delta: params.delta ?? "",
+        text: turn.text,
+      });
     } else if (
       method === "item/completed" &&
       params.turnId &&
@@ -243,6 +262,7 @@ export class CodexAppServerClient extends EventEmitter {
     }
 
     if (method) this.emit("notification", message);
+    this.emit("protocol-message", message);
   }
 
   #turnResult(turn, startedAt) {

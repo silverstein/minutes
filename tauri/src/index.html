@@ -8071,14 +8071,20 @@
         // the app launched. A deliberate Sidekick click should not fail with
         // an opaque slot-collision message: identify that session and offer a
         // one-click replacement while preserving an already-running Sidekick.
-        if (recallPtyAlive) {
-          let existingTitle = '';
-          try {
-            const info = await invoke('cmd_terminal_info', { sessionId: SESSION_ID });
-            existingTitle = info?.title || '';
-          } catch (_) { /* the spawn path remains the source of truth */ }
+        // Ask the backend every time. During startup the restored PTY can be
+        // alive before the webview receives recall:expand, so recallPtyAlive
+        // alone is not authoritative and used to let the Sidekick click race
+        // into an opaque "another assistant session" failure.
+        let existingSession = null;
+        try {
+          existingSession = await invoke('cmd_terminal_info', { sessionId: SESSION_ID });
+        } catch (_) { /* the spawn path remains the source of truth */ }
 
-          if (existingTitle && existingTitle !== 'Codex Sidekick') {
+        if (existingSession?.running) {
+          recallPtyAlive = true;
+          const existingTitle = existingSession.title || 'Minutes Assistant';
+
+          if (existingTitle !== 'Codex Sidekick') {
             const { ask } = window.__TAURI__.dialog;
             const replace = await ask(
               `Recall is currently running “${existingTitle}”. End it and open Codex Sidekick for this meeting?`,

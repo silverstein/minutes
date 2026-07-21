@@ -2417,6 +2417,7 @@ pub struct DesktopCapabilities {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct TerminalInfo {
     pub title: String,
+    pub running: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -9871,13 +9872,15 @@ pub fn cmd_list_agents() -> serde_json::Value {
 
 #[tauri::command]
 pub fn cmd_terminal_info(state: tauri::State<AppState>, session_id: String) -> TerminalInfo {
-    let title = state
+    let existing_title = state
         .pty_manager
         .lock()
         .ok()
-        .and_then(|manager| manager.session_title(&session_id))
-        .unwrap_or_else(|| "Minutes Assistant".into());
-    TerminalInfo { title }
+        .and_then(|manager| manager.session_title(&session_id));
+    TerminalInfo {
+        running: existing_title.is_some(),
+        title: existing_title.unwrap_or_else(|| "Minutes Assistant".into()),
+    }
 }
 
 // ── Settings commands ─────────────────────────────────────────
@@ -11571,6 +11574,7 @@ mod tests {
         assert!(html.contains("openCodexSidekick"));
         assert!(html.contains("Replace Recall session?"));
         assert!(html.contains("cmd_terminal_info"));
+        assert!(html.contains("existingSession?.running"));
         assert!(html.contains("Interactive preview"));
     }
 

@@ -584,8 +584,12 @@ fn cleanup_stale() -> Result<(), PidError> {
 pub fn is_process_alive(pid: u32) -> bool {
     #[cfg(unix)]
     {
-        // kill(pid, 0) checks if the process exists without sending a signal
-        unsafe { libc::kill(pid as i32, 0) == 0 }
+        // kill(pid, 0) checks if the process exists without sending a signal.
+        // EPERM is positive liveness evidence: the process exists, but this
+        // caller (for example a sandboxed Sidekick) cannot inspect it.
+        let result = unsafe { libc::kill(pid as i32, 0) };
+        result == 0
+            || unix_process_probe_is_alive(result, std::io::Error::last_os_error().raw_os_error())
     }
     #[cfg(windows)]
     {
@@ -601,6 +605,11 @@ pub fn is_process_alive(pid: u32) -> bool {
             }
         }
     }
+}
+
+#[cfg(unix)]
+fn unix_process_probe_is_alive(result: i32, error: Option<i32>) -> bool {
+    result == 0 || error == Some(libc::EPERM)
 }
 
 /// Path to the sentinel file used for cross-platform stop signaling.
@@ -769,6 +778,13 @@ mod tests {
         let _guard = crate::test_home_env_lock();
         // PID 99999999 almost certainly doesn't exist
         assert!(!is_process_alive(99_999_999));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_permission_denied_process_probe_still_proves_liveness() {
+        assert!(unix_process_probe_is_alive(-1, Some(libc::EPERM)));
+        assert!(!unix_process_probe_is_alive(-1, Some(libc::ESRCH)));
     }
 
     #[test]

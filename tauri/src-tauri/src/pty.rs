@@ -1,12 +1,21 @@
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use std::collections::HashMap;
 use std::io::{Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::thread::JoinHandle;
 use tauri::Emitter;
 
 pub const ASSISTANT_SESSION_ID: &str = "assistant";
 const MAX_SESSIONS: usize = 1;
+
+fn prioritize_bundled_cli(path_dirs: &mut Vec<String>, current_exe: &Path) {
+    let Some(executable_dir) = current_exe.parent() else {
+        return;
+    };
+    let executable_dir = executable_dir.display().to_string();
+    path_dirs.retain(|entry| entry != &executable_dir);
+    path_dirs.insert(0, executable_dir);
+}
 
 #[cfg(windows)]
 fn terminate_process_tree(process_id: Option<u32>) {
@@ -139,6 +148,12 @@ impl PtyManager {
         let npm_global = home.join(".npm-global/bin");
         if npm_global.exists() {
             path_dirs.insert(0, npm_global.display().to_string());
+        }
+        // The assistant must use the CLI shipped beside the running desktop
+        // binary. User-level or Homebrew `minutes` installs may be older than
+        // Minutes Dev and can disagree on PID/sandbox/context behavior.
+        if let Ok(current_exe) = std::env::current_exe() {
+            prioritize_bundled_cli(&mut path_dirs, &current_exe);
         }
 
         cmd.env("PATH", path_dirs.join(":"));
@@ -307,4 +322,31 @@ pub fn kill_session(mut session: PtySession) -> PathBuf {
 
 pub fn kill_all(sessions: Vec<PtySession>) -> Vec<PathBuf> {
     sessions.into_iter().map(kill_session).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn running_app_directory_precedes_user_and_homebrew_cli_paths() {
+        let mut paths = vec![
+            "/Users/mat/.local/bin".into(),
+            "/opt/homebrew/bin".into(),
+            "/Applications/Minutes Dev.app/Contents/MacOS".into(),
+        ];
+        prioritize_bundled_cli(
+            &mut paths,
+            Path::new("/Applications/Minutes Dev.app/Contents/MacOS/minutes-app"),
+        );
+
+        assert_eq!(paths[0], "/Applications/Minutes Dev.app/Contents/MacOS");
+        assert_eq!(
+            paths
+                .iter()
+                .filter(|entry| *entry == "/Applications/Minutes Dev.app/Contents/MacOS")
+                .count(),
+            1
+        );
+    }
 }

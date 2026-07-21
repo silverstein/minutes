@@ -91,6 +91,12 @@ pub enum ScreenCaptureEvent {
 
 pub type ScreenCaptureEventSink = Arc<dyn Fn(ScreenCaptureEvent) + Send + Sync + 'static>;
 
+const FIRST_CAPTURE_MAX_DELAY: Duration = Duration::from_secs(2);
+
+fn first_capture_delay(interval: Duration) -> Duration {
+    interval.min(FIRST_CAPTURE_MAX_DELAY)
+}
+
 /// Start capture with a lightweight event callback. The callback runs only
 /// after the platform screenshot command has returned, so context-store work
 /// never blocks the OS capture operation itself.
@@ -131,9 +137,10 @@ pub fn start_capture_with_events(
             "screen capture started"
         );
 
-        // Wait one interval before first capture (skip the t=0 screenshot
-        // which is usually taken before the meeting content is on screen)
-        let first_sleep_end = std::time::Instant::now() + interval;
+        // Give the meeting surface a moment to settle, but make screen context
+        // available quickly enough for an assistant launched near recording
+        // start. Subsequent captures still use the configured interval.
+        let first_sleep_end = std::time::Instant::now() + first_capture_delay(interval);
         while std::time::Instant::now() < first_sleep_end {
             if should_stop() {
                 tracing::info!(
@@ -438,10 +445,22 @@ mod tests {
         );
     }
 
+    #[test]
+    fn first_capture_is_ready_for_live_assistance_without_changing_cadence() {
+        assert_eq!(
+            first_capture_delay(Duration::from_secs(30)),
+            Duration::from_secs(2)
+        );
+        assert_eq!(
+            first_capture_delay(Duration::from_secs(1)),
+            Duration::from_secs(1)
+        );
+    }
+
     // Regression test for #423: `minutes stop` breaks the record loop without
     // setting the shared stop flag, so drop must stop the thread on its own.
-    // The interval is long enough that the thread stays in its pre-first-capture
-    // wait, so the test never takes a real screenshot.
+    // Drop happens before the bounded initial delay ends, so the test never
+    // takes a real screenshot.
     #[test]
     fn drop_stops_capture_thread_without_external_stop_flag() {
         let dir = tempfile::tempdir().unwrap();

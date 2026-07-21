@@ -412,6 +412,10 @@
       background: var(--accent-2);
     }
 
+    .recall-phase-dot.sidekick {
+      background: var(--green);
+    }
+
     .recall-phase-label {
       font-size: var(--text-xs);
       font-weight: 600;
@@ -433,6 +437,10 @@
 
     .recall-phase-label.weekly {
       color: var(--accent-2);
+    }
+
+    .recall-phase-label.sidekick {
+      color: var(--green);
     }
 
     .recall-context-label {
@@ -1225,7 +1233,8 @@
       gap: 8px;
     }
 
-    .coach-toggle.is-active {
+    .coach-toggle.is-active,
+    .sidekick-toggle.is-active {
       color: var(--green);
       border-color: var(--green-border);
       background: var(--green-tint-soft);
@@ -5263,6 +5272,7 @@
       <div class="audio-viz" id="audio-viz"></div>
       <div class="recording-actions">
         <button class="btn btn-secondary btn-sm coach-toggle" id="btn-coach-recording" type="button" aria-pressed="false">Coach</button>
+        <button class="btn btn-secondary btn-sm sidekick-toggle" id="btn-sidekick-recording" type="button" aria-pressed="false" title="Interactive preview: open Codex Fast with this meeting's live transcript and screen context">Codex Sidekick</button>
         <button class="btn btn-secondary btn-sm" id="btn-note-inline" title="Add a note">Add Note</button>
         <button class="btn btn-danger btn-sm" id="btn-stop">Stop Recording</button>
       </div>
@@ -5283,6 +5293,7 @@
       <div class="live-utterances" id="live-utterances">0 utterances</div>
       <div class="live-actions">
         <button class="btn btn-secondary btn-sm coach-toggle" id="btn-coach-live" type="button" aria-pressed="false">Coach</button>
+        <button class="btn btn-secondary btn-sm sidekick-toggle" id="btn-sidekick-live" type="button" aria-pressed="false" title="Interactive preview: open Codex Fast with this meeting's live transcript and screen context">Codex Sidekick</button>
         <button class="btn btn-secondary btn-sm" id="btn-stop-live">Stop Live</button>
       </div>
     </div>
@@ -6859,6 +6870,10 @@
       document.getElementById('btn-coach-recording'),
       document.getElementById('btn-coach-live'),
     ].filter(Boolean);
+    const sidekickButtons = [
+      document.getElementById('btn-sidekick-recording'),
+      document.getElementById('btn-sidekick-live'),
+    ].filter(Boolean);
     const aboutTrayCopy = document.getElementById('about-tray-copy');
     const updateBanner = document.getElementById('update-banner');
     const updateBannerTitle = document.getElementById('update-banner-title');
@@ -6883,6 +6898,8 @@
     let isLiveTranscript = false;
     let copilotSnapshot = { active: false, paused: false, state: 'Off', nudge: null };
     let copilotTransition = null;
+    let sidekickLaunching = false;
+    let sidekickSessionOpen = false;
     let copilotCriticalAlertsEnabled = false;
     let isSensitiveMeeting = false;
     let currentMeetingPath = null;
@@ -8013,6 +8030,52 @@
     }
 
     coachButtons.forEach(button => button.addEventListener('click', toggleCoachSurface));
+
+    function renderSidekickControls() {
+      const text = sidekickLaunching
+        ? 'Opening…'
+        : sidekickSessionOpen
+          ? 'Sidekick Open'
+          : 'Codex Sidekick';
+      sidekickButtons.forEach((button) => {
+        button.textContent = text;
+        button.disabled = sidekickLaunching;
+        button.classList.toggle('is-active', sidekickSessionOpen);
+        button.setAttribute('aria-pressed', sidekickSessionOpen ? 'true' : 'false');
+        button.setAttribute('aria-label', sidekickSessionOpen
+          ? 'Return to the open Codex Sidekick session'
+          : 'Open Codex Sidekick for this live meeting');
+        button.title = sidekickSessionOpen
+          ? 'Return to the interactive Codex Sidekick preview'
+          : "Interactive preview: open Codex Fast with this meeting's live transcript and screen context";
+      });
+    }
+
+    async function openCodexSidekick() {
+      if (sidekickLaunching) return;
+      sidekickLaunching = true;
+      renderSidekickControls();
+
+      // Sidekick deliberately uses the existing interactive terminal surface,
+      // regardless of the user's usual Recall chat/terminal preference.
+      recallDevMode = true;
+      localStorage.setItem('minutes.recallDevMode', 'true');
+      setSettingsToggle('settings-recall-dev-mode', true);
+      if (recallModeToggleBtn) {
+        recallModeToggleBtn.classList.add('active');
+        recallModeToggleBtn.title = 'Switch to chat (native mode)';
+      }
+
+      try {
+        const opened = await openRecall('sidekick');
+        sidekickSessionOpen = Boolean(opened);
+      } finally {
+        sidekickLaunching = false;
+        renderSidekickControls();
+      }
+    }
+
+    sidekickButtons.forEach(button => button.addEventListener('click', openCodexSidekick));
 
     function setHotkeyStatus(text, isError = false) {
       if (!hotkeyStatus) return;
@@ -12447,14 +12510,14 @@
     // ── Phase management ──
     function setRecallPhase(phase, context) {
       recallPhase = phase;
-      const dotClasses = ['prep', 'listening', 'debrief', 'weekly'];
+      const dotClasses = ['prep', 'listening', 'debrief', 'weekly', 'sidekick'];
       recallDot.classList.remove(...dotClasses);
       recallPhaseLabel.classList.remove(...dotClasses);
       if (phase !== 'recall') {
         recallDot.classList.add(phase);
         recallPhaseLabel.classList.add(phase);
       }
-      const labels = { recall: 'Recall', prep: 'Prep', listening: 'Listening', debrief: 'Debrief' };
+      const labels = { recall: 'Recall', prep: 'Prep', listening: 'Listening', debrief: 'Debrief', sidekick: 'Sidekick' };
       if (phase === 'weekly') {
         labels.weekly = 'Weekly';
       }
@@ -12586,6 +12649,8 @@
 
       await currentWindow.listen('pty:exit:' + SESSION_ID, () => {
         recallPtyAlive = false;
+        sidekickSessionOpen = false;
+        renderSidekickControls();
         recallExitBanner.classList.add('active');
         recallEndBtn.classList.remove('active');
       });
@@ -13016,7 +13081,7 @@
         }
         applyRecallMode();
         await registerChatListeners();
-        return;
+        return true;
       }
 
       // Developer (terminal) mode \u2014 original PTY path.
@@ -13039,6 +13104,7 @@
             console.error('Recall proactive context:', contextError);
           }
         }
+        return true;
       } catch (e) {
         const msg = typeof e === 'string' ? e : String(e);
         if (msg.includes('already running') || msg.includes('Already')) {
@@ -13065,12 +13131,22 @@
           // so degrade with a calm note instead of a scary "Could not start"
           // error for users who don't have an agent installed.
           console.info('Recall: assistant agent not installed (optional):', msg);
-          recallLoading.querySelector('span').textContent =
-            'AI assistant is optional; install Claude Code to enable it.';
+          recallLoading.querySelector('span').textContent = mode === 'sidekick'
+            ? 'Codex Sidekick needs the Codex CLI installed and signed in.'
+            : 'AI assistant is optional; install Claude Code to enable it.';
         } else {
           console.error('Recall spawn:', e);
           recallLoading.querySelector('span').textContent = 'Could not start: ' + msg;
         }
+        if (mode === 'sidekick') {
+          updateOutputNotice({
+            kind: 'error',
+            title: 'Codex Sidekick not started',
+            detail: msg,
+            path: '',
+          });
+        }
+        return false;
       }
     }
 
@@ -14276,6 +14352,10 @@
       const context = (title || '').replace('Minutes Assistant', '').replace('Discussing: ', '').trim();
       if (mode === 'meeting') {
         setRecallPhase('debrief', context);
+      } else if (mode === 'sidekick') {
+        sidekickSessionOpen = true;
+        renderSidekickControls();
+        setRecallPhase('sidekick', 'Codex Fast · interactive preview');
       } else {
         setRecallPhase('recall', context || null);
       }

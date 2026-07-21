@@ -696,7 +696,7 @@ struct ReplayResult {
 }
 
 pub fn builtin_fixtures() -> Result<Vec<EvalFixture>, EvalError> {
-    const BUILTINS: [(&str, &str); 9] = [
+    const BUILTINS: [(&str, &str); 10] = [
         (
             "long_monologue.json",
             include_str!("../../tests/fixtures/copilot_eval/v1/long_monologue.json"),
@@ -732,6 +732,10 @@ pub fn builtin_fixtures() -> Result<Vec<EvalFixture>, EvalError> {
         (
             "feedback_reduces_nagging.json",
             include_str!("../../tests/fixtures/copilot_eval/v1/feedback_reduces_nagging.json"),
+        ),
+        (
+            "agenda_confirmation.json",
+            include_str!("../../tests/fixtures/copilot_eval/v1/agenda_confirmation.json"),
         ),
     ];
     BUILTINS
@@ -2169,7 +2173,7 @@ mod tests {
             "baseline failures: {:?}",
             first.summary.baseline_failures
         );
-        assert_eq!(first.summary.fixtures, 9);
+        assert_eq!(first.summary.fixtures, 10);
         assert!(first
             .fixtures
             .iter()

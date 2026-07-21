@@ -11579,6 +11579,7 @@ mod tests {
         assert!(html.contains("Replace Recall session?"));
         assert!(html.contains("cmd_terminal_info"));
         assert!(html.contains("existingSession?.running"));
+        assert!(html.contains("Restart Sidekick"));
         assert!(html.contains("Interactive preview"));
     }
 

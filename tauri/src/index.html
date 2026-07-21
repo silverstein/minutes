@@ -5571,7 +5571,7 @@
       </div>
     </div>
     <div class="recall-exit-banner" id="recall-exit-banner">
-      Session ended.
+      <span id="recall-exit-message">Session ended.</span>
       <button class="btn btn-secondary btn-sm" id="btn-recall-restart">Restart</button>
     </div>
   </div>
@@ -6900,6 +6900,7 @@
     let copilotTransition = null;
     let sidekickLaunching = false;
     let sidekickSessionOpen = false;
+    let recallLastTerminalMode = 'assistant';
     let copilotCriticalAlertsEnabled = false;
     let isSensitiveMeeting = false;
     let currentMeetingPath = null;
@@ -12645,7 +12646,12 @@
       recallResizeObserver.observe(recallTerminalContainer);
 
       recallTerminal.onData((data) => {
-        if (!recallPtyAlive) return;
+        if (!recallPtyAlive) {
+          // Never leave a dead xterm looking interactive while silently
+          // discarding keystrokes. Surface the existing restart control.
+          recallExitBanner.classList.add('active');
+          return;
+        }
         invoke('cmd_pty_input', { sessionId: SESSION_ID, data }).catch(console.error);
       });
     }
@@ -12681,9 +12687,16 @@
       });
 
       await currentWindow.listen('pty:exit:' + SESSION_ID, () => {
+        const endedSidekick = recallLastTerminalMode === 'sidekick' || sidekickSessionOpen;
         recallPtyAlive = false;
         sidekickSessionOpen = false;
         renderSidekickControls();
+        document.getElementById('recall-exit-message').textContent = endedSidekick
+          ? 'Codex Sidekick ended.'
+          : 'Session ended.';
+        document.getElementById('btn-recall-restart').textContent = endedSidekick
+          ? 'Restart Sidekick'
+          : 'Restart';
         recallExitBanner.classList.add('active');
         recallEndBtn.classList.remove('active');
       });
@@ -13082,6 +13095,7 @@
 
     // ── Open Recall (spawn PTY if needed, then expand) ──
     async function openRecall(mode, meetingPath) {
+      recallLastTerminalMode = mode || 'assistant';
       recallLoading.classList.add('active');
       recallTerminalContainer.classList.add('hidden');
       recallExitBanner.classList.remove('active');
@@ -13129,6 +13143,10 @@
         await invoke('cmd_spawn_terminal', opts);
         recallPtyAlive = true;
         recallEndBtn.classList.add('active');
+        setTimeout(() => {
+          if (recallFitAddon) recallFitAddon.fit();
+          if (recallTerminal) recallTerminal.focus();
+        }, 60);
         if (mode === 'assistant' && !meetingPath) {
           try {
             const bundle = await invoke('cmd_proactive_context_bundle');
@@ -14460,12 +14478,15 @@
     }
 
     document.getElementById('btn-recall-restart').addEventListener('click', async () => {
+      const restartMode = recallLastTerminalMode;
       recallExitBanner.classList.remove('active');
       // Kill any zombie backend session left after natural PTY exit
       try { await invoke('cmd_pty_kill', { sessionId: SESSION_ID }); } catch (_) { }
       disposeRecallTerminal();
       initRecallTerminal();
-      await openRecall('assistant');
+      const opened = await openRecall(restartMode);
+      sidekickSessionOpen = restartMode === 'sidekick' && Boolean(opened);
+      renderSidekickControls();
     });
 
     // Quick note inside recall panel

@@ -9742,14 +9742,23 @@
         await loadDocuments();
         return;
       }
+      let meetings = [];
       try {
-        await loadProactiveContextBundle();
-        const meetings = await invoke('cmd_list_meetings', { limit: 30 });
+        meetings = await invoke('cmd_list_meetings', { limit: 30 });
         renderMeetings(meetings);
       } catch (e) {
         console.error('Load:', e);
         renderMeetings([]);
+        return;
       }
+      // The proactive context bundle runs several corpus-wide scans and is only
+      // needed for the ambient-context card, not the meetings list itself. Load
+      // it in the background and re-render once it resolves, so first paint is
+      // never gated on it. (It was previously awaited *before* the list — the
+      // dominant cause of the blank window at startup.)
+      loadProactiveContextBundle()
+        .then(() => { if (!documentsViewActive) renderMeetings(meetings); })
+        .catch((e) => console.error('Proactive bundle:', e));
     }
 
     async function refreshOpenMeetingDetail() {

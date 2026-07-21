@@ -2972,6 +2972,29 @@ mod tray_activity_tests {
     }
 
     #[test]
+    fn dictation_overlay_model_missing_recovery_is_reachable() {
+        let manifest = env!("CARGO_MANIFEST_DIR");
+        let commands_rs = std::fs::read_to_string(format!("{}/src/commands.rs", manifest))
+            .expect("failed to read commands.rs");
+        let overlay =
+            std::fs::read_to_string(format!("{}/../src/dictation-overlay.html", manifest))
+                .expect("failed to read dictation overlay");
+
+        assert!(
+            commands_rs.contains("DictationEvent::ModelMissing { .. } => \"model-missing\"")
+                && commands_rs.contains("\"dictation:model-missing\""),
+            "core model-missing events should reach the overlay as state and detail payloads"
+        );
+        assert!(
+            overlay.contains("case 'model-missing':")
+                && overlay.contains("Dictation model not installed")
+                && overlay.contains("cmd_download_model")
+                && overlay.contains("listen('download-model'"),
+            "the recovery UI should expose one-click download and progress handling"
+        );
+    }
+
+    #[test]
     fn dictation_overlay_reduced_motion_disables_animations() {
         let manifest = env!("CARGO_MANIFEST_DIR");
         let overlay =

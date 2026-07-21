@@ -2618,6 +2618,29 @@ fn validate_download_model_name(model: &str) -> Result<&str, String> {
     }
 }
 
+fn dictation_model_size_hint(model: &str) -> Option<&'static str> {
+    match model {
+        "tiny" | "tiny.en" => Some("~75 MB"),
+        "base" | "base.en" => Some("~142 MB"),
+        "small" | "small.en" => Some("~466 MB"),
+        "medium" | "medium.en" => Some("~1.5 GB"),
+        "large" | "large-v1" | "large-v2" | "large-v3" => Some("~3.0 GB"),
+        _ => None,
+    }
+}
+
+fn interrupted_model_repair_command(model: &str, path: &Path) -> Option<String> {
+    let expected_min = minutes_core::transcribe::expected_whisper_model_size_bytes(model)?;
+    let actual = std::fs::metadata(path).ok()?.len();
+    (actual < expected_min).then(|| {
+        format!(
+            "rm \"{}\" && minutes setup --model {}",
+            path.display(),
+            model
+        )
+    })
+}
+
 fn validate_palette_shortcut(shortcut: &str) -> Result<String, String> {
     validate_shortcut(shortcut, &PALETTE_SHORTCUT_CHOICES)
 }
@@ -8275,58 +8298,161 @@ pub fn cmd_needs_setup(state: tauri::State<AppState>) -> serde_json::Value {
     })
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ModelDownloadProgress {
+    model: String,
+    status: &'static str,
+    downloaded_bytes: u64,
+    total_bytes: Option<u64>,
+    percent: Option<u8>,
+    message: Option<String>,
+}
+
+static MODEL_DOWNLOAD_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+struct ModelDownloadGuard;
+
+impl Drop for ModelDownloadGuard {
+    fn drop(&mut self) {
+        MODEL_DOWNLOAD_ACTIVE.store(false, Ordering::Release);
+    }
+}
+
+fn emit_model_download_progress(
+    app: &tauri::AppHandle,
+    model: &str,
+    status: &'static str,
+    downloaded_bytes: u64,
+    total_bytes: Option<u64>,
+    message: Option<String>,
+) {
+    let percent = total_bytes
+        .filter(|total| *total > 0)
+        .map(|total| ((downloaded_bytes.saturating_mul(100) / total).min(100)) as u8);
+    app.emit(
+        "download-model",
+        ModelDownloadProgress {
+            model: model.into(),
+            status,
+            downloaded_bytes,
+            total_bytes,
+            percent,
+            message,
+        },
+    )
+    .ok();
+}
+
+async fn download_whisper_model(
+    app: &tauri::AppHandle,
+    activation_progress: &Arc<Mutex<ActivationProgress>>,
+    model: &str,
+) -> Result<String, String> {
+    let config = Config::load();
+    let model_dir = &config.transcription.model_path;
+    let model_file = model_dir.join(format!("ggml-{model}.bin"));
+
+    if model_file.exists() {
+        if let Some(command) = interrupted_model_repair_command(model, &model_file) {
+            return Err(format!("The model file is incomplete. Fix: {command}"));
+        }
+        mark_activation_model_ready(activation_progress, &model_file);
+        return Ok(format!("Model '{model}' already downloaded"));
+    }
+
+    std::fs::create_dir_all(model_dir).map_err(|error| error.to_string())?;
+    let temp_file = model_file.with_file_name(format!("ggml-{model}.bin.download"));
+    if temp_file.exists() {
+        std::fs::remove_file(&temp_file).map_err(|error| {
+            format!(
+                "Could not clear the interrupted temporary download at {}: {error}",
+                temp_file.display()
+            )
+        })?;
+    }
+
+    let url = format!("https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-{model}.bin");
+    eprintln!("[minutes] Downloading model: {model} from {url}");
+    let response = reqwest::Client::new()
+        .get(url)
+        .send()
+        .await
+        .map_err(|error| format!("Download failed: {error}"))?;
+    if !response.status().is_success() {
+        return Err(format!("Download failed with status {}", response.status()));
+    }
+
+    let total_bytes = response.content_length();
+    emit_model_download_progress(app, model, "downloading", 0, total_bytes, None);
+    let mut output = OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(&temp_file)
+        .map_err(|error| format!("Could not create {}: {error}", temp_file.display()))?;
+    let mut downloaded_bytes = 0_u64;
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|error| format!("Download failed: {error}"))?;
+        output
+            .write_all(&chunk)
+            .map_err(|error| format!("Could not write {}: {error}", temp_file.display()))?;
+        downloaded_bytes = downloaded_bytes.saturating_add(chunk.len() as u64);
+        emit_model_download_progress(
+            app,
+            model,
+            "downloading",
+            downloaded_bytes,
+            total_bytes,
+            None,
+        );
+    }
+    output
+        .flush()
+        .map_err(|error| format!("Could not finish {}: {error}", temp_file.display()))?;
+    drop(output);
+
+    if let Some(expected_min) = minutes_core::transcribe::expected_whisper_model_size_bytes(model) {
+        if downloaded_bytes < expected_min {
+            std::fs::remove_file(&temp_file).ok();
+            return Err(format!(
+                "Download ended early at {} MB. Run: minutes setup --model {model}",
+                downloaded_bytes / (1024 * 1024)
+            ));
+        }
+    }
+
+    std::fs::rename(&temp_file, &model_file)
+        .map_err(|error| format!("Could not install {}: {error}", model_file.display()))?;
+    mark_activation_model_ready(activation_progress, &model_file);
+    Ok(format!(
+        "Downloaded '{model}' model ({} MB)",
+        downloaded_bytes / (1024 * 1024)
+    ))
+}
+
 #[tauri::command]
 pub async fn cmd_download_model(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     model: String,
 ) -> Result<String, String> {
-    // Run in a blocking thread so the UI stays responsive during download
-    let activation_progress = state.activation_progress.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        validate_download_model_name(&model)?;
-
-        let config = Config::load();
-        let model_dir = &config.transcription.model_path;
-        let model_file = model_dir.join(format!("ggml-{}.bin", model));
-
-        if model_file.exists() {
-            mark_activation_model_ready(&activation_progress, &model_file);
-            return Ok(format!("Model '{}' already downloaded", model));
+    validate_download_model_name(&model)?;
+    MODEL_DOWNLOAD_ACTIVE
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .map_err(|_| "A model download is already in progress.".to_string())?;
+    let _guard = ModelDownloadGuard;
+    let result = download_whisper_model(&app, &state.activation_progress, &model).await;
+    match &result {
+        Ok(message) => {
+            emit_model_download_progress(&app, &model, "complete", 0, None, Some(message.clone()))
         }
-
-        std::fs::create_dir_all(model_dir).map_err(|e| e.to_string())?;
-
-        let url = format!(
-            "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-{}.bin",
-            model
-        );
-
-        eprintln!("[minutes] Downloading model: {} from {}", model, url);
-
-        let status = std::process::Command::new("curl")
-            .args([
-                "-L",
-                "-o",
-                &model_file.to_string_lossy(),
-                &url,
-                "--progress-bar",
-            ])
-            .status()
-            .map_err(|e| format!("curl failed: {}", e))?;
-
-        if !status.success() {
-            return Err("Download failed".into());
+        Err(message) => {
+            emit_model_download_progress(&app, &model, "failed", 0, None, Some(message.clone()))
         }
-
-        let size = std::fs::metadata(&model_file)
-            .map(|m| m.len() / (1024 * 1024))
-            .unwrap_or(0);
-        mark_activation_model_ready(&activation_progress, &model_file);
-
-        Ok(format!("Downloaded '{}' model ({} MB)", model, size))
-    })
-    .await
-    .map_err(|e| format!("Download task failed: {}", e))?
+    }
+    result
 }
 
 #[tauri::command]
@@ -14609,6 +14735,27 @@ mod tests {
     }
 
     #[test]
+    fn dictation_model_size_hint_uses_user_facing_small_size() {
+        assert_eq!(dictation_model_size_hint("small"), Some("~466 MB"));
+        assert_eq!(dictation_model_size_hint("custom"), None);
+    }
+
+    #[test]
+    fn interrupted_model_repair_command_is_actionable() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ggml-small.bin");
+        std::fs::write(&path, b"partial").unwrap();
+
+        assert_eq!(
+            interrupted_model_repair_command("small", &path),
+            Some(format!(
+                "rm \"{}\" && minutes setup --model small",
+                path.display()
+            ))
+        );
+    }
+
+    #[test]
     fn palette_shortcut_choices_do_not_collide_with_other_minutes_choices() {
         use std::collections::HashSet;
         let palette: HashSet<&str> = PALETTE_SHORTCUT_CHOICES.iter().map(|(v, _)| *v).collect();
@@ -16777,6 +16924,7 @@ fn start_dictation_session(
     let app_clone = app.clone();
     let stop_flag = Arc::clone(&state.dictation_stop_flag);
     let final_output_emitted = Arc::new(AtomicBool::new(false));
+    let model_missing_emitted = Arc::new(AtomicBool::new(false));
     let dictation_target_context_for_thread = dictation_target_context.clone();
     std::thread::spawn(move || {
         // Move the tray guard into the thread. When this closure exits
@@ -16796,6 +16944,7 @@ fn start_dictation_session(
         let app_for_results = app_clone.clone();
         let config_for_results = config.clone();
         let final_output_for_results = Arc::clone(&final_output_emitted);
+        let model_missing_for_events = Arc::clone(&model_missing_emitted);
         let dictation_target_context_for_results = dictation_target_context_for_thread.clone();
 
         let result = minutes_core::dictation::run(
@@ -16812,9 +16961,29 @@ fn start_dictation_session(
                     DictationEvent::SilenceCountdown { .. } => "",
                     DictationEvent::Success => "success",
                     DictationEvent::Error => "error",
+                    DictationEvent::ModelMissing { .. } => "model-missing",
                     DictationEvent::Cancelled => "cancelled",
                     DictationEvent::Yielded => "yielded",
                 };
+                if let DictationEvent::ModelMissing {
+                    model,
+                    expected_path,
+                    setup_command,
+                } = &event
+                {
+                    model_missing_for_events.store(true, Ordering::Relaxed);
+                    app_for_events
+                        .emit(
+                            "dictation:model-missing",
+                            serde_json::json!({
+                                "model": model,
+                                "expectedPath": expected_path,
+                                "sizeHint": dictation_model_size_hint(model),
+                                "setupCommand": setup_command,
+                            }),
+                        )
+                        .ok();
+                }
                 if !state_str.is_empty() {
                     if matches!(&event, DictationEvent::Listening) {
                         if let Some(message) = insert_fallback_message_for_events.as_ref() {
@@ -16932,7 +17101,9 @@ fn start_dictation_session(
             Ok(()) => {
                 // Session ended normally (silence timeout or yield).
                 // Dismiss overlay if it wasn't already dismissed by a terminal event.
-                if !final_output_emitted.load(Ordering::Relaxed) {
+                if !final_output_emitted.load(Ordering::Relaxed)
+                    && !model_missing_emitted.load(Ordering::Relaxed)
+                {
                     app_clone.emit("dictation:state", "cancelled").ok();
                     let guard = app_clone
                         .state::<AppState>()

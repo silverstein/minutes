@@ -907,6 +907,10 @@ enum Commands {
         /// Overrides the [recording] device setting in config.toml.
         #[arg(short = 'D', long)]
         device: Option<String>,
+
+        /// Check dictation model readiness without opening the microphone.
+        #[arg(long, hide = true)]
+        preflight: bool,
     },
 
     /// List available audio input devices
@@ -1963,6 +1967,7 @@ fn main() -> Result<()> {
             note_only,
             language,
             device,
+            preflight,
         } => {
             if let Some(lang) = language {
                 config.transcription.language = Some(lang);
@@ -1970,7 +1975,11 @@ fn main() -> Result<()> {
             if let Some(dev) = device {
                 config.recording.device = Some(dev);
             }
-            cmd_dictate(stdout, note_only, &config)
+            if preflight {
+                cmd_dictate_preflight(&config)
+            } else {
+                cmd_dictate(stdout, note_only, &config)
+            }
         }
         Commands::Devices => cmd_devices(),
         Commands::Sources => cmd_sources(),
@@ -4138,7 +4147,12 @@ fn cmd_vocabulary_remove(id: &str, json: bool) -> Result<()> {
     let path = minutes_core::vocabulary::default_path();
     let mut store = minutes_core::vocabulary::load().map_err(|e| anyhow::anyhow!("{}", e))?;
     let before = store.entries.len();
-    store.entries.retain(|entry| entry.id != id);
+    // Match by id or by exact canonical, so non-Latin-script entries (whose id
+    // is a `<kind>-<hash>` derived from an empty ASCII slug) can be removed by
+    // the canonical the user typed, not just an opaque hash id. (#511)
+    store
+        .entries
+        .retain(|entry| entry.id != id && entry.canonical != id);
     let removed = store.entries.len() != before;
     let store = store.normalized().map_err(|e| anyhow::anyhow!("{}", e))?;
     minutes_core::vocabulary::save_at(&path, &store).map_err(|e| anyhow::anyhow!("{}", e))?;
@@ -4154,7 +4168,7 @@ fn cmd_vocabulary_remove(id: &str, json: bool) -> Result<()> {
         eprintln!("Removed vocabulary entry: {}", id);
         eprintln!("Existing raw transcripts stay unchanged.");
     } else {
-        eprintln!("No vocabulary entry found with id: {}", id);
+        eprintln!("No vocabulary entry found with id or canonical: {}", id);
     }
     Ok(())
 }
@@ -7618,6 +7632,23 @@ mod tests {
         }
         std::fs::remove_dir_all(&dir).ok();
         result
+    }
+
+    #[cfg(feature = "whisper")]
+    #[test]
+    fn dictation_model_missing_message_includes_exact_repair_command() {
+        let event = minutes_core::dictation::DictationEvent::ModelMissing {
+            model: "small".into(),
+            expected_path: "/tmp/models/ggml-small.bin".into(),
+            setup_command: "rm \"/tmp/models/ggml-small.bin\" && minutes setup --model small"
+                .into(),
+        };
+
+        let message = dictation_model_missing_message(&event).unwrap();
+        assert!(message.contains("Dictation model not installed: small"));
+        assert!(message.contains("Expected: /tmp/models/ggml-small.bin"));
+        assert!(message
+            .contains("Fix: rm \"/tmp/models/ggml-small.bin\" && minutes setup --model small"));
     }
 
     fn attr(
@@ -13734,9 +13765,41 @@ fn cmd_demo(config: &Config) -> Result<()> {
 }
 
 #[cfg(feature = "whisper")]
+fn dictation_model_missing_message(
+    event: &minutes_core::dictation::DictationEvent,
+) -> Option<String> {
+    let minutes_core::dictation::DictationEvent::ModelMissing {
+        model,
+        expected_path,
+        setup_command,
+    } = event
+    else {
+        return None;
+    };
+    Some(format!(
+        "Dictation model not installed: {model}\nExpected: {expected_path}\nFix: {setup_command}"
+    ))
+}
+
+fn cmd_dictate_preflight(_config: &Config) -> Result<()> {
+    #[cfg(feature = "whisper")]
+    {
+        minutes_core::dictation::preflight_model(_config)
+            .map_err(|event| anyhow::anyhow!(dictation_model_missing_message(&event).unwrap()))
+    }
+
+    #[cfg(not(feature = "whisper"))]
+    Err(anyhow::anyhow!(
+        "`minutes dictate` requires the `whisper` feature. Reinstall without `--no-default-features` to use local dictation."
+    ))
+}
+
+#[cfg(feature = "whisper")]
 fn cmd_dictate(stdout: bool, note_only: bool, config: &Config) -> Result<()> {
     use std::sync::atomic::AtomicBool;
     use std::sync::Arc;
+
+    cmd_dictate_preflight(config)?;
 
     let permission_preflight = minutes_core::capture::preflight_microphone_only();
     if let Some(reason) = &permission_preflight.blocking_reason {
@@ -13808,6 +13871,11 @@ fn cmd_dictate(stdout: bool, note_only: bool, config: &Config) -> Result<()> {
                     }
                 }
                 DictationEvent::Error => eprintln!("[minutes] Transcription failed — audio saved"),
+                event @ DictationEvent::ModelMissing { .. } => {
+                    if let Some(message) = dictation_model_missing_message(&event) {
+                        eprintln!("[minutes] {message}");
+                    }
+                }
                 DictationEvent::Cancelled => eprintln!("[minutes] Dictation cancelled"),
                 DictationEvent::Yielded => {
                     eprintln!("[minutes] Recording started — yielding dictation")

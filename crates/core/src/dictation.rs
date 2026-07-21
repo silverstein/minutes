@@ -197,6 +197,15 @@ pub enum DictationEvent {
     },
     Success,
     Error,
+    /// The configured dictation model is missing or incomplete.
+    ModelMissing {
+        /// Model identifier accepted by the corresponding setup command.
+        model: String,
+        /// Path where Minutes expected to find the model.
+        expected_path: String,
+        /// Exact command that installs or repairs the model.
+        setup_command: String,
+    },
     Cancelled,
     Yielded,
 }
@@ -214,6 +223,57 @@ impl DictationFinalBackend {
     }
 }
 
+/// Check that the configured dictation model is installed and usable.
+///
+/// This preflight performs filesystem-only checks and never opens an audio
+/// device. A missing or truncated model is returned as the same event used by
+/// interactive dictation surfaces.
+pub fn preflight_model(config: &Config) -> Result<(), DictationEvent> {
+    if config.dictation.backend == "parakeet" {
+        let model = config.transcription.parakeet_model.clone();
+        if crate::parakeet::resolve_model_file(config, &model).is_some() {
+            return Ok(());
+        }
+        let expected_path = crate::parakeet::install_dir(config, &model)
+            .join(crate::parakeet::default_model_filename(&model));
+        return Err(DictationEvent::ModelMissing {
+            setup_command: crate::transcription_coordinator::parakeet_setup_command(&model),
+            model,
+            expected_path: expected_path.display().to_string(),
+        });
+    }
+
+    #[cfg(feature = "whisper")]
+    {
+        match crate::transcribe::resolve_model_path_for_dictation(config) {
+            Ok(_) => Ok(()),
+            Err(TranscribeError::ModelTruncated {
+                path, model_name, ..
+            }) => Err(DictationEvent::ModelMissing {
+                setup_command: format!("rm \"{}\" && minutes setup --model {}", path, model_name),
+                model: model_name,
+                expected_path: path,
+            }),
+            Err(TranscribeError::ModelNotFound(_)) => {
+                let model = config.dictation.model.clone();
+                let expected_path = config
+                    .transcription
+                    .model_path
+                    .join(format!("ggml-{model}.bin"));
+                Err(DictationEvent::ModelMissing {
+                    setup_command: format!("minutes setup --model {model}"),
+                    model,
+                    expected_path: expected_path.display().to_string(),
+                })
+            }
+            Err(_) => Ok(()),
+        }
+    }
+
+    #[cfg(not(feature = "whisper"))]
+    Ok(())
+}
+
 /// Run the dictation pipeline. Blocks until stopped or silence timeout.
 ///
 /// `stop_flag`: set to true to stop the session (Esc key, Ctrl-C, MCP stop).
@@ -229,6 +289,11 @@ where
     F: FnMut(DictationEvent),
     G: FnMut(DictationResult),
 {
+    if let Err(event) = preflight_model(config) {
+        on_event(event);
+        return Ok(());
+    }
+
     // Check for conflicts: recording must not be active
     if let Ok(Some(_)) = pid::check_recording() {
         return Err(DictationError::RecordingActive.into());
@@ -271,6 +336,7 @@ where
 {
     let run_start = Instant::now();
     startup_debug("run_inner_start", Some(&config.dictation.model), None, None);
+    let final_backend = dictation_final_backend(config);
 
     // Try to use preloaded model, fall back to loading on demand
     #[cfg(feature = "whisper")]
@@ -284,7 +350,7 @@ where
             Some(run_start.elapsed().as_millis()),
             None,
         );
-        ctx
+        Some(ctx)
     } else {
         let load_start = Instant::now();
         startup_debug(
@@ -293,23 +359,47 @@ where
             Some(run_start.elapsed().as_millis()),
             None,
         );
-        let model_path = crate::transcribe::resolve_model_path_for_dictation(config)?;
-        tracing::info!(model = %model_path.display(), "loading whisper model on demand");
-        let ctx = whisper_rs::WhisperContext::new_with_params(
-            model_path
-                .to_str()
-                .ok_or_else(|| TranscribeError::ModelLoadError("invalid path".into()))?,
-            crate::transcribe::whisper_context_params(),
-        )
-        .map_err(|e| TranscribeError::ModelLoadError(format!("{}", e)))?;
-        tracing::info!("whisper model loaded for dictation session");
-        startup_debug(
-            "model_load_done",
-            Some(&model_name),
-            Some(load_start.elapsed().as_millis()),
-            None,
-        );
-        ctx
+        match crate::transcribe::resolve_model_path_for_dictation(config) {
+            Ok(model_path) => {
+                tracing::info!(model = %model_path.display(), "loading whisper model on demand");
+                let context = whisper_rs::WhisperContext::new_with_params(
+                    model_path
+                        .to_str()
+                        .ok_or_else(|| TranscribeError::ModelLoadError("invalid path".into()))?,
+                    crate::transcribe::whisper_context_params(),
+                );
+                match context {
+                    Ok(context) => {
+                        tracing::info!("whisper model loaded for dictation session");
+                        startup_debug(
+                            "model_load_done",
+                            Some(&model_name),
+                            Some(load_start.elapsed().as_millis()),
+                            None,
+                        );
+                        Some(context)
+                    }
+                    Err(error) if final_backend == DictationFinalBackend::Parakeet => {
+                        tracing::warn!(
+                            error = %error,
+                            "whisper partial model could not load; continuing with configured Parakeet dictation"
+                        );
+                        None
+                    }
+                    Err(error) => {
+                        return Err(TranscribeError::ModelLoadError(error.to_string()).into())
+                    }
+                }
+            }
+            Err(error) if final_backend == DictationFinalBackend::Parakeet => {
+                tracing::info!(
+                    error = %error,
+                    "whisper partials unavailable; continuing with configured Parakeet dictation"
+                );
+                None
+            }
+            Err(error) => return Err(error.into()),
+        }
     };
 
     #[cfg(not(feature = "whisper"))]
@@ -363,7 +453,6 @@ where
             config.transcription.language.clone(),
             config.transcription.partial_max_secs,
         );
-        let final_backend = dictation_final_backend(config);
         let mut final_utterance_samples: Vec<f32> = Vec::new();
         let mut accumulated_results: Vec<DictationResult> = Vec::new();
         let mut was_speaking = false;
@@ -391,7 +480,7 @@ where
                         final_backend,
                         &final_utterance_samples,
                         &mut streaming,
-                        &whisper_ctx,
+                        whisper_ctx.as_ref(),
                     ) {
                         handle_utterance(
                             &sr.text,
@@ -419,7 +508,7 @@ where
                         final_backend,
                         &final_utterance_samples,
                         &mut streaming,
-                        &whisper_ctx,
+                        whisper_ctx.as_ref(),
                     ) {
                         handle_utterance(
                             &sr.text,
@@ -503,8 +592,10 @@ where
                 }
 
                 // Feed to streaming whisper — may emit a partial result
-                if let Some(sr) = streaming.feed(&chunk.samples, &whisper_ctx) {
-                    on_event(DictationEvent::PartialText(sr.text));
+                if let Some(context) = whisper_ctx.as_ref() {
+                    if let Some(sr) = streaming.feed(&chunk.samples, context) {
+                        on_event(DictationEvent::PartialText(sr.text));
+                    }
                 }
 
                 // Force-finalize if max utterance reached
@@ -516,7 +607,7 @@ where
                         final_backend,
                         &final_utterance_samples,
                         &mut streaming,
-                        &whisper_ctx,
+                        whisper_ctx.as_ref(),
                     ) {
                         handle_utterance(
                             &sr.text,
@@ -543,7 +634,7 @@ where
                         final_backend,
                         &final_utterance_samples,
                         &mut streaming,
-                        &whisper_ctx,
+                        whisper_ctx.as_ref(),
                     ) {
                         handle_utterance(
                             &sr.text,
@@ -593,7 +684,9 @@ where
         }
 
         // Return model to cache for next session
-        return_model_to_cache(whisper_ctx, model_name);
+        if let Some(context) = whisper_ctx {
+            return_model_to_cache(context, model_name);
+        }
 
         Ok(())
     }
@@ -677,7 +770,7 @@ fn finalize_dictation_transcription(
     _final_backend: DictationFinalBackend,
     _final_utterance_samples: &[f32],
     streaming: &mut StreamingWhisper,
-    whisper_ctx: &whisper_rs::WhisperContext,
+    whisper_ctx: Option<&whisper_rs::WhisperContext>,
 ) -> Option<StreamingResult> {
     #[cfg(target_os = "macos")]
     if _final_backend == DictationFinalBackend::AppleSpeech {
@@ -707,7 +800,7 @@ fn finalize_dictation_transcription(
         }
     }
 
-    streaming.finalize(whisper_ctx)
+    whisper_ctx.and_then(|context| streaming.finalize(context))
 }
 
 #[cfg(target_os = "macos")]
@@ -1325,6 +1418,119 @@ mod tests {
             },
             ..Config::default()
         }
+    }
+
+    #[test]
+    fn model_preflight_returns_model_missing_when_whisper_file_is_absent() {
+        let dir = TempDir::new().unwrap();
+        let mut config = test_config(dir.path());
+        config.transcription.model_path = dir.path().join("models");
+        config.dictation.model = "test-model".into();
+
+        assert_eq!(
+            preflight_model(&config),
+            Err(DictationEvent::ModelMissing {
+                model: "test-model".into(),
+                expected_path: config
+                    .transcription
+                    .model_path
+                    .join("ggml-test-model.bin")
+                    .display()
+                    .to_string(),
+                setup_command: "minutes setup --model test-model".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn model_preflight_proceeds_when_whisper_file_is_present() {
+        let dir = TempDir::new().unwrap();
+        let mut config = test_config(dir.path());
+        config.transcription.model_path = dir.path().join("models");
+        config.dictation.model = "test-model".into();
+        std::fs::create_dir_all(&config.transcription.model_path).unwrap();
+        std::fs::write(
+            config.transcription.model_path.join("ggml-test-model.bin"),
+            b"test model",
+        )
+        .unwrap();
+
+        assert_eq!(preflight_model(&config), Ok(()));
+    }
+
+    #[test]
+    fn model_preflight_surfaces_interrupted_whisper_download_command() {
+        let dir = TempDir::new().unwrap();
+        let mut config = test_config(dir.path());
+        config.transcription.model_path = dir.path().join("models");
+        config.dictation.model = "tiny".into();
+        std::fs::create_dir_all(&config.transcription.model_path).unwrap();
+        let model_path = config.transcription.model_path.join("ggml-tiny.bin");
+        std::fs::write(&model_path, b"partial").unwrap();
+
+        assert_eq!(
+            preflight_model(&config),
+            Err(DictationEvent::ModelMissing {
+                model: "tiny".into(),
+                expected_path: model_path.display().to_string(),
+                setup_command: format!(
+                    "rm \"{}\" && minutes setup --model tiny",
+                    model_path.display()
+                ),
+            })
+        );
+    }
+
+    #[test]
+    fn model_preflight_checks_configured_parakeet_model() {
+        let dir = TempDir::new().unwrap();
+        let mut config = test_config(dir.path());
+        config.transcription.model_path = dir.path().join("models");
+        config.transcription.parakeet_model = "tdt-600m".into();
+        config.dictation.backend = "parakeet".into();
+
+        assert_eq!(
+            preflight_model(&config),
+            Err(DictationEvent::ModelMissing {
+                model: "tdt-600m".into(),
+                expected_path: crate::parakeet::install_dir(&config, "tdt-600m")
+                    .join(crate::parakeet::default_model_filename("tdt-600m"))
+                    .display()
+                    .to_string(),
+                setup_command: "minutes setup --parakeet --parakeet-model tdt-600m".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn run_emits_model_missing_and_returns_before_capture() {
+        let dir = TempDir::new().unwrap();
+        let mut config = test_config(dir.path());
+        config.transcription.model_path = dir.path().join("models");
+        config.dictation.model = "test-model".into();
+        let mut events = Vec::new();
+
+        let result = run(
+            Arc::new(AtomicBool::new(false)),
+            &config,
+            |event| events.push(event),
+            |_| panic!("missing-model preflight must not produce dictation results"),
+        );
+
+        assert!(result.is_ok());
+        assert_eq!(
+            events,
+            vec![DictationEvent::ModelMissing {
+                model: "test-model".into(),
+                expected_path: config
+                    .transcription
+                    .model_path
+                    .join("ggml-test-model.bin")
+                    .display()
+                    .to_string(),
+                setup_command: "minutes setup --model test-model".into(),
+            }]
+        );
     }
 
     #[test]

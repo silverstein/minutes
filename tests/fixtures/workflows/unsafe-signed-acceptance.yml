@@ -1,0 +1,13 @@
+name: Unsafe signed acceptance fixture
+on:
+  push:
+    tags:
+      - acceptance-*
+jobs:
+  sign-reviewed-artifact:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+        run: ./candidate-controlled-signing-script.sh

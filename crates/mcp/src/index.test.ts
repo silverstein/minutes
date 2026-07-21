@@ -20,12 +20,34 @@ import {
   parseCopilotNudgeLog,
   parseCopilotStatusOutput,
   parseKnowledgeConfig,
+  parseDictationModelMissingError,
   parseLiveEventsResourceUri,
   registerLiveEventsSubscriptionHandlers,
   selectCopilotNudges,
   shouldRunMainEntry,
   type CopilotNudgeObservation,
 } from "./index.js";
+
+describe("dictation model preflight errors", () => {
+  it("extracts the model, expected path, and interrupted-download repair command", () => {
+    const error = [
+      "Error: Dictation model not installed: small",
+      "Expected: /Users/test/.minutes/models/ggml-small.bin",
+      "Fix: rm \"/Users/test/.minutes/models/ggml-small.bin\" && minutes setup --model small",
+    ].join("\n");
+
+    expect(parseDictationModelMissingError(error)).toEqual({
+      model: "small",
+      expectedPath: "/Users/test/.minutes/models/ggml-small.bin",
+      setupCommand:
+        "rm \"/Users/test/.minutes/models/ggml-small.bin\" && minutes setup --model small",
+    });
+  });
+
+  it("ignores unrelated startup errors", () => {
+    expect(parseDictationModelMissingError("microphone permission denied")).toBeNull();
+  });
+});
 
 describe("meeting insight contract", () => {
   it("exports only the insight kinds the pipeline emits today", () => {

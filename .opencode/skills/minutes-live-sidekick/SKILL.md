@@ -42,8 +42,12 @@ asks you to use that fallback.
 Check the supported Minutes status surface:
 
 ```bash
-minutes transcript --status
+"${MINUTES_CLI:-minutes}" transcript --status
 ```
+
+`MINUTES_CLI`, when present, is the version-locked CLI bundled with the
+running desktop app. Use the expansion above for every Minutes command in
+this skill; never replace it with a different bare `minutes` found on PATH.
 
 Treat this status result as the authority for whether a live transcript is
 active. Run transcript and screen checks separately: a screen-context or
@@ -58,14 +62,14 @@ Use supported bounded reads to refresh the active meeting before every directly
 typed user turn:
 
 ```bash
-minutes transcript --since 2m
-minutes transcript --since <cursor>
+"${MINUTES_CLI:-minutes}" transcript --since 2m
+"${MINUTES_CLI:-minutes}" transcript --since <cursor>
 ```
 
 Also check the latest exact-session screen context on every directly typed turn:
 
 ```bash
-minutes context screen --limit 1
+"${MINUTES_CLI:-minutes}" context screen --limit 1
 ```
 
 When that command returns an exact-session image, open and inspect it before

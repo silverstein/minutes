@@ -17,6 +17,15 @@ fn prioritize_bundled_cli(path_dirs: &mut Vec<String>, current_exe: &Path) {
     path_dirs.insert(0, executable_dir);
 }
 
+fn bundled_minutes_cli(current_exe: &Path) -> Option<PathBuf> {
+    let executable_dir = current_exe.parent()?;
+    Some(executable_dir.join(if cfg!(windows) {
+        "minutes.exe"
+    } else {
+        "minutes"
+    }))
+}
+
 #[cfg(windows)]
 fn terminate_process_tree(process_id: Option<u32>) {
     let Some(process_id) = process_id else {
@@ -154,6 +163,14 @@ impl PtyManager {
         // Minutes Dev and can disagree on PID/sandbox/context behavior.
         if let Ok(current_exe) = std::env::current_exe() {
             prioritize_bundled_cli(&mut path_dirs, &current_exe);
+            if let Some(minutes_cli) = bundled_minutes_cli(&current_exe) {
+                if minutes_cli.is_file() {
+                    // Codex may reconstruct PATH from the login environment.
+                    // Keep an explicit version-locked command path that skills
+                    // can invoke without falling back to an older global CLI.
+                    cmd.env("MINUTES_CLI", minutes_cli.display().to_string());
+                }
+            }
         }
 
         cmd.env("PATH", path_dirs.join(":"));
@@ -347,6 +364,20 @@ mod tests {
                 .filter(|entry| *entry == "/Applications/Minutes Dev.app/Contents/MacOS")
                 .count(),
             1
+        );
+    }
+
+    #[test]
+    fn bundled_minutes_cli_is_a_sibling_of_the_running_desktop_binary() {
+        assert_eq!(
+            bundled_minutes_cli(Path::new(
+                "/Applications/Minutes Dev.app/Contents/MacOS/minutes-app"
+            )),
+            Some(PathBuf::from(if cfg!(windows) {
+                "/Applications/Minutes Dev.app/Contents/MacOS/minutes.exe"
+            } else {
+                "/Applications/Minutes Dev.app/Contents/MacOS/minutes"
+            }))
         );
     }
 }

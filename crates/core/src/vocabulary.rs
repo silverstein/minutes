@@ -135,7 +135,12 @@ impl VocabularyEntry {
         } else {
             self.id = slugify_id(self.id.trim());
         }
-        if self.id.is_empty() {
+        // Empty, or a bare `<kind>` id (a non-ASCII canonical whose ASCII slug
+        // collapsed to nothing, from an install predating the hash fallback):
+        // re-derive a unique, stable id from the canonical so entries cannot
+        // collide on the bare kind. This migrates existing collided installs on
+        // load. (#511)
+        if self.id.is_empty() || self.id == self.kind.label() {
             self.id = entry_id(self.kind, &self.canonical);
         }
 
@@ -400,9 +405,28 @@ fn key_for(value: &str) -> String {
 }
 
 fn entry_id(kind: VocabularyKind, canonical: &str) -> String {
-    format!("{}-{}", kind.label(), slugify_id(canonical))
-        .trim_end_matches('-')
-        .to_string()
+    let slug = slugify_id(canonical);
+    if slug.is_empty() {
+        // Canonical has no ASCII alphanumerics (e.g. Cyrillic, CJK). An ASCII
+        // slug would be empty and collapse to the bare kind, colliding across
+        // entries. Fall back to a deterministic short hash of the canonical so
+        // every entry gets a unique, stable id regardless of script. (#511)
+        format!("{}-{:x}", kind.label(), canonical_hash(canonical))
+    } else {
+        format!("{}-{}", kind.label(), slug)
+    }
+}
+
+/// Stable FNV-1a hash of a vocabulary canonical, used to build a unique id when
+/// the ASCII slug is empty. Deterministic across runs and Rust versions, so the
+/// derived id stays constant for a given canonical.
+fn canonical_hash(canonical: &str) -> u64 {
+    let mut hash: u64 = 0xcbf29ce484222325; // FNV offset basis
+    for byte in canonical.trim().to_lowercase().as_bytes() {
+        hash ^= *byte as u64;
+        hash = hash.wrapping_mul(0x100000001b3); // FNV prime
+    }
+    hash
 }
 
 fn slugify_id(value: &str) -> String {
@@ -487,6 +511,87 @@ mod tests {
         assert_eq!(entry.id, "organization-automattic");
         assert_eq!(entry.canonical, "Automattic");
         assert_eq!(entry.aliases, vec!["Automatic"]);
+    }
+
+    #[test]
+    fn non_ascii_canonical_gets_unique_hash_id_not_bare_kind() {
+        // Cyrillic canonicals: the ASCII slug is empty, so ids must fall back to
+        // unique <kind>-<hash> rather than collapsing to the bare kind. (#511)
+        let store = VocabularyStore {
+            entries: vec![
+                VocabularyEntry {
+                    kind: VocabularyKind::Term,
+                    canonical: "Пример".into(),
+                    ..VocabularyEntry::default()
+                },
+                VocabularyEntry {
+                    kind: VocabularyKind::Term,
+                    canonical: "Другой".into(),
+                    ..VocabularyEntry::default()
+                },
+            ],
+        }
+        .normalized()
+        .unwrap();
+
+        assert_eq!(store.entries.len(), 2);
+        for entry in &store.entries {
+            assert_ne!(entry.id, "term", "id must not collapse to the bare kind");
+            assert!(entry.id.starts_with("term-"));
+        }
+        assert_ne!(
+            store.entries[0].id, store.entries[1].id,
+            "two different non-ASCII canonicals must get different ids"
+        );
+    }
+
+    #[test]
+    fn non_ascii_id_is_stable_across_normalization() {
+        let build = || {
+            VocabularyStore {
+                entries: vec![VocabularyEntry {
+                    kind: VocabularyKind::Acronym,
+                    canonical: "例え".into(),
+                    ..VocabularyEntry::default()
+                }],
+            }
+            .normalized()
+            .unwrap()
+        };
+        assert_eq!(build().entries[0].id, build().entries[0].id);
+        assert!(build().entries[0].id.starts_with("acronym-"));
+    }
+
+    #[test]
+    fn bare_kind_id_is_migrated_on_normalize() {
+        // An install predating the fix persisted a bare "term" id for a Cyrillic
+        // canonical; normalizing (on every load) re-derives a unique id. (#511)
+        let store = VocabularyStore {
+            entries: vec![VocabularyEntry {
+                id: "term".into(),
+                kind: VocabularyKind::Term,
+                canonical: "Пример".into(),
+                ..VocabularyEntry::default()
+            }],
+        }
+        .normalized()
+        .unwrap();
+        assert_ne!(store.entries[0].id, "term");
+        assert!(store.entries[0].id.starts_with("term-"));
+    }
+
+    #[test]
+    fn ascii_canonical_id_is_unchanged() {
+        let store = VocabularyStore {
+            entries: vec![VocabularyEntry {
+                kind: VocabularyKind::Term,
+                canonical: "TestLatin".into(),
+                ..VocabularyEntry::default()
+            }],
+        }
+        .normalized()
+        .unwrap();
+        assert_eq!(store.entries[0].id, "term-testlatin");
     }
 
     #[test]

@@ -4137,7 +4137,12 @@ fn cmd_vocabulary_remove(id: &str, json: bool) -> Result<()> {
     let path = minutes_core::vocabulary::default_path();
     let mut store = minutes_core::vocabulary::load().map_err(|e| anyhow::anyhow!("{}", e))?;
     let before = store.entries.len();
-    store.entries.retain(|entry| entry.id != id);
+    // Match by id or by exact canonical, so non-Latin-script entries (whose id
+    // is a `<kind>-<hash>` derived from an empty ASCII slug) can be removed by
+    // the canonical the user typed, not just an opaque hash id. (#511)
+    store
+        .entries
+        .retain(|entry| entry.id != id && entry.canonical != id);
     let removed = store.entries.len() != before;
     let store = store.normalized().map_err(|e| anyhow::anyhow!("{}", e))?;
     minutes_core::vocabulary::save_at(&path, &store).map_err(|e| anyhow::anyhow!("{}", e))?;
@@ -4153,7 +4158,7 @@ fn cmd_vocabulary_remove(id: &str, json: bool) -> Result<()> {
         eprintln!("Removed vocabulary entry: {}", id);
         eprintln!("Existing raw transcripts stay unchanged.");
     } else {
-        eprintln!("No vocabulary entry found with id: {}", id);
+        eprintln!("No vocabulary entry found with id or canonical: {}", id);
     }
     Ok(())
 }

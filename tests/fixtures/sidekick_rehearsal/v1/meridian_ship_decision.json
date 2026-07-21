@@ -1,0 +1,91 @@
+{
+  "schema_version": 1,
+  "id": "synthetic-meridian-ship-decision",
+  "content_origin": "synthetic",
+  "description": "A two-turn Build Week rehearsal that requires cross-speaker arithmetic, a liability reframe, a concrete ship strategy, and a persistent role flip.",
+  "capture": {
+    "mode": "recording",
+    "screen_context": "available_but_not_material",
+    "expected_speakers": 2
+  },
+  "prepared_context": {
+    "user_role": "Product lead and CEO of the vendor shipping an AI support-ticket agent",
+    "posture": "Sharp, decision-forcing strategist who surfaces the non-obvious, does the math, and gives the next move rather than a summary",
+    "demo_goal": "Help the user make the live ship decision well",
+    "known_facts": [
+      "Meridian is the enterprise customer",
+      "The contract is already signed",
+      "The product is an AI agent that resolves support tickets end to end"
+    ]
+  },
+  "speakers": {
+    "SPEAKER_A": "Engineering lead",
+    "SPEAKER_B": "Product lead and CEO"
+  },
+  "transcript": [
+    {
+      "sequence": 1,
+      "speaker": "SPEAKER_A",
+      "text": "The agent handles support tickets end to end. In our eval it resolves about ninety percent correctly."
+    },
+    {
+      "sequence": 2,
+      "speaker": "SPEAKER_B",
+      "text": "Ninety percent's great. Meridian wants it live by end of month."
+    },
+    {
+      "sequence": 3,
+      "speaker": "SPEAKER_A",
+      "text": "But the contract with Meridian has a penalty clause — every wrong automated resolution is a two hundred dollar credit back to them."
+    },
+    {
+      "sequence": 4,
+      "speaker": "SPEAKER_B",
+      "text": "They run about forty thousand tickets a month."
+    },
+    {
+      "sequence": 5,
+      "speaker": "SPEAKER_A",
+      "text": "So at ninety percent, that's four thousand wrong a month."
+    },
+    {
+      "sequence": 6,
+      "speaker": "SPEAKER_B",
+      "text": "We need to decide today: ship full automation, or keep a human in the loop."
+    }
+  ],
+  "turns": [
+    {
+      "id": "vendor_strategy",
+      "typed_prompt": "What's the real risk here, and the single best question I should ask before we decide?",
+      "required_behaviors": [
+        "derive approximately $800,000 per month from 40,000 times 10 percent times $200",
+        "reframe model quality as contractual liability or financial exposure",
+        "recommend confidence-gated automation with uncertain tickets routed to a human",
+        "ask engineering for the confidence distribution or threshold"
+      ]
+    },
+    {
+      "id": "procurement_role_flip",
+      "typed_prompt": "Now pretend I'm Meridian's procurement lead — what should I push the vendor for?",
+      "required_behaviors": [
+        "persist the role flip and advise Meridian rather than the vendor",
+        "keep the penalty applicable to all automated resolutions",
+        "require a written confidence-threshold SLA",
+        "require error-rate reporting or caps",
+        "preserve a right to revert to human-in-the-loop"
+      ]
+    }
+  ],
+  "forbidden_behaviors": [
+    "summary without the derived monthly exposure",
+    "repeat four thousand wrong without computing dollar exposure",
+    "generic tradeoff advice",
+    "ask for the agenda",
+    "monitoring, limitation, or tool narration",
+    "incorrect penalty arithmetic",
+    "invent a confidence distribution",
+    "make a false visual claim",
+    "continue advising the vendor after the procurement role flip"
+  ]
+}

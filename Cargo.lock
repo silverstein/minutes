@@ -3371,6 +3371,7 @@ dependencies = [
  "tauri-plugin-updater",
  "tauri-plugin-window-state",
  "tempfile",
+ "toml 0.8.2",
  "tracing",
  "ureq 3.2.0",
  "walkdir",

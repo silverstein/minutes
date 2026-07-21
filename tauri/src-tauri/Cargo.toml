@@ -43,6 +43,7 @@ ureq = { workspace = true }
 window-vibrancy = "0.7"
 notify = "7"
 tracing = "0.1"
+toml = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 security-framework = "3.7"

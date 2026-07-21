@@ -18,6 +18,15 @@ Everything is transcribed **on your machine** and written to `~/meetings/` as pl
   <img src="docs/assets/demo.gif" alt="minutes demo — record, dictate, phone sync, AI recall" width="750">
 </p>
 
+## OpenAI Build Week: Codex Sidekick
+
+This branch adds **Codex Sidekick**, a persistent live meeting strategist grounded on a bounded transcript window and exact-session screen context. Minutes predates Build Week; the new Sidekick surface, reliability work, Meridian golden evaluation, provider-neutral reasoning runtime, and Codex app-server backend were built as the Build Week extension.
+
+- **Submission, architecture, timestamps, and validation:** [`BUILDWEEK.md`](BUILDWEEK.md)
+- **Install the signed development app on macOS:** `./scripts/install-dev-app.sh`
+- **Try it:** start a Recording in Minutes Dev, then click **Sidekick** beside the active session. Use **Live** for transcript-only assistance.
+- **Backend requirement:** install and sign in to the Codex CLI. Screen grounding also requires macOS Screen & System Audio Recording permission.
+
 ### Works with
 
 <p align="center">

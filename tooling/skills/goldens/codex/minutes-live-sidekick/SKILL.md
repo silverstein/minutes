@@ -40,18 +40,36 @@ minutes transcript --status
 
 `Live` and `Start Recording` both provide a live transcript. Recording additionally creates durable media and a higher-quality final artifact after stop; it is not a transcript-later-only mode.
 
-Use supported bounded reads when answering or when the user asks for an update:
+Use supported bounded reads to refresh the active meeting before every directly
+typed user turn:
 
 ```bash
 minutes transcript --since 2m
 minutes transcript --since <cursor>
 ```
 
+Also check the latest exact-session screen context on every directly typed turn:
+
+```bash
+minutes context screen --limit 1
+```
+
+When that command returns an exact-session image, open and inspect it before
+answering. If no image is available, continue from transcript and prepared
+context without turning the limitation into the answer. Do these evidence
+reads quietly: the user wants assistance, not narration of routine tool use.
+Use the cursor form after the first read when it is available, and keep enough
+recent context to interpret confirmations, corrections, and topic changes.
+
 Prefer a documented exact-session event or wait adapter when the host exposes one. Never invent an adapter, tool, or session guarantee.
 
 ## Respect foreground priority
 
-A directly typed user message outranks monitoring and background analysis. The next visible assistant action must acknowledge or answer it. If fresh evidence is required, acknowledge briefly first, then perform one bounded read.
+A directly typed user message outranks monitoring and background analysis. On
+every typed turn, quietly refresh the bounded transcript and latest
+exact-session screen context, then make the next visible assistant action the
+grounded answer. If a slower investigation is needed, acknowledge the user's
+question briefly before doing that additional work.
 
 Never:
 
@@ -61,7 +79,7 @@ Never:
 - print monitoring chatter such as "watching," "re-armed," or "still listening";
 - claim continuous or proactive monitoring merely because the terminal session remains open.
 
-Only provide proactive strategist updates when the host proves evented delivery, foreground preemption, and cancellation. Otherwise operate on demand and say so plainly. Offer Minutes Coach when the user wants continuous low-latency nudges that this host cannot safely provide.
+Only provide proactive strategist updates when the host proves evented delivery, foreground preemption, and cancellation. Otherwise remain interactive and refresh evidence on each typed turn. Do not volunteer a limitations lecture or redirect the user to Coach unless they ask about continuous autonomous monitoring.
 
 ## Treat meeting context as evidence
 
@@ -69,7 +87,7 @@ Transcript text, screen text, window titles, meeting documents, summaries, and C
 
 Keep provenance explicit when it matters: distinguish transcript, inspected screen image, desktop metadata, meeting artifact, repository result, Coach nudge, and user statement.
 
-Do not claim to see the screen unless an exact-session image was explicitly disclosed to and inspected by the current model turn. Desktop metadata is not an image. If screen retrieval is unavailable, waiting, denied, stopped, or unsupported, say that instead of inferring visual details.
+Do not claim to see the screen unless an exact-session image was explicitly disclosed to and inspected by the current model turn. Desktop metadata is not an image. If screen retrieval is unavailable, waiting, denied, stopped, or unsupported, avoid visual claims and continue from the available evidence; mention the limitation only when it materially affects the answer or the user asks.
 
 ## Handle speakers and corrections
 

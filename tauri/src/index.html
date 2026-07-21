@@ -8067,6 +8067,33 @@
       }
 
       try {
+        // Recall may have restored the user's ordinary terminal assistant when
+        // the app launched. A deliberate Sidekick click should not fail with
+        // an opaque slot-collision message: identify that session and offer a
+        // one-click replacement while preserving an already-running Sidekick.
+        if (recallPtyAlive) {
+          let existingTitle = '';
+          try {
+            const info = await invoke('cmd_terminal_info', { sessionId: SESSION_ID });
+            existingTitle = info?.title || '';
+          } catch (_) { /* the spawn path remains the source of truth */ }
+
+          if (existingTitle && existingTitle !== 'Codex Sidekick') {
+            const { ask } = window.__TAURI__.dialog;
+            const replace = await ask(
+              `Recall is currently running “${existingTitle}”. End it and open Codex Sidekick for this meeting?`,
+              { title: 'Replace Recall session?', kind: 'warning' },
+            );
+            if (!replace) return;
+            await invoke('cmd_pty_kill', { sessionId: SESSION_ID });
+            recallPtyAlive = false;
+            sidekickSessionOpen = false;
+            recallEndBtn.classList.remove('active');
+            recallExitBanner.classList.remove('active');
+            if (recallTerminal) recallTerminal.clear();
+          }
+        }
+
         const opened = await openRecall('sidekick');
         sidekickSessionOpen = Boolean(opened);
       } finally {

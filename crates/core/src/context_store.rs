@@ -410,9 +410,34 @@ pub fn open_db_at(path: &Path) -> Result<Connection, ContextStoreError> {
          PRAGMA journal_mode=WAL;
          PRAGMA synchronous=NORMAL;",
     )?;
+    enable_persistent_wal(&conn)?;
     create_schema(&conn)?;
     set_db_permissions(path);
     Ok(conn)
+}
+
+fn enable_persistent_wal(conn: &Connection) -> Result<(), ContextStoreError> {
+    let mut enabled: std::os::raw::c_int = 1;
+    // SAFETY: `conn.handle()` remains valid for the duration of this call,
+    // `main\0` is a static NUL-terminated database name, and SQLite expects a
+    // pointer to an `int` for SQLITE_FCNTL_PERSIST_WAL. SQLite does not retain
+    // any of these pointers after sqlite3_file_control returns.
+    let result = unsafe {
+        rusqlite::ffi::sqlite3_file_control(
+            conn.handle(),
+            b"main\0".as_ptr().cast(),
+            rusqlite::ffi::SQLITE_FCNTL_PERSIST_WAL,
+            (&mut enabled as *mut std::os::raw::c_int).cast(),
+        )
+    };
+    if result == rusqlite::ffi::SQLITE_OK {
+        Ok(())
+    } else {
+        Err(ContextStoreError::Sqlite(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(result),
+            Some("could not enable persistent WAL for read-only clients".into()),
+        )))
+    }
 }
 
 /// Open an existing context store without asking SQLite for write access.
@@ -1947,6 +1972,10 @@ mod tests {
                  INSERT INTO context_meta (key, value) VALUES ('live-session', 'active');",
             )
             .unwrap();
+        drop(writer);
+
+        assert!(sqlite_sidecar_path(&path, "-wal").exists());
+        assert!(sqlite_sidecar_path(&path, "-shm").exists());
 
         let reader = open_db_read_only_at(&path).unwrap();
         let value: String = reader

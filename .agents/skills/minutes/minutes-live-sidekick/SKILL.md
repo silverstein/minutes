@@ -44,6 +44,13 @@ Check the supported Minutes status surface:
 minutes transcript --status
 ```
 
+Treat this status result as the authority for whether a live transcript is
+active. Run transcript and screen checks separately: a screen-context or
+database read failure never means the recording is inactive. If status is
+active, do not report "no active recording" because a later evidence lane
+failed; continue with the bounded transcript and omit only the unavailable
+lane.
+
 `Live` and `Start Recording` both provide a live transcript. Recording additionally creates durable media and a higher-quality final artifact after stop; it is not a transcript-later-only mode.
 
 Use supported bounded reads to refresh the active meeting before every directly
@@ -61,7 +68,8 @@ minutes context screen --limit 1
 ```
 
 When that command returns an exact-session image, open and inspect it before
-answering. If no image is available, continue from transcript and prepared
+answering. If the command fails or no image is available, continue from
+transcript and prepared
 context without turning the limitation into the answer. Do these evidence
 reads quietly: the user wants assistance, not narration of routine tool use.
 Use the cursor form after the first read when it is available, and keep enough

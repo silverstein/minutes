@@ -2,7 +2,7 @@ use crate::config::Config;
 use crate::markdown::ContentType;
 use crate::pid::CaptureMode;
 use chrono::{DateTime, Local};
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
@@ -415,6 +415,31 @@ pub fn open_db_at(path: &Path) -> Result<Connection, ContextStoreError> {
     Ok(conn)
 }
 
+/// Open an existing context store without asking SQLite for write access.
+///
+/// Agent surfaces intentionally run the Minutes CLI in a read-only sandbox.
+/// Query commands must therefore avoid the normal schema/WAL initialization
+/// path: even a SELECT-only command otherwise asks SQLite to create or update
+/// sidecars and fails with SQLITE_CANTOPEN inside the sandbox.
+fn open_db_read_only_at(path: &Path) -> Result<Connection, ContextStoreError> {
+    Ok(Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?)
+}
+
+fn open_db_for_read() -> Result<Connection, ContextStoreError> {
+    let path = db_path();
+    if path.exists() {
+        open_db_read_only_at(&path)
+    } else {
+        // Preserve the existing empty-store behavior for first-run callers.
+        // In a read-only sandbox this can still fail honestly when no store
+        // exists; a real active recording always creates the store first.
+        open_db_at(&path)
+    }
+}
+
 fn sqlite_sidecar_path(path: &Path, suffix: &str) -> PathBuf {
     let mut sidecar = path.as_os_str().to_os_string();
     sidecar.push(suffix);
@@ -635,7 +660,7 @@ fn start_session_with_conn(
 }
 
 pub fn get_session(session_id: &str) -> Result<Option<ContextSession>, ContextStoreError> {
-    let conn = open_db()?;
+    let conn = open_db_for_read()?;
     get_session_with_conn(&conn, session_id)
 }
 
@@ -660,7 +685,7 @@ pub fn get_session_for_link(
     kind: ContextLinkKind,
     target: &str,
 ) -> Result<Option<ContextSession>, ContextStoreError> {
-    let conn = open_db()?;
+    let conn = open_db_for_read()?;
     let mut stmt = conn.prepare(
         "SELECT s.id, s.session_type, s.state, s.capture_mode, s.content_type, s.title, s.started_at, s.ended_at, s.metadata_json
          FROM context_links l
@@ -678,7 +703,7 @@ pub fn get_session_for_link(
 }
 
 pub fn get_session_for_artifact(target: &str) -> Result<Option<ContextSession>, ContextStoreError> {
-    let conn = open_db()?;
+    let conn = open_db_for_read()?;
     let mut stmt = conn.prepare(
         "SELECT s.id, s.session_type, s.state, s.capture_mode, s.content_type, s.title, s.started_at, s.ended_at, s.metadata_json
          FROM context_links l
@@ -696,7 +721,7 @@ pub fn get_session_for_artifact(target: &str) -> Result<Option<ContextSession>, 
 }
 
 pub fn list_links_for_session(session_id: &str) -> Result<Vec<ContextLink>, ContextStoreError> {
-    let conn = open_db()?;
+    let conn = open_db_for_read()?;
     let mut stmt = conn.prepare(
         "SELECT session_id, kind, target, linked_at, metadata_json
          FROM context_links
@@ -797,7 +822,7 @@ pub fn list_events_for_session(
     start: Option<DateTime<Local>>,
     end: Option<DateTime<Local>>,
 ) -> Result<Vec<ContextEvent>, ContextStoreError> {
-    let conn = open_db()?;
+    let conn = open_db_for_read()?;
     let start_db = start.map(timestamp_to_db);
     let end_db = end.map(timestamp_to_db);
     let mut stmt = conn.prepare(
@@ -820,7 +845,7 @@ pub fn list_events_in_window(
     start: DateTime<Local>,
     end: DateTime<Local>,
 ) -> Result<Vec<ContextEvent>, ContextStoreError> {
-    let conn = open_db()?;
+    let conn = open_db_for_read()?;
     let mut stmt = conn.prepare(
         "SELECT id, session_id, observed_at, source, app_name, bundle_id, window_title, url, domain, artifact_path, privacy_scope, metadata_json
          FROM context_events
@@ -836,7 +861,7 @@ pub fn list_events_in_window(
 }
 
 pub fn search_events(query: &str, limit: usize) -> Result<Vec<ContextEvent>, ContextStoreError> {
-    let conn = open_db()?;
+    let conn = open_db_for_read()?;
     let pattern = format!("%{}%", query.to_ascii_lowercase());
     let mut stmt = conn.prepare(
         "SELECT id, session_id, observed_at, source, app_name, bundle_id, window_title, url, domain, artifact_path, privacy_scope, metadata_json
@@ -861,7 +886,7 @@ pub fn search_events(query: &str, limit: usize) -> Result<Vec<ContextEvent>, Con
 pub fn get_session_covering_time(
     at: DateTime<Local>,
 ) -> Result<Option<ContextSession>, ContextStoreError> {
-    let conn = open_db()?;
+    let conn = open_db_for_read()?;
     let at_db = timestamp_to_db(at);
     let mut stmt = conn.prepare(
         "SELECT id, session_type, state, capture_mode, content_type, title, started_at, ended_at, metadata_json
@@ -1183,7 +1208,7 @@ pub fn set_screen_context_status(
 }
 
 pub fn latest_context_session() -> Result<Option<ContextSession>, ContextStoreError> {
-    let conn = open_db()?;
+    let conn = open_db_for_read()?;
     let mut stmt = conn.prepare(
         "SELECT id, session_type, state, capture_mode, content_type, title, started_at, ended_at, metadata_json
          FROM context_sessions
@@ -1199,7 +1224,7 @@ pub fn latest_context_session() -> Result<Option<ContextSession>, ContextStoreEr
 }
 
 pub fn latest_active_context_session() -> Result<Option<ContextSession>, ContextStoreError> {
-    let conn = open_db()?;
+    let conn = open_db_for_read()?;
     let mut stmt = conn.prepare(
         "SELECT id, session_type, state, capture_mode, content_type, title, started_at, ended_at, metadata_json
          FROM context_sessions
@@ -1909,5 +1934,34 @@ mod tests {
             let mode = std::fs::metadata(candidate).unwrap().permissions().mode() & 0o777;
             assert_eq!(mode, 0o600, "{} should be 0600", candidate.display());
         }
+    }
+
+    #[test]
+    fn read_only_connection_sees_wal_data_without_write_access() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("context.db");
+        let writer = open_db_at(&path).unwrap();
+        writer
+            .execute_batch(
+                "PRAGMA wal_autocheckpoint=0;
+                 INSERT INTO context_meta (key, value) VALUES ('live-session', 'active');",
+            )
+            .unwrap();
+
+        let reader = open_db_read_only_at(&path).unwrap();
+        let value: String = reader
+            .query_row(
+                "SELECT value FROM context_meta WHERE key = 'live-session'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(value, "active");
+        assert!(reader
+            .execute(
+                "INSERT INTO context_meta (key, value) VALUES ('forbidden', 'write')",
+                [],
+            )
+            .is_err());
     }
 }

@@ -267,16 +267,21 @@ fn maybe_run_native_sidekick_diagnostic() -> Option<i32> {
         return Some(2);
     }
     let mut typed_message = None;
+    let mut synthetic_fixture = None;
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
         if arg == "--diagnose-native-sidekick-message" {
             typed_message = iter.next().cloned();
         } else if let Some(value) = arg.strip_prefix("--diagnose-native-sidekick-message=") {
             typed_message = Some(value.to_string());
+        } else if arg == "--diagnose-native-sidekick-fixture" {
+            synthetic_fixture = iter.next().map(std::path::PathBuf::from);
+        } else if let Some(value) = arg.strip_prefix("--diagnose-native-sidekick-fixture=") {
+            synthetic_fixture = Some(std::path::PathBuf::from(value));
         }
     }
 
-    match commands::run_native_sidekick_diagnostic(typed_message.clone()) {
+    match commands::run_native_sidekick_diagnostic(typed_message.clone(), synthetic_fixture) {
         Ok(payload) => {
             let passed = payload
                 .pointer("/proactive/outcome")

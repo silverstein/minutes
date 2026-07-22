@@ -15591,6 +15591,7 @@ fn wait_for_native_sidekick_diagnostic_turn(
 /// WebView. The caller must enforce explicit cloud-consent at the CLI boundary.
 pub fn run_native_sidekick_diagnostic(
     typed_message: Option<String>,
+    synthetic_fixture: Option<PathBuf>,
 ) -> Result<serde_json::Value, String> {
     use minutes_core::live_sidekick::{
         AssistancePosture, AssistanceSurface, CaptureMode as SidekickCaptureMode,
@@ -15638,8 +15639,66 @@ pub fn run_native_sidekick_diagnostic(
         .start_capture(context_session.id.clone().into(), capture_mode)
         .map_err(|error| error.to_string())?;
 
-    let mut cursor = 0;
-    let transcript_items = observe_native_sidekick_transcript(&mut engine, &mut cursor)?;
+    let transcript_items = if let Some(path) = synthetic_fixture.as_ref() {
+        let fixture: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(path)
+                .map_err(|error| format!("Could not read Sidekick fixture: {error}"))?,
+        )
+        .map_err(|error| format!("Could not parse Sidekick fixture: {error}"))?;
+        if fixture
+            .get("schema_version")
+            .and_then(serde_json::Value::as_u64)
+            != Some(1)
+            || fixture
+                .get("content_origin")
+                .and_then(serde_json::Value::as_str)
+                != Some("synthetic")
+        {
+            return Err(
+                "Native Sidekick diagnostics accept only schema-v1 synthetic fixtures".into(),
+            );
+        }
+        let items = fixture
+            .get("transcript")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| "Sidekick fixture has no transcript array".to_string())?;
+        let mut accepted = 0;
+        for (index, item) in items.iter().enumerate() {
+            let sequence = item
+                .get("sequence")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or((index + 1) as u64);
+            let text = item
+                .get("text")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| {
+                    format!("Sidekick fixture transcript item {sequence} has no text")
+                })?;
+            let speaker = item
+                .get("speaker")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string);
+            if engine
+                .observe_transcript(minutes_core::live_sidekick::ReasoningTranscriptEvidence {
+                    evidence_id: minutes_core::live_sidekick::EvidenceId::new(format!(
+                        "utterance-{sequence}"
+                    )),
+                    text: text.to_string(),
+                    speaker_label: speaker,
+                    speaker_verified: false,
+                    offset_ms: sequence.saturating_mul(1_000),
+                    duration_ms: 1_000,
+                })
+                .is_ok_and(|reduction| reduction.accepted)
+            {
+                accepted += 1;
+            }
+        }
+        accepted
+    } else {
+        let mut cursor = 0;
+        observe_native_sidekick_transcript(&mut engine, &mut cursor)?
+    };
     let mut last_screen_path = None;
     let screen_available =
         refresh_native_sidekick_screen(&mut engine, &context_session.id, &mut last_screen_path);
@@ -15674,6 +15733,7 @@ pub fn run_native_sidekick_diagnostic(
         "context_session_id": context_session.id,
         "context_session_type": context_session.session_type,
         "transcript_items": transcript_items,
+        "evidence_source": if synthetic_fixture.is_some() { "synthetic_fixture" } else { "active_transcript" },
         "screen_available": screen_available,
         "provider": descriptor.provider,
         "model": descriptor.model,

@@ -17835,6 +17835,49 @@ mod native_sidekick_diagnostic_tests {
         image.save(&path).unwrap();
 
         verify_native_sidekick_acceptance_marker(&path, nonce).unwrap();
+
+        // Production screen context intentionally includes the pointer. A
+        // cursor crossing one cell must not invalidate an otherwise exact
+        // nonce, so verification samples the cell instead of trusting only
+        // its center pixel.
+        let occluded_index = 128_usize;
+        let occluded_row = u32::try_from(occluded_index / 16).unwrap();
+        let occluded_column = u32::try_from(occluded_index % 16).unwrap();
+        let occluded_x = left + occluded_column * (cell + gap);
+        let occluded_y = top + occluded_row * (cell + gap);
+        for y in occluded_y + 8..occluded_y + 28 {
+            for x in occluded_x + 8..occluded_x + 28 {
+                image.put_pixel(x, y, image::Rgb([0xff, 0xff, 0xff]));
+            }
+        }
+        image.save(&path).unwrap();
+        verify_native_sidekick_acceptance_marker(&path, nonce).unwrap();
+
+        let wrong_color = if bits[occluded_index] == 1 {
+            image::Rgb([0xc9, 0x6b, 0x4e])
+        } else {
+            image::Rgb([0x30, 0xd1, 0x58])
+        };
+        for y in occluded_y..occluded_y + cell {
+            for x in occluded_x..occluded_x + cell {
+                image.put_pixel(x, y, wrong_color);
+            }
+        }
+        image.save(&path).unwrap();
+        assert!(verify_native_sidekick_acceptance_marker(&path, nonce).is_err());
+
+        // Restore the exact marker before exercising provider-image creation.
+        let restored_color = if bits[occluded_index] == 1 {
+            image::Rgb([0x30, 0xd1, 0x58])
+        } else {
+            image::Rgb([0xc9, 0x6b, 0x4e])
+        };
+        for y in occluded_y..occluded_y + cell {
+            for x in occluded_x..occluded_x + cell {
+                image.put_pixel(x, y, restored_color);
+            }
+        }
+        image.save(&path).unwrap();
         let generated = generate_native_sidekick_acceptance_marker(&path, nonce).unwrap();
         let provider = image::open(generated).unwrap().to_rgb8();
         assert!(provider.pixels().all(|pixel| matches!(
@@ -18550,40 +18593,89 @@ fn verify_native_sidekick_acceptance_marker(path: &Path, nonce: &str) -> Result<
                 >= column_threshold as usize
         })
         .collect::<Vec<_>>();
-    let (Some(&top), Some(&bottom), Some(&left), Some(&right)) = (
-        marker_rows.first(),
-        marker_rows.last(),
-        marker_columns.first(),
-        marker_columns.last(),
-    ) else {
+    if marker_rows.is_empty() || marker_columns.is_empty() {
         return Err(
             "The actual screen capture did not contain the run-specific marker grid.".into(),
         );
+    }
+    let marker_bands = |positions: &[u32]| {
+        let mut bands = Vec::new();
+        let mut start = positions[0];
+        let mut previous = start;
+        for &position in &positions[1..] {
+            if position > previous.saturating_add(1) {
+                bands.push((start, previous));
+                start = position;
+            }
+            previous = position;
+        }
+        bands.push((start, previous));
+        bands
     };
+    let select_grid_bands = |positions: &[u32], axis: &str| -> Result<Vec<(u32, u32)>, String> {
+        let mut bands = marker_bands(positions);
+        if bands.len() < 16 {
+            return Err(format!(
+                "The captured marker grid had too few {axis} cell bands."
+            ));
+        }
+        // Marker-colored text can contribute a short extra horizontal band.
+        // The 16 grid cells are the dominant repeated bands on each axis.
+        bands.sort_by_key(|(start, end)| std::cmp::Reverse(end - start));
+        bands.truncate(16);
+        bands.sort_by_key(|(start, _)| *start);
+        Ok(bands)
+    };
+    let row_bands = select_grid_bands(&marker_rows, "row")?;
+    let column_bands = select_grid_bands(&marker_columns, "column")?;
+    let top = row_bands.first().map(|band| band.0).unwrap_or(0);
+    let bottom = row_bands.last().map(|band| band.1).unwrap_or(0);
+    let left = column_bands.first().map(|band| band.0).unwrap_or(0);
+    let right = column_bands.last().map(|band| band.1).unwrap_or(0);
     let grid_width = right.saturating_sub(left).saturating_add(1);
     let grid_height = bottom.saturating_sub(top).saturating_add(1);
     if grid_width < 160 || grid_height < 160 {
         return Err("The captured marker grid was too small to verify safely.".into());
     }
     for (index, expected) in expected_bits.iter().enumerate() {
-        let row = u32::try_from(index / 16).unwrap_or(0);
-        let column = u32::try_from(index % 16).unwrap_or(0);
-        let x = left + ((column * 2 + 1) * grid_width) / 32;
-        let y = top + ((row * 2 + 1) * grid_height) / 32;
-        let pixel = image.get_pixel(x.min(width - 1), y.min(height - 1));
+        let row = index / 16;
+        let column = index % 16;
         let target = if *expected == 1 {
             [0x30, 0xd1, 0x58]
         } else {
             [0xc9, 0x6b, 0x4e]
         };
-        if !pixel
-            .0
-            .iter()
-            .zip(target)
-            .all(|(actual, target)| actual.abs_diff(target) <= 64)
-        {
+        let opposite = if *expected == 1 {
+            [0xc9, 0x6b, 0x4e]
+        } else {
+            [0x30, 0xd1, 0x58]
+        };
+        let (x0, x1) = column_bands[column];
+        let (y0, y1) = row_bands[row];
+        let sample =
+            |start: u32, end: u32, tenth: u32| start + (end.saturating_sub(start) * tenth) / 10;
+        let mut expected_samples = 0_u32;
+        let mut opposite_samples = 0_u32;
+        for y_tenth in [1_u32, 3, 5, 7, 9] {
+            for x_tenth in [1_u32, 3, 5, 7, 9] {
+                let pixel = image.get_pixel(
+                    sample(x0, x1, x_tenth).min(width - 1),
+                    sample(y0, y1, y_tenth).min(height - 1),
+                );
+                let close = |color: [u8; 3]| {
+                    pixel
+                        .0
+                        .iter()
+                        .zip(color)
+                        .all(|(actual, target)| actual.abs_diff(target) <= 64)
+                };
+                expected_samples += u32::from(close(target));
+                opposite_samples += u32::from(close(opposite));
+            }
+        }
+        if expected_samples < 13 || expected_samples <= opposite_samples {
             return Err(format!(
-                "The actual screen capture did not preserve marker bit {index}."
+                "The actual screen capture did not preserve marker bit {index} (expected samples {expected_samples}/25, opposite samples {opposite_samples}/25)."
             ));
         }
     }

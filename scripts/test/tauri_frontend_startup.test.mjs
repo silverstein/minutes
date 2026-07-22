@@ -401,6 +401,11 @@ test('Sidekick screen marker paints without the Tauri JavaScript bridge', async 
     1,
     'the orange nonce color must not be reused by decorative marker UI',
   );
+  assert.equal(
+    source.match(/#408cff/g)?.length,
+    1,
+    'the blue grid fiducial must not be reused by decorative marker UI',
+  );
 });
 
 test('Sidekick screen marker reports readiness only after two paint frames', async () => {

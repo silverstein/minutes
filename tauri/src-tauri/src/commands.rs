@@ -17845,7 +17845,16 @@ mod native_sidekick_diagnostic_tests {
         let left = 160;
         let top = 100;
         let cell = 36;
-        let gap = 4;
+        let gap = 0;
+        let border = 8;
+        let grid_size = 16 * cell + 15 * gap;
+        for y in top - border..top + grid_size + border {
+            for x in left - border..left + grid_size + border {
+                if x < left || x >= left + grid_size || y < top || y >= top + grid_size {
+                    image.put_pixel(x, y, image::Rgb([0x40, 0x8c, 0xff]));
+                }
+            }
+        }
         for (index, bit) in bits.iter().enumerate() {
             let row = u32::try_from(index / 16).unwrap();
             let column = u32::try_from(index % 16).unwrap();
@@ -17865,6 +17874,25 @@ mod native_sidekick_diagnostic_tests {
         image.save(&path).unwrap();
 
         verify_native_sidekick_acceptance_marker(&path, nonce).unwrap();
+
+        for y in top - border..top + grid_size + border {
+            for x in left - border..left + grid_size + border {
+                if x < left || x >= left + grid_size || y < top || y >= top + grid_size {
+                    image.put_pixel(x, y, image::Rgb([0x0d, 0x0d, 0x0b]));
+                }
+            }
+        }
+        image.save(&path).unwrap();
+        assert!(verify_native_sidekick_acceptance_marker(&path, nonce)
+            .unwrap_err()
+            .contains("marker fiducial"));
+        for y in top - border..top + grid_size + border {
+            for x in left - border..left + grid_size + border {
+                if x < left || x >= left + grid_size || y < top || y >= top + grid_size {
+                    image.put_pixel(x, y, image::Rgb([0x40, 0x8c, 0xff]));
+                }
+            }
+        }
 
         // Decorative UI near the grid must not redefine its bounds. This
         // strip is wide enough to satisfy the old image-wide threshold and
@@ -18002,7 +18030,7 @@ mod native_sidekick_diagnostic_tests {
         let provider = image::open(generated).unwrap().to_rgb8();
         assert!(provider.pixels().all(|pixel| matches!(
             pixel.0,
-            [0x0d, 0x0d, 0x0b] | [0x30, 0xd1, 0x58] | [0xc9, 0x6b, 0x4e]
+            [0x0d, 0x0d, 0x0b] | [0x30, 0xd1, 0x58] | [0xc9, 0x6b, 0x4e] | [0x40, 0x8c, 0xff]
         )));
         assert!(verify_native_sidekick_acceptance_marker(
             &path,
@@ -18685,29 +18713,61 @@ fn verify_native_sidekick_acceptance_marker(path: &Path, nonce: &str) -> Result<
     if width < 160 || height < 160 {
         return Err("The captured screen marker was unexpectedly small.".into());
     }
-    let is_marker_color = |pixel: &image::Rgb<u8>| {
-        let close = |target: [u8; 3]| {
-            pixel
-                .0
-                .iter()
-                .zip(target)
-                .all(|(actual, expected)| actual.abs_diff(expected) <= 48)
-        };
-        close([0x30, 0xd1, 0x58]) || close([0xc9, 0x6b, 0x4e])
+    let close_to = |pixel: &image::Rgb<u8>, target: [u8; 3], tolerance: u8| {
+        pixel
+            .0
+            .iter()
+            .zip(target)
+            .all(|(actual, expected)| actual.abs_diff(expected) <= tolerance)
     };
+    let is_marker_color = |pixel: &image::Rgb<u8>| {
+        close_to(pixel, [0x30, 0xd1, 0x58], 48) || close_to(pixel, [0xc9, 0x6b, 0x4e], 48)
+    };
+    // A dedicated blue border makes the nonce grid self-locating after
+    // Retina resampling. Bounds inferred from the bit colors alone can drift
+    // when gaps, UI text, or a cached compositor surface contributes similar
+    // pixels elsewhere in the screenshot.
+    let mut fiducial_left = width;
+    let mut fiducial_right = 0_u32;
+    let mut fiducial_top = height;
+    let mut fiducial_bottom = 0_u32;
+    let mut fiducial_pixels = 0_usize;
+    for y in 0..height {
+        for x in 0..width {
+            if close_to(image.get_pixel(x, y), [0x40, 0x8c, 0xff], 48) {
+                fiducial_left = fiducial_left.min(x);
+                fiducial_right = fiducial_right.max(x);
+                fiducial_top = fiducial_top.min(y);
+                fiducial_bottom = fiducial_bottom.max(y);
+                fiducial_pixels += 1;
+            }
+        }
+    }
+    if fiducial_pixels < 32 || fiducial_left >= fiducial_right || fiducial_top >= fiducial_bottom {
+        return Err("The actual screen capture did not contain the marker fiducial.".into());
+    }
+    let fiducial_width = fiducial_right
+        .saturating_sub(fiducial_left)
+        .saturating_add(1);
+    let fiducial_height = fiducial_bottom
+        .saturating_sub(fiducial_top)
+        .saturating_add(1);
+    if fiducial_width < 160 || fiducial_height < 160 {
+        return Err("The captured marker fiducial was too small to verify safely.".into());
+    }
     // Locate the grid from its strongest color bands, not a threshold based
     // on the whole screenshot. Retina downscaling and multi-display captures
     // can otherwise make marker-colored UI text look like a grid boundary.
-    let row_counts = (0..height)
+    let row_counts = (fiducial_top..=fiducial_bottom)
         .map(|y| {
-            (0..width)
+            (fiducial_left..=fiducial_right)
                 .filter(|&x| is_marker_color(image.get_pixel(x, y)))
                 .count()
         })
         .collect::<Vec<_>>();
-    let column_counts = (0..width)
+    let column_counts = (fiducial_left..=fiducial_right)
         .map(|x| {
-            (0..height)
+            (fiducial_top..=fiducial_bottom)
                 .filter(|&y| is_marker_color(image.get_pixel(x, y)))
                 .count()
         })
@@ -18720,7 +18780,8 @@ fn verify_native_sidekick_acceptance_marker(path: &Path, nonce: &str) -> Result<
         .iter()
         .enumerate()
         .filter_map(|(index, &count)| {
-            (row_threshold > 0 && count >= row_threshold).then(|| u32::try_from(index).unwrap_or(0))
+            (row_threshold > 0 && count >= row_threshold)
+                .then(|| fiducial_top + u32::try_from(index).unwrap_or(0))
         })
         .collect::<Vec<_>>();
     let marker_columns = column_counts
@@ -18728,7 +18789,7 @@ fn verify_native_sidekick_acceptance_marker(path: &Path, nonce: &str) -> Result<
         .enumerate()
         .filter_map(|(index, &count)| {
             (column_threshold > 0 && count >= column_threshold)
-                .then(|| u32::try_from(index).unwrap_or(0))
+                .then(|| fiducial_left + u32::try_from(index).unwrap_or(0))
         })
         .collect::<Vec<_>>();
     let (Some(&top), Some(&bottom), Some(&left), Some(&right)) = (
@@ -18823,14 +18884,24 @@ fn generate_native_sidekick_acceptance_marker(
         })
         .collect::<Vec<_>>();
     let cell = 28_u32;
-    let gap = 5_u32;
+    let gap = 0_u32;
+    let border = 8_u32;
     let margin = 16_u32;
     let grid = 16_u32 * cell + 15_u32 * gap;
     let mut generated = image::RgbImage::from_pixel(
-        grid + margin * 2,
-        grid + margin * 2,
+        grid + (margin + border) * 2,
+        grid + (margin + border) * 2,
         image::Rgb([0x0d, 0x0d, 0x0b]),
     );
+    let grid_start = margin + border;
+    for y in margin..grid_start + grid + border {
+        for x in margin..grid_start + grid + border {
+            if x < grid_start || x >= grid_start + grid || y < grid_start || y >= grid_start + grid
+            {
+                generated.put_pixel(x, y, image::Rgb([0x40, 0x8c, 0xff]));
+            }
+        }
+    }
     for (index, bit) in bits.iter().enumerate() {
         let row = u32::try_from(index / 16).unwrap_or(0);
         let column = u32::try_from(index % 16).unwrap_or(0);
@@ -18839,8 +18910,8 @@ fn generate_native_sidekick_acceptance_marker(
         } else {
             image::Rgb([0xc9, 0x6b, 0x4e])
         };
-        let x0 = margin + column * (cell + gap);
-        let y0 = margin + row * (cell + gap);
+        let x0 = grid_start + column * (cell + gap);
+        let y0 = grid_start + row * (cell + gap);
         for y in y0..y0 + cell {
             for x in x0..x0 + cell {
                 generated.put_pixel(x, y, color);

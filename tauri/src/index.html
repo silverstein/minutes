@@ -8445,7 +8445,18 @@
         }
         await new Promise((resolve) => setTimeout(resolve, 25));
       }
-      throw new Error('The recording Sidekick control did not become visibly interactable.');
+      const buttonRect = button.getBoundingClientRect();
+      const buttonStyle = getComputedStyle(button);
+      const barStyle = getComputedStyle(recordingBar);
+      throw new Error(
+        'The recording Sidekick control did not become visibly interactable '
+        + `(viewport=${window.innerWidth}x${window.innerHeight}; `
+        + `document=${document.visibilityState}; focused=${document.hasFocus()}; `
+        + `recording=${isRecording}; bar=${recordingBar.className}/${barStyle.display}; `
+        + `button=${buttonStyle.display}/${buttonStyle.visibility}/${buttonStyle.opacity}; `
+        + `rect=${Math.round(buttonRect.left)},${Math.round(buttonRect.top)},`
+        + `${Math.round(buttonRect.width)}x${Math.round(buttonRect.height)}).`,
+      );
     }
 
     async function openSidekickForUiAcceptance(payload) {

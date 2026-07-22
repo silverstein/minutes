@@ -11818,6 +11818,8 @@ mod tests {
         assert!(html.contains("waitForVisibleRecordingSidekickAcceptanceButton"));
         assert!(html.contains("document.getElementById('btn-sidekick-recording')"));
         assert!(html.contains("performance.now() + 8_000"));
+        assert!(html.contains("@media (max-width: 720px)"));
+        assert!(NATIVE_SIDEKICK_ACCEPTANCE_MAIN_SIZE.0 > 720.0);
         assert!(!html.contains("sidekickButtons.find(Boolean)"));
         assert!(html.contains("focusRecoveryBound"));
         assert!(!html.contains("Replace Recall session?"));
@@ -18724,6 +18726,8 @@ fn generate_native_sidekick_acceptance_marker(
     Ok(path)
 }
 
+const NATIVE_SIDEKICK_ACCEPTANCE_MAIN_SIZE: (f64, f64) = (900.0, 700.0);
+
 fn reveal_native_sidekick_acceptance_main_window(app: &tauri::AppHandle) -> Result<(), String> {
     let marker = app
         .get_webview_window("sidekick-acceptance-marker")
@@ -18734,6 +18738,15 @@ fn reveal_native_sidekick_acceptance_main_window(app: &tauri::AppHandle) -> Resu
     let main = app.get_webview_window("main").ok_or_else(|| {
         "The Minutes main window is missing after screen verification.".to_string()
     })?;
+    // Minutes' compact <=720px layout intentionally collapses the recording
+    // pane in favor of Recall. Acceptance must exercise the real Recording
+    // Sidekick button, so reveal the ordinary two-pane product layout rather
+    // than trying to click a responsive-hidden control.
+    let (width, height) = NATIVE_SIDEKICK_ACCEPTANCE_MAIN_SIZE;
+    main.set_size(tauri::LogicalSize::new(width, height))
+        .map_err(|error| format!("Could not size the Minutes acceptance window: {error}"))?;
+    main.center()
+        .map_err(|error| format!("Could not center the Minutes acceptance window: {error}"))?;
     main.show()
         .map_err(|error| format!("Could not reveal the Minutes main window: {error}"))?;
     main.unminimize()
@@ -18902,7 +18915,7 @@ fn run_native_sidekick_ui_acceptance(
     // present, but compositing may trail that callback by a frame. The captured
     // PNG is still decoded and checked against the full nonce below; this short
     // settle prevents us from starting capture before the first paint.
-    std::thread::sleep(Duration::from_millis(250));
+    std::thread::sleep(Duration::from_secs(1));
     match launch_recording(
         app.clone(),
         &state,

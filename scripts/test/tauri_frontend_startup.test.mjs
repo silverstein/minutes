@@ -134,6 +134,7 @@ function startupContext(declaredIds, {
     body,
     activeElement: body,
     visibilityState: 'visible',
+    hasFocus: () => true,
     getElementById(id) {
       if (!declaredIds.has(id)) return null;
       if (!elements.has(id)) elements.set(id, fakeElement(id));

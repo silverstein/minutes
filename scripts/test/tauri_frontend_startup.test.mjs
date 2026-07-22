@@ -421,6 +421,7 @@ test('Sidekick acceptance traverses visible main control, consent, and one real 
   new vm.Script(bootstrapScript, { filename: 'tauri/src/index.html#startup-recovery' }).runInContext(harness.context);
   new vm.Script(mainScript, { filename: 'tauri/src/index.html#main' }).runInContext(harness.context);
   await new Promise((resolve) => setImmediate(resolve));
+  harness.elements.get('coach-onboarding-overlay').classList.add('active');
   const open = eventHandlers.get('sidekick:acceptance-open');
   assert.equal(typeof open, 'function');
   await open({ payload: { nonce: 'a'.repeat(64) } });
@@ -442,8 +443,9 @@ test('Sidekick acceptance traverses visible main control, consent, and one real 
     harness.invocations
       .filter(({ command }) => command === 'cmd_native_sidekick_ui_acceptance_interactable')
       .map(({ args }) => args.target),
-    ['main_sidekick_button', 'cloud_consent_confirm'],
+    ['coach_onboarding_close', 'main_sidekick_button', 'cloud_consent_confirm'],
   );
+  assert.equal(harness.elements.get('coach-onboarding-overlay').classList.contains('active'), false);
   assert.equal(
     harness.invocations.filter(
       ({ command }) => command === 'cmd_native_sidekick_ui_acceptance_launch_completed',

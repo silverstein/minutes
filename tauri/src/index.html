@@ -8422,12 +8422,29 @@
       });
     }
 
-    async function waitForVisibleRecordingSidekickAcceptanceButton() {
+    async function dismissCoachOnboardingForSidekickAcceptance(nonce) {
+      const overlay = document.getElementById('coach-onboarding-overlay');
+      if (!overlay?.classList.contains('active')) return false;
+      const close = document.getElementById('coach-onboarding-close');
+      if (!close) throw new Error('The visible Coach onboarding has no close control.');
+      await attestSidekickAcceptanceControl(nonce, 'coach_onboarding_close', close);
+      if (!sidekickAcceptanceInteractability(close)) {
+        throw new Error('The Coach onboarding close control changed before it could be clicked.');
+      }
+      close.focus();
+      close.click();
+      return true;
+    }
+
+    async function waitForVisibleRecordingSidekickAcceptanceButton(nonce) {
       const button = document.getElementById('btn-sidekick-recording');
       if (!button) throw new Error('The recording Sidekick control is unavailable.');
       const deadline = performance.now() + 8_000;
       let forcedStatusRefresh = false;
       while (performance.now() < deadline) {
+        if (await dismissCoachOnboardingForSidekickAcceptance(nonce)) {
+          continue;
+        }
         if (!forcedStatusRefresh) {
           // The full-screen nonce marker has just been retired. Wait out any
           // older in-flight read, then force exactly one status render begun
@@ -8485,7 +8502,7 @@
         // window's next status render. Wait for that real render and select the
         // control that is actually visible instead of blindly choosing the
         // first DOM button (the hidden recording button won the old race).
-        const button = await waitForVisibleRecordingSidekickAcceptanceButton();
+        const button = await waitForVisibleRecordingSidekickAcceptanceButton(nonce);
         await attestSidekickAcceptanceControl(nonce, 'main_sidekick_button', button);
         if (!sidekickAcceptanceInteractability(button)) {
           throw new Error('The recording Sidekick control changed before it could be clicked.');

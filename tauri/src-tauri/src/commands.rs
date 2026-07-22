@@ -16377,7 +16377,7 @@ pub fn cmd_native_sidekick_ui_acceptance_interactable(
             turn_id.is_none()
                 && matches!(
                     target.as_str(),
-                    "main_sidekick_button" | "cloud_consent_confirm"
+                    "coach_onboarding_close" | "main_sidekick_button" | "cloud_consent_confirm"
                 )
         }
         "native-sidekick" => {

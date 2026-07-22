@@ -15883,6 +15883,17 @@ fn clear_native_sidekick_acceptance(shared: &NativeSidekickAcceptanceShared) {
     ready.notify_all();
 }
 
+fn mark_native_sidekick_acceptance_marker_loaded(shared: &NativeSidekickAcceptanceShared) -> bool {
+    let (lock, ready) = &**shared;
+    let mut guard = lock.lock().unwrap_or_else(|error| error.into_inner());
+    let Some(runtime) = guard.as_mut() else {
+        return false;
+    };
+    runtime.marker_ready = true;
+    ready.notify_all();
+    true
+}
+
 fn wait_for_native_sidekick_acceptance_ui(
     shared: &NativeSidekickAcceptanceShared,
     timeout: Duration,
@@ -16266,24 +16277,6 @@ pub fn cmd_native_sidekick_ui_acceptance_ready(
         active: true,
         pending,
     })
-}
-
-#[tauri::command]
-pub fn cmd_native_sidekick_ui_acceptance_marker_ready(
-    window: tauri::WebviewWindow,
-    state: tauri::State<AppState>,
-) -> Result<bool, String> {
-    if window.label() != "sidekick-acceptance-marker" {
-        return Err("Only the Sidekick acceptance marker may report marker readiness.".into());
-    }
-    let (lock, ready) = &*state.sidekick_acceptance;
-    let mut guard = lock.lock().unwrap_or_else(|error| error.into_inner());
-    let Some(runtime) = guard.as_mut() else {
-        return Ok(false);
-    };
-    runtime.marker_ready = true;
-    ready.notify_all();
-    Ok(true)
 }
 
 #[tauri::command]
@@ -17545,6 +17538,23 @@ mod native_sidekick_diagnostic_tests {
     }
 
     #[test]
+    fn finished_marker_load_releases_the_acceptance_gate() {
+        let shared = new_native_sidekick_acceptance_shared();
+        configure_native_sidekick_acceptance(&shared, "a".repeat(64)).unwrap();
+
+        assert!(mark_native_sidekick_acceptance_marker_loaded(&shared));
+        let (lock, _) = &*shared;
+        assert!(lock
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .as_ref()
+            .is_some_and(|runtime| runtime.marker_ready));
+
+        clear_native_sidekick_acceptance(&shared);
+        assert!(!mark_native_sidekick_acceptance_marker_loaded(&shared));
+    }
+
+    #[test]
     fn synthetic_diagnostic_context_wins_even_when_a_real_capture_is_active() {
         let context =
             resolve_native_sidekick_diagnostic_context(Some(&fixture()), true, true).unwrap();
@@ -18406,6 +18416,7 @@ fn wait_for_native_sidekick_real_screen(
     timeout: Duration,
 ) -> Result<minutes_core::context_store::ScreenContextImage, String> {
     let deadline = Instant::now() + timeout;
+    let mut last_marker_error = None;
     loop {
         let result = minutes_core::context_store::get_screen_context(context_session_id, None, 1)
             .map_err(|error| {
@@ -18420,8 +18431,10 @@ fn wait_for_native_sidekick_real_screen(
             let bytes = std::fs::read(&image.path)
                 .map_err(|error| format!("Could not read the captured screen PNG: {error}"))?;
             if bytes.starts_with(b"\x89PNG\r\n\x1a\n") && bytes.len() > 8 {
-                verify_native_sidekick_acceptance_marker(Path::new(&image.path), nonce)?;
-                return Ok(image);
+                match verify_native_sidekick_acceptance_marker(Path::new(&image.path), nonce) {
+                    Ok(()) => return Ok(image),
+                    Err(error) => last_marker_error = Some(error),
+                }
             }
         }
         if matches!(
@@ -18434,9 +18447,13 @@ fn wait_for_native_sidekick_real_screen(
                 .unwrap_or_else(|| "Screen Recording permission is unavailable.".into()));
         }
         if Instant::now() >= deadline {
-            return Err(
-                "The real screen-capture worker did not produce a same-session PNG in time.".into(),
-            );
+            let detail = last_marker_error
+                .as_deref()
+                .map(|error| format!(" Last marker check: {error}"))
+                .unwrap_or_default();
+            return Err(format!(
+                "The real screen-capture worker did not produce a verified same-session marker PNG in time.{detail}"
+            ));
         }
         std::thread::sleep(Duration::from_millis(250));
     }
@@ -18735,6 +18752,11 @@ fn run_native_sidekick_ui_acceptance(
         "screen marker",
         |runtime| runtime.marker_ready,
     )?;
+    // WebKit's finished-load callback proves the nonce-only marker document is
+    // present, but compositing may trail that callback by a frame. The captured
+    // PNG is still decoded and checked against the full nonce below; this short
+    // settle prevents us from starting capture before the first paint.
+    std::thread::sleep(Duration::from_millis(250));
     match launch_recording(
         app.clone(),
         &state,
@@ -19312,6 +19334,7 @@ pub fn launch_native_sidekick_ui_acceptance(
     validate_native_sidekick_ui_acceptance_challenge(&nonce)?;
     let state = app.state::<AppState>();
     configure_native_sidekick_acceptance(&state.sidekick_acceptance, nonce.clone())?;
+    let marker_acceptance = state.sidekick_acceptance.clone();
     let marker_result = tauri::WebviewWindowBuilder::new(
         app,
         "sidekick-acceptance-marker",
@@ -19324,6 +19347,11 @@ pub fn launch_native_sidekick_ui_acceptance(
     .content_protected(false)
     .always_on_top(true)
     .focused(true)
+    .on_page_load(move |_window, payload| {
+        if matches!(payload.event(), tauri::webview::PageLoadEvent::Finished) {
+            mark_native_sidekick_acceptance_marker_loaded(&marker_acceptance);
+        }
+    })
     .build();
     if let Err(error) = marker_result {
         clear_native_sidekick_acceptance(&state.sidekick_acceptance);

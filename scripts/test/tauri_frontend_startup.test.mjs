@@ -4,6 +4,7 @@ import test from 'node:test';
 import vm from 'node:vm';
 
 const indexHtml = new URL('../../tauri/src/index.html', import.meta.url);
+const sidekickAcceptanceMarkerHtml = new URL('../../tauri/src/sidekick-acceptance-marker.html', import.meta.url);
 const installDevApp = new URL('../install-dev-app.sh', import.meta.url);
 const mainRust = new URL('../../tauri/src-tauri/src/main.rs', import.meta.url);
 const commandsRust = new URL('../../tauri/src-tauri/src/commands.rs', import.meta.url);
@@ -367,6 +368,25 @@ test('startup smoke rejects the missing Sidekick listener binding regression', a
 
   const broken = mainScript.replace('const { listen } = window.__TAURI__.event;', '');
   assert.doesNotMatch(broken, requiredBinding, 'the regression mutation must be caught by the static guard');
+});
+
+test('Sidekick screen marker paints without the Tauri JavaScript bridge', async () => {
+  const source = await readFile(sidekickAcceptanceMarkerHtml, 'utf8');
+  const script = inlineScripts(source)[0];
+  const trace = '0123456789abcdef'.repeat(4);
+  const grid = { children: [], append(child) { this.children.push(child); } };
+  const traceLabel = { textContent: '' };
+  const document = {
+    getElementById(id) { return id === 'grid' ? grid : traceLabel; },
+    createElement() { return { className: '' }; },
+  };
+
+  assert.doesNotMatch(script, /__TAURI__|\binvoke\s*\(/);
+  assert.doesNotThrow(() => new vm.Script(script, {
+    filename: 'tauri/src/sidekick-acceptance-marker.html',
+  }).runInNewContext({ document, location: { search: `?trace=${trace}` }, URLSearchParams }));
+  assert.equal(grid.children.length, 256);
+  assert.equal(traceLabel.textContent, `trace ${trace}`);
 });
 
 test('Sidekick acceptance traverses visible main control, consent, and one real start invoke', async () => {

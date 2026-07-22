@@ -43,7 +43,6 @@
     <code id="trace"></code>
   </main>
   <script>
-    const { invoke } = window.__TAURI__.core;
     const trace = (new URLSearchParams(location.search).get('trace') || '').toLowerCase();
     const bits = [...trace].flatMap((nibble) => {
       const value = Number.parseInt(nibble, 16);
@@ -56,12 +55,6 @@
       grid.append(cell);
     }
     document.getElementById('trace').textContent = `trace ${trace}`;
-    requestAnimationFrame(() => requestAnimationFrame(async () => {
-      for (let attempt = 0; attempt < 20; attempt += 1) {
-        if (await invoke('cmd_native_sidekick_ui_acceptance_marker_ready')) return;
-        await new Promise((resolve) => setTimeout(resolve, 100));
-      }
-    }));
   </script>
 </body>
 </html>

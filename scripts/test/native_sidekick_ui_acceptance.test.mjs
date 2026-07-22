@@ -1,15 +1,20 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import test from 'node:test';
 import vm from 'node:vm';
 
 import {
+  appendBoundedOutput,
   cleanupNativeSidekickProcessLanes,
   evaluateNativeSidekickUiAcceptance,
   nativeSidekickLaunchServicesArgs,
+  nativeSidekickFailureWithLogs,
   nativeSidekickTemporaryParent,
   parseLsofTextIdentities,
+  readBoundedOutputFile,
   terminateNewExactProcesses,
 } from '../run_native_sidekick_ui_acceptance.mjs';
 
@@ -839,6 +844,39 @@ test('native UI acceptance launches the signed app through LaunchServices with a
   assert.equal(args[parentFdIndex + 1], '0', 'LaunchServices maps the inherited lease to app stdin');
   assert.equal(nativeSidekickTemporaryParent('darwin', '/var/folders/very/long/path'), '/tmp');
   assert.equal(nativeSidekickTemporaryParent('linux', '/var/tmp'), '/var/tmp');
+});
+
+test('native UI acceptance surfaces bounded launch logs before secure cleanup', () => {
+  const failure = nativeSidekickFailureWithLogs(new Error('report missing'), {
+    launchServicesStderr: 'open failed',
+    launchServicesStdout: '',
+    appStderr: 'native diagnostic rejected',
+    appStdout: 'x'.repeat(2_000),
+  });
+
+  assert.match(failure.message, /report missing/);
+  assert.match(failure.message, /LaunchServices stderr:\nopen failed/);
+  assert.match(failure.message, /Minutes stderr:\nnative diagnostic rejected/);
+  assert.equal(failure.message.includes('x'.repeat(1_001)), false);
+  assert.equal(failure.cause.message, 'report missing');
+});
+
+test('native UI acceptance bounds stream collection and file reads before formatting', async () => {
+  const first = appendBoundedOutput(Buffer.alloc(0), Buffer.from('123456'), 8);
+  const second = appendBoundedOutput(first.bytes, Buffer.from('7890'), 8);
+  assert.equal(second.bytes.toString('utf8'), '12345678');
+  assert.equal(second.overflowed, true);
+
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'minutes-bounded-output-'));
+  const file = path.join(directory, 'app.stderr');
+  try {
+    await writeFile(file, 'x'.repeat(2_000));
+    const output = await readBoundedOutputFile(file, 1_000);
+    assert.equal(Buffer.byteLength(output.text), 1_000);
+    assert.equal(output.overflowed, true);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test('exact process identity survives an unrelated stale executable pathname', () => {

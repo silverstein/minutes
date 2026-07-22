@@ -404,6 +404,50 @@ export function nativeSidekickTemporaryParent(platform = process.platform, defau
   return platform === "darwin" ? "/tmp" : defaultTmp;
 }
 
+export function nativeSidekickFailureWithLogs(error, streams) {
+  const diagnostics = [
+    ["LaunchServices stderr", streams.launchServicesStderr, 4_000],
+    ["LaunchServices stdout", streams.launchServicesStdout, 1_000],
+    ["Minutes stderr", streams.appStderr, 4_000],
+    ["Minutes stdout", streams.appStdout, 1_000],
+  ].flatMap(([label, value, limit]) => {
+    const text = String(value || "").trim();
+    return text ? [`${label}:\n${text.slice(0, limit)}`] : [];
+  });
+  if (diagnostics.length === 0) return error;
+  return new Error(`${error.message}\n\n${diagnostics.join("\n\n")}`, { cause: error });
+}
+
+export function appendBoundedOutput(current, chunk, limit) {
+  const input = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+  const remaining = Math.max(0, limit - current.length);
+  return {
+    bytes: remaining > 0
+      ? Buffer.concat([current, input.subarray(0, remaining)], current.length + Math.min(input.length, remaining))
+      : current,
+    overflowed: input.length > remaining,
+  };
+}
+
+export async function readBoundedOutputFile(filePath, limit) {
+  const file = await fs.open(filePath, "r");
+  try {
+    const buffer = Buffer.alloc(limit + 1);
+    let bytesRead = 0;
+    while (bytesRead < buffer.length) {
+      const result = await file.read(buffer, bytesRead, buffer.length - bytesRead, bytesRead);
+      if (result.bytesRead === 0) break;
+      bytesRead += result.bytesRead;
+    }
+    return {
+      text: buffer.subarray(0, Math.min(bytesRead, limit)).toString("utf8"),
+      overflowed: bytesRead > limit,
+    };
+  } finally {
+    await file.close();
+  }
+}
+
 export function parseLsofTextIdentities(output) {
   const identities = [];
   let record = null;
@@ -583,6 +627,12 @@ async function runInstalledUi(app, runtime) {
   let forcedProcessSignals = [];
   let temporaryRootRemoved = false;
   let primaryError = null;
+  let appStdoutPath = null;
+  let appStderrPath = null;
+  let launchServicesStdout = Buffer.alloc(0);
+  let launchServicesStderr = Buffer.alloc(0);
+  let launchServicesStdoutOverflowed = false;
+  let launchServicesStderrOverflowed = false;
   const processGroupExists = () => {
     if (!child?.pid) return false;
     try {
@@ -612,8 +662,8 @@ async function runInstalledUi(app, runtime) {
     const minutesDirectory = path.join(isolatedHome, ".minutes");
     const reportPath = path.join(minutesDirectory, "native-sidekick-ui-acceptance.json");
     const exitReceiptPath = path.join(minutesDirectory, "native-sidekick-ui-acceptance.exit.json");
-    const appStdoutPath = path.join(temporaryRoot, "app.stdout.log");
-    const appStderrPath = path.join(temporaryRoot, "app.stderr.log");
+    appStdoutPath = path.join(temporaryRoot, "app.stdout.log");
+    appStderrPath = path.join(temporaryRoot, "app.stderr.log");
     const providerDirectory = path.join(temporaryRoot, "provider");
     providerCopyPath = path.join(providerDirectory, "codex");
     const nonce = randomBytes(32).toString("hex");
@@ -673,8 +723,6 @@ async function runInstalledUi(app, runtime) {
     // screen, Sidekick, and the provider process itself.
     parentLease = child.stdio[3];
     parentLease.on("error", () => {});
-    let stdout = "";
-    let stderr = "";
     let timedOut = false;
     const startedAt = performance.now();
     const killProcessGroup = (signal) => {
@@ -693,15 +741,17 @@ async function runInstalledUi(app, runtime) {
       parentLease.destroy();
       forceKill = setTimeout(() => killProcessGroup("SIGKILL"), FORCED_CLEANUP_GRACE_MS);
     }, HARD_TIMEOUT_MS);
-    child.stdout.setEncoding("utf8");
-    child.stderr.setEncoding("utf8");
     child.stdout.on("data", (chunk) => {
-      stdout += chunk;
-      if (Buffer.byteLength(stdout) > MAX_OUTPUT_BYTES) parentLease.destroy();
+      const output = appendBoundedOutput(launchServicesStdout, chunk, MAX_OUTPUT_BYTES);
+      launchServicesStdout = output.bytes;
+      launchServicesStdoutOverflowed ||= output.overflowed;
+      if (launchServicesStdoutOverflowed) parentLease.destroy();
     });
     child.stderr.on("data", (chunk) => {
-      stderr += chunk;
-      if (Buffer.byteLength(stderr) > MAX_OUTPUT_BYTES) parentLease.destroy();
+      const output = appendBoundedOutput(launchServicesStderr, chunk, MAX_OUTPUT_BYTES);
+      launchServicesStderr = output.bytes;
+      launchServicesStderrOverflowed ||= output.overflowed;
+      if (launchServicesStderrOverflowed) parentLease.destroy();
     });
     const exitCode = await new Promise((resolve, reject) => {
       child.once("error", reject);
@@ -718,12 +768,16 @@ async function runInstalledUi(app, runtime) {
     providerCopyPostSha256 = await fs.readFile(providerCopyPath).then(sha256);
     const wallMs = Math.round(performance.now() - startedAt);
     if (timedOut) throw new Error(`native Sidekick UI acceptance exceeded ${HARD_TIMEOUT_MS}ms`);
-    const appStdout = await fs.readFile(appStdoutPath, "utf8");
-    const appStderr = await fs.readFile(appStderrPath, "utf8");
-    if (Buffer.byteLength(appStdout) > MAX_OUTPUT_BYTES ||
-        Buffer.byteLength(appStderr) > MAX_OUTPUT_BYTES) {
+    const [appStdoutOutput, appStderrOutput] = await Promise.all([
+      readBoundedOutputFile(appStdoutPath, MAX_OUTPUT_BYTES),
+      readBoundedOutputFile(appStderrPath, MAX_OUTPUT_BYTES),
+    ]);
+    if (appStdoutOutput.overflowed || appStderrOutput.overflowed ||
+        launchServicesStdoutOverflowed || launchServicesStderrOverflowed) {
       throw new Error("native Sidekick UI acceptance app output exceeded its bounded limit");
     }
+    const appStdout = appStdoutOutput.text;
+    const appStderr = appStderrOutput.text;
     const reportBytes = await fs.readFile(reportPath);
     const payload = JSON.parse(reportBytes.toString("utf8"));
     const receipt = JSON.parse(await fs.readFile(exitReceiptPath, "utf8"));
@@ -748,12 +802,25 @@ async function runInstalledUi(app, runtime) {
         wall_ms: wallMs,
         launch_method: "macos_launch_services",
         launch_services_exit_code: exitCode,
-        stderr: [appStderr, stderr].filter(Boolean).join("\n").trim().slice(0, 4_000),
-        stdout: [appStdout, stdout].filter(Boolean).join("\n").trim().slice(0, 1_000),
+        stderr: [appStderr, launchServicesStderr.toString("utf8")].filter(Boolean).join("\n").trim().slice(0, 4_000),
+        stdout: [appStdout, launchServicesStdout.toString("utf8")].filter(Boolean).join("\n").trim().slice(0, 1_000),
       },
     };
   } catch (error) {
-    primaryError = error;
+    const [appStdout, appStderr] = await Promise.all([
+      appStdoutPath
+        ? readBoundedOutputFile(appStdoutPath, MAX_OUTPUT_BYTES).catch(() => ({ text: "", overflowed: false }))
+        : { text: "", overflowed: false },
+      appStderrPath
+        ? readBoundedOutputFile(appStderrPath, MAX_OUTPUT_BYTES).catch(() => ({ text: "", overflowed: false }))
+        : { text: "", overflowed: false },
+    ]);
+    primaryError = nativeSidekickFailureWithLogs(error, {
+      launchServicesStdout: launchServicesStdout.toString("utf8"),
+      launchServicesStderr: launchServicesStderr.toString("utf8"),
+      appStdout: `${appStdout.text}${appStdout.overflowed ? "\n[output truncated at bounded limit]" : ""}`,
+      appStderr: `${appStderr.text}${appStderr.overflowed ? "\n[output truncated at bounded limit]" : ""}`,
+    });
   } finally {
     const cleanupErrors = [];
     let retainTemporaryRoot = false;
@@ -820,9 +887,14 @@ async function runInstalledUi(app, runtime) {
       }
     }
     if (cleanupErrors.length > 0) {
+      const visibleErrors = [primaryError, ...cleanupErrors]
+        .filter(Boolean)
+        .map((error) => error.message)
+        .join("\n\n");
       throw new AggregateError(
         primaryError ? [primaryError, ...cleanupErrors] : cleanupErrors,
-        "native Sidekick UI acceptance cleanup was incomplete",
+        `native Sidekick UI acceptance cleanup was incomplete:\n\n${visibleErrors}`,
+        primaryError ? { cause: primaryError } : undefined,
       );
     }
   }

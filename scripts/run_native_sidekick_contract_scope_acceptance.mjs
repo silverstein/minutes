@@ -15,7 +15,7 @@ import {
 
 const MAX_FIRST_TOKEN_MS = 5_000;
 const MAX_TURN_TOTAL_MS = 10_000;
-const MAX_VISIBLE_PUBLICATION_MS = 5_000;
+const MAX_PUBLICATION_READY_MS = 5_000;
 const MAX_WALL_MS = 20_000;
 const HARD_TIMEOUT_MS = 35_000;
 const MAX_OUTPUT_BYTES = 1024 * 1024;
@@ -198,9 +198,9 @@ export function evaluateContractScopeFixture(payload, runtime, spec) {
       `Observed ${candidate.totalMs ?? "null"}ms.`,
     ),
     check(
-      `visible_publication_under_${MAX_VISIBLE_PUBLICATION_MS}ms`,
+      `publication_ready_under_${MAX_PUBLICATION_READY_MS}ms`,
       Number.isFinite(candidate.publicationReadyMs) &&
-        candidate.publicationReadyMs <= MAX_VISIBLE_PUBLICATION_MS,
+        candidate.publicationReadyMs <= MAX_PUBLICATION_READY_MS,
       `Observed ${candidate.publicationReadyMs ?? "null"}ms from typed request through publication readiness.`,
     ),
     check(
@@ -262,6 +262,26 @@ export async function validateCanonicalInstalledApp(app, canonicalApp) {
       `canonical installed app resolves outside its required location: ${realApp}`,
     );
   }
+}
+
+export function generatedBuildHelperPaths(hostTarget) {
+  if (typeof hostTarget !== "string" || !/^[a-z0-9_]+-[a-z0-9_]+-[a-z0-9_]+$/.test(hostTarget)) {
+    throw new Error(`invalid Rust host target: ${hostTarget ?? "null"}`);
+  }
+  return [...new Set([
+    "tauri/src-tauri/bin/mic_check",
+    "tauri/src-tauri/bin/mic_check-aarch64-apple-darwin",
+    `tauri/src-tauri/bin/mic_check-${hostTarget}`,
+  ])];
+}
+
+export function currentGeneratedBuildHelperPaths(repositoryRoot) {
+  const rustcDetails = execFileSync("rustc", ["-Vv"], {
+    cwd: repositoryRoot,
+    encoding: "utf8",
+  });
+  const hostTarget = rustcDetails.match(/^host:\s*(\S+)\s*$/m)?.[1];
+  return generatedBuildHelperPaths(hostTarget);
 }
 
 async function runInstalledBinary(executable, fixturePath, installedBundleSha256) {
@@ -335,10 +355,7 @@ async function main(argv) {
     ["status", "--porcelain=v1", "--untracked-files=all"],
     { cwd: repositoryRoot, encoding: "utf8" },
   ).trim();
-  const allowedGeneratedPaths = [
-    "tauri/src-tauri/bin/mic_check",
-    "tauri/src-tauri/bin/mic_check-aarch64-apple-darwin",
-  ];
+  const allowedGeneratedPaths = currentGeneratedBuildHelperPaths(repositoryRoot);
   const relevantDirtyLines = checkoutStatus.split("\n").filter(Boolean).filter((line) =>
     !allowedGeneratedPaths.some((generatedPath) => line.slice(3) === generatedPath),
   );

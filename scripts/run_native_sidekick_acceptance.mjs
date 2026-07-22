@@ -11,12 +11,13 @@ import { scoreMeridianResponses } from "../tests/eval/sidekick_rehearsal_golden.
 import {
   bundleManifestSha256,
   canonicalInstalledAppPath,
+  currentGeneratedBuildHelperPaths,
   validateCanonicalInstalledApp,
 } from "./run_native_sidekick_contract_scope_acceptance.mjs";
 
 const MAX_FIRST_TOKEN_MS = 5_000;
 const MAX_TURN_TOTAL_MS = 10_000;
-const MAX_VISIBLE_PUBLICATION_MS = 5_000;
+const MAX_PUBLICATION_READY_MS = 5_000;
 const MAX_WALL_MS = 30_000;
 const HARD_TIMEOUT_MS = 45_000;
 const MAX_OUTPUT_BYTES = 1024 * 1024;
@@ -141,9 +142,9 @@ export function evaluateNativeSidekickAcceptance(payload, runtime) {
         `Observed ${turn.total_ms ?? "null"}ms.`,
       ),
       check(
-        `turn_${index + 1}_visible_publication_under_${MAX_VISIBLE_PUBLICATION_MS}ms`,
+        `turn_${index + 1}_publication_ready_under_${MAX_PUBLICATION_READY_MS}ms`,
         Number.isFinite(turn.publication_ready_ms) &&
-          turn.publication_ready_ms <= MAX_VISIBLE_PUBLICATION_MS,
+          turn.publication_ready_ms <= MAX_PUBLICATION_READY_MS,
         `Observed ${turn.publication_ready_ms ?? "null"}ms from typed request through publication readiness.`,
       ),
     ]),
@@ -244,10 +245,7 @@ async function main(argv) {
     ["status", "--porcelain=v1", "--untracked-files=all"],
     { cwd: repositoryRoot, encoding: "utf8" },
   ).trim();
-  const allowedGeneratedPaths = [
-    "tauri/src-tauri/bin/mic_check",
-    "tauri/src-tauri/bin/mic_check-aarch64-apple-darwin",
-  ];
+  const allowedGeneratedPaths = currentGeneratedBuildHelperPaths(repositoryRoot);
   const relevantDirtyLines = checkoutStatus.split("\n").filter(Boolean).filter((line) =>
     !allowedGeneratedPaths.some((generatedPath) => line.slice(3) === generatedPath),
   );

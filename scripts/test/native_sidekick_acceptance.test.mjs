@@ -113,7 +113,7 @@ test("a slow otherwise-correct response fails the realtime bar", () => {
   assert.equal(report.latency_checks[0].passed, false);
 });
 
-test("a slow visible publication fails even when provider streaming starts quickly", () => {
+test("a slow engine publication fails even when provider streaming starts quickly", () => {
   const payload = passingPayload();
   payload.fixture_turns[0].result.publication_ready_ms = 5_001;
 
@@ -121,7 +121,7 @@ test("a slow visible publication fails even when provider streaming starts quick
 
   assert.equal(report.passed, false);
   assert.equal(
-    report.latency_checks.find((item) => item.name.includes("visible_publication")).passed,
+    report.latency_checks.find((item) => item.name.includes("publication_ready")).passed,
     false,
   );
 });

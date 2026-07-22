@@ -7,6 +7,7 @@ import test from "node:test";
 import {
   canonicalInstalledAppPath,
   evaluateContractScopeFixture,
+  generatedBuildHelperPaths,
   parseArgs,
   validateCanonicalInstalledApp,
 } from "../run_native_sidekick_contract_scope_acceptance.mjs";
@@ -69,6 +70,19 @@ test("installed acceptance rejects a symlink at the canonical app path", async (
   }
 });
 
+test("installed acceptance permits only the exact generated mic helper for the host", () => {
+  assert.deepEqual(generatedBuildHelperPaths("aarch64-apple-darwin"), [
+    "tauri/src-tauri/bin/mic_check",
+    "tauri/src-tauri/bin/mic_check-aarch64-apple-darwin",
+  ]);
+  assert.deepEqual(generatedBuildHelperPaths("x86_64-apple-darwin"), [
+    "tauri/src-tauri/bin/mic_check",
+    "tauri/src-tauri/bin/mic_check-aarch64-apple-darwin",
+    "tauri/src-tauri/bin/mic_check-x86_64-apple-darwin",
+  ]);
+  assert.throws(() => generatedBuildHelperPaths("../../poison"), /invalid Rust host target/);
+});
+
 test("held-out per-window remedy preserves the exact quantified outcome scope", () => {
   const result = scorePerWindowRemedy(northstarReference);
 
@@ -120,6 +134,7 @@ test("held-out per-window remedy preserves the exact quantified outcome scope", 
     "For Northstar, require that every 30-minute service window below 99.95% triggers a $5,000 service credit. Reject one credit per incident.",
     "For Northstar Health, require that every 30-minute service window below 99.95% triggers a $5,000 service credit. Reject one credit per incident.",
     "For Northstar Health, require that every 30-minute service window below 99.95% triggers a $5,000 service credit for Northstar Health. Reject replacing the per-window remedy with one credit per incident.",
+    "For Northstar Health, require that every 30-minute service window below 99.95% triggers Blue Mesa Cloud's obligation to give Northstar Health a $5,000 service credit. Reject replacing the per-window remedy with one credit per incident.",
   ];
   for (const candidate of semanticOrderVariants) {
     assert.equal(scorePerWindowRemedy(candidate).passed, true, candidate);
@@ -240,7 +255,7 @@ test("held-out aggregate remedy preserves its quarterly trigger and cap", () => 
     "For Harbor procurement, require one rebate equal to 8% of quarterly fees if aggregate quarterly spoilage exceeds 2%. No more than a single rebate may be paid in any quarter. Exclude shipment-level rebates.",
     "For Harbor, require that aggregate quarterly spoilage above 2% triggers one rebate equal to 8% of quarterly fees. Cap it at one rebate per quarter. Exclude shipment-level rebates.",
     "For Harbor Foods, require that aggregate quarterly spoilage above 2% triggers one rebate equal to 8% of quarterly fees. Cap it at one rebate per quarter. Exclude shipment-level rebates.",
-    "For Harbor Foods, require that if aggregate quarterly spoilage exceeds 2%, Polar Route owes Harbor Foods one rebate equal to 8% of that quarter's fees. Cap the 8% rebate at one per calendar quarter. Reject a per-shipment rebate.",
+    "For Harbor Foods, require that if aggregate quarterly spoilage exceeds 2%, Polar Route Logistics owes Harbor Foods one rebate equal to 8% of that quarter's fees. Cap the 8% rebate at one per calendar quarter. Reject a per-shipment rebate.",
   ];
   for (const candidate of semanticOrderVariants) {
     assert.equal(scoreAggregateCappedRemedy(candidate).passed, true, candidate);

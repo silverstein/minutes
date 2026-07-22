@@ -17871,9 +17871,120 @@ mod native_sidekick_diagnostic_tests {
                 }
             }
         }
+        // macOS menu-bar accents and uncovered system surfaces can reuse the
+        // fiducial blue outside the marker window. Even a larger square blue
+        // component must not win unless it encloses the nonce-colored grid.
+        for y in 20..36_u32 {
+            for x in 700..995_u32 {
+                image.put_pixel(x, y, image::Rgb([0x40, 0x8c, 0xff]));
+            }
+        }
+        for y in 690..890_u32 {
+            for x in 760..960_u32 {
+                image.put_pixel(x, y, image::Rgb([0x40, 0x8c, 0xff]));
+            }
+        }
+        // Reproduce the signed-run failure class, where marker-like colors
+        // outside the border became the strongest global row and column once
+        // system-blue pixels expanded the old locator's search bounds.
+        for y in 40..50_u32 {
+            for x in 160..995_u32 {
+                image.put_pixel(x, y, image::Rgb([0x30, 0xd1, 0x58]));
+            }
+        }
+        for y in 20..890_u32 {
+            for x in 970..980_u32 {
+                image.put_pixel(x, y, image::Rgb([0xc9, 0x6b, 0x4e]));
+            }
+        }
+
+        // This is the previous image-global locator, retained only as a
+        // mutation guard. The fixture must make it derive the decoy cross,
+        // otherwise it does not prove the connected-component fix matters.
+        let legacy_global_bounds = |source: &image::RgbImage| {
+            let (source_width, source_height) = source.dimensions();
+            let is_blue = |x: u32, y: u32| source.get_pixel(x, y).0 == [0x40, 0x8c, 0xff];
+            let is_nonce_color = |x: u32, y: u32| {
+                matches!(
+                    source.get_pixel(x, y).0,
+                    [0x30, 0xd1, 0x58] | [0xc9, 0x6b, 0x4e]
+                )
+            };
+            let mut blue_left = source_width;
+            let mut blue_right = 0_u32;
+            let mut blue_top = source_height;
+            let mut blue_bottom = 0_u32;
+            for y in 0..source_height {
+                for x in 0..source_width {
+                    if is_blue(x, y) {
+                        blue_left = blue_left.min(x);
+                        blue_right = blue_right.max(x);
+                        blue_top = blue_top.min(y);
+                        blue_bottom = blue_bottom.max(y);
+                    }
+                }
+            }
+            let row_counts = (blue_top..=blue_bottom)
+                .map(|y| {
+                    (blue_left..=blue_right)
+                        .filter(|&x| is_nonce_color(x, y))
+                        .count()
+                })
+                .collect::<Vec<_>>();
+            let column_counts = (blue_left..=blue_right)
+                .map(|x| {
+                    (blue_top..=blue_bottom)
+                        .filter(|&y| is_nonce_color(x, y))
+                        .count()
+                })
+                .collect::<Vec<_>>();
+            let row_threshold = row_counts.iter().copied().max().unwrap_or(0) * 3 / 4;
+            let column_threshold = column_counts.iter().copied().max().unwrap_or(0) * 3 / 4;
+            let rows = row_counts
+                .iter()
+                .enumerate()
+                .filter_map(|(index, &count)| {
+                    (count >= row_threshold).then(|| blue_top + u32::try_from(index).unwrap_or(0))
+                })
+                .collect::<Vec<_>>();
+            let columns = column_counts
+                .iter()
+                .enumerate()
+                .filter_map(|(index, &count)| {
+                    (count >= column_threshold)
+                        .then(|| blue_left + u32::try_from(index).unwrap_or(0))
+                })
+                .collect::<Vec<_>>();
+            Some((
+                *columns.first()?,
+                *rows.first()?,
+                *columns.last()?,
+                *rows.last()?,
+            ))
+        };
+        assert_eq!(legacy_global_bounds(&image), Some((970, 40, 979, 49)));
         image.save(&path).unwrap();
 
         verify_native_sidekick_acceptance_marker(&path, nonce).unwrap();
+
+        // The real worker downsizes a Retina capture. Exercise antialiasing,
+        // subpixel color blending, and a cursor-sized break in the top border
+        // before trusting the exact-RGB fixture above.
+        let mut retina_source = image.clone();
+        for y in top - border..top {
+            for x in left + 250..left + 274_u32 {
+                retina_source.put_pixel(x, y, image::Rgb([0x0d, 0x0d, 0x0b]));
+            }
+        }
+        let retina = image::imageops::resize(
+            &retina_source,
+            577,
+            519,
+            image::imageops::FilterType::Lanczos3,
+        );
+        let retina_path = directory.path().join("marker-retina.png");
+        retina.save(&retina_path).unwrap();
+        verify_native_sidekick_acceptance_marker(&retina_path, nonce).unwrap();
 
         for y in top - border..top + grid_size + border {
             for x in left - border..left + grid_size + border {
@@ -18729,79 +18840,149 @@ fn verify_native_sidekick_acceptance_marker(path: &Path, nonce: &str) -> Result<
     // Retina resampling. Bounds inferred from the bit colors alone can drift
     // when gaps, UI text, or a cached compositor surface contributes similar
     // pixels elsewhere in the screenshot.
-    let mut fiducial_left = width;
-    let mut fiducial_right = 0_u32;
-    let mut fiducial_top = height;
-    let mut fiducial_bottom = 0_u32;
-    let mut fiducial_pixels = 0_usize;
+    let image_width = usize::try_from(width).map_err(|_| "The marker image was too wide.")?;
+    let image_height = usize::try_from(height).map_err(|_| "The marker image was too tall.")?;
+    let mut fiducial_mask = vec![false; image_width.saturating_mul(image_height)];
     for y in 0..height {
         for x in 0..width {
             if close_to(image.get_pixel(x, y), [0x40, 0x8c, 0xff], 48) {
-                fiducial_left = fiducial_left.min(x);
-                fiducial_right = fiducial_right.max(x);
-                fiducial_top = fiducial_top.min(y);
-                fiducial_bottom = fiducial_bottom.max(y);
-                fiducial_pixels += 1;
+                let index = usize::try_from(y)
+                    .unwrap_or(0)
+                    .saturating_mul(image_width)
+                    .saturating_add(usize::try_from(x).unwrap_or(0));
+                if let Some(cell) = fiducial_mask.get_mut(index) {
+                    *cell = true;
+                }
             }
         }
     }
-    if fiducial_pixels < 32 || fiducial_left >= fiducial_right || fiducial_top >= fiducial_bottom {
-        return Err("The actual screen capture did not contain the marker fiducial.".into());
+    // macOS owns the menu bar and other system surfaces above an ordinary
+    // borderless window. Accent-blue pixels there must not expand the marker
+    // bounds. Find connected blue components and choose the square component
+    // that actually encloses the most nonce-colored pixels.
+    let mut visited = vec![false; fiducial_mask.len()];
+    let mut fiducial_candidates = Vec::new();
+    for y in 0..height {
+        for x in 0..width {
+            let start = usize::try_from(y)
+                .unwrap_or(0)
+                .saturating_mul(image_width)
+                .saturating_add(usize::try_from(x).unwrap_or(0));
+            if !fiducial_mask.get(start).copied().unwrap_or(false)
+                || visited.get(start).copied().unwrap_or(true)
+            {
+                continue;
+            }
+            visited[start] = true;
+            let mut queue = VecDeque::from([(x, y)]);
+            let mut component_pixels = 0_usize;
+            let mut component_left = x;
+            let mut component_right = x;
+            let mut component_top = y;
+            let mut component_bottom = y;
+            while let Some((current_x, current_y)) = queue.pop_front() {
+                component_pixels += 1;
+                component_left = component_left.min(current_x);
+                component_right = component_right.max(current_x);
+                component_top = component_top.min(current_y);
+                component_bottom = component_bottom.max(current_y);
+                let mut visit_neighbor = |neighbor_x: u32, neighbor_y: u32| {
+                    let neighbor = usize::try_from(neighbor_y)
+                        .unwrap_or(0)
+                        .saturating_mul(image_width)
+                        .saturating_add(usize::try_from(neighbor_x).unwrap_or(0));
+                    if fiducial_mask.get(neighbor).copied().unwrap_or(false)
+                        && !visited.get(neighbor).copied().unwrap_or(true)
+                    {
+                        visited[neighbor] = true;
+                        queue.push_back((neighbor_x, neighbor_y));
+                    }
+                };
+                if current_x > 0 {
+                    visit_neighbor(current_x - 1, current_y);
+                }
+                if current_x + 1 < width {
+                    visit_neighbor(current_x + 1, current_y);
+                }
+                if current_y > 0 {
+                    visit_neighbor(current_x, current_y - 1);
+                }
+                if current_y + 1 < height {
+                    visit_neighbor(current_x, current_y + 1);
+                }
+            }
+            let component_width = component_right
+                .saturating_sub(component_left)
+                .saturating_add(1);
+            let component_height = component_bottom
+                .saturating_sub(component_top)
+                .saturating_add(1);
+            if component_pixels >= 32
+                && component_width >= 160
+                && component_height >= 160
+                && component_width.saturating_mul(4) >= component_height.saturating_mul(3)
+                && component_height.saturating_mul(4) >= component_width.saturating_mul(3)
+            {
+                fiducial_candidates.push((
+                    component_left,
+                    component_top,
+                    component_right,
+                    component_bottom,
+                ));
+            }
+        }
     }
-    let fiducial_width = fiducial_right
-        .saturating_sub(fiducial_left)
-        .saturating_add(1);
-    let fiducial_height = fiducial_bottom
-        .saturating_sub(fiducial_top)
-        .saturating_add(1);
-    if fiducial_width < 160 || fiducial_height < 160 {
-        return Err("The captured marker fiducial was too small to verify safely.".into());
+    let mut selected: Option<(usize, u32, u32, u32, u32, u32, u32, u32, u32)> = None;
+    for (candidate_left, candidate_top, candidate_right, candidate_bottom) in fiducial_candidates {
+        let mut marker_pixels = 0_usize;
+        let mut marker_left = width;
+        let mut marker_right = 0_u32;
+        let mut marker_top = height;
+        let mut marker_bottom = 0_u32;
+        for y in candidate_top..=candidate_bottom {
+            for x in candidate_left..=candidate_right {
+                if is_marker_color(image.get_pixel(x, y)) {
+                    marker_pixels += 1;
+                    marker_left = marker_left.min(x);
+                    marker_right = marker_right.max(x);
+                    marker_top = marker_top.min(y);
+                    marker_bottom = marker_bottom.max(y);
+                }
+            }
+        }
+        if marker_pixels > 0
+            && selected
+                .as_ref()
+                .is_none_or(|(best_pixels, ..)| marker_pixels > *best_pixels)
+        {
+            selected = Some((
+                marker_pixels,
+                candidate_left,
+                candidate_top,
+                candidate_right,
+                candidate_bottom,
+                marker_left,
+                marker_top,
+                marker_right,
+                marker_bottom,
+            ));
+        }
     }
-    // Locate the grid from its strongest color bands, not a threshold based
-    // on the whole screenshot. Retina downscaling and multi-display captures
-    // can otherwise make marker-colored UI text look like a grid boundary.
-    let row_counts = (fiducial_top..=fiducial_bottom)
-        .map(|y| {
-            (fiducial_left..=fiducial_right)
-                .filter(|&x| is_marker_color(image.get_pixel(x, y)))
-                .count()
-        })
-        .collect::<Vec<_>>();
-    let column_counts = (fiducial_left..=fiducial_right)
-        .map(|x| {
-            (fiducial_top..=fiducial_bottom)
-                .filter(|&y| is_marker_color(image.get_pixel(x, y)))
-                .count()
-        })
-        .collect::<Vec<_>>();
-    let strongest_row = row_counts.iter().copied().max().unwrap_or(0);
-    let strongest_column = column_counts.iter().copied().max().unwrap_or(0);
-    let row_threshold = strongest_row.saturating_mul(3) / 4;
-    let column_threshold = strongest_column.saturating_mul(3) / 4;
-    let marker_rows = row_counts
-        .iter()
-        .enumerate()
-        .filter_map(|(index, &count)| {
-            (row_threshold > 0 && count >= row_threshold)
-                .then(|| fiducial_top + u32::try_from(index).unwrap_or(0))
-        })
-        .collect::<Vec<_>>();
-    let marker_columns = column_counts
-        .iter()
-        .enumerate()
-        .filter_map(|(index, &count)| {
-            (column_threshold > 0 && count >= column_threshold)
-                .then(|| fiducial_left + u32::try_from(index).unwrap_or(0))
-        })
-        .collect::<Vec<_>>();
-    let (Some(&top), Some(&bottom), Some(&left), Some(&right)) = (
-        marker_rows.first(),
-        marker_rows.last(),
-        marker_columns.first(),
-        marker_columns.last(),
-    ) else {
+    let Some((
+        _,
+        fiducial_left,
+        fiducial_top,
+        fiducial_right,
+        fiducial_bottom,
+        left,
+        top,
+        right,
+        bottom,
+    )) = selected
+    else {
         return Err(
-            "The actual screen capture did not contain the run-specific marker grid.".into(),
+            "The actual screen capture did not contain the marker fiducial and run-specific grid."
+                .into(),
         );
     };
     let grid_width = right.saturating_sub(left).saturating_add(1);

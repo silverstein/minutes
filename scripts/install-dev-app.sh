@@ -53,6 +53,24 @@ BACKUP_APP="${INSTALL_DIR}/.${DEV_PRODUCT_NAME}.backup-$$.app"
 INSTALL_LOCK_HELD=0
 INSTALL_SWAP_ACTIVE=0
 
+assert_clean_build_source() {
+  local dirty
+  dirty="$(git status --porcelain=v1 --untracked-files=all | awk '
+    {
+      path = substr($0, 4)
+      if (path != "tauri/src-tauri/bin/mic_check" &&
+          path != "tauri/src-tauri/bin/mic_check-aarch64-apple-darwin") {
+        print $0
+      }
+    }
+  ')"
+  if [[ -n "$dirty" ]]; then
+    echo "Refusing to build Minutes Dev from uncommitted application or harness source:" >&2
+    printf '%s\n' "$dirty" >&2
+    return 1
+  fi
+}
+
 cleanup_install_artifacts() {
   if [[ "$INSTALL_SWAP_ACTIVE" == "1" && -d "$BACKUP_APP" ]]; then
     if [[ ! -d "$INSTALL_APP" || -z "$(running_dev_bundle_pids)" ]]; then
@@ -313,6 +331,7 @@ if [[ -n "$SIGNING_IDENTITY" ]]; then
 fi
 
 echo "=== Building CLI (release) ==="
+assert_clean_build_source
 echo "Build commit: $MINUTES_BUILD_COMMIT"
 run_with_ort_retry cargo build --release -p minutes-cli --features "$MINUTES_BUILD_FEATURES"
 
@@ -326,6 +345,7 @@ echo "=== Building ${DEV_PRODUCT_NAME}.app ==="
 # tauri/src-tauri/resources/ by tauri/src-tauri/build.rs, and Tauri bundles it
 # into the .app automatically via tauri.conf.json.
 run_with_ort_retry cargo tauri build --bundles app --config "$DEV_CONFIG" --features "$MINUTES_BUILD_FEATURES" --no-sign
+assert_clean_build_source
 # Inside-out signing (#311): sign every nested executable FIRST (the CLI
 # sidecar with its own entitlements), then the outer bundle WITHOUT --deep.
 # --deep re-signs nested code with the outer entitlements (clobbering the

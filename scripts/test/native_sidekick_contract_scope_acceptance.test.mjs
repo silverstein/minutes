@@ -102,6 +102,16 @@ test("vague, aggregated, or negated per-window remedies fail closed", () => {
     `${northstarReference} Pay twice that sum.`,
     `${northstarReference} Double the amount.`,
     `${northstarReference} That applies only when convenient.`,
+    "For Northstar procurement, require Northstar to pay Blue Mesa a $5,000 service credit for every 30-minute service window below 99.95%. Reject one credit per incident.",
+    "For Northstar procurement, require every 30-minute service window below 99.95% to trigger a $5,000 service credit and double that credit. Reject one credit per incident.",
+    "For Northstar procurement, require every 30-minute service window below 99.95% to trigger a $5,000 service credit only if Blue Mesa approves. Reject one credit per incident.",
+    "For Northstar procurement, require every 30-minute service window below 99.95% to trigger a $5,000 service credit. Reject the per-window remedy in favor of one credit per incident.",
+    "For Northstar procurement, state every 30-minute service window below 99.95% and a $5,000 service credit, and require reporting. Reject one credit per outage or incident.",
+    "For Northstar procurement, require every 30-minute service window below 99.95% to trigger a $5,000 service credit, subject to Blue Mesa's approval. Reject one credit per incident.",
+    "For Northstar procurement, require every 30-minute service window below 99.95% to trigger a $5,000 service credit, except during maintenance. Reject one credit per incident.",
+    "For Northstar procurement, require every 30-minute service window below 99.95% to trigger a $5,000 service credit, but it doesn't apply. Reject one credit per incident.",
+    "For Northstar procurement, require every 30-minute service window below 99.95% to trigger a $5,000 service credit. Reject the incident-level credit, then preserve it.",
+    "For Northstar procurement, require every 30-minute service window below 99.95% to trigger a $5,000 service credit plus a ７,５００-dollar payment. Reject one credit per incident.",
   ];
 
   for (const candidate of candidates) {
@@ -208,6 +218,21 @@ test("per-shipment invention and negated or missing aggregate caps fail closed",
     `${harborReference} A second payment is okay.`,
     `${harborReference} Apply it to every consignment.`,
     `${harborReference} The seller may set these aside.`,
+    "For Harbor procurement, require Harbor to pay Polar Route one rebate equal to 8% of quarterly fees when aggregate quarterly spoilage exceeds 2%. Cap it at one rebate per quarter. Exclude shipment-level credits.",
+    "For Harbor procurement, require that aggregate quarterly spoilage above 2% triggers one rebate equal to 8% of quarterly fees and double that rebate. Cap it at one rebate per quarter. Exclude shipment-level credits.",
+    "For Harbor procurement, require that aggregate quarterly spoilage above 2% triggers one rebate equal to 8% of quarterly fees if Polar Route agrees. Cap it at one rebate per quarter. Exclude shipment-level credits.",
+    "For Harbor procurement, require reporting on aggregate quarterly spoilage above 2% and one rebate of 8% of quarterly fees. Cap it at one rebate per calendar quarter.",
+    "For Harbor procurement, require that aggregate quarterly spoilage above 2% triggers one rebate equal to 8% of quarterly fees, subject to Polar Route's approval. Cap it at one rebate per quarter. Exclude shipment-level credits.",
+    "For Harbor procurement, require that aggregate quarterly spoilage above 2% triggers one rebate equal to 8% of quarterly fees, except when Polar Route objects. Cap it at one rebate per quarter. Exclude shipment-level credits.",
+    "For Harbor procurement, require that aggregate quarterly spoilage above 2% triggers one rebate equal to 8% of quarterly fees, but it doesn't apply. Cap it at one rebate per quarter. Exclude shipment-level credits.",
+    "For Harbor procurement, require that aggregate quarterly spoilage above 2% triggers one rebate equal to 8% of quarterly fees. Cap it at one rebate per calendar quarter, except for emergencies. Exclude shipment-level credits.",
+    "For Harbor procurement, require that aggregate quarterly spoilage above 2% triggers one rebate equal to 8% of quarterly fees. Cap it at one rebate per calendar quarter, but waive it. Exclude shipment-level credits.",
+    "For Harbor procurement, require that aggregate quarterly spoilage above 2% triggers one rebate equal to 8% of quarterly fees. Cap it at one rebate per quarter and make that a minimum. Exclude shipment-level credits.",
+    "For Harbor procurement, require that aggregate quarterly spoilage above 2% triggers one rebate equal to 8% of quarterly fees. Cap it at one rebate per quarter. Do not prevent each shipment from earning a rebate.",
+    "For Harbor procurement, require that aggregate quarterly spoilage above 2% triggers one rebate equal to 8% of quarterly fees. Cap it at one rebate per quarter. No objection to each shipment earning a rebate.",
+    "For Harbor procurement, require that aggregate quarterly spoilage above 2% triggers one rebate equal to 8% of quarterly fees. Cap it at one rebate per quarter. No shipment is denied a rebate.",
+    "For Harbor procurement, require that aggregate quarterly spoilage above 2% triggers one rebate equal to 8% of quarterly fees. Cap it at one rebate per quarter. No individual shipment triggers a rebate, though select loads do.",
+    "For Harbor procurement, require that aggregate quarterly spoilage above 2% triggers one rebate equal to 8% of quarterly fees plus a １２% payment. Cap it at one rebate per quarter. Exclude shipment-level credits.",
   ];
 
   for (const candidate of candidates) {

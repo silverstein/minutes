@@ -532,6 +532,11 @@ test('dev installer retires the old app and verifies the fresh frontend', async 
     /export MINUTES_BUILD_COMMIT="\$\(git rev-parse --verify HEAD\)"/,
     'the installer must embed the exact checked-out commit for installed-build acceptance',
   );
+  assert.match(
+    source,
+    /assert_clean_build_source[\s\S]*git status --porcelain=v1 --untracked-files=all[\s\S]*echo "=== Building CLI \(release\) ==="[\s\S]*assert_clean_build_source[\s\S]*cargo tauri build[\s\S]*assert_clean_build_source/,
+    'the installer must reject dirty application or harness source before and after compilation',
+  );
 
   assert.match(
     source,

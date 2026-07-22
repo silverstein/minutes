@@ -102,9 +102,19 @@ function coldThenable() {
   return value;
 }
 
-function startupContext(declaredIds) {
+function startupContext(declaredIds, {
+  hangingCommands = new Set(),
+  commandHandlers = new Map(),
+  hangEventListen = false,
+  eventListenHandler = null,
+  fireTimeouts = new Set(),
+  stallAnimationFrames = false,
+} = {}) {
   const elements = new Map();
   const invocations = [];
+  const consoleMessages = [];
+  const intervals = [];
+  const clock = { now: Date.now() };
   const windowEvents = eventTarget();
   const documentEvents = eventTarget();
   const documentElement = fakeElement('html');
@@ -151,6 +161,8 @@ function startupContext(declaredIds) {
   });
   const invoke = (command, args) => {
     invocations.push({ command, args });
+    if (commandHandlers.has(command)) return commandHandlers.get(command)(args);
+    if (hangingCommands.has(command)) return new Promise(() => {});
     if (command === 'cmd_shortcut_status') {
       const shortcut = args?.slot === 'dictation'
         ? 'CmdOrCtrl+Shift+Space'
@@ -167,7 +179,12 @@ function startupContext(declaredIds) {
   };
   const tauri = {
     core: { invoke },
-    event: { listen: () => Promise.resolve(() => {}) },
+    event: {
+      listen: (eventName, handler) => {
+        if (eventListenHandler) return eventListenHandler(eventName, handler);
+        return hangEventListen ? new Promise(() => {}) : Promise.resolve(() => {});
+      },
+    },
     window: { getCurrentWindow: () => currentWindow, LogicalSize: class {}, LogicalPosition: class {} },
     dialog: new Proxy({}, { get: () => () => coldThenable() }),
     shell: new Proxy({}, { get: () => () => coldThenable() }),
@@ -212,6 +229,17 @@ function startupContext(declaredIds) {
     removeEventListener() {}
   }
 
+  const fakeConsole = {
+    debug: (...args) => consoleMessages.push({ level: 'debug', args }),
+    error: (...args) => consoleMessages.push({ level: 'error', args }),
+    info: (...args) => consoleMessages.push({ level: 'info', args }),
+    log: (...args) => consoleMessages.push({ level: 'log', args }),
+    warn: (...args) => consoleMessages.push({ level: 'warn', args }),
+  };
+  class FakeDate extends Date {
+    static now() { return clock.now; }
+  }
+
   const context = vm.createContext({
     window,
     self: window,
@@ -223,11 +251,20 @@ function startupContext(declaredIds) {
     crypto: { randomUUID: () => '00000000-0000-4000-8000-000000000000' },
     performance: { now: () => 0 },
     getComputedStyle: () => ({ getPropertyValue: () => '', display: 'block' }),
-    requestAnimationFrame: (callback) => { callback(0); return 1; },
+    requestAnimationFrame: (callback) => {
+      if (!stallAnimationFrames) callback(0);
+      return 1;
+    },
     cancelAnimationFrame() {},
-    setTimeout: () => 1,
+    setTimeout: (callback, delay) => {
+      if (fireTimeouts.has(delay)) queueMicrotask(callback);
+      return 1;
+    },
     clearTimeout() {},
-    setInterval: () => 1,
+    setInterval: (callback, delay) => {
+      intervals.push({ callback, delay });
+      return intervals.length;
+    },
     clearInterval() {},
     ResizeObserver: Observer,
     MutationObserver: Observer,
@@ -253,7 +290,7 @@ function startupContext(declaredIds) {
     String,
     Number,
     Boolean,
-    Date,
+    Date: FakeDate,
     Math,
     JSON,
     RegExp,
@@ -261,10 +298,10 @@ function startupContext(declaredIds) {
     ReferenceError,
     TypeError,
     RangeError,
-    console,
+    console: fakeConsole,
   });
 
-  return { context, elements, invocations };
+  return { clock, consoleMessages, context, elements, intervals, invocations };
 }
 
 test('complete desktop frontend registers without a startup ReferenceError', async () => {
@@ -292,17 +329,156 @@ test('complete desktop frontend registers without a startup ReferenceError', asy
   );
 });
 
-test('startup smoke fails on the missing Sidekick listener binding regression', async () => {
+test('startup smoke rejects the missing Sidekick listener binding regression', async () => {
   const source = await readFile(indexHtml, 'utf8');
-  const declaredIds = new Set([...source.matchAll(/\bid="([^"]+)"/g)].map((match) => match[1]));
   const mainScript = inlineScripts(source).find((script) => script.includes('const { invoke }'));
   assert.ok(mainScript);
-  const broken = mainScript.replace('const { listen } = window.__TAURI__.event;', '');
-  const { context } = startupContext(declaredIds);
+  const requiredBinding = /const\s*{[^}]*\blisten\b[^}]*}\s*=\s*window\.__TAURI__\.event\s*;/;
+  assert.match(
+    mainScript,
+    requiredBinding,
+    'bare Sidekick listen(...) calls require a statically registered Tauri event binding',
+  );
 
-  assert.throws(
-    () => new vm.Script(broken, { filename: 'tauri/src/index.html#missing-listen' }).runInContext(context),
-    /listen is not defined/,
+  const broken = mainScript.replace('const { listen } = window.__TAURI__.event;', '');
+  assert.doesNotMatch(broken, requiredBinding, 'the regression mutation must be caught by the static guard');
+});
+
+test('frontend readiness is not held hostage by optional startup hydration', async () => {
+  const source = await readFile(indexHtml, 'utf8');
+  const declaredIds = new Set([...source.matchAll(/\bid="([^"]+)"/g)].map((match) => match[1]));
+  const scripts = inlineScripts(source);
+  const bootstrapScript = scripts.find((script) => script.includes('window.__MINUTES_STARTUP__'));
+  const mainScript = scripts.find((script) => script.includes('const { invoke }'));
+  const { context, invocations } = startupContext(declaredIds, {
+    hangingCommands: new Set(['cmd_capture_status']),
+    hangEventListen: true,
+    stallAnimationFrames: true,
+  });
+
+  new vm.Script(bootstrapScript, { filename: 'tauri/src/index.html#startup-recovery' }).runInContext(context);
+  new vm.Script(mainScript, { filename: 'tauri/src/index.html#main' }).runInContext(context);
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const readyIndex = invocations.findIndex(({ command }) => command === 'cmd_frontend_ready');
+  const hydrationIndex = invocations.findIndex(({ command }) => command === 'cmd_capture_status');
+  assert.ok(readyIndex >= 0, 'the registered frontend must report ready even if hydration never settles');
+  assert.ok(hydrationIndex > readyIndex, 'readiness must be sent before optional hydration begins');
+});
+
+test('a timed-out capture status read releases the poller and the real interval recovers', async () => {
+  const source = await readFile(indexHtml, 'utf8');
+  const declaredIds = new Set([...source.matchAll(/\bid="([^"]+)"/g)].map((match) => match[1]));
+  const scripts = inlineScripts(source);
+  const bootstrapScript = scripts.find((script) => script.includes('window.__MINUTES_STARTUP__'));
+  const mainScript = scripts.find((script) => script.includes('const { invoke }'));
+  let captureAttempts = 0;
+  const commandHandlers = new Map([
+    ['cmd_capture_status', () => {
+      captureAttempts += 1;
+      if (captureAttempts === 1) return new Promise(() => {});
+      return Promise.resolve({ processingJobs: [], recording: false, starting: false, processing: false });
+    }],
+  ]);
+  const { clock, context, intervals } = startupContext(declaredIds, {
+    commandHandlers,
+    fireTimeouts: new Set([4_000]),
+  });
+
+  new vm.Script(bootstrapScript, { filename: 'tauri/src/index.html#startup-recovery' }).runInContext(context);
+  new vm.Script(mainScript, { filename: 'tauri/src/index.html#main' }).runInContext(context);
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const retryAt = vm.runInContext('statusRetryAt', context);
+  const statusInterval = intervals.find(({ callback, delay }) => (
+    delay === 2_000 && String(callback).includes('checkStatus')
+  ));
+  assert.ok(statusInterval, 'the production status interval must be registered');
+  assert.equal(captureAttempts, 1);
+  assert.equal(vm.runInContext('statusCheckInFlight', context), false);
+
+  statusInterval.callback();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(captureAttempts, 1, 'backoff must suppress an immediate retry');
+
+  clock.now = retryAt;
+  statusInterval.callback();
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(captureAttempts, 2, 'polling must retry after the timed-out request');
+  assert.equal(vm.runInContext('statusCheckInFlight', context), false);
+});
+
+test('Sidekick listener registration retries and cleans a stale late listener', async () => {
+  const source = await readFile(indexHtml, 'utf8');
+  const declaredIds = new Set([...source.matchAll(/\bid="([^"]+)"/g)].map((match) => match[1]));
+  const scripts = inlineScripts(source);
+  const bootstrapScript = scripts.find((script) => script.includes('window.__MINUTES_STARTUP__'));
+  const mainScript = scripts.find((script) => script.includes('const { invoke }'));
+  let sidekickAttempts = 0;
+  let resolveFirstListener;
+  let staleUnlistenCalls = 0;
+  const activeRegistrations = [];
+  const installListener = (handler, stale = false) => {
+    const registration = { active: true, handler };
+    activeRegistrations.push(registration);
+    return () => {
+      if (!registration.active) return;
+      registration.active = false;
+      if (stale) staleUnlistenCalls += 1;
+    };
+  };
+  const eventListenHandler = (eventName, handler) => {
+    if (eventName !== 'sidekick:state') return Promise.resolve(() => {});
+    sidekickAttempts += 1;
+    if (sidekickAttempts === 1) {
+      const unlisten = installListener(handler, true);
+      return new Promise((resolve) => {
+        resolveFirstListener = () => resolve(unlisten);
+      });
+    }
+    return Promise.resolve(installListener(handler));
+  };
+  const { context } = startupContext(declaredIds, {
+    eventListenHandler,
+    fireTimeouts: new Set([6_000, 1_000]),
+  });
+
+  new vm.Script(bootstrapScript, { filename: 'tauri/src/index.html#startup-recovery' }).runInContext(context);
+  new vm.Script(mainScript, { filename: 'tauri/src/index.html#main' }).runInContext(context);
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(sidekickAttempts, 2, 'a timed-out listener registration must be retried');
+  assert.equal(
+    activeRegistrations.filter(({ active }) => active).length,
+    2,
+    'the harness must exercise the overlap before the stale unlisten handle arrives',
+  );
+
+  activeRegistrations[0].handler({ payload: { active: true } });
+  assert.equal(
+    vm.runInContext('sidekickSessionOpen', context),
+    false,
+    'an invalidated listener must ignore events even before it can be unregistered',
+  );
+  activeRegistrations[1].handler({ payload: { active: true } });
+  assert.equal(
+    vm.runInContext('sidekickSessionOpen', context),
+    true,
+    'the current replacement listener must continue delivering events during the overlap',
+  );
+
+  resolveFirstListener();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(staleUnlistenCalls, 1, 'a late stale registration must be retired');
+  const activeListeners = activeRegistrations.filter(({ active }) => active);
+  assert.equal(activeListeners.length, 1, 'exactly one replacement listener must remain active');
+  activeListeners[0].handler({ payload: { active: false } });
+  assert.equal(
+    vm.runInContext('sidekickSessionOpen', context),
+    false,
+    'the surviving listener must remain connected to the Sidekick UI state',
   );
 });
 

@@ -12,7 +12,7 @@
   </script>
   <script>
     (() => {
-      const state = { error: null, ready: false, bound: false };
+      const state = { error: null, ready: false, readyPromise: null, bound: false };
       const watchdog = setTimeout(() => {
         report('Minutes startup timed out.', 'The frontend did not reach its ready state within 20 seconds.');
       }, 20_000);
@@ -112,15 +112,22 @@
 
       window.__MINUTES_STARTUP__ = {
         markReady() {
-          requestAnimationFrame(() => requestAnimationFrame(() => {
-            if (state.error) return;
-            nativeInvoke('cmd_frontend_ready')
-              .then(() => {
-                state.ready = true;
-                clearTimeout(watchdog);
-              })
-              .catch((error) => report('Minutes could not confirm startup.', error));
-          }));
+          if (state.readyPromise) return state.readyPromise;
+          if (state.error) return Promise.reject(new Error(state.error));
+          // Readiness means the complete frontend script registered and the
+          // native bridge answered. Do not put this behind requestAnimationFrame:
+          // WKWebView may throttle or suspend the paint scheduler as soon as a
+          // menu-bar window becomes hidden.
+          state.readyPromise = nativeInvoke('cmd_frontend_ready')
+            .then(() => {
+              state.ready = true;
+              clearTimeout(watchdog);
+            })
+            .catch((error) => {
+              report('Minutes could not confirm startup.', error);
+              throw error;
+            });
+          return state.readyPromise;
         },
         fail(reason) {
           report('Minutes could not finish starting.', reason);
@@ -6997,6 +7004,19 @@
     const { invoke } = window.__TAURI__.core;
     const { listen } = window.__TAURI__.event;
 
+    function withTimeout(promise, timeoutMs, label) {
+      let timer = null;
+      const timeout = new Promise((_, reject) => {
+        timer = setTimeout(() => {
+          const error = new Error(`${label} timed out after ${timeoutMs}ms`);
+          error.code = 'MINUTES_IPC_TIMEOUT';
+          reject(error);
+        }, timeoutMs);
+      });
+      return Promise.race([Promise.resolve(promise), timeout])
+        .finally(() => clearTimeout(timer));
+    }
+
     // Platform detection — mirrors the data-platform attribute set in the inline
     // <script> at the top of <head>. Used to swap macOS-specific symbols (⌘, ⌥)
     // for their Windows/Linux equivalents without touching macOS behaviour.
@@ -7833,13 +7853,23 @@
     }
 
     // ── Status polling ──
+    const STATUS_REQUEST_TIMEOUT_MS = 4_000;
+    const LIVE_STATUS_REQUEST_TIMEOUT_MS = 3_000;
     let statusCheckInFlight = false;
+    let statusRetryAt = 0;
+    let statusTimeoutCount = 0;
 
     async function checkStatus(fatal = false) {
-      if (statusCheckInFlight) return;
+      if (statusCheckInFlight || (!fatal && Date.now() < statusRetryAt)) return;
       statusCheckInFlight = true;
       try {
-        const status = await invoke('cmd_capture_status');
+        const status = await withTimeout(
+          invoke('cmd_capture_status'),
+          STATUS_REQUEST_TIMEOUT_MS,
+          'Capture status',
+        );
+        statusTimeoutCount = 0;
+        statusRetryAt = 0;
         const wasRecording = isRecording;
         const wasStarting = isStarting;
         const wasProcessing = isProcessing;
@@ -7992,7 +8022,11 @@
           // Check live transcript status
           let wasLive = isLiveTranscript;
           try {
-            const liveStatus = await invoke('cmd_live_transcript_status');
+            const liveStatus = await withTimeout(
+              invoke('cmd_live_transcript_status'),
+              LIVE_STATUS_REQUEST_TIMEOUT_MS,
+              'Live transcript status',
+            );
             isLiveTranscript = !!liveStatus.active;
             if (isLiveTranscript) {
               statusPill.className = 'status-pill live';
@@ -8054,6 +8088,11 @@
         }
       } catch (e) {
         console.error('Status:', e);
+        if (e?.code === 'MINUTES_IPC_TIMEOUT') {
+          statusTimeoutCount += 1;
+          const retryDelay = Math.min(30_000, 1_000 * (2 ** Math.min(statusTimeoutCount, 5)));
+          statusRetryAt = Date.now() + retryDelay;
+        }
         if (fatal) throw e;
       } finally {
         statusCheckInFlight = false;
@@ -8331,10 +8370,63 @@
     }
 
     sidekickButtons.forEach(button => button.addEventListener('click', openCodexSidekick));
-    const sidekickStateListenerReady = listen('sidekick:state', (event) => {
+    const SIDEKICK_LISTENER_TIMEOUT_MS = 6_000;
+    let sidekickListenerGeneration = 0;
+    let sidekickListenerRetryMs = 1_000;
+    let sidekickStateUnlisten = null;
+
+    function handleSidekickState(event) {
       sidekickSessionOpen = Boolean(event.payload?.active);
       renderSidekickControls();
-    });
+    }
+
+    function bindSidekickStateListener() {
+      const generation = ++sidekickListenerGeneration;
+      const handleCurrentSidekickState = (event) => {
+        if (generation === sidekickListenerGeneration) handleSidekickState(event);
+      };
+      let registration;
+      try {
+        registration = Promise.resolve(listen('sidekick:state', handleCurrentSidekickState));
+      } catch (error) {
+        registration = Promise.reject(error);
+      }
+
+      // If a timed-out registration eventually resolves after a newer attempt,
+      // immediately retire it so retries cannot accumulate duplicate handlers.
+      registration.then((unlisten) => {
+        if (generation !== sidekickListenerGeneration && typeof unlisten === 'function') {
+          unlisten();
+        }
+      }).catch(() => {});
+
+      return withTimeout(registration, SIDEKICK_LISTENER_TIMEOUT_MS, 'Sidekick state listener')
+        .then((unlisten) => {
+          if (generation !== sidekickListenerGeneration) {
+            if (typeof unlisten === 'function') unlisten();
+            return null;
+          }
+          if (typeof sidekickStateUnlisten === 'function') sidekickStateUnlisten();
+          sidekickStateUnlisten = typeof unlisten === 'function' ? unlisten : null;
+          sidekickListenerRetryMs = 1_000;
+          return sidekickStateUnlisten;
+        })
+        .catch((error) => {
+          if (generation !== sidekickListenerGeneration) throw error;
+          console.error('Sidekick state listener:', error);
+          // Invalidate this generation now so a late resolution is cleaned up
+          // before the bounded retry creates a replacement listener.
+          const retryGeneration = ++sidekickListenerGeneration;
+          const retryDelay = sidekickListenerRetryMs;
+          sidekickListenerRetryMs = Math.min(30_000, sidekickListenerRetryMs * 2);
+          setTimeout(() => {
+            if (retryGeneration === sidekickListenerGeneration) {
+              bindSidekickStateListener().catch(() => {});
+            }
+          }, retryDelay);
+          throw error;
+        });
+    }
 
     function setHotkeyStatus(text, isError = false) {
       if (!hotkeyStatus) return;
@@ -15641,13 +15733,34 @@
     } else {
       setCueToggle(true);
     }
-    const criticalStartupReady = Promise.all([
-      Promise.resolve(sidekickStateListenerReady),
-      loadDesktopCapabilities(true),
-      loadHotkeySettings(),
-      checkSetup(true),
-      checkStatus(true),
-    ]);
+    // The install/runtime readiness contract is that the complete script has
+    // registered and the native bridge can answer. Data hydration is not part
+    // of that contract: event registration, setup/status reads, or an OS
+    // integration can legitimately take a long time (especially while macOS
+    // backgrounds a newly launched menu-bar window). Holding readiness behind
+    // any of those promises strands an otherwise interactive app on its
+    // loading surface and also throttles the watchdog that would explain why.
+    function startStartupHydration() {
+      const sidekickStateListenerReady = bindSidekickStateListener();
+      return Promise.allSettled([
+        Promise.resolve(sidekickStateListenerReady),
+        loadDesktopCapabilities(true),
+        loadHotkeySettings(),
+        checkSetup(true),
+        checkStatus(true),
+      ]).then((results) => {
+        results.forEach((result, index) => {
+          if (result.status === 'rejected') {
+            const lanes = ['sidekick listener', 'desktop capabilities', 'hotkey settings', 'setup', 'capture status'];
+            console.error(`Startup hydration failed (${lanes[index]}):`, result.reason);
+          }
+        });
+      });
+    }
+    const frontendRegistrationReady = window.__MINUTES_STARTUP__?.markReady();
+    Promise.resolve(frontendRegistrationReady)
+      .then(startStartupHydration)
+      .catch((error) => window.__MINUTES_STARTUP__?.fail(error));
     setInterval(() => { if (!pollInterval) checkStatus(); }, 2000);
     // Defer heavy checks (osascript calendar queries) so the UI is interactive immediately
     setTimeout(() => {
@@ -15733,9 +15846,6 @@
         }, 650);
       }
     })();
-    criticalStartupReady
-      .then(() => window.__MINUTES_STARTUP__?.markReady())
-      .catch((error) => window.__MINUTES_STARTUP__?.fail(error));
   </script>
 </body>
 

@@ -442,6 +442,19 @@ test('Sidekick screen marker reports readiness only after two paint frames', asy
   assert.equal(invocations[0].args.nonce, trace);
 });
 
+test('Sidekick screen marker avoids a cached macOS fullscreen Space', async () => {
+  const source = await readFile(commandsRust, 'utf8');
+  const start = source.indexOf('let marker_result = tauri::WebviewWindowBuilder::new');
+  const end = source.indexOf('.build();', start);
+  assert.ok(start >= 0 && end > start, 'the marker window builder must remain discoverable');
+  const builder = source.slice(start, end);
+  assert.doesNotMatch(builder, /\.fullscreen\(true\)/);
+  assert.match(builder, /\.inner_size\(marker_width, marker_height\)/);
+  assert.match(builder, /\.position\(marker_x, marker_y\)/);
+  assert.match(builder, /\.decorations\(false\)/);
+  assert.match(builder, /\.always_on_top\(true\)/);
+});
+
 test('Sidekick acceptance traverses visible main control, consent, and one real start invoke', async () => {
   const source = await readFile(indexHtml, 'utf8');
   const declaredIds = new Set([...source.matchAll(/\bid="([^"]+)"/g)].map((match) => match[1]));

@@ -19684,18 +19684,40 @@ pub fn launch_native_sidekick_ui_acceptance(
     validate_native_sidekick_ui_acceptance_challenge(&nonce)?;
     let state = app.state::<AppState>();
     configure_native_sidekick_acceptance(&state.sidekick_acceptance, nonce.clone())?;
+    // A native macOS fullscreen window enters a separate Space. Repeated
+    // unattended runs can briefly expose that Space's cached prior surface to
+    // `screencapture`, even after the current WebView has painted. Cover the
+    // current monitor directly with an ordinary borderless window instead;
+    // this keeps the exact same visible marker while avoiding Space caching.
+    let marker_monitor = app
+        .get_webview_window("main")
+        .and_then(|window| window.current_monitor().ok().flatten())
+        .or_else(|| app.primary_monitor().ok().flatten())
+        .ok_or_else(|| {
+            "Could not identify a monitor for the Sidekick screen marker.".to_string()
+        })?;
+    let marker_scale = marker_monitor.scale_factor();
+    let marker_position = marker_monitor.position();
+    let marker_size = marker_monitor.size();
+    let marker_x = marker_position.x as f64 / marker_scale;
+    let marker_y = marker_position.y as f64 / marker_scale;
+    let marker_width = marker_size.width as f64 / marker_scale;
+    let marker_height = marker_size.height as f64 / marker_scale;
     let marker_result = tauri::WebviewWindowBuilder::new(
         app,
         "sidekick-acceptance-marker",
         tauri::WebviewUrl::App(format!("sidekick-acceptance-marker.html?trace={nonce}").into()),
     )
     .title("Minutes Sidekick Acceptance")
-    .fullscreen(true)
+    .inner_size(marker_width, marker_height)
+    .position(marker_x, marker_y)
     .resizable(false)
     .decorations(false)
+    .shadow(false)
     .content_protected(false)
     .always_on_top(true)
     .focused(true)
+    .skip_taskbar(true)
     .build();
     if let Err(error) = marker_result {
         clear_native_sidekick_acceptance(&state.sidekick_acceptance);

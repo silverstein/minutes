@@ -17909,6 +17909,47 @@ mod native_sidekick_diagnostic_tests {
 
     #[cfg(unix)]
     #[test]
+    fn acceptance_process_scan_uses_comm_identity_and_excludes_current_app() {
+        let current_pid = 42;
+        // `ps ... comm=` emits only the executable identity, so a zsh process
+        // whose arguments mention Minutes appears here as `zsh`, not as its
+        // full command line.
+        let process_executables = "\
+  42 /Users/test/Applications/Minutes Dev.app/Contents/MacOS/minutes-app\n\
+  43 zsh\n\
+  44 node\n";
+        assert!(!native_sidekick_acceptance_has_other_minutes_process(
+            process_executables,
+            current_pid,
+        ));
+
+        let actual_other_app = format!(
+            "{process_executables}  45 /Users/test/Applications/Minutes Dev.app/Contents/MacOS/minutes-app\n"
+        );
+        assert!(native_sidekick_acceptance_has_other_minutes_process(
+            &actual_other_app,
+            current_pid,
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn acceptance_process_scan_fails_closed_when_ps_fails() {
+        use std::os::unix::process::ExitStatusExt;
+
+        let output = std::process::Output {
+            status: std::process::ExitStatus::from_raw(1 << 8),
+            stdout: Vec::new(),
+            stderr: vec![b'x'; 2_000],
+        };
+        let error = native_sidekick_acceptance_process_snapshot(output).unwrap_err();
+
+        assert!(error.starts_with("Could not inspect running Minutes processes:"));
+        assert!(error.len() < 600, "process diagnostics must remain bounded");
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn acceptance_exit_receipt_binds_nonce_build_pid_exit_and_report() {
         use std::os::unix::fs::PermissionsExt;
 
@@ -19222,29 +19263,58 @@ fn validate_native_sidekick_acceptance_host_is_idle_at(
         }
     }
     let output = Command::new("/bin/ps")
-        .args(["-axo", "pid=,command="])
+        .args(["-axo", "pid=,comm="])
         .output()
         .map_err(|error| format!("Could not inspect running Minutes processes: {error}"))?;
+    let process_executables = native_sidekick_acceptance_process_snapshot(output)?;
     let current_pid = std::process::id();
-    let other_minutes_app = String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter_map(|line| {
-            let mut parts = line.trim().splitn(2, char::is_whitespace);
-            let pid = parts.next()?.parse::<u32>().ok()?;
-            let command = parts.next()?.trim();
-            Some((pid, command))
-        })
-        .any(|(pid, command)| {
-            pid != current_pid
-                && command.contains(".app/Contents/MacOS/minutes-app")
-                && (command.contains("Minutes.app") || command.contains("Minutes Dev.app"))
-        });
+    let other_minutes_app =
+        native_sidekick_acceptance_has_other_minutes_process(&process_executables, current_pid);
     if other_minutes_app {
         return Err(
             "Close the existing Minutes app before running native Sidekick acceptance.".into(),
         );
     }
     Ok(())
+}
+
+#[cfg(unix)]
+fn native_sidekick_acceptance_process_snapshot(
+    output: std::process::Output,
+) -> Result<String, String> {
+    if !output.status.success() {
+        let detail = String::from_utf8_lossy(&output.stderr)
+            .chars()
+            .take(500)
+            .collect::<String>();
+        return Err(if detail.trim().is_empty() {
+            "Could not inspect running Minutes processes: process enumeration failed.".into()
+        } else {
+            format!("Could not inspect running Minutes processes: {detail}")
+        });
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+#[cfg(unix)]
+fn native_sidekick_acceptance_has_other_minutes_process(
+    process_executables: &str,
+    current_pid: u32,
+) -> bool {
+    process_executables
+        .lines()
+        .filter_map(|line| {
+            let mut parts = line.trim().splitn(2, char::is_whitespace);
+            let pid = parts.next()?.parse::<u32>().ok()?;
+            let executable = parts.next()?.trim();
+            Some((pid, executable))
+        })
+        .any(|(pid, executable)| {
+            pid != current_pid
+                && Path::new(executable)
+                    .file_name()
+                    .is_some_and(|name| name == "minutes-app")
+        })
 }
 
 #[cfg(not(unix))]

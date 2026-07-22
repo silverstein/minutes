@@ -17896,10 +17896,48 @@ mod native_sidekick_diagnostic_tests {
         drop(first);
         acquire_native_sidekick_acceptance_machine_lock().unwrap();
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn acceptance_exit_receipt_binds_nonce_build_pid_exit_and_report() {
+        use std::os::unix::fs::PermissionsExt;
+
+        with_native_sidekick_acceptance_home(|_| {
+            let nonce = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+            let payload = serde_json::json!({
+                "mode": "diagnose-native-sidekick-ui",
+                "process_id": std::process::id(),
+                "passed_product_path": true,
+            });
+            let report_sha256 = write_native_sidekick_ui_acceptance_report(&payload).unwrap();
+            write_native_sidekick_ui_acceptance_exit_receipt(nonce, &report_sha256, 0).unwrap();
+
+            let receipt_path = native_sidekick_ui_acceptance_exit_receipt_path();
+            let receipt: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&receipt_path).unwrap()).unwrap();
+            assert_eq!(
+                receipt["nonce_sha256"],
+                native_sidekick_sha256(nonce.as_bytes())
+            );
+            assert_eq!(receipt["build_commit"], env!("MINUTES_BUILD_COMMIT"));
+            assert_eq!(receipt["pid"], std::process::id());
+            assert_eq!(receipt["exit_code"], 0);
+            assert_eq!(receipt["report_sha256"], report_sha256);
+            assert_eq!(
+                std::fs::metadata(receipt_path)
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        });
+    }
 }
 
 const NATIVE_SIDEKICK_UI_ACCEPTANCE_CHALLENGE: &str = "native-sidekick-ui-acceptance.challenge";
 const NATIVE_SIDEKICK_UI_ACCEPTANCE_REPORT: &str = "native-sidekick-ui-acceptance.json";
+const NATIVE_SIDEKICK_UI_ACCEPTANCE_EXIT_RECEIPT: &str = "native-sidekick-ui-acceptance.exit.json";
 
 pub fn native_sidekick_ui_acceptance_challenge_path() -> PathBuf {
     Config::minutes_dir().join(NATIVE_SIDEKICK_UI_ACCEPTANCE_CHALLENGE)
@@ -17907,6 +17945,10 @@ pub fn native_sidekick_ui_acceptance_challenge_path() -> PathBuf {
 
 pub fn native_sidekick_ui_acceptance_report_path() -> PathBuf {
     Config::minutes_dir().join(NATIVE_SIDEKICK_UI_ACCEPTANCE_REPORT)
+}
+
+pub fn native_sidekick_ui_acceptance_exit_receipt_path() -> PathBuf {
+    Config::minutes_dir().join(NATIVE_SIDEKICK_UI_ACCEPTANCE_EXIT_RECEIPT)
 }
 
 fn validate_native_sidekick_ui_acceptance_challenge(nonce: &str) -> Result<(), String> {
@@ -17968,30 +18010,84 @@ fn validate_native_sidekick_ui_acceptance_challenge(nonce: &str) -> Result<(), S
     Ok(())
 }
 
-fn write_native_sidekick_ui_acceptance_report(payload: &serde_json::Value) -> Result<(), String> {
-    let path = native_sidekick_ui_acceptance_report_path();
+fn write_native_sidekick_durable_json(
+    path: &Path,
+    payload: &serde_json::Value,
+    label: &str,
+) -> Result<String, String> {
     let parent = path
         .parent()
-        .ok_or_else(|| "The Sidekick acceptance report path has no parent.".to_string())?;
-    std::fs::create_dir_all(parent).map_err(|error| {
-        format!("Could not create the Sidekick acceptance report directory: {error}")
-    })?;
+        .ok_or_else(|| format!("The Sidekick acceptance {label} path has no parent."))?;
+    std::fs::create_dir_all(parent)
+        .map_err(|error| format!("Could not create the Sidekick acceptance directory: {error}"))?;
     let tmp = path.with_extension("json.tmp");
-    std::fs::write(
-        &tmp,
-        serde_json::to_vec_pretty(payload)
-            .map_err(|error| format!("Could not encode the Sidekick acceptance report: {error}"))?,
-    )
-    .map_err(|error| format!("Could not write the Sidekick acceptance report: {error}"))?;
+    match std::fs::remove_file(&tmp) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(format!(
+                "Could not replace the Sidekick acceptance {label} staging file: {error}"
+            ))
+        }
+    }
+    let bytes = serde_json::to_vec_pretty(payload)
+        .map_err(|error| format!("Could not encode the Sidekick acceptance {label}: {error}"))?;
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600)).map_err(
-            |error| format!("Could not protect the Sidekick acceptance report: {error}"),
-        )?;
+        use std::os::unix::fs::OpenOptionsExt;
+        options
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
     }
+    let mut file = options
+        .open(&tmp)
+        .map_err(|error| format!("Could not create the Sidekick acceptance {label}: {error}"))?;
+    file.write_all(&bytes)
+        .map_err(|error| format!("Could not write the Sidekick acceptance {label}: {error}"))?;
+    file.sync_all()
+        .map_err(|error| format!("Could not sync the Sidekick acceptance {label}: {error}"))?;
+    drop(file);
     std::fs::rename(&tmp, &path)
-        .map_err(|error| format!("Could not publish the Sidekick acceptance report: {error}"))?;
+        .map_err(|error| format!("Could not publish the Sidekick acceptance {label}: {error}"))?;
+    std::fs::File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| {
+            format!("Could not sync the Sidekick acceptance {label} directory: {error}")
+        })?;
+    Ok(native_sidekick_sha256(&bytes))
+}
+
+fn write_native_sidekick_ui_acceptance_report(
+    payload: &serde_json::Value,
+) -> Result<String, String> {
+    write_native_sidekick_durable_json(
+        &native_sidekick_ui_acceptance_report_path(),
+        payload,
+        "report",
+    )
+}
+
+fn write_native_sidekick_ui_acceptance_exit_receipt(
+    nonce: &str,
+    report_sha256: &str,
+    exit_code: i32,
+) -> Result<(), String> {
+    let receipt = serde_json::json!({
+        "schema_version": 1,
+        "mode": "diagnose-native-sidekick-ui-exit",
+        "nonce_sha256": native_sidekick_sha256(nonce.as_bytes()),
+        "build_commit": env!("MINUTES_BUILD_COMMIT"),
+        "pid": std::process::id(),
+        "exit_code": exit_code,
+        "report_sha256": report_sha256,
+    });
+    write_native_sidekick_durable_json(
+        &native_sidekick_ui_acceptance_exit_receipt_path(),
+        &receipt,
+        "exit receipt",
+    )?;
     Ok(())
 }
 
@@ -18857,6 +18953,7 @@ fn run_native_sidekick_ui_acceptance(
     });
     Ok(serde_json::json!({
         "mode": "diagnose-native-sidekick-ui",
+        "process_id": std::process::id(),
         "passed_product_path": true,
         "bundle_identifier": app.config().identifier,
         "build_commit": env!("MINUTES_BUILD_COMMIT"),
@@ -19136,6 +19233,7 @@ fn validate_native_sidekick_acceptance_host_is_idle(_real_home: &Path) -> Result
 fn abort_native_sidekick_ui_acceptance(
     app: &tauri::AppHandle,
     done: &AtomicBool,
+    nonce: &str,
     reason: &str,
     exit_code: i32,
 ) {
@@ -19148,18 +19246,28 @@ fn abort_native_sidekick_ui_acceptance(
     let teardown = stop_native_sidekick_ui_acceptance(app);
     let payload = serde_json::json!({
         "mode": "diagnose-native-sidekick-ui",
+        "process_id": std::process::id(),
         "passed_product_path": false,
         "build_commit": env!("MINUTES_BUILD_COMMIT"),
         "error": reason,
         "teardown": teardown,
     });
-    let _ = write_native_sidekick_ui_acceptance_report(&payload);
-    app.exit(exit_code);
-    std::thread::sleep(Duration::from_secs(5));
+    let terminal_exit_code =
+        match write_native_sidekick_ui_acceptance_report(&payload).and_then(|report_sha256| {
+            write_native_sidekick_ui_acceptance_exit_receipt(nonce, &report_sha256, exit_code)
+        }) {
+            Ok(()) => exit_code,
+            Err(error) => {
+                eprintln!("native Sidekick UI acceptance failure report failed: {error}");
+                1
+            }
+        };
     #[cfg(unix)]
     unsafe {
-        libc::_exit(exit_code);
+        libc::_exit(terminal_exit_code);
     }
+    #[cfg(not(unix))]
+    app.exit(terminal_exit_code);
 }
 
 #[cfg(unix)]
@@ -19228,6 +19336,7 @@ pub fn launch_native_sidekick_ui_acceptance(
     let host_monitor_done = done.clone();
     let host_monitor_app = app.clone();
     let host_monitor_home = real_home.clone();
+    let host_monitor_nonce = nonce.clone();
     std::thread::spawn(move || {
         while !host_monitor_done.load(Ordering::Acquire) {
             std::thread::sleep(Duration::from_millis(250));
@@ -19236,6 +19345,7 @@ pub fn launch_native_sidekick_ui_acceptance(
                 abort_native_sidekick_ui_acceptance(
                     &host_monitor_app,
                     &host_monitor_done,
+                    &host_monitor_nonce,
                     &format!("Real-home capture isolation changed during acceptance: {error}"),
                     126,
                 );
@@ -19245,6 +19355,7 @@ pub fn launch_native_sidekick_ui_acceptance(
     });
     let watchdog_done = done.clone();
     let watchdog_app = app.clone();
+    let watchdog_nonce = nonce.clone();
     std::thread::spawn(move || {
         let deadline = Instant::now() + Duration::from_secs(150);
         while Instant::now() < deadline {
@@ -19256,6 +19367,7 @@ pub fn launch_native_sidekick_ui_acceptance(
         abort_native_sidekick_ui_acceptance(
             &watchdog_app,
             &watchdog_done,
+            &watchdog_nonce,
             "The app-side 150-second acceptance watchdog expired.",
             124,
         );
@@ -19265,6 +19377,7 @@ pub fn launch_native_sidekick_ui_acceptance(
     {
         let parent_done = done.clone();
         let parent_app = app.clone();
+        let parent_nonce = nonce.clone();
         std::thread::spawn(move || {
             let mut byte = [0_u8; 1];
             let read = loop {
@@ -19286,6 +19399,7 @@ pub fn launch_native_sidekick_ui_acceptance(
                 abort_native_sidekick_ui_acceptance(
                     &parent_app,
                     &parent_done,
+                    &parent_nonce,
                     "The acceptance runner disconnected before the app finished.",
                     125,
                 );
@@ -19298,7 +19412,7 @@ pub fn launch_native_sidekick_ui_acceptance(
     std::thread::spawn(move || {
         let _machine_lock = machine_lock;
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            run_native_sidekick_ui_acceptance(app_handle.clone(), nonce)
+            run_native_sidekick_ui_acceptance(app_handle.clone(), nonce.clone())
         }))
         .unwrap_or_else(|_| Err("Native Sidekick UI acceptance panicked.".into()));
         if worker_done
@@ -19316,6 +19430,7 @@ pub fn launch_native_sidekick_ui_acceptance(
             Err(error) => (
                 serde_json::json!({
                     "mode": "diagnose-native-sidekick-ui",
+                    "process_id": std::process::id(),
                     "passed_product_path": false,
                     "build_commit": env!("MINUTES_BUILD_COMMIT"),
                     "error": error,
@@ -19324,12 +19439,23 @@ pub fn launch_native_sidekick_ui_acceptance(
                 3,
             ),
         };
-        if let Err(error) = write_native_sidekick_ui_acceptance_report(&payload) {
-            eprintln!("native Sidekick UI acceptance report failed: {error}");
-            app_handle.exit(1);
-        } else {
-            app_handle.exit(exit_code);
+        let exit_result =
+            write_native_sidekick_ui_acceptance_report(&payload).and_then(|report_sha256| {
+                write_native_sidekick_ui_acceptance_exit_receipt(&nonce, &report_sha256, exit_code)
+            });
+        let terminal_exit_code = match exit_result {
+            Ok(()) => exit_code,
+            Err(error) => {
+                eprintln!("native Sidekick UI acceptance report failed: {error}");
+                1
+            }
+        };
+        #[cfg(unix)]
+        unsafe {
+            libc::_exit(terminal_exit_code);
         }
+        #[cfg(not(unix))]
+        app_handle.exit(terminal_exit_code);
     });
     Ok(())
 }

@@ -2,6 +2,7 @@
 
 import { execFileSync, spawn } from "node:child_process";
 import { randomBytes, createHash } from "node:crypto";
+import { statSync } from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -62,8 +63,10 @@ export function evaluateNativeSidekickUiAcceptance(payload, runtime) {
   const sourceChecks = [
     check(
       "installed_app_exit_zero",
-      runtime.exit_code === 0,
-      `The signed app exited ${runtime.exit_code}.`,
+      runtime.launch_services_exit_code === 0 &&
+        runtime.app_exit_receipt_verified === true &&
+        runtime.app_exit_code === 0,
+      `LaunchServices exited ${runtime.launch_services_exit_code}; the verified app exit was ${runtime.app_exit_code}.`,
     ),
     check(
       "canonical_executable_matches_signed_build",
@@ -86,8 +89,9 @@ export function evaluateNativeSidekickUiAcceptance(payload, runtime) {
       "real_dev_product_path",
       payload?.mode === "diagnose-native-sidekick-ui" &&
         payload?.passed_product_path === true &&
-        payload?.bundle_identifier === "com.useminutes.desktop.dev",
-      "The check must traverse the real Tauri dev app and native Sidekick window.",
+        payload?.bundle_identifier === "com.useminutes.desktop.dev" &&
+        runtime.launch_method === "macos_launch_services",
+      "The check must launch the real Tauri dev app through macOS LaunchServices and traverse the native Sidekick window.",
     ),
     check(
       "approved_embedded_fixture",
@@ -286,9 +290,12 @@ export function evaluateNativeSidekickUiAcceptance(payload, runtime) {
         payload?.teardown?.sensitive_paths_removed === true &&
         runtime.temporary_root_removed === true &&
         runtime.process_group_empty === true &&
-        runtime.provider_process_cleanup_scope === "original_app_process_group" &&
+        runtime.provider_process_cleanup_scope === "app_teardown_launchservices_wait_exact_executable_scan" &&
+        Array.isArray(runtime.app_processes_remaining) && runtime.app_processes_remaining.length === 0 &&
+        Array.isArray(runtime.provider_processes_remaining) && runtime.provider_processes_remaining.length === 0 &&
+        Array.isArray(runtime.forced_process_signals) && runtime.forced_process_signals.length === 0 &&
         payload?.teardown?.cleanup_complete === true,
-      "The diagnostic must prove complete recording, screen-worker, context, scratch-file, and original app process-group teardown before exit.",
+      "The diagnostic must prove complete recording, screen-worker, context, scratch-file, app, and provider teardown after the LaunchServices app exits.",
     ),
   ];
   const paintChecks = turns.map((turn, index) => check(
@@ -349,7 +356,182 @@ async function writeIsolatedConfig(homeDirectory) {
   ].join("\n"), { mode: 0o600 });
 }
 
-async function runInstalledUi(executable, runtime) {
+export function nativeSidekickLaunchServicesArgs({
+  app,
+  appStdoutPath,
+  appStderrPath,
+  isolatedHome,
+  isolatedTmp,
+  codeHome,
+  providerDirectory,
+  inheritedPath,
+  nonce,
+  realHome,
+}) {
+  const environment = {
+    HOME: isolatedHome,
+    TMPDIR: isolatedTmp,
+    XDG_CONFIG_HOME: path.join(isolatedHome, ".config"),
+    CODEX_HOME: codeHome,
+    PATH: `${providerDirectory}:${inheritedPath || "/usr/bin:/bin"}`,
+  };
+  return [
+    "-n",
+    "-W",
+    "-i",
+    "/dev/fd/3",
+    "-o",
+    appStdoutPath,
+    "--stderr",
+    appStderrPath,
+    ...Object.entries(environment).flatMap(([key, value]) => ["--env", `${key}=${value}`]),
+    app,
+    "--args",
+    "--diagnose-native-sidekick-ui",
+    "--consent-cloud",
+    "--consent-microphone",
+    "--consent-screen",
+    "--acceptance-nonce",
+    nonce,
+    "--acceptance-parent-fd",
+    "0",
+    "--acceptance-real-home",
+    realHome,
+  ];
+}
+
+export function nativeSidekickTemporaryParent(platform = process.platform, defaultTmp = os.tmpdir()) {
+  return platform === "darwin" ? "/tmp" : defaultTmp;
+}
+
+function exactExecutablePids(executable) {
+  const expected = statSync(executable);
+  const processName = path.basename(executable);
+  let candidates = "";
+  try {
+    candidates = execFileSync("/usr/bin/pgrep", ["-x", processName], { encoding: "utf8" });
+  } catch (error) {
+    if (error?.status === 1) return [];
+    throw error;
+  }
+  const matches = [];
+  for (const candidate of candidates.split("\n").filter(Boolean)) {
+    if (!/^\d+$/.test(candidate)) continue;
+    let textFiles = "";
+    try {
+      textFiles = execFileSync("/usr/sbin/lsof", ["-a", "-p", candidate, "-d", "txt", "-Fn"], {
+        encoding: "utf8",
+      });
+    } catch (error) {
+      try {
+        process.kill(Number(candidate), 0);
+      } catch (probeError) {
+        if (probeError?.code === "ESRCH") continue;
+      }
+      throw new Error(`could not inspect live ${processName} candidate PID ${candidate}: ${error.message}`);
+    }
+    const textPaths = textFiles.split("\n").filter((line) => line.startsWith("n")).map((line) => line.slice(1));
+    let matched = false;
+    for (const textPath of textPaths) {
+      try {
+        const observed = statSync(textPath);
+        if (observed.dev === expected.dev && observed.ino === expected.ino) {
+          matched = true;
+          break;
+        }
+      } catch (error) {
+        try {
+          process.kill(Number(candidate), 0);
+        } catch (probeError) {
+          if (probeError?.code === "ESRCH") continue;
+        }
+        throw new Error(`could not identify live ${processName} candidate PID ${candidate}: ${error.message}`);
+      }
+    }
+    if (matched) matches.push(Number(candidate));
+  }
+  return matches;
+}
+
+const wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+
+export async function terminateNewExactProcesses({
+  executable,
+  baselinePids = [],
+  scan = exactExecutablePids,
+  signal = (pid, name) => process.kill(pid, name),
+  pause = wait,
+}) {
+  const baseline = new Set(baselinePids);
+  const signals = [];
+  const remaining = () => scan(executable).filter((pid) => !baseline.has(pid));
+  const waitUntilEmpty = async (attempts) => {
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      const pids = remaining();
+      if (pids.length === 0) return [];
+      await pause(250);
+    }
+    return remaining();
+  };
+  let pids = await waitUntilEmpty(20);
+  for (const pid of pids) {
+    try {
+      signal(pid, "SIGTERM");
+      signals.push({ pid, signal: "SIGTERM" });
+    } catch (error) {
+      if (error?.code !== "ESRCH") throw error;
+    }
+  }
+  pids = await waitUntilEmpty(12);
+  for (const pid of pids) {
+    try {
+      signal(pid, "SIGKILL");
+      signals.push({ pid, signal: "SIGKILL" });
+    } catch (error) {
+      if (error?.code !== "ESRCH") throw error;
+    }
+  }
+  return { remaining: await waitUntilEmpty(8), signals };
+}
+
+export async function cleanupNativeSidekickProcessLanes({
+  appExecutable,
+  appBaselinePids = [],
+  providerExecutable,
+  providerBaselinePids = [],
+  terminate = terminateNewExactProcesses,
+}) {
+  const result = {
+    app: { remaining: [], signals: [] },
+    provider: { remaining: [], signals: [] },
+    errors: [],
+    retainTemporaryRoot: false,
+  };
+  for (const lane of [
+    { name: "app", executable: appExecutable, baselinePids: appBaselinePids },
+    { name: "provider", executable: providerExecutable, baselinePids: providerBaselinePids },
+  ]) {
+    try {
+      const cleanup = await terminate({
+        executable: lane.executable,
+        baselinePids: lane.baselinePids,
+      });
+      result[lane.name] = cleanup;
+      if (cleanup.remaining.length > 0) {
+        result.retainTemporaryRoot = true;
+        result.errors.push(new Error(
+          `exact ${lane.name} processes remained active: ${cleanup.remaining.join(",")}`,
+        ));
+      }
+    } catch (error) {
+      result.retainTemporaryRoot = true;
+      result.errors.push(new Error(`exact ${lane.name} cleanup failed: ${error.message}`));
+    }
+  }
+  return result;
+}
+
+async function runInstalledUi(app, runtime) {
   const egressOverrides = [
     "HTTPS_PROXY",
     "HTTP_PROXY",
@@ -361,14 +543,30 @@ async function runInstalledUi(executable, runtime) {
       `native Sidekick UI acceptance requires direct provider egress; unset ${egressOverrides.join(", ")}`,
     );
   }
-  const temporaryRoot = await fs.mkdtemp(path.join(os.tmpdir(), "minutes-sidekick-ui-"));
+  // The app-server capture relay uses a Unix-domain socket. macOS limits
+  // sockaddr_un paths to 104 bytes, while os.tmpdir() normally expands to a
+  // long /var/folders/... path. A private mkdtemp directly under /tmp keeps
+  // the exact-session socket below that hard platform limit.
+  const temporaryParent = nativeSidekickTemporaryParent();
+  const temporaryRoot = await fs.mkdtemp(path.join(temporaryParent, "minutes-sidekick-ui-"));
+  await fs.chmod(temporaryRoot, 0o700);
   let child = null;
   let timeout = null;
   let forceKill = null;
   let outcome = null;
-  let processGroupEmpty = false;
+  let processGroupEmpty = true;
   let providerCopyPostSha256 = null;
   let providerCopyPath = null;
+  let parentLease = null;
+  let processScanReady = false;
+  let launchStarted = false;
+  let appBaselinePids = [];
+  let providerBaselinePids = [];
+  let appProcessesRemaining = [];
+  let providerProcessesRemaining = [];
+  let forcedProcessSignals = [];
+  let temporaryRootRemoved = false;
+  let primaryError = null;
   const processGroupExists = () => {
     if (!child?.pid) return false;
     try {
@@ -397,12 +595,17 @@ async function runInstalledUi(executable, runtime) {
     const isolatedTmp = path.join(temporaryRoot, "tmp");
     const minutesDirectory = path.join(isolatedHome, ".minutes");
     const reportPath = path.join(minutesDirectory, "native-sidekick-ui-acceptance.json");
+    const exitReceiptPath = path.join(minutesDirectory, "native-sidekick-ui-acceptance.exit.json");
+    const appStdoutPath = path.join(temporaryRoot, "app.stdout.log");
+    const appStderrPath = path.join(temporaryRoot, "app.stderr.log");
     const providerDirectory = path.join(temporaryRoot, "provider");
     providerCopyPath = path.join(providerDirectory, "codex");
     const nonce = randomBytes(32).toString("hex");
     await fs.mkdir(minutesDirectory, { recursive: true, mode: 0o700 });
     await fs.mkdir(isolatedTmp, { recursive: true, mode: 0o700 });
     await fs.mkdir(providerDirectory, { mode: 0o700 });
+    await fs.writeFile(appStdoutPath, "", { mode: 0o600 });
+    await fs.writeFile(appStderrPath, "", { mode: 0o600 });
     await fs.copyFile(runtime.source_provider_path, providerCopyPath);
     await fs.chmod(providerCopyPath, 0o500);
     const providerCopySha256 = await fs.readFile(providerCopyPath).then(sha256);
@@ -420,6 +623,9 @@ async function runInstalledUi(executable, runtime) {
       expected_provider_version: providerCopyVersion,
       provider_copy_is_private: true,
     };
+    appBaselinePids = exactExecutablePids(runtime.executable_path);
+    providerBaselinePids = exactExecutablePids(providerCopyPath);
+    processScanReady = true;
     await fs.writeFile(
       path.join(minutesDirectory, "native-sidekick-ui-acceptance.challenge"),
       nonce,
@@ -427,33 +633,29 @@ async function runInstalledUi(executable, runtime) {
     );
     await writeIsolatedConfig(isolatedHome);
     const realHome = os.homedir();
-    child = spawn(executable, [
-      "--diagnose-native-sidekick-ui",
-      "--consent-cloud",
-      "--consent-microphone",
-      "--consent-screen",
-      "--acceptance-nonce",
+    const launchArgs = nativeSidekickLaunchServicesArgs({
+      app,
+      appStdoutPath,
+      appStderrPath,
+      isolatedHome,
+      isolatedTmp,
+      codeHome: process.env.CODEX_HOME || path.join(realHome, ".codex"),
+      providerDirectory,
+      inheritedPath: process.env.PATH,
       nonce,
-      "--acceptance-parent-fd",
-      "3",
-      "--acceptance-real-home",
       realHome,
-    ], {
-      env: {
-        ...process.env,
-        HOME: isolatedHome,
-        TMPDIR: isolatedTmp,
-        XDG_CONFIG_HOME: path.join(isolatedHome, ".config"),
-        CODEX_HOME: process.env.CODEX_HOME || path.join(realHome, ".codex"),
-        PATH: `${providerDirectory}:${process.env.PATH || "/usr/bin:/bin"}`,
-      },
+    });
+    child = spawn("/usr/bin/open", launchArgs, {
+      env: process.env,
       stdio: ["ignore", "pipe", "pipe", "pipe"],
       detached: true,
     });
-    // fd 3 is a parent-owned lease. The child blocks on its peer; if this
-    // runner crashes or disconnects, the app-side watchdog sees EOF and stops
-    // mic, screen, Sidekick, and the provider process itself.
-    const parentLease = child.stdio[3];
+    launchStarted = true;
+    // LaunchServices makes Minutes Dev—not Terminal or Node—the TCC-responsible
+    // process. `open -i /dev/fd/3` maps this parent-owned pipe to the app's
+    // stdin; if the runner crashes, the app watchdog sees EOF and stops mic,
+    // screen, Sidekick, and the provider process itself.
+    parentLease = child.stdio[3];
     parentLease.on("error", () => {});
     let stdout = "";
     let stderr = "";
@@ -493,44 +695,128 @@ async function runInstalledUi(executable, runtime) {
     timeout = null;
     if (forceKill) clearTimeout(forceKill);
     forceKill = null;
-    processGroupEmpty = await terminateProcessGroup();
+    processGroupEmpty = processGroupEmpty && await terminateProcessGroup();
     if (!processGroupEmpty) {
-      throw new Error("native Sidekick UI acceptance left a detached process in its process group");
+      throw new Error("native Sidekick UI acceptance left its LaunchServices wrapper running");
     }
     providerCopyPostSha256 = await fs.readFile(providerCopyPath).then(sha256);
     const wallMs = Math.round(performance.now() - startedAt);
     if (timedOut) throw new Error(`native Sidekick UI acceptance exceeded ${HARD_TIMEOUT_MS}ms`);
-    const payload = JSON.parse(await fs.readFile(reportPath, "utf8"));
+    const appStdout = await fs.readFile(appStdoutPath, "utf8");
+    const appStderr = await fs.readFile(appStderrPath, "utf8");
+    if (Buffer.byteLength(appStdout) > MAX_OUTPUT_BYTES ||
+        Buffer.byteLength(appStderr) > MAX_OUTPUT_BYTES) {
+      throw new Error("native Sidekick UI acceptance app output exceeded its bounded limit");
+    }
+    const reportBytes = await fs.readFile(reportPath);
+    const payload = JSON.parse(reportBytes.toString("utf8"));
+    const receipt = JSON.parse(await fs.readFile(exitReceiptPath, "utf8"));
+    const appExitReceiptVerified = receipt?.schema_version === 1 &&
+      receipt?.mode === "diagnose-native-sidekick-ui-exit" &&
+      receipt?.nonce_sha256 === sha256(nonce) &&
+      receipt?.build_commit === runtime.expected_build_commit &&
+      Number.isInteger(receipt?.pid) && receipt.pid > 0 &&
+      receipt.pid === payload?.process_id &&
+      Number.isInteger(receipt?.exit_code) &&
+      receipt?.report_sha256 === sha256(reportBytes);
+    if (!appExitReceiptVerified) {
+      throw new Error("native Sidekick UI acceptance exit receipt did not bind the app, report, build, and nonce");
+    }
     outcome = {
       payload,
       runtime: {
         ...runtime,
-        exit_code: exitCode,
+        exit_code: receipt.exit_code,
+        app_exit_code: receipt.exit_code,
+        app_exit_receipt_verified: true,
         wall_ms: wallMs,
-        stderr: stderr.trim().slice(0, 4_000),
-        stdout: stdout.trim().slice(0, 1_000),
+        launch_method: "macos_launch_services",
+        launch_services_exit_code: exitCode,
+        stderr: [appStderr, stderr].filter(Boolean).join("\n").trim().slice(0, 4_000),
+        stdout: [appStdout, stdout].filter(Boolean).join("\n").trim().slice(0, 1_000),
       },
     };
+  } catch (error) {
+    primaryError = error;
   } finally {
+    const cleanupErrors = [];
+    let retainTemporaryRoot = false;
     if (timeout) clearTimeout(timeout);
     if (forceKill) clearTimeout(forceKill);
     if (child && child.exitCode === null) {
-      child.stdio[3]?.destroy();
       try {
+        parentLease?.destroy();
         process.kill(-child.pid, "SIGTERM");
-      } catch {
-        child.kill("SIGTERM");
+      } catch (error) {
+        try {
+          child.kill("SIGTERM");
+        } catch (fallbackError) {
+          cleanupErrors.push(new Error(
+            `could not request LaunchServices wrapper shutdown: ${error.message}; fallback: ${fallbackError.message}`,
+          ));
+        }
       }
     }
-    if (child) processGroupEmpty = await terminateProcessGroup();
+    if (child) {
+      try {
+        const wrapperGroupEmpty = await terminateProcessGroup();
+        processGroupEmpty = processGroupEmpty && wrapperGroupEmpty;
+        if (!wrapperGroupEmpty) {
+          retainTemporaryRoot = true;
+          cleanupErrors.push(new Error("LaunchServices wrapper process group remained active"));
+        }
+      } catch (error) {
+        processGroupEmpty = false;
+        retainTemporaryRoot = true;
+        cleanupErrors.push(new Error(`LaunchServices wrapper cleanup failed: ${error.message}`));
+      }
+    }
+    if (launchStarted && processScanReady) {
+      const exactCleanup = await cleanupNativeSidekickProcessLanes({
+        appExecutable: runtime.executable_path,
+        appBaselinePids,
+        providerExecutable: providerCopyPath,
+        providerBaselinePids,
+      });
+      appProcessesRemaining = exactCleanup.app.remaining;
+      providerProcessesRemaining = exactCleanup.provider.remaining;
+      forcedProcessSignals = [
+        ...exactCleanup.app.signals.map((item) => ({ scope: "app", ...item })),
+        ...exactCleanup.provider.signals.map((item) => ({ scope: "provider", ...item })),
+      ];
+      if (exactCleanup.errors.length > 0) {
+        processGroupEmpty = false;
+        cleanupErrors.push(...exactCleanup.errors);
+      }
+      retainTemporaryRoot = retainTemporaryRoot || exactCleanup.retainTemporaryRoot;
+      processGroupEmpty = processGroupEmpty &&
+        appProcessesRemaining.length === 0 && providerProcessesRemaining.length === 0;
+    }
     if (providerCopyPath) {
       providerCopyPostSha256 = await fs.readFile(providerCopyPath).then(sha256).catch(() => null);
     }
-    await fs.rm(temporaryRoot, { recursive: true, force: true });
+    if (!retainTemporaryRoot) {
+      try {
+        await fs.rm(temporaryRoot, { recursive: true, force: true });
+        temporaryRootRemoved = true;
+      } catch (error) {
+        cleanupErrors.push(new Error(`private acceptance root cleanup failed: ${error.message}`));
+      }
+    }
+    if (cleanupErrors.length > 0) {
+      throw new AggregateError(
+        primaryError ? [primaryError, ...cleanupErrors] : cleanupErrors,
+        "native Sidekick UI acceptance cleanup was incomplete",
+      );
+    }
   }
-  outcome.runtime.temporary_root_removed = true;
+  if (primaryError) throw primaryError;
+  outcome.runtime.temporary_root_removed = temporaryRootRemoved;
   outcome.runtime.process_group_empty = processGroupEmpty;
-  outcome.runtime.provider_process_cleanup_scope = "original_app_process_group";
+  outcome.runtime.app_processes_remaining = appProcessesRemaining;
+  outcome.runtime.provider_processes_remaining = providerProcessesRemaining;
+  outcome.runtime.forced_process_signals = forcedProcessSignals;
+  outcome.runtime.provider_process_cleanup_scope = "app_teardown_launchservices_wait_exact_executable_scan";
   outcome.runtime.provider_copy_post_sha256 = providerCopyPostSha256;
   return outcome;
 }
@@ -587,7 +873,8 @@ async function main(argv) {
     fs.readFile(signedBuildExecutable).then(sha256),
     bundleManifestSha256(signedBuildApp),
   ]);
-  const { payload, runtime } = await runInstalledUi(executable, {
+  const { payload, runtime } = await runInstalledUi(canonicalApp, {
+    executable_path: executable,
     executable_sha256: executableSha256,
     bundle_sha256: bundleSha256,
     expected_executable_sha256: expectedExecutableSha256,

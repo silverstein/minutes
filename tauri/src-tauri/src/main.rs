@@ -450,11 +450,9 @@ fn parse_native_sidekick_ui_diagnostic_cli(
         } else if arg == "--acceptance-parent-fd" {
             let value = diagnostic_value_after(args, &mut index, arg)?;
             if parent_fd
-                .replace(
-                    value.parse::<i32>().map_err(|_| {
-                        "--acceptance-parent-fd must be a positive integer".to_string()
-                    })?,
-                )
+                .replace(value.parse::<i32>().map_err(|_| {
+                    "--acceptance-parent-fd must be a non-negative integer".to_string()
+                })?)
                 .is_some()
             {
                 return Err("Specify exactly one Sidekick UI acceptance parent fd".into());
@@ -489,8 +487,10 @@ fn parse_native_sidekick_ui_diagnostic_cli(
     let parent_fd = parent_fd.ok_or_else(|| {
         "--diagnose-native-sidekick-ui requires --acceptance-parent-fd".to_string()
     })?;
-    if parent_fd < 3 {
-        return Err("--acceptance-parent-fd must be an inherited descriptor at least 3".into());
+    if parent_fd != 0 && parent_fd < 3 {
+        return Err(
+            "--acceptance-parent-fd must be stdin (0) or an inherited descriptor at least 3".into(),
+        );
     }
     let real_home = real_home.ok_or_else(|| {
         "--diagnose-native-sidekick-ui requires --acceptance-real-home".to_string()
@@ -800,6 +800,39 @@ mod native_sidekick_cli_tests {
         );
         assert_eq!(parsed.parent_fd, 3);
         assert_eq!(parsed.real_home, PathBuf::from("/Users/tester"));
+    }
+
+    #[test]
+    fn ui_diagnostic_accepts_launchservices_stdin_as_the_parent_lease() {
+        let parsed = parse_native_sidekick_ui_diagnostic_cli(&args(&[
+            "--diagnose-native-sidekick-ui",
+            "--consent-cloud",
+            "--consent-microphone",
+            "--consent-screen",
+            "--acceptance-nonce=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "--acceptance-parent-fd",
+            "0",
+            "--acceptance-real-home",
+            "/Users/tester",
+        ]))
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(parsed.parent_fd, 0);
+
+        let stderr = parse_native_sidekick_ui_diagnostic_cli(&args(&[
+            "--diagnose-native-sidekick-ui",
+            "--consent-cloud",
+            "--consent-microphone",
+            "--consent-screen",
+            "--acceptance-nonce=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "--acceptance-parent-fd",
+            "2",
+            "--acceptance-real-home",
+            "/Users/tester",
+        ]))
+        .unwrap_err();
+        assert!(stderr.contains("stdin (0)"));
     }
 
     #[test]

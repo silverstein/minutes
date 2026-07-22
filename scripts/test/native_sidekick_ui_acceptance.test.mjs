@@ -4,7 +4,13 @@ import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import vm from 'node:vm';
 
-import { evaluateNativeSidekickUiAcceptance } from '../run_native_sidekick_ui_acceptance.mjs';
+import {
+  cleanupNativeSidekickProcessLanes,
+  evaluateNativeSidekickUiAcceptance,
+  nativeSidekickLaunchServicesArgs,
+  nativeSidekickTemporaryParent,
+  terminateNewExactProcesses,
+} from '../run_native_sidekick_ui_acceptance.mjs';
 
 const sidekickHtml = new URL('../../tauri/src/sidekick.html', import.meta.url);
 
@@ -792,13 +798,120 @@ function passingRuntime() {
     expected_provider_sha256: '9'.repeat(64),
     expected_provider_version: 'codex-cli 1.0.0',
     wall_ms: 25_000,
+    launch_method: 'macos_launch_services',
+    launch_services_exit_code: 0,
+    app_exit_code: 0,
+    app_exit_receipt_verified: true,
     temporary_root_removed: true,
     process_group_empty: true,
-    provider_process_cleanup_scope: 'original_app_process_group',
+    provider_process_cleanup_scope: 'app_teardown_launchservices_wait_exact_executable_scan',
+    app_processes_remaining: [],
+    provider_processes_remaining: [],
+    forced_process_signals: [],
     provider_copy_is_private: true,
     provider_copy_post_sha256: '9'.repeat(64),
   };
 }
+
+test('native UI acceptance launches the signed app through LaunchServices with a parent lease', () => {
+  const args = nativeSidekickLaunchServicesArgs({
+    app: '/Users/tester/Applications/Minutes Dev.app',
+    appStdoutPath: '/tmp/acceptance/app.stdout',
+    appStderrPath: '/tmp/acceptance/app.stderr',
+    isolatedHome: '/tmp/acceptance/home',
+    isolatedTmp: '/tmp/acceptance/tmp',
+    codeHome: '/Users/tester/.codex',
+    providerDirectory: '/tmp/acceptance/provider',
+    inheritedPath: '/opt/homebrew/bin:/usr/bin:/bin',
+    nonce: 'a'.repeat(64),
+    realHome: '/Users/tester',
+  });
+
+  assert.deepEqual(args.slice(0, 4), ['-n', '-W', '-i', '/dev/fd/3']);
+  assert.ok(args.includes('HOME=/tmp/acceptance/home'));
+  assert.ok(args.includes('TMPDIR=/tmp/acceptance/tmp'));
+  assert.ok(args.includes('PATH=/tmp/acceptance/provider:/opt/homebrew/bin:/usr/bin:/bin'));
+  const appIndex = args.indexOf('/Users/tester/Applications/Minutes Dev.app');
+  const argsIndex = args.indexOf('--args');
+  assert.ok(appIndex > 0 && argsIndex === appIndex + 1, 'the bundle path must precede app argv');
+  const parentFdIndex = args.indexOf('--acceptance-parent-fd');
+  assert.equal(args[parentFdIndex + 1], '0', 'LaunchServices maps the inherited lease to app stdin');
+  assert.equal(nativeSidekickTemporaryParent('darwin', '/var/folders/very/long/path'), '/tmp');
+  assert.equal(nativeSidekickTemporaryParent('linux', '/var/tmp'), '/var/tmp');
+});
+
+test('LaunchServices cleanup retires only newly launched exact processes', async () => {
+  let live = [7, 42];
+  const signals = [];
+  const cleanup = await terminateNewExactProcesses({
+    executable: '/Applications/Minutes Dev.app/Contents/MacOS/minutes-app',
+    baselinePids: [7],
+    scan: () => [...live],
+    signal(pid, name) {
+      signals.push({ pid, name });
+      if (pid === 42 && name === 'SIGTERM') live = [7];
+    },
+    pause: async () => {},
+  });
+
+  assert.deepEqual(cleanup.remaining, []);
+  assert.deepEqual(cleanup.signals, [{ pid: 42, signal: 'SIGTERM' }]);
+  assert.deepEqual(signals, [{ pid: 42, name: 'SIGTERM' }]);
+});
+
+test('LaunchServices cleanup escalates to SIGKILL and fails closed on scan uncertainty', async () => {
+  let live = [91];
+  const signals = [];
+  const cleanup = await terminateNewExactProcesses({
+    executable: '/tmp/provider/codex',
+    scan: () => [...live],
+    signal(pid, name) {
+      signals.push({ pid, name });
+      if (name === 'SIGKILL') live = [];
+    },
+    pause: async () => {},
+  });
+  assert.deepEqual(cleanup.remaining, []);
+  assert.deepEqual(cleanup.signals, [
+    { pid: 91, signal: 'SIGTERM' },
+    { pid: 91, signal: 'SIGKILL' },
+  ]);
+  assert.deepEqual(signals, [
+    { pid: 91, name: 'SIGTERM' },
+    { pid: 91, name: 'SIGKILL' },
+  ]);
+
+  await assert.rejects(
+    terminateNewExactProcesses({
+      executable: '/tmp/provider/codex',
+      scan: () => { throw new Error('lsof denied'); },
+      pause: async () => {},
+    }),
+    /lsof denied/,
+  );
+});
+
+test('LaunchServices cleanup attempts the provider lane even when the app lane is uncertain', async () => {
+  const calls = [];
+  const cleanup = await cleanupNativeSidekickProcessLanes({
+    appExecutable: '/Applications/Minutes Dev.app/Contents/MacOS/minutes-app',
+    providerExecutable: '/tmp/provider/codex',
+    terminate: async ({ executable }) => {
+      calls.push(executable);
+      if (executable.endsWith('/minutes-app')) throw new Error('app lsof denied');
+      return { remaining: [], signals: [] };
+    },
+  });
+
+  assert.deepEqual(calls, [
+    '/Applications/Minutes Dev.app/Contents/MacOS/minutes-app',
+    '/tmp/provider/codex',
+  ]);
+  assert.equal(cleanup.errors.length, 1);
+  assert.match(cleanup.errors[0].message, /app lsof denied/);
+  assert.equal(cleanup.retainTemporaryRoot, true);
+  assert.deepEqual(cleanup.provider, { remaining: [], signals: [] });
+});
 
 test('installed UI acceptance requires product path, quality, and paint latency together', async () => {
   const fixture = JSON.parse(await readFile(
@@ -900,6 +1013,10 @@ test('the evaluator rejects a surviving provider process or changed private prov
   );
   for (const mutate of [
     (runtime) => { runtime.process_group_empty = false; },
+    (runtime) => { runtime.provider_processes_remaining = [91]; },
+    (runtime) => { runtime.forced_process_signals = [{ scope: 'provider', pid: 91, signal: 'SIGTERM' }]; },
+    (runtime) => { runtime.app_exit_receipt_verified = false; },
+    (runtime) => { runtime.app_exit_code = 1; },
     (runtime) => { runtime.provider_copy_post_sha256 = '0'.repeat(64); },
   ]) {
     const payload = passingProductPayload();

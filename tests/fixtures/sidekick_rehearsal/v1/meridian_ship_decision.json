@@ -70,7 +70,7 @@
       "typed_prompt": "Now pretend I'm Meridian's procurement lead — what should I push the vendor for?",
       "required_behaviors": [
         "persist the role flip and advise Meridian rather than the vendor",
-        "keep the penalty applicable to all automated resolutions",
+        "keep every wrong automated resolution subject to the existing penalty, with no automation carve-outs",
         "require a written confidence-threshold SLA",
         "require error-rate reporting or caps",
         "preserve a right to revert to human-in-the-loop"

@@ -53,7 +53,7 @@ function passingPayload() {
         prompt: procurementTurn.prompt,
         reasoning_session_correlation: reasoningSessionCorrelation,
         result: candidate(
-          "For Meridian procurement: keep the $200 credit on every automated resolution, require a written confidence-threshold SLA, demand audited error reporting and caps, and preserve Meridian's right to revert to human handling.",
+          "For Meridian procurement: keep every wrong automated resolution subject to the $200 credit with no automation carve-outs, require a written confidence-threshold SLA, demand audited error reporting and caps, and preserve Meridian's right to revert to human handling.",
           ["utterance-1", "utterance-3", "utterance-4"],
         ),
       },

@@ -11643,6 +11643,14 @@ mod tests {
         assert!(sidekick.contains("cmd_native_sidekick_send"));
         assert!(sidekick.contains("sidekick:state"));
         assert!(sidekick.contains("id=\"retry\""));
+        assert!(
+            NATIVE_SIDEKICK_DEVELOPER_INSTRUCTIONS.contains("contractual or financial exposure")
+        );
+        assert!(NATIVE_SIDEKICK_DEVELOPER_INSTRUCTIONS.contains("newest typed role"));
+        assert!(NATIVE_SIDEKICK_DEVELOPER_INSTRUCTIONS.contains("bargained-for remedy"));
+        assert!(NATIVE_SIDEKICK_DEVELOPER_INSTRUCTIONS.contains("narrowing or broadening"));
+        assert!(NATIVE_SIDEKICK_DEVELOPER_INSTRUCTIONS.contains("written acceptance criteria"));
+        assert!(NATIVE_SIDEKICK_DEVELOPER_INSTRUCTIONS.contains("customer-controlled fallback"));
         assert!(sidekick.contains("showSubmitError"));
         assert!(sidekick.contains("snapshot.sessionId"));
         assert!(sidekick.contains("Ask for strategy, a calculation, what to say next"));
@@ -15363,7 +15371,9 @@ const NATIVE_SIDEKICK_BASE_INSTRUCTIONS: &str = r#"You are Minutes Sidekick, a p
 
 const NATIVE_SIDEKICK_DEVELOPER_INSTRUCTIONS: &str = r#"Improve the user's next decision or move; do not summarize the meeting. On background turns, silence is success: speak only for a timely contradiction, risk, decision, opening, stale commitment, or non-obvious synthesis. Routine movement, test chatter, greetings, and already-resolved clarification stay silent. On foreground turns, answer the authoritative typed user message directly.
 
-For quantitative or binary decisions, compute the governing consequence, say which headline metric stops being decisive, propose a thresholded, segmented, staged, or reversible path, and end with a direct question (with a question mark) asking for the distribution or boundary that changes the answer. Protect the user's current stakeholder with measurable acceptance criteria, aligned incentives, reporting or audit rights, and, when relevant, an explicit "human-reversion right" allowing that stakeholder to restore human handling. Do not force these patterns when they do not fit the evidence.
+For quantitative or binary decisions, compute the governing consequence, label it plainly as contractual or financial exposure when money or penalties govern, say which headline metric stops being decisive, propose a thresholded, segmented, staged, or reversible path, and end with a direct question (with a question mark) asking for the distribution or boundary that changes the answer. On a direct risk question, prioritize that consequence, reframe, next move, and boundary question; do not dump a procurement checklist unless the user is currently asking from the customer or procurement side.
+
+The newest typed role or stakeholder correction is authoritative: explicitly name and serve that stakeholder, and do not continue advice for the prior role. Protect the current stakeholder with measurable acceptance criteria, aligned incentives, reporting or audit rights, and a reversible fallback when relevant. For customer or procurement questions, map each evidenced contract term to precisely the outcomes it covers, preserve the bargained-for remedy without narrowing or broadening its scope, translate performance evidence into measurable written acceptance criteria, make observability and enforcement explicit, and keep any customer-controlled fallback independent of vendor permission. Do not force these patterns when they do not fit the evidence.
 
 A visual claim is allowed only when this turn carries an exact-session image and must cite its visual evidence id. Set claims_visual_observation to true if and only if the visible response relies on pixels from that image, and include the exact visual evidence id when true; otherwise set it to false and return no visual evidence ids. Return only the intervention_candidate_v1 JSON object. Keep background text at 65 words or fewer and foreground text at 90 words or fewer, with the useful conclusion first."#;
 

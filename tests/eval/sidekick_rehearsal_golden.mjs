@@ -27,6 +27,183 @@ export function scoreMeridianResponses(responses) {
   const turn1 = normalized(responses.turn_1);
   const turn2 = normalized(responses.turn_2);
 
+  const penaltyTerm =
+    /\b(?:penalt(?:y|ies)|penali[sz]\w*|credits?|charg(?:e|ed|es|ing|eable)|liab(?:le|ility)|remed(?:y|ies))\b/;
+  const automationFragment = String.raw`(?:automat\w*|ai|agent|model|machine|ai[- ]handled|ai[- ]resolved|agent[- ]handled|agent[- ]resolved|model[- ]handled|model[- ]resolved)`;
+  const wrongFragment = String.raw`(?:wrong(?:ly)?|incorrect(?:ly)?|erroneous(?:ly)?|errors?|failed|failures?|mistakes?|mistaken|bad\s+(?:resolutions?|outcomes?|outputs?|responses?|answers?|tickets?))`;
+  const relationBridge = String.raw`(?:(?!\b(?:manual|human|and|but|while|whereas|some|selected)\b)[^,;.!?]){0,60}`;
+  const directAutomatedError = String.raw`(?:\b${automationFragment}\b${relationBridge}\b${wrongFragment}\b|\b${wrongFragment}\b${relationBridge}\b${automationFragment}\b)`;
+  const conditionalAutomatedError = String.raw`\b${automationFragment}\b[^;.!?]{0,55},\s*(?:if|when)\b[^;.!?]{0,45}\b${wrongFragment}\b`;
+  const automatedError = String.raw`(?:${directAutomatedError}|${conditionalAutomatedError})`;
+  const quantifiedAutomatedError = String.raw`\b(?:every|each|all|any|per|whenever)\b${relationBridge}${automatedError}`;
+  const exceptionScopedAutomatedError = String.raw`${automatedError}(?:\s+without\s+(?:any\s+)?(?:exceptions?|exemptions?)|\s+across\s+the\s+board|\s*,?\s*(?:with\s+)?(?:no|zero)\s+(?:automation\s+)?(?:exceptions?|exemptions?|carve[- ]?outs?)(?!\s+(?:for|in|to)\b))`;
+  const scopedAutomatedError = String.raw`(?:${quantifiedAutomatedError}|${exceptionScopedAutomatedError})`;
+  const remedyFragment = String.raw`(?:the\s+)?(?:(?:existing|contractual|current)\s+)*(?:\$\s*200\s+|two\s+hundred\s+dollar\s+)?(?:penalt(?:y|ies)|credits?|remed(?:y|ies)|liability)`;
+  const preserveVerb = String.raw`(?:keep|retain|preserve|maintain|enforce|apply|demand|require|push\s+for)`;
+  const scopedRemedyPatterns = [
+    new RegExp(
+      String.raw`\b${preserveVerb}\b[^;.!?]{0,25}${remedyFragment}\s+(?:(?:on|for|to|against|when|if)\s+${scopedAutomatedError}|whenever\s+${automatedError})`,
+    ),
+    new RegExp(
+      String.raw`${remedyFragment}\s+(?:(?:must|should|shall)\s+)?(?:still\s+)?(?:appl(?:y|ies)|covers?|attaches?)\s+(?:to|for|on)\s+${scopedAutomatedError}`,
+    ),
+    new RegExp(
+      String.raw`${remedyFragment}\s+(?:(?:must|should|shall)\s+)?(?:remains?|stays?)\s+(?:in\s+force|intact)\s+(?:for|on)\s+${scopedAutomatedError}`,
+    ),
+    new RegExp(
+      String.raw`${scopedAutomatedError}[^;.!?]{0,30}\b(?:subject\s+to|covered\s+by|under)\s+${remedyFragment}`,
+    ),
+    new RegExp(
+      String.raw`${scopedAutomatedError}(?:(?!\b(?:not|never)\b|n't)[^;.!?]){0,25}\b(?:triggers?|incurs?|receives?|gets?|carr(?:y|ies))\s+${remedyFragment}`,
+    ),
+    new RegExp(
+      String.raw`${scopedAutomatedError}\s*,\s*${preserveVerb}\b[^;.!?]{0,25}${remedyFragment}`,
+    ),
+    new RegExp(
+      String.raw`\b(?:penali[sz]e|charge)\s+(?:\$\s*200\s+(?:for|on)\s+)?${scopedAutomatedError}`,
+    ),
+    new RegExp(
+      String.raw`\b(?:hold\s+)?(?:the\s+)?(?:vendor|provider|company)?\s*(?:liable|responsible)\s+for\s+${scopedAutomatedError}`,
+    ),
+    new RegExp(
+      String.raw`\b(?:do\s+not|don't|never)\s+(?:carve|exclude|exempt)\s+${automatedError}\s+(?:out\s+of|from)\s+${remedyFragment}`,
+    ),
+    new RegExp(
+      String.raw`\bno\b[^;.!?]{0,20}${automatedError}[^;.!?]{0,25}\b(?:is|are|be)\s+exempt\s+from\s+${remedyFragment}`,
+    ),
+    new RegExp(
+      String.raw`${automatedError}[^;.!?]{0,25}\b(?:is|are|be)\s+(?:not|never)\s+(?:exempt|excluded)\s+from\s+${remedyFragment}`,
+    ),
+    new RegExp(
+      String.raw`\bno\b[^;.!?]{0,20}${automatedError}[^;.!?]{0,30}\b(?:(?:should|must|can)\s+)?(?:escape|avoid)\s+${remedyFragment}`,
+    ),
+    new RegExp(
+      String.raw`\b(?:do\s+not|don't|never)\s+(?:waive|remove|drop|eliminate|suspend|cancel|cap)\w*\s+${remedyFragment}\s+(?:on|for|to)\s+${scopedAutomatedError}`,
+    ),
+    new RegExp(
+      String.raw`\b(?:(?:may|must|shall|can)\s+not|cannot|can't)\s+(?:waive|remove|drop|eliminate|suspend|cancel|cap)\w*\s+${remedyFragment}\s+(?:on|for|to)\s+${scopedAutomatedError}`,
+    ),
+    new RegExp(
+      String.raw`\b(?:do\s+not|don't|never)\s+allow\s+${remedyFragment}\s+to\s+be\s+(?:waived|removed|dropped|eliminated|suspended|cancelled|canceled|capped)\s+(?:on|for|to)\s+${scopedAutomatedError}`,
+    ),
+    new RegExp(
+      String.raw`\b${preserveVerb}\b[^;.!?]{0,25}${remedyFragment}\s+uncapped\s+(?:on|for|to)\s+${scopedAutomatedError}`,
+    ),
+    new RegExp(
+      String.raw`${remedyFragment}\s+(?:remains?|stays?)\s+uncapped\s+(?:on|for|to)\s+${scopedAutomatedError}`,
+    ),
+  ];
+  const overbroadAllAutomation =
+    /\b(?:every|each|all)\s+(?:single\s+)?(?:automat\w*|ai[- ]handled|agent[- ]handled|model[- ]handled)\s+(?:resolutions?|outcomes?|outputs?|responses?|answers?|tickets?)\b|\b(?:whether|regardless of whether)\s+(?:it is |they are )?(?:correct|successful|accurate)\s+(?:or|and)\s+(?:wrong|incorrect)|\b(?:regardless|irrespective)\s+of\s+(?:correctness|accuracy|outcome)\b/;
+  const manualOnlyRemedy =
+    /\b(?:only|solely)\s+(?:for\s+)?(?:wrong\s+)?manual\b|\bmanual\b[^.;!?\n]{0,45}\b(?:only|solely)\b/;
+  const negatesScopedRemedy = new RegExp(
+    String.raw`\b(?:do\s+not|don't|never)\s+(?:keep|retain|preserve|maintain|enforce|apply|demand|require|push\s+for)\b[^;.!?\n]{0,100}\b(?:penalt(?:y|ies)|credits?|remed(?:y|ies)|liability)\b|\b(?:penalt(?:y|ies)|credits?|remed(?:y|ies)|liability)\b[^;.!?\n]{0,45}\b(?:must|should|shall|does|do|is|are)?\s*(?:not|never)\s+(?:apply|attach|cover|remain|stay)\w*\b|${automatedError}[^;.!?\n]{0,35}\b(?:(?:must|should|shall|does|do|is|are)\s+)?(?:not|never)\s+(?:trigger|incur|receive|get|carry|be\s+subject)\w*\b|${automatedError}[^;.!?\n]{0,35}\b(?:shouldn't|doesn't|mustn't|isn't|aren't|won't|can't)\s+(?:trigger|incur|receive|get|carry|be\s+subject)\w*\b`,
+  );
+  const explicitScopedCarveout = new RegExp(
+    String.raw`(?=[^;.!?\n]{0,180}${remedyFragment})(?=[^;.!?\n]{0,180}${automationFragment})(?=[^;.!?\n]{0,180}${wrongFragment})[^;.!?\n]{0,180}\b(?:except(?:\s+for)?|unless|apart\s+from|other\s+than|with\s+the\s+exception\s+of|save(?:\s+for)?|excluding|barring)\b`,
+  );
+  const conditionalScopedCarveout = new RegExp(
+    String.raw`(?=[^;.!?\n]{0,180}${remedyFragment})(?=[^;.!?\n]{0,180}${automationFragment})(?=[^;.!?\n]{0,180}${wrongFragment})[^;.!?\n]{0,180}\b(?:only\s+(?:if|when|where|above|below)|provid(?:ed|ing)\s+that|subject\s+to\s+(?!${remedyFragment}\b))`,
+  );
+
+  function hasUnprotectedRemedyRemoval(text) {
+    const destructive =
+      /\b(?:remove|eliminate|waive|drop|suspend|abolish|cancel|cap)\w*\b/g;
+    for (const match of text.matchAll(destructive)) {
+      const start = match.index;
+      const end = start + match[0].length;
+      const before = text.slice(Math.max(0, start - 55), start);
+      const after = text.slice(end, Math.min(text.length, end + 55));
+      const directlyScopesRemedy =
+        /\b(?:penalt(?:y|ies)|credits?|remed(?:y|ies))\b[^,;.!?\n]{0,30}$/.test(
+          before,
+        ) ||
+        /^[^,;.!?\n]{0,30}\b(?:penalt(?:y|ies)|credits?|remed(?:y|ies))\b/.test(
+          after,
+        );
+      if (!directlyScopesRemedy) continue;
+
+      const prefix = text.slice(Math.max(0, start - 110), start);
+      const protective =
+        /\b(?:do\s+not|don't|never|may\s+not|must\s+not|shall\s+not|can\s+not|cannot|can't)\s+$/.test(
+          prefix,
+        ) ||
+        /\b(?:may|must|shall|can)\s+not\s+be\s+$/.test(prefix) ||
+        /\b(?:no|without\s+(?:a\s+)?)\s+(?:penalt(?:y|ies)|credits?|remed(?:y|ies))\s+$/.test(
+          prefix,
+        ) ||
+        /\b(?:do\s+not|don't|never)\s+allow\b[^;.!?\n]{0,80}\b(?:penalt(?:y|ies)|credits?|remed(?:y|ies))\b[^;.!?\n]{0,20}\bto\s+be\s+$/.test(
+          prefix,
+        );
+      if (!protective) return true;
+    }
+    return false;
+  }
+  function hasPositiveAutomationExemption(text) {
+    const automation = new RegExp(automationFragment, "g");
+    const status = /\b(?:exempt|excluded|outside|not\s+subject)\b/g;
+    const automationSpans = [...text.matchAll(automation)].map((match) => ({
+      start: match.index,
+      end: match.index + match[0].length,
+    }));
+    for (const match of text.matchAll(status)) {
+      const statusStart = match.index;
+      const statusEnd = statusStart + match[0].length;
+      const nearestAutomation = automationSpans
+        .filter(
+          (span) =>
+            Math.min(Math.abs(span.end - statusStart), Math.abs(span.start - statusEnd)) <= 80,
+        )
+        .sort(
+          (left, right) =>
+            Math.min(Math.abs(left.end - statusStart), Math.abs(left.start - statusEnd)) -
+            Math.min(Math.abs(right.end - statusStart), Math.abs(right.start - statusEnd)),
+        )[0];
+      if (!nearestAutomation) continue;
+      if (match[0].startsWith("not subject")) return true;
+      const statusPrefix = text.slice(Math.max(0, statusStart - 18), statusStart);
+      const automationPrefix = text.slice(
+        Math.max(0, nearestAutomation.start - 18),
+        nearestAutomation.start,
+      );
+      const protective =
+        /\b(?:not|never)\s+(?:be\s+)?$/.test(statusPrefix) ||
+        /\b(?:no|none)\s+$/.test(automationPrefix) ||
+        /\b(?:do\s+not|don't|never)\s+$/.test(statusPrefix);
+      if (!protective) return true;
+    }
+    return false;
+  }
+  const broadensPenaltyToCorrectOutcome = turn2
+    .split(/[.;!?\n]+/)
+    .some((clause) => {
+      const namesCorrectOutcome =
+        /\b(?:correct|successful|accurate|valid)\b|\bright\s+(?:resolutions?|outcomes?|outputs?|responses?|answers?)\b/.test(
+          clause,
+        );
+      if (!namesCorrectOutcome || !penaltyTerm.test(clause)) return false;
+
+      const explicitlyExcludesCorrectOutcome =
+        /\b(?:do not|don't|never|exclude|excluding|exempt)\b[^,]{0,45}\b(?:correct|successful|accurate|valid|right\s+(?:resolutions?|outcomes?|outputs?|responses?|answers?))\b|\b(?:correct|successful|accurate|valid|right\s+(?:resolutions?|outcomes?|outputs?|responses?|answers?))\b[^,]{0,45}\b(?:must|should|do|does|are|is|be)?\s*(?:not|never|excluded|exempt|outside)\b|\bonly\b[^,]{0,30}\b(?:wrong(?:ly)?|incorrect(?:ly)?|erroneous(?:ly)?|errors?|failed|failures?)\b[^,]{0,45}\b(?:penalt(?:y|ies)|credits?|charg\w*)\b/.test(
+          clause,
+        );
+      return !explicitlyExcludesCorrectOutcome;
+    });
+  const hasLocalScopedAutomationPenalty = scopedRemedyPatterns.some((pattern) =>
+    pattern.test(turn2),
+  );
+  const scopedAutomationPenalty =
+    hasLocalScopedAutomationPenalty &&
+    !overbroadAllAutomation.test(turn2) &&
+    !broadensPenaltyToCorrectOutcome &&
+    !hasUnprotectedRemedyRemoval(turn2) &&
+    !manualOnlyRemedy.test(turn2) &&
+    !negatesScopedRemedy.test(turn2) &&
+    !explicitScopedCarveout.test(turn2) &&
+    !conditionalScopedCarveout.test(turn2) &&
+    !hasPositiveAutomationExemption(turn2);
+
   const turn1Checks = [
     check(
       "derived_800k_monthly_exposure",
@@ -36,7 +213,7 @@ export function scoreMeridianResponses(responses) {
     ),
     check(
       "liability_reframe",
-      /(liabil|contractual exposure|contractual risk|financial exposure|financial risk|penalty credits?|cost decision|uncapped[- ]loss)/.test(turn1) ||
+      /(liabil|contractual exposure|contractual risk|financial exposure|financial risk|penalty credits?|cost decision|uncapped[- ](?:loss|downside))/.test(turn1) ||
         (/(?:monthly|per month|a month).{0,35}(?:credits?|penalt|cost)|(?:credits?|penalt|cost).{0,35}(?:monthly|per month|a month)/.test(turn1) &&
           /(not|isn't|is not).{0,45}(?:quality|metric|accuracy|ship-ready)/.test(turn1)),
       "Must reframe 90% accuracy as contractual or financial exposure.",
@@ -85,10 +262,7 @@ export function scoreMeridianResponses(responses) {
   ];
 
   const procurementProtections = {
-    penalty_all_automation:
-      /(penalt|credit).{0,60}(?:all|every|each).{0,45}automat|(?:all|every|each).{0,45}automat.{0,60}(penalt|credit)|preserve the \$200 credit[\s\S]{0,400}credits apply automatically/.test(
-        turn2,
-      ),
+    penalty_each_wrong_automation: scopedAutomationPenalty,
     written_confidence_sla:
       /(written.{0,80}(confidence|acceptance|sla)|(confidence|acceptance).{0,80}(written|sla)|sla.{0,80}(confidence|acceptance|threshold|criteria))/.test(
         turn2,
@@ -109,6 +283,9 @@ export function scoreMeridianResponses(responses) {
       /(for meridian|meridian(?:'s)? procurement|as (?:meridian|the customer)|procurement lead|customer-side|meridian (?:traffic|contract))/.test(
         turn2,
       ) ||
+        (/\bpush for\b/.test(turn2) &&
+          /meridian(?:'s)?/.test(turn2) &&
+          /(right|credit|customer harm|acceptance threshold)/.test(turn2)) ||
         (/meridian.{0,60}(?:approves?|can pause|right|authorize)/.test(turn2) &&
           /(not the vendor|vendor consent|vendor-caused)/.test(turn2)),
       "Turn two must persistently advise Meridian procurement, not the vendor.",

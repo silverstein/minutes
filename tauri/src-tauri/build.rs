@@ -3,12 +3,22 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn main() {
+    emit_build_provenance();
     compile_mic_check_helper();
     compile_system_audio_helper();
     compile_calendar_helper();
     stage_minutes_cli_sidecar();
     stage_assistant_skill_bundle();
     tauri_build::build()
+}
+
+fn emit_build_provenance() {
+    println!("cargo:rerun-if-env-changed=MINUTES_BUILD_COMMIT");
+    let commit = std::env::var("MINUTES_BUILD_COMMIT").unwrap_or_else(|_| "unknown".into());
+    let valid =
+        (40..=64).contains(&commit.len()) && commit.bytes().all(|byte| byte.is_ascii_hexdigit());
+    let commit = if valid { commit } else { "unknown".into() };
+    println!("cargo:rustc-env=MINUTES_BUILD_COMMIT={commit}");
 }
 
 /// Deployment target (`-target <arch>-apple-macos<min>`) for a bundled Swift

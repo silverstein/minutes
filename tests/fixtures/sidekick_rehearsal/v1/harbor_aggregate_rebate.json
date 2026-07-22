@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "id": "synthetic-harbor-aggregate-rebate",
+  "content_origin": "synthetic",
+  "description": "A held-out procurement counterexample that requires preserving an aggregate quarterly trigger and cap without inventing a per-shipment remedy.",
+  "capture": {
+    "mode": "recording",
+    "screen_context": "unavailable",
+    "expected_speakers": 2
+  },
+  "prepared_context": {
+    "user_role": "Procurement lead at Harbor Foods",
+    "posture": "Exacting customer-side strategist who preserves the negotiated remedy rather than silently broadening it",
+    "demo_goal": "Turn the negotiated cold-chain remedy into precise final contract language",
+    "known_facts": [
+      "Harbor Foods is the customer",
+      "Polar Route Logistics is the supplier",
+      "The commercial remedy is already negotiated and must be restated accurately"
+    ]
+  },
+  "speakers": {
+    "SPEAKER_A": "Harbor procurement lead",
+    "SPEAKER_B": "Polar Route counsel"
+  },
+  "transcript": [
+    {
+      "sequence": 1,
+      "speaker": "SPEAKER_A",
+      "text": "We measure spoilage across all refrigerated shipments in each calendar quarter."
+    },
+    {
+      "sequence": 2,
+      "speaker": "SPEAKER_B",
+      "text": "If aggregate quarterly spoilage exceeds two percent, Polar Route owes one rebate equal to eight percent of that quarter's fees."
+    },
+    {
+      "sequence": 3,
+      "speaker": "SPEAKER_A",
+      "text": "And the negotiated cap is one such rebate per quarter, regardless of how many individual shipments spoiled. It is not a per-shipment credit."
+    },
+    {
+      "sequence": 4,
+      "speaker": "SPEAKER_B",
+      "text": "Correct. The open issue is making the aggregate measurement and reporting auditable."
+    }
+  ],
+  "turns": [
+    {
+      "id": "aggregate_capped_scope",
+      "typed_prompt": "As Harbor's procurement lead, translate the negotiated remedy into the exact protection I should demand.",
+      "required_behaviors": [
+        "state the aggregate quarterly spoilage trigger above two percent",
+        "state one rebate equal to eight percent of quarterly fees",
+        "preserve the cap of one rebate per quarter",
+        "do not invent a per-shipment credit or penalty"
+      ]
+    }
+  ],
+  "forbidden_behaviors": [
+    "claim each spoiled shipment triggers a rebate",
+    "remove or ignore the one-rebate-per-quarter cap",
+    "change the two-percent trigger or eight-percent remedy",
+    "advise Polar Route instead of Harbor"
+  ]
+}

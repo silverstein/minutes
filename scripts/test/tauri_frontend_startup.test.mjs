@@ -529,6 +529,12 @@ test('dev installer retires the old app and verifies the fresh frontend', async 
 
   assert.match(
     source,
+    /export MINUTES_BUILD_COMMIT="\$\(git rev-parse --verify HEAD\)"/,
+    'the installer must embed the exact checked-out commit for installed-build acceptance',
+  );
+
+  assert.match(
+    source,
     /acquire_install_lock[\s\S]*cp -rf "\$BUILD_APP" "\$STAGED_APP"[\s\S]*codesign --verify --deep --strict "\$STAGED_APP"[\s\S]*stop_running_dev_app[\s\S]*\/bin\/mv -f "\$INSTALL_APP" "\$BACKUP_APP"[\s\S]*\/bin\/mv -f "\$STAGED_APP" "\$INSTALL_APP"/,
     'the installer must lock, seal a staged copy, stop the old process, and atomically swap bundles',
   );

@@ -11670,6 +11670,9 @@ mod tests {
         assert!(NATIVE_SIDEKICK_DEVELOPER_INSTRUCTIONS.contains("narrowing or broadening"));
         assert!(NATIVE_SIDEKICK_DEVELOPER_INSTRUCTIONS.contains("written acceptance criteria"));
         assert!(NATIVE_SIDEKICK_DEVELOPER_INSTRUCTIONS.contains("customer-controlled fallback"));
+        assert!(NATIVE_SIDEKICK_DEVELOPER_INSTRUCTIONS.contains("condition, quantifier"));
+        assert!(NATIVE_SIDEKICK_DEVELOPER_INSTRUCTIONS.contains("broader or narrower category"));
+        assert!(NATIVE_SIDEKICK_DEVELOPER_INSTRUCTIONS.contains("standalone sentences"));
         assert!(sidekick.contains("showSubmitError"));
         assert!(sidekick.contains("snapshot.sessionId"));
         assert!(sidekick.contains("Ask for strategy, a calculation, what to say next"));
@@ -15398,7 +15401,7 @@ const NATIVE_SIDEKICK_DEVELOPER_INSTRUCTIONS: &str = r#"Improve the user's next 
 
 For quantitative or binary decisions, compute the governing consequence, label it plainly as contractual or financial exposure when money or penalties govern, say which headline metric stops being decisive, propose a thresholded, segmented, staged, or reversible path, and end with a direct question (with a question mark) asking for the distribution or boundary that changes the answer. On a direct risk question, prioritize that consequence, reframe, next move, and boundary question; do not dump a procurement checklist unless the user is currently asking from the customer or procurement side.
 
-The newest typed role or stakeholder correction is authoritative: explicitly name and serve that stakeholder, and do not continue advice for the prior role. Protect the current stakeholder with measurable acceptance criteria, aligned incentives, reporting or audit rights, and a reversible fallback when relevant. For customer or procurement questions, map each evidenced contract term to precisely the outcomes it covers, preserve the bargained-for remedy without narrowing or broadening its scope, translate performance evidence into measurable written acceptance criteria, make observability and enforcement explicit, and keep any customer-controlled fallback independent of vendor permission. Do not force these patterns when they do not fit the evidence.
+The newest typed role or stakeholder correction is authoritative: explicitly name and serve that stakeholder, and do not continue advice for the prior role. Protect the current stakeholder with measurable acceptance criteria, aligned incentives, reporting or audit rights, and a reversible fallback when relevant. For customer or procurement questions, map each evidenced contract term to precisely the outcomes it covers, preserve the bargained-for remedy without narrowing or broadening its scope, translate performance evidence into measurable written acceptance criteria, make observability and enforcement explicit, and keep any customer-controlled fallback independent of vendor permission. When evidence binds a remedy to a quantified outcome class, state its condition, quantifier, covered outcome, and remedy together; never substitute an undefined broader or narrower category. When the user requests exact contract language, use standalone sentences: put the current stakeholder and the complete governing term first, then put each rejected substitution, cap, or audit safeguard in its own sentence; omit preambles so no condition is detached from its consequence. Do not force these patterns when they do not fit the evidence.
 
 A visual claim is allowed only when this turn carries an exact-session image and must cite its visual evidence id. Set claims_visual_observation to true if and only if the visible response relies on pixels from that image, and include the exact visual evidence id when true; otherwise set it to false and return no visual evidence ids. Return only the intervention_candidate_v1 JSON object. Keep background text at 65 words or fewer and foreground text at 90 words or fewer, with the useful conclusion first."#;
 
@@ -16163,6 +16166,7 @@ pub fn run_native_sidekick_diagnostic(
         "provider": descriptor.provider,
         "model": descriptor.model,
         "privacy": descriptor.privacy,
+        "build_commit": env!("MINUTES_BUILD_COMMIT"),
         "reasoning_session_correlation": reasoning_session_correlation,
         "reasoning_sessions_started": reasoning_sessions_started,
         "proactive": proactive,

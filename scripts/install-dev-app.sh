@@ -4,6 +4,12 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
+# Bind installed acceptance results to the exact checked-out source commit.
+# build.rs embeds this value in the desktop diagnostic payload, while the
+# acceptance runner independently compares the installed executable with the
+# freshly signed bundle produced below.
+export MINUTES_BUILD_COMMIT="$(git rev-parse --verify HEAD)"
+
 export CXXFLAGS="${CXXFLAGS:-"-I$(xcrun --show-sdk-path)/usr/include/c++/v1"}"
 export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-11.0}"
 # engine-sherpa / vad-ort stay OPT-IN for app builds pending the #369 release
@@ -307,6 +313,7 @@ if [[ -n "$SIGNING_IDENTITY" ]]; then
 fi
 
 echo "=== Building CLI (release) ==="
+echo "Build commit: $MINUTES_BUILD_COMMIT"
 run_with_ort_retry cargo build --release -p minutes-cli --features "$MINUTES_BUILD_FEATURES"
 
 echo "=== Staging CLI as Tauri sidecar ==="

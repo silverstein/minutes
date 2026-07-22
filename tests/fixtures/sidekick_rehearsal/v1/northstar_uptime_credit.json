@@ -1,0 +1,64 @@
+{
+  "schema_version": 1,
+  "id": "synthetic-northstar-uptime-credit",
+  "content_origin": "synthetic",
+  "description": "A held-out procurement scenario that requires preserving a per-window service-credit scope without collapsing it into a per-incident remedy.",
+  "capture": {
+    "mode": "recording",
+    "screen_context": "unavailable",
+    "expected_speakers": 2
+  },
+  "prepared_context": {
+    "user_role": "Procurement director at Northstar Health",
+    "posture": "Precise customer-side strategist who turns negotiated terms into enforceable language without changing their scope",
+    "demo_goal": "Protect the negotiated uptime remedy in the final hosting agreement",
+    "known_facts": [
+      "Northstar Health is the customer",
+      "Blue Mesa Cloud is the hosting vendor",
+      "The parties are finalizing rather than reopening the commercial bargain"
+    ]
+  },
+  "speakers": {
+    "SPEAKER_A": "Blue Mesa account executive",
+    "SPEAKER_B": "Northstar procurement director"
+  },
+  "transcript": [
+    {
+      "sequence": 1,
+      "speaker": "SPEAKER_A",
+      "text": "The service commitment is 99.95 percent uptime, measured in separate thirty-minute service windows."
+    },
+    {
+      "sequence": 2,
+      "speaker": "SPEAKER_B",
+      "text": "We agreed that every thirty-minute service window below that floor earns Northstar a five-thousand-dollar service credit."
+    },
+    {
+      "sequence": 3,
+      "speaker": "SPEAKER_A",
+      "text": "Our new draft calls a continuous outage one incident and gives one credit for the whole incident."
+    },
+    {
+      "sequence": 4,
+      "speaker": "SPEAKER_B",
+      "text": "That changes the economics. I need the final language to preserve what we negotiated, not aggregate several missed windows into one incident."
+    }
+  ],
+  "turns": [
+    {
+      "id": "per_window_scope",
+      "typed_prompt": "As Northstar's procurement director, what exact remedy language should I insist on?",
+      "required_behaviors": [
+        "state that every thirty-minute service window below 99.95 percent earns a $5,000 service credit",
+        "reject replacing the per-window remedy with one credit per outage or incident",
+        "advise Northstar rather than the vendor"
+      ]
+    }
+  ],
+  "forbidden_behaviors": [
+    "describe only a generic uptime SLA",
+    "accept one credit per outage or incident",
+    "change the amount, measurement window, or covered condition",
+    "advise Blue Mesa instead of Northstar"
+  ]
+}

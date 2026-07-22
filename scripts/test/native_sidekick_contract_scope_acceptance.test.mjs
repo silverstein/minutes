@@ -58,6 +58,10 @@ test("held-out per-window remedy preserves the exact quantified outcome scope", 
     "For Northstar procurement, require that every 30-minute service window below 99.95% triggers a $5,000 service credit. Do not let Blue Mesa convert multiple missed windows into a single incident.",
     "For Northstar procurement, require a $5,000 service credit for each 30-minute service window below 99.95%. Reject one credit per incident.",
     "1. For Northstar procurement, require a $5,000 service credit for each 30-minute service window below 99.95%.\n2. Reject one credit per incident.\n3. Can Blue Mesa agree to that wording?",
+    "For Northstar procurement, require that every 30-minute service window where uptime falls below 99.95% gives Northstar a $5,000 service credit. Reject one credit per outage or incident.",
+    "For Northstar procurement, require a $5,000 service credit each time uptime falls below 99.95% in a 30-minute service window. Reject one credit per outage or incident.",
+    "For Northstar procurement, require a $5,000 service credit for each 30-minute service window in which uptime falls below 99.95%. Reject one credit per incident.",
+    "For Northstar procurement, require that every 30-minute service window below 99.95% triggers a $5,000 service credit. Reject treating a continuous outage as one incident for credit purposes.",
   ];
   for (const candidate of semanticOrderVariants) {
     assert.equal(scorePerWindowRemedy(candidate).passed, true, candidate);
@@ -112,6 +116,8 @@ test("vague, aggregated, or negated per-window remedies fail closed", () => {
     "For Northstar procurement, require every 30-minute service window below 99.95% to trigger a $5,000 service credit, but it doesn't apply. Reject one credit per incident.",
     "For Northstar procurement, require every 30-minute service window below 99.95% to trigger a $5,000 service credit. Reject the incident-level credit, then preserve it.",
     "For Northstar procurement, require every 30-minute service window below 99.95% to trigger a $5,000 service credit plus a ７,５００-dollar payment. Reject one credit per incident.",
+    "For Northstar procurement, require that all 30-minute service windows below 99.95% result in a $5,000 service credit. Reject one credit per incident.",
+    "For Northstar procurement, require that all 30-minute service windows below 99.95% trigger a $5,000 service credit. Reject one credit per incident.",
   ];
 
   for (const candidate of candidates) {
@@ -167,6 +173,10 @@ test("held-out aggregate remedy preserves its quarterly trigger and cap", () => 
     "For Harbor procurement, require that aggregate quarterly spoilage above 2% entitles Harbor to one rebate equal to 8% of quarterly fees. Cap it at one rebate per quarter. No individual shipment triggers a rebate.",
     "For Harbor procurement, require one rebate equal to 8% of quarterly fees if aggregate quarterly spoilage exceeds 2%. Cap it at one rebate per quarter. Exclude shipment-level rebates.",
     "1. For Harbor procurement, require one rebate equal to 8% of quarterly fees if aggregate quarterly spoilage exceeds 2%.\n2. Cap it at one rebate per quarter.\n3. Exclude shipment-level rebates.\n4. Can Polar Route agree to that language?",
+    "For Harbor procurement, require one rebate of 8% of quarterly fees when quarterly aggregate spoilage exceeds 2%. Cap it at one rebate per quarter. No per-shipment rebate.",
+    "For Harbor procurement, require one rebate equal to 8% of quarterly fees if aggregate quarterly spoilage exceeds 2%. Limit Harbor to one rebate per quarter. No per-shipment rebate.",
+    "For Harbor procurement, require one rebate equal to 8% of quarterly fees if aggregate quarterly spoilage exceeds 2%. Cap it at one rebate per quarter. No rebate accrues on a shipment-by-shipment basis.",
+    "For Harbor procurement, require one rebate equal to 8% of quarterly fees if aggregate quarterly spoilage exceeds 2%. No more than a single rebate may be paid in any quarter. Exclude shipment-level rebates.",
   ];
   for (const candidate of semanticOrderVariants) {
     assert.equal(scoreAggregateCappedRemedy(candidate).passed, true, candidate);

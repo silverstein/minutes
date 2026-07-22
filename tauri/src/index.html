@@ -8448,12 +8448,23 @@
       const buttonRect = button.getBoundingClientRect();
       const buttonStyle = getComputedStyle(button);
       const barStyle = getComputedStyle(recordingBar);
+      const centerX = buttonRect.left + buttonRect.width / 2;
+      const centerY = buttonRect.top + buttonRect.height / 2;
+      const hit = typeof document.elementFromPoint === 'function'
+        ? document.elementFromPoint(centerX, centerY)
+        : null;
+      const hitIdentity = hit
+        ? `${String(hit.tagName || 'element').toLowerCase()}#${hit.id || '-'}.${
+          String(hit.className || '-').trim().replace(/\s+/g, '.')
+        }`
+        : 'none';
       throw new Error(
         'The recording Sidekick control did not become visibly interactable '
         + `(viewport=${window.innerWidth}x${window.innerHeight}; `
         + `document=${document.visibilityState}; focused=${document.hasFocus()}; `
         + `recording=${isRecording}; bar=${recordingBar.className}/${barStyle.display}; `
         + `button=${buttonStyle.display}/${buttonStyle.visibility}/${buttonStyle.opacity}; `
+        + `pointer=${buttonStyle.pointerEvents}; hit=${hitIdentity}; `
         + `rect=${Math.round(buttonRect.left)},${Math.round(buttonRect.top)},`
         + `${Math.round(buttonRect.width)}x${Math.round(buttonRect.height)}).`,
       );

@@ -8,8 +8,20 @@
 
 use super::session::{CaptureSessionId, EvidenceId, InvocationIdentity};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 use std::sync::Arc;
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+fn is_lower_hex_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
 
 macro_rules! backend_string_id {
     ($name:ident) => {
@@ -153,7 +165,15 @@ pub struct ReasoningTranscriptEvidence {
 pub struct ReasoningImageEvidence {
     pub evidence_id: EvidenceId,
     pub capture_session_id: CaptureSessionId,
+    /// Canonical local provenance for diagnostics and user-facing receipts.
+    /// Providers must consume `png_bytes`, not reopen this mutable pathname.
     pub path: PathBuf,
+    /// Exact PNG bytes selected by Minutes for this reasoning window.
+    /// Keeping the payload in the provider-neutral contract prevents a file
+    /// replacement race between evidence selection and provider dispatch.
+    pub png_bytes: Vec<u8>,
+    /// SHA-256 of `png_bytes`, recorded alongside the evidence receipt.
+    pub sha256: String,
 }
 
 /// The complete evidence window for exactly one reasoning turn.
@@ -198,9 +218,15 @@ impl BoundedReasoningWindow {
             );
         }
         if let Some(image) = &self.latest_image {
-            if !image.evidence_id.is_valid() || !image.path.is_absolute() {
+            if !image.evidence_id.is_valid()
+                || !image.path.is_absolute()
+                || !image.png_bytes.starts_with(b"\x89PNG\r\n\x1a\n")
+                || image.png_bytes.len() > 8 * 1024 * 1024
+                || !is_lower_hex_sha256(&image.sha256)
+                || image.sha256 != sha256_hex(&image.png_bytes)
+            {
                 return Err(ReasoningError::invalid_request(
-                    "image evidence requires an id and absolute path",
+                    "image evidence requires an id, absolute provenance path, and matching bounded PNG bytes",
                 ));
             }
         }
@@ -562,6 +588,8 @@ mod tests {
             evidence_id: "screen-1".into(),
             capture_session_id: "capture-b".into(),
             path: PathBuf::from("/tmp/screen.png"),
+            png_bytes: b"\x89PNG\r\n\x1a\nfixture".to_vec(),
+            sha256: sha256_hex(b"\x89PNG\r\n\x1a\nfixture"),
         });
         assert!(window.validate(4_096).is_err());
     }

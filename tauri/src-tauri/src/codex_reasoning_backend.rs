@@ -5,6 +5,7 @@
 //! publish decision; this file only translates the generic persistent-turn
 //! protocol to Codex JSONL.
 
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use minutes_core::live_sidekick::{
     PersistentReasoningBackend, PersistentReasoningSession, ReasoningBackendDescriptor,
     ReasoningError, ReasoningErrorKind, ReasoningEventSink, ReasoningLatencyClass,
@@ -432,8 +433,11 @@ impl CodexReasoningSession {
         })];
         if let Some(image) = &request.window.latest_image {
             input.push(json!({
-                "type": "localImage",
-                "path": image.path,
+                "type": "image",
+                "url": format!(
+                    "data:image/png;base64,{}",
+                    BASE64_STANDARD.encode(&image.png_bytes)
+                ),
                 "detail": "high"
             }));
         }
@@ -979,6 +983,30 @@ rl.on('line', (line) => {
             typed_user_message: None,
             output_contract: ReasoningOutputContract::InterventionCandidateV1,
         }
+    }
+
+    #[test]
+    fn image_input_dispatches_the_exact_selected_bytes_inline() {
+        let png = b"\x89PNG\r\n\x1a\nnonce-only".to_vec();
+        let mut request = request();
+        request.window.latest_image = Some(minutes_core::live_sidekick::ReasoningImageEvidence {
+            evidence_id: "screen-1".into(),
+            capture_session_id: "capture-a".into(),
+            path: PathBuf::from("/tmp/provider-screen.png"),
+            png_bytes: png.clone(),
+            sha256: "f".repeat(64),
+        });
+
+        let input = CodexReasoningSession::input_for(&request);
+
+        assert_eq!(input.len(), 2);
+        assert_eq!(input[1]["type"], "image");
+        assert_eq!(input[1]["detail"], "high");
+        assert_eq!(
+            input[1]["url"],
+            format!("data:image/png;base64,{}", BASE64_STANDARD.encode(png))
+        );
+        assert!(input[1].get("path").is_none());
     }
 
     #[test]

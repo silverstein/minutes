@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Minutes Sidekick Acceptance</title>
+  <style>
+    * { box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; margin: 0; }
+    body {
+      display: grid;
+      place-items: center;
+      overflow: hidden;
+      color: #e8e4da;
+      background: #0d0d0b;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    main {
+      display: grid;
+      justify-items: center;
+      width: min(90%, 720px);
+      padding: 32px;
+      border: 1px solid #2a2924;
+      border-radius: 12px;
+      background: #141412;
+    }
+    .eyebrow { color: #30d158; font-size: 13px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; }
+    h1 { margin: 12px 0 8px; font-size: 30px; line-height: 1.1; letter-spacing: -.03em; text-align: center; }
+    p { margin: 0; color: #6b6760; font-size: 15px; line-height: 1.5; text-align: center; }
+    .grid { display: grid; grid-template-columns: repeat(16, 28px); gap: 5px; margin-top: 24px; padding: 8px; background: #0d0d0b; }
+    .bit { width: 28px; height: 28px; }
+    .bit.zero { background: #c96b4e; }
+    .bit.one { background: #30d158; }
+    code { display: inline-block; margin-top: 18px; color: #e8e4da; font-size: 13px; }
+  </style>
+</head>
+<body>
+  <main>
+    <div class="eyebrow">Unattended product-path check</div>
+    <h1>Safe screen-capture marker</h1>
+    <p>The full-screen pattern contains only this run’s nonce. It is verified locally before becoming the one image Sidekick may use.</p>
+    <div class="grid" id="grid" aria-label="Run-specific machine-readable marker"></div>
+    <code id="trace"></code>
+  </main>
+  <script>
+    const { invoke } = window.__TAURI__.core;
+    const trace = (new URLSearchParams(location.search).get('trace') || '').toLowerCase();
+    const bits = [...trace].flatMap((nibble) => {
+      const value = Number.parseInt(nibble, 16);
+      return [3, 2, 1, 0].map((shift) => (value >> shift) & 1);
+    });
+    const grid = document.getElementById('grid');
+    for (const bit of bits.slice(0, 256)) {
+      const cell = document.createElement('span');
+      cell.className = `bit ${bit ? 'one' : 'zero'}`;
+      grid.append(cell);
+    }
+    document.getElementById('trace').textContent = `trace ${trace}`;
+    requestAnimationFrame(() => requestAnimationFrame(async () => {
+      for (let attempt = 0; attempt < 20; attempt += 1) {
+        if (await invoke('cmd_native_sidekick_ui_acceptance_marker_ready')) return;
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+    }));
+  </script>
+</body>
+</html>

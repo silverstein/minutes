@@ -5,9 +5,14 @@
 //! adapters can stream reasoning, but cannot decide what reaches the user.
 
 use super::*;
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::{mpsc, Arc};
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
 
 #[derive(Debug, Clone)]
 pub struct LiveSidekickEngineConfig {
@@ -67,6 +72,18 @@ pub struct SidekickPublication {
 pub struct SidekickFailure {
     pub work: SidekickWork,
     pub error: ReasoningError,
+}
+
+/// Immutable receipt for the exact Minutes-owned evidence window handed to a
+/// foreground provider turn. This is suitable for audit and acceptance gates;
+/// it contains opaque provenance identifiers, never transcript or image bytes.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ForegroundEvidenceReceipt {
+    pub turn_id: ForegroundTurnId,
+    pub capture_session_id: CaptureSessionId,
+    pub transcript_evidence_ids: Vec<EvidenceId>,
+    pub visual_evidence_ids: Vec<EvidenceId>,
 }
 
 /// Terminal lifecycle signal for every provider turn that matched the active
@@ -221,18 +238,32 @@ impl LiveSidekickEngine {
         evidence_id: EvidenceId,
         path: PathBuf,
     ) -> Result<Reduction, ReasoningError> {
-        let capture_session_id = self.capture_id()?;
         let canonical = path.canonicalize().map_err(|error| {
             ReasoningError::invalid_request(format!("screen image is unreadable: {error}"))
         })?;
         let bytes = std::fs::read(&canonical).map_err(|error| {
             ReasoningError::invalid_request(format!("screen image is unreadable: {error}"))
         })?;
-        if canonical.extension().and_then(|value| value.to_str()) != Some("png")
-            || !bytes.starts_with(b"\x89PNG\r\n\x1a\n")
+        self.observe_screen_bytes(evidence_id, canonical, bytes)
+    }
+
+    /// Observe exact image bytes already selected by an evidence adapter.
+    /// The provider-neutral window owns these bytes, so a later pathname
+    /// replacement cannot change what a backend receives.
+    pub fn observe_screen_bytes(
+        &mut self,
+        evidence_id: EvidenceId,
+        provenance_path: PathBuf,
+        png_bytes: Vec<u8>,
+    ) -> Result<Reduction, ReasoningError> {
+        let capture_session_id = self.capture_id()?;
+        if !provenance_path.is_absolute()
+            || provenance_path.extension().and_then(|value| value.to_str()) != Some("png")
+            || !png_bytes.starts_with(b"\x89PNG\r\n\x1a\n")
+            || png_bytes.len() > 8 * 1024 * 1024
         {
             return Err(ReasoningError::invalid_request(
-                "screen evidence must be a readable PNG",
+                "screen evidence must contain a bounded PNG and absolute provenance path",
             ));
         }
         let reduction = self.session.reduce(AssistanceEvent::EvidenceObserved {
@@ -248,7 +279,9 @@ impl LiveSidekickEngine {
             self.latest_image = Some(ReasoningImageEvidence {
                 evidence_id,
                 capture_session_id,
-                path: canonical,
+                path: provenance_path,
+                sha256: sha256_hex(&png_bytes),
+                png_bytes,
             });
             self.evidence_revision = self.evidence_revision.saturating_add(1);
         }
@@ -368,6 +401,31 @@ impl LiveSidekickEngine {
         }
         self.remember_user_message(text);
         Ok(turn_id)
+    }
+
+    /// Return the exact evidence provenance currently authorized for a
+    /// foreground turn, if that turn still owns the provider invocation.
+    pub fn foreground_evidence_receipt(
+        &self,
+        turn_id: &ForegroundTurnId,
+    ) -> Option<ForegroundEvidenceReceipt> {
+        let active = self.active.as_ref()?;
+        let SidekickWork::Foreground {
+            turn_id: active_turn_id,
+            ..
+        } = &active.work
+        else {
+            return None;
+        };
+        if active_turn_id != turn_id {
+            return None;
+        }
+        Some(ForegroundEvidenceReceipt {
+            turn_id: turn_id.clone(),
+            capture_session_id: self.capture_id().ok()?,
+            transcript_evidence_ids: active.allowed_evidence_ids.iter().cloned().collect(),
+            visual_evidence_ids: active.allowed_visual_ids.iter().cloned().collect(),
+        })
     }
 
     pub fn pump(&mut self) {
@@ -1026,6 +1084,35 @@ mod tests {
             publications[0].work,
             SidekickWork::Foreground { .. }
         ));
+    }
+
+    #[test]
+    fn foreground_receipt_attests_the_exact_provider_window_and_turn() {
+        let backend = FakeBackend::default();
+        let mut engine = engine(backend);
+        observe(&mut engine, "fixture-1", "First approved fact.");
+        observe(&mut engine, "fixture-2", "Second approved fact.");
+
+        let first = engine.send_user("First question").unwrap();
+        let first_receipt = engine.foreground_evidence_receipt(&first).unwrap();
+        assert_eq!(first_receipt.turn_id, first);
+        assert_eq!(first_receipt.capture_session_id.as_str(), "capture");
+        assert_eq!(
+            first_receipt
+                .transcript_evidence_ids
+                .iter()
+                .map(EvidenceId::as_str)
+                .collect::<Vec<_>>(),
+            vec!["fixture-1", "fixture-2"]
+        );
+        assert!(first_receipt.visual_evidence_ids.is_empty());
+
+        let second = engine.send_user("Second question").unwrap();
+        assert!(engine.foreground_evidence_receipt(&first).is_none());
+        assert_eq!(
+            engine.foreground_evidence_receipt(&second).unwrap().turn_id,
+            second
+        );
     }
 
     #[test]

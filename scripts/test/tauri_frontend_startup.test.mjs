@@ -42,6 +42,9 @@ function fakeElement(id = '') {
     checked: false,
     disabled: false,
     hidden: false,
+    inert: false,
+    parentElement: null,
+    isConnected: true,
     dataset: {},
     children: [],
     style: {
@@ -60,6 +63,7 @@ function fakeElement(id = '') {
       contains: (name) => classes.has(name),
     },
     appendChild(child) {
+      child.parentElement = this;
       this.children.push(child);
       return child;
     },
@@ -69,7 +73,8 @@ function fakeElement(id = '') {
     remove() {},
     focus() {},
     blur() {},
-    click() {},
+    click() { this.dispatchEvent({ type: 'click', target: this, preventDefault() {} }); },
+    contains(candidate) { return candidate === this || this.children.includes(candidate); },
     select() {},
     setAttribute() {},
     removeAttribute() {},
@@ -109,6 +114,7 @@ function startupContext(declaredIds, {
   eventListenHandler = null,
   fireTimeouts = new Set(),
   stallAnimationFrames = false,
+  localStorageInitial = {},
 } = {}) {
   const elements = new Map();
   const invocations = [];
@@ -126,6 +132,7 @@ function startupContext(declaredIds, {
     documentElement,
     body,
     activeElement: body,
+    visibilityState: 'visible',
     getElementById(id) {
       if (!declaredIds.has(id)) return null;
       if (!elements.has(id)) elements.set(id, fakeElement(id));
@@ -202,6 +209,7 @@ function startupContext(declaredIds, {
   };
   window.window = window;
   window.self = window;
+  const localStorageValues = new Map(Object.entries(localStorageInitial));
 
   class Observer {
     observe() {}
@@ -246,11 +254,20 @@ function startupContext(declaredIds, {
     document,
     navigator: { platform: 'MacIntel', clipboard: { writeText: async () => {} } },
     location: { reload() {} },
-    localStorage: { getItem: () => null, setItem() {}, removeItem() {} },
+    localStorage: {
+      getItem: (key) => localStorageValues.get(key) ?? null,
+      setItem: (key, value) => localStorageValues.set(key, String(value)),
+      removeItem: (key) => localStorageValues.delete(key),
+    },
     sessionStorage: { getItem: () => null, setItem() {}, removeItem() {} },
     crypto: { randomUUID: () => '00000000-0000-4000-8000-000000000000' },
     performance: { now: () => 0 },
-    getComputedStyle: () => ({ getPropertyValue: () => '', display: 'block' }),
+    getComputedStyle: (element) => ({
+      getPropertyValue: () => '',
+      display: 'block',
+      visibility: 'visible',
+      opacity: element?.acceptanceOpacity ?? '1',
+    }),
     requestAnimationFrame: (callback) => {
       if (!stallAnimationFrames) callback(0);
       return 1;
@@ -301,7 +318,15 @@ function startupContext(declaredIds, {
     console: fakeConsole,
   });
 
-  return { clock, consoleMessages, context, elements, intervals, invocations };
+  return {
+    clock,
+    consoleMessages,
+    context,
+    elements,
+    intervals,
+    invocations,
+    localStorageValues,
+  };
 }
 
 test('complete desktop frontend registers without a startup ReferenceError', async () => {
@@ -342,6 +367,100 @@ test('startup smoke rejects the missing Sidekick listener binding regression', a
 
   const broken = mainScript.replace('const { listen } = window.__TAURI__.event;', '');
   assert.doesNotMatch(broken, requiredBinding, 'the regression mutation must be caught by the static guard');
+});
+
+test('Sidekick acceptance traverses visible main control, consent, and one real start invoke', async () => {
+  const source = await readFile(indexHtml, 'utf8');
+  const declaredIds = new Set([...source.matchAll(/\bid="([^"]+)"/g)].map((match) => match[1]));
+  const scripts = inlineScripts(source);
+  const bootstrapScript = scripts.find((script) => script.includes('window.__MINUTES_STARTUP__'));
+  const mainScript = scripts.find((script) => script.includes('const { invoke }'));
+  const eventHandlers = new Map();
+  const consentKey = 'minutes.sidekickCloudEgressConsent.v1';
+  const commandHandlers = new Map([
+    ['cmd_native_sidekick_ui_acceptance_launch_claim', () => Promise.resolve(true)],
+    ['cmd_native_sidekick_ui_acceptance_interactable', () => Promise.resolve()],
+    ['cmd_native_sidekick_ui_acceptance_launch_completed', () => Promise.resolve()],
+    ['cmd_native_sidekick_ui_acceptance_main_ready', () => Promise.resolve(true)],
+    ['cmd_start_native_sidekick', () => Promise.resolve({ active: true })],
+  ]);
+  const harness = startupContext(declaredIds, {
+    commandHandlers,
+    fireTimeouts: new Set([25]),
+    localStorageInitial: { [consentKey]: 'previous-choice' },
+    eventListenHandler(eventName, handler) {
+      eventHandlers.set(eventName, handler);
+      return Promise.resolve(() => eventHandlers.delete(eventName));
+    },
+  });
+
+  new vm.Script(bootstrapScript, { filename: 'tauri/src/index.html#startup-recovery' }).runInContext(harness.context);
+  new vm.Script(mainScript, { filename: 'tauri/src/index.html#main' }).runInContext(harness.context);
+  await new Promise((resolve) => setImmediate(resolve));
+  const open = eventHandlers.get('sidekick:acceptance-open');
+  assert.equal(typeof open, 'function');
+  await open({ payload: { nonce: 'a'.repeat(64) } });
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const starts = harness.invocations.filter(
+    ({ command }) => command === 'cmd_start_native_sidekick',
+  );
+  assert.equal(starts.length, 1);
+  assert.equal(starts[0].args.goal, null);
+  assert.equal(starts[0].args.cloudConsent, true);
+  assert.deepEqual(
+    harness.invocations
+      .filter(({ command }) => command === 'cmd_native_sidekick_ui_acceptance_interactable')
+      .map(({ args }) => args.target),
+    ['main_sidekick_button', 'cloud_consent_confirm'],
+  );
+  assert.equal(
+    harness.invocations.filter(
+      ({ command }) => command === 'cmd_native_sidekick_ui_acceptance_launch_completed',
+    ).length,
+    1,
+  );
+  assert.equal(harness.localStorageValues.get(consentKey), 'previous-choice');
+});
+
+test('Sidekick acceptance rejects a main control hidden by an ancestor', async () => {
+  const source = await readFile(indexHtml, 'utf8');
+  const declaredIds = new Set([...source.matchAll(/\bid="([^"]+)"/g)].map((match) => match[1]));
+  const scripts = inlineScripts(source);
+  const bootstrapScript = scripts.find((script) => script.includes('window.__MINUTES_STARTUP__'));
+  const mainScript = scripts.find((script) => script.includes('const { invoke }'));
+  const eventHandlers = new Map();
+  const commandHandlers = new Map([
+    ['cmd_native_sidekick_ui_acceptance_launch_claim', () => Promise.resolve(true)],
+    ['cmd_native_sidekick_ui_acceptance_main_ready', () => Promise.resolve(true)],
+    ['cmd_native_sidekick_ui_acceptance_launch_failed', () => Promise.resolve()],
+  ]);
+  const harness = startupContext(declaredIds, {
+    commandHandlers,
+    eventListenHandler(eventName, handler) {
+      eventHandlers.set(eventName, handler);
+      return Promise.resolve(() => eventHandlers.delete(eventName));
+    },
+  });
+  new vm.Script(bootstrapScript, { filename: 'tauri/src/index.html#startup-recovery' }).runInContext(harness.context);
+  new vm.Script(mainScript, { filename: 'tauri/src/index.html#main' }).runInContext(harness.context);
+  await new Promise((resolve) => setImmediate(resolve));
+  const hiddenAncestor = fakeElement('hidden-ancestor');
+  hiddenAncestor.acceptanceOpacity = '0';
+  harness.elements.get('btn-sidekick-recording').parentElement = hiddenAncestor;
+
+  await eventHandlers.get('sidekick:acceptance-open')({ payload: { nonce: 'b'.repeat(64) } });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(
+    harness.invocations.some(({ command }) => command === 'cmd_start_native_sidekick'),
+    false,
+  );
+  assert.ok(harness.invocations.some(({ command, args }) => (
+    command === 'cmd_native_sidekick_ui_acceptance_launch_failed'
+      && /visibly interactable/i.test(args.error)
+  )));
 });
 
 test('frontend readiness is not held hostage by optional startup hydration', async () => {

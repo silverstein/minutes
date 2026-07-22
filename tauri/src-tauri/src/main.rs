@@ -5,6 +5,7 @@ use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use std::collections::HashMap;
 #[cfg(target_os = "macos")]
 use std::ffi::{c_char, c_void};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 #[cfg(target_os = "macos")]
 use std::sync::OnceLock;
@@ -293,6 +294,13 @@ struct NativeSidekickDiagnosticCli {
     typed_message: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NativeSidekickUiDiagnosticCli {
+    nonce: String,
+    parent_fd: i32,
+    real_home: PathBuf,
+}
+
 fn diagnostic_value_after<'a>(
     args: &'a [String],
     index: &mut usize,
@@ -402,6 +410,98 @@ fn parse_native_sidekick_diagnostic_cli(
     Ok(Some(NativeSidekickDiagnosticCli {
         source,
         typed_message,
+    }))
+}
+
+fn parse_native_sidekick_ui_diagnostic_cli(
+    args: &[String],
+) -> Result<Option<NativeSidekickUiDiagnosticCli>, String> {
+    if !args
+        .iter()
+        .any(|arg| arg == "--diagnose-native-sidekick-ui")
+    {
+        return Ok(None);
+    }
+    let mut consent_cloud = false;
+    let mut consent_microphone = false;
+    let mut consent_screen = false;
+    let mut nonce = None;
+    let mut parent_fd = None;
+    let mut real_home = None;
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        if arg == "--diagnose-native-sidekick-ui" {
+        } else if arg == "--consent-cloud" {
+            consent_cloud = true;
+        } else if arg == "--consent-microphone" {
+            consent_microphone = true;
+        } else if arg == "--consent-screen" {
+            consent_screen = true;
+        } else if arg == "--acceptance-nonce" {
+            let value = diagnostic_value_after(args, &mut index, arg)?.to_string();
+            if nonce.replace(value).is_some() {
+                return Err("Specify exactly one Sidekick UI acceptance nonce".into());
+            }
+        } else if let Some(value) = arg.strip_prefix("--acceptance-nonce=") {
+            if value.trim().is_empty() || nonce.replace(value.to_string()).is_some() {
+                return Err("Specify exactly one non-empty Sidekick UI acceptance nonce".into());
+            }
+        } else if arg == "--acceptance-parent-fd" {
+            let value = diagnostic_value_after(args, &mut index, arg)?;
+            if parent_fd
+                .replace(
+                    value.parse::<i32>().map_err(|_| {
+                        "--acceptance-parent-fd must be a positive integer".to_string()
+                    })?,
+                )
+                .is_some()
+            {
+                return Err("Specify exactly one Sidekick UI acceptance parent fd".into());
+            }
+        } else if arg == "--acceptance-real-home" {
+            let value = diagnostic_value_after(args, &mut index, arg)?;
+            if real_home.replace(PathBuf::from(value)).is_some() {
+                return Err("Specify exactly one Sidekick UI acceptance real home".into());
+            }
+        } else {
+            return Err(format!("Unknown Sidekick UI diagnostic argument: {arg}"));
+        }
+        index += 1;
+    }
+    if !consent_cloud {
+        return Err(
+            "--diagnose-native-sidekick-ui requires --consent-cloud before evidence can be sent to Codex Cloud"
+                .into(),
+        );
+    }
+    if !consent_microphone || !consent_screen {
+        return Err(
+            "--diagnose-native-sidekick-ui requires explicit --consent-microphone and --consent-screen"
+                .into(),
+        );
+    }
+    let nonce = nonce
+        .ok_or_else(|| "--diagnose-native-sidekick-ui requires --acceptance-nonce".to_string())?;
+    if nonce.len() != 64 || !nonce.chars().all(|character| character.is_ascii_hexdigit()) {
+        return Err("--acceptance-nonce must contain exactly 64 hexadecimal characters".into());
+    }
+    let parent_fd = parent_fd.ok_or_else(|| {
+        "--diagnose-native-sidekick-ui requires --acceptance-parent-fd".to_string()
+    })?;
+    if parent_fd < 3 {
+        return Err("--acceptance-parent-fd must be an inherited descriptor at least 3".into());
+    }
+    let real_home = real_home.ok_or_else(|| {
+        "--diagnose-native-sidekick-ui requires --acceptance-real-home".to_string()
+    })?;
+    if !real_home.is_absolute() {
+        return Err("--acceptance-real-home must be an absolute path".into());
+    }
+    Ok(Some(NativeSidekickUiDiagnosticCli {
+        nonce,
+        parent_fd,
+        real_home,
     }))
 }
 
@@ -606,6 +706,100 @@ mod native_sidekick_cli_tests {
         .unwrap_err();
 
         assert!(error.contains("Choose an explicit Sidekick diagnostic source"));
+    }
+
+    #[test]
+    fn ui_diagnostic_requires_explicit_cloud_consent_and_nonce() {
+        let missing_consent = parse_native_sidekick_ui_diagnostic_cli(&args(&[
+            "--diagnose-native-sidekick-ui",
+            "--acceptance-nonce",
+            "0123456789abcdef0123456789abcdef",
+        ]))
+        .unwrap_err();
+        assert!(missing_consent.contains("requires --consent-cloud"));
+
+        let missing_nonce = parse_native_sidekick_ui_diagnostic_cli(&args(&[
+            "--diagnose-native-sidekick-ui",
+            "--consent-cloud",
+            "--consent-microphone",
+            "--consent-screen",
+            "--acceptance-parent-fd",
+            "3",
+            "--acceptance-real-home",
+            "/Users/tester",
+        ]))
+        .unwrap_err();
+        assert!(missing_nonce.contains("requires --acceptance-nonce"));
+
+        let missing_hardware_consent = parse_native_sidekick_ui_diagnostic_cli(&args(&[
+            "--diagnose-native-sidekick-ui",
+            "--consent-cloud",
+            "--acceptance-nonce",
+            "0123456789abcdef0123456789abcdef",
+            "--acceptance-parent-fd",
+            "3",
+            "--acceptance-real-home",
+            "/Users/tester",
+        ]))
+        .unwrap_err();
+        assert!(missing_hardware_consent.contains("--consent-microphone"));
+    }
+
+    #[test]
+    fn ui_diagnostic_rejects_unknown_flags_and_weak_nonces() {
+        let unknown = parse_native_sidekick_ui_diagnostic_cli(&args(&[
+            "--diagnose-native-sidekick-ui",
+            "--consent-cloud",
+            "--consent-microphone",
+            "--consent-screen",
+            "--acceptance-nonce",
+            "0123456789abcdef0123456789abcdef",
+            "--acceptance-parent-fd",
+            "3",
+            "--acceptance-real-home",
+            "/Users/tester",
+            "--diagnose-native-sidekick-active",
+        ]))
+        .unwrap_err();
+        assert!(unknown.contains("Unknown Sidekick UI diagnostic argument"));
+
+        let weak = parse_native_sidekick_ui_diagnostic_cli(&args(&[
+            "--diagnose-native-sidekick-ui",
+            "--consent-cloud",
+            "--consent-microphone",
+            "--consent-screen",
+            "--acceptance-nonce",
+            "not-random",
+            "--acceptance-parent-fd",
+            "3",
+            "--acceptance-real-home",
+            "/Users/tester",
+        ]))
+        .unwrap_err();
+        assert!(weak.contains("exactly 64 hexadecimal"));
+    }
+
+    #[test]
+    fn ui_diagnostic_accepts_only_the_bounded_explicit_mode() {
+        let parsed = parse_native_sidekick_ui_diagnostic_cli(&args(&[
+            "--diagnose-native-sidekick-ui",
+            "--consent-cloud",
+            "--consent-microphone",
+            "--consent-screen",
+            "--acceptance-nonce=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "--acceptance-parent-fd",
+            "3",
+            "--acceptance-real-home",
+            "/Users/tester",
+        ]))
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            parsed.nonce,
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        );
+        assert_eq!(parsed.parent_fd, 3);
+        assert_eq!(parsed.real_home, PathBuf::from("/Users/tester"));
     }
 
     #[test]
@@ -1879,6 +2073,17 @@ fn main() {
         std::process::exit(code);
     }
 
+    let native_sidekick_ui_diagnostic = {
+        let args = std::env::args().skip(1).collect::<Vec<_>>();
+        match parse_native_sidekick_ui_diagnostic_cli(&args) {
+            Ok(cli) => cli,
+            Err(error) => {
+                eprintln!("native Sidekick UI diagnostic arguments are invalid: {error}");
+                std::process::exit(2);
+            }
+        }
+    };
+
     if let Some(code) = maybe_run_process_queue_worker() {
         // Worker subprocess exit: skip C++ static teardown on macOS.
         //
@@ -2224,6 +2429,7 @@ fn main() {
             sidekick_stop_flag: Arc::new(AtomicBool::new(false)),
             sidekick_control: Arc::new(Mutex::new(None)),
             sidekick_snapshot: Arc::new(Mutex::new(commands::NativeSidekickSnapshot::off())),
+            sidekick_acceptance: commands::new_native_sidekick_acceptance_shared(),
             live_shortcut_enabled: {
                 let cfg = minutes_core::config::Config::load();
                 Arc::new(AtomicBool::new(cfg.live_transcript.shortcut_enabled))
@@ -2263,6 +2469,26 @@ fn main() {
 
             #[cfg(target_os = "macos")]
             install_macos_terminate_hook(app.handle());
+
+            // The native Sidekick UI acceptance is a bounded product-path
+            // process, not a second everyday Minutes instance. Keep the real
+            // main window, recording command, screen worker, and Sidekick
+            // surfaces under test while skipping unrelated watchers,
+            // shortcuts, preloaders, call detection, calendar, and jobs.
+            if let Some(cli) = native_sidekick_ui_diagnostic.clone() {
+                commands::seed_latest_retryable_output(&latest_output);
+                show_main_window(app.handle());
+                if let Err(error) = commands::launch_native_sidekick_ui_acceptance(
+                    app.handle(),
+                    cli.nonce,
+                    cli.parent_fd,
+                    cli.real_home,
+                ) {
+                    eprintln!("native Sidekick UI acceptance failed to launch: {error}");
+                    app.handle().exit(2);
+                }
+                return Ok(());
+            }
 
             spawn_meetings_refresh_watcher(app.handle(), startup_config.output_dir.clone());
 
@@ -3233,6 +3459,17 @@ fn main() {
             commands::cmd_native_sidekick_send,
             commands::cmd_stop_native_sidekick,
             commands::cmd_native_sidekick_status,
+            commands::cmd_native_sidekick_ui_acceptance_ready,
+            commands::cmd_native_sidekick_ui_acceptance_marker_ready,
+            commands::cmd_native_sidekick_ui_acceptance_main_ready,
+            commands::cmd_native_sidekick_ui_acceptance_launch_claim,
+            commands::cmd_native_sidekick_ui_acceptance_interactable,
+            commands::cmd_native_sidekick_ui_acceptance_launch_completed,
+            commands::cmd_native_sidekick_ui_acceptance_launch_failed,
+            commands::cmd_native_sidekick_ui_acceptance_claim,
+            commands::cmd_native_sidekick_ui_acceptance_painted,
+            commands::cmd_native_sidekick_ui_acceptance_turn_settled,
+            commands::cmd_native_sidekick_ui_acceptance_failed,
             commands::cmd_live_shortcut_settings,
             commands::cmd_set_live_shortcut,
             commands::cmd_install_update,

@@ -96,6 +96,47 @@ External fixture files are accepted only on Unix hosts, where Minutes can open
 one bounded regular-file descriptor with no-follow and nonblocking semantics;
 other platforms must use a compiled approved golden.
 
+### Native Sidekick UI/provider acceptance (macOS, explicit opt-in)
+
+The deeper installed-app gate is intentionally separate because it opens the
+real dev app, microphone, screen-capture worker, native Sidekick window, and
+Codex Cloud provider:
+
+```bash
+node scripts/run_native_sidekick_ui_acceptance.mjs
+```
+
+Run it only after explicitly consenting to those effects and closing every
+Minutes/Minutes Dev process. It refuses an active real-home recording, uses an
+isolated temporary Minutes home, preserves the dev app's prior cloud-consent
+choice, and cleans its microphone transcript, screen images, Codex auth copy,
+and temporary workspace before it can pass.
+
+This is a bounded native UI/provider integration gate, not a substitute for a
+real two-person rehearsal. It proves that the real Recording launch produces
+sustained room-mic signal, the exact-session screen adapter captures and
+locally verifies a nonce, the visible main-app and Sidekick controls work, one
+persistent reasoning session streams two canonical turns, responses lay out,
+evidence receipts correlate, and teardown completes. Each turn parses bytes
+from an owner/inode/mode-pinned transcript file; turn two appends a real
+approved delta. Each cloud turn receives the exact selected PNG bytes inline
+as a data URL, rather than asking Codex to reopen a mutable pathname. In this
+fixture those bytes contain only the generated nonce marker, never desktop
+pixels. The runner also uses a private byte-matched Codex executable copy,
+checks that path before and after the run, and proves no process in the
+original detached app process group survives cleanup.
+
+The report labels this scope mechanically. It does **not** prove speech
+recognition, two-speaker diarization, semantic understanding of desktop
+screens, compositor/occlusion visibility, provider steering or interruption,
+or the normal installed app's cold-start path. Ambient room speech is recorded
+only for the microphone-signal smoke check and never enters the cloud reasoning
+window. Its declared host threat model is a trusted single-user development
+Mac with no concurrent hostile process running as that same user. The gate does
+not claim live process code-identity attestation, resistance to same-user
+filesystem/process tampering, or discovery of a malicious child that escapes
+the original process group.
+
 ## Dictation shortcut paths
 
 Minutes now has two distinct dictation shortcut paths:

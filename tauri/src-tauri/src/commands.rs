@@ -17,19 +17,25 @@ use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, VecDeque};
 use std::fs::OpenOptions;
 use std::hash::{Hash, Hasher};
-#[cfg(unix)]
-use std::io::Read;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 use tauri::{Emitter, Manager};
 use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 use tauri_plugin_notification::NotificationExt;
 use tauri_plugin_shell::ShellExt;
+
+#[cfg(test)]
+fn commands_test_home_env_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::OnceLock<Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 pub struct AppState {
     pub recording: Arc<AtomicBool>,
@@ -70,6 +76,7 @@ pub struct AppState {
     pub sidekick_stop_flag: Arc<AtomicBool>,
     pub(crate) sidekick_control: Arc<Mutex<Option<std::sync::mpsc::Sender<NativeSidekickControl>>>>,
     pub sidekick_snapshot: Arc<Mutex<NativeSidekickSnapshot>>,
+    pub(crate) sidekick_acceptance: NativeSidekickAcceptanceShared,
     pub pending_update: Arc<Mutex<Option<PendingUpdate>>>,
     pub update_install_running: Arc<AtomicBool>,
     pub update_install_cancel: Arc<AtomicBool>,
@@ -161,11 +168,14 @@ pub struct NativeSidekickMessage {
     pub text: String,
     pub kind: Option<String>,
     pub latency_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub acceptance_turn_id: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NativeSidekickSnapshot {
+    pub revision: u64,
     pub active: bool,
     pub state: String,
     pub detail: String,
@@ -177,9 +187,157 @@ pub struct NativeSidekickSnapshot {
     pub messages: Vec<NativeSidekickMessage>,
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeSidekickPaintAck {
+    pub turn_id: String,
+    pub response_sha256: String,
+    pub typed_to_paint_ms: u64,
+    pub animation_frames: u8,
+    pub width: f64,
+    pub height: f64,
+    pub window_visible: bool,
+    pub on_screen: bool,
+}
+
+#[derive(Debug, Clone)]
+struct NativeSidekickExpectedPaint {
+    turn_id: String,
+    prompt: String,
+    baseline_message_count: usize,
+    requested_at: Instant,
+    deadline: Instant,
+    claimed: bool,
+    submission_started: bool,
+    paint_ack: Option<NativeSidekickPaintAck>,
+    settled: bool,
+    failure: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct NativeSidekickAcceptanceEvidencePlan {
+    transcript: Vec<minutes_core::live_sidekick::ReasoningTranscriptEvidence>,
+    transcript_evidence_prefix: String,
+    transcript_file: NativeSidekickPinnedFile,
+    transcript_initial_items: usize,
+    transcript_initial_sha256: String,
+    transcript_final_sha256: String,
+    transcript_delta_bytes: Arc<Vec<u8>>,
+    transcript_delta_turn_id: String,
+    screen: minutes_core::live_sidekick::ReasoningImageEvidence,
+    screen_sha256: String,
+    screen_file: NativeSidekickPinnedFile,
+    screen_bytes: Arc<Vec<u8>>,
+    screen_capture_path: PathBuf,
+    screen_capture_sha256: String,
+    screen_snapshot_directory: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+struct NativeSidekickPinnedFile {
+    path: PathBuf,
+    device: u64,
+    inode: u64,
+    owner: u32,
+    mode: u32,
+}
+
+#[derive(Debug, Clone)]
+struct NativeSidekickTranscriptRefreshReceipt {
+    cursor: usize,
+    sha256: String,
+    new_items: usize,
+}
+
+#[derive(Debug, Clone)]
+struct NativeSidekickScreenRefreshReceipt {
+    evidence_id: String,
+    provider_path: PathBuf,
+    provider_sha256: String,
+    provider_file: NativeSidekickPinnedFile,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NativeSidekickAdapterReceipt {
+    transcript_adapter: String,
+    transcript_cursor: usize,
+    transcript_sha256: String,
+    transcript_new_items: usize,
+    screen_adapter: String,
+    screen_capture_sha256: String,
+    provider_image_evidence_id: String,
+    provider_image_path: String,
+    provider_image_sha256: String,
+    provider_image_transport: String,
+    provider_image_dispatched_sha256: String,
+    #[serde(skip_serializing)]
+    provider_image_file: NativeSidekickPinnedFile,
+    capture_session_id: String,
+    per_turn_refresh_completed: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NativeSidekickCandidateEvidenceReceipt {
+    transcript_evidence_ids: Vec<String>,
+    visual_evidence_ids: Vec<String>,
+    claims_visual_observation: bool,
+    first_token_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeSidekickAcceptanceChallenge {
+    nonce: String,
+    turn_id: String,
+    message: String,
+    baseline_message_count: usize,
+    should_submit: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeSidekickAcceptanceReady {
+    active: bool,
+    pending: Option<NativeSidekickAcceptanceChallenge>,
+}
+
+#[derive(Debug)]
+pub(crate) struct NativeSidekickAcceptanceRuntime {
+    nonce: String,
+    marker_ready: bool,
+    main_ui_ready: bool,
+    main_launch_claimed: bool,
+    main_launch_completed: bool,
+    ui_ready: bool,
+    interactable_targets: HashMap<String, bool>,
+    fatal_failure: Option<String>,
+    expected_paint: Option<NativeSidekickExpectedPaint>,
+    evidence_plan: Option<NativeSidekickAcceptanceEvidencePlan>,
+    evidence_receipts: HashMap<String, minutes_core::live_sidekick::ForegroundEvidenceReceipt>,
+    adapter_receipts: HashMap<String, NativeSidekickAdapterReceipt>,
+    candidate_evidence: HashMap<String, NativeSidekickCandidateEvidenceReceipt>,
+    owned_sensitive_paths: Vec<PathBuf>,
+    provider_executable_path: Option<String>,
+    provider_executable_sha256: Option<String>,
+    provider_version: Option<String>,
+    provider_descriptor: Option<minutes_core::live_sidekick::ReasoningBackendDescriptor>,
+    reasoning_session_correlation: Option<String>,
+    reasoning_sessions_started: u64,
+}
+
+pub(crate) type NativeSidekickAcceptanceShared =
+    Arc<(Mutex<Option<NativeSidekickAcceptanceRuntime>>, Condvar)>;
+
+pub(crate) fn new_native_sidekick_acceptance_shared() -> NativeSidekickAcceptanceShared {
+    Arc::new((Mutex::new(None), Condvar::new()))
+}
+
 impl NativeSidekickSnapshot {
     pub(crate) fn off() -> Self {
         Self {
+            revision: 0,
             active: false,
             state: "off".into(),
             detail: "Sidekick is off.".into(),
@@ -194,7 +352,10 @@ impl NativeSidekickSnapshot {
 }
 
 pub(crate) enum NativeSidekickControl {
-    UserMessage(String),
+    UserMessage {
+        text: String,
+        acceptance_turn_id: Option<String>,
+    },
     Stop,
 }
 
@@ -11064,14 +11225,11 @@ mod tests {
     use super::*;
     use std::fs;
     use std::path::Path;
-    use std::sync::{Mutex, MutexGuard, OnceLock};
+    use std::sync::MutexGuard;
     use tempfile::TempDir;
 
     fn test_guard() -> MutexGuard<'static, ()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+        commands_test_home_env_lock()
     }
 
     fn with_temp_home<T>(f: impl FnOnce(&Path) -> T) -> T {
@@ -11145,6 +11303,7 @@ mod tests {
             sidekick_stop_flag: Arc::new(AtomicBool::new(false)),
             sidekick_control: Arc::new(Mutex::new(None)),
             sidekick_snapshot: Arc::new(Mutex::new(NativeSidekickSnapshot::off())),
+            sidekick_acceptance: new_native_sidekick_acceptance_shared(),
             pending_update: Arc::new(Mutex::new(None)),
             update_install_running: Arc::new(AtomicBool::new(false)),
             update_install_cancel: Arc::new(AtomicBool::new(false)),
@@ -15479,9 +15638,23 @@ fn observe_native_sidekick_transcript(
     engine: &mut minutes_core::live_sidekick::LiveSidekickEngine,
     cursor: &mut usize,
 ) -> Result<usize, String> {
+    observe_native_sidekick_transcript_from_path(
+        engine,
+        cursor,
+        &minutes_core::pid::live_transcript_jsonl_path(),
+        "transcript-line-",
+    )
+}
+
+fn observe_native_sidekick_transcript_from_path(
+    engine: &mut minutes_core::live_sidekick::LiveSidekickEngine,
+    cursor: &mut usize,
+    path: &Path,
+    evidence_id_prefix: &str,
+) -> Result<usize, String> {
     use minutes_core::live_sidekick::{EvidenceId, ReasoningTranscriptEvidence};
 
-    let lines = minutes_core::live_transcript::read_since_line(*cursor)
+    let lines = minutes_core::live_transcript::read_since_line_from_path(path, *cursor)
         .map_err(|error| format!("Could not read the live transcript: {error}"))?;
     let mut accepted = 0;
     for line in lines {
@@ -15491,7 +15664,7 @@ fn observe_native_sidekick_transcript(
         }
         if engine
             .observe_transcript(ReasoningTranscriptEvidence {
-                evidence_id: EvidenceId::new(format!("transcript-line-{}", line.line)),
+                evidence_id: EvidenceId::new(format!("{evidence_id_prefix}{}", line.line)),
                 text: line.text,
                 speaker_label: line.speaker,
                 speaker_verified: false,
@@ -15504,6 +15677,140 @@ fn observe_native_sidekick_transcript(
         }
     }
     Ok(accepted)
+}
+
+fn observe_native_sidekick_transcript_from_bytes(
+    engine: &mut minutes_core::live_sidekick::LiveSidekickEngine,
+    cursor: &mut usize,
+    bytes: &[u8],
+    evidence_id_prefix: &str,
+) -> Result<usize, String> {
+    use minutes_core::live_sidekick::{EvidenceId, ReasoningTranscriptEvidence};
+
+    let lines = minutes_core::live_transcript::read_since_line_from_bytes(bytes, *cursor)
+        .map_err(|error| format!("Could not parse the verified transcript bytes: {error}"))?;
+    let mut accepted = 0;
+    for line in lines {
+        *cursor = (*cursor).max(line.line);
+        if line.text.trim().is_empty() {
+            continue;
+        }
+        if engine
+            .observe_transcript(ReasoningTranscriptEvidence {
+                evidence_id: EvidenceId::new(format!("{evidence_id_prefix}{}", line.line)),
+                text: line.text,
+                speaker_label: line.speaker,
+                speaker_verified: false,
+                offset_ms: line.offset_ms,
+                duration_ms: line.duration_ms,
+            })
+            .is_ok_and(|reduction| reduction.accepted)
+        {
+            accepted += 1;
+        }
+    }
+    Ok(accepted)
+}
+
+#[cfg(unix)]
+fn pin_native_sidekick_private_file(
+    path: &Path,
+    expected_mode: u32,
+) -> Result<NativeSidekickPinnedFile, String> {
+    use std::os::unix::fs::MetadataExt;
+
+    let metadata = path
+        .symlink_metadata()
+        .map_err(|error| format!("Could not inspect pinned acceptance file: {error}"))?;
+    if !metadata.file_type().is_file()
+        || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.mode() & 0o777 != expected_mode
+    {
+        return Err("The acceptance evidence file is not a private, owned regular file.".into());
+    }
+    Ok(NativeSidekickPinnedFile {
+        path: path.to_path_buf(),
+        device: metadata.dev(),
+        inode: metadata.ino(),
+        owner: metadata.uid(),
+        mode: metadata.mode() & 0o777,
+    })
+}
+
+#[cfg(not(unix))]
+fn pin_native_sidekick_private_file(
+    _path: &Path,
+    _expected_mode: u32,
+) -> Result<NativeSidekickPinnedFile, String> {
+    Err("Native Sidekick acceptance evidence pinning requires a Unix host.".into())
+}
+
+#[cfg(unix)]
+fn verify_native_sidekick_pinned_file(
+    file: &std::fs::File,
+    pinned: &NativeSidekickPinnedFile,
+) -> Result<(), String> {
+    use std::os::unix::fs::MetadataExt;
+
+    let metadata = file
+        .metadata()
+        .map_err(|error| format!("Could not inspect opened acceptance evidence: {error}"))?;
+    if !metadata.file_type().is_file()
+        || metadata.dev() != pinned.device
+        || metadata.ino() != pinned.inode
+        || metadata.uid() != pinned.owner
+        || metadata.mode() & 0o777 != pinned.mode
+    {
+        return Err("The acceptance evidence file identity changed after it was pinned.".into());
+    }
+    Ok(())
+}
+
+fn read_native_sidekick_pinned_file(
+    pinned: &NativeSidekickPinnedFile,
+    max_bytes: u64,
+) -> Result<Vec<u8>, String> {
+    #[cfg(unix)]
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    let file = options
+        .open(&pinned.path)
+        .map_err(|error| format!("Could not open pinned acceptance evidence: {error}"))?;
+    #[cfg(unix)]
+    verify_native_sidekick_pinned_file(&file, pinned)?;
+    let mut bytes = Vec::new();
+    file.take(max_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("Could not read pinned acceptance evidence: {error}"))?;
+    if bytes.len() as u64 > max_bytes {
+        return Err("The pinned acceptance evidence exceeded its byte limit.".into());
+    }
+    Ok(bytes)
+}
+
+fn append_native_sidekick_pinned_file(
+    pinned: &NativeSidekickPinnedFile,
+    bytes: &[u8],
+) -> Result<(), String> {
+    #[cfg(unix)]
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let mut options = OpenOptions::new();
+    options.append(true);
+    #[cfg(unix)]
+    options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    let mut file = options
+        .open(&pinned.path)
+        .map_err(|error| format!("Could not open the pinned transcript for append: {error}"))?;
+    #[cfg(unix)]
+    verify_native_sidekick_pinned_file(&file, pinned)?;
+    file.write_all(bytes)
+        .and_then(|_| file.sync_all())
+        .map_err(|error| format!("Could not append the approved transcript delta: {error}"))
 }
 
 fn current_native_sidekick(
@@ -15525,13 +15832,846 @@ where
 {
     let next = {
         let mut state = snapshot.lock().unwrap_or_else(|error| error.into_inner());
+        let prior_revision = state.revision;
         update(&mut state);
+        state.revision = prior_revision.saturating_add(1);
         state.clone()
     };
     app.emit_to("native-sidekick", "sidekick:state", next.clone())
         .ok();
     app.emit_to("main", "sidekick:state", next.clone()).ok();
     next
+}
+
+fn configure_native_sidekick_acceptance(
+    shared: &NativeSidekickAcceptanceShared,
+    nonce: String,
+) -> Result<(), String> {
+    let (lock, _) = &**shared;
+    let mut runtime = lock.lock().unwrap_or_else(|error| error.into_inner());
+    if runtime.is_some() {
+        return Err("A native Sidekick UI acceptance run is already active.".into());
+    }
+    *runtime = Some(NativeSidekickAcceptanceRuntime {
+        nonce,
+        marker_ready: false,
+        main_ui_ready: false,
+        main_launch_claimed: false,
+        main_launch_completed: false,
+        ui_ready: false,
+        interactable_targets: HashMap::new(),
+        fatal_failure: None,
+        expected_paint: None,
+        evidence_plan: None,
+        evidence_receipts: HashMap::new(),
+        adapter_receipts: HashMap::new(),
+        candidate_evidence: HashMap::new(),
+        owned_sensitive_paths: Vec::new(),
+        provider_executable_path: None,
+        provider_executable_sha256: None,
+        provider_version: None,
+        provider_descriptor: None,
+        reasoning_session_correlation: None,
+        reasoning_sessions_started: 0,
+    });
+    Ok(())
+}
+
+fn clear_native_sidekick_acceptance(shared: &NativeSidekickAcceptanceShared) {
+    let (lock, ready) = &**shared;
+    *lock.lock().unwrap_or_else(|error| error.into_inner()) = None;
+    ready.notify_all();
+}
+
+fn wait_for_native_sidekick_acceptance_ui(
+    shared: &NativeSidekickAcceptanceShared,
+    timeout: Duration,
+) -> Result<(), String> {
+    let (lock, ready) = &**shared;
+    let deadline = Instant::now() + timeout;
+    let mut guard = lock.lock().unwrap_or_else(|error| error.into_inner());
+    loop {
+        match guard.as_ref() {
+            Some(runtime) if runtime.fatal_failure.is_some() => {
+                return Err(runtime
+                    .fatal_failure
+                    .clone()
+                    .unwrap_or_else(|| "The native Sidekick UI failed.".into()));
+            }
+            Some(runtime) if runtime.ui_ready => return Ok(()),
+            Some(_) => {}
+            None => return Err("The native Sidekick UI acceptance run stopped early.".into()),
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(
+                "The native Sidekick window did not become acceptance-ready in time.".into(),
+            );
+        }
+        let (next, timeout_result) = ready
+            .wait_timeout(guard, remaining)
+            .unwrap_or_else(|error| error.into_inner());
+        guard = next;
+        if timeout_result.timed_out() {
+            return Err(
+                "The native Sidekick window did not become acceptance-ready in time.".into(),
+            );
+        }
+    }
+}
+
+fn wait_for_native_sidekick_acceptance_surface(
+    shared: &NativeSidekickAcceptanceShared,
+    timeout: Duration,
+    surface: &str,
+    ready_predicate: impl Fn(&NativeSidekickAcceptanceRuntime) -> bool,
+) -> Result<(), String> {
+    let (lock, ready) = &**shared;
+    let deadline = Instant::now() + timeout;
+    let mut guard = lock.lock().unwrap_or_else(|error| error.into_inner());
+    loop {
+        match guard.as_ref() {
+            Some(runtime) if runtime.fatal_failure.is_some() => {
+                return Err(runtime
+                    .fatal_failure
+                    .clone()
+                    .unwrap_or_else(|| format!("The native Sidekick {surface} failed.")));
+            }
+            Some(runtime) if ready_predicate(runtime) => return Ok(()),
+            Some(_) => {}
+            None => return Err("The native Sidekick UI acceptance run stopped early.".into()),
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(format!(
+                "The native Sidekick {surface} did not become acceptance-ready in time."
+            ));
+        }
+        let (next, timeout_result) = ready
+            .wait_timeout(guard, remaining)
+            .unwrap_or_else(|error| error.into_inner());
+        guard = next;
+        if timeout_result.timed_out() {
+            return Err(format!(
+                "The native Sidekick {surface} did not become acceptance-ready in time."
+            ));
+        }
+    }
+}
+
+fn native_sidekick_acceptance_evidence_plan(
+    app: &tauri::AppHandle,
+) -> Option<NativeSidekickAcceptanceEvidencePlan> {
+    let state = app.state::<AppState>();
+    let (lock, _) = &*state.sidekick_acceptance;
+    let plan = lock
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .as_ref()
+        .and_then(|runtime| runtime.evidence_plan.clone());
+    plan
+}
+
+fn record_native_sidekick_acceptance_evidence_receipt(
+    app: &tauri::AppHandle,
+    acceptance_turn_id: &str,
+    receipt: minutes_core::live_sidekick::ForegroundEvidenceReceipt,
+) {
+    let state = app.state::<AppState>();
+    let (lock, ready) = &*state.sidekick_acceptance;
+    if let Some(runtime) = lock
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .as_mut()
+    {
+        runtime
+            .evidence_receipts
+            .insert(acceptance_turn_id.to_string(), receipt);
+        ready.notify_all();
+    };
+}
+
+fn record_native_sidekick_acceptance_adapter_receipt(
+    app: &tauri::AppHandle,
+    acceptance_turn_id: &str,
+    receipt: NativeSidekickAdapterReceipt,
+) {
+    let state = app.state::<AppState>();
+    let (lock, ready) = &*state.sidekick_acceptance;
+    if let Some(runtime) = lock
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .as_mut()
+    {
+        runtime
+            .adapter_receipts
+            .insert(acceptance_turn_id.to_string(), receipt);
+        ready.notify_all();
+    };
+}
+
+fn record_native_sidekick_acceptance_candidate_evidence(
+    app: &tauri::AppHandle,
+    acceptance_turn_id: &str,
+    receipt: NativeSidekickCandidateEvidenceReceipt,
+) {
+    let state = app.state::<AppState>();
+    let (lock, ready) = &*state.sidekick_acceptance;
+    if let Some(runtime) = lock
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .as_mut()
+    {
+        runtime
+            .candidate_evidence
+            .insert(acceptance_turn_id.to_string(), receipt);
+        ready.notify_all();
+    };
+}
+
+fn record_native_sidekick_acceptance_owned_path(app: &tauri::AppHandle, path: PathBuf) {
+    let state = app.state::<AppState>();
+    let (lock, ready) = &*state.sidekick_acceptance;
+    if let Some(runtime) = lock
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .as_mut()
+    {
+        if !runtime.owned_sensitive_paths.contains(&path) {
+            runtime.owned_sensitive_paths.push(path);
+        }
+        ready.notify_all();
+    };
+}
+
+fn fail_native_sidekick_acceptance_turn(
+    app: &tauri::AppHandle,
+    acceptance_turn_id: &str,
+    error: impl Into<String>,
+) {
+    let state = app.state::<AppState>();
+    let (lock, ready) = &*state.sidekick_acceptance;
+    if let Some(expected) = lock
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .as_mut()
+        .and_then(|runtime| runtime.expected_paint.as_mut())
+        .filter(|expected| expected.turn_id == acceptance_turn_id)
+    {
+        expected.failure = Some(error.into().chars().take(500).collect());
+        ready.notify_all();
+    };
+}
+
+fn request_native_sidekick_acceptance_turn(
+    app: &tauri::AppHandle,
+    shared: &NativeSidekickAcceptanceShared,
+    turn_id: &str,
+    prompt: &str,
+    timeout: Duration,
+    baseline_message_count: usize,
+) -> Result<NativeSidekickPaintAck, String> {
+    let requested_at = Instant::now();
+    {
+        let (lock, _) = &**shared;
+        let mut guard = lock.lock().unwrap_or_else(|error| error.into_inner());
+        let runtime = guard
+            .as_mut()
+            .ok_or_else(|| "The native Sidekick UI acceptance run is not active.".to_string())?;
+        if !runtime.ui_ready {
+            return Err("The native Sidekick window is not acceptance-ready.".into());
+        }
+        if runtime.expected_paint.is_some() {
+            return Err("A native Sidekick acceptance turn is already pending.".into());
+        }
+        runtime.expected_paint = Some(NativeSidekickExpectedPaint {
+            turn_id: turn_id.to_string(),
+            prompt: prompt.to_string(),
+            baseline_message_count,
+            requested_at,
+            deadline: requested_at + timeout,
+            claimed: false,
+            submission_started: false,
+            paint_ack: None,
+            settled: false,
+            failure: None,
+        });
+    }
+    let nonce = {
+        let (lock, _) = &**shared;
+        lock.lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .as_ref()
+            .map(|runtime| runtime.nonce.clone())
+            .ok_or_else(|| "The native Sidekick UI acceptance run stopped early.".to_string())?
+    };
+    if let Err(error) = app.emit_to(
+        "native-sidekick",
+        "sidekick:acceptance-submit",
+        serde_json::json!({
+            "nonce": nonce,
+            "turnId": turn_id,
+            "message": prompt,
+            "baselineMessageCount": baseline_message_count,
+            "timeoutMs": timeout.as_millis().min(u128::from(u64::MAX)) as u64,
+        }),
+    ) {
+        let (lock, _) = &**shared;
+        if let Some(runtime) = lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_mut()
+        {
+            runtime.expected_paint = None;
+        }
+        return Err(format!(
+            "Could not submit the native Sidekick acceptance turn: {error}"
+        ));
+    }
+
+    let (lock, ready) = &**shared;
+    let deadline = requested_at + timeout;
+    let mut guard = lock.lock().unwrap_or_else(|error| error.into_inner());
+    loop {
+        let runtime = guard
+            .as_mut()
+            .ok_or_else(|| "The native Sidekick UI acceptance run stopped early.".to_string())?;
+        if let Some(failure) = runtime.fatal_failure.clone() {
+            runtime.expected_paint = None;
+            return Err(failure);
+        }
+        if let Some(failure) = runtime
+            .expected_paint
+            .as_ref()
+            .and_then(|expected| expected.failure.clone())
+        {
+            runtime.expected_paint = None;
+            return Err(format!(
+                "Native Sidekick turn '{turn_id}' failed in the UI: {failure}"
+            ));
+        }
+        let completed = runtime.expected_paint.as_ref().is_some_and(|expected| {
+            expected.turn_id == turn_id && expected.paint_ack.is_some() && expected.settled
+        });
+        if completed {
+            let expected = runtime
+                .expected_paint
+                .take()
+                .expect("completed acceptance turn remains present");
+            return Ok(expected
+                .paint_ack
+                .expect("completed acceptance turn has a DOM-layout acknowledgement"));
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            runtime.expected_paint = None;
+            return Err(format!(
+                "Native Sidekick turn '{turn_id}' did not paint before the acceptance deadline."
+            ));
+        }
+        let (next, timeout_result) = ready
+            .wait_timeout(guard, remaining)
+            .unwrap_or_else(|error| error.into_inner());
+        guard = next;
+        if timeout_result.timed_out() {
+            if let Some(runtime) = guard.as_mut() {
+                runtime.expected_paint = None;
+            }
+            return Err(format!(
+                "Native Sidekick turn '{turn_id}' did not paint before the acceptance deadline."
+            ));
+        }
+    }
+}
+
+fn record_native_sidekick_acceptance_reasoning_session(
+    app: &tauri::AppHandle,
+    engine: &minutes_core::live_sidekick::LiveSidekickEngine,
+) {
+    let state = app.state::<AppState>();
+    let correlation = native_sidekick_diagnostic_session_correlation(engine).ok();
+    let sessions_started = engine.reasoning_sessions_started();
+    let (lock, ready) = &*state.sidekick_acceptance;
+    if let Some(runtime) = lock
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .as_mut()
+    {
+        runtime.reasoning_session_correlation = correlation;
+        runtime.reasoning_sessions_started = sessions_started;
+        runtime.provider_descriptor = Some(engine.descriptor().clone());
+        ready.notify_all();
+    };
+}
+
+fn record_native_sidekick_acceptance_provider(app: &tauri::AppHandle, executable: &Path) {
+    let canonical = executable.canonicalize().ok();
+    let sha256 = canonical
+        .as_deref()
+        .and_then(|path| std::fs::read(path).ok())
+        .map(|bytes| native_sidekick_sha256(&bytes));
+    let version = canonical.as_deref().and_then(|path| {
+        Command::new(path)
+            .arg("--version")
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+            .filter(|value| !value.is_empty())
+    });
+    let state = app.state::<AppState>();
+    let (lock, ready) = &*state.sidekick_acceptance;
+    if let Some(runtime) = lock
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .as_mut()
+    {
+        runtime.provider_executable_path = canonical.map(|path| path.display().to_string());
+        runtime.provider_executable_sha256 = sha256;
+        runtime.provider_version = version;
+        ready.notify_all();
+    };
+}
+
+#[tauri::command]
+pub fn cmd_native_sidekick_ui_acceptance_ready(
+    window: tauri::WebviewWindow,
+    state: tauri::State<AppState>,
+) -> Result<NativeSidekickAcceptanceReady, String> {
+    if window.label() != "native-sidekick" {
+        return Err("Only the native Sidekick window may join UI acceptance.".into());
+    }
+    let (lock, ready) = &*state.sidekick_acceptance;
+    let mut guard = lock.lock().unwrap_or_else(|error| error.into_inner());
+    let Some(runtime) = guard.as_mut() else {
+        return Ok(NativeSidekickAcceptanceReady {
+            active: false,
+            pending: None,
+        });
+    };
+    runtime.ui_ready = true;
+    let pending =
+        runtime
+            .expected_paint
+            .as_ref()
+            .map(|expected| NativeSidekickAcceptanceChallenge {
+                nonce: runtime.nonce.clone(),
+                turn_id: expected.turn_id.clone(),
+                message: expected.prompt.clone(),
+                baseline_message_count: expected.baseline_message_count,
+                should_submit: !expected.submission_started,
+            });
+    ready.notify_all();
+    Ok(NativeSidekickAcceptanceReady {
+        active: true,
+        pending,
+    })
+}
+
+#[tauri::command]
+pub fn cmd_native_sidekick_ui_acceptance_marker_ready(
+    window: tauri::WebviewWindow,
+    state: tauri::State<AppState>,
+) -> Result<bool, String> {
+    if window.label() != "sidekick-acceptance-marker" {
+        return Err("Only the Sidekick acceptance marker may report marker readiness.".into());
+    }
+    let (lock, ready) = &*state.sidekick_acceptance;
+    let mut guard = lock.lock().unwrap_or_else(|error| error.into_inner());
+    let Some(runtime) = guard.as_mut() else {
+        return Ok(false);
+    };
+    runtime.marker_ready = true;
+    ready.notify_all();
+    Ok(true)
+}
+
+#[tauri::command]
+pub fn cmd_native_sidekick_ui_acceptance_main_ready(
+    window: tauri::WebviewWindow,
+    state: tauri::State<AppState>,
+) -> Result<bool, String> {
+    if window.label() != "main" {
+        return Err("Only the Minutes main window may join Sidekick launch acceptance.".into());
+    }
+    let (lock, ready) = &*state.sidekick_acceptance;
+    let mut guard = lock.lock().unwrap_or_else(|error| error.into_inner());
+    let Some(runtime) = guard.as_mut() else {
+        return Ok(false);
+    };
+    runtime.main_ui_ready = true;
+    ready.notify_all();
+    Ok(true)
+}
+
+#[tauri::command]
+pub fn cmd_native_sidekick_ui_acceptance_launch_claim(
+    window: tauri::WebviewWindow,
+    state: tauri::State<AppState>,
+    nonce: String,
+) -> Result<bool, String> {
+    if window.label() != "main" {
+        return Err("Only the Minutes main window may launch Sidekick acceptance.".into());
+    }
+    let (lock, ready) = &*state.sidekick_acceptance;
+    let mut guard = lock.lock().unwrap_or_else(|error| error.into_inner());
+    let Some(runtime) = guard.as_mut() else {
+        return Ok(false);
+    };
+    if runtime.nonce != nonce || runtime.evidence_plan.is_none() {
+        return Err("The Sidekick launch did not match the authorized acceptance run.".into());
+    }
+    if runtime.main_launch_claimed {
+        return Ok(false);
+    }
+    runtime.main_launch_claimed = true;
+    ready.notify_all();
+    Ok(true)
+}
+
+fn native_sidekick_acceptance_interaction_key(target: &str, turn_id: Option<&str>) -> String {
+    turn_id.map_or_else(|| target.to_string(), |turn| format!("{turn}:{target}"))
+}
+
+fn native_sidekick_acceptance_window_visibility(window: &tauri::WebviewWindow) -> (bool, bool) {
+    let visible = window.is_visible().unwrap_or(false) && !window.is_minimized().unwrap_or(true);
+    let on_screen = window
+        .current_monitor()
+        .ok()
+        .flatten()
+        .and_then(|monitor| {
+            let window_position = window.outer_position().ok()?;
+            let window_size = window.outer_size().ok()?;
+            let monitor_position = monitor.position();
+            let monitor_size = monitor.size();
+            let window_right = i64::from(window_position.x) + i64::from(window_size.width);
+            let window_bottom = i64::from(window_position.y) + i64::from(window_size.height);
+            let monitor_right = i64::from(monitor_position.x) + i64::from(monitor_size.width);
+            let monitor_bottom = i64::from(monitor_position.y) + i64::from(monitor_size.height);
+            Some(
+                i64::from(window_position.x) < monitor_right
+                    && window_right > i64::from(monitor_position.x)
+                    && i64::from(window_position.y) < monitor_bottom
+                    && window_bottom > i64::from(monitor_position.y),
+            )
+        })
+        .unwrap_or(false);
+    (visible, on_screen)
+}
+
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub fn cmd_native_sidekick_ui_acceptance_interactable(
+    window: tauri::WebviewWindow,
+    state: tauri::State<AppState>,
+    nonce: String,
+    turn_id: Option<String>,
+    target: String,
+    width: f64,
+    height: f64,
+    hit_tested: bool,
+    enabled: bool,
+    writable: bool,
+) -> Result<(), String> {
+    let allowed = match window.label() {
+        "main" => {
+            turn_id.is_none()
+                && matches!(
+                    target.as_str(),
+                    "main_sidekick_button" | "cloud_consent_confirm"
+                )
+        }
+        "native-sidekick" => {
+            turn_id.is_some() && matches!(target.as_str(), "sidekick_input" | "sidekick_send")
+        }
+        _ => false,
+    };
+    if !allowed
+        || !width.is_finite()
+        || !height.is_finite()
+        || width <= 0.0
+        || height <= 0.0
+        || width > 10_000.0
+        || height > 10_000.0
+        || !hit_tested
+        || !enabled
+        || !writable
+    {
+        return Err("The Sidekick acceptance control was not visibly interactable.".into());
+    }
+    let (window_visible, window_on_screen) = native_sidekick_acceptance_window_visibility(&window);
+    if !window_visible || !window_on_screen {
+        return Err(
+            "The Sidekick acceptance control was not in a visible, on-screen window.".into(),
+        );
+    }
+    let (lock, ready) = &*state.sidekick_acceptance;
+    let mut guard = lock.lock().unwrap_or_else(|error| error.into_inner());
+    let runtime = guard
+        .as_mut()
+        .ok_or_else(|| "Native Sidekick UI acceptance is not active.".to_string())?;
+    if runtime.nonce != nonce {
+        return Err("Native Sidekick acceptance nonce mismatch.".into());
+    }
+    if window.label() == "main" && !runtime.main_launch_claimed {
+        return Err("The main Sidekick launch was not claimed.".into());
+    }
+    if let Some(turn_id) = turn_id.as_deref() {
+        let matches_expected = runtime
+            .expected_paint
+            .as_ref()
+            .is_some_and(|expected| expected.turn_id == turn_id && expected.claimed);
+        if !matches_expected {
+            return Err("The Sidekick control attestation belongs to the wrong turn.".into());
+        }
+    }
+    runtime.interactable_targets.insert(
+        native_sidekick_acceptance_interaction_key(&target, turn_id.as_deref()),
+        true,
+    );
+    ready.notify_all();
+    Ok(())
+}
+
+#[tauri::command]
+pub fn cmd_native_sidekick_ui_acceptance_launch_completed(
+    window: tauri::WebviewWindow,
+    state: tauri::State<AppState>,
+    nonce: String,
+) -> Result<(), String> {
+    if window.label() != "main" {
+        return Err("Only the Minutes main window may complete Sidekick launch acceptance.".into());
+    }
+    let (lock, ready) = &*state.sidekick_acceptance;
+    let mut guard = lock.lock().unwrap_or_else(|error| error.into_inner());
+    let runtime = guard
+        .as_mut()
+        .ok_or_else(|| "Native Sidekick UI acceptance is not active.".to_string())?;
+    if runtime.nonce != nonce {
+        return Err("Native Sidekick acceptance nonce mismatch.".into());
+    }
+    let button = native_sidekick_acceptance_interaction_key("main_sidekick_button", None);
+    let consent = native_sidekick_acceptance_interaction_key("cloud_consent_confirm", None);
+    if !runtime.main_launch_claimed
+        || !runtime.interactable_targets.contains_key(&button)
+        || !runtime.interactable_targets.contains_key(&consent)
+    {
+        return Err("The real Sidekick controls were not attested before launch.".into());
+    }
+    runtime.main_launch_completed = true;
+    ready.notify_all();
+    Ok(())
+}
+
+#[tauri::command]
+pub fn cmd_native_sidekick_ui_acceptance_launch_failed(
+    window: tauri::WebviewWindow,
+    state: tauri::State<AppState>,
+    nonce: String,
+    error: String,
+) -> Result<(), String> {
+    if window.label() != "main" {
+        return Err("Only the Minutes main window may fail Sidekick launch acceptance.".into());
+    }
+    let (lock, ready) = &*state.sidekick_acceptance;
+    let mut guard = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let runtime = guard
+        .as_mut()
+        .ok_or_else(|| "Native Sidekick UI acceptance is not active.".to_string())?;
+    if runtime.nonce != nonce {
+        return Err("Native Sidekick acceptance nonce mismatch.".into());
+    }
+    runtime.fatal_failure = Some(format!(
+        "The main Sidekick launch failed: {}",
+        error.chars().take(500).collect::<String>()
+    ));
+    ready.notify_all();
+    Ok(())
+}
+
+#[tauri::command]
+pub fn cmd_native_sidekick_ui_acceptance_claim(
+    window: tauri::WebviewWindow,
+    state: tauri::State<AppState>,
+    nonce: String,
+    turn_id: String,
+    message: String,
+    baseline_message_count: usize,
+) -> Result<bool, String> {
+    if window.label() != "native-sidekick" {
+        return Err("Only the native Sidekick window may claim an acceptance turn.".into());
+    }
+    let (lock, _) = &*state.sidekick_acceptance;
+    let mut guard = lock.lock().unwrap_or_else(|error| error.into_inner());
+    let Some(runtime) = guard.as_mut() else {
+        return Ok(false);
+    };
+    if runtime.nonce != nonce {
+        return Err("Native Sidekick acceptance nonce mismatch.".into());
+    }
+    let expected = runtime
+        .expected_paint
+        .as_mut()
+        .ok_or_else(|| "No native Sidekick acceptance turn is pending.".to_string())?;
+    if Instant::now() > expected.deadline
+        || expected.turn_id != turn_id
+        || expected.prompt != message
+        || expected.baseline_message_count != baseline_message_count
+    {
+        return Err("Native Sidekick acceptance turn did not match the pending challenge.".into());
+    }
+    expected.claimed = true;
+    Ok(true)
+}
+
+#[tauri::command]
+pub fn cmd_native_sidekick_ui_acceptance_painted(
+    window: tauri::WebviewWindow,
+    state: tauri::State<AppState>,
+    nonce: String,
+    turn_id: String,
+    user_text: String,
+    dom_text: String,
+    width: f64,
+    height: f64,
+    animation_frames: u8,
+) -> Result<(), String> {
+    if window.label() != "native-sidekick" {
+        return Err("Only the native Sidekick window may acknowledge a painted answer.".into());
+    }
+    let (window_visible, on_screen) = native_sidekick_acceptance_window_visibility(&window);
+    if animation_frames != 2
+        || !width.is_finite()
+        || !height.is_finite()
+        || width <= 0.0
+        || height <= 0.0
+        || dom_text.is_empty()
+        || dom_text.chars().count() > 10_000
+        || !window_visible
+        || !on_screen
+    {
+        return Err(
+            "The Sidekick response was not laid out in a visible, on-screen window.".into(),
+        );
+    }
+
+    let snapshot = current_native_sidekick(&state.sidekick_snapshot);
+    let (lock, ready) = &*state.sidekick_acceptance;
+    let mut guard = lock.lock().unwrap_or_else(|error| error.into_inner());
+    let runtime = guard
+        .as_mut()
+        .ok_or_else(|| "Native Sidekick UI acceptance is not active.".to_string())?;
+    if runtime.nonce != nonce {
+        return Err("Native Sidekick acceptance nonce mismatch.".into());
+    }
+    let expected = runtime
+        .expected_paint
+        .as_mut()
+        .ok_or_else(|| "No native Sidekick acceptance paint is pending.".to_string())?;
+    let tagged_messages = snapshot
+        .messages
+        .iter()
+        .enumerate()
+        .skip(expected.baseline_message_count)
+        .filter(|(_, message)| message.acceptance_turn_id.as_deref() == Some(turn_id.as_str()))
+        .collect::<Vec<_>>();
+    let tagged_user = tagged_messages
+        .iter()
+        .find(|(_, message)| message.role == "user");
+    let tagged_response = tagged_messages
+        .iter()
+        .find(|(_, message)| message.role == "sidekick");
+    let valid = expected.claimed
+        && Instant::now() <= expected.deadline
+        && expected.turn_id == turn_id
+        && expected.prompt == user_text
+        && tagged_messages.len() == 2
+        && tagged_user.is_some_and(|(_, message)| message.text == expected.prompt)
+        && tagged_response.is_some_and(|(_, message)| message.text == dom_text)
+        && tagged_user
+            .zip(tagged_response)
+            .is_some_and(|((user_index, _), (response_index, _))| user_index < response_index);
+    if !valid {
+        return Err(
+            "The laid-out Sidekick answer did not match the authoritative turn snapshot.".into(),
+        );
+    }
+    expected.paint_ack = Some(NativeSidekickPaintAck {
+        turn_id,
+        response_sha256: native_sidekick_sha256(dom_text.as_bytes()),
+        typed_to_paint_ms: Instant::now()
+            .saturating_duration_since(expected.requested_at)
+            .as_millis()
+            .min(u128::from(u64::MAX)) as u64,
+        animation_frames,
+        width,
+        height,
+        window_visible,
+        on_screen,
+    });
+    ready.notify_all();
+    Ok(())
+}
+
+#[tauri::command]
+pub fn cmd_native_sidekick_ui_acceptance_turn_settled(
+    window: tauri::WebviewWindow,
+    state: tauri::State<AppState>,
+    nonce: String,
+    turn_id: String,
+) -> Result<(), String> {
+    if window.label() != "native-sidekick" {
+        return Err("Only the native Sidekick window may settle an acceptance turn.".into());
+    }
+    let (lock, ready) = &*state.sidekick_acceptance;
+    let mut guard = lock.lock().unwrap_or_else(|error| error.into_inner());
+    let runtime = guard
+        .as_mut()
+        .ok_or_else(|| "Native Sidekick UI acceptance is not active.".to_string())?;
+    if runtime.nonce != nonce {
+        return Err("Native Sidekick acceptance nonce mismatch.".into());
+    }
+    let expected = runtime
+        .expected_paint
+        .as_mut()
+        .ok_or_else(|| "No native Sidekick acceptance turn is pending.".to_string())?;
+    if expected.turn_id != turn_id || expected.paint_ack.is_none() {
+        return Err("The Sidekick UI tried to settle the wrong or unpainted turn.".into());
+    }
+    expected.settled = true;
+    ready.notify_all();
+    Ok(())
+}
+
+#[tauri::command]
+pub fn cmd_native_sidekick_ui_acceptance_failed(
+    window: tauri::WebviewWindow,
+    state: tauri::State<AppState>,
+    nonce: String,
+    turn_id: String,
+    error: String,
+) -> Result<(), String> {
+    if window.label() != "native-sidekick" {
+        return Err("Only the native Sidekick window may fail an acceptance turn.".into());
+    }
+    let (lock, ready) = &*state.sidekick_acceptance;
+    let mut guard = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let runtime = guard
+        .as_mut()
+        .ok_or_else(|| "Native Sidekick UI acceptance is not active.".to_string())?;
+    if runtime.nonce != nonce {
+        return Err("Native Sidekick acceptance nonce mismatch.".into());
+    }
+    let expected = runtime
+        .expected_paint
+        .as_mut()
+        .ok_or_else(|| "No native Sidekick acceptance turn is pending.".to_string())?;
+    if expected.turn_id != turn_id {
+        return Err("The Sidekick UI tried to fail the wrong turn.".into());
+    }
+    expected.failure = Some(error.chars().take(500).collect());
+    ready.notify_all();
+    Ok(())
 }
 
 fn show_native_sidekick(app: &tauri::AppHandle) -> Result<(), String> {
@@ -15586,6 +16726,193 @@ fn refresh_native_sidekick_screen(
     } else {
         false
     }
+}
+
+fn refresh_native_sidekick_acceptance_transcript(
+    engine: &mut minutes_core::live_sidekick::LiveSidekickEngine,
+    cursor: &mut usize,
+    plan: &NativeSidekickAcceptanceEvidencePlan,
+    append_delta: bool,
+) -> Result<NativeSidekickTranscriptRefreshReceipt, String> {
+    let before = read_native_sidekick_pinned_file(
+        &plan.transcript_file,
+        NATIVE_SIDEKICK_DIAGNOSTIC_FIXTURE_MAX_BYTES,
+    )?;
+    let before_hash = native_sidekick_sha256(&before);
+    if append_delta {
+        if before_hash == plan.transcript_initial_sha256 {
+            append_native_sidekick_pinned_file(
+                &plan.transcript_file,
+                plan.transcript_delta_bytes.as_slice(),
+            )?;
+        } else if before_hash != plan.transcript_final_sha256 {
+            return Err(
+                "The pinned transcript changed before its approved delta was appended.".into(),
+            );
+        }
+    } else if before_hash != plan.transcript_initial_sha256 {
+        return Err("The pinned transcript changed before the first reasoning turn.".into());
+    }
+    let bytes = read_native_sidekick_pinned_file(
+        &plan.transcript_file,
+        NATIVE_SIDEKICK_DIAGNOSTIC_FIXTURE_MAX_BYTES,
+    )?;
+    let sha256 = native_sidekick_sha256(&bytes);
+    let expected_hash = if append_delta {
+        &plan.transcript_final_sha256
+    } else {
+        &plan.transcript_initial_sha256
+    };
+    if &sha256 != expected_hash {
+        return Err("The exact transcript bytes did not match the approved turn stage.".into());
+    }
+    let new_items = observe_native_sidekick_transcript_from_bytes(
+        engine,
+        cursor,
+        &bytes,
+        &plan.transcript_evidence_prefix,
+    )?;
+    let expected_cursor = if append_delta {
+        plan.transcript.len()
+    } else {
+        plan.transcript_initial_items
+    };
+    if *cursor != expected_cursor {
+        return Err(format!(
+            "The verified transcript adapter ended at cursor {}, expected {expected_cursor}.",
+            *cursor
+        ));
+    }
+    Ok(NativeSidekickTranscriptRefreshReceipt {
+        cursor: *cursor,
+        sha256,
+        new_items,
+    })
+}
+
+fn refresh_native_sidekick_acceptance_screen(
+    engine: &mut minutes_core::live_sidekick::LiveSidekickEngine,
+    context_session_id: &str,
+    last_path: &mut Option<String>,
+    plan: &NativeSidekickAcceptanceEvidencePlan,
+    turn_id: Option<&str>,
+) -> Result<NativeSidekickScreenRefreshReceipt, String> {
+    if plan.screen.capture_session_id.as_str() != context_session_id {
+        return Err("The pinned acceptance screen belongs to a different recording.".into());
+    }
+    let result = minutes_core::context_store::get_screen_context(context_session_id, None, 64)
+        .map_err(|error| format!("Could not read exact-session screen context: {error}"))?;
+    if result.session.as_ref().map(|session| session.id.as_str()) != Some(context_session_id)
+        || result.status.context_session_id.as_deref() != Some(context_session_id)
+    {
+        return Err("The screen adapter returned a different capture session.".into());
+    }
+    let expected_capture = plan
+        .screen_capture_path
+        .canonicalize()
+        .map_err(|error| format!("Could not resolve the pinned screen capture: {error}"))?;
+    let source = result
+        .images
+        .iter()
+        .find_map(|image| {
+            Path::new(&image.path)
+                .canonicalize()
+                .ok()
+                .filter(|path| path == &expected_capture)
+        })
+        .ok_or_else(|| {
+            "The exact screen selected for acceptance is no longer in the context store."
+                .to_string()
+        })?;
+    let source_hash = std::fs::read(&source)
+        .map(|bytes| native_sidekick_sha256(&bytes))
+        .map_err(|error| format!("Could not re-read the exact screen capture: {error}"))?;
+    if source_hash != plan.screen_capture_sha256 {
+        return Err("The exact-session screen changed after local verification.".into());
+    }
+    let provider_bytes = read_native_sidekick_pinned_file(&plan.screen_file, 8 * 1024 * 1024)?;
+    let provider_hash = native_sidekick_sha256(&provider_bytes);
+    if provider_hash != plan.screen_sha256 {
+        return Err("The nonce-only provider image changed before the reasoning turn.".into());
+    }
+    let (evidence_id, provider_path, provider_file, dispatch_bytes) = if let Some(turn_id) = turn_id
+    {
+        if !turn_id
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-'))
+        {
+            return Err("The acceptance turn id cannot name a provider image snapshot.".into());
+        }
+        let snapshot_path = plan
+            .screen_snapshot_directory
+            .join(format!("provider-{turn_id}.png"));
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o400);
+        }
+        options
+            .open(&snapshot_path)
+            .and_then(|mut file| {
+                file.write_all(plan.screen_bytes.as_slice())?;
+                file.sync_all()
+            })
+            .map_err(|error| format!("Could not create the immutable turn image: {error}"))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&snapshot_path, std::fs::Permissions::from_mode(0o400))
+                .map_err(|error| format!("Could not protect the immutable turn image: {error}"))?;
+        }
+        let canonical = snapshot_path
+            .canonicalize()
+            .map_err(|error| format!("Could not resolve the immutable turn image: {error}"))?;
+        let pinned = pin_native_sidekick_private_file(&canonical, 0o400)?;
+        let exact_bytes = read_native_sidekick_pinned_file(&pinned, 8 * 1024 * 1024)?;
+        if native_sidekick_sha256(&exact_bytes) != plan.screen_sha256 {
+            return Err("The immutable turn image did not match the approved nonce image.".into());
+        }
+        (
+            minutes_core::live_sidekick::EvidenceId::new(format!(
+                "{}-{turn_id}",
+                plan.screen.evidence_id.as_str()
+            )),
+            canonical,
+            pinned,
+            exact_bytes,
+        )
+    } else if let Some(path) = last_path.as_deref() {
+        let pinned = pin_native_sidekick_private_file(Path::new(path), 0o400)?;
+        let bytes = read_native_sidekick_pinned_file(&pinned, 8 * 1024 * 1024)?;
+        if native_sidekick_sha256(&bytes) != plan.screen_sha256 {
+            return Err("The current safe screen image changed after verification.".into());
+        }
+        return Ok(NativeSidekickScreenRefreshReceipt {
+            evidence_id: plan.screen.evidence_id.as_str().to_string(),
+            provider_path: PathBuf::from(path),
+            provider_sha256: provider_hash,
+            provider_file: pinned,
+        });
+    } else {
+        (
+            plan.screen.evidence_id.clone(),
+            plan.screen.path.clone(),
+            plan.screen_file.clone(),
+            provider_bytes,
+        )
+    };
+    engine
+        .observe_screen_bytes(evidence_id.clone(), provider_path.clone(), dispatch_bytes)
+        .map_err(|error| format!("Could not refresh the safe acceptance screen: {error}"))?;
+    *last_path = Some(provider_path.display().to_string());
+    Ok(NativeSidekickScreenRefreshReceipt {
+        evidence_id: evidence_id.as_str().to_string(),
+        provider_path,
+        provider_sha256: provider_hash,
+        provider_file,
+    })
 }
 
 fn wait_for_native_sidekick_diagnostic_turn(
@@ -16195,6 +17522,20 @@ pub fn run_native_sidekick_diagnostic(
 mod native_sidekick_diagnostic_tests {
     use super::*;
 
+    fn with_native_sidekick_acceptance_home<T>(run: impl FnOnce(&Path) -> T) -> T {
+        let _guard = commands_test_home_env_lock();
+        let directory = tempfile::tempdir().unwrap();
+        let original_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", directory.path());
+        let result = run(directory.path());
+        if let Some(home) = original_home {
+            std::env::set_var("HOME", home);
+        } else {
+            std::env::remove_var("HOME");
+        }
+        result
+    }
+
     fn fixture() -> LoadedNativeSidekickDiagnosticFixture {
         parse_native_sidekick_diagnostic_fixture(
             EMBEDDED_MERIDIAN_FIXTURE.as_bytes(),
@@ -16256,6 +17597,56 @@ mod native_sidekick_diagnostic_tests {
             loaded.sha256,
             native_sidekick_sha256(EMBEDDED_MERIDIAN_FIXTURE.as_bytes())
         );
+    }
+
+    #[test]
+    fn acceptance_identity_is_consumed_only_by_the_exact_foreground_turn() {
+        use minutes_core::live_sidekick::{
+            BackgroundRunId, ForegroundTurnId, InvocationIdentity, SidekickWork,
+        };
+
+        let expected = ForegroundTurnId::new("foreground-2");
+        let unrelated = ForegroundTurnId::new("foreground-1");
+        let mut turns = HashMap::from([(expected.clone(), "accepted-turn".to_string())]);
+        let invocation = InvocationIdentity {
+            sequence: 1,
+            source_policy_generation: 1,
+            user_generation: 1,
+        };
+
+        assert_eq!(
+            take_native_sidekick_acceptance_turn_for_work(
+                &mut turns,
+                &SidekickWork::Background {
+                    run_id: BackgroundRunId::new("background-1"),
+                    invocation,
+                },
+            ),
+            None
+        );
+        assert_eq!(
+            take_native_sidekick_acceptance_turn_for_work(
+                &mut turns,
+                &SidekickWork::Foreground {
+                    turn_id: unrelated,
+                    invocation,
+                },
+            ),
+            None
+        );
+        assert_eq!(turns.len(), 1);
+        assert_eq!(
+            take_native_sidekick_acceptance_turn_for_work(
+                &mut turns,
+                &SidekickWork::Foreground {
+                    turn_id: expected,
+                    invocation,
+                },
+            )
+            .as_deref(),
+            Some("accepted-turn")
+        );
+        assert!(turns.is_empty());
     }
 
     #[test]
@@ -16343,6 +17734,1604 @@ mod native_sidekick_diagnostic_tests {
         assert!(started.elapsed() < Duration::from_secs(1));
         assert!(error.contains("regular file"));
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn pinned_acceptance_evidence_rejects_a_same_path_replacement() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("transcript.jsonl");
+        let displaced = directory.path().join("transcript-original.jsonl");
+        std::fs::write(&path, b"approved\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let pinned = pin_native_sidekick_private_file(&path, 0o600).unwrap();
+        assert_eq!(
+            read_native_sidekick_pinned_file(&pinned, 64).unwrap(),
+            b"approved\n"
+        );
+
+        std::fs::rename(&path, &displaced).unwrap();
+        std::fs::write(&path, b"swapped\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        assert!(read_native_sidekick_pinned_file(&pinned, 64)
+            .unwrap_err()
+            .contains("identity changed"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ui_acceptance_challenge_is_owner_only_and_single_use() {
+        use std::os::unix::fs::PermissionsExt;
+
+        with_native_sidekick_acceptance_home(|_| {
+            let nonce = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+            let path = native_sidekick_ui_acceptance_challenge_path();
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, nonce).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+            assert!(validate_native_sidekick_ui_acceptance_challenge(nonce)
+                .unwrap_err()
+                .contains("owner-only"));
+
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+            validate_native_sidekick_ui_acceptance_challenge(nonce).unwrap();
+            assert!(
+                !path.exists(),
+                "the challenge must be consumed exactly once"
+            );
+            assert!(validate_native_sidekick_ui_acceptance_challenge(nonce).is_err());
+        });
+    }
+
+    #[test]
+    fn captured_marker_pixels_must_encode_the_run_nonce() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("marker.png");
+        let nonce = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let bits = nonce
+            .chars()
+            .flat_map(|character| {
+                let value = character.to_digit(16).unwrap();
+                [3_u32, 2, 1, 0].map(move |shift| ((value >> shift) & 1) as u8)
+            })
+            .collect::<Vec<_>>();
+        let mut image = image::RgbImage::from_pixel(1_000, 900, image::Rgb([0x0d, 0x0d, 0x0b]));
+        let left = 160;
+        let top = 100;
+        let cell = 36;
+        let gap = 4;
+        for (index, bit) in bits.iter().enumerate() {
+            let row = u32::try_from(index / 16).unwrap();
+            let column = u32::try_from(index % 16).unwrap();
+            let color = if *bit == 1 {
+                image::Rgb([0x30, 0xd1, 0x58])
+            } else {
+                image::Rgb([0xc9, 0x6b, 0x4e])
+            };
+            let x0 = left + column * (cell + gap);
+            let y0 = top + row * (cell + gap);
+            for y in y0..y0 + cell {
+                for x in x0..x0 + cell {
+                    image.put_pixel(x, y, color);
+                }
+            }
+        }
+        image.save(&path).unwrap();
+
+        verify_native_sidekick_acceptance_marker(&path, nonce).unwrap();
+        let generated = generate_native_sidekick_acceptance_marker(&path, nonce).unwrap();
+        let provider = image::open(generated).unwrap().to_rgb8();
+        assert!(provider.pixels().all(|pixel| matches!(
+            pixel.0,
+            [0x0d, 0x0d, 0x0b] | [0x30, 0xd1, 0x58] | [0xc9, 0x6b, 0x4e]
+        )));
+        assert!(verify_native_sidekick_acceptance_marker(
+            &path,
+            "0123456789abcdeff123456789abcdef0123456789abcdef0123456789abcdef"
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn microphone_signal_check_reads_only_the_wav_data_chunk() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("signal.wav");
+        let mut wav = Vec::new();
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&40_u32.to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16_u32.to_le_bytes());
+        wav.extend_from_slice(&1_u16.to_le_bytes());
+        wav.extend_from_slice(&1_u16.to_le_bytes());
+        wav.extend_from_slice(&16_000_u32.to_le_bytes());
+        wav.extend_from_slice(&32_000_u32.to_le_bytes());
+        wav.extend_from_slice(&2_u16.to_le_bytes());
+        wav.extend_from_slice(&16_u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&4_u32.to_le_bytes());
+        wav.extend_from_slice(&0_i16.to_le_bytes());
+        wav.extend_from_slice(&42_i16.to_le_bytes());
+        std::fs::write(&path, wav).unwrap();
+
+        let signal = native_sidekick_wav_signal(&path).unwrap();
+        assert_eq!(signal.samples, 2);
+        assert_eq!(signal.peak, 42);
+        assert_eq!(signal.nonzero_samples, 1);
+        assert!((signal.nonzero_ratio - 0.5).abs() < f64::EPSILON);
+        assert!((signal.rms - (42_f64 / 2_f64.sqrt())).abs() < 0.001);
+        assert!(!signal.is_credible_smoke());
+
+        let one_lsb_glitch = NativeSidekickWavSignal {
+            samples: 16_000,
+            peak: 1,
+            nonzero_samples: 1,
+            rms: 1.0 / 16_000_f64.sqrt(),
+            nonzero_ratio: 1.0 / 16_000.0,
+        };
+        assert!(!one_lsb_glitch.is_credible_smoke());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn acceptance_refuses_a_real_home_capture_and_parallel_machine_lock() {
+        let real_home = tempfile::tempdir().unwrap();
+        let minutes_dir = real_home.path().join(".minutes");
+        std::fs::create_dir_all(&minutes_dir).unwrap();
+        std::fs::write(
+            minutes_dir.join("recording.pid"),
+            std::process::id().to_string(),
+        )
+        .unwrap();
+        assert!(validate_native_sidekick_acceptance_host_is_idle_at(
+            real_home.path(),
+            real_home.path(),
+        )
+        .unwrap_err()
+        .contains("real Minutes recording"));
+
+        let first = acquire_native_sidekick_acceptance_machine_lock().unwrap();
+        assert!(acquire_native_sidekick_acceptance_machine_lock().is_err());
+        drop(first);
+        acquire_native_sidekick_acceptance_machine_lock().unwrap();
+    }
+}
+
+const NATIVE_SIDEKICK_UI_ACCEPTANCE_CHALLENGE: &str = "native-sidekick-ui-acceptance.challenge";
+const NATIVE_SIDEKICK_UI_ACCEPTANCE_REPORT: &str = "native-sidekick-ui-acceptance.json";
+
+pub fn native_sidekick_ui_acceptance_challenge_path() -> PathBuf {
+    Config::minutes_dir().join(NATIVE_SIDEKICK_UI_ACCEPTANCE_CHALLENGE)
+}
+
+pub fn native_sidekick_ui_acceptance_report_path() -> PathBuf {
+    Config::minutes_dir().join(NATIVE_SIDEKICK_UI_ACCEPTANCE_REPORT)
+}
+
+fn validate_native_sidekick_ui_acceptance_challenge(nonce: &str) -> Result<(), String> {
+    if nonce.len() != 64 || !nonce.chars().all(|character| character.is_ascii_hexdigit()) {
+        return Err(
+            "The native Sidekick UI acceptance nonce must contain exactly 64 hexadecimal characters."
+                .into(),
+        );
+    }
+    let path = native_sidekick_ui_acceptance_challenge_path();
+    #[cfg(unix)]
+    let mut file = {
+        use std::os::unix::fs::OpenOptionsExt;
+        OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
+            .open(&path)
+    }
+    .map_err(|error| format!("Could not open the Sidekick acceptance challenge: {error}"))?;
+    #[cfg(not(unix))]
+    let mut file = OpenOptions::new()
+        .read(true)
+        .open(&path)
+        .map_err(|error| format!("Could not open the Sidekick acceptance challenge: {error}"))?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| format!("Could not inspect the Sidekick acceptance challenge: {error}"))?;
+    if !metadata.file_type().is_file() {
+        return Err("The Sidekick acceptance challenge must be a regular file.".into());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if metadata.uid() != unsafe { libc::geteuid() } || metadata.mode() & 0o777 != 0o600 {
+            return Err("The Sidekick acceptance challenge must be owner-only (0600).".into());
+        }
+    }
+    let mut challenge = String::new();
+    file.read_to_string(&mut challenge)
+        .map_err(|error| format!("Could not read the Sidekick acceptance challenge: {error}"))?;
+    if challenge.trim() != nonce {
+        return Err("The Sidekick acceptance challenge did not match the launch nonce.".into());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let current = std::fs::symlink_metadata(&path).map_err(|error| {
+            format!("Could not revalidate the Sidekick acceptance challenge: {error}")
+        })?;
+        if current.file_type().is_symlink()
+            || current.dev() != metadata.dev()
+            || current.ino() != metadata.ino()
+        {
+            return Err("The Sidekick acceptance challenge changed while it was read.".into());
+        }
+    }
+    std::fs::remove_file(path)
+        .map_err(|error| format!("Could not consume the Sidekick acceptance challenge: {error}"))?;
+    Ok(())
+}
+
+fn write_native_sidekick_ui_acceptance_report(payload: &serde_json::Value) -> Result<(), String> {
+    let path = native_sidekick_ui_acceptance_report_path();
+    let parent = path
+        .parent()
+        .ok_or_else(|| "The Sidekick acceptance report path has no parent.".to_string())?;
+    std::fs::create_dir_all(parent).map_err(|error| {
+        format!("Could not create the Sidekick acceptance report directory: {error}")
+    })?;
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(
+        &tmp,
+        serde_json::to_vec_pretty(payload)
+            .map_err(|error| format!("Could not encode the Sidekick acceptance report: {error}"))?,
+    )
+    .map_err(|error| format!("Could not write the Sidekick acceptance report: {error}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600)).map_err(
+            |error| format!("Could not protect the Sidekick acceptance report: {error}"),
+        )?;
+    }
+    std::fs::rename(&tmp, &path)
+        .map_err(|error| format!("Could not publish the Sidekick acceptance report: {error}"))?;
+    Ok(())
+}
+
+fn wait_for_native_sidekick_snapshot<F>(
+    snapshot: &Arc<Mutex<NativeSidekickSnapshot>>,
+    timeout: Duration,
+    predicate: F,
+    timeout_message: &str,
+) -> Result<NativeSidekickSnapshot, String>
+where
+    F: Fn(&NativeSidekickSnapshot) -> bool,
+{
+    let deadline = Instant::now() + timeout;
+    loop {
+        let current = current_native_sidekick(snapshot);
+        if predicate(&current) {
+            return Ok(current);
+        }
+        if current.state == "degraded" {
+            return Err(format!(
+                "Sidekick degraded during UI acceptance: {}",
+                current.detail
+            ));
+        }
+        if Instant::now() >= deadline {
+            return Err(timeout_message.to_string());
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn wait_for_native_sidekick_recording(
+    state: &AppState,
+    timeout: Duration,
+) -> Result<(String, u64, u64), String> {
+    let deadline = Instant::now() + timeout;
+    let wav_path = minutes_core::pid::current_wav_path();
+    let mut prior_size = 0_u64;
+    loop {
+        if state.recording.load(Ordering::Acquire) {
+            if let Some(context_session_id) = minutes_core::pid::read_recording_metadata()
+                .and_then(|metadata| metadata.context_session_id)
+            {
+                let size = wav_path
+                    .metadata()
+                    .map(|metadata| metadata.len())
+                    .unwrap_or(0);
+                if prior_size > 44 && size > prior_size {
+                    return Ok((context_session_id, prior_size, size));
+                }
+                prior_size = size;
+            }
+        } else if !state.starting.load(Ordering::Acquire) {
+            let detail = state
+                .latest_output
+                .lock()
+                .ok()
+                .and_then(|notice| notice.as_ref().map(|notice| notice.detail.clone()))
+                .unwrap_or_else(|| "Minutes did not start microphone capture.".into());
+            return Err(detail);
+        }
+        if Instant::now() >= deadline {
+            return Err(
+                "The real microphone recording did not produce a growing WAV in time.".into(),
+            );
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct NativeSidekickWavSignal {
+    samples: usize,
+    peak: u16,
+    nonzero_samples: usize,
+    rms: f64,
+    nonzero_ratio: f64,
+}
+
+impl NativeSidekickWavSignal {
+    fn is_credible_smoke(&self) -> bool {
+        self.samples >= 1_000 && self.peak >= 8 && self.rms >= 1.0 && self.nonzero_ratio >= 0.01
+    }
+}
+
+fn native_sidekick_wav_signal(path: &Path) -> Result<NativeSidekickWavSignal, String> {
+    let bytes = std::fs::read(path)
+        .map_err(|error| format!("Could not inspect the acceptance microphone WAV: {error}"))?;
+    if bytes.len() <= 44 || bytes.get(..4) != Some(b"RIFF") || bytes.get(8..12) != Some(b"WAVE") {
+        return Err("The acceptance microphone WAV contains only a header.".into());
+    }
+    let mut offset = 12_usize;
+    let mut data_start = None;
+    while offset.saturating_add(8) <= bytes.len() {
+        let chunk_id = &bytes[offset..offset + 4];
+        let declared = usize::try_from(u32::from_le_bytes([
+            bytes[offset + 4],
+            bytes[offset + 5],
+            bytes[offset + 6],
+            bytes[offset + 7],
+        ]))
+        .unwrap_or(usize::MAX);
+        if chunk_id == b"data" {
+            data_start = Some(offset + 8);
+            break;
+        }
+        offset = offset
+            .saturating_add(8)
+            .saturating_add(declared)
+            .saturating_add(declared % 2);
+    }
+    let data_start = data_start
+        .filter(|start| *start < bytes.len())
+        .ok_or_else(|| "The acceptance microphone WAV has no sample-data chunk.".to_string())?;
+    let samples = bytes[data_start..]
+        .chunks_exact(2)
+        .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]))
+        .collect::<Vec<_>>();
+    let peak = samples
+        .iter()
+        .map(|sample| sample.unsigned_abs())
+        .max()
+        .unwrap_or(0);
+    let nonzero = samples.iter().filter(|sample| **sample != 0).count();
+    let energy = samples
+        .iter()
+        .map(|sample| {
+            let value = f64::from(*sample);
+            value * value
+        })
+        .sum::<f64>();
+    let rms = if samples.is_empty() {
+        0.0
+    } else {
+        (energy / samples.len() as f64).sqrt()
+    };
+    let nonzero_ratio = if samples.is_empty() {
+        0.0
+    } else {
+        nonzero as f64 / samples.len() as f64
+    };
+    Ok(NativeSidekickWavSignal {
+        samples: samples.len(),
+        peak,
+        nonzero_samples: nonzero,
+        rms,
+        nonzero_ratio,
+    })
+}
+
+fn install_native_sidekick_acceptance_evidence_plan(
+    shared: &NativeSidekickAcceptanceShared,
+    fixture: &LoadedNativeSidekickDiagnosticFixture,
+    context_session_id: &str,
+    screen_capture_path: &Path,
+    provider_screen_path: &Path,
+    nonce: &str,
+) -> Result<NativeSidekickAcceptanceEvidencePlan, String> {
+    use minutes_core::live_sidekick::{
+        CaptureSessionId, EvidenceId, ReasoningImageEvidence, ReasoningTranscriptEvidence,
+    };
+
+    let nonce_prefix = nonce
+        .get(..16)
+        .ok_or_else(|| "The Sidekick acceptance nonce was unexpectedly short.".to_string())?;
+    let transcript = fixture
+        .fixture
+        .transcript
+        .iter()
+        .map(|item| ReasoningTranscriptEvidence {
+            evidence_id: EvidenceId::new(format!(
+                "acceptance-transcript-{nonce_prefix}-{}",
+                item.sequence
+            )),
+            text: item.text.clone(),
+            speaker_label: Some(item.speaker.clone()),
+            speaker_verified: false,
+            offset_ms: item.sequence.saturating_mul(1_000),
+            duration_ms: 1_000,
+        })
+        .collect::<Vec<_>>();
+    let transcript_directory = Config::minutes_dir().join("native-sidekick-acceptance");
+    std::fs::create_dir_all(&transcript_directory).map_err(|error| {
+        format!("Could not create the isolated acceptance transcript directory: {error}")
+    })?;
+    let transcript_path = transcript_directory.join(format!("transcript-{nonce_prefix}.jsonl"));
+    let now = chrono::Local::now();
+    let transcript_lines = fixture
+        .fixture
+        .transcript
+        .iter()
+        .map(|item| {
+            serde_json::to_string(&minutes_core::live_transcript::TranscriptLine {
+                line: usize::try_from(item.sequence)
+                    .expect("validated acceptance transcript sequence fits usize"),
+                ts: now,
+                offset_ms: item.sequence.saturating_mul(1_000),
+                duration_ms: 1_000,
+                text: item.text.clone(),
+                speaker: Some(item.speaker.clone()),
+            })
+            .map(|line| format!("{line}\n"))
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("Could not encode the isolated acceptance transcript: {error}"))?;
+    let transcript_initial_items = transcript_lines.len().min(4);
+    if transcript_initial_items == transcript_lines.len() {
+        return Err("The acceptance fixture must include a later transcript delta.".into());
+    }
+    let transcript_initial_bytes = transcript_lines[..transcript_initial_items]
+        .concat()
+        .into_bytes();
+    let transcript_delta_bytes = transcript_lines[transcript_initial_items..]
+        .concat()
+        .into_bytes();
+    let transcript_final_bytes = [
+        transcript_initial_bytes.as_slice(),
+        transcript_delta_bytes.as_slice(),
+    ]
+    .concat();
+    let mut transcript_options = OpenOptions::new();
+    transcript_options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        transcript_options.mode(0o600);
+    }
+    transcript_options
+        .open(&transcript_path)
+        .and_then(|mut file| {
+            file.write_all(&transcript_initial_bytes)?;
+            file.sync_all()
+        })
+        .map_err(|error| format!("Could not write the isolated acceptance transcript: {error}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&transcript_path, std::fs::Permissions::from_mode(0o600))
+            .map_err(|error| format!("Could not protect the acceptance transcript: {error}"))?;
+    }
+    let canonical_transcript = transcript_path
+        .canonicalize()
+        .map_err(|error| format!("Could not canonicalize the acceptance transcript: {error}"))?;
+    let canonical_screen = provider_screen_path
+        .canonicalize()
+        .map_err(|error| format!("Could not canonicalize the safe screen marker: {error}"))?;
+    let canonical_capture = screen_capture_path
+        .canonicalize()
+        .map_err(|error| format!("Could not canonicalize the real screen capture: {error}"))?;
+    let screen_bytes = std::fs::read(&canonical_screen)
+        .map_err(|error| format!("Could not read the safe screen marker: {error}"))?;
+    let screen_capture_bytes = std::fs::read(&canonical_capture)
+        .map_err(|error| format!("Could not read the real screen capture: {error}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&canonical_screen, std::fs::Permissions::from_mode(0o400))
+            .map_err(|error| format!("Could not protect the safe screen marker: {error}"))?;
+    }
+    let transcript_file = pin_native_sidekick_private_file(&canonical_transcript, 0o600)?;
+    let screen_file = pin_native_sidekick_private_file(&canonical_screen, 0o400)?;
+    let screen_snapshot_directory = transcript_directory.join("provider-snapshots");
+    std::fs::create_dir(&screen_snapshot_directory).map_err(|error| {
+        format!("Could not create the private provider snapshot directory: {error}")
+    })?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            &screen_snapshot_directory,
+            std::fs::Permissions::from_mode(0o700),
+        )
+        .map_err(|error| format!("Could not protect the provider snapshot directory: {error}"))?;
+    }
+    let plan = NativeSidekickAcceptanceEvidencePlan {
+        transcript,
+        transcript_evidence_prefix: format!("acceptance-transcript-{nonce_prefix}-"),
+        transcript_file,
+        transcript_initial_items,
+        transcript_initial_sha256: native_sidekick_sha256(&transcript_initial_bytes),
+        transcript_final_sha256: native_sidekick_sha256(&transcript_final_bytes),
+        transcript_delta_bytes: Arc::new(transcript_delta_bytes),
+        transcript_delta_turn_id: fixture.fixture.turns[1].id.clone(),
+        screen: ReasoningImageEvidence {
+            evidence_id: EvidenceId::new(format!("acceptance-screen-{nonce_prefix}")),
+            capture_session_id: CaptureSessionId::new(context_session_id),
+            path: canonical_screen.clone(),
+            png_bytes: screen_bytes.clone(),
+            sha256: native_sidekick_sha256(&screen_bytes),
+        },
+        screen_sha256: native_sidekick_sha256(&screen_bytes),
+        screen_file,
+        screen_bytes: Arc::new(screen_bytes),
+        screen_capture_path: canonical_capture.clone(),
+        screen_capture_sha256: native_sidekick_sha256(&screen_capture_bytes),
+        screen_snapshot_directory: screen_snapshot_directory.clone(),
+    };
+    let (lock, ready) = &**shared;
+    let mut guard = lock.lock().unwrap_or_else(|error| error.into_inner());
+    let runtime = guard.as_mut().ok_or_else(|| {
+        "The Sidekick acceptance runtime stopped before evidence pinning.".to_string()
+    })?;
+    runtime.evidence_plan = Some(plan.clone());
+    runtime.owned_sensitive_paths.extend([
+        canonical_transcript,
+        canonical_capture,
+        canonical_screen,
+    ]);
+    ready.notify_all();
+    Ok(plan)
+}
+
+fn wait_for_native_sidekick_real_screen(
+    context_session_id: &str,
+    nonce: &str,
+    timeout: Duration,
+) -> Result<minutes_core::context_store::ScreenContextImage, String> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let result = minutes_core::context_store::get_screen_context(context_session_id, None, 1)
+            .map_err(|error| {
+            format!("Could not read the exact-session screen context: {error}")
+        })?;
+        if result.session.as_ref().map(|session| session.id.as_str()) != Some(context_session_id)
+            || result.status.context_session_id.as_deref() != Some(context_session_id)
+        {
+            return Err("The screen-context query did not attest the requested recording.".into());
+        }
+        if let Some(image) = result.images.into_iter().next() {
+            let bytes = std::fs::read(&image.path)
+                .map_err(|error| format!("Could not read the captured screen PNG: {error}"))?;
+            if bytes.starts_with(b"\x89PNG\r\n\x1a\n") && bytes.len() > 8 {
+                verify_native_sidekick_acceptance_marker(Path::new(&image.path), nonce)?;
+                return Ok(image);
+            }
+        }
+        if matches!(
+            result.status.state,
+            minutes_core::context_store::ScreenContextState::PermissionUnavailable
+        ) {
+            return Err(result
+                .status
+                .most_recent_error
+                .unwrap_or_else(|| "Screen Recording permission is unavailable.".into()));
+        }
+        if Instant::now() >= deadline {
+            return Err(
+                "The real screen-capture worker did not produce a same-session PNG in time.".into(),
+            );
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+}
+
+fn verify_native_sidekick_acceptance_marker(path: &Path, nonce: &str) -> Result<(), String> {
+    if nonce.len() != 64 || !nonce.chars().all(|character| character.is_ascii_hexdigit()) {
+        return Err("The screen marker requires the full 256-bit acceptance nonce.".into());
+    }
+    let expected_bits = nonce
+        .chars()
+        .flat_map(|character| {
+            let value = character.to_digit(16).unwrap_or(0);
+            [3_u32, 2, 1, 0].map(move |shift| ((value >> shift) & 1) as u8)
+        })
+        .collect::<Vec<_>>();
+    let image = image::open(path)
+        .map_err(|error| format!("Could not decode the captured screen marker: {error}"))?
+        .to_rgb8();
+    let (width, height) = image.dimensions();
+    if width < 160 || height < 160 {
+        return Err("The captured screen marker was unexpectedly small.".into());
+    }
+    let is_marker_color = |pixel: &image::Rgb<u8>| {
+        let close = |target: [u8; 3]| {
+            pixel
+                .0
+                .iter()
+                .zip(target)
+                .all(|(actual, expected)| actual.abs_diff(expected) <= 48)
+        };
+        close([0x30, 0xd1, 0x58]) || close([0xc9, 0x6b, 0x4e])
+    };
+    let row_threshold = (width / 10).max(1);
+    let column_threshold = (height / 10).max(1);
+    let marker_rows = (0..height)
+        .filter(|&y| {
+            (0..width)
+                .filter(|&x| is_marker_color(image.get_pixel(x, y)))
+                .count()
+                >= row_threshold as usize
+        })
+        .collect::<Vec<_>>();
+    let marker_columns = (0..width)
+        .filter(|&x| {
+            (0..height)
+                .filter(|&y| is_marker_color(image.get_pixel(x, y)))
+                .count()
+                >= column_threshold as usize
+        })
+        .collect::<Vec<_>>();
+    let (Some(&top), Some(&bottom), Some(&left), Some(&right)) = (
+        marker_rows.first(),
+        marker_rows.last(),
+        marker_columns.first(),
+        marker_columns.last(),
+    ) else {
+        return Err(
+            "The actual screen capture did not contain the run-specific marker grid.".into(),
+        );
+    };
+    let grid_width = right.saturating_sub(left).saturating_add(1);
+    let grid_height = bottom.saturating_sub(top).saturating_add(1);
+    if grid_width < 160 || grid_height < 160 {
+        return Err("The captured marker grid was too small to verify safely.".into());
+    }
+    for (index, expected) in expected_bits.iter().enumerate() {
+        let row = u32::try_from(index / 16).unwrap_or(0);
+        let column = u32::try_from(index % 16).unwrap_or(0);
+        let x = left + ((column * 2 + 1) * grid_width) / 32;
+        let y = top + ((row * 2 + 1) * grid_height) / 32;
+        let pixel = image.get_pixel(x.min(width - 1), y.min(height - 1));
+        let target = if *expected == 1 {
+            [0x30, 0xd1, 0x58]
+        } else {
+            [0xc9, 0x6b, 0x4e]
+        };
+        if !pixel
+            .0
+            .iter()
+            .zip(target)
+            .all(|(actual, target)| actual.abs_diff(target) <= 64)
+        {
+            return Err(format!(
+                "The actual screen capture did not preserve marker bit {index}."
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn generate_native_sidekick_acceptance_marker(
+    source: &Path,
+    nonce: &str,
+) -> Result<PathBuf, String> {
+    verify_native_sidekick_acceptance_marker(source, nonce)?;
+    let bits = nonce
+        .chars()
+        .flat_map(|character| {
+            let value = character.to_digit(16).unwrap_or(0);
+            [3_u32, 2, 1, 0].map(move |shift| ((value >> shift) & 1) as u8)
+        })
+        .collect::<Vec<_>>();
+    let cell = 28_u32;
+    let gap = 5_u32;
+    let margin = 16_u32;
+    let grid = 16_u32 * cell + 15_u32 * gap;
+    let mut generated = image::RgbImage::from_pixel(
+        grid + margin * 2,
+        grid + margin * 2,
+        image::Rgb([0x0d, 0x0d, 0x0b]),
+    );
+    for (index, bit) in bits.iter().enumerate() {
+        let row = u32::try_from(index / 16).unwrap_or(0);
+        let column = u32::try_from(index % 16).unwrap_or(0);
+        let color = if *bit == 1 {
+            image::Rgb([0x30, 0xd1, 0x58])
+        } else {
+            image::Rgb([0xc9, 0x6b, 0x4e])
+        };
+        let x0 = margin + column * (cell + gap);
+        let y0 = margin + row * (cell + gap);
+        for y in y0..y0 + cell {
+            for x in x0..x0 + cell {
+                generated.put_pixel(x, y, color);
+            }
+        }
+    }
+    let parent = source
+        .parent()
+        .ok_or_else(|| "The marker capture has no parent directory.".to_string())?;
+    let path = parent.join(format!(
+        "acceptance-generated-{}.png",
+        nonce.get(..16).unwrap_or(nonce)
+    ));
+    generated
+        .save(&path)
+        .map_err(|error| format!("Could not write the nonce-only screen marker: {error}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+            .map_err(|error| format!("Could not protect the nonce-only screen marker: {error}"))?;
+    }
+    verify_native_sidekick_acceptance_marker(&path, nonce)?;
+    Ok(path)
+}
+
+fn stop_native_sidekick_ui_acceptance(app: &tauri::AppHandle) -> serde_json::Value {
+    let state = app.state::<AppState>();
+    let mut context_session_id = minutes_core::pid::read_recording_metadata()
+        .and_then(|metadata| metadata.context_session_id);
+    let wav_path = minutes_core::pid::current_wav_path();
+    let mut sensitive_paths = {
+        let (lock, _) = &*state.sidekick_acceptance;
+        lock.lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .as_ref()
+            .map(|runtime| runtime.owned_sensitive_paths.clone())
+            .unwrap_or_default()
+    };
+    sensitive_paths.extend([
+        minutes_core::pid::live_transcript_jsonl_path(),
+        minutes_core::pid::live_transcript_status_path(),
+        minutes_core::pid::live_transcript_wav_path(),
+        wav_path.clone(),
+    ]);
+    let _ = cmd_stop_native_sidekick(state.clone());
+    let sidekick_deadline = Instant::now() + Duration::from_secs(35);
+    while state.sidekick_active.load(Ordering::Acquire) && Instant::now() < sidekick_deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    state
+        .discard_short_hotkey_capture
+        .store(true, Ordering::Release);
+    let mut recording_stop_requested = false;
+    let recording_deadline = Instant::now() + Duration::from_secs(35);
+    let mut cleanup = (false, false, false, false, false, false);
+    while Instant::now() < recording_deadline {
+        let capture_starting = state.starting.load(Ordering::Acquire);
+        let capture_active = recording_active(&state.recording);
+        if capture_starting || capture_active {
+            // Startup resets the ordinary stop flag as it takes ownership.
+            // Reassert cancellation until the acceptance-owned launch either
+            // fails or becomes active and is stopped.
+            state.stop_flag.store(true, Ordering::Release);
+            recording_stop_requested = true;
+            let _ = request_stop(&state.recording, &state.stop_flag);
+        }
+        if context_session_id.is_none() {
+            context_session_id = minutes_core::pid::read_recording_metadata()
+                .and_then(|metadata| metadata.context_session_id);
+        }
+        let atomics_stopped =
+            !state.recording.load(Ordering::Acquire) && !state.starting.load(Ordering::Acquire);
+        let pid_removed = !minutes_core::pid::pid_path().exists();
+        let metadata_cleared = minutes_core::pid::read_recording_metadata().is_none();
+        let wav_removed = !wav_path.exists();
+        let processing_idle = !state.processing.load(Ordering::Acquire);
+        let context_discarded_and_screen_stopped = context_session_id
+            .as_deref()
+            .and_then(|session_id| {
+                let session = minutes_core::context_store::get_session(session_id)
+                    .ok()
+                    .flatten()?;
+                let screen =
+                    minutes_core::context_store::screen_context_status_for_session(session_id)
+                        .ok()
+                        .flatten()?;
+                Some((
+                    session.state == minutes_core::context_store::ContextSessionState::Discarded,
+                    matches!(
+                        screen.state,
+                        minutes_core::context_store::ScreenContextState::Stopped
+                            | minutes_core::context_store::ScreenContextState::Cleaned
+                    ),
+                ))
+            })
+            .unwrap_or((false, false));
+        cleanup = (
+            atomics_stopped,
+            pid_removed,
+            metadata_cleared,
+            wav_removed,
+            processing_idle,
+            context_discarded_and_screen_stopped.0 && context_discarded_and_screen_stopped.1,
+        );
+        if cleanup.0 && cleanup.1 && cleanup.2 && cleanup.3 && cleanup.4 && cleanup.5 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    for path in &sensitive_paths {
+        match std::fs::remove_file(path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => eprintln!(
+                "native Sidekick acceptance could not remove {}: {error}",
+                path.display()
+            ),
+        }
+    }
+    let sensitive_paths_removed = sensitive_paths.iter().all(|path| !path.exists());
+    if let Some(window) = app.get_webview_window("sidekick-acceptance-marker") {
+        window.destroy().ok();
+    }
+    if let Some(window) = app.get_webview_window("native-sidekick") {
+        window.destroy().ok();
+    }
+    let result = serde_json::json!({
+        "sidekick_stopped": !state.sidekick_active.load(Ordering::Acquire),
+        "sidekick_control_cleared": state.sidekick_control.lock().map(|control| control.is_none()).unwrap_or(false),
+        "recording_stop_requested": recording_stop_requested,
+        "recording_stopped": cleanup.0,
+        "recording_pid_removed": cleanup.1,
+        "recording_metadata_cleared": cleanup.2,
+        "disposable_wav_removed": cleanup.3,
+        "processing_idle": cleanup.4,
+        "context_discarded_and_screen_stopped": cleanup.5,
+        "context_session_id": context_session_id,
+        "sensitive_paths_removed": sensitive_paths_removed,
+        "cleanup_complete": cleanup.0 && cleanup.1 && cleanup.2 && cleanup.3 && cleanup.4 && cleanup.5 && sensitive_paths_removed,
+    });
+    clear_native_sidekick_acceptance(&state.sidekick_acceptance);
+    result
+}
+
+fn run_native_sidekick_ui_acceptance(
+    app: tauri::AppHandle,
+    nonce: String,
+) -> Result<serde_json::Value, String> {
+    let acceptance_started_at = Instant::now();
+    let fixture =
+        load_native_sidekick_diagnostic_source(&NativeSidekickDiagnosticSource::EmbeddedMeridian)?
+            .ok_or_else(|| {
+                "The embedded Meridian acceptance fixture is unavailable.".to_string()
+            })?;
+    let brief_path = Config::minutes_dir()
+        .join("assistant")
+        .join("SIDEKICK_BRIEF.md");
+    if let Some(parent) = brief_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("Could not create the Sidekick brief directory: {error}"))?;
+    }
+    std::fs::write(
+        &brief_path,
+        serde_json::to_vec_pretty(&fixture.fixture.prepared_context)
+            .map_err(|error| format!("Could not encode the acceptance brief: {error}"))?,
+    )
+    .map_err(|error| format!("Could not write the acceptance brief: {error}"))?;
+
+    let state = app.state::<AppState>();
+    wait_for_native_sidekick_acceptance_surface(
+        &state.sidekick_acceptance,
+        Duration::from_secs(10),
+        "screen marker",
+        |runtime| runtime.marker_ready,
+    )?;
+    match launch_recording(
+        app.clone(),
+        &state,
+        CaptureMode::Meeting,
+        Some(RecordingIntent::Room),
+        true,
+        Some("Native Sidekick UI acceptance".into()),
+        None,
+        None,
+        Some(state.discard_short_hotkey_capture.clone()),
+    )? {
+        LaunchOutcome::Started => {}
+        LaunchOutcome::ConsentRequested => {
+            return Err(
+                "The isolated UI acceptance config unexpectedly requested recording consent."
+                    .into(),
+            )
+        }
+    }
+    let (context_session_id, wav_size_before, wav_size_after) =
+        wait_for_native_sidekick_recording(&state, Duration::from_secs(20))?;
+    let signal_deadline = Instant::now() + Duration::from_secs(5);
+    let audio_signal = loop {
+        let metrics = native_sidekick_wav_signal(&minutes_core::pid::current_wav_path())?;
+        if metrics.is_credible_smoke() {
+            break metrics;
+        }
+        if Instant::now() >= signal_deadline {
+            return Err("The real room microphone produced only digital silence.".into());
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    };
+    let recording_ready_ms = acceptance_started_at.elapsed().as_millis() as u64;
+    let context_session = minutes_core::context_store::get_session(&context_session_id)
+        .map_err(|error| format!("Could not read the recording context session: {error}"))?
+        .ok_or_else(|| "The recording context session is missing.".to_string())?;
+    if context_session.session_type != minutes_core::context_store::ContextSessionType::Recording
+        || context_session.state != minutes_core::context_store::ContextSessionState::Active
+    {
+        return Err("The acceptance recording did not own an active Recording context.".into());
+    }
+    let real_screen =
+        wait_for_native_sidekick_real_screen(&context_session_id, &nonce, Duration::from_secs(12))?;
+    let screen_ready_ms = acceptance_started_at.elapsed().as_millis() as u64;
+    let real_screen_bytes = std::fs::read(&real_screen.path)
+        .map_err(|error| format!("Could not hash the real screen capture: {error}"))?;
+    let provider_screen =
+        generate_native_sidekick_acceptance_marker(Path::new(&real_screen.path), &nonce)?;
+    let evidence_plan = install_native_sidekick_acceptance_evidence_plan(
+        &state.sidekick_acceptance,
+        &fixture,
+        &context_session_id,
+        Path::new(&real_screen.path),
+        &provider_screen,
+        &nonce,
+    )?;
+    if let Some(marker_window) = app.get_webview_window("sidekick-acceptance-marker") {
+        marker_window.destroy().ok();
+    }
+    wait_for_native_sidekick_acceptance_surface(
+        &state.sidekick_acceptance,
+        Duration::from_secs(10),
+        "main window launch path",
+        |runtime| runtime.main_ui_ready,
+    )?;
+    app.emit_to(
+        "main",
+        "sidekick:acceptance-open",
+        serde_json::json!({ "nonce": nonce }),
+    )
+    .map_err(|error| format!("Could not ask the main Minutes UI to open Sidekick: {error}"))?;
+    wait_for_native_sidekick_acceptance_ui(&state.sidekick_acceptance, Duration::from_secs(10))?;
+    wait_for_native_sidekick_acceptance_surface(
+        &state.sidekick_acceptance,
+        Duration::from_secs(10),
+        "main launch completion",
+        |runtime| runtime.main_launch_completed,
+    )?;
+    let ready = wait_for_native_sidekick_snapshot(
+        &state.sidekick_snapshot,
+        Duration::from_secs(20),
+        |snapshot| {
+            snapshot.active
+                && snapshot.state == "ready"
+                && snapshot.session_id == context_session_id
+                && snapshot.screen_available
+        },
+        "The native Sidekick worker did not become ready with exact-session screen context.",
+    )?;
+    let sidekick_ready_ms = acceptance_started_at.elapsed().as_millis() as u64;
+
+    let mut turns = Vec::new();
+    for turn in &fixture.fixture.turns {
+        let baseline = current_native_sidekick(&state.sidekick_snapshot)
+            .messages
+            .len();
+        let ack = request_native_sidekick_acceptance_turn(
+            &app,
+            &state.sidekick_acceptance,
+            &turn.id,
+            &turn.typed_prompt,
+            Duration::from_secs(30),
+            baseline,
+        )?;
+        let snapshot = current_native_sidekick(&state.sidekick_snapshot);
+        let response = snapshot
+            .messages
+            .iter()
+            .skip(baseline)
+            .find(|message| {
+                message.role == "sidekick"
+                    && message.acceptance_turn_id.as_deref() == Some(turn.id.as_str())
+            })
+            .map(|message| message.text.clone())
+            .ok_or_else(|| format!("Turn '{}' has no authoritative Sidekick response.", turn.id))?;
+        let evidence_receipt = {
+            let (lock, _) = &*state.sidekick_acceptance;
+            lock.lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .as_ref()
+                .and_then(|runtime| runtime.evidence_receipts.get(&turn.id).cloned())
+                .ok_or_else(|| format!("Turn '{}' has no provider evidence receipt.", turn.id))?
+        };
+        let (adapter_receipt, candidate_evidence) = {
+            let (lock, _) = &*state.sidekick_acceptance;
+            let guard = lock.lock().unwrap_or_else(|error| error.into_inner());
+            let runtime = guard.as_ref().ok_or_else(|| {
+                "The Sidekick acceptance runtime stopped before adapter reporting.".to_string()
+            })?;
+            (
+                runtime
+                    .adapter_receipts
+                    .get(&turn.id)
+                    .cloned()
+                    .ok_or_else(|| format!("Turn '{}' has no adapter receipt.", turn.id))?,
+                runtime
+                    .candidate_evidence
+                    .get(&turn.id)
+                    .cloned()
+                    .ok_or_else(|| {
+                        format!("Turn '{}' has no candidate evidence declaration.", turn.id)
+                    })?,
+            )
+        };
+        let transcript_after_turn = read_native_sidekick_pinned_file(
+            &evidence_plan.transcript_file,
+            NATIVE_SIDEKICK_DIAGNOSTIC_FIXTURE_MAX_BYTES,
+        )?;
+        if native_sidekick_sha256(&transcript_after_turn) != adapter_receipt.transcript_sha256 {
+            return Err(format!(
+                "Turn '{}' transcript changed after its provider dispatch.",
+                turn.id
+            ));
+        }
+        let provider_image_after_turn =
+            read_native_sidekick_pinned_file(&adapter_receipt.provider_image_file, 8 * 1024 * 1024)
+                .map_err(|error| {
+                    format!(
+                        "Could not re-read turn '{}' pinned provider image: {error}",
+                        turn.id
+                    )
+                })?;
+        if native_sidekick_sha256(&provider_image_after_turn)
+            != adapter_receipt.provider_image_sha256
+            || adapter_receipt.provider_image_transport != "inline_data_url"
+            || adapter_receipt.provider_image_dispatched_sha256
+                != adapter_receipt.provider_image_sha256
+        {
+            return Err(format!(
+                "Turn '{}' provider image did not remain bound to its inline provider dispatch.",
+                turn.id
+            ));
+        }
+        turns.push(serde_json::json!({
+            "id": turn.id,
+            "prompt": turn.typed_prompt,
+            "response": response,
+            "dom_layout": ack,
+            "evidence_receipt": evidence_receipt,
+            "adapter_receipt": adapter_receipt,
+            "candidate_evidence": candidate_evidence,
+        }));
+    }
+    let (
+        reasoning_session_correlation,
+        reasoning_sessions_started,
+        main_launch_claimed,
+        main_launch_completed,
+        interactable_targets,
+        provider_executable_path,
+        provider_executable_sha256,
+        provider_version,
+        provider_descriptor,
+    ) = {
+        let (lock, _) = &*state.sidekick_acceptance;
+        let guard = lock.lock().unwrap_or_else(|error| error.into_inner());
+        let runtime = guard.as_ref().ok_or_else(|| {
+            "The Sidekick acceptance runtime stopped before reporting.".to_string()
+        })?;
+        (
+            runtime.reasoning_session_correlation.clone(),
+            runtime.reasoning_sessions_started,
+            runtime.main_launch_claimed,
+            runtime.main_launch_completed,
+            runtime.interactable_targets.clone(),
+            runtime.provider_executable_path.clone(),
+            runtime.provider_executable_sha256.clone(),
+            runtime.provider_version.clone(),
+            runtime.provider_descriptor.clone(),
+        )
+    };
+    let streaming_delta_observed = turns.iter().all(|turn| {
+        turn.pointer("/candidate_evidence/firstTokenMs")
+            .and_then(serde_json::Value::as_u64)
+            .is_some()
+    });
+    Ok(serde_json::json!({
+        "mode": "diagnose-native-sidekick-ui",
+        "passed_product_path": true,
+        "bundle_identifier": app.config().identifier,
+        "build_commit": env!("MINUTES_BUILD_COMMIT"),
+        "fixture_id": fixture.fixture.id,
+        "fixture_sha256": fixture.sha256,
+        "nonce_sha256": native_sidekick_sha256(nonce.as_bytes()),
+        "context_session_id": context_session_id,
+        "context_session_type": context_session.session_type,
+        "audio": {
+            "intent": "room",
+            "path": minutes_core::pid::current_wav_path(),
+            "size_before": wav_size_before,
+            "size_after": wav_size_after,
+            "growing": wav_size_after > wav_size_before && wav_size_before > 44,
+            "samples_inspected": audio_signal.samples,
+            "peak_amplitude": audio_signal.peak,
+            "nonzero_samples": audio_signal.nonzero_samples,
+            "rms_amplitude": audio_signal.rms,
+            "nonzero_ratio": audio_signal.nonzero_ratio,
+            "scope": "microphone_signal_smoke_only",
+            "speech_or_asr_claimed": false,
+        },
+        "startup_latency": {
+            "recording_ready_ms": recording_ready_ms,
+            "screen_ready_ms": screen_ready_ms,
+            "sidekick_ready_ms": sidekick_ready_ms,
+        },
+        "transcript": {
+            "source": "acceptance_pinned_fixture",
+            "adapter": "verified_bytes_live_transcript_jsonl_delta",
+            "fixture_jsonl_sha256": evidence_plan.transcript_final_sha256,
+            "initial_jsonl_sha256": evidence_plan.transcript_initial_sha256,
+            "final_jsonl_sha256": evidence_plan.transcript_final_sha256,
+            "items": evidence_plan.transcript.len(),
+            "initial_items": evidence_plan.transcript_initial_items,
+            "delta_items": evidence_plan.transcript.len().saturating_sub(evidence_plan.transcript_initial_items),
+            "delta_turn_id": evidence_plan.transcript_delta_turn_id,
+            "approved_evidence_ids": evidence_plan.transcript.iter().map(|item| item.evidence_id.as_str()).collect::<Vec<_>>(),
+            "ambient_live_transcript_allowed": false,
+        },
+        "screen": {
+            "permission_capture_path": real_screen.path,
+            "permission_capture_bytes": real_screen.byte_size,
+            "permission_capture_sha256": native_sidekick_sha256(&real_screen_bytes),
+            "provider_marker_path": evidence_plan.screen.path,
+            "provider_marker_evidence_prefix": evidence_plan.screen.evidence_id,
+            "provider_marker_sha256": evidence_plan.screen_sha256,
+            "marker_nonce_verified_from_pixels": true,
+            "provider_marker_is_generated_nonce_only": true,
+            "capture_session_id": evidence_plan.screen.capture_session_id,
+            "adapter": "context_store_exact_session",
+        },
+        "sidekick": {
+            "ready_session_id": ready.session_id,
+            "screen_available": ready.screen_available,
+            "launch_surface": if main_launch_claimed && main_launch_completed { "main_sidekick_button_cloud_consent" } else { "unverified" },
+            "main_launch_completed": main_launch_completed,
+            "interactable_targets": interactable_targets,
+            "reasoning_session_correlation": reasoning_session_correlation,
+            "reasoning_sessions_started": reasoning_sessions_started,
+            "provider_executable_path": provider_executable_path,
+            "provider_executable_sha256": provider_executable_sha256,
+            "provider_version": provider_version,
+            "provider_executable_attestation_scope": "trusted_host_path_pre_post",
+            "provider_requested_contract": provider_descriptor,
+            "provider_capabilities_exercised": {
+                "persistent_sequential_turns": reasoning_sessions_started == 1,
+                "streaming_delta_observed": streaming_delta_observed,
+                "steering": false,
+                "interruption": false,
+            },
+        },
+        "acceptance_scope": {
+            "kind": "bounded_native_ui_provider_integration",
+            "host_threat_model": "trusted_single_user_no_concurrent_hostile_same_uid_process",
+            "includes": [
+                "real_room_microphone_signal_smoke",
+                "exact_session_screen_permission_and_nonce_capture",
+                "real_main_and_sidekick_ui_controls",
+                "two_persistent_cloud_reasoning_turns",
+                "verified_staged_synthetic_transcript_bytes",
+                "inline_exact_image_bytes"
+            ],
+            "excludes": [
+                "live_speech_recognition",
+                "two_speaker_diarization",
+                "semantic_desktop_screen_understanding",
+                "compositor_or_occlusion_proof",
+                "provider_steering_and_interruption",
+                "normal_installed_app_cold_start",
+                "hostile_same_user_filesystem_or_process_tampering",
+                "provider_live_process_code_identity_attestation",
+                "escaped_session_descendant_detection"
+            ]
+        },
+        "turns": turns,
+    }))
+}
+
+#[cfg(unix)]
+struct NativeSidekickAcceptanceMachineLock {
+    file: std::fs::File,
+}
+
+#[cfg(unix)]
+impl Drop for NativeSidekickAcceptanceMachineLock {
+    fn drop(&mut self) {
+        use std::os::fd::AsRawFd;
+        unsafe {
+            libc::flock(self.file.as_raw_fd(), libc::LOCK_UN);
+        }
+    }
+}
+
+#[cfg(unix)]
+fn acquire_native_sidekick_acceptance_machine_lock(
+) -> Result<NativeSidekickAcceptanceMachineLock, String> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+
+    let path = PathBuf::from(format!(
+        "/tmp/minutes-native-sidekick-acceptance-{}.lock",
+        unsafe { libc::geteuid() }
+    ));
+    let file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(&path)
+        .map_err(|error| format!("Could not open the machine-wide acceptance lock: {error}"))?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| format!("Could not inspect the machine-wide acceptance lock: {error}"))?;
+    if !metadata.file_type().is_file()
+        || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.mode() & 0o077 != 0
+    {
+        return Err("The machine-wide acceptance lock is not a private owned file.".into());
+    }
+    let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    if result != 0 {
+        return Err("Another native Sidekick acceptance run is already active.".into());
+    }
+    Ok(NativeSidekickAcceptanceMachineLock { file })
+}
+
+#[cfg(not(unix))]
+struct NativeSidekickAcceptanceMachineLock;
+
+#[cfg(not(unix))]
+fn acquire_native_sidekick_acceptance_machine_lock(
+) -> Result<NativeSidekickAcceptanceMachineLock, String> {
+    Err("Native Sidekick UI acceptance currently requires macOS.".into())
+}
+
+#[cfg(unix)]
+fn native_sidekick_acceptance_account_home() -> Result<PathBuf, String> {
+    use std::ffi::CStr;
+
+    let uid = unsafe { libc::geteuid() };
+    let suggested = unsafe { libc::sysconf(libc::_SC_GETPW_R_SIZE_MAX) };
+    let buffer_len = if suggested > 0 {
+        usize::try_from(suggested).unwrap_or(16_384).max(1_024)
+    } else {
+        16_384
+    };
+    let mut buffer = vec![0_u8; buffer_len];
+    let mut password: libc::passwd = unsafe { std::mem::zeroed() };
+    let mut result = std::ptr::null_mut();
+    let code = unsafe {
+        libc::getpwuid_r(
+            uid,
+            &mut password,
+            buffer.as_mut_ptr().cast::<libc::c_char>(),
+            buffer.len(),
+            &mut result,
+        )
+    };
+    if code != 0 || result.is_null() || password.pw_dir.is_null() {
+        return Err("Could not derive the current account home for acceptance isolation.".into());
+    }
+    let home = unsafe { CStr::from_ptr(password.pw_dir) }
+        .to_str()
+        .map_err(|_| "The current account home is not valid UTF-8.".to_string())?;
+    PathBuf::from(home)
+        .canonicalize()
+        .map_err(|error| format!("Could not resolve the current account home: {error}"))
+}
+
+#[cfg(unix)]
+fn validate_native_sidekick_acceptance_host_is_idle(real_home: &Path) -> Result<(), String> {
+    let account_home = native_sidekick_acceptance_account_home()?;
+    validate_native_sidekick_acceptance_host_is_idle_at(real_home, &account_home)
+}
+
+#[cfg(unix)]
+fn validate_native_sidekick_acceptance_host_is_idle_at(
+    real_home: &Path,
+    account_home: &Path,
+) -> Result<(), String> {
+    use std::os::unix::fs::MetadataExt;
+
+    let canonical_home = real_home
+        .canonicalize()
+        .map_err(|error| format!("Could not resolve the real user home: {error}"))?;
+    let metadata = canonical_home
+        .metadata()
+        .map_err(|error| format!("Could not inspect the real user home: {error}"))?;
+    if metadata.uid() != unsafe { libc::geteuid() } {
+        return Err("The acceptance real-home path is not owned by the current user.".into());
+    }
+    if canonical_home != account_home {
+        return Err(
+            "The acceptance real-home path did not match the operating-system account home.".into(),
+        );
+    }
+    let minutes_dir = canonical_home.join(".minutes");
+    for (label, path) in [
+        ("recording", minutes_dir.join("recording.pid")),
+        ("Live Transcript", minutes_dir.join("live-transcript.pid")),
+        ("dictation", minutes_dir.join("dictation.pid")),
+    ] {
+        if minutes_core::pid::inspect_pid_file(&path).is_active() {
+            return Err(format!(
+                "Refusing acceptance while the real Minutes {label} session is active."
+            ));
+        }
+    }
+    let relay_path = minutes_dir.join("capture-relay.json");
+    if let Ok(bytes) = std::fs::read(&relay_path) {
+        if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+            if value
+                .get("pid")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|pid| u32::try_from(pid).ok())
+                .is_some_and(minutes_core::pid::is_process_alive)
+            {
+                return Err(
+                    "Refusing acceptance while the real Minutes capture relay is active.".into(),
+                );
+            }
+        }
+    }
+    let output = Command::new("/bin/ps")
+        .args(["-axo", "pid=,command="])
+        .output()
+        .map_err(|error| format!("Could not inspect running Minutes processes: {error}"))?;
+    let current_pid = std::process::id();
+    let other_minutes_app = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| {
+            let mut parts = line.trim().splitn(2, char::is_whitespace);
+            let pid = parts.next()?.parse::<u32>().ok()?;
+            let command = parts.next()?.trim();
+            Some((pid, command))
+        })
+        .any(|(pid, command)| {
+            pid != current_pid
+                && command.contains(".app/Contents/MacOS/minutes-app")
+                && (command.contains("Minutes.app") || command.contains("Minutes Dev.app"))
+        });
+    if other_minutes_app {
+        return Err(
+            "Close the existing Minutes app before running native Sidekick acceptance.".into(),
+        );
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn validate_native_sidekick_acceptance_host_is_idle(_real_home: &Path) -> Result<(), String> {
+    Err("Native Sidekick UI acceptance currently requires macOS.".into())
+}
+
+fn abort_native_sidekick_ui_acceptance(
+    app: &tauri::AppHandle,
+    done: &AtomicBool,
+    reason: &str,
+    exit_code: i32,
+) {
+    if done
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return;
+    }
+    let teardown = stop_native_sidekick_ui_acceptance(app);
+    let payload = serde_json::json!({
+        "mode": "diagnose-native-sidekick-ui",
+        "passed_product_path": false,
+        "build_commit": env!("MINUTES_BUILD_COMMIT"),
+        "error": reason,
+        "teardown": teardown,
+    });
+    let _ = write_native_sidekick_ui_acceptance_report(&payload);
+    app.exit(exit_code);
+    std::thread::sleep(Duration::from_secs(5));
+    #[cfg(unix)]
+    unsafe {
+        libc::_exit(exit_code);
+    }
+}
+
+#[cfg(unix)]
+fn validate_native_sidekick_acceptance_parent_fd(parent_fd: i32) -> Result<(), String> {
+    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstat(parent_fd, &mut stat) } != 0 {
+        return Err(format!(
+            "Could not inspect the acceptance parent lease: {}",
+            io::Error::last_os_error()
+        ));
+    }
+    let file_type = stat.st_mode & libc::S_IFMT;
+    if file_type != libc::S_IFIFO && file_type != libc::S_IFSOCK {
+        return Err("The acceptance parent lease is not an inherited pipe or socket.".into());
+    }
+    let flags = unsafe { libc::fcntl(parent_fd, libc::F_GETFD) };
+    if flags < 0 || unsafe { libc::fcntl(parent_fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) } != 0
+    {
+        return Err(format!(
+            "Could not isolate the acceptance parent lease from provider children: {}",
+            io::Error::last_os_error()
+        ));
+    }
+    Ok(())
+}
+
+pub fn launch_native_sidekick_ui_acceptance(
+    app: &tauri::AppHandle,
+    nonce: String,
+    parent_fd: i32,
+    real_home: PathBuf,
+) -> Result<(), String> {
+    if app.config().identifier != "com.useminutes.desktop.dev" {
+        return Err(
+            "Native Sidekick UI acceptance is restricted to the Minutes dev bundle.".into(),
+        );
+    }
+    let machine_lock = acquire_native_sidekick_acceptance_machine_lock()?;
+    validate_native_sidekick_acceptance_host_is_idle(&real_home)?;
+    #[cfg(unix)]
+    validate_native_sidekick_acceptance_parent_fd(parent_fd)?;
+    validate_native_sidekick_ui_acceptance_challenge(&nonce)?;
+    let state = app.state::<AppState>();
+    configure_native_sidekick_acceptance(&state.sidekick_acceptance, nonce.clone())?;
+    let marker_result = tauri::WebviewWindowBuilder::new(
+        app,
+        "sidekick-acceptance-marker",
+        tauri::WebviewUrl::App(format!("sidekick-acceptance-marker.html?trace={nonce}").into()),
+    )
+    .title("Minutes Sidekick Acceptance")
+    .fullscreen(true)
+    .resizable(false)
+    .decorations(false)
+    .content_protected(false)
+    .always_on_top(true)
+    .focused(true)
+    .build();
+    if let Err(error) = marker_result {
+        clear_native_sidekick_acceptance(&state.sidekick_acceptance);
+        return Err(format!(
+            "Could not show the Sidekick acceptance marker: {error}"
+        ));
+    }
+
+    let done = Arc::new(AtomicBool::new(false));
+    let host_monitor_done = done.clone();
+    let host_monitor_app = app.clone();
+    let host_monitor_home = real_home.clone();
+    std::thread::spawn(move || {
+        while !host_monitor_done.load(Ordering::Acquire) {
+            std::thread::sleep(Duration::from_millis(250));
+            if let Err(error) = validate_native_sidekick_acceptance_host_is_idle(&host_monitor_home)
+            {
+                abort_native_sidekick_ui_acceptance(
+                    &host_monitor_app,
+                    &host_monitor_done,
+                    &format!("Real-home capture isolation changed during acceptance: {error}"),
+                    126,
+                );
+                return;
+            }
+        }
+    });
+    let watchdog_done = done.clone();
+    let watchdog_app = app.clone();
+    std::thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(150);
+        while Instant::now() < deadline {
+            if watchdog_done.load(Ordering::Acquire) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(250));
+        }
+        abort_native_sidekick_ui_acceptance(
+            &watchdog_app,
+            &watchdog_done,
+            "The app-side 150-second acceptance watchdog expired.",
+            124,
+        );
+    });
+
+    #[cfg(unix)]
+    {
+        let parent_done = done.clone();
+        let parent_app = app.clone();
+        std::thread::spawn(move || {
+            let mut byte = [0_u8; 1];
+            let read = loop {
+                let result = unsafe {
+                    libc::read(
+                        parent_fd,
+                        byte.as_mut_ptr().cast::<libc::c_void>(),
+                        byte.len(),
+                    )
+                };
+                if result < 0
+                    && std::io::Error::last_os_error().kind() == io::ErrorKind::Interrupted
+                {
+                    continue;
+                }
+                break result;
+            };
+            if read <= 0 && !parent_done.load(Ordering::Acquire) {
+                abort_native_sidekick_ui_acceptance(
+                    &parent_app,
+                    &parent_done,
+                    "The acceptance runner disconnected before the app finished.",
+                    125,
+                );
+            }
+        });
+    }
+
+    let app_handle = app.clone();
+    let worker_done = done.clone();
+    std::thread::spawn(move || {
+        let _machine_lock = machine_lock;
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            run_native_sidekick_ui_acceptance(app_handle.clone(), nonce)
+        }))
+        .unwrap_or_else(|_| Err("Native Sidekick UI acceptance panicked.".into()));
+        if worker_done
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return;
+        }
+        let teardown = stop_native_sidekick_ui_acceptance(&app_handle);
+        let (payload, exit_code) = match result {
+            Ok(mut payload) => {
+                payload["teardown"] = teardown;
+                (payload, 0)
+            }
+            Err(error) => (
+                serde_json::json!({
+                    "mode": "diagnose-native-sidekick-ui",
+                    "passed_product_path": false,
+                    "build_commit": env!("MINUTES_BUILD_COMMIT"),
+                    "error": error,
+                    "teardown": teardown,
+                }),
+                3,
+            ),
+        };
+        if let Err(error) = write_native_sidekick_ui_acceptance_report(&payload) {
+            eprintln!("native Sidekick UI acceptance report failed: {error}");
+            app_handle.exit(1);
+        } else {
+            app_handle.exit(exit_code);
+        }
+    });
+    Ok(())
 }
 
 struct NativeSidekickRunGuard {
@@ -16350,6 +19339,18 @@ struct NativeSidekickRunGuard {
     active: Arc<AtomicBool>,
     control: Arc<Mutex<Option<std::sync::mpsc::Sender<NativeSidekickControl>>>>,
     snapshot: Arc<Mutex<NativeSidekickSnapshot>>,
+}
+
+fn take_native_sidekick_acceptance_turn_for_work(
+    turns: &mut HashMap<minutes_core::live_sidekick::ForegroundTurnId, String>,
+    work: &minutes_core::live_sidekick::SidekickWork,
+) -> Option<String> {
+    match work {
+        minutes_core::live_sidekick::SidekickWork::Foreground { turn_id, .. } => {
+            turns.remove(turn_id)
+        }
+        minutes_core::live_sidekick::SidekickWork::Background { .. } => None,
+    }
 }
 
 impl Drop for NativeSidekickRunGuard {
@@ -16392,6 +19393,7 @@ fn run_native_sidekick(
         control: control_slot,
         snapshot: snapshot.clone(),
     };
+    record_native_sidekick_acceptance_provider(&app, &codex_path);
     let backend = match crate::codex_reasoning_backend::CodexReasoningBackend::sidekick(
         codex_path,
         configured_codex_mcp_servers(),
@@ -16460,6 +19462,48 @@ fn run_native_sidekick(
         });
         return;
     }
+    let mut transcript_cursor = 0;
+    let mut last_screen_path = None;
+    let acceptance_evidence = native_sidekick_acceptance_evidence_plan(&app);
+    if let Some(plan) = &acceptance_evidence {
+        if plan.screen.capture_session_id.as_str() != context_session.id {
+            publish_native_sidekick(&app, &snapshot, |state| {
+                state.state = "degraded".into();
+                state.detail = "The acceptance screen belongs to a different recording.".into();
+            });
+            return;
+        }
+        let transcript_refresh = refresh_native_sidekick_acceptance_transcript(
+            &mut engine,
+            &mut transcript_cursor,
+            plan,
+            false,
+        );
+        if !matches!(transcript_refresh, Ok(ref receipt) if receipt.new_items == plan.transcript_initial_items)
+        {
+            publish_native_sidekick(&app, &snapshot, |state| {
+                state.state = "degraded".into();
+                state.detail = format!(
+                    "The isolated transcript adapter did not load the approved first-stage fixture: {transcript_refresh:?}"
+                );
+            });
+            return;
+        }
+        if let Err(error) = refresh_native_sidekick_acceptance_screen(
+            &mut engine,
+            &context_session.id,
+            &mut last_screen_path,
+            plan,
+            None,
+        ) {
+            publish_native_sidekick(&app, &snapshot, |state| {
+                state.state = "degraded".into();
+                state.detail = format!("Could not pin the safe acceptance screen: {error}");
+            });
+            return;
+        }
+    }
+    record_native_sidekick_acceptance_reasoning_session(&app, &engine);
     let descriptor = engine.descriptor().clone();
     publish_native_sidekick(&app, &snapshot, |state| {
         state.state = "ready".into();
@@ -16478,20 +19522,21 @@ fn run_native_sidekick(
         }
         .into();
         state.detail = "Ready — listening for decisions, risks, and openings.".into();
+        state.screen_available = acceptance_evidence.is_some();
     });
 
     // The active scratch transcript is authoritative and is truncated for each
     // capture session. Bootstrap from line zero, then advance an incremental
     // cursor. This avoids rereading and sorting the global/rotated event logs.
-    let mut transcript_cursor = 0;
     let mut pending_evidence = 0_u32;
     let mut last_evidence_at: Option<Instant> = None;
-    let mut last_screen_path = None;
     let mut last_screen_refresh = Instant::now() - Duration::from_secs(2);
     let mut last_session_check = Instant::now();
     let mut backend_available = true;
     let mut recovery_attempts = 0_u32;
     let mut next_backend_retry: Option<Instant> = None;
+    let mut acceptance_turns_by_foreground =
+        HashMap::<minutes_core::live_sidekick::ForegroundTurnId, String>::new();
 
     while !stop_flag.load(Ordering::Acquire) {
         if last_session_check.elapsed() >= Duration::from_secs(1) {
@@ -16518,28 +19563,49 @@ fn run_native_sidekick(
         // Drain the authoritative capture transcript before user controls so
         // a typed question always includes utterances already committed by
         // the recording sidecar.
-        match observe_native_sidekick_transcript(&mut engine, &mut transcript_cursor) {
-            Ok(accepted) if accepted > 0 => {
-                pending_evidence = pending_evidence.saturating_add(accepted as u32);
-                last_evidence_at = Some(Instant::now());
-            }
-            Ok(_) => {}
-            Err(error) => {
-                publish_native_sidekick(&app, &snapshot, |state| {
-                    if state.state != "thinking" {
-                        state.state = "degraded".into();
-                        state.detail = error;
-                    }
-                });
+        {
+            let transcript_result = if acceptance_evidence.is_some() {
+                // Acceptance evidence is refreshed synchronously, fail-closed,
+                // immediately before each typed turn below. Background reads
+                // must not impersonate that per-turn receipt.
+                Ok(0)
+            } else {
+                observe_native_sidekick_transcript(&mut engine, &mut transcript_cursor)
+            };
+            match transcript_result {
+                Ok(accepted) if accepted > 0 => {
+                    pending_evidence = pending_evidence.saturating_add(accepted as u32);
+                    last_evidence_at = Some(Instant::now());
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    publish_native_sidekick(&app, &snapshot, |state| {
+                        if state.state != "thinking" {
+                            state.state = "degraded".into();
+                            state.detail = error;
+                        }
+                    });
+                }
             }
         }
 
         if last_screen_refresh.elapsed() >= Duration::from_secs(1) {
-            let available = refresh_native_sidekick_screen(
-                &mut engine,
-                &context_session.id,
-                &mut last_screen_path,
-            );
+            let available = if let Some(plan) = &acceptance_evidence {
+                refresh_native_sidekick_acceptance_screen(
+                    &mut engine,
+                    &context_session.id,
+                    &mut last_screen_path,
+                    plan,
+                    None,
+                )
+                .is_ok()
+            } else {
+                refresh_native_sidekick_screen(
+                    &mut engine,
+                    &context_session.id,
+                    &mut last_screen_path,
+                )
+            };
             if available != current_native_sidekick(&snapshot).screen_available {
                 publish_native_sidekick(&app, &snapshot, |state| {
                     state.screen_available = available;
@@ -16595,12 +19661,85 @@ fn run_native_sidekick(
                     stop_flag.store(true, Ordering::Release);
                     break;
                 }
-                NativeSidekickControl::UserMessage(text) => {
-                    let screen_available = refresh_native_sidekick_screen(
-                        &mut engine,
-                        &context_session.id,
-                        &mut last_screen_path,
-                    );
+                NativeSidekickControl::UserMessage {
+                    text,
+                    acceptance_turn_id,
+                } => {
+                    let user_message_acceptance_turn_id = acceptance_turn_id.clone();
+                    let transcript_refresh = if let Some(plan) = &acceptance_evidence {
+                        let Some(turn_id) = acceptance_turn_id.as_deref() else {
+                            publish_native_sidekick(&app, &snapshot, |state| {
+                                state.state = "degraded".into();
+                                state.detail =
+                                    "The acceptance turn was missing its exact UI identity.".into();
+                            });
+                            continue;
+                        };
+                        match refresh_native_sidekick_acceptance_transcript(
+                            &mut engine,
+                            &mut transcript_cursor,
+                            plan,
+                            turn_id == plan.transcript_delta_turn_id,
+                        ) {
+                            Ok(receipt) => Some(receipt),
+                            Err(error) => {
+                                fail_native_sidekick_acceptance_turn(
+                                    &app,
+                                    turn_id,
+                                    format!("The pinned transcript refresh failed: {error}"),
+                                );
+                                publish_native_sidekick(&app, &snapshot, |state| {
+                                    state.state = "degraded".into();
+                                    state.detail = error;
+                                });
+                                continue;
+                            }
+                        }
+                    } else {
+                        None
+                    };
+                    let (screen_available, screen_refresh) = if let Some(plan) =
+                        &acceptance_evidence
+                    {
+                        match refresh_native_sidekick_acceptance_screen(
+                            &mut engine,
+                            &context_session.id,
+                            &mut last_screen_path,
+                            plan,
+                            acceptance_turn_id.as_deref(),
+                        ) {
+                            Ok(receipt) => {
+                                record_native_sidekick_acceptance_owned_path(
+                                    &app,
+                                    receipt.provider_path.clone(),
+                                );
+                                (true, Some(receipt))
+                            }
+                            Err(error) => {
+                                if let Some(turn_id) = acceptance_turn_id.as_deref() {
+                                    fail_native_sidekick_acceptance_turn(
+                                        &app,
+                                        turn_id,
+                                        format!("The exact-session screen refresh failed: {error}"),
+                                    );
+                                }
+                                publish_native_sidekick(&app, &snapshot, |state| {
+                                    state.state = "degraded".into();
+                                    state.detail = error;
+                                });
+                                continue;
+                            }
+                        }
+                    } else {
+                        (
+                            refresh_native_sidekick_screen(
+                                &mut engine,
+                                &context_session.id,
+                                &mut last_screen_path,
+                            ),
+                            None,
+                        )
+                    };
                     publish_native_sidekick(&app, &snapshot, |state| {
                         state.screen_available = screen_available;
                         state.state = "thinking".into();
@@ -16610,23 +19749,97 @@ fn run_native_sidekick(
                             text: text.clone(),
                             kind: None,
                             latency_ms: None,
+                            acceptance_turn_id: user_message_acceptance_turn_id,
                         });
                     });
                     if !backend_available {
+                        if let Some(turn_id) = acceptance_turn_id.as_deref() {
+                            fail_native_sidekick_acceptance_turn(
+                                &app,
+                                turn_id,
+                                "The reasoning backend was unavailable before the acceptance turn started.",
+                            );
+                        }
                         publish_native_sidekick(&app, &snapshot, |state| {
                             state.state = "degraded".into();
                             state.detail = "Reasoning is disconnected. Wait for reconnection or end Sidekick and try again.".into();
                         });
-                    } else if let Err(error) = engine.send_user(text) {
-                        backend_available = false;
-                        if error.retryable {
-                            recovery_attempts = 0;
-                            next_backend_retry = Some(Instant::now() + Duration::from_secs(1));
+                    } else {
+                        match engine.send_user(text) {
+                            Ok(foreground_turn_id) => {
+                                if let Some(acceptance_turn_id) = acceptance_turn_id {
+                                    if let Some(receipt) =
+                                        engine.foreground_evidence_receipt(&foreground_turn_id)
+                                    {
+                                        record_native_sidekick_acceptance_evidence_receipt(
+                                            &app,
+                                            &acceptance_turn_id,
+                                            receipt,
+                                        );
+                                    }
+                                    if let (Some(plan), Some(transcript), Some(screen)) = (
+                                        &acceptance_evidence,
+                                        transcript_refresh.as_ref(),
+                                        screen_refresh.as_ref(),
+                                    ) {
+                                        record_native_sidekick_acceptance_adapter_receipt(
+                                            &app,
+                                            &acceptance_turn_id,
+                                            NativeSidekickAdapterReceipt {
+                                                transcript_adapter: "live_transcript_jsonl_delta"
+                                                    .into(),
+                                                transcript_cursor: transcript.cursor,
+                                                transcript_sha256: transcript.sha256.clone(),
+                                                transcript_new_items: transcript.new_items,
+                                                screen_adapter: "context_store_exact_session"
+                                                    .into(),
+                                                screen_capture_sha256: plan
+                                                    .screen_capture_sha256
+                                                    .clone(),
+                                                provider_image_evidence_id: screen
+                                                    .evidence_id
+                                                    .clone(),
+                                                provider_image_path: screen
+                                                    .provider_path
+                                                    .display()
+                                                    .to_string(),
+                                                provider_image_sha256: screen
+                                                    .provider_sha256
+                                                    .clone(),
+                                                provider_image_transport: "inline_data_url".into(),
+                                                provider_image_dispatched_sha256: screen
+                                                    .provider_sha256
+                                                    .clone(),
+                                                provider_image_file: screen.provider_file.clone(),
+                                                capture_session_id: context_session.id.clone(),
+                                                per_turn_refresh_completed: true,
+                                            },
+                                        );
+                                    }
+                                    acceptance_turns_by_foreground
+                                        .insert(foreground_turn_id, acceptance_turn_id);
+                                }
+                            }
+                            Err(error) => {
+                                if let Some(turn_id) = acceptance_turn_id.as_deref() {
+                                    fail_native_sidekick_acceptance_turn(
+                                        &app,
+                                        turn_id,
+                                        format!("The provider rejected the turn: {error}"),
+                                    );
+                                }
+                                backend_available = false;
+                                if error.retryable {
+                                    recovery_attempts = 0;
+                                    next_backend_retry =
+                                        Some(Instant::now() + Duration::from_secs(1));
+                                }
+                                publish_native_sidekick(&app, &snapshot, |state| {
+                                    state.state = "degraded".into();
+                                    state.detail = format!("Sidekick turn failed: {error}");
+                                });
+                            }
                         }
-                        publish_native_sidekick(&app, &snapshot, |state| {
-                            state.state = "degraded".into();
-                            state.detail = format!("Sidekick turn failed: {error}");
-                        });
                     }
                 }
             }
@@ -16667,6 +19880,33 @@ fn run_native_sidekick(
         let publications = engine.take_publications();
         let failures = engine.take_failures();
         for publication in publications {
+            record_native_sidekick_acceptance_reasoning_session(&app, &engine);
+            let acceptance_turn_id = take_native_sidekick_acceptance_turn_for_work(
+                &mut acceptance_turns_by_foreground,
+                &publication.work,
+            );
+            if let Some(turn_id) = acceptance_turn_id.as_deref() {
+                record_native_sidekick_acceptance_candidate_evidence(
+                    &app,
+                    turn_id,
+                    NativeSidekickCandidateEvidenceReceipt {
+                        transcript_evidence_ids: publication
+                            .candidate
+                            .evidence_ids
+                            .iter()
+                            .map(|id| id.as_str().to_string())
+                            .collect(),
+                        visual_evidence_ids: publication
+                            .candidate
+                            .visual_evidence_ids
+                            .iter()
+                            .map(|id| id.as_str().to_string())
+                            .collect(),
+                        claims_visual_observation: publication.candidate.claims_visual_observation,
+                        first_token_ms: publication.first_token_ms,
+                    },
+                );
+            }
             let text = publication.candidate.text.unwrap_or_default();
             publish_native_sidekick(&app, &snapshot, |state| {
                 state.state = "ready".into();
@@ -16676,10 +19916,22 @@ fn run_native_sidekick(
                     text,
                     kind: publication.candidate.kind,
                     latency_ms: Some(publication.total_ms),
+                    acceptance_turn_id,
                 });
             });
         }
         for failure in failures {
+            let acceptance_turn_id = take_native_sidekick_acceptance_turn_for_work(
+                &mut acceptance_turns_by_foreground,
+                &failure.work,
+            );
+            if let Some(turn_id) = acceptance_turn_id.as_deref() {
+                fail_native_sidekick_acceptance_turn(
+                    &app,
+                    turn_id,
+                    format!("The exact provider turn failed: {}", failure.error),
+                );
+            }
             backend_available = false;
             if failure.error.retryable {
                 backend_available = false;
@@ -16694,10 +19946,33 @@ fn run_native_sidekick(
             });
         }
         for lifecycle in engine.take_lifecycle_events() {
-            if let SidekickLifecycleOutcome::Suppressed(_) = lifecycle.outcome {
+            if let SidekickLifecycleOutcome::Suppressed(reason) = lifecycle.outcome {
+                let foreground = matches!(
+                    lifecycle.work,
+                    minutes_core::live_sidekick::SidekickWork::Foreground { .. }
+                );
+                let acceptance_turn_id = take_native_sidekick_acceptance_turn_for_work(
+                    &mut acceptance_turns_by_foreground,
+                    &lifecycle.work,
+                );
+                if let Some(turn_id) = acceptance_turn_id.as_deref() {
+                    fail_native_sidekick_acceptance_turn(
+                        &app,
+                        turn_id,
+                        format!("The provider produced no publishable answer: {reason:?}"),
+                    );
+                }
                 publish_native_sidekick(&app, &snapshot, |state| {
-                    state.state = "ready".into();
-                    state.detail = "Ready — no intervention was needed for that evidence.".into();
+                    if foreground {
+                        state.state = "degraded".into();
+                        state.detail =
+                            "Sidekick produced no answer for that question. Retry the message."
+                                .into();
+                    } else {
+                        state.state = "ready".into();
+                        state.detail =
+                            "Ready — no intervention was needed for that evidence.".into();
+                    }
                 });
             }
         }
@@ -16741,6 +20016,7 @@ pub fn cmd_start_native_sidekick(
     state.sidekick_stop_flag.store(false, Ordering::SeqCst);
     let snapshot = publish_native_sidekick(&app, &state.sidekick_snapshot, |snapshot| {
         *snapshot = NativeSidekickSnapshot {
+            revision: 0,
             active: true,
             state: "arming".into(),
             detail: "Starting a persistent Codex Cloud reasoning session…".into(),
@@ -16809,9 +20085,90 @@ pub fn cmd_native_sidekick_send(
         .unwrap_or_else(|error| error.into_inner())
         .clone()
         .ok_or_else(|| "Sidekick is not active.".to_string())?;
-    sender
-        .send(NativeSidekickControl::UserMessage(message))
-        .map_err(|_| "Sidekick stopped before the message was delivered.".into())
+    let (acceptance_turn_id, acceptance_error) = {
+        let (lock, _) = &*state.sidekick_acceptance;
+        let mut guard = lock.lock().unwrap_or_else(|error| error.into_inner());
+        let Some(runtime) = guard.as_mut() else {
+            return sender
+                .send(NativeSidekickControl::UserMessage {
+                    text: message,
+                    acceptance_turn_id: None,
+                })
+                .map_err(|error| {
+                    format!("Sidekick stopped before the message was delivered: {error}")
+                });
+        };
+        let Some(expected) = runtime.expected_paint.as_mut() else {
+            return sender
+                .send(NativeSidekickControl::UserMessage {
+                    text: message,
+                    acceptance_turn_id: None,
+                })
+                .map_err(|error| {
+                    format!("Sidekick stopped before the message was delivered: {error}")
+                });
+        };
+        if expected.prompt != message {
+            (None, None)
+        } else if expected.submission_started {
+            (
+                None,
+                Some(
+                    "This acceptance turn was already submitted; duplicate delivery was blocked."
+                        .to_string(),
+                ),
+            )
+        } else {
+            let input_key = native_sidekick_acceptance_interaction_key(
+                "sidekick_input",
+                Some(&expected.turn_id),
+            );
+            let send_key = native_sidekick_acceptance_interaction_key(
+                "sidekick_send",
+                Some(&expected.turn_id),
+            );
+            if !expected.claimed
+                || Instant::now() > expected.deadline
+                || !runtime.interactable_targets.contains_key(&input_key)
+                || !runtime.interactable_targets.contains_key(&send_key)
+            {
+                (
+                    None,
+                    Some(
+                        "The acceptance message did not come through the attested Sidekick controls."
+                            .to_string(),
+                    ),
+                )
+            } else {
+                expected.submission_started = true;
+                (Some(expected.turn_id.clone()), None)
+            }
+        }
+    };
+    if let Some(error) = acceptance_error {
+        return Err(error);
+    }
+    if let Err(error) = sender.send(NativeSidekickControl::UserMessage {
+        text: message,
+        acceptance_turn_id: acceptance_turn_id.clone(),
+    }) {
+        if let Some(turn_id) = acceptance_turn_id {
+            let (lock, _) = &*state.sidekick_acceptance;
+            if let Some(expected) = lock
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .as_mut()
+                .and_then(|runtime| runtime.expected_paint.as_mut())
+                .filter(|expected| expected.turn_id == turn_id)
+            {
+                expected.submission_started = false;
+            }
+        }
+        return Err(format!(
+            "Sidekick stopped before the message was delivered: {error}"
+        ));
+    }
+    Ok(())
 }
 
 #[tauri::command]

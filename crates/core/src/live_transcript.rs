@@ -2620,7 +2620,11 @@ pub fn read_since_line(since_line: usize) -> Result<Vec<TranscriptLine>, Minutes
     read_since_line_from_path(&path, since_line)
 }
 
-fn read_since_line_from_path(
+/// Read transcript lines from an explicitly selected scratch JSONL source.
+/// Native integrations use this to exercise the same cursor/parser adapter
+/// against an isolated, pre-authorized source without switching the process
+/// global Minutes home or mixing ambient capture into a cloud evidence window.
+pub fn read_since_line_from_path(
     path: &Path,
     since_line: usize,
 ) -> Result<Vec<TranscriptLine>, MinutesError> {
@@ -2629,7 +2633,24 @@ fn read_since_line_from_path(
     }
 
     let file = File::open(path)?;
-    let reader = BufReader::new(file);
+    read_since_line_from_reader(BufReader::new(file), since_line)
+}
+
+/// Parse transcript deltas from bytes already opened and verified by a host
+/// integration. This keeps the production JSONL parser/cursor semantics while
+/// allowing security-sensitive callers to avoid reopening a mutable pathname
+/// after they validate its owner, mode, inode, and digest.
+pub fn read_since_line_from_bytes(
+    bytes: &[u8],
+    since_line: usize,
+) -> Result<Vec<TranscriptLine>, MinutesError> {
+    read_since_line_from_reader(BufReader::new(bytes), since_line)
+}
+
+fn read_since_line_from_reader(
+    reader: impl BufRead,
+    since_line: usize,
+) -> Result<Vec<TranscriptLine>, MinutesError> {
     let mut lines = Vec::new();
 
     for line_result in reader.lines() {

@@ -97,10 +97,93 @@
     let rendered = 0;
     let pendingMessage = '';
     let lastState = 'arming';
+    let pendingAcceptance = null;
+    let queuedAcceptance = [];
+    let latestMessages = [];
+    let renderedMessageKeys = [];
+    let renderedSessionId = '';
+    let lastRevision = -1;
 
-    function appendMessage(message) {
+    function intersectRect(left, top, right, bottom, rect) {
+      return {
+        left: Math.max(left, rect.left),
+        top: Math.max(top, rect.top),
+        right: Math.min(right, rect.right),
+        bottom: Math.min(bottom, rect.bottom),
+      };
+    }
+
+    function elementInteractability(element) {
+      if (!element || !element.isConnected || element.disabled) return null;
+      let visibleThroughAncestors = true;
+      let clipped = {
+        left: 0,
+        top: 0,
+        right: window.innerWidth,
+        bottom: window.innerHeight,
+      };
+      for (let node = element; node; node = node.parentElement) {
+        const style = getComputedStyle(node);
+        if (style.display === 'none'
+          || style.visibility === 'hidden'
+          || Number(style.opacity || '1') <= 0
+          || node.inert) {
+          visibleThroughAncestors = false;
+          break;
+        }
+        const clipsX = ['auto', 'scroll', 'hidden', 'clip'].includes(style.overflowX);
+        const clipsY = ['auto', 'scroll', 'hidden', 'clip'].includes(style.overflowY);
+        if (clipsX || clipsY) {
+          const ancestorRect = node.getBoundingClientRect();
+          clipped = intersectRect(
+            clipsX ? clipped.left : 0,
+            clipsY ? clipped.top : 0,
+            clipsX ? clipped.right : window.innerWidth,
+            clipsY ? clipped.bottom : window.innerHeight,
+            ancestorRect,
+          );
+        }
+      }
+      const rect = element.getBoundingClientRect();
+      const intersection = intersectRect(
+        clipped.left,
+        clipped.top,
+        clipped.right,
+        clipped.bottom,
+        rect,
+      );
+      const width = Math.max(0, intersection.right - intersection.left);
+      const height = Math.max(0, intersection.bottom - intersection.top);
+      const centerX = intersection.left + width / 2;
+      const centerY = intersection.top + height / 2;
+      const hit = width > 0 && height > 0 && typeof document.elementFromPoint === 'function'
+        ? document.elementFromPoint(centerX, centerY)
+        : element;
+      const hitTested = Boolean(hit && (hit === element || element.contains?.(hit)));
+      if (document.visibilityState === 'hidden'
+        || !visibleThroughAncestors
+        || rect.width <= 0
+        || rect.height <= 0
+        || width <= 0
+        || height <= 0
+        || !hitTested) return null;
+      return { rect, width, height, hitTested };
+    }
+
+    function messageRenderKey(message) {
+      return JSON.stringify([
+        message?.role || '',
+        message?.text || '',
+        message?.kind || '',
+        message?.latencyMs ?? null,
+        message?.acceptanceTurnId || '',
+      ]);
+    }
+
+    function appendMessage(message, snapshotIndex) {
       const item = document.createElement('article');
       item.className = `message ${message.role}`;
+      item.dataset.snapshotIndex = String(snapshotIndex);
       const label = document.createElement('div');
       label.className = 'label';
       label.textContent = message.role === 'user' ? 'You' : (message.kind || 'Sidekick');
@@ -115,10 +198,203 @@
         item.append(foot);
       }
       stream.append(item);
+      return item;
+    }
+
+    function maybeAcknowledgeAcceptance(messages) {
+      const pending = pendingAcceptance;
+      if (!pending || pending.paintScheduled) return;
+      const userIndex = messages.findIndex((message, index) => (
+        index >= pending.baselineMessageCount
+          && message?.role === 'user'
+          && message?.text === pending.message
+          && message?.acceptanceTurnId === pending.turnId
+      ));
+      const responseIndex = messages.findIndex((message, index) => (
+        index > userIndex
+          && message?.role === 'sidekick'
+          && message?.acceptanceTurnId === pending.turnId
+      ));
+      if (userIndex < 0 || responseIndex < 0) return;
+      const response = messages[responseIndex];
+      const bubble = stream.querySelector(
+        `[data-snapshot-index="${responseIndex}"] .bubble`,
+      );
+      if (!bubble || bubble.textContent !== response.text) return;
+      pending.paintScheduled = true;
+      requestAnimationFrame(() => requestAnimationFrame(async () => {
+        const interactability = elementInteractability(bubble);
+        if (!interactability) {
+          pending.paintScheduled = false;
+          pending.paintAttempts += 1;
+          if (performance.now() < pending.deadlineAt && pending.paintAttempts < 120) {
+            requestAnimationFrame(() => maybeAcknowledgeAcceptance(latestMessages));
+          } else {
+            await failAcceptance(pending, 'The answer never became visible in the Sidekick window.');
+          }
+          return;
+        }
+        try {
+          await invoke('cmd_native_sidekick_ui_acceptance_painted', {
+            nonce: pending.nonce,
+            turnId: pending.turnId,
+            userText: pending.message,
+            domText: bubble.textContent,
+            width: interactability.width,
+            height: interactability.height,
+            animationFrames: 2,
+          });
+          await invoke('cmd_native_sidekick_ui_acceptance_turn_settled', {
+            nonce: pending.nonce,
+            turnId: pending.turnId,
+          });
+          if (pendingAcceptance === pending) {
+            pendingAcceptance = null;
+            const next = queuedAcceptance.shift();
+            if (next) void acceptChallenge(next);
+          }
+        } catch (error) {
+          pending.paintScheduled = false;
+          pending.paintAttempts += 1;
+          console.error('Sidekick acceptance paint acknowledgement failed', error);
+          if (performance.now() < pending.deadlineAt && pending.paintAttempts < 5) {
+            requestAnimationFrame(() => maybeAcknowledgeAcceptance(latestMessages));
+          } else {
+            await failAcceptance(pending, error);
+          }
+        }
+      }));
+    }
+
+    async function failAcceptance(pending, error) {
+      if (!pending || pending.failed) return;
+      pending.failed = true;
+      const message = String(error?.message || error || 'Unknown Sidekick UI failure.');
+      try {
+        await invoke('cmd_native_sidekick_ui_acceptance_failed', {
+          nonce: pending.nonce,
+          turnId: pending.turnId,
+          error: message,
+        });
+      } catch (reportError) {
+        console.error('Could not report Sidekick acceptance failure', reportError);
+      } finally {
+        if (pendingAcceptance === pending) {
+          pendingAcceptance = null;
+          queuedAcceptance = queuedAcceptance.filter(
+            (candidate) => String(candidate?.turnId || '') !== pending.turnId,
+          );
+          const next = queuedAcceptance.shift();
+          if (next) void acceptChallenge(next);
+        }
+      }
+    }
+
+    function normalizeChallenge(payload) {
+      payload = payload || {};
+      const nonce = String(payload.nonce || '');
+      const turnId = String(payload.turnId || '');
+      const message = String(payload.message || '');
+      const baselineMessageCount = Number(payload.baselineMessageCount);
+      const timeoutMs = Number(payload.timeoutMs || 30_000);
+      if (!/^[a-f0-9]{32,128}$/i.test(nonce)
+        || !/^[a-zA-Z0-9_-]{1,80}$/.test(turnId)
+        || !message.trim()
+        || message.length > 2000
+        || !Number.isSafeInteger(baselineMessageCount)
+        || baselineMessageCount < 0
+        || !Number.isFinite(timeoutMs)
+        || timeoutMs <= 0
+        || timeoutMs > 120_000) return null;
+      return {
+        nonce,
+        turnId,
+        message,
+        baselineMessageCount,
+        shouldSubmit: payload.shouldSubmit !== false,
+        deadlineAt: performance.now() + timeoutMs,
+        paintScheduled: false,
+        paintAttempts: 0,
+        failed: false,
+      };
+    }
+
+    async function acceptChallenge(payload) {
+      const pending = normalizeChallenge(payload);
+      if (!pending) return;
+      if (pendingAcceptance) {
+        if (pendingAcceptance.turnId !== pending.turnId
+          && !queuedAcceptance.some((candidate) => (
+            String(candidate?.turnId || '') === pending.turnId
+          ))) queuedAcceptance.push(payload);
+        return;
+      }
+      // Reserve synchronously before the first await. A reload can deliver
+      // both the event and the authoritative ready-state replay in the same
+      // task; neither is allowed to submit the same turn twice.
+      pendingAcceptance = pending;
+      try {
+        if (pending.shouldSubmit) {
+          const claimed = await invoke('cmd_native_sidekick_ui_acceptance_claim', {
+            nonce: pending.nonce,
+            turnId: pending.turnId,
+            message: pending.message,
+            baselineMessageCount: pending.baselineMessageCount,
+          });
+          if (!claimed) {
+            pendingAcceptance = null;
+            return;
+          }
+        }
+        if (pending.shouldSubmit) {
+          const inputAck = elementInteractability(input);
+          const sendAck = elementInteractability(send);
+          if (!inputAck || !sendAck) {
+            throw new Error('The Sidekick input or Send control is not visibly interactable.');
+          }
+          const inputWritable = !input.readOnly && !input.inert && !input.closest?.('[inert]');
+          const sendWritable = !send.inert && !send.closest?.('[inert]');
+          if (!inputWritable || !sendWritable) {
+            throw new Error('The Sidekick input or Send control is not writable.');
+          }
+          await invoke('cmd_native_sidekick_ui_acceptance_interactable', {
+            nonce: pending.nonce,
+            turnId: pending.turnId,
+            target: 'sidekick_input',
+            width: inputAck.width,
+            height: inputAck.height,
+            hitTested: inputAck.hitTested,
+            enabled: !input.disabled,
+            writable: inputWritable,
+          });
+          await invoke('cmd_native_sidekick_ui_acceptance_interactable', {
+            nonce: pending.nonce,
+            turnId: pending.turnId,
+            target: 'sidekick_send',
+            width: sendAck.width,
+            height: sendAck.height,
+            hitTested: sendAck.hitTested,
+            enabled: !send.disabled,
+            writable: sendWritable,
+          });
+          input.value = pending.message;
+          input.focus();
+          send.click();
+        } else {
+          maybeAcknowledgeAcceptance(latestMessages);
+        }
+      } catch (error) {
+        await failAcceptance(pending, error);
+      }
     }
 
     function render(snapshot) {
       snapshot = snapshot || {};
+      const revision = Number(snapshot.revision);
+      if (Number.isSafeInteger(revision)) {
+        if (revision < lastRevision) return;
+        lastRevision = revision;
+      }
       const nextState = snapshot.state || 'off';
       document.body.dataset.state = snapshot.state || 'off';
       document.getElementById('state').textContent = nextState;
@@ -132,13 +408,22 @@
       document.getElementById('detail').textContent = snapshot.detail || '';
       send.disabled = !snapshot.active || nextState === 'arming';
       const messages = Array.isArray(snapshot.messages) ? snapshot.messages : [];
+      latestMessages = messages;
+      const nextMessageKeys = messages.map(messageRenderKey);
       // Starting a new exact session replaces the backend snapshot. Mirror the
       // reset instead of leaving messages from the prior meeting on screen.
-      if (messages.length < rendered) {
+      const prefixChanged = renderedMessageKeys.some((key, index) => nextMessageKeys[index] !== key);
+      if (sessionId !== renderedSessionId || messages.length < rendered || prefixChanged) {
         stream.replaceChildren();
         rendered = 0;
+        renderedMessageKeys = [];
       }
-      while (rendered < messages.length) appendMessage(messages[rendered++]);
+      renderedSessionId = sessionId;
+      while (rendered < messages.length) {
+        appendMessage(messages[rendered], rendered);
+        renderedMessageKeys.push(nextMessageKeys[rendered]);
+        rendered += 1;
+      }
       empty.hidden = rendered > 0;
       const latestMessage = messages.at(-1);
       if (!pendingMessage && nextState === 'degraded' && latestMessage?.role === 'user') {
@@ -154,6 +439,7 @@
       retry.classList.toggle('visible', failedPendingTurn);
       if (failedPendingTurn && !input.value.trim()) input.value = pendingMessage;
       lastState = nextState;
+      maybeAcknowledgeAcceptance(messages);
       requestAnimationFrame(() => { scroller.scrollTop = scroller.scrollHeight; });
     }
 
@@ -175,6 +461,10 @@
         input.value = '';
       } catch (error) {
         showSubmitError(message, error);
+        const acceptance = pendingAcceptance;
+        if (acceptance?.message === message && acceptance.shouldSubmit) {
+          await failAcceptance(acceptance, error);
+        }
       }
     }
 
@@ -199,11 +489,19 @@
       window.__TAURI__.window.getCurrentWindow().close();
     });
 
-    listen('sidekick:state', (event) => render(event.payload));
-    invoke('cmd_native_sidekick_status').then(render).catch((error) => {
+    async function bootstrap() {
+      await listen('sidekick:state', (event) => render(event.payload));
+      await listen('sidekick:acceptance-submit', (event) => acceptChallenge(event.payload));
+      const snapshot = await invoke('cmd_native_sidekick_status');
+      render(snapshot);
+      const acceptance = await invoke('cmd_native_sidekick_ui_acceptance_ready');
+      if (acceptance?.pending) await acceptChallenge(acceptance.pending);
+      input.focus();
+    }
+
+    bootstrap().catch((error) => {
       showSubmitError(input.value.trim(), error);
     });
-    input.focus();
   </script>
 </body>
 </html>

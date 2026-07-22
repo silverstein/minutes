@@ -26,6 +26,7 @@ This branch adds **Codex Sidekick**, a persistent live meeting strategist ground
 - **Install the signed development app on macOS:** `./scripts/install-dev-app.sh`
 - **Try it:** start a Recording in Minutes Dev, then click **Sidekick** beside the active session. Use **Live** for transcript-only assistance.
 - **Backend requirement:** install and sign in to the Codex CLI. Screen grounding also requires macOS Screen & System Audio Recording permission.
+- **Developer acceptance:** see the bounded installed-app gates in [`docs/development/desktop-development.md`](docs/development/desktop-development.md#native-sidekick-installed-binary-acceptance). The real mic/screen/cloud UI gate is opt-in and never runs as part of installation.
 
 ### Works with
 

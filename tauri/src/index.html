@@ -8370,6 +8370,119 @@
     }
 
     sidekickButtons.forEach(button => button.addEventListener('click', openCodexSidekick));
+
+    function sidekickAcceptanceInteractability(element) {
+      if (!element || !element.isConnected || element.disabled) return null;
+      let visibleThroughAncestors = true;
+      for (let node = element; node; node = node.parentElement) {
+        const style = getComputedStyle(node);
+        if (style.display === 'none'
+          || style.visibility === 'hidden'
+          || Number(style.opacity || '1') <= 0
+          || node.inert) {
+          visibleThroughAncestors = false;
+          break;
+        }
+      }
+      const rect = element.getBoundingClientRect();
+      const left = Math.max(0, rect.left);
+      const top = Math.max(0, rect.top);
+      const right = Math.min(window.innerWidth, rect.right);
+      const bottom = Math.min(window.innerHeight, rect.bottom);
+      const width = Math.max(0, right - left);
+      const height = Math.max(0, bottom - top);
+      const centerX = left + width / 2;
+      const centerY = top + height / 2;
+      const hit = width > 0 && height > 0 && typeof document.elementFromPoint === 'function'
+        ? document.elementFromPoint(centerX, centerY)
+        : element;
+      const hitTested = Boolean(hit && (hit === element || element.contains?.(hit)));
+      if (document.visibilityState === 'hidden'
+        || !visibleThroughAncestors
+        || rect.width <= 0
+        || rect.height <= 0
+        || width <= 0
+        || height <= 0
+        || !hitTested) return null;
+      return { width, height, hitTested };
+    }
+
+    async function attestSidekickAcceptanceControl(nonce, target, element) {
+      const ack = sidekickAcceptanceInteractability(element);
+      if (!ack) throw new Error(`The ${target} control is not visibly interactable.`);
+      await invoke('cmd_native_sidekick_ui_acceptance_interactable', {
+        nonce,
+        turnId: null,
+        target,
+        width: ack.width,
+        height: ack.height,
+        hitTested: ack.hitTested,
+        enabled: !element.disabled,
+        writable: !element.inert && !element.closest?.('[inert]'),
+      });
+    }
+
+    async function openSidekickForUiAcceptance(payload) {
+      const nonce = String(payload?.nonce || '');
+      if (!/^[a-f0-9]{32,128}$/i.test(nonce)) return;
+      const claimed = await invoke('cmd_native_sidekick_ui_acceptance_launch_claim', { nonce });
+      if (!claimed) return;
+      const priorConsent = localStorage.getItem(SIDEKICK_CLOUD_CONSENT_KEY);
+      // The runner's explicit cloud-consent flag authorizes this one dev-only
+      // rehearsal. Clear cached consent so the test still traverses the real
+      // overlay and its confirmation button instead of skipping that UX.
+      try {
+        localStorage.removeItem(SIDEKICK_CLOUD_CONSENT_KEY);
+        const button = sidekickButtons.find(Boolean);
+        if (!button) throw new Error('The recording Sidekick control is unavailable.');
+        await attestSidekickAcceptanceControl(nonce, 'main_sidekick_button', button);
+        button.focus();
+        button.click();
+        for (let attempt = 0; attempt < 120; attempt += 1) {
+          if (sidekickCloudConsentOverlay.classList.contains('active')) {
+            await attestSidekickAcceptanceControl(
+              nonce,
+              'cloud_consent_confirm',
+              sidekickCloudConsentConfirm,
+            );
+            sidekickCloudConsentConfirm.focus();
+            sidekickCloudConsentConfirm.click();
+            for (let launchAttempt = 0; launchAttempt < 400; launchAttempt += 1) {
+              if (sidekickSessionOpen && !sidekickLaunching) {
+                await invoke('cmd_native_sidekick_ui_acceptance_launch_completed', { nonce });
+                return;
+              }
+              await new Promise((resolve) => setTimeout(resolve, 25));
+            }
+            throw new Error('The real Sidekick start command did not open a session.');
+          }
+          await new Promise((resolve) => setTimeout(resolve, 25));
+        }
+        throw new Error('The Sidekick cloud-consent overlay did not open.');
+      } finally {
+        if (priorConsent === null) localStorage.removeItem(SIDEKICK_CLOUD_CONSENT_KEY);
+        else localStorage.setItem(SIDEKICK_CLOUD_CONSENT_KEY, priorConsent);
+      }
+    }
+
+    (async () => {
+      await listen('sidekick:acceptance-open', (event) => {
+        openSidekickForUiAcceptance(event.payload).catch((error) => {
+          console.error('Sidekick UI acceptance launch failed', error);
+          const nonce = String(event.payload?.nonce || '');
+          invoke('cmd_native_sidekick_ui_acceptance_launch_failed', {
+            nonce,
+            error: String(error?.message || error || 'Unknown Sidekick launch failure.'),
+          }).catch((reportError) => {
+            console.error('Could not report Sidekick UI acceptance launch failure', reportError);
+          });
+        });
+      });
+      await invoke('cmd_native_sidekick_ui_acceptance_main_ready');
+    })().catch((error) => {
+      console.error('Sidekick UI acceptance registration failed', error);
+    });
+
     const SIDEKICK_LISTENER_TIMEOUT_MS = 6_000;
     let sidekickListenerGeneration = 0;
     let sidekickListenerRetryMs = 1_000;

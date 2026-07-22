@@ -430,6 +430,11 @@ test('Sidekick acceptance traverses visible main control, consent, and one real 
     ({ command }) => command === 'cmd_start_native_sidekick',
   );
   assert.equal(starts.length, 1);
+  assert.equal(
+    harness.invocations.filter(({ command }) => command === 'cmd_capture_status').length,
+    2,
+    'even an already-visible control requires one fresh post-transition status read',
+  );
   assert.equal(starts[0].args.goal, null);
   assert.equal(starts[0].args.cloudConsent, true);
   assert.deepEqual(
@@ -445,6 +450,54 @@ test('Sidekick acceptance traverses visible main control, consent, and one real 
     1,
   );
   assert.equal(harness.localStorageValues.get(consentKey), 'previous-choice');
+});
+
+test('Sidekick acceptance refreshes recording state once before using the revealed control', async () => {
+  const source = await readFile(indexHtml, 'utf8');
+  const declaredIds = new Set([...source.matchAll(/\bid="([^"]+)"/g)].map((match) => match[1]));
+  const scripts = inlineScripts(source);
+  const bootstrapScript = scripts.find((script) => script.includes('window.__MINUTES_STARTUP__'));
+  const mainScript = scripts.find((script) => script.includes('const { invoke }'));
+  const eventHandlers = new Map();
+  let captureAttempts = 0;
+  let recordingBar;
+  const commandHandlers = new Map([
+    ['cmd_capture_status', () => {
+      captureAttempts += 1;
+      if (captureAttempts > 1) recordingBar.acceptanceOpacity = '1';
+      return Promise.resolve({ processingJobs: [], recording: captureAttempts > 1, starting: false, processing: false });
+    }],
+    ['cmd_native_sidekick_ui_acceptance_launch_claim', () => Promise.resolve(true)],
+    ['cmd_native_sidekick_ui_acceptance_interactable', () => Promise.resolve()],
+    ['cmd_native_sidekick_ui_acceptance_launch_completed', () => Promise.resolve()],
+    ['cmd_native_sidekick_ui_acceptance_main_ready', () => Promise.resolve(true)],
+    ['cmd_start_native_sidekick', () => Promise.resolve({ active: true })],
+  ]);
+  const harness = startupContext(declaredIds, {
+    commandHandlers,
+    localStorageInitial: { 'minutes.sidekickCloudEgressConsent.v1': 'previous-choice' },
+    eventListenHandler(eventName, handler) {
+      eventHandlers.set(eventName, handler);
+      return Promise.resolve(() => eventHandlers.delete(eventName));
+    },
+  });
+  new vm.Script(bootstrapScript, { filename: 'tauri/src/index.html#startup-recovery' }).runInContext(harness.context);
+  new vm.Script(mainScript, { filename: 'tauri/src/index.html#main' }).runInContext(harness.context);
+  recordingBar = fakeElement('recording-bar');
+  recordingBar.acceptanceOpacity = '0';
+  harness.elements.get('btn-sidekick-recording').parentElement = recordingBar;
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(captureAttempts, 1, 'startup hydration should make the baseline status read');
+
+  await eventHandlers.get('sidekick:acceptance-open')({ payload: { nonce: 'd'.repeat(64) } });
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(captureAttempts, 2, 'the transition should force exactly one fresh status read');
+  assert.equal(
+    harness.invocations.filter(({ command }) => command === 'cmd_start_native_sidekick').length,
+    1,
+  );
 });
 
 test('Sidekick acceptance rejects a main control hidden by an ancestor', async () => {

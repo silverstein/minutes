@@ -16402,6 +16402,11 @@ pub fn cmd_native_sidekick_ui_acceptance_interactable(
             "The Sidekick acceptance control was not in a visible, on-screen window.".into(),
         );
     }
+    if window.label() == "main" && !window.is_focused().unwrap_or(false) {
+        return Err(
+            "The recording Sidekick control was not in the foreground Minutes window.".into(),
+        );
+    }
     let (lock, ready) = &*state.sidekick_acceptance;
     let mut guard = lock.lock().unwrap_or_else(|error| error.into_inner());
     let runtime = guard
@@ -18719,6 +18724,29 @@ fn generate_native_sidekick_acceptance_marker(
     Ok(path)
 }
 
+fn reveal_native_sidekick_acceptance_main_window(app: &tauri::AppHandle) -> Result<(), String> {
+    let marker = app
+        .get_webview_window("sidekick-acceptance-marker")
+        .ok_or_else(|| "The verified Sidekick screen marker window is missing.".to_string())?;
+    marker
+        .destroy()
+        .map_err(|error| format!("Could not retire the verified screen marker: {error}"))?;
+    let main = app.get_webview_window("main").ok_or_else(|| {
+        "The Minutes main window is missing after screen verification.".to_string()
+    })?;
+    main.show()
+        .map_err(|error| format!("Could not reveal the Minutes main window: {error}"))?;
+    main.unminimize()
+        .map_err(|error| format!("Could not restore the Minutes main window: {error}"))?;
+    main.set_focus()
+        .map_err(|error| format!("Could not focus the Minutes main window: {error}"))?;
+    // `set_focus` dispatches the native request. The real postcondition is
+    // checked in the nonce-bound main-control attestation immediately before
+    // the production click; querying it here from the worker can block on an
+    // unbounded event-loop receive and make a nominal deadline dishonest.
+    Ok(())
+}
+
 fn stop_native_sidekick_ui_acceptance(app: &tauri::AppHandle) -> serde_json::Value {
     let state = app.state::<AppState>();
     let mut context_session_id = minutes_core::pid::read_recording_metadata()
@@ -18931,9 +18959,7 @@ fn run_native_sidekick_ui_acceptance(
         &provider_screen,
         &nonce,
     )?;
-    if let Some(marker_window) = app.get_webview_window("sidekick-acceptance-marker") {
-        marker_window.destroy().ok();
-    }
+    reveal_native_sidekick_acceptance_main_window(&app)?;
     wait_for_native_sidekick_acceptance_surface(
         &state.sidekick_acceptance,
         Duration::from_secs(10),

@@ -8426,8 +8426,23 @@
       const button = document.getElementById('btn-sidekick-recording');
       if (!button) throw new Error('The recording Sidekick control is unavailable.');
       const deadline = performance.now() + 8_000;
+      let forcedStatusRefresh = false;
       while (performance.now() < deadline) {
-        if (sidekickAcceptanceInteractability(button)) return button;
+        if (!forcedStatusRefresh) {
+          // The full-screen nonce marker has just been retired. Wait out any
+          // older in-flight read, then force exactly one status render begun
+          // after this transition. Even an already-visible button must not
+          // bypass that fresh production-state proof.
+          if (!statusCheckInFlight) {
+            forcedStatusRefresh = true;
+            await checkStatus(true);
+            // A slow refresh may finish at the deadline. Honor the state it
+            // just rendered before deciding the control never appeared.
+            if (sidekickAcceptanceInteractability(button)) return button;
+          }
+        } else if (sidekickAcceptanceInteractability(button)) {
+          return button;
+        }
         await new Promise((resolve) => setTimeout(resolve, 25));
       }
       throw new Error('The recording Sidekick control did not become visibly interactable.');

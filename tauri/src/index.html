@@ -6800,6 +6800,7 @@
 
   <script>
     const { invoke } = window.__TAURI__.core;
+    const { listen } = window.__TAURI__.event;
 
     // Platform detection — mirrors the data-platform attribute set in the inline
     // <script> at the top of <head>. Used to swap macOS-specific symbols (⌘, ⌥)

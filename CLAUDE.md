@@ -42,11 +42,11 @@ open target/release/bundle/macos/Minutes.app   # Launch app
 
 - If the work touches TCC-sensitive features, do **not** keep replacing `/Applications/Minutes.app` with local rebuilds.
 - Use `./scripts/install-dev-app.sh` and test `~/Applications/Minutes Dev.app`.
-- If a stable local codesigning identity exists, export `MINUTES_DEV_SIGNING_IDENTITY` before running the script. This is machine-local — set it in your shell profile or a local (untracked) env file to your **own** signing identity; do not hardcode a specific identity here, since exporting an identity whose cert isn't in the local keychain makes the signing step abort. Without it, the script falls back to ad-hoc signing.
+- If exactly one valid `Apple Development` identity exists in the login keychain, the script selects it automatically so the dev app keeps a stable macOS privacy identity across rebuilds. To override that choice, export `MINUTES_DEV_SIGNING_IDENTITY` in your shell profile or a local (untracked) env file. Do not hardcode a maintainer identity in the repository. Without an explicit identity or a single auto-detectable Apple Development identity, the script falls back to ad-hoc signing.
 - Example (substitute your own identity):
 
 ```bash
-export MINUTES_DEV_SIGNING_IDENTITY="Developer ID Application: Your Name (TEAMID)"
+export MINUTES_DEV_SIGNING_IDENTITY="Apple Development: Your Name (TEAMID)"
 ./scripts/install-dev-app.sh
 ```
 
@@ -107,10 +107,11 @@ For dictation shortcut work:
 This repo is public, so local scripts must not assume the maintainer's Apple
 certificate or local notarization credentials.
 
-- `./scripts/install-dev-app.sh` works without Apple credentials by falling
-  back to ad-hoc signing
-- for more stable TCC-sensitive testing, contributors can export
-  `MINUTES_DEV_SIGNING_IDENTITY` to any consistent local codesigning identity
+- `./scripts/install-dev-app.sh` auto-selects exactly one valid Apple
+  Development identity, or works without Apple credentials by falling back to
+  ad-hoc signing
+- contributors with multiple identities can export
+  `MINUTES_DEV_SIGNING_IDENTITY` to choose one consistent local codesigning identity
 - release signing / notarization is maintainer-only and should be configured
   explicitly via environment variables, not by hardcoded defaults in scripts
 

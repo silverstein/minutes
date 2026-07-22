@@ -57,7 +57,8 @@ and leaves a visible recovery panel in the app instead of a blank window.
 That script:
 
 - builds the desktop bundle with the dev overlay config
-- signs it with a configured local identity when available
+- automatically signs it with the only valid Apple Development identity when available
+- honors an explicit `MINUTES_DEV_SIGNING_IDENTITY` override
 - otherwise falls back to ad-hoc signing so contributors can still run it
 - installs it to `~/Applications/Minutes Dev.app`
 - runs the native hotkey diagnostic from the installed app identity
@@ -156,8 +157,9 @@ When validating dictation for normal users, prefer the standard shortcut path fi
 
 For open-source contributors, the script supports two modes:
 
-- configured identity:
-  - set `MINUTES_DEV_SIGNING_IDENTITY` (preferred) or `APPLE_SIGNING_IDENTITY`
+- stable identity:
+  - automatically selects the only valid Apple Development identity
+  - if more than one is valid, set `MINUTES_DEV_SIGNING_IDENTITY` (preferred) or `APPLE_SIGNING_IDENTITY` to choose one
   - best for stable TCC-sensitive testing across rebuilds
 - ad-hoc:
   - no signing identity configured
@@ -167,7 +169,7 @@ For open-source contributors, the script supports two modes:
 Example with an explicit local signing identity:
 
 ```bash
-export MINUTES_DEV_SIGNING_IDENTITY="Developer ID Application: Your Name (TEAMID)"
+export MINUTES_DEV_SIGNING_IDENTITY="Apple Development: Your Name (TEAMID)"
 ./scripts/install-dev-app.sh
 ```
 

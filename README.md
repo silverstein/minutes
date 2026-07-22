@@ -1067,9 +1067,11 @@ If you are testing hotkeys, Screen Recording, Input Monitoring, or repeated macO
 This repository is open source, so local development does not require the
 maintainer's Apple signing credentials:
 
-- `./scripts/install-dev-app.sh` works with ad-hoc signing by default
-- for more stable macOS permission behavior across rebuilds, set
-  `MINUTES_DEV_SIGNING_IDENTITY` to a consistent local codesigning identity
+- `./scripts/install-dev-app.sh` automatically uses the only valid Apple
+  Development identity in your keychain when one is available, and otherwise
+  works with ad-hoc signing by default
+- if you have multiple signing identities, set `MINUTES_DEV_SIGNING_IDENTITY`
+  to choose one consistently for stable macOS permission behavior across rebuilds
 - release signing and notarization remain maintainer/release workflows
 
 For dictation, the recommended path is the standard shortcut in the desktop app

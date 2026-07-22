@@ -86,9 +86,13 @@ global hotkeys), do **not** dogfood by repeatedly replacing
 Use the dedicated development app identity instead:
 
 ```bash
-export MINUTES_DEV_SIGNING_IDENTITY="Developer ID Application: Your Name (TEAMID)"
 ./scripts/install-dev-app.sh
 ```
+
+The installer automatically selects the only valid `Apple Development`
+identity in the local keychain. If the machine has multiple valid development
+identities, set `MINUTES_DEV_SIGNING_IDENTITY` explicitly so the choice stays
+stable.
 
 Canonical dogfood target:
 

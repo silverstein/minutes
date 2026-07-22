@@ -72,6 +72,28 @@ if [[ "$HOST_MIC_HELPER" != "${TRACKED_BUILD_HELPERS[0]}" \
   PRESERVED_BUILD_HELPERS+=("$HOST_MIC_HELPER")
 fi
 
+select_automatic_apple_development_identity() {
+  local identities
+  local identity_count
+  identities="$({ security find-identity -v -p codesigning 2>/dev/null || true; } \
+    | awk 'index($0, "\"Apple Development:") && length($2) == 40 && $2 ~ /^[0-9A-Fa-f]+$/ { print toupper($2) }' \
+    | LC_ALL=C sort -u)"
+  identity_count="$(printf '%s\n' "$identities" | awk 'NF { count++ } END { print count + 0 }')"
+  case "$identity_count" in
+    0)
+      return 1
+      ;;
+    1)
+      printf '%s\n' "$identities"
+      ;;
+    *)
+      echo "Multiple valid Apple Development identities are available; refusing to choose one and risk changing the app's macOS permission identity." >&2
+      echo "Set MINUTES_DEV_SIGNING_IDENTITY to the intended certificate name or SHA-1 fingerprint." >&2
+      return 2
+      ;;
+  esac
+}
+
 assert_clean_build_source() {
   local dirty
   dirty="$(git status --porcelain=v1 --untracked-files=all)"
@@ -441,6 +463,17 @@ if [[ "$INSTALL_AFTER_BUILD" == "1" ]]; then
   acquire_install_lock
 fi
 
+if [[ -z "$SIGNING_IDENTITY" ]]; then
+  automatic_identity_status=0
+  SIGNING_IDENTITY="$(select_automatic_apple_development_identity)" || automatic_identity_status=$?
+  if [[ "$automatic_identity_status" == "2" ]]; then
+    exit 1
+  fi
+  if [[ -n "$SIGNING_IDENTITY" ]]; then
+    echo "Automatically selected the only valid Apple Development identity: $SIGNING_IDENTITY"
+  fi
+fi
+
 if [[ -n "$SIGNING_IDENTITY" ]]; then
   if ! security find-identity -v -p codesigning | grep -Fq "$SIGNING_IDENTITY"; then
     echo "Signing identity not found: $SIGNING_IDENTITY" >&2
@@ -504,7 +537,7 @@ if [[ "$SIGN_MODE" == "identity" ]]; then
     "$BUILD_APP"
 else
   echo "=== Signing ${DEV_PRODUCT_NAME}.app ad-hoc (inside-out) ==="
-  echo "No MINUTES_DEV_SIGNING_IDENTITY / APPLE_SIGNING_IDENTITY configured."
+  echo "No explicit identity or single valid Apple Development identity is available."
   echo "Using ad-hoc signing so the app remains runnable for contributors."
   echo "TCC-sensitive features may still require re-granting permissions after rebuilds."
   while IFS= read -r nested_executable; do
@@ -578,8 +611,9 @@ if [[ "$INSTALL_AFTER_BUILD" == "1" ]]; then
 fi
 if [[ "$SIGN_MODE" == "adhoc" ]]; then
   echo ""
-  echo "Tip: export MINUTES_DEV_SIGNING_IDENTITY to a consistent local signing identity"
-  echo "if you want more stable macOS permission behavior across rebuilds."
+  echo "Tip: create one valid Apple Development certificate in Xcode, or export"
+  echo "MINUTES_DEV_SIGNING_IDENTITY to a consistent local signing identity, for"
+  echo "more stable macOS permission behavior across rebuilds."
 fi
 
 if [[ "$INSTALL_AFTER_BUILD" == "0" ]]; then

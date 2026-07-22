@@ -648,6 +648,16 @@ test('dev installer retires the old app and verifies the fresh frontend', async 
 
   assert.match(
     source,
+    /select_automatic_apple_development_identity[\s\S]*security find-identity -v -p codesigning[\s\S]*index\(\$0, "\\"Apple Development:"\)[\s\S]*identity_count[\s\S]*Multiple valid Apple Development identities[\s\S]*MINUTES_DEV_SIGNING_IDENTITY/,
+    'the installer must auto-select exactly one valid Apple Development identity and fail closed when the choice is ambiguous',
+  );
+  assert.match(
+    source,
+    /SIGNING_IDENTITY="\$\{MINUTES_DEV_SIGNING_IDENTITY:-\$\{APPLE_SIGNING_IDENTITY:-}}"[\s\S]*if \[\[ -z "\$SIGNING_IDENTITY" \]\][\s\S]*SIGNING_IDENTITY="\$\(select_automatic_apple_development_identity\)"/,
+    'an explicit signing identity must take precedence over automatic local identity discovery',
+  );
+  assert.match(
+    source,
     /export MINUTES_BUILD_COMMIT="\$\(git rev-parse --verify HEAD\)"/,
     'the installer must embed the exact checked-out commit for installed-build acceptance',
   );

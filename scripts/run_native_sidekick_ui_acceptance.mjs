@@ -2,7 +2,7 @@
 
 import { execFileSync, spawn } from "node:child_process";
 import { randomBytes, createHash } from "node:crypto";
-import { statSync } from "node:fs";
+import { constants as fsConstants, statSync } from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -360,6 +360,7 @@ export function nativeSidekickLaunchServicesArgs({
   app,
   appStdoutPath,
   appStderrPath,
+  parentLeasePath,
   isolatedHome,
   isolatedTmp,
   codeHome,
@@ -379,7 +380,7 @@ export function nativeSidekickLaunchServicesArgs({
     "-n",
     "-W",
     "-i",
-    "/dev/fd/3",
+    parentLeasePath,
     "-o",
     appStdoutPath,
     "--stderr",
@@ -446,6 +447,14 @@ export async function readBoundedOutputFile(filePath, limit) {
   } finally {
     await file.close();
   }
+}
+
+export function singleFlightAsync(action) {
+  let promise = null;
+  return () => {
+    promise ||= Promise.resolve().then(action);
+    return promise;
+  };
 }
 
 export function parseLsofTextIdentities(output) {
@@ -618,6 +627,8 @@ async function runInstalledUi(app, runtime) {
   let providerCopyPostSha256 = null;
   let providerCopyPath = null;
   let parentLease = null;
+  let parentLeaseCloseOperation = null;
+  let parentLeaseCloseError = null;
   let processScanReady = false;
   let launchStarted = false;
   let appBaselinePids = [];
@@ -656,6 +667,14 @@ async function runInstalledUi(app, runtime) {
     }
     return !processGroupExists();
   };
+  const closeParentLease = () => {
+    return parentLeaseCloseOperation ? parentLeaseCloseOperation() : Promise.resolve();
+  };
+  const requestParentLeaseClose = () => {
+    void closeParentLease().catch((error) => {
+      parentLeaseCloseError ||= error;
+    });
+  };
   try {
     const isolatedHome = path.join(temporaryRoot, "home");
     const isolatedTmp = path.join(temporaryRoot, "tmp");
@@ -664,6 +683,7 @@ async function runInstalledUi(app, runtime) {
     const exitReceiptPath = path.join(minutesDirectory, "native-sidekick-ui-acceptance.exit.json");
     appStdoutPath = path.join(temporaryRoot, "app.stdout.log");
     appStderrPath = path.join(temporaryRoot, "app.stderr.log");
+    const parentLeasePath = path.join(temporaryRoot, "parent-lease.fifo");
     const providerDirectory = path.join(temporaryRoot, "provider");
     providerCopyPath = path.join(providerDirectory, "codex");
     const nonce = randomBytes(32).toString("hex");
@@ -672,6 +692,22 @@ async function runInstalledUi(app, runtime) {
     await fs.mkdir(providerDirectory, { mode: 0o700 });
     await fs.writeFile(appStdoutPath, "", { mode: 0o600 });
     await fs.writeFile(appStderrPath, "", { mode: 0o600 });
+    execFileSync("/usr/bin/mkfifo", [parentLeasePath]);
+    await fs.chmod(parentLeasePath, 0o600);
+    parentLease = await fs.open(
+      parentLeasePath,
+      fsConstants.O_RDWR | fsConstants.O_NONBLOCK,
+    );
+    parentLeaseCloseOperation = singleFlightAsync(async () => {
+      const lease = parentLease;
+      parentLease = null;
+      if (!lease) return;
+      try {
+        await lease.close();
+      } catch (error) {
+        if (error?.code !== "EBADF") throw error;
+      }
+    });
     await fs.copyFile(runtime.source_provider_path, providerCopyPath);
     await fs.chmod(providerCopyPath, 0o500);
     const providerCopySha256 = await fs.readFile(providerCopyPath).then(sha256);
@@ -703,6 +739,7 @@ async function runInstalledUi(app, runtime) {
       app,
       appStdoutPath,
       appStderrPath,
+      parentLeasePath,
       isolatedHome,
       isolatedTmp,
       codeHome: process.env.CODEX_HOME || path.join(realHome, ".codex"),
@@ -713,16 +750,15 @@ async function runInstalledUi(app, runtime) {
     });
     child = spawn("/usr/bin/open", launchArgs, {
       env: process.env,
-      stdio: ["ignore", "pipe", "pipe", "pipe"],
+      stdio: ["ignore", "pipe", "pipe"],
       detached: true,
     });
     launchStarted = true;
     // LaunchServices makes Minutes Dev—not Terminal or Node—the TCC-responsible
-    // process. `open -i /dev/fd/3` maps this parent-owned pipe to the app's
-    // stdin; if the runner crashes, the app watchdog sees EOF and stops mic,
-    // screen, Sidekick, and the provider process itself.
-    parentLease = child.stdio[3];
-    parentLease.on("error", () => {});
+    // process. A private named pipe is required because macOS 26 LaunchServices
+    // rejects /dev/fd aliases with -10810. The parent keeps the only writer
+    // open; if it crashes or closes the lease, the app watchdog sees stdin EOF
+    // and stops mic, screen, Sidekick, and the provider process itself.
     let timedOut = false;
     const startedAt = performance.now();
     const killProcessGroup = (signal) => {
@@ -738,20 +774,20 @@ async function runInstalledUi(app, runtime) {
       // EOF asks the app-owned watchdog to perform its full teardown. Give it
       // longer than the Sidekick + recording teardown budget before the last-
       // resort process-group kill, so a stuck provider cannot be orphaned.
-      parentLease.destroy();
+      requestParentLeaseClose();
       forceKill = setTimeout(() => killProcessGroup("SIGKILL"), FORCED_CLEANUP_GRACE_MS);
     }, HARD_TIMEOUT_MS);
     child.stdout.on("data", (chunk) => {
       const output = appendBoundedOutput(launchServicesStdout, chunk, MAX_OUTPUT_BYTES);
       launchServicesStdout = output.bytes;
       launchServicesStdoutOverflowed ||= output.overflowed;
-      if (launchServicesStdoutOverflowed) parentLease.destroy();
+      if (launchServicesStdoutOverflowed) requestParentLeaseClose();
     });
     child.stderr.on("data", (chunk) => {
       const output = appendBoundedOutput(launchServicesStderr, chunk, MAX_OUTPUT_BYTES);
       launchServicesStderr = output.bytes;
       launchServicesStderrOverflowed ||= output.overflowed;
-      if (launchServicesStderrOverflowed) parentLease.destroy();
+      if (launchServicesStderrOverflowed) requestParentLeaseClose();
     });
     const exitCode = await new Promise((resolve, reject) => {
       child.once("error", reject);
@@ -826,9 +862,18 @@ async function runInstalledUi(app, runtime) {
     let retainTemporaryRoot = false;
     if (timeout) clearTimeout(timeout);
     if (forceKill) clearTimeout(forceKill);
+    try {
+      await closeParentLease();
+    } catch (error) {
+      parentLeaseCloseError ||= error;
+    }
+    if (parentLeaseCloseError) {
+      cleanupErrors.push(new Error(
+        `acceptance parent lease cleanup failed: ${parentLeaseCloseError.message}`,
+      ));
+    }
     if (child && child.exitCode === null) {
       try {
-        parentLease?.destroy();
         process.kill(-child.pid, "SIGTERM");
       } catch (error) {
         try {

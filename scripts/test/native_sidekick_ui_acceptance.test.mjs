@@ -15,6 +15,7 @@ import {
   nativeSidekickTemporaryParent,
   parseLsofTextIdentities,
   readBoundedOutputFile,
+  singleFlightAsync,
   terminateNewExactProcesses,
 } from '../run_native_sidekick_ui_acceptance.mjs';
 
@@ -824,6 +825,7 @@ test('native UI acceptance launches the signed app through LaunchServices with a
     app: '/Users/tester/Applications/Minutes Dev.app',
     appStdoutPath: '/tmp/acceptance/app.stdout',
     appStderrPath: '/tmp/acceptance/app.stderr',
+    parentLeasePath: '/tmp/acceptance/parent-lease.fifo',
     isolatedHome: '/tmp/acceptance/home',
     isolatedTmp: '/tmp/acceptance/tmp',
     codeHome: '/Users/tester/.codex',
@@ -833,7 +835,7 @@ test('native UI acceptance launches the signed app through LaunchServices with a
     realHome: '/Users/tester',
   });
 
-  assert.deepEqual(args.slice(0, 4), ['-n', '-W', '-i', '/dev/fd/3']);
+  assert.deepEqual(args.slice(0, 4), ['-n', '-W', '-i', '/tmp/acceptance/parent-lease.fifo']);
   assert.ok(args.includes('HOME=/tmp/acceptance/home'));
   assert.ok(args.includes('TMPDIR=/tmp/acceptance/tmp'));
   assert.ok(args.includes('PATH=/tmp/acceptance/provider:/opt/homebrew/bin:/usr/bin:/bin'));
@@ -877,6 +879,24 @@ test('native UI acceptance bounds stream collection and file reads before format
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
+});
+
+test('concurrent parent lease close requests join one in-flight operation', async () => {
+  let calls = 0;
+  let release;
+  const close = singleFlightAsync(() => {
+    calls += 1;
+    return new Promise((resolve) => { release = resolve; });
+  });
+
+  const first = close();
+  const second = close();
+  assert.equal(first, second);
+  await Promise.resolve();
+  assert.equal(calls, 1);
+  release();
+  await Promise.all([first, second, close()]);
+  assert.equal(calls, 1);
 });
 
 test('exact process identity survives an unrelated stale executable pathname', () => {

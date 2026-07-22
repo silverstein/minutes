@@ -276,6 +276,34 @@ pub fn embedding_model_for_config(config: &Config) -> &'static EmbeddingModelInf
         .unwrap_or_else(|| embedding_model_info("cam++").unwrap())
 }
 
+/// Compute raw speaker embeddings for pre-normalized 16 kHz PCM windows.
+///
+/// Voice enrollment owns windowing and quality gates; this wrapper only shares
+/// the existing model resolution and `pyannote-rs` extractor without invoking
+/// segmentation or clustering.
+#[cfg(feature = "diarize")]
+pub fn extract_speaker_embeddings(
+    windows: &[Vec<i16>],
+    config: &Config,
+) -> Result<Vec<Vec<f32>>, Box<dyn std::error::Error>> {
+    use pyannote_rs::EmbeddingExtractor;
+
+    let info = embedding_model_for_config(config);
+    let model_path = config.diarization.model_path.join(info.filename);
+    if !model_path.exists() {
+        return Err(format!(
+            "Embedding model not found at {}. Run `minutes setup --diarization` to download.",
+            model_path.display()
+        )
+        .into());
+    }
+    let mut extractor = EmbeddingExtractor::new(&model_path)?;
+    windows
+        .iter()
+        .map(|window| Ok(extractor.compute(window)?.collect()))
+        .collect()
+}
+
 /// Check if diarization models are installed.
 pub fn models_installed(config: &Config) -> bool {
     let dir = &config.diarization.model_path;

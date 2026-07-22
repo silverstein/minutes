@@ -1,8 +1,26 @@
 use crate::config::Config;
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
+
+/// Connection type used by the local voice database APIs.
+pub type VoiceConnection = Connection;
+
+#[cfg(feature = "diarize")]
+const SOLO_SAMPLE_RATE: u32 = 16_000;
+#[cfg(feature = "diarize")]
+const SOLO_WINDOW_SECONDS: f64 = 3.0;
+#[cfg(feature = "diarize")]
+const SOLO_WINDOW_HOP_SECONDS: f64 = 1.5;
+#[cfg(any(feature = "diarize", test))]
+const SOLO_MIN_SPEECH_SECONDS: f64 = 5.0;
+#[cfg(any(feature = "diarize", test))]
+const SOLO_MIN_WINDOW_CONSISTENCY: f32 = 0.70;
+#[cfg(any(feature = "diarize", test))]
+const SOLO_MIN_SNR_DB: f32 = 8.0;
+#[cfg(any(feature = "diarize", test))]
+const SOLO_MAX_CLIPPING_FRACTION: f32 = 0.05;
 
 // ──────────────────────────────────────────────────────────────
 // Voice profile storage and matching.
@@ -23,8 +41,68 @@ pub enum VoiceError {
     Sqlite(#[from] rusqlite::Error),
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
+    #[error("voice clip rejected: {reason}")]
+    LowQuality { reason: String },
     #[error("{0}")]
     Other(String),
+}
+
+/// Quality evidence produced alongside a manually captured voice embedding.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct VoiceQuality {
+    /// Estimated signal-to-noise ratio in decibels.
+    pub snr: f32,
+    /// Fraction of decoded samples at or above the clipping threshold.
+    pub clipping: f32,
+    /// Lowest pairwise cosine similarity among the accepted windows.
+    pub window_consistency: f32,
+}
+
+/// One quality-gated embedding produced from a known-single-speaker WAV.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SoloEmbedding {
+    pub embedding: Vec<f32>,
+    pub dim: usize,
+    pub model_id: String,
+    pub speech_seconds: f64,
+    pub segment_count: u32,
+    pub quality: VoiceQuality,
+}
+
+/// User-facing summary of an active model-scoped voice enrollment.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct VoiceEnrollmentSummary {
+    pub person_slug: String,
+    pub name: String,
+    pub model_id: String,
+    pub sample_count: u32,
+    pub updated_at: String,
+    pub last_match_similarity: Option<f32>,
+    pub last_match_margin: Option<f32>,
+}
+
+/// Evidence from comparing one probe against compatible active profiles.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct VoiceMatchEvidence {
+    pub model_id: String,
+    pub winner_slug: Option<String>,
+    pub winner_name: Option<String>,
+    pub similarity: Option<f32>,
+    pub runner_up_similarity: Option<f32>,
+    pub margin: Option<f32>,
+    pub threshold: f32,
+    pub accepted: bool,
+    pub reason: String,
+}
+
+/// Counts returned after a complete local biometric-data sweep.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DeleteVoiceDataReport {
+    pub profiles_deleted: usize,
+    pub samples_deleted: usize,
+    pub active_profiles_deleted: usize,
+    pub sidecars_deleted: usize,
+    pub sqlite_aux_files_deleted: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -153,6 +231,288 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
         return 0.0;
     }
     dot / (norm_a * norm_b)
+}
+
+#[cfg(any(feature = "diarize", test))]
+fn l2_normalize(embedding: &[f32]) -> Result<Vec<f32>, VoiceError> {
+    if embedding.is_empty() || embedding.iter().any(|value| !value.is_finite()) {
+        return Err(VoiceError::LowQuality {
+            reason: "the embedding model returned an empty or non-finite vector".to_string(),
+        });
+    }
+    let norm = embedding
+        .iter()
+        .map(|value| value * value)
+        .sum::<f32>()
+        .sqrt();
+    if !norm.is_finite() || norm <= f32::EPSILON {
+        return Err(VoiceError::LowQuality {
+            reason: "the embedding model returned a zero-length vector".to_string(),
+        });
+    }
+    Ok(embedding.iter().map(|value| value / norm).collect())
+}
+
+#[cfg(any(feature = "diarize", test))]
+fn aggregate_solo_embeddings(
+    window_embeddings: &[Vec<f32>],
+    model_id: &str,
+    speech_seconds: f64,
+    snr: f32,
+    clipping: f32,
+) -> Result<SoloEmbedding, VoiceError> {
+    if speech_seconds < SOLO_MIN_SPEECH_SECONDS {
+        return Err(VoiceError::LowQuality {
+            reason: format!(
+                "only {speech_seconds:.1}s of speech was detected; speak for at least {SOLO_MIN_SPEECH_SECONDS:.0}s"
+            ),
+        });
+    }
+    if snr < SOLO_MIN_SNR_DB {
+        return Err(VoiceError::LowQuality {
+            reason: format!(
+                "signal-to-noise ratio was {snr:.1} dB; move closer to the microphone or reduce background noise"
+            ),
+        });
+    }
+    if clipping > SOLO_MAX_CLIPPING_FRACTION {
+        return Err(VoiceError::LowQuality {
+            reason: format!(
+                "{:.1}% of the recording was clipped; lower the microphone level or move farther away",
+                clipping * 100.0
+            ),
+        });
+    }
+    if window_embeddings.len() < 2 {
+        return Err(VoiceError::LowQuality {
+            reason: "too few clean speech windows were available for a reliable voiceprint"
+                .to_string(),
+        });
+    }
+
+    let normalized = window_embeddings
+        .iter()
+        .map(|embedding| l2_normalize(embedding))
+        .collect::<Result<Vec<_>, _>>()?;
+    let dim = normalized[0].len();
+    if normalized.iter().any(|embedding| embedding.len() != dim) {
+        return Err(VoiceError::LowQuality {
+            reason: "the embedding model returned inconsistent vector dimensions".to_string(),
+        });
+    }
+
+    let mut window_consistency = 1.0f32;
+    for left in 0..normalized.len() {
+        for right in (left + 1)..normalized.len() {
+            window_consistency =
+                window_consistency.min(cosine_similarity(&normalized[left], &normalized[right]));
+        }
+    }
+    if window_consistency < SOLO_MIN_WINDOW_CONSISTENCY {
+        return Err(VoiceError::LowQuality {
+            reason: format!(
+                "the recording was inconsistent across speech windows (cosine {window_consistency:.2}); make sure only one person speaks"
+            ),
+        });
+    }
+
+    let mut embedding = vec![0.0f32; dim];
+    for window in &normalized {
+        for (sum, value) in embedding.iter_mut().zip(window) {
+            *sum += value;
+        }
+    }
+    for value in &mut embedding {
+        *value /= normalized.len() as f32;
+    }
+    let embedding = l2_normalize(&embedding)?;
+    let segment_count = u32::try_from(normalized.len())
+        .map_err(|_| VoiceError::Other("voice window count exceeds u32".to_string()))?;
+
+    Ok(SoloEmbedding {
+        embedding,
+        dim,
+        model_id: model_id.to_string(),
+        speech_seconds,
+        segment_count,
+        quality: VoiceQuality {
+            snr,
+            clipping,
+            window_consistency,
+        },
+    })
+}
+
+#[cfg(feature = "diarize")]
+fn decode_wav_mono_16khz(path: &Path) -> Result<Vec<f32>, VoiceError> {
+    let mut reader = hound::WavReader::open(path)
+        .map_err(|error| VoiceError::Other(format!("could not read WAV: {error}")))?;
+    let spec = reader.spec();
+    if spec.channels == 0 || spec.sample_rate == 0 {
+        return Err(VoiceError::LowQuality {
+            reason: "the WAV has an invalid channel count or sample rate".to_string(),
+        });
+    }
+
+    let interleaved = match spec.sample_format {
+        hound::SampleFormat::Float => reader
+            .samples::<f32>()
+            .map(|sample| {
+                sample.map_err(|error| VoiceError::Other(format!("could not decode WAV: {error}")))
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+        hound::SampleFormat::Int => {
+            let scale = 2_f32.powi(i32::from(spec.bits_per_sample).saturating_sub(1));
+            reader
+                .samples::<i32>()
+                .map(|sample| {
+                    sample.map(|value| value as f32 / scale).map_err(|error| {
+                        VoiceError::Other(format!("could not decode WAV: {error}"))
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?
+        }
+    };
+
+    let channels = usize::from(spec.channels);
+    let mut mono = Vec::with_capacity(interleaved.len() / channels);
+    for frame in interleaved.chunks_exact(channels) {
+        let sample = frame.iter().copied().sum::<f32>() / channels as f32;
+        if !sample.is_finite() {
+            return Err(VoiceError::LowQuality {
+                reason: "the WAV contains non-finite samples".to_string(),
+            });
+        }
+        mono.push(sample.clamp(-1.0, 1.0));
+    }
+
+    if spec.sample_rate == SOLO_SAMPLE_RATE {
+        return Ok(mono);
+    }
+
+    // Capture uses `crate::resample` to produce this same canonical 16 kHz
+    // stream. Imported WAVs take the equivalent in-process linear path here so
+    // enrollment never shells out to ffmpeg or feeds a model the wrong rate.
+    let ratio = f64::from(spec.sample_rate) / f64::from(SOLO_SAMPLE_RATE);
+    let output_len = (mono.len() as f64 / ratio).floor() as usize;
+    let mut resampled = Vec::with_capacity(output_len);
+    for output_index in 0..output_len {
+        let source_position = output_index as f64 * ratio;
+        let left = source_position.floor() as usize;
+        let right = (left + 1).min(mono.len().saturating_sub(1));
+        let fraction = (source_position - left as f64) as f32;
+        if let Some(left_sample) = mono.get(left) {
+            resampled.push(*left_sample + (mono[right] - *left_sample) * fraction);
+        }
+    }
+    Ok(resampled)
+}
+
+#[cfg(feature = "diarize")]
+fn solo_audio_quality(samples: &[f32]) -> (f64, f32, f32) {
+    let clipping = samples.iter().filter(|sample| sample.abs() >= 0.99).count() as f32
+        / samples.len().max(1) as f32;
+    let frame_len = (SOLO_SAMPLE_RATE / 50) as usize;
+    let mut frame_rms = samples
+        .chunks(frame_len)
+        .filter(|frame| frame.len() == frame_len)
+        .map(|frame| {
+            (frame.iter().map(|sample| sample * sample).sum::<f32>() / frame.len() as f32).sqrt()
+        })
+        .collect::<Vec<_>>();
+    if frame_rms.is_empty() {
+        return (0.0, 0.0, clipping);
+    }
+    frame_rms.sort_by(f32::total_cmp);
+    let peak_rms = *frame_rms.last().unwrap_or(&0.0);
+    let mut noise_rms = frame_rms[frame_rms.len() / 10].max(0.0001);
+    if noise_rms >= peak_rms * 0.8 {
+        noise_rms = 0.0001;
+    }
+    let speech_floor = (noise_rms * 3.0).max(0.003);
+    let speech_frames = frame_rms
+        .iter()
+        .copied()
+        .filter(|rms| *rms >= speech_floor)
+        .collect::<Vec<_>>();
+    let speech_seconds =
+        speech_frames.len() as f64 * frame_len as f64 / f64::from(SOLO_SAMPLE_RATE);
+    let signal_rms = if speech_frames.is_empty() {
+        0.0
+    } else {
+        speech_frames.iter().sum::<f32>() / speech_frames.len() as f32
+    };
+    let snr = if signal_rms <= 0.0 {
+        0.0
+    } else {
+        20.0 * (signal_rms / noise_rms).log10()
+    };
+    (speech_seconds, snr, clipping)
+}
+
+#[cfg(feature = "diarize")]
+fn solo_embedding_windows(samples: &[f32]) -> Vec<Vec<i16>> {
+    let window_len = (SOLO_WINDOW_SECONDS * f64::from(SOLO_SAMPLE_RATE)) as usize;
+    let hop_len = (SOLO_WINDOW_HOP_SECONDS * f64::from(SOLO_SAMPLE_RATE)) as usize;
+    if samples.len() < window_len {
+        return Vec::new();
+    }
+    (0..=(samples.len() - window_len))
+        .step_by(hop_len)
+        .filter_map(|start| {
+            let window = &samples[start..start + window_len];
+            let rms = (window.iter().map(|sample| sample * sample).sum::<f32>()
+                / window.len() as f32)
+                .sqrt();
+            if rms < 0.003 {
+                return None;
+            }
+            let gain = (0.1 / rms).min(20.0);
+            Some(
+                window
+                    .iter()
+                    .map(|sample| (sample * gain).clamp(-1.0, 1.0))
+                    .map(|sample| (sample * 32767.0) as i16)
+                    .collect(),
+            )
+        })
+        .collect()
+}
+
+/// Embed a known-single-speaker WAV using overlapping, independently
+/// normalized windows and reject clips that cannot safely form a voiceprint.
+#[cfg(feature = "diarize")]
+pub fn embed_solo_clip(wav_path: &Path, config: &Config) -> Result<SoloEmbedding, VoiceError> {
+    let samples = decode_wav_mono_16khz(wav_path)?;
+    let (speech_seconds, snr, clipping) = solo_audio_quality(&samples);
+    if speech_seconds < SOLO_MIN_SPEECH_SECONDS {
+        return aggregate_solo_embeddings(
+            &[],
+            model_version(config),
+            speech_seconds,
+            snr,
+            clipping,
+        );
+    }
+    let windows = solo_embedding_windows(&samples);
+    let embeddings = crate::diarize::extract_speaker_embeddings(&windows, config)
+        .map_err(|error| VoiceError::Other(format!("voice embedding failed: {error}")))?;
+    aggregate_solo_embeddings(
+        &embeddings,
+        model_version(config),
+        speech_seconds,
+        snr,
+        clipping,
+    )
+}
+
+/// Compile-safe enrollment stub for builds without the local diarization model.
+#[cfg(not(feature = "diarize"))]
+pub fn embed_solo_clip(_wav_path: &Path, _config: &Config) -> Result<SoloEmbedding, VoiceError> {
+    Err(VoiceError::Other(
+        "voice enrollment requires the `diarize` feature; reinstall Minutes with diarization enabled"
+            .to_string(),
+    ))
 }
 
 fn embedding_to_bytes(embedding: &[f32]) -> Vec<u8> {
@@ -606,6 +966,256 @@ pub fn list_active_profiles(
     Ok(profiles)
 }
 
+/// List all active enrollments, including the most recent stored match evidence.
+pub fn list_voice_enrollments(
+    conn: &Connection,
+) -> Result<Vec<VoiceEnrollmentSummary>, VoiceError> {
+    let mut stmt = conn.prepare(
+        "SELECT active.person_slug, active.name, active.model_id,
+                (SELECT COUNT(*) FROM voice_samples samples
+                 WHERE samples.person_slug = active.person_slug
+                   AND samples.model_id = active.model_id
+                   AND samples.revoked_at IS NULL),
+                active.updated_at,
+                (SELECT similarity FROM voice_samples matched
+                 WHERE matched.person_slug = active.person_slug
+                   AND matched.model_id = active.model_id
+                   AND matched.similarity IS NOT NULL
+                 ORDER BY matched.created_at DESC, matched.id DESC LIMIT 1),
+                (SELECT top2_margin FROM voice_samples matched
+                 WHERE matched.person_slug = active.person_slug
+                   AND matched.model_id = active.model_id
+                   AND matched.similarity IS NOT NULL
+                 ORDER BY matched.created_at DESC, matched.id DESC LIMIT 1)
+         FROM voice_active_profiles active
+         ORDER BY lower(active.name), active.model_id",
+    )?;
+    let summaries = stmt
+        .query_map([], |row| {
+            Ok(VoiceEnrollmentSummary {
+                person_slug: row.get(0)?,
+                name: row.get(1)?,
+                model_id: row.get(2)?,
+                sample_count: row.get(3)?,
+                updated_at: row.get(4)?,
+                last_match_similarity: row.get::<_, Option<f64>>(5)?.map(|value| value as f32),
+                last_match_margin: row.get::<_, Option<f64>>(6)?.map(|value| value as f32),
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(summaries)
+}
+
+/// Compare a probe only with profiles produced by the same embedding model.
+pub fn match_active_profiles(
+    embedding: &[f32],
+    model_id: &str,
+    profiles: &[ActiveProfile],
+    threshold: f32,
+) -> VoiceMatchEvidence {
+    let mut ranked = profiles
+        .iter()
+        .filter(|profile| profile.model_id == model_id && profile.embedding_dim == embedding.len())
+        .map(|profile| (profile, cosine_similarity(embedding, &profile.embedding)))
+        .collect::<Vec<_>>();
+    ranked.sort_by(|left, right| right.1.total_cmp(&left.1));
+    let Some((winner, similarity)) = ranked.first().copied() else {
+        return VoiceMatchEvidence {
+            model_id: model_id.to_string(),
+            winner_slug: None,
+            winner_name: None,
+            similarity: None,
+            runner_up_similarity: None,
+            margin: None,
+            threshold,
+            accepted: false,
+            reason: "no compatible active voice profiles".to_string(),
+        };
+    };
+    let runner_up_similarity = ranked.get(1).map(|(_, score)| *score);
+    let margin = runner_up_similarity.map(|runner_up| similarity - runner_up);
+    let accepted = similarity >= threshold;
+    VoiceMatchEvidence {
+        model_id: model_id.to_string(),
+        winner_slug: Some(winner.person_slug.clone()),
+        winner_name: Some(winner.name.clone()),
+        similarity: Some(similarity),
+        runner_up_similarity,
+        margin,
+        threshold,
+        accepted,
+        reason: if accepted {
+            "matched above the configured threshold".to_string()
+        } else {
+            "best compatible profile was below the configured threshold".to_string()
+        },
+    }
+}
+
+/// Revoke every immutable sample for one person and remove derived caches.
+pub fn revoke_voice_person(conn: &Connection, slug: &str) -> Result<usize, VoiceError> {
+    let transaction = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+    let revoked = transaction.execute(
+        "UPDATE voice_samples SET revoked_at = ?1
+         WHERE person_slug = ?2 AND revoked_at IS NULL",
+        params![now_timestamp(), slug],
+    )?;
+    transaction.execute(
+        "DELETE FROM voice_active_profiles WHERE person_slug = ?1",
+        params![slug],
+    )?;
+    let legacy_deleted = transaction.execute(
+        "DELETE FROM voice_profiles WHERE person_slug = ?1",
+        params![slug],
+    )?;
+    transaction.commit()?;
+    Ok(revoked + legacy_deleted)
+}
+
+fn sqlite_aux_path(db_path: &Path, suffix: &str) -> PathBuf {
+    let mut path = db_path.as_os_str().to_os_string();
+    path.push(suffix);
+    PathBuf::from(path)
+}
+
+fn voice_sidecars(roots: &[PathBuf]) -> Vec<PathBuf> {
+    let mut sidecars = Vec::new();
+    for root in roots {
+        if !root.exists() {
+            continue;
+        }
+        for entry in walkdir::WalkDir::new(root)
+            .follow_links(false)
+            .into_iter()
+            .filter_map(Result::ok)
+        {
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy();
+            if name.ends_with(".embeddings") {
+                sidecars.push(entry.into_path());
+            }
+        }
+    }
+    sidecars.sort();
+    sidecars.dedup();
+    sidecars
+}
+
+fn restore_staged_sidecars(staged: &[(PathBuf, PathBuf)]) {
+    for (original, quarantine) in staged.iter().rev() {
+        if quarantine.exists() {
+            let _ = std::fs::rename(quarantine, original);
+        }
+    }
+}
+
+fn delete_all_voice_data_at(
+    db_path: &Path,
+    sidecar_roots: &[PathBuf],
+) -> Result<DeleteVoiceDataReport, VoiceError> {
+    let nonce = format!(
+        "{}-{}",
+        std::process::id(),
+        chrono::Local::now()
+            .timestamp_nanos_opt()
+            .unwrap_or_default()
+    );
+    let mut staged = Vec::<(PathBuf, PathBuf)>::new();
+    for (index, original) in voice_sidecars(sidecar_roots).into_iter().enumerate() {
+        let file_name = original
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("voice-sidecar");
+        let quarantine = original.with_file_name(format!(
+            ".{file_name}.minutes-delete-{nonce}-{index}.embeddings"
+        ));
+        if let Err(error) = std::fs::rename(&original, &quarantine) {
+            restore_staged_sidecars(&staged);
+            return Err(VoiceError::Io(error));
+        }
+        staged.push((original, quarantine));
+    }
+
+    let database_result = (|| -> Result<(usize, usize, usize), VoiceError> {
+        if let Some(parent) = db_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let conn = open_db_at(db_path)?;
+        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+        let transaction = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+        transaction.execute_batch(
+            "DROP TRIGGER IF EXISTS voice_samples_prevent_delete;
+             DROP TRIGGER IF EXISTS voice_samples_prevent_content_update;
+             DROP TRIGGER IF EXISTS voice_samples_prevent_rerevoke;",
+        )?;
+        let active_profiles_deleted =
+            transaction.execute("DELETE FROM voice_active_profiles", [])?;
+        let samples_deleted = transaction.execute("DELETE FROM voice_samples", [])?;
+        let profiles_deleted = transaction.execute("DELETE FROM voice_profiles", [])?;
+        transaction.execute_batch(
+            "CREATE TRIGGER voice_samples_prevent_delete
+             BEFORE DELETE ON voice_samples
+             BEGIN SELECT RAISE(ABORT, 'voice samples are immutable'); END;
+
+             CREATE TRIGGER voice_samples_prevent_content_update
+             BEFORE UPDATE OF person_slug, name, embedding, embedding_dim, model_id,
+                 normalization, trust_class, meeting_path, sidecar_speaker,
+                 capture_source, speech_seconds, segment_count, quality_json,
+                 similarity, top2_margin, threshold_version, sensitivity, created_at
+             ON voice_samples
+             BEGIN SELECT RAISE(ABORT, 'voice samples are immutable'); END;
+
+             CREATE TRIGGER voice_samples_prevent_rerevoke
+             BEFORE UPDATE OF revoked_at ON voice_samples
+             WHEN NEW.revoked_at IS NULL OR OLD.revoked_at IS NOT NULL
+             BEGIN SELECT RAISE(ABORT, 'voice sample revocation is immutable'); END;",
+        )?;
+        transaction.commit()?;
+        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+        drop(conn);
+        Ok((profiles_deleted, samples_deleted, active_profiles_deleted))
+    })();
+
+    let (profiles_deleted, samples_deleted, active_profiles_deleted) = match database_result {
+        Ok(counts) => counts,
+        Err(error) => {
+            restore_staged_sidecars(&staged);
+            return Err(error);
+        }
+    };
+
+    let mut sidecars_deleted = 0;
+    for (_, quarantine) in &staged {
+        std::fs::remove_file(quarantine)?;
+        sidecars_deleted += 1;
+    }
+
+    let mut sqlite_aux_files_deleted = 0;
+    for suffix in ["-wal", "-shm"] {
+        let path = sqlite_aux_path(db_path, suffix);
+        if path.exists() {
+            std::fs::remove_file(path)?;
+            sqlite_aux_files_deleted += 1;
+        }
+    }
+
+    Ok(DeleteVoiceDataReport {
+        profiles_deleted,
+        samples_deleted,
+        active_profiles_deleted,
+        sidecars_deleted,
+        sqlite_aux_files_deleted,
+    })
+}
+
+/// Remove all local voice profiles, immutable samples, derived caches,
+/// meeting sidecars (including orphans), and SQLite WAL/SHM files.
+pub fn delete_all_voice_data(config: &Config) -> Result<DeleteVoiceDataReport, VoiceError> {
+    delete_all_voice_data_at(&db_path(), std::slice::from_ref(&config.output_dir))
+}
+
 /// Import legacy mutable profiles as manual immutable samples without creating duplicates.
 pub fn migrate_legacy_profiles(conn: &Connection) -> Result<usize, VoiceError> {
     let transaction = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
@@ -859,12 +1469,13 @@ pub fn load_self_profile(config: &Config) -> Option<VoiceProfileWithEmbedding> {
         return None;
     }
     let name = config.identity.name.as_ref()?;
-    let slug = slugify(name);
+    let slug = person_slug(name);
     let conn = open_db().ok()?;
     load_profile_with_embedding(&conn, &slug).ok().flatten()
 }
 
-fn slugify(text: &str) -> String {
+/// Produce the stable slug used by voice profiles for a display name.
+pub fn person_slug(text: &str) -> String {
     let slug: String = text
         .to_lowercase()
         .chars()
@@ -1265,7 +1876,159 @@ mod tests {
 
     #[test]
     fn slugify_basic() {
-        assert_eq!(slugify("Mat Silverstein"), "mat-silverstein");
+        assert_eq!(person_slug("Mat Silverstein"), "mat-silverstein");
+    }
+
+    #[test]
+    fn voice_embed_solo_consistent_injected_windows_pass_quality_gate() {
+        let result = aggregate_solo_embeddings(
+            &[
+                vec![1.0, 0.02, 0.0],
+                vec![0.99, 0.04, 0.01],
+                vec![0.98, 0.03, 0.02],
+            ],
+            "model-a",
+            8.0,
+            24.0,
+            0.0,
+        )
+        .unwrap();
+        assert_eq!(result.model_id, "model-a");
+        assert_eq!(result.dim, 3);
+        assert_eq!(result.segment_count, 3);
+        assert!(result.quality.window_consistency > 0.99);
+        assert!((cosine_similarity(&result.embedding, &result.embedding) - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn voice_embed_solo_multimodal_injected_windows_are_rejected() {
+        let error = aggregate_solo_embeddings(
+            &[vec![1.0, 0.0], vec![0.0, 1.0], vec![0.7, 0.7]],
+            "model-a",
+            8.0,
+            24.0,
+            0.0,
+        )
+        .unwrap_err();
+        assert!(matches!(error, VoiceError::LowQuality { .. }));
+        assert!(error.to_string().contains("inconsistent"));
+    }
+
+    #[test]
+    fn voice_embed_solo_short_speech_is_rejected_before_model_use() {
+        let error =
+            aggregate_solo_embeddings(&[vec![1.0, 0.0], vec![1.0, 0.0]], "model-a", 2.0, 24.0, 0.0)
+                .unwrap_err();
+        assert!(matches!(error, VoiceError::LowQuality { .. }));
+        assert!(error.to_string().contains("at least 5s"));
+    }
+
+    #[test]
+    fn voice_match_evidence_uses_only_compatible_models() {
+        let profiles = vec![
+            ActiveProfile {
+                person_slug: "mat".into(),
+                model_id: "model-a".into(),
+                name: "Mat".into(),
+                embedding: vec![1.0, 0.0],
+                embedding_dim: 2,
+                sample_count: 1,
+            },
+            ActiveProfile {
+                person_slug: "alex".into(),
+                model_id: "model-b".into(),
+                name: "Alex".into(),
+                embedding: vec![1.0, 0.0],
+                embedding_dim: 2,
+                sample_count: 1,
+            },
+        ];
+        let evidence = match_active_profiles(&[0.99, 0.01], "model-a", &profiles, 0.65);
+        assert!(evidence.accepted);
+        assert_eq!(evidence.winner_slug.as_deref(), Some("mat"));
+        assert!(evidence.runner_up_similarity.is_none());
+    }
+
+    #[test]
+    fn voice_remove_revokes_samples_and_clears_active_profile() {
+        let (conn, _tmp) = test_db();
+        insert_voice_sample(
+            &conn,
+            &voice_sample_input("mat", "Mat", &[1.0, 0.0], "model-a", "2026-01-01T00:00:00Z"),
+        )
+        .unwrap();
+        assert_eq!(revoke_voice_person(&conn, "mat").unwrap(), 1);
+        assert!(active_profile(&conn, "mat", "model-a").unwrap().is_none());
+        let revoked: usize = conn
+            .query_row(
+                "SELECT COUNT(*) FROM voice_samples WHERE revoked_at IS NOT NULL",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(revoked, 1);
+    }
+
+    #[test]
+    fn voice_privacy_sweep_removes_profiles_samples_cache_sidecars_and_wal() {
+        let root = tempfile::TempDir::new().unwrap();
+        let db = root.path().join("state/voices.db");
+        let meetings = root.path().join("meetings");
+        let nested = meetings.join("archive");
+        std::fs::create_dir_all(db.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(&nested).unwrap();
+        let meeting = meetings.join("present.md");
+        std::fs::write(&meeting, "# present").unwrap();
+        let sidecar = meeting_embeddings_sidecar_path(&meeting);
+        std::fs::write(&sidecar, b"{}").unwrap();
+        let orphan = nested.join(".missing.embeddings");
+        std::fs::write(&orphan, b"{}").unwrap();
+
+        let conn = open_db_at(&db).unwrap();
+        insert_voice_sample(
+            &conn,
+            &voice_sample_input("mat", "Mat", &[1.0, 0.0], "model-a", "2026-01-01T00:00:00Z"),
+        )
+        .unwrap();
+        save_profile(&conn, "legacy", "Legacy", &[1.0, 0.0], "test", "model-a").unwrap();
+        drop(conn);
+        std::fs::write(sqlite_aux_path(&db, "-wal"), b"stale wal").unwrap();
+        std::fs::write(sqlite_aux_path(&db, "-shm"), b"stale shm").unwrap();
+
+        let report = delete_all_voice_data_at(&db, std::slice::from_ref(&meetings)).unwrap();
+        assert_eq!(report.profiles_deleted, 1);
+        assert_eq!(report.samples_deleted, 1);
+        assert_eq!(report.active_profiles_deleted, 1);
+        assert_eq!(report.sidecars_deleted, 2);
+        assert!(!sidecar.exists());
+        assert!(!orphan.exists());
+        assert!(!sqlite_aux_path(&db, "-wal").exists());
+        assert!(!sqlite_aux_path(&db, "-shm").exists());
+
+        let conn = open_db_at(&db).unwrap();
+        assert!(list_profiles(&conn).unwrap().is_empty());
+        assert!(list_voice_enrollments(&conn).unwrap().is_empty());
+    }
+
+    #[cfg(feature = "diarize")]
+    #[test]
+    #[ignore = "requires the local CAM++ ONNX model; exercised manually on macOS"]
+    fn voice_embed_solo_real_wav_model_integration() {
+        let root = tempfile::TempDir::new().unwrap();
+        let wav = root.path().join("speaker.wav");
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: SOLO_SAMPLE_RATE,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut writer = hound::WavWriter::create(&wav, spec).unwrap();
+        for index in 0..SOLO_SAMPLE_RATE * 8 {
+            let sample = ((index as f32 * 0.11).sin() * 8_000.0) as i16;
+            writer.write_sample(sample).unwrap();
+        }
+        writer.finalize().unwrap();
+        embed_solo_clip(&wav, &Config::default()).unwrap();
     }
 
     #[test]

@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 
 mod dashboard;
 mod demo_data;
+mod voice;
 use std::io::{BufRead, BufReader, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -1106,6 +1107,12 @@ enum Commands {
         action: VaultAction,
     },
 
+    /// Enroll, inspect, test, revoke, or delete local voiceprints
+    Voice {
+        #[command(subcommand)]
+        action: voice::VoiceAction,
+    },
+
     /// Enroll your voice for automatic speaker identification
     Enroll {
         /// Enroll from an existing audio file instead of recording
@@ -2115,6 +2122,7 @@ fn main() -> Result<()> {
             VaultAction::Unlink => cmd_vault_unlink(config),
             VaultAction::Sync => cmd_vault_sync(&config),
         },
+        Commands::Voice { action } => voice::run(action, &config),
         Commands::Enroll { file, duration } => cmd_enroll(file.as_deref(), duration, &config),
         Commands::Voices { delete, json } => cmd_voices(delete, json),
         Commands::Delete {

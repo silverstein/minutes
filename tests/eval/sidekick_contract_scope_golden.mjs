@@ -27,7 +27,7 @@ function matchesAnyWholeClause(clause, patterns) {
   return patterns.some((pattern) => pattern.test(clause));
 }
 
-const NORTHSTAR_ROLE = String.raw`(?:for|as)\s+northstar(?:'s)?\s+(?:procurement(?:\s+director)?|customer)\s*,\s*`;
+const NORTHSTAR_ROLE = String.raw`(?:for|as)\s+northstar(?:\s+health)?(?:'s)?(?:\s+(?:procurement(?:\s+director)?|customer))?\s*,\s*`;
 const ANSWER_PREFIX = String.raw`(?:use\s+this\s+(?:language|clause)\s*:\s*)?`;
 const NORTHSTAR_ACTION = String.raw`(?:(?:(?:insist|demand|require|state|write|specify)(?:\s+(?:that|the\s+clause\s+says\s+that))?|insist\s+on\s+language\s+stating\s+that)\s+|(?:(?:insist\s+on|require|demand|use|state|write|specify)\s+(?:this|the\s+following)\s+(?:language|clause)\s*:\s*"))`;
 const NORTHSTAR_WINDOW = String.raw`(?:every|each|any)\s+(?:single\s+)?(?:30|thirty)[ -]minute\s+(?:service\s+)?windows?`;
@@ -37,7 +37,7 @@ const NORTHSTAR_REMEDY = String.raw`(?:(?:\$\s*(?:5,?000|5k)|five[- ]thousand[- 
 
 const northstarScopePatterns = [
   new RegExp(
-    String.raw`^-?\s*${ANSWER_PREFIX}${NORTHSTAR_ROLE}${NORTHSTAR_ACTION}${NORTHSTAR_WINDOW}\s+(?:(?:that\s+(?:fall|are)|where\s+uptime\s+(?:falls|is))\s+)?${NORTHSTAR_FAILURE}\s*,?\s*(?:to\s+)?(?:triggers?|earns?|carries|receives?|generates?|entitles?|results?\s+in|gives?\s+northstar)\s+(?:northstar\s+to\s+)?(?:a\s+)?${NORTHSTAR_REMEDY}(?:\s+(?:for|to)\s+northstar)?"?$`,
+    String.raw`^-?\s*${ANSWER_PREFIX}${NORTHSTAR_ROLE}${NORTHSTAR_ACTION}${NORTHSTAR_WINDOW}\s+(?:(?:that\s+(?:fall|are)|where\s+uptime\s+(?:falls|is))\s+)?${NORTHSTAR_FAILURE}\s*,?\s*(?:to\s+)?(?:(?:triggers?|carries|generates?|results?\s+in)\s+(?:a\s+)?${NORTHSTAR_REMEDY}(?:\s+(?:for|to)\s+northstar)?|(?:earns?|gives?)\s+(?:northstar\s+)?(?:a\s+)?${NORTHSTAR_REMEDY}|entitles?\s+northstar\s+to\s+(?:a\s+)?${NORTHSTAR_REMEDY})"?$`,
   ),
   new RegExp(
     String.raw`^-?\s*${ANSWER_PREFIX}${NORTHSTAR_ROLE}${NORTHSTAR_ACTION}${NORTHSTAR_ALL_WINDOWS}\s+(?:(?:that\s+(?:fall|are)|where\s+uptime\s+(?:falls|is))\s+)?${NORTHSTAR_FAILURE}\s*,?\s+each\s+(?:triggers?|earns?|carries|generates?|results?\s+in)\s+(?:a\s+)?${NORTHSTAR_REMEDY}(?:\s+(?:for|to)\s+northstar)?"?$`,
@@ -145,24 +145,25 @@ export function scorePerWindowRemedy(text) {
   };
 }
 
-const HARBOR_ROLE = String.raw`(?:for|as)\s+harbor(?:'s)?\s+(?:procurement(?:\s+lead)?|customer)\s*,\s*`;
+const HARBOR_ROLE = String.raw`(?:for|as)\s+harbor(?:\s+foods)?(?:'s)?(?:\s+(?:procurement(?:\s+lead)?|customer))?\s*,\s*`;
 const HARBOR_ACTION = String.raw`(?:(?:(?:require|demand|insist)(?:\s+that)?|demand\s+contract\s+language\s+under\s+which)\s+|(?:(?:insist\s+on|require|demand|use|state|write|specify)\s+(?:this|the\s+following)\s+(?:language|clause)\s*:\s*"))`;
 const HARBOR_TRIGGER_TAIL = String.raw`(?:exceeds|exceeding|is\s+above|rises\s+above|goes\s+over|above|over)\s+(?:2|two)\s*(?:%|percent)`;
 const HARBOR_TRIGGER = String.raw`(?:aggregate\s+quarterly|quarterly\s+aggregate)\s+spoilage\s+${HARBOR_TRIGGER_TAIL}`;
-const HARBOR_REMEDY = String.raw`(?:polar\s+route\s+)?(?:owes?|pays?|provides?|must\s+(?:owe|pay|provide)|results?\s+in|triggers?|yields?|entitles?\s+harbor\s+to|harbor\s+receives?)\s+(?:one|a\s+single)\s+(?:quarterly\s+)?rebate\s+(?:equal\s+to|of|worth)\s+(?:8|eight)\s*(?:%|percent)\s+(?:of\s+)?(?:that\s+quarter's\s+fees|the\s+quarter's\s+fees|quarterly\s+fees|fees)`;
+const HARBOR_REBATE_TERM = String.raw`(?:one|a\s+single)\s+(?:quarterly\s+)?rebate\s+(?:equal\s+to|of|worth)\s+(?:8|eight)\s*(?:%|percent)\s+(?:of\s+)?(?:that\s+quarter's\s+fees|the\s+quarter's\s+fees|quarterly\s+fees)`;
+const HARBOR_REMEDY = String.raw`(?:(?:polar\s+route\s+(?:owes?|pays?|provides?|must\s+(?:owe|pay|provide))\s+${HARBOR_REBATE_TERM})|(?:(?:results?\s+in|triggers?|yields?)\s+${HARBOR_REBATE_TERM}(?:\s+for\s+harbor)?)|(?:entitles?\s+harbor\s+to\s+${HARBOR_REBATE_TERM})|(?:harbor\s+receives?\s+${HARBOR_REBATE_TERM}))`;
 
 const harborScopePatterns = [
   new RegExp(
     String.raw`^-?\s*${ANSWER_PREFIX}${HARBOR_ROLE}${HARBOR_ACTION}(?:if\s+)?${HARBOR_TRIGGER}\s*,?\s*${HARBOR_REMEDY}"?$`,
   ),
   new RegExp(
-    String.raw`^-?\s*${ANSWER_PREFIX}${HARBOR_ROLE}(?:require|demand|insist)(?:\s+that)?\s+(?:an?\s+|one\s+|a\s+single\s+)?(?:8|eight)\s*(?:%|percent)\s+rebate\s+(?:of|equal\s+to)\s+(?:quarterly\s+fees|(?:that|the)\s+quarter's\s+fees)\s+(?:whenever|when|if)\s+aggregate\s+spoilage\s+(?:for|in)\s+(?:that|the)\s+quarter\s+${HARBOR_TRIGGER_TAIL}$`,
+    String.raw`^-?\s*${ANSWER_PREFIX}${HARBOR_ROLE}(?:require|demand|insist)(?:\s+that)?\s+(?:an?\s+|one\s+|a\s+single\s+)?(?:8|eight)\s*(?:%|percent)\s+rebate\s+(?:of|equal\s+to)\s+(?:quarterly\s+fees|(?:that|the)\s+quarter's\s+fees)(?:\s+for\s+harbor)?\s+(?:whenever|when|if)\s+aggregate\s+spoilage\s+(?:for|in)\s+(?:that|the)\s+quarter\s+${HARBOR_TRIGGER_TAIL}$`,
   ),
   new RegExp(
-    String.raw`^-?\s*${ANSWER_PREFIX}${HARBOR_ROLE}(?:require|demand|insist)(?:\s+that)?\s+(?:polar\s+route\s+)?(?:must\s+)?(?:pay|owe|provide)\s+(?:one|a\s+single)\s+rebate\s+(?:equal\s+to|of|worth)\s+(?:8|eight)\s*(?:%|percent)\s+(?:of\s+)?(?:that\s+quarter's\s+fees|the\s+quarter's\s+fees|quarterly\s+fees|fees)\s+(?:whenever|when|if)\s+${HARBOR_TRIGGER}$`,
+    String.raw`^-?\s*${ANSWER_PREFIX}${HARBOR_ROLE}(?:require|demand|insist)(?:\s+that)?\s+polar\s+route\s+(?:must\s+)?(?:pay|owe|provide)\s+${HARBOR_REBATE_TERM}\s+(?:whenever|when|if)\s+${HARBOR_TRIGGER}$`,
   ),
   new RegExp(
-    String.raw`^-?\s*${ANSWER_PREFIX}${HARBOR_ROLE}(?:require|demand|insist)(?:\s+that)?\s+(?:one|a\s+single)\s+(?:quarterly\s+)?rebate\s+(?:equal\s+to|of|worth)\s+(?:8|eight)\s*(?:%|percent)\s+(?:of\s+)?(?:that\s+quarter's\s+fees|the\s+quarter's\s+fees|quarterly\s+fees|fees)\s+(?:whenever|when|if)\s+${HARBOR_TRIGGER}$`,
+    String.raw`^-?\s*${ANSWER_PREFIX}${HARBOR_ROLE}(?:require|demand|insist)(?:\s+that)?\s+${HARBOR_REBATE_TERM}(?:\s+for\s+harbor)?\s+(?:whenever|when|if)\s+${HARBOR_TRIGGER}$`,
   ),
 ];
 

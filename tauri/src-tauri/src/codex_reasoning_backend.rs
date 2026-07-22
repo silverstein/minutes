@@ -779,6 +779,9 @@ fn handle_message(message: Value, state: &Mutex<ProtocolState>) -> Option<Value>
     match method {
         "item/agentMessage/delta" => {
             let delta = params.get("delta").and_then(Value::as_str).unwrap_or("");
+            if delta.trim().is_empty() {
+                return None;
+            }
             let event = {
                 let mut state = lock_unpoisoned(state);
                 state.turns.get_mut(turn_id).map(|turn| {
@@ -1063,6 +1066,61 @@ rl.on('line', (line) => {
                 assert_eq!(error.kind, ReasoningErrorKind::Protocol);
             }
             event => panic!("failed turn was misclassified: {event:?}"),
+        }
+    }
+
+    #[test]
+    fn empty_stream_deltas_do_not_start_the_visible_latency_clock() {
+        let state = Mutex::new(ProtocolState::default());
+        let (sender, receiver) = mpsc::sync_channel(2);
+        lock_unpoisoned(&state).turns.insert(
+            "turn-empty-delta".into(),
+            ActiveTurn {
+                id: "turn-empty-delta".into(),
+                invocation: request().invocation,
+                sink: Arc::new(move |event| {
+                    let _ = sender.send(event);
+                }),
+                started_at: Instant::now(),
+                first_token_at: None,
+                text: String::new(),
+            },
+        );
+
+        for delta in ["", "   "] {
+            assert!(handle_message(
+                json!({
+                    "method": "item/agentMessage/delta",
+                    "params": { "turnId": "turn-empty-delta", "delta": delta }
+                }),
+                &state,
+            )
+            .is_none());
+        }
+        {
+            let state = lock_unpoisoned(&state);
+            let turn = state.turns.get("turn-empty-delta").unwrap();
+            assert!(turn.first_token_at.is_none());
+            assert!(turn.text.is_empty());
+        }
+        assert!(matches!(receiver.try_recv(), Err(TryRecvError::Empty)));
+
+        handle_message(
+            json!({
+                "method": "item/agentMessage/delta",
+                "params": { "turnId": "turn-empty-delta", "delta": "visible" }
+            }),
+            &state,
+        );
+        {
+            let state = lock_unpoisoned(&state);
+            let turn = state.turns.get("turn-empty-delta").unwrap();
+            assert!(turn.first_token_at.is_some());
+            assert_eq!(turn.text, "visible");
+        }
+        match receiver.recv_timeout(Duration::from_secs(1)).unwrap() {
+            ReasoningStreamEvent::TextDelta { text, .. } => assert_eq!(text, "visible"),
+            event => panic!("visible delta emitted wrong event: {event:?}"),
         }
     }
 

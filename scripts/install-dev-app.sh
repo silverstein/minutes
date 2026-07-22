@@ -52,23 +52,84 @@ STAGED_APP="${INSTALL_DIR}/.${DEV_PRODUCT_NAME}.staged-$$.app"
 BACKUP_APP="${INSTALL_DIR}/.${DEV_PRODUCT_NAME}.backup-$$.app"
 INSTALL_LOCK_HELD=0
 INSTALL_SWAP_ACTIVE=0
+HELPER_BACKUP_DIR=""
+HELPER_WORKSPACE_PREPARED=0
+TRACKED_BUILD_HELPERS=(
+  "tauri/src-tauri/bin/mic_check"
+  "tauri/src-tauri/bin/mic_check-aarch64-apple-darwin"
+)
 
 assert_clean_build_source() {
   local dirty
-  dirty="$(git status --porcelain=v1 --untracked-files=all | awk '
-    {
-      path = substr($0, 4)
-      if (path != "tauri/src-tauri/bin/mic_check" &&
-          path != "tauri/src-tauri/bin/mic_check-aarch64-apple-darwin") {
-        print $0
-      }
-    }
-  ')"
+  dirty="$(git status --porcelain=v1 --untracked-files=all)"
   if [[ -n "$dirty" ]]; then
     echo "Refusing to build Minutes Dev from uncommitted application or harness source:" >&2
     printf '%s\n' "$dirty" >&2
     return 1
   fi
+}
+
+write_head_helper() {
+  local helper="$1"
+  local staged
+  staged="$(mktemp "${TMPDIR:-/tmp}/minutes-dev-head-helper.XXXXXX")"
+  git show "HEAD:${helper}" > "$staged"
+  chmod 755 "$staged"
+  /bin/mv -f "$staged" "$helper"
+}
+
+prepare_canonical_build_helpers() {
+  local index
+  local helper
+  HELPER_BACKUP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/minutes-dev-helper-backup.XXXXXX")"
+  for index in "${!TRACKED_BUILD_HELPERS[@]}"; do
+    helper="${TRACKED_BUILD_HELPERS[$index]}"
+    if [[ -e "$helper" ]]; then
+      cp -p "$helper" "$HELPER_BACKUP_DIR/$index"
+    else
+      : > "$HELPER_BACKUP_DIR/$index.missing"
+    fi
+  done
+  HELPER_WORKSPACE_PREPARED=1
+  for helper in "${TRACKED_BUILD_HELPERS[@]}"; do
+    write_head_helper "$helper"
+  done
+}
+
+reset_tracked_build_helpers_to_head() {
+  local helper
+  for helper in "${TRACKED_BUILD_HELPERS[@]}"; do
+    write_head_helper "$helper"
+  done
+}
+
+remove_generated_build_helpers() {
+  rm -f \
+    tauri/src-tauri/bin/mic_check \
+    tauri/src-tauri/bin/mic_check-* \
+    tauri/src-tauri/bin/system_audio_record \
+    tauri/src-tauri/bin/system_audio_record-* \
+    tauri/src-tauri/bin/calendar-events \
+    tauri/src-tauri/bin/calendar-events-*
+}
+
+restore_user_build_helpers() {
+  local index
+  local helper
+  if [[ "$HELPER_WORKSPACE_PREPARED" != "1" ]]; then
+    return
+  fi
+  for index in "${!TRACKED_BUILD_HELPERS[@]}"; do
+    helper="${TRACKED_BUILD_HELPERS[$index]}"
+    if [[ -f "$HELPER_BACKUP_DIR/$index.missing" ]]; then
+      rm -f "$helper"
+    else
+      cp -p "$HELPER_BACKUP_DIR/$index" "$helper"
+    fi
+  done
+  HELPER_WORKSPACE_PREPARED=0
+  rm -rf "$HELPER_BACKUP_DIR"
+  HELPER_BACKUP_DIR=""
 }
 
 cleanup_install_artifacts() {
@@ -86,6 +147,7 @@ cleanup_install_artifacts() {
   if [[ "$INSTALL_LOCK_HELD" == "1" ]]; then
     rm -rf "$LOCK_DIR"
   fi
+  restore_user_build_helpers
 }
 
 acquire_install_lock() {
@@ -96,9 +158,6 @@ acquire_install_lock() {
   fi
   INSTALL_LOCK_HELD=1
   printf '%s\n' "$$" > "$LOCK_DIR/pid"
-  trap cleanup_install_artifacts EXIT
-  trap 'exit 130' INT
-  trap 'exit 143' TERM
 }
 
 bundle_process_rows() {
@@ -311,6 +370,10 @@ for arg in "$@"; do
   esac
 done
 
+trap cleanup_install_artifacts EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
 if [[ "$INSTALL_AFTER_BUILD" == "1" ]]; then
   for required in /usr/sbin/lsof osascript plutil open; do
     if ! command -v "$required" >/dev/null 2>&1; then
@@ -330,6 +393,12 @@ if [[ -n "$SIGNING_IDENTITY" ]]; then
   SIGN_MODE="identity"
 fi
 
+echo "=== Preparing canonical build helpers ==="
+# build.rs writes two tracked helper paths. Preserve the developer's local
+# copies, build from HEAD-owned source state, and restore those copies only
+# after the signed bundle has been completely produced.
+prepare_canonical_build_helpers
+
 echo "=== Building CLI (release) ==="
 assert_clean_build_source
 echo "Build commit: $MINUTES_BUILD_COMMIT"
@@ -341,10 +410,13 @@ mkdir -p tauri/src-tauri/bin
 cp -f target/release/minutes "tauri/src-tauri/bin/minutes-${HOST_TARGET}"
 
 echo "=== Building ${DEV_PRODUCT_NAME}.app ==="
-# The calendar-events Swift helper is compiled and staged into
-# tauri/src-tauri/resources/ by tauri/src-tauri/build.rs, and Tauri bundles it
-# into the .app automatically via tauri.conf.json.
+# build.rs compiles all three Swift helpers into the external-bin staging
+# directory, and Tauri bundles their fresh target-specific copies.
+echo "=== Forcing fresh native helper generation ==="
+cargo clean -p minutes-app
+remove_generated_build_helpers
 run_with_ort_retry cargo tauri build --bundles app --config "$DEV_CONFIG" --features "$MINUTES_BUILD_FEATURES" --no-sign
+reset_tracked_build_helpers_to_head
 assert_clean_build_source
 # Inside-out signing (#311): sign every nested executable FIRST (the CLI
 # sidecar with its own entitlements), then the outer bundle WITHOUT --deep.

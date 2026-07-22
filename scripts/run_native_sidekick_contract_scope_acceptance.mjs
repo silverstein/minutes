@@ -217,14 +217,43 @@ export function evaluateContractScopeFixture(payload, runtime, spec) {
   };
 }
 
-function parseArgs(argv) {
-  let app = path.join(os.homedir(), "Applications", "Minutes Dev.app");
+export function canonicalInstalledAppPath(homeDirectory = os.homedir()) {
+  return path.resolve(homeDirectory, "Applications", "Minutes Dev.app");
+}
+
+export function parseArgs(argv, homeDirectory = os.homedir()) {
+  const canonicalApp = canonicalInstalledAppPath(homeDirectory);
+  let app = canonicalApp;
   for (let index = 2; index < argv.length; index += 1) {
-    if (argv[index] === "--app") app = argv[++index];
+    if (argv[index] === "--app") {
+      const supplied = argv[++index];
+      if (!supplied) throw new Error("--app requires a path");
+      app = path.resolve(supplied);
+    }
     else throw new Error(`unknown argument: ${argv[index]}`);
   }
-  if (!app) throw new Error("--app requires a path");
-  return { app: path.resolve(app) };
+  if (app !== canonicalApp) {
+    throw new Error(
+      `installed acceptance only runs against the canonical app at ${canonicalApp}`,
+    );
+  }
+  return { app, canonicalApp };
+}
+
+export async function validateCanonicalInstalledApp(app, canonicalApp) {
+  const appStat = await fs.lstat(app);
+  if (appStat.isSymbolicLink()) {
+    throw new Error(`canonical installed app must not be a symlink: ${app}`);
+  }
+  if (!appStat.isDirectory()) {
+    throw new Error(`canonical installed app is not a bundle directory: ${app}`);
+  }
+  const realApp = await fs.realpath(app);
+  if (realApp !== canonicalApp) {
+    throw new Error(
+      `canonical installed app resolves outside its required location: ${realApp}`,
+    );
+  }
 }
 
 async function runInstalledBinary(executable, fixturePath, installedBundleSha256) {
@@ -283,7 +312,8 @@ async function runInstalledBinary(executable, fixturePath, installedBundleSha256
 }
 
 async function main(argv) {
-  const { app } = parseArgs(argv);
+  const { app, canonicalApp } = parseArgs(argv);
+  await validateCanonicalInstalledApp(app, canonicalApp);
   const repositoryRoot = fileURLToPath(new URL("../", import.meta.url));
   const expectedBuildCommit = execFileSync("git", ["rev-parse", "--verify", "HEAD"], {
     cwd: repositoryRoot,
@@ -345,6 +375,7 @@ async function main(argv) {
   ]);
   const report = {
     schema_version: 1,
+    tested_app_path: app,
     expected_build_commit: expectedBuildCommit,
     expected_executable_sha256: expectedExecutableSha256,
     expected_bundle_sha256: expectedBundleSha256,

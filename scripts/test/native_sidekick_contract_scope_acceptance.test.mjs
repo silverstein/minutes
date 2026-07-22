@@ -1,7 +1,15 @@
 import assert from "node:assert/strict";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
 
-import { evaluateContractScopeFixture } from "../run_native_sidekick_contract_scope_acceptance.mjs";
+import {
+  canonicalInstalledAppPath,
+  evaluateContractScopeFixture,
+  parseArgs,
+  validateCanonicalInstalledApp,
+} from "../run_native_sidekick_contract_scope_acceptance.mjs";
 import {
   scoreAggregateCappedRemedy,
   scorePerWindowRemedy,
@@ -12,6 +20,54 @@ const northstarReference =
 
 const harborReference =
   "For Harbor procurement, require that if aggregate quarterly spoilage exceeds 2%, Polar Route owes one rebate equal to 8% of that quarter's fees. Cap it at one rebate per calendar quarter, and state that this is not a per-shipment credit.";
+
+test("installed acceptance is locked to the canonical non-raw app path", () => {
+  const syntheticHome = "/Users/sidekick-test";
+  const canonical = canonicalInstalledAppPath(syntheticHome);
+
+  assert.deepEqual(parseArgs(["node", "runner"], syntheticHome), {
+    app: canonical,
+    canonicalApp: canonical,
+  });
+  assert.deepEqual(
+    parseArgs(["node", "runner", "--app", canonical], syntheticHome),
+    { app: canonical, canonicalApp: canonical },
+  );
+  assert.throws(
+    () => parseArgs([
+      "node",
+      "runner",
+      "--app",
+      "/repo/target/release/bundle/macos/Minutes Dev.app",
+    ], syntheticHome),
+    /only runs against the canonical app/,
+  );
+  assert.throws(
+    () => parseArgs(["node", "runner", "--app"], syntheticHome),
+    /requires a path/,
+  );
+});
+
+test("installed acceptance rejects a symlink at the canonical app path", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "minutes-installed-app-test-"));
+  try {
+    const home = path.join(root, "home");
+    const canonical = canonicalInstalledAppPath(home);
+    const rawBundle = path.join(root, "target", "Minutes Dev.app");
+    await fs.mkdir(canonical, { recursive: true });
+    await validateCanonicalInstalledApp(canonical, canonical);
+
+    await fs.rm(canonical, { recursive: true });
+    await fs.mkdir(rawBundle, { recursive: true });
+    await fs.symlink(rawBundle, canonical);
+    await assert.rejects(
+      validateCanonicalInstalledApp(canonical, canonical),
+      /must not be a symlink/,
+    );
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
 
 test("held-out per-window remedy preserves the exact quantified outcome scope", () => {
   const result = scorePerWindowRemedy(northstarReference);
@@ -62,6 +118,8 @@ test("held-out per-window remedy preserves the exact quantified outcome scope", 
     "For Northstar procurement, require a $5,000 service credit each time uptime falls below 99.95% in a 30-minute service window. Reject one credit per outage or incident.",
     "For Northstar procurement, require a $5,000 service credit for each 30-minute service window in which uptime falls below 99.95%. Reject one credit per incident.",
     "For Northstar procurement, require that every 30-minute service window below 99.95% triggers a $5,000 service credit. Reject treating a continuous outage as one incident for credit purposes.",
+    "For Northstar, require that every 30-minute service window below 99.95% triggers a $5,000 service credit. Reject one credit per incident.",
+    "For Northstar Health, require that every 30-minute service window below 99.95% triggers a $5,000 service credit. Reject one credit per incident.",
   ];
   for (const candidate of semanticOrderVariants) {
     assert.equal(scorePerWindowRemedy(candidate).passed, true, candidate);
@@ -118,6 +176,7 @@ test("vague, aggregated, or negated per-window remedies fail closed", () => {
     "For Northstar procurement, require every 30-minute service window below 99.95% to trigger a $5,000 service credit plus a ７,５００-dollar payment. Reject one credit per incident.",
     "For Northstar procurement, require that all 30-minute service windows below 99.95% result in a $5,000 service credit. Reject one credit per incident.",
     "For Northstar procurement, require that all 30-minute service windows below 99.95% trigger a $5,000 service credit. Reject one credit per incident.",
+    "For Northstar procurement, require that every 30-minute service window below 99.95% entitles a $5,000 service credit. Reject one credit per incident.",
   ];
 
   for (const candidate of candidates) {
@@ -132,12 +191,12 @@ test("held-out aggregate remedy preserves its quarterly trigger and cap", () => 
   assert.deepEqual(result.score, { numerator: 4, denominator: 4 });
 
   const singleQuarterlyVariant = scoreAggregateCappedRemedy(
-    "For Harbor procurement, require that aggregate quarterly spoilage above 2% triggers a single quarterly rebate of 8% of fees. A single quarterly rebate is the maximum. No per-shipment remedy.",
+    "For Harbor procurement, require that aggregate quarterly spoilage above 2% triggers a single quarterly rebate of 8% of quarterly fees. A single quarterly rebate is the maximum. No per-shipment remedy.",
   );
   assert.equal(singleQuarterlyVariant.passed, true);
 
   const resultsInVariant = scoreAggregateCappedRemedy(
-    "For Harbor procurement, require that aggregate quarterly spoilage above 2% results in one rebate of 8% of fees. Cap the rebate at one per calendar quarter, with no per-shipment remedy.",
+    "For Harbor procurement, require that aggregate quarterly spoilage above 2% results in one rebate of 8% of quarterly fees. Cap the rebate at one per calendar quarter, with no per-shipment remedy.",
   );
   assert.equal(resultsInVariant.passed, true);
 
@@ -162,7 +221,7 @@ test("held-out aggregate remedy preserves its quarterly trigger and cap", () => 
   assert.equal(quotedVariant.passed, true);
 
   const bulletVariant = scoreAggregateCappedRemedy(
-    "- For Harbor procurement, require that aggregate quarterly spoilage above 2% triggers a single quarterly rebate of 8% of fees\n- Limit recovery to one rebate each quarter\n- Exclude shipment-level credits",
+    "- For Harbor procurement, require that aggregate quarterly spoilage above 2% triggers a single quarterly rebate of 8% of quarterly fees\n- Limit recovery to one rebate each quarter\n- Exclude shipment-level credits",
   );
   assert.equal(bulletVariant.passed, true);
 
@@ -177,6 +236,8 @@ test("held-out aggregate remedy preserves its quarterly trigger and cap", () => 
     "For Harbor procurement, require one rebate equal to 8% of quarterly fees if aggregate quarterly spoilage exceeds 2%. Limit Harbor to one rebate per quarter. No per-shipment rebate.",
     "For Harbor procurement, require one rebate equal to 8% of quarterly fees if aggregate quarterly spoilage exceeds 2%. Cap it at one rebate per quarter. No rebate accrues on a shipment-by-shipment basis.",
     "For Harbor procurement, require one rebate equal to 8% of quarterly fees if aggregate quarterly spoilage exceeds 2%. No more than a single rebate may be paid in any quarter. Exclude shipment-level rebates.",
+    "For Harbor, require that aggregate quarterly spoilage above 2% triggers one rebate equal to 8% of quarterly fees. Cap it at one rebate per quarter. Exclude shipment-level rebates.",
+    "For Harbor Foods, require that aggregate quarterly spoilage above 2% triggers one rebate equal to 8% of quarterly fees. Cap it at one rebate per quarter. Exclude shipment-level rebates.",
   ];
   for (const candidate of semanticOrderVariants) {
     assert.equal(scoreAggregateCappedRemedy(candidate).passed, true, candidate);
@@ -243,6 +304,8 @@ test("per-shipment invention and negated or missing aggregate caps fail closed",
     "For Harbor procurement, require that aggregate quarterly spoilage above 2% triggers one rebate equal to 8% of quarterly fees. Cap it at one rebate per quarter. No shipment is denied a rebate.",
     "For Harbor procurement, require that aggregate quarterly spoilage above 2% triggers one rebate equal to 8% of quarterly fees. Cap it at one rebate per quarter. No individual shipment triggers a rebate, though select loads do.",
     "For Harbor procurement, require that aggregate quarterly spoilage above 2% triggers one rebate equal to 8% of quarterly fees plus a １２% payment. Cap it at one rebate per quarter. Exclude shipment-level credits.",
+    "For Harbor procurement, require that aggregate quarterly spoilage above 2% owes one rebate equal to 8% of quarterly fees. Cap it at one rebate per quarter. Exclude shipment-level credits.",
+    "For Harbor procurement, require that aggregate quarterly spoilage above 2% results in one rebate equal to 8% of fees. Cap it at one rebate per quarter. Exclude shipment-level credits.",
   ];
 
   for (const candidate of candidates) {

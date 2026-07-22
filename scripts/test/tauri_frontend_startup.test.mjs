@@ -537,6 +537,26 @@ test('dev installer retires the old app and verifies the fresh frontend', async 
     /assert_clean_build_source[\s\S]*git status --porcelain=v1 --untracked-files=all[\s\S]*echo "=== Building CLI \(release\) ==="[\s\S]*assert_clean_build_source[\s\S]*cargo tauri build[\s\S]*assert_clean_build_source/,
     'the installer must reject dirty application or harness source before and after compilation',
   );
+  assert.doesNotMatch(
+    source.match(/assert_clean_build_source\(\)[\s\S]*?^}/m)?.[0] || '',
+    /mic_check/,
+    'the source cleanliness gate must not exempt generated helper binaries',
+  );
+  assert.match(
+    source,
+    /prepare_canonical_build_helpers[\s\S]*cp -p "\$helper" "\$HELPER_BACKUP_DIR\/\$index"[\s\S]*write_head_helper "\$helper"/,
+    'the installer must preserve developer helper copies while resetting build inputs to HEAD',
+  );
+  assert.match(
+    source,
+    /cargo clean -p minutes-app[\s\S]*remove_generated_build_helpers[\s\S]*cargo tauri build[\s\S]*reset_tracked_build_helpers_to_head[\s\S]*assert_clean_build_source/,
+    'a warm build must regenerate every bundled native helper before packaging and restore canonical source state afterward',
+  );
+  assert.match(
+    source,
+    /cleanup_install_artifacts[\s\S]*restore_user_build_helpers/,
+    'developer helper copies must be restored on every success or failure exit path',
+  );
 
   assert.match(
     source,

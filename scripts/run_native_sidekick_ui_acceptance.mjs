@@ -404,8 +404,36 @@ export function nativeSidekickTemporaryParent(platform = process.platform, defau
   return platform === "darwin" ? "/tmp" : defaultTmp;
 }
 
+export function parseLsofTextIdentities(output) {
+  const identities = [];
+  let record = null;
+  const flush = () => {
+    if (!record) return;
+    if (record.device === undefined || record.inode === undefined) {
+      throw new Error(
+        `lsof text record ${record.descriptor || "unknown"} is missing device or inode identity`,
+      );
+    }
+    identities.push(record);
+  };
+  for (const line of output.split("\n")) {
+    if (line.startsWith("f")) {
+      flush();
+      record = { descriptor: line.slice(1) };
+    } else if (record && line.startsWith("D")) {
+      record.device = BigInt(line.slice(1)).toString();
+    } else if (record && line.startsWith("i")) {
+      record.inode = BigInt(line.slice(1)).toString();
+    } else if (record && line.startsWith("n")) {
+      record.path = line.slice(1);
+    }
+  }
+  flush();
+  return identities;
+}
+
 function exactExecutablePids(executable) {
-  const expected = statSync(executable);
+  const expected = statSync(executable, { bigint: true });
   const processName = path.basename(executable);
   let candidates = "";
   try {
@@ -419,7 +447,7 @@ function exactExecutablePids(executable) {
     if (!/^\d+$/.test(candidate)) continue;
     let textFiles = "";
     try {
-      textFiles = execFileSync("/usr/sbin/lsof", ["-a", "-p", candidate, "-d", "txt", "-Fn"], {
+      textFiles = execFileSync("/usr/sbin/lsof", ["-a", "-p", candidate, "-d", "txt", "-F", "pDfni"], {
         encoding: "utf8",
       });
     } catch (error) {
@@ -430,24 +458,12 @@ function exactExecutablePids(executable) {
       }
       throw new Error(`could not inspect live ${processName} candidate PID ${candidate}: ${error.message}`);
     }
-    const textPaths = textFiles.split("\n").filter((line) => line.startsWith("n")).map((line) => line.slice(1));
-    let matched = false;
-    for (const textPath of textPaths) {
-      try {
-        const observed = statSync(textPath);
-        if (observed.dev === expected.dev && observed.ino === expected.ino) {
-          matched = true;
-          break;
-        }
-      } catch (error) {
-        try {
-          process.kill(Number(candidate), 0);
-        } catch (probeError) {
-          if (probeError?.code === "ESRCH") continue;
-        }
-        throw new Error(`could not identify live ${processName} candidate PID ${candidate}: ${error.message}`);
-      }
+    const identities = parseLsofTextIdentities(textFiles);
+    if (identities.length === 0) {
+      throw new Error(`could not identify live ${processName} candidate PID ${candidate}: lsof returned no device/inode identity`);
     }
+    const matched = identities.some((identity) =>
+      identity.device === expected.dev.toString() && identity.inode === expected.ino.toString());
     if (matched) matches.push(Number(candidate));
   }
   return matches;

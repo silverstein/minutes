@@ -9,6 +9,7 @@ import {
   evaluateNativeSidekickUiAcceptance,
   nativeSidekickLaunchServicesArgs,
   nativeSidekickTemporaryParent,
+  parseLsofTextIdentities,
   terminateNewExactProcesses,
 } from '../run_native_sidekick_ui_acceptance.mjs';
 
@@ -838,6 +839,49 @@ test('native UI acceptance launches the signed app through LaunchServices with a
   assert.equal(args[parentFdIndex + 1], '0', 'LaunchServices maps the inherited lease to app stdin');
   assert.equal(nativeSidekickTemporaryParent('darwin', '/var/folders/very/long/path'), '/tmp');
   assert.equal(nativeSidekickTemporaryParent('linux', '/var/tmp'), '/var/tmp');
+});
+
+test('exact process identity survives an unrelated stale executable pathname', () => {
+  const identities = parseLsofTextIdentities([
+    'p20799',
+    'ftxt',
+    'D0x1000012',
+    'i2354314229',
+    'n/vanished/ChatGPT.app/Contents/Resources/codex',
+    'ftxt',
+    'D0x1000012',
+    'i1152921500312573174',
+    'n/usr/lib/dyld',
+    '',
+  ].join('\n'));
+
+  assert.deepEqual(identities, [
+    {
+      descriptor: 'txt',
+      device: BigInt('0x1000012').toString(),
+      inode: '2354314229',
+      path: '/vanished/ChatGPT.app/Contents/Resources/codex',
+    },
+    {
+      descriptor: 'txt',
+      device: BigInt('0x1000012').toString(),
+      inode: '1152921500312573174',
+      path: '/usr/lib/dyld',
+    },
+  ]);
+});
+
+test('exact process identity fails closed when the primary lsof record is incomplete', () => {
+  assert.throws(() => parseLsofTextIdentities([
+    'p4242',
+    'ftxt',
+    'n/tmp/private-provider/codex',
+    'ftxt',
+    'D0x1000012',
+    'i1152921500312573174',
+    'n/usr/lib/dyld',
+    '',
+  ].join('\n')), /missing device or inode identity/);
 });
 
 test('LaunchServices cleanup retires only newly launched exact processes', async () => {

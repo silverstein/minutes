@@ -391,6 +391,16 @@ test('Sidekick screen marker paints without the Tauri JavaScript bridge', async 
   }).runInNewContext({ document, location: { search: `?trace=${trace}` }, URLSearchParams }));
   assert.equal(grid.children.length, 256);
   assert.equal(traceLabel.textContent, `trace ${trace}`);
+  assert.equal(
+    source.match(/#30d158/g)?.length,
+    1,
+    'the green nonce color must not be reused by decorative marker UI',
+  );
+  assert.equal(
+    source.match(/#c96b4e/g)?.length,
+    1,
+    'the orange nonce color must not be reused by decorative marker UI',
+  );
 });
 
 test('Sidekick screen marker reports readiness only after two paint frames', async () => {

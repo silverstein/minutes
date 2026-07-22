@@ -17866,6 +17866,17 @@ mod native_sidekick_diagnostic_tests {
 
         verify_native_sidekick_acceptance_marker(&path, nonce).unwrap();
 
+        // Decorative UI near the grid must not redefine its bounds. This
+        // strip is wide enough to satisfy the old image-wide threshold and
+        // models marker-colored text or a badge above the real grid.
+        for y in 40..50_u32 {
+            for x in 300..480_u32 {
+                image.put_pixel(x, y, image::Rgb([0x30, 0xd1, 0x58]));
+            }
+        }
+        image.save(&path).unwrap();
+        verify_native_sidekick_acceptance_marker(&path, nonce).unwrap();
+
         // Production screen context intentionally includes the pointer. A
         // cursor crossing one cell must not invalidate an otherwise exact
         // nonce, so verification samples the cell instead of trusting only
@@ -18684,22 +18695,40 @@ fn verify_native_sidekick_acceptance_marker(path: &Path, nonce: &str) -> Result<
         };
         close([0x30, 0xd1, 0x58]) || close([0xc9, 0x6b, 0x4e])
     };
-    let row_threshold = (width / 10).max(1);
-    let column_threshold = (height / 10).max(1);
-    let marker_rows = (0..height)
-        .filter(|&y| {
+    // Locate the grid from its strongest color bands, not a threshold based
+    // on the whole screenshot. Retina downscaling and multi-display captures
+    // can otherwise make marker-colored UI text look like a grid boundary.
+    let row_counts = (0..height)
+        .map(|y| {
             (0..width)
                 .filter(|&x| is_marker_color(image.get_pixel(x, y)))
                 .count()
-                >= row_threshold as usize
         })
         .collect::<Vec<_>>();
-    let marker_columns = (0..width)
-        .filter(|&x| {
+    let column_counts = (0..width)
+        .map(|x| {
             (0..height)
                 .filter(|&y| is_marker_color(image.get_pixel(x, y)))
                 .count()
-                >= column_threshold as usize
+        })
+        .collect::<Vec<_>>();
+    let strongest_row = row_counts.iter().copied().max().unwrap_or(0);
+    let strongest_column = column_counts.iter().copied().max().unwrap_or(0);
+    let row_threshold = strongest_row.saturating_mul(3) / 4;
+    let column_threshold = strongest_column.saturating_mul(3) / 4;
+    let marker_rows = row_counts
+        .iter()
+        .enumerate()
+        .filter_map(|(index, &count)| {
+            (row_threshold > 0 && count >= row_threshold).then(|| u32::try_from(index).unwrap_or(0))
+        })
+        .collect::<Vec<_>>();
+    let marker_columns = column_counts
+        .iter()
+        .enumerate()
+        .filter_map(|(index, &count)| {
+            (column_threshold > 0 && count >= column_threshold)
+                .then(|| u32::try_from(index).unwrap_or(0))
         })
         .collect::<Vec<_>>();
     let (Some(&top), Some(&bottom), Some(&left), Some(&right)) = (

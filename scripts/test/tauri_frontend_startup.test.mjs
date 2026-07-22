@@ -724,8 +724,13 @@ test('dev installer retires the old app and verifies the fresh frontend', async 
 
   assert.match(
     source,
-    /acquire_install_lock[\s\S]*cp -rf "\$BUILD_APP" "\$STAGED_APP"[\s\S]*codesign --verify --deep --strict "\$STAGED_APP"[\s\S]*stop_running_dev_app[\s\S]*\/bin\/mv -f "\$INSTALL_APP" "\$BACKUP_APP"[\s\S]*\/bin\/mv -f "\$STAGED_APP" "\$INSTALL_APP"/,
-    'the installer must lock, seal a staged copy, stop the old process, and atomically swap bundles',
+    /acquire_install_lock[\s\S]*\/bin\/cp -pR "\$BUILD_APP" "\$STAGED_APP"[\s\S]*codesign --verify --deep --strict "\$STAGED_APP"[\s\S]*stop_running_dev_app[\s\S]*\/bin\/mv -f "\$INSTALL_APP" "\$BACKUP_APP"[\s\S]*\/bin\/mv -f "\$STAGED_APP" "\$INSTALL_APP"/,
+    'the installer must lock, preserve the signed bundle modes, seal a staged copy, stop the old process, and atomically swap bundles',
+  );
+  assert.doesNotMatch(
+    source,
+    /cp -rf "\$BUILD_APP"/,
+    'a restrictive caller umask must not rewrite the signed build artifact modes during staging',
   );
   assert.match(
     source,

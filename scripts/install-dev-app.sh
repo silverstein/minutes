@@ -558,7 +558,11 @@ codesign --verify --deep --strict "$BUILD_APP" && echo "  Seal OK"
 if [[ "$INSTALL_AFTER_BUILD" == "1" ]]; then
   echo "=== Installing ${DEV_PRODUCT_NAME}.app to ${INSTALL_DIR} ==="
   rm -rf "$STAGED_APP" "$BACKUP_APP"
-  cp -rf "$BUILD_APP" "$STAGED_APP"
+  # Preserve the signed bundle's modes even when the caller uses a restrictive
+  # umask (the unattended acceptance runner uses 077). Otherwise the installed
+  # bundle remains code-sign valid but is no longer byte-and-mode identical to
+  # the artifact that was just built and verified.
+  /bin/cp -pR "$BUILD_APP" "$STAGED_APP"
   echo "=== Verifying staged installed bytes ==="
   codesign --verify --deep --strict "$STAGED_APP" && echo "  Staged seal OK"
   if ! stop_running_dev_app; then

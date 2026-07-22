@@ -17845,8 +17845,12 @@ mod native_sidekick_diagnostic_tests {
         let occluded_column = u32::try_from(occluded_index % 16).unwrap();
         let occluded_x = left + occluded_column * (cell + gap);
         let occluded_y = top + occluded_row * (cell + gap);
-        for y in occluded_y + 8..occluded_y + 28 {
-            for x in occluded_x + 8..occluded_x + 28 {
+        // Approximate the opaque arrow body rather than a solid square: the
+        // pointer's transparent bounding-box pixels never replace the screen.
+        for delta_y in 0..20_u32 {
+            for delta_x in 0..=(delta_y / 2) {
+                let y = occluded_y + 8 + delta_y;
+                let x = occluded_x + 8 + delta_x;
                 image.put_pixel(x, y, image::Rgb([0xff, 0xff, 0xff]));
             }
         }
@@ -18593,53 +18597,24 @@ fn verify_native_sidekick_acceptance_marker(path: &Path, nonce: &str) -> Result<
                 >= column_threshold as usize
         })
         .collect::<Vec<_>>();
-    if marker_rows.is_empty() || marker_columns.is_empty() {
+    let (Some(&top), Some(&bottom), Some(&left), Some(&right)) = (
+        marker_rows.first(),
+        marker_rows.last(),
+        marker_columns.first(),
+        marker_columns.last(),
+    ) else {
         return Err(
             "The actual screen capture did not contain the run-specific marker grid.".into(),
         );
-    }
-    let marker_bands = |positions: &[u32]| {
-        let mut bands = Vec::new();
-        let mut start = positions[0];
-        let mut previous = start;
-        for &position in &positions[1..] {
-            if position > previous.saturating_add(1) {
-                bands.push((start, previous));
-                start = position;
-            }
-            previous = position;
-        }
-        bands.push((start, previous));
-        bands
     };
-    let select_grid_bands = |positions: &[u32], axis: &str| -> Result<Vec<(u32, u32)>, String> {
-        let mut bands = marker_bands(positions);
-        if bands.len() < 16 {
-            return Err(format!(
-                "The captured marker grid had too few {axis} cell bands."
-            ));
-        }
-        // Marker-colored text can contribute a short extra horizontal band.
-        // The 16 grid cells are the dominant repeated bands on each axis.
-        bands.sort_by_key(|(start, end)| std::cmp::Reverse(end - start));
-        bands.truncate(16);
-        bands.sort_by_key(|(start, _)| *start);
-        Ok(bands)
-    };
-    let row_bands = select_grid_bands(&marker_rows, "row")?;
-    let column_bands = select_grid_bands(&marker_columns, "column")?;
-    let top = row_bands.first().map(|band| band.0).unwrap_or(0);
-    let bottom = row_bands.last().map(|band| band.1).unwrap_or(0);
-    let left = column_bands.first().map(|band| band.0).unwrap_or(0);
-    let right = column_bands.last().map(|band| band.1).unwrap_or(0);
     let grid_width = right.saturating_sub(left).saturating_add(1);
     let grid_height = bottom.saturating_sub(top).saturating_add(1);
     if grid_width < 160 || grid_height < 160 {
         return Err("The captured marker grid was too small to verify safely.".into());
     }
     for (index, expected) in expected_bits.iter().enumerate() {
-        let row = index / 16;
-        let column = index % 16;
+        let row = u32::try_from(index / 16).unwrap_or(0);
+        let column = u32::try_from(index % 16).unwrap_or(0);
         let target = if *expected == 1 {
             [0x30, 0xd1, 0x58]
         } else {
@@ -18650,17 +18625,22 @@ fn verify_native_sidekick_acceptance_marker(path: &Path, nonce: &str) -> Result<
         } else {
             [0x30, 0xd1, 0x58]
         };
-        let (x0, x1) = column_bands[column];
-        let (y0, y1) = row_bands[row];
-        let sample =
-            |start: u32, end: u32, tenth: u32| start + (end.saturating_sub(start) * tenth) / 10;
+        let center_x = left + ((column * 2 + 1) * grid_width) / 32;
+        let center_y = top + ((row * 2 + 1) * grid_height) / 32;
+        // Sample a compact area inside the cell. The step is one eighth of a
+        // logical cell, which stays clear of the CSS gaps after Retina
+        // downscaling while tolerating a captured mouse pointer at the center.
+        let step_x = (grid_width / 128).max(1);
+        let step_y = (grid_height / 128).max(1);
         let mut expected_samples = 0_u32;
         let mut opposite_samples = 0_u32;
-        for y_tenth in [1_u32, 3, 5, 7, 9] {
-            for x_tenth in [1_u32, 3, 5, 7, 9] {
+        for y_offset in [-2_i64, -1, 0, 1, 2] {
+            for x_offset in [-2_i64, -1, 0, 1, 2] {
+                let sample_x = i64::from(center_x) + x_offset * i64::from(step_x);
+                let sample_y = i64::from(center_y) + y_offset * i64::from(step_y);
                 let pixel = image.get_pixel(
-                    sample(x0, x1, x_tenth).min(width - 1),
-                    sample(y0, y1, y_tenth).min(height - 1),
+                    u32::try_from(sample_x.max(0)).unwrap_or(0).min(width - 1),
+                    u32::try_from(sample_y.max(0)).unwrap_or(0).min(height - 1),
                 );
                 let close = |color: [u8; 3]| {
                     pixel

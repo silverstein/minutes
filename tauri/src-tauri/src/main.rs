@@ -287,43 +287,249 @@ fn maybe_run_process_queue_worker() -> Option<i32> {
     }
 }
 
-fn maybe_run_native_sidekick_diagnostic() -> Option<i32> {
-    let args = std::env::args().skip(1).collect::<Vec<_>>();
-    if !args.iter().any(|arg| arg == "--diagnose-native-sidekick") {
-        return None;
-    }
-    if !args.iter().any(|arg| arg == "--consent-cloud") {
-        eprintln!(
-            "--diagnose-native-sidekick requires --consent-cloud before meeting evidence can be sent to Codex Cloud"
-        );
-        return Some(2);
-    }
-    let mut typed_message = None;
-    let mut synthetic_fixture = None;
-    let mut iter = args.iter();
-    while let Some(arg) = iter.next() {
-        if arg == "--diagnose-native-sidekick-message" {
-            typed_message = iter.next().cloned();
-        } else if let Some(value) = arg.strip_prefix("--diagnose-native-sidekick-message=") {
-            typed_message = Some(value.to_string());
-        } else if arg == "--diagnose-native-sidekick-fixture" {
-            synthetic_fixture = iter.next().map(std::path::PathBuf::from);
-        } else if let Some(value) = arg.strip_prefix("--diagnose-native-sidekick-fixture=") {
-            synthetic_fixture = Some(std::path::PathBuf::from(value));
-        }
-    }
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NativeSidekickDiagnosticCli {
+    source: commands::NativeSidekickDiagnosticSource,
+    typed_message: Option<String>,
+}
 
-    match commands::run_native_sidekick_diagnostic(typed_message.clone(), synthetic_fixture) {
-        Ok(payload) => {
-            let passed = payload
-                .pointer("/proactive/outcome")
+fn diagnostic_value_after<'a>(
+    args: &'a [String],
+    index: &mut usize,
+    flag: &str,
+) -> Result<&'a str, String> {
+    *index += 1;
+    let value = args
+        .get(*index)
+        .filter(|value| !value.trim().is_empty() && !value.starts_with("--"))
+        .ok_or_else(|| format!("{flag} requires a value"))?;
+    Ok(value)
+}
+
+fn set_native_sidekick_diagnostic_source(
+    slot: &mut Option<commands::NativeSidekickDiagnosticSource>,
+    source: commands::NativeSidekickDiagnosticSource,
+) -> Result<(), String> {
+    if slot.replace(source).is_some() {
+        return Err("Specify exactly one Sidekick diagnostic evidence source".into());
+    }
+    Ok(())
+}
+
+fn parse_native_sidekick_diagnostic_cli(
+    args: &[String],
+) -> Result<Option<NativeSidekickDiagnosticCli>, String> {
+    if !args.iter().any(|arg| arg == "--diagnose-native-sidekick") {
+        return Ok(None);
+    }
+    let mut consent_cloud = false;
+    let mut source = None;
+    let mut typed_message = None;
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        if arg == "--diagnose-native-sidekick" {
+        } else if arg == "--consent-cloud" {
+            consent_cloud = true;
+        } else if arg == "--diagnose-native-sidekick-active" {
+            set_native_sidekick_diagnostic_source(
+                &mut source,
+                commands::NativeSidekickDiagnosticSource::ActiveCapture,
+            )?;
+        } else if arg == "--diagnose-native-sidekick-golden" {
+            let value = diagnostic_value_after(args, &mut index, arg)?;
+            if value != "meridian" {
+                return Err(format!("Unknown embedded Sidekick golden fixture: {value}"));
+            }
+            set_native_sidekick_diagnostic_source(
+                &mut source,
+                commands::NativeSidekickDiagnosticSource::EmbeddedMeridian,
+            )?;
+        } else if let Some(value) = arg.strip_prefix("--diagnose-native-sidekick-golden=") {
+            if value != "meridian" {
+                return Err(format!("Unknown embedded Sidekick golden fixture: {value}"));
+            }
+            set_native_sidekick_diagnostic_source(
+                &mut source,
+                commands::NativeSidekickDiagnosticSource::EmbeddedMeridian,
+            )?;
+        } else if arg == "--diagnose-native-sidekick-fixture" {
+            let value = diagnostic_value_after(args, &mut index, arg)?;
+            set_native_sidekick_diagnostic_source(
+                &mut source,
+                commands::NativeSidekickDiagnosticSource::ExternalFixture(value.into()),
+            )?;
+        } else if let Some(value) = arg.strip_prefix("--diagnose-native-sidekick-fixture=") {
+            if value.trim().is_empty() {
+                return Err("--diagnose-native-sidekick-fixture requires a value".into());
+            }
+            set_native_sidekick_diagnostic_source(
+                &mut source,
+                commands::NativeSidekickDiagnosticSource::ExternalFixture(value.into()),
+            )?;
+        } else if arg == "--diagnose-native-sidekick-message" {
+            let value = diagnostic_value_after(args, &mut index, arg)?.to_string();
+            if typed_message.replace(value).is_some() {
+                return Err("Specify at most one Sidekick diagnostic message".into());
+            }
+        } else if let Some(value) = arg.strip_prefix("--diagnose-native-sidekick-message=") {
+            if value.trim().is_empty() || typed_message.replace(value.to_string()).is_some() {
+                return Err("Specify one non-empty Sidekick diagnostic message".into());
+            }
+        } else {
+            return Err(format!("Unknown Sidekick diagnostic argument: {arg}"));
+        }
+        index += 1;
+    }
+    if !consent_cloud {
+        return Err(
+            "--diagnose-native-sidekick requires --consent-cloud before evidence can be sent to Codex Cloud"
+                .into(),
+        );
+    }
+    let source = source.ok_or_else(|| {
+        "Choose an explicit Sidekick diagnostic source: --diagnose-native-sidekick-active, --diagnose-native-sidekick-golden meridian, or --diagnose-native-sidekick-fixture PATH"
+            .to_string()
+    })?;
+    if source == commands::NativeSidekickDiagnosticSource::EmbeddedMeridian
+        && typed_message.is_some()
+    {
+        return Err(
+            "The embedded Meridian golden uses only its compiled prompts; do not supply a caller message"
+                .into(),
+        );
+    }
+    Ok(Some(NativeSidekickDiagnosticCli {
+        source,
+        typed_message,
+    }))
+}
+
+fn native_sidekick_diagnostic_operationally_passed(
+    payload: &serde_json::Value,
+    cli: &NativeSidekickDiagnosticCli,
+) -> bool {
+    let synthetic_fixture_provenance = |source: &str, trust: &str| {
+        payload
+            .pointer("/transcript_source")
+            .and_then(serde_json::Value::as_str)
+            == Some(source)
+            && payload
+                .pointer("/prepared_context_source")
                 .and_then(serde_json::Value::as_str)
-                == Some("published")
-                && (typed_message.is_none()
+                == Some(source)
+            && payload
+                .pointer("/screen_source")
+                .and_then(serde_json::Value::as_str)
+                == Some("none")
+            && payload
+                .pointer("/screen_available")
+                .and_then(serde_json::Value::as_bool)
+                == Some(false)
+            && payload
+                .pointer("/fixture_trust")
+                .and_then(serde_json::Value::as_str)
+                == Some(trust)
+            && payload
+                .pointer("/fixture_id")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|id| !id.trim().is_empty())
+            && payload
+                .pointer("/fixture_sha256")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|digest| {
+                    digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+                })
+            && payload
+                .pointer("/context_session_id")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|id| id.starts_with("sidekick-diagnostic-synthetic-"))
+    };
+    let all_fixture_turns_published = |expected_ids: Option<&[&str]>| {
+        let Some(session_correlation) = payload
+            .pointer("/reasoning_session_correlation")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+        else {
+            return false;
+        };
+        if payload
+            .pointer("/reasoning_sessions_started")
+            .and_then(serde_json::Value::as_u64)
+            != Some(1)
+        {
+            return false;
+        }
+        payload
+            .pointer("/fixture_turns")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|turns| {
+                !turns.is_empty()
+                    && expected_ids.is_none_or(|ids| {
+                        turns.len() == ids.len()
+                            && turns.iter().zip(ids).all(|(turn, expected)| {
+                                turn.pointer("/id").and_then(serde_json::Value::as_str)
+                                    == Some(*expected)
+                            })
+                    })
+                    && turns.iter().all(|turn| {
+                        turn.pointer("/prompt")
+                            .and_then(serde_json::Value::as_str)
+                            .is_some_and(|prompt| !prompt.trim().is_empty())
+                            && turn
+                                .pointer("/reasoning_session_correlation")
+                                .and_then(serde_json::Value::as_str)
+                                == Some(session_correlation)
+                            && turn
+                                .pointer("/result/outcome")
+                                .and_then(serde_json::Value::as_str)
+                                == Some("published")
+                    })
+            })
+    };
+
+    match &cli.source {
+        commands::NativeSidekickDiagnosticSource::EmbeddedMeridian => {
+            synthetic_fixture_provenance("embedded_golden", "embedded_approved")
+                && all_fixture_turns_published(Some(&["vendor_strategy", "procurement_role_flip"]))
+        }
+        commands::NativeSidekickDiagnosticSource::ExternalFixture(_) => {
+            synthetic_fixture_provenance("external_user_supplied_fixture", "external_user_supplied")
+                && all_fixture_turns_published(None)
+                && (cli.typed_message.is_none()
                     || payload
                         .pointer("/foreground/outcome")
                         .and_then(serde_json::Value::as_str)
-                        == Some("published"));
+                        == Some("published"))
+        }
+        commands::NativeSidekickDiagnosticSource::ActiveCapture => {
+            payload
+                .pointer("/proactive/outcome")
+                .and_then(serde_json::Value::as_str)
+                == Some("published")
+                && (cli.typed_message.is_none()
+                    || payload
+                        .pointer("/foreground/outcome")
+                        .and_then(serde_json::Value::as_str)
+                        == Some("published"))
+        }
+    }
+}
+
+fn maybe_run_native_sidekick_diagnostic() -> Option<i32> {
+    let args = std::env::args().skip(1).collect::<Vec<_>>();
+    let cli = match parse_native_sidekick_diagnostic_cli(&args) {
+        Ok(Some(cli)) => cli,
+        Ok(None) => return None,
+        Err(error) => {
+            eprintln!("native Sidekick diagnostic arguments are invalid: {error}");
+            return Some(2);
+        }
+    };
+
+    match commands::run_native_sidekick_diagnostic(cli.source.clone(), cli.typed_message.clone()) {
+        Ok(payload) => {
+            let passed = native_sidekick_diagnostic_operationally_passed(&payload, &cli);
             match serde_json::to_string_pretty(&payload) {
                 Ok(json) => println!("{json}"),
                 Err(error) => {
@@ -337,6 +543,140 @@ fn maybe_run_native_sidekick_diagnostic() -> Option<i32> {
             eprintln!("native Sidekick diagnostic failed: {error}");
             Some(1)
         }
+    }
+}
+
+#[cfg(test)]
+mod native_sidekick_cli_tests {
+    use super::*;
+
+    fn args(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| (*value).to_string()).collect()
+    }
+
+    #[test]
+    fn missing_fixture_value_never_falls_back_to_an_active_meeting() {
+        let error = parse_native_sidekick_diagnostic_cli(&args(&[
+            "--diagnose-native-sidekick",
+            "--consent-cloud",
+            "--diagnose-native-sidekick-fixture",
+        ]))
+        .unwrap_err();
+
+        assert!(error.contains("requires a value"));
+    }
+
+    #[test]
+    fn typoed_source_flag_is_rejected() {
+        let error = parse_native_sidekick_diagnostic_cli(&args(&[
+            "--diagnose-native-sidekick",
+            "--consent-cloud",
+            "--diagnose-native-sidekick-fixtur",
+            "fixture.json",
+        ]))
+        .unwrap_err();
+
+        assert!(error.contains("Unknown Sidekick diagnostic argument"));
+    }
+
+    #[test]
+    fn embedded_golden_is_an_explicit_message_free_source() {
+        let parsed = parse_native_sidekick_diagnostic_cli(&args(&[
+            "--diagnose-native-sidekick",
+            "--consent-cloud",
+            "--diagnose-native-sidekick-golden",
+            "meridian",
+        ]))
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(
+            parsed.source,
+            commands::NativeSidekickDiagnosticSource::EmbeddedMeridian
+        );
+        assert_eq!(parsed.typed_message, None);
+    }
+
+    #[test]
+    fn source_is_required_even_when_cloud_consent_exists() {
+        let error = parse_native_sidekick_diagnostic_cli(&args(&[
+            "--diagnose-native-sidekick",
+            "--consent-cloud",
+        ]))
+        .unwrap_err();
+
+        assert!(error.contains("Choose an explicit Sidekick diagnostic source"));
+    }
+
+    #[test]
+    fn golden_operational_pass_requires_synthetic_provenance_and_both_turns() {
+        let cli = NativeSidekickDiagnosticCli {
+            source: commands::NativeSidekickDiagnosticSource::EmbeddedMeridian,
+            typed_message: None,
+        };
+        let payload = serde_json::json!({
+            "transcript_source": "embedded_golden",
+            "prepared_context_source": "embedded_golden",
+            "screen_source": "none",
+            "screen_available": false,
+            "fixture_id": "synthetic-meridian-ship-decision",
+            "fixture_trust": "embedded_approved",
+            "fixture_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "context_session_id": "sidekick-diagnostic-synthetic-42-1",
+            "reasoning_session_correlation": "session-a",
+            "reasoning_sessions_started": 1,
+            "fixture_turns": [
+                {
+                    "id": "vendor_strategy",
+                    "prompt": "What is the risk?",
+                    "reasoning_session_correlation": "session-a",
+                    "result": { "outcome": "published" }
+                },
+                {
+                    "id": "procurement_role_flip",
+                    "prompt": "Advise procurement.",
+                    "reasoning_session_correlation": "session-a",
+                    "result": { "outcome": "published" }
+                }
+            ]
+        });
+
+        assert!(native_sidekick_diagnostic_operationally_passed(
+            &payload, &cli
+        ));
+        let mut wrong_source = payload;
+        wrong_source["transcript_source"] = serde_json::json!("active_transcript");
+        assert!(!native_sidekick_diagnostic_operationally_passed(
+            &wrong_source,
+            &cli
+        ));
+    }
+
+    #[test]
+    fn external_fixture_cannot_pass_without_published_persistent_turns() {
+        let cli = NativeSidekickDiagnosticCli {
+            source: commands::NativeSidekickDiagnosticSource::ExternalFixture(
+                "fixture.json".into(),
+            ),
+            typed_message: None,
+        };
+        let payload = serde_json::json!({
+            "transcript_source": "external_user_supplied_fixture",
+            "prepared_context_source": "external_user_supplied_fixture",
+            "screen_source": "none",
+            "screen_available": false,
+            "fixture_id": "synthetic-fixture",
+            "fixture_trust": "external_user_supplied",
+            "fixture_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "context_session_id": "sidekick-diagnostic-synthetic-42-1",
+            "reasoning_session_correlation": "session-a",
+            "reasoning_sessions_started": 1,
+            "fixture_turns": []
+        });
+
+        assert!(!native_sidekick_diagnostic_operationally_passed(
+            &payload, &cli
+        ));
     }
 }
 

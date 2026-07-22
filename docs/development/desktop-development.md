@@ -63,6 +63,39 @@ That script:
 - runs the native hotkey diagnostic from the installed app identity
 - launches `Minutes Dev.app`
 
+## Native Sidekick installed-binary acceptance
+
+After installing a Sidekick change, run the complete Meridian acceptance from
+the repository checkout:
+
+```bash
+node scripts/run_native_sidekick_acceptance.mjs
+```
+
+This command runs the `minutes-app` executable inside the installed
+`~/Applications/Minutes Dev.app`; it does not require an active recording,
+microphone, screen permission, or manual interaction. The approved Meridian
+fixture and its two typed prompts are compiled into the signed binary. The
+runner fails unless all of the following hold together:
+
+- the transcript and prepared context came from the embedded golden fixture
+- the installed binary's compiled fixture bytes match the checkout golden by
+  SHA-256, so a stale bundle cannot self-attest a pass
+- no live transcript, `SIDEKICK_BRIEF.md`, context database, or screen lane was used
+- both exact canonical prompts published through one provider-neutral
+  reasoning-session identity, with exactly one backend session start
+- the canonical 15-point Meridian quality golden passed
+- first-token, turn-total, and cold two-turn wall latency stayed within the
+  documented realtime thresholds
+
+The command intentionally includes `--consent-cloud` when invoking the native
+diagnostic because the embedded synthetic evidence is sent to Codex Cloud. An
+external fixture is always labeled `external_user_supplied_fixture`; the word
+`synthetic` in an arbitrary file is not treated as an approved privacy claim.
+External fixture files are accepted only on Unix hosts, where Minutes can open
+one bounded regular-file descriptor with no-follow and nonblocking semantics;
+other platforms must use a compiled approved golden.
+
 ## Dictation shortcut paths
 
 Minutes now has two distinct dictation shortcut paths:

@@ -96,6 +96,7 @@ pub struct LiveSidekickEngine {
     pub session: LiveAssistanceSession,
     backend: Arc<dyn PersistentReasoningBackend>,
     backend_session: Option<Box<dyn PersistentReasoningSession>>,
+    backend_sessions_started: u64,
     descriptor: ReasoningBackendDescriptor,
     config: LiveSidekickEngineConfig,
     transcript: VecDeque<ReasoningTranscriptEvidence>,
@@ -135,6 +136,7 @@ impl LiveSidekickEngine {
             session: LiveAssistanceSession::new(session_id, surface, role, posture),
             backend,
             backend_session: None,
+            backend_sessions_started: 0,
             descriptor,
             config,
             transcript: VecDeque::new(),
@@ -156,6 +158,20 @@ impl LiveSidekickEngine {
 
     pub fn descriptor(&self) -> &ReasoningBackendDescriptor {
         &self.descriptor
+    }
+
+    /// Opaque identity of the currently attached provider-neutral reasoning
+    /// session. Diagnostics use this to prove sequential turns stayed on one
+    /// persistent session without depending on a vendor-specific thread API.
+    pub fn reasoning_session_id(&self) -> Option<&ReasoningSessionId> {
+        self.backend_session.as_ref().map(|session| session.id())
+    }
+
+    /// Number of backend sessions successfully started during this engine's
+    /// lifetime. A value above one means recovery or a policy epoch change
+    /// replaced the persistent session.
+    pub fn reasoning_sessions_started(&self) -> u64 {
+        self.backend_sessions_started
     }
 
     pub fn start_capture(
@@ -674,7 +690,7 @@ impl LiveSidekickEngine {
             provider.close();
         }
         let capture_session_id = self.capture_id()?;
-        self.backend_session = Some(self.backend.start_session(ReasoningSessionConfig {
+        let session = self.backend.start_session(ReasoningSessionConfig {
             base_instructions: self.config.base_instructions.clone(),
             developer_instructions: self.config.developer_instructions.clone(),
             latency_class: ReasoningLatencyClass::Realtime,
@@ -684,7 +700,9 @@ impl LiveSidekickEngine {
                 capture_session_id,
                 source_policy_generation: self.session.source_policy_generation,
             },
-        })?);
+        })?;
+        self.backend_sessions_started = self.backend_sessions_started.saturating_add(1);
+        self.backend_session = Some(session);
         Ok(())
     }
 
@@ -970,6 +988,24 @@ mod tests {
             Some("A material synthesis.")
         );
         assert!(engine.evaluate_background().unwrap().is_none());
+    }
+
+    #[test]
+    fn engine_reports_provider_neutral_persistent_session_identity() {
+        let backend = FakeBackend::default();
+        let mut engine = engine(backend.clone());
+
+        assert_eq!(engine.reasoning_sessions_started(), 1);
+        assert_eq!(
+            engine
+                .reasoning_session_id()
+                .map(ReasoningSessionId::as_str),
+            Some("fake-session")
+        );
+
+        engine.invalidate_source_policy(1).unwrap();
+        assert_eq!(engine.reasoning_sessions_started(), 2);
+        assert_eq!(lock(&backend.state).sessions_started, 2);
     }
 
     #[test]

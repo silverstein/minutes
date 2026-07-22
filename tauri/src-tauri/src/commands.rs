@@ -11,11 +11,14 @@ use minutes_core::config::{
 use minutes_core::markdown::ConsentBasis;
 use minutes_core::{CaptureMode, Config, ContentType};
 use reqwest::header::{ACCEPT, CONTENT_LENGTH};
+use sha2::{Digest, Sha256};
 use std::cmp::Reverse;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, VecDeque};
 use std::fs::OpenOptions;
 use std::hash::{Hash, Hasher};
+#[cfg(unix)]
+use std::io::Read;
 use std::io::{self, Write};
 use std::path::Path;
 use std::path::PathBuf;
@@ -15584,27 +15587,377 @@ fn wait_for_native_sidekick_diagnostic_turn(
     }
 }
 
-/// Headless acceptance path for the signed desktop bundle. This deliberately
-/// uses the same exact-session resolver, provider adapter, evidence reducer,
-/// prompt contract, and publication gate as the native window. It exists so a
-/// developer or CI host can prove the live path without manually driving the
-/// WebView. The caller must enforce explicit cloud-consent at the CLI boundary.
+fn native_sidekick_diagnostic_session_correlation(
+    engine: &minutes_core::live_sidekick::LiveSidekickEngine,
+) -> Result<String, String> {
+    let session_id = engine.reasoning_session_id().ok_or_else(|| {
+        "Sidekick diagnostic has no attached persistent reasoning session".to_string()
+    })?;
+    if !session_id.is_valid() {
+        return Err("Sidekick diagnostic reasoning session identity is invalid".into());
+    }
+    // The provider's raw thread/session id is not evidence and need not leave
+    // the desktop process. A digest is sufficient to prove both turns stayed
+    // on one opaque provider-neutral reasoning session.
+    Ok(native_sidekick_sha256(session_id.as_str().as_bytes()))
+}
+
+const NATIVE_SIDEKICK_DIAGNOSTIC_FIXTURE_MAX_BYTES: u64 = 128 * 1024;
+const NATIVE_SIDEKICK_DIAGNOSTIC_TEXT_MAX_CHARS: usize = 4_000;
+const NATIVE_SIDEKICK_DIAGNOSTIC_MAX_TRANSCRIPT_ITEMS: usize = 64;
+const NATIVE_SIDEKICK_DIAGNOSTIC_MAX_TURNS: usize = 4;
+const EMBEDDED_MERIDIAN_FIXTURE: &str =
+    include_str!("../../../tests/fixtures/sidekick_rehearsal/v1/meridian_ship_decision.json");
+static NATIVE_SIDEKICK_DIAGNOSTIC_SESSION_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum NativeSidekickDiagnosticSource {
+    ActiveCapture,
+    EmbeddedMeridian,
+    ExternalFixture(PathBuf),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NativeSidekickDiagnosticFixtureTrust {
+    EmbeddedApproved,
+    ExternalUserSupplied,
+}
+
+impl NativeSidekickDiagnosticFixtureTrust {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::EmbeddedApproved => "embedded_approved",
+            Self::ExternalUserSupplied => "external_user_supplied",
+        }
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NativeSidekickFixturePreparedContext {
+    user_role: String,
+    posture: String,
+    demo_goal: String,
+    known_facts: Vec<String>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NativeSidekickFixtureTranscriptItem {
+    sequence: u64,
+    speaker: String,
+    text: String,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NativeSidekickFixtureTurn {
+    id: String,
+    typed_prompt: String,
+    #[serde(rename = "required_behaviors")]
+    _required_behaviors: Vec<String>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NativeSidekickDiagnosticFixture {
+    schema_version: u64,
+    id: String,
+    content_origin: String,
+    #[serde(rename = "description")]
+    _description: String,
+    #[serde(rename = "capture")]
+    _capture: serde_json::Value,
+    prepared_context: NativeSidekickFixturePreparedContext,
+    #[serde(rename = "speakers")]
+    _speakers: HashMap<String, String>,
+    transcript: Vec<NativeSidekickFixtureTranscriptItem>,
+    turns: Vec<NativeSidekickFixtureTurn>,
+    #[serde(rename = "forbidden_behaviors")]
+    _forbidden_behaviors: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct LoadedNativeSidekickDiagnosticFixture {
+    fixture: NativeSidekickDiagnosticFixture,
+    trust: NativeSidekickDiagnosticFixtureTrust,
+    sha256: String,
+}
+
+fn native_sidekick_sha256(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+fn validate_native_sidekick_fixture_text(
+    label: &str,
+    value: &str,
+    max_chars: usize,
+) -> Result<(), String> {
+    let length = value.chars().count();
+    if value.trim().is_empty() || length > max_chars {
+        return Err(format!(
+            "Sidekick fixture {label} must contain 1 to {max_chars} characters"
+        ));
+    }
+    Ok(())
+}
+
+fn parse_native_sidekick_diagnostic_fixture(
+    bytes: &[u8],
+    trust: NativeSidekickDiagnosticFixtureTrust,
+) -> Result<LoadedNativeSidekickDiagnosticFixture, String> {
+    if bytes.is_empty() || bytes.len() as u64 > NATIVE_SIDEKICK_DIAGNOSTIC_FIXTURE_MAX_BYTES {
+        return Err(format!(
+            "Sidekick fixture must be between 1 byte and {} bytes",
+            NATIVE_SIDEKICK_DIAGNOSTIC_FIXTURE_MAX_BYTES
+        ));
+    }
+    let fixture: NativeSidekickDiagnosticFixture = serde_json::from_slice(bytes)
+        .map_err(|error| format!("Could not parse Sidekick fixture: {error}"))?;
+    if fixture.schema_version != 1 || fixture.content_origin != "synthetic" {
+        return Err("Native Sidekick diagnostics accept only schema-v1 synthetic fixtures".into());
+    }
+    validate_native_sidekick_fixture_text("id", &fixture.id, 80)?;
+    if !fixture
+        .id
+        .chars()
+        .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
+    {
+        return Err("Sidekick fixture id may contain only letters, numbers, '-' and '_'".into());
+    }
+    validate_native_sidekick_fixture_text(
+        "prepared user role",
+        &fixture.prepared_context.user_role,
+        500,
+    )?;
+    validate_native_sidekick_fixture_text(
+        "prepared posture",
+        &fixture.prepared_context.posture,
+        1_000,
+    )?;
+    validate_native_sidekick_fixture_text(
+        "prepared demo goal",
+        &fixture.prepared_context.demo_goal,
+        1_000,
+    )?;
+    if fixture.prepared_context.known_facts.len() > 32 {
+        return Err("Sidekick fixture may contain at most 32 known facts".into());
+    }
+    for fact in &fixture.prepared_context.known_facts {
+        validate_native_sidekick_fixture_text("known fact", fact, 500)?;
+    }
+    if fixture.transcript.is_empty()
+        || fixture.transcript.len() > NATIVE_SIDEKICK_DIAGNOSTIC_MAX_TRANSCRIPT_ITEMS
+    {
+        return Err(format!(
+            "Sidekick fixture transcript must contain 1 to {} items",
+            NATIVE_SIDEKICK_DIAGNOSTIC_MAX_TRANSCRIPT_ITEMS
+        ));
+    }
+    let mut previous_sequence = 0;
+    for item in &fixture.transcript {
+        if item.sequence == 0 || item.sequence <= previous_sequence {
+            return Err(
+                "Sidekick fixture transcript sequences must be unique and strictly increasing"
+                    .into(),
+            );
+        }
+        previous_sequence = item.sequence;
+        validate_native_sidekick_fixture_text("transcript speaker", &item.speaker, 100)?;
+        validate_native_sidekick_fixture_text(
+            "transcript text",
+            &item.text,
+            NATIVE_SIDEKICK_DIAGNOSTIC_TEXT_MAX_CHARS,
+        )?;
+    }
+    if fixture.turns.is_empty() || fixture.turns.len() > NATIVE_SIDEKICK_DIAGNOSTIC_MAX_TURNS {
+        return Err(format!(
+            "Sidekick fixture must contain 1 to {} turns",
+            NATIVE_SIDEKICK_DIAGNOSTIC_MAX_TURNS
+        ));
+    }
+    let mut turn_ids = std::collections::HashSet::new();
+    for turn in &fixture.turns {
+        validate_native_sidekick_fixture_text("turn id", &turn.id, 80)?;
+        validate_native_sidekick_fixture_text("turn prompt", &turn.typed_prompt, 1_000)?;
+        if !turn_ids.insert(turn.id.as_str()) {
+            return Err("Sidekick fixture turn ids must be unique".into());
+        }
+    }
+    let prepared_len = serde_json::to_string(&fixture.prepared_context)
+        .map_err(|error| format!("Could not encode Sidekick fixture context: {error}"))?
+        .len();
+    let transcript_len = fixture
+        .transcript
+        .iter()
+        .map(|item| item.text.len().saturating_add(item.speaker.len()))
+        .sum::<usize>();
+    if prepared_len.saturating_add(transcript_len) > 7_000 {
+        return Err("Sidekick fixture evidence exceeds the 7,000-byte diagnostic budget".into());
+    }
+    Ok(LoadedNativeSidekickDiagnosticFixture {
+        fixture,
+        trust,
+        sha256: native_sidekick_sha256(bytes),
+    })
+}
+
+#[cfg(unix)]
+fn load_external_native_sidekick_diagnostic_fixture(
+    path: &Path,
+) -> Result<LoadedNativeSidekickDiagnosticFixture, String> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let mut options = OpenOptions::new();
+    options
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC);
+    let file = options
+        .open(path)
+        .map_err(|error| format!("Could not open Sidekick fixture safely: {error}"))?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| format!("Could not inspect open Sidekick fixture: {error}"))?;
+    if !metadata.is_file() {
+        return Err("Sidekick fixture must be a regular file, not a symlink or device".into());
+    }
+    if metadata.len() == 0 || metadata.len() > NATIVE_SIDEKICK_DIAGNOSTIC_FIXTURE_MAX_BYTES {
+        return Err(format!(
+            "Sidekick fixture must be between 1 byte and {} bytes",
+            NATIVE_SIDEKICK_DIAGNOSTIC_FIXTURE_MAX_BYTES
+        ));
+    }
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.take(NATIVE_SIDEKICK_DIAGNOSTIC_FIXTURE_MAX_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("Could not read Sidekick fixture: {error}"))?;
+    if bytes.len() as u64 > NATIVE_SIDEKICK_DIAGNOSTIC_FIXTURE_MAX_BYTES {
+        return Err(format!(
+            "Sidekick fixture must be between 1 byte and {} bytes",
+            NATIVE_SIDEKICK_DIAGNOSTIC_FIXTURE_MAX_BYTES
+        ));
+    }
+    parse_native_sidekick_diagnostic_fixture(
+        &bytes,
+        NativeSidekickDiagnosticFixtureTrust::ExternalUserSupplied,
+    )
+}
+
+#[cfg(not(unix))]
+fn load_external_native_sidekick_diagnostic_fixture(
+    _path: &Path,
+) -> Result<LoadedNativeSidekickDiagnosticFixture, String> {
+    Err(
+        "External Sidekick fixtures require safe no-follow file opening and are not supported on this platform; use an embedded approved golden"
+            .into(),
+    )
+}
+
+fn load_native_sidekick_diagnostic_source(
+    source: &NativeSidekickDiagnosticSource,
+) -> Result<Option<LoadedNativeSidekickDiagnosticFixture>, String> {
+    match source {
+        NativeSidekickDiagnosticSource::ActiveCapture => Ok(None),
+        NativeSidekickDiagnosticSource::EmbeddedMeridian => {
+            parse_native_sidekick_diagnostic_fixture(
+                EMBEDDED_MERIDIAN_FIXTURE.as_bytes(),
+                NativeSidekickDiagnosticFixtureTrust::EmbeddedApproved,
+            )
+            .map(Some)
+        }
+        NativeSidekickDiagnosticSource::ExternalFixture(path) => {
+            load_external_native_sidekick_diagnostic_fixture(path).map(Some)
+        }
+    }
+}
+
+fn synthetic_native_sidekick_context_session(
+    fixture: &LoadedNativeSidekickDiagnosticFixture,
+) -> minutes_core::context_store::ContextSession {
+    let nonce = NATIVE_SIDEKICK_DIAGNOSTIC_SESSION_COUNTER.fetch_add(1, Ordering::Relaxed);
+    minutes_core::context_store::ContextSession {
+        id: format!(
+            "sidekick-diagnostic-synthetic-{}-{nonce}",
+            std::process::id()
+        ),
+        session_type: minutes_core::context_store::ContextSessionType::Recording,
+        state: minutes_core::context_store::ContextSessionState::Active,
+        capture_mode: Some(CaptureMode::Meeting),
+        content_type: Some(ContentType::Meeting),
+        title: Some("Synthetic Sidekick diagnostic".into()),
+        started_at: chrono::Local::now(),
+        ended_at: None,
+        metadata: serde_json::json!({
+            "content_origin": "synthetic",
+            "fixture_id": &fixture.fixture.id,
+            "fixture_trust": fixture.trust.as_str(),
+        }),
+    }
+}
+
+fn resolve_native_sidekick_diagnostic_context(
+    fixture: Option<&LoadedNativeSidekickDiagnosticFixture>,
+    recording_active: bool,
+    live_active: bool,
+) -> Result<minutes_core::context_store::ContextSession, String> {
+    if let Some(fixture) = fixture {
+        return Ok(synthetic_native_sidekick_context_session(fixture));
+    }
+    resolve_native_sidekick_context_session_from_activity(recording_active, live_active)
+}
+
+fn native_sidekick_diagnostic_prepared_context(
+    fixture: Option<&LoadedNativeSidekickDiagnosticFixture>,
+) -> Result<String, String> {
+    let Some(fixture) = fixture else {
+        return Ok(native_sidekick_prepared_context(DEFAULT_COPILOT_GOAL));
+    };
+    let encoded = serde_json::to_string_pretty(&fixture.fixture.prepared_context)
+        .map_err(|error| format!("Could not encode Sidekick fixture context: {error}"))?;
+    let encoded = encoded
+        .chars()
+        .take(NATIVE_SIDEKICK_BRIEF_LIMIT)
+        .collect::<String>();
+    Ok(format!(
+        "meeting_goal={}\n\nsynthetic_fixture_prepared_context:\n{}",
+        DEFAULT_COPILOT_GOAL, encoded
+    ))
+}
+
+/// Headless acceptance path for the signed desktop bundle. Live diagnostics
+/// use the same exact-session resolver as the native window. Explicitly
+/// synthetic fixtures instead use an isolated in-memory session, while both
+/// paths share the provider adapter, evidence reducer, prompt contract, and
+/// publication gate. The caller must enforce explicit cloud consent at the CLI
+/// boundary.
 pub fn run_native_sidekick_diagnostic(
+    source: NativeSidekickDiagnosticSource,
     typed_message: Option<String>,
-    synthetic_fixture: Option<PathBuf>,
 ) -> Result<serde_json::Value, String> {
     use minutes_core::live_sidekick::{
         AssistancePosture, AssistanceSurface, CaptureMode as SidekickCaptureMode,
         LiveAssistanceSessionId, LiveSidekickEngine, LiveSidekickEngineConfig, UserRole,
     };
 
-    let recording_active =
-        minutes_core::pid::inspect_pid_file(&minutes_core::pid::pid_path()).is_active();
-    let live_active =
-        minutes_core::pid::inspect_pid_file(&minutes_core::pid::live_transcript_pid_path())
-            .is_active();
-    let context_session =
-        resolve_native_sidekick_context_session_from_activity(recording_active, live_active)?;
+    // Parse and validate the fixture before it is allowed to bypass the live
+    // session resolver. Synthetic diagnostics are hermetic by construction:
+    // they never read a live transcript, SIDEKICK_BRIEF.md, context.db, or a
+    // real screen capture from the user's current meeting.
+    let fixture = load_native_sidekick_diagnostic_source(&source)?;
+    let (recording_active, live_active) = if fixture.is_some() {
+        (false, false)
+    } else {
+        (
+            minutes_core::pid::inspect_pid_file(&minutes_core::pid::pid_path()).is_active(),
+            minutes_core::pid::inspect_pid_file(&minutes_core::pid::live_transcript_pid_path())
+                .is_active(),
+        )
+    };
+    let context_session = resolve_native_sidekick_diagnostic_context(
+        fixture.as_ref(),
+        recording_active,
+        live_active,
+    )?;
     let codex_path = resolve_agent_binary("codex").map_err(|error| error.user_message())?;
     let backend = Arc::new(
         crate::codex_reasoning_backend::CodexReasoningBackend::sidekick(
@@ -15622,7 +15975,7 @@ pub fn run_native_sidekick_diagnostic(
         LiveSidekickEngineConfig {
             base_instructions: NATIVE_SIDEKICK_BASE_INSTRUCTIONS.into(),
             developer_instructions: NATIVE_SIDEKICK_DEVELOPER_INSTRUCTIONS.into(),
-            prepared_context: native_sidekick_prepared_context(DEFAULT_COPILOT_GOAL),
+            prepared_context: native_sidekick_diagnostic_prepared_context(fixture.as_ref())?,
             max_window_chars: 8_000,
             max_transcript_items: 32,
         },
@@ -15638,74 +15991,91 @@ pub fn run_native_sidekick_diagnostic(
     engine
         .start_capture(context_session.id.clone().into(), capture_mode)
         .map_err(|error| error.to_string())?;
+    let initial_reasoning_session_correlation =
+        native_sidekick_diagnostic_session_correlation(&engine)?;
 
-    let transcript_items = if let Some(path) = synthetic_fixture.as_ref() {
-        let fixture: serde_json::Value = serde_json::from_slice(
-            &std::fs::read(path)
-                .map_err(|error| format!("Could not read Sidekick fixture: {error}"))?,
-        )
-        .map_err(|error| format!("Could not parse Sidekick fixture: {error}"))?;
-        if fixture
-            .get("schema_version")
-            .and_then(serde_json::Value::as_u64)
-            != Some(1)
-            || fixture
-                .get("content_origin")
-                .and_then(serde_json::Value::as_str)
-                != Some("synthetic")
-        {
-            return Err(
-                "Native Sidekick diagnostics accept only schema-v1 synthetic fixtures".into(),
-            );
-        }
-        let items = fixture
-            .get("transcript")
-            .and_then(serde_json::Value::as_array)
-            .ok_or_else(|| "Sidekick fixture has no transcript array".to_string())?;
+    let transcript_items = if let Some(fixture) = fixture.as_ref() {
         let mut accepted = 0;
-        for (index, item) in items.iter().enumerate() {
-            let sequence = item
-                .get("sequence")
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or((index + 1) as u64);
-            let text = item
-                .get("text")
-                .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| {
-                    format!("Sidekick fixture transcript item {sequence} has no text")
-                })?;
-            let speaker = item
-                .get("speaker")
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_string);
-            if engine
+        for item in &fixture.fixture.transcript {
+            let reduction = engine
                 .observe_transcript(minutes_core::live_sidekick::ReasoningTranscriptEvidence {
                     evidence_id: minutes_core::live_sidekick::EvidenceId::new(format!(
-                        "utterance-{sequence}"
+                        "utterance-{}",
+                        item.sequence
                     )),
-                    text: text.to_string(),
-                    speaker_label: speaker,
+                    text: item.text.clone(),
+                    speaker_label: Some(item.speaker.clone()),
                     speaker_verified: false,
-                    offset_ms: sequence.saturating_mul(1_000),
+                    offset_ms: item.sequence.saturating_mul(1_000),
                     duration_ms: 1_000,
                 })
-                .is_ok_and(|reduction| reduction.accepted)
-            {
-                accepted += 1;
+                .map_err(|error| {
+                    format!(
+                        "Sidekick rejected fixture utterance {}: {error}",
+                        item.sequence
+                    )
+                })?;
+            if !reduction.accepted {
+                return Err(format!(
+                    "Sidekick did not accept fixture utterance {}",
+                    item.sequence
+                ));
             }
+            accepted += 1;
+        }
+        if accepted != fixture.fixture.transcript.len() {
+            return Err("Sidekick did not accept the complete fixture transcript".into());
         }
         accepted
     } else {
         let mut cursor = 0;
         observe_native_sidekick_transcript(&mut engine, &mut cursor)?
     };
-    let mut last_screen_path = None;
-    let screen_available =
-        refresh_native_sidekick_screen(&mut engine, &context_session.id, &mut last_screen_path);
-    let proactive = if engine
-        .evaluate_background()
-        .map_err(|error| error.to_string())?
-        .is_some()
+    let screen_available = if fixture.is_some() {
+        false
+    } else {
+        let mut last_screen_path = None;
+        refresh_native_sidekick_screen(&mut engine, &context_session.id, &mut last_screen_path)
+    };
+    let mut fixture_turns = Vec::new();
+    if let Some(fixture) = fixture.as_ref() {
+        for turn in &fixture.fixture.turns {
+            if engine.reasoning_sessions_started() != 1
+                || native_sidekick_diagnostic_session_correlation(&engine)?
+                    != initial_reasoning_session_correlation
+            {
+                return Err(
+                    "Sidekick diagnostic replaced its persistent reasoning session before a fixture turn"
+                        .into(),
+                );
+            }
+            engine
+                .send_user(turn.typed_prompt.clone())
+                .map_err(|error| error.to_string())?;
+            let result =
+                wait_for_native_sidekick_diagnostic_turn(&mut engine, Duration::from_secs(20))?;
+            let turn_session_correlation = native_sidekick_diagnostic_session_correlation(&engine)?;
+            if engine.reasoning_sessions_started() != 1
+                || turn_session_correlation != initial_reasoning_session_correlation
+            {
+                return Err(
+                    "Sidekick diagnostic replaced its persistent reasoning session during a fixture turn"
+                        .into(),
+                );
+            }
+            fixture_turns.push(serde_json::json!({
+                "id": turn.id.as_str(),
+                "prompt": turn.typed_prompt.as_str(),
+                "reasoning_session_correlation": turn_session_correlation,
+                "result": result,
+            }));
+        }
+    }
+    let proactive = if fixture_turns.is_empty()
+        && engine
+            .evaluate_background()
+            .map_err(|error| error.to_string())?
+            .is_some()
     {
         Some(wait_for_native_sidekick_diagnostic_turn(
             &mut engine,
@@ -15714,6 +16084,9 @@ pub fn run_native_sidekick_diagnostic(
     } else {
         None
     };
+    let typed_message_present = typed_message
+        .as_ref()
+        .is_some_and(|value| !value.trim().is_empty());
     let foreground = if let Some(message) = typed_message.filter(|value| !value.trim().is_empty()) {
         engine
             .send_user(message)
@@ -15726,6 +16099,8 @@ pub fn run_native_sidekick_diagnostic(
         None
     };
     let descriptor = engine.descriptor().clone();
+    let reasoning_session_correlation = native_sidekick_diagnostic_session_correlation(&engine)?;
+    let reasoning_sessions_started = engine.reasoning_sessions_started();
     let _ = engine.stop_capture();
 
     Ok(serde_json::json!({
@@ -15733,14 +16108,186 @@ pub fn run_native_sidekick_diagnostic(
         "context_session_id": context_session.id,
         "context_session_type": context_session.session_type,
         "transcript_items": transcript_items,
-        "evidence_source": if synthetic_fixture.is_some() { "synthetic_fixture" } else { "active_transcript" },
+        "evidence_source": if fixture.is_some() { "synthetic_fixture" } else { "active_transcript" },
+        "transcript_source": match fixture.as_ref().map(|fixture| fixture.trust) {
+            Some(NativeSidekickDiagnosticFixtureTrust::EmbeddedApproved) => "embedded_golden",
+            Some(NativeSidekickDiagnosticFixtureTrust::ExternalUserSupplied) => "external_user_supplied_fixture",
+            None => "active_transcript",
+        },
+        "prepared_context_source": match fixture.as_ref().map(|fixture| fixture.trust) {
+            Some(NativeSidekickDiagnosticFixtureTrust::EmbeddedApproved) => "embedded_golden",
+            Some(NativeSidekickDiagnosticFixtureTrust::ExternalUserSupplied) => "external_user_supplied_fixture",
+            None => "sidekick_brief",
+        },
+        "screen_source": if fixture.is_some() { "none" } else { "exact_session" },
+        "fixture_id": fixture.as_ref().map(|fixture| fixture.fixture.id.as_str()),
+        "fixture_trust": fixture.as_ref().map(|fixture| fixture.trust.as_str()),
+        "fixture_sha256": fixture.as_ref().map(|fixture| fixture.sha256.as_str()),
+        "typed_message_present": typed_message_present,
         "screen_available": screen_available,
         "provider": descriptor.provider,
         "model": descriptor.model,
         "privacy": descriptor.privacy,
+        "reasoning_session_correlation": reasoning_session_correlation,
+        "reasoning_sessions_started": reasoning_sessions_started,
         "proactive": proactive,
         "foreground": foreground,
+        "fixture_turns": fixture_turns,
     }))
+}
+
+#[cfg(test)]
+mod native_sidekick_diagnostic_tests {
+    use super::*;
+
+    fn fixture() -> LoadedNativeSidekickDiagnosticFixture {
+        parse_native_sidekick_diagnostic_fixture(
+            EMBEDDED_MERIDIAN_FIXTURE.as_bytes(),
+            NativeSidekickDiagnosticFixtureTrust::EmbeddedApproved,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn synthetic_diagnostic_context_wins_even_when_a_real_capture_is_active() {
+        let context =
+            resolve_native_sidekick_diagnostic_context(Some(&fixture()), true, true).unwrap();
+
+        assert_eq!(
+            context.session_type,
+            minutes_core::context_store::ContextSessionType::Recording
+        );
+        assert_eq!(
+            context
+                .metadata
+                .get("content_origin")
+                .and_then(serde_json::Value::as_str),
+            Some("synthetic")
+        );
+        assert!(context.id.starts_with("sidekick-diagnostic-synthetic-"));
+    }
+
+    #[test]
+    fn live_diagnostic_still_requires_an_active_capture() {
+        let error = resolve_native_sidekick_diagnostic_context(None, false, false).unwrap_err();
+        assert_eq!(
+            error,
+            "Start a recording or live transcript before opening Sidekick."
+        );
+    }
+
+    #[test]
+    fn synthetic_prepared_context_comes_only_from_the_fixture() {
+        let prepared = native_sidekick_diagnostic_prepared_context(Some(&fixture())).unwrap();
+
+        assert!(prepared.contains("Product lead and CEO"));
+        assert!(prepared.contains("Sharp, decision-forcing strategist"));
+        assert!(prepared.contains("synthetic_fixture_prepared_context"));
+        assert!(!prepared.contains("prepared_sidekick_brief"));
+    }
+
+    #[test]
+    fn embedded_meridian_fixture_is_the_real_two_turn_golden() {
+        let loaded = fixture();
+
+        assert_eq!(
+            loaded.trust,
+            NativeSidekickDiagnosticFixtureTrust::EmbeddedApproved
+        );
+        assert_eq!(loaded.fixture.id, "synthetic-meridian-ship-decision");
+        assert_eq!(loaded.fixture.transcript.len(), 6);
+        assert_eq!(loaded.fixture.turns.len(), 2);
+        assert_eq!(
+            loaded.sha256,
+            native_sidekick_sha256(EMBEDDED_MERIDIAN_FIXTURE.as_bytes())
+        );
+    }
+
+    #[test]
+    fn relabeled_or_malformed_fixtures_fail_closed() {
+        let mut value: serde_json::Value = serde_json::from_str(EMBEDDED_MERIDIAN_FIXTURE).unwrap();
+        value["content_origin"] = serde_json::json!("private");
+        let wrong_origin = serde_json::to_vec(&value).unwrap();
+        assert!(parse_native_sidekick_diagnostic_fixture(
+            &wrong_origin,
+            NativeSidekickDiagnosticFixtureTrust::ExternalUserSupplied,
+        )
+        .is_err());
+
+        value["content_origin"] = serde_json::json!("synthetic");
+        value["transcript"][1]["sequence"] = serde_json::json!(1);
+        let duplicate_sequence = serde_json::to_vec(&value).unwrap();
+        assert!(parse_native_sidekick_diagnostic_fixture(
+            &duplicate_sequence,
+            NativeSidekickDiagnosticFixtureTrust::ExternalUserSupplied,
+        )
+        .is_err());
+
+        let mut no_turns: serde_json::Value =
+            serde_json::from_str(EMBEDDED_MERIDIAN_FIXTURE).unwrap();
+        no_turns["turns"] = serde_json::json!([]);
+        assert!(parse_native_sidekick_diagnostic_fixture(
+            &serde_json::to_vec(&no_turns).unwrap(),
+            NativeSidekickDiagnosticFixtureTrust::ExternalUserSupplied,
+        )
+        .is_err());
+
+        assert!(parse_native_sidekick_diagnostic_fixture(
+            &vec![b'x'; NATIVE_SIDEKICK_DIAGNOSTIC_FIXTURE_MAX_BYTES as usize + 1],
+            NativeSidekickDiagnosticFixtureTrust::ExternalUserSupplied,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn external_fixture_is_read_once_from_a_bounded_regular_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("fixture.json");
+        std::fs::write(&path, EMBEDDED_MERIDIAN_FIXTURE).unwrap();
+
+        let loaded = load_external_native_sidekick_diagnostic_fixture(&path).unwrap();
+
+        assert_eq!(
+            loaded.trust,
+            NativeSidekickDiagnosticFixtureTrust::ExternalUserSupplied
+        );
+        assert_eq!(
+            loaded.sha256,
+            native_sidekick_sha256(EMBEDDED_MERIDIAN_FIXTURE.as_bytes())
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn external_fixture_rejects_a_symlink_at_open_time() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("target.json");
+        let link = directory.path().join("fixture.json");
+        std::fs::write(&target, EMBEDDED_MERIDIAN_FIXTURE).unwrap();
+        symlink(&target, &link).unwrap();
+
+        assert!(load_external_native_sidekick_diagnostic_fixture(&link).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn external_fixture_rejects_a_fifo_without_blocking() {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("fixture.fifo");
+        let c_path = CString::new(path.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) }, 0);
+
+        let started = Instant::now();
+        let error = load_external_native_sidekick_diagnostic_fixture(&path).unwrap_err();
+
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(error.contains("regular file"));
+    }
 }
 
 struct NativeSidekickRunGuard {

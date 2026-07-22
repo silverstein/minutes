@@ -462,7 +462,7 @@ jobs:
         run: npm run check
 
       - name: Exercise full frontend registration and recovery
-        run: node --test scripts/test/tauri_startup_bindings.test.mjs scripts/test/tauri_frontend_startup.test.mjs
+        run: node --test scripts/test/tauri_startup_bindings.test.mjs scripts/test/tauri_frontend_startup.test.mjs scripts/test/native_sidekick_acceptance.test.mjs
 
   design_tokens:
     name: Design Tokens

@@ -39,6 +39,11 @@ fi
 if [[ -n "$RUSTUP_CARGO" && "$ACTIVE_CARGO" != "$RUSTUP_CARGO" ]]; then
     echo "Warning: cargo at $ACTIVE_CARGO is not the rustup-managed cargo ($RUSTUP_CARGO); rust-toolchain.toml may be ignored."
 fi
+HOST_TARGET="$(rustc -Vv | awk '/host:/ {print $2}')"
+if [[ -z "$HOST_TARGET" ]]; then
+    echo "Error: could not determine the Rust host target." >&2
+    exit 1
+fi
 
 DEV_CONFIG="tauri/src-tauri/tauri.dev.conf.json"
 DEV_PRODUCT_NAME="Minutes Dev"
@@ -48,9 +53,11 @@ INSTALL_APP="${INSTALL_DIR}/${DEV_PRODUCT_NAME}.app"
 SIGNING_IDENTITY="${MINUTES_DEV_SIGNING_IDENTITY:-${APPLE_SIGNING_IDENTITY:-}}"
 SIGN_MODE="adhoc"
 LOCK_DIR="${INSTALL_DIR}/.${DEV_PRODUCT_NAME}.install-lock"
+BUILD_LOCK_DIR="${ROOT_DIR}/target/.minutes-dev-build-lock"
 STAGED_APP="${INSTALL_DIR}/.${DEV_PRODUCT_NAME}.staged-$$.app"
 BACKUP_APP="${INSTALL_DIR}/.${DEV_PRODUCT_NAME}.backup-$$.app"
 INSTALL_LOCK_HELD=0
+BUILD_LOCK_HELD=0
 INSTALL_SWAP_ACTIVE=0
 HELPER_BACKUP_DIR=""
 HELPER_WORKSPACE_PREPARED=0
@@ -58,6 +65,12 @@ TRACKED_BUILD_HELPERS=(
   "tauri/src-tauri/bin/mic_check"
   "tauri/src-tauri/bin/mic_check-aarch64-apple-darwin"
 )
+PRESERVED_BUILD_HELPERS=("${TRACKED_BUILD_HELPERS[@]}")
+HOST_MIC_HELPER="tauri/src-tauri/bin/mic_check-${HOST_TARGET}"
+if [[ "$HOST_MIC_HELPER" != "${TRACKED_BUILD_HELPERS[0]}" \
+  && "$HOST_MIC_HELPER" != "${TRACKED_BUILD_HELPERS[1]}" ]]; then
+  PRESERVED_BUILD_HELPERS+=("$HOST_MIC_HELPER")
+fi
 
 assert_clean_build_source() {
   local dirty
@@ -73,7 +86,10 @@ write_head_helper() {
   local helper="$1"
   local staged
   staged="$(mktemp "${TMPDIR:-/tmp}/minutes-dev-head-helper.XXXXXX")"
-  git show "HEAD:${helper}" > "$staged"
+  if ! git show "HEAD:${helper}" > "$staged"; then
+    rm -f "$staged"
+    return 1
+  fi
   chmod 755 "$staged"
   /bin/mv -f "$staged" "$helper"
 }
@@ -82,8 +98,8 @@ prepare_canonical_build_helpers() {
   local index
   local helper
   HELPER_BACKUP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/minutes-dev-helper-backup.XXXXXX")"
-  for index in "${!TRACKED_BUILD_HELPERS[@]}"; do
-    helper="${TRACKED_BUILD_HELPERS[$index]}"
+  for index in "${!PRESERVED_BUILD_HELPERS[@]}"; do
+    helper="${PRESERVED_BUILD_HELPERS[$index]}"
     if [[ -e "$helper" ]]; then
       cp -p "$helper" "$HELPER_BACKUP_DIR/$index"
     else
@@ -94,6 +110,10 @@ prepare_canonical_build_helpers() {
   for helper in "${TRACKED_BUILD_HELPERS[@]}"; do
     write_head_helper "$helper"
   done
+  if [[ "$HOST_MIC_HELPER" != "${TRACKED_BUILD_HELPERS[0]}" \
+    && "$HOST_MIC_HELPER" != "${TRACKED_BUILD_HELPERS[1]}" ]]; then
+    rm -f "$HOST_MIC_HELPER"
+  fi
 }
 
 reset_tracked_build_helpers_to_head() {
@@ -119,20 +139,26 @@ restore_user_build_helpers() {
   if [[ "$HELPER_WORKSPACE_PREPARED" != "1" ]]; then
     return
   fi
-  for index in "${!TRACKED_BUILD_HELPERS[@]}"; do
-    helper="${TRACKED_BUILD_HELPERS[$index]}"
+  local restore_failed=0
+  for index in "${!PRESERVED_BUILD_HELPERS[@]}"; do
+    helper="${PRESERVED_BUILD_HELPERS[$index]}"
     if [[ -f "$HELPER_BACKUP_DIR/$index.missing" ]]; then
       rm -f "$helper"
-    else
-      cp -p "$HELPER_BACKUP_DIR/$index" "$helper"
+    elif ! cp -p "$HELPER_BACKUP_DIR/$index" "$helper"; then
+      restore_failed=1
     fi
   done
+  if [[ "$restore_failed" == "1" ]]; then
+    echo "Could not restore every developer helper; recovery copies remain at $HELPER_BACKUP_DIR" >&2
+    return 1
+  fi
   HELPER_WORKSPACE_PREPARED=0
   rm -rf "$HELPER_BACKUP_DIR"
   HELPER_BACKUP_DIR=""
 }
 
 cleanup_install_artifacts() {
+  local cleanup_status=0
   if [[ "$INSTALL_SWAP_ACTIVE" == "1" && -d "$BACKUP_APP" ]]; then
     if [[ ! -d "$INSTALL_APP" || -z "$(running_dev_bundle_pids)" ]]; then
       rm -rf "$INSTALL_APP"
@@ -144,10 +170,26 @@ cleanup_install_artifacts() {
     fi
   fi
   rm -rf "$STAGED_APP"
+  if ! restore_user_build_helpers; then
+    cleanup_status=1
+  fi
   if [[ "$INSTALL_LOCK_HELD" == "1" ]]; then
     rm -rf "$LOCK_DIR"
   fi
-  restore_user_build_helpers
+  if [[ "$BUILD_LOCK_HELD" == "1" ]]; then
+    rm -rf "$BUILD_LOCK_DIR"
+  fi
+  return "$cleanup_status"
+}
+
+acquire_build_lock() {
+  mkdir -p "$(dirname "$BUILD_LOCK_DIR")"
+  if ! mkdir "$BUILD_LOCK_DIR" 2>/dev/null; then
+    echo "Another ${DEV_PRODUCT_NAME} build is already running for this checkout (lock: $BUILD_LOCK_DIR)." >&2
+    exit 1
+  fi
+  BUILD_LOCK_HELD=1
+  printf '%s\n' "$$" > "$BUILD_LOCK_DIR/pid"
 }
 
 acquire_install_lock() {
@@ -273,6 +315,18 @@ restore_previous_app() {
   fi
 }
 
+handle_install_signal() {
+  local exit_code="$1"
+  trap - INT TERM
+  if [[ "$INSTALL_SWAP_ACTIVE" == "1" && -d "$BACKUP_APP" ]]; then
+    echo "Install interrupted during startup verification; restoring the previous app." >&2
+    if ! restore_previous_app 1 1; then
+      echo "Automatic rollback failed; the known-good recovery bundle remains at $BACKUP_APP" >&2
+    fi
+  fi
+  exit "$exit_code"
+}
+
 verify_frontend_startup() {
   local launch_started_unix_ms="$1"
   local status_path="$HOME/.minutes/desktop-control/desktop-app-com.useminutes.desktop.dev.json"
@@ -371,8 +425,8 @@ for arg in "$@"; do
 done
 
 trap cleanup_install_artifacts EXIT
-trap 'exit 130' INT
-trap 'exit 143' TERM
+trap 'handle_install_signal 130' INT
+trap 'handle_install_signal 143' TERM
 
 if [[ "$INSTALL_AFTER_BUILD" == "1" ]]; then
   for required in /usr/sbin/lsof osascript plutil open; do
@@ -381,6 +435,9 @@ if [[ "$INSTALL_AFTER_BUILD" == "1" ]]; then
       exit 1
     fi
   done
+fi
+acquire_build_lock
+if [[ "$INSTALL_AFTER_BUILD" == "1" ]]; then
   acquire_install_lock
 fi
 
@@ -405,7 +462,6 @@ echo "Build commit: $MINUTES_BUILD_COMMIT"
 run_with_ort_retry cargo build --release -p minutes-cli --features "$MINUTES_BUILD_FEATURES"
 
 echo "=== Staging CLI as Tauri sidecar ==="
-HOST_TARGET="$(rustc -Vv | awk '/host:/ {print $2}')"
 mkdir -p tauri/src-tauri/bin
 cp -f target/release/minutes "tauri/src-tauri/bin/minutes-${HOST_TARGET}"
 
@@ -415,7 +471,9 @@ echo "=== Building ${DEV_PRODUCT_NAME}.app ==="
 echo "=== Forcing fresh native helper generation ==="
 cargo clean -p minutes-app
 remove_generated_build_helpers
+rm -rf "$BUILD_APP"
 run_with_ort_retry cargo tauri build --bundles app --config "$DEV_CONFIG" --features "$MINUTES_BUILD_FEATURES" --no-sign
+remove_generated_build_helpers
 reset_tracked_build_helpers_to_head
 assert_clean_build_source
 # Inside-out signing (#311): sign every nested executable FIRST (the CLI

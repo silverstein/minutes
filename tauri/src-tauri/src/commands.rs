@@ -15591,6 +15591,7 @@ fn refresh_native_sidekick_screen(
 fn wait_for_native_sidekick_diagnostic_turn(
     engine: &mut minutes_core::live_sidekick::LiveSidekickEngine,
     timeout: Duration,
+    requested_at: Instant,
 ) -> Result<serde_json::Value, String> {
     use minutes_core::live_sidekick::SidekickLifecycleOutcome;
 
@@ -15602,6 +15603,10 @@ fn wait_for_native_sidekick_diagnostic_turn(
                 "candidate": publication.candidate,
                 "first_token_ms": publication.first_token_ms,
                 "total_ms": publication.total_ms,
+                "publication_ready_ms": Instant::now()
+                    .saturating_duration_since(requested_at)
+                    .as_millis()
+                    .min(u128::from(u64::MAX)) as u64,
             }));
         }
         if let Some(failure) = engine.take_failures().into_iter().next() {
@@ -16090,11 +16095,15 @@ pub fn run_native_sidekick_diagnostic(
                         .into(),
                 );
             }
+            let requested_at = Instant::now();
             engine
                 .send_user(turn.typed_prompt.clone())
                 .map_err(|error| error.to_string())?;
-            let result =
-                wait_for_native_sidekick_diagnostic_turn(&mut engine, Duration::from_secs(20))?;
+            let result = wait_for_native_sidekick_diagnostic_turn(
+                &mut engine,
+                Duration::from_secs(20),
+                requested_at,
+            )?;
             let turn_session_correlation = native_sidekick_diagnostic_session_correlation(&engine)?;
             if engine.reasoning_sessions_started() != 1
                 || turn_session_correlation != initial_reasoning_session_correlation
@@ -16112,6 +16121,7 @@ pub fn run_native_sidekick_diagnostic(
             }));
         }
     }
+    let proactive_requested_at = Instant::now();
     let proactive = if fixture_turns.is_empty()
         && engine
             .evaluate_background()
@@ -16121,6 +16131,7 @@ pub fn run_native_sidekick_diagnostic(
         Some(wait_for_native_sidekick_diagnostic_turn(
             &mut engine,
             Duration::from_secs(20),
+            proactive_requested_at,
         )?)
     } else {
         None
@@ -16128,6 +16139,7 @@ pub fn run_native_sidekick_diagnostic(
     let typed_message_present = typed_message
         .as_ref()
         .is_some_and(|value| !value.trim().is_empty());
+    let foreground_requested_at = Instant::now();
     let foreground = if let Some(message) = typed_message.filter(|value| !value.trim().is_empty()) {
         engine
             .send_user(message)
@@ -16135,6 +16147,7 @@ pub fn run_native_sidekick_diagnostic(
         Some(wait_for_native_sidekick_diagnostic_turn(
             &mut engine,
             Duration::from_secs(20),
+            foreground_requested_at,
         )?)
     } else {
         None

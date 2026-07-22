@@ -15,6 +15,7 @@ import {
 
 const MAX_FIRST_TOKEN_MS = 5_000;
 const MAX_TURN_TOTAL_MS = 10_000;
+const MAX_VISIBLE_PUBLICATION_MS = 5_000;
 const MAX_WALL_MS = 20_000;
 const HARD_TIMEOUT_MS = 35_000;
 const MAX_OUTPUT_BYTES = 1024 * 1024;
@@ -44,11 +45,11 @@ const fixtureSpecs = Object.freeze([
   }),
 ]);
 
-function sha256(bytes) {
+export function sha256(bytes) {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
-async function bundleManifestSha256(root) {
+export async function bundleManifestSha256(root) {
   const hash = createHash("sha256");
   async function walk(directory, relativeDirectory) {
     const entries = await fs.readdir(directory, { withFileTypes: true });
@@ -109,6 +110,7 @@ function candidateFromPayload(payload) {
     evidenceIds: Array.isArray(candidate?.evidence_ids) ? candidate.evidence_ids : [],
     firstTokenMs: result?.first_token_ms ?? null,
     totalMs: result?.total_ms ?? null,
+    publicationReadyMs: result?.publication_ready_ms ?? null,
   };
 }
 
@@ -194,6 +196,12 @@ export function evaluateContractScopeFixture(payload, runtime, spec) {
       `turn_total_under_${MAX_TURN_TOTAL_MS}ms`,
       Number.isFinite(candidate.totalMs) && candidate.totalMs <= MAX_TURN_TOTAL_MS,
       `Observed ${candidate.totalMs ?? "null"}ms.`,
+    ),
+    check(
+      `visible_publication_under_${MAX_VISIBLE_PUBLICATION_MS}ms`,
+      Number.isFinite(candidate.publicationReadyMs) &&
+        candidate.publicationReadyMs <= MAX_VISIBLE_PUBLICATION_MS,
+      `Observed ${candidate.publicationReadyMs ?? "null"}ms from typed request through publication readiness.`,
     ),
     check(
       `cold_wall_under_${MAX_WALL_MS}ms`,

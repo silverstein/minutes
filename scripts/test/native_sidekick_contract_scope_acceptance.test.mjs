@@ -115,11 +115,11 @@ test("held-out per-window remedy preserves the exact quantified outcome scope", 
     "For Northstar procurement, require a $5,000 service credit for each 30-minute service window below 99.95%. Reject one credit per incident.",
     "1. For Northstar procurement, require a $5,000 service credit for each 30-minute service window below 99.95%.\n2. Reject one credit per incident.\n3. Can Blue Mesa agree to that wording?",
     "For Northstar procurement, require that every 30-minute service window where uptime falls below 99.95% gives Northstar a $5,000 service credit. Reject one credit per outage or incident.",
-    "For Northstar procurement, require a $5,000 service credit each time uptime falls below 99.95% in a 30-minute service window. Reject one credit per outage or incident.",
     "For Northstar procurement, require a $5,000 service credit for each 30-minute service window in which uptime falls below 99.95%. Reject one credit per incident.",
     "For Northstar procurement, require that every 30-minute service window below 99.95% triggers a $5,000 service credit. Reject treating a continuous outage as one incident for credit purposes.",
     "For Northstar, require that every 30-minute service window below 99.95% triggers a $5,000 service credit. Reject one credit per incident.",
     "For Northstar Health, require that every 30-minute service window below 99.95% triggers a $5,000 service credit. Reject one credit per incident.",
+    "For Northstar Health, require that every 30-minute service window below 99.95% triggers a $5,000 service credit for Northstar Health. Reject replacing the per-window remedy with one credit per incident.",
   ];
   for (const candidate of semanticOrderVariants) {
     assert.equal(scorePerWindowRemedy(candidate).passed, true, candidate);
@@ -177,6 +177,8 @@ test("vague, aggregated, or negated per-window remedies fail closed", () => {
     "For Northstar procurement, require that all 30-minute service windows below 99.95% result in a $5,000 service credit. Reject one credit per incident.",
     "For Northstar procurement, require that all 30-minute service windows below 99.95% trigger a $5,000 service credit. Reject one credit per incident.",
     "For Northstar procurement, require that every 30-minute service window below 99.95% entitles a $5,000 service credit. Reject one credit per incident.",
+    "For Northstar procurement, require a $5,000 service credit each time uptime falls below 99.95% in a 30-minute service window. Reject one credit per outage or incident.",
+    "As Northstar Health's customer, require that every 30-minute service window below 99.95% triggers a $5,000 service credit. Reject one credit per incident.",
   ];
 
   for (const candidate of candidates) {
@@ -238,6 +240,7 @@ test("held-out aggregate remedy preserves its quarterly trigger and cap", () => 
     "For Harbor procurement, require one rebate equal to 8% of quarterly fees if aggregate quarterly spoilage exceeds 2%. No more than a single rebate may be paid in any quarter. Exclude shipment-level rebates.",
     "For Harbor, require that aggregate quarterly spoilage above 2% triggers one rebate equal to 8% of quarterly fees. Cap it at one rebate per quarter. Exclude shipment-level rebates.",
     "For Harbor Foods, require that aggregate quarterly spoilage above 2% triggers one rebate equal to 8% of quarterly fees. Cap it at one rebate per quarter. Exclude shipment-level rebates.",
+    "For Harbor Foods, require that if aggregate quarterly spoilage exceeds 2%, Polar Route owes Harbor Foods one rebate equal to 8% of that quarter's fees. Cap the 8% rebate at one per calendar quarter. Reject a per-shipment rebate.",
   ];
   for (const candidate of semanticOrderVariants) {
     assert.equal(scoreAggregateCappedRemedy(candidate).passed, true, candidate);
@@ -306,6 +309,7 @@ test("per-shipment invention and negated or missing aggregate caps fail closed",
     "For Harbor procurement, require that aggregate quarterly spoilage above 2% triggers one rebate equal to 8% of quarterly fees plus a １２% payment. Cap it at one rebate per quarter. Exclude shipment-level credits.",
     "For Harbor procurement, require that aggregate quarterly spoilage above 2% owes one rebate equal to 8% of quarterly fees. Cap it at one rebate per quarter. Exclude shipment-level credits.",
     "For Harbor procurement, require that aggregate quarterly spoilage above 2% results in one rebate equal to 8% of fees. Cap it at one rebate per quarter. Exclude shipment-level credits.",
+    "As Harbor Foods's customer, require that aggregate quarterly spoilage above 2% triggers one rebate equal to 8% of quarterly fees. Cap it at one rebate per quarter. Exclude shipment-level rebates.",
   ];
 
   for (const candidate of candidates) {
@@ -330,8 +334,9 @@ test("whole-clause grammar rejects unconsumed contradictory tails", () => {
   );
 
   const harborScope =
-    "For Harbor procurement, require that aggregate quarterly spoilage above 2% triggers one rebate of 8% of fees";
+    "For Harbor procurement, require that aggregate quarterly spoilage above 2% triggers one rebate of 8% of quarterly fees";
   const harborCap = "Cap it at one rebate per quarter.";
+  assert.equal(scoreAggregateCappedRemedy(`${harborScope}. ${harborCap}`).passed, true);
   for (const glue of [", ", " and ", " but ", ": "]) {
     assert.equal(
       scoreAggregateCappedRemedy(`${harborScope}${glue}allow another rebate. ${harborCap}`).passed,
@@ -389,6 +394,7 @@ test("installed held-out acceptance requires provenance, evidence, quality, and 
         outcome: "published",
         first_token_ms: 2_500,
         total_ms: 4_000,
+        publication_ready_ms: 4_100,
         candidate: {
           text: northstarReference,
           evidence_ids: spec.requiredEvidenceIds,
@@ -432,6 +438,10 @@ test("installed held-out acceptance requires provenance, evidence, quality, and 
   invalidCorrelation.reasoning_session_correlation = "persistent-session";
   invalidCorrelation.fixture_turns[0].reasoning_session_correlation = "persistent-session";
   assert.equal(evaluateContractScopeFixture(invalidCorrelation, runtime, spec).passed, false);
+
+  const slowVisiblePublication = structuredClone(payload);
+  slowVisiblePublication.fixture_turns[0].result.publication_ready_ms = 5_001;
+  assert.equal(evaluateContractScopeFixture(slowVisiblePublication, runtime, spec).passed, false);
 
   assert.equal(
     evaluateContractScopeFixture(payload, { ...runtime, wall_ms: 20_001 }, spec).passed,
@@ -483,6 +493,7 @@ test("installed held-out acceptance evaluates the aggregate capped counterexampl
         outcome: "published",
         first_token_ms: 2_500,
         total_ms: 4_000,
+        publication_ready_ms: 4_100,
         candidate: {
           text: harborReference,
           evidence_ids: spec.requiredEvidenceIds,

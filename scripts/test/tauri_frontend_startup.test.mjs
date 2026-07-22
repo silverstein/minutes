@@ -549,13 +549,28 @@ test('dev installer retires the old app and verifies the fresh frontend', async 
   );
   assert.match(
     source,
-    /cargo clean -p minutes-app[\s\S]*remove_generated_build_helpers[\s\S]*cargo tauri build[\s\S]*reset_tracked_build_helpers_to_head[\s\S]*assert_clean_build_source/,
+    /cargo clean -p minutes-app[\s\S]*remove_generated_build_helpers[\s\S]*rm -rf "\$BUILD_APP"[\s\S]*cargo tauri build[\s\S]*remove_generated_build_helpers[\s\S]*reset_tracked_build_helpers_to_head[\s\S]*assert_clean_build_source/,
     'a warm build must regenerate every bundled native helper before packaging and restore canonical source state afterward',
   );
   assert.match(
     source,
     /cleanup_install_artifacts[\s\S]*restore_user_build_helpers/,
     'developer helper copies must be restored on every success or failure exit path',
+  );
+  assert.match(
+    source,
+    /HOST_TARGET=.*rustc -Vv[\s\S]*HOST_MIC_HELPER="tauri\/src-tauri\/bin\/mic_check-\$\{HOST_TARGET\}"[\s\S]*PRESERVED_BUILD_HELPERS\+=\("\$HOST_MIC_HELPER"\)/,
+    'Intel and other host-specific mic helpers must be preserved without weakening the strict source gate',
+  );
+  assert.match(
+    source,
+    /trap cleanup_install_artifacts EXIT[\s\S]*acquire_build_lock[\s\S]*acquire_install_lock[\s\S]*prepare_canonical_build_helpers/,
+    'every build mode must hold a checkout-scoped lock before touching user helpers',
+  );
+  const cleanupBody = source.match(/cleanup_install_artifacts\(\) \{[\s\S]*?\n}/)?.[0] || '';
+  assert.ok(
+    cleanupBody.indexOf('restore_user_build_helpers') < cleanupBody.indexOf('rm -rf "$BUILD_LOCK_DIR"'),
+    'the checkout lock must remain held until user helper restoration finishes',
   );
 
   assert.match(
@@ -592,6 +607,11 @@ test('dev installer retires the old app and verifies the fresh frontend', async 
     source,
     /verify_frontend_startup[\s\S]*restore_previous_app 1 1/,
     'a candidate that never reaches frontend-ready must use the hardened rollback path',
+  );
+  assert.match(
+    source,
+    /handle_install_signal[\s\S]*INSTALL_SWAP_ACTIVE[\s\S]*restore_previous_app 1 1[\s\S]*trap 'handle_install_signal 130' INT[\s\S]*trap 'handle_install_signal 143' TERM/,
+    'INT or TERM during verification must retire the candidate and relaunch the prior known-good app',
   );
   assert.match(
     source,

@@ -779,13 +779,16 @@ fn handle_message(message: Value, state: &Mutex<ProtocolState>) -> Option<Value>
     match method {
         "item/agentMessage/delta" => {
             let delta = params.get("delta").and_then(Value::as_str).unwrap_or("");
-            if delta.trim().is_empty() {
+            if delta.is_empty() {
                 return None;
             }
+            let starts_visible_latency = !delta.trim().is_empty();
             let event = {
                 let mut state = lock_unpoisoned(state);
                 state.turns.get_mut(turn_id).map(|turn| {
-                    turn.first_token_at.get_or_insert_with(Instant::now);
+                    if starts_visible_latency {
+                        turn.first_token_at.get_or_insert_with(Instant::now);
+                    }
                     turn.text.push_str(delta);
                     ReasoningStreamEvent::TextDelta {
                         turn_id: turn.id.clone(),
@@ -1070,9 +1073,9 @@ rl.on('line', (line) => {
     }
 
     #[test]
-    fn empty_stream_deltas_do_not_start_the_visible_latency_clock() {
+    fn stream_deltas_preserve_whitespace_and_start_latency_on_visible_content() {
         let state = Mutex::new(ProtocolState::default());
-        let (sender, receiver) = mpsc::sync_channel(2);
+        let (sender, receiver) = mpsc::sync_channel(8);
         lock_unpoisoned(&state).turns.insert(
             "turn-empty-delta".into(),
             ActiveTurn {
@@ -1087,41 +1090,59 @@ rl.on('line', (line) => {
             },
         );
 
-        for delta in ["", "   "] {
-            assert!(handle_message(
-                json!({
-                    "method": "item/agentMessage/delta",
-                    "params": { "turnId": "turn-empty-delta", "delta": delta }
-                }),
-                &state,
-            )
-            .is_none());
-        }
-        {
-            let state = lock_unpoisoned(&state);
-            let turn = state.turns.get("turn-empty-delta").unwrap();
-            assert!(turn.first_token_at.is_none());
-            assert!(turn.text.is_empty());
-        }
+        assert!(handle_message(
+            json!({
+                "method": "item/agentMessage/delta",
+                "params": { "turnId": "turn-empty-delta", "delta": "" }
+            }),
+            &state,
+        )
+        .is_none());
         assert!(matches!(receiver.try_recv(), Err(TryRecvError::Empty)));
 
         handle_message(
             json!({
                 "method": "item/agentMessage/delta",
-                "params": { "turnId": "turn-empty-delta", "delta": "visible" }
+                "params": { "turnId": "turn-empty-delta", "delta": "   " }
             }),
             &state,
         );
         {
             let state = lock_unpoisoned(&state);
             let turn = state.turns.get("turn-empty-delta").unwrap();
-            assert!(turn.first_token_at.is_some());
-            assert_eq!(turn.text, "visible");
+            assert!(turn.first_token_at.is_none());
+            assert_eq!(turn.text, "   ");
         }
         match receiver.recv_timeout(Duration::from_secs(1)).unwrap() {
-            ReasoningStreamEvent::TextDelta { text, .. } => assert_eq!(text, "visible"),
-            event => panic!("visible delta emitted wrong event: {event:?}"),
+            ReasoningStreamEvent::TextDelta { text, .. } => assert_eq!(text, "   "),
+            event => panic!("whitespace delta emitted wrong event: {event:?}"),
         }
+
+        for delta in ["Hello", " ", "world"] {
+            handle_message(
+                json!({
+                    "method": "item/agentMessage/delta",
+                    "params": { "turnId": "turn-empty-delta", "delta": delta }
+                }),
+                &state,
+            );
+        }
+        {
+            let state = lock_unpoisoned(&state);
+            let turn = state.turns.get("turn-empty-delta").unwrap();
+            assert!(turn.first_token_at.is_some());
+            assert_eq!(turn.text, "   Hello world");
+        }
+        let streamed = (0..3)
+            .map(
+                |_| match receiver.recv_timeout(Duration::from_secs(1)).unwrap() {
+                    ReasoningStreamEvent::TextDelta { text, .. } => text,
+                    event => panic!("content delta emitted wrong event: {event:?}"),
+                },
+            )
+            .collect::<String>();
+        assert_eq!(streamed, "Hello world");
+        assert!(matches!(receiver.try_recv(), Err(TryRecvError::Empty)));
     }
 
     #[test]

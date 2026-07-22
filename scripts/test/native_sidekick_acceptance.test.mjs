@@ -6,7 +6,13 @@ import {
   evaluateNativeSidekickAcceptance,
 } from "../run_native_sidekick_acceptance.mjs";
 
-function candidate(text, evidenceIds, firstTokenMs = 900, totalMs = 1_800) {
+function candidate(
+  text,
+  evidenceIds,
+  firstTokenMs = 900,
+  totalMs = 1_800,
+  publicationReadyMs = 1_900,
+) {
   return {
     outcome: "published",
     candidate: {
@@ -17,6 +23,21 @@ function candidate(text, evidenceIds, firstTokenMs = 900, totalMs = 1_800) {
     },
     first_token_ms: firstTokenMs,
     total_ms: totalMs,
+    publication_ready_ms: publicationReadyMs,
+  };
+}
+
+function passingRuntime(overrides = {}) {
+  return {
+    exit_code: 0,
+    wall_ms: 4_000,
+    executable_sha256: "b".repeat(64),
+    expected_executable_sha256: "b".repeat(64),
+    bundle_sha256: "d".repeat(64),
+    expected_bundle_sha256: "d".repeat(64),
+    expected_build_commit: "c".repeat(40),
+    stderr: "",
+    ...overrides,
   };
 }
 
@@ -36,6 +57,7 @@ function passingPayload() {
     provider: "codex-app-server",
     model: "codex-fast",
     privacy: "cloud",
+    build_commit: "c".repeat(40),
     reasoning_session_correlation: reasoningSessionCorrelation,
     reasoning_sessions_started: 1,
     fixture_turns: [
@@ -62,11 +84,7 @@ function passingPayload() {
 }
 
 test("installed acceptance requires quality, provenance, and latency together", () => {
-  const report = evaluateNativeSidekickAcceptance(passingPayload(), {
-    exit_code: 0,
-    wall_ms: 4_000,
-    stderr: "",
-  });
+  const report = evaluateNativeSidekickAcceptance(passingPayload(), passingRuntime());
 
   assert.equal(report.passed, true);
   assert.deepEqual(report.quality_score, { numerator: 15, denominator: 15 });
@@ -76,11 +94,7 @@ test("an active-meeting fallback cannot impersonate an embedded golden pass", ()
   const payload = passingPayload();
   payload.transcript_source = "active_transcript";
 
-  const report = evaluateNativeSidekickAcceptance(payload, {
-    exit_code: 0,
-    wall_ms: 4_000,
-    stderr: "",
-  });
+  const report = evaluateNativeSidekickAcceptance(payload, passingRuntime());
 
   assert.equal(report.passed, false);
   assert.equal(
@@ -93,25 +107,43 @@ test("a slow otherwise-correct response fails the realtime bar", () => {
   const payload = passingPayload();
   payload.fixture_turns[0].result.first_token_ms = 5_001;
 
-  const report = evaluateNativeSidekickAcceptance(payload, {
-    exit_code: 0,
-    wall_ms: 4_000,
-    stderr: "",
-  });
+  const report = evaluateNativeSidekickAcceptance(payload, passingRuntime());
 
   assert.equal(report.passed, false);
   assert.equal(report.latency_checks[0].passed, false);
+});
+
+test("a slow visible publication fails even when provider streaming starts quickly", () => {
+  const payload = passingPayload();
+  payload.fixture_turns[0].result.publication_ready_ms = 5_001;
+
+  const report = evaluateNativeSidekickAcceptance(payload, passingRuntime());
+
+  assert.equal(report.passed, false);
+  assert.equal(
+    report.latency_checks.find((item) => item.name.includes("visible_publication")).passed,
+    false,
+  );
+});
+
+test("a stale installed binary cannot inherit a current golden pass", () => {
+  const report = evaluateNativeSidekickAcceptance(
+    passingPayload(),
+    passingRuntime({ executable_sha256: "e".repeat(64) }),
+  );
+
+  assert.equal(report.passed, false);
+  assert.equal(
+    report.source_checks.find((item) => item.name === "installed_binary_matches_current_signed_build").passed,
+    false,
+  );
 });
 
 test("fixture labels cannot hide a stale compiled golden", () => {
   const payload = passingPayload();
   payload.fixture_sha256 = "0".repeat(64);
 
-  const report = evaluateNativeSidekickAcceptance(payload, {
-    exit_code: 0,
-    wall_ms: 4_000,
-    stderr: "",
-  });
+  const report = evaluateNativeSidekickAcceptance(payload, passingRuntime());
 
   assert.equal(report.passed, false);
   assert.equal(
@@ -124,11 +156,7 @@ test("missing or changed canonical prompts cannot earn a persistence pass", () =
   const payload = passingPayload();
   delete payload.fixture_turns[0].prompt;
 
-  const report = evaluateNativeSidekickAcceptance(payload, {
-    exit_code: 0,
-    wall_ms: 4_000,
-    stderr: "",
-  });
+  const report = evaluateNativeSidekickAcceptance(payload, passingRuntime());
 
   assert.equal(report.passed, false);
   assert.equal(
@@ -141,11 +169,7 @@ test("two turns on different reasoning sessions cannot impersonate persistence",
   const payload = passingPayload();
   payload.fixture_turns[1].reasoning_session_correlation = "b".repeat(64);
 
-  const report = evaluateNativeSidekickAcceptance(payload, {
-    exit_code: 0,
-    wall_ms: 4_000,
-    stderr: "",
-  });
+  const report = evaluateNativeSidekickAcceptance(payload, passingRuntime());
 
   assert.equal(report.passed, false);
   assert.equal(

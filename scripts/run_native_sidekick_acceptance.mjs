@@ -1,17 +1,22 @@
 #!/usr/bin/env node
 
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 
 import { scoreMeridianResponses } from "../tests/eval/sidekick_rehearsal_golden.mjs";
+import {
+  bundleManifestSha256,
+  canonicalInstalledAppPath,
+  validateCanonicalInstalledApp,
+} from "./run_native_sidekick_contract_scope_acceptance.mjs";
 
 const MAX_FIRST_TOKEN_MS = 5_000;
 const MAX_TURN_TOTAL_MS = 10_000;
+const MAX_VISIBLE_PUBLICATION_MS = 5_000;
 const MAX_WALL_MS = 30_000;
 const HARD_TIMEOUT_MS = 45_000;
 const MAX_OUTPUT_BYTES = 1024 * 1024;
@@ -54,6 +59,7 @@ function candidateFromTurn(turn) {
     evidence_ids: Array.isArray(candidate?.evidence_ids) ? candidate.evidence_ids : [],
     first_token_ms: result?.first_token_ms ?? null,
     total_ms: result?.total_ms ?? null,
+    publication_ready_ms: result?.publication_ready_ms ?? null,
     reasoning_session_correlation: turn?.reasoning_session_correlation ?? null,
   };
 }
@@ -85,6 +91,27 @@ export function evaluateNativeSidekickAcceptance(payload, runtime) {
     );
   const sourceChecks = [
     check("binary_exit_zero", runtime.exit_code === 0, `Installed binary exited ${runtime.exit_code}.`),
+    check(
+      "installed_binary_matches_current_signed_build",
+      typeof runtime.executable_sha256 === "string" &&
+        /^[a-f0-9]{64}$/.test(runtime.executable_sha256) &&
+        runtime.executable_sha256 === runtime.expected_executable_sha256,
+      "The installed executable must byte-match the freshly signed bundle from this checkout.",
+    ),
+    check(
+      "installed_bundle_matches_current_signed_build",
+      typeof runtime.bundle_sha256 === "string" &&
+        /^[a-f0-9]{64}$/.test(runtime.bundle_sha256) &&
+        runtime.bundle_sha256 === runtime.expected_bundle_sha256,
+      "Every path, file, symlink, and mode in the installed app must match the freshly signed bundle.",
+    ),
+    check(
+      "binary_reports_current_source_commit",
+      typeof payload?.build_commit === "string" &&
+        /^[a-f0-9]{40,64}$/.test(payload.build_commit) &&
+        payload.build_commit === runtime.expected_build_commit,
+      "The installed executable must report the current checkout commit embedded at build time.",
+    ),
     check("embedded_transcript_only", payload?.transcript_source === "embedded_golden", "Transcript must come from compiled golden bytes."),
     check("embedded_prepared_context_only", payload?.prepared_context_source === "embedded_golden", "Prepared context must come from compiled golden bytes."),
     check("no_screen_lane", payload?.screen_source === "none" && payload?.screen_available === false, "Golden run must never inspect a user screen."),
@@ -113,6 +140,12 @@ export function evaluateNativeSidekickAcceptance(payload, runtime) {
         Number.isFinite(turn.total_ms) && turn.total_ms <= MAX_TURN_TOTAL_MS,
         `Observed ${turn.total_ms ?? "null"}ms.`,
       ),
+      check(
+        `turn_${index + 1}_visible_publication_under_${MAX_VISIBLE_PUBLICATION_MS}ms`,
+        Number.isFinite(turn.publication_ready_ms) &&
+          turn.publication_ready_ms <= MAX_VISIBLE_PUBLICATION_MS,
+        `Observed ${turn.publication_ready_ms ?? "null"}ms from typed request through publication readiness.`,
+      ),
     ]),
     check(
       `cold_two_turn_wall_under_${MAX_WALL_MS}ms`,
@@ -139,17 +172,7 @@ export function evaluateNativeSidekickAcceptance(payload, runtime) {
   };
 }
 
-function parseArgs(argv) {
-  let app = path.join(os.homedir(), "Applications", "Minutes Dev.app");
-  for (let index = 2; index < argv.length; index += 1) {
-    if (argv[index] === "--app") app = argv[++index];
-    else throw new Error(`unknown argument: ${argv[index]}`);
-  }
-  if (!app) throw new Error("--app requires a path");
-  return { app: path.resolve(app) };
-}
-
-async function runInstalledBinary(executable) {
+async function runInstalledBinary(executable, installedBundleSha256) {
   await fs.access(executable);
   const executableSha256 = sha256(await fs.readFile(executable));
   const startedAt = performance.now();
@@ -198,16 +221,64 @@ async function runInstalledBinary(executable) {
       exit_code: exitCode,
       wall_ms: wallMs,
       executable_sha256: executableSha256,
+      bundle_sha256: installedBundleSha256,
       stderr: stderr.trim().slice(0, 2_000),
     },
   };
 }
 
 async function main(argv) {
-  const { app } = parseArgs(argv);
+  const canonicalApp = canonicalInstalledAppPath();
+  if (argv.length > 2) {
+    throw new Error(`installed Meridian acceptance only runs against ${canonicalApp}`);
+  }
+  const app = canonicalApp;
+  await validateCanonicalInstalledApp(app, canonicalApp);
+  const repositoryRoot = fileURLToPath(new URL("../", import.meta.url));
+  const expectedBuildCommit = execFileSync("git", ["rev-parse", "--verify", "HEAD"], {
+    cwd: repositoryRoot,
+    encoding: "utf8",
+  }).trim().toLowerCase();
+  const checkoutStatus = execFileSync(
+    "git",
+    ["status", "--porcelain=v1", "--untracked-files=all"],
+    { cwd: repositoryRoot, encoding: "utf8" },
+  ).trim();
+  const allowedGeneratedPaths = [
+    "tauri/src-tauri/bin/mic_check",
+    "tauri/src-tauri/bin/mic_check-aarch64-apple-darwin",
+  ];
+  const relevantDirtyLines = checkoutStatus.split("\n").filter(Boolean).filter((line) =>
+    !allowedGeneratedPaths.some((generatedPath) => line.slice(3) === generatedPath),
+  );
+  if (relevantDirtyLines.length > 0) {
+    throw new Error(`acceptance requires committed application and harness source; dirty paths:\n${relevantDirtyLines.join("\n")}`);
+  }
+  const signedBuildApp = path.join(
+    repositoryRoot,
+    "target",
+    "release",
+    "bundle",
+    "macos",
+    "Minutes Dev.app",
+  );
+  const signedBuildExecutable = path.join(signedBuildApp, "Contents", "MacOS", "minutes-app");
   const executable = path.join(app, "Contents", "MacOS", "minutes-app");
-  const { payload, runtime } = await runInstalledBinary(executable);
+  execFileSync("codesign", ["--verify", "--deep", "--strict", signedBuildApp]);
+  execFileSync("codesign", ["--verify", "--deep", "--strict", app]);
+  const [expectedExecutableSha256, expectedBundleSha256, installedBundleSha256] = await Promise.all([
+    fs.readFile(signedBuildExecutable).then(sha256),
+    bundleManifestSha256(signedBuildApp),
+    bundleManifestSha256(app),
+  ]);
+  const { payload, runtime } = await runInstalledBinary(executable, installedBundleSha256);
+  Object.assign(runtime, {
+    expected_build_commit: expectedBuildCommit,
+    expected_executable_sha256: expectedExecutableSha256,
+    expected_bundle_sha256: expectedBundleSha256,
+  });
   const report = evaluateNativeSidekickAcceptance(payload, runtime);
+  report.tested_app_path = app;
   process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
   return report.passed ? 0 : 1;
 }

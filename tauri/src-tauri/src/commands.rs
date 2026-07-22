@@ -15389,6 +15389,16 @@ fn resolve_native_sidekick_context_session(
 ) -> Result<minutes_core::context_store::ContextSession, String> {
     let recording_active = state.recording.load(Ordering::Acquire)
         || minutes_core::pid::inspect_pid_file(&minutes_core::pid::pid_path()).is_active();
+    let live_active = state.live_transcript_active.load(Ordering::Acquire)
+        || minutes_core::pid::inspect_pid_file(&minutes_core::pid::live_transcript_pid_path())
+            .is_active();
+    resolve_native_sidekick_context_session_from_activity(recording_active, live_active)
+}
+
+fn resolve_native_sidekick_context_session_from_activity(
+    recording_active: bool,
+    live_active: bool,
+) -> Result<minutes_core::context_store::ContextSession, String> {
     if recording_active {
         let session_id = minutes_core::pid::read_recording_metadata()
             .and_then(|metadata| metadata.context_session_id)
@@ -15408,10 +15418,7 @@ fn resolve_native_sidekick_context_session(
         return Ok(session);
     }
 
-    if state.live_transcript_active.load(Ordering::Acquire)
-        || minutes_core::pid::inspect_pid_file(&minutes_core::pid::live_transcript_pid_path())
-            .is_active()
-    {
+    if live_active {
         let session = minutes_core::context_store::latest_active_context_session()
             .map_err(|error| format!("Could not read the active live session: {error}"))?
             .ok_or_else(|| "The active live transcript has no context session.".to_string())?;
@@ -15535,6 +15542,145 @@ fn refresh_native_sidekick_screen(
     } else {
         false
     }
+}
+
+fn wait_for_native_sidekick_diagnostic_turn(
+    engine: &mut minutes_core::live_sidekick::LiveSidekickEngine,
+    timeout: Duration,
+) -> Result<serde_json::Value, String> {
+    use minutes_core::live_sidekick::SidekickLifecycleOutcome;
+
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(publication) = engine.take_publications().into_iter().next() {
+            return Ok(serde_json::json!({
+                "outcome": "published",
+                "candidate": publication.candidate,
+                "first_token_ms": publication.first_token_ms,
+                "total_ms": publication.total_ms,
+            }));
+        }
+        if let Some(failure) = engine.take_failures().into_iter().next() {
+            return Err(format!(
+                "Sidekick diagnostic turn failed: {}",
+                failure.error
+            ));
+        }
+        for lifecycle in engine.take_lifecycle_events() {
+            if let SidekickLifecycleOutcome::Suppressed(reason) = lifecycle.outcome {
+                return Ok(serde_json::json!({
+                    "outcome": "suppressed",
+                    "reason": reason,
+                }));
+            }
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "Sidekick diagnostic turn exceeded {} seconds",
+                timeout.as_secs()
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// Headless acceptance path for the signed desktop bundle. This deliberately
+/// uses the same exact-session resolver, provider adapter, evidence reducer,
+/// prompt contract, and publication gate as the native window. It exists so a
+/// developer or CI host can prove the live path without manually driving the
+/// WebView. The caller must enforce explicit cloud-consent at the CLI boundary.
+pub fn run_native_sidekick_diagnostic(
+    typed_message: Option<String>,
+) -> Result<serde_json::Value, String> {
+    use minutes_core::live_sidekick::{
+        AssistancePosture, AssistanceSurface, CaptureMode as SidekickCaptureMode,
+        LiveAssistanceSessionId, LiveSidekickEngine, LiveSidekickEngineConfig, UserRole,
+    };
+
+    let recording_active =
+        minutes_core::pid::inspect_pid_file(&minutes_core::pid::pid_path()).is_active();
+    let live_active =
+        minutes_core::pid::inspect_pid_file(&minutes_core::pid::live_transcript_pid_path())
+            .is_active();
+    let context_session =
+        resolve_native_sidekick_context_session_from_activity(recording_active, live_active)?;
+    let codex_path = resolve_agent_binary("codex").map_err(|error| error.user_message())?;
+    let backend = Arc::new(
+        crate::codex_reasoning_backend::CodexReasoningBackend::sidekick(
+            codex_path,
+            configured_codex_mcp_servers(),
+        )
+        .map_err(|error| error.to_string())?,
+    );
+    let mut engine = LiveSidekickEngine::new(
+        LiveAssistanceSessionId::new(format!("sidekick-diagnostic-{}", context_session.id)),
+        AssistanceSurface::NativeRecall,
+        UserRole::DecisionMaker,
+        AssistancePosture::Strategist,
+        backend,
+        LiveSidekickEngineConfig {
+            base_instructions: NATIVE_SIDEKICK_BASE_INSTRUCTIONS.into(),
+            developer_instructions: NATIVE_SIDEKICK_DEVELOPER_INSTRUCTIONS.into(),
+            prepared_context: native_sidekick_prepared_context(DEFAULT_COPILOT_GOAL),
+            max_window_chars: 8_000,
+            max_transcript_items: 32,
+        },
+    )
+    .map_err(|error| error.to_string())?;
+    let capture_mode = if context_session.session_type
+        == minutes_core::context_store::ContextSessionType::Recording
+    {
+        SidekickCaptureMode::Recording
+    } else {
+        SidekickCaptureMode::Live
+    };
+    engine
+        .start_capture(context_session.id.clone().into(), capture_mode)
+        .map_err(|error| error.to_string())?;
+
+    let mut cursor = 0;
+    let transcript_items = observe_native_sidekick_transcript(&mut engine, &mut cursor)?;
+    let mut last_screen_path = None;
+    let screen_available =
+        refresh_native_sidekick_screen(&mut engine, &context_session.id, &mut last_screen_path);
+    let proactive = if engine
+        .evaluate_background()
+        .map_err(|error| error.to_string())?
+        .is_some()
+    {
+        Some(wait_for_native_sidekick_diagnostic_turn(
+            &mut engine,
+            Duration::from_secs(20),
+        )?)
+    } else {
+        None
+    };
+    let foreground = if let Some(message) = typed_message.filter(|value| !value.trim().is_empty()) {
+        engine
+            .send_user(message)
+            .map_err(|error| error.to_string())?;
+        Some(wait_for_native_sidekick_diagnostic_turn(
+            &mut engine,
+            Duration::from_secs(20),
+        )?)
+    } else {
+        None
+    };
+    let descriptor = engine.descriptor().clone();
+    let _ = engine.stop_capture();
+
+    Ok(serde_json::json!({
+        "mode": "diagnose-native-sidekick",
+        "context_session_id": context_session.id,
+        "context_session_type": context_session.session_type,
+        "transcript_items": transcript_items,
+        "screen_available": screen_available,
+        "provider": descriptor.provider,
+        "model": descriptor.model,
+        "privacy": descriptor.privacy,
+        "proactive": proactive,
+        "foreground": foreground,
+    }))
 }
 
 struct NativeSidekickRunGuard {

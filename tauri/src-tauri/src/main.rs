@@ -255,6 +255,54 @@ fn maybe_run_process_queue_worker() -> Option<i32> {
     }
 }
 
+fn maybe_run_native_sidekick_diagnostic() -> Option<i32> {
+    let args = std::env::args().skip(1).collect::<Vec<_>>();
+    if !args.iter().any(|arg| arg == "--diagnose-native-sidekick") {
+        return None;
+    }
+    if !args.iter().any(|arg| arg == "--consent-cloud") {
+        eprintln!(
+            "--diagnose-native-sidekick requires --consent-cloud before meeting evidence can be sent to Codex Cloud"
+        );
+        return Some(2);
+    }
+    let mut typed_message = None;
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        if arg == "--diagnose-native-sidekick-message" {
+            typed_message = iter.next().cloned();
+        } else if let Some(value) = arg.strip_prefix("--diagnose-native-sidekick-message=") {
+            typed_message = Some(value.to_string());
+        }
+    }
+
+    match commands::run_native_sidekick_diagnostic(typed_message.clone()) {
+        Ok(payload) => {
+            let passed = payload
+                .pointer("/proactive/outcome")
+                .and_then(serde_json::Value::as_str)
+                == Some("published")
+                && (typed_message.is_none()
+                    || payload
+                        .pointer("/foreground/outcome")
+                        .and_then(serde_json::Value::as_str)
+                        == Some("published"));
+            match serde_json::to_string_pretty(&payload) {
+                Ok(json) => println!("{json}"),
+                Err(error) => {
+                    eprintln!("failed to encode native Sidekick diagnostic: {error}");
+                    return Some(1);
+                }
+            }
+            Some(if passed { 0 } else { 3 })
+        }
+        Err(error) => {
+            eprintln!("native Sidekick diagnostic failed: {error}");
+            Some(1)
+        }
+    }
+}
+
 pub(crate) fn show_main_window(app: &tauri::AppHandle) {
     if let Some(win) = app.get_webview_window("main") {
         if !win.is_visible().ok().unwrap_or(false) {
@@ -1447,6 +1495,10 @@ fn main() {
 
     #[cfg(target_os = "macos")]
     if let Some(code) = maybe_run_hotkey_diagnostic() {
+        std::process::exit(code);
+    }
+
+    if let Some(code) = maybe_run_native_sidekick_diagnostic() {
         std::process::exit(code);
     }
 

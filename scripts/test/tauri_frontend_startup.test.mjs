@@ -1,0 +1,379 @@
+import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
+import test from 'node:test';
+import vm from 'node:vm';
+
+const indexHtml = new URL('../../tauri/src/index.html', import.meta.url);
+const installDevApp = new URL('../install-dev-app.sh', import.meta.url);
+const mainRust = new URL('../../tauri/src-tauri/src/main.rs', import.meta.url);
+
+function inlineScripts(source) {
+  return [...source.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/gi)]
+    .map((match) => match[1])
+    .filter((script) => script.trim());
+}
+
+function eventTarget() {
+  const listeners = new Map();
+  return {
+    addEventListener(type, listener) {
+      const registered = listeners.get(type) || [];
+      registered.push(listener);
+      listeners.set(type, registered);
+    },
+    removeEventListener() {},
+    dispatchEvent(event) {
+      for (const listener of listeners.get(event.type) || []) listener(event);
+      return true;
+    },
+  };
+}
+
+function fakeElement(id = '') {
+  const classes = new Set();
+  const events = eventTarget();
+  const element = {
+    ...events,
+    id,
+    textContent: '',
+    innerHTML: '',
+    value: '',
+    checked: false,
+    disabled: false,
+    hidden: false,
+    dataset: {},
+    children: [],
+    style: {
+      setProperty() {},
+      removeProperty() {},
+    },
+    classList: {
+      add: (...names) => names.forEach((name) => classes.add(name)),
+      remove: (...names) => names.forEach((name) => classes.delete(name)),
+      toggle(name, force) {
+        const enabled = force === undefined ? !classes.has(name) : Boolean(force);
+        if (enabled) classes.add(name);
+        else classes.delete(name);
+        return enabled;
+      },
+      contains: (name) => classes.has(name),
+    },
+    appendChild(child) {
+      this.children.push(child);
+      return child;
+    },
+    replaceChildren(...children) {
+      this.children = children;
+    },
+    remove() {},
+    focus() {},
+    blur() {},
+    click() {},
+    select() {},
+    setAttribute() {},
+    removeAttribute() {},
+    getAttribute() { return null; },
+    hasAttribute() { return false; },
+    closest() { return null; },
+    matches() { return false; },
+    querySelector(selector) { return fakeElement(selector); },
+    querySelectorAll() { return []; },
+    scrollIntoView() {},
+    getBoundingClientRect() {
+      return { x: 0, y: 0, top: 0, left: 0, right: 560, bottom: 700, width: 560, height: 700 };
+    },
+    scrollHeight: 0,
+    scrollTop: 0,
+    clientHeight: 700,
+    clientWidth: 560,
+    offsetHeight: 0,
+    offsetWidth: 0,
+  };
+  return element;
+}
+
+function coldThenable() {
+  const value = {
+    then() { return value; },
+    catch() { return value; },
+    finally() { return value; },
+  };
+  return value;
+}
+
+function startupContext(declaredIds) {
+  const elements = new Map();
+  const invocations = [];
+  const windowEvents = eventTarget();
+  const documentEvents = eventTarget();
+  const documentElement = fakeElement('html');
+  documentElement.dataset.platform = 'macos';
+  const body = fakeElement('body');
+  const document = {
+    ...documentEvents,
+    readyState: 'complete',
+    documentElement,
+    body,
+    activeElement: body,
+    getElementById(id) {
+      if (!declaredIds.has(id)) return null;
+      if (!elements.has(id)) elements.set(id, fakeElement(id));
+      return elements.get(id);
+    },
+    createElement(tagName) { return fakeElement(tagName); },
+    createTextNode(text) { return { textContent: text }; },
+    querySelector(selector) { return fakeElement(selector); },
+    querySelectorAll() { return []; },
+  };
+  const responses = {
+    cmd_capture_status: { processingJobs: [], recording: false, starting: false, processing: false },
+    cmd_copilot_surface_status: {},
+    cmd_desktop_capabilities: {},
+    cmd_get_recall_workspace_state: null,
+    cmd_get_settings: { assistant: { agent: 'codex' }, notifications: {} },
+    cmd_global_hotkey_settings: { choices: [], enabled: false, shortcut: 'capslock' },
+    cmd_list_agents: [],
+    cmd_list_meetings: [],
+    cmd_needs_setup: {},
+    cmd_set_global_hotkey: { choices: [], enabled: false, shortcut: 'capslock' },
+  };
+  const currentWindow = new Proxy({
+    listen: () => Promise.resolve(() => {}),
+    setSize: () => coldThenable(),
+    setPosition: () => coldThenable(),
+    outerPosition: () => coldThenable(),
+    outerSize: () => coldThenable(),
+  }, {
+    get(target, property) {
+      return property in target ? target[property] : () => coldThenable();
+    },
+  });
+  const invoke = (command, args) => {
+    invocations.push({ command, args });
+    if (command === 'cmd_shortcut_status') {
+      const shortcut = args?.slot === 'dictation'
+        ? 'CmdOrCtrl+Shift+Space'
+        : 'CmdOrCtrl+Shift+M';
+      return Promise.resolve({
+        slot: args?.slot,
+        enabled: false,
+        shortcut,
+        keycode: -1,
+        message: 'Off.',
+      });
+    }
+    return Promise.resolve(responses[command] ?? {});
+  };
+  const tauri = {
+    core: { invoke },
+    event: { listen: () => Promise.resolve(() => {}) },
+    window: { getCurrentWindow: () => currentWindow, LogicalSize: class {}, LogicalPosition: class {} },
+    dialog: new Proxy({}, { get: () => () => coldThenable() }),
+    shell: new Proxy({}, { get: () => () => coldThenable() }),
+    app: new Proxy({}, { get: () => () => coldThenable() }),
+  };
+  const window = {
+    ...windowEvents,
+    document,
+    __TAURI__: tauri,
+    innerWidth: 560,
+    innerHeight: 700,
+    devicePixelRatio: 2,
+    getSelection: () => ({ toString: () => '' }),
+    matchMedia: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }),
+  };
+  window.window = window;
+  window.self = window;
+
+  class Observer {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  }
+  class FakeTerminal {
+    loadAddon() {}
+    open() {}
+    focus() {}
+    write() {}
+    writeln() {}
+    onData() { return { dispose() {} }; }
+    onResize() { return { dispose() {} }; }
+    dispose() {}
+  }
+  class FakeAudio {
+    constructor() {
+      this.volume = 1;
+      this.currentTime = 0;
+    }
+    play() { return Promise.resolve(); }
+    pause() {}
+    addEventListener() {}
+    removeEventListener() {}
+  }
+
+  const context = vm.createContext({
+    window,
+    self: window,
+    document,
+    navigator: { platform: 'MacIntel', clipboard: { writeText: async () => {} } },
+    location: { reload() {} },
+    localStorage: { getItem: () => null, setItem() {}, removeItem() {} },
+    sessionStorage: { getItem: () => null, setItem() {}, removeItem() {} },
+    crypto: { randomUUID: () => '00000000-0000-4000-8000-000000000000' },
+    performance: { now: () => 0 },
+    getComputedStyle: () => ({ getPropertyValue: () => '', display: 'block' }),
+    requestAnimationFrame: (callback) => { callback(0); return 1; },
+    cancelAnimationFrame() {},
+    setTimeout: () => 1,
+    clearTimeout() {},
+    setInterval: () => 1,
+    clearInterval() {},
+    ResizeObserver: Observer,
+    MutationObserver: Observer,
+    IntersectionObserver: Observer,
+    Audio: FakeAudio,
+    Terminal: FakeTerminal,
+    FitAddon: { FitAddon: class { fit() {} } },
+    marked: { parse: (value) => String(value ?? ''), setOptions() {} },
+    CSS: { escape: (value) => String(value) },
+    URL,
+    URLSearchParams,
+    Blob,
+    TextDecoder,
+    TextEncoder,
+    AbortController,
+    Promise,
+    Map,
+    Set,
+    WeakMap,
+    WeakSet,
+    Array,
+    Object,
+    String,
+    Number,
+    Boolean,
+    Date,
+    Math,
+    JSON,
+    RegExp,
+    Error,
+    ReferenceError,
+    TypeError,
+    RangeError,
+    console,
+  });
+
+  return { context, elements, invocations };
+}
+
+test('complete desktop frontend registers without a startup ReferenceError', async () => {
+  const source = await readFile(indexHtml, 'utf8');
+  const declaredIds = new Set([...source.matchAll(/\bid="([^"]+)"/g)].map((match) => match[1]));
+  const scripts = inlineScripts(source);
+  const bootstrapScript = scripts.find((script) => script.includes('window.__MINUTES_STARTUP__'));
+  const mainScript = scripts.find((script) => script.includes('const { invoke }'));
+  assert.ok(bootstrapScript, 'startup recovery bootstrap should be present');
+  assert.ok(mainScript, 'main desktop inline script should be present');
+  const { context, invocations } = startupContext(declaredIds);
+
+  assert.doesNotThrow(
+    () => {
+      new vm.Script(bootstrapScript, { filename: 'tauri/src/index.html#startup-recovery' }).runInContext(context);
+      new vm.Script(mainScript, { filename: 'tauri/src/index.html#main' }).runInContext(context);
+    },
+    'the complete desktop frontend must register without an undefined global or startup exception',
+  );
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.ok(
+    invocations.some(({ command }) => command === 'cmd_frontend_ready'),
+    'a fully registered frontend should complete the native readiness handshake',
+  );
+});
+
+test('startup smoke fails on the missing Sidekick listener binding regression', async () => {
+  const source = await readFile(indexHtml, 'utf8');
+  const declaredIds = new Set([...source.matchAll(/\bid="([^"]+)"/g)].map((match) => match[1]));
+  const mainScript = inlineScripts(source).find((script) => script.includes('const { invoke }'));
+  assert.ok(mainScript);
+  const broken = mainScript.replace('const { listen } = window.__TAURI__.event;', '');
+  const { context } = startupContext(declaredIds);
+
+  assert.throws(
+    () => new vm.Script(broken, { filename: 'tauri/src/index.html#missing-listen' }).runInContext(context),
+    /listen is not defined/,
+  );
+});
+
+test('startup bootstrap renders a recovery surface and reports the diagnostic', async () => {
+  const source = await readFile(indexHtml, 'utf8');
+  const declaredIds = new Set([...source.matchAll(/\bid="([^"]+)"/g)].map((match) => match[1]));
+  const bootstrapScript = inlineScripts(source).find((script) => script.includes('window.__MINUTES_STARTUP__'));
+  assert.ok(bootstrapScript);
+  const { context, elements, invocations } = startupContext(declaredIds);
+  new vm.Script(bootstrapScript, { filename: 'tauri/src/index.html#startup-recovery' }).runInContext(context);
+
+  vm.runInContext("window.__MINUTES_STARTUP__.fail(new ReferenceError('listen is not defined'))", context);
+
+  assert.equal(elements.get('startup-failure').classList.contains('active'), true);
+  assert.match(elements.get('startup-failure-detail').textContent, /listen is not defined/);
+  assert.ok(
+    invocations.some(({ command, args }) =>
+      command === 'cmd_frontend_startup_failed' && args.message.includes('listen is not defined')),
+  );
+});
+
+test('startup smoke fails when a required control disappears from the real markup', async () => {
+  const source = await readFile(indexHtml, 'utf8');
+  const scripts = inlineScripts(source);
+  const mainScript = scripts.find((script) => script.includes('const { invoke }'));
+  const declaredIds = new Set([...source.matchAll(/\bid="([^"]+)"/g)].map((match) => match[1]));
+  declaredIds.delete('btn-settings');
+  const { context } = startupContext(declaredIds);
+
+  assert.throws(
+    () => new vm.Script(mainScript, { filename: 'tauri/src/index.html#missing-control' }).runInContext(context),
+    /null|addEventListener|classList/,
+  );
+});
+
+test('every native command invoked by the desktop frontend is registered', async () => {
+  const [html, rust] = await Promise.all([readFile(indexHtml, 'utf8'), readFile(mainRust, 'utf8')]);
+  const handler = rust.split('.invoke_handler(tauri::generate_handler![')[1]?.split('])')[0] || '';
+  const commands = new Set([...html.matchAll(/\binvoke\(\s*['"](cmd_[a-zA-Z0-9_]+)['"]/g)].map((match) => match[1]));
+  assert.ok(commands.size > 20, 'frontend command extraction should cover the real desktop surface');
+  for (const command of commands) {
+    assert.match(handler, new RegExp(`\\b${command}\\b`), `${command} must be in Tauri generate_handler!`);
+  }
+});
+
+test('dev installer retires the old app and verifies the fresh frontend', async () => {
+  const source = await readFile(installDevApp, 'utf8');
+
+  assert.match(
+    source,
+    /acquire_install_lock[\s\S]*cp -rf "\$BUILD_APP" "\$STAGED_APP"[\s\S]*codesign --verify --deep --strict "\$STAGED_APP"[\s\S]*stop_running_dev_app[\s\S]*\/bin\/mv -f "\$INSTALL_APP" "\$BACKUP_APP"[\s\S]*\/bin\/mv -f "\$STAGED_APP" "\$INSTALL_APP"/,
+    'the installer must lock, seal a staged copy, stop the old process, and atomically swap bundles',
+  );
+  assert.match(
+    source,
+    /LAUNCH_STARTED_UNIX_MS=.*[\s\S]*open -n "\$INSTALL_APP"[\s\S]*verify_frontend_startup "\$LAUNCH_STARTED_UNIX_MS"/,
+    'the installer must launch a new process and wait for a launch-fresh frontend readiness signal',
+  );
+  assert.match(
+    source,
+    /status_pid" == "\$pid"[\s\S]*frontend_ready" == "true"[\s\S]*process_started_unix_ms" -ge "\$launch_started_unix_ms"[\s\S]*frontend_ready_at_unix_ms" -ge "\$launch_started_unix_ms"/,
+    'the readiness gate must reject a stale heartbeat or a different process',
+  );
+  assert.match(
+    source,
+    /restore_previous_app 1/,
+    'a launch or startup failure must restore the previous app',
+  );
+  assert.match(
+    source,
+    /INSTALL_SWAP_ACTIVE[\s\S]*cleanup_install_artifacts[\s\S]*restored the previous/,
+    'an interrupted swap must not strand the machine without its previous app',
+  );
+  assert.doesNotMatch(source, /open -a "\$INSTALL_APP"/);
+});

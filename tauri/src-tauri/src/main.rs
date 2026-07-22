@@ -40,9 +40,21 @@ const MAIN_WINDOW_TRANSPARENT: bool = false;
 const MAIN_WINDOW_APPLY_VIBRANCY: bool = false;
 
 static CLEAN_EXIT_STARTED: AtomicBool = AtomicBool::new(false);
+static FRONTEND_READY: AtomicBool = AtomicBool::new(false);
+static FRONTEND_READY_AT_UNIX_MS: AtomicU64 = AtomicU64::new(0);
+static FRONTEND_ERROR: Mutex<Option<String>> = Mutex::new(None);
 
 #[cfg(target_os = "macos")]
 static MACOS_TERMINATE_APP_HANDLE: OnceLock<tauri::AppHandle> = OnceLock::new();
+
+fn unix_ms_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
+}
 
 fn cleanup_before_process_exit(app: &tauri::AppHandle) {
     if let Some(state) = app.try_state::<commands::AppState>() {
@@ -63,6 +75,26 @@ fn cleanup_before_process_exit(app: &tauri::AppHandle) {
         .unwrap_or_default();
     crate::pty::kill_all(sessions);
     minutes_core::parakeet_sidecar::shutdown_global_parakeet_sidecar();
+}
+
+#[tauri::command]
+fn cmd_frontend_ready() {
+    FRONTEND_READY_AT_UNIX_MS.store(unix_ms_now(), Ordering::Release);
+    FRONTEND_READY.store(true, Ordering::Release);
+    *FRONTEND_ERROR
+        .lock()
+        .unwrap_or_else(|error| error.into_inner()) = None;
+}
+
+#[tauri::command]
+fn cmd_frontend_startup_failed(message: String) {
+    let bounded = message.chars().take(2_000).collect::<String>();
+    FRONTEND_READY.store(false, Ordering::Release);
+    FRONTEND_READY_AT_UNIX_MS.store(0, Ordering::Release);
+    *FRONTEND_ERROR
+        .lock()
+        .unwrap_or_else(|error| error.into_inner()) = Some(bounded.clone());
+    eprintln!("[frontend-startup] {bounded}");
 }
 
 fn exit_process_without_destructors(code: i32) -> ! {
@@ -1524,6 +1556,8 @@ fn main() {
         exit_process_without_destructors(code);
     }
 
+    let process_started_at_unix_ms = unix_ms_now();
+
     // Load with first-run and upgrade migrations so palette defaults
     // stay enabled across upgrades and fresh installs.
     let mut startup_config_snapshot = minutes_core::config::Config::load_with_migrations();
@@ -2578,32 +2612,67 @@ fn main() {
             }
 
             let app_control = app.handle().clone();
-            std::thread::spawn(move || loop {
-                let status = minutes_core::desktop_control::DesktopAppStatus {
-                    pid: std::process::id(),
-                    updated_at: chrono::Local::now(),
-                    platform: std::env::consts::OS.into(),
-                };
-                minutes_core::desktop_control::write_desktop_app_status(&status).ok();
-
-                let pending = minutes_core::desktop_control::claim_pending_requests(
-                    &std::process::id().to_string(),
-                );
-                if !pending.is_empty() {
-                    let state = app_control.state::<commands::AppState>();
-                    for claimed in pending {
-                        let response = commands::handle_desktop_control_request(
-                            app_control.clone(),
-                            &state,
-                            claimed.request.clone(),
-                        );
-                        minutes_core::desktop_control::write_response(&response).ok();
-                        minutes_core::desktop_control::finish_claimed_request(&claimed.claim_path)
-                            .ok();
+            let app_identifier = app.config().identifier.clone();
+            std::thread::spawn(move || {
+                let mut heartbeat_error_logged = false;
+                loop {
+                    let ready_at = FRONTEND_READY_AT_UNIX_MS.load(Ordering::Acquire);
+                    let status = minutes_core::desktop_control::DesktopAppStatus {
+                        pid: std::process::id(),
+                        updated_at: chrono::Local::now(),
+                        platform: std::env::consts::OS.into(),
+                        frontend_ready: FRONTEND_READY.load(Ordering::Acquire),
+                        frontend_error: FRONTEND_ERROR
+                            .lock()
+                            .unwrap_or_else(|error| error.into_inner())
+                            .clone(),
+                        process_started_at_unix_ms,
+                        frontend_ready_at_unix_ms: (ready_at > 0).then_some(ready_at),
+                    };
+                    let heartbeat_result =
+                        minutes_core::desktop_control::write_desktop_app_status_for(
+                            &app_identifier,
+                            &status,
+                        )
+                        .and_then(|_| {
+                            minutes_core::desktop_control::write_desktop_app_status(&status)
+                        });
+                    match heartbeat_result {
+                        Ok(()) if heartbeat_error_logged => {
+                            eprintln!("[desktop-heartbeat] status writes recovered");
+                            heartbeat_error_logged = false;
+                        }
+                        Err(error) if !heartbeat_error_logged => {
+                            eprintln!(
+                                "[desktop-heartbeat] failed to write status for {}: {}",
+                                app_identifier, error
+                            );
+                            heartbeat_error_logged = true;
+                        }
+                        _ => {}
                     }
-                }
 
-                std::thread::sleep(std::time::Duration::from_secs(2));
+                    let pending = minutes_core::desktop_control::claim_pending_requests(
+                        &std::process::id().to_string(),
+                    );
+                    if !pending.is_empty() {
+                        let state = app_control.state::<commands::AppState>();
+                        for claimed in pending {
+                            let response = commands::handle_desktop_control_request(
+                                app_control.clone(),
+                                &state,
+                                claimed.request.clone(),
+                            );
+                            minutes_core::desktop_control::write_response(&response).ok();
+                            minutes_core::desktop_control::finish_claimed_request(
+                                &claimed.claim_path,
+                            )
+                            .ok();
+                        }
+                    }
+
+                    std::thread::sleep(std::time::Duration::from_secs(2));
+                }
             });
 
             // Calendar items in tray menu — refresh every minute
@@ -2766,6 +2835,8 @@ fn main() {
             commands::cmd_download_model,
             commands::cmd_mark_activation_nudge_shown,
             cmd_show_main_window,
+            cmd_frontend_ready,
+            cmd_frontend_startup_failed,
             cmd_apply_recall_window_layout,
             cmd_scale_window,
             commands::cmd_upcoming_meetings,

@@ -22,11 +22,33 @@ pub fn desktop_app_status_path() -> PathBuf {
     control_dir().join("desktop-app.json")
 }
 
+pub fn desktop_app_status_path_for(app_identifier: &str) -> PathBuf {
+    let safe_identifier = app_identifier
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    control_dir().join(format!("desktop-app-{safe_identifier}.json"))
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DesktopAppStatus {
     pub pid: u32,
     pub updated_at: DateTime<Local>,
     pub platform: String,
+    #[serde(default)]
+    pub frontend_ready: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frontend_error: Option<String>,
+    #[serde(default)]
+    pub process_started_at_unix_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frontend_ready_at_unix_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -78,6 +100,18 @@ fn ensure_dirs() -> std::io::Result<()> {
 pub fn write_desktop_app_status(status: &DesktopAppStatus) -> std::io::Result<()> {
     ensure_dirs()?;
     let path = desktop_app_status_path();
+    let tmp = path.with_extension("json.tmp");
+    fs::write(&tmp, serde_json::to_vec_pretty(status)?)?;
+    fs::rename(tmp, path)?;
+    Ok(())
+}
+
+pub fn write_desktop_app_status_for(
+    app_identifier: &str,
+    status: &DesktopAppStatus,
+) -> std::io::Result<()> {
+    ensure_dirs()?;
+    let path = desktop_app_status_path_for(app_identifier);
     let tmp = path.with_extension("json.tmp");
     fs::write(&tmp, serde_json::to_vec_pretty(status)?)?;
     fs::rename(tmp, path)?;
@@ -300,6 +334,10 @@ mod tests {
             pid: current_pid,
             updated_at: Local::now(),
             platform: "macos".into(),
+            frontend_ready: true,
+            frontend_error: None,
+            process_started_at_unix_ms: 1,
+            frontend_ready_at_unix_ms: Some(2),
         })
         .unwrap();
         assert!(desktop_app_owns_pid(current_pid));
@@ -309,10 +347,37 @@ mod tests {
             pid: current_pid,
             updated_at: Local::now() - Duration::seconds(30),
             platform: "macos".into(),
+            frontend_ready: true,
+            frontend_error: None,
+            process_started_at_unix_ms: 1,
+            frontend_ready_at_unix_ms: Some(2),
         })
         .unwrap();
         assert!(!desktop_app_owns_pid(current_pid));
 
         restore_env();
+    }
+
+    #[test]
+    fn legacy_desktop_status_defaults_frontend_readiness_to_false() {
+        let status: DesktopAppStatus = serde_json::from_str(
+            r#"{"pid":42,"updated_at":"2026-07-21T17:53:47-07:00","platform":"macos"}"#,
+        )
+        .unwrap();
+
+        assert!(!status.frontend_ready);
+        assert_eq!(status.frontend_error, None);
+        assert_eq!(status.process_started_at_unix_ms, 0);
+        assert_eq!(status.frontend_ready_at_unix_ms, None);
+    }
+
+    #[test]
+    fn namespaced_desktop_status_path_sanitizes_identifier() {
+        assert_eq!(
+            desktop_app_status_path_for("com.useminutes.desktop.dev/../../bad")
+                .file_name()
+                .and_then(|name| name.to_str()),
+            Some("desktop-app-com.useminutes.desktop.dev_.._.._bad.json")
+        );
     }
 }

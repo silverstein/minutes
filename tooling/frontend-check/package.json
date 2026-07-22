@@ -1,0 +1,12 @@
+{
+  "name": "minutes-desktop-frontend-check",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "node check.mjs"
+  },
+  "devDependencies": {
+    "eslint": "9.39.1",
+    "globals": "16.4.0"
+  }
+}

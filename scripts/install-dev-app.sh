@@ -41,6 +41,170 @@ INSTALL_DIR="${INSTALL_DIR:-$HOME/Applications}"
 INSTALL_APP="${INSTALL_DIR}/${DEV_PRODUCT_NAME}.app"
 SIGNING_IDENTITY="${MINUTES_DEV_SIGNING_IDENTITY:-${APPLE_SIGNING_IDENTITY:-}}"
 SIGN_MODE="adhoc"
+LOCK_DIR="${INSTALL_DIR}/.${DEV_PRODUCT_NAME}.install-lock"
+STAGED_APP="${INSTALL_DIR}/.${DEV_PRODUCT_NAME}.staged-$$.app"
+BACKUP_APP="${INSTALL_DIR}/.${DEV_PRODUCT_NAME}.backup-$$.app"
+INSTALL_LOCK_HELD=0
+INSTALL_SWAP_ACTIVE=0
+
+cleanup_install_artifacts() {
+  if [[ "$INSTALL_SWAP_ACTIVE" == "1" && -d "$BACKUP_APP" ]]; then
+    if [[ ! -d "$INSTALL_APP" || -z "$(running_dev_bundle_pids)" ]]; then
+      rm -rf "$INSTALL_APP"
+      /bin/mv -f "$BACKUP_APP" "$INSTALL_APP"
+      echo "Interrupted install: restored the previous ${DEV_PRODUCT_NAME}.app." >&2
+      INSTALL_SWAP_ACTIVE=0
+    else
+      echo "Interrupted install: the replacement is running; previous app preserved at $BACKUP_APP" >&2
+    fi
+  fi
+  rm -rf "$STAGED_APP"
+  if [[ "$INSTALL_LOCK_HELD" == "1" ]]; then
+    rm -rf "$LOCK_DIR"
+  fi
+}
+
+acquire_install_lock() {
+  mkdir -p "$INSTALL_DIR"
+  if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+    echo "Another ${DEV_PRODUCT_NAME} install is already running (lock: $LOCK_DIR)." >&2
+    exit 1
+  fi
+  INSTALL_LOCK_HELD=1
+  printf '%s\n' "$$" > "$LOCK_DIR/pid"
+  trap cleanup_install_artifacts EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+}
+
+bundle_process_rows() {
+  local marker="$INSTALL_APP/Contents/MacOS/"
+  local pid
+  local executable
+  ps -ww -axo pid=,command= | awk -v marker="$marker" 'index($0, marker) { print $1 }' | while read -r pid; do
+    [[ -n "$pid" ]] || continue
+    executable="$(/usr/sbin/lsof -a -p "$pid" -d txt -Fn 2>/dev/null \
+      | sed -n 's/^n//p' \
+      | awk -v marker="$marker" 'index($0, marker) == 1 { print; exit }')"
+    case "$executable" in
+      "$marker"*) printf '%s\t%s\n' "$pid" "$executable" ;;
+    esac
+  done
+}
+
+running_dev_app_pids() {
+  local executable="$INSTALL_APP/Contents/MacOS/minutes-app"
+  bundle_process_rows | awk -F '\t' -v executable="$executable" '$2 == executable { print $1 }'
+}
+
+running_dev_bundle_pids() {
+  bundle_process_rows | awk -F '\t' '{ print $1 }'
+}
+
+stop_running_dev_app() {
+  local pids
+  pids="$(running_dev_bundle_pids)"
+  if [[ -z "$pids" ]]; then
+    return
+  fi
+
+  echo "=== Closing the running ${DEV_PRODUCT_NAME}.app before replacement ==="
+  if [[ -n "$(running_dev_app_pids)" ]] && ! osascript -e 'tell application id "com.useminutes.desktop.dev" to quit'; then
+    echo "Could not ask ${DEV_PRODUCT_NAME}.app to quit safely. Quit it manually and rerun the installer." >&2
+    return 1
+  fi
+  local attempt
+  for ((attempt = 0; attempt < 40; attempt++)); do
+    if [[ -z "$(running_dev_bundle_pids)" ]]; then
+      return
+    fi
+    sleep 0.5
+  done
+
+  echo "${DEV_PRODUCT_NAME}.app did not exit within 20 seconds; refusing to replace a running bundle." >&2
+  echo "Still running bundle PID(s): $(running_dev_bundle_pids | tr '\n' ' ')" >&2
+  return 1
+}
+
+restore_previous_app() {
+  local relaunch="${1:-0}"
+
+  if [[ -n "$(running_dev_bundle_pids)" ]] && ! stop_running_dev_app; then
+    echo "Could not stop the failed candidate; previous app remains at $BACKUP_APP" >&2
+    return 1
+  fi
+
+  rm -rf "$INSTALL_APP"
+  if [[ ! -d "$BACKUP_APP" ]]; then
+    echo "No previous app existed; removed the failed candidate." >&2
+    return 0
+  fi
+
+  /bin/mv -f "$BACKUP_APP" "$INSTALL_APP"
+  INSTALL_SWAP_ACTIVE=0
+  echo "Previous app restored." >&2
+  if [[ "$relaunch" == "1" ]]; then
+    echo "Relaunching the previous app." >&2
+    if ! open -n "$INSTALL_APP"; then
+      echo "The previous app was restored but could not be relaunched automatically." >&2
+      return 1
+    fi
+  fi
+}
+
+verify_frontend_startup() {
+  local launch_started_unix_ms="$1"
+  local status_path="$HOME/.minutes/desktop-control/desktop-app-com.useminutes.desktop.dev.json"
+  local pids=""
+  local pid=""
+  local status_pid=""
+  local frontend_ready=""
+  local frontend_error=""
+  local process_started_unix_ms=""
+  local frontend_ready_at_unix_ms=""
+  local attempt
+
+  echo "=== Verifying fresh desktop frontend startup ==="
+  for ((attempt = 0; attempt < 60; attempt++)); do
+    pids="$(running_dev_app_pids)"
+    if [[ -n "$pids" && "$(printf '%s\n' "$pids" | wc -l | tr -d ' ')" == "1" ]]; then
+      pid="$pids"
+      if [[ -f "$status_path" ]]; then
+        status_pid="$(plutil -extract pid raw -o - "$status_path" 2>/dev/null || true)"
+        frontend_ready="$(plutil -extract frontend_ready raw -o - "$status_path" 2>/dev/null || true)"
+        frontend_error="$(plutil -extract frontend_error raw -o - "$status_path" 2>/dev/null || true)"
+        process_started_unix_ms="$(plutil -extract process_started_at_unix_ms raw -o - "$status_path" 2>/dev/null || true)"
+        frontend_ready_at_unix_ms="$(plutil -extract frontend_ready_at_unix_ms raw -o - "$status_path" 2>/dev/null || true)"
+        if [[ "$status_pid" == "$pid" && "$frontend_ready" == "true" \
+          && "$process_started_unix_ms" =~ ^[0-9]+$ \
+          && "$frontend_ready_at_unix_ms" =~ ^[0-9]+$ \
+          && "$process_started_unix_ms" -ge "$launch_started_unix_ms" \
+          && "$frontend_ready_at_unix_ms" -ge "$launch_started_unix_ms" ]]; then
+          echo "  Frontend ready (fresh PID $pid)"
+          return 0
+        fi
+        if [[ "$status_pid" == "$pid" && -n "$frontend_error" ]]; then
+          echo "Frontend startup failed in fresh PID $pid:" >&2
+          echo "$frontend_error" >&2
+          return 1
+        fi
+      fi
+    fi
+    sleep 0.5
+  done
+
+  echo "Fresh ${DEV_PRODUCT_NAME}.app did not report a ready frontend within 30 seconds." >&2
+  if [[ -n "$pids" ]]; then
+    echo "Observed PID(s): $(printf '%s' "$pids" | tr '\n' ' ')" >&2
+  else
+    echo "No installed dev-app process is running." >&2
+  fi
+  if [[ -f "$status_path" ]]; then
+    echo "Last desktop heartbeat:" >&2
+    plutil -convert json -o - "$status_path" 2>/dev/null >&2 || true
+  fi
+  return 1
+}
 
 run_with_ort_retry() {
   local _build_tmp
@@ -79,6 +243,16 @@ for arg in "$@"; do
       ;;
   esac
 done
+
+if [[ "$INSTALL_AFTER_BUILD" == "1" ]]; then
+  for required in /usr/sbin/lsof osascript plutil open; do
+    if ! command -v "$required" >/dev/null 2>&1; then
+      echo "Required macOS install tool is unavailable: $required" >&2
+      exit 1
+    fi
+  done
+  acquire_install_lock
+fi
 
 if [[ -n "$SIGNING_IDENTITY" ]]; then
   if ! security find-identity -v -p codesigning | grep -Fq "$SIGNING_IDENTITY"; then
@@ -150,9 +324,31 @@ codesign --verify --deep --strict "$BUILD_APP" && echo "  Seal OK"
 
 if [[ "$INSTALL_AFTER_BUILD" == "1" ]]; then
   echo "=== Installing ${DEV_PRODUCT_NAME}.app to ${INSTALL_DIR} ==="
-  mkdir -p "$INSTALL_DIR"
-  rm -rf "$INSTALL_APP"
-  cp -rf "$BUILD_APP" "$INSTALL_APP"
+  rm -rf "$STAGED_APP" "$BACKUP_APP"
+  cp -rf "$BUILD_APP" "$STAGED_APP"
+  echo "=== Verifying staged installed bytes ==="
+  codesign --verify --deep --strict "$STAGED_APP" && echo "  Staged seal OK"
+  if ! stop_running_dev_app; then
+    exit 1
+  fi
+  if [[ -d "$INSTALL_APP" ]]; then
+    /bin/mv -f "$INSTALL_APP" "$BACKUP_APP"
+    INSTALL_SWAP_ACTIVE=1
+  fi
+  if ! /bin/mv -f "$STAGED_APP" "$INSTALL_APP"; then
+    if [[ -d "$BACKUP_APP" ]]; then
+      /bin/mv -f "$BACKUP_APP" "$INSTALL_APP"
+      INSTALL_SWAP_ACTIVE=0
+    fi
+    echo "Could not atomically install ${DEV_PRODUCT_NAME}.app; the previous app was restored." >&2
+    exit 1
+  fi
+  if ! codesign --verify --deep --strict "$INSTALL_APP"; then
+    echo "Installed bundle seal verification failed; restoring the previous app." >&2
+    restore_previous_app 0 || true
+    exit 1
+  fi
+  echo "  Installed seal OK"
 
   echo "=== Running native hotkey diagnostic from installed dev app ==="
   set +e
@@ -194,5 +390,22 @@ fi
 if [[ "$OPEN_AFTER_INSTALL" == "1" && "$INSTALL_AFTER_BUILD" == "1" ]]; then
   echo ""
   echo "=== Launching ${DEV_PRODUCT_NAME}.app ==="
-  open -a "$INSTALL_APP"
+  LAUNCH_STARTED_UNIX_MS="$(( $(date +%s) * 1000 ))"
+  if ! open -n "$INSTALL_APP"; then
+    echo "macOS refused to launch the newly installed app; restoring the previous app." >&2
+    restore_previous_app 1 || true
+    exit 1
+  fi
+  if ! verify_frontend_startup "$LAUNCH_STARTED_UNIX_MS"; then
+    echo "=== Restoring previous ${DEV_PRODUCT_NAME}.app after failed startup ===" >&2
+    restore_previous_app 1 || true
+    exit 1
+  fi
+  INSTALL_SWAP_ACTIVE=0
+  rm -rf "$BACKUP_APP"
+elif [[ "$INSTALL_AFTER_BUILD" == "1" ]]; then
+  # --no-open deliberately skips the runtime readiness gate, but the staged
+  # and installed bundle seals above still protect the replacement itself.
+  INSTALL_SWAP_ACTIVE=0
+  rm -rf "$BACKUP_APP"
 fi

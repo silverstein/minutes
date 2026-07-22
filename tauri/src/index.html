@@ -10,6 +10,124 @@
       document.documentElement.dataset.platform = 'macos';
     }
   </script>
+  <script>
+    (() => {
+      const state = { error: null, ready: false, bound: false };
+      const watchdog = setTimeout(() => {
+        report('Minutes startup timed out.', 'The frontend did not reach its ready state within 20 seconds.');
+      }, 20_000);
+
+      function describe(reason) {
+        if (reason instanceof Error) return reason.stack || `${reason.name}: ${reason.message}`;
+        if (typeof reason === 'string') return reason;
+        try { return JSON.stringify(reason); } catch (_) { return String(reason); }
+      }
+
+      function nativeInvoke(command, args = {}) {
+        const invoke = window.__TAURI__?.core?.invoke;
+        if (typeof invoke !== 'function') return Promise.reject(new Error('The native Minutes bridge is unavailable.'));
+        return invoke(command, args);
+      }
+
+      function render() {
+        if (!state.error) return;
+        const overlay = document.getElementById('startup-failure');
+        const detail = document.getElementById('startup-failure-detail');
+        if (!overlay || !detail) return;
+        detail.textContent = state.error;
+        overlay.classList.add('active');
+        document.querySelectorAll('body > :not(#startup-failure)').forEach((element) => {
+          element.inert = true;
+          element.setAttribute('aria-hidden', 'true');
+        });
+        document.getElementById('startup-failure-retry')?.focus();
+      }
+
+      function report(kind, reason) {
+        if (state.ready || state.error) return;
+        state.error = `${kind}\n\n${describe(reason)}`.slice(0, 2_000);
+        render();
+        nativeInvoke('cmd_frontend_startup_failed', { message: state.error }).catch(() => {});
+      }
+
+      function bindRecoveryActions() {
+        if (state.bound) return;
+        state.bound = true;
+        document.getElementById('startup-failure-retry')?.addEventListener('click', () => location.reload());
+        document.getElementById('startup-failure-copy')?.addEventListener('click', async (event) => {
+          const button = event.currentTarget;
+          try {
+            await navigator.clipboard.writeText(state.error || 'Minutes frontend startup failed.');
+            button.textContent = 'Copied';
+          } catch (_) {
+            button.textContent = 'Copy failed';
+          }
+        });
+        document.getElementById('startup-failure-restart')?.addEventListener('click', async (event) => {
+          const button = event.currentTarget;
+          button.disabled = true;
+          button.textContent = 'Checking…';
+          try {
+            const safety = await nativeInvoke('cmd_permission_restart_safety');
+            if (Array.isArray(safety?.blockers) && safety.blockers.length > 0) {
+              throw new Error(safety.detail || safety.blockers.join(' '));
+            }
+            if (safety?.requires_confirmation) {
+              const confirmed = window.confirm('Restarting Minutes will close the active assistant session. Restart anyway?');
+              if (!confirmed) {
+                button.disabled = false;
+                button.textContent = 'Restart Minutes';
+                return;
+              }
+            }
+            button.textContent = 'Restarting…';
+            await nativeInvoke('cmd_restart_for_permission', {
+              confirmAssistant: safety?.requires_confirmation === true,
+            });
+          } catch (error) {
+            button.disabled = false;
+            button.textContent = 'Restart Minutes';
+            state.error = `${state.error || 'Minutes frontend startup failed.'}\n\nRestart failed: ${describe(error)}`.slice(0, 2_000);
+            render();
+          }
+        });
+        render();
+      }
+
+      window.addEventListener('error', (event) => {
+        if (!event.message && !event.error) return;
+        const location = event.filename
+          ? `\n${event.filename}:${event.lineno || 0}:${event.colno || 0}`
+          : '';
+        report('Minutes could not finish starting.', `${describe(event.error || event.message)}${location}`);
+      });
+      window.addEventListener('unhandledrejection', (event) => {
+        report('Minutes could not finish starting.', event.reason);
+      });
+      if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', bindRecoveryActions, { once: true });
+      } else {
+        bindRecoveryActions();
+      }
+
+      window.__MINUTES_STARTUP__ = {
+        markReady() {
+          requestAnimationFrame(() => requestAnimationFrame(() => {
+            if (state.error) return;
+            nativeInvoke('cmd_frontend_ready')
+              .then(() => {
+                state.ready = true;
+                clearTimeout(watchdog);
+              })
+              .catch((error) => report('Minutes could not confirm startup.', error));
+          }));
+        },
+        fail(reason) {
+          report('Minutes could not finish starting.', reason);
+        },
+      };
+    })();
+  </script>
   <script src="scripts/ui-zoom.js"></script>
   <link rel="stylesheet" href="styles/ui-zoom-tokens.css">
   <style>
@@ -5230,10 +5348,87 @@
     }
     #settings-coach-models .coach-model-grid { margin-top: 0; }
 
+    .startup-failure {
+      position: fixed;
+      inset: 0;
+      z-index: 10000;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+      background: var(--overlay-scrim);
+      color: var(--text);
+    }
+
+    .startup-failure.active {
+      display: flex;
+    }
+
+    .startup-failure-card {
+      width: min(560px, 100%);
+      padding: 20px;
+      border: 1px solid var(--border-mid);
+      border-radius: 12px;
+      background: var(--bg-elevated);
+      box-shadow: 0 24px 60px var(--shadow-strong);
+    }
+
+    .startup-failure-kicker {
+      margin-bottom: 8px;
+      color: var(--red);
+      font: 500 var(--text-xs) 'Geist Mono', monospace;
+      letter-spacing: 0.08em;
+    }
+
+    .startup-failure h1 {
+      margin-bottom: 8px;
+      font: 400 var(--text-2xl) 'Instrument Serif', serif;
+    }
+
+    .startup-failure p {
+      color: var(--text-secondary);
+      font-size: var(--text-body);
+      line-height: 1.5;
+    }
+
+    .startup-failure pre {
+      max-height: 180px;
+      margin: 16px 0;
+      padding: 12px;
+      overflow: auto;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--bg-hover);
+      color: var(--text-secondary);
+      font: 400 var(--text-meta) 'Geist Mono', monospace;
+      line-height: 1.45;
+    }
+
+    .startup-failure-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
   </style>
 </head>
 
 <body>
+  <div class="startup-failure" id="startup-failure" role="alertdialog" aria-modal="true" aria-labelledby="startup-failure-title" aria-describedby="startup-failure-description startup-failure-detail">
+    <div class="startup-failure-card">
+      <div class="startup-failure-kicker">STARTUP RECOVERY</div>
+      <h1 id="startup-failure-title">Minutes couldn’t finish starting.</h1>
+      <p id="startup-failure-description">Your recordings and meeting files are untouched. Retry this window, restart Minutes, or copy the diagnostic below.</p>
+      <pre id="startup-failure-detail">Waiting for startup diagnostics…</pre>
+      <div class="startup-failure-actions">
+        <button class="btn btn-primary" id="startup-failure-retry" type="button">Retry startup</button>
+        <button class="btn btn-secondary" id="startup-failure-restart" type="button">Restart Minutes</button>
+        <button class="btn btn-secondary" id="startup-failure-copy" type="button">Copy diagnostics</button>
+      </div>
+    </div>
+  </div>
   <div class="app-left">
     <!-- Header -->
     <div class="window-drag-strip" data-tauri-drag-region aria-hidden="true"></div>
@@ -7187,12 +7382,13 @@
       }
     }
 
-    async function loadDesktopCapabilities() {
+    async function loadDesktopCapabilities(fatal = false) {
       try {
         const caps = await invoke('cmd_desktop_capabilities');
         applyDesktopCapabilities(caps);
       } catch (e) {
         console.error('Desktop capabilities:', e);
+        if (fatal) throw e;
       }
     }
 
@@ -7639,7 +7835,7 @@
     // ── Status polling ──
     let statusCheckInFlight = false;
 
-    async function checkStatus() {
+    async function checkStatus(fatal = false) {
       if (statusCheckInFlight) return;
       statusCheckInFlight = true;
       try {
@@ -7858,6 +8054,7 @@
         }
       } catch (e) {
         console.error('Status:', e);
+        if (fatal) throw e;
       } finally {
         statusCheckInFlight = false;
       }
@@ -8134,7 +8331,7 @@
     }
 
     sidekickButtons.forEach(button => button.addEventListener('click', openCodexSidekick));
-    listen('sidekick:state', (event) => {
+    const sidekickStateListenerReady = listen('sidekick:state', (event) => {
       sidekickSessionOpen = Boolean(event.payload?.active);
       renderSidekickControls();
     });
@@ -9983,7 +10180,7 @@
     }
 
     // ── Onboarding ──
-    async function checkSetup() {
+    async function checkSetup(fatal = false) {
       try {
         currentSetup = await invoke('cmd_needs_setup');
         activationState = currentSetup.activation || activationState;
@@ -9991,6 +10188,7 @@
       } catch (e) {
         console.error('Setup check:', e);
         loadMeetings();
+        if (fatal) throw e;
       }
     }
 
@@ -15443,10 +15641,13 @@
     } else {
       setCueToggle(true);
     }
-    loadDesktopCapabilities();
-    loadHotkeySettings();
-    checkSetup();
-    checkStatus();
+    const criticalStartupReady = Promise.all([
+      Promise.resolve(sidekickStateListenerReady),
+      loadDesktopCapabilities(true),
+      loadHotkeySettings(),
+      checkSetup(true),
+      checkStatus(true),
+    ]);
     setInterval(() => { if (!pollInterval) checkStatus(); }, 2000);
     // Defer heavy checks (osascript calendar queries) so the UI is interactive immediately
     setTimeout(() => {
@@ -15532,6 +15733,9 @@
         }, 650);
       }
     })();
+    criticalStartupReady
+      .then(() => window.__MINUTES_STARTUP__?.markReady())
+      .catch((error) => window.__MINUTES_STARTUP__?.fail(error));
   </script>
 </body>
 

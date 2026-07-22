@@ -442,6 +442,28 @@ jobs:
       - name: Test committed release flow
         run: node --test scripts/release.test.mjs
 
+  desktop_frontend_startup:
+    name: Desktop Frontend Startup
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install frontend checker
+        working-directory: tooling/frontend-check
+        run: npm ci
+
+      - name: Reject undefined frontend globals
+        working-directory: tooling/frontend-check
+        run: npm run check
+
+      - name: Exercise full frontend registration and recovery
+        run: node --test scripts/test/tauri_startup_bindings.test.mjs scripts/test/tauri_frontend_startup.test.mjs
+
   design_tokens:
     name: Design Tokens
     runs-on: ubuntu-latest

@@ -48,6 +48,12 @@ For any desktop work that touches TCC-sensitive features, use exactly one app:
 ./scripts/install-dev-app.sh
 ```
 
+The installer closes any currently running Minutes Dev process before replacing
+the bundle, launches the installed app as a fresh process, and waits for the
+frontend readiness handshake. Do not treat the install as successful unless it
+ends with `Frontend ready (fresh PID ...)`; a JavaScript startup error is printed
+and leaves a visible recovery panel in the app instead of a blank window.
+
 That script:
 
 - builds the desktop bundle with the dev overlay config

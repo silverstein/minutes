@@ -18793,6 +18793,12 @@ fn run_native_sidekick_ui_acceptance(
         "screen marker",
         |runtime| runtime.marker_ready,
     )?;
+    if !minutes_core::macos_permissions::request_screen_recording_access() {
+        return Err(
+            "macOS did not grant Screen Recording to this signed Minutes app. Approve the system prompt and rerun; if no prompt appeared, remove or reset the stale Minutes permission entry once before retrying."
+                .into(),
+        );
+    }
     // WebKit's finished-load callback proves the nonce-only marker document is
     // present, but compositing may trail that callback by a frame. The captured
     // PNG is still decoded and checked against the full nonce below; this short

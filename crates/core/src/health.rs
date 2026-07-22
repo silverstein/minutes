@@ -426,7 +426,7 @@ pub fn screen_recording_status(config: &Config) -> HealthItem {
             HealthItem {
                 label: "Screen recording".into(),
                 state: "attention".into(),
-                detail: "Screen-context capture is enabled but Screen Recording permission is unavailable in this environment — recordings started here will have no screenshots. If System Settings shows the app as enabled, the grant is stale: toggle it off and on under Privacy & Security > Screen & System Audio Recording."
+                detail: "Screen-context capture is enabled but macOS rejected Screen Recording in this environment, so recordings started here will have no screenshots. If the current app is already enabled in System Settings, remove or reset the stale entry once and grant the current signed app access again."
                     .into(),
                 optional: true,
             }

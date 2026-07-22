@@ -1957,7 +1957,7 @@ fn start_screen_capture_if_enabled(
 /// grant as enabled after the app's signature changes, so the failure must
 /// also reach the structured log, the event stream, and the desktop (#424).
 fn report_screen_permission_failure(output_path: &Path) {
-    let message = "Screen context is enabled but Screen Recording permission is unavailable — recording continues without screenshots. If System Settings already shows Minutes as enabled, the grant is stale: toggle it off and on under Privacy & Security > Screen & System Audio Recording, then restart the recording.";
+    let message = "Screen context is enabled but macOS rejected Screen Recording for this running Minutes app, so recording continues without screenshots. If the current Minutes app is already enabled in System Settings, quit Minutes, remove or reset the stale Minutes entry once, then reopen the current signed app and grant access again.";
 
     eprintln!("[minutes] {}", message);
     crate::logging::log_error(
@@ -1970,7 +1970,7 @@ fn report_screen_permission_failure(output_path: &Path) {
         message: message.into(),
     });
     send_desktop_notification(
-        "Screen context is on, but Screen Recording permission is missing or stale — this recording will have no screenshots. Re-enable it in System Settings > Privacy & Security.",
+        "Screen context is on, but macOS rejected Screen Recording for this app — this recording will have no screenshots. Grant the current signed Minutes app access in System Settings; replace any stale old entry instead of repeatedly toggling it.",
     );
 }
 

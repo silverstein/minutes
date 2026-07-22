@@ -171,6 +171,16 @@ pub fn screen_recording_status() -> MacPermissionStatus {
     platform::screen_recording_status()
 }
 
+/// Ask macOS to grant Screen Recording access to the current signed app.
+///
+/// Callers must obtain explicit user consent before invoking this API because
+/// macOS may display a system privacy prompt. A `false` result includes both a
+/// denial and the restart/re-authorization state macOS can require after a
+/// stale code-signing identity entry.
+pub fn request_screen_recording_access() -> bool {
+    platform::request_screen_recording_access()
+}
+
 pub fn microphone_row() -> MacPermissionRow {
     let status = microphone_status();
     MacPermissionRow::new(MacPermissionRowSpec {
@@ -352,6 +362,7 @@ mod platform {
     #[link(name = "CoreGraphics", kind = "framework")]
     extern "C" {
         fn CGPreflightScreenCaptureAccess() -> bool;
+        fn CGRequestScreenCaptureAccess() -> bool;
     }
 
     pub fn microphone_status() -> MacPermissionStatus {
@@ -377,6 +388,10 @@ mod platform {
         } else {
             MacPermissionStatus::Denied
         }
+    }
+
+    pub fn request_screen_recording_access() -> bool {
+        unsafe { CGRequestScreenCaptureAccess() }
     }
 
     pub fn input_monitoring_status() -> MacPermissionStatus {
@@ -446,6 +461,10 @@ mod platform {
         MacPermissionStatus::NotNeeded
     }
 
+    pub fn request_screen_recording_access() -> bool {
+        true
+    }
+
     pub fn input_monitoring_status() -> MacPermissionStatus {
         MacPermissionStatus::NotNeeded
     }
@@ -466,6 +485,12 @@ mod platform {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn screen_recording_request_is_a_noop_off_macos() {
+        assert!(request_screen_recording_access());
+    }
 
     #[test]
     fn classify_probe_status_distinguishes_definitive_and_transient_outcomes() {

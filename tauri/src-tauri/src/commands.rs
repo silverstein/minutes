@@ -16720,13 +16720,27 @@ fn show_native_sidekick(app: &tauri::AppHandle) -> Result<(), String> {
     .map_err(|error| format!("Could not open Sidekick: {error}"))
 }
 
+// Sidekick intentionally asks the context store for one latest exact-session
+// image per evidence refresh. Keep the adapter inside the store's public
+// contract at compile time so an internal search-window change cannot make
+// the real product path degrade before reasoning starts.
+const NATIVE_SIDEKICK_SCREEN_CONTEXT_LIMIT: usize = 1;
+const _: () = assert!(
+    NATIVE_SIDEKICK_SCREEN_CONTEXT_LIMIT > 0
+        && NATIVE_SIDEKICK_SCREEN_CONTEXT_LIMIT
+            <= minutes_core::context_store::MAX_SCREEN_CONTEXT_IMAGES
+);
+
 fn refresh_native_sidekick_screen(
     engine: &mut minutes_core::live_sidekick::LiveSidekickEngine,
     context_session_id: &str,
     last_path: &mut Option<String>,
 ) -> bool {
-    let Ok(result) = minutes_core::context_store::get_screen_context(context_session_id, None, 1)
-    else {
+    let Ok(result) = minutes_core::context_store::get_screen_context(
+        context_session_id,
+        None,
+        NATIVE_SIDEKICK_SCREEN_CONTEXT_LIMIT,
+    ) else {
         return false;
     };
     let Some(image) = result.images.first() else {
@@ -16822,8 +16836,12 @@ fn refresh_native_sidekick_acceptance_screen(
     if plan.screen.capture_session_id.as_str() != context_session_id {
         return Err("The pinned acceptance screen belongs to a different recording.".into());
     }
-    let result = minutes_core::context_store::get_screen_context(context_session_id, None, 64)
-        .map_err(|error| format!("Could not read exact-session screen context: {error}"))?;
+    let result = minutes_core::context_store::get_screen_context(
+        context_session_id,
+        None,
+        NATIVE_SIDEKICK_SCREEN_CONTEXT_LIMIT,
+    )
+    .map_err(|error| format!("Could not read exact-session screen context: {error}"))?;
     if result.session.as_ref().map(|session| session.id.as_str()) != Some(context_session_id)
         || result.status.context_session_id.as_deref() != Some(context_session_id)
     {
@@ -17830,6 +17848,15 @@ mod native_sidekick_diagnostic_tests {
     }
 
     #[test]
+    fn sidekick_screen_refresh_stays_inside_context_store_contract() {
+        assert_eq!(NATIVE_SIDEKICK_SCREEN_CONTEXT_LIMIT, 1);
+        assert!(
+            NATIVE_SIDEKICK_SCREEN_CONTEXT_LIMIT
+                <= minutes_core::context_store::MAX_SCREEN_CONTEXT_IMAGES
+        );
+    }
+
+    #[test]
     fn captured_marker_pixels_must_encode_the_run_nonce() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("marker.png");
@@ -18767,10 +18794,12 @@ fn wait_for_native_sidekick_real_screen(
     let deadline = Instant::now() + timeout;
     let mut last_marker_error = None;
     loop {
-        let result = minutes_core::context_store::get_screen_context(context_session_id, None, 1)
-            .map_err(|error| {
-            format!("Could not read the exact-session screen context: {error}")
-        })?;
+        let result = minutes_core::context_store::get_screen_context(
+            context_session_id,
+            None,
+            NATIVE_SIDEKICK_SCREEN_CONTEXT_LIMIT,
+        )
+        .map_err(|error| format!("Could not read the exact-session screen context: {error}"))?;
         if result.session.as_ref().map(|session| session.id.as_str()) != Some(context_session_id)
             || result.status.context_session_id.as_deref() != Some(context_session_id)
         {

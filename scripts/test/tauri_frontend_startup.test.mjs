@@ -489,6 +489,14 @@ test('Sidekick acceptance traverses visible main control, consent, and one real 
   new vm.Script(mainScript, { filename: 'tauri/src/index.html#main' }).runInContext(harness.context);
   await new Promise((resolve) => setImmediate(resolve));
   harness.elements.get('coach-onboarding-overlay').classList.add('active');
+  const onboardingClose = harness.elements.get('coach-onboarding-close');
+  let onboardingClosePaintReads = 0;
+  Object.defineProperty(onboardingClose, 'acceptanceOpacity', {
+    get() {
+      onboardingClosePaintReads += 1;
+      return onboardingClosePaintReads === 1 ? '0' : '1';
+    },
+  });
   const open = eventHandlers.get('sidekick:acceptance-open');
   assert.equal(typeof open, 'function');
   await open({ payload: { nonce: 'a'.repeat(64) } });
@@ -506,6 +514,10 @@ test('Sidekick acceptance traverses visible main control, consent, and one real 
   );
   assert.equal(starts[0].args.goal, null);
   assert.equal(starts[0].args.cloudConsent, true);
+  assert.ok(
+    onboardingClosePaintReads >= 4,
+    'the product path should yield one paint and then re-attest the onboarding control',
+  );
   assert.deepEqual(
     harness.invocations
       .filter(({ command }) => command === 'cmd_native_sidekick_ui_acceptance_interactable')

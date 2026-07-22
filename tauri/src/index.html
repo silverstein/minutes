@@ -8427,6 +8427,11 @@
       if (!overlay?.classList.contains('active')) return false;
       const close = document.getElementById('coach-onboarding-close');
       if (!close) throw new Error('The visible Coach onboarding has no close control.');
+      // The native marker window has only just yielded to the main WebView.
+      // WebKit can expose the overlay's active DOM state one paint before its
+      // hit-test tree is current. Keep the product-path click pending rather
+      // than treating that transient compositor state as a broken control.
+      if (!sidekickAcceptanceInteractability(close)) return true;
       await attestSidekickAcceptanceControl(nonce, 'coach_onboarding_close', close);
       if (!sidekickAcceptanceInteractability(close)) {
         throw new Error('The Coach onboarding close control changed before it could be clicked.');
@@ -8443,6 +8448,10 @@
       let forcedStatusRefresh = false;
       while (performance.now() < deadline) {
         if (await dismissCoachOnboardingForSidekickAcceptance(nonce)) {
+          // Yield a paint whether the overlay was just dismissed or is still
+          // waiting for its first valid hit-test result. A tight async loop of
+          // already-resolved promises can otherwise starve WebKit rendering.
+          await new Promise((resolve) => setTimeout(resolve, 25));
           continue;
         }
         if (!forcedStatusRefresh) {

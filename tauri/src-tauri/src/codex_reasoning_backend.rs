@@ -59,7 +59,7 @@ impl CodexReasoningBackend {
     /// bounded text/image input sent by Minutes.
     pub fn sidekick(
         executable: PathBuf,
-        configured_mcp_servers: impl IntoIterator<Item = String>,
+        _configured_mcp_servers: impl IntoIterator<Item = String>,
     ) -> Result<Self, ReasoningError> {
         let isolated_dir = Arc::new(tempfile::tempdir().map_err(|error| {
             ReasoningError::new(
@@ -125,20 +125,10 @@ impl CodexReasoningBackend {
             "--config".into(),
             "model_reasoning_effort=\"low\"".into(),
         ];
-        let mut servers = configured_mcp_servers.into_iter().collect::<Vec<_>>();
-        servers.sort();
-        servers.dedup();
-        for server in servers {
-            if server
-                .chars()
-                .all(|character| character.is_ascii_alphanumeric() || "_-".contains(character))
-            {
-                args.extend([
-                    "--config".into(),
-                    format!("mcp_servers.{server}.enabled=false"),
-                ]);
-            }
-        }
+        // CODEX_HOME contains authentication only, so there are no inherited
+        // MCP definitions to disable. Do not synthesize partial per-server
+        // tables here: strict config correctly rejects entries with no
+        // transport before app-server can start.
         args.extend(["--enable".into(), "fast_mode".into(), "app-server".into()]);
         Ok(Self {
             executable,
@@ -1258,13 +1248,14 @@ rl.on('line', (line) => {
             "--disable skill_mcp_dependency_install",
             "--disable browser_use",
             "--disable computer_use",
-            "mcp_servers.github.enabled=false",
-            "mcp_servers.slack.enabled=false",
+            "mcp_servers={}",
             "service_tier=\"fast\"",
             "model_reasoning_effort=\"low\"",
         ] {
             assert!(joined.contains(required), "missing {required}: {joined}");
         }
+        assert!(!joined.contains("mcp_servers.github"));
+        assert!(!joined.contains("mcp_servers.slack"));
         assert!(backend.cwd.is_absolute());
         assert!(backend.home.starts_with(&backend.cwd));
         assert!(backend.codex_home.starts_with(&backend.cwd));

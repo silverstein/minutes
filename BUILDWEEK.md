@@ -24,6 +24,7 @@ The last commit before this work is [`146d062f`](https://github.com/silverstein/
 - The Meridian golden evaluation: a deterministic multi-speaker negotiation fixture whose required insight combines separate facts into an unstated `$800K/month` consequence, followed by a procurement-lead role reversal. The scorer fails summaries, wrong arithmetic, unsupported evidence, and self-sabotaging advice.
 - A provider-neutral persistent reasoning runtime. Minutes owns the session reducer, bounded evidence window, corrections, intervention policy, memory, and publish decision. A backend only performs a steerable, streaming reasoning turn.
 - A hardened **Codex app-server adapter** as the first backend: persistent thread, streamed deltas, foreground steering, interruption, Codex Fast, no model-callable tools/MCP lanes, and an isolated workspace. The interface can also be implemented by Claude-via-MCP or a local Ollama/Apple Foundation Models backend without moving vendor logic into core.
+- A fully automated native UI/provider acceptance gate that drives the real Recording, Sidekick, and cloud-consent controls; verifies room-mic signal and exact-session screen capture; stages two transcript turns; scores strategic quality; rejects adversarial false-green mutations; and proves bounded teardown. Minutes now owns the exact PNG bytes sent to a provider, so Codex receives a validated inline image instead of reopening a mutable file path.
 
 ## How Codex collaborated in building it
 
@@ -89,7 +90,7 @@ The golden fixture and checker live in [`tests/eval/sidekick_rehearsal_golden.mj
 
 ## Timestamped Build Week commits
 
-All timestamps below are the author timestamps recorded by Git. PDT is UTC−07:00 on July 21, 2026.
+All timestamps below are the author timestamps recorded by Git. PDT is UTC−07:00 on July 21–22, 2026.
 
 | Commit | UTC | Pacific | Build Week contribution |
 | --- | --- | --- | --- |
@@ -104,5 +105,24 @@ All timestamps below are the author timestamps recorded by Git. PDT is UTC−07:
 | `e20a9ef8` | 2026-07-21 21:56:10 | 14:56:10 PDT | Make a dead Sidekick terminal recoverable |
 | `8f9f48b2` | 2026-07-21 21:59:51 | 14:59:51 PDT | Pin Sidekick to the bundled Minutes CLI |
 | `2576cc90` | 2026-07-21 23:07:54 | 16:07:54 PDT | Add provider-neutral native Sidekick, persistent Codex app-server adapter, and adversarial harness |
+| `40acc2ab` | 2026-07-21 23:09:27 | 2026-07-21 16:09:27 PDT | Add the Build Week submission guide and project boundary |
+| `b77453af` | 2026-07-22 00:12:42 | 2026-07-21 17:12:42 PDT | Harden native Sidekick behavior for production use |
+| `064635d2` | 2026-07-22 00:26:42 | 2026-07-21 17:26:42 PDT | Add the installed-binary headless acceptance path |
+| `d1de9f83` | 2026-07-22 00:30:20 | 2026-07-21 17:30:20 PDT | Support isolated synthetic Sidekick fixtures |
+| `3c6693cf` | 2026-07-22 00:32:40 | 2026-07-21 17:32:40 PDT | Keep strict Codex isolation configuration valid |
+| `c0ae8b30` | 2026-07-22 00:51:26 | 2026-07-21 17:51:26 PDT | Bind the Sidekick listener during desktop startup |
+| `4b6fcb25` | 2026-07-22 01:20:05 | 2026-07-21 18:20:05 PDT | Gate desktop installs on frontend readiness |
+| `325f673a` | 2026-07-22 02:13:39 | 2026-07-21 19:13:39 PDT | Make Sidekick acceptance hermetic |
+| `c3e8dd86` | 2026-07-22 02:19:48 | 2026-07-21 19:19:48 PDT | Tolerate cold dev-app registration |
+| `a7276e19` | 2026-07-22 03:09:38 | 2026-07-21 20:09:38 PDT | Harden Sidekick strategy quality and golden scoring |
+| `3c04c34b` | 2026-07-22 03:30:18 | 2026-07-21 20:30:18 PDT | Keep desktop startup off meeting storage |
+| `0d250143` | 2026-07-22 03:49:36 | 2026-07-21 20:49:36 PDT | Decouple frontend readiness from optional hydration |
+| `80b95870` | 2026-07-22 04:54:19 | 2026-07-21 21:54:19 PDT | Preserve quantified contract remedies in held-out evals |
+| `feeddae2` | 2026-07-22 05:02:09 | 2026-07-21 22:02:09 PDT | Fail closed on contract semantics |
+| `265a93ec` | 2026-07-22 05:10:53 | 2026-07-21 22:10:53 PDT | Define an exact contract-output grammar |
+| `4c38edb6` | 2026-07-22 05:29:21 | 2026-07-21 22:29:21 PDT | Attest the canonical Sidekick installation |
+| `3df8aa35` | 2026-07-22 05:49:05 | 2026-07-21 22:49:05 PDT | Close reviewed Sidekick acceptance bypasses |
+| `70a3d033` | 2026-07-22 05:57:44 | 2026-07-21 22:57:44 PDT | Align Sidekick host and contract identity |
+| `1c7f0511` | 2026-07-22 08:27:55 | 2026-07-22 01:27:55 PDT | Harden the native UI/provider gate, exact evidence bytes, adversarial mutations, and truthful scope |
 
 This branch intentionally remains separate from `main` for Build Week review and live rehearsal.

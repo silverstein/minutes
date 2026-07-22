@@ -2013,7 +2013,13 @@ fn model_file_for_config(config: &Config) -> PathBuf {
     whisper_model_file(config, &config.transcription.model)
 }
 
-fn latest_saved_artifact_from_search(config: &Config) -> Option<PathBuf> {
+#[derive(Debug, Clone)]
+struct IndexedActivationArtifact {
+    path: PathBuf,
+    saved_at: String,
+}
+
+fn latest_saved_artifact_from_index(config: &Config) -> Option<IndexedActivationArtifact> {
     let filters = minutes_core::search::SearchFilters {
         content_type: None,
         since: None,
@@ -2023,17 +2029,30 @@ fn latest_saved_artifact_from_search(config: &Config) -> Option<PathBuf> {
         recorded_by: None,
         include_restricted: true,
     };
-    minutes_core::search::search("", config, &filters)
+    // This runs on the desktop main thread before Tauri has created a window
+    // or started its heartbeat. Query the local SQLite index directly: even
+    // `search_with_mode(..., Skip)` checks whether output_dir exists before it
+    // honors Skip, and that stat can wedge on an unavailable File Provider or
+    // network mount. Normal search/watcher paths own filesystem freshness
+    // after startup.
+    let index = minutes_core::search_index::SearchIndex::open(config).ok()?;
+    index
+        .search("", &filters, Some(1))
         .ok()?
         .into_iter()
         .next()
-        .map(|item| item.path)
+        .map(|item| IndexedActivationArtifact {
+            path: item.path,
+            saved_at: chrono::DateTime::parse_from_rfc3339(&item.date)
+                .map(|value| value.to_rfc3339())
+                .unwrap_or_else(|_| now_rfc3339()),
+        })
 }
 
 fn backfill_activation_from_paths(
     progress: &mut ActivationProgress,
     model_file: &Path,
-    latest_artifact: Option<&Path>,
+    latest_artifact: Option<&IndexedActivationArtifact>,
 ) -> bool {
     let mut changed = false;
     if progress.model_ready_at.is_none() && model_file.exists() {
@@ -2042,11 +2061,12 @@ fn backfill_activation_from_paths(
     }
 
     if progress.first_artifact_saved_at.is_none() {
-        if let Some(path) = latest_artifact {
-            progress.first_artifact_saved_at =
-                Some(path_timestamp(path).unwrap_or_else(now_rfc3339));
+        if let Some(artifact) = latest_artifact {
+            // Do not stat the artifact here. It can live on the same remote or
+            // File Provider-backed meetings tree that startup must not touch.
+            progress.first_artifact_saved_at = Some(artifact.saved_at.clone());
             if progress.first_artifact_path.is_none() {
-                progress.first_artifact_path = Some(path.display().to_string());
+                progress.first_artifact_path = Some(artifact.path.display().to_string());
             }
             changed = true;
         }
@@ -2069,9 +2089,8 @@ pub fn load_activation_progress(config: &Config) -> Arc<Mutex<ActivationProgress
     }
 
     let model_file = model_file_for_config(config);
-    let latest_artifact = latest_saved_artifact_from_search(config);
-    changed |=
-        backfill_activation_from_paths(&mut progress, &model_file, latest_artifact.as_deref());
+    let latest_artifact = latest_saved_artifact_from_index(config);
+    changed |= backfill_activation_from_paths(&mut progress, &model_file, latest_artifact.as_ref());
 
     if changed {
         persist_activation_progress(&progress);
@@ -13853,17 +13872,23 @@ mod tests {
     fn backfill_activation_from_paths_populates_missing_model_and_artifact_milestones() {
         let temp = TempDir::new().unwrap();
         let model = temp.path().join("ggml-small.bin");
-        let artifact = temp.path().join("2026-04-09-demo.md");
+        let artifact_path = temp.path().join("missing-remote-artifact.md");
+        let artifact = IndexedActivationArtifact {
+            path: artifact_path.clone(),
+            saved_at: "2026-04-09T12:30:00-07:00".into(),
+        };
         std::fs::write(&model, "model").unwrap();
-        std::fs::write(&artifact, "---\ntitle: Demo\n---\n").unwrap();
 
         let mut progress = ActivationProgress::default();
         let changed = backfill_activation_from_paths(&mut progress, &model, Some(&artifact));
-        let expected = artifact.display().to_string();
+        let expected = artifact_path.display().to_string();
 
         assert!(changed);
         assert!(progress.model_ready_at.is_some());
-        assert!(progress.first_artifact_saved_at.is_some());
+        assert_eq!(
+            progress.first_artifact_saved_at.as_deref(),
+            Some("2026-04-09T12:30:00-07:00")
+        );
         assert_eq!(
             progress.first_artifact_path.as_deref(),
             Some(expected.as_str())

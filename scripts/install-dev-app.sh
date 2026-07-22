@@ -102,6 +102,7 @@ running_dev_bundle_pids() {
 }
 
 stop_running_dev_app() {
+  local force_failed_candidate="${1:-0}"
   local pids
   pids="$(running_dev_bundle_pids)"
   if [[ -z "$pids" ]]; then
@@ -109,17 +110,53 @@ stop_running_dev_app() {
   fi
 
   echo "=== Closing the running ${DEV_PRODUCT_NAME}.app before replacement ==="
-  if [[ -n "$(running_dev_app_pids)" ]] && ! osascript -e 'tell application id "com.useminutes.desktop.dev" to quit'; then
-    echo "Could not ask ${DEV_PRODUCT_NAME}.app to quit safely. Quit it manually and rerun the installer." >&2
-    return 1
+  if [[ -n "$(running_dev_app_pids)" ]] && ! osascript \
+    -e 'with timeout of 5 seconds' \
+    -e 'tell application id "com.useminutes.desktop.dev" to quit' \
+    -e 'end timeout'; then
+    if [[ "$force_failed_candidate" != "1" ]]; then
+      echo "Could not ask ${DEV_PRODUCT_NAME}.app to quit safely. Quit it manually and rerun the installer." >&2
+      return 1
+    fi
+    echo "The failed candidate did not accept a quit request; retiring only its verified bundle process." >&2
   fi
   local attempt
-  for ((attempt = 0; attempt < 40; attempt++)); do
+  local graceful_attempts=40
+  if [[ "$force_failed_candidate" == "1" ]]; then
+    graceful_attempts=10
+  fi
+  for ((attempt = 0; attempt < graceful_attempts; attempt++)); do
     if [[ -z "$(running_dev_bundle_pids)" ]]; then
       return
     fi
     sleep 0.5
   done
+
+  if [[ "$force_failed_candidate" == "1" ]]; then
+    pids="$(running_dev_bundle_pids)"
+    if [[ -n "$pids" ]]; then
+      echo "Terminating failed candidate bundle PID(s): $(printf '%s' "$pids" | tr '\n' ' ')" >&2
+      kill -TERM $pids 2>/dev/null || true
+      for ((attempt = 0; attempt < 10; attempt++)); do
+        if [[ -z "$(running_dev_bundle_pids)" ]]; then
+          return
+        fi
+        sleep 0.5
+      done
+    fi
+
+    pids="$(running_dev_bundle_pids)"
+    if [[ -n "$pids" ]]; then
+      echo "Force-stopping unresponsive failed candidate bundle PID(s): $(printf '%s' "$pids" | tr '\n' ' ')" >&2
+      kill -KILL $pids 2>/dev/null || true
+      for ((attempt = 0; attempt < 20; attempt++)); do
+        if [[ -z "$(running_dev_bundle_pids)" ]]; then
+          return
+        fi
+        sleep 0.25
+      done
+    fi
+  fi
 
   echo "${DEV_PRODUCT_NAME}.app did not exit within 20 seconds; refusing to replace a running bundle." >&2
   echo "Still running bundle PID(s): $(running_dev_bundle_pids | tr '\n' ' ')" >&2
@@ -128,8 +165,9 @@ stop_running_dev_app() {
 
 restore_previous_app() {
   local relaunch="${1:-0}"
+  local force_failed_candidate="${2:-0}"
 
-  if [[ -n "$(running_dev_bundle_pids)" ]] && ! stop_running_dev_app; then
+  if [[ -n "$(running_dev_bundle_pids)" ]] && ! stop_running_dev_app "$force_failed_candidate"; then
     echo "Could not stop the failed candidate; previous app remains at $BACKUP_APP" >&2
     return 1
   fi
@@ -403,7 +441,7 @@ if [[ "$OPEN_AFTER_INSTALL" == "1" && "$INSTALL_AFTER_BUILD" == "1" ]]; then
   fi
   if ! verify_frontend_startup "$LAUNCH_STARTED_UNIX_MS"; then
     echo "=== Restoring previous ${DEV_PRODUCT_NAME}.app after failed startup ===" >&2
-    restore_previous_app 1 || true
+    restore_previous_app 1 1 || true
     exit 1
   fi
   INSTALL_SWAP_ACTIVE=0

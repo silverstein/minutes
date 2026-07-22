@@ -6,6 +6,7 @@ import vm from 'node:vm';
 const indexHtml = new URL('../../tauri/src/index.html', import.meta.url);
 const installDevApp = new URL('../install-dev-app.sh', import.meta.url);
 const mainRust = new URL('../../tauri/src-tauri/src/main.rs', import.meta.url);
+const commandsRust = new URL('../../tauri/src-tauri/src/commands.rs', import.meta.url);
 
 function inlineScripts(source) {
   return [...source.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/gi)]
@@ -377,8 +378,34 @@ test('dev installer retires the old app and verifies the fresh frontend', async 
   );
   assert.match(
     source,
+    /with timeout of 5 seconds[\s\S]*force_failed_candidate[\s\S]*kill -TERM[\s\S]*kill -KILL/,
+    'rollback must bound an unresponsive AppleEvent and retire only the verified failed candidate process',
+  );
+  assert.match(
+    source,
+    /verify_frontend_startup[\s\S]*restore_previous_app 1 1/,
+    'a candidate that never reaches frontend-ready must use the hardened rollback path',
+  );
+  assert.match(
+    source,
     /INSTALL_SWAP_ACTIVE[\s\S]*cleanup_install_artifacts[\s\S]*restored the previous/,
     'an interrupted swap must not strand the machine without its previous app',
   );
   assert.doesNotMatch(source, /open -a "\$INSTALL_APP"/);
+});
+
+test('desktop activation backfill cannot crawl the meetings tree before the UI starts', async () => {
+  const source = await readFile(commandsRust, 'utf8');
+  const indexLookup = source
+    .split('fn latest_saved_artifact_from_index(config: &Config) -> Option<IndexedActivationArtifact> {')[1]
+    ?.split('\n}')[0] || '';
+  const backfill = source
+    .split('fn backfill_activation_from_paths(')[1]
+    ?.split('\n}')[0] || '';
+  const executableIndexLookup = indexLookup.replace(/\/\/.*$/gm, '');
+
+  assert.match(executableIndexLookup, /SearchIndex::open\(config\)[\s\S]*\.search\("", &filters, Some\(1\)\)/);
+  assert.doesNotMatch(executableIndexLookup, /search_with_mode|output_dir|\.exists\(|metadata\(|path_timestamp/);
+  assert.match(backfill, /artifact\.saved_at\.clone\(\)/);
+  assert.doesNotMatch(backfill, /path_timestamp\(artifact|path_timestamp\(path/);
 });

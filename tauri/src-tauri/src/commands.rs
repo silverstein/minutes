@@ -18032,11 +18032,13 @@ mod native_sidekick_diagnostic_tests {
             pixel.0,
             [0x0d, 0x0d, 0x0b] | [0x30, 0xd1, 0x58] | [0xc9, 0x6b, 0x4e] | [0x40, 0x8c, 0xff]
         )));
-        assert!(verify_native_sidekick_acceptance_marker(
+        let mismatch = verify_native_sidekick_acceptance_marker(
             &path,
-            "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+            "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
         )
-        .is_err());
+        .unwrap_err();
+        assert!(mismatch.contains("expected nonce ffffffffffffffff"));
+        assert!(mismatch.contains(&format!("observed nonce {nonce}")));
     }
 
     #[test]
@@ -18808,6 +18810,7 @@ fn verify_native_sidekick_acceptance_marker(path: &Path, nonce: &str) -> Result<
         return Err("The captured marker grid was too small to verify safely.".into());
     }
     let mut obscured_bits = Vec::new();
+    let mut observed_bits = Vec::with_capacity(expected_bits.len());
     for (index, expected) in expected_bits.iter().enumerate() {
         let row = u32::try_from(index / 16).unwrap_or(0);
         let column = u32::try_from(index % 16).unwrap_or(0);
@@ -18851,6 +18854,7 @@ fn verify_native_sidekick_acceptance_marker(path: &Path, nonce: &str) -> Result<
         }
         const MIN_CONFIDENT_SAMPLES: u32 = 8;
         if expected_samples >= MIN_CONFIDENT_SAMPLES && expected_samples > opposite_samples {
+            observed_bits.push(Some(*expected));
             continue;
         }
         // Production captures intentionally include the macOS pointer. Its
@@ -18858,13 +18862,29 @@ fn verify_native_sidekick_acceptance_marker(path: &Path, nonce: &str) -> Result<
         // small sample that appears confidently opposite. Treat both as a
         // bounded erasure instead of trusting cursor-covered pixels. The
         // remaining 252 nonce bits still bind the image to this run.
+        let observed = (opposite_samples >= MIN_CONFIDENT_SAMPLES
+            && opposite_samples > expected_samples)
+            .then_some(1_u8.saturating_sub(*expected));
+        observed_bits.push(observed);
         obscured_bits.push((index, expected_samples, opposite_samples));
     }
     const MAX_OBSCURED_BITS: usize = 4;
     if obscured_bits.len() > MAX_OBSCURED_BITS {
         let (first_index, expected_samples, opposite_samples) = obscured_bits[0];
+        let observed_nonce = observed_bits
+            .chunks(4)
+            .map(|nibble| {
+                if nibble.len() != 4 || nibble.iter().any(Option::is_none) {
+                    return '?';
+                }
+                let value = nibble.iter().fold(0_u32, |value, bit| {
+                    (value << 1) | u32::from(bit.unwrap_or(0))
+                });
+                char::from_digit(value, 16).unwrap_or('?')
+            })
+            .collect::<String>();
         return Err(format!(
-            "The actual screen capture had too many obscured marker bits ({}/256; first obscured bit {first_index}, expected samples {expected_samples}/25, opposite samples {opposite_samples}/25).",
+            "The actual screen capture had too many obscured marker bits ({}/256; first obscured bit {first_index}, expected samples {expected_samples}/25, opposite samples {opposite_samples}/25; expected nonce {nonce}; observed nonce {observed_nonce}; image {width}x{height}; fiducial {fiducial_left},{fiducial_top}-{fiducial_right},{fiducial_bottom}; grid {left},{top}-{right},{bottom}).",
             obscured_bits.len(),
         ));
     }

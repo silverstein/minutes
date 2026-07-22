@@ -18793,12 +18793,7 @@ fn run_native_sidekick_ui_acceptance(
         "screen marker",
         |runtime| runtime.marker_ready,
     )?;
-    if !minutes_core::macos_permissions::request_screen_recording_access() {
-        return Err(
-            "macOS did not grant Screen Recording to this signed Minutes app. Approve the system prompt and rerun; if no prompt appeared, remove or reset the stale Minutes permission entry once before retrying."
-                .into(),
-        );
-    }
+    request_native_sidekick_screen_recording_access(&app)?;
     // WebKit's finished-load callback proves the nonce-only marker document is
     // present, but compositing may trail that callback by a frame. The captured
     // PNG is still decoded and checked against the full nonce below; this short
@@ -19120,6 +19115,29 @@ fn run_native_sidekick_ui_acceptance(
         },
         "turns": turns,
     }))
+}
+
+fn request_native_sidekick_screen_recording_access(app: &tauri::AppHandle) -> Result<(), String> {
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    app.run_on_main_thread(move || {
+        sender
+            .send(minutes_core::macos_permissions::request_screen_recording_access())
+            .ok();
+    })
+    .map_err(|error| format!("Could not request Screen Recording on the app UI thread: {error}"))?;
+    match receiver.recv_timeout(Duration::from_secs(45)) {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(
+            "macOS did not grant Screen Recording to this signed Minutes app. Approve the system prompt and rerun; if no prompt appeared, remove or reset the stale Minutes permission entry once before retrying."
+                .into(),
+        ),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(
+            "macOS did not resolve the Screen Recording request within 45 seconds.".into(),
+        ),
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            Err("The Screen Recording request ended without a result.".into())
+        }
+    }
 }
 
 #[cfg(unix)]

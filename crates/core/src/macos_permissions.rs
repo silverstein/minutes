@@ -174,9 +174,10 @@ pub fn screen_recording_status() -> MacPermissionStatus {
 /// Ask macOS to grant Screen Recording access to the current signed app.
 ///
 /// Callers must obtain explicit user consent before invoking this API because
-/// macOS may display a system privacy prompt. A `false` result includes both a
-/// denial and the restart/re-authorization state macOS can require after a
-/// stale code-signing identity entry.
+/// macOS may display a system privacy prompt. Call it from the application's
+/// main UI thread so the prompt can be presented. A `false` result includes
+/// both a denial and the restart/re-authorization state macOS can require
+/// after a stale code-signing identity entry.
 pub fn request_screen_recording_access() -> bool {
     platform::request_screen_recording_access()
 }

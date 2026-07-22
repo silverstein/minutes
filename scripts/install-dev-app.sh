@@ -162,10 +162,15 @@ verify_frontend_startup() {
   local frontend_error=""
   local process_started_unix_ms=""
   local frontend_ready_at_unix_ms=""
+  # LaunchServices can spend more than 30 seconds registering a freshly
+  # replaced, freshly signed bundle before the process creates its WebView.
+  # Keep the rollback gate strict, but give a cold launch enough time to
+  # produce the same PID-bound heartbeat that warm launches emit quickly.
+  local max_attempts=180
   local attempt
 
   echo "=== Verifying fresh desktop frontend startup ==="
-  for ((attempt = 0; attempt < 60; attempt++)); do
+  for ((attempt = 0; attempt < max_attempts; attempt++)); do
     pids="$(running_dev_app_pids)"
     if [[ -n "$pids" && "$(printf '%s\n' "$pids" | wc -l | tr -d ' ')" == "1" ]]; then
       pid="$pids"
@@ -193,7 +198,7 @@ verify_frontend_startup() {
     sleep 0.5
   done
 
-  echo "Fresh ${DEV_PRODUCT_NAME}.app did not report a ready frontend within 30 seconds." >&2
+  echo "Fresh ${DEV_PRODUCT_NAME}.app did not report a ready frontend within 90 seconds." >&2
   if [[ -n "$pids" ]]; then
     echo "Observed PID(s): $(printf '%s' "$pids" | tr '\n' ' ')" >&2
   else

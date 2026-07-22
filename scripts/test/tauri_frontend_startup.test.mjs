@@ -367,6 +367,11 @@ test('dev installer retires the old app and verifies the fresh frontend', async 
   );
   assert.match(
     source,
+    /local max_attempts=180[\s\S]*attempt < max_attempts[\s\S]*sleep 0\.5/,
+    'the readiness gate must tolerate a 90-second cold LaunchServices registration without weakening PID freshness',
+  );
+  assert.match(
+    source,
     /restore_previous_app 1/,
     'a launch or startup failure must restore the previous app',
   );

@@ -11815,6 +11815,10 @@ mod tests {
         assert!(html.contains("id=\"sidekick-cloud-consent-overlay\""));
         assert!(html.contains("bounded window of the current meeting transcript"));
         assert!(html.contains("cloudConsent: true"));
+        assert!(html.contains("waitForVisibleRecordingSidekickAcceptanceButton"));
+        assert!(html.contains("document.getElementById('btn-sidekick-recording')"));
+        assert!(html.contains("performance.now() + 8_000"));
+        assert!(!html.contains("sidekickButtons.find(Boolean)"));
         assert!(html.contains("focusRecoveryBound"));
         assert!(!html.contains("Replace Recall session?"));
         assert!(!html.contains("Restart Sidekick"));

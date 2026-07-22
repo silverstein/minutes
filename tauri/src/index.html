@@ -8422,6 +8422,17 @@
       });
     }
 
+    async function waitForVisibleRecordingSidekickAcceptanceButton() {
+      const button = document.getElementById('btn-sidekick-recording');
+      if (!button) throw new Error('The recording Sidekick control is unavailable.');
+      const deadline = performance.now() + 8_000;
+      while (performance.now() < deadline) {
+        if (sidekickAcceptanceInteractability(button)) return button;
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      throw new Error('The recording Sidekick control did not become visibly interactable.');
+    }
+
     async function openSidekickForUiAcceptance(payload) {
       const nonce = String(payload?.nonce || '');
       if (!/^[a-f0-9]{32,128}$/i.test(nonce)) return;
@@ -8433,9 +8444,15 @@
       // overlay and its confirmation button instead of skipping that UX.
       try {
         localStorage.removeItem(SIDEKICK_CLOUD_CONSENT_KEY);
-        const button = sidekickButtons.find(Boolean);
-        if (!button) throw new Error('The recording Sidekick control is unavailable.');
+        // Recording state is published by the native recorder before the main
+        // window's next status render. Wait for that real render and select the
+        // control that is actually visible instead of blindly choosing the
+        // first DOM button (the hidden recording button won the old race).
+        const button = await waitForVisibleRecordingSidekickAcceptanceButton();
         await attestSidekickAcceptanceControl(nonce, 'main_sidekick_button', button);
+        if (!sidekickAcceptanceInteractability(button)) {
+          throw new Error('The recording Sidekick control changed before it could be clicked.');
+        }
         button.focus();
         button.click();
         for (let attempt = 0; attempt < 120; attempt += 1) {

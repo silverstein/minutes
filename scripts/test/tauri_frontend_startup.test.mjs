@@ -262,7 +262,7 @@ function startupContext(declaredIds, {
     },
     sessionStorage: { getItem: () => null, setItem() {}, removeItem() {} },
     crypto: { randomUUID: () => '00000000-0000-4000-8000-000000000000' },
-    performance: { now: () => 0 },
+    performance: { now: () => clock.now },
     getComputedStyle: (element) => ({
       getPropertyValue: () => '',
       display: 'block',
@@ -275,7 +275,10 @@ function startupContext(declaredIds, {
     },
     cancelAnimationFrame() {},
     setTimeout: (callback, delay) => {
-      if (fireTimeouts.has(delay)) queueMicrotask(callback);
+      if (fireTimeouts.has(delay)) {
+        clock.now += delay;
+        queueMicrotask(callback);
+      }
       return 1;
     },
     clearTimeout() {},
@@ -458,6 +461,7 @@ test('Sidekick acceptance rejects a main control hidden by an ancestor', async (
   ]);
   const harness = startupContext(declaredIds, {
     commandHandlers,
+    fireTimeouts: new Set([25]),
     eventListenHandler(eventName, handler) {
       eventHandlers.set(eventName, handler);
       return Promise.resolve(() => eventHandlers.delete(eventName));
@@ -480,6 +484,50 @@ test('Sidekick acceptance rejects a main control hidden by an ancestor', async (
   assert.ok(harness.invocations.some(({ command, args }) => (
     command === 'cmd_native_sidekick_ui_acceptance_launch_failed'
       && /visibly interactable/i.test(args.error)
+  )));
+});
+
+test('Sidekick acceptance rechecks the recording control after native attestation', async () => {
+  const source = await readFile(indexHtml, 'utf8');
+  const declaredIds = new Set([...source.matchAll(/\bid="([^"]+)"/g)].map((match) => match[1]));
+  const scripts = inlineScripts(source);
+  const bootstrapScript = scripts.find((script) => script.includes('window.__MINUTES_STARTUP__'));
+  const mainScript = scripts.find((script) => script.includes('const { invoke }'));
+  const eventHandlers = new Map();
+  let recordingButton;
+  const commandHandlers = new Map([
+    ['cmd_native_sidekick_ui_acceptance_launch_claim', () => Promise.resolve(true)],
+    ['cmd_native_sidekick_ui_acceptance_main_ready', () => Promise.resolve(true)],
+    ['cmd_native_sidekick_ui_acceptance_interactable', ({ target }) => {
+      if (target === 'main_sidekick_button') recordingButton.parentElement.acceptanceOpacity = '0';
+      return Promise.resolve();
+    }],
+    ['cmd_native_sidekick_ui_acceptance_launch_failed', () => Promise.resolve()],
+  ]);
+  const harness = startupContext(declaredIds, {
+    commandHandlers,
+    eventListenHandler(eventName, handler) {
+      eventHandlers.set(eventName, handler);
+      return Promise.resolve(() => eventHandlers.delete(eventName));
+    },
+  });
+  new vm.Script(bootstrapScript, { filename: 'tauri/src/index.html#startup-recovery' }).runInContext(harness.context);
+  new vm.Script(mainScript, { filename: 'tauri/src/index.html#main' }).runInContext(harness.context);
+  await new Promise((resolve) => setImmediate(resolve));
+  recordingButton = harness.elements.get('btn-sidekick-recording');
+  recordingButton.parentElement = fakeElement('recording-bar');
+
+  await eventHandlers.get('sidekick:acceptance-open')({ payload: { nonce: 'c'.repeat(64) } });
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(
+    harness.invocations.some(({ command }) => command === 'cmd_start_native_sidekick'),
+    false,
+  );
+  assert.ok(harness.invocations.some(({ command, args }) => (
+    command === 'cmd_native_sidekick_ui_acceptance_launch_failed'
+      && /changed before it could be clicked/i.test(args.error)
   )));
 });
 

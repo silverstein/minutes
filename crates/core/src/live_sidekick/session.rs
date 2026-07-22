@@ -751,8 +751,17 @@ impl LiveAssistanceSession {
         {
             return Err(CandidateSuppressionReason::UnsupportedProvenance);
         }
+        if candidate.claims_visual_observation == candidate.visual_evidence_ids.is_empty() {
+            return Err(CandidateSuppressionReason::UnsupportedProvenance);
+        }
         if candidate.decision == InterventionDecision::Silent {
             return Err(CandidateSuppressionReason::ModelChoseSilence);
+        }
+        if background
+            && candidate.evidence_ids.is_empty()
+            && candidate.visual_evidence_ids.is_empty()
+        {
+            return Err(CandidateSuppressionReason::UnsupportedProvenance);
         }
         if background && candidate.confidence < MINIMUM_PROACTIVE_CONFIDENCE {
             return Err(CandidateSuppressionReason::BelowInterventionThreshold);
@@ -952,6 +961,9 @@ pub struct InterventionCandidate {
     pub text: Option<String>,
     pub evidence_ids: Vec<EvidenceId>,
     pub visual_evidence_ids: Vec<EvidenceId>,
+    /// Explicit structural declaration that visible response text relies on
+    /// pixels from the exact-session image supplied for this turn.
+    pub claims_visual_observation: bool,
     pub confidence: u8,
 }
 
@@ -1242,6 +1254,7 @@ mod tests {
             text: Some("Material grounded guidance.".into()),
             evidence_ids: Vec::new(),
             visual_evidence_ids: Vec::new(),
+            claims_visual_observation: false,
             confidence: 90,
         }
     }
@@ -1602,6 +1615,19 @@ mod tests {
     #[test]
     fn minutes_suppresses_silent_low_confidence_and_unsupported_candidates() {
         let mut session = session(CaptureMode::Live);
+        assert!(
+            session
+                .reduce(AssistanceEvent::EvidenceObserved {
+                    session_id: "assist-1".into(),
+                    evidence: UntrustedEvidence {
+                        id: "grounding".into(),
+                        source_kind: EvidenceSourceKind::TranscriptFinal,
+                        capture_session_id: Some("capture-1".into()),
+                        finalized_meeting_ref: None,
+                    },
+                })
+                .accepted
+        );
         for (index, candidate, reason) in [
             (
                 1,
@@ -1616,6 +1642,7 @@ mod tests {
                 2,
                 InterventionCandidate {
                     confidence: 42,
+                    evidence_ids: vec!["grounding".into()],
                     ..candidate()
                 },
                 CandidateSuppressionReason::BelowInterventionThreshold,
@@ -1642,6 +1669,49 @@ mod tests {
                 vec![AssistanceAction::SuppressCandidate { invocation, reason }]
             );
         }
+    }
+
+    #[test]
+    fn proactive_output_requires_grounding_and_visual_claims_require_a_receipt() {
+        let mut session = session(CaptureMode::Recording);
+
+        let invocation = start_background(&mut session, "ungrounded");
+        let reduced = session.reduce(AssistanceEvent::BackgroundCompleted {
+            session_id: "assist-1".into(),
+            run_id: "ungrounded".into(),
+            invocation,
+            candidate: candidate(),
+        });
+        assert_eq!(
+            reduced.actions,
+            vec![AssistanceAction::SuppressCandidate {
+                invocation,
+                reason: CandidateSuppressionReason::UnsupportedProvenance,
+            }]
+        );
+
+        let (invocation, _) = ask(
+            &mut session,
+            "turn-visual",
+            "typed-visual",
+            "What is on screen?",
+        );
+        let reduced = session.reduce(AssistanceEvent::ForegroundCompleted {
+            session_id: "assist-1".into(),
+            turn_id: "turn-visual".into(),
+            invocation,
+            candidate: InterventionCandidate {
+                claims_visual_observation: true,
+                ..candidate()
+            },
+        });
+        assert_eq!(
+            reduced.actions,
+            vec![AssistanceAction::SuppressCandidate {
+                invocation,
+                reason: CandidateSuppressionReason::UnsupportedProvenance,
+            }]
+        );
     }
 
     #[test]

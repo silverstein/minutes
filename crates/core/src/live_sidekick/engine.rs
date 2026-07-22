@@ -69,6 +69,22 @@ pub struct SidekickFailure {
     pub error: ReasoningError,
 }
 
+/// Terminal lifecycle signal for every provider turn that matched the active
+/// invocation. UI runtimes can settle loading state even when Minutes elects
+/// not to publish model output.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SidekickLifecycleEvent {
+    pub work: SidekickWork,
+    pub outcome: SidekickLifecycleOutcome,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SidekickLifecycleOutcome {
+    Published,
+    Suppressed(CandidateSuppressionReason),
+    Failed(ReasoningError),
+}
+
 struct ActiveReasoning {
     turn_id: ReasoningTurnId,
     work: SidekickWork,
@@ -90,6 +106,7 @@ pub struct LiveSidekickEngine {
     active: Option<ActiveReasoning>,
     publications: VecDeque<SidekickPublication>,
     failures: VecDeque<SidekickFailure>,
+    lifecycle_events: VecDeque<SidekickLifecycleEvent>,
     evidence_revision: u64,
     last_background_revision: Option<u64>,
     next_run: u64,
@@ -128,6 +145,7 @@ impl LiveSidekickEngine {
             active: None,
             publications: VecDeque::new(),
             failures: VecDeque::new(),
+            lifecycle_events: VecDeque::new(),
             evidence_revision: 0,
             last_background_revision: None,
             next_run: 1,
@@ -249,11 +267,7 @@ impl LiveSidekickEngine {
             invocation,
         };
         if let Err(error) = self.start_turn(work.clone(), None) {
-            self.reduce_failure(&work);
-            self.failures.push_back(SidekickFailure {
-                work,
-                error: error.clone(),
-            });
+            self.record_failure(work, error.clone());
             return Err(error);
         }
         Ok(Some(run_id))
@@ -294,22 +308,17 @@ impl LiveSidekickEngine {
             turn_id: turn_id.clone(),
             invocation,
         };
-        self.authoritative_memory.push_back(text.clone());
-        while self.authoritative_memory.len() > 6
-            || self
-                .authoritative_memory
-                .iter()
-                .map(String::len)
-                .sum::<usize>()
-                > 2_000
-        {
-            self.authoritative_memory.pop_front();
-        }
-        let request = match self.request_for(invocation, ReasoningTurnKind::Foreground, Some(text))
-        {
+        // The current message has its own authority lane. It becomes memory
+        // only after this request is handed to a provider, so it is never
+        // duplicated inside the same inference payload.
+        let request = match self.request_for(
+            invocation,
+            ReasoningTurnKind::Foreground,
+            Some(text.clone()),
+        ) {
             Ok(request) => request,
             Err(error) => {
-                self.reduce_failure(&work);
+                self.record_failure(work, error.clone());
                 return Err(error);
             }
         };
@@ -328,6 +337,7 @@ impl LiveSidekickEngine {
                         allowed_evidence_ids,
                         allowed_visual_ids,
                     });
+                    self.remember_user_message(text);
                     return Ok(turn_id);
                 }
             }
@@ -337,13 +347,10 @@ impl LiveSidekickEngine {
             let _ = provider.interrupt_turn(&active.turn_id);
         }
         if let Err(error) = self.start_turn(work.clone(), Some(request)) {
-            self.reduce_failure(&work);
-            self.failures.push_back(SidekickFailure {
-                work,
-                error: error.clone(),
-            });
+            self.record_failure(work, error.clone());
             return Err(error);
         }
+        self.remember_user_message(text);
         Ok(turn_id)
     }
 
@@ -373,6 +380,18 @@ impl LiveSidekickEngine {
     pub fn take_failures(&mut self) -> Vec<SidekickFailure> {
         self.pump();
         self.failures.drain(..).collect()
+    }
+
+    /// Pump provider events and report whether an inference remains active.
+    pub fn has_active_turn(&mut self) -> bool {
+        self.pump();
+        self.active.is_some()
+    }
+
+    /// Drain terminal turn outcomes, including intentional suppression.
+    pub fn take_lifecycle_events(&mut self) -> Vec<SidekickLifecycleEvent> {
+        self.pump();
+        self.lifecycle_events.drain(..).collect()
     }
 
     pub fn stop_capture(&mut self) -> Result<Reduction, ReasoningError> {
@@ -452,25 +471,52 @@ impl LiveSidekickEngine {
         kind: ReasoningTurnKind,
         typed_user_message: Option<String>,
     ) -> Result<ReasoningTurnRequest, ReasoningError> {
-        let request = ReasoningTurnRequest {
-            kind,
-            invocation,
-            window: BoundedReasoningWindow {
-                capture_session_id: self.capture_id()?,
-                transcript: self.transcript.iter().cloned().collect(),
-                latest_image: self
-                    .descriptor
-                    .image_input
-                    .then(|| self.latest_image.clone())
-                    .flatten(),
-                prepared_context: self.prepared_context_snapshot(),
-            },
-            authoritative_memory: self.authoritative_memory.iter().cloned().collect(),
-            typed_user_message,
-            output_contract: ReasoningOutputContract::InterventionCandidateV1,
+        let mut transcript: Vec<ReasoningTranscriptEvidence> =
+            self.transcript.iter().cloned().collect();
+        let mut authoritative_memory: Vec<String> =
+            self.authoritative_memory.iter().cloned().collect();
+        let capture_session_id = self.capture_id()?;
+        let latest_image = self
+            .descriptor
+            .image_input
+            .then(|| self.latest_image.clone())
+            .flatten();
+        let prepared_context = self.prepared_context_snapshot();
+        let build_request = |transcript: Vec<ReasoningTranscriptEvidence>,
+                             authoritative_memory: Vec<String>| {
+            ReasoningTurnRequest {
+                kind,
+                invocation,
+                window: BoundedReasoningWindow {
+                    capture_session_id: capture_session_id.clone(),
+                    transcript,
+                    latest_image: latest_image.clone(),
+                    prepared_context: prepared_context.clone(),
+                },
+                authoritative_memory,
+                typed_user_message: typed_user_message.clone(),
+                output_contract: ReasoningOutputContract::InterventionCandidateV1,
+            }
         };
-        request.validate(self.config.max_window_chars)?;
-        Ok(request)
+        loop {
+            let request = build_request(transcript.clone(), authoritative_memory.clone());
+            if request.serialized_evidence_chars() <= self.config.max_window_chars {
+                request.validate(self.config.max_window_chars)?;
+                return Ok(request);
+            }
+            // Keep the freshest item in each lane as long as possible, then
+            // fail closed if fixed/current context alone exceeds the budget.
+            if transcript.len() > 1 {
+                transcript.remove(0);
+            } else if !authoritative_memory.is_empty() {
+                authoritative_memory.remove(0);
+            } else if !transcript.is_empty() {
+                transcript.remove(0);
+            } else {
+                request.validate(self.config.max_window_chars)?;
+                unreachable!("over-budget request validation must fail")
+            }
+        }
     }
 
     fn complete(
@@ -489,15 +535,14 @@ impl LiveSidekickEngine {
         let allowed_visual_ids = active.allowed_visual_ids.clone();
         let work = self.active.take().expect("active checked").work;
         let Ok(candidate) = InterventionCandidate::from_backend_json(&result.text) else {
-            self.reduce_failure(&work);
-            self.failures.push_back(SidekickFailure {
+            self.record_failure(
                 work,
-                error: ReasoningError::new(
+                ReasoningError::new(
                     ReasoningErrorKind::Protocol,
                     "reasoning backend returned an invalid intervention candidate",
                     true,
                 ),
-            });
+            );
             return;
         };
         let provenance_supported = candidate
@@ -509,15 +554,14 @@ impl LiveSidekickEngine {
                 .iter()
                 .all(|id| allowed_visual_ids.contains(id));
         if !provenance_supported {
-            self.reduce_failure(&work);
-            self.failures.push_back(SidekickFailure {
+            self.record_failure(
                 work,
-                error: ReasoningError::new(
+                ReasoningError::new(
                     ReasoningErrorKind::Protocol,
                     "reasoning candidate cited evidence outside its bounded turn window",
                     false,
                 ),
-            });
+            );
             return;
         }
         let reduction = match &work {
@@ -540,19 +584,41 @@ impl LiveSidekickEngine {
                 candidate: candidate.clone(),
             }),
         };
-        if reduction.actions.iter().any(|action| {
+        let published = reduction.actions.iter().any(|action| {
             matches!(
                 action,
                 AssistanceAction::PublishForegroundResponse { .. }
                     | AssistanceAction::PublishBackgroundInsight { .. }
             )
-        }) {
+        });
+        if published {
             self.publications.push_back(SidekickPublication {
-                work,
+                work: work.clone(),
                 candidate,
                 first_token_ms: result.first_token_ms,
                 total_ms: result.total_ms,
             });
+            self.lifecycle_events.push_back(SidekickLifecycleEvent {
+                work,
+                outcome: SidekickLifecycleOutcome::Published,
+            });
+        } else if let Some(reason) = reduction.actions.iter().find_map(|action| match action {
+            AssistanceAction::SuppressCandidate { reason, .. } => Some(*reason),
+            _ => None,
+        }) {
+            self.lifecycle_events.push_back(SidekickLifecycleEvent {
+                work,
+                outcome: SidekickLifecycleOutcome::Suppressed(reason),
+            });
+        } else {
+            self.record_failure(
+                work,
+                ReasoningError::new(
+                    ReasoningErrorKind::Protocol,
+                    "active reasoning completion was rejected by session state",
+                    false,
+                ),
+            );
         }
     }
 
@@ -569,8 +635,19 @@ impl LiveSidekickEngine {
             return;
         }
         let work = self.active.take().expect("active checked").work;
+        self.record_failure(work, error);
+    }
+
+    fn record_failure(&mut self, work: SidekickWork, error: ReasoningError) {
         self.reduce_failure(&work);
-        self.failures.push_back(SidekickFailure { work, error });
+        self.failures.push_back(SidekickFailure {
+            work: work.clone(),
+            error: error.clone(),
+        });
+        self.lifecycle_events.push_back(SidekickLifecycleEvent {
+            work,
+            outcome: SidekickLifecycleOutcome::Failed(error),
+        });
     }
 
     fn reduce_failure(&mut self, work: &SidekickWork) {
@@ -637,6 +714,13 @@ impl LiveSidekickEngine {
             ));
         }
         context
+    }
+
+    fn remember_user_message(&mut self, text: String) {
+        self.authoritative_memory.push_back(text);
+        while self.authoritative_memory.len() > 6 {
+            self.authoritative_memory.pop_front();
+        }
     }
 
     fn trim_transcript(&mut self) {
@@ -843,7 +927,20 @@ mod tests {
             text: Some(text.into()),
             evidence_ids: evidence_ids.iter().map(|id| EvidenceId::new(*id)).collect(),
             visual_evidence_ids: Vec::new(),
+            claims_visual_observation: false,
             confidence: 90,
+        }
+    }
+
+    fn silent() -> InterventionCandidate {
+        InterventionCandidate {
+            decision: InterventionDecision::Silent,
+            kind: None,
+            text: None,
+            evidence_ids: Vec::new(),
+            visual_evidence_ids: Vec::new(),
+            claims_visual_observation: false,
+            confidence: 95,
         }
     }
 
@@ -911,5 +1008,123 @@ mod tests {
         engine.stop_capture().unwrap();
         backend.complete(1, speak(&["new-fact"], "Late after stop."));
         assert!(engine.take_publications().is_empty());
+    }
+
+    #[test]
+    fn current_typed_message_is_not_duplicated_in_authoritative_memory() {
+        let backend = FakeBackend::default();
+        let mut engine = engine(backend.clone());
+        observe(&mut engine, "fact", "A material risk exists.");
+
+        engine.send_user("First question").unwrap();
+        {
+            let state = lock(&backend.state);
+            assert_eq!(
+                state.turns[0].request.typed_user_message.as_deref(),
+                Some("First question")
+            );
+            assert!(state.turns[0].request.authoritative_memory.is_empty());
+        }
+        backend.complete(0, speak(&["fact"], "First answer."));
+
+        engine.send_user("Second question").unwrap();
+        let state = lock(&backend.state);
+        assert_eq!(
+            state.turns[1].request.authoritative_memory,
+            vec!["First question"]
+        );
+        assert_eq!(
+            state.turns[1].request.typed_user_message.as_deref(),
+            Some("Second question")
+        );
+        assert!(!state.turns[1]
+            .request
+            .authoritative_memory
+            .iter()
+            .any(|message| message == "Second question"));
+    }
+
+    #[test]
+    fn engine_trims_old_lanes_to_the_combined_serialized_budget() {
+        let backend = FakeBackend::default();
+        let mut engine = engine(backend.clone());
+        engine.config.max_window_chars = 700;
+        engine.authoritative_memory.push_back("m".repeat(300));
+        observe(&mut engine, "large-fact", &"t".repeat(300));
+
+        engine.send_user("What changed?").unwrap();
+        let state = lock(&backend.state);
+        let request = &state.turns[0].request;
+        assert!(request.serialized_evidence_chars() <= 700);
+        assert_eq!(request.typed_user_message.as_deref(), Some("What changed?"));
+        assert!(request.authoritative_memory.is_empty());
+        assert_eq!(request.window.transcript.len(), 1);
+    }
+
+    #[test]
+    fn suppressed_completion_emits_terminal_lifecycle_event() {
+        let backend = FakeBackend::default();
+        let mut engine = engine(backend.clone());
+        observe(&mut engine, "fact", "Routine transcript movement.");
+        engine.evaluate_background().unwrap().unwrap();
+        assert!(engine.has_active_turn());
+
+        backend.complete(0, silent());
+        assert!(!engine.has_active_turn());
+        let events = engine.take_lifecycle_events();
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            events[0].outcome,
+            SidekickLifecycleOutcome::Suppressed(CandidateSuppressionReason::ModelChoseSilence)
+        ));
+        assert!(engine.take_publications().is_empty());
+    }
+
+    #[test]
+    fn visual_receipt_must_be_the_exact_image_selected_for_the_turn() {
+        let backend = FakeBackend::default();
+        let mut engine = engine(backend.clone());
+        let directory = std::env::temp_dir();
+        let first = directory.join(format!("minutes-sidekick-{}-first.png", std::process::id()));
+        let second = directory.join(format!(
+            "minutes-sidekick-{}-second.png",
+            std::process::id()
+        ));
+        std::fs::write(&first, b"\x89PNG\r\n\x1a\nfirst").unwrap();
+        std::fs::write(&second, b"\x89PNG\r\n\x1a\nsecond").unwrap();
+
+        engine
+            .observe_screen("screen-first".into(), first.clone())
+            .unwrap();
+        engine.evaluate_background().unwrap().unwrap();
+        engine
+            .observe_screen("screen-second".into(), second.clone())
+            .unwrap();
+        backend.complete(
+            0,
+            InterventionCandidate {
+                decision: InterventionDecision::Speak,
+                kind: Some("insight".into()),
+                text: Some("The later screen says something.".into()),
+                evidence_ids: Vec::new(),
+                visual_evidence_ids: vec!["screen-second".into()],
+                claims_visual_observation: true,
+                confidence: 90,
+            },
+        );
+        assert!(engine.take_publications().is_empty());
+        assert!(matches!(
+            engine.take_lifecycle_events().as_slice(),
+            [SidekickLifecycleEvent {
+                outcome: SidekickLifecycleOutcome::Failed(ReasoningError {
+                    kind: ReasoningErrorKind::Protocol,
+                    ..
+                }),
+                ..
+            }]
+        ));
+
+        let _ = std::fs::remove_file(first);
+        let _ = std::fs::remove_file(second);
     }
 }

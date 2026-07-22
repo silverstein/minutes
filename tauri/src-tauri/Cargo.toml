@@ -44,6 +44,7 @@ window-vibrancy = "0.7"
 notify = "7"
 tracing = "0.1"
 toml = { workspace = true }
+tempfile = "3"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 security-framework = "3.7"
@@ -55,5 +56,4 @@ arboard = "3"
 tauri-build = { version = "2", features = [] }
 
 [dev-dependencies]
-tempfile = "3"
 hound = { workspace = true }

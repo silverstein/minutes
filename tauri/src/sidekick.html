@@ -49,7 +49,10 @@
     .sidekick .bubble { border-radius: 16px 16px 16px 7px; background: color-mix(in srgb, var(--accent) 7%, var(--panel)); }
     .foot { margin: 5px 4px 0; color: var(--muted); font: 10px 'Geist Mono', monospace; }
     footer { padding: 12px 16px 16px; border-top: 1px solid var(--line); background: var(--panel); }
-    .status { min-height: 17px; margin: 0 5px 8px; color: var(--muted); font-size: 12px; }
+    .status-row { min-height: 25px; margin: 0 5px 8px; display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+    .status { color: var(--muted); font-size: 12px; line-height: 1.35; }
+    .retry { display: none; min-height: 26px; padding: 0 10px; flex: 0 0 auto; }
+    .retry.visible { display: inline-flex; align-items: center; }
     form { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 9px; }
     textarea { width: 100%; min-height: 44px; max-height: 110px; resize: none; border: 1px solid var(--line); border-radius: 14px; outline: none; padding: 11px 13px; background: var(--bg); color: var(--text); font: 14px/1.4 Geist, sans-serif; }
     textarea:focus { border-color: color-mix(in srgb, var(--accent) 60%, transparent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 10%, transparent); }
@@ -63,7 +66,7 @@
       <span class="mark" aria-hidden="true"><i></i><i></i><i></i></span>
       <div style="min-width:0">
         <h1>Sidekick</h1>
-        <div class="meta"><span class="dot"></span><span id="state">Arming</span><span>·</span><span class="provider" id="provider">Codex app-server</span><span id="screen"></span></div>
+        <div class="meta"><span class="dot"></span><span id="state">Arming</span><span>·</span><span class="provider" id="provider">Codex app-server</span><span id="session"></span><span id="screen"></span></div>
       </div>
     </div>
     <button id="stop" type="button">End</button>
@@ -73,7 +76,10 @@
     <div class="stream" id="stream"></div>
   </main>
   <footer>
-    <div class="status" id="detail">Starting a private persistent reasoning session…</div>
+    <div class="status-row">
+      <div class="status" id="detail" role="status" aria-live="polite">Starting a persistent Codex Cloud reasoning session…</div>
+      <button class="retry" id="retry" type="button">Retry</button>
+    </div>
     <form id="form">
       <textarea id="input" rows="1" placeholder="Ask for strategy, a calculation, what to say next…" aria-label="Message Sidekick"></textarea>
       <button class="send" id="send" type="submit">Send</button>
@@ -87,7 +93,10 @@
     const scroller = document.getElementById('messages');
     const input = document.getElementById('input');
     const send = document.getElementById('send');
+    const retry = document.getElementById('retry');
     let rendered = 0;
+    let pendingMessage = '';
+    let lastState = 'arming';
 
     function appendMessage(message) {
       const item = document.createElement('article');
@@ -109,23 +118,75 @@
     }
 
     function render(snapshot) {
+      snapshot = snapshot || {};
+      const nextState = snapshot.state || 'off';
       document.body.dataset.state = snapshot.state || 'off';
-      document.getElementById('state').textContent = snapshot.state || 'off';
+      document.getElementById('state').textContent = nextState;
       document.getElementById('provider').textContent = [snapshot.provider, snapshot.privacy].filter(Boolean).join(' · ');
+      const sessionId = snapshot.session_id || snapshot.sessionId || '';
+      const sessionType = snapshot.session_type || snapshot.sessionType || '';
+      document.getElementById('session').textContent = sessionId
+        ? `· ${sessionType || 'session'} ${String(sessionId).slice(0, 8)}`
+        : '';
       document.getElementById('screen').textContent = snapshot.screenAvailable ? '· screen' : '';
       document.getElementById('detail').textContent = snapshot.detail || '';
-      send.disabled = !snapshot.active || snapshot.state === 'arming';
-      while (rendered < snapshot.messages.length) appendMessage(snapshot.messages[rendered++]);
+      send.disabled = !snapshot.active || nextState === 'arming';
+      const messages = Array.isArray(snapshot.messages) ? snapshot.messages : [];
+      // Starting a new exact session replaces the backend snapshot. Mirror the
+      // reset instead of leaving messages from the prior meeting on screen.
+      if (messages.length < rendered) {
+        stream.replaceChildren();
+        rendered = 0;
+      }
+      while (rendered < messages.length) appendMessage(messages[rendered++]);
       empty.hidden = rendered > 0;
+      const latestMessage = messages.at(-1);
+      if (!pendingMessage && nextState === 'degraded' && latestMessage?.role === 'user') {
+        // The window may have reloaded after the backend accepted the text but
+        // before the turn failed. Recover the unanswered text from the
+        // authoritative snapshot so Retry never depends on webview memory.
+        pendingMessage = String(latestMessage.text || '');
+      }
+      if (pendingMessage && nextState === 'ready' && lastState === 'thinking') {
+        pendingMessage = '';
+      }
+      const failedPendingTurn = Boolean(pendingMessage) && nextState === 'degraded';
+      retry.classList.toggle('visible', failedPendingTurn);
+      if (failedPendingTurn && !input.value.trim()) input.value = pendingMessage;
+      lastState = nextState;
       requestAnimationFrame(() => { scroller.scrollTop = scroller.scrollHeight; });
+    }
+
+    function showSubmitError(message, error) {
+      pendingMessage = message;
+      if (!input.value.trim()) input.value = message;
+      document.body.dataset.state = 'degraded';
+      document.getElementById('state').textContent = 'degraded';
+      document.getElementById('detail').textContent = `Message not delivered: ${String(error?.message || error || 'Sidekick is unavailable.')}`;
+      retry.classList.toggle('visible', Boolean(message));
+      input.focus();
+    }
+
+    async function submitMessage(message) {
+      pendingMessage = message;
+      retry.classList.remove('visible');
+      try {
+        await invoke('cmd_native_sidekick_send', { message });
+        input.value = '';
+      } catch (error) {
+        showSubmitError(message, error);
+      }
     }
 
     document.getElementById('form').addEventListener('submit', async (event) => {
       event.preventDefault();
       const message = input.value.trim();
       if (!message) return;
-      input.value = '';
-      await invoke('cmd_native_sidekick_send', { message });
+      await submitMessage(message);
+    });
+    retry.addEventListener('click', () => {
+      const message = (input.value.trim() || pendingMessage).trim();
+      if (message) submitMessage(message);
     });
     input.addEventListener('keydown', (event) => {
       if (event.key === 'Enter' && !event.shiftKey) {
@@ -139,7 +200,9 @@
     });
 
     listen('sidekick:state', (event) => render(event.payload));
-    invoke('cmd_native_sidekick_status').then(render);
+    invoke('cmd_native_sidekick_status').then(render).catch((error) => {
+      showSubmitError(input.value.trim(), error);
+    });
     input.focus();
   </script>
 </body>

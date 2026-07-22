@@ -5661,6 +5661,26 @@
     </div>
   </div>
 
+  <!-- First-use cloud evidence consent for the Codex Sidekick provider -->
+  <div class="consent-overlay" id="sidekick-cloud-consent-overlay">
+    <div class="readiness-card" role="dialog" aria-modal="true" aria-labelledby="sidekick-cloud-consent-title" aria-describedby="sidekick-cloud-consent-detail">
+      <div class="readiness-header">
+        <div>
+          <div class="readiness-title" id="sidekick-cloud-consent-title">Before Sidekick connects</div>
+          <div class="readiness-sub" id="sidekick-cloud-consent-detail">This Codex provider sends a bounded window of the current meeting transcript and, when available, the latest exact-session screenshot to OpenAI for reasoning. Minutes does not send your full meeting archive.</div>
+        </div>
+      </div>
+      <div class="readiness-scroll">
+        <p class="consent-script-label">Cloud evidence</p>
+        <p class="consent-disclosure">Only start Sidekick if everyone whose information may appear in the transcript or screenshot is allowed to have that content processed by OpenAI. You can cancel and continue recording locally.</p>
+      </div>
+      <div class="readiness-actions consent-actions">
+        <button class="btn btn-primary btn-sm" id="sidekick-cloud-consent-confirm">Allow and open Sidekick</button>
+        <button class="btn btn-secondary btn-sm" id="sidekick-cloud-consent-cancel">Cancel</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Recording consent confirmation -->
   <div class="consent-overlay" id="recording-consent-overlay">
     <div class="readiness-card" role="dialog" aria-modal="true" aria-labelledby="recording-consent-title">
@@ -6853,6 +6873,9 @@
     const recordingConsentDisclosure = document.getElementById('recording-consent-disclosure');
     const recordingConsentConfirm = document.getElementById('recording-consent-confirm');
     const recordingConsentCancel = document.getElementById('recording-consent-cancel');
+    const sidekickCloudConsentOverlay = document.getElementById('sidekick-cloud-consent-overlay');
+    const sidekickCloudConsentConfirm = document.getElementById('sidekick-cloud-consent-confirm');
+    const sidekickCloudConsentCancel = document.getElementById('sidekick-cloud-consent-cancel');
     const jobsButton = document.getElementById('btn-jobs');
     const jobsCount = document.getElementById('jobs-count');
     const jobsOverlay = document.getElementById('jobs-overlay');
@@ -6901,6 +6924,7 @@
     let sidekickLaunching = false;
     let sidekickSessionOpen = false;
     let recallLastTerminalMode = 'assistant';
+    let pendingSidekickConsent = null;
     let copilotCriticalAlertsEnabled = false;
     let isSensitiveMeeting = false;
     let currentMeetingPath = null;
@@ -8007,6 +8031,15 @@
       });
     }
 
+    function showSidekickError(error) {
+      updateOutputNotice({
+        kind: 'error',
+        title: 'Sidekick not started',
+        detail: String(error?.message || error || 'Sidekick could not be started.'),
+        path: '',
+      });
+    }
+
     async function toggleCoachSurface() {
       // In-flight guard: ignore clicks while a start/stop is pending so rapid
       // clicking can't stack concurrent invokes (QA find: repeated Coach
@@ -8052,16 +8085,47 @@
       });
     }
 
+    const SIDEKICK_CLOUD_CONSENT_KEY = 'minutes.sidekickCloudEgressConsent.v1';
+
+    function requestSidekickCloudConsent() {
+      if (localStorage.getItem(SIDEKICK_CLOUD_CONSENT_KEY) === 'true') {
+        return Promise.resolve(true);
+      }
+      if (pendingSidekickConsent) return pendingSidekickConsent.promise;
+      let resolveConsent;
+      const promise = new Promise((resolve) => { resolveConsent = resolve; });
+      pendingSidekickConsent = { promise, resolve: resolveConsent };
+      sidekickCloudConsentOverlay.classList.add('active');
+      sidekickCloudConsentConfirm.focus();
+      return promise;
+    }
+
+    function settleSidekickCloudConsent(allowed) {
+      sidekickCloudConsentOverlay.classList.remove('active');
+      if (allowed) localStorage.setItem(SIDEKICK_CLOUD_CONSENT_KEY, 'true');
+      const pending = pendingSidekickConsent;
+      pendingSidekickConsent = null;
+      if (pending) pending.resolve(Boolean(allowed));
+    }
+
+    sidekickCloudConsentConfirm.addEventListener('click', () => settleSidekickCloudConsent(true));
+    sidekickCloudConsentCancel.addEventListener('click', () => settleSidekickCloudConsent(false));
+    sidekickCloudConsentOverlay.addEventListener('click', (event) => {
+      if (event.target === sidekickCloudConsentOverlay) settleSidekickCloudConsent(false);
+    });
+
     async function openCodexSidekick() {
       if (sidekickLaunching) return;
       sidekickLaunching = true;
       renderSidekickControls();
       try {
-        const opened = await invoke('cmd_start_native_sidekick', { goal: null });
+        const cloudConsent = await requestSidekickCloudConsent();
+        if (!cloudConsent) return;
+        const opened = await invoke('cmd_start_native_sidekick', { goal: null, cloudConsent: true });
         sidekickSessionOpen = Boolean(opened?.active);
       } catch (error) {
         sidekickSessionOpen = false;
-        showCoachError(error);
+        showSidekickError(error);
       } finally {
         sidekickLaunching = false;
         renderSidekickControls();
@@ -12584,6 +12648,15 @@
       recallFitAddon = new FitAddon.FitAddon();
       recallTerminal.loadAddon(recallFitAddon);
       recallTerminal.open(recallTerminalContainer);
+      // WebKit can leave xterm's hidden helper textarea unfocused after a
+      // native child window (including Sidekick) closes. A deliberate click
+      // anywhere in the terminal must always restore keyboard input.
+      if (!recallTerminalContainer.dataset.focusRecoveryBound) {
+        recallTerminalContainer.dataset.focusRecoveryBound = 'true';
+        recallTerminalContainer.addEventListener('pointerdown', () => {
+          requestAnimationFrame(() => recallTerminal?.focus());
+        });
+      }
       window.MINUTES_XTERM_THEME_QUERY.addEventListener('change', recallThemeHandler);
       document.addEventListener('uizoomchange', () => {
         recallTerminal.options.fontSize = getTerminalFontSize();
@@ -12650,16 +12723,9 @@
       });
 
       await currentWindow.listen('pty:exit:' + SESSION_ID, () => {
-        const endedSidekick = recallLastTerminalMode === 'sidekick' || sidekickSessionOpen;
         recallPtyAlive = false;
-        sidekickSessionOpen = false;
-        renderSidekickControls();
-        document.getElementById('recall-exit-message').textContent = endedSidekick
-          ? 'Codex Sidekick ended.'
-          : 'Session ended.';
-        document.getElementById('btn-recall-restart').textContent = endedSidekick
-          ? 'Restart Sidekick'
-          : 'Restart';
+        document.getElementById('recall-exit-message').textContent = 'Session ended.';
+        document.getElementById('btn-recall-restart').textContent = 'Restart';
         recallExitBanner.classList.add('active');
         recallEndBtn.classList.remove('active');
       });
@@ -14363,13 +14429,13 @@
     // ── Listen for recall:expand events from Rust backend ──
     currentWindow.listen('recall:expand', (event) => {
       const { title, mode } = event.payload;
+      // `sidekick` was the retired terminal-preview mode. Native Sidekick has
+      // its own window, snapshot, and events; a late legacy PTY event must not
+      // mutate Recall or claim that the native session is alive.
+      if (mode === 'sidekick') return;
       const context = (title || '').replace('Minutes Assistant', '').replace('Discussing: ', '').trim();
       if (mode === 'meeting') {
         setRecallPhase('debrief', context);
-      } else if (mode === 'sidekick') {
-        sidekickSessionOpen = true;
-        renderSidekickControls();
-        setRecallPhase('sidekick', 'Codex Fast · interactive preview');
       } else {
         setRecallPhase('recall', context || null);
       }
@@ -14447,9 +14513,8 @@
       try { await invoke('cmd_pty_kill', { sessionId: SESSION_ID }); } catch (_) { }
       disposeRecallTerminal();
       initRecallTerminal();
-      const opened = await openRecall(restartMode);
-      sidekickSessionOpen = restartMode === 'sidekick' && Boolean(opened);
-      renderSidekickControls();
+      await openRecall(restartMode);
+      // Recall's PTY is independent of the native Sidekick lifecycle.
     });
 
     // Quick note inside recall panel
@@ -15284,6 +15349,7 @@
         recoveryOverlay,
         jobsOverlay,
         detailOverlay,
+        sidekickCloudConsentOverlay,
         recordingConsentOverlay,
         cliSetupScrim,
         artifactTemplateOverlay,

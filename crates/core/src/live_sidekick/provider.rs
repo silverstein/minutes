@@ -235,6 +235,23 @@ pub enum ReasoningOutputContract {
 }
 
 impl ReasoningTurnRequest {
+    /// Number of bytes in the serialized, text-bearing egress envelope.
+    ///
+    /// The limit is intentionally shared by every lane that can grow with
+    /// meeting or user content. This prevents a request from satisfying four
+    /// independent limits while exceeding the provider's actual bounded
+    /// evidence window when those lanes are combined.
+    pub fn serialized_evidence_chars(&self) -> usize {
+        serde_json::to_vec(&serde_json::json!({
+            "prepared_context": self.window.prepared_context,
+            "transcript": self.window.transcript,
+            "authoritative_memory": self.authoritative_memory,
+            "typed_user_message": self.typed_user_message,
+        }))
+        .expect("reasoning evidence is JSON serializable")
+        .len()
+    }
+
     /// Validate user authority, evidence provenance, and the egress budget.
     pub fn validate(&self, max_window_chars: usize) -> Result<(), ReasoningError> {
         if !self.invocation.is_valid() {
@@ -264,18 +281,19 @@ impl ReasoningTurnRequest {
             .authoritative_memory
             .iter()
             .any(|message| message.trim().is_empty())
-            || self
-                .authoritative_memory
-                .iter()
-                .map(String::len)
-                .sum::<usize>()
-                > max_window_chars / 2
         {
             return Err(ReasoningError::invalid_request(
-                "authoritative user memory is empty or over budget",
+                "authoritative user memory cannot contain empty entries",
             ));
         }
-        self.window.validate(max_window_chars)
+        self.window.validate(max_window_chars)?;
+        let total = self.serialized_evidence_chars();
+        if total > max_window_chars {
+            return Err(ReasoningError::invalid_request(format!(
+                "serialized reasoning evidence is {total} chars; limit is {max_window_chars}"
+            )));
+        }
+        Ok(())
     }
 
     /// Render the bounded Minutes-owned turn payload for a provider adapter.
@@ -292,9 +310,12 @@ impl ReasoningTurnRequest {
                 serde_json::json!({
                     "evidence_id": evidence.evidence_id.as_str(),
                     "speaker": if evidence.speaker_verified {
-                        evidence.speaker_label.as_deref().unwrap_or("verified speaker")
+                        evidence
+                            .speaker_label
+                            .clone()
+                            .unwrap_or_else(|| "verified speaker".to_owned())
                     } else {
-                        "unverified speaker"
+                        anonymous_speaker_track(evidence.speaker_label.as_deref())
                     },
                     "text": evidence.text,
                     "offset_ms": evidence.offset_ms,
@@ -332,6 +353,23 @@ impl ReasoningTurnRequest {
                 .expect("bounded reasoning payload is JSON serializable")
         )
     }
+}
+
+/// Convert an unverified diarization label into a stable opaque track ID.
+/// Raw, potentially incorrect names never leave Minutes, but separate speaker
+/// tracks no longer collapse into one fictitious participant.
+fn anonymous_speaker_track(label: Option<&str>) -> String {
+    let Some(label) = label.filter(|label| !label.trim().is_empty()) else {
+        return "anonymous_track_unknown".to_owned();
+    };
+    // Stable FNV-1a rather than DefaultHasher, whose output is not a public
+    // cross-process stability contract.
+    let mut hash = 0xcbf29ce484222325_u64;
+    for byte in label.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("anonymous_track_{hash:016x}")
 }
 
 /// One event from a streaming backend turn.
@@ -552,7 +590,70 @@ mod tests {
         assert!(prompt.contains("AUTHORITATIVE TYPED USER MESSAGE"));
         assert!(prompt.contains("What should I ask next?"));
         assert!(!prompt.contains("PARTICIPANT_A"));
-        assert!(prompt.contains("unverified speaker"));
+        assert!(prompt.contains("anonymous_track_"));
+    }
+
+    #[test]
+    fn combined_serialized_lanes_share_one_budget() {
+        let request = ReasoningTurnRequest {
+            kind: ReasoningTurnKind::Foreground,
+            invocation: invocation(),
+            window: BoundedReasoningWindow {
+                capture_session_id: "capture-a".into(),
+                transcript: vec![ReasoningTranscriptEvidence {
+                    evidence_id: "evidence-1".into(),
+                    text: "t".repeat(80),
+                    speaker_label: None,
+                    speaker_verified: false,
+                    offset_ms: 0,
+                    duration_ms: 100,
+                }],
+                latest_image: None,
+                prepared_context: "p".repeat(80),
+            },
+            authoritative_memory: vec!["m".repeat(80)],
+            typed_user_message: Some("u".repeat(80)),
+            output_contract: ReasoningOutputContract::InterventionCandidateV1,
+        };
+        // Each lane independently fits, but their serialized union does not.
+        let error = request.validate(300).unwrap_err();
+        assert!(error.message.contains("serialized reasoning evidence"));
+    }
+
+    #[test]
+    fn unverified_speaker_tracks_are_stable_distinct_and_anonymous() {
+        let mut request = ReasoningTurnRequest {
+            kind: ReasoningTurnKind::Foreground,
+            invocation: invocation(),
+            window: window("capture-a"),
+            authoritative_memory: Vec::new(),
+            typed_user_message: Some("Who disagreed?".into()),
+            output_contract: ReasoningOutputContract::InterventionCandidateV1,
+        };
+        request.window.transcript.push(ReasoningTranscriptEvidence {
+            evidence_id: "evidence-2".into(),
+            text: "A different synthetic statement.".into(),
+            speaker_label: Some("PARTICIPANT_B".into()),
+            speaker_verified: false,
+            offset_ms: 100,
+            duration_ms: 100,
+        });
+        request.window.transcript.push(ReasoningTranscriptEvidence {
+            evidence_id: "evidence-3".into(),
+            text: "The first track again.".into(),
+            speaker_label: Some("PARTICIPANT_A".into()),
+            speaker_verified: false,
+            offset_ms: 200,
+            duration_ms: 100,
+        });
+        let prompt = request.render_prompt();
+        assert!(!prompt.contains("PARTICIPANT_A"));
+        assert!(!prompt.contains("PARTICIPANT_B"));
+        let first = anonymous_speaker_track(Some("PARTICIPANT_A"));
+        let second = anonymous_speaker_track(Some("PARTICIPANT_B"));
+        assert_ne!(first, second);
+        assert_eq!(prompt.matches(&first).count(), 2);
+        assert_eq!(prompt.matches(&second).count(), 1);
     }
 
     #[test]

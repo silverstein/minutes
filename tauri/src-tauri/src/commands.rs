@@ -168,6 +168,8 @@ pub struct NativeSidekickSnapshot {
     pub detail: String,
     pub provider: String,
     pub privacy: String,
+    pub session_id: String,
+    pub session_type: String,
     pub screen_available: bool,
     pub messages: Vec<NativeSidekickMessage>,
 }
@@ -180,6 +182,8 @@ impl NativeSidekickSnapshot {
             detail: "Sidekick is off.".into(),
             provider: String::new(),
             privacy: String::new(),
+            session_id: String::new(),
+            session_type: String::new(),
             screen_available: false,
             messages: Vec::new(),
         }
@@ -11627,9 +11631,17 @@ mod tests {
         assert!(html.contains("id=\"btn-sidekick-live\""));
         assert!(html.contains("openCodexSidekick"));
         assert!(html.contains("cmd_start_native_sidekick"));
+        assert!(html.contains("id=\"sidekick-cloud-consent-overlay\""));
+        assert!(html.contains("bounded window of the current meeting transcript"));
+        assert!(html.contains("cloudConsent: true"));
+        assert!(html.contains("focusRecoveryBound"));
         assert!(!html.contains("Replace Recall session?"));
+        assert!(!html.contains("Restart Sidekick"));
         assert!(sidekick.contains("cmd_native_sidekick_send"));
         assert!(sidekick.contains("sidekick:state"));
+        assert!(sidekick.contains("id=\"retry\""));
+        assert!(sidekick.contains("showSubmitError"));
+        assert!(sidekick.contains("snapshot.sessionId"));
         assert!(sidekick.contains("Ask for strategy, a calculation, what to say next"));
     }
 
@@ -15348,9 +15360,100 @@ const NATIVE_SIDEKICK_BASE_INSTRUCTIONS: &str = r#"You are Minutes Sidekick, a p
 
 const NATIVE_SIDEKICK_DEVELOPER_INSTRUCTIONS: &str = r#"Improve the user's next decision or move; do not summarize the meeting. On background turns, silence is success: speak only for a timely contradiction, risk, decision, opening, stale commitment, or non-obvious synthesis. Routine movement, test chatter, greetings, and already-resolved clarification stay silent. On foreground turns, answer the authoritative typed user message directly.
 
-For quantitative or binary decisions, compute the governing consequence, say which headline metric stops being decisive, propose a thresholded, segmented, staged, or reversible path, and ask for the distribution or boundary that changes the answer. Protect the user's current stakeholder with measurable acceptance criteria, aligned incentives, reporting or audit rights, and rollback or human-reversion rights when relevant. Do not force these patterns when they do not fit the evidence.
+For quantitative or binary decisions, compute the governing consequence, say which headline metric stops being decisive, propose a thresholded, segmented, staged, or reversible path, and end with a direct question (with a question mark) asking for the distribution or boundary that changes the answer. Protect the user's current stakeholder with measurable acceptance criteria, aligned incentives, reporting or audit rights, and, when relevant, an explicit "human-reversion right" allowing that stakeholder to restore human handling. Do not force these patterns when they do not fit the evidence.
 
-A visual claim is allowed only when this turn carries an exact-session image and must cite its visual evidence id. Return only the intervention_candidate_v1 JSON object. Keep background text at 65 words or fewer and foreground text at 90 words or fewer, with the useful conclusion first."#;
+A visual claim is allowed only when this turn carries an exact-session image and must cite its visual evidence id. Set claims_visual_observation to true if and only if the visible response relies on pixels from that image, and include the exact visual evidence id when true; otherwise set it to false and return no visual evidence ids. Return only the intervention_candidate_v1 JSON object. Keep background text at 65 words or fewer and foreground text at 90 words or fewer, with the useful conclusion first."#;
+
+const NATIVE_SIDEKICK_BRIEF_LIMIT: usize = 3_000;
+
+fn native_sidekick_prepared_context(goal: &str) -> String {
+    let mut prepared = format!("meeting_goal={}", goal.trim());
+    let brief_path = Config::minutes_dir()
+        .join("assistant")
+        .join("SIDEKICK_BRIEF.md");
+    if let Ok(brief) = std::fs::read_to_string(brief_path) {
+        let brief = brief
+            .chars()
+            .take(NATIVE_SIDEKICK_BRIEF_LIMIT)
+            .collect::<String>();
+        if !brief.trim().is_empty() {
+            prepared.push_str("\n\nprepared_sidekick_brief:\n");
+            prepared.push_str(brief.trim());
+        }
+    }
+    prepared
+}
+
+fn resolve_native_sidekick_context_session(
+    state: &AppState,
+) -> Result<minutes_core::context_store::ContextSession, String> {
+    let recording_active = state.recording.load(Ordering::Acquire)
+        || minutes_core::pid::inspect_pid_file(&minutes_core::pid::pid_path()).is_active();
+    if recording_active {
+        let session_id = minutes_core::pid::read_recording_metadata()
+            .and_then(|metadata| metadata.context_session_id)
+            .ok_or_else(|| {
+                "The active recording has no context-session identity. Stop it, start a new recording, and try Sidekick again.".to_string()
+            })?;
+        let session = minutes_core::context_store::get_session(&session_id)
+            .map_err(|error| format!("Could not read the active recording session: {error}"))?
+            .ok_or_else(|| {
+                "The active recording session is missing from Minutes context.".to_string()
+            })?;
+        if session.state != minutes_core::context_store::ContextSessionState::Active
+            || session.session_type != minutes_core::context_store::ContextSessionType::Recording
+        {
+            return Err("The recording's exact context session is no longer active.".into());
+        }
+        return Ok(session);
+    }
+
+    if state.live_transcript_active.load(Ordering::Acquire)
+        || minutes_core::pid::inspect_pid_file(&minutes_core::pid::live_transcript_pid_path())
+            .is_active()
+    {
+        let session = minutes_core::context_store::latest_active_context_session()
+            .map_err(|error| format!("Could not read the active live session: {error}"))?
+            .ok_or_else(|| "The active live transcript has no context session.".to_string())?;
+        if session.session_type != minutes_core::context_store::ContextSessionType::LiveTranscript {
+            return Err("The exact active context is not the current live transcript.".into());
+        }
+        return Ok(session);
+    }
+
+    Err("Start a recording or live transcript before opening Sidekick.".into())
+}
+
+fn observe_native_sidekick_transcript(
+    engine: &mut minutes_core::live_sidekick::LiveSidekickEngine,
+    cursor: &mut usize,
+) -> Result<usize, String> {
+    use minutes_core::live_sidekick::{EvidenceId, ReasoningTranscriptEvidence};
+
+    let lines = minutes_core::live_transcript::read_since_line(*cursor)
+        .map_err(|error| format!("Could not read the live transcript: {error}"))?;
+    let mut accepted = 0;
+    for line in lines {
+        *cursor = (*cursor).max(line.line);
+        if line.text.trim().is_empty() {
+            continue;
+        }
+        if engine
+            .observe_transcript(ReasoningTranscriptEvidence {
+                evidence_id: EvidenceId::new(format!("transcript-line-{}", line.line)),
+                text: line.text,
+                speaker_label: line.speaker,
+                speaker_verified: false,
+                offset_ms: line.offset_ms,
+                duration_ms: line.duration_ms,
+            })
+            .is_ok_and(|reduction| reduction.accepted)
+        {
+            accepted += 1;
+        }
+    }
+    Ok(accepted)
+}
 
 fn current_native_sidekick(
     snapshot: &Arc<Mutex<NativeSidekickSnapshot>>,
@@ -15450,8 +15553,10 @@ impl Drop for NativeSidekickRunGuard {
             .unwrap_or_else(|error| error.into_inner()) = None;
         publish_native_sidekick(&self.app, &self.snapshot, |state| {
             state.active = false;
-            state.state = "off".into();
-            state.detail = "Sidekick stopped.".into();
+            if state.state != "degraded" {
+                state.state = "off".into();
+                state.detail = "Sidekick stopped.".into();
+            }
         });
     }
 }
@@ -15468,9 +15573,9 @@ fn run_native_sidekick(
     snapshot: Arc<Mutex<NativeSidekickSnapshot>>,
 ) {
     use minutes_core::live_sidekick::{
-        AssistancePosture, AssistanceSurface, CaptureMode as SidekickCaptureMode, EvidenceId,
+        AssistancePosture, AssistanceSurface, CaptureMode as SidekickCaptureMode,
         LiveAssistanceSessionId, LiveSidekickEngine, LiveSidekickEngineConfig,
-        ReasoningTranscriptEvidence, UserRole,
+        SidekickLifecycleOutcome, UserRole,
     };
 
     let _guard = NativeSidekickRunGuard {
@@ -15501,7 +15606,7 @@ fn run_native_sidekick(
         LiveSidekickEngineConfig {
             base_instructions: NATIVE_SIDEKICK_BASE_INSTRUCTIONS.into(),
             developer_instructions: NATIVE_SIDEKICK_DEVELOPER_INSTRUCTIONS.into(),
-            prepared_context: format!("meeting_goal={goal}"),
+            prepared_context: native_sidekick_prepared_context(&goal),
             max_window_chars: 8_000,
             max_transcript_items: 32,
         },
@@ -15522,6 +15627,24 @@ fn run_native_sidekick(
     } else {
         SidekickCaptureMode::Live
     };
+    match minutes_core::context_store::get_session(&context_session.id) {
+        Ok(Some(session))
+            if session.state == minutes_core::context_store::ContextSessionState::Active => {}
+        Ok(_) => {
+            publish_native_sidekick(&app, &snapshot, |state| {
+                state.state = "degraded".into();
+                state.detail = "The meeting ended before Sidekick finished attaching.".into();
+            });
+            return;
+        }
+        Err(error) => {
+            publish_native_sidekick(&app, &snapshot, |state| {
+                state.state = "degraded".into();
+                state.detail = format!("Could not revalidate the meeting session: {error}");
+            });
+            return;
+        }
+    }
     if let Err(error) = engine.start_capture(context_session.id.clone().into(), capture_mode) {
         publish_native_sidekick(&app, &snapshot, |state| {
             state.state = "degraded".into();
@@ -15539,32 +15662,125 @@ fn run_native_sidekick(
             minutes_core::live_sidekick::ReasoningPrivacyClass::Cloud => "Cloud",
         }
         .into();
+        state.session_id = context_session.id.clone();
+        state.session_type = match context_session.session_type {
+            minutes_core::context_store::ContextSessionType::Recording => "Recording",
+            minutes_core::context_store::ContextSessionType::LiveTranscript => "Live transcript",
+            _ => "Meeting",
+        }
+        .into();
         state.detail = "Ready — listening for decisions, risks, and openings.".into();
     });
 
-    // Replay only events carrying this exact capture id. Starting at zero
-    // preserves the bounded current-session transcript even if app-server
-    // initialization takes several seconds or Sidekick joins mid-meeting.
-    let mut cursor = 0;
+    // The active scratch transcript is authoritative and is truncated for each
+    // capture session. Bootstrap from line zero, then advance an incremental
+    // cursor. This avoids rereading and sorting the global/rotated event logs.
+    let mut transcript_cursor = 0;
     let mut pending_evidence = 0_u32;
     let mut last_evidence_at: Option<Instant> = None;
     let mut last_screen_path = None;
     let mut last_screen_refresh = Instant::now() - Duration::from_secs(2);
     let mut last_session_check = Instant::now();
+    let mut backend_available = true;
+    let mut recovery_attempts = 0_u32;
+    let mut next_backend_retry: Option<Instant> = None;
 
     while !stop_flag.load(Ordering::Acquire) {
         if last_session_check.elapsed() >= Duration::from_secs(1) {
-            let still_active = minutes_core::context_store::get_session(&context_session.id)
-                .ok()
-                .flatten()
-                .is_some_and(|session| {
-                    session.state == minutes_core::context_store::ContextSessionState::Active
-                });
-            if !still_active {
-                break;
+            match minutes_core::context_store::get_session(&context_session.id) {
+                Ok(Some(session))
+                    if session.state
+                        == minutes_core::context_store::ContextSessionState::Active => {}
+                Ok(_) => break,
+                Err(error) => {
+                    // A transient read error must not impersonate a confirmed
+                    // meeting end. Capture continues independently; retry.
+                    publish_native_sidekick(&app, &snapshot, |state| {
+                        if state.state != "thinking" {
+                            state.state = "degraded".into();
+                            state.detail =
+                                format!("Meeting status is temporarily unavailable: {error}");
+                        }
+                    });
+                }
             }
             last_session_check = Instant::now();
         }
+
+        // Drain the authoritative capture transcript before user controls so
+        // a typed question always includes utterances already committed by
+        // the recording sidecar.
+        match observe_native_sidekick_transcript(&mut engine, &mut transcript_cursor) {
+            Ok(accepted) if accepted > 0 => {
+                pending_evidence = pending_evidence.saturating_add(accepted as u32);
+                last_evidence_at = Some(Instant::now());
+            }
+            Ok(_) => {}
+            Err(error) => {
+                publish_native_sidekick(&app, &snapshot, |state| {
+                    if state.state != "thinking" {
+                        state.state = "degraded".into();
+                        state.detail = error;
+                    }
+                });
+            }
+        }
+
+        if last_screen_refresh.elapsed() >= Duration::from_secs(1) {
+            let available = refresh_native_sidekick_screen(
+                &mut engine,
+                &context_session.id,
+                &mut last_screen_path,
+            );
+            if available != current_native_sidekick(&snapshot).screen_available {
+                publish_native_sidekick(&app, &snapshot, |state| {
+                    state.screen_available = available;
+                });
+            }
+            last_screen_refresh = Instant::now();
+        }
+
+        if next_backend_retry.is_some_and(|retry_at| Instant::now() >= retry_at) {
+            match engine.recover_backend() {
+                Ok(()) => {
+                    backend_available = true;
+                    recovery_attempts = 0;
+                    next_backend_retry = None;
+                    last_evidence_at = pending_evidence.gt(&0).then(Instant::now);
+                    publish_native_sidekick(&app, &snapshot, |state| {
+                        state.state = "ready".into();
+                        state.detail = "Reconnected — grounded in the active meeting.".into();
+                    });
+                }
+                Err(error) => {
+                    recovery_attempts = recovery_attempts.saturating_add(1);
+                    if error.retryable && recovery_attempts < 3 {
+                        let jitter_ms = SystemTime::now()
+                            .duration_since(SystemTime::UNIX_EPOCH)
+                            .map_or(0, |duration| u64::from(duration.subsec_millis()) % 250);
+                        let delay = Duration::from_secs(1_u64 << recovery_attempts.min(3))
+                            + Duration::from_millis(jitter_ms);
+                        next_backend_retry = Some(Instant::now() + delay);
+                        publish_native_sidekick(&app, &snapshot, |state| {
+                            state.state = "degraded".into();
+                            state.detail = format!(
+                                "Reasoning disconnected; retrying in {:.1}s.",
+                                delay.as_secs_f32()
+                            );
+                        });
+                    } else {
+                        next_backend_retry = None;
+                        publish_native_sidekick(&app, &snapshot, |state| {
+                            state.state = "degraded".into();
+                            state.detail = format!(
+                                "Reasoning could not reconnect. End Sidekick and try again: {error}"
+                            );
+                        });
+                    }
+                }
+            }
+        }
+
         while let Ok(control) = control_receiver.try_recv() {
             match control {
                 NativeSidekickControl::Stop => {
@@ -15588,7 +15804,17 @@ fn run_native_sidekick(
                             latency_ms: None,
                         });
                     });
-                    if let Err(error) = engine.send_user(text) {
+                    if !backend_available {
+                        publish_native_sidekick(&app, &snapshot, |state| {
+                            state.state = "degraded".into();
+                            state.detail = "Reasoning is disconnected. Wait for reconnection or end Sidekick and try again.".into();
+                        });
+                    } else if let Err(error) = engine.send_user(text) {
+                        backend_available = false;
+                        if error.retryable {
+                            recovery_attempts = 0;
+                            next_backend_retry = Some(Instant::now() + Duration::from_secs(1));
+                        }
                         publish_native_sidekick(&app, &snapshot, |state| {
                             state.state = "degraded".into();
                             state.detail = format!("Sidekick turn failed: {error}");
@@ -15598,54 +15824,9 @@ fn run_native_sidekick(
             }
         }
 
-        for envelope in minutes_core::events::read_events_since_seq(cursor, None) {
-            cursor = cursor.max(envelope.seq);
-            let minutes_core::events::MinutesEvent::LiveUtteranceFinal {
-                session_id,
-                text,
-                speaker,
-                offset_ms,
-                duration_ms,
-                ..
-            } = envelope.event
-            else {
-                continue;
-            };
-            if session_id.as_deref() != Some(context_session.id.as_str()) || text.trim().is_empty()
-            {
-                continue;
-            }
-            let accepted = engine
-                .observe_transcript(ReasoningTranscriptEvidence {
-                    evidence_id: EvidenceId::new(format!("transcript-{}", envelope.seq)),
-                    text,
-                    speaker_label: speaker,
-                    speaker_verified: false,
-                    offset_ms,
-                    duration_ms,
-                })
-                .is_ok_and(|reduction| reduction.accepted);
-            if accepted {
-                pending_evidence = pending_evidence.saturating_add(1);
-                last_evidence_at = Some(Instant::now());
-            }
-        }
-
-        if last_screen_refresh.elapsed() >= Duration::from_secs(1) {
-            let available = refresh_native_sidekick_screen(
-                &mut engine,
-                &context_session.id,
-                &mut last_screen_path,
-            );
-            if available != current_native_sidekick(&snapshot).screen_available {
-                publish_native_sidekick(&app, &snapshot, |state| {
-                    state.screen_available = available;
-                });
-            }
-            last_screen_refresh = Instant::now();
-        }
-
-        if pending_evidence > 0
+        if backend_available
+            && next_backend_retry.is_none()
+            && pending_evidence > 0
             && last_evidence_at.is_some_and(|at| {
                 at.elapsed() >= Duration::from_millis(900)
                     || (pending_evidence == 1 && at.elapsed() >= Duration::from_secs(3))
@@ -15662,6 +15843,11 @@ fn run_native_sidekick(
                 }
                 Ok(None) => {}
                 Err(error) => {
+                    backend_available = false;
+                    if error.retryable {
+                        recovery_attempts = 0;
+                        next_backend_retry = Some(Instant::now() + Duration::from_secs(1));
+                    }
                     publish_native_sidekick(&app, &snapshot, |state| {
                         state.state = "degraded".into();
                         state.detail = format!("Reasoning is temporarily unavailable: {error}");
@@ -15670,7 +15856,9 @@ fn run_native_sidekick(
             }
         }
 
-        for publication in engine.take_publications() {
+        let publications = engine.take_publications();
+        let failures = engine.take_failures();
+        for publication in publications {
             let text = publication.candidate.text.unwrap_or_default();
             publish_native_sidekick(&app, &snapshot, |state| {
                 state.state = "ready".into();
@@ -15683,11 +15871,27 @@ fn run_native_sidekick(
                 });
             });
         }
-        for failure in engine.take_failures() {
+        for failure in failures {
+            backend_available = false;
+            if failure.error.retryable {
+                backend_available = false;
+                recovery_attempts = 0;
+                next_backend_retry = Some(Instant::now() + Duration::from_secs(1));
+            } else {
+                next_backend_retry = None;
+            }
             publish_native_sidekick(&app, &snapshot, |state| {
                 state.state = "degraded".into();
                 state.detail = format!("Reasoning turn failed: {}", failure.error);
             });
+        }
+        for lifecycle in engine.take_lifecycle_events() {
+            if let SidekickLifecycleOutcome::Suppressed(_) = lifecycle.outcome {
+                publish_native_sidekick(&app, &snapshot, |state| {
+                    state.state = "ready".into();
+                    state.detail = "Ready — no intervention was needed for that evidence.".into();
+                });
+            }
         }
         std::thread::sleep(Duration::from_millis(120));
     }
@@ -15699,24 +15903,19 @@ pub fn cmd_start_native_sidekick(
     app: tauri::AppHandle,
     state: tauri::State<AppState>,
     goal: Option<String>,
+    cloud_consent: bool,
 ) -> Result<NativeSidekickSnapshot, String> {
     if state.sidekick_active.load(Ordering::SeqCst) {
         show_native_sidekick(&app)?;
         return Ok(current_native_sidekick(&state.sidekick_snapshot));
     }
-    let context_session = minutes_core::context_store::latest_active_context_session()
-        .map_err(|error| format!("Could not read the active meeting session: {error}"))?
-        .ok_or_else(|| {
-            "Start a recording or live transcript before opening Sidekick.".to_string()
-        })?;
-    if !matches!(
-        context_session.session_type,
-        minutes_core::context_store::ContextSessionType::Recording
-            | minutes_core::context_store::ContextSessionType::LiveTranscript
-    ) {
-        state.sidekick_active.store(false, Ordering::SeqCst);
-        return Err("The active Minutes session is not a recording or live transcript.".into());
+    if !cloud_consent {
+        return Err(
+            "Sidekick requires explicit consent before sending a bounded transcript window or screen image to Codex Cloud."
+                .into(),
+        );
     }
+    let context_session = resolve_native_sidekick_context_session(&state)?;
     let codex_path = resolve_agent_binary("codex").map_err(|error| error.user_message())?;
     if state
         .sidekick_active
@@ -15736,15 +15935,28 @@ pub fn cmd_start_native_sidekick(
         *snapshot = NativeSidekickSnapshot {
             active: true,
             state: "arming".into(),
-            detail: "Starting a private persistent reasoning session…".into(),
+            detail: "Starting a persistent Codex Cloud reasoning session…".into(),
             provider: "Codex app-server".into(),
             privacy: "Cloud".into(),
+            session_id: context_session.id.clone(),
+            session_type: match context_session.session_type {
+                minutes_core::context_store::ContextSessionType::Recording => "Recording",
+                minutes_core::context_store::ContextSessionType::LiveTranscript => {
+                    "Live transcript"
+                }
+                _ => "Meeting",
+            }
+            .into(),
             screen_available: false,
             messages: Vec::new(),
         };
     });
     if let Err(error) = show_native_sidekick(&app) {
         state.sidekick_active.store(false, Ordering::SeqCst);
+        *state
+            .sidekick_control
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
         return Err(error);
     }
     let app_for_thread = app.clone();
@@ -15779,6 +15991,9 @@ pub fn cmd_native_sidekick_send(
     let message = message.trim().to_string();
     if message.is_empty() {
         return Err("Type a message for Sidekick.".into());
+    }
+    if message.chars().count() > 2_000 {
+        return Err("Sidekick messages are limited to 2,000 characters.".into());
     }
     let sender = state
         .sidekick_control

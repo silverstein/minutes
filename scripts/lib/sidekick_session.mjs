@@ -13,6 +13,11 @@ export const SIDEKICK_OUTPUT_SCHEMA = {
     text: { type: ["string", "null"] },
     evidence_ids: { type: "array", items: { type: "string" } },
     visual_evidence_ids: { type: "array", items: { type: "string" } },
+    claims_visual_observation: {
+      type: "boolean",
+      description:
+        "True iff the visible response relies on pixels from the supplied exact-session image; false otherwise.",
+    },
     confidence: { type: "integer", minimum: 0, maximum: 100 },
   },
   required: [
@@ -21,6 +26,7 @@ export const SIDEKICK_OUTPUT_SCHEMA = {
     "text",
     "evidence_ids",
     "visual_evidence_ids",
+    "claims_visual_observation",
     "confidence",
   ],
 };
@@ -32,9 +38,9 @@ Stay grounded in supplied evidence. Never invent a speaker identity, number, quo
 const DEVELOPER_INSTRUCTIONS = `Your job is to improve the user's next decision or move, not summarize the meeting.
 For background turns, silence is success. Speak only for a material and timely contradiction, risk, decision, opening, stale commitment, or non-obvious synthesis. Routine transcript movement, test chatter, greetings, topic confirmation, and compatible clarification stay silent. Never ask for an agenda after the topic is confirmed.
 For foreground turns, answer the typed user directly and always choose speak. Prioritize their newest typed message over background analysis. Remember explicit role and posture corrections across turns.
-For quantitative or binary decisions, compute the governing consequence and explicitly say what the headline metric stops meaning and what financial, contractual, safety, or operational quantity now governs. Propose a thresholded, segmented, staged, or reversible path, and ask for the distribution or boundary that would change the answer.
-When the decision concerns probabilistic automation, do not accept an aggregate accuracy rate. Ask for calibrated confidence or error distributions, gate automation to a measured safe band, and route the remainder to a human. When the user switches stakeholder roles, name that stakeholder, then protect it with written measurable acceptance criteria or an SLA, reporting or audit rights, incentives that apply to every automated outcome, and a concrete rollback or human-reversion right.
-A visual claim is allowed only when this exact turn includes a local image. Cite its supplied visual evidence id. Transcript evidence cannot support a visual claim.
+For quantitative or binary decisions, compute the governing consequence and explicitly say what the headline metric stops meaning and what financial, contractual, safety, or operational quantity now governs. Propose a thresholded, segmented, staged, or reversible path, and end with a direct question (with a question mark) asking for the distribution or boundary that would change the answer.
+When the decision concerns probabilistic automation, do not accept an aggregate accuracy rate. Ask for calibrated confidence or error distributions, gate automation to a measured safe band, and route the remainder to a human. When the user switches stakeholder roles, name that stakeholder, then protect it with written measurable acceptance criteria or an SLA, reporting or audit rights, incentives that apply to every automated outcome, and explicitly call for a "human-reversion right" allowing that stakeholder to restore human handling.
+A visual claim is allowed only when this exact turn includes a local image. Set claims_visual_observation to true if and only if the visible response relies on pixels from that image, and cite its supplied visual evidence id when true; otherwise set it to false and return no visual evidence ids. Transcript evidence cannot support a visual claim.
 Return only the requested JSON object. Keep visible text crisp: usually one to four sentences, with the useful conclusion first.`;
 
 function textInput(text) {
@@ -59,6 +65,9 @@ function parseDecision(raw) {
   }
   if (!Array.isArray(parsed.evidence_ids) || !Array.isArray(parsed.visual_evidence_ids)) {
     throw new Error("Sidekick response has invalid evidence provenance");
+  }
+  if (typeof parsed.claims_visual_observation !== "boolean") {
+    throw new Error("Sidekick response has no visual-observation declaration");
   }
   if (!Number.isInteger(parsed.confidence) || parsed.confidence < 0 || parsed.confidence > 100) {
     throw new Error("Sidekick response has invalid confidence");
@@ -409,6 +418,9 @@ export class SidekickSession {
       if (!invocation.allowedVisualIds.has(id)) {
         throw new Error(`Response cited unavailable visual evidence ${id}`);
       }
+    }
+    if (decision.claims_visual_observation === (decision.visual_evidence_ids.length === 0)) {
+      throw new Error("Response visual-observation declaration does not match its receipts");
     }
     if (decision.visual_evidence_ids.length === 0 && referencesVisualDetail(decision.text)) {
       throw new Error("Response made a visual claim without inspected image provenance");

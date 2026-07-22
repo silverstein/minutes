@@ -23,6 +23,8 @@ function result(decision, latency = {}) {
       text: decision.text ?? null,
       evidence_ids: decision.evidence_ids ?? [],
       visual_evidence_ids: decision.visual_evidence_ids ?? [],
+      claims_visual_observation:
+        decision.claims_visual_observation ?? Boolean(decision.visual_evidence_ids?.length),
       confidence: decision.confidence ?? 90,
     }),
   };
@@ -215,6 +217,30 @@ test("an exact-session image grounds the response and is refreshed on each turn"
     }),
   );
   assert.equal((await second).published, true);
+});
+
+test("visual receipt and explicit observation declaration must agree", async () => {
+  const backend = new FakeBackend();
+  const session = new SidekickSession({ backend, captureSessionId: "capture-a" });
+  await session.start();
+  session.observeScreen({
+    id: "screen-1",
+    captureSessionId: "capture-a",
+    path: "/tmp/screen-1.png",
+  });
+  const completion = session.sendUser("What matters here?");
+  await new Promise((resolve) => setImmediate(resolve));
+  backend.turns[0].pending.resolve(
+    result({
+      decision: "speak",
+      text: "The visible plan has a Friday deadline.",
+      visual_evidence_ids: ["screen-1"],
+      claims_visual_observation: false,
+    }),
+  );
+  const completed = await completion;
+  assert.equal(completed.invalid, true);
+  assert.match(completed.error, /declaration does not match its receipts/);
 });
 
 test("model output cannot cite evidence that was not supplied", async () => {

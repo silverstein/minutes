@@ -15889,15 +15889,21 @@ fn clear_native_sidekick_acceptance(shared: &NativeSidekickAcceptanceShared) {
     ready.notify_all();
 }
 
-fn mark_native_sidekick_acceptance_marker_loaded(shared: &NativeSidekickAcceptanceShared) -> bool {
+fn mark_native_sidekick_acceptance_marker_painted(
+    shared: &NativeSidekickAcceptanceShared,
+    nonce: &str,
+) -> Result<bool, String> {
     let (lock, ready) = &**shared;
     let mut guard = lock.lock().unwrap_or_else(|error| error.into_inner());
     let Some(runtime) = guard.as_mut() else {
-        return false;
+        return Ok(false);
     };
+    if runtime.nonce != nonce {
+        return Err("The painted screen marker did not match the acceptance run.".into());
+    }
     runtime.marker_ready = true;
     ready.notify_all();
-    true
+    Ok(true)
 }
 
 fn wait_for_native_sidekick_acceptance_ui(
@@ -16283,6 +16289,18 @@ pub fn cmd_native_sidekick_ui_acceptance_ready(
         active: true,
         pending,
     })
+}
+
+#[tauri::command]
+pub fn cmd_native_sidekick_ui_acceptance_marker_painted(
+    window: tauri::WebviewWindow,
+    state: tauri::State<AppState>,
+    nonce: String,
+) -> Result<bool, String> {
+    if window.label() != "sidekick-acceptance-marker" {
+        return Err("Only the Sidekick marker window may confirm its paint.".into());
+    }
+    mark_native_sidekick_acceptance_marker_painted(&state.sidekick_acceptance, &nonce)
 }
 
 #[tauri::command]
@@ -17549,11 +17567,16 @@ mod native_sidekick_diagnostic_tests {
     }
 
     #[test]
-    fn finished_marker_load_releases_the_acceptance_gate() {
+    fn painted_marker_with_the_exact_nonce_releases_the_acceptance_gate() {
         let shared = new_native_sidekick_acceptance_shared();
         configure_native_sidekick_acceptance(&shared, "a".repeat(64)).unwrap();
 
-        assert!(mark_native_sidekick_acceptance_marker_loaded(&shared));
+        assert!(
+            mark_native_sidekick_acceptance_marker_painted(&shared, &"b".repeat(64))
+                .unwrap_err()
+                .contains("did not match")
+        );
+        assert!(mark_native_sidekick_acceptance_marker_painted(&shared, &"a".repeat(64)).unwrap());
         let (lock, _) = &*shared;
         assert!(lock
             .lock()
@@ -17562,7 +17585,7 @@ mod native_sidekick_diagnostic_tests {
             .is_some_and(|runtime| runtime.marker_ready));
 
         clear_native_sidekick_acceptance(&shared);
-        assert!(!mark_native_sidekick_acceptance_marker_loaded(&shared));
+        assert!(!mark_native_sidekick_acceptance_marker_painted(&shared, &"a".repeat(64)).unwrap());
     }
 
     #[test]
@@ -19632,7 +19655,6 @@ pub fn launch_native_sidekick_ui_acceptance(
     validate_native_sidekick_ui_acceptance_challenge(&nonce)?;
     let state = app.state::<AppState>();
     configure_native_sidekick_acceptance(&state.sidekick_acceptance, nonce.clone())?;
-    let marker_acceptance = state.sidekick_acceptance.clone();
     let marker_result = tauri::WebviewWindowBuilder::new(
         app,
         "sidekick-acceptance-marker",
@@ -19645,11 +19667,6 @@ pub fn launch_native_sidekick_ui_acceptance(
     .content_protected(false)
     .always_on_top(true)
     .focused(true)
-    .on_page_load(move |_window, payload| {
-        if matches!(payload.event(), tauri::webview::PageLoadEvent::Finished) {
-            mark_native_sidekick_acceptance_marker_loaded(&marker_acceptance);
-        }
-    })
     .build();
     if let Err(error) = marker_result {
         clear_native_sidekick_acceptance(&state.sidekick_acceptance);

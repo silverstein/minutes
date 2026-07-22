@@ -393,6 +393,45 @@ test('Sidekick screen marker paints without the Tauri JavaScript bridge', async 
   assert.equal(traceLabel.textContent, `trace ${trace}`);
 });
 
+test('Sidekick screen marker reports readiness only after two paint frames', async () => {
+  const source = await readFile(sidekickAcceptanceMarkerHtml, 'utf8');
+  const scripts = inlineScripts(source);
+  const handshake = scripts[1];
+  const trace = '0123456789abcdef'.repeat(4);
+  const frames = [];
+  const timers = [];
+  const invocations = [];
+  const window = {
+    __TAURI__: {
+      core: {
+        invoke(command, args) {
+          invocations.push({ command, args });
+          return Promise.resolve();
+        },
+      },
+    },
+    requestAnimationFrame(callback) { frames.push(callback); },
+    setTimeout(callback, delay) { timers.push({ callback, delay }); },
+  };
+
+  new vm.Script(handshake, {
+    filename: 'tauri/src/sidekick-acceptance-marker.html#paint-handshake',
+  }).runInNewContext({ window, location: { search: `?trace=${trace}` }, URLSearchParams });
+  assert.equal(invocations.length, 0);
+  assert.equal(frames.length, 1);
+  frames.shift()();
+  assert.equal(invocations.length, 0);
+  assert.equal(frames.length, 1);
+  frames.shift()();
+  assert.equal(invocations.length, 0);
+  assert.deepEqual(timers.map(({ delay }) => delay), [100]);
+  timers.shift().callback();
+  await Promise.resolve();
+  assert.equal(invocations.length, 1);
+  assert.equal(invocations[0].command, 'cmd_native_sidekick_ui_acceptance_marker_painted');
+  assert.equal(invocations[0].args.nonce, trace);
+});
+
 test('Sidekick acceptance traverses visible main control, consent, and one real start invoke', async () => {
   const source = await readFile(indexHtml, 'utf8');
   const declaredIds = new Set([...source.matchAll(/\bid="([^"]+)"/g)].map((match) => match[1]));

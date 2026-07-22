@@ -56,5 +56,23 @@
     }
     document.getElementById('trace').textContent = `trace ${trace}`;
   </script>
+  <script>
+    (() => {
+      const nonce = (new URLSearchParams(location.search).get('trace') || '').toLowerCase();
+      const invoke = window.__TAURI__?.core?.invoke;
+      if (!invoke || !/^[0-9a-f]{64}$/.test(nonce)) return;
+      // A finished document load can precede the first compositor commit.
+      // Confirm readiness only after two animation frames and a short task
+      // boundary, so the real screen worker cannot capture WebKit's previous
+      // backing-store contents under the current run nonce.
+      window.requestAnimationFrame(() => {
+        window.requestAnimationFrame(() => {
+          window.setTimeout(() => {
+            invoke('cmd_native_sidekick_ui_acceptance_marker_painted', { nonce }).catch(() => {});
+          }, 100);
+        });
+      });
+    })();
+  </script>
 </body>
 </html>

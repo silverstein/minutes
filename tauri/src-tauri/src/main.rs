@@ -3492,6 +3492,7 @@ fn main() {
             commands::cmd_native_sidekick_send,
             commands::cmd_stop_native_sidekick,
             commands::cmd_native_sidekick_status,
+            commands::cmd_native_sidekick_ui_acceptance_marker_painted,
             commands::cmd_native_sidekick_ui_acceptance_ready,
             commands::cmd_native_sidekick_ui_acceptance_main_ready,
             commands::cmd_native_sidekick_ui_acceptance_launch_claim,

@@ -16,6 +16,16 @@ use std::path::{Path, PathBuf};
 pub const DEFAULT_CONTEXT_CARD_CHAR_BUDGET: usize = 7_000;
 const MAX_PARTICIPANTS: usize = 8;
 const MAX_PREPARED_BRIEF_CHARS: usize = 3_000;
+const MAX_PROJECT_FILE_BYTES: u64 = 128 * 1024;
+const MAX_PROJECT_FILE_CHARS: usize = 2_000;
+const MAX_PROJECT_FILES: usize = 4;
+const PROJECT_CONTEXT_CANDIDATES: &[&str] = &[
+    "README.md",
+    "AGENTS.md",
+    "CLAUDE.md",
+    "package.json",
+    "Cargo.toml",
+];
 
 /// Inputs whose authority and scope were established by Minutes before
 /// retrieval. Participant candidates must come from explicit user context or
@@ -28,6 +38,10 @@ pub struct ContextCardRequest {
     /// reads and hashes this path itself so later turns can invalidate stale
     /// content instead of trusting a detached string snapshot.
     pub prepared_brief_path: Option<PathBuf>,
+    /// Explicit project directory selected by the user for this meeting.
+    /// Context assembly reads only a small allowlist of root-level project
+    /// files and never performs ambient repository traversal.
+    pub project_root: Option<PathBuf>,
     pub max_chars: usize,
 }
 
@@ -63,6 +77,8 @@ pub struct ContextCard {
     evidence: Vec<ReasoningContextEvidence>,
     sources: Vec<ContextSourceReceipt>,
     limitations: Vec<String>,
+    project_label: Option<String>,
+    project_revision: Option<String>,
     rendered: String,
 }
 
@@ -87,6 +103,14 @@ impl ContextCard {
         &self.participant_candidates
     }
 
+    pub fn project_label(&self) -> Option<&str> {
+        self.project_label.as_deref()
+    }
+
+    pub fn project_revision(&self) -> Option<&str> {
+        self.project_revision.as_deref()
+    }
+
     pub fn rendered(&self) -> &str {
         &self.rendered
     }
@@ -106,6 +130,19 @@ impl ContextCard {
     ) -> Result<Self, ContextCardError> {
         request.max_chars = request.max_chars.clamp(1, DEFAULT_CONTEXT_CARD_CHAR_BUDGET);
         request.participant_candidates = normalized_participants(request.participant_candidates);
+        if let Some(root) = request.project_root.as_ref() {
+            let canonical = root.canonicalize().map_err(|error| {
+                ContextCardError::SourcesUnavailable(format!(
+                    "selected project could not be opened: {error}"
+                ))
+            })?;
+            if !canonical.is_dir() {
+                return Err(ContextCardError::SourcesUnavailable(
+                    "selected project is not a directory".into(),
+                ));
+            }
+            request.project_root = Some(canonical);
+        }
 
         Self::assemble_with_stability_hook(config, request, || {})
     }
@@ -160,6 +197,50 @@ impl ContextCard {
                     }
                 }
                 Err(error) => source_errors.push(format!("prepared brief: {error}")),
+            }
+        }
+
+        if let Some(root) = builder.project_root.clone() {
+            let mut loaded = 0;
+            for relative in PROJECT_CONTEXT_CANDIDATES {
+                if loaded >= MAX_PROJECT_FILES {
+                    break;
+                }
+                let path = root.join(relative);
+                let Ok(metadata) = std::fs::metadata(&path) else {
+                    continue;
+                };
+                if !metadata.is_file()
+                    || metadata.len() == 0
+                    || metadata.len() > MAX_PROJECT_FILE_BYTES
+                {
+                    continue;
+                }
+                let Ok(content) = std::fs::read_to_string(&path) else {
+                    continue;
+                };
+                let excerpt = content
+                    .chars()
+                    .take(MAX_PROJECT_FILE_CHARS)
+                    .collect::<String>();
+                if excerpt.trim().is_empty() {
+                    continue;
+                }
+                if builder.push(
+                    EvidenceSourceKind::RepositoryResult,
+                    "project_file",
+                    &path.display().to_string(),
+                    excerpt.trim(),
+                    &[],
+                    SourceDerivation::project(&[excerpt.trim().to_string()]),
+                ) {
+                    loaded += 1;
+                }
+            }
+            if loaded == 0 {
+                return Err(ContextCardError::SourcesUnavailable(
+                    "selected project has no readable root-level context files".into(),
+                ));
             }
         }
 
@@ -339,9 +420,11 @@ impl ContextCard {
                     .into(),
             );
         }
-        builder
-            .limitations
-            .push("No project repository was explicitly selected for this meeting.".into());
+        if builder.project_root.is_none() {
+            builder
+                .limitations
+                .push("No project repository was explicitly selected for this meeting.".into());
+        }
         Ok(builder.finish())
     }
 
@@ -393,6 +476,8 @@ impl ContextCard {
 struct ContextCardBuilder {
     request: ContextCardRequest,
     archive_root: Option<PathBuf>,
+    project_root: Option<PathBuf>,
+    project_label: Option<String>,
     evidence: Vec<ReasoningContextEvidence>,
     sources: Vec<ContextSourceReceipt>,
     limitations: Vec<String>,
@@ -402,30 +487,56 @@ struct ContextCardBuilder {
 
 struct SourceDerivation<'a> {
     tokens: &'a [String],
-    allow_outside_archive: bool,
+    scope: SourceScope,
+}
+
+#[derive(Clone, Copy)]
+enum SourceScope {
+    Archive,
+    Prepared,
+    Project,
 }
 
 impl<'a> SourceDerivation<'a> {
     fn archive(tokens: &'a [String]) -> Self {
         Self {
             tokens,
-            allow_outside_archive: false,
+            scope: SourceScope::Archive,
         }
     }
 
     fn prepared(tokens: &'a [String]) -> Self {
         Self {
             tokens,
-            allow_outside_archive: true,
+            scope: SourceScope::Prepared,
+        }
+    }
+
+    fn project(tokens: &'a [String]) -> Self {
+        Self {
+            tokens,
+            scope: SourceScope::Project,
         }
     }
 }
 
 impl ContextCardBuilder {
     fn new(request: ContextCardRequest, archive_root: Option<PathBuf>) -> Self {
+        let project_root = request
+            .project_root
+            .as_ref()
+            .and_then(|path| path.canonicalize().ok())
+            .filter(|path| path.is_dir());
+        let project_label = project_root.as_ref().and_then(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .map(str::to_string)
+        });
         Self {
             request,
             archive_root,
+            project_root,
+            project_label,
             evidence: Vec::new(),
             sources: Vec::new(),
             limitations: Vec::new(),
@@ -444,36 +555,41 @@ impl ContextCardBuilder {
         content: &str,
         subject_labels: &[String],
         derivation: SourceDerivation<'_>,
-    ) {
+    ) -> bool {
         let content = content.trim();
         if content.is_empty() {
-            return;
+            return false;
         }
         let normalized = content.to_ascii_lowercase();
         if self.seen_content.contains(&normalized) {
-            return;
+            return false;
         }
         let path = Path::new(source_ref);
-        if !derivation.allow_outside_archive {
-            let Ok(canonical) = path.canonicalize() else {
-                return;
-            };
-            if self
+        let Ok(canonical) = path.canonicalize() else {
+            return false;
+        };
+        let inside_scope = match derivation.scope {
+            SourceScope::Archive => self
                 .archive_root
                 .as_ref()
-                .is_none_or(|root| !canonical.starts_with(root))
-            {
-                return;
-            }
+                .is_some_and(|root| canonical.starts_with(root)),
+            SourceScope::Prepared => true,
+            SourceScope::Project => self
+                .project_root
+                .as_ref()
+                .is_some_and(|root| canonical.starts_with(root)),
+        };
+        if !inside_scope {
+            return false;
         }
         let Ok(bytes) = std::fs::read(path) else {
-            return;
+            return false;
         };
         if source_is_restricted(&bytes) {
-            return;
+            return false;
         }
         let Ok(source_text) = std::str::from_utf8(&bytes) else {
-            return;
+            return false;
         };
         let normalized_source = normalize_derivation_text(source_text);
         let padded_source = format!(" {normalized_source} ");
@@ -484,7 +600,7 @@ impl ContextCardBuilder {
             .filter(|token| !token.is_empty())
             .any(|token| !padded_source.contains(&format!(" {token} ")))
         {
-            return;
+            return false;
         }
         let source_sha256 = sha256_hex(&bytes);
 
@@ -503,7 +619,7 @@ impl ContextCardBuilder {
             content
         );
         if self.rendered_len.saturating_add(rendered_line.len()) > self.request.max_chars {
-            return;
+            return false;
         }
         self.rendered_len += rendered_line.len();
         self.seen_content.insert(normalized);
@@ -526,6 +642,7 @@ impl ContextCardBuilder {
             evidence_only: true,
             subject_labels: normalized_participants(derived_subject_labels),
         });
+        true
     }
 
     fn finish(self) -> ContextCard {
@@ -543,12 +660,33 @@ impl ContextCardBuilder {
         for limitation in &self.limitations {
             rendered.push_str(&format!("- context_limitation: {limitation}\n"));
         }
+        let project_revision = {
+            let project_hashes = self
+                .evidence
+                .iter()
+                .zip(&self.sources)
+                .filter(|(evidence, _)| {
+                    evidence.source_kind == EvidenceSourceKind::RepositoryResult
+                })
+                .map(|(_, source)| source.source_sha256.as_str())
+                .collect::<Vec<_>>()
+                .join("\0");
+            (!project_hashes.is_empty())
+                .then(|| format!("context-{}", stable_short_id(&project_hashes)))
+        };
+        let project_label = if project_revision.is_some() {
+            self.project_label
+        } else {
+            None
+        };
         ContextCard {
             query: self.request.query,
             participant_candidates: self.request.participant_candidates,
             evidence: self.evidence,
             sources: self.sources,
             limitations: self.limitations,
+            project_label,
+            project_revision,
             rendered,
         }
     }
@@ -886,6 +1024,81 @@ mod tests {
             card.validate_sources_current(),
             Err(ContextCardError::SourceChanged(_))
         ));
+    }
+
+    #[test]
+    fn explicit_project_context_is_allowlisted_bounded_and_revision_stamped() {
+        let _guard = crate::test_home_env_lock();
+        let temp = tempfile::tempdir().unwrap();
+        let _home = HomeOverride::set(temp.path());
+        let project = temp.path().join("meridian");
+        std::fs::create_dir_all(project.join("src")).unwrap();
+        std::fs::write(
+            project.join("README.md"),
+            "# Meridian\nLaunch with a reversible customer cohort.",
+        )
+        .unwrap();
+        std::fs::write(
+            project.join("Cargo.toml"),
+            "[package]\nname = \"meridian\"\nversion = \"0.1.0\"",
+        )
+        .unwrap();
+        std::fs::write(project.join(".env"), "API_KEY=never-export-this").unwrap();
+        std::fs::write(
+            project.join("src").join("private.txt"),
+            "never traverse nested project files",
+        )
+        .unwrap();
+        let mut request = ContextCardRequest::new("launch");
+        request.project_root = Some(project.clone());
+
+        let card = ContextCard::assemble(&Config::default(), request).unwrap();
+        let serialized = serde_json::to_string(&card).unwrap();
+
+        assert_eq!(card.project_label(), Some("meridian"));
+        assert!(card
+            .project_revision()
+            .is_some_and(|revision| revision.starts_with("context-")));
+        assert!(card.evidence.iter().all(|evidence| {
+            evidence.source_kind == EvidenceSourceKind::RepositoryResult
+                && evidence.context_class == "project_file"
+        }));
+        assert!(serialized.contains("reversible customer cohort"));
+        assert!(!serialized.contains("never-export-this"));
+        assert!(!serialized.contains("never traverse nested"));
+        card.validate_sources_current().unwrap();
+
+        std::fs::write(
+            project.join("README.md"),
+            "# Meridian\nLaunch only after procurement approval.",
+        )
+        .unwrap();
+        assert!(matches!(
+            card.validate_sources_current(),
+            Err(ContextCardError::SourceChanged(_))
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn project_context_cannot_follow_an_allowlisted_symlink_outside_the_selected_root() {
+        use std::os::unix::fs::symlink;
+
+        let _guard = crate::test_home_env_lock();
+        let temp = tempfile::tempdir().unwrap();
+        let _home = HomeOverride::set(temp.path());
+        let project = temp.path().join("meridian");
+        std::fs::create_dir_all(&project).unwrap();
+        let outside = temp.path().join("outside.md");
+        std::fs::write(&outside, "External project secret").unwrap();
+        symlink(&outside, project.join("README.md")).unwrap();
+        let mut request = ContextCardRequest::new("launch");
+        request.project_root = Some(project);
+
+        let error = ContextCard::assemble(&Config::default(), request).unwrap_err();
+
+        assert!(matches!(error, ContextCardError::SourcesUnavailable(_)));
+        assert!(!error.to_string().contains("External project secret"));
     }
 
     #[test]

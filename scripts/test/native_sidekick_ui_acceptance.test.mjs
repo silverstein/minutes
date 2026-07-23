@@ -110,10 +110,29 @@ class FakeElement {
     this.children = [];
     this.listeners = new Map();
     this.isConnected = true;
+    const assignedClasses = new Set();
+    const syncClassName = () => {
+      this.className = [...assignedClasses].join(' ');
+    };
     this.classList = {
-      toggle() {},
-      add() {},
-      remove() {},
+      contains: (name) => (
+        assignedClasses.has(name) || this.className.split(/\s+/).includes(name)
+      ),
+      toggle: (name, force) => {
+        const next = force === undefined ? !this.classList.contains(name) : Boolean(force);
+        if (next) assignedClasses.add(name);
+        else assignedClasses.delete(name);
+        syncClassName();
+        return next;
+      },
+      add: (...names) => {
+        names.forEach((name) => assignedClasses.add(name));
+        syncClassName();
+      },
+      remove: (...names) => {
+        names.forEach((name) => assignedClasses.delete(name));
+        syncClassName();
+      },
     };
   }
 
@@ -142,6 +161,10 @@ class FakeElement {
   }
 
   focus() {}
+
+  setAttribute(name, value) {
+    this[name] = String(value);
+  }
 
   scrollIntoView(options) {
     this.lastScrollIntoViewOptions = options;
@@ -288,8 +311,103 @@ async function sidekickHarness(options = {}) {
   await settle();
   frames.splice(0).forEach((frame) => frame(0));
   await settle();
-  return { elements, eventHandlers, frames, form, invocations, stream };
+  return {
+    body: document.body,
+    elements,
+    eventHandlers,
+    frames,
+    form,
+    invocations,
+    stream,
+  };
 }
+
+test('a proactive publication rests as one quiet signal with visible source receipts', async () => {
+  const harness = await sidekickHarness({
+    readySnapshot: {
+      revision: 1,
+      active: true,
+      state: 'ready',
+      detail: 'Current context loaded.',
+      provider: 'Codex',
+      privacy: 'Cloud',
+      sessionId: 'session-quiet',
+      meetingTitle: 'Meridian launch review',
+      screenAvailable: true,
+      contextLoaded: true,
+      contextItemCount: 2,
+      contextSources: [
+        { kind: 'history', label: 'Prior meetings' },
+        { kind: 'project', label: 'meridian-app' },
+      ],
+      messages: [{
+        role: 'sidekick',
+        kind: 'material_opening',
+        text: 'The proposed rollout puts $800K at risk. Ask for the error distribution before choosing a binary ship decision.',
+        sources: ['Live meeting', 'Prior meetings', 'Project · meridian-app'],
+      }],
+    },
+  });
+
+  assert.equal(harness.body.dataset.mode, 'signal');
+  assert.equal(harness.elements.get('meeting-title').textContent, 'Meridian launch review');
+  assert.equal(harness.elements.get('state').textContent, 'Listening');
+  assert.equal(
+    harness.elements.get('signal-title').textContent,
+    'The proposed rollout puts $800K at risk.',
+  );
+  assert.match(harness.elements.get('signal-body').textContent, /error distribution/i);
+  assert.deepEqual(
+    harness.elements.get('signal-sources').children.map((child) => child.textContent),
+    ['Live meeting', 'Prior meetings', 'Project · meridian-app'],
+  );
+  assert.equal(harness.elements.get('context-count').textContent, 'Grounded in 4 bounded sources');
+  assert.equal(harness.elements.get('project-remove').hidden, false);
+});
+
+test('the quiet signal expands into a strategist thread as soon as the user engages', async () => {
+  const harness = await sidekickHarness({
+    readySnapshot: {
+      revision: 2,
+      active: true,
+      state: 'ready',
+      detail: 'Current context loaded.',
+      provider: 'Codex',
+      privacy: 'Cloud',
+      sessionId: 'session-thread',
+      meetingTitle: 'Meridian launch review',
+      screenAvailable: false,
+      contextLoaded: true,
+      contextItemCount: 1,
+      contextSources: [{ kind: 'person', label: 'Dylan Barth' }],
+      messages: [
+        {
+          role: 'sidekick',
+          kind: 'decision',
+          text: 'The current plan exposes $800K.',
+          sources: ['Live meeting', 'Prior meeting · Dylan Barth'],
+        },
+        { role: 'user', text: 'Give me the line.', sources: [] },
+        {
+          role: 'sidekick',
+          kind: 'say_this',
+          text: '“Before we approve a binary launch, show us the failure distribution.”',
+          sources: ['Live meeting', 'Prior meeting · Dylan Barth'],
+        },
+      ],
+    },
+  });
+
+  assert.equal(harness.body.dataset.mode, 'thread');
+  assert.equal(harness.stream.children.length, 3);
+  assert.equal(harness.stream.children[1].children[0].textContent, 'You');
+  assert.equal(harness.stream.children[2].children[0].textContent, 'Say This');
+  assert.deepEqual(
+    harness.stream.children[2].children.at(-1).children.map((child) => child.textContent),
+    ['Live meeting', 'Prior meeting · Dylan Barth'],
+  );
+  assert.equal(harness.elements.get('context-count').textContent, 'Grounded in 2 bounded sources');
+});
 
 test('native Sidekick acceptance traverses the real form and waits for two paints', async () => {
   const harness = await sidekickHarness();
@@ -608,7 +726,7 @@ test('an older status response cannot overwrite a newer event snapshot', async (
   await settle();
   assert.equal(harness.stream.children.length, 1);
   assert.equal(harness.stream.children[0].children[1].textContent, 'Newest authoritative answer.');
-  assert.equal(harness.elements.get('state').textContent, 'ready');
+  assert.equal(harness.elements.get('state').textContent, 'Listening');
 });
 
 test('a reloaded Sidekick window recovers an already-submitted acceptance turn without resending it', async () => {

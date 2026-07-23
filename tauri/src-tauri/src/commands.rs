@@ -14,7 +14,7 @@ use reqwest::header::{ACCEPT, CONTENT_LENGTH};
 use sha2::{Digest, Sha256};
 use std::cmp::Reverse;
 use std::collections::hash_map::DefaultHasher;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::OpenOptions;
 use std::hash::{Hash, Hasher};
 use std::io::{self, Read, Write};
@@ -168,8 +168,16 @@ pub struct NativeSidekickMessage {
     pub text: String,
     pub kind: Option<String>,
     pub latency_ms: Option<u64>,
+    pub sources: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub acceptance_turn_id: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeSidekickContextSource {
+    pub kind: String,
+    pub label: String,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -183,7 +191,12 @@ pub struct NativeSidekickSnapshot {
     pub privacy: String,
     pub session_id: String,
     pub session_type: String,
+    pub meeting_title: String,
     pub screen_available: bool,
+    pub context_loaded: bool,
+    pub context_item_count: usize,
+    pub context_sources: Vec<NativeSidekickContextSource>,
+    pub project_revision: Option<String>,
     pub messages: Vec<NativeSidekickMessage>,
 }
 
@@ -364,7 +377,12 @@ impl NativeSidekickSnapshot {
             privacy: String::new(),
             session_id: String::new(),
             session_type: String::new(),
+            meeting_title: String::new(),
             screen_available: false,
+            context_loaded: false,
+            context_item_count: 0,
+            context_sources: Vec::new(),
+            project_revision: None,
             messages: Vec::new(),
         }
     }
@@ -382,6 +400,10 @@ pub(crate) enum NativeSidekickControl {
     ContextUnavailable {
         detail: String,
     },
+    SetProject {
+        root: PathBuf,
+    },
+    ClearProject,
     Stop,
 }
 
@@ -11840,6 +11862,8 @@ mod tests {
         assert!(html.contains("cmd_start_native_sidekick"));
         assert!(html.contains("id=\"sidekick-cloud-consent-overlay\""));
         assert!(html.contains("bounded window of the current meeting transcript"));
+        assert!(html.contains("explicitly attach a project"));
+        assert!(html.contains("allowlisted root files"));
         assert!(html.contains("cloudConsent: true"));
         assert!(html.contains("waitForVisibleRecordingSidekickAcceptanceButton"));
         assert!(html.contains("document.getElementById('btn-sidekick-recording')"));
@@ -11851,8 +11875,20 @@ mod tests {
         assert!(!html.contains("Replace Recall session?"));
         assert!(!html.contains("Restart Sidekick"));
         assert!(sidekick.contains("cmd_native_sidekick_send"));
+        assert!(sidekick.contains("cmd_native_sidekick_set_project"));
+        assert!(sidekick.contains("cmd_native_sidekick_clear_project"));
         assert!(sidekick.contains("sidekick:state"));
         assert!(sidekick.contains("id=\"retry\""));
+        assert!(sidekick.contains("data-mode=\"empty\""));
+        assert!(sidekick.contains("id=\"give-line\""));
+        assert!(sidekick.contains("id=\"challenge\""));
+        assert!(sidekick.contains("id=\"context-toggle\""));
+        assert!(sidekick.contains("Only a bounded window of the sources shown here"));
+        assert!(sidekick.contains("review the allowlisted files before attaching"));
+        assert!(!sidekick.contains("Secrets and ambient repository traversal are excluded"));
+        assert!(sidekick.contains("Listening for what matters."));
+        assert!(sidekick.contains("Ask, correct, or steer Sidekick"));
+        assert!(sidekick.contains("@media (prefers-reduced-motion: reduce)"));
         assert!(
             NATIVE_SIDEKICK_DEVELOPER_INSTRUCTIONS.contains("contractual or financial exposure")
         );
@@ -11876,7 +11912,33 @@ mod tests {
             .contains("name the remedy's obligor and beneficiary"));
         assert!(sidekick.contains("showSubmitError"));
         assert!(sidekick.contains("snapshot.sessionId"));
-        assert!(sidekick.contains("Ask for strategy, a calculation, what to say next"));
+        assert!(!sidekick.contains("class=\"mark\""));
+    }
+
+    #[test]
+    fn native_sidekick_publication_receipts_survive_a_later_context_swap() {
+        let labels = HashMap::from([(
+            "context-old-project".to_string(),
+            "Project: meridian".to_string(),
+        )]);
+        let candidate = minutes_core::live_sidekick::InterventionCandidate {
+            decision: minutes_core::live_sidekick::InterventionDecision::Speak,
+            kind: Some("decision".into()),
+            text: Some("The old project context still produced this answer.".into()),
+            evidence_ids: vec!["transcript-current".into(), "context-old-project".into()],
+            visual_evidence_ids: vec!["screen-current".into()],
+            claims_visual_observation: true,
+            confidence: 95,
+        };
+
+        assert_eq!(
+            native_sidekick_publication_sources(&candidate, &labels),
+            vec![
+                "Live meeting".to_string(),
+                "Screen".to_string(),
+                "Project: meridian".to_string(),
+            ]
+        );
     }
 
     #[cfg(unix)]
@@ -15620,6 +15682,7 @@ fn assemble_native_sidekick_context_card(
     config: &Config,
     context_session: &minutes_core::context_store::ContextSession,
     goal: &str,
+    project_root: Option<PathBuf>,
 ) -> Result<minutes_core::context_card::ContextCard, String> {
     let calendar_events = minutes_core::calendar::events_overlapping(context_session.started_at);
     let calendar_event =
@@ -15641,9 +15704,140 @@ fn assemble_native_sidekick_context_card(
     );
     request.participant_candidates = participants;
     request.prepared_brief_path = native_sidekick_brief_path();
+    request.project_root = project_root;
     request.max_chars = 5_000;
     minutes_core::context_card::ContextCard::assemble(config, request)
         .map_err(|error| error.to_string())
+}
+
+fn native_sidekick_context_view(
+    card: &minutes_core::context_card::ContextCard,
+) -> (Vec<NativeSidekickContextSource>, usize, Option<String>) {
+    let history_source_count = card
+        .evidence()
+        .iter()
+        .filter(|item| {
+            item.source_kind == minutes_core::live_sidekick::EvidenceSourceKind::MeetingArtifact
+                && item.context_class != "prepared_brief"
+        })
+        .map(|item| item.source_id.as_str())
+        .collect::<HashSet<_>>()
+        .len();
+    let has_prepared_brief = card
+        .evidence()
+        .iter()
+        .any(|item| item.context_class == "prepared_brief");
+    let mut sources = Vec::new();
+    if history_source_count > 0 {
+        sources.push(NativeSidekickContextSource {
+            kind: "history".into(),
+            label: format!(
+                "{history_source_count} prior meeting{}",
+                if history_source_count == 1 { "" } else { "s" }
+            ),
+        });
+    }
+    for participant in card.participant_candidates().iter().take(2) {
+        sources.push(NativeSidekickContextSource {
+            kind: "person".into(),
+            label: participant.clone(),
+        });
+    }
+    if has_prepared_brief {
+        sources.push(NativeSidekickContextSource {
+            kind: "brief".into(),
+            label: "Prepared brief".into(),
+        });
+    }
+    if let Some(project) = card.project_label() {
+        sources.push(NativeSidekickContextSource {
+            kind: "project".into(),
+            label: format!("Project: {project}"),
+        });
+    }
+    (
+        sources,
+        card.evidence().len(),
+        card.project_revision().map(str::to_string),
+    )
+}
+
+fn apply_native_sidekick_context_view(
+    state: &mut NativeSidekickSnapshot,
+    card: &minutes_core::context_card::ContextCard,
+) {
+    let (sources, item_count, project_revision) = native_sidekick_context_view(card);
+    state.context_loaded = true;
+    state.context_item_count = item_count;
+    state.context_sources = sources;
+    state.project_revision = project_revision;
+}
+
+fn clear_native_sidekick_context_view(state: &mut NativeSidekickSnapshot) {
+    state.context_loaded = true;
+    state.context_item_count = 0;
+    state.context_sources.clear();
+    state.project_revision = None;
+}
+
+fn native_sidekick_publication_sources(
+    candidate: &minutes_core::live_sidekick::InterventionCandidate,
+    context_source_labels: &HashMap<String, String>,
+) -> Vec<String> {
+    let mut sources = Vec::new();
+    if candidate
+        .evidence_ids
+        .iter()
+        .any(|id| !id.as_str().starts_with("context-"))
+    {
+        sources.push("Live meeting".into());
+    }
+    if !candidate.visual_evidence_ids.is_empty() {
+        sources.push("Screen".into());
+    }
+    for evidence_id in &candidate.evidence_ids {
+        if let Some(label) = context_source_labels.get(evidence_id.as_str()) {
+            if !sources.contains(label) {
+                sources.push(label.clone());
+            }
+        }
+    }
+    sources
+}
+
+fn remember_native_sidekick_context_sources(
+    labels: &mut HashMap<String, String>,
+    card: &minutes_core::context_card::ContextCard,
+) {
+    for evidence in card.evidence() {
+        let label = match evidence.context_class.as_str() {
+            "prepared_brief" => "Prepared brief".into(),
+            "project_file" => card
+                .project_label()
+                .map(|project| format!("Project: {project}"))
+                .unwrap_or_else(|| "Selected project".into()),
+            _ => "Prior meetings".into(),
+        };
+        labels.insert(evidence.evidence_id.as_str().to_string(), label);
+    }
+}
+
+fn native_sidekick_meeting_only_context_update(
+    context_session: &minutes_core::context_store::ContextSession,
+    goal: &str,
+) -> (Option<minutes_core::context_card::ContextCard>, String) {
+    match assemble_native_sidekick_context_card(&Config::load(), context_session, goal, None) {
+        Ok(card) => (
+            Some(card),
+            "The attached project changed and was removed; refreshed meeting history is ready."
+                .into(),
+        ),
+        Err(_) => (
+            None,
+            "The attached project changed and was removed; Sidekick is continuing with live meeting evidence."
+                .into(),
+        ),
+    }
 }
 
 fn select_native_sidekick_calendar_event<'a>(
@@ -16837,8 +17031,8 @@ fn show_native_sidekick(app: &tauri::AppHandle) -> Result<(), String> {
         tauri::WebviewUrl::App("sidekick.html".into()),
     )
     .title("Minutes Sidekick")
-    .inner_size(560.0, 620.0)
-    .min_inner_size(440.0, 420.0)
+    .inner_size(720.0, 760.0)
+    .min_inner_size(480.0, 520.0)
     .resizable(true)
     .decorations(true)
     .content_protected(true)
@@ -20567,6 +20761,7 @@ fn run_native_sidekick(
     }
     let acceptance_evidence = native_sidekick_acceptance_evidence_plan(&app);
     let mut loaded_context: Option<minutes_core::context_card::ContextCard> = None;
+    let mut context_source_labels = HashMap::<String, String>::new();
     if acceptance_evidence.is_none() {
         if let Some(sender) = context_sender {
             let config = Config::load();
@@ -20575,7 +20770,12 @@ fn run_native_sidekick(
             let _ = std::thread::Builder::new()
                 .name("minutes-sidekick-context".into())
                 .spawn(move || {
-                    match assemble_native_sidekick_context_card(&config, &context_session, &goal) {
+                    match assemble_native_sidekick_context_card(
+                        &config,
+                        &context_session,
+                        &goal,
+                        None,
+                    ) {
                         Ok(card) => {
                             let history_count = card
                                 .evidence()
@@ -20683,6 +20883,7 @@ fn run_native_sidekick(
             });
             return;
         }
+        remember_native_sidekick_context_sources(&mut context_source_labels, &acceptance_context);
         loaded_context = Some(acceptance_context);
     }
     record_native_sidekick_acceptance_reasoning_session(&app, &engine);
@@ -20703,8 +20904,16 @@ fn run_native_sidekick(
             _ => "Meeting",
         }
         .into();
+        state.meeting_title = context_session
+            .title
+            .clone()
+            .filter(|title| !title.trim().is_empty())
+            .unwrap_or_else(|| "Live meeting".into());
         state.detail = "Ready — listening for decisions, risks, and openings.".into();
         state.screen_available = acceptance_evidence.is_some();
+        if let Some(card) = loaded_context.as_ref() {
+            apply_native_sidekick_context_view(state, card);
+        }
     });
 
     // The active scratch transcript is authoritative and is truncated for each
@@ -20717,7 +20926,9 @@ fn run_native_sidekick(
     let mut backend_available = true;
     let mut recovery_attempts = 0_u32;
     let mut next_backend_retry: Option<Instant> = None;
-    let mut pending_context: Option<(minutes_core::context_card::ContextCard, String)> = None;
+    let mut pending_context: Option<(Option<minutes_core::context_card::ContextCard>, String)> =
+        None;
+    let mut project_override_active = false;
     let mut acceptance_turns_by_foreground =
         HashMap::<minutes_core::live_sidekick::ForegroundTurnId, String>::new();
 
@@ -20839,25 +21050,54 @@ fn run_native_sidekick(
         }
 
         if pending_context.is_some() && !engine.has_active_turn() {
-            let (card, summary) = pending_context
+            let (next_card, summary) = pending_context
                 .take()
                 .expect("pending context checked before load");
-            match engine.load_context_card(card.clone()).map_err(|error| {
-                minutes_core::context_card::ContextCardError::SourcesUnavailable(error.to_string())
-            }) {
+            let context_update = (|| {
+                if let Some(card) = next_card.as_ref() {
+                    card.validate_sources_current()?;
+                }
+                if loaded_context.is_some() {
+                    loaded_context = None;
+                    engine.clear_context_evidence().map_err(|error| {
+                        minutes_core::context_card::ContextCardError::SourcesUnavailable(
+                            error.to_string(),
+                        )
+                    })?;
+                }
+                if let Some(card) = next_card.as_ref() {
+                    engine.load_context_card(card.clone()).map_err(|error| {
+                        minutes_core::context_card::ContextCardError::SourcesUnavailable(
+                            error.to_string(),
+                        )
+                    })?;
+                }
+                Ok::<(), minutes_core::context_card::ContextCardError>(())
+            })();
+            match context_update {
                 Ok(()) => {
-                    loaded_context = Some(card);
+                    if let Some(card) = next_card.as_ref() {
+                        remember_native_sidekick_context_sources(&mut context_source_labels, card);
+                    }
+                    loaded_context = next_card;
                     publish_native_sidekick(&app, &snapshot, |state| {
+                        if let Some(card) = loaded_context.as_ref() {
+                            apply_native_sidekick_context_view(state, card);
+                        } else {
+                            clear_native_sidekick_context_view(state);
+                        }
                         if state.state == "ready" {
                             state.detail = summary.clone();
                         }
                     });
                 }
                 Err(error) => {
+                    loaded_context = None;
                     publish_native_sidekick(&app, &snapshot, |state| {
+                        clear_native_sidekick_context_view(state);
                         if state.state == "ready" {
                             state.detail = format!(
-                                "Sidekick is ready with live meeting evidence; historical context was rejected ({error})."
+                                "Sidekick is ready with live meeting evidence; the context change was rejected ({error})."
                             );
                         }
                     });
@@ -20873,17 +21113,79 @@ fn run_native_sidekick(
                         break;
                     }
                     NativeSidekickControl::ContextReady { card, summary } => {
-                        pending_context = Some((card, summary));
+                        if project_override_active {
+                            continue;
+                        }
+                        pending_context = Some((Some(card), summary));
                         // Preserve channel order: later user messages remain
                         // queued behind this context barrier until it is applied.
                         break;
                     }
                     NativeSidekickControl::ContextUnavailable { detail } => {
+                        if project_override_active || loaded_context.is_some() {
+                            continue;
+                        }
                         publish_native_sidekick(&app, &snapshot, |state| {
+                            clear_native_sidekick_context_view(state);
                             if state.state == "ready" {
                                 state.detail = detail.clone();
                             }
                         });
+                    }
+                    NativeSidekickControl::SetProject { root } => {
+                        publish_native_sidekick(&app, &snapshot, |state| {
+                            state.detail = "Loading the selected project context…".into();
+                        });
+                        match assemble_native_sidekick_context_card(
+                            &Config::load(),
+                            &context_session,
+                            &goal,
+                            Some(root),
+                        ) {
+                            Ok(card) => {
+                                project_override_active = true;
+                                let project = card.project_label().unwrap_or("selected project");
+                                let summary = format!(
+                                    "Project context ready — {project}, {} bounded context items.",
+                                    card.evidence().len()
+                                );
+                                pending_context = Some((Some(card), summary));
+                                break;
+                            }
+                            Err(error) => {
+                                publish_native_sidekick(&app, &snapshot, |state| {
+                                    state.state = "ready".into();
+                                    state.detail =
+                                        format!("Could not attach that project: {error}");
+                                });
+                            }
+                        }
+                    }
+                    NativeSidekickControl::ClearProject => {
+                        project_override_active = false;
+                        publish_native_sidekick(&app, &snapshot, |state| {
+                            state.detail = "Removing project context…".into();
+                        });
+                        match assemble_native_sidekick_context_card(
+                            &Config::load(),
+                            &context_session,
+                            &goal,
+                            None,
+                        ) {
+                            Ok(card) => {
+                                pending_context =
+                                    Some((Some(card), "Project context removed.".into()));
+                                break;
+                            }
+                            Err(_) => {
+                                pending_context = Some((
+                                    None,
+                                    "Project context removed; no other relevant meeting history was found."
+                                        .into(),
+                                ));
+                                break;
+                            }
+                        }
                     }
                     NativeSidekickControl::UserMessage {
                         text,
@@ -20973,6 +21275,7 @@ fn run_native_sidekick(
                                 text: text.clone(),
                                 kind: None,
                                 latency_ms: None,
+                                sources: Vec::new(),
                                 acceptance_turn_id: user_message_acceptance_turn_id,
                             });
                         });
@@ -20994,7 +21297,16 @@ fn run_native_sidekick(
                                 &mut loaded_context,
                             ) {
                                 Ok(Some(detail)) => {
+                                    if project_override_active {
+                                        project_override_active = false;
+                                        pending_context =
+                                            Some(native_sidekick_meeting_only_context_update(
+                                                &context_session,
+                                                &goal,
+                                            ));
+                                    }
                                     publish_native_sidekick(&app, &snapshot, |state| {
+                                        clear_native_sidekick_context_view(state);
                                         state.detail = detail.clone();
                                     });
                                 }
@@ -21121,7 +21433,15 @@ fn run_native_sidekick(
         {
             match revalidate_native_sidekick_context(&mut engine, &mut loaded_context) {
                 Ok(Some(detail)) => {
+                    if project_override_active {
+                        project_override_active = false;
+                        pending_context = Some(native_sidekick_meeting_only_context_update(
+                            &context_session,
+                            &goal,
+                        ));
+                    }
                     publish_native_sidekick(&app, &snapshot, |state| {
+                        clear_native_sidekick_context_view(state);
                         if state.state == "ready" {
                             state.detail = detail.clone();
                         }
@@ -21226,6 +21546,8 @@ fn run_native_sidekick(
                     },
                 );
             }
+            let source_labels =
+                native_sidekick_publication_sources(&publication.candidate, &context_source_labels);
             let text = publication.candidate.text.unwrap_or_default();
             publish_native_sidekick(&app, &snapshot, |state| {
                 state.state = "ready".into();
@@ -21235,6 +21557,7 @@ fn run_native_sidekick(
                     text,
                     kind: publication.candidate.kind,
                     latency_ms: Some(publication.total_ms),
+                    sources: source_labels,
                     acceptance_turn_id,
                 });
             });
@@ -21358,7 +21681,16 @@ pub fn cmd_start_native_sidekick(
                 _ => "Meeting",
             }
             .into(),
+            meeting_title: context_session
+                .title
+                .clone()
+                .filter(|title| !title.trim().is_empty())
+                .unwrap_or_else(|| "Live meeting".into()),
             screen_available: false,
+            context_loaded: false,
+            context_item_count: 0,
+            context_sources: Vec::new(),
+            project_revision: None,
             messages: Vec::new(),
         };
     });
@@ -21496,6 +21828,58 @@ pub fn cmd_native_sidekick_send(
         ));
     }
     Ok(())
+}
+
+#[tauri::command]
+pub fn cmd_native_sidekick_set_project(
+    state: tauri::State<AppState>,
+    path: String,
+) -> Result<(), String> {
+    if !state.sidekick_active.load(Ordering::SeqCst) {
+        return Err("Start Sidekick before attaching a project.".into());
+    }
+    let root = PathBuf::from(path.trim());
+    let root = root
+        .canonicalize()
+        .map_err(|error| format!("Could not open that project folder: {error}"))?;
+    if !root.is_dir() {
+        return Err("Choose a project folder, not a file.".into());
+    }
+    let looks_like_project = root.join(".git").exists()
+        || root.join("package.json").is_file()
+        || root.join("Cargo.toml").is_file()
+        || root.join("README.md").is_file();
+    if !looks_like_project {
+        return Err(
+            "That folder does not look like a project. Choose a repository or a folder with a README or project manifest."
+                .into(),
+        );
+    }
+    let sender = state
+        .sidekick_control
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .clone()
+        .ok_or_else(|| "Sidekick is not active.".to_string())?;
+    sender
+        .send(NativeSidekickControl::SetProject { root })
+        .map_err(|error| format!("Sidekick stopped before the project was attached: {error}"))
+}
+
+#[tauri::command]
+pub fn cmd_native_sidekick_clear_project(state: tauri::State<AppState>) -> Result<(), String> {
+    if !state.sidekick_active.load(Ordering::SeqCst) {
+        return Err("Sidekick is not active.".into());
+    }
+    let sender = state
+        .sidekick_control
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .clone()
+        .ok_or_else(|| "Sidekick is not active.".to_string())?;
+    sender
+        .send(NativeSidekickControl::ClearProject)
+        .map_err(|error| format!("Sidekick stopped before project context was removed: {error}"))
 }
 
 #[tauri::command]

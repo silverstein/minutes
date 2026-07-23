@@ -10,90 +10,209 @@
     @font-face { font-family: Geist; src: url('fonts/Geist-Regular.woff2') format('woff2'); font-weight: 400; }
     @font-face { font-family: Geist; src: url('fonts/Geist-Medium.woff2') format('woff2'); font-weight: 600; }
     @font-face { font-family: 'Geist Mono'; src: url('fonts/GeistMono-Regular.woff2') format('woff2'); }
+    @font-face { font-family: 'Instrument Serif'; src: url('fonts/InstrumentSerif-Regular.woff2') format('woff2'); font-weight: 400; }
     * { box-sizing: border-box; }
     :root {
-      color-scheme: dark;
-      --bg: #11110f; --panel: #181815; --raised: #20201c; --line: rgba(245,241,231,.12);
-      --text: #f4f0e7; --muted: #aaa49a; --accent: #78dc8d; --blue: #8fc5e8;
+      color-scheme: light;
+      --bg: #F8F4ED;
+      --panel: #EFEBE2;
+      --hover: #E8E2D8;
+      --line: rgba(0,0,0,.07);
+      --line-mid: rgba(0,0,0,.13);
+      --text: #1A1916;
+      --muted: #8C8880;
+      --tertiary: #BDB9B0;
+      --accent: #C96B4E;
+      --accent-hover: #B85A3E;
+      --accent-soft: rgba(201,107,78,.10);
+      --danger: #C0392B;
+      --success: #2E7D46;
+      --thinking: #6B6760;
     }
-    @media (prefers-color-scheme: light) {
-      :root { color-scheme: light; --bg: #f4f0e8; --panel: #fbf8f2; --raised: #eee9df; --line: rgba(26,25,22,.13); --text: #1b1a17; --muted: #6a655d; --accent: #306b3f; --blue: #315f7b; }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        color-scheme: dark;
+        --bg: #0D0D0B;
+        --panel: #141412;
+        --hover: #1C1C1A;
+        --line: rgba(255,255,255,.06);
+        --line-mid: #2A2924;
+        --text: #E8E4DA;
+        --muted: #6B6760;
+        --tertiary: #3D3B38;
+        --accent: #30D158;
+        --accent-hover: #4ADE70;
+        --accent-soft: rgba(48,209,88,.10);
+        --danger: #FF453A;
+        --success: #30D158;
+        --thinking: #BF5AF2;
+      }
     }
     html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; background: var(--bg); color: var(--text); font-family: Geist, -apple-system, sans-serif; }
     body { display: grid; grid-template-rows: auto minmax(0,1fr) auto; }
-    header { display: grid; grid-template-columns: minmax(0,1fr) auto; align-items: center; gap: 12px; padding: 18px 20px 14px; border-bottom: 1px solid var(--line); background: color-mix(in srgb, var(--panel) 94%, transparent); }
-    .brand { display: flex; align-items: center; gap: 11px; min-width: 0; }
-    .mark { display: flex; align-items: end; gap: 2px; width: 30px; height: 30px; padding: 7px; border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent); border-radius: 10px 10px 7px 7px; background: color-mix(in srgb, var(--accent) 12%, transparent); }
-    .mark i { width: 3px; border-radius: 3px; background: var(--accent); }
-    .mark i:nth-child(1) { height: 7px; opacity: .55; } .mark i:nth-child(2) { height: 14px; } .mark i:nth-child(3) { height: 10px; opacity: .75; }
-    h1 { margin: 0; font-size: 17px; letter-spacing: -.02em; }
-    .meta { display: flex; align-items: center; gap: 7px; min-width: 0; margin-top: 3px; color: var(--muted); font: 11px 'Geist Mono', monospace; text-transform: uppercase; letter-spacing: .045em; }
-    .dot { width: 6px; height: 6px; flex: 0 0 auto; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 13%, transparent); }
-    [data-state="thinking"] .dot, [data-state="arming"] .dot { background: var(--blue); animation: pulse 1.2s ease-in-out infinite; }
-    [data-state="degraded"] .dot { background: #f09187; }
-    @keyframes pulse { 50% { opacity: .35; transform: scale(.8); } }
-    .provider { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    button { border: 1px solid var(--line); background: transparent; color: var(--muted); border-radius: 999px; min-height: 32px; padding: 0 12px; cursor: pointer; font: 600 12px Geist, sans-serif; }
-    button:hover { color: var(--text); background: color-mix(in srgb, var(--raised) 70%, transparent); }
-    main { overflow-y: auto; padding: 22px 20px 28px; scroll-behavior: smooth; }
-    .empty { min-height: 100%; display: grid; place-content: center; text-align: center; color: var(--muted); padding: 30px; }
-    .empty strong { display: block; margin-bottom: 7px; color: var(--text); font-size: 20px; letter-spacing: -.025em; }
-    .empty span { max-width: 370px; font-size: 14px; line-height: 1.5; }
-    .stream { display: flex; flex-direction: column; gap: 15px; }
-    .message { max-width: 91%; animation: arrive 180ms ease-out both; }
-    .message.user { align-self: flex-end; }
-    .message.sidekick { align-self: flex-start; }
-    @keyframes arrive { from { opacity: 0; transform: translateY(5px); } }
-    .label { margin: 0 0 5px 4px; color: var(--muted); font: 10px 'Geist Mono', monospace; letter-spacing: .05em; text-transform: uppercase; }
-    .bubble { padding: 12px 14px; border: 1px solid var(--line); border-radius: 16px 16px 7px 16px; background: var(--raised); font-size: 15px; line-height: 1.45; white-space: pre-wrap; }
-    .sidekick .bubble { border-radius: 16px 16px 16px 7px; background: color-mix(in srgb, var(--accent) 7%, var(--panel)); }
-    .foot { margin: 5px 4px 0; color: var(--muted); font: 10px 'Geist Mono', monospace; }
-    footer { padding: 12px 16px 16px; border-top: 1px solid var(--line); background: var(--panel); }
-    .status-row { min-height: 25px; margin: 0 5px 8px; display: flex; align-items: center; justify-content: space-between; gap: 10px; }
-    .status { color: var(--muted); font-size: 12px; line-height: 1.35; }
-    .retry { display: none; min-height: 26px; padding: 0 10px; flex: 0 0 auto; }
+    button, textarea { font: inherit; }
+    button { min-height: 34px; border: 1px solid var(--line-mid); border-radius: 8px; padding: 0 12px; background: transparent; color: var(--muted); cursor: pointer; font-size: 12px; font-weight: 600; transition: background 150ms ease, color 150ms ease, border-color 150ms ease; }
+    button:hover { background: var(--hover); color: var(--text); }
+    button:focus-visible, textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    button:disabled { cursor: default; opacity: .45; }
+    header { display: grid; grid-template-columns: minmax(0,1fr) auto auto; align-items: center; gap: 16px; padding: 16px 20px; border-bottom: 1px solid var(--line); }
+    .meeting { min-width: 0; }
+    .product-name { margin-bottom: 4px; color: var(--accent); font: 500 10px 'Geist Mono', monospace; letter-spacing: .08em; text-transform: uppercase; }
+    h1 { overflow: hidden; margin: 0; font-size: 16px; font-weight: 600; letter-spacing: -.02em; text-overflow: ellipsis; white-space: nowrap; }
+    .live-state { display: flex; align-items: center; gap: 8px; color: var(--muted); font: 11px 'Geist Mono', monospace; white-space: nowrap; }
+    .dot { width: 7px; height: 7px; flex: 0 0 auto; border-radius: 50%; background: var(--success); }
+    [data-state="thinking"] .dot, [data-state="arming"] .dot { background: var(--thinking); animation: pulse 1s ease-in-out infinite; }
+    [data-state="degraded"] .dot { background: var(--danger); }
+    @keyframes pulse { 50% { opacity: .35; transform: scale(.82); } }
+    .end { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 35%, transparent); }
+    main { overflow-y: auto; padding: 20px; scroll-behavior: smooth; }
+    .empty { min-height: 100%; display: grid; place-content: center; padding: 36px; text-align: center; }
+    .empty strong { display: block; margin-bottom: 8px; font: 400 30px/1.1 'Instrument Serif', serif; }
+    .empty span { display: block; max-width: 410px; color: var(--muted); font-size: 13px; line-height: 1.55; }
+    .signal { display: none; }
+    [data-mode="signal"] .signal { display: block; }
+    [data-mode="signal"] .empty, [data-mode="signal"] .thread { display: none; }
+    [data-mode="thread"] .empty, [data-mode="thread"] .signal { display: none; }
+    .signal-card { padding: 20px; border: 1px solid var(--line-mid); border-radius: 12px; background: var(--panel); }
+    .signal-kicker { margin-bottom: 12px; color: var(--accent); font: 500 10px 'Geist Mono', monospace; letter-spacing: .08em; text-transform: uppercase; }
+    .signal-title { max-width: 600px; margin: 0 0 10px; font: 400 clamp(30px, 5.2vw, 46px)/1.02 'Instrument Serif', serif; letter-spacing: -.025em; }
+    .signal-body { max-width: 620px; margin: 0; font-size: 14px; line-height: 1.55; }
+    .signal-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 18px; }
+    .signal-primary { border-color: var(--accent); background: var(--accent); color: #fff; }
+    @media (prefers-color-scheme: dark) { .signal-primary { color: #0D0D0B; } }
+    .signal-primary:hover { border-color: var(--accent-hover); background: var(--accent-hover); }
+    .signal-sources, .message-sources { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--line); }
+    .source-receipt { color: var(--muted); font: 10px 'Geist Mono', monospace; }
+    .source-receipt + .source-receipt::before { content: "·"; margin-right: 6px; color: var(--tertiary); }
+    .earlier { margin-top: 22px; }
+    .section-title { margin: 0 0 8px; font-size: 13px; font-weight: 600; }
+    .earlier-row { display: grid; grid-template-columns: 58px minmax(0,1fr); gap: 12px; padding: 12px 0; border-top: 1px solid var(--line); }
+    .earlier-time, .label, .foot { color: var(--muted); font: 10px 'Geist Mono', monospace; }
+    .earlier-text { overflow: hidden; font-size: 13px; line-height: 1.45; text-overflow: ellipsis; white-space: nowrap; }
+    .thread { display: none; width: min(680px, 100%); margin: 0 auto; }
+    [data-mode="thread"] .thread { display: flex; flex-direction: column; }
+    .message { padding: 16px 0; border-top: 1px solid var(--line); animation: arrive 160ms ease-out both; }
+    .message:first-child { border-top: 0; padding-top: 0; }
+    @keyframes arrive { from { opacity: 0; transform: translateY(4px); } }
+    .label { margin-bottom: 7px; letter-spacing: .07em; text-transform: uppercase; }
+    .message.sidekick .label { color: var(--accent); }
+    .bubble { font-size: 15px; line-height: 1.52; white-space: pre-wrap; }
+    .message.sidekick .bubble { max-width: 640px; font: 400 clamp(22px, 3.7vw, 32px)/1.12 'Instrument Serif', serif; }
+    .message.user { padding-left: 18%; }
+    .message.user .bubble { font-size: 14px; }
+    .message-sources { margin-top: 12px; padding-top: 9px; }
+    .foot { margin-top: 8px; }
+    footer { border-top: 1px solid var(--line); background: var(--panel); }
+    .context-wrap { border-bottom: 1px solid var(--line); }
+    .context-toggle { display: grid; width: 100%; min-height: 44px; grid-template-columns: auto minmax(0,1fr) auto; align-items: center; gap: 10px; border: 0; border-radius: 0; padding: 8px 16px; text-align: left; }
+    .context-count { color: var(--text); font-size: 12px; }
+    .context-preview { overflow: hidden; color: var(--muted); font: 10px 'Geist Mono', monospace; text-overflow: ellipsis; white-space: nowrap; }
+    .context-action { color: var(--accent); font-size: 11px; }
+    .context-panel { display: none; padding: 4px 16px 14px; }
+    .context-panel.visible { display: block; }
+    .context-list { border-top: 1px solid var(--line); }
+    .context-row { display: grid; grid-template-columns: minmax(0,1fr) auto; align-items: center; gap: 12px; min-height: 38px; border-bottom: 1px solid var(--line); font-size: 12px; }
+    .context-row-meta { color: var(--muted); font: 10px 'Geist Mono', monospace; }
+    .context-controls { display: flex; gap: 8px; margin-top: 12px; }
+    .context-disclosure { margin: 10px 0 0; color: var(--muted); font-size: 11px; line-height: 1.45; }
+    .composer { padding: 12px 16px 14px; }
+    .status-row { min-height: 20px; margin: 0 2px 8px; display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+    .status { overflow: hidden; color: var(--muted); font: 10px 'Geist Mono', monospace; text-overflow: ellipsis; white-space: nowrap; }
+    .retry { display: none; min-height: 26px; padding: 0 9px; flex: 0 0 auto; }
     .retry.visible { display: inline-flex; align-items: center; }
-    form { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 9px; }
-    textarea { width: 100%; min-height: 44px; max-height: 110px; resize: none; border: 1px solid var(--line); border-radius: 14px; outline: none; padding: 11px 13px; background: var(--bg); color: var(--text); font: 14px/1.4 Geist, sans-serif; }
-    textarea:focus { border-color: color-mix(in srgb, var(--accent) 60%, transparent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 10%, transparent); }
-    .send { align-self: end; min-width: 72px; height: 44px; border-color: color-mix(in srgb, var(--accent) 48%, transparent); background: color-mix(in srgb, var(--accent) 13%, transparent); color: var(--text); }
-    .send:disabled { opacity: .45; cursor: default; }
+    form { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 8px; }
+    textarea { width: 100%; min-height: 42px; max-height: 100px; resize: none; border: 1px solid var(--line-mid); border-radius: 8px; outline: none; padding: 10px 12px; background: var(--bg); color: var(--text); font-size: 13px; line-height: 1.4; }
+    textarea:focus { border-color: var(--accent); }
+    .send { align-self: end; min-width: 66px; height: 42px; border-color: var(--accent); background: var(--accent); color: #fff; }
+    @media (prefers-color-scheme: dark) { .send { color: #0D0D0B; } }
+    .send:hover { border-color: var(--accent-hover); background: var(--accent-hover); }
+    @media (max-width: 540px) {
+      header { grid-template-columns: minmax(0,1fr) auto; gap: 10px; }
+      .live-state { grid-column: 1 / -1; grid-row: 2; }
+      main { padding: 16px; }
+      .signal-card { padding: 16px; }
+      .context-preview { display: none; }
+      .message.user { padding-left: 8%; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { animation: none !important; scroll-behavior: auto !important; transition: none !important; }
+    }
   </style>
 </head>
-<body data-state="arming">
+<body data-state="arming" data-mode="empty">
   <header>
-    <div class="brand">
-      <span class="mark" aria-hidden="true"><i></i><i></i><i></i></span>
-      <div style="min-width:0">
-        <h1>Sidekick</h1>
-        <div class="meta"><span class="dot"></span><span id="state">Arming</span><span>·</span><span class="provider" id="provider">Codex app-server</span><span id="session"></span><span id="screen"></span></div>
-      </div>
+    <div class="meeting">
+      <div class="product-name">Sidekick</div>
+      <h1 id="meeting-title">Live meeting</h1>
     </div>
-    <button id="stop" type="button">End</button>
+    <div class="live-state" role="status" aria-live="polite">
+      <span class="dot" aria-hidden="true"></span>
+      <span id="state">Joining the meeting</span>
+    </div>
+    <button class="end" id="stop" type="button">End</button>
   </header>
   <main id="messages">
-    <div class="empty" id="empty"><div><strong>Your strategist is joining.</strong><span>It will stay quiet until there is a decision, contradiction, risk, or opening worth surfacing. Ask it anything while the meeting continues.</span></div></div>
-    <div class="stream" id="stream"></div>
+    <section class="empty" id="empty">
+      <div>
+        <strong>Listening for what matters.</strong>
+        <span>Sidekick stays quiet until there is a decision, contradiction, risk, or opening worth interrupting for. You can ask or steer it at any time.</span>
+      </div>
+    </section>
+    <section class="signal" id="signal" aria-live="polite">
+      <article class="signal-card">
+        <div class="signal-kicker" id="signal-kicker">Material opening</div>
+        <h2 class="signal-title" id="signal-title"></h2>
+        <p class="signal-body" id="signal-body"></p>
+        <div class="signal-actions">
+          <button class="signal-primary" id="give-line" type="button">Give me the line</button>
+          <button id="challenge" type="button">Challenge this</button>
+        </div>
+        <div class="signal-sources" id="signal-sources"></div>
+      </article>
+      <div class="earlier" id="earlier">
+        <h3 class="section-title">Earlier signals</h3>
+        <div id="earlier-list"></div>
+      </div>
+    </section>
+    <section class="thread" id="stream" aria-live="polite"></section>
   </main>
   <footer>
-    <div class="status-row">
-      <div class="status" id="detail" role="status" aria-live="polite">Starting a persistent Codex Cloud reasoning session…</div>
-      <button class="retry" id="retry" type="button">Retry</button>
+    <div class="context-wrap">
+      <button class="context-toggle" id="context-toggle" type="button" aria-expanded="false" aria-controls="context-panel">
+        <span class="context-count" id="context-count">Grounded in the live meeting</span>
+        <span class="context-preview" id="context-preview">Loading context…</span>
+        <span class="context-action">Review</span>
+      </button>
+      <div class="context-panel" id="context-panel">
+        <div class="context-list" id="context-list"></div>
+        <div class="context-controls">
+          <button id="project-attach" type="button">Attach project</button>
+          <button id="project-remove" type="button" hidden>Remove project</button>
+        </div>
+        <p class="context-disclosure">Only a bounded window of the sources shown here is shared for each reasoning turn. Restricted meeting history is excluded.</p>
+      </div>
     </div>
-    <form id="form">
-      <textarea id="input" rows="1" placeholder="Ask for strategy, a calculation, what to say next…" aria-label="Message Sidekick"></textarea>
-      <button class="send" id="send" type="submit">Send</button>
-    </form>
+    <div class="composer">
+      <div class="status-row">
+        <div class="status" id="detail" role="status" aria-live="polite">Joining the meeting…</div>
+        <button class="retry" id="retry" type="button">Retry</button>
+      </div>
+      <form id="form">
+        <textarea id="input" rows="1" placeholder="Ask, correct, or steer Sidekick…" aria-label="Message Sidekick"></textarea>
+        <button class="send" id="send" type="submit">Send</button>
+      </form>
+    </div>
   </footer>
   <script>
     const { invoke } = window.__TAURI__.core;
     const { listen } = window.__TAURI__.event;
     const stream = document.getElementById('stream');
-    const empty = document.getElementById('empty');
     const scroller = document.getElementById('messages');
     const input = document.getElementById('input');
     const send = document.getElementById('send');
     const retry = document.getElementById('retry');
+    const contextToggle = document.getElementById('context-toggle');
+    const contextPanel = document.getElementById('context-panel');
     let rendered = 0;
     let pendingMessage = '';
     let lastState = 'arming';
@@ -178,8 +297,30 @@
         message?.text || '',
         message?.kind || '',
         message?.latencyMs ?? null,
+        Array.isArray(message?.sources) ? message.sources : [],
         message?.acceptanceTurnId || '',
       ]);
+    }
+
+    function readableKind(kind, fallback = 'Sidekick') {
+      const label = String(kind || fallback).replaceAll('_', ' ').trim();
+      return label ? label.replace(/\b\w/g, (letter) => letter.toUpperCase()) : fallback;
+    }
+
+    function appendSourceReceipts(container, sources) {
+      const unique = [...new Set((Array.isArray(sources) ? sources : []).filter(Boolean))];
+      if (!unique.length) return;
+      const receipts = document.createElement('div');
+      receipts.className = container.classList.contains('signal-card')
+        ? 'signal-sources'
+        : 'message-sources';
+      unique.forEach((source) => {
+        const receipt = document.createElement('span');
+        receipt.className = 'source-receipt';
+        receipt.textContent = source;
+        receipts.append(receipt);
+      });
+      container.append(receipts);
     }
 
     function appendMessage(message, snapshotIndex) {
@@ -188,19 +329,124 @@
       item.dataset.snapshotIndex = String(snapshotIndex);
       const label = document.createElement('div');
       label.className = 'label';
-      label.textContent = message.role === 'user' ? 'You' : (message.kind || 'Sidekick');
+      label.textContent = message.role === 'user' ? 'You' : readableKind(message.kind);
       const bubble = document.createElement('div');
       bubble.className = 'bubble';
       bubble.textContent = message.text;
       item.append(label, bubble);
+      appendSourceReceipts(item, message.sources);
       if (message.latencyMs) {
         const foot = document.createElement('div');
         foot.className = 'foot';
-        foot.textContent = `${(message.latencyMs / 1000).toFixed(1)}s · grounded answer`;
+        foot.textContent = `${(message.latencyMs / 1000).toFixed(1)}s · grounded`;
         item.append(foot);
       }
       stream.append(item);
       return item;
+    }
+
+    function splitSignalText(text) {
+      const clean = String(text || '').trim();
+      if (!clean) return { title: 'A material opening surfaced.', body: '' };
+      const boundary = clean.search(/(?<=[.!?])\s+/);
+      if (boundary > 0 && boundary <= 150) {
+        return {
+          title: clean.slice(0, boundary + 1).trim(),
+          body: clean.slice(boundary + 1).trim(),
+        };
+      }
+      const line = clean.split('\n').find(Boolean) || clean;
+      if (line.length <= 150) {
+        return { title: line, body: clean === line ? '' : clean.slice(line.length).trim() };
+      }
+      return { title: `${line.slice(0, 147).trim()}…`, body: clean };
+    }
+
+    function renderSignal(messages) {
+      const sidekickMessages = messages.filter((message) => message?.role === 'sidekick');
+      const latest = sidekickMessages.at(-1);
+      if (!latest) return;
+      const { title, body } = splitSignalText(latest.text);
+      document.getElementById('signal-kicker').textContent =
+        readableKind(latest.kind, 'Material opening');
+      document.getElementById('signal-title').textContent = title;
+      document.getElementById('signal-body').textContent =
+        body || 'Ask for the line, challenge the premise, or steer Sidekick as the meeting changes.';
+      const sourceContainer = document.getElementById('signal-sources');
+      sourceContainer.replaceChildren();
+      [...new Set((latest.sources || []).filter(Boolean))].forEach((source) => {
+        const receipt = document.createElement('span');
+        receipt.className = 'source-receipt';
+        receipt.textContent = source;
+        sourceContainer.append(receipt);
+      });
+      const earlier = sidekickMessages.slice(0, -1).slice(-3);
+      const earlierSection = document.getElementById('earlier');
+      const earlierList = document.getElementById('earlier-list');
+      earlierList.replaceChildren();
+      earlierSection.hidden = earlier.length === 0;
+      earlier.forEach((message) => {
+        const row = document.createElement('div');
+        row.className = 'earlier-row';
+        const kind = document.createElement('span');
+        kind.className = 'earlier-time';
+        kind.textContent = readableKind(message.kind, 'Signal');
+        const text = document.createElement('span');
+        text.className = 'earlier-text';
+        text.textContent = message.text;
+        row.append(kind, text);
+        earlierList.append(row);
+      });
+    }
+
+    function contextRow(label, meta) {
+      const row = document.createElement('div');
+      row.className = 'context-row';
+      const name = document.createElement('span');
+      name.textContent = label;
+      const detail = document.createElement('span');
+      detail.className = 'context-row-meta';
+      detail.textContent = meta;
+      row.append(name, detail);
+      return row;
+    }
+
+    function renderContext(snapshot) {
+      const sources = Array.isArray(snapshot.contextSources) ? snapshot.contextSources : [];
+      const itemCount = Number(snapshot.contextItemCount || 0);
+      const boundedCount = 1 + (snapshot.screenAvailable ? 1 : 0) + itemCount;
+      document.getElementById('context-count').textContent =
+        `Grounded in ${boundedCount} bounded ${boundedCount === 1 ? 'source' : 'sources'}`;
+      const labels = ['Live meeting', ...(snapshot.screenAvailable ? ['Screen'] : [])]
+        .concat(sources.map((source) => source?.label).filter(Boolean));
+      document.getElementById('context-preview').textContent =
+        labels.length ? labels.join(' · ') : 'Live meeting';
+      const list = document.getElementById('context-list');
+      list.replaceChildren();
+      list.append(contextRow('Live meeting', 'Active'));
+      if (snapshot.screenAvailable) list.append(contextRow('Screen', 'Exact session'));
+      const metaByKind = {
+        history: 'Bounded history',
+        person: 'Calendar-confirmed',
+        brief: 'Prepared',
+        project: 'Explicitly attached',
+      };
+      sources.forEach((source) => {
+        list.append(contextRow(source.label, metaByKind[source.kind] || 'Bounded'));
+      });
+      if (!snapshot.contextLoaded) list.append(contextRow('Meeting history', 'Loading'));
+      const projectAttached = sources.some((source) => source?.kind === 'project');
+      document.getElementById('project-attach').textContent =
+        projectAttached ? 'Change project' : 'Attach project';
+      document.getElementById('project-remove').hidden = !projectAttached;
+    }
+
+    function stateLabel(state, hasMessages) {
+      if (state === 'arming') return 'Joining the meeting';
+      if (state === 'thinking') return 'Thinking from fresh context';
+      if (state === 'degraded') return 'Needs attention';
+      if (state === 'ready') return hasMessages ? 'Listening' : 'Listening quietly';
+      return 'Sidekick is off';
     }
 
     function maybeAcknowledgeAcceptance(messages) {
@@ -405,19 +651,22 @@
         lastRevision = revision;
       }
       const nextState = snapshot.state || 'off';
-      document.body.dataset.state = snapshot.state || 'off';
-      document.getElementById('state').textContent = nextState;
-      document.getElementById('provider').textContent = [snapshot.provider, snapshot.privacy].filter(Boolean).join(' · ');
+      document.body.dataset.state = nextState;
       const sessionId = snapshot.session_id || snapshot.sessionId || '';
-      const sessionType = snapshot.session_type || snapshot.sessionType || '';
-      document.getElementById('session').textContent = sessionId
-        ? `· ${sessionType || 'session'} ${String(sessionId).slice(0, 8)}`
-        : '';
-      document.getElementById('screen').textContent = snapshot.screenAvailable ? '· screen' : '';
-      document.getElementById('detail').textContent = snapshot.detail || '';
+      document.getElementById('meeting-title').textContent =
+        snapshot.meetingTitle || 'Live meeting';
       send.disabled = !snapshot.active || nextState === 'arming';
       const messages = Array.isArray(snapshot.messages) ? snapshot.messages : [];
       latestMessages = messages;
+      const engaged = messages.some((message) => message?.role === 'user');
+      const hasSignal = messages.some((message) => message?.role === 'sidekick');
+      document.body.dataset.mode = engaged ? 'thread' : hasSignal ? 'signal' : 'empty';
+      document.getElementById('state').textContent = stateLabel(nextState, messages.length > 0);
+      const providerStatus = [snapshot.provider, snapshot.privacy].filter(Boolean).join(' · ');
+      document.getElementById('detail').textContent =
+        [snapshot.detail, providerStatus].filter(Boolean).join(' · ');
+      renderContext(snapshot);
+      if (hasSignal && !engaged) renderSignal(messages);
       const nextMessageKeys = messages.map(messageRenderKey);
       // Starting a new exact session replaces the backend snapshot. Mirror the
       // reset instead of leaving messages from the prior meeting on screen.
@@ -433,7 +682,6 @@
         renderedMessageKeys.push(nextMessageKeys[rendered]);
         rendered += 1;
       }
-      empty.hidden = rendered > 0;
       const latestMessage = messages.at(-1);
       if (!pendingMessage && nextState === 'degraded' && latestMessage?.role === 'user') {
         // The window may have reloaded after the backend accepted the text but
@@ -449,14 +697,14 @@
       if (failedPendingTurn && !input.value.trim()) input.value = pendingMessage;
       lastState = nextState;
       maybeAcknowledgeAcceptance(messages);
-      requestAnimationFrame(() => { scroller.scrollTop = scroller.scrollHeight; });
+      if (engaged) requestAnimationFrame(() => { scroller.scrollTop = scroller.scrollHeight; });
     }
 
     function showSubmitError(message, error) {
       pendingMessage = message;
       if (!input.value.trim()) input.value = message;
       document.body.dataset.state = 'degraded';
-      document.getElementById('state').textContent = 'degraded';
+      document.getElementById('state').textContent = 'Needs attention';
       document.getElementById('detail').textContent = `Message not delivered: ${String(error?.message || error || 'Sidekick is unavailable.')}`;
       retry.classList.toggle('visible', Boolean(message));
       input.focus();
@@ -491,6 +739,51 @@
       if (event.key === 'Enter' && !event.shiftKey) {
         event.preventDefault();
         document.getElementById('form').requestSubmit();
+      }
+    });
+    document.getElementById('give-line').addEventListener('click', () => {
+      submitMessage('Give me the exact sentence to say next.');
+    });
+    document.getElementById('challenge').addEventListener('click', () => {
+      submitMessage('Challenge this insight. What evidence or boundary would make it wrong?');
+    });
+    contextToggle.addEventListener('click', () => {
+      const visible = !contextPanel.classList.contains('visible');
+      contextPanel.classList.toggle('visible', visible);
+      contextToggle.setAttribute('aria-expanded', String(visible));
+      contextToggle.querySelector('.context-action').textContent = visible ? 'Close' : 'Review';
+    });
+    document.getElementById('project-attach').addEventListener('click', async () => {
+      try {
+        const dialog = window.__TAURI__.dialog;
+        if (!dialog?.ask || !dialog?.open) {
+          throw new Error('The project picker is unavailable.');
+        }
+        const approved = await dialog.ask(
+          'Minutes will read a small allowlist of root-level project files, such as README.md and project manifests. A bounded excerpt may be sent to the active reasoning provider for this meeting. Files outside that allowlist and ambient repository traversal are excluded; review the allowlisted files before attaching.',
+          { title: 'Attach project context?', kind: 'warning' },
+        );
+        if (!approved) return;
+        const selected = await dialog.open({
+          directory: true,
+          multiple: false,
+          title: 'Choose a project for this meeting',
+        });
+        if (!selected || Array.isArray(selected)) return;
+        document.getElementById('detail').textContent = 'Attaching bounded project context…';
+        await invoke('cmd_native_sidekick_set_project', { path: selected });
+      } catch (error) {
+        document.getElementById('detail').textContent =
+          `Project not attached: ${String(error?.message || error)}`;
+      }
+    });
+    document.getElementById('project-remove').addEventListener('click', async () => {
+      try {
+        document.getElementById('detail').textContent = 'Removing project context…';
+        await invoke('cmd_native_sidekick_clear_project');
+      } catch (error) {
+        document.getElementById('detail').textContent =
+          `Project context was not removed: ${String(error?.message || error)}`;
       }
     });
     document.getElementById('stop').addEventListener('click', async () => {

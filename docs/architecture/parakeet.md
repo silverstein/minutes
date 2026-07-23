@@ -531,10 +531,7 @@ The `parakeet` Cargo feature must be enabled at build time:
 cargo build --release -p minutes-cli --features parakeet
 
 # Tauri desktop app
-TAURI_FEATURES="parakeet" cargo tauri build --bundles app
-
-# Or use the build script (add parakeet feature)
-cargo build --release -p minutes-cli --features parakeet
+cargo tauri build --bundles app --features parakeet
 ```
 
 For local macOS builds in this repo, prefer the helper scripts because they keep the CLI and desktop app aligned on the same feature set:

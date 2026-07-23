@@ -16241,21 +16241,34 @@ fn record_native_sidekick_acceptance_reasoning_session(
     };
 }
 
+fn native_sidekick_provider_identity(
+    executable: &Path,
+) -> Result<(PathBuf, String, String), String> {
+    let canonical = executable
+        .canonicalize()
+        .map_err(|error| format!("Could not resolve the Sidekick provider executable: {error}"))?;
+    let bytes = std::fs::read(&canonical)
+        .map_err(|error| format!("Could not read the Sidekick provider executable: {error}"))?;
+    let version_output = Command::new(&canonical)
+        .arg("--version")
+        .output()
+        .map_err(|error| format!("Could not inspect the Sidekick provider version: {error}"))?;
+    if !version_output.status.success() {
+        return Err("The Sidekick provider did not report a usable version.".into());
+    }
+    let version = String::from_utf8_lossy(&version_output.stdout)
+        .trim()
+        .to_string();
+    if version.is_empty() {
+        return Err("The Sidekick provider reported an empty version.".into());
+    }
+    Ok((canonical, native_sidekick_sha256(&bytes), version))
+}
+
 fn record_native_sidekick_acceptance_provider(app: &tauri::AppHandle, executable: &Path) {
-    let canonical = executable.canonicalize().ok();
-    let sha256 = canonical
-        .as_deref()
-        .and_then(|path| std::fs::read(path).ok())
-        .map(|bytes| native_sidekick_sha256(&bytes));
-    let version = canonical.as_deref().and_then(|path| {
-        Command::new(path)
-            .arg("--version")
-            .output()
-            .ok()
-            .filter(|output| output.status.success())
-            .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
-            .filter(|value| !value.is_empty())
-    });
+    let Ok((canonical, sha256, version)) = native_sidekick_provider_identity(executable) else {
+        return;
+    };
     let state = app.state::<AppState>();
     let (lock, ready) = &*state.sidekick_acceptance;
     if let Some(runtime) = lock
@@ -16263,9 +16276,9 @@ fn record_native_sidekick_acceptance_provider(app: &tauri::AppHandle, executable
         .unwrap_or_else(|error| error.into_inner())
         .as_mut()
     {
-        runtime.provider_executable_path = canonical.map(|path| path.display().to_string());
-        runtime.provider_executable_sha256 = sha256;
-        runtime.provider_version = version;
+        runtime.provider_executable_path = Some(canonical.display().to_string());
+        runtime.provider_executable_sha256 = Some(sha256);
+        runtime.provider_version = Some(version);
         ready.notify_all();
     };
 }
@@ -17397,7 +17410,10 @@ pub fn run_native_sidekick_diagnostic(
         recording_active,
         live_active,
     )?;
-    let codex_path = resolve_agent_binary("codex").map_err(|error| error.user_message())?;
+    let resolved_codex_path =
+        resolve_agent_binary("codex").map_err(|error| error.user_message())?;
+    let provider_identity = native_sidekick_provider_identity(&resolved_codex_path)?;
+    let codex_path = provider_identity.0.clone();
     let backend = Arc::new(
         crate::codex_reasoning_backend::CodexReasoningBackend::sidekick(
             codex_path.clone(),
@@ -17407,7 +17423,7 @@ pub fn run_native_sidekick_diagnostic(
     );
     let verifier_backend = Arc::new(
         crate::codex_reasoning_backend::CodexReasoningBackend::sidekick_verifier(
-            codex_path,
+            codex_path.clone(),
             configured_codex_mcp_servers(),
         )
         .map_err(|error| error.to_string())?,
@@ -17559,6 +17575,10 @@ pub fn run_native_sidekick_diagnostic(
     let reasoning_sessions_started = engine.reasoning_sessions_started();
     let verifier_sessions_started = engine.verifier_sessions_started();
     let _ = engine.stop_capture();
+    let provider_identity_after = native_sidekick_provider_identity(&codex_path)?;
+    if provider_identity_after != provider_identity {
+        return Err("The Sidekick provider executable changed during the diagnostic.".into());
+    }
 
     Ok(serde_json::json!({
         "mode": "diagnose-native-sidekick",
@@ -17588,6 +17608,9 @@ pub fn run_native_sidekick_diagnostic(
         "verifier_provider": verifier_descriptor.provider,
         "verifier_model": verifier_descriptor.model,
         "verifier_privacy": verifier_descriptor.privacy,
+        "provider_executable_path": provider_identity.0.display().to_string(),
+        "provider_executable_sha256": provider_identity.1,
+        "provider_version": provider_identity.2,
         "build_commit": env!("MINUTES_BUILD_COMMIT"),
         "reasoning_session_correlation": reasoning_session_correlation,
         "reasoning_sessions_started": reasoning_sessions_started,
@@ -17601,6 +17624,27 @@ pub fn run_native_sidekick_diagnostic(
 #[cfg(test)]
 mod native_sidekick_diagnostic_tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn provider_identity_canonicalizes_and_binds_executable_bytes_and_version() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let directory = tempfile::tempdir().unwrap();
+        let executable = directory.path().join("codex-real");
+        let alias = directory.path().join("codex");
+        let bytes = b"#!/bin/sh\necho 'codex-cli test-version'\n";
+        std::fs::write(&executable, bytes).unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        symlink(&executable, &alias).unwrap();
+
+        let identity = native_sidekick_provider_identity(&alias).unwrap();
+
+        assert_eq!(identity.0, executable.canonicalize().unwrap());
+        assert!(identity.0.is_absolute());
+        assert_eq!(identity.1, native_sidekick_sha256(bytes));
+        assert_eq!(identity.2, "codex-cli test-version");
+    }
 
     fn with_native_sidekick_acceptance_home<T>(run: impl FnOnce(&Path) -> T) -> T {
         let _guard = commands_test_home_env_lock();

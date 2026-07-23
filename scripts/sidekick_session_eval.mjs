@@ -153,16 +153,20 @@ async function runVerifierCalibration({ codex, verifierModel, verifierEffort }) 
         candidate: item.candidate,
         transcriptEvidence: item.transcript_evidence,
         screenEvidence,
-        authoritativeContext: { role: "meeting strategist" },
+        authoritativeContext: item.authoritative_context ?? { role: "meeting strategist" },
       });
       results.push({
         id: item.id,
         expected_allowed: item.expected_allowed,
+        expected_reason_code: item.expected_reason_code,
         allowed: verdict.allowed,
         decision: verdict.decision,
         reason_code: verdict.reason_code,
         latency: verdict.latency,
-        passed: verdict.allowed === item.expected_allowed,
+        passed:
+          verdict.allowed === item.expected_allowed &&
+          (!item.expected_reason_code ||
+            verdict.reason_code === item.expected_reason_code),
       });
     }
     return {

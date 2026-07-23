@@ -3,6 +3,11 @@ import path from "node:path";
 import { assertReasoningBackend } from "./sidekick_provider.mjs";
 import { assertEvidenceVerifier } from "./sidekick_evidence_verifier.mjs";
 
+const INTERVENTION_CONTRACT = JSON.parse(readFileSync(
+  new URL("../../resources/live_sidekick/intervention_contract.json", import.meta.url),
+  "utf8",
+));
+
 export const SIDEKICK_OUTPUT_SCHEMA = {
   type: "object",
   additionalProperties: false,
@@ -14,8 +19,7 @@ export const SIDEKICK_OUTPUT_SCHEMA = {
     },
     text: {
       type: ["string", "null"],
-      description:
-        "Visible answer. For customer-side automation protections, explicitly name a written confidence-threshold SLA, auditable error reporting, the customer's unilateral human-reversion right without vendor permission, and each monetary remedy as a directionally complete obligation: vendor owes the stated remedy to the customer for the exact evidenced failure class.",
+      description: INTERVENTION_CONTRACT.text_description,
     },
     evidence_ids: {
       type: "array",
@@ -49,8 +53,10 @@ export function sidekickOutputSchemaFor(mode) {
   // A background turn can be promoted in place through provider steering, so
   // every started turn needs enough schema headroom for a foreground answer.
   // Minutes still enforces the stricter 50-word background publication limit.
-  const maxLength = 700;
-  const targetWords = mode === "background" ? 36 : 44;
+  const maxLength = INTERVENTION_CONTRACT.max_characters;
+  const targetWords = mode === "background"
+    ? INTERVENTION_CONTRACT.background_target_words
+    : INTERVENTION_CONTRACT.foreground_target_words;
   return {
     ...SIDEKICK_OUTPUT_SCHEMA,
     properties: {
@@ -325,6 +331,10 @@ export class SidekickSession {
           invocation.evidenceRevision = this.evidenceRevision;
           invocation.generationEvidenceRevision = this.evidenceRevision;
           invocation.freshnessRetry = 0;
+          invocation.completenessRetry = 0;
+          invocation.policyFeedback = null;
+          invocation.carriedTotalMs = 0;
+          invocation.initialFirstTokenMs = null;
           invocation.supersededByUserGeneration = null;
           invocation.allowedVisualIds = turn.visualIds;
           invocation.allowedEvidenceIds = turn.evidenceIds;
@@ -380,7 +390,15 @@ export class SidekickSession {
     this.#record("session_stopped", {});
   }
 
-  async #startInference({ mode, typedMessage, freshnessRetry = 0 }) {
+  async #startInference({
+    mode,
+    typedMessage,
+    freshnessRetry = 0,
+    completenessRetry = 0,
+    policyFeedback = null,
+    carriedTotalMs = 0,
+    initialFirstTokenMs = null,
+  }) {
     const invocation = {
       id: this.nextInvocation++,
       mode,
@@ -389,6 +407,10 @@ export class SidekickSession {
       generationEvidenceRevision: this.evidenceRevision,
       verifiedEvidenceRevision: null,
       freshnessRetry,
+      completenessRetry,
+      policyFeedback,
+      carriedTotalMs,
+      initialFirstTokenMs,
       typedMessage,
       supersededByUserGeneration: null,
       stage: "generating",
@@ -401,7 +423,7 @@ export class SidekickSession {
       verificationRefreshes: 0,
       completion: null,
     };
-    const turn = this.#turnInput({ mode, typedMessage });
+    const turn = this.#turnInput({ mode, typedMessage, policyFeedback });
     invocation.allowedEvidenceIds = turn.evidenceIds;
     invocation.allowedVisualIds = turn.visualIds;
     invocation.transcriptEvidence = turn.transcriptEvidence;
@@ -425,7 +447,7 @@ export class SidekickSession {
     return invocation.completion;
   }
 
-  #turnInput({ mode, typedMessage }) {
+  #turnInput({ mode, typedMessage, policyFeedback = null }) {
     const transcript = this.#boundedTranscript();
     const prompt = {
       turn_mode: mode,
@@ -444,6 +466,9 @@ export class SidekickSession {
     ];
     if (typedMessage) {
       input.push(textInput(`AUTHORITATIVE TYPED USER MESSAGE\n${typedMessage}`));
+    }
+    if (policyFeedback) {
+      input.push(textInput(`MINUTES PUBLICATION POLICY FEEDBACK\n${policyFeedback}`));
     }
     const visualIds = new Set();
     const screen = this.latestScreenId ? this.screens.get(this.latestScreenId) : null;
@@ -529,6 +554,7 @@ export class SidekickSession {
           const verificationWindow = this.#turnInput({
             mode: invocation.mode,
             typedMessage: invocation.typedMessage,
+            policyFeedback: invocation.policyFeedback,
           });
           const sealedEvidenceRevision = this.evidenceRevision;
           const sealedTranscriptRevision = this.transcriptRevision;
@@ -589,6 +615,18 @@ export class SidekickSession {
               invocation,
               result,
               "fresh_verifier_rejected_stale_candidate",
+              verificationTotalMs,
+            );
+          }
+          if (
+            invocation.mode === "foreground" &&
+            verdict.reason_code === "incomplete_material_consequence" &&
+            invocation.completenessRetry === 0
+          ) {
+            return this.#restartForCompleteness(
+              invocation,
+              result,
+              verificationTotalMs,
             );
           }
           throw new Error(`Independent evidence verification rejected the response: ${verdict.reason_code}`);
@@ -600,7 +638,11 @@ export class SidekickSession {
         });
         result = {
           ...result,
-          totalMs: (result.totalMs ?? 0) + verificationTotalMs,
+          firstTokenMs: invocation.initialFirstTokenMs ?? result.firstTokenMs,
+          totalMs:
+            invocation.carriedTotalMs +
+            (result.totalMs ?? 0) +
+            verificationTotalMs,
         };
       }
     } catch (error) {
@@ -655,7 +697,7 @@ export class SidekickSession {
     return { published: false, decision, result };
   }
 
-  #restartForFreshEvidence(invocation, result, boundary) {
+  #restartForFreshEvidence(invocation, result, boundary, verificationTotalMs) {
     if (
       this.stopped ||
       this.active !== invocation ||
@@ -682,6 +724,44 @@ export class SidekickSession {
       mode: invocation.mode,
       typedMessage: invocation.typedMessage,
       freshnessRetry: invocation.freshnessRetry + 1,
+      completenessRetry: invocation.completenessRetry,
+      policyFeedback: invocation.policyFeedback,
+      carriedTotalMs:
+        invocation.carriedTotalMs +
+        (result.totalMs ?? 0) +
+        verificationTotalMs,
+      initialFirstTokenMs: invocation.initialFirstTokenMs ?? result.firstTokenMs,
+    });
+  }
+
+  #restartForCompleteness(invocation, result, verificationTotalMs) {
+    if (
+      this.stopped ||
+      this.active !== invocation ||
+      this.userGeneration !== invocation.userGeneration ||
+      invocation.supersededByUserGeneration !== null
+    ) {
+      if (this.active === invocation) this.active = null;
+      this.#record("stale_completion_rejected", { invocation: invocation.id });
+      return { published: false, stale: true, result };
+    }
+    this.active = null;
+    this.#record("material_completeness_retry", {
+      invocation: invocation.id,
+      retry: invocation.completenessRetry + 1,
+    });
+    return this.#startInference({
+      mode: invocation.mode,
+      typedMessage: invocation.typedMessage,
+      freshnessRetry: invocation.freshnessRetry,
+      completenessRetry: invocation.completenessRetry + 1,
+      policyFeedback:
+        "The prior candidate omitted a relevant explicitly evidenced material consequence required by the user's request. Re-read the bounded evidence and produce a complete answer without inventing or broadening terms.",
+      carriedTotalMs:
+        invocation.carriedTotalMs +
+        (result.totalMs ?? 0) +
+        verificationTotalMs,
+      initialFirstTokenMs: invocation.initialFirstTokenMs ?? result.firstTokenMs,
     });
   }
 

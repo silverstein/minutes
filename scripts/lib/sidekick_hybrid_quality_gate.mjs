@@ -177,7 +177,10 @@ function calibrationRecomputesCleanly(calibration) {
 
 function verifierCalibrationRecomputesCleanly(calibration) {
   const expected = new Map(
-    sidekickVerifierCalibrationCases.map((item) => [item.id, item.expected_allowed]),
+    sidekickVerifierCalibrationCases.map((item) => [item.id, {
+      allowed: item.expected_allowed,
+      reasonCode: item.expected_reason_code,
+    }]),
   );
   const results = Array.isArray(calibration?.results) ? calibration.results : [];
   const sessionIds = Array.isArray(calibration?.session_ids)
@@ -188,12 +191,19 @@ function verifierCalibrationRecomputesCleanly(calibration) {
     results.length === expected.size &&
     new Set(results.map((item) => item?.id)).size === expected.size &&
     results.every((item) => {
-      const expectedAllowed = expected.get(item?.id);
-      const verdictIsCoherent = expectedAllowed
-        ? item?.decision === "allow" && item?.reason_code === "supported"
-        : item?.decision === "reject" && item?.reason_code !== "supported";
+      const expectedVerdict = expected.get(item?.id);
+      const expectedAllowed = expectedVerdict?.allowed;
+      const verdictIsCoherent =
+        item?.decision === (expectedAllowed ? "allow" : "reject") &&
+        (expectedAllowed
+          ? item?.reason_code === "supported"
+          : item?.reason_code !== "supported") &&
+        (!expectedVerdict?.reasonCode ||
+          item?.reason_code === expectedVerdict.reasonCode);
       return expected.has(item?.id) &&
         item?.expected_allowed === expectedAllowed &&
+        (!expectedVerdict.reasonCode ||
+          item?.expected_reason_code === expectedVerdict.reasonCode) &&
         item?.allowed === expectedAllowed &&
         item?.passed === true &&
         verdictIsCoherent &&

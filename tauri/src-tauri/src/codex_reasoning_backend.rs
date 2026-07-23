@@ -502,19 +502,32 @@ impl CodexReasoningSession {
     fn output_schema_for(contract: ReasoningOutputContract, kind: ReasoningTurnKind) -> Value {
         match contract {
             ReasoningOutputContract::InterventionCandidateV1 => {
+                let shared_contract: Value = serde_json::from_str(include_str!(
+                    "../../../resources/live_sidekick/intervention_contract.json"
+                ))
+                .expect("shared Sidekick intervention contract must be valid JSON");
                 // A background turn can be promoted through turn/steer, which
                 // cannot replace its output schema. Give every started turn
                 // foreground-capable character headroom; Minutes core still
                 // enforces the stricter 50-word background publication cap.
-                let max_length = 700;
+                let max_length = shared_contract["max_characters"]
+                    .as_u64()
+                    .expect("shared Sidekick max_characters must be an integer");
                 let turn_name = match kind {
                     ReasoningTurnKind::Background => "steerable background",
                     ReasoningTurnKind::Foreground => "foreground",
                 };
                 let target_words = match kind {
-                    ReasoningTurnKind::Background => 36,
-                    ReasoningTurnKind::Foreground => 44,
+                    ReasoningTurnKind::Background => shared_contract["background_target_words"]
+                        .as_u64()
+                        .expect("shared Sidekick background target must be an integer"),
+                    ReasoningTurnKind::Foreground => shared_contract["foreground_target_words"]
+                        .as_u64()
+                        .expect("shared Sidekick foreground target must be an integer"),
                 };
+                let text_description = shared_contract["text_description"]
+                    .as_str()
+                    .expect("shared Sidekick text description must be a string");
                 json!({
                     "type": "object",
                     "additionalProperties": false,
@@ -527,7 +540,7 @@ impl CodexReasoningSession {
                         "text": {
                             "type": ["string", "null"],
                             "maxLength": max_length,
-                            "description": format!("Visible answer. For customer-side automation protections, explicitly name a written confidence-threshold SLA, auditable case-level error reporting with access to underlying records rather than aggregate-only dashboards, the customer's unilateral human-reversion right without vendor permission, and each monetary remedy as a directionally complete obligation: vendor owes the stated remedy to the customer for the exact evidenced failure class. Target at most {target_words} words and never exceed {max_length} characters for this {turn_name} turn.")
+                            "description": format!("{text_description} Target at most {target_words} words and never exceed {max_length} characters for this {turn_name} turn.")
                         },
                         "evidence_ids": {
                             "type": "array",
@@ -554,7 +567,7 @@ impl CodexReasoningSession {
                     "decision": { "type": "string", "enum": ["allow", "reject"] },
                     "reason_code": {
                         "type": "string",
-                        "enum": ["supported", "unsupported_fact", "unsupported_visual", "contradiction", "uncertain"]
+                        "enum": ["supported", "unsupported_fact", "unsupported_visual", "contradiction", "incomplete_material_consequence", "uncertain"]
                     }
                 },
                 "required": ["decision", "reason_code"]
@@ -1075,6 +1088,7 @@ rl.on('line', (line) => {
             },
             authoritative_memory: Vec::new(),
             typed_user_message: None,
+            policy_feedback: None,
             output_contract: ReasoningOutputContract::InterventionCandidateV1,
             candidate_to_verify: None,
         }
@@ -1412,6 +1426,16 @@ rl.on('line', (line) => {
             .and_then(Value::as_str)
             .unwrap()
             .contains("directionally complete obligation"));
+        assert!(schema
+            .pointer("/properties/text/description")
+            .and_then(Value::as_str)
+            .unwrap()
+            .contains("Never omit an evidenced monetary remedy to save words"));
+        assert!(schema
+            .pointer("/properties/text/description")
+            .and_then(Value::as_str)
+            .unwrap()
+            .contains("Target at most 60 words"));
         assert_eq!(
             schema.pointer("/properties/text/maxLength"),
             Some(&json!(700))
@@ -1424,6 +1448,11 @@ rl.on('line', (line) => {
             background_schema.pointer("/properties/text/maxLength"),
             Some(&json!(700))
         );
+        assert!(background_schema
+            .pointer("/properties/text/description")
+            .and_then(Value::as_str)
+            .unwrap()
+            .contains("Target at most 36 words"));
     }
 
     #[test]
@@ -1443,6 +1472,7 @@ rl.on('line', (line) => {
                 "unsupported_fact",
                 "unsupported_visual",
                 "contradiction",
+                "incomplete_material_consequence",
                 "uncertain"
             ]))
         );

@@ -47,6 +47,22 @@ export const sidekickVerifierCalibrationCases = Object.freeze([
     transcript_evidence: strategyEvidence,
   }),
   Object.freeze({
+    id: "procurement_omission_of_material_remedy",
+    expected_allowed: false,
+    expected_reason_code: "incomplete_material_consequence",
+    candidate: Object.freeze({
+      decision: "speak",
+      text: "For Meridian, require a written confidence-threshold SLA, case-level reporting, and Meridian's unilateral right to revert affected work to humans without vendor permission.",
+      evidence_ids: ["accuracy", "volume", "decision"],
+      visual_evidence_ids: [],
+      claims_visual_observation: false,
+    }),
+    transcript_evidence: strategyEvidence,
+    authoritative_context: Object.freeze({
+      typed_user_message: "Now advise me as Meridian's procurement lead. What protections do I need?",
+    }),
+  }),
+  Object.freeze({
     id: "contradicted_signature_claim",
     expected_allowed: false,
     candidate: Object.freeze({

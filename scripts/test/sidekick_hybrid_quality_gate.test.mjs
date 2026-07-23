@@ -138,9 +138,12 @@ function passingArtifact() {
       results: sidekickVerifierCalibrationCases.map((item, index) => ({
         id: item.id,
         expected_allowed: item.expected_allowed,
+        expected_reason_code: item.expected_reason_code,
         allowed: item.expected_allowed,
         decision: item.expected_allowed ? "allow" : "reject",
-        reason_code: item.expected_allowed ? "supported" : "unsupported_fact",
+        reason_code:
+          item.expected_reason_code ??
+          (item.expected_allowed ? "supported" : "unsupported_fact"),
         latency: { first_token_ms: 300 + index, total_ms: 600 + index },
         passed: true,
       })),
@@ -254,6 +257,11 @@ test("hybrid gate rejects thin self-attestation and recomputed failures", () => 
     (report) => { report.runs[2].published_count = 1; },
     (report) => { report.runs[0].semantic_calibration.results[0].predicted_pass = false; },
     (report) => { report.verifier_calibration.results[1].allowed = true; },
+    (report) => {
+      report.verifier_calibration.results.find(
+        (item) => item.id === "procurement_omission_of_material_remedy",
+      ).reason_code = "unsupported_fact";
+    },
     (report) => { report.verifier_calibration.session_ids[3] = report.verifier_calibration.session_ids[0]; },
     (report) => { report.runs[1].latency.role_flip.total_ms = 30_000; },
     (report) => {

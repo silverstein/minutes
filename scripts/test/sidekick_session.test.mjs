@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import {
   compactVisibleText,
+  sidekickOutputSchemaFor,
   SidekickSession,
 } from "../lib/sidekick_session.mjs";
 
@@ -96,6 +97,26 @@ test("the harness sends the shared product instructions byte-for-byte", async ()
   assert.equal(backend.sessionConfig.developerInstructions, developerInstructions);
 });
 
+test("foreground completeness outranks the soft brevity target", async () => {
+  const instructions = await readFile(
+    new URL("../../resources/live_sidekick/developer_instructions.txt", import.meta.url),
+    "utf8",
+  );
+  assert.match(instructions, /foreground text at 60 words or fewer/);
+  assert.match(
+    instructions,
+    /Completeness of required stakeholder protections and evidenced contractual consequences outranks these soft word targets/,
+  );
+  assert.match(
+    sidekickOutputSchemaFor("foreground").properties.text.description,
+    /Never omit an evidenced monetary remedy to save words.*Target at most 60 words/s,
+  );
+  assert.match(
+    sidekickOutputSchemaFor("background").properties.text.description,
+    /Target at most 36 words/,
+  );
+});
+
 class DeferredSteerBackend extends FakeBackend {
   constructor() {
     super();
@@ -115,6 +136,18 @@ class DeferredEvidenceVerifier {
     const pending = deferred();
     this.calls.push({ params, pending });
     return pending.promise;
+  }
+}
+
+class SequenceEvidenceVerifier {
+  constructor(verdicts) {
+    this.verdicts = [...verdicts];
+    this.calls = [];
+  }
+
+  async verify(params) {
+    this.calls.push(params);
+    return this.verdicts.shift();
   }
 }
 
@@ -387,6 +420,185 @@ test("a real but irrelevant receipt cannot launder an invented factual claim", a
   assert.equal(completed.invalid, true);
   assert.match(completed.error, /Independent evidence verification rejected/);
   assert.equal(backend.verifications[0].transcriptEvidence[0].id, "weather");
+});
+
+test("an incomplete foreground answer gets one policy-guided retry before publication", async () => {
+  const backend = new FakeBackend();
+  const verifier = new SequenceEvidenceVerifier([
+    {
+      allowed: false,
+      decision: "reject",
+      reason_code: "incomplete_material_consequence",
+      latency: { total_ms: 7 },
+    },
+    {
+      allowed: true,
+      decision: "allow",
+      reason_code: "supported",
+      latency: { total_ms: 11 },
+    },
+  ]);
+  const publications = [];
+  const session = new SidekickSession({
+    backend,
+    evidenceVerifier: verifier,
+    captureSessionId: "capture-a",
+    onPublish: (item) => publications.push(item),
+  });
+  await session.start();
+  session.observeTranscript({
+    id: "remedy",
+    captureSessionId: "capture-a",
+    text: "The vendor owes the customer $200 for every wrong automated resolution.",
+  });
+
+  const completion = session.sendUser("Now advise me as the customer procurement lead.");
+  await new Promise((resolve) => setImmediate(resolve));
+  backend.turns[0].pending.resolve(result({
+    decision: "speak",
+    text: "Require audit rights.",
+    evidence_ids: ["remedy"],
+  }, { first: 3, total: 20 }));
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(backend.turns.length, 2);
+  assert.match(
+    backend.turns[1].params.input[2].text,
+    /prior candidate omitted a relevant explicitly evidenced material consequence/,
+  );
+  backend.turns[1].pending.resolve(result({
+    decision: "speak",
+    text: "Require the vendor to owe the customer $200 for every wrong automated resolution.",
+    evidence_ids: ["remedy"],
+  }, { first: 4, total: 30 }));
+
+  const completed = await completion;
+  assert.equal(completed.published, true);
+  assert.equal(publications.length, 1);
+  assert.equal(publications[0].latency.first_token_ms, 3);
+  assert.equal(publications[0].latency.total_ms, 68);
+  assert.equal(
+    session.trace.filter((item) => item.type === "material_completeness_retry").length,
+    1,
+  );
+});
+
+test("completeness then freshness retries preserve policy and full latency", async () => {
+  const backend = new FakeBackend();
+  const verifier = new DeferredEvidenceVerifier();
+  const publications = [];
+  const session = new SidekickSession({
+    backend,
+    evidenceVerifier: verifier,
+    captureSessionId: "capture-a",
+    onPublish: (item) => publications.push(item),
+  });
+  await session.start();
+  session.observeTranscript({ id: "e1", captureSessionId: "capture-a", text: "A $200 remedy applies." });
+  const completion = session.sendUser("Advise me on the decision.");
+  await new Promise((resolve) => setImmediate(resolve));
+  backend.turns[0].pending.resolve(result({ decision: "speak", text: "Require audit rights.", evidence_ids: ["e1"] }, { first: 3, total: 20 }));
+  await new Promise((resolve) => setImmediate(resolve));
+  verifier.calls[0].pending.resolve({ allowed: false, decision: "reject", reason_code: "incomplete_material_consequence", latency: { total_ms: 5 } });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  backend.turns[1].pending.resolve(result({ decision: "speak", text: "Preserve the $200 remedy.", evidence_ids: ["e1"] }, { first: 4, total: 30 }));
+  await new Promise((resolve) => setImmediate(resolve));
+  session.observeTranscript({ id: "e2", captureSessionId: "capture-a", text: "The first correction changes scope." });
+  verifier.calls[1].pending.resolve({ allowed: true, decision: "allow", reason_code: "supported", latency: { total_ms: 7 } });
+  await new Promise((resolve) => setImmediate(resolve));
+  session.observeTranscript({ id: "e3", captureSessionId: "capture-a", text: "The second correction changes scope again." });
+  verifier.calls[2].pending.resolve({ allowed: false, decision: "reject", reason_code: "contradiction", latency: { total_ms: 13 } });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.match(backend.turns[2].params.input[2].text, /prior candidate omitted/);
+  backend.turns[2].pending.resolve(result({ decision: "speak", text: "Preserve the corrected $200 remedy.", evidence_ids: ["e1", "e3"] }, { first: 6, total: 40 }));
+  await new Promise((resolve) => setImmediate(resolve));
+  verifier.calls[3].pending.resolve({ allowed: true, decision: "allow", reason_code: "supported", latency: { total_ms: 11 } });
+
+  const completed = await completion;
+  assert.equal(completed.published, true);
+  assert.equal(publications[0].latency.first_token_ms, 3);
+  assert.equal(publications[0].latency.total_ms, 126);
+});
+
+test("freshness then completeness retries preserve full latency", async () => {
+  const backend = new FakeBackend();
+  const verifier = new DeferredEvidenceVerifier();
+  const publications = [];
+  const session = new SidekickSession({
+    backend,
+    evidenceVerifier: verifier,
+    captureSessionId: "capture-a",
+    onPublish: (item) => publications.push(item),
+  });
+  await session.start();
+  session.observeTranscript({ id: "e1", captureSessionId: "capture-a", text: "A $200 remedy applies." });
+  const completion = session.sendUser("Advise me on the decision.");
+  await new Promise((resolve) => setImmediate(resolve));
+  backend.turns[0].pending.resolve(result({ decision: "speak", text: "Preserve the remedy.", evidence_ids: ["e1"] }, { first: 3, total: 20 }));
+  await new Promise((resolve) => setImmediate(resolve));
+  session.observeTranscript({ id: "e2", captureSessionId: "capture-a", text: "The first correction changes scope." });
+  verifier.calls[0].pending.resolve({ allowed: true, decision: "allow", reason_code: "supported", latency: { total_ms: 5 } });
+  await new Promise((resolve) => setImmediate(resolve));
+  session.observeTranscript({ id: "e3", captureSessionId: "capture-a", text: "The second correction changes scope again." });
+  verifier.calls[1].pending.resolve({ allowed: false, decision: "reject", reason_code: "contradiction", latency: { total_ms: 7 } });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  backend.turns[1].pending.resolve(result({ decision: "speak", text: "Require audit rights.", evidence_ids: ["e3"] }, { first: 4, total: 30 }));
+  await new Promise((resolve) => setImmediate(resolve));
+  verifier.calls[2].pending.resolve({ allowed: false, decision: "reject", reason_code: "incomplete_material_consequence", latency: { total_ms: 13 } });
+  await new Promise((resolve) => setImmediate(resolve));
+  backend.turns[2].pending.resolve(result({ decision: "speak", text: "Preserve the corrected $200 remedy.", evidence_ids: ["e1", "e3"] }, { first: 6, total: 40 }));
+  await new Promise((resolve) => setImmediate(resolve));
+  verifier.calls[3].pending.resolve({ allowed: true, decision: "allow", reason_code: "supported", latency: { total_ms: 11 } });
+
+  const completed = await completion;
+  assert.equal(completed.published, true);
+  assert.equal(publications[0].latency.first_token_ms, 3);
+  assert.equal(publications[0].latency.total_ms, 126);
+});
+
+test("steering an active retry gives the new user turn fresh retry and latency state", async () => {
+  const backend = new FakeBackend();
+  const verifier = new SequenceEvidenceVerifier([
+    { allowed: false, decision: "reject", reason_code: "incomplete_material_consequence", latency: { total_ms: 5 } },
+    { allowed: false, decision: "reject", reason_code: "incomplete_material_consequence", latency: { total_ms: 7 } },
+    { allowed: true, decision: "allow", reason_code: "supported", latency: { total_ms: 11 } },
+  ]);
+  const publications = [];
+  const session = new SidekickSession({
+    backend,
+    evidenceVerifier: verifier,
+    captureSessionId: "capture-a",
+    onPublish: (item) => publications.push(item),
+  });
+  await session.start();
+  session.observeTranscript({ id: "e1", captureSessionId: "capture-a", text: "A $200 remedy applies." });
+
+  const oldCompletion = session.sendUser("First procurement question.");
+  await new Promise((resolve) => setImmediate(resolve));
+  backend.turns[0].pending.resolve(result({ decision: "speak", text: "Require audit rights.", evidence_ids: ["e1"] }, { first: 3, total: 20 }));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(backend.turns.length, 2);
+
+  const newCompletion = session.sendUser("New procurement question.");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(backend.steers.length, 1);
+  assert.match(backend.steers[0].input[1].text, /New procurement question/);
+  backend.turns[1].pending.resolve(result({ decision: "speak", text: "Require reporting.", evidence_ids: ["e1"] }, { first: 4, total: 30 }));
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(backend.turns.length, 3);
+  assert.match(backend.turns[2].params.input[2].text, /prior candidate omitted/);
+  backend.turns[2].pending.resolve(result({ decision: "speak", text: "Preserve the $200 remedy.", evidence_ids: ["e1"] }, { first: 6, total: 40 }));
+  const [oldResult, newResult] = await Promise.all([oldCompletion, newCompletion]);
+
+  assert.equal(oldResult.published, true);
+  assert.equal(newResult.published, true);
+  assert.equal(publications.length, 1);
+  assert.equal(publications[0].latency.first_token_ms, 4);
+  assert.equal(publications[0].latency.total_ms, 88);
 });
 
 test("a transcript correction during verification restarts on current evidence", async () => {

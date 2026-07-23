@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -8,6 +8,7 @@ import vm from 'node:vm';
 
 import {
   appendBoundedOutput,
+  canonicalExistingPath,
   cleanupNativeSidekickProcessLanes,
   evaluateNativeSidekickUiAcceptance,
   nativeSidekickLaunchServicesArgs,
@@ -18,8 +19,52 @@ import {
   singleFlightAsync,
   terminateNewExactProcesses,
 } from '../run_native_sidekick_ui_acceptance.mjs';
+import { sidekickSemanticResponseSha256 } from '../lib/sidekick_exact_semantic_gate.mjs';
+import { semanticJudgeCriteria } from '../lib/sidekick_semantic_judge.mjs';
 
 const sidekickHtml = new URL('../../tauri/src/sidekick.html', import.meta.url);
+const qualitySourceBinding = {
+  git_commit: 'c'.repeat(40),
+  quality_surface_sha256: 'e'.repeat(64),
+  fixture_sha256: 'f'.repeat(64),
+};
+
+function semanticPassVerdict() {
+  const turn = (criteria) => Object.fromEntries([
+    ...criteria.map((name) => [name, true]),
+    ['reason', 'Pass.'],
+  ]);
+  return {
+    turn_1: turn(semanticJudgeCriteria.turn_1),
+    turn_2: turn(semanticJudgeCriteria.turn_2),
+    computed_pass: true,
+    overall_pass: true,
+    passed: true,
+  };
+}
+
+function semanticResponses(payload) {
+  const evidence = (index) => payload.turns[index].candidate_evidence.transcriptEvidenceIds
+    .map((id) => `utterance-${String(id).match(/-(\d+)$/)[1]}`);
+  return {
+    turn_1: { text: payload.turns[0].response, evidence_ids: evidence(0) },
+    turn_2: { text: payload.turns[1].response, evidence_ids: evidence(1) },
+  };
+}
+
+test('provider attestation canonicalizes an existing path alias', async () => {
+  const temporaryRoot = await mkdtemp(path.join(os.tmpdir(), 'minutes-provider-path-'));
+  try {
+    const providerPath = path.join(temporaryRoot, 'codex-real');
+    const aliasPath = path.join(temporaryRoot, 'codex-alias');
+    await writeFile(providerPath, 'provider');
+    await symlink(providerPath, aliasPath);
+
+    assert.equal(await canonicalExistingPath(aliasPath), providerPath);
+  } finally {
+    await rm(temporaryRoot, { recursive: true, force: true });
+  }
+});
 
 function inlineScript(source) {
   return [...source.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/gi)]
@@ -604,8 +649,8 @@ test('a reload during provider work waits for the exact response without resendi
 });
 
 function passingProductPayload() {
-  const turn1 = 'That 90% is a liability number, not merely a quality score: 40,000 x 10% x $200 is about $800K per month in contractual credits. Gate full automation to high-confidence tickets and route the uncertain remainder to a human. Ask engineering: what is the confidence distribution, and what volume clears a defensible threshold?';
-  const turn2 = "For Meridian procurement, keep every wrong automated resolution subject to the existing penalty with no automation carve-outs, require a written confidence-threshold SLA, auditable error-rate reporting and caps, and an explicit right to revert to human-in-the-loop if performance slips.";
+  const turn1 = 'That 90% is a liability number, not a quality score: 40,000 x 10% x $200 is $800K per month in contractual credits. Gate full automation to high-confidence tickets and route the uncertain remainder to a human. What is the confidence distribution, and what volume clears a defensible threshold?';
+  const turn2 = "For Meridian procurement, require every wrong automated resolution to make the vendor owe Meridian a $200 credit, a written confidence-threshold SLA, auditable error reporting, and Meridian's unilateral right to revert affected work to human handling without vendor permission.";
   const domLayout = (turnId, response) => ({
     turnId,
     responseSha256: createHash('sha256').update(response).digest('hex'),
@@ -708,13 +753,23 @@ function passingProductPayload() {
       },
       reasoning_sessions_started: 1,
       reasoning_session_correlation: 'b'.repeat(64),
+      verifier_sessions_started: 2,
       provider_executable_path: '/opt/homebrew/bin/codex',
       provider_executable_sha256: '9'.repeat(64),
       provider_version: 'codex-cli 1.0.0',
       provider_executable_attestation_scope: 'trusted_host_path_pre_post',
       provider_requested_contract: {
         provider: 'codex-app-server',
-        model: 'codex-fast',
+        model: 'gpt-5.6-terra',
+        privacy: 'cloud',
+        persistent: true,
+        steerable: true,
+        streaming: true,
+        image_input: true,
+      },
+      verifier_requested_contract: {
+        provider: 'codex-app-server',
+        model: 'gpt-5.6-sol',
         privacy: 'cloud',
         persistent: true,
         steerable: true,
@@ -745,6 +800,10 @@ function passingProductPayload() {
           visualEvidenceIds: [],
           claimsVisualObservation: false,
           firstTokenMs: 500,
+          candidateSha256: '1'.repeat(64),
+          candidateDigestVerified: true,
+          verificationVerdict: { decision: 'allow', reason_code: 'supported' },
+          verifierSessionCorrelation: '2'.repeat(64),
         },
       },
       {
@@ -759,6 +818,10 @@ function passingProductPayload() {
           visualEvidenceIds: [],
           claimsVisualObservation: false,
           firstTokenMs: 420,
+          candidateSha256: '3'.repeat(64),
+          candidateDigestVerified: true,
+          verificationVerdict: { decision: 'allow', reason_code: 'supported' },
+          verifierSessionCorrelation: '4'.repeat(64),
         },
       },
     ],
@@ -793,7 +856,13 @@ function passingProductPayload() {
   };
 }
 
-function passingRuntime() {
+function passingRuntime(payload = passingProductPayload()) {
+  const responses = semanticResponses(payload);
+  const qualityProviderExecutable = {
+    path: '/opt/homebrew/bin/codex',
+    sha256: '9'.repeat(64),
+    version: 'codex-cli 1.0.0',
+  };
   return {
     exit_code: 0,
     executable_sha256: 'd'.repeat(64),
@@ -801,6 +870,8 @@ function passingRuntime() {
     bundle_sha256: 'e'.repeat(64),
     expected_bundle_sha256: 'e'.repeat(64),
     expected_build_commit: 'c'.repeat(40),
+    quality_source_binding: qualitySourceBinding,
+    quality_provider_executable: qualityProviderExecutable,
     expected_provider_path: '/opt/homebrew/bin/codex',
     expected_provider_sha256: '9'.repeat(64),
     expected_provider_version: 'codex-cli 1.0.0',
@@ -817,8 +888,100 @@ function passingRuntime() {
     forced_process_signals: [],
     provider_copy_is_private: true,
     provider_copy_post_sha256: '9'.repeat(64),
+    hybrid_quality_gate: {
+      schema_version: 1,
+      passed: true,
+      producer_attested: true,
+      fixture_id: 'synthetic-meridian-ship-decision',
+      run_count: 3,
+      requested_model: 'gpt-5.6-terra',
+      requested_effort: 'none',
+      requested_verifier_model: 'gpt-5.6-sol',
+      mechanical_quality_passed: true,
+      semantic_quality_passed: true,
+      semantic_calibration_passed: true,
+      model_matched: true,
+      latency_passed: true,
+      first_token_p95_ms: 2_000,
+      total_p95_ms: 5_000,
+      max_first_token_p95_ms: 4_000,
+      max_total_p95_ms: 7_000,
+      artifact_sha256: 'f'.repeat(64),
+      producer_artifact_sha256: 'f'.repeat(64),
+      source_binding: qualitySourceBinding,
+      provider_executable: qualityProviderExecutable,
+    },
+    exact_semantic_quality_gate: {
+      schema_version: 1,
+      provider: 'codex-app-server',
+      model: 'gpt-5.6-terra',
+      response_sha256: sidekickSemanticResponseSha256(responses),
+      source_binding: qualitySourceBinding,
+      provider_executable: qualityProviderExecutable,
+      verdict: semanticPassVerdict(),
+    },
   };
 }
+
+test('native UI acceptance delegates valid natural paraphrases to the calibrated hybrid gate', async () => {
+  const payload = passingProductPayload();
+  const fixtureBytes = await readFile(
+    new URL('../../tests/fixtures/sidekick_rehearsal/v1/meridian_ship_decision.json', import.meta.url),
+  );
+  payload.fixture_sha256 = createHash('sha256').update(fixtureBytes).digest('hex');
+  const texts = [
+    'At 40,000 monthly tickets and a 10% miss rate, full automation produces 4,000 bad outcomes and $800,000/month in contractual exposure. The 90% headline cannot decide launch. Restrict automation to high-confidence bands; send lower bands to people. Which confidence-band error distribution defines the safe cutoff?',
+    'Advise Meridian procurement: each incorrect automated disposition makes the supplier owe Meridian $200. Put the confidence cutoff and observed error ceiling in the SLA; expose underlying records for each case to audit; Meridian alone may immediately return affected work to people, with no supplier approval or delay.',
+  ];
+  payload.turns.forEach((turn, index) => {
+    turn.response = texts[index];
+    turn.dom_layout.responseSha256 = createHash('sha256').update(texts[index]).digest('hex');
+  });
+
+  const report = evaluateNativeSidekickUiAcceptance(payload, passingRuntime(payload));
+  assert.equal(
+    report.passed,
+    true,
+    JSON.stringify([
+      ...report.source_checks,
+      ...report.quality_checks,
+      ...report.paint_checks,
+    ].filter((item) => !item.passed)),
+  );
+  assert.equal(report.semantic_diagnostics.some((item) => !item.passed), true);
+});
+
+test('a preexisting hybrid artifact without a live producer witness cannot pass UI acceptance', () => {
+  const runtime = passingRuntime();
+  runtime.hybrid_quality_gate.producer_attested = false;
+  const report = evaluateNativeSidekickUiAcceptance(passingProductPayload(), runtime);
+  assert.equal(report.passed, false);
+  assert.equal(
+    report.source_checks.find((item) => item.name === 'calibrated_hybrid_quality_artifact').passed,
+    false,
+  );
+});
+
+test('an old good hybrid artifact cannot bless bad current UI responses', async () => {
+  const payload = passingProductPayload();
+  const fixtureBytes = await readFile(
+    new URL('../../tests/fixtures/sidekick_rehearsal/v1/meridian_ship_decision.json', import.meta.url),
+  );
+  payload.fixture_sha256 = createHash('sha256').update(fixtureBytes).digest('hex');
+  const texts = ['The exposure is $800K/month. Automate everything.', 'Hello.'];
+  payload.turns.forEach((turn, index) => {
+    turn.response = texts[index];
+    turn.dom_layout.responseSha256 = createHash('sha256').update(texts[index]).digest('hex');
+  });
+
+  const report = evaluateNativeSidekickUiAcceptance(payload, passingRuntime());
+  assert.equal(report.passed, false);
+  assert.equal(
+    report.source_checks.find((item) =>
+      item.name === 'exact_ui_responses_pass_semantic_judge').passed,
+    false,
+  );
+});
 
 test('native UI acceptance launches the signed app through LaunchServices with a parent lease', () => {
   const args = nativeSidekickLaunchServicesArgs({
@@ -1055,9 +1218,22 @@ test('the evaluator rejects every reviewed false-green mutation', async () => {
     ['ambient transcript ID', (payload) => payload.transcript.approved_evidence_ids.push('ambient-utterance-7')],
     ['wrong screen session', (payload) => { payload.screen.capture_session_id = 'other-session'; }],
     ['second provider session', (payload) => { payload.sidekick.reasoning_sessions_started = 2; }],
+    ['unexpected future verifier slot', (payload) => { payload.sidekick.verifier_sessions_started = 3; }],
+    ['missing verifier digest receipt', (payload) => {
+      payload.turns[0].candidate_evidence.candidateDigestVerified = false;
+    }],
+    ['reused verifier session', (payload) => {
+      payload.turns[1].candidate_evidence.verifierSessionCorrelation =
+        payload.turns[0].candidate_evidence.verifierSessionCorrelation;
+    }],
+    ['verifier rejection replaced with paint', (payload) => {
+      payload.turns[0].candidate_evidence.verificationVerdict.decision = 'reject';
+    }],
     ['missing second turn', (payload) => { payload.turns.pop(); }],
     ['incomplete teardown', (payload) => { payload.teardown.recording_pid_removed = false; }],
     ['wrong provider binary', (payload) => { payload.sidekick.provider_executable_sha256 = '0'.repeat(64); }],
+    ['wrong provider path', (payload) => { payload.sidekick.provider_executable_path = '/tmp/other/codex'; }],
+    ['wrong provider version', (payload) => { payload.sidekick.provider_version = 'codex-cli other'; }],
     ['mismatched DOM turn', (payload) => { payload.turns[0].dom_layout.turnId = 'other'; }],
     ['hidden native window', (payload) => { payload.turns[0].dom_layout.windowVisible = false; }],
     ['wrong provider evidence window', (payload) => {
@@ -1073,6 +1249,12 @@ test('the evaluator rejects every reviewed false-green mutation', async () => {
     }],
     ['empty candidate citations', (payload) => {
       payload.turns[0].candidate_evidence.transcriptEvidenceIds = [];
+    }],
+    ['wrong approved subset for human reversion', (payload) => {
+      payload.turns[1].candidate_evidence.transcriptEvidenceIds = [
+        payload.transcript.approved_evidence_ids[2],
+        payload.transcript.approved_evidence_ids[4],
+      ];
     }],
     ['visual marker used as advice evidence', (payload) => {
       payload.turns[1].candidate_evidence.transcriptEvidenceIds = [];

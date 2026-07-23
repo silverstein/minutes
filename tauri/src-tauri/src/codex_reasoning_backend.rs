@@ -10,7 +10,8 @@ use minutes_core::live_sidekick::{
     PersistentReasoningBackend, PersistentReasoningSession, ReasoningBackendDescriptor,
     ReasoningError, ReasoningErrorKind, ReasoningEventSink, ReasoningLatencyClass,
     ReasoningOutputContract, ReasoningPrivacyClass, ReasoningSessionConfig, ReasoningSessionId,
-    ReasoningStreamEvent, ReasoningTurnId, ReasoningTurnRequest, ReasoningTurnResult,
+    ReasoningStreamEvent, ReasoningTurnId, ReasoningTurnKind, ReasoningTurnRequest,
+    ReasoningTurnResult,
 };
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -25,6 +26,19 @@ use std::time::{Duration, Instant};
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const STDERR_TAIL_BYTES: usize = 8_000;
+// The Codex adapter owns this provider-specific mapping. Minutes core asks for
+// the provider-neutral Realtime latency class and never names a vendor model.
+fn codex_realtime_model() -> &'static str {
+    include_str!("../../../resources/live_sidekick/codex_realtime_model.txt").trim()
+}
+
+fn codex_verifier_model() -> &'static str {
+    include_str!("../../../resources/live_sidekick/codex_verifier_model.txt").trim()
+}
+
+fn codex_realtime_effort() -> &'static str {
+    include_str!("../../../resources/live_sidekick/codex_realtime_effort.txt").trim()
+}
 
 fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|error| error.into_inner())
@@ -37,6 +51,7 @@ pub struct CodexReasoningBackend {
     cwd: PathBuf,
     home: PathBuf,
     codex_home: PathBuf,
+    model: String,
     _isolated_dir: Option<Arc<tempfile::TempDir>>,
 }
 
@@ -51,6 +66,7 @@ impl CodexReasoningBackend {
             cwd,
             home,
             codex_home,
+            model: codex_realtime_model().into(),
             _isolated_dir: None,
         }
     }
@@ -60,7 +76,22 @@ impl CodexReasoningBackend {
     /// bounded text/image input sent by Minutes.
     pub fn sidekick(
         executable: PathBuf,
+        configured_mcp_servers: impl IntoIterator<Item = String>,
+    ) -> Result<Self, ReasoningError> {
+        Self::sidekick_with_model(executable, configured_mcp_servers, codex_realtime_model())
+    }
+
+    pub fn sidekick_verifier(
+        executable: PathBuf,
+        configured_mcp_servers: impl IntoIterator<Item = String>,
+    ) -> Result<Self, ReasoningError> {
+        Self::sidekick_with_model(executable, configured_mcp_servers, codex_verifier_model())
+    }
+
+    fn sidekick_with_model(
+        executable: PathBuf,
         _configured_mcp_servers: impl IntoIterator<Item = String>,
+        model: &str,
     ) -> Result<Self, ReasoningError> {
         let isolated_dir = Arc::new(tempfile::tempdir().map_err(|error| {
             ReasoningError::new(
@@ -124,7 +155,7 @@ impl CodexReasoningBackend {
             "--config".into(),
             "service_tier=\"fast\"".into(),
             "--config".into(),
-            "model_reasoning_effort=\"low\"".into(),
+            format!("model_reasoning_effort=\"{}\"", codex_realtime_effort()),
         ];
         // CODEX_HOME contains authentication only, so there are no inherited
         // MCP definitions to disable. Do not synthesize partial per-server
@@ -137,6 +168,7 @@ impl CodexReasoningBackend {
             cwd: isolated_dir.path().to_path_buf(),
             home,
             codex_home,
+            model: model.into(),
             _isolated_dir: Some(isolated_dir),
         })
     }
@@ -191,7 +223,7 @@ impl PersistentReasoningBackend for CodexReasoningBackend {
     fn descriptor(&self) -> ReasoningBackendDescriptor {
         ReasoningBackendDescriptor {
             provider: "codex-app-server".into(),
-            model: "codex-fast".into(),
+            model: self.model.clone(),
             privacy: ReasoningPrivacyClass::Cloud,
             persistent: true,
             steerable: true,
@@ -253,6 +285,7 @@ impl PersistentReasoningBackend for CodexReasoningBackend {
         let mut session = CodexReasoningSession {
             id: ReasoningSessionId::new("pending-codex-thread"),
             config,
+            model: self.model.clone(),
             cwd: self.cwd.clone(),
             stdin,
             child: Some(child),
@@ -305,6 +338,7 @@ struct ProtocolState {
 pub struct CodexReasoningSession {
     id: ReasoningSessionId,
     config: ReasoningSessionConfig,
+    model: String,
     cwd: PathBuf,
     stdin: Arc<Mutex<ChildStdin>>,
     child: Option<Child>,
@@ -342,6 +376,7 @@ impl CodexReasoningSession {
                 "approvalPolicy": "never",
                 "sandbox": "read-only",
                 "serviceTier": service_tier,
+                "model": self.model,
                 "ephemeral": self.config.ephemeral,
                 "baseInstructions": self.config.base_instructions,
                 "developerInstructions": self.config.developer_instructions,
@@ -444,30 +479,65 @@ impl CodexReasoningSession {
         input
     }
 
-    fn output_schema_for(contract: ReasoningOutputContract) -> Value {
+    fn output_schema_for(contract: ReasoningOutputContract, kind: ReasoningTurnKind) -> Value {
         match contract {
-            ReasoningOutputContract::InterventionCandidateV1 => json!({
+            ReasoningOutputContract::InterventionCandidateV1 => {
+                // A background turn can be promoted through turn/steer, which
+                // cannot replace its output schema. Give every started turn
+                // foreground-capable character headroom; Minutes core still
+                // enforces the stricter 50-word background publication cap.
+                let max_length = 440;
+                let turn_name = match kind {
+                    ReasoningTurnKind::Background => "steerable background",
+                    ReasoningTurnKind::Foreground => "foreground",
+                };
+                let target_words = match kind {
+                    ReasoningTurnKind::Background => 42,
+                    ReasoningTurnKind::Foreground => 62,
+                };
+                json!({
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "decision": { "type": "string", "enum": ["silent", "speak"] },
+                        "kind": {
+                            "type": ["string", "null"],
+                            "enum": ["insight", "question", "risk", "opening", "answer", "strategy", null]
+                        },
+                        "text": {
+                            "type": ["string", "null"],
+                            "maxLength": max_length,
+                            "description": format!("Visible answer. For customer-side automation protections, explicitly name a written confidence-threshold SLA, auditable case-level error reporting with access to underlying records rather than aggregate-only dashboards, the customer's unilateral human-reversion right without vendor permission, and each monetary remedy as a directionally complete obligation: vendor owes the stated remedy to the customer for the exact evidenced failure class. Target at most {target_words} words and never exceed {max_length} characters for this {turn_name} turn.")
+                        },
+                        "evidence_ids": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "Exact transcript evidence IDs supporting every visible factual claim, number, remedy condition, and fallback control. Include all distinct items needed for a synthesis; do not cite an item merely because it is available. If recommending human reversion when the evidence contains a human-in-loop versus automation decision, cite that decision item as well as any contract-remedy item."
+                        },
+                        "visual_evidence_ids": { "type": "array", "items": { "type": "string" } },
+                        "claims_visual_observation": {
+                            "type": "boolean",
+                            "description": "True iff the visible response relies on pixels from the supplied exact-session image; false otherwise."
+                        },
+                        "confidence": { "type": "integer", "minimum": 0, "maximum": 100 }
+                    },
+                    "required": [
+                        "decision", "kind", "text", "evidence_ids", "visual_evidence_ids",
+                        "claims_visual_observation", "confidence"
+                    ]
+                })
+            }
+            ReasoningOutputContract::EvidenceVerificationV1 => json!({
                 "type": "object",
                 "additionalProperties": false,
                 "properties": {
-                    "decision": { "type": "string", "enum": ["silent", "speak"] },
-                    "kind": {
-                        "type": ["string", "null"],
-                        "enum": ["insight", "question", "risk", "opening", "answer", "strategy", null]
-                    },
-                    "text": { "type": ["string", "null"] },
-                    "evidence_ids": { "type": "array", "items": { "type": "string" } },
-                    "visual_evidence_ids": { "type": "array", "items": { "type": "string" } },
-                    "claims_visual_observation": {
-                        "type": "boolean",
-                        "description": "True iff the visible response relies on pixels from the supplied exact-session image; false otherwise."
-                    },
-                    "confidence": { "type": "integer", "minimum": 0, "maximum": 100 }
+                    "decision": { "type": "string", "enum": ["allow", "reject"] },
+                    "reason_code": {
+                        "type": "string",
+                        "enum": ["supported", "unsupported_fact", "unsupported_visual", "contradiction", "uncertain"]
+                    }
                 },
-                "required": [
-                    "decision", "kind", "text", "evidence_ids", "visual_evidence_ids",
-                    "claims_visual_observation", "confidence"
-                ]
+                "required": ["decision", "reason_code"]
             }),
         }
     }
@@ -518,9 +588,9 @@ impl PersistentReasoningSession for CodexReasoningSession {
             json!({
                 "threadId": self.id.as_str(),
                 "input": Self::input_for(&request),
-                "outputSchema": Self::output_schema_for(request.output_contract),
+                "outputSchema": Self::output_schema_for(request.output_contract, request.kind),
                 "serviceTier": service_tier,
-                "effort": "low",
+                "effort": codex_realtime_effort(),
                 "environments": []
             }),
             PendingKind::TurnStart {
@@ -933,9 +1003,13 @@ function send(value) { process.stdout.write(JSON.stringify(value) + '\n'); }
 rl.on('line', (line) => {
   const msg = JSON.parse(line);
   if (msg.method === 'initialize') send({ id: msg.id, result: { userAgent: 'fake' } });
-  else if (msg.method === 'thread/start') send({ id: msg.id, result: { thread: { id: 'thread-1' } } });
+  else if (msg.method === 'thread/start') {
+    if (msg.params.model !== 'gpt-5.6-terra') send({ id: msg.id, error: { code: -32602, message: 'wrong model' } });
+    else send({ id: msg.id, result: { thread: { id: 'thread-1' } } });
+  }
   else if (msg.method === 'turn/start') {
-    send({ id: msg.id, result: { turn: { id: 'turn-1' } } });
+    if (msg.params.effort !== 'none') send({ id: msg.id, error: { code: -32602, message: 'wrong effort' } });
+    else send({ id: msg.id, result: { turn: { id: 'turn-1' } } });
     send({ method: 'item/agentMessage/delta', params: { turnId: 'turn-1', delta: '{"decision":' } });
     send({ method: 'item/agentMessage/delta', params: { turnId: 'turn-1', delta: '"silent"}' } });
     send({ method: 'turn/completed', params: { turn: { id: 'turn-1', status: 'completed' } } });
@@ -982,6 +1056,7 @@ rl.on('line', (line) => {
             authoritative_memory: Vec::new(),
             typed_user_message: None,
             output_contract: ReasoningOutputContract::InterventionCandidateV1,
+            candidate_to_verify: None,
         }
     }
 
@@ -1302,6 +1377,7 @@ rl.on('line', (line) => {
     fn intervention_schema_requires_visual_claim_provenance() {
         let schema = CodexReasoningSession::output_schema_for(
             ReasoningOutputContract::InterventionCandidateV1,
+            ReasoningTurnKind::Foreground,
         );
         assert_eq!(
             schema.pointer("/properties/claims_visual_observation/type"),
@@ -1311,6 +1387,50 @@ rl.on('line', (line) => {
             .as_array()
             .unwrap()
             .contains(&json!("claims_visual_observation")));
+        assert!(schema
+            .pointer("/properties/text/description")
+            .and_then(Value::as_str)
+            .unwrap()
+            .contains("directionally complete obligation"));
+        assert_eq!(
+            schema.pointer("/properties/text/maxLength"),
+            Some(&json!(440))
+        );
+        let background_schema = CodexReasoningSession::output_schema_for(
+            ReasoningOutputContract::InterventionCandidateV1,
+            ReasoningTurnKind::Background,
+        );
+        assert_eq!(
+            background_schema.pointer("/properties/text/maxLength"),
+            Some(&json!(440))
+        );
+    }
+
+    #[test]
+    fn evidence_verifier_schema_is_structured_and_fail_closed() {
+        let schema = CodexReasoningSession::output_schema_for(
+            ReasoningOutputContract::EvidenceVerificationV1,
+            ReasoningTurnKind::Foreground,
+        );
+        assert_eq!(
+            schema.pointer("/properties/decision/enum"),
+            Some(&json!(["allow", "reject"]))
+        );
+        assert_eq!(
+            schema.pointer("/properties/reason_code/enum"),
+            Some(&json!([
+                "supported",
+                "unsupported_fact",
+                "unsupported_visual",
+                "contradiction",
+                "uncertain"
+            ]))
+        );
+        assert!(schema["required"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("reason_code")));
+        assert_eq!(schema["additionalProperties"], json!(false));
     }
 
     #[test]
@@ -1357,7 +1477,7 @@ rl.on('line', (line) => {
             "--disable computer_use",
             "mcp_servers={}",
             "service_tier=\"fast\"",
-            "model_reasoning_effort=\"low\"",
+            "model_reasoning_effort=\"none\"",
         ] {
             assert!(joined.contains(required), "missing {required}: {joined}");
         }
@@ -1386,5 +1506,13 @@ rl.on('line', (line) => {
             Some(&Some(backend.codex_home.as_os_str().to_owned()))
         );
         assert_eq!(command.get_current_dir(), Some(backend.cwd.as_path()));
+
+        let verifier = CodexReasoningBackend::sidekick_verifier(
+            PathBuf::from("/usr/bin/codex"),
+            Vec::<String>::new(),
+        )
+        .unwrap();
+        assert_eq!(backend.descriptor().model, "gpt-5.6-terra");
+        assert_eq!(verifier.descriptor().model, "gpt-5.6-sol");
     }
 }

@@ -12,6 +12,7 @@ import {
   scoreAggregateCappedRemedy,
   scorePerWindowRemedy,
 } from "../tests/eval/sidekick_contract_scope_golden.mjs";
+import { CODEX_REALTIME_MODEL } from "./lib/sidekick_provider.mjs";
 
 const MAX_FIRST_TOKEN_MS = 5_000;
 const MAX_TURN_TOTAL_MS = 10_000;
@@ -182,8 +183,8 @@ export function evaluateContractScopeFixture(payload, runtime, spec) {
     ),
     check(
       "codex_fast_backend",
-      payload?.provider === "codex-app-server" && payload?.model === "codex-fast" && payload?.privacy === "cloud",
-      "The installed held-out run must exercise the Codex Fast provider adapter.",
+      payload?.provider === "codex-app-server" && payload?.model === CODEX_REALTIME_MODEL && payload?.privacy === "cloud",
+      "The installed held-out run must exercise the configured Codex Fast model.",
     ),
   ];
   const latencyChecks = [

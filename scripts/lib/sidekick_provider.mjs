@@ -1,3 +1,20 @@
+import { readFileSync } from "node:fs";
+
+export const CODEX_REALTIME_MODEL = readFileSync(
+  new URL("../../resources/live_sidekick/codex_realtime_model.txt", import.meta.url),
+  "utf8",
+).trim();
+
+export const CODEX_REALTIME_EFFORT = readFileSync(
+  new URL("../../resources/live_sidekick/codex_realtime_effort.txt", import.meta.url),
+  "utf8",
+).trim();
+
+export const CODEX_VERIFIER_MODEL = readFileSync(
+  new URL("../../resources/live_sidekick/codex_verifier_model.txt", import.meta.url),
+  "utf8",
+).trim();
+
 /**
  * Vendor-neutral persistent reasoning backend contract used by Sidekick.
  *
@@ -32,8 +49,13 @@ function codexInput(item) {
 
 /** Codex app-server implementation of the vendor-neutral backend contract. */
 export class CodexAppServerBackend {
-  constructor(client) {
+  constructor(
+    client,
+    { model = CODEX_REALTIME_MODEL, reasoningEffort = CODEX_REALTIME_EFFORT } = {},
+  ) {
     this.client = client;
+    this.model = model;
+    this.reasoningEffort = reasoningEffort;
     this.threadId = null;
   }
 
@@ -45,6 +67,7 @@ export class CodexAppServerBackend {
       sandbox: "read-only",
       serviceTier: "fast",
       ephemeral: true,
+      ...(this.model ? { model: this.model } : {}),
       baseInstructions,
       developerInstructions,
     });
@@ -57,14 +80,14 @@ export class CodexAppServerBackend {
     };
   }
 
-  async startTurn({ input, outputSchema, latencyClass = "fast", effort = "low" }) {
+  async startTurn({ input, outputSchema, latencyClass = "fast" }) {
     this.#assertStarted();
     const started = await this.client.startTurn({
       threadId: this.threadId,
       input: input.map(codexInput),
       outputSchema,
       serviceTier: latencyClass,
-      effort,
+      effort: this.reasoningEffort,
     });
     return {
       turnId: started.turnId,
@@ -100,4 +123,3 @@ export class CodexAppServerBackend {
     if (!this.threadId) throw new Error("Codex Sidekick backend has not started");
   }
 }
-

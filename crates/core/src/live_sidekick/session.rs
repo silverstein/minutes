@@ -739,6 +739,18 @@ impl LiveAssistanceSession {
         {
             return Err(CandidateSuppressionReason::InvalidCandidate);
         }
+        let maximum_words = if background {
+            MAXIMUM_BACKGROUND_WORDS
+        } else {
+            MAXIMUM_FOREGROUND_WORDS
+        };
+        if candidate
+            .text
+            .as_deref()
+            .is_some_and(|text| text.split_whitespace().count() > maximum_words)
+        {
+            return Err(CandidateSuppressionReason::InvalidCandidate);
+        }
         if candidate
             .evidence_ids
             .iter()
@@ -754,13 +766,18 @@ impl LiveAssistanceSession {
         if candidate.claims_visual_observation == candidate.visual_evidence_ids.is_empty() {
             return Err(CandidateSuppressionReason::UnsupportedProvenance);
         }
+        if candidate.visual_evidence_ids.is_empty()
+            && candidate
+                .text
+                .as_deref()
+                .is_some_and(references_visual_detail)
+        {
+            return Err(CandidateSuppressionReason::UnsupportedProvenance);
+        }
         if candidate.decision == InterventionDecision::Silent {
             return Err(CandidateSuppressionReason::ModelChoseSilence);
         }
-        if background
-            && candidate.evidence_ids.is_empty()
-            && candidate.visual_evidence_ids.is_empty()
-        {
+        if candidate.evidence_ids.is_empty() && candidate.visual_evidence_ids.is_empty() {
             return Err(CandidateSuppressionReason::UnsupportedProvenance);
         }
         if background && candidate.confidence < MINIMUM_PROACTIVE_CONFIDENCE {
@@ -944,6 +961,40 @@ impl LiveAssistanceSession {
 }
 
 const MINIMUM_PROACTIVE_CONFIDENCE: u8 = 70;
+const MAXIMUM_BACKGROUND_WORDS: usize = 50;
+const MAXIMUM_FOREGROUND_WORDS: usize = 70;
+
+fn references_visual_detail(text: &str) -> bool {
+    let text = text.to_lowercase();
+    [
+        "according to your deck",
+        "according to the deck",
+        "according to your screen",
+        "according to the screen",
+        "according to your slide",
+        "according to the slide",
+        "your screen shows",
+        "the screen shows",
+        "your slide shows",
+        "the slide shows",
+        "your deck shows",
+        "the deck shows",
+        "the chart",
+        "your chart",
+        "the graph",
+        "your graph",
+        "the table",
+        "your table",
+        "the spreadsheet",
+        "your spreadsheet",
+        "the diagram",
+        "your diagram",
+        "i can see",
+        "visible on your screen",
+    ]
+    .iter()
+    .any(|phrase| text.contains(phrase))
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -982,6 +1033,7 @@ pub enum CandidateSuppressionReason {
     ModelChoseSilence,
     BelowInterventionThreshold,
     UnsupportedProvenance,
+    UnsupportedSemanticEvidence,
     InvalidCandidate,
     BackendFailure,
 }
@@ -1531,6 +1583,23 @@ mod tests {
     #[test]
     fn foreground_completion_identity_prevents_aba_publication_after_turn_id_reuse() {
         let mut session = session(CaptureMode::Live);
+        assert!(
+            session
+                .reduce(AssistanceEvent::EvidenceObserved {
+                    session_id: "assist-1".into(),
+                    evidence: UntrustedEvidence {
+                        id: "grounding".into(),
+                        source_kind: EvidenceSourceKind::TranscriptFinal,
+                        capture_session_id: Some("capture-1".into()),
+                        finalized_meeting_ref: None,
+                    },
+                })
+                .accepted
+        );
+        let grounded_candidate = InterventionCandidate {
+            evidence_ids: vec!["grounding".into()],
+            ..candidate()
+        };
         let (first_invocation, _) = ask(&mut session, "turn-reused", "user-event-1", "First?");
         assert!(
             session
@@ -1538,7 +1607,7 @@ mod tests {
                     session_id: "assist-1".into(),
                     turn_id: "turn-reused".into(),
                     invocation: first_invocation,
-                    candidate: candidate(),
+                    candidate: grounded_candidate.clone(),
                 })
                 .accepted
         );
@@ -1551,7 +1620,7 @@ mod tests {
                 session_id: "assist-1".into(),
                 turn_id: "turn-reused".into(),
                 invocation: first_invocation,
-                candidate: candidate(),
+                candidate: grounded_candidate.clone(),
             },
             RejectionReason::StaleForegroundResult,
         );
@@ -1560,14 +1629,14 @@ mod tests {
             session_id: "assist-1".into(),
             turn_id: "turn-reused".into(),
             invocation: second_invocation,
-            candidate: candidate(),
+            candidate: grounded_candidate.clone(),
         });
         assert_eq!(
             current.actions,
             vec![AssistanceAction::PublishForegroundResponse {
                 turn_id: "turn-reused".into(),
                 invocation: second_invocation,
-                candidate: candidate(),
+                candidate: grounded_candidate,
             }]
         );
     }
@@ -1672,13 +1741,48 @@ mod tests {
     }
 
     #[test]
-    fn proactive_output_requires_grounding_and_visual_claims_require_a_receipt() {
+    fn minutes_enforces_provider_neutral_response_brevity() {
+        let session = session(CaptureMode::Live);
+        for (background, words) in [(true, 51), (false, 71)] {
+            let overlong = InterventionCandidate {
+                text: Some(vec!["word"; words].join(" ")),
+                ..candidate()
+            };
+            assert_eq!(
+                session.validate_candidate(&overlong, background),
+                Err(CandidateSuppressionReason::InvalidCandidate)
+            );
+        }
+    }
+
+    #[test]
+    fn every_visible_output_requires_grounding_and_visual_claims_require_a_receipt() {
         let mut session = session(CaptureMode::Recording);
 
         let invocation = start_background(&mut session, "ungrounded");
         let reduced = session.reduce(AssistanceEvent::BackgroundCompleted {
             session_id: "assist-1".into(),
             run_id: "ungrounded".into(),
+            invocation,
+            candidate: candidate(),
+        });
+        assert_eq!(
+            reduced.actions,
+            vec![AssistanceAction::SuppressCandidate {
+                invocation,
+                reason: CandidateSuppressionReason::UnsupportedProvenance,
+            }]
+        );
+
+        let (invocation, _) = ask(
+            &mut session,
+            "turn-ungrounded",
+            "typed-ungrounded",
+            "What did they approve?",
+        );
+        let reduced = session.reduce(AssistanceEvent::ForegroundCompleted {
+            session_id: "assist-1".into(),
+            turn_id: "turn-ungrounded".into(),
             invocation,
             candidate: candidate(),
         });
@@ -1702,6 +1806,67 @@ mod tests {
             invocation,
             candidate: InterventionCandidate {
                 claims_visual_observation: true,
+                ..candidate()
+            },
+        });
+        assert_eq!(
+            reduced.actions,
+            vec![AssistanceAction::SuppressCandidate {
+                invocation,
+                reason: CandidateSuppressionReason::UnsupportedProvenance,
+            }]
+        );
+
+        assert!(
+            session
+                .reduce(AssistanceEvent::EvidenceObserved {
+                    session_id: "assist-1".into(),
+                    evidence: UntrustedEvidence {
+                        id: "weather".into(),
+                        source_kind: EvidenceSourceKind::TranscriptFinal,
+                        capture_session_id: Some("capture-1".into()),
+                        finalized_meeting_ref: None,
+                    },
+                })
+                .accepted
+        );
+        let (invocation, _) = ask(
+            &mut session,
+            "turn-deck-claim",
+            "typed-deck-claim",
+            "What is committed?",
+        );
+        let reduced = session.reduce(AssistanceEvent::ForegroundCompleted {
+            session_id: "assist-1".into(),
+            turn_id: "turn-deck-claim".into(),
+            invocation,
+            candidate: InterventionCandidate {
+                text: Some("According to your deck, revenue is one million dollars.".into()),
+                evidence_ids: vec!["weather".into()],
+                ..candidate()
+            },
+        });
+        assert_eq!(
+            reduced.actions,
+            vec![AssistanceAction::SuppressCandidate {
+                invocation,
+                reason: CandidateSuppressionReason::UnsupportedProvenance,
+            }]
+        );
+
+        let (invocation, _) = ask(
+            &mut session,
+            "turn-chart-claim",
+            "typed-chart-claim",
+            "What is committed?",
+        );
+        let reduced = session.reduce(AssistanceEvent::ForegroundCompleted {
+            session_id: "assist-1".into(),
+            turn_id: "turn-chart-claim".into(),
+            invocation,
+            candidate: InterventionCandidate {
+                text: Some("The chart puts committed ARR at one million dollars.".into()),
+                evidence_ids: vec!["weather".into()],
                 ..candidate()
             },
         });

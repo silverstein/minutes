@@ -10,6 +10,20 @@ import process from "node:process";
 import { fileURLToPath } from "node:url";
 
 import { scoreMeridianResponses } from "../tests/eval/sidekick_rehearsal_golden.mjs";
+import { CODEX_REALTIME_MODEL, CODEX_VERIFIER_MODEL } from "./lib/sidekick_provider.mjs";
+import {
+  runAndLoadSidekickHybridQualityArtifact,
+  sidekickHybridQualityReceiptPasses,
+} from "./lib/sidekick_hybrid_quality_gate.mjs";
+import {
+  runSidekickExactSemanticGate,
+  sidekickExactSemanticReceiptPasses,
+} from "./lib/sidekick_exact_semantic_gate.mjs";
+import { currentSidekickQualitySourceBinding } from "./lib/sidekick_quality_source_binding.mjs";
+import {
+  attestSidekickProviderExecutable,
+  sidekickProviderAttestationMatches,
+} from "./lib/sidekick_provider_attestation.mjs";
 import {
   bundleManifestSha256,
   canonicalInstalledAppPath,
@@ -29,6 +43,10 @@ function sha256(bytes) {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
+export async function canonicalExistingPath(filePath) {
+  return fs.realpath(filePath);
+}
+
 function check(name, passed, detail) {
   return { name, passed: Boolean(passed), detail };
 }
@@ -39,18 +57,36 @@ if (!Array.isArray(canonicalFixture.turns) || canonicalFixture.turns.length !== 
   throw new Error("canonical Meridian UI fixture must contain exactly two turns");
 }
 
+function canonicalEvidenceId(id) {
+  const sequence = String(id).match(/-(\d+)$/)?.[1];
+  return sequence ? `utterance-${sequence}` : String(id);
+}
+
+function semanticResponsesFromUiPayload(payload) {
+  const turns = Array.isArray(payload?.turns) ? payload.turns : [];
+  const evidenceIds = (index) => Array.isArray(
+    turns[index]?.candidate_evidence?.transcriptEvidenceIds,
+  ) ? turns[index].candidate_evidence.transcriptEvidenceIds.map(canonicalEvidenceId) : [];
+  return {
+    turn_1: { text: String(turns[0]?.response ?? ""), evidence_ids: evidenceIds(0) },
+    turn_2: { text: String(turns[1]?.response ?? ""), evidence_ids: evidenceIds(1) },
+  };
+}
+
 export function evaluateNativeSidekickUiAcceptance(payload, runtime) {
   const turns = Array.isArray(payload?.turns) ? payload.turns : [];
   const turnOneCandidateEvidence = Array.isArray(turns[0]?.candidate_evidence?.transcriptEvidenceIds)
     ? turns[0].candidate_evidence.transcriptEvidenceIds
     : [];
+  const turnTwoCandidateEvidence = Array.isArray(turns[1]?.candidate_evidence?.transcriptEvidenceIds)
+    ? turns[1].candidate_evidence.transcriptEvidenceIds
+    : [];
+  const semanticResponses = semanticResponsesFromUiPayload(payload);
   const quality = scoreMeridianResponses({
     turn_1: turns[0]?.response ?? "",
     turn_2: turns[1]?.response ?? "",
-    turn_1_evidence_ids: turnOneCandidateEvidence.map((id) => {
-      const sequence = String(id).match(/-(\d+)$/)?.[1];
-      return sequence ? `utterance-${sequence}` : String(id);
-    }),
+    turn_1_evidence_ids: turnOneCandidateEvidence.map(canonicalEvidenceId),
+    turn_2_evidence_ids: turnTwoCandidateEvidence.map(canonicalEvidenceId),
   });
   const expectedPrompts = canonicalFixture.turns.map(({ id, typed_prompt }) => ({
     id,
@@ -61,6 +97,46 @@ export function evaluateNativeSidekickUiAcceptance(payload, runtime) {
     : [];
   const approvedVisualPrefix = payload?.screen?.provider_marker_evidence_prefix;
   const sourceChecks = [
+    check(
+      "calibrated_hybrid_quality_artifact",
+      sidekickHybridQualityReceiptPasses(
+        runtime.hybrid_quality_gate,
+        runtime.quality_source_binding,
+        runtime.quality_provider_executable,
+      ) && runtime.hybrid_quality_gate?.producer_attested === true,
+      "Semantic quality requires a fresh three-run evaluator witnessed by this acceptance process; this UI boundary also owns exact source, mechanical, provenance, and painted-product checks.",
+    ),
+    check(
+      "exact_ui_responses_pass_semantic_judge",
+      sidekickExactSemanticReceiptPasses(
+        runtime.exact_semantic_quality_gate,
+        semanticResponses,
+        runtime.quality_source_binding,
+        runtime.quality_provider_executable,
+      ),
+      "The calibrated semantic judge must grade these exact painted candidate bytes, not unrelated prior responses.",
+    ),
+    check(
+      "quality_source_matches_current_build",
+      runtime.quality_source_binding?.git_commit === runtime.expected_build_commit,
+      "Quality prompts, evaluator, fixture, and engine must be bound to the installed build commit.",
+    ),
+    check(
+      "one_attested_provider_for_product_and_quality_gates",
+      payload?.sidekick?.provider_executable_path === runtime.quality_provider_executable?.path &&
+        payload?.sidekick?.provider_executable_sha256 ===
+          runtime.quality_provider_executable?.sha256 &&
+        payload?.sidekick?.provider_version === runtime.quality_provider_executable?.version &&
+        sidekickProviderAttestationMatches(
+          runtime.hybrid_quality_gate?.provider_executable,
+          runtime.quality_provider_executable,
+        ) &&
+        sidekickProviderAttestationMatches(
+          runtime.exact_semantic_quality_gate?.provider_executable,
+          runtime.quality_provider_executable,
+        ),
+      "The signed app, fresh evaluator, verifier, and exact semantic judge must use the same canonical private provider executable bytes.",
+    ),
     check(
       "installed_app_exit_zero",
       runtime.launch_services_exit_code === 0 &&
@@ -179,6 +255,25 @@ export function evaluateNativeSidekickUiAcceptance(payload, runtime) {
       "Both visible turns must use one persistent provider-neutral reasoning session.",
     ),
     check(
+      "fresh_independent_verifier_receipt_per_visible_turn",
+      payload?.sidekick?.verifier_sessions_started === turns.length &&
+        payload?.sidekick?.verifier_requested_contract?.provider === "codex-app-server" &&
+        payload?.sidekick?.verifier_requested_contract?.model === CODEX_VERIFIER_MODEL &&
+        payload?.sidekick?.verifier_requested_contract?.privacy === "cloud" &&
+        turns.length === 2 &&
+        turns.every((turn) =>
+          /^[a-f0-9]{64}$/.test(turn?.candidate_evidence?.candidateSha256 ?? "") &&
+          turn?.candidate_evidence?.candidateDigestVerified === true &&
+          turn?.candidate_evidence?.verificationVerdict?.decision === "allow" &&
+          turn?.candidate_evidence?.verificationVerdict?.reason_code === "supported" &&
+          /^[a-f0-9]{64}$/.test(
+            turn?.candidate_evidence?.verifierSessionCorrelation ?? "",
+          )) &&
+        new Set(turns.map((turn) =>
+          turn.candidate_evidence.verifierSessionCorrelation)).size === turns.length,
+      "Every painted candidate must be digest-bound to an allow/supported verdict from its own one-time verifier session, without synchronously prewarming an unrelated future slot.",
+    ),
+    check(
       "trusted_host_provider_copy_unchanged_pre_post",
       /^[a-f0-9]{64}$/.test(payload?.sidekick?.provider_executable_sha256 ?? "") &&
         payload?.sidekick?.provider_executable_sha256 === runtime.expected_provider_sha256 &&
@@ -192,7 +287,7 @@ export function evaluateNativeSidekickUiAcceptance(payload, runtime) {
     check(
       "provider_request_and_exercised_capabilities_are_distinct",
       payload?.sidekick?.provider_requested_contract?.provider === "codex-app-server" &&
-        payload?.sidekick?.provider_requested_contract?.model === "codex-fast" &&
+        payload?.sidekick?.provider_requested_contract?.model === CODEX_REALTIME_MODEL &&
         payload?.sidekick?.provider_requested_contract?.privacy === "cloud" &&
         payload?.sidekick?.provider_requested_contract?.persistent === true &&
         payload?.sidekick?.provider_requested_contract?.steerable === true &&
@@ -240,8 +335,7 @@ export function evaluateNativeSidekickUiAcceptance(payload, runtime) {
             ? [approvedTranscriptIds[0], approvedTranscriptIds[2], approvedTranscriptIds[3]]
               .every((id) => candidateTranscriptIds?.includes(id))
             : candidateTranscriptIds?.includes(approvedTranscriptIds[2]) &&
-              [approvedTranscriptIds[4], approvedTranscriptIds[5]]
-                .some((id) => candidateTranscriptIds?.includes(id));
+              candidateTranscriptIds?.includes(approvedTranscriptIds[5]);
           return (
           turn?.id === expectedPrompts[index].id &&
           turn?.prompt === expectedPrompts[index].prompt &&
@@ -312,7 +406,7 @@ export function evaluateNativeSidekickUiAcceptance(payload, runtime) {
       turn.dom_layout.typedToPaintMs <= MAX_DOM_PAINT_MS,
     `Observed ${turn?.dom_layout?.typedToPaintMs ?? "null"}ms from UI request through two DOM-layout frames in a visible on-screen window.`,
   ));
-  const checks = [...sourceChecks, ...quality.checks, ...paintChecks];
+  const checks = [...sourceChecks, ...quality.mechanical_checks, ...paintChecks];
   return {
     schema_version: 1,
     fixture_id: canonicalFixture.id,
@@ -323,7 +417,9 @@ export function evaluateNativeSidekickUiAcceptance(payload, runtime) {
     },
     quality_score: quality.score,
     source_checks: sourceChecks,
-    quality_checks: quality.checks,
+    quality_checks: quality.mechanical_checks,
+    semantic_diagnostics: quality.checks.filter((item) =>
+      !quality.mechanical_checks.some((mechanical) => mechanical.name === item.name)),
     paint_checks: paintChecks,
     runtime,
     product_path: payload,
@@ -684,12 +780,18 @@ async function runInstalledUi(app, runtime) {
     appStdoutPath = path.join(temporaryRoot, "app.stdout.log");
     appStderrPath = path.join(temporaryRoot, "app.stderr.log");
     const parentLeasePath = path.join(temporaryRoot, "parent-lease.fifo");
-    const providerDirectory = path.join(temporaryRoot, "provider");
-    providerCopyPath = path.join(providerDirectory, "codex");
+    const providerDirectory = runtime.reuse_source_provider_copy
+      ? path.dirname(runtime.source_provider_path)
+      : path.join(temporaryRoot, "provider");
+    providerCopyPath = runtime.reuse_source_provider_copy
+      ? runtime.source_provider_path
+      : path.join(providerDirectory, "codex");
     const nonce = randomBytes(32).toString("hex");
     await fs.mkdir(minutesDirectory, { recursive: true, mode: 0o700 });
     await fs.mkdir(isolatedTmp, { recursive: true, mode: 0o700 });
-    await fs.mkdir(providerDirectory, { mode: 0o700 });
+    if (!runtime.reuse_source_provider_copy) {
+      await fs.mkdir(providerDirectory, { mode: 0o700 });
+    }
     await fs.writeFile(appStdoutPath, "", { mode: 0o600 });
     await fs.writeFile(appStderrPath, "", { mode: 0o600 });
     execFileSync("/usr/bin/mkfifo", [parentLeasePath]);
@@ -708,8 +810,10 @@ async function runInstalledUi(app, runtime) {
         if (error?.code !== "EBADF") throw error;
       }
     });
-    await fs.copyFile(runtime.source_provider_path, providerCopyPath);
-    await fs.chmod(providerCopyPath, 0o500);
+    if (!runtime.reuse_source_provider_copy) {
+      await fs.copyFile(runtime.source_provider_path, providerCopyPath);
+      await fs.chmod(providerCopyPath, 0o500);
+    }
     const providerCopySha256 = await fs.readFile(providerCopyPath).then(sha256);
     const providerCopyVersion = execFileSync(providerCopyPath, ["--version"], {
       encoding: "utf8",
@@ -720,7 +824,11 @@ async function runInstalledUi(app, runtime) {
     }
     runtime = {
       ...runtime,
-      expected_provider_path: providerCopyPath,
+      // macOS exposes the same temporary directory through both /tmp and
+      // /private/tmp. Compare the provider's own canonical path report with a
+      // canonical host path so the attestation fails only for a real identity
+      // mismatch, not an OS path alias.
+      expected_provider_path: await canonicalExistingPath(providerCopyPath),
       expected_provider_sha256: providerCopySha256,
       expected_provider_version: providerCopyVersion,
       provider_copy_is_private: true,
@@ -987,36 +1095,91 @@ async function main(argv) {
   );
   const executable = path.join(canonicalApp, "Contents", "MacOS", "minutes-app");
   const signedBuildExecutable = path.join(signedBuildApp, "Contents", "MacOS", "minutes-app");
-  const providerPath = await fs.realpath(execFileSync("/usr/bin/which", ["codex"], {
+  const providerSourcePath = await fs.realpath(execFileSync("/usr/bin/which", ["codex"], {
     encoding: "utf8",
   }).trim());
-  const providerVersion = execFileSync(providerPath, ["--version"], {
-    encoding: "utf8",
-  }).trim();
-  execFileSync("codesign", ["--verify", "--deep", "--strict", signedBuildApp]);
-  execFileSync("codesign", ["--verify", "--deep", "--strict", canonicalApp]);
-  const [
-    executableSha256,
-    bundleSha256,
-    expectedExecutableSha256,
-    expectedBundleSha256,
-  ] = await Promise.all([
-    fs.readFile(executable).then(sha256),
-    bundleManifestSha256(canonicalApp),
-    fs.readFile(signedBuildExecutable).then(sha256),
-    bundleManifestSha256(signedBuildApp),
-  ]);
-  const { payload, runtime } = await runInstalledUi(canonicalApp, {
-    executable_path: executable,
-    executable_sha256: executableSha256,
-    bundle_sha256: bundleSha256,
-    expected_executable_sha256: expectedExecutableSha256,
-    expected_bundle_sha256: expectedBundleSha256,
-    expected_build_commit: expectedBuildCommit,
-    source_provider_path: providerPath,
-    source_provider_sha256: await fs.readFile(providerPath).then(sha256),
-    source_provider_version: providerVersion,
-  });
+  const providerSource = await attestSidekickProviderExecutable(providerSourcePath);
+  let qualityProviderRoot = null;
+  let qualityProviderExecutable;
+  let executableSha256;
+  let bundleSha256;
+  let expectedExecutableSha256;
+  let expectedBundleSha256;
+  let outcome;
+  let qualitySourceBinding;
+  let hybridQualityGate;
+  let exactSemanticQualityGate;
+  try {
+    qualityProviderRoot = await fs.mkdtemp(path.join(
+      nativeSidekickTemporaryParent(),
+      "minutes-sidekick-quality-provider-",
+    ));
+    await fs.chmod(qualityProviderRoot, 0o700);
+    const qualityProviderPath = path.join(qualityProviderRoot, "codex");
+    await fs.copyFile(providerSource.path, qualityProviderPath);
+    await fs.chmod(qualityProviderPath, 0o500);
+    qualityProviderExecutable = await attestSidekickProviderExecutable(qualityProviderPath);
+    if (
+      qualityProviderExecutable.sha256 !== providerSource.sha256 ||
+      qualityProviderExecutable.version !== providerSource.version
+    ) {
+      throw new Error("private Sidekick quality provider copy failed source attestation");
+    }
+    execFileSync("codesign", ["--verify", "--deep", "--strict", signedBuildApp]);
+    execFileSync("codesign", ["--verify", "--deep", "--strict", canonicalApp]);
+    [
+      executableSha256,
+      bundleSha256,
+      expectedExecutableSha256,
+      expectedBundleSha256,
+    ] = await Promise.all([
+      fs.readFile(executable).then(sha256),
+      bundleManifestSha256(canonicalApp),
+      fs.readFile(signedBuildExecutable).then(sha256),
+      bundleManifestSha256(signedBuildApp),
+    ]);
+    outcome = await runInstalledUi(canonicalApp, {
+      executable_path: executable,
+      executable_sha256: executableSha256,
+      bundle_sha256: bundleSha256,
+      expected_executable_sha256: expectedExecutableSha256,
+      expected_bundle_sha256: expectedBundleSha256,
+      expected_build_commit: expectedBuildCommit,
+      source_provider_path: qualityProviderExecutable.path,
+      source_provider_sha256: qualityProviderExecutable.sha256,
+      source_provider_version: qualityProviderExecutable.version,
+      reuse_source_provider_copy: true,
+    });
+    qualitySourceBinding = await currentSidekickQualitySourceBinding(repositoryRoot);
+    hybridQualityGate = await runAndLoadSidekickHybridQualityArtifact({
+      codexPath: qualityProviderExecutable.path,
+    });
+    exactSemanticQualityGate = await runSidekickExactSemanticGate({
+      fixture: canonicalFixture,
+      responses: semanticResponsesFromUiPayload(outcome.payload),
+      sourceBinding: qualitySourceBinding,
+      codex: qualityProviderExecutable.path,
+    });
+    const qualityProviderAfter = await attestSidekickProviderExecutable(
+      qualityProviderExecutable.path,
+    );
+    if (!sidekickProviderAttestationMatches(
+      qualityProviderAfter,
+      qualityProviderExecutable,
+    )) {
+      throw new Error("private Sidekick provider changed across product and quality gates");
+    }
+  } finally {
+    if (qualityProviderRoot) {
+      await fs.rm(qualityProviderRoot, { recursive: true, force: true });
+    }
+  }
+  const { payload, runtime } = outcome;
+  runtime.quality_source_binding = qualitySourceBinding;
+  runtime.quality_provider_executable = qualityProviderExecutable;
+  runtime.quality_provider_copy_removed = true;
+  runtime.hybrid_quality_gate = hybridQualityGate;
+  runtime.exact_semantic_quality_gate = exactSemanticQualityGate;
   const report = evaluateNativeSidekickUiAcceptance(payload, runtime);
   report.tested_app_path = canonicalApp;
   process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);

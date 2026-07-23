@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { SidekickSession } from "../lib/sidekick_session.mjs";
 
@@ -35,9 +36,18 @@ class FakeBackend {
     this.turns = [];
     this.steers = [];
     this.interrupts = [];
+    this.sessionConfig = null;
+    this.verifications = [];
+    this.verificationVerdict = {
+      allowed: true,
+      decision: "allow",
+      reason_code: "supported",
+      latency: { total_ms: 5 },
+    };
   }
 
-  async startSession() {
+  async startSession(config) {
+    this.sessionConfig = config;
     return {
       sessionId: "session-1",
       provider: "fake",
@@ -62,8 +72,26 @@ class FakeBackend {
     this.interrupts.push(params);
   }
 
+  async verify(params) {
+    this.verifications.push(params);
+    return this.verificationVerdict;
+  }
+
   close() {}
 }
+
+test("the harness sends the shared product instructions byte-for-byte", async () => {
+  const backend = new FakeBackend();
+  const session = new SidekickSession({ backend, captureSessionId: "capture-a" });
+  await session.start();
+
+  const [baseInstructions, developerInstructions] = await Promise.all([
+    readFile(new URL("../../resources/live_sidekick/base_instructions.txt", import.meta.url), "utf8"),
+    readFile(new URL("../../resources/live_sidekick/developer_instructions.txt", import.meta.url), "utf8"),
+  ]);
+  assert.equal(backend.sessionConfig.baseInstructions, baseInstructions);
+  assert.equal(backend.sessionConfig.developerInstructions, developerInstructions);
+});
 
 class DeferredSteerBackend extends FakeBackend {
   constructor() {
@@ -74,6 +102,16 @@ class DeferredSteerBackend extends FakeBackend {
   async steerTurn(params) {
     this.steers.push(params);
     return this.steerAcknowledgement.promise;
+  }
+}
+
+class DeferredEvidenceVerifier {
+  constructor() { this.calls = []; }
+
+  verify(params) {
+    const pending = deferred();
+    this.calls.push({ params, pending });
+    return pending.promise;
   }
 }
 
@@ -99,10 +137,12 @@ test("a typed user message steers and promotes active background work", async ()
 
   assert.equal(backend.turns.length, 1);
   assert.equal(backend.steers.length, 1);
+  const steeredForegroundText = Array.from({ length: 55 }, () => "answer").join(" ");
+  assert.ok(steeredForegroundText.length > 340 && steeredForegroundText.length <= 440);
   backend.turns[0].pending.resolve(
     result({
       decision: "speak",
-      text: "$800K per month if 4,000 resolutions are wrong.",
+      text: steeredForegroundText,
       evidence_ids: ["evidence-1"],
     }),
   );
@@ -111,6 +151,7 @@ test("a typed user message steers and promotes active background work", async ()
   assert.equal(foregroundResult.published, true);
   assert.equal(publications.length, 1);
   assert.equal(publications[0].mode, "foreground");
+  assert.equal(publications[0].decision.text, steeredForegroundText);
 });
 
 test("routine background movement can resolve silently without publication", async () => {
@@ -129,10 +170,43 @@ test("routine background movement can resolve silently without publication", asy
   });
   const completion = session.evaluateProactive();
   await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(backend.turns[0].params.outputSchema.properties.text.maxLength, 440);
   backend.turns[0].pending.resolve(result({ decision: "silent", confidence: 99 }));
   const completed = await completion;
   assert.equal(completed.published, false);
   assert.equal(publications.length, 0);
+});
+
+test("Minutes rejects overlong responses even when a backend ignores its schema", async () => {
+  const backend = new FakeBackend();
+  const session = new SidekickSession({ backend, captureSessionId: "capture-a" });
+  await session.start();
+  session.observeTranscript({
+    id: "grounding",
+    captureSessionId: "capture-a",
+    text: "A material decision is pending.",
+  });
+
+  const background = session.evaluateProactive();
+  await new Promise((resolve) => setImmediate(resolve));
+  backend.turns[0].pending.resolve(
+    result({
+      decision: "speak",
+      text: Array.from({ length: 51 }, () => "word").join(" "),
+      evidence_ids: ["grounding"],
+    }),
+  );
+  assert.equal((await background).invalid, true);
+
+  const foreground = session.sendUser("What should I do?");
+  await new Promise((resolve) => setImmediate(resolve));
+  backend.turns[1].pending.resolve(
+    result({
+      decision: "speak",
+      text: Array.from({ length: 71 }, () => "word").join(" "),
+    }),
+  );
+  assert.equal((await foreground).invalid, true);
 });
 
 test("wrong-session transcript and screen evidence are rejected before inference", async () => {
@@ -170,12 +244,333 @@ test("visual claims require an exact image receipt on the same turn", async () =
   backend.turns[0].pending.resolve(
     result({
       decision: "speak",
-      text: "The slide shows a launch chart.",
+      text: "Your slide lists one million dollars in committed revenue.",
     }),
   );
   const completed = await completion;
   assert.equal(completed.invalid, true);
   assert.match(completed.error, /visual claim without inspected image provenance/);
+});
+
+test("according to your deck is treated as a visual claim", async () => {
+  const backend = new FakeBackend();
+  const session = new SidekickSession({ backend, captureSessionId: "capture-a" });
+  await session.start();
+  session.observeTranscript({
+    id: "weather",
+    captureSessionId: "capture-a",
+    text: "Nice weather today.",
+  });
+  const completion = session.sendUser("What is committed?");
+  await new Promise((resolve) => setImmediate(resolve));
+  backend.turns[0].pending.resolve(
+    result({
+      decision: "speak",
+      text: "According to your deck, committed revenue is one million dollars.",
+      evidence_ids: ["weather"],
+    }),
+  );
+  const completed = await completion;
+  assert.equal(completed.invalid, true);
+  assert.match(completed.error, /visual claim without inspected image provenance/);
+});
+
+test("a chart claim cannot hide behind transcript-only provenance", async () => {
+  const backend = new FakeBackend();
+  const session = new SidekickSession({ backend, captureSessionId: "capture-a" });
+  await session.start();
+  session.observeTranscript({
+    id: "weather",
+    captureSessionId: "capture-a",
+    text: "Nice weather today.",
+  });
+  session.observeScreen({
+    id: "arr-chart",
+    captureSessionId: "capture-a",
+    path: "/tmp/chart.png",
+  });
+  const completion = session.sendUser("What is committed?");
+  await new Promise((resolve) => setImmediate(resolve));
+  backend.turns[0].pending.resolve(result({
+    decision: "speak",
+    text: "The chart puts committed ARR at $1 million.",
+    evidence_ids: ["weather"],
+    claims_visual_observation: false,
+  }));
+  const completed = await completion;
+  assert.equal(completed.invalid, true);
+  assert.match(completed.error, /visual claim without inspected image provenance/);
+  assert.equal(backend.verifications.length, 0);
+});
+
+test("foreground factual claims require exact-session evidence provenance", async () => {
+  const backend = new FakeBackend();
+  const session = new SidekickSession({ backend, captureSessionId: "capture-a" });
+  await session.start();
+  session.observeTranscript({
+    id: "evidence-1",
+    captureSessionId: "capture-a",
+    text: "They discussed a pilot without approving a commitment.",
+  });
+  const completion = session.sendUser("What did they approve?");
+  await new Promise((resolve) => setImmediate(resolve));
+  backend.turns[0].pending.resolve(
+    result({
+      decision: "speak",
+      text: "They approved a $1 million commitment in the meeting.",
+    }),
+  );
+  const completed = await completion;
+  assert.equal(completed.invalid, true);
+  assert.match(completed.error, /requires exact-session evidence provenance/);
+});
+
+test("a real but irrelevant receipt cannot launder an invented factual claim", async () => {
+  const backend = new FakeBackend();
+  backend.verificationVerdict = {
+    allowed: false,
+    decision: "reject",
+    reason_code: "unsupported_fact",
+    latency: { total_ms: 5 },
+  };
+  const session = new SidekickSession({ backend, captureSessionId: "capture-a" });
+  await session.start();
+  session.observeTranscript({
+    id: "weather",
+    captureSessionId: "capture-a",
+    text: "Nice weather today.",
+  });
+  const completion = session.sendUser("What was approved?");
+  await new Promise((resolve) => setImmediate(resolve));
+  backend.turns[0].pending.resolve(
+    result({
+      decision: "speak",
+      text: "They approved a one million dollar commitment.",
+      evidence_ids: ["weather"],
+    }),
+  );
+  const completed = await completion;
+  assert.equal(completed.invalid, true);
+  assert.match(completed.error, /Independent evidence verification rejected/);
+  assert.equal(backend.verifications[0].transcriptEvidence[0].id, "weather");
+});
+
+test("a transcript correction during verification restarts on current evidence", async () => {
+  const backend = new FakeBackend();
+  const verifier = new DeferredEvidenceVerifier();
+  const publications = [];
+  const session = new SidekickSession({
+    backend,
+    evidenceVerifier: verifier,
+    captureSessionId: "capture-a",
+    onPublish: (item) => publications.push(item),
+  });
+  await session.start();
+  session.observeTranscript({
+    id: "approval",
+    captureSessionId: "capture-a",
+    text: "The launch is approved.",
+  });
+  const completion = session.sendUser("Should we proceed?");
+  await new Promise((resolve) => setImmediate(resolve));
+  backend.turns[0].pending.resolve(result({
+    decision: "speak",
+    text: "Proceed; the launch is approved.",
+    evidence_ids: ["approval"],
+  }));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(verifier.calls.length, 1);
+
+  session.observeTranscript({
+    id: "correction",
+    captureSessionId: "capture-a",
+    text: "That authorization has been rescinded.",
+  });
+  verifier.calls[0].pending.resolve({
+    allowed: true,
+    decision: "allow",
+    reason_code: "supported",
+    latency: { total_ms: 5 },
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(backend.turns.length, 1);
+  assert.equal(verifier.calls.length, 2);
+  assert.match(
+    verifier.calls[1].params.transcriptEvidence.at(-1).text,
+    /authorization has been rescinded/,
+  );
+  assert.equal(publications.length, 0);
+
+  verifier.calls[1].pending.resolve({
+    allowed: false,
+    decision: "reject",
+    reason_code: "contradiction",
+    latency: { total_ms: 5 },
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(backend.turns.length, 2);
+  assert.match(backend.turns[1].params.input[0].text, /authorization has been rescinded/);
+
+  backend.turns[1].pending.resolve(result({
+    decision: "speak",
+    text: "Stop; approval was withdrawn.",
+    evidence_ids: ["correction"],
+  }));
+  await new Promise((resolve) => setImmediate(resolve));
+  verifier.calls[2].pending.resolve({
+    allowed: true,
+    decision: "allow",
+    reason_code: "supported",
+    latency: { total_ms: 5 },
+  });
+  const completed = await completion;
+  assert.equal(completed.published, true);
+  assert.equal(publications[0].decision.text, "Stop; approval was withdrawn.");
+  assert.equal(session.trace.filter((item) => item.type === "stale_evidence_restart").length, 1);
+  assert.equal(session.trace.filter((item) => item.type === "stale_evidence_reverify").length, 1);
+});
+
+test("continuous live transcript churn publishes after one fresh verification window", async () => {
+  const backend = new FakeBackend();
+  const verifier = new DeferredEvidenceVerifier();
+  const publications = [];
+  const session = new SidekickSession({
+    backend,
+    evidenceVerifier: verifier,
+    captureSessionId: "capture-a",
+    onPublish: (item) => publications.push(item),
+  });
+  await session.start();
+  session.observeTranscript({
+    id: "approval",
+    captureSessionId: "capture-a",
+    text: "The launch is approved.",
+  });
+  const completion = session.evaluateProactive();
+  await new Promise((resolve) => setImmediate(resolve));
+
+  session.observeTranscript({
+    id: "routine-1",
+    captureSessionId: "capture-a",
+    text: "Routine live transcript movement one.",
+  });
+  backend.turns[0].pending.resolve(result({
+    decision: "speak",
+    text: "Proceed; the launch is approved.",
+    evidence_ids: ["approval"],
+  }));
+  await new Promise((resolve) => setImmediate(resolve));
+
+  session.observeTranscript({
+    id: "routine-2",
+    captureSessionId: "capture-a",
+    text: "Routine live transcript movement two.",
+  });
+  verifier.calls[0].pending.resolve({
+    allowed: true,
+    decision: "allow",
+    reason_code: "supported",
+    latency: { total_ms: 5 },
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(verifier.calls.length, 2);
+  assert.match(
+    verifier.calls[1].params.transcriptEvidence.at(-1).text,
+    /movement two/,
+  );
+  session.observeTranscript({
+    id: "routine-3",
+    captureSessionId: "capture-a",
+    text: "Routine live transcript movement three.",
+  });
+  verifier.calls[1].pending.resolve({
+    allowed: true,
+    decision: "allow",
+    reason_code: "supported",
+    latency: { total_ms: 5 },
+  });
+
+  assert.equal((await completion).published, true);
+  assert.equal(publications.length, 1);
+  assert.equal(backend.turns.length, 1);
+  assert.equal(
+    session.trace.filter((item) => item.type === "stale_evidence_restart").length,
+    0,
+  );
+  assert.equal(
+    session.trace.filter((item) => item.type === "stale_evidence_reverify").length,
+    1,
+  );
+  assert.equal(
+    session.trace.filter((item) => item.type === "bounded_verification_lag").length,
+    1,
+  );
+  const followOn = session.evaluateProactive();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(backend.turns.length, 2);
+  backend.turns[1].pending.resolve(result({ decision: "silent", confidence: 99 }));
+  assert.equal((await followOn).published, false);
+});
+
+test("a new exact-session screen during verification invalidates the old visual answer", async () => {
+  const backend = new FakeBackend();
+  const verifier = new DeferredEvidenceVerifier();
+  const publications = [];
+  const session = new SidekickSession({
+    backend,
+    evidenceVerifier: verifier,
+    captureSessionId: "capture-a",
+    onPublish: (item) => publications.push(item),
+  });
+  await session.start();
+  session.observeScreen({ id: "screen-1", captureSessionId: "capture-a", path: "/tmp/one.png" });
+  const completion = session.sendUser("What is the launch date?");
+  await new Promise((resolve) => setImmediate(resolve));
+  backend.turns[0].pending.resolve(result({
+    decision: "speak",
+    text: "The screen shows a Thursday launch.",
+    visual_evidence_ids: ["screen-1"],
+    claims_visual_observation: true,
+  }));
+  await new Promise((resolve) => setImmediate(resolve));
+  session.observeScreen({ id: "screen-2", captureSessionId: "capture-a", path: "/tmp/two.png" });
+  verifier.calls[0].pending.resolve({
+    allowed: true,
+    decision: "allow",
+    reason_code: "supported",
+    latency: { total_ms: 5 },
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(backend.turns.length, 1);
+  assert.equal(verifier.calls.length, 2);
+  assert.equal(verifier.calls[1].params.screenEvidence.path, "/tmp/two.png");
+  assert.equal(publications.length, 0);
+
+  verifier.calls[1].pending.resolve({
+    allowed: false,
+    decision: "reject",
+    reason_code: "contradiction",
+    latency: { total_ms: 5 },
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(backend.turns.length, 2);
+  assert.equal(backend.turns[1].params.input.at(-1).path, "/tmp/two.png");
+
+  backend.turns[1].pending.resolve(result({
+    decision: "speak",
+    text: "The current screen shows a Friday launch.",
+    visual_evidence_ids: ["screen-2"],
+    claims_visual_observation: true,
+  }));
+  await new Promise((resolve) => setImmediate(resolve));
+  verifier.calls[2].pending.resolve({
+    allowed: true,
+    decision: "allow",
+    reason_code: "supported",
+    latency: { total_ms: 5 },
+  });
+  assert.equal((await completion).published, true);
+  assert.equal(publications[0].decision.visual_evidence_ids[0], "screen-2");
 });
 
 test("an exact-session image grounds the response and is refreshed on each turn", async () => {
@@ -282,6 +677,7 @@ test("typed authority is outside the untrusted transcript envelope and evidence 
   const completion = session.sendUser("What should I say?");
   await new Promise((resolve) => setImmediate(resolve));
   const inputs = backend.turns[0].params.input.filter((item) => item.type === "text");
+  assert.equal(backend.turns[0].params.outputSchema.properties.text.maxLength, 440);
   assert.equal(inputs.length, 2);
   assert.doesNotMatch(inputs[0].text, /AUTHORITATIVE TYPED USER MESSAGE/);
   assert.equal(inputs[1].text, "AUTHORITATIVE TYPED USER MESSAGE\nWhat should I say?");

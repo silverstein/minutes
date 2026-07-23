@@ -8,6 +8,20 @@ import process from "node:process";
 import { fileURLToPath } from "node:url";
 
 import { scoreMeridianResponses } from "../tests/eval/sidekick_rehearsal_golden.mjs";
+import { CODEX_REALTIME_MODEL, CODEX_VERIFIER_MODEL } from "./lib/sidekick_provider.mjs";
+import {
+  runAndLoadSidekickHybridQualityArtifact,
+  sidekickHybridQualityReceiptPasses,
+} from "./lib/sidekick_hybrid_quality_gate.mjs";
+import {
+  runSidekickExactSemanticGate,
+  sidekickExactSemanticReceiptPasses,
+} from "./lib/sidekick_exact_semantic_gate.mjs";
+import { currentSidekickQualitySourceBinding } from "./lib/sidekick_quality_source_binding.mjs";
+import {
+  attestSidekickProviderExecutable,
+  sidekickProviderAttestationMatches,
+} from "./lib/sidekick_provider_attestation.mjs";
 import {
   bundleManifestSha256,
   canonicalInstalledAppPath,
@@ -45,6 +59,21 @@ export const canonicalMeridianAcceptance = Object.freeze({
   ),
 });
 
+function semanticResponsesFromPayload(payload) {
+  const turns = Array.isArray(payload?.fixture_turns) ? payload.fixture_turns : [];
+  const candidate = (index) => turns[index]?.result?.candidate ?? {};
+  return {
+    turn_1: {
+      text: String(candidate(0).text ?? ""),
+      evidence_ids: Array.isArray(candidate(0).evidence_ids) ? candidate(0).evidence_ids : [],
+    },
+    turn_2: {
+      text: String(candidate(1).text ?? ""),
+      evidence_ids: Array.isArray(candidate(1).evidence_ids) ? candidate(1).evidence_ids : [],
+    },
+  };
+}
+
 function check(name, passed, detail) {
   return { name, passed: Boolean(passed), detail };
 }
@@ -62,6 +91,18 @@ function candidateFromTurn(turn) {
     total_ms: result?.total_ms ?? null,
     publication_ready_ms: result?.publication_ready_ms ?? null,
     reasoning_session_correlation: turn?.reasoning_session_correlation ?? null,
+    evidence_verification: result?.evidence_verification ?? null,
+    candidate_sha256: sha256(Buffer.from(JSON.stringify({
+      decision: candidate?.decision ?? null,
+      kind: candidate?.kind ?? null,
+      text: candidate?.text ?? null,
+      evidence_ids: Array.isArray(candidate?.evidence_ids) ? candidate.evidence_ids : [],
+      visual_evidence_ids: Array.isArray(candidate?.visual_evidence_ids)
+        ? candidate.visual_evidence_ids
+        : [],
+      claims_visual_observation: candidate?.claims_visual_observation ?? null,
+      confidence: candidate?.confidence ?? null,
+    }))),
   };
 }
 
@@ -70,10 +111,12 @@ export function evaluateNativeSidekickAcceptance(payload, runtime) {
   const turns = fixtureTurns.map(candidateFromTurn);
   const turn1 = turns[0] ?? candidateFromTurn(null);
   const turn2 = turns[1] ?? candidateFromTurn(null);
+  const semanticResponses = semanticResponsesFromPayload(payload);
   const quality = scoreMeridianResponses({
     turn_1: turn1.text,
     turn_2: turn2.text,
     turn_1_evidence_ids: turn1.evidence_ids,
+    turn_2_evidence_ids: turn2.evidence_ids,
   });
   const canonicalTurns = canonicalMeridianAcceptance.turns;
   const persistentCorrelation = payload?.reasoning_session_correlation;
@@ -90,7 +133,62 @@ export function evaluateNativeSidekickAcceptance(payload, runtime) {
     turns.every(
       (turn) => turn.reasoning_session_correlation === persistentCorrelation,
     );
+  const freshVerifierPerTurn =
+    payload?.verifier_sessions_started === turns.length &&
+    payload?.verifier_provider === "codex-app-server" &&
+    payload?.verifier_model === CODEX_VERIFIER_MODEL &&
+    payload?.verifier_privacy === "cloud" &&
+    turns.length === canonicalTurns.length &&
+    turns.every((turn) =>
+      /^[a-f0-9]{64}$/.test(turn.evidence_verification?.candidate_sha256 ?? "") &&
+      turn.evidence_verification.candidate_sha256 === turn.candidate_sha256 &&
+      turn.evidence_verification?.verdict?.decision === "allow" &&
+      turn.evidence_verification?.verdict?.reason_code === "supported" &&
+      /^[a-f0-9]{64}$/.test(
+        turn.evidence_verification?.verifier_session_correlation ?? "",
+      )) &&
+    new Set(turns.map((turn) =>
+      turn.evidence_verification.verifier_session_correlation)).size === turns.length;
   const sourceChecks = [
+    check(
+      "calibrated_hybrid_quality_artifact",
+      sidekickHybridQualityReceiptPasses(
+        runtime.hybrid_quality_gate,
+        runtime.quality_source_binding,
+        runtime.quality_provider_executable,
+      ) && runtime.hybrid_quality_gate?.producer_attested === true,
+      "Semantic quality requires a fresh three-run evaluator witnessed by this acceptance process; this native boundary also owns exact source, mechanical, provenance, and latency checks.",
+    ),
+    check(
+      "exact_native_responses_pass_semantic_judge",
+      sidekickExactSemanticReceiptPasses(
+        runtime.exact_semantic_quality_gate,
+        semanticResponses,
+        runtime.quality_source_binding,
+        runtime.quality_provider_executable,
+      ),
+      "The calibrated semantic judge must grade these exact native candidate bytes, not unrelated prior responses.",
+    ),
+    check(
+      "quality_source_matches_current_build",
+      runtime.quality_source_binding?.git_commit === runtime.expected_build_commit,
+      "Quality prompts, evaluator, fixture, and engine must be bound to the installed build commit.",
+    ),
+    check(
+      "one_attested_provider_for_product_and_quality_gates",
+      payload?.provider_executable_path === runtime.quality_provider_executable?.path &&
+        payload?.provider_executable_sha256 === runtime.quality_provider_executable?.sha256 &&
+        payload?.provider_version === runtime.quality_provider_executable?.version &&
+        sidekickProviderAttestationMatches(
+          runtime.hybrid_quality_gate?.provider_executable,
+          runtime.quality_provider_executable,
+        ) &&
+        sidekickProviderAttestationMatches(
+          runtime.exact_semantic_quality_gate?.provider_executable,
+          runtime.quality_provider_executable,
+        ),
+      "The installed product, fresh three-run evaluator, verifier, and exact semantic judge must use the same canonical provider executable bytes.",
+    ),
     check("binary_exit_zero", runtime.exit_code === 0, `Installed binary exited ${runtime.exit_code}.`),
     check(
       "installed_binary_matches_current_signed_build",
@@ -120,13 +218,18 @@ export function evaluateNativeSidekickAcceptance(payload, runtime) {
     check("fixture_digest_matches_checkout", payload?.fixture_sha256 === canonicalMeridianAcceptance.fixture_sha256, "Installed binary's compiled fixture must byte-match the checkout golden."),
     check("synthetic_capture_identity", /^sidekick-diagnostic-synthetic-/.test(payload?.context_session_id ?? ""), "Capture identity must be synthetic and isolated."),
     check("canonical_transcript_items", payload?.transcript_items === canonicalMeridianAcceptance.transcript_items, "Every canonical fixture utterance must reach the reducer."),
-    check("codex_fast_backend", payload?.provider === "codex-app-server" && payload?.model === "codex-fast" && payload?.privacy === "cloud", "Installed acceptance must exercise the Codex Fast cloud adapter."),
+    check("codex_fast_backend", payload?.provider === "codex-app-server" && payload?.model === CODEX_REALTIME_MODEL && payload?.privacy === "cloud", "Installed acceptance must exercise the configured Codex Fast cloud model."),
     check(
       "two_persistent_turns",
       turnsMatchCanonicalPrompts &&
         turns.every((turn) => turn.outcome === "published") &&
         onePersistentSession,
       "Both exact canonical prompts must publish through one provider-neutral persistent reasoning session.",
+    ),
+    check(
+      "fresh_independent_verifier_per_turn",
+      freshVerifierPerTurn,
+      "Each published candidate must carry an allow/supported receipt from its own one-time verifier, with no synchronous future-session prewarm blocking publication.",
     ),
   ];
   const latencyChecks = [
@@ -154,7 +257,7 @@ export function evaluateNativeSidekickAcceptance(payload, runtime) {
       `Observed ${runtime.wall_ms}ms including provider startup and teardown.`,
     ),
   ];
-  const allChecks = [...sourceChecks, ...quality.checks, ...latencyChecks];
+  const allChecks = [...sourceChecks, ...quality.mechanical_checks, ...latencyChecks];
   return {
     schema_version: 1,
     fixture_id: canonicalMeridianAcceptance.fixture_id,
@@ -166,7 +269,9 @@ export function evaluateNativeSidekickAcceptance(payload, runtime) {
     },
     quality_score: quality.score,
     source_checks: sourceChecks,
-    quality_checks: quality.checks,
+    quality_checks: quality.mechanical_checks,
+    semantic_diagnostics: quality.checks.filter((item) =>
+      !quality.mechanical_checks.some((mechanical) => mechanical.name === item.name)),
     latency_checks: latencyChecks,
     runtime,
     turns,
@@ -270,11 +375,42 @@ async function main(argv) {
     bundleManifestSha256(app),
   ]);
   const { payload, runtime } = await runInstalledBinary(executable, installedBundleSha256);
+  const qualitySourceBinding = await currentSidekickQualitySourceBinding(repositoryRoot);
+  const qualityProviderExecutable = await attestSidekickProviderExecutable(
+    payload.provider_executable_path,
+  );
+  if (
+    payload.provider_executable_sha256 !== qualityProviderExecutable.sha256 ||
+    payload.provider_version !== qualityProviderExecutable.version
+  ) {
+    throw new Error("installed Sidekick provider attestation did not match the current executable");
+  }
+  const semanticResponses = semanticResponsesFromPayload(payload);
   Object.assign(runtime, {
     expected_build_commit: expectedBuildCommit,
     expected_executable_sha256: expectedExecutableSha256,
     expected_bundle_sha256: expectedBundleSha256,
+    quality_source_binding: qualitySourceBinding,
+    quality_provider_executable: qualityProviderExecutable,
+    hybrid_quality_gate: await runAndLoadSidekickHybridQualityArtifact({
+      codexPath: qualityProviderExecutable.path,
+    }),
+    exact_semantic_quality_gate: await runSidekickExactSemanticGate({
+      fixture: canonicalFixture,
+      responses: semanticResponses,
+      sourceBinding: qualitySourceBinding,
+      codex: qualityProviderExecutable.path,
+    }),
   });
+  const qualityProviderExecutableAfter = await attestSidekickProviderExecutable(
+    qualityProviderExecutable.path,
+  );
+  if (!sidekickProviderAttestationMatches(
+    qualityProviderExecutableAfter,
+    qualityProviderExecutable,
+  )) {
+    throw new Error("Sidekick provider executable changed across native acceptance");
+  }
   const report = evaluateNativeSidekickAcceptance(payload, runtime);
   report.tested_app_path = app;
   process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);

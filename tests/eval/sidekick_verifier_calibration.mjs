@@ -47,6 +47,22 @@ export const sidekickVerifierCalibrationCases = Object.freeze([
     transcript_evidence: strategyEvidence,
   }),
   Object.freeze({
+    id: "strategy_omits_human_fallback",
+    expected_allowed: false,
+    expected_reason_code: "incomplete_material_consequence",
+    candidate: Object.freeze({
+      decision: "speak",
+      text: "Full automation creates $800k/month contractual exposure; 90% accuracy stops being decisive. Stage launch behind a confidence gate. What is the error-rate distribution by confidence band?",
+      evidence_ids: ["accuracy", "volume", "credit", "decision"],
+      visual_evidence_ids: [],
+      claims_visual_observation: false,
+    }),
+    transcript_evidence: strategyEvidence,
+    authoritative_context: Object.freeze({
+      typed_user_message: "What's the real risk here, and the single best question I should ask before we decide?",
+    }),
+  }),
+  Object.freeze({
     id: "procurement_omission_of_material_remedy",
     expected_allowed: false,
     expected_reason_code: "incomplete_material_consequence",

@@ -102,10 +102,22 @@ test("foreground completeness outranks the soft brevity target", async () => {
     new URL("../../resources/live_sidekick/developer_instructions.txt", import.meta.url),
     "utf8",
   );
+  const verifierInstructions = await readFile(
+    new URL("../../resources/live_sidekick/verifier_developer_instructions.txt", import.meta.url),
+    "utf8",
+  );
   assert.match(instructions, /foreground text at 60 words or fewer/);
   assert.match(
     instructions,
     /Completeness of required stakeholder protections and evidenced contractual consequences outranks these soft word targets/,
+  );
+  assert.match(
+    instructions,
+    /Merely naming a confidence gate is incomplete.*state what happens to work that does not clear the gate/,
+  );
+  assert.match(
+    verifierInstructions,
+    /reject with incomplete_material_consequence if a candidate proposes a confidence gate without saying that uncertain or below-threshold work goes to a human/,
   );
   assert.match(
     sidekickOutputSchemaFor("foreground").properties.text.description,

@@ -33,6 +33,11 @@ export const meridianSemanticCalibrationCases = Object.freeze([
     `${goodTurn1} The 90% score passes the ship gate.`,
   ),
   example(
+    "missing_human_fallback_fail",
+    false,
+    "The $800K/month contractual exposure makes 90% accuracy non-decisive. Stage launch behind a confidence gate. What is the error-rate distribution by confidence band?",
+  ),
+  example(
     "visible_errors_only_fail",
     false,
     goodTurn1,

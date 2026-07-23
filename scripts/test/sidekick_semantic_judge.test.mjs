@@ -72,6 +72,10 @@ test("semantic judge passes only a structurally consistent all-true verdict", as
     turn_id: "judge-turn",
   });
   assert.match(backend.turn.input[0].text, /BEGIN UNTRUSTED EVAL DATA/);
+  assert.match(
+    backend.session.developerInstructions,
+    /merely naming a confidence gate, staged launch, or reversible path is insufficient/,
+  );
   assert.equal(backend.turn.outputSchema.additionalProperties, false);
   judge.close();
   assert.equal(backend.closed, true);

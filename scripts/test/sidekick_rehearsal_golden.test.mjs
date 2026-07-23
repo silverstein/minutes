@@ -56,6 +56,9 @@ test("compact human-review placement variants remain confidence gated", () => {
     "Full automation creates $800K/month contractual exposure, so 90% accuracy is not decisive. Roll out only where confidence is high and leave remaining tickets to support reps. What error-rate distribution and confidence threshold changes the boundary?",
     "Full automation creates $800K/month contractual exposure, so 90% accuracy is not decisive. Automate only the high-confidence queue and leave the rest with specialists. What error-rate distribution and confidence threshold changes the boundary?",
     "Financial exposure is $800K/month, so 90% accuracy is not decisive. Stage confidence-gated automation with human fallback. What is the error-rate distribution by confidence band?",
+    "Financial exposure is $800K/month, so 90% accuracy is not decisive. Stage confidence-gated automation and route below-threshold tickets to humans. What is the error-rate distribution by confidence band?",
+    "Full automation creates $800K/month contractual exposure, so 90% accuracy stops deciding. Ship only above a confidence threshold and route all below-threshold tickets to humans. What is the error-rate distribution by confidence band?",
+    "Financial exposure is $800K/month, so 90% accuracy is not decisive. Ship confidence-gated automation, routing below-threshold work to humans. What is the error-rate distribution by confidence band?",
   ]) {
     assert.equal(scoreMeridianResponses({ ...passing, turn_1 }).passed, true, turn_1);
   }
@@ -67,6 +70,7 @@ test("human reversion requires affirmative customer independence", () => {
     "For Meridian procurement, every wrong automated resolution makes the vendor owe Meridian a $200 credit. Require a written confidence-threshold SLA and audited error reporting. Meridian alone may put affected tickets back into human review at any time; vendor signoff is unnecessary.",
     "For Meridian procurement, the supplier must compensate Meridian with a $200 credit for every AI misresolution. Require a written confidence-threshold SLA and audited error reporting. Meridian can unilaterally hand affected tickets back to its support team; no supplier signoff is required.",
     "For Meridian procurement, the provider owes Meridian $200 whenever AI gets a resolution wrong. Require a written cutoff/error SLA and auditable reports. Meridian independently sends impacted cases back to its agents without provider approval.",
+    "For Meridian procurement, the vendor owes Meridian a $200 credit for every wrong automated resolution. Require a written cutoff/error SLA and auditable reports. Meridian independently sends impacted cases back to its agents without provider approval.",
     "For Meridian procurement, each automated ticket resolved in error makes the supplier credit Meridian $200. Require a written cutoff/error SLA and auditable reports. Meridian can pull impacted work back to support reps without asking the provider.",
     "For Meridian procurement, the supplier issues a $200 credit to Meridian for each AI-resolved ticket that turns out wrong. Require a written cutoff/error SLA and auditable error logs. Meridian unilaterally moves impacted work back to manual operations without provider approval.",
   ]) {

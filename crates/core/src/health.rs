@@ -391,13 +391,12 @@ pub fn mic_status() -> HealthItem {
 /// Check screen-context capture readiness for recordings started from this
 /// process's environment.
 ///
-/// macOS: probes Screen Recording permission with a real capture attempt
-/// (same check the recording path uses), which also catches the stale-grant
-/// case: after an app's code signature changes, System Settings still shows
-/// it as enabled while macOS silently denies capture and never re-prompts
-/// (#424). Note TCC grants are per-identity — run from a terminal this
-/// validates CLI recordings, not the desktop app; the app's own probe at
-/// recording start raises a notification when it fails.
+/// macOS: reads CoreGraphics' Screen Recording TCC preflight for the current
+/// process identity. The real recording worker separately reports any runtime
+/// screenshot failure, so a granted TCC state is not treated as capture
+/// evidence. TCC grants are per identity — run from a terminal this validates
+/// CLI recordings, not the desktop app; the app performs its own preflight at
+/// recording start.
 pub fn screen_recording_status(config: &Config) -> HealthItem {
     if !config.screen_context.enabled {
         return HealthItem {
@@ -417,7 +416,7 @@ pub fn screen_recording_status(config: &Config) -> HealthItem {
                 label: "Screen recording".into(),
                 state: "ready".into(),
                 detail: format!(
-                    "Screen Recording permission granted for this environment — recordings started here will capture screenshots every {}s. The desktop app's grant is separate; if it fails at recording start, a notification is raised.",
+                    "Screen Recording permission granted for this process identity — recordings started here will attempt screenshots every {}s. The real capture worker reports any runtime failure; the desktop app's grant is separate.",
                     config.screen_context.interval_secs
                 ),
                 optional: true,
@@ -426,7 +425,7 @@ pub fn screen_recording_status(config: &Config) -> HealthItem {
             HealthItem {
                 label: "Screen recording".into(),
                 state: "attention".into(),
-                detail: "Screen-context capture is enabled but macOS rejected Screen Recording in this environment, so recordings started here will have no screenshots. If the current app is already enabled in System Settings, remove or reset the stale entry once and grant the current signed app access again."
+                detail: "Screen-context capture is enabled but macOS reports no Screen Recording grant for this process identity, so recordings started here will have no screenshots. If the current app is already enabled in System Settings, remove or reset the stale entry once and grant the current signed app access again."
                     .into(),
                 optional: true,
             }

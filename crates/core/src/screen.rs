@@ -27,32 +27,17 @@ use chrono::{DateTime, Local};
 pub fn check_screen_permission() -> bool {
     #[cfg(target_os = "macos")]
     {
-        // Capture a 1x1 test screenshot to check permission
-        let test_path = std::env::temp_dir().join("minutes-screen-test.png");
-        let result = crate::engine_process::command("screencapture")
-            .args(["-x", "-R", "0,0,1,1", "-t", "png"])
-            .arg(&test_path)
-            .output();
-
-        let _ = std::fs::remove_file(&test_path);
-
-        match result {
-            Ok(output) => {
-                if output.status.success() {
-                    // Check if the file was created and is non-trivial
-                    // (blank/black screenshots from missing permission are still valid PNGs
-                    // but we can't easily distinguish them without image analysis)
-                    true
-                } else {
-                    tracing::warn!("screen capture permission check failed — grant Screen Recording permission in System Settings > Privacy & Security");
-                    false
-                }
-            }
-            Err(_) => {
-                tracing::warn!("screencapture command not found");
-                false
-            }
+        // Ask CoreGraphics for TCC state directly. The previous probe launched
+        // `screencapture` against a hard-coded 1x1 rectangle at (0,0). That
+        // subprocess can fail for capture-geometry or runtime reasons unrelated
+        // to TCC (including "could not create image from rect"), falsely
+        // reporting a granted Minutes identity as denied.
+        // Actual capture failures remain observable from `capture_screenshot`.
+        let granted = crate::macos_permissions::screen_recording_status().is_granted();
+        if !granted {
+            tracing::warn!("screen capture permission check failed — grant Screen Recording permission in System Settings > Privacy & Security");
         }
+        granted
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -403,6 +388,20 @@ impl Drop for ScreenCaptureHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn permission_preflight_uses_tcc_without_taking_a_probe_screenshot() {
+        let source = include_str!("screen.rs");
+        let start = source.find("pub fn check_screen_permission()").unwrap();
+        let end = source[start..]
+            .find("pub fn start_capture(")
+            .map(|offset| start + offset)
+            .unwrap();
+        let preflight = &source[start..end];
+
+        assert!(preflight.contains("macos_permissions::screen_recording_status"));
+        assert!(!preflight.contains("engine_process::command"));
+    }
 
     #[test]
     fn list_screenshots_returns_sorted_pngs() {

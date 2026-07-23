@@ -385,6 +385,7 @@ export function scoreMeridianResponses(responses, { turn1Mode = "background" } =
     return recommends && !rejects;
   });
   const hasConfidenceGatedHumanFallback = [
+    /\bconfidence[- ]gated\s+automation\b[^;.!?]{0,30}\bwith\s+(?:a\s+)?human\s+fallback\b/,
     /\b(?:route|send|return|revert|switch|leave|keep|retain)\w*\b[^;.!?]{0,55}\b(?:uncertain|low[- ]confidence|below\s+(?:the\s+)?(?:confidence\s+)?threshold|high[- ]risk|remaining|remainder)\b[^;.!?]{0,45}\bhuman(?:s| handling| review|[- ]in[- ]the[- ]loop)?\b/,
     /\b(?:uncertain|low[- ]confidence|below\s+(?:the\s+)?(?:confidence\s+)?threshold|high[- ]risk|remaining|remainder)\b[^;.!?]{0,45}\b(?:route|send|return|revert|switch|leave|keep|retain)\w*\b[^;.!?]{0,45}\bhuman(?:s| handling| review|[- ]in[- ]the[- ]loop)?\b/,
     /\bhuman\s+(?:review|handling)\b[^;.!?]{0,45}\b(?:below|outside|for)\b[^;.!?]{0,35}\b(?:confidence|threshold|segment|high[- ]risk|uncertain)/,

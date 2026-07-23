@@ -55,6 +55,7 @@ test("compact human-review placement variants remain confidence gated", () => {
     "Full automation creates $800K/month contractual exposure, so 90% accuracy is not decisive. Automate the high-confidence queue and send the balance to the support team. What error-rate distribution and confidence band changes the launch boundary?",
     "Full automation creates $800K/month contractual exposure, so 90% accuracy is not decisive. Roll out only where confidence is high and leave remaining tickets to support reps. What error-rate distribution and confidence threshold changes the boundary?",
     "Full automation creates $800K/month contractual exposure, so 90% accuracy is not decisive. Automate only the high-confidence queue and leave the rest with specialists. What error-rate distribution and confidence threshold changes the boundary?",
+    "Financial exposure is $800K/month, so 90% accuracy is not decisive. Stage confidence-gated automation with human fallback. What is the error-rate distribution by confidence band?",
   ]) {
     assert.equal(scoreMeridianResponses({ ...passing, turn_1 }).passed, true, turn_1);
   }

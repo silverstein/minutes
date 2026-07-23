@@ -724,7 +724,12 @@ fn repair_header(
                 .map_err(|error| error.to_string())?;
         }
         file.sync_all().map_err(|error| error.to_string())?;
-        hound::WavReader::open(path)
+        // Validate through the SAME locked handle: opening a second handle
+        // here deadlocks against our own exclusive lock on Windows, where
+        // file locks are mandatory rather than advisory (os error 33).
+        file.seek(SeekFrom::Start(0))
+            .map_err(|error| error.to_string())?;
+        hound::WavReader::new(std::io::BufReader::new(&mut file))
             .map(drop)
             .map_err(|error| format!("repaired WAV did not pass decoder validation: {error}"))
     })();

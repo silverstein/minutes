@@ -485,7 +485,10 @@ export default function Home() {
 
         <p className="mx-auto mt-12 max-w-[620px] rounded-[5px] border border-[color:var(--border)] bg-[var(--bg-elevated)] px-4 py-3 font-mono text-[12px] leading-5 text-[var(--text-secondary)]">
           <span className="text-[var(--accent)]">v{MINUTES_RELEASE_VERSION}</span>{" "}
-          closes the macOS desktop window-lifecycle crash, detects Zoom calls on vanity meeting URLs, and makes app settings persist reliably.{" "}
+          teaches Minutes your voice (on-device enrollment via{" "}
+          <span className="text-[var(--text)]">minutes voice</span>), rescues
+          call recordings with broken WAV headers, and adds Cursor Agent as a
+          summarization backend.{" "}
           <a
             href={`https://github.com/silverstein/minutes/releases/tag/v${MINUTES_RELEASE_VERSION}`}
             className="text-[var(--text)] underline decoration-[color:var(--border-mid)] underline-offset-2 hover:text-[var(--accent)]"

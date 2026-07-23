@@ -7,14 +7,13 @@
     "check:llms": "node ../scripts/generate_llms_txt.mjs --check",
     "dev": "next dev --turbopack",
     "build": "next build",
-    "start": "next start"
+    "start": "npx --yes wrangler@4.114.0 pages dev out"
   },
   "dependencies": {
     "@react-three/drei": "^10.7.7",
     "@react-three/fiber": "^9.5.0",
     "@remotion/player": "^4.0.446",
     "@types/three": "^0.183.1",
-    "@vercel/analytics": "^2.0.1",
     "geist": "^1.4.1",
     "next": "^16.2.3",
     "react": "^19.2.5",

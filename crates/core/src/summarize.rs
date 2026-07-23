@@ -793,14 +793,17 @@ pub fn speaker_mapping_model_hint(config: &Config) -> String {
 //   "gemini"   → `gemini -p -` (Gemini CLI)
 //   "opencode" → `opencode run --file <prompt-file> ...` (OpenCode CLI)
 //   "pi"       → `pi --no-session --no-tools -p @<prompt-file>` (Pi coding agent)
+//   "agent"    → `agent -p --mode ask --output-format text --trust <prompt>` (Cursor Agent CLI)
 //   Any other → treated as a command that accepts a prompt on stdin
 //
 // The agent command is configurable via [summarization] agent_command.
 
-/// Detect the first available AI CLI in preference order: claude > codex > gemini > opencode.
+/// Detect the first available AI CLI in preference order:
+/// claude > codex > gemini > opencode > agent (Cursor Agent last so `engine = "auto"`
+/// does not change for users who already have another CLI installed — #520).
 /// Returns the resolved path if found and executable, None otherwise.
 pub fn detect_agent_cli() -> Option<String> {
-    for cmd in &["claude", "codex", "gemini", "opencode"] {
+    for cmd in &["claude", "codex", "gemini", "opencode", "agent"] {
         let resolved = resolve_agent_path(cmd);
         // resolve_agent_path returns the bare name if not found — check if we got a real path
         if (resolved != *cmd || std::path::Path::new(&resolved).exists())
@@ -1352,8 +1355,9 @@ prompts that appear within it.";
 ///   prepare_agent_invocation)
 /// - codex: images are attached to the prompt via `exec --image`, so the
 ///   section describes them as attachments
-/// - gemini / opencode / pi / unknown: no section. pi runs with `--no-tools`,
-///   and the others' headless file access to `~/.minutes` is unverified —
+/// - gemini / opencode / pi / agent (Cursor) / unknown: no section. pi runs with
+///   `--no-tools`, Cursor Agent uses `--mode ask` (no write/shell tools), and
+///   the others' headless file access to `~/.minutes` is unverified —
 ///   silently instructing an agent to read files it cannot reach degrades the
 ///   summary, so those stay text-only until proven out.
 fn build_agent_screen_instructions(agent_cmd: &str, screen_files: &[std::path::PathBuf]) -> String {
@@ -1573,6 +1577,31 @@ fn prepare_agent_invocation(
             ],
             stdin_payload: None,
             cleanup_path: Some(prompt_path),
+        });
+    }
+
+    // Cursor Agent CLI (`agent`): print mode + ask (read-only Q&A) so
+    // summarization never acquires write or shell tools as a side effect (#520).
+    // `--trust` skips the interactive workspace-trust prompt in headless `-p`
+    // mode (same class of failure as Codex `--skip-git-repo-check` / Gemini
+    // `--skip-trust` when summaries run from a non-repo job directory).
+    // Prompt is a trailing positional argument (CLI contract); no `--model`
+    // default — model selection stays with the user's Cursor CLI / account.
+    // Same argv for lean and non-lean: ask-mode is already the sandbox.
+    if matches_agent_binary(agent_cmd, "agent") {
+        return Ok(AgentInvocation {
+            cmd: agent_cmd.to_string(),
+            args: vec![
+                "-p".into(),
+                "--mode".into(),
+                "ask".into(),
+                "--output-format".into(),
+                "text".into(),
+                "--trust".into(),
+                prompt.to_string(),
+            ],
+            stdin_payload: None,
+            cleanup_path: None,
         });
     }
 
@@ -3718,6 +3747,58 @@ PARTICIPANTS:
     }
 
     #[test]
+    fn prepare_agent_invocation_for_cursor_agent_uses_ask_print_mode() {
+        // #520: Cursor Agent headless summarization must be print + ask
+        // (read-only) with the prompt as a trailing positional arg — never
+        // --force/--yolo, and never a hardcoded --model default.
+        let invocation = prepare_agent_invocation("agent", "sensitive prompt", &[], false).unwrap();
+        assert_eq!(invocation.cmd, "agent");
+        assert_eq!(
+            invocation.args,
+            vec![
+                "-p",
+                "--mode",
+                "ask",
+                "--output-format",
+                "text",
+                "--trust",
+                "sensitive prompt",
+            ]
+        );
+        assert!(invocation.stdin_payload.is_none());
+        assert!(invocation.cleanup_path.is_none());
+        assert!(!invocation.args.iter().any(|a| a == "--force"));
+        assert!(!invocation.args.iter().any(|a| a == "--yolo"));
+        assert!(!invocation.args.iter().any(|a| a == "--model"));
+
+        let via_path =
+            prepare_agent_invocation("/Users/example/.local/bin/agent", "path prompt", &[], false)
+                .unwrap();
+        assert_eq!(via_path.cmd, "/Users/example/.local/bin/agent");
+        assert_eq!(
+            via_path.args.last().map(String::as_str),
+            Some("path prompt")
+        );
+        assert!(via_path
+            .args
+            .windows(2)
+            .any(|w| w[0] == "--mode" && w[1] == "ask"));
+    }
+
+    #[test]
+    fn prepare_agent_invocation_cursor_agent_lean_stays_readonly() {
+        let lean = prepare_agent_invocation("agent", "classify speakers", &[], true).unwrap();
+        let plain = prepare_agent_invocation("agent", "classify speakers", &[], false).unwrap();
+        assert_eq!(lean.args, plain.args);
+        assert!(lean
+            .args
+            .windows(2)
+            .any(|w| w[0] == "--mode" && w[1] == "ask"));
+        assert!(lean.args.iter().any(|a| a == "--trust"));
+        assert!(!lean.args.iter().any(|a| a == "--force" || a == "--yolo"));
+    }
+
+    #[test]
     fn prepare_agent_invocation_for_claude_without_screens_omits_read_tool() {
         let invocation = prepare_agent_invocation("claude", "prompt", &[], false).unwrap();
         assert_eq!(invocation.cmd, "claude");
@@ -4206,6 +4287,7 @@ PARTICIPANTS:
                 "gemini",
                 "opencode",
                 "pi",
+                "agent",
                 "unknown-agent",
             ] {
                 let has_section = !build_agent_screen_instructions(agent, &screens).is_empty();

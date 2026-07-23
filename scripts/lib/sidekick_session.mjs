@@ -49,8 +49,8 @@ export function sidekickOutputSchemaFor(mode) {
   // A background turn can be promoted in place through provider steering, so
   // every started turn needs enough schema headroom for a foreground answer.
   // Minutes still enforces the stricter 50-word background publication limit.
-  const maxLength = 440;
-  const targetWords = mode === "background" ? 42 : 62;
+  const maxLength = 700;
+  const targetWords = mode === "background" ? 36 : 54;
   return {
     ...SIDEKICK_OUTPUT_SCHEMA,
     properties: {
@@ -111,6 +111,80 @@ function parseDecision(raw) {
 
 function visibleWordCount(text) {
   return String(text ?? "").trim().match(/\S+/g)?.length ?? 0;
+}
+
+function terminalCore(word) {
+  return String(word ?? "").replace(/["'”’\)\]\}]+$/gu, "");
+}
+
+function endsSentence(word) {
+  return /[.!?]$/u.test(terminalCore(word));
+}
+
+function sentenceIsQuestion(sentence) {
+  const lastWord = String(sentence ?? "").trim().match(/\S+$/u)?.[0] ?? "";
+  const punctuation = terminalCore(lastWord).match(/[.!?]+$/u)?.[0] ?? "";
+  return punctuation.includes("?");
+}
+
+function hasFragmentBoundary(word) {
+  return /[,:;.!?]$/u.test(terminalCore(word));
+}
+
+function truncateFragment(text, maximumWords, terminal) {
+  const words = String(text ?? "").trim().match(/\S+/g) ?? [];
+  if (words.length <= maximumWords) return words.join(" ");
+  const selected = words.slice(0, maximumWords);
+  let boundary = -1;
+  for (let index = selected.length - 1; index >= Math.floor(selected.length / 2); index -= 1) {
+    if (hasFragmentBoundary(selected[index])) {
+      boundary = index;
+      break;
+    }
+  }
+  const kept = selected.slice(0, boundary >= 0 ? boundary + 1 : selected.length);
+  let compacted = kept.join(" ").replace(/[,:;.!?"'”’\)\]\}]+$/gu, "");
+  compacted += terminal === "?" ? "?" : "…";
+  return compacted;
+}
+
+export function compactVisibleText(text, maximumWords) {
+  const normalized = String(text ?? "").trim().replace(/\s+/g, " ");
+  if (visibleWordCount(normalized) <= maximumWords) return normalized;
+  const sentences = [];
+  let current = [];
+  for (const word of normalized.match(/\S+/gu) ?? []) {
+    current.push(word);
+    if (endsSentence(word)) {
+      sentences.push(current.join(" "));
+      current = [];
+    }
+  }
+  if (current.length > 0) sentences.push(current.join(" "));
+  const questionIndex = sentences.findLastIndex(sentenceIsQuestion);
+  const question = questionIndex >= 0 ? sentences[questionIndex] : null;
+  const questionText = question
+    ? truncateFragment(question, Math.min(maximumWords, visibleWordCount(question)), "?")
+    : null;
+  const questionWords = visibleWordCount(questionText);
+  const bodyBudget = Math.max(0, maximumWords - questionWords);
+  const bodyCandidates = questionIndex >= 0 ? sentences.slice(0, questionIndex) : sentences;
+  const selected = [];
+  let selectedWords = 0;
+  for (const sentence of bodyCandidates) {
+    const count = visibleWordCount(sentence);
+    if (selectedWords + count > bodyBudget) break;
+    selected.push(sentence);
+    selectedWords += count;
+  }
+  if (selected.length === 0 && bodyBudget > 0 && bodyCandidates[0]) {
+    selected.push(truncateFragment(bodyCandidates[0], bodyBudget, "…"));
+  }
+  const compacted = [...selected, ...(questionText ? [questionText] : [])]
+    .filter(Boolean)
+    .join(" ")
+    .trim();
+  return compacted || truncateFragment(normalized, maximumWords, sentenceIsQuestion(normalized) ? "?" : "…");
 }
 
 function referencesVisualDetail(text) {
@@ -431,7 +505,17 @@ export class SidekickSession {
       decision = parseDecision(result.text);
       const maxWords = invocation.mode === "background" ? 50 : 70;
       if (decision.decision === "speak" && visibleWordCount(decision.text) > maxWords) {
-        throw new Error(`${invocation.mode} response exceeded ${maxWords} words`);
+        const originalWords = visibleWordCount(decision.text);
+        decision = {
+          ...decision,
+          text: compactVisibleText(decision.text, maxWords),
+        };
+        this.#record("visible_response_compacted", {
+          invocation: invocation.id,
+          mode: invocation.mode,
+          original_words: originalWords,
+          published_words: visibleWordCount(decision.text),
+        });
       }
       this.#validateProvenance(invocation, decision);
       if (invocation.mode === "foreground" && decision.decision !== "speak") {

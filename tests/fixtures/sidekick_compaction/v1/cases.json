@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "id": "single_question",
+      "prefix": "The contractual exposure is $800,000 monthly.",
+      "filler_word": "material",
+      "filler_count": 55,
+      "suffix": ". What confidence threshold changes the decision?",
+      "maximum_words": 50,
+      "expected": "The contractual exposure is $800,000 monthly. What confidence threshold changes the decision?"
+    },
+    {
+      "id": "mixed_question_punctuation",
+      "prefix": "The contractual exposure is $800,000 monthly!!!",
+      "filler_word": "material",
+      "filler_count": 55,
+      "suffix": ". What confidence threshold changes the decision?!",
+      "maximum_words": 50,
+      "expected": "The contractual exposure is $800,000 monthly!!! What confidence threshold changes the decision?!"
+    },
+    {
+      "id": "ellipsis",
+      "prefix": "The downside is $800,000 monthly...",
+      "filler_word": "detail",
+      "filler_count": 55,
+      "suffix": ". Which confidence band is safe?",
+      "maximum_words": 50,
+      "expected": "The downside is $800,000 monthly... Which confidence band is safe?"
+    },
+    {
+      "id": "quoted_question",
+      "prefix": "The contract creates material exposure.",
+      "filler_word": "background",
+      "filler_count": 55,
+      "suffix": ". She asked, \"Which threshold keeps Meridian safe?\"",
+      "maximum_words": 50,
+      "expected": "The contract creates material exposure. She asked, \"Which threshold keeps Meridian safe?\""
+    },
+    {
+      "id": "long_leading_consequence",
+      "prefix": "The contractual consequence is immediate because forty thousand monthly tickets at ten percent error creates four thousand wrong automated resolutions,",
+      "filler_word": "exposure",
+      "filler_count": 45,
+      "suffix": ". Which confidence boundary keeps the rollout reversible?",
+      "maximum_words": 50,
+      "expected": "The contractual consequence is immediate because forty thousand monthly tickets at ten percent error creates four thousand wrong automated resolutions, exposure exposure exposure exposure exposure exposure exposure exposure exposure exposure exposure exposure exposure exposure exposure exposure exposure exposure exposure exposure exposure exposure exposure… Which confidence boundary keeps the rollout reversible?"
+    }
+  ]
+}

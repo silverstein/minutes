@@ -11,10 +11,15 @@ import {
 import {
   currentSidekickQualitySourceBinding,
 } from "../lib/sidekick_quality_source_binding.mjs";
-import { CODEX_REALTIME_EFFORT } from "../lib/sidekick_provider.mjs";
+import {
+  CODEX_REALTIME_EFFORT,
+  CODEX_VERIFIER_EFFORT,
+  CODEX_VERIFIER_MODEL,
+} from "../lib/sidekick_provider.mjs";
 import { semanticJudgeCriteria } from "../lib/sidekick_semantic_judge.mjs";
 import { scoreMeridianResponses } from "../../tests/eval/sidekick_rehearsal_golden.mjs";
 import { meridianSemanticCalibrationCases } from "../../tests/eval/sidekick_semantic_calibration.mjs";
+import { sidekickVerifierCalibrationCases } from "../../tests/eval/sidekick_verifier_calibration.mjs";
 
 const sourceBinding = Object.freeze({
   git_commit: "a".repeat(40),
@@ -26,6 +31,9 @@ const providerExecutable = Object.freeze({
   sha256: "d".repeat(64),
   version: "codex-cli 1.0.0",
 });
+const verifierCalibrationSessionIds = sidekickVerifierCalibrationCases.map(
+  (_, index) => `verifier-calibration-${index + 1}`,
+);
 
 const repoRoot = fileURLToPath(new URL("../..", import.meta.url));
 
@@ -74,7 +82,8 @@ function passingArtifact() {
     provider: "codex-app-server",
     requested_model: "gpt-5.6-terra",
     requested_effort: CODEX_REALTIME_EFFORT,
-    requested_verifier_model: "gpt-5.6-sol",
+    requested_verifier_model: CODEX_VERIFIER_MODEL,
+    requested_verifier_effort: CODEX_VERIFIER_EFFORT,
     provider_executable: structuredClone(providerExecutable),
     model: "gpt-5.6-terra",
     backend_session_id: `strategist-session-${number}`,
@@ -82,7 +91,7 @@ function passingArtifact() {
     semantic_judge_model: "gpt-5.6-terra",
     semantic_judge_session_id: `judge-session-${number}`,
     verifier_provider: "codex-app-server",
-    verifier_model: "gpt-5.6-sol",
+    verifier_model: CODEX_VERIFIER_MODEL,
     published_count: 2,
     responses: structuredClone(responses),
     response_evidence_ids: structuredClone(responseEvidence),
@@ -117,10 +126,28 @@ function passingArtifact() {
     benchmark: "persistent-provider-neutral-sidekick",
     requested_model: "gpt-5.6-terra",
     requested_effort: CODEX_REALTIME_EFFORT,
-    requested_verifier_model: "gpt-5.6-sol",
+    requested_verifier_model: CODEX_VERIFIER_MODEL,
+    requested_verifier_effort: CODEX_VERIFIER_EFFORT,
     provider_executable: structuredClone(providerExecutable),
     source_binding: structuredClone(sourceBinding),
     runs,
+    verifier_calibration: {
+      model: CODEX_VERIFIER_MODEL,
+      effort: CODEX_VERIFIER_EFFORT,
+      passed: true,
+      results: sidekickVerifierCalibrationCases.map((item, index) => ({
+        id: item.id,
+        expected_allowed: item.expected_allowed,
+        allowed: item.expected_allowed,
+        decision: item.expected_allowed ? "allow" : "reject",
+        reason_code: item.expected_allowed ? "supported" : "unsupported_fact",
+        latency: { first_token_ms: 300 + index, total_ms: 600 + index },
+        passed: true,
+      })),
+      session_ids: sidekickVerifierCalibrationCases.map(
+        (_, index) => `verifier-calibration-${index + 1}`,
+      ),
+    },
     aggregate: {
       budgets: { max_first_token_p95_ms: 4_000, max_total_p95_ms: 7_000 },
     },
@@ -148,7 +175,15 @@ test("real quality-surface manifest resolves every bound source file", async () 
 });
 
 test("live producer receipt binds artifact bytes, source, provider, and three fresh sessions", () => {
-  const artifactBytes = Buffer.from("fresh evaluator artifact");
+  const artifactBytes = Buffer.from(JSON.stringify({
+    runs: [1, 2, 3].map((number) => ({
+      backend_session_id: `strategist-${number}`,
+      semantic_judge_session_id: `judge-${number}`,
+    })),
+    verifier_calibration: {
+      session_ids: verifierCalibrationSessionIds,
+    },
+  }));
   const producerReceipt = {
     schema_version: 1,
     artifact_sha256: createHash("sha256").update(artifactBytes).digest("hex"),
@@ -156,6 +191,7 @@ test("live producer receipt binds artifact bytes, source, provider, and three fr
     provider_executable: providerExecutable,
     strategist_session_ids: ["strategist-1", "strategist-2", "strategist-3"],
     semantic_judge_session_ids: ["judge-1", "judge-2", "judge-3"],
+    verifier_calibration_session_ids: verifierCalibrationSessionIds,
   };
   const matches = (receipt = producerReceipt, bytes = artifactBytes) =>
     sidekickProducerReceiptMatches({
@@ -172,6 +208,34 @@ test("live producer receipt binds artifact bytes, source, provider, and three fr
   }), false);
   assert.equal(matches({
     ...producerReceipt,
+    strategist_session_ids: [
+      "unrelated-strategist-1",
+      "unrelated-strategist-2",
+      "unrelated-strategist-3",
+    ],
+  }), false);
+  assert.equal(matches({
+    ...producerReceipt,
+    semantic_judge_session_ids: [
+      "unrelated-judge-1",
+      "unrelated-judge-2",
+      "unrelated-judge-3",
+    ],
+  }), false);
+  assert.equal(matches({
+    ...producerReceipt,
+    verifier_calibration_session_ids: verifierCalibrationSessionIds.map(
+      (_, index) => `unrelated-verifier-${index + 1}`,
+    ),
+  }), false);
+  assert.equal(matches({
+    ...producerReceipt,
+    verifier_calibration_session_ids: verifierCalibrationSessionIds.map(
+      (id, index) => index === 1 ? verifierCalibrationSessionIds[0] : id,
+    ),
+  }), false);
+  assert.equal(matches({
+    ...producerReceipt,
     strategist_session_ids: ["strategist-1", "strategist-1", "strategist-3"],
   }), false);
 });
@@ -183,6 +247,8 @@ test("hybrid gate rejects thin self-attestation and recomputed failures", () => 
     (report) => { report.runs[1].semantic.turn_1.no_contradiction = false; },
     (report) => { report.runs[2].published_count = 1; },
     (report) => { report.runs[0].semantic_calibration.results[0].predicted_pass = false; },
+    (report) => { report.verifier_calibration.results[1].allowed = true; },
+    (report) => { report.verifier_calibration.session_ids[3] = report.verifier_calibration.session_ids[0]; },
     (report) => { report.runs[1].latency.role_flip.total_ms = 30_000; },
     (report) => { report.runs[1].latency.role_flip.first_token_ms = -1; },
     (report) => { report.runs[1].latency.role_flip.first_token_ms = 5_000; },

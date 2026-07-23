@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 import {
   CODEX_REALTIME_EFFORT,
   CODEX_REALTIME_MODEL,
+  CODEX_VERIFIER_EFFORT,
   CODEX_VERIFIER_MODEL,
 } from "./sidekick_provider.mjs";
 import {
@@ -24,6 +25,7 @@ import {
 } from "./sidekick_provider_attestation.mjs";
 import { scoreMeridianResponses } from "../../tests/eval/sidekick_rehearsal_golden.mjs";
 import { meridianSemanticCalibrationCases } from "../../tests/eval/sidekick_semantic_calibration.mjs";
+import { sidekickVerifierCalibrationCases } from "../../tests/eval/sidekick_verifier_calibration.mjs";
 
 export const DEFAULT_SIDEKICK_HYBRID_ARTIFACT = "/tmp/sidekick-session-eval.json";
 export const MAX_ACCEPTED_FIRST_TOKEN_P95_MS = 4_000;
@@ -110,6 +112,7 @@ function runRecomputesCleanly(run, expectedRun) {
     run?.requested_model === CODEX_REALTIME_MODEL &&
     run?.requested_effort === CODEX_REALTIME_EFFORT &&
     run?.requested_verifier_model === CODEX_VERIFIER_MODEL &&
+    run?.requested_verifier_effort === CODEX_VERIFIER_EFFORT &&
     run?.model === CODEX_REALTIME_MODEL &&
     typeof run?.backend_session_id === "string" && run.backend_session_id.trim().length > 0 &&
     typeof run?.semantic_judge_session_id === "string" &&
@@ -160,6 +163,39 @@ function calibrationRecomputesCleanly(calibration) {
     calibration?.accuracy === 1;
 }
 
+function verifierCalibrationRecomputesCleanly(calibration) {
+  const expected = new Map(
+    sidekickVerifierCalibrationCases.map((item) => [item.id, item.expected_allowed]),
+  );
+  const results = Array.isArray(calibration?.results) ? calibration.results : [];
+  const sessionIds = Array.isArray(calibration?.session_ids)
+    ? calibration.session_ids
+    : [];
+  return calibration?.model === CODEX_VERIFIER_MODEL &&
+    calibration?.effort === CODEX_VERIFIER_EFFORT &&
+    results.length === expected.size &&
+    new Set(results.map((item) => item?.id)).size === expected.size &&
+    results.every((item) => {
+      const expectedAllowed = expected.get(item?.id);
+      const verdictIsCoherent = expectedAllowed
+        ? item?.decision === "allow" && item?.reason_code === "supported"
+        : item?.decision === "reject" && item?.reason_code !== "supported";
+      return expected.has(item?.id) &&
+        item?.expected_allowed === expectedAllowed &&
+        item?.allowed === expectedAllowed &&
+        item?.passed === true &&
+        verdictIsCoherent &&
+        Number.isFinite(item?.latency?.first_token_ms) &&
+        Number.isFinite(item?.latency?.total_ms) &&
+        item.latency.first_token_ms >= 0 &&
+        item.latency.first_token_ms <= item.latency.total_ms;
+    }) &&
+    sessionIds.length === expected.size &&
+    sessionIds.every((id) => typeof id === "string" && id.trim().length > 0) &&
+    new Set(sessionIds).size === expected.size &&
+    calibration?.passed === true;
+}
+
 /** Recompute the complete calibrated quality artifact; trust no aggregate flag. */
 export function validateSidekickHybridQualityArtifact(
   report,
@@ -190,6 +226,9 @@ export function validateSidekickHybridQualityArtifact(
     runs.map((run) => substantiveRunFingerprint(run)),
   ).size === 3;
   const calibrationPass = calibrationRecomputesCleanly(runs[0]?.semantic_calibration);
+  const verifierCalibrationPass = verifierCalibrationRecomputesCleanly(
+    report?.verifier_calibration,
+  );
   const latencyPass =
     latencySamples.length === 6 &&
     firstTokenP95 <= MAX_ACCEPTED_FIRST_TOKEN_P95_MS &&
@@ -203,6 +242,7 @@ export function validateSidekickHybridQualityArtifact(
     report?.requested_model === CODEX_REALTIME_MODEL &&
     report?.requested_effort === CODEX_REALTIME_EFFORT &&
     report?.requested_verifier_model === CODEX_VERIFIER_MODEL &&
+    report?.requested_verifier_effort === CODEX_VERIFIER_EFFORT &&
     sidekickProviderAttestationMatches(
       report?.provider_executable,
       report?.provider_executable,
@@ -213,6 +253,7 @@ export function validateSidekickHybridQualityArtifact(
     distinctSemanticJudgeSessions &&
     distinctSubstantiveRuns &&
     calibrationPass &&
+    verifierCalibrationPass &&
     latencyPass;
 
   return {
@@ -223,10 +264,12 @@ export function validateSidekickHybridQualityArtifact(
     requested_model: report?.requested_model ?? null,
     requested_effort: report?.requested_effort ?? null,
     requested_verifier_model: report?.requested_verifier_model ?? null,
+    requested_verifier_effort: report?.requested_verifier_effort ?? null,
     provider_executable: report?.provider_executable ?? null,
     mechanical_quality_passed: runsPass,
     semantic_quality_passed: runsPass,
     semantic_calibration_passed: calibrationPass,
+    verifier_calibration_passed: verifierCalibrationPass,
     model_matched: runsPass,
     latency_passed: latencyPass,
     first_token_p95_ms: firstTokenP95,
@@ -250,6 +293,7 @@ export function sidekickHybridQualityReceiptPasses(
     receipt?.requested_model === CODEX_REALTIME_MODEL &&
     receipt?.requested_effort === CODEX_REALTIME_EFFORT &&
     receipt?.requested_verifier_model === CODEX_VERIFIER_MODEL &&
+    receipt?.requested_verifier_effort === CODEX_VERIFIER_EFFORT &&
     sidekickProviderAttestationMatches(
       receipt?.provider_executable,
       providerExecutable,
@@ -257,6 +301,7 @@ export function sidekickHybridQualityReceiptPasses(
     receipt?.mechanical_quality_passed === true &&
     receipt?.semantic_quality_passed === true &&
     receipt?.semantic_calibration_passed === true &&
+    receipt?.verifier_calibration_passed === true &&
     receipt?.model_matched === true &&
     receipt?.latency_passed === true &&
     receipt?.first_token_p95_ms <= MAX_ACCEPTED_FIRST_TOKEN_P95_MS &&
@@ -362,6 +407,25 @@ export function sidekickProducerReceiptMatches({
   expectedSourceBinding,
   expectedProviderExecutable,
 }) {
+  let report;
+  try {
+    report = JSON.parse(Buffer.from(artifactBytes).toString("utf8"));
+  } catch {
+    return false;
+  }
+  const exactOrderedIds = (actual, expected) =>
+    Array.isArray(actual) &&
+    Array.isArray(expected) &&
+    actual.length === expected.length &&
+    actual.every((id, index) =>
+      typeof id === "string" && id.trim().length > 0 && id === expected[index]);
+  const artifactStrategistIds = Array.isArray(report?.runs)
+    ? report.runs.map((run) => run?.backend_session_id)
+    : null;
+  const artifactSemanticJudgeIds = Array.isArray(report?.runs)
+    ? report.runs.map((run) => run?.semantic_judge_session_id)
+    : null;
+  const artifactVerifierCalibrationIds = report?.verifier_calibration?.session_ids;
   return producerReceipt?.schema_version === 1 &&
     producerReceipt?.artifact_sha256 === sha256(artifactBytes) &&
     sidekickQualitySourceBindingMatches(
@@ -375,9 +439,20 @@ export function sidekickProducerReceiptMatches({
     Array.isArray(producerReceipt?.strategist_session_ids) &&
     producerReceipt.strategist_session_ids.length === 3 &&
     new Set(producerReceipt.strategist_session_ids).size === 3 &&
+    exactOrderedIds(producerReceipt.strategist_session_ids, artifactStrategistIds) &&
     Array.isArray(producerReceipt?.semantic_judge_session_ids) &&
     producerReceipt.semantic_judge_session_ids.length === 3 &&
-    new Set(producerReceipt.semantic_judge_session_ids).size === 3;
+    new Set(producerReceipt.semantic_judge_session_ids).size === 3 &&
+    exactOrderedIds(producerReceipt.semantic_judge_session_ids, artifactSemanticJudgeIds) &&
+    Array.isArray(producerReceipt?.verifier_calibration_session_ids) &&
+    producerReceipt.verifier_calibration_session_ids.length ===
+      sidekickVerifierCalibrationCases.length &&
+    new Set(producerReceipt.verifier_calibration_session_ids).size ===
+      sidekickVerifierCalibrationCases.length &&
+    exactOrderedIds(
+      producerReceipt.verifier_calibration_session_ids,
+      artifactVerifierCalibrationIds,
+    );
 }
 
 export const sidekickHybridMechanicalCheckNames = MECHANICAL_CHECK_NAMES;

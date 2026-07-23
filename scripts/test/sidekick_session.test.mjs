@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
-import { SidekickSession } from "../lib/sidekick_session.mjs";
+import {
+  compactVisibleText,
+  SidekickSession,
+} from "../lib/sidekick_session.mjs";
 
 function deferred() {
   let resolve;
@@ -138,7 +141,7 @@ test("a typed user message steers and promotes active background work", async ()
   assert.equal(backend.turns.length, 1);
   assert.equal(backend.steers.length, 1);
   const steeredForegroundText = Array.from({ length: 55 }, () => "answer").join(" ");
-  assert.ok(steeredForegroundText.length > 340 && steeredForegroundText.length <= 440);
+  assert.ok(steeredForegroundText.length > 340 && steeredForegroundText.length <= 700);
   backend.turns[0].pending.resolve(
     result({
       decision: "speak",
@@ -170,14 +173,14 @@ test("routine background movement can resolve silently without publication", asy
   });
   const completion = session.evaluateProactive();
   await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(backend.turns[0].params.outputSchema.properties.text.maxLength, 440);
+  assert.equal(backend.turns[0].params.outputSchema.properties.text.maxLength, 700);
   backend.turns[0].pending.resolve(result({ decision: "silent", confidence: 99 }));
   const completed = await completion;
   assert.equal(completed.published, false);
   assert.equal(publications.length, 0);
 });
 
-test("Minutes rejects overlong responses even when a backend ignores its schema", async () => {
+test("Minutes compacts rare model overages before verification and publication", async () => {
   const backend = new FakeBackend();
   const session = new SidekickSession({ backend, captureSessionId: "capture-a" });
   await session.start();
@@ -192,21 +195,52 @@ test("Minutes rejects overlong responses even when a backend ignores its schema"
   backend.turns[0].pending.resolve(
     result({
       decision: "speak",
-      text: Array.from({ length: 51 }, () => "word").join(" "),
+      text: `${Array.from({ length: 55 }, () => "material").join(" ")}. What threshold changes the decision?`,
       evidence_ids: ["grounding"],
     }),
   );
-  assert.equal((await background).invalid, true);
+  const backgroundResult = await background;
+  assert.equal(backgroundResult.published, true);
+  assert.ok(backgroundResult.publication.decision.text.split(/\s+/).length <= 50);
+  assert.match(backgroundResult.publication.decision.text, /What threshold changes the decision\?$/);
 
   const foreground = session.sendUser("What should I do?");
   await new Promise((resolve) => setImmediate(resolve));
   backend.turns[1].pending.resolve(
     result({
       decision: "speak",
-      text: Array.from({ length: 71 }, () => "word").join(" "),
+      text: `${Array.from({ length: 75 }, () => "specific").join(" ")}. Which boundary changes the answer?`,
+      evidence_ids: ["grounding"],
     }),
   );
-  assert.equal((await foreground).invalid, true);
+  const foregroundResult = await foreground;
+  assert.equal(foregroundResult.published, true);
+  assert.ok(foregroundResult.publication.decision.text.split(/\s+/).length <= 70);
+  assert.match(foregroundResult.publication.decision.text, /Which boundary changes the answer\?$/);
+  assert.equal(
+    session.trace.filter((item) => item.type === "visible_response_compacted").length,
+    2,
+  );
+});
+
+test("JavaScript compaction matches the shared native expected-output corpus", async () => {
+  const corpus = JSON.parse(await readFile(
+    new URL("../../tests/fixtures/sidekick_compaction/v1/cases.json", import.meta.url),
+    "utf8",
+  ));
+  assert.equal(corpus.schema_version, 1);
+  for (const item of corpus.cases) {
+    const input = [
+      item.prefix,
+      Array.from({ length: item.filler_count }, () => item.filler_word).join(" "),
+      item.suffix,
+    ].filter(Boolean).join(" ");
+    assert.equal(
+      compactVisibleText(input, item.maximum_words),
+      item.expected,
+      item.id,
+    );
+  }
 });
 
 test("wrong-session transcript and screen evidence are rejected before inference", async () => {
@@ -677,7 +711,7 @@ test("typed authority is outside the untrusted transcript envelope and evidence 
   const completion = session.sendUser("What should I say?");
   await new Promise((resolve) => setImmediate(resolve));
   const inputs = backend.turns[0].params.input.filter((item) => item.type === "text");
-  assert.equal(backend.turns[0].params.outputSchema.properties.text.maxLength, 440);
+  assert.equal(backend.turns[0].params.outputSchema.properties.text.maxLength, 700);
   assert.equal(inputs.length, 2);
   assert.doesNotMatch(inputs[0].text, /AUTHORITATIVE TYPED USER MESSAGE/);
   assert.equal(inputs[1].text, "AUTHORITATIVE TYPED USER MESSAGE\nWhat should I say?");

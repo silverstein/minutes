@@ -13,6 +13,8 @@ const QUALITY_SURFACE_PATHS = Object.freeze([
   "resources/live_sidekick/codex_realtime_model.txt",
   "resources/live_sidekick/codex_realtime_effort.txt",
   "resources/live_sidekick/codex_verifier_model.txt",
+  "resources/live_sidekick/codex_verifier_effort.txt",
+  "tauri/src/assets/app-icon.png",
   "scripts/lib/sidekick_provider.mjs",
   "scripts/lib/sidekick_provider_attestation.mjs",
   "scripts/lib/sidekick_session.mjs",
@@ -21,6 +23,8 @@ const QUALITY_SURFACE_PATHS = Object.freeze([
   "scripts/sidekick_session_eval.mjs",
   "tests/eval/sidekick_rehearsal_golden.mjs",
   "tests/eval/sidekick_semantic_calibration.mjs",
+  "tests/eval/sidekick_verifier_calibration.mjs",
+  "tests/fixtures/sidekick_compaction/v1/cases.json",
   "tests/fixtures/sidekick_rehearsal/v1/meridian_ship_decision.json",
 ]);
 

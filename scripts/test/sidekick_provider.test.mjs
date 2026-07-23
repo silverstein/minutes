@@ -4,6 +4,7 @@ import {
   assertReasoningBackend,
   CODEX_REALTIME_EFFORT,
   CODEX_REALTIME_MODEL,
+  CODEX_VERIFIER_EFFORT,
   CODEX_VERIFIER_MODEL,
   CodexAppServerBackend,
 } from "../lib/sidekick_provider.mjs";
@@ -113,7 +114,8 @@ test("the Codex adapter defaults to the shipped realtime model", async () => {
   });
 
   assert.equal(CODEX_REALTIME_MODEL, "gpt-5.6-terra");
-  assert.equal(CODEX_VERIFIER_MODEL, "gpt-5.6-sol");
+  assert.equal(CODEX_VERIFIER_MODEL, "gpt-5.6-terra");
+  assert.equal(CODEX_VERIFIER_EFFORT, "low");
   assert.equal(CODEX_REALTIME_EFFORT, "none");
   assert.equal(client.started.model, CODEX_REALTIME_MODEL);
   const turn = await backend.startTurn({ input: [], outputSchema: { type: "object" } });

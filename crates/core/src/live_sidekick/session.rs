@@ -961,8 +961,130 @@ impl LiveAssistanceSession {
 }
 
 const MINIMUM_PROACTIVE_CONFIDENCE: u8 = 70;
-const MAXIMUM_BACKGROUND_WORDS: usize = 50;
-const MAXIMUM_FOREGROUND_WORDS: usize = 70;
+pub(super) const MAXIMUM_BACKGROUND_WORDS: usize = 50;
+pub(super) const MAXIMUM_FOREGROUND_WORDS: usize = 70;
+
+fn terminal_core(word: &str) -> &str {
+    word.trim_end_matches(['"', '\'', '”', '’', ')', ']', '}'])
+}
+
+fn ends_sentence(word: &str) -> bool {
+    terminal_core(word)
+        .chars()
+        .last()
+        .is_some_and(|character| matches!(character, '.' | '!' | '?'))
+}
+
+fn sentence_is_question(sentence: &str) -> bool {
+    let terminal = terminal_core(sentence.split_whitespace().last().unwrap_or_default());
+    terminal
+        .chars()
+        .rev()
+        .take_while(|character| matches!(character, '.' | '!' | '?'))
+        .any(|character| character == '?')
+}
+
+fn has_fragment_boundary(word: &str) -> bool {
+    terminal_core(word)
+        .chars()
+        .last()
+        .is_some_and(|character| matches!(character, ',' | ':' | ';' | '.' | '!' | '?'))
+}
+
+fn truncate_visible_fragment(text: &str, maximum_words: usize, terminal: char) -> String {
+    let words = text.split_whitespace().collect::<Vec<_>>();
+    if words.len() <= maximum_words {
+        return words.join(" ");
+    }
+    let selected = &words[..maximum_words];
+    let boundary_floor = selected.len() / 2;
+    let boundary = selected
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(index, word)| *index >= boundary_floor && has_fragment_boundary(word))
+        .map(|(index, _)| index + 1)
+        .unwrap_or(selected.len());
+    let mut compacted = selected[..boundary].join(" ");
+    while compacted.chars().last().is_some_and(|character| {
+        matches!(
+            character,
+            ',' | ':' | ';' | '.' | '!' | '?' | '"' | '\'' | '”' | '’' | ')' | ']' | '}'
+        )
+    }) {
+        compacted.pop();
+    }
+    compacted.push(if terminal == '?' { '?' } else { '…' });
+    compacted
+}
+
+pub(super) fn compact_visible_text(text: &str, maximum_words: usize) -> String {
+    let normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.split_whitespace().count() <= maximum_words {
+        return normalized;
+    }
+    let mut sentences: Vec<String> = Vec::new();
+    let mut current: Vec<&str> = Vec::new();
+    for word in normalized.split_whitespace() {
+        current.push(word);
+        if ends_sentence(word) {
+            sentences.push(current.join(" "));
+            current.clear();
+        }
+    }
+    if !current.is_empty() {
+        sentences.push(current.join(" "));
+    }
+    let question_index = sentences
+        .iter()
+        .rposition(|sentence| sentence_is_question(sentence));
+    let question = question_index.map(|index| {
+        let sentence = &sentences[index];
+        truncate_visible_fragment(
+            sentence,
+            sentence.split_whitespace().count().min(maximum_words),
+            '?',
+        )
+    });
+    let question_words = question
+        .as_deref()
+        .map(|value| value.split_whitespace().count())
+        .unwrap_or(0);
+    let body_budget = maximum_words.saturating_sub(question_words);
+    let body_end = question_index.unwrap_or(sentences.len());
+    let mut selected = Vec::new();
+    let mut selected_words: usize = 0;
+    for sentence in &sentences[..body_end] {
+        let count = sentence.split_whitespace().count();
+        if selected_words.saturating_add(count) > body_budget {
+            break;
+        }
+        selected.push(sentence.clone());
+        selected_words = selected_words.saturating_add(count);
+    }
+    if selected.is_empty() && body_budget > 0 {
+        if let Some(sentence) = sentences.first() {
+            selected.push(truncate_visible_fragment(sentence, body_budget, '…'));
+        }
+    }
+    if let Some(question) = question {
+        selected.push(question);
+    }
+    let compacted = selected.join(" ").trim().to_string();
+    if compacted.is_empty() {
+        truncate_visible_fragment(
+            &normalized,
+            maximum_words,
+            if sentence_is_question(&normalized) {
+                '?'
+            } else {
+                '…'
+            },
+        )
+    } else {
+        compacted
+    }
+}
 
 fn references_visual_detail(text: &str) -> bool {
     let text = text.to_lowercase();
@@ -1751,6 +1873,47 @@ mod tests {
             assert_eq!(
                 session.validate_candidate(&overlong, background),
                 Err(CandidateSuppressionReason::InvalidCandidate)
+            );
+        }
+    }
+
+    #[test]
+    fn native_compaction_matches_the_shared_expected_output_corpus() {
+        #[derive(Deserialize)]
+        struct Corpus {
+            schema_version: u8,
+            cases: Vec<Case>,
+        }
+        #[derive(Deserialize)]
+        struct Case {
+            id: String,
+            prefix: String,
+            filler_word: String,
+            filler_count: usize,
+            suffix: String,
+            maximum_words: usize,
+            expected: String,
+        }
+
+        let corpus: Corpus = serde_json::from_str(include_str!(
+            "../../../../tests/fixtures/sidekick_compaction/v1/cases.json"
+        ))
+        .unwrap();
+        assert_eq!(corpus.schema_version, 1);
+        for case in corpus.cases {
+            let filler = std::iter::repeat_n(case.filler_word, case.filler_count)
+                .collect::<Vec<_>>()
+                .join(" ");
+            let input = [case.prefix, filler, case.suffix]
+                .into_iter()
+                .filter(|part| !part.is_empty())
+                .collect::<Vec<_>>()
+                .join(" ");
+            assert_eq!(
+                compact_visible_text(&input, case.maximum_words),
+                case.expected,
+                "{}",
+                case.id
             );
         }
     }

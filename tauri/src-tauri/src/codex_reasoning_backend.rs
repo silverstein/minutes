@@ -40,6 +40,10 @@ fn codex_realtime_effort() -> &'static str {
     include_str!("../../../resources/live_sidekick/codex_realtime_effort.txt").trim()
 }
 
+fn codex_verifier_effort() -> &'static str {
+    include_str!("../../../resources/live_sidekick/codex_verifier_effort.txt").trim()
+}
+
 fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|error| error.into_inner())
 }
@@ -52,6 +56,7 @@ pub struct CodexReasoningBackend {
     home: PathBuf,
     codex_home: PathBuf,
     model: String,
+    effort: String,
     _isolated_dir: Option<Arc<tempfile::TempDir>>,
 }
 
@@ -67,6 +72,7 @@ impl CodexReasoningBackend {
             home,
             codex_home,
             model: codex_realtime_model().into(),
+            effort: codex_realtime_effort().into(),
             _isolated_dir: None,
         }
     }
@@ -78,20 +84,31 @@ impl CodexReasoningBackend {
         executable: PathBuf,
         configured_mcp_servers: impl IntoIterator<Item = String>,
     ) -> Result<Self, ReasoningError> {
-        Self::sidekick_with_model(executable, configured_mcp_servers, codex_realtime_model())
+        Self::sidekick_with_model_and_effort(
+            executable,
+            configured_mcp_servers,
+            codex_realtime_model(),
+            codex_realtime_effort(),
+        )
     }
 
     pub fn sidekick_verifier(
         executable: PathBuf,
         configured_mcp_servers: impl IntoIterator<Item = String>,
     ) -> Result<Self, ReasoningError> {
-        Self::sidekick_with_model(executable, configured_mcp_servers, codex_verifier_model())
+        Self::sidekick_with_model_and_effort(
+            executable,
+            configured_mcp_servers,
+            codex_verifier_model(),
+            codex_verifier_effort(),
+        )
     }
 
-    fn sidekick_with_model(
+    fn sidekick_with_model_and_effort(
         executable: PathBuf,
         _configured_mcp_servers: impl IntoIterator<Item = String>,
         model: &str,
+        effort: &str,
     ) -> Result<Self, ReasoningError> {
         let isolated_dir = Arc::new(tempfile::tempdir().map_err(|error| {
             ReasoningError::new(
@@ -155,7 +172,7 @@ impl CodexReasoningBackend {
             "--config".into(),
             "service_tier=\"fast\"".into(),
             "--config".into(),
-            format!("model_reasoning_effort=\"{}\"", codex_realtime_effort()),
+            format!("model_reasoning_effort=\"{effort}\""),
         ];
         // CODEX_HOME contains authentication only, so there are no inherited
         // MCP definitions to disable. Do not synthesize partial per-server
@@ -169,6 +186,7 @@ impl CodexReasoningBackend {
             home,
             codex_home,
             model: model.into(),
+            effort: effort.into(),
             _isolated_dir: Some(isolated_dir),
         })
     }
@@ -286,6 +304,7 @@ impl PersistentReasoningBackend for CodexReasoningBackend {
             id: ReasoningSessionId::new("pending-codex-thread"),
             config,
             model: self.model.clone(),
+            effort: self.effort.clone(),
             cwd: self.cwd.clone(),
             stdin,
             child: Some(child),
@@ -339,6 +358,7 @@ pub struct CodexReasoningSession {
     id: ReasoningSessionId,
     config: ReasoningSessionConfig,
     model: String,
+    effort: String,
     cwd: PathBuf,
     stdin: Arc<Mutex<ChildStdin>>,
     child: Option<Child>,
@@ -486,14 +506,14 @@ impl CodexReasoningSession {
                 // cannot replace its output schema. Give every started turn
                 // foreground-capable character headroom; Minutes core still
                 // enforces the stricter 50-word background publication cap.
-                let max_length = 440;
+                let max_length = 700;
                 let turn_name = match kind {
                     ReasoningTurnKind::Background => "steerable background",
                     ReasoningTurnKind::Foreground => "foreground",
                 };
                 let target_words = match kind {
-                    ReasoningTurnKind::Background => 42,
-                    ReasoningTurnKind::Foreground => 62,
+                    ReasoningTurnKind::Background => 36,
+                    ReasoningTurnKind::Foreground => 54,
                 };
                 json!({
                     "type": "object",
@@ -590,7 +610,7 @@ impl PersistentReasoningSession for CodexReasoningSession {
                 "input": Self::input_for(&request),
                 "outputSchema": Self::output_schema_for(request.output_contract, request.kind),
                 "serviceTier": service_tier,
-                "effort": codex_realtime_effort(),
+                "effort": self.effort.as_str(),
                 "environments": []
             }),
             PendingKind::TurnStart {
@@ -1394,7 +1414,7 @@ rl.on('line', (line) => {
             .contains("directionally complete obligation"));
         assert_eq!(
             schema.pointer("/properties/text/maxLength"),
-            Some(&json!(440))
+            Some(&json!(700))
         );
         let background_schema = CodexReasoningSession::output_schema_for(
             ReasoningOutputContract::InterventionCandidateV1,
@@ -1402,7 +1422,7 @@ rl.on('line', (line) => {
         );
         assert_eq!(
             background_schema.pointer("/properties/text/maxLength"),
-            Some(&json!(440))
+            Some(&json!(700))
         );
     }
 
@@ -1513,6 +1533,12 @@ rl.on('line', (line) => {
         )
         .unwrap();
         assert_eq!(backend.descriptor().model, "gpt-5.6-terra");
-        assert_eq!(verifier.descriptor().model, "gpt-5.6-sol");
+        assert_eq!(verifier.descriptor().model, "gpt-5.6-terra");
+        assert_eq!(backend.effort, "none");
+        assert_eq!(verifier.effort, "low");
+        assert!(verifier
+            .args
+            .join(" ")
+            .contains("model_reasoning_effort=\"low\""));
     }
 }

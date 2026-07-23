@@ -15,6 +15,11 @@ export const CODEX_VERIFIER_MODEL = readFileSync(
   "utf8",
 ).trim();
 
+export const CODEX_VERIFIER_EFFORT = readFileSync(
+  new URL("../../resources/live_sidekick/codex_verifier_effort.txt", import.meta.url),
+  "utf8",
+).trim();
+
 /**
  * Vendor-neutral persistent reasoning backend contract used by Sidekick.
  *

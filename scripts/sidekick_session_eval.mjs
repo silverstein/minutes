@@ -14,6 +14,7 @@ import {
 import {
   CODEX_REALTIME_EFFORT,
   CODEX_REALTIME_MODEL,
+  CODEX_VERIFIER_EFFORT,
   CODEX_VERIFIER_MODEL,
   CodexAppServerBackend,
 } from "./lib/sidekick_provider.mjs";
@@ -25,6 +26,7 @@ import {
   scoreMeridianResponses,
 } from "../tests/eval/sidekick_rehearsal_golden.mjs";
 import { meridianSemanticCalibrationCases } from "../tests/eval/sidekick_semantic_calibration.mjs";
+import { sidekickVerifierCalibrationCases } from "../tests/eval/sidekick_verifier_calibration.mjs";
 import { currentSidekickQualitySourceBinding } from "./lib/sidekick_quality_source_binding.mjs";
 import {
   attestSidekickProviderExecutable,
@@ -43,6 +45,7 @@ function parseArgs(argv) {
     model: CODEX_REALTIME_MODEL,
     effort: CODEX_REALTIME_EFFORT,
     verifierModel: CODEX_VERIFIER_MODEL,
+    verifierEffort: CODEX_VERIFIER_EFFORT,
     maxFirstTokenMs: 4_000,
     maxTotalMs: 7_000,
     producerReceipt: false,
@@ -56,6 +59,7 @@ function parseArgs(argv) {
     else if (arg === "--model") options.model = argv[++index];
     else if (arg === "--effort") options.effort = argv[++index];
     else if (arg === "--verifier-model") options.verifierModel = argv[++index];
+    else if (arg === "--verifier-effort") options.verifierEffort = argv[++index];
     else if (arg === "--max-first-token-ms") options.maxFirstTokenMs = Number(argv[++index]);
     else if (arg === "--max-total-ms") options.maxTotalMs = Number(argv[++index]);
     else if (arg === "--producer-receipt") options.producerReceipt = true;
@@ -83,10 +87,87 @@ function preparedBrief(fixture) {
   };
 }
 
-async function runOnce({ fixture, codex, model, verifierModel, effort, run }) {
+async function runVerifierCalibration({ codex, verifierModel, verifierEffort }) {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "minutes-sidekick-verifier-calibration-"));
+  const mcpDisableArgs = await configuredMcpDisableArgs();
+  let session = 0;
+  const verifier = new BackendEvidenceVerifier({
+    backendFactory: () => {
+      session += 1;
+      const client = new CodexAppServerClient({
+        command: codex,
+        args: [
+          "--disable",
+          "apps",
+          "--disable",
+          "plugins",
+          "--config",
+          'service_tier="fast"',
+          "--config",
+          `model_reasoning_effort=${JSON.stringify(verifierEffort)}`,
+          ...mcpDisableArgs,
+          "--enable",
+          "fast_mode",
+          "app-server",
+        ],
+        cwd,
+        requestTimeoutMs: 60_000,
+        experimentalApi: true,
+        clientInfo: {
+          name: `minutes-sidekick-verifier-calibration-${session}`,
+          title: "Minutes Sidekick Verifier Calibration",
+          version: "0.2.0",
+        },
+      });
+      return new CodexAppServerBackend(client, {
+        model: verifierModel,
+        reasoningEffort: verifierEffort,
+      });
+    },
+  });
+  const results = [];
+  try {
+    await verifier.start({ cwd });
+    for (const item of sidekickVerifierCalibrationCases) {
+      const screenEvidence = item.screen_evidence
+        ? {
+            id: item.screen_evidence.id,
+            path: path.resolve(repoRoot, item.screen_evidence.path),
+          }
+        : null;
+      const verdict = await verifier.verify({
+        candidate: item.candidate,
+        transcriptEvidence: item.transcript_evidence,
+        screenEvidence,
+        authoritativeContext: { role: "meeting strategist" },
+      });
+      results.push({
+        id: item.id,
+        expected_allowed: item.expected_allowed,
+        allowed: verdict.allowed,
+        decision: verdict.decision,
+        reason_code: verdict.reason_code,
+        latency: verdict.latency,
+        passed: verdict.allowed === item.expected_allowed,
+      });
+    }
+    return {
+      model: verifierModel,
+      effort: verifierEffort,
+      passed: results.every((item) => item.passed),
+      results,
+      session_ids: verifier.verificationReceipts.map((receipt) => receipt.session_id),
+    };
+  } finally {
+    await verifier.close();
+    await fs.rm(cwd, { recursive: true, force: true });
+  }
+}
+
+async function runOnce({ fixture, codex, model, verifierModel, effort, verifierEffort, run }) {
   const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "minutes-sidekick-session-eval-"));
   const mcpDisableArgs = await configuredMcpDisableArgs();
-  const clientOptions = (name, title) => ({
+  const clientOptions = (name, title, backendEffort = effort) => ({
     command: codex,
     args: [
       "--disable",
@@ -96,7 +177,7 @@ async function runOnce({ fixture, codex, model, verifierModel, effort, run }) {
       "--config",
       'service_tier="fast"',
       "--config",
-      `model_reasoning_effort=${JSON.stringify(effort)}`,
+      `model_reasoning_effort=${JSON.stringify(backendEffort)}`,
       ...mcpDisableArgs,
       "--enable",
       "fast_mode",
@@ -126,11 +207,12 @@ async function runOnce({ fixture, codex, model, verifierModel, effort, run }) {
         clientOptions(
           `minutes-sidekick-evidence-verifier-${verifierSession}`,
           "Minutes Sidekick Evidence Verifier",
+          verifierEffort,
         ),
       );
       return new CodexAppServerBackend(verifierClient, {
         model: verifierModel,
-        reasoningEffort: effort,
+        reasoningEffort: verifierEffort,
       });
     },
   });
@@ -197,6 +279,7 @@ async function runOnce({ fixture, codex, model, verifierModel, effort, run }) {
       requested_model: model,
       requested_effort: effort,
       requested_verifier_model: verifierModel,
+      requested_verifier_effort: verifierEffort,
       model: backend.model,
       backend_session_id: backend.sessionId,
       semantic_judge_provider: semanticBackend.provider,
@@ -252,9 +335,15 @@ async function main() {
       model: options.model,
       effort: options.effort,
       verifierModel: options.verifierModel,
+      verifierEffort: options.verifierEffort,
       run,
     }));
   }
+  const verifierCalibration = await runVerifierCalibration({
+    codex: providerExecutable.path,
+    verifierModel: options.verifierModel,
+    verifierEffort: options.verifierEffort,
+  });
   const latencySamples = runs.flatMap((run) =>
     [run.latency.proactive, run.latency.role_flip].filter(Boolean),
   );
@@ -269,6 +358,7 @@ async function main() {
   const qualityPassed = runs.every((run) => run.golden.passed);
   const semanticQualityPassed = runs.every((run) => run.semantic.passed);
   const semanticCalibrationPassed = runs[0]?.semantic_calibration?.passed === true;
+  const verifierCalibrationPassed = verifierCalibration.passed === true;
   const modelMatched = runs.every((run) => run.model === options.model);
   const latencyPassed =
     firstTokenP95 !== null &&
@@ -288,19 +378,23 @@ async function main() {
     requested_model: options.model,
     requested_effort: options.effort,
     requested_verifier_model: options.verifierModel,
+    requested_verifier_effort: options.verifierEffort,
     provider_executable: providerExecutable,
     source_binding: await currentSidekickQualitySourceBinding(repoRoot),
     runs,
+    verifier_calibration: verifierCalibration,
     aggregate: {
       quality_passed: qualityPassed,
       semantic_quality_passed: semanticQualityPassed,
       semantic_calibration_passed: semanticCalibrationPassed,
+      verifier_calibration_passed: verifierCalibrationPassed,
       model_matched: modelMatched,
       latency_passed: latencyPassed,
       passed:
         qualityPassed &&
         semanticQualityPassed &&
         semanticCalibrationPassed &&
+        verifierCalibrationPassed &&
         modelMatched &&
         latencyPassed,
       first_token_p95_ms: firstTokenP95,
@@ -324,6 +418,7 @@ async function main() {
       source_binding: report.source_binding,
       strategist_session_ids: runs.map((run) => run.backend_session_id),
       semantic_judge_session_ids: runs.map((run) => run.semantic_judge_session_id),
+      verifier_calibration_session_ids: verifierCalibration.session_ids,
       provider_executable: providerExecutableAfter,
     })}\n`);
   }

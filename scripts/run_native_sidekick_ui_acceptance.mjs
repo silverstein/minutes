@@ -42,6 +42,15 @@ const MAX_OUTPUT_BYTES = 1024 * 1024;
 const CANONICAL_FIXTURE_PATH = fileURLToPath(
   new URL("../tests/fixtures/sidekick_rehearsal/v1/meridian_ship_decision.json", import.meta.url),
 );
+const MAC_SESSION_LOCK_PROBE = [
+  "import CoreGraphics",
+  "if let session = CGSessionCopyCurrentDictionary() as? [String: Any],",
+  "   let locked = session[\"CGSSessionScreenIsLocked\"] as? Bool {",
+  "  print(locked ? \"locked\" : \"unlocked\")",
+  "} else {",
+  "  print(\"unknown\")",
+  "}",
+].join("\n");
 
 function sha256(bytes) {
   return createHash("sha256").update(bytes).digest("hex");
@@ -53,6 +62,28 @@ export async function canonicalExistingPath(filePath) {
 
 function check(name, passed, detail) {
   return { name, passed: Boolean(passed), detail };
+}
+
+export function parseMacSessionLockProbe(output) {
+  const state = String(output).trim();
+  if (state === "locked") return true;
+  if (state === "unlocked") return false;
+  throw new Error(`could not determine macOS session lock state: ${state || "empty response"}`);
+}
+
+export function assertMacSessionUnlocked({
+  platform = process.platform,
+  probe = () => execFileSync("/usr/bin/swift", ["-e", MAC_SESSION_LOCK_PROBE], {
+    encoding: "utf8",
+    timeout: 10_000,
+  }),
+} = {}) {
+  if (platform !== "darwin") return;
+  if (parseMacSessionLockProbe(probe())) {
+    throw new Error(
+      "Unlock the Mac before running native Sidekick acceptance; a locked session cannot expose the painted marker or real room-microphone signal.",
+    );
+  }
 }
 
 const canonicalFixtureBytes = await fs.readFile(CANONICAL_FIXTURE_PATH);
@@ -1071,6 +1102,7 @@ async function main(argv) {
   if (argv.length > 2) {
     throw new Error(`installed native Sidekick UI acceptance only runs against ${canonicalApp}`);
   }
+  assertMacSessionUnlocked();
   await validateCanonicalInstalledApp(canonicalApp, canonicalApp);
   const repositoryRoot = fileURLToPath(new URL("../", import.meta.url));
   const expectedBuildCommit = execFileSync("git", ["rev-parse", "--verify", "HEAD"], {

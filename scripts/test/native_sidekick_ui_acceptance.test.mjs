@@ -8,12 +8,14 @@ import vm from 'node:vm';
 
 import {
   appendBoundedOutput,
+  assertMacSessionUnlocked,
   canonicalExistingPath,
   cleanupNativeSidekickProcessLanes,
   evaluateNativeSidekickUiAcceptance,
   nativeSidekickLaunchServicesArgs,
   nativeSidekickFailureWithLogs,
   nativeSidekickTemporaryParent,
+  parseMacSessionLockProbe,
   parseLsofTextIdentities,
   readBoundedOutputFile,
   singleFlightAsync,
@@ -51,6 +53,24 @@ function semanticResponses(payload) {
     turn_2: { text: payload.turns[1].response, evidence_ids: evidence(1) },
   };
 }
+
+test('native acceptance refuses a locked macOS session before capture', () => {
+  assert.throws(
+    () => assertMacSessionUnlocked({ platform: 'darwin', probe: () => 'locked\n' }),
+    /Unlock the Mac before running native Sidekick acceptance/,
+  );
+  assert.doesNotThrow(
+    () => assertMacSessionUnlocked({ platform: 'darwin', probe: () => 'unlocked\n' }),
+  );
+  assert.doesNotThrow(
+    () => assertMacSessionUnlocked({ platform: 'linux', probe: () => {
+      throw new Error('probe must not run off macOS');
+    } }),
+  );
+  assert.equal(parseMacSessionLockProbe('locked'), true);
+  assert.equal(parseMacSessionLockProbe('unlocked'), false);
+  assert.throws(() => parseMacSessionLockProbe('unknown'), /could not determine/);
+});
 
 test('provider attestation canonicalizes an existing path alias', async () => {
   const temporaryRoot = await mkdtemp(path.join(os.tmpdir(), 'minutes-provider-path-'));

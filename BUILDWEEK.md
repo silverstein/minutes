@@ -161,5 +161,6 @@ All timestamps below are the author timestamps recorded by Git. PDT is UTC−07:
 | `3f0094e1` | 2026-07-22 21:01:43 | 2026-07-22 14:01:43 PDT | Locate the Sidekick marker by its connected fiducial |
 | `547e2074` | 2026-07-22 21:06:22 | 2026-07-22 14:06:22 PDT | Wait for Sidekick onboarding paint |
 | `c9a66909` | 2026-07-22 21:11:59 | 2026-07-22 14:11:59 PDT | Bind Sidekick screen-context reads to the active session |
+| `7dd209e8` | 2026-07-23 01:28:58 | 2026-07-22 18:28:58 PDT | Add evidence-verified publication, continuous-speech liveness, stale-event isolation, provider-bound semantic judging, and the witnessed autonomous quality gate |
 
 This branch intentionally remains separate from `main` for Build Week review and live rehearsal.

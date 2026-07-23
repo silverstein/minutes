@@ -7660,9 +7660,14 @@ mod prepare_transcription_input_tests {
             .expect("repaired stems must be mixed internally");
 
         assert!(matches!(result, PreparedTranscriptionInput::Mixed(_)));
+        // Canonicalize expectations: macOS tempdirs live under the /var ->
+        // /private/var symlink and the prepare path canonicalizes stem paths.
         assert_eq!(
             invocations.into_inner(),
-            vec![(system.clone(), voice.clone())],
+            vec![(
+                system.canonicalize().unwrap(),
+                voice.canonicalize().unwrap()
+            )],
             "both repaired stems must flow through the internal mixer seam"
         );
         for path in [&voice, &system] {
@@ -7799,9 +7804,10 @@ mod prepare_transcription_input_tests {
         })
         .expect("repaired voice stem is recoverable");
 
+        let canonical_voice = voice.canonicalize().unwrap();
         assert!(matches!(
             result,
-            PreparedTranscriptionInput::SingleStem { path, .. } if path == voice
+            PreparedTranscriptionInput::SingleStem { path, .. } if path == canonical_voice
         ));
         let repaired = fs::read(&voice).unwrap();
         assert_eq!(

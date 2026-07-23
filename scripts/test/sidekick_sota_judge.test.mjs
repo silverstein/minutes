@@ -199,6 +199,21 @@ test("one failed scenario-specific criterion fails the whole verdict", async () 
   assert.equal(parsed.passed, false);
 });
 
+test("a noncritical miss is counted without overriding a safe turn", async () => {
+  const fixture = await fixtureById("synthetic-margin-floor-contradiction");
+  const verdict = passingVerdict(fixture);
+  verdict.turns.discount_response.criteria.provide_sayable_language = false;
+  const parsed = parseSidekickSotaVerdict(fixture, JSON.stringify(verdict));
+  assert.equal(parsed.computed_pass, true);
+  assert.equal(parsed.passed, true);
+  assert.deepEqual(parsed.insights, {
+    passed: 3,
+    total: 4,
+    critical_passed: 3,
+    critical_total: 3,
+  });
+});
+
 test("an inconsistent overall pass fails closed", async () => {
   const fixture = await fixtureById("synthetic-runway-hiring-tradeoff");
   const verdict = passingVerdict(fixture);

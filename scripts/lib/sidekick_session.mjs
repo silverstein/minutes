@@ -219,6 +219,10 @@ export class SidekickSession {
     this.backend = backend;
     this.captureSessionId = captureSessionId;
     this.brief = structuredClone(brief);
+    this.contextEvidence = Array.isArray(this.brief.evidence)
+      ? this.brief.evidence.map((item) => structuredClone(item))
+      : [];
+    delete this.brief.evidence;
     this.minimumProactiveConfidence = minimumProactiveConfidence;
     this.maxTranscriptChars = maxTranscriptChars;
     this.shutdownGraceMs = shutdownGraceMs;
@@ -467,6 +471,7 @@ export class SidekickSession {
     const prompt = {
       turn_mode: mode,
       prepared_context: this.brief,
+      bounded_context_evidence: this.contextEvidence,
       exact_capture_session_id: this.captureSessionId,
       bounded_transcript_evidence: transcript,
       response_rule:
@@ -498,12 +503,16 @@ export class SidekickSession {
     }
     return {
       input,
-      evidenceIds: new Set(transcript.map((item) => item.id)),
+      evidenceIds: new Set([
+        ...this.contextEvidence.map((item) => item.id),
+        ...transcript.map((item) => item.id),
+      ]),
       visualIds,
       transcriptEvidence: transcript,
       screenEvidence: screen,
       authoritativeContext: {
         prepared_context: this.brief,
+        context_evidence: this.contextEvidence,
         typed_user_message: typedMessage ?? null,
       },
     };

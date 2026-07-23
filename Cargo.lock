@@ -3383,7 +3383,7 @@ dependencies = [
 
 [[package]]
 name = "minutes-cli"
-version = "0.22.1"
+version = "0.23.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3401,6 +3401,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "symphonia",
+ "tempfile",
  "tracing",
  "tracing-subscriber",
  "ureq 3.2.0",
@@ -3410,7 +3411,7 @@ dependencies = [
 
 [[package]]
 name = "minutes-core"
-version = "0.22.1"
+version = "0.23.0"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -3456,7 +3457,7 @@ dependencies = [
 
 [[package]]
 name = "minutes-reader"
-version = "0.22.1"
+version = "0.23.0"
 dependencies = [
  "chrono",
  "schemars 1.2.1",

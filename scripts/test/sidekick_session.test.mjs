@@ -97,6 +97,52 @@ test("the harness sends the shared product instructions byte-for-byte", async ()
   assert.equal(backend.sessionConfig.developerInstructions, developerInstructions);
 });
 
+test("historical and repository context stay separate from prepared context and remain citable", async () => {
+  const backend = new FakeBackend();
+  const session = new SidekickSession({
+    backend,
+    captureSessionId: "capture-a",
+    brief: {
+      user_role: "Founder",
+      goal: "State the release boundary",
+      evidence: [{
+        id: "repository_status",
+        kind: "repository_result",
+        text: "Revision 4f2c9a is tested on a feature branch and is not deployed.",
+      }],
+    },
+  });
+  await session.start();
+  session.observeTranscript({
+    id: "utterance-1",
+    captureSessionId: "capture-a",
+    text: "Can we tell the customer this is live?",
+  });
+
+  const pending = session.sendUser("Give me the exact boundary.");
+  await new Promise((resolve) => setImmediate(resolve));
+  const serializedInput = backend.turns[0].params.input[0].text;
+  assert.match(
+    serializedInput,
+    /"bounded_context_evidence":\s*\[\s*\{\s*"id":\s*"repository_status"/,
+  );
+  assert.doesNotMatch(
+    serializedInput,
+    /"prepared_context":\{[^}]*"evidence"/,
+  );
+  backend.turns[0].pending.resolve(result({
+    decision: "speak",
+    text: "It is tested at revision 4f2c9a but not deployed.",
+    evidence_ids: ["repository_status", "utterance-1"],
+  }));
+  const completed = await pending;
+  assert.equal(completed.published, true);
+  assert.deepEqual(
+    backend.verifications[0].authoritativeContext.context_evidence.map(({ id }) => id),
+    ["repository_status"],
+  );
+});
+
 test("foreground completeness outranks the soft brevity target", async () => {
   const instructions = await readFile(
     new URL("../../resources/live_sidekick/developer_instructions.txt", import.meta.url),
@@ -118,6 +164,90 @@ test("foreground completeness outranks the soft brevity target", async () => {
   assert.match(
     verifierInstructions,
     /reject with incomplete_material_consequence if a candidate proposes a confidence gate without saying that uncertain or below-threshold work goes to a human/,
+  );
+  assert.match(
+    verifierInstructions,
+    /That is a supported epistemic boundary, not an unsupported factual claim/,
+  );
+  assert.match(
+    verifierInstructions,
+    /never treat attendance history as live identity or voice verification/,
+  );
+  assert.match(
+    verifierInstructions,
+    /A price-concession recommendation is materially complete when it says the concession may cross/,
+  );
+  assert.match(
+    verifierInstructions,
+    /allow a question that asks for the unknown margin/,
+  );
+  assert.match(
+    instructions,
+    /When the user explicitly asks what boundary to set.*state the operational hold or recovery gate explicitly/,
+  );
+  assert.match(
+    instructions,
+    /name both the material evidenced upside and downside of the tradeoff/,
+  );
+  assert.match(
+    instructions,
+    /Never replace that supported gate with a question asking the user to invent one/,
+  );
+  assert.match(
+    instructions,
+    /never offer a later escalation that discards the queued work, fallback, remedy, or other consequence/,
+  );
+  assert.match(
+    instructions,
+    /A price discount and a gross-margin floor are different measures/,
+  );
+  assert.match(
+    instructions,
+    /say the discount may or could cross the floor rather than claiming that it does/,
+  );
+  assert.match(
+    instructions,
+    /do not silently ignore that premise: explicitly say why it is insufficient/,
+  );
+  assert.match(
+    instructions,
+    /Do not invent qualitative labels such as demo-ready, production-ready, launch-ready, or ready/,
+  );
+  assert.match(
+    instructions,
+    /feature branch must be merged into the target branch, never that the target branch itself must be merged/,
+  );
+  assert.match(
+    verifierInstructions,
+    /reject with incomplete_material_consequence if the candidate merely asks the user to invent the boundary/,
+  );
+  assert.match(
+    verifierInstructions,
+    /reject if any later clause abandons a queued-work, human-fallback, remedy, or other material safety condition/,
+  );
+  assert.match(
+    instructions,
+    /rejects or overrides a live proposal must cite both that proposal and the evidence establishing the conflicting boundary/,
+  );
+  assert.match(
+    instructions,
+    /repository status claim must name the scoped repository, branch, and revision together/,
+  );
+  assert.match(
+    instructions,
+    /[Nn]ame at least one concrete give-get such as term, prepayment, narrower scope, or a written exception/,
+  );
+  assert.match(
+    instructions,
+    /If the user asks what to say, give a short first-person line they can use verbatim/,
+  );
+  assert.match(
+    instructions,
+    /live demo, passing test, or branch claim.*cite both the live premise and the revision-stamped repository evidence/,
+  );
+  assert.match(
+    instructions,
+    /ask for explicit identity confirmation before attaching a real name to the commitment/,
   );
   assert.match(
     verifierInstructions,

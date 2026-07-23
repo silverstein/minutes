@@ -2,11 +2,11 @@
 
 > Generated file. Do not edit by hand.
 > Source: crates/core thiserror definitions
-> Last generated: 2026-07-17
+> Last generated: 2026-07-23
 
 This is the generated public catalog of stable Minutes core errors. It intentionally favors actionable, user-facing errors over generic wrapper variants.
 
-- Visible actionable errors: 59
+- Visible actionable errors: 60
 - Hidden low-signal wrappers: 16
 
 # CaptureError
@@ -752,3 +752,17 @@ Exact message:
 Source: `crates/core/src/graph.rs`
 
 Reference URL: https://useminutes.app/docs/errors#error-grapherror-dirnotfound
+
+# VoiceError
+
+<a id="error-voiceerror-lowquality"></a>
+
+## `VoiceError::LowQuality`
+
+Exact message:
+
+> voice clip rejected: {reason}
+
+Source: `crates/core/src/voice.rs`
+
+Reference URL: https://useminutes.app/docs/errors#error-voiceerror-lowquality

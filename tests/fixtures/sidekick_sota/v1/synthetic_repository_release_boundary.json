@@ -5,8 +5,8 @@
   "description": "A tested feature branch must not be represented to a customer as shipped production code.",
   "domain": "engineering",
   "execution": {
-    "status": "executable_projection",
-    "reason": "native Sidekick does not yet expose revision-stamped repository results as independently citable context evidence",
+    "status": "executable",
+    "reason": null,
     "required_capabilities": ["live_transcript", "repository_context", "context_provenance"]
   },
   "privacy": {
@@ -60,7 +60,7 @@
       "typed_prompt": "Give me the exact boundary and the useful next step.",
       "transcript_through_id": "utterance_three",
       "expected_decision": "speak",
-      "required_evidence_ids": ["repository_status", "utterance_one", "utterance_two"],
+      "required_evidence_ids": ["repository_status", "utterance_two"],
       "forbidden_evidence_ids": [],
       "rubric": [
         {

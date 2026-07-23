@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 
 mod dashboard;
 mod demo_data;
+mod voice;
 use std::io::{BufRead, BufReader, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -1086,12 +1087,12 @@ enum Commands {
         action: ContextAction,
     },
 
-    /// Import meetings from another app, or recover-process an audio file
+    /// Import meetings from Granola or a text archive, or process an audio file
     Import {
-        /// Source app (granola), or an audio file path to process as a meeting
+        /// Source (granola or text), a transcript directory, or an audio file path
         from: String,
 
-        /// Directory containing exported meetings (default: ~/.granola-archivist/output/)
+        /// Source directory (required for text; Granola defaults to ~/.granola-archivist/output/)
         #[arg(short, long)]
         dir: Option<PathBuf>,
 
@@ -1104,6 +1105,12 @@ enum Commands {
     Vault {
         #[command(subcommand)]
         action: VaultAction,
+    },
+
+    /// Enroll, inspect, test, revoke, or delete local voiceprints
+    Voice {
+        #[command(subcommand)]
+        action: voice::VoiceAction,
     },
 
     /// Enroll your voice for automatic speaker identification
@@ -1581,6 +1588,7 @@ enum ContextAction {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    let verbose = cli.verbose;
 
     // Initialize logging.
     //
@@ -2102,7 +2110,7 @@ fn main() -> Result<()> {
         } => cmd_insights(kind, confidence, participant, since, limit, actionable),
         Commands::Context { action } => cmd_context(action),
         Commands::Import { from, dir, dry_run } => {
-            cmd_import(&from, dir.as_deref(), dry_run, &config)
+            cmd_import(&from, dir.as_deref(), dry_run, verbose, &config)
         }
         Commands::Vault { action } => match action {
             VaultAction::Setup {
@@ -2114,6 +2122,7 @@ fn main() -> Result<()> {
             VaultAction::Unlink => cmd_vault_unlink(config),
             VaultAction::Sync => cmd_vault_sync(&config),
         },
+        Commands::Voice { action } => voice::run(action, &config),
         Commands::Enroll { file, duration } => cmd_enroll(file.as_deref(), duration, &config),
         Commands::Voices { delete, json } => cmd_voices(delete, json),
         Commands::Delete {
@@ -5990,6 +5999,7 @@ fn build_capability_report() -> CapabilityReport {
     features.insert("get_meeting_insights".into(), true);
     features.insert("get_person_profile".into(), true);
     features.insert("get_status".into(), true);
+    features.insert("import_text".into(), true);
     features.insert("ingest_meeting".into(), true);
     features.insert("knowledge_status".into(), true);
     features.insert("list_meetings".into(), true);
@@ -8135,6 +8145,297 @@ life (qmd://life/)
             }
             _ => panic!("expected Import variant"),
         }
+    }
+
+    fn text_import_config(output_dir: PathBuf) -> Config {
+        Config {
+            output_dir,
+            ..Config::default()
+        }
+    }
+
+    fn imported_markdown_files(output_dir: &Path) -> Vec<PathBuf> {
+        let mut paths = std::fs::read_dir(output_dir)
+            .unwrap()
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .filter(|path| path.extension().and_then(|extension| extension.to_str()) == Some("md"))
+            .collect::<Vec<_>>();
+        paths.sort();
+        paths
+    }
+
+    #[test]
+    fn text_import_date_inference_obeys_precedence_and_filename_forms() {
+        let modified = Local
+            .with_ymd_and_hms(2022, 2, 3, 4, 5, 6)
+            .single()
+            .unwrap();
+
+        assert_eq!(
+            infer_text_import_date(
+                "\ndate: 2026-07-01T09:30:45\n",
+                "Date: 2026-07-02\n",
+                "notes-2026-07-03",
+                modified,
+            ),
+            "2026-07-01T09:30:45"
+        );
+        assert_eq!(
+            infer_text_import_date(
+                "",
+                "Date: 2026-07-02 @ 10:31\n",
+                "notes-2026-07-03",
+                modified,
+            ),
+            "2026-07-02T10:31:00"
+        );
+        assert_eq!(
+            infer_text_import_date("", "", "notes-2026-07-03-1430", modified),
+            "2026-07-03T14:30:00"
+        );
+        assert_eq!(
+            infer_text_import_date("", "", "20260704_15-45_notes", modified),
+            "2026-07-04T15:45:00"
+        );
+        assert_eq!(
+            infer_text_import_date("", "", "notes-2026-13-40", modified),
+            "2022-02-03T04:05:06"
+        );
+        assert_eq!(
+            infer_text_import_date("", "", "notes-20261340", modified),
+            "2022-02-03T04:05:06"
+        );
+    }
+
+    #[test]
+    fn text_import_title_inference_obeys_precedence_and_date_fallback() {
+        assert_eq!(
+            infer_text_import_title(
+                "\ntitle: Frontmatter title\n",
+                "# Meeting: Heading title\n",
+                "filename-title",
+                "2026-07-01T00:00:00",
+            ),
+            "Frontmatter title"
+        );
+        assert_eq!(
+            infer_text_import_title(
+                "",
+                "# Meeting: Heading title\n",
+                "filename-title",
+                "2026-07-01T00:00:00",
+            ),
+            "Heading title"
+        );
+        assert_eq!(
+            infer_text_import_title("", "Body", "filename-title", "2026-07-01T00:00:00"),
+            "filename title"
+        );
+        assert_eq!(
+            infer_text_import_title("", "Body", "2026-07-01", "2026-07-01T00:00:00"),
+            "Imported note 2026-07-01"
+        );
+    }
+
+    #[test]
+    fn text_import_plain_txt_wraps_body_and_uses_private_permissions() {
+        let temp = tempfile::tempdir().unwrap();
+        let source_dir = temp.path().join("archive");
+        let output_dir = temp.path().join("meetings");
+        std::fs::create_dir_all(&source_dir).unwrap();
+        std::fs::write(
+            source_dir.join("project-notes.txt"),
+            "Alice: We should ship it.\nBob: Agreed.\n",
+        )
+        .unwrap();
+        let config = text_import_config(output_dir.clone());
+
+        let summary = import_text_files(&source_dir, false, false, &config).unwrap();
+        assert_eq!(
+            summary,
+            TextImportSummary {
+                imported: 1,
+                skipped: 0
+            }
+        );
+
+        let paths = imported_markdown_files(&output_dir);
+        assert_eq!(paths.len(), 1);
+        let content = std::fs::read_to_string(&paths[0]).unwrap();
+        assert!(content.contains("title: \"project notes\""));
+        assert!(content.contains("source: text-import"));
+        assert!(content.contains("## Transcript\n\nAlice: We should ship it."));
+        assert!(content.ends_with("Bob: Agreed.\n"));
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&paths[0]).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+    }
+
+    #[test]
+    fn text_import_strips_foreign_frontmatter_and_lifts_fields() {
+        let temp = tempfile::tempdir().unwrap();
+        let source_dir = temp.path().join("archive");
+        let output_dir = temp.path().join("meetings");
+        std::fs::create_dir_all(&source_dir).unwrap();
+        std::fs::write(
+            source_dir.join("obsidian.md"),
+            "---\ntitle: Obsidian planning\ndate: 2026-06-15\ntags: [work]\n---\n# Source heading\n\nKeep this body.\n",
+        )
+        .unwrap();
+        let config = text_import_config(output_dir.clone());
+
+        let summary = import_text_files(&source_dir, false, false, &config).unwrap();
+        assert_eq!(summary.imported, 1);
+        let content = std::fs::read_to_string(&imported_markdown_files(&output_dir)[0]).unwrap();
+        assert!(content.contains("title: \"Obsidian planning\""));
+        assert!(content.contains("date: 2026-06-15T00:00:00"));
+        assert!(!content.contains("tags: [work]"));
+        assert!(content.contains("## Transcript\n\n# Source heading\n\nKeep this body.\n"));
+    }
+
+    #[test]
+    fn text_import_skips_existing_minutes_meeting() {
+        let temp = tempfile::tempdir().unwrap();
+        let source_dir = temp.path().join("archive");
+        let output_dir = temp.path().join("meetings");
+        std::fs::create_dir_all(&source_dir).unwrap();
+        std::fs::write(
+            source_dir.join("minutes.md"),
+            "---\ntitle: Existing\ntype: meeting\ndate: 2026-07-01T00:00:00\n---\nBody\n",
+        )
+        .unwrap();
+        let config = text_import_config(output_dir.clone());
+
+        let summary = import_text_files(&source_dir, false, false, &config).unwrap();
+        assert_eq!(
+            summary,
+            TextImportSummary {
+                imported: 0,
+                skipped: 1
+            }
+        );
+        assert!(imported_markdown_files(&output_dir).is_empty());
+    }
+
+    #[test]
+    fn text_import_rerun_is_a_no_op() {
+        let temp = tempfile::tempdir().unwrap();
+        let source_dir = temp.path().join("archive");
+        let output_dir = temp.path().join("meetings");
+        std::fs::create_dir_all(&source_dir).unwrap();
+        std::fs::write(
+            source_dir.join("2026-07-01-notes.txt"),
+            "A durable transcript.\n",
+        )
+        .unwrap();
+        let config = text_import_config(output_dir);
+
+        let first = import_text_files(&source_dir, false, false, &config).unwrap();
+        let second = import_text_files(&source_dir, false, false, &config).unwrap();
+        assert_eq!(first.imported, 1);
+        assert_eq!(second.imported, 0);
+        assert_eq!(second.skipped, 1);
+    }
+
+    #[test]
+    fn text_import_disambiguates_same_named_files_by_parent() {
+        let temp = tempfile::tempdir().unwrap();
+        let source_dir = temp.path().join("archive");
+        let output_dir = temp.path().join("meetings");
+        std::fs::create_dir_all(source_dir.join("alpha")).unwrap();
+        std::fs::create_dir_all(source_dir.join("beta")).unwrap();
+        for parent in ["alpha", "beta"] {
+            std::fs::write(
+                source_dir.join(parent).join("notes.txt"),
+                "Date: 2026-07-01\nSame inferred title.\n",
+            )
+            .unwrap();
+        }
+        let config = text_import_config(output_dir.clone());
+
+        let first = import_text_files(&source_dir, false, false, &config).unwrap();
+        assert_eq!(first.imported, 2);
+        let names = imported_markdown_files(&output_dir)
+            .into_iter()
+            .map(|path| path.file_name().unwrap().to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            vec![
+                "2026-07-01-notes-beta.md".to_string(),
+                "2026-07-01-notes.md".to_string()
+            ]
+        );
+
+        let second = import_text_files(&source_dir, false, false, &config).unwrap();
+        assert_eq!(second.imported, 0);
+        assert_eq!(second.skipped, 2);
+    }
+
+    #[test]
+    fn text_import_requires_dir_for_named_source() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = text_import_config(temp.path().join("meetings"));
+        let error = cmd_import("text", None, false, false, &config).unwrap_err();
+        assert!(error.to_string().contains("--dir"));
+    }
+
+    #[test]
+    fn import_existing_directory_routes_to_text_import() {
+        let temp = tempfile::tempdir().unwrap();
+        let source_dir = temp.path().join("archive");
+        std::fs::create_dir_all(&source_dir).unwrap();
+        std::fs::write(source_dir.join("notes.txt"), "Existing transcript\n").unwrap();
+        let config = text_import_config(temp.path().join("meetings"));
+
+        cmd_import(source_dir.to_str().unwrap(), None, true, false, &config).unwrap();
+    }
+
+    #[test]
+    fn text_import_quoted_title_is_valid_yaml_and_extractable() {
+        let rendered = render_text_import(
+            "Roadmap: the \"Q3\" plan",
+            "2026-07-01T00:00:00",
+            &[],
+            Path::new("notes.txt"),
+            "Body\n",
+        )
+        .unwrap();
+        let (frontmatter, _) = minutes_core::markdown::split_frontmatter(&rendered);
+        assert!(minutes_core::markdown::extract_field(frontmatter, "title").is_some());
+        let yaml: serde_yaml::Value = serde_yaml::from_str(frontmatter).unwrap();
+        assert_eq!(yaml["title"], "Roadmap: the \"Q3\" plan");
+    }
+
+    #[test]
+    fn text_import_skips_non_utf8_file_without_aborting_batch() {
+        let temp = tempfile::tempdir().unwrap();
+        let source_dir = temp.path().join("archive");
+        let output_dir = temp.path().join("meetings");
+        std::fs::create_dir_all(&source_dir).unwrap();
+        std::fs::write(
+            source_dir.join("latin1.txt"),
+            [0x4d, 0x65, 0xe9, 0x74, 0x0a],
+        )
+        .unwrap();
+        std::fs::write(source_dir.join("valid.txt"), "A readable transcript.\n").unwrap();
+        let config = text_import_config(output_dir.clone());
+
+        let summary = import_text_files(&source_dir, false, false, &config).unwrap();
+        assert_eq!(
+            summary,
+            TextImportSummary {
+                imported: 1,
+                skipped: 1
+            }
+        );
+        assert_eq!(imported_markdown_files(&output_dir).len(), 1);
     }
 
     #[test]
@@ -12324,7 +12625,13 @@ fn cmd_context_get_moment(
 
 // ── Import ──────────────────────────────────────────────────
 
-fn cmd_import(from: &str, dir: Option<&Path>, dry_run: bool, config: &Config) -> Result<()> {
+fn cmd_import(
+    from: &str,
+    dir: Option<&Path>,
+    dry_run: bool,
+    verbose: bool,
+    config: &Config,
+) -> Result<()> {
     if dir.is_none() && looks_like_audio_path(from) {
         let path = Path::new(from);
         if dry_run {
@@ -12353,8 +12660,17 @@ fn cmd_import(from: &str, dir: Option<&Path>, dry_run: bool, config: &Config) ->
 
     match from {
         "granola" => import_granola(dir, dry_run, config),
+        "text" => {
+            let source_dir = dir.ok_or_else(|| {
+                anyhow::anyhow!("Text import requires --dir <DIR>; there is no default text archive directory")
+            })?;
+            import_text(source_dir, dry_run, verbose, config)
+        }
+        directory if dir.is_none() && Path::new(directory).is_dir() => {
+            import_text(Path::new(directory), dry_run, verbose, config)
+        }
         other => anyhow::bail!(
-            "Unknown import source: {}. Supported source: granola. To process an audio file, run: minutes process \"{}\" --type meeting",
+            "Unknown import source: {}. Supported sources: granola, text, or an existing directory. To process an audio file, run: minutes process \"{}\" --type meeting",
             other,
             other
         ),
@@ -12372,6 +12688,499 @@ fn looks_like_audio_path(value: &str) -> bool {
             )
         })
         .unwrap_or(false)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TextImportSummary {
+    imported: usize,
+    skipped: usize,
+}
+
+fn import_text(source_dir: &Path, dry_run: bool, verbose: bool, config: &Config) -> Result<()> {
+    let summary = import_text_files(source_dir, dry_run, verbose, config)?;
+
+    if !dry_run && summary.imported > 0 {
+        if let Err(e) = minutes_core::graph::rebuild_index(config) {
+            tracing::warn!(error = %e, "graph index rebuild failed (non-fatal)");
+        }
+    }
+
+    let action = if dry_run { "Would import" } else { "Imported" };
+    let json = serde_json::json!({
+        "imported": summary.imported,
+        "skipped": summary.skipped,
+        "source": "text",
+        "output_dir": config.output_dir.display().to_string(),
+        "dry_run": dry_run,
+    });
+    println!("{}", serde_json::to_string_pretty(&json)?);
+    eprintln!(
+        "\n{} {} files ({} skipped)",
+        action, summary.imported, summary.skipped
+    );
+
+    Ok(())
+}
+
+fn import_text_files(
+    source_dir: &Path,
+    dry_run: bool,
+    verbose: bool,
+    config: &Config,
+) -> Result<TextImportSummary> {
+    if !source_dir.is_dir() {
+        anyhow::bail!(
+            "Text import directory not found or not a directory: {}",
+            source_dir.display()
+        );
+    }
+
+    let output_dir = &config.output_dir;
+    std::fs::create_dir_all(output_dir)?;
+    let canonical_output_dir = output_dir.canonicalize()?;
+
+    let mut source_files = Vec::new();
+    for entry in walkdir::WalkDir::new(source_dir).follow_links(false) {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(e) => {
+                tracing::warn!(error = %e, "skipping unreadable archive entry");
+                continue;
+            }
+        };
+        if entry.file_type().is_file() && is_text_import_extension(entry.path()) {
+            source_files.push(entry.into_path());
+        }
+    }
+    source_files.sort();
+
+    let mut imported = 0;
+    let mut skipped = 0;
+    let mut reserved_filenames = std::collections::HashSet::new();
+
+    for path in source_files {
+        if let Some(reason) = text_import_path_skip_reason(&path, source_dir) {
+            skipped += 1;
+            print_text_import_skip(verbose, reason, &path);
+            continue;
+        }
+
+        match path.canonicalize() {
+            Ok(canonical) if canonical.starts_with(&canonical_output_dir) => {
+                skipped += 1;
+                print_text_import_skip(verbose, "inside output directory", &path);
+                continue;
+            }
+            Ok(_) => {}
+            Err(_) => {
+                skipped += 1;
+                print_text_import_skip(verbose, "unreadable path", &path);
+                continue;
+            }
+        }
+
+        // One bad file (permissions, non-UTF-8 legacy encoding) must not abort
+        // a multi-thousand-file archive run — skip it and keep going.
+        let Ok(content) = std::fs::read_to_string(&path) else {
+            skipped += 1;
+            print_text_import_skip(verbose, "unreadable (IO error or not UTF-8)", &path);
+            continue;
+        };
+        let (frontmatter, body) = minutes_core::markdown::split_frontmatter(&content);
+        if !frontmatter.is_empty()
+            && minutes_core::markdown::extract_field(frontmatter, "date").is_some()
+            && minutes_core::markdown::extract_field(frontmatter, "type").is_some()
+        {
+            skipped += 1;
+            print_text_import_skip(verbose, "already a Minutes meeting", &path);
+            continue;
+        }
+
+        let stem = path
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .unwrap_or("");
+        let Ok(modified) = std::fs::metadata(&path).and_then(|meta| meta.modified()) else {
+            skipped += 1;
+            print_text_import_skip(verbose, "unreadable metadata", &path);
+            continue;
+        };
+        let date = infer_text_import_date(
+            frontmatter,
+            body,
+            stem,
+            chrono::DateTime::<Local>::from(modified),
+        );
+        let title = infer_text_import_title(frontmatter, body, stem, &date);
+        let attendees = infer_text_import_attendees(body);
+        let relative_source = path.strip_prefix(source_dir).unwrap_or(&path);
+
+        let base_slug = text_import_slug(&title);
+        let date_prefix = &date[..10];
+        let base_filename = format!("{date_prefix}-{base_slug}.md");
+        let filename = reserve_text_import_filename(&base_filename, &path, &mut reserved_filenames);
+        let output_path = output_dir.join(&filename);
+
+        if output_path.exists() {
+            skipped += 1;
+            print_text_import_skip(verbose, "output exists", &path);
+            continue;
+        }
+
+        let output = render_text_import(&title, &date, &attendees, relative_source, body)?;
+
+        if dry_run {
+            eprintln!("  WOULD IMPORT: {} -> {}", path.display(), filename);
+        } else {
+            std::fs::write(&output_path, output)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&output_path, std::fs::Permissions::from_mode(0o600))?;
+            }
+            eprintln!("  Imported: {}", filename);
+        }
+        imported += 1;
+    }
+
+    Ok(TextImportSummary { imported, skipped })
+}
+
+fn is_text_import_extension(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| {
+            matches!(
+                extension.to_ascii_lowercase().as_str(),
+                "md" | "markdown" | "txt"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn text_import_path_skip_reason(path: &Path, source_dir: &Path) -> Option<&'static str> {
+    let relative = path.strip_prefix(source_dir).unwrap_or(path);
+    for component in relative.components() {
+        let std::path::Component::Normal(value) = component else {
+            continue;
+        };
+        let value = value.to_string_lossy();
+        if value.starts_with('.') {
+            return Some("hidden path");
+        }
+        if value == "processed" || value == "failed" {
+            return Some("watcher directory");
+        }
+    }
+    None
+}
+
+fn print_text_import_skip(verbose: bool, reason: &str, path: &Path) {
+    if verbose {
+        eprintln!("  SKIP ({reason}): {}", path.display());
+    }
+}
+
+fn infer_text_import_date(
+    frontmatter: &str,
+    body: &str,
+    stem: &str,
+    modified: chrono::DateTime<Local>,
+) -> String {
+    minutes_core::markdown::extract_field(frontmatter, "date")
+        .and_then(|value| normalize_text_import_date(&value))
+        .or_else(|| {
+            body.lines().take(10).find_map(|line| {
+                line.strip_prefix("Date:")
+                    .and_then(|value| normalize_text_import_date(value.trim()))
+            })
+        })
+        .or_else(|| infer_text_import_filename_date(stem))
+        .unwrap_or_else(|| modified.format("%Y-%m-%dT%H:%M:%S").to_string())
+}
+
+fn normalize_text_import_date(value: &str) -> Option<String> {
+    let cleaned = value.trim().trim_matches(['\'', '"']);
+    let date_prefix = cleaned.get(..10)?;
+    let date = chrono::NaiveDate::parse_from_str(date_prefix, "%Y-%m-%d").ok()?;
+    let time = cleaned
+        .get(10..)
+        .map(|remainder| {
+            remainder.trim_start_matches(|character: char| {
+                character.is_ascii_whitespace() || character == 'T' || character == '@'
+            })
+        })
+        .and_then(parse_text_import_time_prefix)
+        .unwrap_or((0, 0, 0));
+    Some(format!(
+        "{}T{:02}:{:02}:{:02}",
+        date.format("%Y-%m-%d"),
+        time.0,
+        time.1,
+        time.2
+    ))
+}
+
+fn parse_text_import_time_prefix(value: &str) -> Option<(u32, u32, u32)> {
+    let bytes = value.as_bytes();
+    let (hour, minute, second) = if bytes.len() >= 8
+        && bytes[2] == b':'
+        && bytes[5] == b':'
+        && bytes[..2].iter().all(u8::is_ascii_digit)
+        && bytes[3..5].iter().all(u8::is_ascii_digit)
+        && bytes[6..8].iter().all(u8::is_ascii_digit)
+    {
+        (
+            value[..2].parse().ok()?,
+            value[3..5].parse().ok()?,
+            value[6..8].parse().ok()?,
+        )
+    } else if bytes.len() >= 5
+        && matches!(bytes[2], b':' | b'-')
+        && bytes[..2].iter().all(u8::is_ascii_digit)
+        && bytes[3..5].iter().all(u8::is_ascii_digit)
+    {
+        (value[..2].parse().ok()?, value[3..5].parse().ok()?, 0)
+    } else if bytes.len() >= 4 && bytes[..4].iter().all(u8::is_ascii_digit) {
+        (value[..2].parse().ok()?, value[2..4].parse().ok()?, 0)
+    } else {
+        return None;
+    };
+
+    if hour < 24 && minute < 60 && second < 60 {
+        Some((hour, minute, second))
+    } else {
+        None
+    }
+}
+
+fn infer_text_import_filename_date(stem: &str) -> Option<String> {
+    let bytes = stem.as_bytes();
+    for start in 0..bytes.len() {
+        if let Some(date) = parse_dashed_filename_date(stem, start) {
+            return Some(date);
+        }
+        if let Some(date) = parse_compact_filename_date(stem, start) {
+            return Some(date);
+        }
+    }
+    None
+}
+
+fn parse_dashed_filename_date(stem: &str, start: usize) -> Option<String> {
+    let candidate = stem.get(start..start + 10)?;
+    let date = chrono::NaiveDate::parse_from_str(candidate, "%Y-%m-%d").ok()?;
+    let time = adjacent_text_import_time(stem, start, start + 10).unwrap_or((0, 0, 0));
+    Some(format!(
+        "{}T{:02}:{:02}:{:02}",
+        date.format("%Y-%m-%d"),
+        time.0,
+        time.1,
+        time.2
+    ))
+}
+
+fn parse_compact_filename_date(stem: &str, start: usize) -> Option<String> {
+    let candidate = stem.get(start..start + 8)?;
+    if !candidate.starts_with("19") && !candidate.starts_with("20") {
+        return None;
+    }
+    let date = chrono::NaiveDate::parse_from_str(candidate, "%Y%m%d").ok()?;
+    let time = adjacent_text_import_time(stem, start, start + 8).unwrap_or((0, 0, 0));
+    Some(format!(
+        "{}T{:02}:{:02}:{:02}",
+        date.format("%Y-%m-%d"),
+        time.0,
+        time.1,
+        time.2
+    ))
+}
+
+fn adjacent_text_import_time(
+    stem: &str,
+    date_start: usize,
+    date_end: usize,
+) -> Option<(u32, u32, u32)> {
+    if let Some(after) = stem.get(date_end..) {
+        let after = after
+            .strip_prefix(|character: char| matches!(character, 'T' | '-' | '_' | ' '))
+            .unwrap_or(after);
+        if let Some(time) = parse_text_import_time_prefix(after) {
+            return Some(time);
+        }
+    }
+
+    let before = stem.get(..date_start)?;
+    let before = before
+        .strip_suffix(|character: char| matches!(character, 'T' | '-' | '_' | ' '))
+        .unwrap_or(before);
+    if before.len() >= 5 {
+        if let Some(time) = before
+            .get(before.len() - 5..)
+            .and_then(parse_text_import_time_prefix)
+        {
+            return Some(time);
+        }
+    }
+    if before.len() >= 4 {
+        return before
+            .get(before.len() - 4..)
+            .and_then(parse_text_import_time_prefix);
+    }
+    None
+}
+
+fn infer_text_import_title(frontmatter: &str, body: &str, stem: &str, date: &str) -> String {
+    if let Some(title) = minutes_core::markdown::extract_field(frontmatter, "title")
+        .filter(|title| !title.trim().is_empty())
+    {
+        return title;
+    }
+
+    if let Some(title) = body.lines().find_map(|line| line.strip_prefix("# ")) {
+        let title = title.trim();
+        let title = title.strip_prefix("Meeting:").unwrap_or(title).trim();
+        if !title.is_empty() {
+            return title.to_string();
+        }
+    }
+
+    if is_date_only_text_import_stem(stem) {
+        return format!("Imported note {}", &date[..10]);
+    }
+
+    let title = stem.replace(['-', '_'], " ");
+    let title = title.trim();
+    if title.is_empty() {
+        "Imported note".to_string()
+    } else {
+        title.to_string()
+    }
+}
+
+fn is_date_only_text_import_stem(stem: &str) -> bool {
+    let stem = stem.trim();
+    for date_len in [10, 8] {
+        let valid_date = if date_len == 10 {
+            parse_dashed_filename_date(stem, 0).is_some()
+        } else {
+            parse_compact_filename_date(stem, 0).is_some()
+        };
+        if !valid_date || stem.len() < date_len {
+            continue;
+        }
+        let remainder = &stem[date_len..];
+        if remainder.is_empty() {
+            return true;
+        }
+        let remainder = remainder
+            .strip_prefix(|character: char| matches!(character, 'T' | '-' | '_' | ' '))
+            .unwrap_or(remainder);
+        let consumed = if remainder.as_bytes().get(2) == Some(&b'-') {
+            5
+        } else {
+            4
+        };
+        if remainder.len() == consumed && parse_text_import_time_prefix(remainder).is_some() {
+            return true;
+        }
+    }
+    false
+}
+
+fn infer_text_import_attendees(body: &str) -> Vec<String> {
+    body.lines()
+        .take(10)
+        .find_map(|line| {
+            line.strip_prefix("Attendees:")
+                .or_else(|| line.strip_prefix("Participants:"))
+        })
+        .map(|value| minutes_core::markdown::parse_attendees_raw(value.trim()))
+        .unwrap_or_default()
+}
+
+fn text_import_slug(value: &str) -> String {
+    value
+        .to_lowercase()
+        .chars()
+        .map(|character| {
+            if character.is_alphanumeric() || character == ' ' {
+                character
+            } else {
+                ' '
+            }
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join("-")
+}
+
+fn reserve_text_import_filename(
+    base_filename: &str,
+    source_path: &Path,
+    reserved: &mut std::collections::HashSet<String>,
+) -> String {
+    if reserved.insert(base_filename.to_string()) {
+        return base_filename.to_string();
+    }
+
+    let base = base_filename.strip_suffix(".md").unwrap_or(base_filename);
+    let parent_slug = source_path
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(|value| value.to_str())
+        .map(text_import_slug)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "archive".to_string());
+    let parent_filename = format!("{base}-{parent_slug}.md");
+    if reserved.insert(parent_filename.clone()) {
+        return parent_filename;
+    }
+
+    for suffix in 2.. {
+        let filename = format!("{base}-{parent_slug}-{suffix}.md");
+        if reserved.insert(filename.clone()) {
+            return filename;
+        }
+    }
+    unreachable!()
+}
+
+fn render_text_import(
+    title: &str,
+    date: &str,
+    attendees: &[String],
+    relative_source: &Path,
+    body: &str,
+) -> Result<String> {
+    let mut output = String::new();
+    output.push_str("---\n");
+    output.push_str(&format!("title: {}\n", serde_json::to_string(title)?));
+    output.push_str("type: meeting\n");
+    output.push_str(&format!("date: {date}\n"));
+    output.push_str("source: text-import\n");
+    if !attendees.is_empty() {
+        output.push_str("attendees:\n");
+        for attendee in attendees {
+            output.push_str(&format!("  - {}\n", serde_json::to_string(attendee)?));
+        }
+    }
+    output.push_str(&format!(
+        "imported_from: {}\n",
+        serde_json::to_string(&relative_source.to_string_lossy())?
+    ));
+    output.push_str("---\n\n");
+
+    let has_transcript_heading = body
+        .lines()
+        .any(|line| line.trim_end_matches('\r') == "## Transcript");
+    if !has_transcript_heading {
+        output.push_str("## Transcript\n\n");
+    }
+    output.push_str(body.trim_end_matches(['\r', '\n']));
+    output.push('\n');
+    Ok(output)
 }
 
 fn import_granola(dir: Option<&Path>, dry_run: bool, config: &Config) -> Result<()> {

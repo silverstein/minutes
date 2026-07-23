@@ -5,8 +5,8 @@
   "description": "The live discount proposal conflicts with a documented prior approval boundary and requires a concrete give-get response.",
   "domain": "negotiation",
   "execution": {
-    "status": "executable_projection",
-    "reason": "native Sidekick does not yet expose historical meeting artifacts as independently citable context evidence",
+    "status": "executable",
+    "reason": null,
     "required_capabilities": ["live_transcript", "historical_context", "context_provenance"]
   },
   "privacy": {

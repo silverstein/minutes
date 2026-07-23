@@ -24,11 +24,7 @@ test("the SOTA corpus is synthetic, broad, and schema-valid", async () => {
   assert.ok(
     fixtures.some(({ fixture }) => fixture.execution.status === "executable"),
   );
-  assert.ok(
-    fixtures.some(
-      ({ fixture }) => fixture.execution.status === "executable_projection",
-    ),
-  );
+  assert.ok(fixtures.every(({ fixture }) => fixture.execution.status === "executable"));
   for (const { fixture } of fixtures) {
     assert.equal(fixture.content_origin, "synthetic");
     assert.deepEqual(validateSidekickSotaFixture(fixture), []);

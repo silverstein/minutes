@@ -47,7 +47,7 @@ So `minutes record --device "MacBook Pro Microphone"` always wins over `[recordi
 | key | default | meaning |
 |---|---|---|
 | `engine` | `"none"` | `"none"`, `"auto"`, `"agent"`, `"ollama"`, `"openai-compatible"`, `"claude"`, `"openai"`, `"mistral"` |
-| `agent_command` | `"claude"` | CLI to shell out to when engine = `"agent"` (`claude`, `codex`, `opencode`, `pi`, etc.) |
+| `agent_command` | `"claude"` | CLI to shell out to when engine = `"agent"` (`claude`, `codex`, `opencode`, `pi`, `agent` / Cursor Agent, etc.) |
 | `ollama_url` | `http://localhost:11434` | Ollama server URL |
 | `ollama_model` | `"llama3.2"` | Model name pulled in Ollama |
 | `openai_compatible_base_url` | `http://localhost:11434/v1` | OpenAI-compatible base URL. Minutes appends `/chat/completions` unless it is already present. |
@@ -283,7 +283,7 @@ Dictation clipboard behavior is platform-specific:
 | `path` | unset | Wiki root (e.g. `~/Documents/life`) |
 | `adapter` | `"wiki"` | `"wiki"`, `"para"`, `"obsidian"` |
 | `engine` | `"none"` | `"agent"`, `"ollama"`, `"none"` |
-| `agent_command` | `"claude"` | Agent CLI when engine = `"agent"` (`claude`, `codex`, `opencode`, `pi`, etc.) |
+| `agent_command` | `"claude"` | Agent CLI when engine = `"agent"` (`claude`, `codex`, `opencode`, `pi`, `agent` / Cursor Agent, etc.) |
 | `log_file` / `index_file` | `log.md` / `index.md` | Chronological + content-oriented index |
 | `min_confidence` | `"strong"` | `"explicit"`, `"strong"`, `"inferred"`, `"tentative"` |
 

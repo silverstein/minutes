@@ -419,13 +419,13 @@ pub fn open_db_at(path: &Path) -> Result<Connection, ContextStoreError> {
 fn enable_persistent_wal(conn: &Connection) -> Result<(), ContextStoreError> {
     let mut enabled: std::os::raw::c_int = 1;
     // SAFETY: `conn.handle()` remains valid for the duration of this call,
-    // `main\0` is a static NUL-terminated database name, and SQLite expects a
+    // `c"main"` is a static NUL-terminated database name, and SQLite expects a
     // pointer to an `int` for SQLITE_FCNTL_PERSIST_WAL. SQLite does not retain
     // any of these pointers after sqlite3_file_control returns.
     let result = unsafe {
         rusqlite::ffi::sqlite3_file_control(
             conn.handle(),
-            b"main\0".as_ptr().cast(),
+            c"main".as_ptr(),
             rusqlite::ffi::SQLITE_FCNTL_PERSIST_WAL,
             (&mut enabled as *mut std::os::raw::c_int).cast(),
         )

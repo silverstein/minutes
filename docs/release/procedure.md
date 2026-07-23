@@ -210,15 +210,30 @@ Before deploying, make sure the site matches what just shipped:
    The `Site Release Link Consistency` CI job runs this with `--check` on every push, so forgetting this step also blocks CI — but running it locally first saves a round-trip and surfaces drift before tagging.
 2. **Hand-update the prose** — the changelog strip and headline feature blurb in `site/app/page.tsx`, plus `docs/architecture/frontmatter-schema.md`'s "corresponds to" footer if the schema row moved. The sync script handles numbers; it cannot rewrite copy that references last release's headline features.
 3. **Refresh social proof + comparison freshness** — update `site/lib/proof.ts` (stars/forks/contributors from the GitHub API, npm monthly downloads from `api.npmjs.org`) and spot-check the homepage comparison table cells plus `/compare/*` pages against competitors' current public docs. Competitor capabilities drift; stale cells cost more credibility than they buy.
-4. **Then deploy**:
+4. **Build the exact static artifact**:
    ```bash
-   npx vercel@50.38.2 build --prod
-   npx vercel@50.38.2 deploy --prebuilt --yes --prod --scope evil-genius-laboratory
+   npm --prefix site ci
+   npm --prefix site run check:llms
+   npm --prefix site run build
    ```
 
-**IMPORTANT**: Run these commands from the repo root, not `site/`. The linked Vercel project uses `rootDirectory=site`, and the Git-connected / remote build path is currently failing after successful Next 16.2.3 builds because Vercel looks for `.next/routes-manifest-deterministic.json`. The prebuilt flow uploads the local `.vercel/output` and avoids that failing server-side post-build step.
+Commit and push the validated site changes to `main`. The Cloudflare Pages
+project `useminutes` watches only `site/*`, builds from `site/`, and publishes
+`site/out/`; changes elsewhere in the repository do not trigger a website
+build.
 
-**Check before deploying**: `cat .vercel/project.json` should show `"projectName": "useminutes.app"` with `"framework": "nextjs"`. If it's pointing at a different project (e.g. `rx-vip/minutes`), the build produces an empty static tree (no `index.html`, no SSR functions) and the deploy aliases return 404. Fix the link before building.
+For an operator-controlled recovery deploy, authenticate Wrangler with
+`CLOUDFLARE_API_TOKEN`, then run from `site/`:
+
+```bash
+npx --yes wrangler@4.114.0 pages deploy out \
+  --project-name useminutes \
+  --branch main
+```
+
+Verify `https://useminutes.pages.dev`, `https://www.useminutes.app`, and
+`https://useminutes.app` after deployment. `/llms.txt` must remain
+`text/plain; charset=utf-8` with `Cache-Control: public, max-age=3600`.
 
 ### 16. Update Homebrew tap formula if CLI changed
 The formula lives at `silverstein/homebrew-tap` → `Formula/minutes.rb`. Update the `tag:` to the new version:

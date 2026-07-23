@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   assertDistinctSotaJudgeModels,
   buildSidekickSotaEvalPlan,
+  scoreSidekickSotaLatency,
   sidekickSotaExitCode,
 } from "../sidekick_sota_eval.mjs";
 import {
@@ -20,32 +21,23 @@ test("the autonomous SOTA runner executes only current production-path scenarios
   assert.deepEqual(plan.counts, {
     total: 7,
     matched: 7,
-    runnable: 4,
-    skipped: 3,
+    runnable: 7,
+    skipped: 0,
   });
   assert.ok(
     plan.runnable.every(
       ({ fixture }) => fixture.execution.status === "executable",
     ),
   );
-  assert.ok(
-    plan.skipped.every(({ status }) => status === "executable_projection"),
-  );
+  assert.deepEqual(plan.skipped, []);
 });
 
-test("projection scenarios cannot be promoted into production-path passes by a runner flag", async () => {
+test("repository context scenario runs through the current production evidence contract", async () => {
   const fixtures = await loadSidekickSotaFixtures(FIXTURE_DIRECTORY);
   const scenario = "synthetic-repository-release-boundary";
   assert.deepEqual(
     buildSidekickSotaEvalPlan(fixtures, { scenario }).counts,
-    { total: 7, matched: 1, runnable: 0, skipped: 1 },
-  );
-  assert.deepEqual(
-    buildSidekickSotaEvalPlan(fixtures, {
-      scenario,
-      includeProjections: true,
-    }).counts,
-    { total: 7, matched: 1, runnable: 0, skipped: 1 },
+    { total: 7, matched: 1, runnable: 1, skipped: 0 },
   );
 });
 
@@ -88,4 +80,31 @@ test("partial corpus success requires an explicit non-release opt-in", () => {
     }),
     0,
   );
+});
+
+test("foreground latency is a fail-closed part of the SOTA result", async () => {
+  const fixtures = await loadSidekickSotaFixtures(FIXTURE_DIRECTORY);
+  const fixture = fixtures.find(
+    ({ fixture: candidate }) =>
+      candidate.id === "synthetic-runway-hiring-tradeoff",
+  ).fixture;
+  const fast = scoreSidekickSotaLatency({
+    fixture,
+    latencies: {
+      runway_decision: { first_token_ms: 1_200, total_ms: 4_800 },
+    },
+  });
+  assert.equal(fast.passed, true);
+
+  const slow = scoreSidekickSotaLatency({
+    fixture,
+    latencies: {
+      runway_decision: { first_token_ms: 1_200, total_ms: 17_000 },
+    },
+  });
+  assert.equal(slow.passed, false);
+  assert.equal(slow.total_p95_ms, 17_000);
+
+  const missing = scoreSidekickSotaLatency({ fixture, latencies: {} });
+  assert.equal(missing.passed, false);
 });

@@ -1,5 +1,4 @@
 import type { Metadata } from "next";
-import { Analytics } from "@vercel/analytics/next";
 import { Instrument_Serif } from "next/font/google";
 import { GeistSans } from "geist/font/sans";
 import { GeistMono } from "geist/font/mono";
@@ -63,10 +62,7 @@ export default function RootLayout({
           content="#0D0D0B"
         />
       </head>
-      <body className="font-sans antialiased">
-        {children}
-        <Analytics />
-      </body>
+      <body className="font-sans antialiased">{children}</body>
     </html>
   );
 }

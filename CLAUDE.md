@@ -129,7 +129,7 @@ Two traps that bite hardest (the rest are in the doc):
 - All 6 version sources must match (`Cargo.toml`, `crates/cli/Cargo.toml`, `tauri/src-tauri/tauri.conf.json`, `crates/mcp/package.json`, `crates/sdk/package.json`, `manifest.json`) plus the version string in `crates/mcp/src/index.ts`.
 - `crates/whisper-guard/` ships on its own cadence — bump + publish independently if it changed since last whisper-guard publish.
 - Push to `main` and wait for CI green **before** tagging. Create the GitHub release as a `--draft`, wait for release workflows, then `--draft=false`. Never `git tag` locally.
-- After tagging: upload `.mcpb`, publish npm packages (sdk first, then mcp — and `crates/mcp/package.json` must depend on the npm version of `minutes-sdk`, not `file:../sdk`), redeploy site via prebuilt Vercel flow from repo root, update Homebrew tap if CLI changed.
+- After tagging: upload `.mcpb`, publish npm packages (sdk first, then mcp — and `crates/mcp/package.json` must depend on the npm version of `minutes-sdk`, not `file:../sdk`), verify the Cloudflare Pages site deploy after the validated `site/` changes reach `main`, and update the Homebrew tap if CLI changed.
 
 ## Design System
 

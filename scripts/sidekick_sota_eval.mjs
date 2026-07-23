@@ -48,6 +48,8 @@ function parseArgs(argv) {
     verifierEffort: CODEX_VERIFIER_EFFORT,
     judgeModel: "gpt-5.6-sol",
     judgeEffort: "medium",
+    maxFirstTokenMs: 5_000,
+    maxTotalMs: 8_000,
     output: null,
     list: false,
     allowPartial: false,
@@ -63,6 +65,11 @@ function parseArgs(argv) {
     else if (argument === "--verifier-effort") options.verifierEffort = argv[++index];
     else if (argument === "--judge-model") options.judgeModel = argv[++index];
     else if (argument === "--judge-effort") options.judgeEffort = argv[++index];
+    else if (argument === "--max-first-token-ms") {
+      options.maxFirstTokenMs = Number(argv[++index]);
+    } else if (argument === "--max-total-ms") {
+      options.maxTotalMs = Number(argv[++index]);
+    }
     else if (argument === "--output") options.output = argv[++index];
     else if (argument === "--list") options.list = true;
     else if (argument === "--allow-partial") options.allowPartial = true;
@@ -90,6 +97,51 @@ export function sidekickSotaExitCode(aggregate, { allowPartial = false } = {}) {
   if (aggregate.full_corpus_passed) return 0;
   if (allowPartial && aggregate.behavioral_path_all_passed) return 0;
   return 1;
+}
+
+function percentile(values, quantile) {
+  if (values.length === 0) return null;
+  const sorted = [...values].sort((left, right) => left - right);
+  return sorted[Math.max(0, Math.ceil(sorted.length * quantile) - 1)];
+}
+
+export function scoreSidekickSotaLatency({
+  fixture,
+  latencies,
+  maxFirstTokenMs = 5_000,
+  maxTotalMs = 8_000,
+}) {
+  const samples = fixture.turns
+    .filter((turn) => turn.mode === "foreground")
+    .map((turn) => ({
+      turn_id: turn.id,
+      first_token_ms: latencies?.[turn.id]?.first_token_ms ?? null,
+      total_ms: latencies?.[turn.id]?.total_ms ?? null,
+    }));
+  const checks = samples.map((sample) => ({
+    ...sample,
+    passed:
+      Number.isFinite(sample.first_token_ms) &&
+      Number.isFinite(sample.total_ms) &&
+      sample.first_token_ms <= maxFirstTokenMs &&
+      sample.total_ms <= maxTotalMs,
+  }));
+  const firstTokenP95 = percentile(
+    samples.map(({ first_token_ms }) => first_token_ms).filter(Number.isFinite),
+    0.95,
+  );
+  const totalP95 = percentile(
+    samples.map(({ total_ms }) => total_ms).filter(Number.isFinite),
+    0.95,
+  );
+  return {
+    passed: checks.every(({ passed }) => passed),
+    max_first_token_ms: maxFirstTokenMs,
+    max_total_ms: maxTotalMs,
+    first_token_p95_ms: firstTokenP95,
+    total_p95_ms: totalP95,
+    checks,
+  };
 }
 
 export function buildSidekickSotaEvalPlan(
@@ -245,10 +297,17 @@ async function runScenario({ fixture, providerExecutable, options, mcpDisableArg
     }
     const mechanical = scoreSidekickSotaResponses({ fixture, responses });
     const semantic = await judge.grade({ fixture, responses });
+    const latency = scoreSidekickSotaLatency({
+      fixture,
+      latencies,
+      maxFirstTokenMs: options.maxFirstTokenMs,
+      maxTotalMs: options.maxTotalMs,
+    });
     return {
       fixture_id: fixture.id,
       execution_status: fixture.execution.status,
-      passed: mechanical.passed && semantic.passed,
+      passed: mechanical.passed && semantic.passed && latency.passed,
+      quality_passed: mechanical.passed && semantic.passed,
       coverage: {
         persistent_reasoning_path: true,
         projected_transcript_ingestion: true,
@@ -276,6 +335,7 @@ async function runScenario({ fixture, providerExecutable, options, mcpDisableArg
       },
       responses,
       latencies,
+      latency,
       mechanical,
       semantic,
       trace: session.trace,
@@ -349,6 +409,26 @@ export async function main(argv = process.argv) {
   if (!sidekickProviderAttestationMatches(providerExecutableAfter, providerExecutable)) {
     throw new Error("Codex provider executable changed during Sidekick SOTA evaluation");
   }
+  const insightPassed = results.reduce(
+    (total, result) => total + (result.semantic?.insights?.passed ?? 0),
+    0,
+  );
+  const insightTotal = results.reduce(
+    (total, result) => total + (result.semantic?.insights?.total ?? 0),
+    0,
+  );
+  const requiredInsightRate = insightTotal > 0 ? insightPassed / insightTotal : 0;
+  const qualityPassed =
+    results.length > 0 &&
+    results.every((result) => result.quality_passed) &&
+    requiredInsightRate >= 0.9;
+  const latencyPassed =
+    results.length > 0 && results.every((result) => result.latency?.passed);
+  const behavioralPathAllPassed =
+    qualityPassed &&
+    latencyPassed &&
+    results.length > 0 &&
+    results.every((result) => result.passed);
   const report = {
     schema_version: 1,
     benchmark: "sidekick-sota-adversarial-corpus",
@@ -359,6 +439,8 @@ export async function main(argv = process.argv) {
     requested_verifier_effort: options.verifierEffort,
     requested_judge_model: options.judgeModel,
     requested_judge_effort: options.judgeEffort,
+    max_first_token_ms: options.maxFirstTokenMs,
+    max_total_ms: options.maxTotalMs,
     skipped: plan.skipped,
     results,
     aggregate: {
@@ -366,18 +448,38 @@ export async function main(argv = process.argv) {
       passed: results.filter((result) => result.passed).length,
       failed: results.filter((result) => !result.passed).length,
       deferred: plan.skipped.length,
-      behavioral_path_all_passed:
-        results.length > 0 && results.every((result) => result.passed),
+      quality_passed: qualityPassed,
+      latency_passed: latencyPassed,
+      required_insights_found: insightPassed,
+      required_insights_total: insightTotal,
+      required_insight_rate: requiredInsightRate,
+      first_token_p95_ms: percentile(
+        results
+          .flatMap((result) => result.latency?.checks ?? [])
+          .map(({ first_token_ms }) => first_token_ms)
+          .filter(Number.isFinite),
+        0.95,
+      ),
+      total_p95_ms: percentile(
+        results
+          .flatMap((result) => result.latency?.checks ?? [])
+          .map(({ total_ms }) => total_ms)
+          .filter(Number.isFinite),
+        0.95,
+      ),
+      behavioral_path_all_passed: behavioralPathAllPassed,
       full_corpus_passed:
         plan.counts.matched === plan.counts.total &&
         plan.skipped.length === 0 &&
         results.length === plan.counts.matched &&
-        results.length > 0 &&
-        results.every((result) => result.passed),
+        behavioralPathAllPassed,
       release_ready: false,
       partial_success_allowed: options.allowPartial,
       release_blockers: [
         "capture and diarization are not exercised by this behavioral replay",
+        ...(requiredInsightRate < 0.9
+          ? ["fewer than 90% of rubric insights were found"]
+          : []),
         ...(plan.skipped.length > 0
           ? ["projection scenarios remain deferred until their product evidence lanes exist"]
           : []),

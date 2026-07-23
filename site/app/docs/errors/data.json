@@ -1,6 +1,6 @@
 {
-  "generatedAt": "2026-07-17",
-  "visibleCount": 59,
+  "generatedAt": "2026-07-23",
+  "visibleCount": 60,
   "hiddenCount": 16,
   "groups": [
     {
@@ -721,6 +721,23 @@
           "hidden": false,
           "anchorId": "error-grapherror-dirnotfound",
           "docsUrl": "https://useminutes.app/docs/errors#error-grapherror-dirnotfound"
+        }
+      ]
+    },
+    {
+      "enumName": "VoiceError",
+      "count": 1,
+      "entries": [
+        {
+          "id": "voiceerror-lowquality",
+          "enumName": "VoiceError",
+          "variant": "LowQuality",
+          "cfg": null,
+          "message": "voice clip rejected: {reason}",
+          "sourceFile": "crates/core/src/voice.rs",
+          "hidden": false,
+          "anchorId": "error-voiceerror-lowquality",
+          "docsUrl": "https://useminutes.app/docs/errors#error-voiceerror-lowquality"
         }
       ]
     }

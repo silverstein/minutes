@@ -3843,6 +3843,14 @@ mod tray_activity_tests {
             "main", false
         ));
         assert!(crate::commands::content_protection_for_window("main", true));
+        assert!(!crate::commands::content_protection_for_window(
+            "native-sidekick",
+            false
+        ));
+        assert!(crate::commands::content_protection_for_window(
+            "native-sidekick",
+            true
+        ));
     }
 
     #[test]

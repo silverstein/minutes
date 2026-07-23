@@ -17035,7 +17035,13 @@ fn show_native_sidekick(app: &tauri::AppHandle) -> Result<(), String> {
     .min_inner_size(480.0, 520.0)
     .resizable(true)
     .decorations(true)
-    .content_protected(true)
+    // Sidekick follows the same user-controlled screen-share preference as
+    // the main Minutes window. Coach HUD nudges remain independently
+    // protected through `content_protection_for_window`.
+    .content_protected(content_protection_for_window(
+        "native-sidekick",
+        Config::load().privacy.hide_from_screen_share,
+    ))
     .always_on_top(true)
     .focused(true)
     .build()

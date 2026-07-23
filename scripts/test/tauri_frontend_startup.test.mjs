@@ -460,6 +460,26 @@ test('Sidekick screen marker avoids a cached macOS fullscreen Space', async () =
   assert.match(builder, /\.always_on_top\(true\)/);
 });
 
+test('Sidekick screen marker readiness survives an occluded WebKit view', async () => {
+  const source = await readFile(commandsRust, 'utf8');
+  const start = source.indexOf('let marker_result = tauri::WebviewWindowBuilder::new');
+  const end = source.indexOf('.build();', start);
+  assert.ok(start >= 0 && end > start, 'the marker window builder must remain discoverable');
+  const builder = source.slice(start, end);
+  assert.match(builder, /\.on_page_load\(/);
+  assert.match(builder, /PageLoadEvent::Finished/);
+  assert.match(builder, /mark_native_sidekick_acceptance_marker_painted/);
+
+  const acceptanceStart = source.indexOf('fn run_native_sidekick_ui_acceptance(');
+  const acceptanceEnd = source.indexOf(
+    'fn request_native_sidekick_screen_recording_access',
+    acceptanceStart,
+  );
+  const acceptance = source.slice(acceptanceStart, acceptanceEnd);
+  assert.match(acceptance, /std::thread::sleep\(Duration::from_secs\(1\)\)/);
+  assert.match(acceptance, /wait_for_native_sidekick_real_screen/);
+});
+
 test('Sidekick acceptance traverses visible main control, consent, and one real start invoke', async () => {
   const source = await readFile(indexHtml, 'utf8');
   const declaredIds = new Set([...source.matchAll(/\bid="([^"]+)"/g)].map((match) => match[1]));

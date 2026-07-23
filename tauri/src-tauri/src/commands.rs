@@ -20094,6 +20094,8 @@ pub fn launch_native_sidekick_ui_acceptance(
     let marker_y = marker_position.y as f64 / marker_scale;
     let marker_width = marker_size.width as f64 / marker_scale;
     let marker_height = marker_size.height as f64 / marker_scale;
+    let marker_acceptance = state.sidekick_acceptance.clone();
+    let marker_nonce = nonce.clone();
     let marker_result = tauri::WebviewWindowBuilder::new(
         app,
         "sidekick-acceptance-marker",
@@ -20109,6 +20111,18 @@ pub fn launch_native_sidekick_ui_acceptance(
     .always_on_top(true)
     .focused(true)
     .skip_taskbar(true)
+    // An occluded WKWebView can suspend requestAnimationFrame before the
+    // marker's JavaScript handshake runs. The native finished-load callback
+    // remains reliable in that state. It only releases the settle delay; the
+    // real screen worker still has to capture and decode the complete nonce
+    // before any image can count as accepted evidence.
+    .on_page_load(move |window, payload| {
+        if window.label() == "sidekick-acceptance-marker"
+            && matches!(payload.event(), tauri::webview::PageLoadEvent::Finished)
+        {
+            mark_native_sidekick_acceptance_marker_painted(&marker_acceptance, &marker_nonce).ok();
+        }
+    })
     .build();
     if let Err(error) = marker_result {
         clear_native_sidekick_acceptance(&state.sidekick_acceptance);

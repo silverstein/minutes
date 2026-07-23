@@ -66,6 +66,7 @@ pub mod sensitive;
 // Always compiled: the path/resolution helpers are pure std/Config so `setup`
 // can install models without the engine. Only `transcribe_samples` is gated.
 pub mod sherpa_engine;
+pub(crate) mod stem_probe;
 #[cfg(feature = "streaming-diarize")]
 pub mod streaming_diarize;
 pub mod summarize;

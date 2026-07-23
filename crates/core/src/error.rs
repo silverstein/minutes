@@ -90,9 +90,9 @@ pub enum TranscribeError {
 
     #[error(
         "native call capture cannot be transcribed: {reason}. \
-         The .mov produced by macOS SCRecordingOutput decodes to ~2x source duration on this \
-         container shape; transcription requires the sibling .voice.wav and .system.wav PCM \
-         stems to be mixed via ffmpeg first."
+         Minutes could not recover a usable sibling PCM stem or create its internal mix. \
+         The original capture files remain available; retry from Recovery Center, and if the \
+         failure persists share this error at https://github.com/silverstein/minutes/discussions."
     )]
     NativeCaptureStemMixUnavailable { reason: String },
 

@@ -154,6 +154,8 @@
       );
       const width = Math.max(0, intersection.right - intersection.left);
       const height = Math.max(0, intersection.bottom - intersection.top);
+      const minimumVisibleWidth = Math.min(rect.width, 24);
+      const minimumVisibleHeight = Math.min(rect.height, 24);
       const centerX = intersection.left + width / 2;
       const centerY = intersection.top + height / 2;
       const hit = width > 0 && height > 0 && typeof document.elementFromPoint === 'function'
@@ -164,8 +166,8 @@
         || !visibleThroughAncestors
         || rect.width <= 0
         || rect.height <= 0
-        || width <= 0
-        || height <= 0
+        || width < minimumVisibleWidth
+        || height < minimumVisibleHeight
         || !hitTested) return null;
       return { rect, width, height, hitTested };
     }
@@ -221,6 +223,13 @@
         `[data-snapshot-index="${responseIndex}"] .bubble`,
       );
       if (!bubble || bubble.textContent !== response.text) return;
+      // Acceptance must prove a readable painted answer, not a fractional
+      // sliver while the production smooth-scroll animation is still moving.
+      // Keep normal user sessions smooth; only the isolated acceptance lane
+      // forces the exact response into view synchronously.
+      scroller.style.scrollBehavior = 'auto';
+      scroller.scrollTop = scroller.scrollHeight;
+      bubble.scrollIntoView?.({ behavior: 'instant', block: 'nearest', inline: 'nearest' });
       pending.paintScheduled = true;
       requestAnimationFrame(() => requestAnimationFrame(async () => {
         const interactability = elementInteractability(bubble);

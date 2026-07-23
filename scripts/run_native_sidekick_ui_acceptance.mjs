@@ -36,6 +36,7 @@ import {
 // The separately sampled real UI gets a 10s hard ceiling for hung paints;
 // typical service latency remains governed by the required distribution gate.
 const MAX_DOM_PAINT_MS = 10_000;
+const MIN_VISIBLE_RESPONSE_PX = 24;
 const HARD_TIMEOUT_MS = 230_000;
 const FORCED_CLEANUP_GRACE_MS = 75_000;
 const MAX_OUTPUT_BYTES = 1024 * 1024;
@@ -439,13 +440,15 @@ export function evaluateNativeSidekickUiAcceptance(payload, runtime) {
       turn?.dom_layout?.animationFrames === 2 &&
       turn?.dom_layout?.windowVisible === true &&
       turn?.dom_layout?.onScreen === true &&
-      Number.isFinite(turn?.dom_layout?.width) && turn.dom_layout.width > 0 &&
-      Number.isFinite(turn?.dom_layout?.height) && turn.dom_layout.height > 0 &&
+      Number.isFinite(turn?.dom_layout?.width) &&
+      turn.dom_layout.width >= MIN_VISIBLE_RESPONSE_PX &&
+      Number.isFinite(turn?.dom_layout?.height) &&
+      turn.dom_layout.height >= MIN_VISIBLE_RESPONSE_PX &&
       /^[a-f0-9]{64}$/.test(turn?.dom_layout?.responseSha256 ?? "") &&
       turn.dom_layout.responseSha256 === sha256(turn.response ?? "") &&
       Number.isFinite(turn?.dom_layout?.typedToPaintMs) &&
       turn.dom_layout.typedToPaintMs <= MAX_DOM_PAINT_MS,
-    `Observed ${turn?.dom_layout?.typedToPaintMs ?? "null"}ms from UI request through two DOM-layout frames in a visible on-screen window.`,
+    `Observed ${turn?.dom_layout?.typedToPaintMs ?? "null"}ms from UI request through two DOM-layout frames with at least ${MIN_VISIBLE_RESPONSE_PX}px visible in each axis.`,
   ));
   const checks = [...sourceChecks, ...quality.mechanical_checks, ...paintChecks];
   return {

@@ -103,6 +103,9 @@ class FakeElement {
     this.disabled = false;
     this.readOnly = false;
     this.inert = false;
+    this.style = {};
+    this.scrollTop = 0;
+    this.scrollHeight = 620;
     this.dataset = {};
     this.children = [];
     this.listeners = new Map();
@@ -139,6 +142,10 @@ class FakeElement {
   }
 
   focus() {}
+
+  scrollIntoView(options) {
+    this.lastScrollIntoViewOptions = options;
+  }
 
   click() {
     this.dispatchEvent({ type: 'click', target: this, preventDefault() {} });
@@ -338,7 +345,7 @@ test('native Sidekick acceptance traverses the real form and waits for two paint
   assert.equal(paint.args.animationFrames, 2);
   assert.equal(paint.args.userText, message);
   assert.equal(paint.args.domText, 'The downside is $800K; gate rollout by the error distribution.');
-  assert.ok(paint.args.width > 0 && paint.args.height > 0);
+  assert.ok(paint.args.width >= 24 && paint.args.height >= 24);
   assert.ok(harness.invocations.some(
     ({ command, args }) => command === 'cmd_native_sidekick_ui_acceptance_turn_settled'
       && args.turnId === 'vendor_strategy',
@@ -435,6 +442,44 @@ test('native Sidekick acceptance rejects a bubble clipped out of the message scr
     harness.invocations.some(({ command }) => command === 'cmd_native_sidekick_ui_acceptance_painted'),
     false,
   );
+});
+
+test('native Sidekick acceptance rejects a fractional response sliver', async () => {
+  const harness = await sidekickHarness();
+  const nonce = '102132435465768798a9bacbdcedfe0f';
+  const message = 'Show me the almost hidden answer';
+  await harness.eventHandlers.get('sidekick:acceptance-submit')({
+    payload: { nonce, turnId: 'fractional_turn', message, baselineMessageCount: 0 },
+  });
+  harness.elements.get('messages').getBoundingClientRect = () => ({
+    width: 1_024, height: 40.8, top: 0, left: 0, right: 1_024, bottom: 40.8,
+  });
+  harness.eventHandlers.get('sidekick:state')({
+    payload: {
+      revision: 1,
+      active: true,
+      state: 'ready',
+      messages: [
+        { role: 'user', text: message, acceptanceTurnId: 'fractional_turn' },
+        { role: 'sidekick', text: 'Only a fractional sliver is visible.', acceptanceTurnId: 'fractional_turn' },
+      ],
+    },
+  });
+  const bubble = harness.stream.children[1].children.find((child) => child.className === 'bubble');
+  bubble.getBoundingClientRect = () => ({
+    width: 320, height: 32, top: 40, left: 0, right: 320, bottom: 72,
+  });
+  harness.frames.splice(0).forEach((frame) => frame(1));
+  harness.frames.splice(0).forEach((frame) => frame(2));
+  await settle();
+  assert.equal(
+    harness.invocations.some(({ command }) => command === 'cmd_native_sidekick_ui_acceptance_painted'),
+    false,
+  );
+  assert.equal(harness.elements.get('messages').style.scrollBehavior, 'auto');
+  assert.equal(bubble.lastScrollIntoViewOptions.behavior, 'instant');
+  assert.equal(bubble.lastScrollIntoViewOptions.block, 'nearest');
+  assert.equal(bubble.lastScrollIntoViewOptions.inline, 'nearest');
 });
 
 test('event plus replay of the same challenge submits exactly once', async () => {
@@ -1264,6 +1309,7 @@ test('the evaluator rejects every reviewed false-green mutation', async () => {
     ['wrong provider version', (payload) => { payload.sidekick.provider_version = 'codex-cli other'; }],
     ['mismatched DOM turn', (payload) => { payload.turns[0].dom_layout.turnId = 'other'; }],
     ['hidden native window', (payload) => { payload.turns[0].dom_layout.windowVisible = false; }],
+    ['fractional response sliver', (payload) => { payload.turns[1].dom_layout.height = 0.8; }],
     ['wrong provider evidence window', (payload) => {
       payload.turns[1].evidence_receipt.transcriptEvidenceIds = ['invented'];
     }],

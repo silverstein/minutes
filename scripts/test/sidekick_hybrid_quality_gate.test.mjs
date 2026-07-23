@@ -149,7 +149,13 @@ function passingArtifact() {
       ),
     },
     aggregate: {
-      budgets: { max_first_token_p95_ms: 4_000, max_total_p95_ms: 7_000 },
+      budgets: {
+        max_first_token_p95_ms: 4_000,
+        max_total_median_ms: 6_000,
+        service_target_total_ms: 8_000,
+        min_service_target_pass_count: 5,
+        max_total_p95_ms: 10_000,
+      },
     },
   };
 }
@@ -250,6 +256,18 @@ test("hybrid gate rejects thin self-attestation and recomputed failures", () => 
     (report) => { report.verifier_calibration.results[1].allowed = true; },
     (report) => { report.verifier_calibration.session_ids[3] = report.verifier_calibration.session_ids[0]; },
     (report) => { report.runs[1].latency.role_flip.total_ms = 30_000; },
+    (report) => {
+      for (const run of report.runs.slice(0, 2)) {
+        run.latency.proactive.total_ms = 6_500;
+        run.latency.role_flip.total_ms = 6_500;
+      }
+    },
+    (report) => {
+      // Even with a healthy median and bounded 10s maximum, two completions
+      // outside the 8s interactive target must fail the distribution gate.
+      report.runs[0].latency.proactive.total_ms = 8_500;
+      report.runs[1].latency.proactive.total_ms = 8_500;
+    },
     (report) => { report.runs[1].latency.role_flip.first_token_ms = -1; },
     (report) => { report.runs[1].latency.role_flip.first_token_ms = 5_000; },
     (report) => {

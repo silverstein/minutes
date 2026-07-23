@@ -31,7 +31,8 @@ import {
 
 const MAX_FIRST_TOKEN_MS = 5_000;
 const MAX_TURN_TOTAL_MS = 10_000;
-// The fresh three-run hybrid gate enforces the tighter 7s p95 service bar.
+// The fresh three-run hybrid gate enforces a 6s median, a five-of-six 8s
+// service target, and its own 10s absolute tail ceiling.
 // This separately sampled per-turn ceiling catches a hung signed product;
 // typical service latency remains governed by the required distribution gate.
 const MAX_PUBLICATION_READY_MS = 10_000;

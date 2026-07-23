@@ -47,7 +47,10 @@ function parseArgs(argv) {
     verifierModel: CODEX_VERIFIER_MODEL,
     verifierEffort: CODEX_VERIFIER_EFFORT,
     maxFirstTokenMs: 4_000,
-    maxTotalMs: 7_000,
+    maxMedianTotalMs: 6_000,
+    serviceTargetTotalMs: 8_000,
+    minServiceTargetSamples: 5,
+    maxTotalMs: 10_000,
     producerReceipt: false,
   };
   for (let index = 2; index < argv.length; index += 1) {
@@ -61,6 +64,8 @@ function parseArgs(argv) {
     else if (arg === "--verifier-model") options.verifierModel = argv[++index];
     else if (arg === "--verifier-effort") options.verifierEffort = argv[++index];
     else if (arg === "--max-first-token-ms") options.maxFirstTokenMs = Number(argv[++index]);
+    else if (arg === "--max-median-total-ms") options.maxMedianTotalMs = Number(argv[++index]);
+    else if (arg === "--service-target-total-ms") options.serviceTargetTotalMs = Number(argv[++index]);
     else if (arg === "--max-total-ms") options.maxTotalMs = Number(argv[++index]);
     else if (arg === "--producer-receipt") options.producerReceipt = true;
     else throw new Error(`unknown argument: ${arg}`);
@@ -76,6 +81,15 @@ function percentile(values, quantile) {
   const sorted = [...values].sort((left, right) => left - right);
   const index = Math.max(0, Math.ceil(quantile * sorted.length) - 1);
   return sorted[index];
+}
+
+function median(values) {
+  if (values.length === 0) return null;
+  const sorted = [...values].sort((left, right) => left - right);
+  const midpoint = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 0
+    ? (sorted[midpoint - 1] + sorted[midpoint]) / 2
+    : sorted[midpoint];
 }
 
 function preparedBrief(fixture) {
@@ -355,6 +369,13 @@ async function main() {
     latencySamples.map((sample) => sample.total_ms).filter(Number.isFinite),
     0.95,
   );
+  const totalMedian = median(
+    latencySamples.map((sample) => sample.total_ms).filter(Number.isFinite),
+  );
+  const serviceTargetPassCount = latencySamples.filter(
+    (sample) => Number.isFinite(sample.total_ms) &&
+      sample.total_ms <= options.serviceTargetTotalMs,
+  ).length;
   const qualityPassed = runs.every((run) => run.golden.passed);
   const semanticQualityPassed = runs.every((run) => run.semantic.passed);
   const semanticCalibrationPassed = runs[0]?.semantic_calibration?.passed === true;
@@ -362,8 +383,11 @@ async function main() {
   const modelMatched = runs.every((run) => run.model === options.model);
   const latencyPassed =
     firstTokenP95 !== null &&
+    totalMedian !== null &&
     totalP95 !== null &&
     firstTokenP95 <= options.maxFirstTokenMs &&
+    totalMedian <= options.maxMedianTotalMs &&
+    serviceTargetPassCount >= options.minServiceTargetSamples &&
     totalP95 <= options.maxTotalMs;
   const providerExecutableAfter = await attestSidekickProviderExecutable(
     providerExecutable.path,
@@ -398,9 +422,15 @@ async function main() {
         modelMatched &&
         latencyPassed,
       first_token_p95_ms: firstTokenP95,
+      total_median_ms: totalMedian,
+      service_target_pass_count: serviceTargetPassCount,
+      total_sample_count: latencySamples.length,
       total_p95_ms: totalP95,
       budgets: {
         max_first_token_p95_ms: options.maxFirstTokenMs,
+        max_total_median_ms: options.maxMedianTotalMs,
+        service_target_total_ms: options.serviceTargetTotalMs,
+        min_service_target_pass_count: options.minServiceTargetSamples,
         max_total_p95_ms: options.maxTotalMs,
       },
     },

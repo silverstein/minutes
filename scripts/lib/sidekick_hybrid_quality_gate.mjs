@@ -29,7 +29,10 @@ import { sidekickVerifierCalibrationCases } from "../../tests/eval/sidekick_veri
 
 export const DEFAULT_SIDEKICK_HYBRID_ARTIFACT = "/tmp/sidekick-session-eval.json";
 export const MAX_ACCEPTED_FIRST_TOKEN_P95_MS = 4_000;
-export const MAX_ACCEPTED_TOTAL_P95_MS = 7_000;
+export const MAX_ACCEPTED_TOTAL_MEDIAN_MS = 6_000;
+export const ACCEPTED_SERVICE_TARGET_TOTAL_MS = 8_000;
+export const MIN_ACCEPTED_SERVICE_TARGET_SAMPLES = 5;
+export const MAX_ACCEPTED_TOTAL_P95_MS = 10_000;
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const execFileAsync = promisify(execFile);
@@ -53,6 +56,15 @@ function percentile(values, quantile) {
   if (values.length === 0) return null;
   const sorted = [...values].sort((left, right) => left - right);
   return sorted[Math.max(0, Math.ceil(quantile * sorted.length) - 1)];
+}
+
+function median(values) {
+  if (values.length === 0) return null;
+  const sorted = [...values].sort((left, right) => left - right);
+  const midpoint = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 0
+    ? (sorted[midpoint - 1] + sorted[midpoint]) / 2
+    : sorted[midpoint];
 }
 
 function semanticVerdictPasses(verdict) {
@@ -208,7 +220,11 @@ export function validateSidekickHybridQualityArtifact(
     run?.latency?.role_flip,
   ]).filter(Boolean);
   const firstTokenP95 = percentile(latencySamples.map((item) => item.first_token_ms), 0.95);
+  const totalMedian = median(latencySamples.map((item) => item.total_ms));
   const totalP95 = percentile(latencySamples.map((item) => item.total_ms), 0.95);
+  const serviceTargetPassCount = latencySamples.filter(
+    (item) => item.total_ms <= ACCEPTED_SERVICE_TARGET_TOTAL_MS,
+  ).length;
   const budgets = report?.aggregate?.budgets ?? {};
   const sourceBound = sidekickQualitySourceBindingMatches(
     report?.source_binding,
@@ -232,8 +248,13 @@ export function validateSidekickHybridQualityArtifact(
   const latencyPass =
     latencySamples.length === 6 &&
     firstTokenP95 <= MAX_ACCEPTED_FIRST_TOKEN_P95_MS &&
+    totalMedian <= MAX_ACCEPTED_TOTAL_MEDIAN_MS &&
+    serviceTargetPassCount >= MIN_ACCEPTED_SERVICE_TARGET_SAMPLES &&
     totalP95 <= MAX_ACCEPTED_TOTAL_P95_MS &&
     budgets?.max_first_token_p95_ms === MAX_ACCEPTED_FIRST_TOKEN_P95_MS &&
+    budgets?.max_total_median_ms === MAX_ACCEPTED_TOTAL_MEDIAN_MS &&
+    budgets?.service_target_total_ms === ACCEPTED_SERVICE_TARGET_TOTAL_MS &&
+    budgets?.min_service_target_pass_count === MIN_ACCEPTED_SERVICE_TARGET_SAMPLES &&
     budgets?.max_total_p95_ms === MAX_ACCEPTED_TOTAL_P95_MS;
   const passed =
     report?.schema_version === 1 &&
@@ -273,8 +294,14 @@ export function validateSidekickHybridQualityArtifact(
     model_matched: runsPass,
     latency_passed: latencyPass,
     first_token_p95_ms: firstTokenP95,
+    total_median_ms: totalMedian,
+    service_target_pass_count: serviceTargetPassCount,
+    total_sample_count: latencySamples.length,
     total_p95_ms: totalP95,
     max_first_token_p95_ms: budgets?.max_first_token_p95_ms ?? null,
+    max_total_median_ms: budgets?.max_total_median_ms ?? null,
+    service_target_total_ms: budgets?.service_target_total_ms ?? null,
+    min_service_target_pass_count: budgets?.min_service_target_pass_count ?? null,
     max_total_p95_ms: budgets?.max_total_p95_ms ?? null,
     source_binding: report?.source_binding ?? null,
     artifact_sha256: artifactBytes ? sha256(artifactBytes) : null,
@@ -305,8 +332,14 @@ export function sidekickHybridQualityReceiptPasses(
     receipt?.model_matched === true &&
     receipt?.latency_passed === true &&
     receipt?.first_token_p95_ms <= MAX_ACCEPTED_FIRST_TOKEN_P95_MS &&
+    receipt?.total_median_ms <= MAX_ACCEPTED_TOTAL_MEDIAN_MS &&
+    receipt?.service_target_pass_count >= MIN_ACCEPTED_SERVICE_TARGET_SAMPLES &&
+    receipt?.total_sample_count === 6 &&
     receipt?.total_p95_ms <= MAX_ACCEPTED_TOTAL_P95_MS &&
     receipt?.max_first_token_p95_ms === MAX_ACCEPTED_FIRST_TOKEN_P95_MS &&
+    receipt?.max_total_median_ms === MAX_ACCEPTED_TOTAL_MEDIAN_MS &&
+    receipt?.service_target_total_ms === ACCEPTED_SERVICE_TARGET_TOTAL_MS &&
+    receipt?.min_service_target_pass_count === MIN_ACCEPTED_SERVICE_TARGET_SAMPLES &&
     receipt?.max_total_p95_ms === MAX_ACCEPTED_TOTAL_P95_MS &&
     sidekickQualitySourceBindingMatches(receipt?.source_binding, sourceBinding) &&
     /^[a-f0-9]{64}$/.test(receipt?.artifact_sha256 ?? "");

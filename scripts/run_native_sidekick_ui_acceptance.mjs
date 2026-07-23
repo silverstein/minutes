@@ -31,7 +31,8 @@ import {
   validateCanonicalInstalledApp,
 } from "./run_native_sidekick_contract_scope_acceptance.mjs";
 
-// The fresh three-run hybrid gate enforces the tighter 7s p95 service bar.
+// The fresh three-run hybrid gate enforces a 6s median, a five-of-six 8s
+// service target, and its own 10s absolute tail ceiling.
 // The separately sampled real UI gets a 10s hard ceiling for hung paints;
 // typical service latency remains governed by the required distribution gate.
 const MAX_DOM_PAINT_MS = 10_000;

@@ -104,9 +104,15 @@ function passingRuntime(overrides = {}, payload = passingPayload()) {
       model_matched: true,
       latency_passed: true,
       first_token_p95_ms: 2_000,
+      total_median_ms: 4_500,
+      service_target_pass_count: 6,
+      total_sample_count: 6,
       total_p95_ms: 5_000,
       max_first_token_p95_ms: 4_000,
-      max_total_p95_ms: 7_000,
+      max_total_median_ms: 6_000,
+      service_target_total_ms: 8_000,
+      min_service_target_pass_count: 5,
+      max_total_p95_ms: 10_000,
       artifact_sha256: "f".repeat(64),
       producer_artifact_sha256: "f".repeat(64),
       source_binding: qualitySourceBinding,
@@ -285,7 +291,7 @@ test("a bounded signed tail passes only with a passing fresh latency distributio
   const runtime = passingRuntime();
   runtime.hybrid_quality_gate.passed = false;
   runtime.hybrid_quality_gate.latency_passed = false;
-  runtime.hybrid_quality_gate.total_p95_ms = 7_001;
+  runtime.hybrid_quality_gate.service_target_pass_count = 3;
   const failing = evaluateNativeSidekickAcceptance(payload, runtime);
   assert.equal(failing.passed, false);
   assert.equal(

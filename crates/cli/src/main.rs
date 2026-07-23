@@ -767,6 +767,28 @@ enum Commands {
         json: bool,
     },
 
+    /// Re-run the AI pass (summary + derived frontmatter) on an edited meeting or memo
+    Resummarize {
+        /// Path to a meeting/memo .md file, or a search term to find one
+        meeting: String,
+
+        /// Actually write the regenerated content (default: preview — the model IS still invoked)
+        #[arg(long)]
+        apply: bool,
+
+        /// Override the summarization engine for this run (e.g. "agent", "ollama", "apple")
+        #[arg(long)]
+        engine: Option<String>,
+
+        /// Apply a template for this run (slug); default is the template recorded in the file
+        #[arg(long)]
+        template: Option<String>,
+
+        /// Emit machine-readable JSON instead of human output
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Process an audio file through the pipeline
     Process {
         /// Path to audio file (.wav, .m4a, .mp3)
@@ -1893,6 +1915,13 @@ fn main() -> Result<()> {
             engine,
             json,
         } => cmd_redo_speaker_mapping(&meeting, apply, engine, json, &config),
+        Commands::Resummarize {
+            meeting,
+            apply,
+            engine,
+            template,
+            json,
+        } => cmd_resummarize(&meeting, apply, engine, template, json, &config),
         Commands::Process {
             path,
             content_type,
@@ -4772,6 +4801,18 @@ fn cmd_ingest(path: Option<PathBuf>, all: bool, dry_run: bool, config: &Config) 
 /// meetings directory, so neither a crafted path nor a symlinked search hit can
 /// point a mutating command at a file outside the user's meetings.
 fn resolve_single_meeting(meeting: &str, config: &Config) -> Result<std::path::PathBuf> {
+    // Restrict the search to meetings so a memo/dictation never resolves here.
+    resolve_artifact_path(meeting, config, Some("meeting"), "meeting")
+}
+
+/// Resolve an artifact path from a direct path or a search term while ensuring
+/// the result remains contained by the configured meetings directory.
+fn resolve_artifact_path(
+    query: &str,
+    config: &Config,
+    content_type: Option<&str>,
+    kind_desc: &str,
+) -> Result<std::path::PathBuf> {
     let meetings_dir = &config.output_dir;
     let meetings_canonical = meetings_dir
         .canonicalize()
@@ -4787,14 +4828,13 @@ fn resolve_single_meeting(meeting: &str, config: &Config) -> Result<std::path::P
         Ok(canonical)
     };
 
-    let path = std::path::PathBuf::from(meeting);
+    let path = std::path::PathBuf::from(query);
     if path.exists() {
         return ensure_contained(path.canonicalize()?);
     }
 
-    // Restrict the search to meetings so a memo/dictation never resolves here.
     let filters = minutes_core::search::SearchFilters {
-        content_type: Some("meeting".into()),
+        content_type: content_type.map(Into::into),
         since: None,
         attendee: None,
         intent_kind: None,
@@ -4802,9 +4842,9 @@ fn resolve_single_meeting(meeting: &str, config: &Config) -> Result<std::path::P
         recorded_by: None,
         include_restricted: true,
     };
-    let results = minutes_core::search::search(meeting, config, &filters)?;
+    let results = minutes_core::search::search(query, config, &filters)?;
     if results.is_empty() {
-        anyhow::bail!("no meeting found matching: {}", meeting);
+        anyhow::bail!("no {kind_desc} found matching: {query}");
     }
     let canonical = ensure_contained(results[0].path.canonicalize()?)?;
     eprintln!("  Matched: {}", canonical.display());
@@ -4817,50 +4857,9 @@ fn resolve_single_meeting(meeting: &str, config: &Config) -> Result<std::path::P
 /// `Transcript` (outside any code fence) opens the section, and the next real H2
 /// closes it. Returns `None` when there is no such section.
 fn transcript_section(body: &str) -> Option<String> {
-    // Track which marker opened the current fence so a `~~~` line inside a
-    // ``` block (or vice versa) is treated as content, not as a fence toggle.
-    let mut fence: Option<char> = None;
-    let mut found = false;
-    let mut collected: Vec<&str> = Vec::new();
-    for line in body.lines() {
-        let trimmed = line.trim_start();
-        let marker = if trimmed.starts_with("```") {
-            Some('`')
-        } else if trimmed.starts_with("~~~") {
-            Some('~')
-        } else {
-            None
-        };
-        if let Some(m) = marker {
-            match fence {
-                None => fence = Some(m),                 // open a fence
-                Some(open) if open == m => fence = None, // close only on a matching marker
-                Some(_) => {}                            // other marker inside a fence: content
-            }
-            if found {
-                collected.push(line);
-            }
-            continue;
-        }
-        if fence.is_none() {
-            if let Some(rest) = line.strip_prefix("## ") {
-                if found {
-                    break; // next section ends the transcript
-                }
-                if rest.trim() == "Transcript" {
-                    found = true;
-                    continue;
-                }
-            }
-        }
-        if found {
-            collected.push(line);
-        }
-    }
-    if !found {
-        return None;
-    }
-    Some(collected.join("\n").trim_start_matches('\n').to_string())
+    // Read-only extraction, so the lenient first-match variant is correct;
+    // writers (resummarize) go through find_unique_section and fail closed.
+    minutes_core::markdown::first_section_text(body, "Transcript")
 }
 
 /// Merge a freshly-computed speaker map into the existing one without ever
@@ -5101,6 +5100,183 @@ fn report_redo_result(
         }
     } else {
         println!("  (dry run: re-run with --apply to write)");
+    }
+
+    Ok(())
+}
+
+/// Resolve a meeting **or memo** `.md` file from a path or search term.
+///
+/// `resummarize` accepts more content types than `redo-speaker-mapping`
+/// (memos and `source: text-import` files get summaries too), so this
+/// resolver searches without a content-type filter and lets the core
+/// validation reject unsupported artifacts (dictation, no-speech,
+/// `capture: none`) with a precise error. Same containment guarantee as
+/// [`resolve_single_meeting`]: results must live under the meetings dir.
+fn resolve_single_artifact(meeting: &str, config: &Config) -> Result<std::path::PathBuf> {
+    resolve_artifact_path(meeting, config, None, "meeting or memo")
+}
+
+fn describe_merge_disposition(d: &minutes_core::resummarize::MergeDisposition) -> String {
+    use minutes_core::resummarize::MergeDisposition;
+    match d {
+        MergeDisposition::Carried => "carried".into(),
+        MergeDisposition::CarriedWithConflict(c) => format!("carried with conflict: {c}"),
+        MergeDisposition::KeptUnmatched => {
+            "kept (no match in regenerated set, has user state)".into()
+        }
+        MergeDisposition::Dropped => "dropped (no match, no user state)".into(),
+        MergeDisposition::Ambiguous => {
+            "ambiguous identity — not auto-merged, resolve manually".into()
+        }
+    }
+}
+
+fn cmd_resummarize(
+    meeting: &str,
+    apply: bool,
+    engine: Option<String>,
+    template: Option<String>,
+    json: bool,
+    config: &Config,
+) -> Result<()> {
+    // With --json, failures must also reach stdout as an envelope — a bare
+    // anyhow bail would leave machine consumers with nothing to parse.
+    let fail_json = |stage: &str, error: &dyn std::fmt::Display| -> Result<()> {
+        if json {
+            let payload = serde_json::json!({
+                "applied": false,
+                "stage": stage,
+                "error": error.to_string(),
+            });
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json_envelope("resummarize", payload))?
+            );
+        }
+        Ok(())
+    };
+
+    let path = match resolve_single_artifact(meeting, config) {
+        Ok(path) => path,
+        Err(e) => {
+            fail_json("resolve", &e)?;
+            return Err(e);
+        }
+    };
+
+    // Engine override goes through the same choke point the pipeline uses
+    // (config.summarization.engine, resolved inside the summarizer) — never
+    // a parallel resolution path (#523 maintainer note M1).
+    let mut cfg = config.clone();
+    if let Some(e) = &engine {
+        cfg.summarization.engine = e.clone();
+    }
+
+    if !json {
+        // Cost/privacy transparency: preview still runs the model (M3).
+        eprintln!(
+            "Running the summarization model (engine: {}){}...",
+            cfg.summarization.engine,
+            if apply {
+                ""
+            } else {
+                " — preview: no changes written without --apply"
+            }
+        );
+    }
+
+    let opts = minutes_core::resummarize::ResummarizeOptions {
+        apply,
+        template_override: template,
+    };
+    let report = match minutes_core::resummarize::resummarize_meeting(&path, &cfg, &opts) {
+        Ok(report) => report,
+        Err(e) => {
+            fail_json("resummarize", &e)?;
+            return Err(e.into());
+        }
+    };
+
+    if json {
+        let merge_notes: Vec<serde_json::Value> = report
+            .merge_notes
+            .iter()
+            .map(|n| {
+                serde_json::json!({
+                    "kind": n.kind,
+                    "previous": n.previous,
+                    "disposition": describe_merge_disposition(&n.disposition),
+                })
+            })
+            .collect();
+        let payload = serde_json::json!({
+            "path": report.path.display().to_string(),
+            "applied": report.applied,
+            "model_invoked": true,
+            "engine": report.engine,
+            "model": report.model,
+            "template": report.template,
+            "duration_ms": report.duration_ms,
+            "sections_replaced": report.sections_replaced,
+            "merge_notes": merge_notes,
+            "action_items": report.action_items,
+            "decisions": report.decisions,
+            "new_ai_body": report.new_ai_body,
+            "backup": report.backup.as_ref().map(|p| p.display().to_string()),
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json_envelope("resummarize", payload))?
+        );
+        return Ok(());
+    }
+
+    println!("Artifact: {}", path.display());
+    println!(
+        "  engine: {} (model: {}){}",
+        report.engine,
+        report.model,
+        report
+            .template
+            .as_deref()
+            .map(|t| format!(", template: {t}"))
+            .unwrap_or_default()
+    );
+    println!("  summarize stage: {} ms", report.duration_ms);
+    if report.sections_replaced.is_empty() {
+        println!("  sections: first AI pass (no existing AI sections found)");
+    } else {
+        println!(
+            "  sections replaced: {}",
+            report.sections_replaced.join(", ")
+        );
+    }
+    if !report.merge_notes.is_empty() {
+        println!("  merge decisions needing eyes:");
+        for note in &report.merge_notes {
+            println!(
+                "    - [{}] \"{}\": {}",
+                note.kind,
+                note.previous,
+                describe_merge_disposition(&note.disposition)
+            );
+        }
+    }
+    println!("\n--- regenerated content (## Summary) ---");
+    println!("{}", report.new_ai_body.trim_end());
+    println!("--- end ---\n");
+    if report.applied {
+        if let Some(backup) = report.backup.as_ref() {
+            println!(
+                "  written: {} (backup: {})",
+                path.display(),
+                backup.display()
+            );
+        }
+    } else {
+        println!("  preview only — the model WAS invoked, but nothing was written.");
+        println!("  Re-run with --apply to write.");
     }
 
     Ok(())
@@ -7770,41 +7946,8 @@ mod tests {
         assert_eq!(merged.len(), 1, "duplicate labels collapse to one");
     }
 
-    #[test]
-    fn transcript_section_requires_exact_heading() {
-        // A look-alike heading must not be treated as the transcript.
-        let body = "## Transcript cleanup notes\n\n[SPEAKER_00 0:00] not the transcript\n";
-        assert!(transcript_section(body).is_none());
-    }
-
-    #[test]
-    fn transcript_section_ignores_fenced_code_block() {
-        // A `## Transcript` line inside a code fence must be ignored; the real
-        // section after the fence is the one that wins.
-        let body = "## Summary\n\n```\n## Transcript\n[SPEAKER_99 0:00] fake\n```\n\n## Transcript\n\n[SPEAKER_00 0:00] real line\n";
-        let t = transcript_section(body).expect("real transcript section found");
-        assert!(t.contains("real line"));
-        assert!(!t.contains("fake"));
-    }
-
-    #[test]
-    fn transcript_section_handles_mixed_fence_markers() {
-        // A backtick fence whose body contains a `~~~` line must NOT be treated
-        // as closed by that tilde line; the fake `## Transcript` inside stays
-        // ignored and the real section after the fence wins.
-        let body = "## Summary\n\n```\n~~~\n## Transcript\n[SPEAKER_99 0:00] fake\n```\n\n## Transcript\n\n[SPEAKER_00 0:00] real line\n";
-        let t = transcript_section(body).expect("real transcript section found");
-        assert!(t.contains("real line"));
-        assert!(!t.contains("fake"));
-    }
-
-    #[test]
-    fn transcript_section_extracts_first_and_stops_at_next_h2() {
-        let body = "## Transcript\n\n[SPEAKER_00 0:00] hello\n\n## Action Items\n\n- do thing\n";
-        let t = transcript_section(body).unwrap();
-        assert!(t.contains("hello"));
-        assert!(!t.contains("Action Items"));
-    }
+    // The transcript_section fence/heading tests moved to
+    // minutes-core::markdown (section-range parser), which now owns the logic.
 
     #[test]
     fn recording_consent_explicit_basis_still_reminds_in_remind_mode() {
@@ -8089,6 +8232,28 @@ life (qmd://life/)
     /// flag on every utterance and silently fell back to spawning parakeet
     /// directly, ending in a confusing error on Ctrl+C and a session-level
     /// fallback to whisper.
+    #[test]
+    fn resummarize_clap_parses_all_flags() {
+        for args in [
+            vec!["minutes", "resummarize", "weekly sync"],
+            vec!["minutes", "resummarize", "/tmp/m.md", "--apply"],
+            vec![
+                "minutes",
+                "resummarize",
+                "m.md",
+                "--apply",
+                "--engine",
+                "apple",
+                "--template",
+                "standup",
+                "--json",
+            ],
+        ] {
+            let parsed = Cli::try_parse_from(args).expect("resummarize must parse");
+            assert!(matches!(parsed.command, Commands::Resummarize { .. }));
+        }
+    }
+
     #[test]
     fn parakeet_helper_clap_accepts_fp16_flag_present_or_absent() {
         let common = [

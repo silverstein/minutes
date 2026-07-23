@@ -153,6 +153,55 @@ pub enum MarkdownError {
     #[error("rename refused: {0}")]
     RenameRefused(String),
 
+    #[error("file changed on disk between staging and swap; rewrite aborted")]
+    ConcurrentModification,
+
+    #[error("ambiguous document: found {count} '## {name}' sections; refusing to operate on an ambiguous file")]
+    AmbiguousSection {
+        /// The H2 heading text that matched more than once.
+        name: String,
+        /// How many `## {name}` headings were found.
+        count: usize,
+    },
+
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
+}
+
+/// Errors from re-running the AI pass on an existing artifact (#523).
+///
+/// Every variant is a **hard no-write failure**: the artifact on disk is
+/// untouched whenever `resummarize` returns an error.
+#[derive(Debug, thiserror::Error)]
+pub enum ResummarizeError {
+    #[error("unsupported artifact: {0}")]
+    Unsupported(String),
+
+    #[error("frontmatter does not parse: {0}")]
+    Frontmatter(String),
+
+    #[error("template '{slug}' is unavailable: {reason} (pass --template to override explicitly)")]
+    TemplateUnavailable {
+        /// The slug that failed to resolve.
+        slug: String,
+        /// Why resolution failed.
+        reason: String,
+    },
+
+    #[error("summarization produced nothing (engine '{engine}'): {reason}; file left untouched")]
+    SummarizeFailed {
+        /// The configured engine at the time of the run.
+        engine: String,
+        /// Machine-readable reason (`disabled`, `provider_error`, `empty_summary`).
+        reason: String,
+    },
+
+    #[error("file changed while summarizing — save your editor and re-run")]
+    ConcurrentEdit,
+
+    #[error(transparent)]
+    Markdown(#[from] MarkdownError),
+
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 }

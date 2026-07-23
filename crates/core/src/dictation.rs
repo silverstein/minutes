@@ -1302,6 +1302,7 @@ fn write_dictation_file(text: &str, duration_secs: f64, config: &Config) -> Opti
         name_corrections: Vec::new(),
         recording_health: None,
         speaker_mapping: None,
+        summarization: None,
         template: None,
         filter_diagnosis: None,
     };

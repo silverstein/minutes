@@ -6,8 +6,8 @@ export const MINUTES_RELEASE_VERSION = "0.23.0";
 export const MINUTES_RELEASE_TAG = `v${MINUTES_RELEASE_VERSION}`;
 
 export const MINUTES_MCP_TOOL_COUNT = 36;
-export const MINUTES_CLI_COMMAND_COUNT = 57;
-export const MINUTES_TEST_COUNT = 1613;
+export const MINUTES_CLI_COMMAND_COUNT = 58;
+export const MINUTES_TEST_COUNT = 1660;
 
 export const APPLE_SILICON_DMG =
   `https://github.com/silverstein/minutes/releases/download/${MINUTES_RELEASE_TAG}/Minutes_${MINUTES_RELEASE_VERSION}_aarch64.dmg`;

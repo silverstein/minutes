@@ -241,6 +241,7 @@ mod tests {
             name_corrections: Vec::new(),
             recording_health: None,
             speaker_mapping: None,
+            summarization: None,
             processing_warnings: Vec::new(),
             template: None,
             filter_diagnosis: None,

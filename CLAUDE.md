@@ -215,7 +215,7 @@ minutes/
 │   │   ├── jobs.rs            # Background job queue for async processing
 │   │   └── palette.rs         # Command palette definitions and matching
 │   ├── whisper-guard/          # Standalone anti-hallucination toolkit (segment dedup, silence strip, whisper params)
-│   ├── cli/                   # CLI binary — 45 commands
+│   ├── cli/                   # CLI binary — 58 commands
 │   ├── reader/                # Lightweight read-only meeting parser (no audio deps)
 │   ├── assets/                # Bundled assets (demo.wav)
 │   └── mcp/                   # MCP server — 35 tools + 8 resources + MCP App dashboard

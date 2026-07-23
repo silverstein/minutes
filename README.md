@@ -1021,6 +1021,17 @@ minutes redo-speaker-mapping <meeting> --json                   # machine-readab
 
 `<meeting>` is a path or a search term. The command never downgrades an existing High-confidence attribution, and it records a `speaker_mapping:` health block in the frontmatter (status `ok` / `empty` / `skipped`, plus the model, speaker/attendee counts, and timing) so a meeting that shipped anonymous is both greppable and re-runnable.
 
+**Re-run the AI pass after editing a transcript.** If you've corrected transcription errors, deleted worthless sections, or struck sensitive content from a meeting file, the summary and derived frontmatter go stale. `minutes resummarize` re-runs just the summarization stage on the current transcript text — no audio reprocessing, no duplicate file:
+
+```bash
+minutes resummarize <meeting>                    # preview: show the regenerated summary + merge decisions
+minutes resummarize <meeting> --apply            # splice the regenerated content into the file
+minutes resummarize <meeting> --engine apple     # override the engine for this run
+minutes resummarize <meeting> --json             # machine-readable output
+```
+
+`<meeting>` is a path or a search term (memos and `minutes import text` files work too — for imported archives this is their first AI pass). The preview **does invoke the model** (on cloud engines the transcript leaves the machine), it just doesn't write. Only the AI-owned sections (`## Summary`, `## Decisions`, `## Action Items`, `## Open Questions`, `## Commitments`) and derived frontmatter are replaced — `## Notes`, `## Transcript`, `speaker_map`, and capture/consent metadata are never touched. Action items and decisions keep user-curated state (`status: done`, due dates, decision authority) by exact-identity matching; anything ambiguous is surfaced in the preview instead of silently resolved. A failed run (engine `none`, provider error, empty output) never modifies the file, and the previous version is backed up to a hidden `.<name>.pre-resummarize.<unix-secs>.bak` sibling on every apply; the newest 3 backups per artifact are kept. One redaction caveat: editing the transcript never touches the retained WAV — for true audio redaction, delete or re-record the audio (`minutes cleanup` / retention settings).
+
 **Privacy**: Voice enrollment is self-only (no enrolling others). Level 3 confirmed profiles require explicit opt-in per person. Voice embeddings are stored locally in `~/.minutes/voices.db` with 0600 permissions. Nothing leaves your machine.
 
 > **Platform notes:** Calendar integration (auto-detecting meeting attendees) requires macOS. Screen context capture works on macOS and Linux. The voice memo pipeline works on all platforms — any folder sync (iCloud, Dropbox, Google Drive, Syncthing) can feed the watcher. The `minutes service install` auto-start command requires macOS (launchd); on Linux, use systemd or cron. Speaker diarization (`pyannote-rs`) works on all platforms (CLI, Tauri app, and via MCP). All other features — recording, transcription, search, action items, person profiles — work on all platforms.
@@ -1231,7 +1242,7 @@ the PNGs and their readable references after summarization.
 ```
 minutes/
 ├── crates/core/          53 Rust modules — the engine (shared by all interfaces)
-├── crates/cli/           CLI binary — 52 commands (recording, search, health, storage, templates, workflows)
+├── crates/cli/           CLI binary — 58 commands (recording, search, health, storage, templates, workflows)
 ├── crates/whisper-guard/ Anti-hallucination toolkit (VAD gating, dedup, noise trimming)
 ├── crates/reader/        Lightweight read-only meeting parser (no audio deps)
 ├── crates/assets/        Bundled assets (demo.wav)

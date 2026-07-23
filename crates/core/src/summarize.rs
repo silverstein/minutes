@@ -23,7 +23,7 @@ use std::time::Instant;
 //   Chunk by time segments → summarize each chunk → synthesize final.
 // ──────────────────────────────────────────────────────────────
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Summary {
     pub text: String,
     pub decisions: Vec<String>,

@@ -1762,6 +1762,7 @@ pub fn write_transcript_artifact(
         name_corrections: Vec::new(),
         recording_health: context.recording_health.clone(),
         speaker_mapping: None,
+        summarization: None,
         processing_warnings: Vec::new(),
         template: context.template.as_ref().map(|t| t.slug().to_string()),
         filter_diagnosis: if status == Some(OutputStatus::NoSpeech) {
@@ -2860,6 +2861,7 @@ where
         name_corrections,
         recording_health,
         speaker_mapping: None,
+        summarization: None,
         template: template.map(|t| t.slug().to_string()),
         filter_diagnosis: if status == Some(OutputStatus::NoSpeech) {
             // Prefer the all-noise-suppression diagnosis when it fired; it
@@ -4363,7 +4365,7 @@ fn finalize_title(title: String) -> String {
 
 /// Extract structured action items from a Summary.
 /// Parses lines like "- @user: Send pricing doc by Friday" into ActionItem structs.
-fn extract_action_items(summary: &summarize::Summary) -> Vec<markdown::ActionItem> {
+pub(crate) fn extract_action_items(summary: &summarize::Summary) -> Vec<markdown::ActionItem> {
     summary
         .action_items
         .iter()
@@ -4396,7 +4398,7 @@ fn extract_action_items(summary: &summarize::Summary) -> Vec<markdown::ActionIte
 }
 
 /// Extract structured decisions from a Summary.
-fn extract_decisions(summary: &summarize::Summary) -> Vec<markdown::Decision> {
+pub(crate) fn extract_decisions(summary: &summarize::Summary) -> Vec<markdown::Decision> {
     summary
         .decisions
         .iter()
@@ -4424,7 +4426,7 @@ fn parse_actor_prefix(text: &str) -> (Option<String>, String) {
     (None, text.trim().to_string())
 }
 
-fn extract_intents(summary: &summarize::Summary) -> Vec<markdown::Intent> {
+pub(crate) fn extract_intents(summary: &summarize::Summary) -> Vec<markdown::Intent> {
     let mut intents = Vec::new();
 
     for item in extract_action_items(summary) {
@@ -4546,7 +4548,7 @@ fn infer_topic(text: &str) -> Option<String> {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn build_entity_links(
+pub(crate) fn build_entity_links(
     title: &str,
     pre_context: Option<&str>,
     attendees: &[String],
@@ -5515,6 +5517,7 @@ mod tests {
             name_corrections: Vec::new(),
             recording_health: None,
             speaker_mapping: None,
+            summarization: None,
             processing_warnings: Vec::new(),
             template: None,
             filter_diagnosis: None,
@@ -7310,6 +7313,7 @@ mod tests {
             name_corrections: Vec::new(),
             recording_health: None,
             speaker_mapping: None,
+            summarization: None,
             processing_warnings: Vec::new(),
             template: None,
             filter_diagnosis: None,

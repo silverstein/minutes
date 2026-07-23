@@ -165,6 +165,31 @@ pub struct SpeakerMappingHealth {
     pub last_run: Option<String>,
 }
 
+/// Health of the summarization stage, surfaced in frontmatter so a re-run of
+/// the AI pass (`minutes resummarize`, #523) is greppable and auditable.
+/// Shape mirrors [`SpeakerMappingHealth`] per maintainer guidance on #523.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct SummarizationHealth {
+    /// `ok` — resummarize refuses to write anything else (failed runs never
+    /// mutate the file, so a failure can never appear here).
+    pub status: String,
+    /// Engine/model hint used (e.g. `agent:claude`, `apple-fm`).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub model: String,
+    /// Template slug applied to this run, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template: Option<String>,
+    /// Wall-clock of the summarize stage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    /// Machine-readable context (reserved; `None` for successful runs).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// RFC3339 timestamp of the most recent resummarize run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_run: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct RecordingHealth {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -324,6 +349,10 @@ pub struct Frontmatter {
     /// log (#384). `None` for meetings processed before this field existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub speaker_mapping: Option<SpeakerMappingHealth>,
+    /// Health of the most recent re-run of the AI pass (`minutes resummarize`).
+    /// `None` for artifacts that have only been through the original pipeline.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summarization: Option<SummarizationHealth>,
     /// Slug of the template applied to this recording, if any.
     /// Recorded so a Phase 2 reprocessor knows which template produced the
     /// summary. `None` means no template was passed (legacy / default flow).
@@ -1112,6 +1141,131 @@ where
     Ok(())
 }
 
+/// Atomically replace an artifact's full content, preserving its file mode
+/// (modes are not uniformly 0600 — `Visibility::Team` files are 0640).
+///
+/// Same write discipline as [`update_frontmatter`] (#384): tmp-sibling write,
+/// mode copy, parse-after-write validation of the frontmatter, then rename.
+/// On any failure the original file is untouched.
+///
+/// When `expected_current` is given, the target file is re-read and compared
+/// twice: once before the backup copy and once **immediately before the
+/// rename**. A concurrent editor save that lands during the backup copy still
+/// aborts the swap with
+/// [`MarkdownError::ConcurrentModification`] with the smallest
+/// copy-free check-to-rename window a plain filesystem allows (it cannot be
+/// zero without OS-level file locking).
+///
+/// When `backup_to` is given, the current file is copied there (via
+/// [`fs::copy`], which carries the source mode) **after** the guard passes
+/// and before the rename — so a conflicted or failed run never disturbs a
+/// backup left by an earlier successful one.
+pub fn atomic_rewrite_preserving_mode_guarded(
+    path: &Path,
+    new_content: &str,
+    expected_current: Option<&str>,
+    backup_to: Option<&Path>,
+) -> Result<(), MarkdownError> {
+    // Unique tmp name (pid + clock nanos): two concurrent runs must not
+    // stage into — or rename — each other's file.
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0);
+    let tmp_path = path.with_extension(format!(
+        "md.resummarize.{}.{}.tmp",
+        std::process::id(),
+        nanos
+    ));
+    // Create with the artifact's final mode from the first byte. OpenOptions'
+    // mode is umask-masked (so it may under-permission, never over-permission),
+    // then the exact mode is enforced on the open handle before any content
+    // byte is written.
+    let original_mode = preserved_file_mode(path);
+    let mut open_opts = fs::OpenOptions::new();
+    open_opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        open_opts.mode(original_mode);
+    }
+    #[cfg(not(unix))]
+    let _ = original_mode;
+    let write_result = open_opts.open(&tmp_path).and_then(|mut file| {
+        #[cfg(unix)]
+        file.set_permissions(fs::Permissions::from_mode(original_mode))?;
+        use std::io::Write;
+        file.write_all(new_content.as_bytes())
+    });
+    if let Err(e) = write_result {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(MarkdownError::Io(e));
+    }
+
+    match fs::read_to_string(&tmp_path) {
+        Ok(written) => {
+            let (wfm, _) = split_frontmatter(&written);
+            if wfm.is_empty() || serde_yaml::from_str::<Frontmatter>(wfm).is_err() {
+                let _ = fs::remove_file(&tmp_path);
+                return Err(MarkdownError::SerializationError(
+                    "post-write frontmatter validation failed".into(),
+                ));
+            }
+        }
+        Err(e) => {
+            let _ = fs::remove_file(&tmp_path);
+            return Err(MarkdownError::Io(e));
+        }
+    }
+
+    let compare_current = || -> Result<(), MarkdownError> {
+        if let Some(expected) = expected_current {
+            match fs::read_to_string(path) {
+                Ok(current) if current != expected => {
+                    return Err(MarkdownError::ConcurrentModification);
+                }
+                Ok(_) => {}
+                Err(e) => return Err(MarkdownError::Io(e)),
+            }
+        }
+        Ok(())
+    };
+
+    // Cheap early guard: do not create a backup for a stale snapshot.
+    if let Err(e) = compare_current() {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(e);
+    }
+
+    // Backup only once the guard has passed: a conflicted run must never
+    // clobber the backup of an earlier successful run. `fs::copy` carries
+    // the source file's mode, so the backup is never umask-readable.
+    let mut created_backup = None;
+    if let Some(backup) = backup_to {
+        if let Err(e) = fs::copy(path, backup) {
+            let _ = fs::remove_file(&tmp_path);
+            return Err(MarkdownError::Io(e));
+        }
+        created_backup = Some(backup);
+    }
+
+    // Guard compare again immediately before the swap. If the file changed
+    // during backup creation, that backup belongs only to this failed run.
+    if let Err(e) = compare_current() {
+        let _ = fs::remove_file(&tmp_path);
+        if let Some(backup) = created_backup {
+            let _ = fs::remove_file(backup);
+        }
+        return Err(e);
+    }
+
+    if let Err(e) = fs::rename(&tmp_path, path) {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(MarkdownError::Io(e));
+    }
+    Ok(())
+}
+
 /// Set file permissions to the given mode (Unix only; no-op on Windows).
 fn set_permissions(path: &Path, _mode: u32) -> Result<(), MarkdownError> {
     #[cfg(unix)]
@@ -1180,6 +1334,135 @@ pub fn extract_field(frontmatter: &str, key: &str) -> Option<String> {
     None
 }
 
+/// Byte-offset bounds of one `## <heading>` section inside a markdown body
+/// (the body as returned by [`split_frontmatter`], not the full file).
+///
+/// All offsets lie on line boundaries of the original text, so a caller can
+/// splice `body[..content_start] + new_content + body[end..]` without
+/// disturbing a single byte outside the section — including CRLF line
+/// endings elsewhere in the document.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SectionRange {
+    /// Byte offset of the start of the `## ` heading line.
+    pub heading_start: usize,
+    /// Byte offset of the first content byte after the heading line
+    /// (equal to `end` when the section is empty).
+    pub content_start: usize,
+    /// Byte offset one past the section content: the start of the next H2
+    /// heading line, or `body.len()` when the section runs to the end.
+    pub end: usize,
+}
+
+/// Scan `body` for H2 (`## `) heading lines outside fenced code blocks,
+/// returning `(line_start, after_line, heading_text)` per heading.
+///
+/// Fence tracking matches CommonMark's relevant closing rules: the matching
+/// fence character must run for at least the opener's length, and the rest of
+/// a closing line must be whitespace-only. Different, shorter, or
+/// info-string-bearing fence lines are content. Headings must start at column
+/// 0.
+fn h2_headings(body: &str) -> Vec<(usize, usize, &str)> {
+    let mut fence: Option<(char, usize)> = None;
+    let mut headings = Vec::new();
+    let mut offset = 0;
+    for line in body.split_inclusive('\n') {
+        let start = offset;
+        offset += line.len();
+        let trimmed = line.trim_start();
+        let marker = trimmed.chars().next().and_then(|marker| {
+            (matches!(marker, '`' | '~')).then(|| {
+                let run_len = trimmed.chars().take_while(|c| *c == marker).count();
+                (marker, run_len)
+            })
+        });
+        if let Some((marker, run_len)) = marker.filter(|(_, run_len)| *run_len >= 3) {
+            match fence {
+                None => fence = Some((marker, run_len)),
+                Some((open_marker, open_len))
+                    if open_marker == marker
+                        && run_len >= open_len
+                        && trimmed[run_len..].trim().is_empty() =>
+                {
+                    fence = None;
+                }
+                Some(_) => {} // non-closing marker inside a fence: content
+            }
+            continue;
+        }
+        if fence.is_none() {
+            if let Some(rest) = line.strip_prefix("## ") {
+                headings.push((start, offset, rest.trim()));
+            }
+        }
+    }
+    headings
+}
+
+/// Find every `## <name>` section in `body` (fence-aware; the heading text
+/// must equal `name` after trimming surrounding whitespace).
+///
+/// A section ends at the next H2 heading of *any* name outside a fence, or at
+/// the end of the body. Most callers want [`find_unique_section`]; this
+/// exists so previews can report *where* duplicate headings live.
+pub fn find_sections(body: &str, name: &str) -> Vec<SectionRange> {
+    let headings = h2_headings(body);
+    let mut sections = Vec::new();
+    for (i, (heading_start, content_start, text)) in headings.iter().enumerate() {
+        if *text == name {
+            let end = headings.get(i + 1).map_or(body.len(), |next| next.0);
+            sections.push(SectionRange {
+                heading_start: *heading_start,
+                content_start: *content_start,
+                end,
+            });
+        }
+    }
+    sections
+}
+
+/// Find the single `## <name>` section, failing closed on ambiguity.
+///
+/// Returns `Ok(None)` when the section is absent, and
+/// [`MarkdownError::AmbiguousSection`] when more than one heading matches — a
+/// splice against an ambiguous document could rewrite the wrong section, so
+/// writers must treat the error as a hard stop and surface it to the user.
+pub fn find_unique_section(body: &str, name: &str) -> Result<Option<SectionRange>, MarkdownError> {
+    let mut sections = find_sections(body, name);
+    match sections.len() {
+        0 => Ok(None),
+        1 => Ok(Some(sections.remove(0))),
+        count => Err(MarkdownError::AmbiguousSection {
+            name: name.to_string(),
+            count,
+        }),
+    }
+}
+
+/// Extract a section's text content given its resolved range.
+///
+/// Line endings are normalized to `\n` and leading blank lines are dropped,
+/// matching the historical CLI `transcript_section` behavior. Use the raw
+/// `body[range.content_start..range.end]` slice when exact bytes matter.
+pub fn section_text(body: &str, range: SectionRange) -> String {
+    body[range.content_start..range.end]
+        .lines()
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim_start_matches('\n')
+        .to_string()
+}
+
+/// Text of the first `## <name>` section, or `None` when the body has none.
+///
+/// Lenient variant for read-only callers: duplicate headings resolve to the
+/// first occurrence, exactly as the CLI transcript extractor always did.
+/// Anything that writes back must go through [`find_unique_section`] instead.
+pub fn first_section_text(body: &str, name: &str) -> Option<String> {
+    find_sections(body, name)
+        .first()
+        .map(|range| section_text(body, *range))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1216,6 +1499,7 @@ mod tests {
             name_corrections: Vec::new(),
             recording_health: None,
             speaker_mapping: None,
+            summarization: None,
             processing_warnings: Vec::new(),
             template: None,
             filter_diagnosis: None,
@@ -2169,5 +2453,187 @@ mod tests {
         assert!(content.contains("no_speech filter"));
         assert!(content.contains(audio.display().to_string().as_str()));
         assert!(content.contains("minutes process"));
+    }
+
+    // --- section-range parser (migrated from the CLI transcript extractor) ---
+
+    #[test]
+    fn section_requires_exact_heading() {
+        // A look-alike heading must not be treated as the transcript.
+        let body = "## Transcript cleanup notes\n\n[SPEAKER_00 0:00] not the transcript\n";
+        assert!(first_section_text(body, "Transcript").is_none());
+    }
+
+    #[test]
+    fn section_ignores_fenced_code_block() {
+        // A `## Transcript` line inside a code fence must be ignored; the real
+        // section after the fence is the one that wins.
+        let body = "## Summary\n\n```\n## Transcript\n[SPEAKER_99 0:00] fake\n```\n\n## Transcript\n\n[SPEAKER_00 0:00] real line\n";
+        let t = first_section_text(body, "Transcript").expect("real transcript section found");
+        assert!(t.contains("real line"));
+        assert!(!t.contains("fake"));
+    }
+
+    #[test]
+    fn section_handles_mixed_fence_markers() {
+        // A backtick fence whose body contains a `~~~` line must NOT be treated
+        // as closed by that tilde line; the fake `## Transcript` inside stays
+        // ignored and the real section after the fence wins.
+        let body = "## Summary\n\n```\n~~~\n## Transcript\n[SPEAKER_99 0:00] fake\n```\n\n## Transcript\n\n[SPEAKER_00 0:00] real line\n";
+        let t = first_section_text(body, "Transcript").expect("real transcript section found");
+        assert!(t.contains("real line"));
+        assert!(!t.contains("fake"));
+    }
+
+    #[test]
+    fn section_keeps_shorter_backtick_run_inside_longer_fence() {
+        let body = "## Summary\n\n````\n```\n## Transcript\n[SPEAKER_99 0:00] fake\n````\n\n## Transcript\n\n[SPEAKER_00 0:00] real line\n";
+        let t = first_section_text(body, "Transcript").expect("real transcript section found");
+        assert!(t.contains("real line"));
+        assert!(!t.contains("fake"));
+    }
+
+    #[test]
+    fn section_keeps_info_string_fence_line_inside_open_fence() {
+        let body = "## Summary\n\n```\n```rust\n## Transcript\n[SPEAKER_99 0:00] fake\n```\n\n## Transcript\n\n[SPEAKER_00 0:00] real line\n";
+        let t = first_section_text(body, "Transcript").expect("real transcript section found");
+        assert!(t.contains("real line"));
+        assert!(!t.contains("fake"));
+    }
+
+    #[test]
+    fn guarded_rewrite_conflict_leaves_no_backup() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("meeting.md");
+        let original = "---\ntitle: Test\ntype: meeting\ndate: 2026-07-23\nduration: 1m\n---\n\n## Transcript\n\nold\n";
+        let replacement = original.replace("old", "new");
+        fs::write(&path, original).unwrap();
+        let expected = fs::read_to_string(&path).unwrap();
+        fs::write(&path, original.replace("old", "edited by user")).unwrap();
+        let backup = dir.path().join(".meeting.md.pre-resummarize.1.bak");
+
+        let err = atomic_rewrite_preserving_mode_guarded(
+            &path,
+            &replacement,
+            Some(&expected),
+            Some(&backup),
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, MarkdownError::ConcurrentModification));
+        assert!(!backup.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn guarded_rewrite_preserves_team_file_mode_despite_umask() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("meeting.md");
+        let original = "---\ntitle: Test\ntype: meeting\ndate: 2026-07-23\nduration: 1m\n---\n\n## Transcript\n\nold\n";
+        let replacement = original.replace("old", "new");
+        fs::write(&path, original).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o640)).unwrap();
+
+        atomic_rewrite_preserving_mode_guarded(&path, &replacement, None, None).unwrap();
+
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o7777;
+        assert_eq!(mode, 0o640);
+    }
+
+    #[test]
+    fn section_extracts_first_and_stops_at_next_h2() {
+        let body = "## Transcript\n\n[SPEAKER_00 0:00] hello\n\n## Action Items\n\n- do thing\n";
+        let t = first_section_text(body, "Transcript").unwrap();
+        assert!(t.contains("hello"));
+        assert!(!t.contains("Action Items"));
+    }
+
+    // --- new coverage beyond the migrated CLI tests ---
+
+    #[test]
+    fn find_unique_section_absent_is_ok_none() {
+        let body = "## Summary\n\ntext\n";
+        assert_eq!(find_unique_section(body, "Transcript").unwrap(), None);
+    }
+
+    #[test]
+    fn find_unique_section_rejects_duplicates() {
+        let body = "## Transcript\na\n## Notes\nn\n## Transcript\nb\n";
+        let err = find_unique_section(body, "Transcript").unwrap_err();
+        match err {
+            MarkdownError::AmbiguousSection { name, count } => {
+                assert_eq!(name, "Transcript");
+                assert_eq!(count, 2);
+            }
+            other => panic!("expected AmbiguousSection, got {other:?}"),
+        }
+        // The lenient reader still resolves to the first occurrence.
+        assert_eq!(first_section_text(body, "Transcript").unwrap(), "a");
+    }
+
+    #[test]
+    fn section_range_splices_without_touching_neighbors() {
+        let body = "## Summary\n\nold summary\n\n## Transcript\n\n[SPEAKER_00 0:00] hi\n";
+        let range = find_unique_section(body, "Summary").unwrap().unwrap();
+        let spliced = format!(
+            "{}\nnew summary\n\n{}",
+            &body[..range.content_start],
+            &body[range.end..]
+        );
+        assert_eq!(
+            spliced,
+            "## Summary\n\nnew summary\n\n## Transcript\n\n[SPEAKER_00 0:00] hi\n"
+        );
+    }
+
+    #[test]
+    fn section_range_handles_crlf_bodies() {
+        let body = "## Summary\r\nold\r\n## Transcript\r\n[SPEAKER_00 0:00] hi\r\n";
+        let summary = find_unique_section(body, "Summary").unwrap().unwrap();
+        // Extracted text is newline-normalized...
+        assert_eq!(section_text(body, summary), "old");
+        // ...but the byte range preserves the CRLF world around a splice.
+        let untouched = &body[summary.end..];
+        assert!(untouched.starts_with("## Transcript\r\n"));
+    }
+
+    #[test]
+    fn section_at_end_of_body_runs_to_len() {
+        let body = "## Notes\n\nkeep me\n\n## Transcript\n\n[SPEAKER_00 0:00] tail";
+        let range = find_unique_section(body, "Transcript").unwrap().unwrap();
+        assert_eq!(range.end, body.len());
+        assert_eq!(section_text(body, range), "[SPEAKER_00 0:00] tail");
+    }
+
+    #[test]
+    fn empty_section_yields_empty_text() {
+        // Heading as the final line, no trailing newline: content is empty,
+        // but the section still exists (Some(""), matching the old extractor).
+        let body = "## Summary\n\ns\n\n## Transcript";
+        let range = find_unique_section(body, "Transcript").unwrap().unwrap();
+        assert_eq!(range.content_start, range.end);
+        assert_eq!(first_section_text(body, "Transcript").unwrap(), "");
+    }
+
+    #[test]
+    fn indented_heading_is_not_a_section_boundary() {
+        // Headings must start at column 0 (same rule as the old extractor);
+        // an indented `## ` line is content and must not end the section.
+        let body = "## Transcript\n\nline one\n  ## Action Items\nline two\n";
+        let t = first_section_text(body, "Transcript").unwrap();
+        assert!(t.contains("line one"));
+        assert!(t.contains("line two"));
+        assert!(t.contains("## Action Items"));
+    }
+
+    #[test]
+    fn find_sections_reports_every_duplicate_location() {
+        let body = "## Transcript\na\n## Transcript\nb\n";
+        let all = find_sections(body, "Transcript");
+        assert_eq!(all.len(), 2);
+        assert_eq!(section_text(body, all[0]), "a");
+        assert_eq!(section_text(body, all[1]), "b");
     }
 }

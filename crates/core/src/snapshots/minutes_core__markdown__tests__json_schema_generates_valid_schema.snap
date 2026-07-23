@@ -1,5 +1,6 @@
 ---
 source: crates/core/src/markdown.rs
+assertion_line: 1586
 expression: schema
 ---
 {
@@ -187,6 +188,17 @@ expression: schema
       "anyOf": [
         {
           "$ref": "#/$defs/OutputStatus"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "summarization": {
+      "description": "Health of the most recent re-run of the AI pass (`minutes resummarize`).\n`None` for artifacts that have only been through the original pipeline.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SummarizationHealth"
         },
         {
           "type": "null"
@@ -731,6 +743,53 @@ expression: schema
         "diarized_speakers",
         "mapped_speakers",
         "attendees"
+      ]
+    },
+    "SummarizationHealth": {
+      "description": "Health of the summarization stage, surfaced in frontmatter so a re-run of\nthe AI pass (`minutes resummarize`, #523) is greppable and auditable.\nShape mirrors [`SpeakerMappingHealth`] per maintainer guidance on #523.",
+      "type": "object",
+      "properties": {
+        "duration_ms": {
+          "description": "Wall-clock of the summarize stage.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "last_run": {
+          "description": "RFC3339 timestamp of the most recent resummarize run.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "model": {
+          "description": "Engine/model hint used (e.g. `agent:claude`, `apple-fm`).",
+          "type": "string"
+        },
+        "reason": {
+          "description": "Machine-readable context (reserved; `None` for successful runs).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "description": "`ok` — resummarize refuses to write anything else (failed runs never\nmutate the file, so a failure can never appear here).",
+          "type": "string"
+        },
+        "template": {
+          "description": "Template slug applied to this run, if any.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "status"
       ]
     },
     "Visibility": {

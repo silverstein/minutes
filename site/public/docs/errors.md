@@ -6,8 +6,8 @@
 
 This is the generated public catalog of stable Minutes core errors. It intentionally favors actionable, user-facing errors over generic wrapper variants.
 
-- Visible actionable errors: 60
-- Hidden low-signal wrappers: 16
+- Visible actionable errors: 67
+- Hidden low-signal wrappers: 17
 
 # CaptureError
 
@@ -374,6 +374,92 @@ Exact message:
 Source: `crates/core/src/error.rs`
 
 Reference URL: https://useminutes.app/docs/errors#error-markdownerror-renamerefused
+
+<a id="error-markdownerror-concurrentmodification"></a>
+
+## `MarkdownError::ConcurrentModification`
+
+Exact message:
+
+> file changed on disk between staging and swap; rewrite aborted
+
+Source: `crates/core/src/error.rs`
+
+Reference URL: https://useminutes.app/docs/errors#error-markdownerror-concurrentmodification
+
+<a id="error-markdownerror-ambiguoussection"></a>
+
+## `MarkdownError::AmbiguousSection`
+
+Exact message:
+
+> ambiguous document: found {count} '## {name}' sections; refusing to operate on an ambiguous file
+
+Source: `crates/core/src/error.rs`
+
+Reference URL: https://useminutes.app/docs/errors#error-markdownerror-ambiguoussection
+
+# ResummarizeError
+
+<a id="error-resummarizeerror-unsupported"></a>
+
+## `ResummarizeError::Unsupported`
+
+Exact message:
+
+> unsupported artifact: {0}
+
+Source: `crates/core/src/error.rs`
+
+Reference URL: https://useminutes.app/docs/errors#error-resummarizeerror-unsupported
+
+<a id="error-resummarizeerror-frontmatter"></a>
+
+## `ResummarizeError::Frontmatter`
+
+Exact message:
+
+> frontmatter does not parse: {0}
+
+Source: `crates/core/src/error.rs`
+
+Reference URL: https://useminutes.app/docs/errors#error-resummarizeerror-frontmatter
+
+<a id="error-resummarizeerror-templateunavailable"></a>
+
+## `ResummarizeError::TemplateUnavailable`
+
+Exact message:
+
+> template '{slug}' is unavailable: {reason} (pass --template to override explicitly)
+
+Source: `crates/core/src/error.rs`
+
+Reference URL: https://useminutes.app/docs/errors#error-resummarizeerror-templateunavailable
+
+<a id="error-resummarizeerror-summarizefailed"></a>
+
+## `ResummarizeError::SummarizeFailed`
+
+Exact message:
+
+> summarization produced nothing (engine '{engine}'): {reason}; file left untouched
+
+Source: `crates/core/src/error.rs`
+
+Reference URL: https://useminutes.app/docs/errors#error-resummarizeerror-summarizefailed
+
+<a id="error-resummarizeerror-concurrentedit"></a>
+
+## `ResummarizeError::ConcurrentEdit`
+
+Exact message:
+
+> file changed while summarizing — save your editor and re-run
+
+Source: `crates/core/src/error.rs`
+
+Reference URL: https://useminutes.app/docs/errors#error-resummarizeerror-concurrentedit
 
 # VaultError
 

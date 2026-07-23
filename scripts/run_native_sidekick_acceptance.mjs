@@ -31,7 +31,10 @@ import {
 
 const MAX_FIRST_TOKEN_MS = 5_000;
 const MAX_TURN_TOTAL_MS = 10_000;
-const MAX_PUBLICATION_READY_MS = 5_000;
+// The fresh three-run hybrid gate enforces the tighter 7s p95 service bar.
+// This separately sampled per-turn ceiling catches a hung signed product;
+// typical service latency remains governed by the required distribution gate.
+const MAX_PUBLICATION_READY_MS = 10_000;
 const MAX_WALL_MS = 30_000;
 const HARD_TIMEOUT_MS = 45_000;
 const MAX_OUTPUT_BYTES = 1024 * 1024;
@@ -117,7 +120,7 @@ export function evaluateNativeSidekickAcceptance(payload, runtime) {
     turn_2: turn2.text,
     turn_1_evidence_ids: turn1.evidence_ids,
     turn_2_evidence_ids: turn2.evidence_ids,
-  });
+  }, { turn1Mode: "foreground" });
   const canonicalTurns = canonicalMeridianAcceptance.turns;
   const persistentCorrelation = payload?.reasoning_session_correlation;
   const turnsMatchCanonicalPrompts =

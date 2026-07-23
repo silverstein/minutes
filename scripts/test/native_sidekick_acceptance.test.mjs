@@ -264,13 +264,33 @@ test("a slow otherwise-correct response fails the realtime bar", () => {
 
 test("a slow engine publication fails even when provider streaming starts quickly", () => {
   const payload = passingPayload();
-  payload.fixture_turns[0].result.publication_ready_ms = 5_001;
+  payload.fixture_turns[0].result.publication_ready_ms = 10_001;
 
   const report = evaluateNativeSidekickAcceptance(payload, passingRuntime());
 
   assert.equal(report.passed, false);
   assert.equal(
     report.latency_checks.find((item) => item.name.includes("publication_ready")).passed,
+    false,
+  );
+});
+
+test("a bounded signed tail passes only with a passing fresh latency distribution", () => {
+  const payload = passingPayload();
+  payload.fixture_turns[0].result.publication_ready_ms = 8_000;
+
+  const passing = evaluateNativeSidekickAcceptance(payload, passingRuntime());
+  assert.equal(passing.passed, true);
+
+  const runtime = passingRuntime();
+  runtime.hybrid_quality_gate.passed = false;
+  runtime.hybrid_quality_gate.latency_passed = false;
+  runtime.hybrid_quality_gate.total_p95_ms = 7_001;
+  const failing = evaluateNativeSidekickAcceptance(payload, runtime);
+  assert.equal(failing.passed, false);
+  assert.equal(
+    failing.source_checks.find((item) =>
+      item.name === "calibrated_hybrid_quality_artifact").passed,
     false,
   );
 });

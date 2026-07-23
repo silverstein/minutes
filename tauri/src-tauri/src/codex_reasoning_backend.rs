@@ -513,7 +513,7 @@ impl CodexReasoningSession {
                 };
                 let target_words = match kind {
                     ReasoningTurnKind::Background => 36,
-                    ReasoningTurnKind::Foreground => 54,
+                    ReasoningTurnKind::Foreground => 44,
                 };
                 json!({
                     "type": "object",

@@ -426,6 +426,18 @@ test("brevity limits are part of the quality gate", () => {
   assert.equal(failed(report, "foreground_brevity"), true);
 });
 
+test("a typed first turn uses the direct-answer budget, not the proactive budget", () => {
+  const turn_1 = `${passing.turn_1} This extra sentence deliberately crosses fifty words while remaining below the direct-answer ceiling.`;
+  const proactive = scoreMeridianResponses({ ...passing, turn_1 });
+  const foreground = scoreMeridianResponses(
+    { ...passing, turn_1 },
+    { turn1Mode: "foreground" },
+  );
+
+  assert.equal(failed(proactive, "background_brevity"), true);
+  assert.equal(failed(foreground, "foreground_turn_1_brevity"), false);
+});
+
 test("the live harness requires the three-source arithmetic evidence chain", () => {
   const report = scoreMeridianResponses({
     ...passing,

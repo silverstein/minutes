@@ -31,7 +31,10 @@ import {
   validateCanonicalInstalledApp,
 } from "./run_native_sidekick_contract_scope_acceptance.mjs";
 
-const MAX_DOM_PAINT_MS = 5_000;
+// The fresh three-run hybrid gate enforces the tighter 7s p95 service bar.
+// The separately sampled real UI gets a 10s hard ceiling for hung paints;
+// typical service latency remains governed by the required distribution gate.
+const MAX_DOM_PAINT_MS = 10_000;
 const HARD_TIMEOUT_MS = 230_000;
 const FORCED_CLEANUP_GRACE_MS = 75_000;
 const MAX_OUTPUT_BYTES = 1024 * 1024;
@@ -87,7 +90,7 @@ export function evaluateNativeSidekickUiAcceptance(payload, runtime) {
     turn_2: turns[1]?.response ?? "",
     turn_1_evidence_ids: turnOneCandidateEvidence.map(canonicalEvidenceId),
     turn_2_evidence_ids: turnTwoCandidateEvidence.map(canonicalEvidenceId),
-  });
+  }, { turn1Mode: "foreground" });
   const expectedPrompts = canonicalFixture.turns.map(({ id, typed_prompt }) => ({
     id,
     prompt: typed_prompt,

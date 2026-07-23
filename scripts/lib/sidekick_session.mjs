@@ -50,7 +50,7 @@ export function sidekickOutputSchemaFor(mode) {
   // every started turn needs enough schema headroom for a foreground answer.
   // Minutes still enforces the stricter 50-word background publication limit.
   const maxLength = 700;
-  const targetWords = mode === "background" ? 36 : 54;
+  const targetWords = mode === "background" ? 36 : 44;
   return {
     ...SIDEKICK_OUTPUT_SCHEMA,
     properties: {

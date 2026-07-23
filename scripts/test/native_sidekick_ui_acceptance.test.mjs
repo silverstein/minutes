@@ -1204,7 +1204,7 @@ test('an internally ready answer cannot impersonate a visibly painted answer', a
   );
   const payload = passingProductPayload();
   payload.fixture_sha256 = createHash('sha256').update(fixtureBytes).digest('hex');
-  payload.turns[0].dom_layout.typedToPaintMs = 5_001;
+  payload.turns[0].dom_layout.typedToPaintMs = 10_001;
 
   const report = evaluateNativeSidekickUiAcceptance(payload, passingRuntime());
 

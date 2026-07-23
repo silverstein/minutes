@@ -91,7 +91,10 @@ function assertedMonthlyAmounts(text) {
   return values;
 }
 
-export function scoreMeridianResponses(responses) {
+export function scoreMeridianResponses(responses, { turn1Mode = "background" } = {}) {
+  if (!["background", "foreground"].includes(turn1Mode)) {
+    throw new Error(`Unsupported Meridian turn-one mode: ${turn1Mode}`);
+  }
   const turn1 = normalized(responses.turn_1);
   const turn2 = normalized(responses.turn_2);
 
@@ -480,9 +483,11 @@ export function scoreMeridianResponses(responses) {
       "The synthetic screen carries no material evidence.",
     ),
     check(
-      "background_brevity",
-      wordCount(responses.turn_1) <= 50,
-      "A proactive intervention must be 50 words or fewer.",
+      turn1Mode === "background" ? "background_brevity" : "foreground_turn_1_brevity",
+      wordCount(responses.turn_1) <= (turn1Mode === "background" ? 50 : 70),
+      turn1Mode === "background"
+        ? "A proactive intervention must be 50 words or fewer."
+        : "A direct Sidekick response must be 70 words or fewer.",
     ),
   ];
 
@@ -666,6 +671,7 @@ export function scoreMeridianResponses(responses) {
     "no_monitoring_or_tool_narration",
     "no_false_visual_claim",
     "background_brevity",
+    "foreground_turn_1_brevity",
     "foreground_brevity",
     "hero_evidence_chain",
     "procurement_evidence_chain",

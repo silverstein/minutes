@@ -44,9 +44,15 @@ const CANONICAL_FIXTURE_PATH = fileURLToPath(
 );
 const MAC_SESSION_LOCK_PROBE = [
   "import CoreGraphics",
-  "if let session = CGSessionCopyCurrentDictionary() as? [String: Any],",
-  "   let locked = session[\"CGSSessionScreenIsLocked\"] as? Bool {",
-  "  print(locked ? \"locked\" : \"unlocked\")",
+  "if let session = CGSessionCopyCurrentDictionary() as? [String: Any] {",
+  "  if let raw = session[\"CGSSessionScreenIsLocked\"] {",
+  "    let value = String(describing: raw).lowercased()",
+  "    if value == \"1\" || value == \"true\" { print(\"locked\") }",
+  "    else if value == \"0\" || value == \"false\" { print(\"unlocked\") }",
+  "    else { print(\"unknown\") }",
+  "  } else {",
+  "    print(\"unlocked\")",
+  "  }",
   "} else {",
   "  print(\"unknown\")",
   "}",

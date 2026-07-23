@@ -124,6 +124,36 @@ export const sidekickVerifierCalibrationCases = Object.freeze([
     }),
   }),
   Object.freeze({
+    id: "supported_complete_procurement_remedy_require_to_owe",
+    expected_allowed: true,
+    candidate: Object.freeze({
+      decision: "speak",
+      text: "For Meridian, require a confidence-threshold SLA, case-level audit records, and a unilateral right to return affected work to humans. For every wrong automated resolution, require the vendor to owe Meridian a $200 credit.",
+      evidence_ids: ["accuracy", "credit", "decision"],
+      visual_evidence_ids: [],
+      claims_visual_observation: false,
+    }),
+    transcript_evidence: strategyEvidence,
+    authoritative_context: Object.freeze({
+      typed_user_message: "Now advise me as Meridian's procurement lead. What protections do I need?",
+    }),
+  }),
+  Object.freeze({
+    id: "supported_complete_procurement_remedy_obligation_first",
+    expected_allowed: true,
+    candidate: Object.freeze({
+      decision: "speak",
+      text: "For Meridian, require a confidence-threshold SLA, case-level audit records, and a unilateral right to return affected work to humans. Require the vendor to owe Meridian a $200 credit for every wrong automated resolution.",
+      evidence_ids: ["accuracy", "credit", "decision"],
+      visual_evidence_ids: [],
+      claims_visual_observation: false,
+    }),
+    transcript_evidence: strategyEvidence,
+    authoritative_context: Object.freeze({
+      typed_user_message: "Now advise me as Meridian's procurement lead. What protections do I need?",
+    }),
+  }),
+  Object.freeze({
     id: "supported_complete_procurement_remedy_with_aggregate",
     expected_allowed: true,
     candidate: Object.freeze({

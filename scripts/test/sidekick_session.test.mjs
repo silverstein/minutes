@@ -121,7 +121,11 @@ test("foreground completeness outranks the soft brevity target", async () => {
   );
   assert.match(
     verifierInstructions,
-    /For every wrong automated resolution, require the vendor owes Meridian a \$200 credit.*already supplies the condition, universal quantifier, obligor, beneficiary, and amount/,
+    /For every wrong automated resolution, require the vendor owes Meridian a \$200 credit.*For every wrong automated resolution, require the vendor to owe Meridian a \$200 credit.*each supply the condition, universal quantifier, obligor, beneficiary, and amount/,
+  );
+  assert.match(
+    instructions,
+    /Prefer the direct grammatical form "For every <covered failure>, <vendor> owes <customer> <remedy>"/,
   );
   assert.match(
     sidekickOutputSchemaFor("foreground").properties.text.description,

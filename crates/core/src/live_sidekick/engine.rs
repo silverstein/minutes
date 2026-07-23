@@ -174,7 +174,6 @@ pub struct LiveSidekickEngine {
     verifier_backend: Arc<dyn PersistentReasoningBackend>,
     backend_session: Option<Box<dyn PersistentReasoningSession>>,
     ready_verifier_session: Option<Box<dyn PersistentReasoningSession>>,
-    ready_verifier_warmup_turn: Option<ReasoningTurnId>,
     active_verifier_session: Option<Box<dyn PersistentReasoningSession>>,
     backend_sessions_started: u64,
     verifier_sessions_started: u64,
@@ -248,7 +247,6 @@ impl LiveSidekickEngine {
             verifier_backend,
             backend_session: None,
             ready_verifier_session: None,
-            ready_verifier_warmup_turn: None,
             active_verifier_session: None,
             backend_sessions_started: 0,
             verifier_sessions_started: 0,
@@ -628,7 +626,6 @@ impl LiveSidekickEngine {
         if let Some(mut verifier) = self.ready_verifier_session.take() {
             verifier.close();
         }
-        self.ready_verifier_warmup_turn = None;
         Ok(reduction)
     }
 
@@ -917,9 +914,6 @@ impl LiveSidekickEngine {
             .ready_verifier_session
             .take()
             .expect("a ready verifier was ensured");
-        if let Some(warmup_turn) = self.ready_verifier_warmup_turn.take() {
-            let _ = verifier.interrupt_turn(&warmup_turn);
-        }
         let verification_turn_id = match verifier.start_turn(
             verification_request.clone(),
             Arc::new(move |event| {
@@ -1243,7 +1237,6 @@ impl LiveSidekickEngine {
         if let Some(mut verifier) = self.ready_verifier_session.take() {
             verifier.close();
         }
-        self.ready_verifier_warmup_turn = None;
         let capture_session_id = self.capture_id()?;
         let evidence_scope = ReasoningEvidenceScope {
             capture_session_id,
@@ -1276,7 +1269,7 @@ impl LiveSidekickEngine {
             capture_session_id: self.capture_id()?,
             source_policy_generation: self.session.source_policy_generation,
         };
-        let mut verifier = self
+        let verifier = self
             .verifier_backend
             .start_session(ReasoningSessionConfig {
                 base_instructions: VERIFIER_BASE_INSTRUCTIONS.into(),
@@ -1286,50 +1279,13 @@ impl LiveSidekickEngine {
                 ephemeral: true,
                 evidence_scope: evidence_scope.clone(),
             })?;
-        let warmup_id = EvidenceId::new("synthetic-verifier-warmup");
-        let warmup_request = ReasoningTurnRequest {
-            kind: ReasoningTurnKind::Background,
-            invocation: InvocationIdentity {
-                sequence: u64::MAX,
-                source_policy_generation: self.session.source_policy_generation,
-                user_generation: 0,
-            },
-            window: BoundedReasoningWindow {
-                capture_session_id: evidence_scope.capture_session_id.clone(),
-                transcript: vec![ReasoningTranscriptEvidence {
-                    evidence_id: warmup_id.clone(),
-                    text: "The verifier warmup is ready.".into(),
-                    speaker_label: None,
-                    speaker_verified: false,
-                    offset_ms: 0,
-                    duration_ms: 0,
-                }],
-                latest_image: None,
-                prepared_context: "Synthetic verifier warmup; no meeting data.".into(),
-            },
-            authoritative_memory: Vec::new(),
-            typed_user_message: None,
-            output_contract: ReasoningOutputContract::EvidenceVerificationV1,
-            candidate_to_verify: Some(InterventionCandidate {
-                decision: InterventionDecision::Speak,
-                kind: Some("answer".into()),
-                text: Some("The verifier warmup is ready.".into()),
-                evidence_ids: vec![warmup_id],
-                visual_evidence_ids: Vec::new(),
-                claims_visual_observation: false,
-                confidence: 100,
-            }),
-        };
-        let warmup_turn = match verifier.start_turn(warmup_request, Arc::new(|_| {})) {
-            Ok(turn_id) => turn_id,
-            Err(error) => {
-                verifier.close();
-                return Err(error);
-            }
-        };
+        // Starting a speculative inference turn here creates a provider race:
+        // a verifier needed immediately can arrive before app-server marks the
+        // warm-up active, making interrupt fail and causing both requests to
+        // share the warm-up event identity. Keep the independent verifier's
+        // process and thread hot, but reserve its first turn for real evidence.
         self.verifier_sessions_started = self.verifier_sessions_started.saturating_add(1);
         self.ready_verifier_session = Some(verifier);
-        self.ready_verifier_warmup_turn = Some(warmup_turn);
         Ok(())
     }
 
@@ -1423,6 +1379,7 @@ mod tests {
         sessions_started: usize,
         turns: Vec<FakeTurn>,
         verification_turns: Vec<FakeTurn>,
+        verification_turns_started: usize,
         closed_sessions: Vec<String>,
         steer_fails: bool,
         defer_verification: bool,
@@ -1512,6 +1469,7 @@ mod tests {
         ) -> Result<ReasoningTurnId, ReasoningError> {
             let mut state = lock(&self.state);
             if request.output_contract == ReasoningOutputContract::EvidenceVerificationV1 {
+                state.verification_turns_started += 1;
                 let is_warmup = request
                     .candidate_to_verify
                     .as_ref()
@@ -1707,6 +1665,27 @@ mod tests {
         assert_eq!(engine.reasoning_sessions_started(), 2);
         assert_eq!(engine.verifier_sessions_started(), 2);
         assert_eq!(lock(&backend.state).sessions_started, 4);
+    }
+
+    #[test]
+    fn ready_verifier_reserves_its_first_turn_for_real_evidence() {
+        let backend = FakeBackend::default();
+        let mut engine = engine(backend.clone());
+
+        assert_eq!(lock(&backend.state).verification_turns_started, 0);
+        observe(
+            &mut engine,
+            "decision",
+            "The team approved the staged rollout.",
+        );
+        engine.send_user("What was approved?").unwrap();
+        backend.complete(
+            0,
+            speak(&["decision"], "The team approved the staged rollout."),
+        );
+
+        assert_eq!(engine.take_publications().len(), 1);
+        assert_eq!(lock(&backend.state).verification_turns_started, 1);
     }
 
     #[test]

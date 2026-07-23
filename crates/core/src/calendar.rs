@@ -528,11 +528,23 @@ fn parse_eventkit_output(stdout: &str) -> Vec<CalendarEvent> {
         .collect()
 }
 
-/// Deduplicate events by title, keeping the one closest to now.
+/// Deduplicate only exact duplicate rows. Distinct events with the same title
+/// must remain visible to privacy-sensitive callers so attendee ambiguity is
+/// never silently erased.
 #[cfg(any(test, target_os = "macos"))]
 fn dedup_events(events: &mut Vec<CalendarEvent>) {
-    events.sort_by_key(|e| (e.title.clone(), e.minutes_until.abs()));
-    events.dedup_by(|a, b| a.title == b.title);
+    events.sort_by_key(|event| {
+        (
+            event.title.clone(),
+            event.start.clone(),
+            event.attendees.clone(),
+            event.url.clone(),
+            event.minutes_until.abs(),
+        )
+    });
+    events.dedup_by(|a, b| {
+        a.title == b.title && a.start == b.start && a.attendees == b.attendees && a.url == b.url
+    });
     // Re-sort by proximity to now (most relevant first)
     events.sort_by_key(|e| e.minutes_until.abs());
 }
@@ -841,6 +853,30 @@ mod tests {
             extract_meeting_url(text),
             Some("https://airwallex.zoom.com/j/93507198550".to_string())
         );
+    }
+
+    #[test]
+    fn dedup_preserves_same_title_events_with_distinct_attendees() {
+        let mut events = vec![
+            CalendarEvent {
+                title: "Meridian Ship Review".into(),
+                start: "2026-07-23T12:00:00Z".into(),
+                minutes_until: 0,
+                attendees: vec!["Sam Lee".into()],
+                url: None,
+            },
+            CalendarEvent {
+                title: "Meridian Ship Review".into(),
+                start: "2026-07-23T12:00:00Z".into(),
+                minutes_until: 0,
+                attendees: vec!["Alex Kim".into()],
+                url: None,
+            },
+        ];
+
+        dedup_events(&mut events);
+
+        assert_eq!(events.len(), 2);
     }
 
     // Tests that shell out to a POSIX helper script are unix-only. On

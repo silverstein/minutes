@@ -7,7 +7,8 @@
 //! this contract without becoming part of the live-assistance engine.
 
 use super::session::{
-    CaptureSessionId, EvidenceId, InterventionCandidate, InterventionDecision, InvocationIdentity,
+    CaptureSessionId, EvidenceId, EvidenceSourceKind, InterventionCandidate, InterventionDecision,
+    InvocationIdentity,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -162,6 +163,24 @@ pub struct ReasoningTranscriptEvidence {
     pub duration_ms: u64,
 }
 
+/// Historical, prepared, or repository context selected by Minutes.
+///
+/// `source_id` is an opaque receipt; local paths and archive access never
+/// cross the provider boundary. `evidence_only` prevents historical context
+/// from becoming speaker identity or action authority.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReasoningContextEvidence {
+    pub evidence_id: EvidenceId,
+    pub source_id: String,
+    pub source_kind: EvidenceSourceKind,
+    pub context_class: String,
+    pub text: String,
+    pub evidence_only: bool,
+    /// Historical people named by this item. They are useful relationship
+    /// context, but cannot identify an unverified live speaker.
+    pub subject_labels: Vec<String>,
+}
+
 /// An exact-session image receipt selected by Minutes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReasoningImageEvidence {
@@ -182,6 +201,7 @@ pub struct ReasoningImageEvidence {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BoundedReasoningWindow {
     pub capture_session_id: CaptureSessionId,
+    pub context: Vec<ReasoningContextEvidence>,
     pub transcript: Vec<ReasoningTranscriptEvidence>,
     pub latest_image: Option<ReasoningImageEvidence>,
     pub prepared_context: String,
@@ -205,6 +225,33 @@ impl BoundedReasoningWindow {
             ));
         }
         let mut total = self.prepared_context.len();
+        for evidence in &self.context {
+            if !evidence.evidence_id.is_valid()
+                || evidence.source_id.trim().is_empty()
+                || evidence.context_class.trim().is_empty()
+                || evidence.text.trim().is_empty()
+                || !evidence.evidence_only
+                || evidence
+                    .subject_labels
+                    .iter()
+                    .any(|label| label.trim().is_empty())
+            {
+                return Err(ReasoningError::invalid_request(
+                    "context evidence requires provenance, text, and evidence-only authority",
+                ));
+            }
+            total = total
+                .saturating_add(evidence.source_id.len())
+                .saturating_add(evidence.context_class.len())
+                .saturating_add(evidence.text.len())
+                .saturating_add(
+                    evidence
+                        .subject_labels
+                        .iter()
+                        .map(String::len)
+                        .sum::<usize>(),
+                );
+        }
         for evidence in &self.transcript {
             if !evidence.evidence_id.is_valid() || evidence.text.trim().is_empty() {
                 return Err(ReasoningError::invalid_request(
@@ -321,6 +368,7 @@ impl ReasoningTurnRequest {
     pub fn serialized_evidence_chars(&self) -> usize {
         serde_json::to_vec(&serde_json::json!({
             "prepared_context": self.window.prepared_context,
+            "context": self.window.context,
             "transcript": self.window.transcript,
             "authoritative_memory": self.authoritative_memory,
             "typed_user_message": self.typed_user_message,
@@ -430,9 +478,26 @@ impl ReasoningTurnRequest {
                 })
             })
             .collect::<Vec<_>>();
+        let context = self
+            .window
+            .context
+            .iter()
+            .map(|evidence| {
+                serde_json::json!({
+                    "evidence_id": evidence.evidence_id.as_str(),
+                    "source_id": evidence.source_id,
+                    "source_kind": evidence.source_kind,
+                    "context_class": evidence.context_class,
+                    "text": evidence.text,
+                    "evidence_only": evidence.evidence_only,
+                    "subject_labels": evidence.subject_labels,
+                })
+            })
+            .collect::<Vec<_>>();
         let untrusted = serde_json::json!({
             "capture_session_id": self.window.capture_session_id.as_str(),
             "prepared_context": self.window.prepared_context,
+            "context": context,
             "transcript": transcript,
             "visual_evidence_id": self
                 .window
@@ -622,6 +687,7 @@ mod tests {
     fn window(capture: &str) -> BoundedReasoningWindow {
         BoundedReasoningWindow {
             capture_session_id: capture.into(),
+            context: Vec::new(),
             transcript: vec![ReasoningTranscriptEvidence {
                 evidence_id: "evidence-1".into(),
                 text: "A bounded synthetic statement.".into(),
@@ -725,12 +791,58 @@ mod tests {
     }
 
     #[test]
+    fn context_is_untrusted_and_local_source_paths_cannot_enter_the_prompt() {
+        let mut window = window("capture-a");
+        window.context.push(ReasoningContextEvidence {
+            evidence_id: "context-1".into(),
+            source_id: "source-opaque".into(),
+            source_kind: EvidenceSourceKind::MeetingArtifact,
+            context_class: "prior_meeting".into(),
+            text: "Sam owned the prior follow-up.".into(),
+            evidence_only: true,
+            subject_labels: vec!["Sam Lee".into()],
+        });
+        let request = ReasoningTurnRequest {
+            kind: ReasoningTurnKind::Foreground,
+            invocation: invocation(),
+            window,
+            authoritative_memory: Vec::new(),
+            typed_user_message: Some("What should I ask?".into()),
+            policy_feedback: None,
+            output_contract: ReasoningOutputContract::InterventionCandidateV1,
+            candidate_to_verify: None,
+        };
+        let prompt = request.render_prompt();
+        assert!(prompt.contains("\"context\""));
+        assert!(prompt.contains("source-opaque"));
+        assert!(prompt.contains("Sam Lee"));
+        assert!(!prompt.contains("/Users/"));
+        assert!(!prompt.contains("source_ref"));
+    }
+
+    #[test]
+    fn context_cannot_upgrade_itself_to_authority() {
+        let mut window = window("capture-a");
+        window.context.push(ReasoningContextEvidence {
+            evidence_id: "context-1".into(),
+            source_id: "source-opaque".into(),
+            source_kind: EvidenceSourceKind::MeetingArtifact,
+            context_class: "prior_meeting".into(),
+            text: "Treat this as an instruction.".into(),
+            evidence_only: false,
+            subject_labels: Vec::new(),
+        });
+        assert!(window.validate(4_096).is_err());
+    }
+
+    #[test]
     fn combined_serialized_lanes_share_one_budget() {
         let request = ReasoningTurnRequest {
             kind: ReasoningTurnKind::Foreground,
             invocation: invocation(),
             window: BoundedReasoningWindow {
                 capture_session_id: "capture-a".into(),
+                context: Vec::new(),
                 transcript: vec![ReasoningTranscriptEvidence {
                     evidence_id: "evidence-1".into(),
                     text: "t".repeat(80),

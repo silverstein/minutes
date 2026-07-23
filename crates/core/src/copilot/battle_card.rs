@@ -1,8 +1,8 @@
 use crate::config::Config;
-use crate::{graph, search};
+use crate::context_card::{ContextCard, ContextCardRequest};
 use serde::{Deserialize, Serialize};
 
-const BATTLE_CARD_CHAR_BUDGET: usize = 7_000;
+const BATTLE_CARD_CHAR_BUDGET: usize = crate::context_card::DEFAULT_CONTEXT_CARD_CHAR_BUDGET;
 
 /// Bounded historical context refreshed asynchronously for the fast lane.
 ///
@@ -58,148 +58,34 @@ impl BattleCard {
     }
 
     pub fn assemble(config: &Config, query: &str) -> Result<Self, BattleCardError> {
+        let mut request = ContextCardRequest::new(query);
+        request.max_chars = BATTLE_CARD_CHAR_BUDGET;
+        let context = ContextCard::assemble(config, request)
+            .map_err(|error| BattleCardError::SourcesUnavailable(error.to_string()))?;
         let mut card = Self::default();
-        let mut source_errors = Vec::new();
-
-        // Rebuild before reading graph-derived context so a cache created by
-        // older code cannot retain a meeting that is restricted today. If the
-        // rebuild fails, omit graph context instead of consulting stale data.
-        let graph_ready = match graph::rebuild_index(config) {
-            Ok(_) => true,
-            Err(error) => {
-                source_errors.push(format!("graph rebuild: {error}"));
-                false
-            }
-        };
-
-        if graph_ready {
-            match graph::relationship_map(config) {
-                Ok(people) => {
-                    card.people = people
-                        .into_iter()
-                        .take(8)
-                        .map(|person| {
-                            let topics = if person.top_topics.is_empty() {
-                                "no recurring topics".to_string()
-                            } else {
-                                person.top_topics.join(", ")
-                            };
-                            format!(
-                                "{} — {} prior meetings; topics: {}",
-                                person.name, person.meeting_count, topics
-                            )
-                        })
-                        .collect();
+        for evidence in context.evidence() {
+            match evidence.context_class.as_str() {
+                "relationship" => card.people.push(evidence.text.clone()),
+                "commitment" => card.open_commitments.push(evidence.text.clone()),
+                "decision" => card.decisions.push(evidence.text.clone()),
+                "open_intent" => card.intents.push(evidence.text.clone()),
+                "meeting_excerpt" | "related_meeting" | "prior_meeting" => {
+                    card.fts_excerpts.push(evidence.text.clone());
                 }
-                Err(error) => source_errors.push(format!("graph people: {error}")),
+                _ => {}
             }
         }
-
-        if graph_ready {
-            match graph::query_commitments(config, None) {
-                Ok(commitments) => {
-                    card.open_commitments = commitments
-                        .into_iter()
-                        .take(10)
-                        .map(|commitment| {
-                            let owner = commitment
-                                .person_name
-                                .as_deref()
-                                .unwrap_or("owner not verified");
-                            let due = commitment
-                                .due_date
-                                .as_deref()
-                                .map(|date| format!("; due {date}"))
-                                .unwrap_or_default();
-                            format!(
-                                "{}: {}{} (from {})",
-                                owner, commitment.text, due, commitment.meeting_title
-                            )
-                        })
-                        .collect();
-                }
-                Err(error) => source_errors.push(format!("graph commitments: {error}")),
-            }
-        }
-
-        let filters = search::SearchFilters::default();
-        match search::search_intents("", config, &filters) {
-            Ok(intents) => {
-                card.intents = intents
-                    .into_iter()
-                    .filter(|intent| intent.status == "open")
-                    .take(10)
-                    .map(|intent| {
-                        let owner = intent.who.as_deref().unwrap_or("owner not verified");
-                        format!(
-                            "{:?}: {} — {} ({})",
-                            intent.kind, intent.what, owner, intent.title
-                        )
-                    })
-                    .collect();
-            }
-            Err(error) => source_errors.push(format!("structured intents: {error}")),
-        }
-
-        match search::cross_meeting_research(query, config, &filters) {
-            Ok(research) => {
-                card.decisions = research
-                    .related_decisions
-                    .into_iter()
-                    .take(8)
-                    .map(|decision| format!("{} ({})", decision.what, decision.title))
-                    .collect();
-                // `cross_meeting_research` can find goal-specific intents that
-                // are especially valuable; add them after the global open list
-                // and dedupe below.
-                card.intents
-                    .extend(
-                        research
-                            .related_open_intents
-                            .into_iter()
-                            .take(5)
-                            .map(|intent| {
-                                let owner = intent.who.as_deref().unwrap_or("owner not verified");
-                                format!(
-                                    "{:?}: {} — {} ({})",
-                                    intent.kind, intent.what, owner, intent.title
-                                )
-                            }),
-                    );
-                dedupe(&mut card.intents);
-                card.intents.truncate(10);
-            }
-            Err(error) => source_errors.push(format!("decision research: {error}")),
-        }
-
-        if !query.trim().is_empty() {
-            match search::search(query, config, &filters) {
-                Ok(results) => {
-                    card.fts_excerpts = results
-                        .into_iter()
-                        .take(6)
-                        .map(|result| {
-                            format!("{} ({}): {}", result.title, result.date, result.snippet)
-                        })
-                        .collect();
-                }
-                Err(error) => source_errors.push(format!("FTS: {error}")),
-            }
-        }
-
-        if card.people.is_empty()
-            && card.open_commitments.is_empty()
-            && card.decisions.is_empty()
-            && card.intents.is_empty()
-            && card.fts_excerpts.is_empty()
-            && !source_errors.is_empty()
-        {
-            return Err(BattleCardError::SourcesUnavailable(
-                source_errors.join("; "),
-            ));
-        }
-
-        card.rendered = render_bounded(&card);
+        dedupe(&mut card.people);
+        dedupe(&mut card.open_commitments);
+        dedupe(&mut card.decisions);
+        dedupe(&mut card.intents);
+        dedupe(&mut card.fts_excerpts);
+        card.people.truncate(8);
+        card.open_commitments.truncate(10);
+        card.decisions.truncate(8);
+        card.intents.truncate(10);
+        card.fts_excerpts.truncate(6);
+        card.rendered = context.rendered().to_string();
         if card.rendered.is_empty() {
             card.rendered = "No relevant unrestricted historical context was found.".into();
         }
@@ -210,36 +96,6 @@ impl BattleCard {
 fn dedupe(values: &mut Vec<String>) {
     let mut seen = std::collections::HashSet::new();
     values.retain(|value| seen.insert(value.to_ascii_lowercase()));
-}
-
-fn render_bounded(card: &BattleCard) -> String {
-    let mut output = String::new();
-    append_section(&mut output, "People", &card.people);
-    append_section(&mut output, "Open commitments", &card.open_commitments);
-    append_section(&mut output, "Recent decisions", &card.decisions);
-    append_section(&mut output, "Open intents", &card.intents);
-    append_section(&mut output, "Relevant excerpts", &card.fts_excerpts);
-    output
-}
-
-fn append_section(output: &mut String, heading: &str, values: &[String]) {
-    if values.is_empty() || output.len() >= BATTLE_CARD_CHAR_BUDGET {
-        return;
-    }
-    let heading_line = format!("## {heading}\n");
-    if output.len() + heading_line.len() <= BATTLE_CARD_CHAR_BUDGET {
-        output.push_str(&heading_line);
-    }
-    for value in values {
-        let line = format!("- {value}\n");
-        if output.len() + line.len() > BATTLE_CARD_CHAR_BUDGET {
-            break;
-        }
-        output.push_str(&line);
-    }
-    if output.len() < BATTLE_CARD_CHAR_BUDGET {
-        output.push('\n');
-    }
 }
 
 #[cfg(test)]
@@ -286,7 +142,7 @@ mod tests {
     }
 
     #[test]
-    fn assembly_excludes_restricted_history_from_graph_structured_and_fts_sources() {
+    fn unscoped_coach_grounding_fails_closed_instead_of_exporting_archive_identities() {
         let _guard = crate::test_home_env_lock();
         let temp = tempfile::tempdir().unwrap();
         let _home = HomeOverride::set(temp.path());
@@ -317,11 +173,14 @@ mod tests {
         config.output_dir = meetings;
         let card = BattleCard::assemble(&config, "pricing").unwrap();
 
-        assert!(card.rendered.contains("Sam Lee"));
-        assert!(card.rendered.contains("public pricing deck"));
+        assert!(!card.rendered.contains("Sam Lee"));
+        assert!(!card.rendered.contains("public pricing deck"));
         assert!(!card.rendered.contains("Alex Kim"));
         assert!(!card.rendered.contains("SECRET"));
         assert!(!card.rendered.contains("Board Pricing"));
+        assert!(card
+            .rendered
+            .contains("No explicit or calendar-confirmed participant context"));
         assert!(card.rendered.len() <= BATTLE_CARD_CHAR_BUDGET);
 
         let serialized_card = serde_json::to_string(&card).unwrap();

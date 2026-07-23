@@ -4,6 +4,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 
 const QUALITY_SURFACE_PATHS = Object.freeze([
+  "crates/core/src/context_card.rs",
   "crates/core/src/live_sidekick/engine.rs",
   "crates/core/src/live_sidekick/provider.rs",
   "crates/core/src/live_sidekick/session.rs",

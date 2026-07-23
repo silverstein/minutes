@@ -281,6 +281,7 @@ struct NativeSidekickAdapterReceipt {
 #[serde(rename_all = "camelCase")]
 struct NativeSidekickCandidateEvidenceReceipt {
     transcript_evidence_ids: Vec<String>,
+    context_evidence_ids: Vec<String>,
     visual_evidence_ids: Vec<String>,
     claims_visual_observation: bool,
     first_token_ms: Option<u64>,
@@ -288,6 +289,18 @@ struct NativeSidekickCandidateEvidenceReceipt {
     candidate_digest_verified: bool,
     verification_verdict: minutes_core::live_sidekick::EvidenceVerificationVerdict,
     verifier_session_correlation: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NativeSidekickForegroundEvidenceReceipt {
+    turn_id: minutes_core::live_sidekick::ForegroundTurnId,
+    capture_session_id: minutes_core::live_sidekick::CaptureSessionId,
+    transcript_evidence_ids: Vec<minutes_core::live_sidekick::EvidenceId>,
+    context_evidence_ids: Vec<minutes_core::live_sidekick::EvidenceId>,
+    visual_evidence_ids: Vec<minutes_core::live_sidekick::EvidenceId>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    context_sources: Vec<minutes_core::context_card::ContextSourceReceipt>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -319,7 +332,7 @@ pub(crate) struct NativeSidekickAcceptanceRuntime {
     fatal_failure: Option<String>,
     expected_paint: Option<NativeSidekickExpectedPaint>,
     evidence_plan: Option<NativeSidekickAcceptanceEvidencePlan>,
-    evidence_receipts: HashMap<String, minutes_core::live_sidekick::ForegroundEvidenceReceipt>,
+    evidence_receipts: HashMap<String, NativeSidekickForegroundEvidenceReceipt>,
     adapter_receipts: HashMap<String, NativeSidekickAdapterReceipt>,
     candidate_evidence: HashMap<String, NativeSidekickCandidateEvidenceReceipt>,
     owned_sensitive_paths: Vec<PathBuf>,
@@ -361,6 +374,13 @@ pub(crate) enum NativeSidekickControl {
     UserMessage {
         text: String,
         acceptance_turn_id: Option<String>,
+    },
+    ContextReady {
+        card: minutes_core::context_card::ContextCard,
+        summary: String,
+    },
+    ContextUnavailable {
+        detail: String,
     },
     Stop,
 }
@@ -15585,21 +15605,94 @@ const NATIVE_SIDEKICK_DEVELOPER_INSTRUCTIONS: &str =
 const NATIVE_SIDEKICK_BRIEF_LIMIT: usize = 3_000;
 
 fn native_sidekick_prepared_context(goal: &str) -> String {
-    let mut prepared = format!("meeting_goal={}", goal.trim());
-    let brief_path = Config::minutes_dir()
+    format!("meeting_goal={}", goal.trim())
+}
+
+fn native_sidekick_brief_path() -> Option<PathBuf> {
+    let path = Config::minutes_dir()
         .join("assistant")
         .join("SIDEKICK_BRIEF.md");
-    if let Ok(brief) = std::fs::read_to_string(brief_path) {
-        let brief = brief
-            .chars()
-            .take(NATIVE_SIDEKICK_BRIEF_LIMIT)
-            .collect::<String>();
-        if !brief.trim().is_empty() {
-            prepared.push_str("\n\nprepared_sidekick_brief:\n");
-            prepared.push_str(brief.trim());
-        }
+    let metadata = std::fs::metadata(&path).ok()?;
+    (metadata.is_file() && metadata.len() > 0).then_some(path)
+}
+
+fn assemble_native_sidekick_context_card(
+    config: &Config,
+    context_session: &minutes_core::context_store::ContextSession,
+    goal: &str,
+) -> Result<minutes_core::context_card::ContextCard, String> {
+    let calendar_events = minutes_core::calendar::events_overlapping(context_session.started_at);
+    let calendar_event =
+        select_native_sidekick_calendar_event(&calendar_events, context_session.title.as_deref());
+    let participants = calendar_event
+        .as_ref()
+        .map(|event| event.attendees.clone())
+        .unwrap_or_default();
+    let mut query_parts = vec![goal.trim().to_string()];
+    if let Some(event) = calendar_event {
+        query_parts.push(event.title.clone());
     }
-    prepared
+    let mut request = minutes_core::context_card::ContextCardRequest::new(
+        query_parts
+            .into_iter()
+            .filter(|part| !part.trim().is_empty())
+            .collect::<Vec<_>>()
+            .join(" "),
+    );
+    request.participant_candidates = participants;
+    request.prepared_brief_path = native_sidekick_brief_path();
+    request.max_chars = 5_000;
+    minutes_core::context_card::ContextCard::assemble(config, request)
+        .map_err(|error| error.to_string())
+}
+
+fn select_native_sidekick_calendar_event<'a>(
+    events: &'a [minutes_core::calendar::CalendarEvent],
+    session_title: Option<&str>,
+) -> Option<&'a minutes_core::calendar::CalendarEvent> {
+    let session_title = normalized_native_sidekick_title(session_title?);
+    if session_title.len() < 4 {
+        return None;
+    }
+    let mut matches = events.iter().filter(|event| {
+        let event_title = normalized_native_sidekick_title(&event.title);
+        event_title == session_title
+    });
+    let matched = matches.next()?;
+    matches.next().is_none().then_some(matched)
+}
+
+fn revalidate_native_sidekick_context(
+    engine: &mut minutes_core::live_sidekick::LiveSidekickEngine,
+    loaded_context: &mut Option<minutes_core::context_card::ContextCard>,
+) -> Result<Option<String>, minutes_core::live_sidekick::ReasoningError> {
+    let Some(card) = loaded_context.as_ref() else {
+        return Ok(None);
+    };
+    let Err(error) = card.validate_sources_current() else {
+        return Ok(None);
+    };
+    engine.clear_context_evidence()?;
+    *loaded_context = None;
+    Ok(Some(format!(
+        "Historical context changed and was removed before provider egress ({error})."
+    )))
+}
+
+fn normalized_native_sidekick_title(value: &str) -> String {
+    value
+        .chars()
+        .map(|character| {
+            if character.is_alphanumeric() {
+                character.to_ascii_lowercase()
+            } else {
+                ' '
+            }
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn resolve_native_sidekick_context_session(
@@ -16010,6 +16103,7 @@ fn record_native_sidekick_acceptance_evidence_receipt(
     app: &tauri::AppHandle,
     acceptance_turn_id: &str,
     receipt: minutes_core::live_sidekick::ForegroundEvidenceReceipt,
+    context_sources: Vec<minutes_core::context_card::ContextSourceReceipt>,
 ) {
     let state = app.state::<AppState>();
     let (lock, ready) = &*state.sidekick_acceptance;
@@ -16018,9 +16112,17 @@ fn record_native_sidekick_acceptance_evidence_receipt(
         .unwrap_or_else(|error| error.into_inner())
         .as_mut()
     {
-        runtime
-            .evidence_receipts
-            .insert(acceptance_turn_id.to_string(), receipt);
+        runtime.evidence_receipts.insert(
+            acceptance_turn_id.to_string(),
+            NativeSidekickForegroundEvidenceReceipt {
+                turn_id: receipt.turn_id,
+                capture_session_id: receipt.capture_session_id,
+                transcript_evidence_ids: receipt.transcript_evidence_ids,
+                context_evidence_ids: receipt.context_evidence_ids,
+                visual_evidence_ids: receipt.visual_evidence_ids,
+                context_sources,
+            },
+        );
         ready.notify_all();
     };
 }
@@ -17624,6 +17726,63 @@ pub fn run_native_sidekick_diagnostic(
 #[cfg(test)]
 mod native_sidekick_diagnostic_tests {
     use super::*;
+
+    fn calendar_event(title: &str, attendee: &str) -> minutes_core::calendar::CalendarEvent {
+        minutes_core::calendar::CalendarEvent {
+            title: title.into(),
+            start: "2026-07-23T12:00:00Z".into(),
+            minutes_until: 0,
+            attendees: vec![attendee.into()],
+            url: None,
+        }
+    }
+
+    #[test]
+    fn ambiguous_overlapping_calendar_events_do_not_bind_people() {
+        let events = vec![
+            calendar_event("Meridian Ship Review", "Sam Lee"),
+            calendar_event("Board Pricing", "Alex Kim"),
+        ];
+        assert!(select_native_sidekick_calendar_event(&events, None).is_none());
+        assert!(select_native_sidekick_calendar_event(&events, Some("Weekly meeting")).is_none());
+    }
+
+    #[test]
+    fn one_unrelated_calendar_event_does_not_bind_people() {
+        let events = vec![calendar_event("Board Pricing", "Alex Kim")];
+        assert!(
+            select_native_sidekick_calendar_event(&events, Some("Meridian Ship Review")).is_none()
+        );
+        assert!(select_native_sidekick_calendar_event(&events, None).is_none());
+    }
+
+    #[test]
+    fn partial_calendar_title_does_not_bind_people() {
+        let events = vec![calendar_event("Salesforce Migration", "Alex Kim")];
+        assert!(select_native_sidekick_calendar_event(&events, Some("Sales")).is_none());
+    }
+
+    #[test]
+    fn duplicate_titles_with_distinct_attendees_remain_ambiguous() {
+        let events = vec![
+            calendar_event("Meridian Ship Review", "Sam Lee"),
+            calendar_event("Meridian Ship Review", "Alex Kim"),
+        ];
+        assert!(
+            select_native_sidekick_calendar_event(&events, Some("Meridian Ship Review")).is_none()
+        );
+    }
+
+    #[test]
+    fn capture_title_selects_one_exact_overlapping_calendar_event() {
+        let events = vec![
+            calendar_event("Meridian Ship Review", "Sam Lee"),
+            calendar_event("Board Pricing", "Alex Kim"),
+        ];
+        let selected =
+            select_native_sidekick_calendar_event(&events, Some("Meridian Ship Review")).unwrap();
+        assert_eq!(selected.attendees, vec!["Sam Lee"]);
+    }
 
     #[cfg(unix)]
     #[test]
@@ -20312,6 +20471,10 @@ fn run_native_sidekick(
         SidekickLifecycleOutcome, UserRole,
     };
 
+    let context_sender = control_slot
+        .lock()
+        .ok()
+        .and_then(|sender| sender.as_ref().cloned());
     let _guard = NativeSidekickRunGuard {
         app: app.clone(),
         active,
@@ -20357,7 +20520,7 @@ fn run_native_sidekick(
             base_instructions: NATIVE_SIDEKICK_BASE_INSTRUCTIONS.into(),
             developer_instructions: NATIVE_SIDEKICK_DEVELOPER_INSTRUCTIONS.into(),
             prepared_context: native_sidekick_prepared_context(&goal),
-            max_window_chars: 8_000,
+            max_window_chars: 16_000,
             max_transcript_items: 32,
         },
     ) {
@@ -20402,9 +20565,57 @@ fn run_native_sidekick(
         });
         return;
     }
+    let acceptance_evidence = native_sidekick_acceptance_evidence_plan(&app);
+    let mut loaded_context: Option<minutes_core::context_card::ContextCard> = None;
+    if acceptance_evidence.is_none() {
+        if let Some(sender) = context_sender {
+            let config = Config::load();
+            let context_session = context_session.clone();
+            let goal = goal.clone();
+            let _ = std::thread::Builder::new()
+                .name("minutes-sidekick-context".into())
+                .spawn(move || {
+                    match assemble_native_sidekick_context_card(&config, &context_session, &goal) {
+                        Ok(card) => {
+                            let history_count = card
+                                .evidence()
+                                .iter()
+                                .filter(|item| {
+                                    matches!(
+                                        item.context_class.as_str(),
+                                        "prior_meeting" | "related_meeting" | "meeting_excerpt"
+                                    )
+                                })
+                                .count();
+                            let participant_count = card.participant_candidates().len();
+                            let summary = format!(
+                                "History ready — {} context items, {} prior-meeting references, {} calendar-confirmed participants.",
+                                card.evidence().len(),
+                                history_count,
+                                participant_count
+                            );
+                            if card.is_empty() {
+                                let _ = sender.send(NativeSidekickControl::ContextUnavailable {
+                                    detail: "Sidekick is ready with live meeting evidence; no relevant unrestricted history was found.".into(),
+                                });
+                            } else {
+                                let _ = sender
+                                    .send(NativeSidekickControl::ContextReady { card, summary });
+                            }
+                        }
+                        Err(error) => {
+                            let _ = sender.send(NativeSidekickControl::ContextUnavailable {
+                                detail: format!(
+                                    "Sidekick is ready with live meeting evidence; historical context is unavailable ({error})."
+                                ),
+                            });
+                        }
+                    }
+                });
+        }
+    }
     let mut transcript_cursor = 0;
     let mut last_screen_path = None;
-    let acceptance_evidence = native_sidekick_acceptance_evidence_plan(&app);
     if let Some(plan) = &acceptance_evidence {
         if plan.screen.capture_session_id.as_str() != context_session.id {
             publish_native_sidekick(&app, &snapshot, |state| {
@@ -20442,6 +20653,37 @@ fn run_native_sidekick(
             });
             return;
         }
+        let mut request =
+            minutes_core::context_card::ContextCardRequest::new("acceptance prepared context");
+        let Some(brief_path) = native_sidekick_brief_path() else {
+            publish_native_sidekick(&app, &snapshot, |state| {
+                state.state = "degraded".into();
+                state.detail = "The acceptance prepared-context source is missing.".into();
+            });
+            return;
+        };
+        request.prepared_brief_path = Some(brief_path);
+        request.max_chars = 5_000;
+        let acceptance_context =
+            match minutes_core::context_card::ContextCard::assemble(&Config::load(), request) {
+                Ok(card) => card,
+                Err(error) => {
+                    publish_native_sidekick(&app, &snapshot, |state| {
+                        state.state = "degraded".into();
+                        state.detail =
+                            format!("Could not bind the acceptance context source: {error}");
+                    });
+                    return;
+                }
+            };
+        if let Err(error) = engine.load_context_card(acceptance_context.clone()) {
+            publish_native_sidekick(&app, &snapshot, |state| {
+                state.state = "degraded".into();
+                state.detail = format!("Could not load the acceptance context: {error}");
+            });
+            return;
+        }
+        loaded_context = Some(acceptance_context);
     }
     record_native_sidekick_acceptance_reasoning_session(&app, &engine);
     let descriptor = engine.descriptor().clone();
@@ -20475,6 +20717,7 @@ fn run_native_sidekick(
     let mut backend_available = true;
     let mut recovery_attempts = 0_u32;
     let mut next_backend_retry: Option<Instant> = None;
+    let mut pending_context: Option<(minutes_core::context_card::ContextCard, String)> = None;
     let mut acceptance_turns_by_foreground =
         HashMap::<minutes_core::live_sidekick::ForegroundTurnId, String>::new();
 
@@ -20595,189 +20838,272 @@ fn run_native_sidekick(
             }
         }
 
-        while let Ok(control) = control_receiver.try_recv() {
-            match control {
-                NativeSidekickControl::Stop => {
-                    stop_flag.store(true, Ordering::Release);
-                    break;
+        if pending_context.is_some() && !engine.has_active_turn() {
+            let (card, summary) = pending_context
+                .take()
+                .expect("pending context checked before load");
+            match engine.load_context_card(card.clone()).map_err(|error| {
+                minutes_core::context_card::ContextCardError::SourcesUnavailable(error.to_string())
+            }) {
+                Ok(()) => {
+                    loaded_context = Some(card);
+                    publish_native_sidekick(&app, &snapshot, |state| {
+                        if state.state == "ready" {
+                            state.detail = summary.clone();
+                        }
+                    });
                 }
-                NativeSidekickControl::UserMessage {
-                    text,
-                    acceptance_turn_id,
-                } => {
-                    let user_message_acceptance_turn_id = acceptance_turn_id.clone();
-                    let transcript_refresh = if let Some(plan) = &acceptance_evidence {
-                        let Some(turn_id) = acceptance_turn_id.as_deref() else {
-                            publish_native_sidekick(&app, &snapshot, |state| {
-                                state.state = "degraded".into();
-                                state.detail =
-                                    "The acceptance turn was missing its exact UI identity.".into();
-                            });
-                            continue;
-                        };
-                        match refresh_native_sidekick_acceptance_transcript(
-                            &mut engine,
-                            &mut transcript_cursor,
-                            plan,
-                            turn_id == plan.transcript_delta_turn_id,
-                        ) {
-                            Ok(receipt) => Some(receipt),
-                            Err(error) => {
-                                fail_native_sidekick_acceptance_turn(
-                                    &app,
-                                    turn_id,
-                                    format!("The pinned transcript refresh failed: {error}"),
-                                );
+                Err(error) => {
+                    publish_native_sidekick(&app, &snapshot, |state| {
+                        if state.state == "ready" {
+                            state.detail = format!(
+                                "Sidekick is ready with live meeting evidence; historical context was rejected ({error})."
+                            );
+                        }
+                    });
+                }
+            }
+        }
+
+        if pending_context.is_none() {
+            while let Ok(control) = control_receiver.try_recv() {
+                match control {
+                    NativeSidekickControl::Stop => {
+                        stop_flag.store(true, Ordering::Release);
+                        break;
+                    }
+                    NativeSidekickControl::ContextReady { card, summary } => {
+                        pending_context = Some((card, summary));
+                        // Preserve channel order: later user messages remain
+                        // queued behind this context barrier until it is applied.
+                        break;
+                    }
+                    NativeSidekickControl::ContextUnavailable { detail } => {
+                        publish_native_sidekick(&app, &snapshot, |state| {
+                            if state.state == "ready" {
+                                state.detail = detail.clone();
+                            }
+                        });
+                    }
+                    NativeSidekickControl::UserMessage {
+                        text,
+                        acceptance_turn_id,
+                    } => {
+                        let user_message_acceptance_turn_id = acceptance_turn_id.clone();
+                        let transcript_refresh = if let Some(plan) = &acceptance_evidence {
+                            let Some(turn_id) = acceptance_turn_id.as_deref() else {
                                 publish_native_sidekick(&app, &snapshot, |state| {
                                     state.state = "degraded".into();
-                                    state.detail = error;
+                                    state.detail =
+                                        "The acceptance turn was missing its exact UI identity."
+                                            .into();
                                 });
                                 continue;
-                            }
-                        }
-                    } else {
-                        None
-                    };
-                    let (screen_available, screen_refresh) = if let Some(plan) =
-                        &acceptance_evidence
-                    {
-                        match refresh_native_sidekick_acceptance_screen(
-                            &mut engine,
-                            &context_session.id,
-                            &mut last_screen_path,
-                            plan,
-                            acceptance_turn_id.as_deref(),
-                        ) {
-                            Ok(receipt) => {
-                                record_native_sidekick_acceptance_owned_path(
-                                    &app,
-                                    receipt.provider_path.clone(),
-                                );
-                                (true, Some(receipt))
-                            }
-                            Err(error) => {
-                                if let Some(turn_id) = acceptance_turn_id.as_deref() {
+                            };
+                            match refresh_native_sidekick_acceptance_transcript(
+                                &mut engine,
+                                &mut transcript_cursor,
+                                plan,
+                                turn_id == plan.transcript_delta_turn_id,
+                            ) {
+                                Ok(receipt) => Some(receipt),
+                                Err(error) => {
                                     fail_native_sidekick_acceptance_turn(
+                                        &app,
+                                        turn_id,
+                                        format!("The pinned transcript refresh failed: {error}"),
+                                    );
+                                    publish_native_sidekick(&app, &snapshot, |state| {
+                                        state.state = "degraded".into();
+                                        state.detail = error;
+                                    });
+                                    continue;
+                                }
+                            }
+                        } else {
+                            None
+                        };
+                        let (screen_available, screen_refresh) =
+                            if let Some(plan) = &acceptance_evidence {
+                                match refresh_native_sidekick_acceptance_screen(
+                                    &mut engine,
+                                    &context_session.id,
+                                    &mut last_screen_path,
+                                    plan,
+                                    acceptance_turn_id.as_deref(),
+                                ) {
+                                    Ok(receipt) => {
+                                        record_native_sidekick_acceptance_owned_path(
+                                            &app,
+                                            receipt.provider_path.clone(),
+                                        );
+                                        (true, Some(receipt))
+                                    }
+                                    Err(error) => {
+                                        if let Some(turn_id) = acceptance_turn_id.as_deref() {
+                                            fail_native_sidekick_acceptance_turn(
                                         &app,
                                         turn_id,
                                         format!("The exact-session screen refresh failed: {error}"),
                                     );
+                                        }
+                                        publish_native_sidekick(&app, &snapshot, |state| {
+                                            state.state = "degraded".into();
+                                            state.detail = error;
+                                        });
+                                        continue;
+                                    }
                                 }
-                                publish_native_sidekick(&app, &snapshot, |state| {
-                                    state.state = "degraded".into();
-                                    state.detail = error;
-                                });
-                                continue;
-                            }
-                        }
-                    } else {
-                        (
-                            refresh_native_sidekick_screen(
-                                &mut engine,
-                                &context_session.id,
-                                &mut last_screen_path,
-                            ),
-                            None,
-                        )
-                    };
-                    publish_native_sidekick(&app, &snapshot, |state| {
-                        state.screen_available = screen_available;
-                        state.state = "thinking".into();
-                        state.detail = "Working from the latest meeting evidence…".into();
-                        state.messages.push(NativeSidekickMessage {
-                            role: "user".into(),
-                            text: text.clone(),
-                            kind: None,
-                            latency_ms: None,
-                            acceptance_turn_id: user_message_acceptance_turn_id,
+                            } else {
+                                (
+                                    refresh_native_sidekick_screen(
+                                        &mut engine,
+                                        &context_session.id,
+                                        &mut last_screen_path,
+                                    ),
+                                    None,
+                                )
+                            };
+                        publish_native_sidekick(&app, &snapshot, |state| {
+                            state.screen_available = screen_available;
+                            state.state = "thinking".into();
+                            state.detail = "Working from the latest meeting evidence…".into();
+                            state.messages.push(NativeSidekickMessage {
+                                role: "user".into(),
+                                text: text.clone(),
+                                kind: None,
+                                latency_ms: None,
+                                acceptance_turn_id: user_message_acceptance_turn_id,
+                            });
                         });
-                    });
-                    if !backend_available {
-                        if let Some(turn_id) = acceptance_turn_id.as_deref() {
-                            fail_native_sidekick_acceptance_turn(
+                        if !backend_available {
+                            if let Some(turn_id) = acceptance_turn_id.as_deref() {
+                                fail_native_sidekick_acceptance_turn(
                                 &app,
                                 turn_id,
                                 "The reasoning backend was unavailable before the acceptance turn started.",
                             );
-                        }
-                        publish_native_sidekick(&app, &snapshot, |state| {
-                            state.state = "degraded".into();
-                            state.detail = "Reasoning is disconnected. Wait for reconnection or end Sidekick and try again.".into();
-                        });
-                    } else {
-                        match engine.send_user(text) {
-                            Ok(foreground_turn_id) => {
-                                if let Some(acceptance_turn_id) = acceptance_turn_id {
-                                    if let Some(receipt) =
-                                        engine.foreground_evidence_receipt(&foreground_turn_id)
-                                    {
-                                        record_native_sidekick_acceptance_evidence_receipt(
-                                            &app,
-                                            &acceptance_turn_id,
-                                            receipt,
-                                        );
+                            }
+                            publish_native_sidekick(&app, &snapshot, |state| {
+                                state.state = "degraded".into();
+                                state.detail = "Reasoning is disconnected. Wait for reconnection or end Sidekick and try again.".into();
+                            });
+                        } else {
+                            match revalidate_native_sidekick_context(
+                                &mut engine,
+                                &mut loaded_context,
+                            ) {
+                                Ok(Some(detail)) => {
+                                    publish_native_sidekick(&app, &snapshot, |state| {
+                                        state.detail = detail.clone();
+                                    });
+                                }
+                                Ok(None) => {}
+                                Err(error) => {
+                                    backend_available = false;
+                                    if error.retryable {
+                                        recovery_attempts = 0;
+                                        next_backend_retry =
+                                            Some(Instant::now() + Duration::from_secs(1));
                                     }
-                                    if let (Some(plan), Some(transcript), Some(screen)) = (
-                                        &acceptance_evidence,
-                                        transcript_refresh.as_ref(),
-                                        screen_refresh.as_ref(),
-                                    ) {
-                                        record_native_sidekick_acceptance_adapter_receipt(
-                                            &app,
-                                            &acceptance_turn_id,
-                                            NativeSidekickAdapterReceipt {
-                                                transcript_adapter: "live_transcript_jsonl_delta"
-                                                    .into(),
-                                                transcript_cursor: transcript.cursor,
-                                                transcript_sha256: transcript.sha256.clone(),
-                                                transcript_new_items: transcript.new_items,
-                                                screen_adapter: "context_store_exact_session"
-                                                    .into(),
-                                                screen_capture_sha256: plan
-                                                    .screen_capture_sha256
-                                                    .clone(),
-                                                provider_image_evidence_id: screen
-                                                    .evidence_id
-                                                    .clone(),
-                                                provider_image_path: screen
-                                                    .provider_path
-                                                    .display()
-                                                    .to_string(),
-                                                provider_image_sha256: screen
-                                                    .provider_sha256
-                                                    .clone(),
-                                                provider_image_transport: "inline_data_url".into(),
-                                                provider_image_dispatched_sha256: screen
-                                                    .provider_sha256
-                                                    .clone(),
-                                                provider_image_file: screen.provider_file.clone(),
-                                                capture_session_id: context_session.id.clone(),
-                                                per_turn_refresh_completed: true,
-                                            },
-                                        );
-                                    }
-                                    acceptance_turns_by_foreground
-                                        .insert(foreground_turn_id, acceptance_turn_id);
+                                    publish_native_sidekick(&app, &snapshot, |state| {
+                                        state.state = "degraded".into();
+                                        state.detail =
+                                            format!("Could not remove stale history: {error}");
+                                    });
+                                    continue;
                                 }
                             }
-                            Err(error) => {
-                                if let Some(turn_id) = acceptance_turn_id.as_deref() {
-                                    fail_native_sidekick_acceptance_turn(
-                                        &app,
-                                        turn_id,
-                                        format!("The provider rejected the turn: {error}"),
-                                    );
+                            match engine.send_user(text) {
+                                Ok(foreground_turn_id) => {
+                                    if let Some(acceptance_turn_id) = acceptance_turn_id {
+                                        if let Some(receipt) =
+                                            engine.foreground_evidence_receipt(&foreground_turn_id)
+                                        {
+                                            record_native_sidekick_acceptance_evidence_receipt(
+                                                &app,
+                                                &acceptance_turn_id,
+                                                receipt,
+                                                loaded_context
+                                                    .as_ref()
+                                                    .map(|card| card.sources().to_vec())
+                                                    .unwrap_or_default(),
+                                            );
+                                        }
+                                        if let (Some(plan), Some(transcript), Some(screen)) = (
+                                            &acceptance_evidence,
+                                            transcript_refresh.as_ref(),
+                                            screen_refresh.as_ref(),
+                                        ) {
+                                            record_native_sidekick_acceptance_adapter_receipt(
+                                                &app,
+                                                &acceptance_turn_id,
+                                                NativeSidekickAdapterReceipt {
+                                                    transcript_adapter:
+                                                        "live_transcript_jsonl_delta".into(),
+                                                    transcript_cursor: transcript.cursor,
+                                                    transcript_sha256: transcript.sha256.clone(),
+                                                    transcript_new_items: transcript.new_items,
+                                                    screen_adapter: "context_store_exact_session"
+                                                        .into(),
+                                                    screen_capture_sha256: plan
+                                                        .screen_capture_sha256
+                                                        .clone(),
+                                                    provider_image_evidence_id: screen
+                                                        .evidence_id
+                                                        .clone(),
+                                                    provider_image_path: screen
+                                                        .provider_path
+                                                        .display()
+                                                        .to_string(),
+                                                    provider_image_sha256: screen
+                                                        .provider_sha256
+                                                        .clone(),
+                                                    provider_image_transport: "inline_data_url"
+                                                        .into(),
+                                                    provider_image_dispatched_sha256: screen
+                                                        .provider_sha256
+                                                        .clone(),
+                                                    provider_image_file: screen
+                                                        .provider_file
+                                                        .clone(),
+                                                    capture_session_id: context_session.id.clone(),
+                                                    per_turn_refresh_completed: true,
+                                                },
+                                            );
+                                        }
+                                        acceptance_turns_by_foreground
+                                            .insert(foreground_turn_id, acceptance_turn_id);
+                                    }
                                 }
-                                backend_available = false;
-                                if error.retryable {
-                                    recovery_attempts = 0;
-                                    next_backend_retry =
-                                        Some(Instant::now() + Duration::from_secs(1));
+                                Err(error) => {
+                                    if let Some(turn_id) = acceptance_turn_id.as_deref() {
+                                        fail_native_sidekick_acceptance_turn(
+                                            &app,
+                                            turn_id,
+                                            format!("The provider rejected the turn: {error}"),
+                                        );
+                                    }
+                                    if error.retryable {
+                                        backend_available = false;
+                                        recovery_attempts = 0;
+                                        next_backend_retry =
+                                            Some(Instant::now() + Duration::from_secs(1));
+                                        publish_native_sidekick(&app, &snapshot, |state| {
+                                            state.state = "degraded".into();
+                                            state.detail = format!("Sidekick turn failed: {error}");
+                                        });
+                                    } else {
+                                        backend_available = true;
+                                        next_backend_retry = None;
+                                        publish_native_sidekick(&app, &snapshot, |state| {
+                                            state.state = "ready".into();
+                                            state.detail = format!(
+                                            "That request failed the Sidekick input gate: {error}"
+                                        );
+                                        });
+                                    }
                                 }
-                                publish_native_sidekick(&app, &snapshot, |state| {
-                                    state.state = "degraded".into();
-                                    state.detail = format!("Sidekick turn failed: {error}");
-                                });
                             }
                         }
                     }
@@ -20793,13 +21119,12 @@ fn run_native_sidekick(
                     || (pending_evidence == 1 && at.elapsed() >= Duration::from_secs(3))
             })
         {
-            match engine.evaluate_background() {
-                Ok(Some(_)) => {
-                    pending_evidence = 0;
+            match revalidate_native_sidekick_context(&mut engine, &mut loaded_context) {
+                Ok(Some(detail)) => {
                     publish_native_sidekick(&app, &snapshot, |state| {
-                        state.state = "thinking".into();
-                        state.detail =
-                            "Checking whether anything is worth interrupting for…".into();
+                        if state.state == "ready" {
+                            state.detail = detail.clone();
+                        }
                     });
                 }
                 Ok(None) => {}
@@ -20811,8 +21136,40 @@ fn run_native_sidekick(
                     }
                     publish_native_sidekick(&app, &snapshot, |state| {
                         state.state = "degraded".into();
-                        state.detail = format!("Reasoning is temporarily unavailable: {error}");
+                        state.detail = format!("Could not remove stale history: {error}");
                     });
+                    continue;
+                }
+            }
+            match engine.evaluate_background() {
+                Ok(Some(_)) => {
+                    pending_evidence = 0;
+                    publish_native_sidekick(&app, &snapshot, |state| {
+                        state.state = "thinking".into();
+                        state.detail =
+                            "Checking whether anything is worth interrupting for…".into();
+                    });
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    if error.retryable {
+                        backend_available = false;
+                        recovery_attempts = 0;
+                        next_backend_retry = Some(Instant::now() + Duration::from_secs(1));
+                        publish_native_sidekick(&app, &snapshot, |state| {
+                            state.state = "degraded".into();
+                            state.detail = format!("Reasoning is temporarily unavailable: {error}");
+                        });
+                    } else {
+                        backend_available = true;
+                        next_backend_retry = None;
+                        publish_native_sidekick(&app, &snapshot, |state| {
+                            state.state = "ready".into();
+                            state.detail =
+                                "A proactive thought failed the grounding gate; Sidekick is still listening."
+                                    .into();
+                        });
+                    }
                 }
             }
         }
@@ -20837,6 +21194,14 @@ fn run_native_sidekick(
                             .candidate
                             .evidence_ids
                             .iter()
+                            .filter(|id| !id.as_str().starts_with("context-"))
+                            .map(|id| id.as_str().to_string())
+                            .collect(),
+                        context_evidence_ids: publication
+                            .candidate
+                            .evidence_ids
+                            .iter()
+                            .filter(|id| id.as_str().starts_with("context-"))
                             .map(|id| id.as_str().to_string())
                             .collect(),
                         visual_evidence_ids: publication
@@ -20886,18 +21251,26 @@ fn run_native_sidekick(
                     format!("The exact provider turn failed: {}", failure.error),
                 );
             }
-            backend_available = false;
             if failure.error.retryable {
                 backend_available = false;
                 recovery_attempts = 0;
                 next_backend_retry = Some(Instant::now() + Duration::from_secs(1));
+                publish_native_sidekick(&app, &snapshot, |state| {
+                    state.state = "degraded".into();
+                    state.detail = format!("Reasoning turn failed: {}", failure.error);
+                });
             } else {
+                // A rejected or ungrounded candidate is a turn-level failure,
+                // not proof that the provider transport is disconnected.
+                backend_available = true;
                 next_backend_retry = None;
+                publish_native_sidekick(&app, &snapshot, |state| {
+                    state.state = "ready".into();
+                    state.detail =
+                        "That response failed the grounding gate; Sidekick is still listening."
+                            .into();
+                });
             }
-            publish_native_sidekick(&app, &snapshot, |state| {
-                state.state = "degraded".into();
-                state.detail = format!("Reasoning turn failed: {}", failure.error);
-            });
         }
         for lifecycle in engine.take_lifecycle_events() {
             if let SidekickLifecycleOutcome::Suppressed(reason) = lifecycle.outcome {

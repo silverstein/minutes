@@ -33,10 +33,11 @@ fn walk_meeting_files(dir: &Path) -> impl Iterator<Item = walkdir::DirEntry> {
 ///
 /// Reads only the frontmatter via the line-based `extract_field` helper, so
 /// the check stays cheap enough to post-filter index results. Unreadable
-/// files are treated as not restricted — every consumer skips them anyway.
-fn is_restricted_path(path: &Path) -> bool {
+/// sources fail closed: a stale index snippet must never bypass sensitivity
+/// enforcement merely because its source file cannot be revalidated.
+pub(crate) fn is_restricted_path(path: &Path) -> bool {
     let Ok(content) = std::fs::read_to_string(path) else {
-        return false;
+        return true;
     };
     let (frontmatter, _) = split_frontmatter(&content);
     extract_field(frontmatter, "sensitivity").as_deref() == Some("restricted")
@@ -566,6 +567,47 @@ pub fn search(
     search_with_mode(query, config, filters, crate::search_index::SyncMode::Auto)
 }
 
+/// Read-only file search for detached live-assistance retrieval.
+///
+/// Unlike the public interactive search path, this never opens or synchronizes
+/// the FTS database. That keeps a Sidekick context worker from racing capture
+/// finalization or mutating shared search state.
+pub(crate) fn search_read_only(
+    query: &str,
+    config: &Config,
+    filters: &SearchFilters,
+) -> Result<Vec<SearchResult>, SearchError> {
+    let dir = &config.output_dir;
+    if !dir.exists() {
+        return Err(SearchError::DirNotFound(dir.display().to_string()));
+    }
+    let query = query.trim().to_lowercase();
+    if query.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut results = Vec::new();
+    for entry in walk_meeting_files(dir) {
+        let path = entry.path();
+        if is_restricted_path(path) {
+            continue;
+        }
+        match process_file(path, &query, filters) {
+            Ok(Some(result)) => results.push(result),
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %error,
+                    "skipping file in read-only live-assistance search"
+                );
+            }
+        }
+    }
+    results.sort_by(|a, b| b.date.cmp(&a.date).then_with(|| a.path.cmp(&b.path)));
+    exclude_restricted_results(&mut results, filters);
+    Ok(results)
+}
+
 /// Search with explicit sync mode. Lets the CLI expose `--sync` / `--no-sync`
 /// flags for piped/scripted use cases without making every other caller think
 /// about freshness.
@@ -935,6 +977,23 @@ fn consistency_report_at(
 }
 
 pub fn person_profile(config: &Config, person: &str) -> Result<PersonProfile, SearchError> {
+    person_profile_with_match(config, person, false)
+}
+
+/// Build a person profile only from exact normalized identity matches.
+///
+/// Live Sidekick uses this stricter entry point for calendar-confirmed people;
+/// partial-name lookup remains available through `person_profile` for explicit
+/// interactive search.
+pub fn person_profile_exact(config: &Config, person: &str) -> Result<PersonProfile, SearchError> {
+    person_profile_with_match(config, person, true)
+}
+
+fn person_profile_with_match(
+    config: &Config,
+    person: &str,
+    exact_identity: bool,
+) -> Result<PersonProfile, SearchError> {
     let dir = &config.output_dir;
     if !dir.exists() {
         return Err(SearchError::DirNotFound(dir.display().to_string()));
@@ -989,25 +1048,33 @@ pub fn person_profile(config: &Config, person: &str) -> Result<PersonProfile, Se
         let date = frontmatter.date.to_rfc3339();
         let speaker_overlays = speaker_overlay_map(&frontmatter, &overlay_db_path, &path);
 
+        let matches_person = |candidate: &str| {
+            if exact_identity {
+                normalized_identity(candidate) == normalized_identity(person)
+            } else {
+                candidate.to_lowercase().contains(&person_lower)
+            }
+        };
         let attendee_match = frontmatter
             .attendees
             .iter()
-            .any(|attendee| attendee.to_lowercase().contains(&person_lower));
+            .any(|attendee| matches_person(attendee));
         let linked_person_match = frontmatter
             .people
             .iter()
-            .any(|person| person.to_lowercase().contains(&person_lower))
+            .any(|person| matches_person(person))
             || frontmatter.entities.people.iter().any(|entity| {
-                entity.label.to_lowercase().contains(&person_lower)
-                    || entity
-                        .aliases
-                        .iter()
-                        .any(|alias| alias.to_lowercase().contains(&person_lower))
+                matches_person(&entity.label)
+                    || entity.aliases.iter().any(|alias| matches_person(alias))
             });
         let owned_intent_match = frontmatter.intents.iter().any(|intent| {
             let owner_resolution =
                 resolve_owner_with_speaker_overlays(intent.who.as_deref(), &speaker_overlays);
-            owner_matches(&owner_resolution, &person_lower)
+            if exact_identity {
+                owner_matches_exact(&owner_resolution, person)
+            } else {
+                owner_matches(&owner_resolution, &person_lower)
+            }
         });
 
         if !(attendee_match || linked_person_match || owned_intent_match) {
@@ -1046,7 +1113,11 @@ pub fn person_profile(config: &Config, person: &str) -> Result<PersonProfile, Se
         for intent in &frontmatter.intents {
             let owner_resolution =
                 resolve_owner_with_speaker_overlays(intent.who.as_deref(), &speaker_overlays);
-            let owned_by_person = owner_matches(&owner_resolution, &person_lower);
+            let owned_by_person = if exact_identity {
+                owner_matches_exact(&owner_resolution, person)
+            } else {
+                owner_matches(&owner_resolution, &person_lower)
+            };
 
             if owned_by_person
                 && intent.status == "open"
@@ -1094,6 +1165,33 @@ pub fn person_profile(config: &Config, person: &str) -> Result<PersonProfile, Se
         recent_decisions,
         top_topics,
     })
+}
+
+fn normalized_identity(value: &str) -> String {
+    let display = value.split('<').next().unwrap_or(value);
+    display
+        .chars()
+        .map(|character| {
+            if character.is_alphanumeric() {
+                character.to_ascii_lowercase()
+            } else {
+                ' '
+            }
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn owner_matches_exact(resolution: &OwnerResolution, person: &str) -> bool {
+    let person = normalized_identity(person);
+    !person.is_empty()
+        && resolution
+            .who
+            .iter()
+            .chain(resolution.who_original.iter())
+            .any(|candidate| normalized_identity(candidate) == person)
 }
 
 // Legacy walk-and-grep helper. The `search()` public API now delegates to the
@@ -2118,6 +2216,33 @@ mod tests {
     }
 
     #[test]
+    fn exact_person_profile_does_not_bind_substring_names() {
+        let _guard = crate::test_home_env_lock();
+        let dir = TempDir::new().unwrap();
+        create_test_file(
+            dir.path(),
+            "2026-03-17-a.md",
+            "---\ntitle: Joanne Sync\ntype: meeting\ndate: 2026-03-17T12:00:00-07:00\nduration: 42m\nstatus: complete\ntags: []\nattendees: [Joanne]\npeople: [Joanne]\naction_items: []\ndecisions: []\nintents: []\n---\n",
+        );
+        let config = Config {
+            output_dir: dir.path().to_path_buf(),
+            ..Config::default()
+        };
+
+        assert_eq!(
+            person_profile(&config, "Ann")
+                .unwrap()
+                .recent_meetings
+                .len(),
+            1
+        );
+        assert!(person_profile_exact(&config, "Ann")
+            .unwrap()
+            .recent_meetings
+            .is_empty());
+    }
+
+    #[test]
     fn cross_meeting_research_collects_decisions_intents_and_meetings() {
         let _guard = crate::test_home_env_lock();
         let dir = TempDir::new().unwrap();
@@ -2337,4 +2462,9 @@ mod tests {
             .iter()
             .all(|stale| stale.entry.what != "Draft board pricing memo"));
     }
+}
+#[test]
+fn unreadable_index_source_fails_closed_for_restricted_filtering() {
+    let temp = tempfile::tempdir().unwrap();
+    assert!(is_restricted_path(&temp.path().join("missing.md")));
 }

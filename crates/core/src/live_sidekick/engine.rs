@@ -5,6 +5,7 @@
 //! adapters can stream reasoning, but cannot decide what reaches the user.
 
 use super::*;
+use crate::context_card::ContextCard;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeSet, VecDeque};
 use std::path::PathBuf;
@@ -99,6 +100,7 @@ pub struct ForegroundEvidenceReceipt {
     pub turn_id: ForegroundTurnId,
     pub capture_session_id: CaptureSessionId,
     pub transcript_evidence_ids: Vec<EvidenceId>,
+    pub context_evidence_ids: Vec<EvidenceId>,
     pub visual_evidence_ids: Vec<EvidenceId>,
 }
 
@@ -185,6 +187,10 @@ pub struct LiveSidekickEngine {
     verifier_sessions_started: u64,
     descriptor: ReasoningBackendDescriptor,
     config: LiveSidekickEngineConfig,
+    /// Local-only source receipts for the active historical context. Provider
+    /// adapters receive only the evidence copied from this receipted card.
+    context_card: Option<ContextCard>,
+    context_evidence: Vec<ReasoningContextEvidence>,
     transcript: VecDeque<ReasoningTranscriptEvidence>,
     authoritative_memory: VecDeque<String>,
     latest_image: Option<ReasoningImageEvidence>,
@@ -258,6 +264,8 @@ impl LiveSidekickEngine {
             verifier_sessions_started: 0,
             descriptor,
             config,
+            context_card: None,
+            context_evidence: Vec::new(),
             transcript: VecDeque::new(),
             authoritative_memory: VecDeque::new(),
             latest_image: None,
@@ -325,6 +333,109 @@ impl LiveSidekickEngine {
         }
         self.restart_backend()?;
         Ok(reduction)
+    }
+
+    /// Load one Minutes-owned historical context card between reasoning turns.
+    ///
+    /// The persistent provider session is replaced so it cannot retain an
+    /// older context window. Live transcript and user corrections remain
+    /// Minutes-owned and survive the provider replacement.
+    fn load_context_evidence(
+        &mut self,
+        context: Vec<ReasoningContextEvidence>,
+    ) -> Result<(), ReasoningError> {
+        self.pump();
+        if self.active.is_some() {
+            return Err(ReasoningError::new(
+                ReasoningErrorKind::Unavailable,
+                "Sidekick context refresh is waiting for the active turn to finish",
+                true,
+            ));
+        }
+        if !self.context_evidence.is_empty() {
+            return Err(ReasoningError::invalid_request(
+                "Sidekick context was already loaded for this capture",
+            ));
+        }
+        let mut context_ids = BTreeSet::new();
+        if context.iter().any(|evidence| {
+            !evidence.evidence_id.as_str().starts_with("context-")
+                || !context_ids.insert(evidence.evidence_id.clone())
+                || !matches!(
+                    evidence.source_kind,
+                    EvidenceSourceKind::MeetingArtifact | EvidenceSourceKind::RepositoryResult
+                )
+                || self.session.evidence.contains_key(&evidence.evidence_id)
+        }) {
+            return Err(ReasoningError::invalid_request(
+                "Sidekick context requires unique context-scoped meeting or repository evidence ids",
+            ));
+        }
+        self.validate_context_load_budget(&context)?;
+
+        for evidence in &context {
+            let reduction = self.session.reduce(AssistanceEvent::EvidenceObserved {
+                session_id: self.session.id.clone(),
+                evidence: UntrustedEvidence {
+                    id: evidence.evidence_id.clone(),
+                    source_kind: evidence.source_kind,
+                    capture_session_id: None,
+                    finalized_meeting_ref: None,
+                },
+            });
+            if !reduction.accepted {
+                return Err(ReasoningError::invalid_request(format!(
+                    "context evidence was rejected: {:?}",
+                    reduction.rejection
+                )));
+            }
+        }
+        self.context_evidence = context;
+        self.evidence_revision = self.evidence_revision.saturating_add(1);
+        self.last_background_revision = None;
+        Ok(())
+    }
+
+    /// Load a fully receipted Minutes context card. Production callers use
+    /// this path so every later strategist/verifier turn can re-check the
+    /// exact local bytes selected during retrieval.
+    pub fn load_context_card(&mut self, card: ContextCard) -> Result<(), ReasoningError> {
+        card.validate_sources_current().map_err(|error| {
+            ReasoningError::new(
+                ReasoningErrorKind::Unavailable,
+                format!("historical context failed source validation: {error}"),
+                false,
+            )
+        })?;
+        self.load_context_evidence(card.evidence().to_vec())?;
+        self.context_card = Some(card);
+        Ok(())
+    }
+
+    /// Remove historical context after its local source receipts become stale.
+    ///
+    /// The provider session is replaced only on removal, because an earlier
+    /// turn may already contain the now-invalid context in provider history.
+    pub fn clear_context_evidence(&mut self) -> Result<(), ReasoningError> {
+        self.pump();
+        if self.active.is_some() {
+            return Err(ReasoningError::new(
+                ReasoningErrorKind::Unavailable,
+                "Sidekick context invalidation is waiting for the active turn to finish",
+                true,
+            ));
+        }
+        if self.context_evidence.is_empty() {
+            return Ok(());
+        }
+        for evidence in &self.context_evidence {
+            self.session.evidence.remove(&evidence.evidence_id);
+        }
+        self.context_evidence.clear();
+        self.context_card = None;
+        self.evidence_revision = self.evidence_revision.saturating_add(1);
+        self.last_background_revision = None;
+        self.restart_backend()
     }
 
     pub fn observe_transcript(
@@ -560,7 +671,20 @@ impl LiveSidekickEngine {
         Some(ForegroundEvidenceReceipt {
             turn_id: turn_id.clone(),
             capture_session_id: self.capture_id().ok()?,
-            transcript_evidence_ids: active.allowed_evidence_ids.iter().cloned().collect(),
+            transcript_evidence_ids: active
+                .request
+                .window
+                .transcript
+                .iter()
+                .map(|item| item.evidence_id.clone())
+                .collect(),
+            context_evidence_ids: active
+                .request
+                .window
+                .context
+                .iter()
+                .map(|item| item.evidence_id.clone())
+                .collect(),
             visual_evidence_ids: active.allowed_visual_ids.iter().cloned().collect(),
         })
     }
@@ -653,6 +777,8 @@ impl LiveSidekickEngine {
             )));
         }
         self.transcript.clear();
+        self.context_evidence.clear();
+        self.context_card = None;
         self.authoritative_memory.clear();
         self.latest_image = None;
         self.active = None;
@@ -684,6 +810,7 @@ impl LiveSidekickEngine {
             Some(request) => request,
             None => self.request_for(work.invocation(), ReasoningTurnKind::Background, None)?,
         };
+        self.ensure_context_sources_current()?;
         let sender = self.event_sender.clone();
         let (allowed_evidence_ids, allowed_visual_ids) = Self::allowed_provenance(&request);
         let turn_id = self
@@ -728,6 +855,7 @@ impl LiveSidekickEngine {
         kind: ReasoningTurnKind,
         typed_user_message: Option<String>,
     ) -> Result<ReasoningTurnRequest, ReasoningError> {
+        self.ensure_context_sources_current()?;
         let mut transcript: Vec<ReasoningTranscriptEvidence> =
             self.transcript.iter().cloned().collect();
         let mut authoritative_memory: Vec<String> =
@@ -765,6 +893,7 @@ impl LiveSidekickEngine {
                 invocation,
                 window: BoundedReasoningWindow {
                     capture_session_id: capture_session_id.clone(),
+                    context: self.context_evidence.clone(),
                     transcript,
                     latest_image: latest_image.clone(),
                     prepared_context: prepared_context.clone(),
@@ -873,6 +1002,17 @@ impl LiveSidekickEngine {
             );
             return;
         }
+        if claims_unverified_live_attribution(&candidate, &active.request.window) {
+            self.record_failure(
+                active.work,
+                ReasoningError::new(
+                    ReasoningErrorKind::Protocol,
+                    "reasoning candidate attributed a live statement to a person known only from historical context",
+                    false,
+                ),
+            );
+            return;
+        }
         if candidate.decision == InterventionDecision::Silent {
             let processed_evidence_revision = active.evidence_revision;
             self.finalize_candidate(
@@ -945,6 +1085,11 @@ impl LiveSidekickEngine {
             .ready_verifier_session
             .take()
             .expect("a ready verifier was ensured");
+        if let Err(error) = self.ensure_context_sources_current() {
+            verifier.close();
+            self.record_failure(active.work, error);
+            return;
+        }
         let verification_turn_id = match verifier.start_turn(
             verification_request.clone(),
             Arc::new(move |event| {
@@ -1099,6 +1244,10 @@ impl LiveSidekickEngine {
         evidence_verification: Option<EvidenceVerificationReceipt>,
         processed_evidence_revision: u64,
     ) {
+        if let Err(error) = self.ensure_context_sources_current() {
+            self.record_failure(work, error);
+            return;
+        }
         let reduction = match &work {
             SidekickWork::Background { run_id, invocation } => {
                 self.last_background_revision = Some(processed_evidence_revision);
@@ -1447,12 +1596,19 @@ impl LiveSidekickEngine {
     fn allowed_provenance(
         request: &ReasoningTurnRequest,
     ) -> (BTreeSet<EvidenceId>, BTreeSet<EvidenceId>) {
-        let transcript = request
+        let mut transcript = request
             .window
             .transcript
             .iter()
             .map(|item| item.evidence_id.clone())
-            .collect();
+            .collect::<BTreeSet<_>>();
+        transcript.extend(
+            request
+                .window
+                .context
+                .iter()
+                .map(|item| item.evidence_id.clone()),
+        );
         let visual = request
             .window
             .latest_image
@@ -1461,6 +1617,285 @@ impl LiveSidekickEngine {
             .collect();
         (transcript, visual)
     }
+
+    fn ensure_context_sources_current(&self) -> Result<(), ReasoningError> {
+        let Some(card) = &self.context_card else {
+            return Ok(());
+        };
+        card.validate_sources_current().map_err(|error| {
+            ReasoningError::new(
+                ReasoningErrorKind::Unavailable,
+                format!(
+                    "historical context changed before provider egress or publication: {error}"
+                ),
+                false,
+            )
+        })
+    }
+
+    fn validate_context_load_budget(
+        &self,
+        context: &[ReasoningContextEvidence],
+    ) -> Result<(), ReasoningError> {
+        let request = ReasoningTurnRequest {
+            kind: ReasoningTurnKind::Background,
+            invocation: InvocationIdentity {
+                sequence: 1,
+                source_policy_generation: self.session.source_policy_generation,
+                user_generation: self.session.user_generation,
+            },
+            window: BoundedReasoningWindow {
+                capture_session_id: self.capture_id()?,
+                context: context.to_vec(),
+                transcript: Vec::new(),
+                latest_image: None,
+                prepared_context: self.prepared_context_snapshot(),
+            },
+            authoritative_memory: Vec::new(),
+            typed_user_message: None,
+            policy_feedback: None,
+            output_contract: ReasoningOutputContract::InterventionCandidateV1,
+            candidate_to_verify: None,
+        };
+        request.validate(self.config.max_window_chars)?;
+        let verification_reserve = (self.config.max_window_chars / 4).clamp(256, 1_024);
+        let generation_budget = self
+            .config
+            .max_window_chars
+            .saturating_sub(verification_reserve);
+        if request.serialized_evidence_chars() > generation_budget {
+            return Err(ReasoningError::invalid_request(
+                "historical context leaves no room for evidence verification",
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn claims_unverified_live_attribution(
+    candidate: &InterventionCandidate,
+    window: &BoundedReasoningWindow,
+) -> bool {
+    let Some(text) = candidate.text.as_deref() else {
+        return false;
+    };
+    let anonymous_live_ids = window
+        .transcript
+        .iter()
+        .filter(|item| !item.speaker_verified)
+        .map(|item| &item.evidence_id)
+        .collect::<BTreeSet<_>>();
+    if !candidate
+        .evidence_ids
+        .iter()
+        .any(|id| anonymous_live_ids.contains(id))
+    {
+        return false;
+    }
+    const UNVERIFIED_IDENTITY_CLAIMS: &[&str] = &[
+        "anonymous speaker is",
+        "the speaker is",
+        "current speaker is",
+        "live speaker is",
+        "person speaking is",
+        "this speaker is",
+        "the voice is",
+        "person who just spoke",
+        "person who spoke",
+        "is the person speaking",
+    ];
+    let verified_speakers = window
+        .transcript
+        .iter()
+        .filter(|item| item.speaker_verified)
+        .filter_map(|item| item.speaker_label.as_deref())
+        .map(normalize_identity_claim_text)
+        .collect::<BTreeSet<_>>();
+    const HISTORICAL_FRAMES: &[&str] = &[
+        "prior meeting",
+        "previous meeting",
+        "last meeting",
+        "earlier meeting",
+        "historical context",
+        "past notes",
+        "prepared brief",
+        "previously",
+        "historically",
+        "prior commitment",
+        "prior decision",
+        "on january",
+        "on february",
+        "on march",
+        "on april",
+        "on may",
+        "on june",
+        "on july",
+        "on august",
+        "on september",
+        "on october",
+        "on november",
+        "on december",
+    ];
+    const ATTRIBUTION_VERBS: &[&str] = &[
+        "said",
+        "says",
+        "asked",
+        "asks",
+        "approved",
+        "approves",
+        "agreed",
+        "agrees",
+        "wants",
+        "needs",
+        "thinks",
+        "believes",
+        "owns",
+        "committed",
+        "commits",
+        "proposed",
+        "proposes",
+        "rejected",
+        "rejects",
+        "confirmed",
+        "confirms",
+        "objected",
+        "objects",
+    ];
+    const STRONG_LIVE_MARKERS: &[&str] = &[
+        "just",
+        "now",
+        "currently",
+        "speaker",
+        "speaking",
+        "spoke",
+        "voice",
+    ];
+    let mut historical_labels = window
+        .context
+        .iter()
+        .flat_map(|item| item.subject_labels.iter())
+        .map(|label| normalize_identity_claim_text(label))
+        .filter(|label| !label.is_empty() && !verified_speakers.contains(label))
+        .collect::<BTreeSet<_>>();
+    let explicit_aliases = historical_labels
+        .iter()
+        .flat_map(|label| {
+            let words = label.split_whitespace().collect::<Vec<_>>();
+            if words.len() < 2 {
+                return Vec::new();
+            }
+            [words.first(), words.last()]
+                .into_iter()
+                .flatten()
+                .filter(|word| word.len() >= 3)
+                .map(|word| (*word).to_string())
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    historical_labels.extend(explicit_aliases);
+    for evidence in &window.context {
+        historical_labels.extend(context_identity_phrases(&evidence.text));
+    }
+
+    text.split(['.', '!', '?', ';', '\n']).any(|raw_clause| {
+        let clause = normalize_identity_claim_text(raw_clause);
+        if clause.is_empty() {
+            return false;
+        }
+        let padded_clause = format!(" {clause} ");
+        if UNVERIFIED_IDENTITY_CLAIMS
+            .iter()
+            .any(|claim| padded_clause.contains(&format!(" {claim} ")))
+        {
+            return true;
+        }
+        let clause_words = clause.split_whitespace().collect::<Vec<_>>();
+        historical_labels.iter().any(|label| {
+            let label_words = label.split_whitespace().collect::<Vec<_>>();
+            if label_words.is_empty() || label_words.len() > clause_words.len() {
+                return false;
+            }
+            let occurrences = clause_words
+                .windows(label_words.len())
+                .enumerate()
+                .filter(|(_, words)| *words == label_words.as_slice())
+                .map(|(start, _)| start)
+                .collect::<Vec<_>>();
+            occurrences
+                .iter()
+                .enumerate()
+                .any(|(occurrence_index, &start)| {
+                    let end = start + label_words.len();
+                    let after = &clause_words[end..clause_words.len().min(end + 6)];
+                    let has_strong_live_marker =
+                        after.iter().any(|word| STRONG_LIVE_MARKERS.contains(word));
+                    let has_direct_attribution = after
+                        .first()
+                        .is_some_and(|word| ATTRIBUTION_VERBS.contains(word))
+                        || (after.first() == Some(&"just")
+                            && after
+                                .get(1)
+                                .is_some_and(|word| ATTRIBUTION_VERBS.contains(word)));
+                    if !has_strong_live_marker && !has_direct_attribution {
+                        return false;
+                    }
+                    let previous_end = occurrence_index
+                        .checked_sub(1)
+                        .and_then(|index| occurrences.get(index))
+                        .map(|previous| previous + label_words.len())
+                        .unwrap_or(0);
+                    let history_start = start.saturating_sub(4).max(previous_end);
+                    let history_end = clause_words.len().min(end + 6);
+                    let local_history =
+                        format!(" {} ", clause_words[history_start..history_end].join(" "));
+                    let is_explicitly_historical = HISTORICAL_FRAMES
+                        .iter()
+                        .any(|frame| local_history.contains(&format!(" {frame} ")))
+                        || clause_words[history_start..history_end].iter().any(|word| {
+                            word.len() == 4 && word.chars().all(|ch| ch.is_ascii_digit())
+                        });
+                    !is_explicitly_historical
+                })
+        })
+    })
+}
+
+fn context_identity_phrases(value: &str) -> BTreeSet<String> {
+    const STOPWORDS: &[&str] = &[
+        "a", "an", "and", "are", "as", "at", "be", "by", "for", "from", "has", "have", "he", "her",
+        "his", "i", "in", "is", "it", "my", "of", "on", "or", "our", "she", "that", "the", "their",
+        "they", "this", "to", "was", "we", "were", "with", "you", "your",
+    ];
+    let normalized = normalize_identity_claim_text(value);
+    let words = normalized.split_whitespace().collect::<Vec<_>>();
+    let mut phrases = BTreeSet::new();
+    for size in 2..=3 {
+        for window in words.windows(size) {
+            if window
+                .iter()
+                .all(|word| word.len() >= 2 && !STOPWORDS.contains(word))
+            {
+                phrases.insert(window.join(" "));
+            }
+        }
+    }
+    phrases
+}
+
+fn normalize_identity_claim_text(value: &str) -> String {
+    value
+        .chars()
+        .map(|character| {
+            if character.is_alphanumeric() {
+                character.to_ascii_lowercase()
+            } else {
+                ' '
+            }
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 #[cfg(test)]
@@ -1721,6 +2156,279 @@ mod tests {
             claims_visual_observation: false,
             confidence: 95,
         }
+    }
+
+    #[test]
+    fn historical_context_is_bounded_citable_and_separate_from_live_speakers() {
+        let backend = FakeBackend::default();
+        let mut engine = engine(backend.clone());
+        engine
+            .load_context_evidence(vec![ReasoningContextEvidence {
+                evidence_id: "context-prior-decision".into(),
+                source_id: "source-prior-meeting".into(),
+                source_kind: EvidenceSourceKind::MeetingArtifact,
+                context_class: "decision".into(),
+                text: "The prior meeting approved a reversible pilot.".into(),
+                evidence_only: true,
+                subject_labels: vec!["Sam Lee".into()],
+            }])
+            .unwrap();
+        observe(
+            &mut engine,
+            "live-anonymous",
+            "I want to revisit the rollout.",
+        );
+
+        let turn_id = engine.send_user("What should I protect?").unwrap();
+        let state = lock(&backend.state);
+        let request = &state.turns.last().unwrap().request;
+        assert_eq!(request.window.context.len(), 1);
+        assert_eq!(
+            request.window.context[0].evidence_id.as_str(),
+            "context-prior-decision"
+        );
+        assert_eq!(
+            request.window.transcript[0].speaker_label.as_deref(),
+            None,
+            "history must not identify an anonymous live speaker"
+        );
+        drop(state);
+
+        let receipt = engine.foreground_evidence_receipt(&turn_id).unwrap();
+        assert_eq!(
+            receipt.context_evidence_ids,
+            vec![EvidenceId::new("context-prior-decision")]
+        );
+        assert_eq!(
+            receipt.transcript_evidence_ids,
+            vec![EvidenceId::new("live-anonymous")]
+        );
+    }
+
+    fn receipted_context_card(path: &std::path::Path, text: &str) -> ContextCard {
+        std::fs::write(path, text).unwrap();
+        let mut request = crate::context_card::ContextCardRequest::new("pricing");
+        request.prepared_brief_path = Some(path.to_path_buf());
+        ContextCard::assemble(&crate::config::Config::default(), request).unwrap()
+    }
+
+    #[test]
+    fn context_source_change_blocks_internal_verifier_egress_and_publication() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("meeting.md");
+        let backend = FakeBackend::default();
+        let mut engine = engine(backend.clone());
+        let card = receipted_context_card(&source, "Sam Lee supported the prior pilot.");
+        let context_id = card.evidence()[0].evidence_id.clone();
+        engine.load_context_card(card).unwrap();
+        observe(&mut engine, "live", "I support the pilot.");
+        engine.send_user("What changed?").unwrap();
+
+        std::fs::write(
+            &source,
+            "---\nsensitivity: restricted\n---\nrestricted source\n",
+        )
+        .unwrap();
+        backend.complete(
+            0,
+            speak(&[context_id.as_str(), "live"], "The pilot has support."),
+        );
+
+        let failures = engine.take_failures();
+        assert_eq!(failures.len(), 1);
+        assert!(failures[0].error.message.contains("provider egress"));
+        assert!(engine.take_publications().is_empty());
+        assert_eq!(
+            lock(&backend.state).turns.len(),
+            1,
+            "a stale card must not reach the independent verifier"
+        );
+    }
+
+    #[test]
+    fn oversized_context_is_rejected_atomically_before_it_can_poison_turns() {
+        let backend = FakeBackend::default();
+        let mut engine = engine(backend.clone());
+        let error = engine
+            .load_context_evidence(vec![ReasoningContextEvidence {
+                evidence_id: "context-too-large".into(),
+                source_id: "source-too-large".into(),
+                source_kind: EvidenceSourceKind::MeetingArtifact,
+                context_class: "decision".into(),
+                text: "x".repeat(350),
+                evidence_only: true,
+                subject_labels: vec!["Sam Lee".into()],
+            }])
+            .unwrap_err();
+        assert!(error.message.contains("evidence verification"));
+
+        observe(&mut engine, "live", "Current evidence remains usable.");
+        engine.send_user("Can you still help?").unwrap();
+        assert!(lock(&backend.state).turns[0]
+            .request
+            .window
+            .context
+            .is_empty());
+    }
+
+    #[test]
+    fn policy_invalidation_clears_historical_context() {
+        let backend = FakeBackend::default();
+        let mut engine = engine(backend.clone());
+        engine
+            .load_context_evidence(vec![ReasoningContextEvidence {
+                evidence_id: "context-prior".into(),
+                source_id: "source-prior".into(),
+                source_kind: EvidenceSourceKind::MeetingArtifact,
+                context_class: "decision".into(),
+                text: "A historical decision.".into(),
+                evidence_only: true,
+                subject_labels: vec!["Sam Lee".into()],
+            }])
+            .unwrap();
+
+        engine.invalidate_source_policy(1).unwrap();
+        observe(&mut engine, "current", "Current evidence.");
+        engine.send_user("What is current?").unwrap();
+        let state = lock(&backend.state);
+        assert!(state
+            .turns
+            .last()
+            .unwrap()
+            .request
+            .window
+            .context
+            .is_empty());
+    }
+
+    #[test]
+    fn history_cannot_identify_an_unverified_live_speaker() {
+        let backend = FakeBackend::default();
+        let mut engine = engine(backend.clone());
+        engine
+            .load_context_evidence(vec![ReasoningContextEvidence {
+                evidence_id: "context-sam".into(),
+                source_id: "source-sam".into(),
+                source_kind: EvidenceSourceKind::MeetingArtifact,
+                context_class: "prior_meeting".into(),
+                text: "Sam Lee attended the prior meeting.".into(),
+                evidence_only: true,
+                subject_labels: vec!["Sam Lee".into()],
+            }])
+            .unwrap();
+        observe(&mut engine, "live", "I approve the pilot.");
+        engine.send_user("What changed?").unwrap();
+        backend.complete(
+            0,
+            speak(
+                &["context-sam", "live"],
+                "Sam Lee said the pilot is approved.",
+            ),
+        );
+
+        let failures = engine.take_failures();
+        assert_eq!(failures.len(), 1);
+        assert!(failures[0].error.message.contains("historical context"));
+        assert!(engine.take_publications().is_empty());
+    }
+
+    #[test]
+    fn history_can_support_strategy_about_a_named_person() {
+        let window = BoundedReasoningWindow {
+            capture_session_id: "capture-a".into(),
+            context: vec![ReasoningContextEvidence {
+                evidence_id: "context-sam".into(),
+                source_id: "source-sam".into(),
+                source_kind: EvidenceSourceKind::MeetingArtifact,
+                context_class: "commitment".into(),
+                text: "Sam Lee owns the follow-up.".into(),
+                evidence_only: true,
+                subject_labels: vec!["Sam Lee".into()],
+            }],
+            transcript: vec![ReasoningTranscriptEvidence {
+                evidence_id: "live".into(),
+                text: "What should we ask next?".into(),
+                speaker_label: None,
+                speaker_verified: false,
+                offset_ms: 0,
+                duration_ms: 1,
+            }],
+            latest_image: None,
+            prepared_context: String::new(),
+        };
+        let candidate = |text| speak(&["context-sam", "live"], text);
+        assert!(!claims_unverified_live_attribution(
+            &candidate("Ask Sam Lee about the prior follow-up."),
+            &window
+        ));
+        assert!(!claims_unverified_live_attribution(
+            &candidate("Send Sam Lee the recap."),
+            &window
+        ));
+        assert!(claims_unverified_live_attribution(
+            &candidate("The anonymous speaker is Sam Lee."),
+            &window
+        ));
+        assert!(claims_unverified_live_attribution(
+            &candidate("Sam Lee wants the pilot."),
+            &window
+        ));
+        assert!(claims_unverified_live_attribution(
+            &candidate("The person who just spoke is Sam Lee."),
+            &window
+        ));
+        assert!(!claims_unverified_live_attribution(
+            &candidate("In the prior meeting, Sam Lee owned the follow-up."),
+            &window
+        ));
+        assert!(!claims_unverified_live_attribution(
+            &candidate("On June 11, Sam Lee owned the follow-up."),
+            &window
+        ));
+        assert!(claims_unverified_live_attribution(
+            &candidate("In the prior meeting Sam Lee owned pricing; Sam Lee just approved it."),
+            &window
+        ));
+        assert!(claims_unverified_live_attribution(
+            &candidate("Ask Sam Lee why they just approved."),
+            &window
+        ));
+        assert!(claims_unverified_live_attribution(
+            &candidate("Sam just approved the pilot."),
+            &window
+        ));
+        assert!(claims_unverified_live_attribution(
+            &candidate("Historically Sam Lee owned pricing, and Sam Lee just approved the pilot."),
+            &window
+        ));
+        assert!(claims_unverified_live_attribution(
+            &candidate("Historically Sam Lee owned pricing and Sam Lee just approved the pilot."),
+            &window
+        ));
+        assert!(claims_unverified_live_attribution(
+            &candidate("Historically Sam Lee agreed and Sam just approved."),
+            &window
+        ));
+
+        let mut lowercase_window = window.clone();
+        lowercase_window.context[0].text = "sam lee attended the prepared customer review".into();
+        lowercase_window.context[0].subject_labels = vec!["sam lee".into()];
+        assert!(claims_unverified_live_attribution(
+            &candidate("sam lee just approved the pilot."),
+            &lowercase_window
+        ));
+        assert!(claims_unverified_live_attribution(
+            &candidate("sam just approved the pilot."),
+            &lowercase_window
+        ));
+
+        let mut short_name_window = window.clone();
+        short_name_window.context[0].text = "Ann owned the prior follow-up.".into();
+        short_name_window.context[0].subject_labels = vec!["Ann".into()];
+        assert!(!claims_unverified_live_attribution(
+            &candidate("Will this annual plan work?"),
+            &short_name_window
+        ));
     }
 
     #[test]

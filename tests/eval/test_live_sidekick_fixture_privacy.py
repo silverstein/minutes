@@ -11,6 +11,8 @@ import contextlib
 import importlib.util
 import io
 import json
+import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -19,7 +21,9 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CHECKER_PATH = REPO_ROOT / "scripts/check_live_sidekick_fixture_privacy.py"
+SOTA_RELEASE_CHECKER_PATH = REPO_ROOT / "scripts/check_sidekick_sota_release_privacy.py"
 FIXTURE_DIR = REPO_ROOT / "crates/core/tests/fixtures/live_sidekick_eval/v1"
+SOTA_FIXTURE_DIR = REPO_ROOT / "tests/fixtures/sidekick_sota/v1"
 
 SPEC = importlib.util.spec_from_file_location("live_sidekick_fixture_privacy", CHECKER_PATH)
 if SPEC is None or SPEC.loader is None:  # pragma: no cover - import machinery guard
@@ -80,6 +84,11 @@ class LiveSidekickFixturePrivacyTests(unittest.TestCase):
     def test_repository_fixtures_are_synthetic_and_clean(self) -> None:
         documents, findings = CHECKER.check_fixture_dir(FIXTURE_DIR)
         self.assertEqual(len(documents), 14)
+        self.assertEqual(findings, [])
+
+    def test_sota_repository_fixtures_are_synthetic_and_clean(self) -> None:
+        documents, findings = CHECKER.check_fixture_dir(SOTA_FIXTURE_DIR)
+        self.assertEqual(len(documents), 7)
         self.assertEqual(findings, [])
 
     def test_required_scenarios_are_present(self) -> None:
@@ -165,6 +174,41 @@ class LiveSidekickFixturePrivacyTests(unittest.TestCase):
             with contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(CHECKER.main([str(path)]), 1)
 
+    def test_unapproved_sentence_initial_proper_noun_is_a_failing_warning(self) -> None:
+        findings = self.check_data(synthetic_fixture("Zora approved the proposal."))
+        self.assertIn(
+            "unexpected_proper_noun",
+            {item.rule for item in findings},
+        )
+
+    def test_identity_casing_and_unicode_variants_fail_closed(self) -> None:
+        controls = {
+            "unexpected_lowercase_identity": "zora approved the proposal",
+            "unexpected_uppercase_token": "ZORA approved the proposal",
+            "unexpected_proper_noun": "Li approved the proposal",
+            "non_ascii_identity_risk": "José approved the proposal",
+        }
+        for expected_rule, value in controls.items():
+            with self.subTest(rule=expected_rule):
+                self.assertIn(
+                    expected_rule,
+                    {item.rule for item in self.check_data(synthetic_fixture(value))},
+                )
+
+    def test_lowercase_identity_grammar_variants_fail_closed(self) -> None:
+        controls = (
+            "zora presented the proposal",
+            "contact zora tomorrow",
+            "zora's account is ready",
+            "zora, please take the next item",
+        )
+        for value in controls:
+            with self.subTest(value=value):
+                self.assertIn(
+                    "unexpected_lowercase_identity",
+                    {item.rule for item in self.check_data(synthetic_fixture(value))},
+                )
+
     def test_private_overlap_output_never_echoes_text_paths_or_hashes(self) -> None:
         shared_text = "alpha beta gamma delta epsilon zeta"
         with tempfile.TemporaryDirectory() as fixture_temp, tempfile.TemporaryDirectory() as corpus_temp:
@@ -197,6 +241,53 @@ class LiveSidekickFixturePrivacyTests(unittest.TestCase):
             self.assertNotIn(str(corpus_dir), rendered)
             self.assertNotIn("private.txt", rendered)
             self.assertNotRegex(rendered, r"\b[a-f0-9]{32,}\b")
+
+    def test_sota_release_gate_blocks_when_private_corpus_is_not_configured(self) -> None:
+        environment = dict(os.environ)
+        environment.pop("MINUTES_PRIVATE_EVAL_CORPUS_DIR", None)
+        completed = subprocess.run(
+            [sys.executable, str(SOTA_RELEASE_CHECKER_PATH)],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=environment,
+        )
+        self.assertEqual(completed.returncode, 2)
+        self.assertIn("release_privacy=blocked", completed.stdout)
+        self.assertNotIn("/home/", completed.stdout)
+
+    def test_private_overlap_fails_closed_on_unsupported_corpus_bytes(self) -> None:
+        with tempfile.TemporaryDirectory() as corpus_temp:
+            corpus_dir = Path(corpus_temp)
+            (corpus_dir / "unsupported.bin").write_bytes(b"\xff\xfe\x00")
+            overlaps, unreadable, readable, comparison_ngrams = CHECKER.check_private_overlap(
+                [],
+                corpus_dir,
+                5,
+                0,
+            )
+            self.assertEqual(overlaps, {})
+            self.assertEqual(unreadable, 1)
+            self.assertEqual(readable, 0)
+            self.assertEqual(comparison_ngrams, 0)
+
+    def test_private_overlap_fails_closed_on_empty_or_noncomparable_corpus(self) -> None:
+        for content in (None, "too short"):
+            with self.subTest(content=content):
+                with tempfile.TemporaryDirectory() as corpus_temp:
+                    corpus_dir = Path(corpus_temp)
+                    if content is not None:
+                        (corpus_dir / "short.txt").write_text(
+                            content,
+                            encoding="utf-8",
+                        )
+                    overlaps, unreadable, readable, comparison_ngrams = (
+                        CHECKER.check_private_overlap([], corpus_dir, 5, 0)
+                    )
+                    self.assertEqual(overlaps, {})
+                    self.assertEqual(unreadable, 0)
+                    self.assertEqual(comparison_ngrams, 0)
+                    self.assertEqual(readable, 0 if content is None else 1)
 
 
 if __name__ == "__main__":

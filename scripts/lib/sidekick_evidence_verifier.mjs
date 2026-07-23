@@ -63,16 +63,18 @@ function parseVerdict(result) {
 
 /** Separate provider-neutral semantic evidence check run before publication. */
 export class BackendEvidenceVerifier {
-  constructor({ backendFactory }) {
+  constructor({ backendFactory, shutdownGraceMs = 2_500 }) {
     if (typeof backendFactory !== "function") {
       throw new Error("evidence verifier requires a fresh backend factory");
     }
     this.backendFactory = backendFactory;
+    this.shutdownGraceMs = shutdownGraceMs;
     this.started = false;
     this.closed = false;
     this.cwd = null;
     this.readyPromise = null;
     this.activeBackend = null;
+    this.preparingBackend = null;
     this.sessionsStarted = 0;
     this.verificationReceipts = [];
   }
@@ -102,8 +104,10 @@ export class BackendEvidenceVerifier {
 
   async #prepareSlot() {
     const backend = assertReasoningBackend(await this.backendFactory());
+    this.preparingBackend = backend;
     if (this.closed) {
       backend.close();
+      if (this.preparingBackend === backend) this.preparingBackend = null;
       throw new Error("evidence verifier is closed");
     }
     try {
@@ -132,9 +136,11 @@ export class BackendEvidenceVerifier {
         authoritativeContext: { synthetic_warmup: true },
       });
       if (this.closed) throw new Error("evidence verifier is closed");
+      if (this.preparingBackend === backend) this.preparingBackend = null;
       return { backend, session };
     } catch (error) {
       backend.close();
+      if (this.preparingBackend === backend) this.preparingBackend = null;
       throw error;
     }
   }
@@ -212,12 +218,18 @@ export class BackendEvidenceVerifier {
     this.started = false;
     this.activeBackend?.close();
     this.activeBackend = null;
-    try {
-      const slot = await this.#takePreparedSlot();
-      slot?.backend?.close();
-    } catch {
-      // Preparation may have been interrupted by shutdown.
-    }
+    this.preparingBackend?.close();
+    this.preparingBackend = null;
+    let deadline;
+    await Promise.race([
+      this.#takePreparedSlot()
+        .then((slot) => slot?.backend?.close())
+        .catch(() => {}),
+      new Promise((resolve) => {
+        deadline = setTimeout(resolve, this.shutdownGraceMs);
+      }),
+    ]);
+    clearTimeout(deadline);
     this.readyPromise = null;
   }
 }

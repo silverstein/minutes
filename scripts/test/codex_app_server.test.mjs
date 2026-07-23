@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import process from "node:process";
+import { once } from "node:events";
 import {
   CodexAppServerClient,
   mcpDisableArgsFromConfig,
@@ -115,4 +116,43 @@ command = "duplicate"
       'mcp_servers."odd.name".enabled=false',
     ],
   );
+});
+
+test("close escalates a wedged app-server and does not retain its stdio handles", async () => {
+const stubbornServer = String.raw`
+process.on("SIGTERM", () => {});
+setInterval(() => {}, 1000);
+const readline = require("node:readline");
+readline.createInterface({ input: process.stdin }).on("line", (line) => {
+  const message = JSON.parse(line);
+  if (message.method === "initialize") {
+    process.stdout.write(JSON.stringify({ id: message.id, result: { userAgent: "stubborn" } }) + "\n");
+  }
+});
+`;
+  const client = new CodexAppServerClient({
+    command: process.execPath,
+    args: ["-e", stubbornServer],
+    requestTimeoutMs: 500,
+    closeGraceMs: 20,
+  });
+  await client.start();
+  const child = client.child;
+  const exited = once(child, "exit");
+  client.close();
+  let deadline;
+  const [, signal] = await Promise.race([
+    exited,
+    new Promise((_, reject) => {
+      deadline = setTimeout(
+        () => reject(new Error("wedged app-server did not exit")),
+        500,
+      );
+    }),
+  ]);
+  clearTimeout(deadline);
+  assert.equal(signal, "SIGKILL");
+  assert.equal(child.stdin.destroyed, true);
+  assert.equal(child.stdout.destroyed, true);
+  assert.equal(child.stderr.destroyed, true);
 });

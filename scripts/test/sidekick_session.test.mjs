@@ -1006,6 +1006,29 @@ test("stop invalidates a late completion", async () => {
   assert.equal(publications.length, 0);
 });
 
+test("stop closes the provider before bounding a wedged interrupt request", async () => {
+  const backend = new FakeBackend();
+  let closed = false;
+  backend.interruptTurn = () => new Promise(() => {});
+  backend.close = () => {
+    closed = true;
+  };
+  const session = new SidekickSession({
+    backend,
+    captureSessionId: "capture-a",
+    shutdownGraceMs: 5,
+  });
+  await session.start();
+  const pending = session.evaluateProactive();
+  await new Promise((resolve) => setImmediate(resolve));
+  await session.stop();
+  assert.equal(closed, true);
+  backend.turns[0].pending.resolve(
+    result({ decision: "silent" }),
+  );
+  assert.equal((await pending).stale, true);
+});
+
 test("proactive evaluation does not repeat without new evidence", async () => {
   const backend = new FakeBackend();
   const session = new SidekickSession({ backend, captureSessionId: "capture-a" });

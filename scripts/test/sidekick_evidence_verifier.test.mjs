@@ -108,3 +108,22 @@ test("meeting evidence never persists into the next candidate verifier slot", as
   assert.equal(factory.backends[1].closed, true);
   await verifier.close();
 });
+
+test("close bounds a wedged verifier preparation after closing its backend", async () => {
+  let resolveStart;
+  const backend = new FakeBackend({ id: "wedged" });
+  backend.startSession = () =>
+    new Promise((resolve) => {
+      resolveStart = resolve;
+    });
+  const verifier = new BackendEvidenceVerifier({
+    backendFactory: () => backend,
+    shutdownGraceMs: 5,
+  });
+  const starting = verifier.start();
+  await new Promise((resolve) => setImmediate(resolve));
+  await verifier.close();
+  assert.equal(backend.closed, true);
+  resolveStart({ sessionId: "late-session" });
+  await assert.rejects(starting, /closed/);
+});

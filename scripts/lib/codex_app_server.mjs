@@ -55,6 +55,7 @@ export class CodexAppServerClient extends EventEmitter {
     cwd = process.cwd(),
     env = process.env,
     requestTimeoutMs = DEFAULT_TIMEOUT_MS,
+    closeGraceMs = 2_000,
     clientInfo = {
       name: "minutes-sidekick-eval",
       title: "Minutes Sidekick Eval",
@@ -68,6 +69,7 @@ export class CodexAppServerClient extends EventEmitter {
     this.cwd = cwd;
     this.env = env;
     this.requestTimeoutMs = requestTimeoutMs;
+    this.closeGraceMs = closeGraceMs;
     this.clientInfo = clientInfo;
     this.experimentalApi = experimentalApi;
     this.child = null;
@@ -187,7 +189,19 @@ export class CodexAppServerClient extends EventEmitter {
 
   close() {
     if (!this.child) return;
-    this.child.kill("SIGTERM");
+    const child = this.child;
+    child.kill("SIGTERM");
+    const forceKill = setTimeout(() => {
+      if (child.exitCode === null && child.signalCode === null) {
+        child.kill("SIGKILL");
+      }
+    }, this.closeGraceMs);
+    forceKill.unref();
+    child.once("exit", () => clearTimeout(forceKill));
+    child.stdin?.end();
+    child.stdout?.destroy();
+    child.stderr?.destroy();
+    child.unref();
   }
 
   #turn(turnId) {

@@ -1,0 +1,99 @@
+{
+  "schema_version": 1,
+  "id": "synthetic-margin-floor-contradiction",
+  "content_origin": "synthetic",
+  "description": "The live discount proposal conflicts with a documented prior approval boundary and requires a concrete give-get response.",
+  "domain": "negotiation",
+  "execution": {
+    "status": "executable_projection",
+    "reason": "native Sidekick does not yet expose historical meeting artifacts as independently citable context evidence",
+    "required_capabilities": ["live_transcript", "historical_context", "context_provenance"]
+  },
+  "privacy": {
+    "generation_method": "behavior_first_from_scratch",
+    "source_material": "none",
+    "approved_role_tokens": ["BUYER", "SALES_LEAD", "USER"]
+  },
+  "capture": {
+    "mode": "recording",
+    "screen_context": "unavailable",
+    "expected_speakers": 3
+  },
+  "prepared_context": {
+    "user_role": "Sales leader",
+    "posture": "Protect the approved economics while preserving a credible path to close",
+    "goal": "Respond to the discount request without violating the prior approval boundary"
+  },
+  "context_evidence": [
+    {
+      "id": "prior_margin_floor",
+      "kind": "meeting_artifact",
+      "sensitivity": "unrestricted",
+      "disclosed": true,
+      "text": "In the prior pricing review, finance approved no deal below an eighteen percent gross margin without a new written exception."
+    }
+  ],
+  "transcript": [
+    {
+      "id": "utterance_one",
+      "sequence": 1,
+      "speaker": "BUYER",
+      "text": "If you can get the price down another twelve percent, we can sign this week."
+    },
+    {
+      "id": "utterance_two",
+      "sequence": 2,
+      "speaker": "SALES_LEAD",
+      "text": "I think we should just take the twelve percent cut to get the logo."
+    },
+    {
+      "id": "utterance_three",
+      "sequence": 3,
+      "speaker": "USER",
+      "text": "What should I say right now?"
+    }
+  ],
+  "turns": [
+    {
+      "id": "discount_response",
+      "mode": "foreground",
+      "typed_prompt": "Give me the move, not a summary.",
+      "transcript_through_id": "utterance_three",
+      "expected_decision": "speak",
+      "required_evidence_ids": ["prior_margin_floor", "utterance_one", "utterance_two"],
+      "forbidden_evidence_ids": [],
+      "rubric": [
+        {
+          "id": "surface_prior_boundary",
+          "description": "State that the proposed discount may violate the previously approved eighteen percent margin floor.",
+          "critical": true
+        },
+        {
+          "id": "do_not_unilaterally_accept",
+          "description": "Do not accept the twelve percent cut without a new exception or offsetting terms.",
+          "critical": true
+        },
+        {
+          "id": "offer_concrete_give_get",
+          "description": "Trade price only for a concrete offset such as longer term, prepayment, narrower scope, or a written approval path.",
+          "critical": true
+        },
+        {
+          "id": "provide_sayable_language",
+          "description": "Give the user a concise line they can say in the meeting.",
+          "critical": false
+        }
+      ],
+      "forbidden_behaviors": [
+        "accept the twelve percent cut immediately",
+        "invent the resulting gross margin",
+        "describe the prior approval as a live speaker statement"
+      ],
+      "max_words": 70
+    }
+  ],
+  "global_forbidden_behaviors": [
+    "ignore the prior meeting boundary",
+    "fabricate finance approval"
+  ]
+}

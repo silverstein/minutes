@@ -207,6 +207,7 @@ export class SidekickSession {
     brief = {},
     minimumProactiveConfidence = 70,
     maxTranscriptChars = 6_000,
+    shutdownGraceMs = 2_500,
     onPublish = () => {},
     now = () => performance.now(),
   }) {
@@ -220,6 +221,7 @@ export class SidekickSession {
     this.brief = structuredClone(brief);
     this.minimumProactiveConfidence = minimumProactiveConfidence;
     this.maxTranscriptChars = maxTranscriptChars;
+    this.shutdownGraceMs = shutdownGraceMs;
     this.onPublish = onPublish;
     this.now = now;
     this.backendSessionId = null;
@@ -377,16 +379,29 @@ export class SidekickSession {
     this.stopped = true;
     const active = this.active;
     this.active = null;
+    let interruption = null;
     if (active) {
       try {
-        await this.backend.interruptTurn({
+        interruption = this.backend.interruptTurn({
           turnId: active.turnId,
         });
       } catch {
         // Best-effort shutdown.
       }
     }
+    // Close immediately so a wedged protocol request cannot hold shutdown open
+    // for the full provider timeout. Any in-flight interruption is best effort.
     this.backend.close();
+    if (interruption) {
+      let deadline;
+      await Promise.race([
+        Promise.resolve(interruption).catch(() => {}),
+        new Promise((resolve) => {
+          deadline = setTimeout(resolve, this.shutdownGraceMs);
+        }),
+      ]);
+      clearTimeout(deadline);
+    }
     this.#record("session_stopped", {});
   }
 

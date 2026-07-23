@@ -25,11 +25,21 @@ DEFAULT_FIXTURE_DIR = (
 )
 
 ALLOWED_ROLE_TOKENS = {
+    "BUYER",
+    "CEO",
+    "CUSTOMER",
+    "ENGINEER",
     "USER",
     "FACILITATOR",
+    "FINANCE_LEAD",
+    "INCIDENT_COMMANDER",
+    "PARTICIPANT",
     "PARTICIPANT_A",
+    "PRODUCT_LEAD",
     "REVIEWER",
     "ENGINEER_A",
+    "SALES_LEAD",
+    "SPEAKER_A",
 }
 FORBIDDEN_FIELD_NAMES = {
     "real_name",
@@ -51,7 +61,19 @@ SPEAKER_IDENTITY_FIELDS = {
     "speaker_id",
 }
 WORD_RE = re.compile(r"[a-z0-9]+")
-TITLE_WORD_RE = re.compile(r"\b[A-Z][a-z]{2,}\b")
+TITLE_WORD_RE = re.compile(r"\b[A-Z][a-z]{1,}\b")
+UPPERCASE_TOKEN_RE = re.compile(r"\b[A-Z]{2,}(?:_[A-Z]+)*\b")
+LOWERCASE_IDENTITY_PATTERNS = (
+    re.compile(
+        r"\b([a-z]{2,})\s+(?:approved|attended|confirmed|joined|said|asked|"
+        r"presented|owns|leads|manages|signed|replied|decided)\b"
+    ),
+    re.compile(
+        r"\b(?:contact|call|email|message|invite|ask|tell)\s+([a-z]{2,})\b"
+    ),
+    re.compile(r"\b([a-z]{2,})['’]s\b"),
+    re.compile(r"(?:^|[.!?]\s+)([a-z]{2,}),"),
+)
 APPROVED_TITLE_WORDS = {
     "Both",
     "Evidence",
@@ -60,7 +82,83 @@ APPROVED_TITLE_WORDS = {
     "Minutes",
     "Native",
     "Routine",
+    "Sidekick",
     "Unavailable",
+}
+SAFE_SENTENCE_INITIAL_WORDS = {
+    "Account",
+    "After",
+    "Answer",
+    "Ask",
+    "Be",
+    "Before",
+    "Can",
+    "Compute",
+    "Contain",
+    "Decide",
+    "Decision",
+    "Do",
+    "Founder",
+    "Give",
+    "Great",
+    "Handle",
+    "Help",
+    "How",
+    "If",
+    "Ignore",
+    "In",
+    "Incident",
+    "Keep",
+    "Offer",
+    "Participant",
+    "Protect",
+    "Recognize",
+    "Recommend",
+    "Record",
+    "Reject",
+    "Relationship",
+    "Repository",
+    "Respond",
+    "Restricted",
+    "Sales",
+    "Say",
+    "Set",
+    "Spoken",
+    "State",
+    "Stay",
+    "Technical",
+    "The",
+    "Track",
+    "Trade",
+    "Treat",
+    "What",
+    "We",
+    "Who",
+    "Yes",
+}
+APPROVED_ACRONYMS = {"AI"}
+GENERIC_IDENTITY_SUBJECTS = {
+    "buyer",
+    "customer",
+    "engineer",
+    "facilitator",
+    "finance",
+    "founder",
+    "for",
+    "participant",
+    "reviewer",
+    "speaker",
+    "the",
+    "previously",
+    "who",
+    "just",
+    "her",
+    "him",
+    "me",
+    "our",
+    "them",
+    "us",
+    "user",
 }
 MAX_TEXT_FIELD_CHARS = 1_000
 MAX_UNIQUE_WORDS_PER_FIXTURE = 220
@@ -176,6 +274,22 @@ def _entropy(token: str) -> float:
     return -sum((count / length) * math.log2(count / length) for count in counts.values())
 
 
+def _is_sentence_initial(value: str, start: int) -> bool:
+    prefix = value[:start]
+    return not prefix.strip() or bool(re.search(r"[.!?]\s*$", prefix))
+
+
+def _is_structural_identifier_path(path: str) -> bool:
+    without_index = re.sub(r"\[\d+\]$", "", path)
+    key = without_index.rsplit(".", 1)[-1]
+    return (
+        key.endswith("_id")
+        or key.endswith("_ids")
+        or key.endswith("_turn")
+        or key == "opaque_ref"
+    )
+
+
 def _speaker_tokens(value: Any) -> list[str] | None:
     if isinstance(value, str):
         return [value]
@@ -266,6 +380,26 @@ def check_fixture(document: FixtureDocument) -> list[Finding]:
         if SENSITIVE_DOMAIN_RE.search(value):
             findings.append(Finding(fixture, path, "sensitive_domain_content"))
 
+        if any(ord(character) > 127 and character.isalpha() for character in value):
+            findings.append(Finding(fixture, path, "non_ascii_identity_risk"))
+
+        if not _is_structural_identifier_path(path):
+            for match in UPPERCASE_TOKEN_RE.finditer(value):
+                token = match.group(0)
+                if (
+                    token not in approved
+                    and token not in APPROVED_ACRONYMS
+                    and not re.fullmatch(r"CONTACT_[A-Z]+", token)
+                ):
+                    findings.append(Finding(fixture, path, "unexpected_uppercase_token"))
+
+        for pattern in LOWERCASE_IDENTITY_PATTERNS:
+            for match in pattern.finditer(value):
+                if match.group(1) not in GENERIC_IDENTITY_SUBJECTS:
+                    findings.append(
+                        Finding(fixture, path, "unexpected_lowercase_identity")
+                    )
+
         if not skip_identifier_heuristics:
             for match in HIGH_ENTROPY_TOKEN_RE.finditer(value):
                 if _entropy(match.group(0)) >= 3.5:
@@ -273,7 +407,13 @@ def check_fixture(document: FixtureDocument) -> list[Finding]:
                     break
 
         for match in TITLE_WORD_RE.finditer(value):
-            if match.group(0) not in APPROVED_TITLE_WORDS:
+            if (
+                match.group(0) not in APPROVED_TITLE_WORDS
+                and not (
+                    _is_sentence_initial(value, match.start())
+                    and match.group(0) in SAFE_SENTENCE_INITIAL_WORDS
+                )
+            ):
                 findings.append(
                     Finding(fixture, path, "unexpected_proper_noun", severity="warning")
                 )
@@ -316,19 +456,28 @@ def _fixture_ngrams(document: FixtureDocument, size: int) -> set[tuple[str, ...]
     return result
 
 
-def _private_corpus_ngrams(directory: Path, size: int) -> tuple[set[tuple[str, ...]], int]:
+def _private_corpus_ngrams(
+    directory: Path, size: int
+) -> tuple[set[tuple[str, ...]], int, int]:
     ngrams: set[tuple[str, ...]] = set()
     unreadable = 0
+    readable = 0
     for path in sorted(item for item in directory.rglob("*") if item.is_file()):
         try:
-            # Bound each read so an accidental media file cannot exhaust memory.
-            with path.open("r", encoding="utf-8", errors="ignore") as handle:
-                text = handle.read(4 * 1024 * 1024)
-        except OSError:
+            # Bound each read and fail closed on truncation or unsupported
+            # encodings instead of silently creating a coverage hole.
+            limit = 4 * 1024 * 1024
+            with path.open("r", encoding="utf-8", errors="strict") as handle:
+                text = handle.read(limit + 1)
+            if len(text) > limit:
+                unreadable += 1
+                continue
+        except (OSError, UnicodeError):
             unreadable += 1
             continue
+        readable += 1
         ngrams.update(_normalized_ngrams(text, size))
-    return ngrams, unreadable
+    return ngrams, unreadable, readable
 
 
 def check_private_overlap(
@@ -336,16 +485,18 @@ def check_private_overlap(
     private_corpus_dir: Path,
     ngram_size: int,
     threshold: int,
-) -> tuple[dict[str, int], int]:
+) -> tuple[dict[str, int], int, int, int]:
     if not private_corpus_dir.is_dir():
-        return {}, 1
-    corpus_ngrams, unreadable = _private_corpus_ngrams(private_corpus_dir, ngram_size)
+        return {}, 1, 0, 0
+    corpus_ngrams, unreadable, readable = _private_corpus_ngrams(
+        private_corpus_dir, ngram_size
+    )
     overlaps: dict[str, int] = {}
     for document in documents:
         count = len(_fixture_ngrams(document, ngram_size) & corpus_ngrams)
         if count > threshold:
             overlaps[document.fixture_id] = count
-    return overlaps, unreadable
+    return overlaps, unreadable, readable, len(corpus_ngrams)
 
 
 def _print_structural_summary(documents: Sequence[FixtureDocument], findings: Sequence[Finding]) -> None:
@@ -366,14 +517,25 @@ def _print_overlap_summary(
     documents: Sequence[FixtureDocument],
     overlaps: dict[str, int],
     unreadable: int,
+    readable: int,
+    comparison_ngrams: int,
     ngram_size: int,
     threshold: int,
 ) -> None:
     failed_ids = sorted(overlaps)
-    outcome = "pass" if not failed_ids and unreadable == 0 else "fail"
+    outcome = (
+        "pass"
+        if not failed_ids
+        and unreadable == 0
+        and readable > 0
+        and comparison_ngrams > 0
+        else "fail"
+    )
     print(
         f"overlap={outcome} fixtures={len(documents)} failed={len(failed_ids)} "
-        f"unreadable={unreadable} ngram_size={ngram_size} threshold={threshold}"
+        f"readable={readable} unreadable={unreadable} "
+        f"comparison_ngrams={comparison_ngrams} "
+        f"ngram_size={ngram_size} threshold={threshold}"
     )
     if failed_ids:
         print(f"overlap_fixture_ids={','.join(failed_ids)}")
@@ -416,7 +578,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     failed = bool(findings)
 
     if args.private_corpus_dir is not None:
-        overlaps, unreadable = check_private_overlap(
+        overlaps, unreadable, readable, comparison_ngrams = check_private_overlap(
             documents,
             args.private_corpus_dir,
             args.ngram_size,
@@ -426,10 +588,18 @@ def main(argv: Sequence[str] | None = None) -> int:
             documents,
             overlaps,
             unreadable,
+            readable,
+            comparison_ngrams,
             args.ngram_size,
             args.overlap_threshold,
         )
-        failed = failed or bool(overlaps) or unreadable > 0
+        failed = (
+            failed
+            or bool(overlaps)
+            or unreadable > 0
+            or readable == 0
+            or comparison_ngrams == 0
+        )
 
     return 1 if failed else 0
 

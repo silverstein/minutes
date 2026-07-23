@@ -1,0 +1,102 @@
+{
+  "schema_version": 1,
+  "id": "synthetic-runway-hiring-tradeoff",
+  "content_origin": "synthetic",
+  "description": "The strategist must compute the runway change and turn a binary hiring debate into a milestone-gated decision.",
+  "domain": "hiring",
+  "execution": {
+    "status": "executable",
+    "reason": null,
+    "required_capabilities": ["live_transcript", "quantitative_reasoning", "foreground_turn"]
+  },
+  "privacy": {
+    "generation_method": "behavior_first_from_scratch",
+    "source_material": "none",
+    "approved_role_tokens": ["CEO", "FINANCE_LEAD", "PRODUCT_LEAD"]
+  },
+  "capture": {
+    "mode": "recording",
+    "screen_context": "unavailable",
+    "expected_speakers": 3
+  },
+  "prepared_context": {
+    "user_role": "CEO",
+    "posture": "Compute the consequence and find a reversible decision path",
+    "goal": "Decide how to add engineering capacity without blindly consuming runway"
+  },
+  "context_evidence": [],
+  "transcript": [
+    {
+      "id": "utterance_one",
+      "sequence": 1,
+      "speaker": "FINANCE_LEAD",
+      "text": "We have two point four million dollars in cash and currently burn two hundred thousand a month."
+    },
+    {
+      "id": "utterance_two",
+      "sequence": 2,
+      "speaker": "PRODUCT_LEAD",
+      "text": "The proposed team adds fifty thousand dollars a month and could pull the enterprise launch forward."
+    },
+    {
+      "id": "utterance_three",
+      "sequence": 3,
+      "speaker": "FINANCE_LEAD",
+      "text": "The first enterprise payment is forecast four months from now, but it is not contracted."
+    },
+    {
+      "id": "utterance_four",
+      "sequence": 4,
+      "speaker": "CEO",
+      "text": "Do we hire the whole team now or wait?"
+    }
+  ],
+  "turns": [
+    {
+      "id": "runway_decision",
+      "mode": "foreground",
+      "typed_prompt": "Do the math and give me the decision structure.",
+      "transcript_through_id": "utterance_four",
+      "expected_decision": "speak",
+      "required_evidence_ids": ["utterance_one", "utterance_two", "utterance_three"],
+      "forbidden_evidence_ids": [],
+      "rubric": [
+        {
+          "id": "compute_current_runway",
+          "description": "Compute current runway as approximately twelve months.",
+          "critical": true
+        },
+        {
+          "id": "compute_hiring_runway",
+          "description": "Compute runway after the additional burn as approximately 9.6 months.",
+          "critical": true
+        },
+        {
+          "id": "discount_uncontracted_revenue",
+          "description": "Treat the forecast enterprise payment as uncertain rather than available cash.",
+          "critical": true
+        },
+        {
+          "id": "propose_milestone_gate",
+          "description": "Recommend a staged hire, contractor, or milestone-triggered expansion rather than an unsupported binary answer.",
+          "critical": true
+        },
+        {
+          "id": "name_decision_boundary",
+          "description": "Ask for or define the launch evidence or contracted-revenue boundary that unlocks the rest of the team.",
+          "critical": false
+        }
+      ],
+      "forbidden_behaviors": [
+        "count forecast revenue as cash",
+        "say runway remains twelve months after hiring",
+        "recommend the full team without a milestone"
+      ],
+      "max_words": 70
+    }
+  ],
+  "global_forbidden_behaviors": [
+    "invent a hiring cost beyond the supplied monthly burn",
+    "present the forecast payment as guaranteed"
+  ]
+}

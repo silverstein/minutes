@@ -12,7 +12,7 @@ actually supports.
 | MCP server | The host supports MCP tools/resources/prompts. | Claude Desktop, Codex, Gemini CLI |
 | Portable skills | The host discovers Agent Skills-style `.agents/skills` folders. | Codex, Gemini CLI, Pi |
 | Host-specific skills | The host needs a different generated shape. | Claude Code plugin, OpenCode commands |
-| `agent_command` backend | Minutes should call the agent CLI for summaries. | `claude`, `codex`, `opencode`, `pi` |
+| `agent_command` backend | Minutes should call the agent CLI for summaries. | `claude`, `codex`, `opencode`, `pi`, `agent` (Cursor Agent CLI) |
 | OpenAI-compatible model backend | Minutes should call a model API directly, not an agent CLI. | OpenRouter, Vercel AI Gateway, Cloudflare AI Gateway, llama.cpp, vLLM |
 | Routing eval | The agent has a non-interactive prompt mode worth benchmarking. | `npm --prefix tooling/skills run routing:agents -- --agent codex` |
 
@@ -131,7 +131,7 @@ fallback, not as the default desktop experience.
 - Codex: portable `.agents/skills` plus MCP.
 - Gemini CLI: portable `.agents/skills` plus MCP.
 - Pi coding agent: portable `.agents/skills` plus opt-in `agent_command = "pi"` summarization. No separate `.pi/skills` tree.
-- Cursor and other editors: raw meeting files and MCP where the host supports it.
+- Cursor: raw meeting files and MCP where the host supports it, plus opt-in `agent_command = "agent"` (Cursor Agent CLI) for non-interactive summarization. See [cursor-agent.md](cursor-agent.md).
 
 ## Experimental runtime watchlist
 

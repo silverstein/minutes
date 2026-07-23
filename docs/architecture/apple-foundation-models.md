@@ -44,7 +44,7 @@ engine = "auto"      # prefers Apple FM when available, else agent CLI, else non
 - `engine = "apple"` (alias `"apple-fm"`): use Foundation Models; errors
   surface as processing warnings if unavailable.
 - `engine = "auto"`: privacy-first ordering — **Apple FM first** (on-device),
-  then an installed agent CLI (claude/codex/gemini/opencode, which round-trips
+  then an installed agent CLI (claude/codex/gemini/opencode/agent, which round-trips
   through that provider's cloud), then skip.
 - The compiled default remains `engine = "none"` (no summarization).
 

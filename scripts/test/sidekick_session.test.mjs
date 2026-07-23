@@ -120,6 +120,10 @@ test("foreground completeness outranks the soft brevity target", async () => {
     /reject with incomplete_material_consequence if a candidate proposes a confidence gate without saying that uncertain or below-threshold work goes to a human/,
   );
   assert.match(
+    verifierInstructions,
+    /For every wrong automated resolution, require the vendor owes Meridian a \$200 credit.*already supplies the condition, universal quantifier, obligor, beneficiary, and amount/,
+  );
+  assert.match(
     sidekickOutputSchemaFor("foreground").properties.text.description,
     /Never omit an evidenced monetary remedy to save words.*Target at most 60 words/s,
   );

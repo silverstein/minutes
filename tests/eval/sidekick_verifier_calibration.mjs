@@ -1,7 +1,12 @@
 const arithmeticEvidence = [
   { id: "accuracy", text: "Accuracy is 90%." },
   { id: "volume", text: "Volume is 40,000 tickets monthly." },
-  { id: "credit", text: "Each wrong automated resolution earns Meridian a $200 credit." },
+  { id: "credit", text: "The vendor owes Meridian a $200 credit for each wrong automated resolution." },
+];
+
+const strategyEvidence = [
+  ...arithmeticEvidence,
+  { id: "decision", text: "We must decide between full automation and keeping a human in the loop." },
 ];
 
 export const sidekickVerifierCalibrationCases = Object.freeze([
@@ -28,6 +33,18 @@ export const sidekickVerifierCalibrationCases = Object.freeze([
       claims_visual_observation: false,
     }),
     transcript_evidence: arithmeticEvidence,
+  }),
+  Object.freeze({
+    id: "supported_strategy_and_unknown_boundary",
+    expected_allowed: true,
+    candidate: Object.freeze({
+      decision: "speak",
+      text: "Full automation creates $800k/month contractual exposure; 90% accuracy stops being decisive. Ship confidence-gated automation with human handling below threshold. What is the error-rate distribution by confidence band?",
+      evidence_ids: ["accuracy", "volume", "credit", "decision"],
+      visual_evidence_ids: [],
+      claims_visual_observation: false,
+    }),
+    transcript_evidence: strategyEvidence,
   }),
   Object.freeze({
     id: "contradicted_signature_claim",

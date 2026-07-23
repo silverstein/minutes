@@ -445,7 +445,7 @@ impl ReasoningTurnRequest {
             .as_ref()
             .map(|candidate| {
                 format!(
-                    "\n\nBEGIN UNTRUSTED CANDIDATE TO VERIFY\n{}\nEND UNTRUSTED CANDIDATE TO VERIFY\nIndependently check every material factual, numeric, contractual, attribution, and visual claim against the bounded evidence above. Evidence IDs selected by the candidate are hints, not proof. Derived arithmetic and clearly labeled strategy may pass when their premises are supported. Reject invented facts, contradictions, unsupported certainty, or any claimed deck/screen observation without supplied image support.",
+                    "\n\nBEGIN UNTRUSTED CANDIDATE TO VERIFY\n{}\nEND UNTRUSTED CANDIDATE TO VERIFY\nIndependently check every material factual, numeric, contractual, attribution, and visual claim against the bounded evidence above. Evidence IDs selected by the candidate are hints, not proof. Derived arithmetic and clearly labeled strategy may pass when their premises are supported. Recommendations and questions may propose a confidence threshold, confidence-band analysis, staged rollout, human fallback, or an unknown decision boundary without claiming it already exists. Verify factual premises fail-closed, but do not reject merely because a proposed control or requested unknown is absent. Reject invented facts, contradictions, unsupported certainty, or any claimed deck/screen observation without supplied image support.",
                     serde_json::to_string_pretty(candidate)
                         .expect("verification candidate is JSON serializable")
                 )

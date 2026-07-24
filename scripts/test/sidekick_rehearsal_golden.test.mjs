@@ -36,6 +36,19 @@ test("strong natural cadence, reframe, remedy, and independence variants pass", 
   assert.equal(report.passed, true, JSON.stringify(report.checks.filter((item) => !item.passed)));
 });
 
+test("direct customer-subject procurement advice preserves the role flip", () => {
+  const report = scoreMeridianResponses({
+    ...passing,
+    turn_2:
+      "Meridian should require a written confidence-threshold SLA tied to observed error rates, auditable case-level records, and Meridian's unilateral right to revert affected work to human handling. For every wrong automated resolution, the vendor owes Meridian a $200 credit.",
+  });
+  assert.equal(
+    report.checks.find((item) => item.name === "procurement_role_flip")?.passed,
+    true,
+  );
+  assert.equal(report.passed, true);
+});
+
 test("contractual credits plus a displaced accuracy headline is a liability reframe", () => {
   const report = scoreMeridianResponses({
     ...passing,

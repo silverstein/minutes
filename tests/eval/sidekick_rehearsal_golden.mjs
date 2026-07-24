@@ -614,6 +614,10 @@ export function scoreMeridianResponses(responses, { turn1Mode = "background" } =
       /(for meridian|meridian(?:'s)? procurement|as (?:meridian|the customer)|procurement lead|customer-side|meridian (?:traffic|contract))/.test(
         turn2,
       ) ||
+        (/\bmeridian\b[^;.!?]{0,24}\b(?:should|must|can)\b[^;.!?]{0,16}\b(?:require|demand|insist|push)\b/.test(
+          turn2,
+        ) &&
+          /\b(?:vendor|provider|supplier)\b/.test(turn2)) ||
         (/\bpush for\b/.test(turn2) &&
           /meridian(?:'s)?/.test(turn2) &&
           /(right|credit|customer harm|acceptance threshold)/.test(turn2)) ||

@@ -9,6 +9,7 @@ scorecards, and release gates.
 Related:
 
 - `docs/plans/codex-sidekick-production-2026-07-21.md`
+- `docs/plans/sidekick-signed-mac-checkpoint-2026-07-24.md`
 - `docs/plans/live-assistance-orchestration-2026-07-15.md`
 - `docs/rfcs/0004-copilot-realtime-stream.md`
 - `docs/rfcs/0005-copilot-eval.md`

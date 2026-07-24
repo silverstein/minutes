@@ -871,17 +871,12 @@ fn handle_message(message: Value, state: &Mutex<ProtocolState>) -> Option<Value>
         return None;
     }
 
-    let Some(method) = message.get("method").and_then(Value::as_str) else {
-        return None;
-    };
+    let method = message.get("method").and_then(Value::as_str)?;
     let params = message.get("params").unwrap_or(&Value::Null);
     let turn_id = params
         .get("turnId")
         .and_then(Value::as_str)
-        .or_else(|| params.pointer("/turn/id").and_then(Value::as_str));
-    let Some(turn_id) = turn_id else {
-        return None;
-    };
+        .or_else(|| params.pointer("/turn/id").and_then(Value::as_str))?;
 
     match method {
         "item/agentMessage/delta" => {
@@ -914,15 +909,16 @@ fn handle_message(message: Value, state: &Mutex<ProtocolState>) -> Option<Value>
                 }
             }
         }
-        "item/completed" => {
-            if params.pointer("/item/type").and_then(Value::as_str) == Some("agentMessage") {
-                if let Some(text) = params.pointer("/item/text").and_then(Value::as_str) {
-                    if let Some(turn) = lock_unpoisoned(state).turns.get_mut(turn_id) {
-                        turn.text = text.into();
-                    }
+        "item/completed"
+            if params.pointer("/item/type").and_then(Value::as_str) == Some("agentMessage") =>
+        {
+            if let Some(text) = params.pointer("/item/text").and_then(Value::as_str) {
+                if let Some(turn) = lock_unpoisoned(state).turns.get_mut(turn_id) {
+                    turn.text = text.into();
                 }
             }
         }
+        "item/completed" => {}
         "turn/completed" => {
             if let Some(turn) = lock_unpoisoned(state).turns.remove(turn_id) {
                 let now = Instant::now();

@@ -16872,6 +16872,9 @@ pub fn cmd_native_sidekick_ui_acceptance_claim(
 }
 
 #[tauri::command]
+// Tauri exposes these independently named paint attestation fields to the
+// frontend; collapsing them into an opaque payload would weaken the IPC shape.
+#[allow(clippy::too_many_arguments)]
 pub fn cmd_native_sidekick_ui_acceptance_painted(
     window: tauri::WebviewWindow,
     state: tauri::State<AppState>,
@@ -18880,7 +18883,7 @@ fn write_native_sidekick_durable_json(
     file.sync_all()
         .map_err(|error| format!("Could not sync the Sidekick acceptance {label}: {error}"))?;
     drop(file);
-    std::fs::rename(&tmp, &path)
+    std::fs::rename(&tmp, path)
         .map_err(|error| format!("Could not publish the Sidekick acceptance {label}: {error}"))?;
     std::fs::File::open(parent)
         .and_then(|directory| directory.sync_all())
@@ -19406,7 +19409,8 @@ fn verify_native_sidekick_acceptance_marker(path: &Path, nonce: &str) -> Result<
             }
         }
     }
-    let mut selected: Option<(usize, u32, u32, u32, u32, u32, u32, u32, u32)> = None;
+    type FiducialSelection = (usize, u32, u32, u32, u32, u32, u32, u32, u32);
+    let mut selected: Option<FiducialSelection> = None;
     for (candidate_left, candidate_top, candidate_right, candidate_bottom) in fiducial_candidates {
         let mut marker_pixels = 0_usize;
         let mut marker_left = width;
@@ -20656,6 +20660,10 @@ impl Drop for NativeSidekickRunGuard {
     }
 }
 
+// The worker receives explicit ownership handles for each independently
+// stoppable/publishable lane. Keeping them separate makes shutdown races
+// visible at the thread boundary.
+#[allow(clippy::too_many_arguments)]
 fn run_native_sidekick(
     app: tauri::AppHandle,
     context_session: minutes_core::context_store::ContextSession,

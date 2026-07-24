@@ -298,6 +298,7 @@ struct NativeSidekickCandidateEvidenceReceipt {
     visual_evidence_ids: Vec<String>,
     claims_visual_observation: bool,
     first_token_ms: Option<u64>,
+    total_ms: u64,
     candidate_sha256: String,
     candidate_digest_verified: bool,
     verification_verdict: minutes_core::live_sidekick::EvidenceVerificationVerdict,
@@ -21598,6 +21599,7 @@ fn run_native_sidekick(
                             .collect(),
                         claims_visual_observation: publication.candidate.claims_visual_observation,
                         first_token_ms: publication.first_token_ms,
+                        total_ms: publication.total_ms,
                         candidate_digest_verified: candidate_sha256
                             == publication.evidence_verification.candidate_sha256,
                         candidate_sha256,

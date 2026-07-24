@@ -985,6 +985,7 @@ function passingProductPayload() {
           visualEvidenceIds: [],
           claimsVisualObservation: false,
           firstTokenMs: 500,
+          totalMs: 1_500,
           candidateSha256: '1'.repeat(64),
           candidateDigestVerified: true,
           verificationVerdict: { decision: 'allow', reason_code: 'supported' },
@@ -1003,6 +1004,7 @@ function passingProductPayload() {
           visualEvidenceIds: [],
           claimsVisualObservation: false,
           firstTokenMs: 420,
+          totalMs: 1_400,
           candidateSha256: '3'.repeat(64),
           candidateDigestVerified: true,
           verificationVerdict: { decision: 'allow', reason_code: 'supported' },
@@ -1548,6 +1550,10 @@ test('the evaluator rejects every reviewed false-green mutation', async () => {
     ['mismatched DOM turn', (payload) => { payload.turns[0].dom_layout.turnId = 'other'; }],
     ['hidden native window', (payload) => { payload.turns[0].dom_layout.windowVisible = false; }],
     ['fractional response sliver', (payload) => { payload.turns[1].dom_layout.height = 0.8; }],
+    ['provider pipeline time exceeds painted receipt', (payload) => {
+      payload.turns[0].candidate_evidence.totalMs =
+        payload.turns[0].dom_layout.typedToPaintMs + 1;
+    }],
     ['wrong provider evidence window', (payload) => {
       payload.turns[1].evidence_receipt.transcriptEvidenceIds = ['invented'];
     }],

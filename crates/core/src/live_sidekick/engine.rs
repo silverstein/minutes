@@ -28,9 +28,11 @@ fn contains_any(text: &str, terms: &[&str]) -> bool {
 }
 
 /// Narrow Minutes-owned completeness rule for an automation decision whose
-/// evidence explicitly names human handling as the alternative. The semantic
+/// evidence explicitly names human handling as the alternative. A boundary
+/// question alone is not an operating recommendation: the candidate must say
+/// both what may be automated and where the rejected work goes. The semantic
 /// verifier still judges all broader factual, contractual, and visual claims.
-fn confidence_gate_omits_human_disposition(
+fn automation_decision_omits_complete_gated_path(
     request: &ReasoningTurnRequest,
     candidate: &InterventionCandidate,
 ) -> bool {
@@ -209,12 +211,13 @@ fn confidence_gate_omits_human_disposition(
         ],
     );
 
-    frames_automation
-        && frames_human_alternative
-        && frames_decision
-        && proposes_automation
+    let complete_gated_path = proposes_automation
         && proposes_confidence_gate
-        && !(names_human && names_rejected_work && names_disposition)
+        && names_human
+        && names_rejected_work
+        && names_disposition;
+
+    frames_automation && frames_human_alternative && frames_decision && !complete_gated_path
 }
 
 #[derive(Debug, Clone)]
@@ -1259,12 +1262,12 @@ impl LiveSidekickEngine {
         candidate: InterventionCandidate,
         generation_result: ReasoningTurnResult,
     ) {
-        if confidence_gate_omits_human_disposition(&active.request, &candidate) {
+        if automation_decision_omits_complete_gated_path(&active.request, &candidate) {
             if matches!(active.work, SidekickWork::Foreground { .. })
                 && active.completeness_retries == 0
             {
                 active.policy_feedback = Some(
-                    "The confidence-gated path left rejected work unresolved. Explicitly route uncertain or below-threshold work to a human."
+                    "State the complete confidence-gated operating path now: automate only the supported band, explicitly route uncertain or below-threshold work to a human, then ask for the boundary."
                         .into(),
                 );
                 self.restart_for_semantic_rejection(
@@ -3270,7 +3273,7 @@ mod tests {
                 .policy_feedback
                 .as_deref()
                 .unwrap()
-                .contains("route uncertain or below-threshold work to a human"));
+                .contains("complete confidence-gated operating path"));
         }
 
         backend.complete(
@@ -3283,6 +3286,53 @@ mod tests {
         let publications = engine.take_publications();
         assert_eq!(publications.len(), 1);
         assert_eq!(lock(&backend.state).verification_turns_started, 1);
+    }
+
+    #[test]
+    fn automation_risk_math_and_boundary_question_without_operating_path_retries() {
+        let backend = FakeBackend::default();
+        let mut engine = engine(backend.clone());
+        observe(
+            &mut engine,
+            "volume",
+            "The vendor evaluated 40,000 automated resolutions at 90% accuracy.",
+        );
+        observe(
+            &mut engine,
+            "remedy",
+            "For every wrong automated resolution, the vendor owes Meridian a $200 credit.",
+        );
+        observe(
+            &mut engine,
+            "decision",
+            "We must decide between full automation and keeping a human in the loop.",
+        );
+        engine
+            .send_user("What is the real risk, and what should I ask?")
+            .unwrap();
+        let candidate = speak(
+            &["decision"],
+            "Financial exposure: if the 90% eval rate holds, 10% of 40,000 is 4,000 wrong resolutions; for every wrong automated resolution, the vendor owes Meridian a $200 credit—$800,000/month. The 90% headline is not decisive. What is the error-rate distribution by confidence band?",
+        );
+        {
+            let state = lock(&backend.state);
+            assert!(automation_decision_omits_complete_gated_path(
+                &state.turns[0].request,
+                &candidate,
+            ));
+        }
+        backend.complete(0, candidate);
+
+        assert!(engine.has_active_turn());
+        let state = lock(&backend.state);
+        assert_eq!(state.verification_turns_started, 0);
+        assert_eq!(state.turns.len(), 2);
+        assert!(state.turns[1]
+            .request
+            .policy_feedback
+            .as_deref()
+            .unwrap()
+            .contains("route uncertain or below-threshold work to a human"));
     }
 
     #[test]
@@ -3307,6 +3357,31 @@ mod tests {
             assert_eq!(state.turns.len(), 1, "{text}");
             assert_eq!(state.verification_turns_started, 1, "{text}");
         }
+    }
+
+    #[test]
+    fn automation_question_without_evidenced_human_alternative_does_not_force_one() {
+        let backend = FakeBackend::default();
+        let mut engine = engine(backend.clone());
+        observe(
+            &mut engine,
+            "decision",
+            "We need to decide whether to ship the automated workflow.",
+        );
+        engine.send_user("What is the real risk?").unwrap();
+        backend.complete(
+            0,
+            speak(
+                &["decision"],
+                "Stage the automated workflow behind a confidence threshold. What error-rate distribution supports the boundary?",
+            ),
+        );
+
+        let publications = engine.take_publications();
+        assert_eq!(publications.len(), 1);
+        let state = lock(&backend.state);
+        assert_eq!(state.turns.len(), 1);
+        assert_eq!(state.verification_turns_started, 1);
     }
 
     #[test]

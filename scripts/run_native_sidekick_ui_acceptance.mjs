@@ -411,10 +411,13 @@ export function evaluateNativeSidekickUiAcceptance(payload, runtime) {
           hasTurnSpecificGrounding &&
           Array.isArray(candidateVisualIds) && candidateVisualIds.length === 0 &&
           turn?.candidate_evidence?.claimsVisualObservation === false &&
-          Number.isFinite(turn?.candidate_evidence?.firstTokenMs)
+          Number.isFinite(turn?.candidate_evidence?.firstTokenMs) &&
+          Number.isFinite(turn?.candidate_evidence?.totalMs) &&
+          turn.candidate_evidence.firstTokenMs <= turn.candidate_evidence.totalMs &&
+          turn.candidate_evidence.totalMs <= turn?.dom_layout?.typedToPaintMs
           );
         }),
-      "Both UI turns must prove their exact staged transcript bytes, exact inline image bytes, transcript-only material grounding, and distinct streamed foreground turns.",
+      "Both UI turns must prove their exact staged transcript bytes, exact inline image bytes, transcript-only material grounding, distinct streamed foreground turns, and provider pipeline latency bounded by the painted UI receipt.",
     ),
     check(
       "clean_teardown",
@@ -452,7 +455,7 @@ export function evaluateNativeSidekickUiAcceptance(payload, runtime) {
       turn.dom_layout.responseSha256 === sha256(turn.response ?? "") &&
       Number.isFinite(turn?.dom_layout?.typedToPaintMs) &&
       turn.dom_layout.typedToPaintMs <= MAX_DOM_PAINT_MS,
-    `Observed ${turn?.dom_layout?.typedToPaintMs ?? "null"}ms from UI request through two DOM-layout frames with at least ${MIN_VISIBLE_RESPONSE_PX}px visible in each axis.`,
+    `Observed ${turn?.candidate_evidence?.totalMs ?? "null"}ms inside the provider pipeline and ${turn?.dom_layout?.typedToPaintMs ?? "null"}ms from UI request through two DOM-layout frames with at least ${MIN_VISIBLE_RESPONSE_PX}px visible in each axis.`,
   ));
   const checks = [...sourceChecks, ...quality.mechanical_checks, ...paintChecks];
   return {

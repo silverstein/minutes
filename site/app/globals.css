@@ -12,8 +12,8 @@
   --border: rgba(0, 0, 0, 0.07);
   --border-mid: rgba(0, 0, 0, 0.13);
   --text: #1a1916;
-  --text-secondary: #8c8880;
-  --text-tertiary: #bdb9b0;
+  --text-secondary: #6f6a62;
+  --text-tertiary: #958f85;
   --accent: #c96b4e;
   --accent-hover: #b85a3e;
   --accent-soft: rgba(201, 107, 78, 0.1);
@@ -33,8 +33,8 @@
     --border: rgba(255, 255, 255, 0.06);
     --border-mid: #2a2924;
     --text: #e8e4da;
-    --text-secondary: #6b6760;
-    --text-tertiary: #3d3b38;
+    --text-secondary: #aaa49a;
+    --text-tertiary: #716c64;
     --accent: #30d158;
     --accent-hover: #4ade70;
     --accent-soft: rgba(48, 209, 88, 0.1);
@@ -71,9 +71,510 @@ button {
     transform 0.18s ease;
 }
 
+a:focus-visible,
+button:focus-visible,
+summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 4px;
+}
+
 ::selection {
   background: var(--accent-soft);
   color: var(--text);
+}
+
+.marketing-header {
+  position: sticky;
+  top: 0;
+  z-index: 50;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+}
+
+.marketing-nav {
+  display: flex;
+  min-height: 64px;
+  max-width: 1240px;
+  margin: 0 auto;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 0 32px;
+}
+
+.marketing-mobile-menu {
+  position: relative;
+}
+
+.marketing-mobile-menu summary {
+  cursor: pointer;
+  list-style: none;
+  border: 1px solid var(--border-mid);
+  border-radius: 4px;
+  padding: 8px 12px;
+  font: 600 11px/1 var(--font-mono);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.marketing-mobile-menu summary::-webkit-details-marker {
+  display: none;
+}
+
+.marketing-mobile-links {
+  position: absolute;
+  top: calc(100% + 12px);
+  right: 0;
+  display: flex;
+  width: min(82vw, 320px);
+  flex-direction: column;
+  border: 1px solid var(--border-mid);
+  background: var(--bg);
+  padding: 10px 18px 18px;
+  box-shadow: var(--shadow-panel);
+}
+
+.marketing-hero {
+  display: grid;
+  max-width: 1320px;
+  margin: 0 auto;
+  grid-template-columns: minmax(0, 0.95fr) minmax(560px, 1.05fr);
+  gap: clamp(48px, 4.5vw, 64px);
+  align-items: center;
+  padding: 48px 32px 40px;
+}
+
+.marketing-hero-copy {
+  align-self: center;
+}
+
+.marketing-eyebrow,
+.marketing-product-kicker {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.5;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+
+.marketing-hero h1 {
+  margin-top: 24px;
+  max-width: 650px;
+  font-family: var(--font-display);
+  font-size: clamp(52px, 4.9vw, 72px);
+  font-weight: 400;
+  line-height: 0.92;
+  letter-spacing: -0.052em;
+  color: var(--text);
+}
+
+.marketing-hero h1 span {
+  display: block;
+  margin-top: 8px;
+  font-style: italic;
+  color: var(--accent);
+}
+
+.marketing-lede {
+  max-width: 560px;
+  margin-top: 28px;
+  font-size: 17px;
+  line-height: 1.7;
+  color: var(--text-secondary);
+}
+
+.marketing-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 32px;
+}
+
+.marketing-primary-action,
+.marketing-secondary-action {
+  display: inline-flex;
+  min-height: 48px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  padding: 0 22px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+}
+
+.marketing-primary-action {
+  background: var(--accent);
+  color: #171411;
+}
+
+.marketing-primary-action:hover {
+  background: var(--accent-hover);
+  transform: translateY(-1px);
+}
+
+.marketing-secondary-action {
+  border: 1px solid var(--border-mid);
+  color: var(--text);
+}
+
+.marketing-secondary-action:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.marketing-proof-line {
+  margin-top: 24px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.8;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+}
+
+.marketing-works-with {
+  margin-top: 38px;
+  border-top: 1px solid var(--border);
+  padding-top: 20px;
+}
+
+.marketing-works-with > span {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+}
+
+.marketing-works-with div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 22px;
+  margin-top: 12px;
+}
+
+.marketing-works-with strong {
+  font-family: var(--font-display);
+  font-size: 19px;
+  font-weight: 400;
+  color: var(--text);
+}
+
+.marketing-hero-product {
+  min-width: 0;
+  scroll-margin-top: 96px;
+}
+
+.memory-sequence {
+  position: relative;
+  margin-top: 20px;
+  border-left: 1px solid var(--accent);
+  padding-left: 24px;
+}
+
+.memory-step {
+  display: grid;
+  grid-template-columns: 86px minmax(0, 1fr);
+  gap: 16px;
+  padding: 0 0 12px;
+}
+
+.memory-step:last-child {
+  padding-bottom: 0;
+}
+
+.memory-step-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding-top: 12px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  line-height: 1.4;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+}
+
+.memory-step-meta span:first-child {
+  color: var(--accent);
+}
+
+.memory-step-meta strong {
+  font-weight: 600;
+  color: var(--text);
+}
+
+.memory-artifact {
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--border-mid);
+  border-radius: 5px;
+  background: var(--bg-elevated);
+  box-shadow: 0 12px 32px rgba(26, 25, 22, 0.07);
+}
+
+.memory-artifact-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border-bottom: 1px solid var(--border);
+  padding: 8px 12px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+
+.memory-artifact-bar span:first-child {
+  overflow: hidden;
+  color: var(--text);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.memory-capture p {
+  padding: 12px 16px 6px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text);
+}
+
+.memory-capture-meta {
+  display: block;
+  padding: 0 16px 12px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+
+.memory-file pre {
+  max-height: none;
+  overflow: visible;
+  padding: 12px 14px 14px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  line-height: 1.5;
+  color: var(--text);
+  white-space: pre-wrap;
+}
+
+.memory-recall {
+  padding: 12px;
+}
+
+.memory-recall-header {
+  display: flex;
+  justify-content: space-between;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 10px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+}
+
+.memory-prompt {
+  margin: 10px 2px 8px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.55;
+  color: var(--text);
+}
+
+.memory-answer {
+  border: 1px solid var(--border);
+  background: var(--bg);
+  padding: 10px;
+}
+
+.memory-answer-mark {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+
+.memory-answer p {
+  margin-top: 7px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.55;
+  color: var(--text);
+}
+
+.memory-source {
+  display: block;
+  margin-top: 9px;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+
+.marketing-proof-band {
+  background: #171714;
+  color: #f1ece3;
+}
+
+.marketing-proof-band-inner {
+  display: grid;
+  max-width: 1320px;
+  margin: 0 auto;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  padding: 0 32px;
+}
+
+.marketing-proof-band-inner > div,
+.marketing-proof-band-inner > a {
+  min-height: 190px;
+  border-left: 1px solid rgba(248, 244, 237, 0.13);
+  padding: 32px 24px;
+}
+
+.marketing-proof-band-inner > :last-child {
+  border-right: 1px solid rgba(248, 244, 237, 0.13);
+}
+
+.marketing-proof-band-inner span {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: #c96b4e;
+}
+
+.marketing-proof-band-inner strong {
+  display: block;
+  margin-top: 18px;
+  font-family: var(--font-display);
+  font-size: 28px;
+  font-weight: 400;
+  line-height: 1;
+}
+
+.marketing-proof-band-inner p {
+  margin-top: 14px;
+  font-size: 13px;
+  line-height: 1.65;
+  color: #aaa49a;
+}
+
+.marketing-proof-band-inner > a:hover {
+  background: #1e1e1a;
+}
+
+@media (max-width: 1023px) {
+  .marketing-hero {
+    grid-template-columns: 1fr;
+    gap: 64px;
+    padding-top: 72px;
+  }
+
+  .marketing-hero-copy,
+  .marketing-lede {
+    max-width: 760px;
+  }
+
+  .marketing-hero h1 {
+    max-width: 800px;
+  }
+
+  .marketing-hero-product {
+    max-width: 760px;
+  }
+
+  .marketing-proof-band-inner {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .marketing-proof-band-inner > :nth-child(odd) {
+    border-left: 1px solid rgba(248, 244, 237, 0.13);
+  }
+
+  .marketing-proof-band-inner > :last-child {
+    border-right: 1px solid rgba(248, 244, 237, 0.13);
+  }
+}
+
+@media (max-width: 640px) {
+  .marketing-nav {
+    min-height: 58px;
+    padding: 0 20px;
+  }
+
+  .marketing-hero {
+    gap: 48px;
+    padding: 52px 20px 64px;
+  }
+
+  .marketing-hero h1 {
+    margin-top: 18px;
+    font-size: clamp(45px, 14vw, 60px);
+    line-height: 0.95;
+  }
+
+  .marketing-lede {
+    margin-top: 22px;
+    font-size: 16px;
+  }
+
+  .marketing-actions {
+    flex-direction: column;
+  }
+
+  .marketing-primary-action,
+  .marketing-secondary-action {
+    width: 100%;
+  }
+
+  .marketing-proof-line {
+    font-size: 10px;
+  }
+
+  .memory-sequence {
+    padding-left: 14px;
+  }
+
+  .memory-step {
+    grid-template-columns: 1fr;
+    gap: 8px;
+  }
+
+  .memory-step-meta {
+    flex-direction: row;
+    gap: 10px;
+    padding-top: 4px;
+  }
+
+  .memory-file pre {
+    max-height: 246px;
+    font-size: 9px;
+  }
+
+  .marketing-proof-band-inner {
+    grid-template-columns: 1fr;
+    padding: 0 20px;
+  }
+
+  .marketing-proof-band-inner > div,
+  .marketing-proof-band-inner > a {
+    min-height: auto;
+    border-right: 1px solid rgba(248, 244, 237, 0.13);
+    border-bottom: 1px solid rgba(248, 244, 237, 0.13);
+    padding: 28px 22px;
+  }
 }
 
 .transcript-grid {

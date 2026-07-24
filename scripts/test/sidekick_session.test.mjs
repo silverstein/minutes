@@ -660,6 +660,73 @@ test("an incomplete foreground answer gets one policy-guided retry before public
   );
 });
 
+test("completeness and verifier recovery have separate bounded budgets", async () => {
+  const backend = new FakeBackend();
+  const verifier = new SequenceEvidenceVerifier([
+    {
+      allowed: false,
+      decision: "reject",
+      reason_code: "incomplete_material_consequence",
+      latency: { total_ms: 5 },
+    },
+    {
+      allowed: false,
+      decision: "reject",
+      reason_code: "unsupported_fact",
+      latency: { total_ms: 7 },
+    },
+    {
+      allowed: true,
+      decision: "allow",
+      reason_code: "supported",
+      latency: { total_ms: 11 },
+    },
+  ]);
+  const session = new SidekickSession({
+    backend,
+    evidenceVerifier: verifier,
+    captureSessionId: "capture-a",
+  });
+  await session.start();
+  session.observeTranscript({
+    id: "decision",
+    captureSessionId: "capture-a",
+    text: "We must decide between full automation and keeping a human in the loop.",
+  });
+  const completion = session.sendUser("What is the real risk?");
+  await new Promise((resolve) => setImmediate(resolve));
+
+  backend.turns[0].pending.resolve(result({
+    decision: "speak",
+    text: "Stage automated resolution behind a confidence gate.",
+    evidence_ids: ["decision"],
+  }));
+  await new Promise((resolve) => setImmediate(resolve));
+  backend.turns[1].pending.resolve(result({
+    decision: "speak",
+    text: "Ship confidence-gated automation and route below-threshold work to humans.",
+    evidence_ids: ["decision"],
+  }));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(backend.turns.length, 3);
+  backend.turns[2].pending.resolve(result({
+    decision: "speak",
+    text: "Ship confidence-gated automation and route below-threshold work to humans.",
+    evidence_ids: ["decision"],
+  }));
+
+  const completed = await completion;
+  assert.equal(completed.published, true);
+  assert.equal(
+    session.trace.filter((item) => item.type === "material_completeness_retry").length,
+    1,
+  );
+  assert.equal(
+    session.trace.filter((item) => item.type === "semantic_verification_retry").length,
+    1,
+  );
+});
+
 test("completeness then freshness retries preserve policy and full latency", async () => {
   const backend = new FakeBackend();
   const verifier = new DeferredEvidenceVerifier();

@@ -339,6 +339,7 @@ struct ActiveReasoning {
     verification_refreshes: u8,
     freshness_retries: u8,
     completeness_retries: u8,
+    verification_retries: u8,
     carried_total_ms: u64,
     initial_first_token_ms: Option<u64>,
 }
@@ -353,6 +354,21 @@ enum ActiveReasoningStage {
         candidate: InterventionCandidate,
         generation_result: ReasoningTurnResult,
     },
+}
+
+#[derive(Debug, Clone, Copy)]
+enum SemanticRetryKind {
+    Completeness,
+    Verification,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct TurnRetryState {
+    freshness_retries: u8,
+    completeness_retries: u8,
+    verification_retries: u8,
+    carried_total_ms: u64,
+    initial_first_token_ms: Option<u64>,
 }
 
 impl ActiveReasoningStage {
@@ -812,6 +828,7 @@ impl LiveSidekickEngine {
                             verification_refreshes: 0,
                             freshness_retries: 0,
                             completeness_retries: 0,
+                            verification_retries: 0,
                             carried_total_ms: 0,
                             initial_first_token_ms: None,
                         });
@@ -981,17 +998,14 @@ impl LiveSidekickEngine {
         work: SidekickWork,
         prepared_request: Option<ReasoningTurnRequest>,
     ) -> Result<(), ReasoningError> {
-        self.start_turn_with_retry(work, prepared_request, 0, 0, 0, None)
+        self.start_turn_with_retry(work, prepared_request, TurnRetryState::default())
     }
 
     fn start_turn_with_retry(
         &mut self,
         work: SidekickWork,
         prepared_request: Option<ReasoningTurnRequest>,
-        freshness_retries: u8,
-        completeness_retries: u8,
-        carried_total_ms: u64,
-        initial_first_token_ms: Option<u64>,
+        retry_state: TurnRetryState,
     ) -> Result<(), ReasoningError> {
         let request = match prepared_request {
             Some(request) => request,
@@ -1028,10 +1042,11 @@ impl LiveSidekickEngine {
             transcript_revision: self.transcript_revision,
             screen_revision: self.screen_revision,
             verification_refreshes: 0,
-            freshness_retries,
-            completeness_retries,
-            carried_total_ms,
-            initial_first_token_ms,
+            freshness_retries: retry_state.freshness_retries,
+            completeness_retries: retry_state.completeness_retries,
+            verification_retries: retry_state.verification_retries,
+            carried_total_ms: retry_state.carried_total_ms,
+            initial_first_token_ms: retry_state.initial_first_token_ms,
         });
         Ok(())
     }
@@ -1229,7 +1244,12 @@ impl LiveSidekickEngine {
                     "The confidence-gated path left rejected work unresolved. Explicitly route uncertain or below-threshold work to a human."
                         .into(),
                 );
-                self.restart_for_material_completeness(active, generation_result, 0);
+                self.restart_for_semantic_rejection(
+                    active,
+                    generation_result,
+                    0,
+                    SemanticRetryKind::Completeness,
+                );
                 return;
             }
             if matches!(active.work, SidekickWork::Background { .. }) {
@@ -1383,9 +1403,22 @@ impl LiveSidekickEngine {
                 self.restart_for_fresh_evidence(active, result.total_ms);
                 return;
             }
-            if matches!(active.work, SidekickWork::Foreground { .. })
+            let retry_kind = if !matches!(active.work, SidekickWork::Foreground { .. }) {
+                None
+            } else if verdict.reason_code
+                == EvidenceVerificationReason::IncompleteMaterialConsequence
                 && active.completeness_retries == 0
             {
+                Some(SemanticRetryKind::Completeness)
+            } else if verdict.reason_code
+                != EvidenceVerificationReason::IncompleteMaterialConsequence
+                && active.verification_retries == 0
+            {
+                Some(SemanticRetryKind::Verification)
+            } else {
+                None
+            };
+            if let Some(retry_kind) = retry_kind {
                 active.policy_feedback = Some(
                     match verdict.reason_code {
                         EvidenceVerificationReason::IncompleteMaterialConsequence => {
@@ -1398,10 +1431,11 @@ impl LiveSidekickEngine {
                     .into(),
                 );
                 let retry_generation_result = generation_result.clone();
-                self.restart_for_material_completeness(
+                self.restart_for_semantic_rejection(
                     active,
                     retry_generation_result,
                     result.total_ms,
+                    retry_kind,
                 );
                 return;
             }
@@ -1621,20 +1655,24 @@ impl LiveSidekickEngine {
         if let Err(error) = self.start_turn_with_retry(
             work.clone(),
             Some(request),
-            active.freshness_retries.saturating_add(1),
-            active.completeness_retries,
-            carried_total_ms,
-            initial_first_token_ms,
+            TurnRetryState {
+                freshness_retries: active.freshness_retries.saturating_add(1),
+                completeness_retries: active.completeness_retries,
+                verification_retries: active.verification_retries,
+                carried_total_ms,
+                initial_first_token_ms,
+            },
         ) {
             self.record_failure(work, error);
         }
     }
 
-    fn restart_for_material_completeness(
+    fn restart_for_semantic_rejection(
         &mut self,
         active: ActiveReasoning,
         generation_result: ReasoningTurnResult,
         verification_total_ms: u64,
+        retry_kind: SemanticRetryKind,
     ) {
         let kind = ReasoningTurnKind::Foreground;
         let typed_user_message = active.request.typed_user_message.clone();
@@ -1660,12 +1698,19 @@ impl LiveSidekickEngine {
         if let Err(error) = self.start_turn_with_retry(
             work.clone(),
             Some(request),
-            active.freshness_retries,
-            active.completeness_retries.saturating_add(1),
-            generation_result
-                .total_ms
-                .saturating_add(verification_total_ms),
-            generation_result.first_token_ms,
+            TurnRetryState {
+                freshness_retries: active.freshness_retries,
+                completeness_retries: active.completeness_retries.saturating_add(u8::from(
+                    matches!(retry_kind, SemanticRetryKind::Completeness),
+                )),
+                verification_retries: active.verification_retries.saturating_add(u8::from(
+                    matches!(retry_kind, SemanticRetryKind::Verification),
+                )),
+                carried_total_ms: generation_result
+                    .total_ms
+                    .saturating_add(verification_total_ms),
+                initial_first_token_ms: generation_result.first_token_ms,
+            },
         ) {
             self.record_failure(work, error);
         }
@@ -2874,6 +2919,61 @@ mod tests {
         let publications = engine.take_publications();
         assert_eq!(publications.len(), 1);
         assert_eq!(lock(&backend.state).verification_turns_started, 1);
+    }
+
+    #[test]
+    fn completeness_and_verifier_recovery_have_separate_bounded_budgets() {
+        let backend = FakeBackend::default();
+        {
+            let mut state = lock(&backend.state);
+            state
+                .verification_verdicts
+                .push_back(EvidenceVerificationVerdict {
+                    decision: EvidenceVerificationDecision::Reject,
+                    reason_code: EvidenceVerificationReason::UnsupportedFact,
+                });
+            state
+                .verification_verdicts
+                .push_back(EvidenceVerificationVerdict {
+                    decision: EvidenceVerificationDecision::Allow,
+                    reason_code: EvidenceVerificationReason::Supported,
+                });
+        }
+        let mut engine = engine(backend.clone());
+        observe(
+            &mut engine,
+            "decision",
+            "We must decide between full automation and keeping a human in the loop.",
+        );
+        engine.send_user("What is the real risk?").unwrap();
+        backend.complete(
+            0,
+            speak(
+                &["decision"],
+                "Stage automated resolution behind a confidence gate.",
+            ),
+        );
+        assert!(engine.has_active_turn());
+
+        backend.complete(
+            1,
+            speak(
+                &["decision"],
+                "Ship confidence-gated automation and route below-threshold work to humans.",
+            ),
+        );
+        assert!(engine.has_active_turn());
+        assert_eq!(lock(&backend.state).turns.len(), 3);
+
+        backend.complete(
+            2,
+            speak(
+                &["decision"],
+                "Ship confidence-gated automation and route below-threshold work to humans.",
+            ),
+        );
+        assert_eq!(engine.take_publications().len(), 1);
+        assert_eq!(lock(&backend.state).verification_turns_started, 2);
     }
 
     #[test]

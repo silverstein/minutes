@@ -338,6 +338,7 @@ export class SidekickSession {
           invocation.generationEvidenceRevision = this.evidenceRevision;
           invocation.freshnessRetry = 0;
           invocation.completenessRetry = 0;
+          invocation.verificationRetry = 0;
           invocation.policyFeedback = null;
           invocation.carriedTotalMs = 0;
           invocation.initialFirstTokenMs = null;
@@ -414,6 +415,7 @@ export class SidekickSession {
     typedMessage,
     freshnessRetry = 0,
     completenessRetry = 0,
+    verificationRetry = 0,
     policyFeedback = null,
     carriedTotalMs = 0,
     initialFirstTokenMs = null,
@@ -427,6 +429,7 @@ export class SidekickSession {
       verifiedEvidenceRevision: null,
       freshnessRetry,
       completenessRetry,
+      verificationRetry,
       policyFeedback,
       carriedTotalMs,
       initialFirstTokenMs,
@@ -644,7 +647,12 @@ export class SidekickSession {
           }
           if (
             invocation.mode === "foreground" &&
-            invocation.completenessRetry === 0
+            (
+              (verdict.reason_code === "incomplete_material_consequence" &&
+                invocation.completenessRetry === 0) ||
+              (verdict.reason_code !== "incomplete_material_consequence" &&
+                invocation.verificationRetry === 0)
+            )
           ) {
             return this.#restartForCompleteness(
               invocation,
@@ -749,6 +757,7 @@ export class SidekickSession {
       typedMessage: invocation.typedMessage,
       freshnessRetry: invocation.freshnessRetry + 1,
       completenessRetry: invocation.completenessRetry,
+      verificationRetry: invocation.verificationRetry,
       policyFeedback: invocation.policyFeedback,
       carriedTotalMs:
         invocation.carriedTotalMs +
@@ -781,7 +790,9 @@ export class SidekickSession {
         : "semantic_verification_retry",
       {
         invocation: invocation.id,
-        retry: invocation.completenessRetry + 1,
+        retry: reasonCode === "incomplete_material_consequence"
+          ? invocation.completenessRetry + 1
+          : invocation.verificationRetry + 1,
         reason_code: reasonCode,
       },
     );
@@ -789,7 +800,10 @@ export class SidekickSession {
       mode: invocation.mode,
       typedMessage: invocation.typedMessage,
       freshnessRetry: invocation.freshnessRetry,
-      completenessRetry: invocation.completenessRetry + 1,
+      completenessRetry: invocation.completenessRetry +
+        Number(reasonCode === "incomplete_material_consequence"),
+      verificationRetry: invocation.verificationRetry +
+        Number(reasonCode !== "incomplete_material_consequence"),
       policyFeedback: reasonCode === "incomplete_material_consequence"
         ? "The prior candidate omitted a relevant explicitly evidenced material consequence required by the user's request. Re-read the bounded evidence and produce a complete answer without inventing or broadening terms."
         : "The prior candidate did not pass independent evidence verification. Re-read the exact bounded evidence, recompute every material claim, remove unsupported or contradictory statements, and answer the user's request fully without inventing facts.",

@@ -1578,11 +1578,11 @@ rl.on('line', (line) => {
         assert_eq!(backend.descriptor().model, "gpt-5.6-terra");
         assert_eq!(verifier.descriptor().model, "gpt-5.6-terra");
         assert_eq!(backend.effort, "none");
-        assert_eq!(verifier.effort, "low");
+        assert_eq!(verifier.effort, "none");
         assert_eq!(verifier.deliberate_effort, "medium");
         assert!(verifier
             .args
             .join(" ")
-            .contains("model_reasoning_effort=\"low\""));
+            .contains("model_reasoning_effort=\"none\""));
     }
 }

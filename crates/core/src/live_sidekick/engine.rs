@@ -20,6 +20,193 @@ fn sha256_hex(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
+fn contains_any(text: &str, terms: &[&str]) -> bool {
+    terms.iter().any(|term| text.contains(term))
+}
+
+/// Narrow Minutes-owned completeness rule for an automation decision whose
+/// evidence explicitly names human handling as the alternative. The semantic
+/// verifier still judges all broader factual, contractual, and visual claims.
+fn confidence_gate_omits_human_disposition(
+    request: &ReasoningTurnRequest,
+    candidate: &InterventionCandidate,
+) -> bool {
+    let mut decision_context = request
+        .window
+        .transcript
+        .iter()
+        .map(|item| item.text.to_lowercase())
+        .collect::<Vec<_>>()
+        .join("\n");
+    if let Some(message) = request.typed_user_message.as_deref() {
+        decision_context.push('\n');
+        decision_context.push_str(&message.to_lowercase());
+    }
+    let candidate_text = candidate.text.as_deref().unwrap_or_default().to_lowercase();
+    let stakeholder_protection_request =
+        request
+            .typed_user_message
+            .as_deref()
+            .is_some_and(|message| {
+                let message = message.to_lowercase();
+                contains_any(
+                    &message,
+                    &[
+                        "procurement",
+                        "customer-side",
+                        "customer side",
+                        "buyer",
+                        "contract",
+                        "protection",
+                        "remedy",
+                        "remedies",
+                        "audit right",
+                        "service-level",
+                        "service level",
+                        "sla",
+                    ],
+                )
+            });
+    if stakeholder_protection_request {
+        return false;
+    }
+
+    let frames_automation = contains_any(
+        &decision_context,
+        &[
+            "automation",
+            "automated",
+            "ai-handled",
+            "ai handled",
+            "ai-resolved",
+            "ai resolved",
+            "agent-handled",
+            "agent handled",
+            "model-handled",
+            "model handled",
+        ],
+    );
+    let frames_human_alternative = contains_any(
+        &decision_context,
+        &[
+            "human",
+            "manual",
+            "people",
+            "support team",
+            "support rep",
+            "support agent",
+            "specialist",
+            "operator",
+        ],
+    );
+    let frames_decision = contains_any(
+        &decision_context,
+        &[
+            "decide",
+            "decision",
+            "between",
+            "versus",
+            " vs ",
+            "either",
+            "instead",
+            "alternative",
+            "ship",
+            "launch",
+            "roll out",
+            "deploy",
+            "keep",
+        ],
+    );
+    let proposes_automation = contains_any(
+        &candidate_text,
+        &[
+            "automation",
+            "automated",
+            "ai-handled",
+            "ai handled",
+            "ai-resolved",
+            "ai resolved",
+            "agent-handled",
+            "agent handled",
+            "model-handled",
+            "model handled",
+        ],
+    );
+    let proposes_confidence_gate = contains_any(
+        &candidate_text,
+        &[
+            "confidence gate",
+            "confidence-gated",
+            "confidence gated",
+            "confidence threshold",
+            "confidence-thresholded",
+            "confidence band",
+            "confidence cutoff",
+            "high-confidence",
+            "high confidence",
+            "low-confidence",
+            "low confidence",
+            "above-threshold",
+            "below-threshold",
+        ],
+    );
+    let names_human = contains_any(
+        &candidate_text,
+        &[
+            "human",
+            "manual",
+            "people",
+            "support team",
+            "support rep",
+            "support agent",
+            "specialist",
+            "operator",
+        ],
+    );
+    let names_rejected_work = contains_any(
+        &candidate_text,
+        &[
+            "uncertain",
+            "low-confidence",
+            "low confidence",
+            "below-threshold",
+            "below threshold",
+            "below the threshold",
+            "below it",
+            "remainder",
+            "remaining",
+            "the rest",
+            "the balance",
+            "everything else",
+            "human fallback",
+        ],
+    );
+    let names_disposition = contains_any(
+        &candidate_text,
+        &[
+            "route",
+            "routing",
+            "send",
+            "return",
+            "revert",
+            "switch",
+            "leave",
+            "keep",
+            "retain",
+            "human handling",
+            "human review",
+            "human fallback",
+        ],
+    );
+
+    frames_automation
+        && frames_human_alternative
+        && frames_decision
+        && proposes_automation
+        && proposes_confidence_gate
+        && !(names_human && names_rejected_work && names_disposition)
+}
+
 #[derive(Debug, Clone)]
 pub struct LiveSidekickEngineConfig {
     pub base_instructions: String,
@@ -1034,6 +1221,29 @@ impl LiveSidekickEngine {
         candidate: InterventionCandidate,
         generation_result: ReasoningTurnResult,
     ) {
+        if confidence_gate_omits_human_disposition(&active.request, &candidate) {
+            if matches!(active.work, SidekickWork::Foreground { .. })
+                && active.completeness_retries == 0
+            {
+                active.policy_feedback = Some(
+                    "The confidence-gated path left rejected work unresolved. Explicitly route uncertain or below-threshold work to a human."
+                        .into(),
+                );
+                self.restart_for_material_completeness(active, generation_result, 0);
+                return;
+            }
+            if matches!(active.work, SidekickWork::Background { .. }) {
+                self.last_background_revision = Some(active.evidence_revision);
+            }
+            self.reduce_failure(&active.work);
+            self.lifecycle_events.push_back(SidekickLifecycleEvent {
+                work: active.work,
+                outcome: SidekickLifecycleOutcome::Suppressed(
+                    CandidateSuppressionReason::UnsupportedSemanticEvidence,
+                ),
+            });
+            return;
+        }
         let kind = match &active.work {
             SidekickWork::Background { .. } => ReasoningTurnKind::Background,
             SidekickWork::Foreground { .. } => ReasoningTurnKind::Foreground,
@@ -1426,10 +1636,12 @@ impl LiveSidekickEngine {
                 return;
             }
         };
-        request.policy_feedback = Some(
-            "The prior candidate omitted a relevant explicitly evidenced material consequence required by the user's request. Re-read the bounded evidence and produce a complete answer without inventing or broadening terms."
-                .into(),
-        );
+        request.policy_feedback = active.policy_feedback.clone().or_else(|| {
+            Some(
+                "The prior candidate omitted a relevant explicitly evidenced material consequence required by the user's request. Re-read the bounded evidence and produce a complete answer without inventing or broadening terms."
+                    .into(),
+            )
+        });
         if let Err(error) = request.validate(self.config.max_window_chars) {
             self.record_failure(active.work, error);
             return;
@@ -2553,6 +2765,76 @@ mod tests {
         assert_eq!(publications.len(), 1);
         assert_eq!(publications[0].first_token_ms, Some(250));
         assert_eq!(publications[0].total_ms, 1_200);
+    }
+
+    #[test]
+    fn confidence_gate_without_human_disposition_retries_before_model_verification() {
+        let backend = FakeBackend::default();
+        let mut engine = engine(backend.clone());
+        observe(
+            &mut engine,
+            "decision",
+            "We must decide between full automation and keeping a human in the loop.",
+        );
+        engine
+            .send_user("What is the real risk, and what should I ask?")
+            .unwrap();
+        backend.complete(
+            0,
+            speak(
+                &["decision"],
+                "Stage automated resolution behind a confidence gate. Ask for the confidence-band error distribution.",
+            ),
+        );
+        assert!(engine.has_active_turn());
+
+        {
+            let state = lock(&backend.state);
+            assert_eq!(state.verification_turns_started, 0);
+            assert_eq!(state.turns.len(), 2);
+            assert!(state.turns[1]
+                .request
+                .policy_feedback
+                .as_deref()
+                .unwrap()
+                .contains("route uncertain or below-threshold work to a human"));
+        }
+
+        backend.complete(
+            1,
+            speak(
+                &["decision"],
+                "Ship confidence-gated automation and route below-threshold work to a human.",
+            ),
+        );
+        let publications = engine.take_publications();
+        assert_eq!(publications.len(), 1);
+        assert_eq!(lock(&backend.state).verification_turns_started, 1);
+    }
+
+    #[test]
+    fn procurement_protections_remain_subject_to_the_semantic_verifier() {
+        let backend = FakeBackend::default();
+        let mut engine = engine(backend.clone());
+        observe(
+            &mut engine,
+            "decision",
+            "We must decide between full automation and keeping a human in the loop.",
+        );
+        engine
+            .send_user("Advise me as the customer procurement lead. What protections do I need?")
+            .unwrap();
+        backend.complete(
+            0,
+            speak(
+                &["decision"],
+                "Require a confidence-threshold SLA and a unilateral right to revert affected work to humans.",
+            ),
+        );
+
+        let publications = engine.take_publications();
+        assert_eq!(publications.len(), 1);
+        assert_eq!(lock(&backend.state).verification_turns_started, 1);
     }
 
     #[test]

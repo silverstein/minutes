@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { BackendEvidenceVerifier } from "../lib/sidekick_evidence_verifier.mjs";
+import {
+  BackendEvidenceVerifier,
+  deterministicEvidenceRejection,
+} from "../lib/sidekick_evidence_verifier.mjs";
 
 const supported = { decision: "allow", reason_code: "supported" };
 
@@ -47,6 +50,98 @@ function verifierFactory(configure = () => [supported, supported]) {
     },
   };
 }
+
+const automationDecisionEvidence = [
+  {
+    id: "decision",
+    text: "We must decide between full automation and keeping a human in the loop.",
+  },
+];
+
+test("deterministic policy rejects a confidence gate that strands uncertain work", () => {
+  assert.equal(
+    deterministicEvidenceRejection({
+      candidate: {
+        text: "Stage automated resolution behind a confidence gate. Which confidence band should launch?",
+      },
+      transcriptEvidence: automationDecisionEvidence,
+      authoritativeContext: {
+        typed_user_message: "What is the safest decision?",
+      },
+    }),
+    "incomplete_material_consequence",
+  );
+});
+
+test("deterministic policy allows a confidence gate with an explicit human disposition", () => {
+  for (const text of [
+    "Ship confidence-gated automation with human handling below threshold.",
+    "Automate only the high-confidence queue and send the balance to the support team.",
+    "Launch above the confidence threshold; route uncertain work to specialists.",
+    "Stage automated resolution by confidence, routing below-threshold tickets to humans.",
+  ]) {
+    assert.equal(
+      deterministicEvidenceRejection({
+        candidate: { text },
+        transcriptEvidence: automationDecisionEvidence,
+      }),
+      null,
+      text,
+    );
+  }
+});
+
+test("deterministic policy does not broaden into unrelated confidence advice", () => {
+  assert.equal(
+    deterministicEvidenceRejection({
+      candidate: {
+        text: "Use a confidence band when negotiating the renewal discount.",
+      },
+      transcriptEvidence: [{
+        id: "negotiation",
+        text: "A human account lead is deciding whether to offer a renewal discount.",
+      }],
+    }),
+    null,
+  );
+});
+
+test("deterministic policy leaves procurement completeness to the semantic verifier", () => {
+  assert.equal(
+    deterministicEvidenceRejection({
+      candidate: {
+        text: "For Meridian, require a confidence-threshold SLA, case-level audit records, and a unilateral right to revert affected work to humans.",
+      },
+      transcriptEvidence: automationDecisionEvidence,
+      authoritativeContext: {
+        typed_user_message: "Advise me as Meridian's procurement lead. What protections do I need?",
+      },
+    }),
+    null,
+  );
+});
+
+test("deterministic rejection retains a unique verifier receipt without model inference", async () => {
+  const factory = verifierFactory();
+  const verifier = new BackendEvidenceVerifier({ backendFactory: factory.create });
+  await verifier.start();
+  const verdict = await verifier.verify({
+    candidate: {
+      text: "Stage automated resolution behind a confidence gate.",
+    },
+    transcriptEvidence: automationDecisionEvidence,
+    screenEvidence: null,
+  });
+  assert.equal(verdict.allowed, false);
+  assert.equal(verdict.reason_code, "incomplete_material_consequence");
+  assert.equal(verdict.latency.total_ms, 0);
+  assert.equal(factory.backends[0].turns.length, 1);
+  assert.deepEqual(
+    verifier.verificationReceipts.map(({ session_id }) => session_id),
+    ["verifier-1"],
+  );
+  await verifier.close();
+});
 
 test("verifier fails closed on an allow verdict with unsupported claims", async () => {
   const factory = verifierFactory((id) => id === 1

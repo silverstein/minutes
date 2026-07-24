@@ -31,6 +31,7 @@ import {
 
 const MAX_FIRST_TOKEN_MS = 5_000;
 const MAX_TURN_TOTAL_MS = 10_000;
+const MAX_REASONING_READY_MS = 10_000;
 // The fresh three-run hybrid gate enforces a 6s median, a five-of-six 8s
 // service target, and its own 10s absolute tail ceiling.
 // This separately sampled per-turn ceiling catches a hung signed product;
@@ -194,6 +195,13 @@ export function evaluateNativeSidekickAcceptance(payload, runtime) {
           runtime.quality_provider_executable,
         ),
       "The installed product, fresh three-run evaluator, verifier, and exact semantic judge must use the same canonical provider executable bytes.",
+    ),
+    check(
+      `persistent_reasoning_ready_under_${MAX_REASONING_READY_MS}ms`,
+      Number.isFinite(payload?.reasoning_ready_ms) &&
+        payload.reasoning_ready_ms >= 0 &&
+        payload.reasoning_ready_ms <= MAX_REASONING_READY_MS,
+      `Observed ${payload?.reasoning_ready_ms ?? "null"}ms to create and warm the current persistent reasoning session.`,
     ),
     check("binary_exit_zero", runtime.exit_code === 0, `Installed binary exited ${runtime.exit_code}.`),
     check(

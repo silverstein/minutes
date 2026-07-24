@@ -158,6 +158,7 @@ function passingPayload() {
     reasoning_session_correlation: reasoningSessionCorrelation,
     reasoning_sessions_started: 1,
     verifier_sessions_started: 2,
+    reasoning_ready_ms: 2_400,
     fixture_turns: [
       {
         id: vendorTurn.id,
@@ -203,6 +204,20 @@ test("installed acceptance permits one fail-closed verifier recovery", () => {
   const report = evaluateNativeSidekickAcceptance(payload, passingRuntime({}, payload));
 
   assert.equal(report.passed, true);
+});
+
+test("installed acceptance rejects a cold session that is not ready within the UX budget", () => {
+  const payload = passingPayload();
+  payload.reasoning_ready_ms = 10_001;
+
+  const report = evaluateNativeSidekickAcceptance(payload, passingRuntime({}, payload));
+
+  assert.equal(report.passed, false);
+  assert.equal(
+    report.source_checks.find((item) =>
+      item.name === "persistent_reasoning_ready_under_10000ms")?.passed,
+    false,
+  );
 });
 
 test("installed acceptance delegates semantic paraphrases to the calibrated hybrid gate", () => {

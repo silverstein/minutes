@@ -80,6 +80,9 @@ const DEVELOPER_INSTRUCTIONS = readFileSync(
   "utf8",
 );
 
+const SESSION_WARMUP_INSTRUCTION =
+  "MINUTES SESSION WARMUP\nNo meeting evidence or user request is present. Return a silent Sidekick decision with no text, evidence IDs, visual claim, or factual claim. Treat this synthetic warmup as lifecycle traffic, not meeting history.";
+
 function textInput(text) {
   return { type: "text", text };
 }
@@ -249,6 +252,34 @@ export class SidekickSession {
       baseInstructions: BASE_INSTRUCTIONS,
       developerInstructions: DEVELOPER_INSTRUCTIONS,
     });
+    let warmupResult;
+    try {
+      const warmup = await this.backend.startTurn({
+        input: [
+          textInput(SESSION_WARMUP_INSTRUCTION),
+        ],
+        outputSchema: sidekickOutputSchemaFor("background"),
+      });
+      warmupResult = await warmup.completion;
+      if (warmupResult.status !== "completed" || warmupResult.error) {
+        throw new Error(
+          warmupResult.error?.message ?? `Sidekick warmup ended as ${warmupResult.status}`,
+        );
+      }
+      const warmupDecision = parseDecision(warmupResult.text);
+      if (
+        warmupDecision.decision !== "silent" ||
+        String(warmupDecision.text ?? "").trim() ||
+        warmupDecision.evidence_ids.length > 0 ||
+        warmupDecision.visual_evidence_ids.length > 0 ||
+        warmupDecision.claims_visual_observation
+      ) {
+        throw new Error("Sidekick warmup must resolve as an empty silent decision");
+      }
+    } catch (error) {
+      this.backend.close();
+      throw error;
+    }
     this.backendSessionId = result.sessionId;
     this.stopped = false;
     this.#record("session_started", {
@@ -256,6 +287,10 @@ export class SidekickSession {
       provider: result.provider ?? null,
       model: result.model ?? null,
       service_tier: result.serviceTier ?? null,
+    });
+    this.#record("session_warmed", {
+      first_token_ms: warmupResult.firstTokenMs ?? null,
+      total_ms: warmupResult.totalMs ?? null,
     });
     return result;
   }

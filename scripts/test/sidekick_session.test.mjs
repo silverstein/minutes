@@ -38,16 +38,19 @@ function result(decision, latency = {}) {
 class FakeBackend {
   constructor() {
     this.turns = [];
+    this.warmups = [];
     this.steers = [];
     this.interrupts = [];
     this.sessionConfig = null;
     this.verifications = [];
+    this.warmupDecision = { decision: "silent", confidence: 100 };
     this.verificationVerdict = {
       allowed: true,
       decision: "allow",
       reason_code: "supported",
       latency: { total_ms: 5 },
     };
+    this.closed = false;
   }
 
   async startSession(config) {
@@ -61,6 +64,19 @@ class FakeBackend {
   }
 
   async startTurn(params) {
+    if (
+      params.input.some(
+        (item) => item.type === "text" && item.text.startsWith("MINUTES SESSION WARMUP"),
+      )
+    ) {
+      this.warmups.push(params);
+      return {
+        turnId: `warmup-${this.warmups.length}`,
+        completion: Promise.resolve(
+          result(this.warmupDecision, { first: 4, total: 12 }),
+        ),
+      };
+    }
     const pending = deferred();
     const turn = { id: `turn-${this.turns.length + 1}`, params, pending };
     this.turns.push(turn);
@@ -81,7 +97,7 @@ class FakeBackend {
     return this.verificationVerdict;
   }
 
-  close() {}
+  close() { this.closed = true; }
 }
 
 test("the harness sends the shared product instructions byte-for-byte", async () => {
@@ -95,6 +111,26 @@ test("the harness sends the shared product instructions byte-for-byte", async ()
   ]);
   assert.equal(backend.sessionConfig.baseInstructions, baseInstructions);
   assert.equal(backend.sessionConfig.developerInstructions, developerInstructions);
+  assert.equal(backend.warmups.length, 1);
+  assert.match(backend.warmups[0].input[0].text, /^MINUTES SESSION WARMUP/);
+  assert.doesNotMatch(backend.warmups[0].input[0].text, /capture-a/);
+});
+
+test("a warmup can never publish or smuggle evidence into the persistent session", async () => {
+  const backend = new FakeBackend();
+  backend.warmupDecision = {
+    decision: "speak",
+    text: "A synthetic claim.",
+    evidence_ids: ["synthetic-evidence"],
+  };
+  const session = new SidekickSession({ backend, captureSessionId: "capture-a" });
+
+  await assert.rejects(
+    session.start(),
+    /warmup must resolve as an empty silent decision/,
+  );
+  assert.equal(backend.turns.length, 0);
+  assert.equal(backend.closed, true);
 });
 
 test("historical and repository context stay separate from prepared context and remain citable", async () => {

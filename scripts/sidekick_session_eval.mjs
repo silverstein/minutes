@@ -294,6 +294,7 @@ async function runOnce({ fixture, codex, model, verifierModel, effort, verifierE
           examples: meridianSemanticCalibrationCases,
         })
       : null;
+    const warmup = session.trace.find((event) => event.type === "session_warmed") ?? null;
     return {
       run,
       provider: backend.provider,
@@ -310,6 +311,12 @@ async function runOnce({ fixture, codex, model, verifierModel, effort, verifierE
       verifier_model: verifierBackend.model,
       service_tier: backend.serviceTier,
       latency: {
+        session_warmup: warmup
+          ? {
+              first_token_ms: warmup.first_token_ms,
+              total_ms: warmup.total_ms,
+            }
+          : null,
         proactive: proactive?.publication?.latency ?? null,
         role_flip: roleFlip?.publication?.latency ?? null,
       },

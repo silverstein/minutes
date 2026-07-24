@@ -10,11 +10,14 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::{mpsc, Arc};
+use std::time::{Duration, Instant};
 
 const VERIFIER_BASE_INSTRUCTIONS: &str =
     include_str!("../../../../resources/live_sidekick/verifier_base_instructions.txt");
 const VERIFIER_DEVELOPER_INSTRUCTIONS: &str =
     include_str!("../../../../resources/live_sidekick/verifier_developer_instructions.txt");
+const STRATEGIST_WARMUP_INSTRUCTION: &str = "MINUTES SESSION WARMUP\nNo meeting evidence or user request is present. Return a silent Sidekick decision with no text, evidence IDs, visual claim, or factual claim. Treat this synthetic warmup as lifecycle traffic, not meeting history.";
+const SESSION_WARMUP_TIMEOUT: Duration = Duration::from_secs(15);
 
 fn sha256_hex(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
@@ -389,6 +392,7 @@ pub struct LiveSidekickEngine {
     active_verifier_session: Option<Box<dyn PersistentReasoningSession>>,
     backend_sessions_started: u64,
     verifier_sessions_started: u64,
+    reasoning_ready_ms: Option<u64>,
     descriptor: ReasoningBackendDescriptor,
     config: LiveSidekickEngineConfig,
     /// Local-only source receipts for the active historical context. Provider
@@ -466,6 +470,7 @@ impl LiveSidekickEngine {
             active_verifier_session: None,
             backend_sessions_started: 0,
             verifier_sessions_started: 0,
+            reasoning_ready_ms: None,
             descriptor,
             config,
             context_card: None,
@@ -517,6 +522,13 @@ impl LiveSidekickEngine {
     /// provider's candidate is never accepted on self-attestation alone.
     pub fn verifier_sessions_started(&self) -> u64 {
         self.verifier_sessions_started
+    }
+
+    /// Wall time required to create and warm the current persistent strategist
+    /// and independent verifier sessions. The first real intervention starts
+    /// only after both lifecycle turns resolve safely.
+    pub fn reasoning_ready_ms(&self) -> Option<u64> {
+        self.reasoning_ready_ms
     }
 
     pub fn start_capture(
@@ -1775,6 +1787,8 @@ impl LiveSidekickEngine {
     }
 
     fn restart_backend(&mut self) -> Result<(), ReasoningError> {
+        let started_at = Instant::now();
+        self.reasoning_ready_ms = None;
         if let Some(mut provider) = self.backend_session.take() {
             provider.close();
         }
@@ -1789,7 +1803,7 @@ impl LiveSidekickEngine {
             capture_session_id,
             source_policy_generation: self.session.source_policy_generation,
         };
-        let session = self.backend.start_session(ReasoningSessionConfig {
+        let mut session = self.backend.start_session(ReasoningSessionConfig {
             base_instructions: self.config.base_instructions.clone(),
             developer_instructions: self.config.developer_instructions.clone(),
             latency_class: ReasoningLatencyClass::Realtime,
@@ -1797,6 +1811,10 @@ impl LiveSidekickEngine {
             ephemeral: true,
             evidence_scope: evidence_scope.clone(),
         })?;
+        if let Err(error) = self.warm_strategist_session(session.as_mut()) {
+            session.close();
+            return Err(error);
+        }
         self.backend_sessions_started = self.backend_sessions_started.saturating_add(1);
         self.backend_session = Some(session);
         if let Err(error) = self.replenish_ready_verifier() {
@@ -1805,7 +1823,196 @@ impl LiveSidekickEngine {
             }
             return Err(error);
         }
+        self.reasoning_ready_ms = Some(started_at.elapsed().as_millis() as u64);
         Ok(())
+    }
+
+    fn warm_strategist_session(
+        &self,
+        session: &mut dyn PersistentReasoningSession,
+    ) -> Result<(), ReasoningError> {
+        let request = ReasoningTurnRequest {
+            kind: ReasoningTurnKind::Background,
+            reasoning_depth: ReasoningDepth::Realtime,
+            invocation: InvocationIdentity {
+                sequence: u64::MAX,
+                source_policy_generation: self.session.source_policy_generation,
+                user_generation: self.session.user_generation,
+            },
+            window: BoundedReasoningWindow {
+                capture_session_id: self.capture_id()?,
+                context: Vec::new(),
+                transcript: Vec::new(),
+                latest_image: None,
+                prepared_context: String::new(),
+            },
+            authoritative_memory: Vec::new(),
+            typed_user_message: None,
+            policy_feedback: Some(STRATEGIST_WARMUP_INSTRUCTION.into()),
+            output_contract: ReasoningOutputContract::InterventionCandidateV1,
+            candidate_to_verify: None,
+        };
+        request.validate(self.config.max_window_chars)?;
+        let result = Self::run_warmup_turn(session, request, "strategist")?;
+        let candidate = InterventionCandidate::from_backend_json(&result.text).map_err(|_| {
+            ReasoningError::new(
+                ReasoningErrorKind::Protocol,
+                "reasoning session warmup returned an invalid decision",
+                true,
+            )
+        })?;
+        let empty_text = candidate
+            .text
+            .as_deref()
+            .is_none_or(|text| text.trim().is_empty());
+        if candidate.decision != InterventionDecision::Silent
+            || !empty_text
+            || !candidate.evidence_ids.is_empty()
+            || !candidate.visual_evidence_ids.is_empty()
+            || candidate.claims_visual_observation
+        {
+            return Err(ReasoningError::new(
+                ReasoningErrorKind::Protocol,
+                "reasoning session warmup did not resolve as an empty silent decision",
+                true,
+            ));
+        }
+        Ok(())
+    }
+
+    fn warm_verifier_session(
+        &self,
+        session: &mut dyn PersistentReasoningSession,
+    ) -> Result<(), ReasoningError> {
+        let evidence_id = EvidenceId::new("synthetic-verifier-warmup");
+        let candidate = InterventionCandidate {
+            decision: InterventionDecision::Speak,
+            kind: Some("answer".into()),
+            text: Some("The verifier warmup is ready.".into()),
+            evidence_ids: vec![evidence_id.clone()],
+            visual_evidence_ids: Vec::new(),
+            claims_visual_observation: false,
+            confidence: 100,
+        };
+        let request = ReasoningTurnRequest {
+            kind: ReasoningTurnKind::Background,
+            reasoning_depth: ReasoningDepth::Realtime,
+            invocation: InvocationIdentity {
+                sequence: u64::MAX - 1,
+                source_policy_generation: self.session.source_policy_generation,
+                user_generation: self.session.user_generation,
+            },
+            window: BoundedReasoningWindow {
+                capture_session_id: self.capture_id()?,
+                context: Vec::new(),
+                transcript: vec![ReasoningTranscriptEvidence {
+                    evidence_id,
+                    text: "The verifier warmup is ready.".into(),
+                    speaker_label: None,
+                    speaker_verified: false,
+                    offset_ms: 0,
+                    duration_ms: 0,
+                }],
+                latest_image: None,
+                prepared_context: String::new(),
+            },
+            authoritative_memory: Vec::new(),
+            typed_user_message: None,
+            policy_feedback: None,
+            output_contract: ReasoningOutputContract::EvidenceVerificationV1,
+            candidate_to_verify: Some(candidate),
+        };
+        request.validate(self.config.max_window_chars)?;
+        let result = Self::run_warmup_turn(session, request, "verifier")?;
+        let verdict =
+            EvidenceVerificationVerdict::from_backend_json(&result.text).map_err(|_| {
+                ReasoningError::new(
+                    ReasoningErrorKind::Protocol,
+                    "evidence verifier warmup returned an invalid verdict",
+                    true,
+                )
+            })?;
+        if !verdict.allows_publication() {
+            return Err(ReasoningError::new(
+                ReasoningErrorKind::Protocol,
+                "evidence verifier warmup rejected supported synthetic evidence",
+                true,
+            ));
+        }
+        Ok(())
+    }
+
+    fn run_warmup_turn(
+        session: &mut dyn PersistentReasoningSession,
+        request: ReasoningTurnRequest,
+        lane: &str,
+    ) -> Result<ReasoningTurnResult, ReasoningError> {
+        let invocation = request.invocation;
+        let (sender, receiver) = mpsc::channel();
+        let turn_id = session.start_turn(
+            request,
+            Arc::new(move |event| {
+                let _ = sender.send(event);
+            }),
+        )?;
+        let deadline = Instant::now() + SESSION_WARMUP_TIMEOUT;
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                let _ = session.interrupt_turn(&turn_id);
+                return Err(ReasoningError::new(
+                    ReasoningErrorKind::Timeout,
+                    format!("{lane} session warmup timed out"),
+                    true,
+                ));
+            }
+            match receiver.recv_timeout(remaining) {
+                Ok(ReasoningStreamEvent::TextDelta { .. }) => {}
+                Ok(ReasoningStreamEvent::Completed {
+                    turn_id: completed_turn_id,
+                    invocation: completed_invocation,
+                    result,
+                }) => {
+                    if completed_turn_id != turn_id || completed_invocation != invocation {
+                        return Err(ReasoningError::new(
+                            ReasoningErrorKind::Protocol,
+                            format!("{lane} session warmup returned the wrong turn identity"),
+                            false,
+                        ));
+                    }
+                    return Ok(result);
+                }
+                Ok(ReasoningStreamEvent::Failed {
+                    turn_id: failed_turn_id,
+                    invocation: failed_invocation,
+                    error,
+                }) => {
+                    if failed_turn_id != turn_id || failed_invocation != invocation {
+                        return Err(ReasoningError::new(
+                            ReasoningErrorKind::Protocol,
+                            format!("{lane} session warmup failed with the wrong turn identity"),
+                            false,
+                        ));
+                    }
+                    return Err(error);
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    let _ = session.interrupt_turn(&turn_id);
+                    return Err(ReasoningError::new(
+                        ReasoningErrorKind::Timeout,
+                        format!("{lane} session warmup timed out"),
+                        true,
+                    ));
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err(ReasoningError::new(
+                        ReasoningErrorKind::Unavailable,
+                        format!("{lane} session warmup disconnected"),
+                        true,
+                    ));
+                }
+            }
+        }
     }
 
     fn replenish_ready_verifier(&mut self) -> Result<(), ReasoningError> {
@@ -1816,7 +2023,7 @@ impl LiveSidekickEngine {
             capture_session_id: self.capture_id()?,
             source_policy_generation: self.session.source_policy_generation,
         };
-        let verifier = self
+        let mut verifier = self
             .verifier_backend
             .start_session(ReasoningSessionConfig {
                 base_instructions: VERIFIER_BASE_INSTRUCTIONS.into(),
@@ -1826,11 +2033,13 @@ impl LiveSidekickEngine {
                 ephemeral: true,
                 evidence_scope: evidence_scope.clone(),
             })?;
-        // Starting a speculative inference turn here creates a provider race:
-        // a verifier needed immediately can arrive before app-server marks the
-        // warm-up active, making interrupt fail and causing both requests to
-        // share the warm-up event identity. Keep the independent verifier's
-        // process and thread hot, but reserve its first turn for real evidence.
+        // Complete the synthetic turn before exposing this slot. A prior
+        // speculative warmup raced real evidence; this synchronous lifecycle
+        // gate makes that provider-local turn identity race impossible.
+        if let Err(error) = self.warm_verifier_session(verifier.as_mut()) {
+            verifier.close();
+            return Err(error);
+        }
         self.verifier_sessions_started = self.verifier_sessions_started.saturating_add(1);
         self.ready_verifier_session = Some(verifier);
         Ok(())
@@ -2211,6 +2420,8 @@ mod tests {
     #[derive(Default)]
     struct FakeState {
         sessions_started: usize,
+        strategist_warmups: Vec<ReasoningTurnRequest>,
+        verifier_warmups: Vec<ReasoningTurnRequest>,
         turns: Vec<FakeTurn>,
         verification_turns: Vec<FakeTurn>,
         verification_turns_started: usize,
@@ -2303,8 +2514,26 @@ mod tests {
             sink: Arc<dyn ReasoningEventSink>,
         ) -> Result<ReasoningTurnId, ReasoningError> {
             let mut state = lock(&self.state);
+            if request.policy_feedback.as_deref() == Some(STRATEGIST_WARMUP_INSTRUCTION) {
+                state.strategist_warmups.push(request.clone());
+                let id = ReasoningTurnId::new(format!(
+                    "fake-strategist-warmup-{}",
+                    state.strategist_warmups.len()
+                ));
+                let invocation = request.invocation;
+                drop(state);
+                sink.on_event(ReasoningStreamEvent::Completed {
+                    turn_id: id.clone(),
+                    invocation,
+                    result: ReasoningTurnResult {
+                        text: serde_json::to_string(&silent()).unwrap(),
+                        first_token_ms: Some(10),
+                        total_ms: 20,
+                    },
+                });
+                return Ok(id);
+            }
             if request.output_contract == ReasoningOutputContract::EvidenceVerificationV1 {
-                state.verification_turns_started += 1;
                 let is_warmup = request
                     .candidate_to_verify
                     .as_ref()
@@ -2314,6 +2543,11 @@ mod tests {
                             .iter()
                             .any(|id| id.as_str() == "synthetic-verifier-warmup")
                     });
+                if is_warmup {
+                    state.verifier_warmups.push(request.clone());
+                } else {
+                    state.verification_turns_started += 1;
+                }
                 let id = if state.reuse_verifier_turn_ids {
                     ReasoningTurnId::new("provider-local-turn-1")
                 } else {
@@ -2765,25 +2999,52 @@ mod tests {
 
         assert_eq!(engine.reasoning_sessions_started(), 1);
         assert_eq!(engine.verifier_sessions_started(), 1);
+        assert!(engine.reasoning_ready_ms().is_some());
         assert_eq!(
             engine
                 .reasoning_session_id()
                 .map(ReasoningSessionId::as_str),
             Some("fake-session-1")
         );
+        {
+            let state = lock(&backend.state);
+            assert_eq!(state.strategist_warmups.len(), 1);
+            let warmup = &state.strategist_warmups[0];
+            assert!(warmup.window.context.is_empty());
+            assert!(warmup.window.transcript.is_empty());
+            assert!(warmup.window.latest_image.is_none());
+            assert!(warmup.window.prepared_context.is_empty());
+            assert!(warmup.authoritative_memory.is_empty());
+            assert!(warmup.typed_user_message.is_none());
+            assert_eq!(state.verifier_warmups.len(), 1);
+            let verifier_warmup = &state.verifier_warmups[0];
+            assert!(verifier_warmup.window.context.is_empty());
+            assert!(verifier_warmup.window.latest_image.is_none());
+            assert!(verifier_warmup.window.prepared_context.is_empty());
+            assert!(verifier_warmup.authoritative_memory.is_empty());
+            assert!(verifier_warmup.typed_user_message.is_none());
+            assert_eq!(verifier_warmup.window.transcript.len(), 1);
+            assert_eq!(
+                verifier_warmup.window.transcript[0].evidence_id.as_str(),
+                "synthetic-verifier-warmup"
+            );
+        }
 
         engine.invalidate_source_policy(1).unwrap();
         assert_eq!(engine.reasoning_sessions_started(), 2);
         assert_eq!(engine.verifier_sessions_started(), 2);
-        assert_eq!(lock(&backend.state).sessions_started, 4);
+        let state = lock(&backend.state);
+        assert_eq!(state.sessions_started, 4);
+        assert_eq!(state.strategist_warmups.len(), 2);
     }
 
     #[test]
-    fn ready_verifier_reserves_its_first_turn_for_real_evidence() {
+    fn ready_verifier_warms_before_first_real_evidence() {
         let backend = FakeBackend::default();
         let mut engine = engine(backend.clone());
 
         assert_eq!(lock(&backend.state).verification_turns_started, 0);
+        assert_eq!(lock(&backend.state).verifier_warmups.len(), 1);
         observe(
             &mut engine,
             "decision",

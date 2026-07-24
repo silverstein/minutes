@@ -17881,6 +17881,7 @@ pub fn run_native_sidekick_diagnostic(
     let reasoning_session_correlation = native_sidekick_diagnostic_session_correlation(&engine)?;
     let reasoning_sessions_started = engine.reasoning_sessions_started();
     let verifier_sessions_started = engine.verifier_sessions_started();
+    let reasoning_ready_ms = engine.reasoning_ready_ms();
     let _ = engine.stop_capture();
     let provider_identity_after = native_sidekick_provider_identity(&codex_path)?;
     if provider_identity_after != provider_identity {
@@ -17922,6 +17923,7 @@ pub fn run_native_sidekick_diagnostic(
         "reasoning_session_correlation": reasoning_session_correlation,
         "reasoning_sessions_started": reasoning_sessions_started,
         "verifier_sessions_started": verifier_sessions_started,
+        "reasoning_ready_ms": reasoning_ready_ms,
         "proactive": proactive,
         "foreground": foreground,
         "fixture_turns": fixture_turns,

@@ -124,7 +124,7 @@ test("the Codex adapter defaults to the shipped realtime model", async () => {
 
   assert.equal(CODEX_REALTIME_MODEL, "gpt-5.6-terra");
   assert.equal(CODEX_VERIFIER_MODEL, "gpt-5.6-terra");
-  assert.equal(CODEX_VERIFIER_EFFORT, "none");
+  assert.equal(CODEX_VERIFIER_EFFORT, "low");
   assert.equal(CODEX_VERIFIER_ADJUDICATION_EFFORT, "medium");
   assert.equal(CODEX_REALTIME_EFFORT, "none");
   assert.equal(client.started.model, CODEX_REALTIME_MODEL);

@@ -1080,7 +1080,7 @@ function passingRuntime(payload = passingProductPayload()) {
       requested_model: 'gpt-5.6-terra',
       requested_effort: 'none',
       requested_verifier_model: 'gpt-5.6-terra',
-      requested_verifier_effort: 'none',
+      requested_verifier_effort: 'low',
       mechanical_quality_passed: true,
       semantic_quality_passed: true,
       semantic_calibration_passed: true,

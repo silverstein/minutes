@@ -14529,6 +14529,7 @@ mod tests {
 
     #[test]
     fn list_documents_merges_assistant_and_meeting_sources_by_recency() {
+        let _guard = test_guard();
         let home = dirs::home_dir().expect("home dir");
         let temp = tempfile::Builder::new()
             .prefix("minutes-documents-test-")
@@ -18672,6 +18673,7 @@ mod native_sidekick_diagnostic_tests {
     #[test]
     fn acceptance_refuses_a_real_home_capture_and_parallel_machine_lock() {
         let real_home = tempfile::tempdir().unwrap();
+        let canonical_home = real_home.path().canonicalize().unwrap();
         let minutes_dir = real_home.path().join(".minutes");
         std::fs::create_dir_all(&minutes_dir).unwrap();
         std::fs::write(
@@ -18681,7 +18683,7 @@ mod native_sidekick_diagnostic_tests {
         .unwrap();
         assert!(validate_native_sidekick_acceptance_host_is_idle_at(
             real_home.path(),
-            real_home.path(),
+            &canonical_home,
         )
         .unwrap_err()
         .contains("real Minutes recording"));

@@ -314,6 +314,17 @@ The execution order is deliberate:
 No step may weaken the proven invariant that an optional Sidekick consumer can
 never degrade recording or WAV preservation.
 
+### 2026-07-24 engine replay milestone
+
+The first no-human orchestration and fault-injection gate is implemented and
+documented in
+[`sidekick-engine-replay-checkpoint-2026-07-24.md`](sidekick-engine-replay-checkpoint-2026-07-24.md).
+Its eight scenarios and 29 assertions pass reproducibly through the production
+engine, reducer, evidence window, independent verification, publication,
+recovery, and teardown paths. It intentionally remains only a partial
+completion of step 2: native audio/ASR/diarization, native permission adapters,
+retrieval adapters, and real-provider behavior are explicit exclusions.
+
 ## Current Baseline
 
 The branch has a strong deterministic integration foundation and an excellent

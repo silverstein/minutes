@@ -220,6 +220,83 @@ fn automation_decision_omits_complete_gated_path(
     frames_automation && frames_human_alternative && frames_decision && !complete_gated_path
 }
 
+/// Complete a narrow Minutes-owned operating recommendation without asking
+/// the provider to repeat the full reasoning turn. This adds no meeting fact:
+/// it inserts the reversible policy path that follows from the evidenced
+/// automation-versus-human choice, then lets the independent verifier judge
+/// the complete candidate against the same bounded window.
+fn repair_automation_decision_path(
+    request: &ReasoningTurnRequest,
+    candidate: &mut InterventionCandidate,
+) -> bool {
+    if !automation_decision_omits_complete_gated_path(request, candidate) {
+        return false;
+    }
+    let Some(text) = candidate.text.as_deref() else {
+        return false;
+    };
+    let candidate_text = text.to_lowercase();
+    if contains_any(
+        &candidate_text,
+        &[
+            "ship full automation",
+            "launch full automation",
+            "deploy full automation",
+            "blanket automation",
+            "fully automate",
+            "automate everything",
+            "automate every",
+            "do not use a confidence",
+            "don't use a confidence",
+            "without a confidence threshold",
+            "without a confidence gate",
+        ],
+    ) {
+        return false;
+    }
+    const OPERATING_PATH: &str =
+        "Stage automation behind a confidence threshold; route uncertain or below-threshold work to a human.";
+    let text = text.trim();
+    let repaired = if let Some(without_question) = text.strip_suffix('?') {
+        let question_start = without_question
+            .rfind(['.', '!', '?'])
+            .map_or(0, |index| index + 1);
+        let prefix = text[..question_start].trim();
+        let question = text[question_start..].trim();
+        [prefix, OPERATING_PATH, question]
+            .into_iter()
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ")
+    } else {
+        format!("{text} {OPERATING_PATH}")
+    };
+    if repaired.split_whitespace().count() > MAXIMUM_FOREGROUND_WORDS {
+        return false;
+    }
+    candidate.text = Some(repaired);
+
+    for evidence in request.window.transcript.iter().filter(|item| {
+        contains_any(
+            &item.text.to_lowercase(),
+            &[
+                "human",
+                "manual",
+                "support team",
+                "support rep",
+                "support agent",
+                "specialist",
+                "operator",
+            ],
+        )
+    }) {
+        if !candidate.evidence_ids.contains(&evidence.evidence_id) {
+            candidate.evidence_ids.push(evidence.evidence_id.clone());
+        }
+    }
+    !automation_decision_omits_complete_gated_path(request, candidate)
+}
+
 #[derive(Debug, Clone)]
 pub struct LiveSidekickEngineConfig {
     pub base_instructions: String,
@@ -1259,10 +1336,16 @@ impl LiveSidekickEngine {
     fn start_candidate_verification(
         &mut self,
         mut active: ActiveReasoning,
-        candidate: InterventionCandidate,
+        mut candidate: InterventionCandidate,
         generation_result: ReasoningTurnResult,
     ) {
         if automation_decision_omits_complete_gated_path(&active.request, &candidate) {
+            if matches!(active.work, SidekickWork::Foreground { .. })
+                && repair_automation_decision_path(&active.request, &mut candidate)
+            {
+                self.start_candidate_verification(active, candidate, generation_result);
+                return;
+            }
             if matches!(active.work, SidekickWork::Foreground { .. })
                 && active.completeness_retries == 0
             {
@@ -3244,9 +3327,10 @@ mod tests {
     }
 
     #[test]
-    fn confidence_gate_without_human_disposition_retries_before_model_verification() {
+    fn confidence_gate_without_human_disposition_is_repaired_before_model_verification() {
         let backend = FakeBackend::default();
         let mut engine = engine(backend.clone());
+        engine.config.max_window_chars = 2_000;
         observe(
             &mut engine,
             "decision",
@@ -3262,36 +3346,26 @@ mod tests {
                 "Stage automated resolution behind a confidence gate. Ask for the confidence-band error distribution.",
             ),
         );
-        assert!(engine.has_active_turn());
 
-        {
-            let state = lock(&backend.state);
-            assert_eq!(state.verification_turns_started, 0);
-            assert_eq!(state.turns.len(), 2);
-            assert!(state.turns[1]
-                .request
-                .policy_feedback
-                .as_deref()
-                .unwrap()
-                .contains("complete confidence-gated operating path"));
-        }
-
-        backend.complete(
-            1,
-            speak(
-                &["decision"],
-                "Ship confidence-gated automation and route below-threshold work to a human.",
-            ),
-        );
         let publications = engine.take_publications();
         assert_eq!(publications.len(), 1);
-        assert_eq!(lock(&backend.state).verification_turns_started, 1);
+        let text = publications[0].candidate.text.as_deref().unwrap();
+        assert!(text.contains("route uncertain or below-threshold work to a human"));
+        assert!(text.contains("Ask for the confidence-band error distribution."));
+        assert!(publications[0]
+            .candidate
+            .evidence_ids
+            .contains(&EvidenceId::new("decision")));
+        let state = lock(&backend.state);
+        assert_eq!(state.verification_turns_started, 1);
+        assert_eq!(state.turns.len(), 1);
     }
 
     #[test]
-    fn automation_risk_math_and_boundary_question_without_operating_path_retries() {
+    fn automation_risk_math_and_boundary_question_gets_a_local_operating_path() {
         let backend = FakeBackend::default();
         let mut engine = engine(backend.clone());
+        engine.config.max_window_chars = 2_000;
         observe(
             &mut engine,
             "volume",
@@ -3323,16 +3397,19 @@ mod tests {
         }
         backend.complete(0, candidate);
 
-        assert!(engine.has_active_turn());
+        let publications = engine.take_publications();
+        assert_eq!(
+            publications.len(),
+            1,
+            "failures={:?}",
+            engine.take_failures()
+        );
+        let text = publications[0].candidate.text.as_deref().unwrap();
+        assert!(text.contains("route uncertain or below-threshold work to a human"));
+        assert!(text.ends_with("What is the error-rate distribution by confidence band?"));
         let state = lock(&backend.state);
-        assert_eq!(state.verification_turns_started, 0);
-        assert_eq!(state.turns.len(), 2);
-        assert!(state.turns[1]
-            .request
-            .policy_feedback
-            .as_deref()
-            .unwrap()
-            .contains("route uncertain or below-threshold work to a human"));
+        assert_eq!(state.verification_turns_started, 1);
+        assert_eq!(state.turns.len(), 1);
     }
 
     #[test]
@@ -3385,7 +3462,37 @@ mod tests {
     }
 
     #[test]
-    fn completeness_and_verifier_recovery_have_separate_bounded_budgets() {
+    fn contradictory_full_automation_candidate_retries_instead_of_being_locally_patched() {
+        let backend = FakeBackend::default();
+        let mut engine = engine(backend.clone());
+        observe(
+            &mut engine,
+            "decision",
+            "We must decide between full automation and keeping a human in the loop.",
+        );
+        engine.send_user("What is the real risk?").unwrap();
+        backend.complete(
+            0,
+            speak(
+                &["decision"],
+                "Ship full automation. What error-rate distribution supports a confidence threshold?",
+            ),
+        );
+
+        assert!(engine.has_active_turn());
+        let state = lock(&backend.state);
+        assert_eq!(state.verification_turns_started, 0);
+        assert_eq!(state.turns.len(), 2);
+        assert!(state.turns[1]
+            .request
+            .policy_feedback
+            .as_deref()
+            .unwrap()
+            .contains("complete confidence-gated operating path"));
+    }
+
+    #[test]
+    fn local_completeness_repair_preserves_the_verifier_recovery_budget() {
         let backend = FakeBackend::default();
         {
             let mut state = lock(&backend.state);
@@ -3417,19 +3524,10 @@ mod tests {
             ),
         );
         assert!(engine.has_active_turn());
+        assert_eq!(lock(&backend.state).turns.len(), 2);
 
         backend.complete(
             1,
-            speak(
-                &["decision"],
-                "Ship confidence-gated automation and route below-threshold work to humans.",
-            ),
-        );
-        assert!(engine.has_active_turn());
-        assert_eq!(lock(&backend.state).turns.len(), 3);
-
-        backend.complete(
-            2,
             speak(
                 &["decision"],
                 "Ship confidence-gated automation and route below-threshold work to humans.",

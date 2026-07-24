@@ -58,7 +58,7 @@ function assertedMonthlyAmounts(text) {
       "g",
     ),
     new RegExp(
-      String.raw`\b(?:correct|actual|true|real|calculated)\s+(?:monthly\s+)?(?:amount|figure|exposure|risk|liability|cost)\b[^0-9$]{0,25}\$?\s*${amount}\b`,
+      String.raw`\b(?:correct|actual|true|real|calculated)\s+(?:monthly\s+)?(?:amount|figure|exposure|risk|liability|cost)\b[^0-9$]{0,25}\$?\s*${amount}\b(?!\s*%)`,
       "g",
     ),
   ];

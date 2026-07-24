@@ -423,6 +423,17 @@ test("summary, agenda confusion, monitoring narration, and broadening fail close
   }
 });
 
+test("a correct comma-formatted hero amount is not confused with a nearby accuracy percentage", () => {
+  const report = scoreMeridianResponses({
+    ...passing,
+    turn_1:
+      "The real risk is contractual: 90% accuracy across 40,000 tickets implies 4,000 wrong resolutions and $800,000/month in credits. Accuracy is no longer decisive; error distribution by confidence band is. Route below-threshold tickets to humans. What error-rate distribution by confidence band supports the threshold?",
+  }, { turn1Mode: "foreground" });
+
+  assert.equal(failed(report, "derived_800k_monthly_exposure"), false);
+  assert.equal(failed(report, "no_wrong_math"), false);
+});
+
 test("brevity limits are part of the quality gate", () => {
   const background = `${passing.turn_1} ${"generic filler ".repeat(20)}`;
   const foreground = `${passing.turn_2} ${"generic filler ".repeat(25)}`;

@@ -216,11 +216,12 @@ export function MemoryCompoundsHero() {
           </p>
 
           <div className="marketing-works-with">
-            <span>One folder of truth for</span>
+            <span>One folder, every surface</span>
             <div>
+              <strong>Desktop</strong>
+              <strong>CLI</strong>
               <strong>Claude</strong>
               <strong>Codex</strong>
-              <strong>Gemini</strong>
               <strong>Any MCP client</strong>
             </div>
           </div>
@@ -247,14 +248,14 @@ export function MemoryCompoundsHero() {
             <p>Capture, transcription, and storage stay on your machine.</p>
           </div>
           <div>
-            <span>Agent surface</span>
-            <strong>{MINUTES_MCP_TOOL_COUNT} MCP tools</strong>
-            <p>Claude, Codex, Gemini, Cursor, OpenCode, and any MCP client.</p>
+            <span>Command surfaces</span>
+            <strong>CLI + {MINUTES_MCP_TOOL_COUNT} MCP tools</strong>
+            <p>Run Minutes in your shell or through Claude, Codex, Gemini, and any MCP client.</p>
           </div>
           <a href="/compare">
-            <span>Fit, not hype</span>
-            <strong>Honest comparisons</strong>
-            <p>See exactly where Minutes wins—and where another tool fits better.</p>
+            <span>Choose by fit</span>
+            <strong>Compare Minutes</strong>
+            <p>See the differences in architecture, ownership, workflow, and tradeoffs.</p>
           </a>
         </div>
       </section>

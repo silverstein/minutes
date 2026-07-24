@@ -8,6 +8,7 @@ import {
   useVideoConfig,
   Sequence,
 } from "remotion";
+import { MINUTES_MCP_TOOL_COUNT } from "@/lib/release";
 
 const BG = "#F8F4ED";
 const FG = "#1A1916";
@@ -389,9 +390,9 @@ const Scene5: React.FC = () => {
   const { fps } = useVideoConfig();
 
   const stats = [
-    { label: "binary", value: "7 MB", color: GREEN },
+    { label: "interface", value: "CLI", color: GREEN },
     { label: "transcription", value: "local", color: ACCENT },
-    { label: "MCP tools", value: "13", color: PURPLE },
+    { label: "MCP tools", value: String(MINUTES_MCP_TOOL_COUNT), color: PURPLE },
     { label: "license", value: "MIT", color: ORANGE },
   ];
 

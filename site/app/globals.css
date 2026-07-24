@@ -590,7 +590,7 @@ summary:focus-visible {
   }
 }
 
-/* Streaming-transcript hero reveal. Product-honest, not decorative: it mirrors
+/* Streaming-transcript hero reveal. Product-grounded, not decorative: it mirrors
    how Minutes streams real transcription in (see DESIGN.md → Motion). Plays
    once on load, and only when the user has not asked to reduce motion — under
    `reduce`, no rule applies and every line is visible immediately. */

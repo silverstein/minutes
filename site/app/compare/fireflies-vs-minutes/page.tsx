@@ -87,7 +87,7 @@ export default function FirefliesVsMinutesPage() {
         "Minutes is better if your core problem is long-lived memory and recall across tools rather than primarily hosted transcript and workflow automation.",
       ]}
       workflowSection={[
-        "Fireflies.ai now has real MCP surfaces, including an MCP server for meeting data and a docs MCP server. So the comparison is not 'Fireflies.ai is SaaS and Minutes is MCP.' The more honest distinction is what the system is optimized around. Fireflies.ai is centered on hosted meeting-assistant workflows, integrations, and team operations. Minutes uses MCP as one surface of a broader local-first memory system.",
+        "Fireflies.ai now has real MCP surfaces, including an MCP server for meeting data and a docs MCP server. So the comparison is not 'Fireflies.ai is SaaS and Minutes is MCP.' The useful distinction is what the system is optimized around. Fireflies.ai is centered on hosted meeting-assistant workflows, integrations, and team operations. Minutes uses MCP as one surface of a broader local-first memory system.",
         "If your team wants a managed meeting assistant that plugs into the rest of your SaaS stack, Fireflies.ai is often the better fit. If you want durable local artifacts and a workflow your own assistants can use across files, desktop, CLI, plugin, and MCP, Minutes is the better fit.",
       ]}
       chooseSection={[

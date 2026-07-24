@@ -6,6 +6,7 @@
 - Grounding reference: `/Users/silverbook/.codex/visualizations/2026/07/24/019f9180-f6dd-7212-ad6a-3bc4fd455f01/minutes-site-audit/07-installed-minutes-app-grounding.png`
 - Final implementation screenshot: `/Users/silverbook/.codex/visualizations/2026/07/24/019f9180-f6dd-7212-ad6a-3bc4fd455f01/minutes-site-audit/19-redesign-final-desktop-v2.png`
 - Final mobile screenshot: `/Users/silverbook/.codex/visualizations/2026/07/24/019f9180-f6dd-7212-ad6a-3bc4fd455f01/minutes-site-audit/18-redesign-final-mobile.png`
+- CLI/copy follow-up screenshot: `/Users/silverbook/.codex/visualizations/2026/07/24/019f9180-f6dd-7212-ad6a-3bc4fd455f01/minutes-site-audit/22-redesign-cli-copy-final.png`
 - Full-view comparison: `/Users/silverbook/.codex/visualizations/2026/07/24/019f9180-f6dd-7212-ad6a-3bc4fd455f01/minutes-site-audit/20-design-qa-final-side-by-side.png`
 - Focused artifact comparison: `/Users/silverbook/.codex/visualizations/2026/07/24/019f9180-f6dd-7212-ad6a-3bc4fd455f01/minutes-site-audit/21-design-qa-artifact-focus.png`
 - State: light theme, homepage at scroll position 0, mobile menu closed.
@@ -52,6 +53,9 @@ No actionable P0, P1, or P2 findings remain.
 
 - The generated concept's imagined multi-file flow was corrected to the shipped contract: one Markdown artifact under `~/meetings/`, containing structured frontmatter and the transcript.
 - The example uses real schema fields (`type`, `consent`, `decisions`, `authority`) and a sourced recall response.
+- CLI now appears beside the desktop and MCP surfaces in the hero and proof band.
+- The animated stats use the generated MCP tool count and no longer make a binary-size claim.
+- Comparison links and editorial pages use direct, descriptive wording instead of self-certifying “honest” language.
 - Comparison content remains substantial on the homepage, and the primary nav plus contextual comparison links strengthen crawl paths to `/compare` and key competitor pages.
 
 ### States, interactions, and responsiveness
@@ -62,6 +66,7 @@ No actionable P0, P1, or P2 findings remain.
 - Both hero actions work. `#memory-flow` lands below the sticky header, and `#install` lands with Mac and Windows choices visible.
 - The mobile primary CTA is visible within the initial 390 × 844 viewport.
 - Browser console warnings/errors: none.
+- The revised `CLI + 36 MCP tools` proof point fits its cell without horizontal overflow.
 
 ### Accessibility
 
@@ -91,6 +96,7 @@ No actionable P0, P1, or P2 findings remain.
 - `19-redesign-final-desktop-v2.png`: complete local file artifact, proof band visible by 116.6 px, no horizontal overflow.
 - `20-design-qa-final-side-by-side.png`: final full-view source/implementation comparison.
 - `21-design-qa-artifact-focus.png`: final focused product-evidence comparison.
+- `22-redesign-cli-copy-final.png`: follow-up copy pass with Desktop, CLI, and MCP visible as distinct product surfaces.
 
 ## Follow-up polish
 

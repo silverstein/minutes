@@ -712,7 +712,7 @@ export default function Home() {
             href="/compare"
             className="font-mono text-[11px] font-semibold uppercase tracking-[0.1em] text-[var(--accent)] underline decoration-[color:var(--border-mid)] underline-offset-4"
           >
-            Explore all honest Minutes comparisons
+            Explore all Minutes comparisons
           </a>
           <a href="/compare/granola-vs-minutes" className="hover:text-[var(--text)]">
             Granola

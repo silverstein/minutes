@@ -157,7 +157,7 @@ export default function GranolaVsMinutesPage() {
         "The durable output is inspectable files any agent can read: Claude, Codex, and other MCP clients query your meetings as local memory across CLI, desktop, SDK, and the Claude Code plugin.",
       ]}
       workflowSection={[
-        "Both now have MCP, so this is no longer 'Granola for humans, Minutes for agents.' The honest distinction is where the data the MCP serves actually lives. Granola's MCP reads a hosted notes product on Granola's servers; Minutes' MCP reads local files you own, alongside a CLI, a desktop app, live transcript reads, a public MCP reference, and a Claude Code plugin.",
+        "Both now have MCP, so this is no longer 'Granola for humans, Minutes for agents.' The architectural distinction is where the data the MCP serves actually lives. Granola's MCP reads a hosted notes product on Granola's servers; Minutes' MCP reads local files you own, alongside a CLI, a desktop app, live transcript reads, a public MCP reference, and a Claude Code plugin.",
         "If the question is 'can my assistant see some meeting notes?', both qualify. If it's 'can my assistant use my meetings as durable local memory that never leaves my control?', only one architecture answers yes.",
       ]}
       chooseSection={[

@@ -114,7 +114,7 @@ export default function RemoveNotetakerBotsPage() {
           The most-searched questions about AI notetakers aren&rsquo;t &ldquo;which one is
           best&rdquo; — they&rsquo;re &ldquo;how do I get this thing out of my call.&rdquo;
           Fair. Here&rsquo;s the complete removal guide for the common bots, the settings that
-          stop them coming back, and the honest limits of what you can control when the bot
+          stop them coming back, and the practical limits of what you can control when the bot
           belongs to someone else.
         </p>
         <div className="mt-6 flex flex-wrap gap-3">

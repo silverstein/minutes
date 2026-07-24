@@ -40,6 +40,8 @@ const MIN_VISIBLE_RESPONSE_PX = 24;
 const HARD_TIMEOUT_MS = 230_000;
 const FORCED_CLEANUP_GRACE_MS = 75_000;
 const MAX_OUTPUT_BYTES = 1024 * 1024;
+const MAX_AUDIT_SCREEN_BYTES = 32 * 1024 * 1024;
+const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 const CANONICAL_FIXTURE_PATH = fileURLToPath(
   new URL("../tests/fixtures/sidekick_rehearsal/v1/meridian_ship_decision.json", import.meta.url),
 );
@@ -472,7 +474,7 @@ export function evaluateNativeSidekickUiAcceptance(payload, runtime) {
   };
 }
 
-async function writeIsolatedConfig(homeDirectory) {
+async function writeIsolatedConfig(homeDirectory, { auditCapture = false } = {}) {
   const configDirectory = path.join(homeDirectory, ".config", "minutes");
   const outputDirectory = path.join(homeDirectory, "meetings");
   await fs.mkdir(configDirectory, { recursive: true, mode: 0o700 });
@@ -483,7 +485,7 @@ async function writeIsolatedConfig(homeDirectory) {
     "",
     "[screen_context]",
     "enabled = true",
-    "interval_secs = 300",
+    `interval_secs = ${auditCapture ? 1 : 300}`,
     "keep_after_summary = false",
     "",
     "[consent]",
@@ -510,6 +512,7 @@ export function nativeSidekickLaunchServicesArgs({
   inheritedPath,
   nonce,
   realHome,
+  auditCapture = false,
 }) {
   const environment = {
     HOME: isolatedHome,
@@ -517,6 +520,7 @@ export function nativeSidekickLaunchServicesArgs({
     XDG_CONFIG_HOME: path.join(isolatedHome, ".config"),
     CODEX_HOME: codeHome,
     PATH: `${providerDirectory}:${inheritedPath || "/usr/bin:/bin"}`,
+    ...(auditCapture ? { MINUTES_SIDEKICK_UI_AUDIT_CAPTURE: "1" } : {}),
   };
   return [
     "-n",
@@ -589,6 +593,95 @@ export async function readBoundedOutputFile(filePath, limit) {
   } finally {
     await file.close();
   }
+}
+
+function pathIsInside(parent, candidate) {
+  const relative = path.relative(parent, candidate);
+  return relative !== "" && !relative.startsWith(`..${path.sep}`) && relative !== ".." &&
+    !path.isAbsolute(relative);
+}
+
+export async function resolveNativeSidekickAuditDirectory(
+  repositoryRoot,
+  requestedDirectory,
+) {
+  if (!requestedDirectory) return null;
+  if (!path.isAbsolute(requestedDirectory)) {
+    throw new Error("MINUTES_SIDEKICK_UI_AUDIT_DIR must be an absolute path");
+  }
+  const targetRoot = await fs.realpath(path.join(repositoryRoot, "target"));
+  await fs.mkdir(requestedDirectory, { recursive: true, mode: 0o700 });
+  await fs.chmod(requestedDirectory, 0o700);
+  const auditDirectory = await fs.realpath(requestedDirectory);
+  if (!pathIsInside(targetRoot, auditDirectory)) {
+    throw new Error("MINUTES_SIDEKICK_UI_AUDIT_DIR must resolve inside this checkout's target directory");
+  }
+  return auditDirectory;
+}
+
+export async function preserveNativeSidekickAuditArtifacts(
+  payload,
+  temporaryRoot,
+  auditDirectory,
+) {
+  if (!auditDirectory) return [];
+  const canonicalTemporaryRoot = await fs.realpath(temporaryRoot);
+  const canonicalAuditDirectory = await fs.realpath(auditDirectory);
+  const turns = Array.isArray(payload?.turns) ? payload.turns : [];
+  if (turns.length === 0) {
+    throw new Error("native Sidekick audit capture produced no turns");
+  }
+  const screenshots = [];
+  for (const [index, turn] of turns.entries()) {
+    const source = turn?.audit_screen;
+    if (!source?.path || !source?.sha256) {
+      throw new Error(`native Sidekick audit capture is missing for turn ${index + 1}`);
+    }
+    const canonicalSource = await fs.realpath(source.path);
+    if (!pathIsInside(canonicalTemporaryRoot, canonicalSource)) {
+      throw new Error(`native Sidekick audit screen ${index + 1} escaped the private acceptance root`);
+    }
+    const bytes = await fs.readFile(canonicalSource);
+    if (bytes.length === 0 || bytes.length > MAX_AUDIT_SCREEN_BYTES) {
+      throw new Error(`native Sidekick audit screen ${index + 1} has an invalid byte size`);
+    }
+    if (!bytes.subarray(0, PNG_SIGNATURE.length).equals(PNG_SIGNATURE)) {
+      throw new Error(`native Sidekick audit screen ${index + 1} is not a PNG`);
+    }
+    const digest = sha256(bytes);
+    if (digest !== source.sha256 || bytes.length !== source.byte_size) {
+      throw new Error(`native Sidekick audit screen ${index + 1} does not match its app receipt`);
+    }
+    const label = index === 0 ? "vendor-strategy" :
+      index === 1 ? "procurement-role-flip" : `turn-${index + 1}`;
+    const destination = path.join(
+      canonicalAuditDirectory,
+      `${String(index + 1).padStart(2, "0")}-${label}.png`,
+    );
+    const staging = `${destination}.${process.pid}.${randomBytes(8).toString("hex")}.tmp`;
+    await fs.writeFile(staging, bytes, { mode: 0o600 });
+    await fs.rename(staging, destination);
+    await fs.chmod(destination, 0o600);
+    screenshots.push({
+      turn_id: turn.id,
+      path: destination,
+      captured_at: source.captured_at,
+      byte_size: bytes.length,
+      sha256: digest,
+    });
+  }
+  const reportPath = path.join(canonicalAuditDirectory, "product-path.json");
+  const report = {
+    schema_version: 1,
+    captured_at: new Date().toISOString(),
+    screenshots,
+    product_path: payload,
+  };
+  const staging = `${reportPath}.${process.pid}.${randomBytes(8).toString("hex")}.tmp`;
+  await fs.writeFile(staging, `${JSON.stringify(report, null, 2)}\n`, { mode: 0o600 });
+  await fs.rename(staging, reportPath);
+  await fs.chmod(reportPath, 0o600);
+  return screenshots;
 }
 
 export function singleFlightAsync(action) {
@@ -780,6 +873,7 @@ async function runInstalledUi(app, runtime) {
   let forcedProcessSignals = [];
   let temporaryRootRemoved = false;
   let primaryError = null;
+  let auditScreenshots = [];
   let appStdoutPath = null;
   let appStderrPath = null;
   let launchServicesStdout = Buffer.alloc(0);
@@ -887,7 +981,8 @@ async function runInstalledUi(app, runtime) {
       nonce,
       { mode: 0o600 },
     );
-    await writeIsolatedConfig(isolatedHome);
+    const auditCapture = Boolean(runtime.audit_directory);
+    await writeIsolatedConfig(isolatedHome, { auditCapture });
     const realHome = os.homedir();
     const launchArgs = nativeSidekickLaunchServicesArgs({
       app,
@@ -901,6 +996,7 @@ async function runInstalledUi(app, runtime) {
       inheritedPath: process.env.PATH,
       nonce,
       realHome,
+      auditCapture,
     });
     child = spawn("/usr/bin/open", launchArgs, {
       env: process.env,
@@ -982,6 +1078,11 @@ async function runInstalledUi(app, runtime) {
     if (!appExitReceiptVerified) {
       throw new Error("native Sidekick UI acceptance exit receipt did not bind the app, report, build, and nonce");
     }
+    auditScreenshots = await preserveNativeSidekickAuditArtifacts(
+      payload,
+      temporaryRoot,
+      runtime.audit_directory,
+    );
     outcome = {
       payload,
       runtime: {
@@ -994,6 +1095,7 @@ async function runInstalledUi(app, runtime) {
         launch_services_exit_code: exitCode,
         stderr: [appStderr, launchServicesStderr.toString("utf8")].filter(Boolean).join("\n").trim().slice(0, 4_000),
         stdout: [appStdout, launchServicesStdout.toString("utf8")].filter(Boolean).join("\n").trim().slice(0, 1_000),
+        audit_screenshots: auditScreenshots,
       },
     };
   } catch (error) {
@@ -1132,6 +1234,10 @@ async function main(argv) {
   if (relevantDirtyLines.length > 0) {
     throw new Error(`UI acceptance requires committed application and harness source; dirty paths:\n${relevantDirtyLines.join("\n")}`);
   }
+  const auditDirectory = await resolveNativeSidekickAuditDirectory(
+    repositoryRoot,
+    process.env.MINUTES_SIDEKICK_UI_AUDIT_DIR?.trim(),
+  );
   const signedBuildApp = path.join(
     repositoryRoot,
     "target",
@@ -1196,6 +1302,7 @@ async function main(argv) {
       source_provider_sha256: qualityProviderExecutable.sha256,
       source_provider_version: qualityProviderExecutable.version,
       reuse_source_provider_copy: true,
+      audit_directory: auditDirectory,
     });
     qualitySourceBinding = await currentSidekickQualitySourceBinding(repositoryRoot);
     hybridQualityGate = await runAndLoadSidekickHybridQualityArtifact({

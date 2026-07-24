@@ -19774,11 +19774,42 @@ fn stop_native_sidekick_ui_acceptance(app: &tauri::AppHandle) -> serde_json::Val
     result
 }
 
+fn wait_for_native_sidekick_ui_audit_screen(
+    context_session_id: &str,
+    captured_after: chrono::DateTime<chrono::Local>,
+    timeout: Duration,
+) -> Result<minutes_core::context_store::ScreenContextImage, String> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let result = minutes_core::context_store::get_screen_context(
+            context_session_id,
+            Some(captured_after),
+            3,
+        )
+        .map_err(|error| format!("Could not read Sidekick audit screen context: {error}"))?;
+        if let Some(image) = result
+            .images
+            .into_iter()
+            .find(|image| image.captured_at > captured_after)
+        {
+            return Ok(image);
+        }
+        if Instant::now() >= deadline {
+            return Err(
+                "The Sidekick audit lane did not capture the painted response in time.".into(),
+            );
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
 fn run_native_sidekick_ui_acceptance(
     app: tauri::AppHandle,
     nonce: String,
 ) -> Result<serde_json::Value, String> {
     let acceptance_started_at = Instant::now();
+    let capture_audit_screens =
+        std::env::var("MINUTES_SIDEKICK_UI_AUDIT_CAPTURE").as_deref() == Ok("1");
     let fixture =
         load_native_sidekick_diagnostic_source(&NativeSidekickDiagnosticSource::EmbeddedMeridian)?
             .ok_or_else(|| {
@@ -19913,6 +19944,24 @@ fn run_native_sidekick_ui_acceptance(
             Duration::from_secs(30),
             baseline,
         )?;
+        let audit_screen = if capture_audit_screens {
+            let captured_after = chrono::Local::now();
+            let image = wait_for_native_sidekick_ui_audit_screen(
+                &context_session_id,
+                captured_after,
+                Duration::from_secs(5),
+            )?;
+            let bytes = std::fs::read(&image.path)
+                .map_err(|error| format!("Could not read Sidekick audit screen: {error}"))?;
+            Some(serde_json::json!({
+                "path": image.path,
+                "captured_at": image.captured_at,
+                "byte_size": image.byte_size,
+                "sha256": native_sidekick_sha256(&bytes),
+            }))
+        } else {
+            None
+        };
         let snapshot = current_native_sidekick(&state.sidekick_snapshot);
         let response = snapshot
             .messages
@@ -19990,6 +20039,7 @@ fn run_native_sidekick_ui_acceptance(
             "evidence_receipt": evidence_receipt,
             "adapter_receipt": adapter_receipt,
             "candidate_evidence": candidate_evidence,
+            "audit_screen": audit_screen,
         }));
     }
     let (
@@ -20083,6 +20133,7 @@ fn run_native_sidekick_ui_acceptance(
             "provider_marker_is_generated_nonce_only": true,
             "capture_session_id": evidence_plan.screen.capture_session_id,
             "adapter": "context_store_exact_session",
+            "audit_capture_requested": capture_audit_screens,
         },
         "sidekick": {
             "ready_session_id": ready.session_id,

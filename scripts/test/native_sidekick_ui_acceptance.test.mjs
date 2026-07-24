@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -17,7 +17,9 @@ import {
   nativeSidekickTemporaryParent,
   parseMacSessionLockProbe,
   parseLsofTextIdentities,
+  preserveNativeSidekickAuditArtifacts,
   readBoundedOutputFile,
+  resolveNativeSidekickAuditDirectory,
   singleFlightAsync,
   terminateNewExactProcesses,
 } from '../run_native_sidekick_ui_acceptance.mjs';
@@ -1193,6 +1195,7 @@ test('native UI acceptance launches the signed app through LaunchServices with a
   assert.ok(args.includes('HOME=/tmp/acceptance/home'));
   assert.ok(args.includes('TMPDIR=/tmp/acceptance/tmp'));
   assert.ok(args.includes('PATH=/tmp/acceptance/provider:/opt/homebrew/bin:/usr/bin:/bin'));
+  assert.equal(args.some((item) => item === 'MINUTES_SIDEKICK_UI_AUDIT_CAPTURE=1'), false);
   const appIndex = args.indexOf('/Users/tester/Applications/Minutes Dev.app');
   const argsIndex = args.indexOf('--args');
   assert.ok(appIndex > 0 && argsIndex === appIndex + 1, 'the bundle path must precede app argv');
@@ -1200,6 +1203,101 @@ test('native UI acceptance launches the signed app through LaunchServices with a
   assert.equal(args[parentFdIndex + 1], '0', 'LaunchServices maps the inherited lease to app stdin');
   assert.equal(nativeSidekickTemporaryParent('darwin', '/var/folders/very/long/path'), '/tmp');
   assert.equal(nativeSidekickTemporaryParent('linux', '/var/tmp'), '/var/tmp');
+
+  const auditArgs = nativeSidekickLaunchServicesArgs({
+    app: '/Users/tester/Applications/Minutes Dev.app',
+    appStdoutPath: '/tmp/acceptance/app.stdout',
+    appStderrPath: '/tmp/acceptance/app.stderr',
+    parentLeasePath: '/tmp/acceptance/parent-lease.fifo',
+    isolatedHome: '/tmp/acceptance/home',
+    isolatedTmp: '/tmp/acceptance/tmp',
+    codeHome: '/Users/tester/.codex',
+    providerDirectory: '/tmp/acceptance/provider',
+    inheritedPath: '/opt/homebrew/bin:/usr/bin:/bin',
+    nonce: 'a'.repeat(64),
+    realHome: '/Users/tester',
+    auditCapture: true,
+  });
+  assert.ok(auditArgs.includes('MINUTES_SIDEKICK_UI_AUDIT_CAPTURE=1'));
+});
+
+test('native UI acceptance preserves opt-in app-captured screenshots with exact receipts', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'minutes-ui-audit-'));
+  try {
+    const temporaryRoot = path.join(root, 'private');
+    const auditDirectory = path.join(root, 'repo', 'target', 'audit');
+    await mkdir(temporaryRoot, { recursive: true });
+    await mkdir(auditDirectory, { recursive: true });
+    const png = Buffer.concat([
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+      Buffer.from('bounded synthetic audit image'),
+    ]);
+    const turns = [];
+    for (let index = 0; index < 2; index += 1) {
+      const source = path.join(temporaryRoot, `screen-${index + 1}.png`);
+      await writeFile(source, png);
+      turns.push({
+        id: `turn-${index + 1}`,
+        audit_screen: {
+          path: source,
+          captured_at: `2026-07-24T12:00:0${index}Z`,
+          byte_size: png.length,
+          sha256: createHash('sha256').update(png).digest('hex'),
+        },
+      });
+    }
+    const screenshots = await preserveNativeSidekickAuditArtifacts(
+      { turns },
+      temporaryRoot,
+      auditDirectory,
+    );
+    assert.equal(screenshots.length, 2);
+    assert.deepEqual(await readFile(screenshots[0].path), png);
+    assert.deepEqual((await stat(screenshots[0].path)).mode & 0o777, 0o600);
+    const report = JSON.parse(await readFile(path.join(auditDirectory, 'product-path.json'), 'utf8'));
+    assert.equal(report.screenshots[1].turn_id, 'turn-2');
+
+    turns[0].audit_screen.sha256 = '0'.repeat(64);
+    await assert.rejects(
+      preserveNativeSidekickAuditArtifacts({ turns }, temporaryRoot, auditDirectory),
+      /does not match its app receipt/,
+    );
+    turns[0].audit_screen.sha256 = createHash('sha256').update(png).digest('hex');
+    const outside = path.join(root, 'outside.png');
+    await writeFile(outside, png);
+    turns[0].audit_screen.path = outside;
+    await assert.rejects(
+      preserveNativeSidekickAuditArtifacts({ turns }, temporaryRoot, auditDirectory),
+      /escaped the private acceptance root/,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('native UI audit directory must resolve inside the checkout target directory', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'minutes-ui-audit-dir-'));
+  try {
+    const repositoryRoot = path.join(root, 'repo');
+    const targetRoot = path.join(repositoryRoot, 'target');
+    const accepted = path.join(targetRoot, 'sidekick-audit');
+    await mkdir(targetRoot, { recursive: true });
+    assert.equal(
+      await resolveNativeSidekickAuditDirectory(repositoryRoot, accepted),
+      accepted,
+    );
+    assert.deepEqual((await stat(accepted)).mode & 0o777, 0o700);
+    await assert.rejects(
+      resolveNativeSidekickAuditDirectory(repositoryRoot, path.join(root, 'outside')),
+      /must resolve inside/,
+    );
+    await assert.rejects(
+      resolveNativeSidekickAuditDirectory(repositoryRoot, 'target/relative'),
+      /must be an absolute path/,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test('native UI acceptance surfaces bounded launch logs before secure cleanup', () => {

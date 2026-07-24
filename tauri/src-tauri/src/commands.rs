@@ -19774,35 +19774,6 @@ fn stop_native_sidekick_ui_acceptance(app: &tauri::AppHandle) -> serde_json::Val
     result
 }
 
-fn wait_for_native_sidekick_ui_audit_screen(
-    context_session_id: &str,
-    captured_after: chrono::DateTime<chrono::Local>,
-    timeout: Duration,
-) -> Result<minutes_core::context_store::ScreenContextImage, String> {
-    let deadline = Instant::now() + timeout;
-    loop {
-        let result = minutes_core::context_store::get_screen_context(
-            context_session_id,
-            Some(captured_after),
-            3,
-        )
-        .map_err(|error| format!("Could not read Sidekick audit screen context: {error}"))?;
-        if let Some(image) = result
-            .images
-            .into_iter()
-            .find(|image| image.captured_at > captured_after)
-        {
-            return Ok(image);
-        }
-        if Instant::now() >= deadline {
-            return Err(
-                "The Sidekick audit lane did not capture the painted response in time.".into(),
-            );
-        }
-        std::thread::sleep(Duration::from_millis(200));
-    }
-}
-
 fn run_native_sidekick_ui_acceptance(
     app: tauri::AppHandle,
     nonce: String,
@@ -19952,18 +19923,34 @@ fn run_native_sidekick_ui_acceptance(
             baseline,
         )?;
         let audit_screen = if capture_audit_screens {
-            let captured_after = chrono::Local::now();
-            let image = wait_for_native_sidekick_ui_audit_screen(
-                &context_session_id,
-                captured_after,
-                Duration::from_secs(5),
-            )?;
-            let bytes = std::fs::read(&image.path)
+            let audit_directory = Config::minutes_dir().join("native-sidekick-ui-audit");
+            std::fs::create_dir_all(&audit_directory).map_err(|error| {
+                format!("Could not create the Sidekick audit directory: {error}")
+            })?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&audit_directory, std::fs::Permissions::from_mode(0o700))
+                    .map_err(|error| {
+                        format!("Could not protect the Sidekick audit directory: {error}")
+                    })?;
+            }
+            let path = audit_directory.join(format!("turn-{}.png", turns.len() + 1));
+            minutes_core::screen::capture_screenshot(&path)
+                .map_err(|error| format!("Could not capture the painted Sidekick UI: {error}"))?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).map_err(
+                    |error| format!("Could not protect the Sidekick audit screen: {error}"),
+                )?;
+            }
+            let bytes = std::fs::read(&path)
                 .map_err(|error| format!("Could not read Sidekick audit screen: {error}"))?;
             Some(serde_json::json!({
-                "path": image.path,
-                "captured_at": image.captured_at,
-                "byte_size": image.byte_size,
+                "path": path,
+                "captured_at": chrono::Local::now(),
+                "byte_size": bytes.len(),
                 "sha256": native_sidekick_sha256(&bytes),
             }))
         } else {
@@ -20141,6 +20128,7 @@ fn run_native_sidekick_ui_acceptance(
             "capture_session_id": evidence_plan.screen.capture_session_id,
             "adapter": "context_store_exact_session",
             "audit_capture_requested": capture_audit_screens,
+            "audit_capture_scope": if capture_audit_screens { "app_direct_post_paint_not_reasoning_context" } else { "disabled" },
         },
         "sidekick": {
             "ready_session_id": ready.session_id,

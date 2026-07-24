@@ -265,7 +265,7 @@ const MAX_SCREENSHOTS: u32 = 60;
 const TARGET_WIDTH: u32 = 1280;
 
 /// Capture a single screenshot to the given path, downscaled to TARGET_WIDTH.
-fn capture_screenshot(path: &Path) -> std::io::Result<()> {
+pub fn capture_screenshot(path: &Path) -> std::io::Result<()> {
     // macOS: screencapture to temp file, then resize with sips
     #[cfg(target_os = "macos")]
     {

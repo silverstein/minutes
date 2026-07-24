@@ -474,7 +474,7 @@ export function evaluateNativeSidekickUiAcceptance(payload, runtime) {
   };
 }
 
-async function writeIsolatedConfig(homeDirectory, { auditCapture = false } = {}) {
+async function writeIsolatedConfig(homeDirectory) {
   const configDirectory = path.join(homeDirectory, ".config", "minutes");
   const outputDirectory = path.join(homeDirectory, "meetings");
   await fs.mkdir(configDirectory, { recursive: true, mode: 0o700 });
@@ -485,7 +485,7 @@ async function writeIsolatedConfig(homeDirectory, { auditCapture = false } = {})
     "",
     "[screen_context]",
     "enabled = true",
-    `interval_secs = ${auditCapture ? 1 : 300}`,
+    "interval_secs = 300",
     "keep_after_summary = false",
     "",
     "[consent]",
@@ -982,7 +982,7 @@ async function runInstalledUi(app, runtime) {
       { mode: 0o600 },
     );
     const auditCapture = Boolean(runtime.audit_directory);
-    await writeIsolatedConfig(isolatedHome, { auditCapture });
+    await writeIsolatedConfig(isolatedHome);
     const realHome = os.homedir();
     const launchArgs = nativeSidekickLaunchServicesArgs({
       app,

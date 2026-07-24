@@ -1387,6 +1387,19 @@ test('installed UI acceptance requires product path, quality, and paint latency 
   assert.ok(report.quality_score.numerator >= 14);
 });
 
+test('installed UI acceptance permits one fail-closed verifier recovery', async () => {
+  const fixtureBytes = await readFile(
+    new URL('../../tests/fixtures/sidekick_rehearsal/v1/meridian_ship_decision.json', import.meta.url),
+  );
+  const payload = passingProductPayload();
+  payload.fixture_sha256 = createHash('sha256').update(fixtureBytes).digest('hex');
+  payload.sidekick.verifier_sessions_started = 3;
+
+  const report = evaluateNativeSidekickUiAcceptance(payload, passingRuntime(payload));
+
+  assert.equal(report.passed, true);
+});
+
 test('an internally ready answer cannot impersonate a visibly painted answer', async () => {
   const fixtureBytes = await readFile(
     new URL('../../tests/fixtures/sidekick_rehearsal/v1/meridian_ship_decision.json', import.meta.url),
@@ -1409,7 +1422,7 @@ test('the evaluator rejects every reviewed false-green mutation', async () => {
     ['ambient transcript ID', (payload) => payload.transcript.approved_evidence_ids.push('ambient-utterance-7')],
     ['wrong screen session', (payload) => { payload.screen.capture_session_id = 'other-session'; }],
     ['second provider session', (payload) => { payload.sidekick.reasoning_sessions_started = 2; }],
-    ['unexpected future verifier slot', (payload) => { payload.sidekick.verifier_sessions_started = 3; }],
+    ['excess verifier sessions', (payload) => { payload.sidekick.verifier_sessions_started = 5; }],
     ['missing verifier digest receipt', (payload) => {
       payload.turns[0].candidate_evidence.candidateDigestVerified = false;
     }],

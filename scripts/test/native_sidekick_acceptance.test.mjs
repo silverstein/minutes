@@ -196,6 +196,15 @@ test("installed acceptance requires quality, provenance, and latency together", 
   assert.deepEqual(report.quality_score, { numerator: 18, denominator: 18 });
 });
 
+test("installed acceptance permits one fail-closed verifier recovery", () => {
+  const payload = passingPayload();
+  payload.verifier_sessions_started = 3;
+
+  const report = evaluateNativeSidekickAcceptance(payload, passingRuntime({}, payload));
+
+  assert.equal(report.passed, true);
+});
+
 test("installed acceptance delegates semantic paraphrases to the calibrated hybrid gate", () => {
   const payload = passingPayload();
   const texts = [
@@ -355,7 +364,7 @@ test("two turns on different reasoning sessions cannot impersonate persistence",
 
 test("a missing, reused, or rejected verifier receipt cannot earn acceptance", () => {
   const mutations = [
-    (payload) => { payload.verifier_sessions_started = 3; },
+    (payload) => { payload.verifier_sessions_started = 5; },
     (payload) => {
       payload.fixture_turns[0].result.evidence_verification.candidate_sha256 = "9".repeat(64);
     },

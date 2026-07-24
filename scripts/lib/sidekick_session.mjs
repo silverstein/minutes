@@ -644,13 +644,13 @@ export class SidekickSession {
           }
           if (
             invocation.mode === "foreground" &&
-            verdict.reason_code === "incomplete_material_consequence" &&
             invocation.completenessRetry === 0
           ) {
             return this.#restartForCompleteness(
               invocation,
               result,
               verificationTotalMs,
+              verdict.reason_code,
             );
           }
           throw new Error(`Independent evidence verification rejected the response: ${verdict.reason_code}`);
@@ -758,7 +758,12 @@ export class SidekickSession {
     });
   }
 
-  #restartForCompleteness(invocation, result, verificationTotalMs) {
+  #restartForCompleteness(
+    invocation,
+    result,
+    verificationTotalMs,
+    reasonCode = "incomplete_material_consequence",
+  ) {
     if (
       this.stopped ||
       this.active !== invocation ||
@@ -770,17 +775,24 @@ export class SidekickSession {
       return { published: false, stale: true, result };
     }
     this.active = null;
-    this.#record("material_completeness_retry", {
-      invocation: invocation.id,
-      retry: invocation.completenessRetry + 1,
-    });
+    this.#record(
+      reasonCode === "incomplete_material_consequence"
+        ? "material_completeness_retry"
+        : "semantic_verification_retry",
+      {
+        invocation: invocation.id,
+        retry: invocation.completenessRetry + 1,
+        reason_code: reasonCode,
+      },
+    );
     return this.#startInference({
       mode: invocation.mode,
       typedMessage: invocation.typedMessage,
       freshnessRetry: invocation.freshnessRetry,
       completenessRetry: invocation.completenessRetry + 1,
-      policyFeedback:
-        "The prior candidate omitted a relevant explicitly evidenced material consequence required by the user's request. Re-read the bounded evidence and produce a complete answer without inventing or broadening terms.",
+      policyFeedback: reasonCode === "incomplete_material_consequence"
+        ? "The prior candidate omitted a relevant explicitly evidenced material consequence required by the user's request. Re-read the bounded evidence and produce a complete answer without inventing or broadening terms."
+        : "The prior candidate did not pass independent evidence verification. Re-read the exact bounded evidence, recompute every material claim, remove unsupported or contradictory statements, and answer the user's request fully without inventing facts.",
       carriedTotalMs:
         invocation.carriedTotalMs +
         (result.totalMs ?? 0) +

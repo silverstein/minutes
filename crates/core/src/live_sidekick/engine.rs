@@ -1383,10 +1383,20 @@ impl LiveSidekickEngine {
                 self.restart_for_fresh_evidence(active, result.total_ms);
                 return;
             }
-            if verdict.reason_code == EvidenceVerificationReason::IncompleteMaterialConsequence
-                && matches!(active.work, SidekickWork::Foreground { .. })
+            if matches!(active.work, SidekickWork::Foreground { .. })
                 && active.completeness_retries == 0
             {
+                active.policy_feedback = Some(
+                    match verdict.reason_code {
+                        EvidenceVerificationReason::IncompleteMaterialConsequence => {
+                            "The prior candidate omitted a relevant explicitly evidenced material consequence required by the user's request. Re-read the bounded evidence and produce a complete answer without inventing or broadening terms."
+                        }
+                        _ => {
+                            "The prior candidate did not pass independent evidence verification. Re-read the exact bounded evidence, recompute every material claim, remove unsupported or contradictory statements, and answer the user's request fully without inventing facts."
+                        }
+                    }
+                    .into(),
+                );
                 let retry_generation_result = generation_result.clone();
                 self.restart_for_material_completeness(
                     active,
@@ -2768,6 +2778,60 @@ mod tests {
     }
 
     #[test]
+    fn unsupported_foreground_candidate_gets_one_fresh_grounded_retry() {
+        let backend = FakeBackend::default();
+        {
+            let mut state = lock(&backend.state);
+            state
+                .verification_verdicts
+                .push_back(EvidenceVerificationVerdict {
+                    decision: EvidenceVerificationDecision::Reject,
+                    reason_code: EvidenceVerificationReason::UnsupportedFact,
+                });
+            state
+                .verification_verdicts
+                .push_back(EvidenceVerificationVerdict {
+                    decision: EvidenceVerificationDecision::Allow,
+                    reason_code: EvidenceVerificationReason::Supported,
+                });
+        }
+        let mut engine = engine(backend.clone());
+        observe(
+            &mut engine,
+            "decision",
+            "The team approved a staged rollout.",
+        );
+        engine.send_user("What was approved?").unwrap();
+        backend.complete(
+            0,
+            speak(&["decision"], "The team approved a blanket rollout."),
+        );
+        assert!(engine.has_active_turn());
+        {
+            let state = lock(&backend.state);
+            assert_eq!(state.turns.len(), 2);
+            assert!(state.turns[1]
+                .request
+                .policy_feedback
+                .as_deref()
+                .unwrap()
+                .contains("did not pass independent evidence verification"));
+        }
+
+        backend.complete(
+            1,
+            speak(&["decision"], "The team approved a staged rollout."),
+        );
+        let publications = engine.take_publications();
+        assert_eq!(publications.len(), 1);
+        assert_eq!(
+            publications[0].candidate.text.as_deref(),
+            Some("The team approved a staged rollout.")
+        );
+        assert_eq!(lock(&backend.state).verification_turns_started, 2);
+    }
+
+    #[test]
     fn confidence_gate_without_human_disposition_retries_before_model_verification() {
         let backend = FakeBackend::default();
         let mut engine = engine(backend.clone());
@@ -3001,17 +3065,29 @@ mod tests {
     #[test]
     fn independent_verifier_blocks_real_but_irrelevant_receipt_laundering() {
         let backend = FakeBackend::default();
-        lock(&backend.state)
-            .verification_verdicts
-            .push_back(EvidenceVerificationVerdict {
+        lock(&backend.state).verification_verdicts.extend([
+            EvidenceVerificationVerdict {
                 decision: EvidenceVerificationDecision::Reject,
                 reason_code: EvidenceVerificationReason::UnsupportedFact,
-            });
+            },
+            EvidenceVerificationVerdict {
+                decision: EvidenceVerificationDecision::Reject,
+                reason_code: EvidenceVerificationReason::UnsupportedFact,
+            },
+        ]);
         let mut engine = engine(backend.clone());
         observe(&mut engine, "weather", "Nice weather today.");
         let turn_id = engine.send_user("What did they approve?").unwrap();
         backend.complete(
             0,
+            speak(
+                &["weather"],
+                "They approved a one million dollar commitment.",
+            ),
+        );
+        assert!(engine.has_active_turn());
+        backend.complete(
+            1,
             speak(
                 &["weather"],
                 "They approved a one million dollar commitment.",

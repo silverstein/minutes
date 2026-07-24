@@ -138,7 +138,9 @@ export function evaluateNativeSidekickAcceptance(payload, runtime) {
       (turn) => turn.reasoning_session_correlation === persistentCorrelation,
     );
   const freshVerifierPerTurn =
-    payload?.verifier_sessions_started === turns.length &&
+    Number.isInteger(payload?.verifier_sessions_started) &&
+    payload.verifier_sessions_started >= turns.length &&
+    payload.verifier_sessions_started <= turns.length * 2 &&
     payload?.verifier_provider === "codex-app-server" &&
     payload?.verifier_model === CODEX_VERIFIER_MODEL &&
     payload?.verifier_privacy === "cloud" &&
@@ -233,7 +235,7 @@ export function evaluateNativeSidekickAcceptance(payload, runtime) {
     check(
       "fresh_independent_verifier_per_turn",
       freshVerifierPerTurn,
-      "Each published candidate must carry an allow/supported receipt from its own one-time verifier, with no synchronous future-session prewarm blocking publication.",
+      "Each published candidate must carry an allow/supported receipt from its own one-time verifier; at most one fail-closed verification recovery is allowed per visible turn.",
     ),
   ];
   const latencyChecks = [

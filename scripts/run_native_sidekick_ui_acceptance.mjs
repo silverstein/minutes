@@ -298,7 +298,9 @@ export function evaluateNativeSidekickUiAcceptance(payload, runtime) {
     ),
     check(
       "fresh_independent_verifier_receipt_per_visible_turn",
-      payload?.sidekick?.verifier_sessions_started === turns.length &&
+      Number.isInteger(payload?.sidekick?.verifier_sessions_started) &&
+        payload.sidekick.verifier_sessions_started >= turns.length &&
+        payload.sidekick.verifier_sessions_started <= turns.length * 2 &&
         payload?.sidekick?.verifier_requested_contract?.provider === "codex-app-server" &&
         payload?.sidekick?.verifier_requested_contract?.model === CODEX_VERIFIER_MODEL &&
         payload?.sidekick?.verifier_requested_contract?.privacy === "cloud" &&
@@ -313,7 +315,7 @@ export function evaluateNativeSidekickUiAcceptance(payload, runtime) {
           )) &&
         new Set(turns.map((turn) =>
           turn.candidate_evidence.verifierSessionCorrelation)).size === turns.length,
-      "Every painted candidate must be digest-bound to an allow/supported verdict from its own one-time verifier session, without synchronously prewarming an unrelated future slot.",
+      "Every painted candidate must be digest-bound to an allow/supported verdict from its own one-time verifier session; at most one fail-closed verification recovery is allowed per visible turn.",
     ),
     check(
       "trusted_host_provider_copy_unchanged_pre_post",

@@ -542,15 +542,27 @@ test("foreground factual claims require exact-session evidence provenance", asyn
   assert.match(completed.error, /requires exact-session evidence provenance/);
 });
 
-test("a real but irrelevant receipt cannot launder an invented factual claim", async () => {
+test("a real but irrelevant receipt triggers one fresh grounded retry", async () => {
   const backend = new FakeBackend();
-  backend.verificationVerdict = {
-    allowed: false,
-    decision: "reject",
-    reason_code: "unsupported_fact",
-    latency: { total_ms: 5 },
-  };
-  const session = new SidekickSession({ backend, captureSessionId: "capture-a" });
+  const verifier = new SequenceEvidenceVerifier([
+    {
+      allowed: false,
+      decision: "reject",
+      reason_code: "unsupported_fact",
+      latency: { total_ms: 5 },
+    },
+    {
+      allowed: true,
+      decision: "allow",
+      reason_code: "supported",
+      latency: { total_ms: 7 },
+    },
+  ]);
+  const session = new SidekickSession({
+    backend,
+    evidenceVerifier: verifier,
+    captureSessionId: "capture-a",
+  });
   await session.start();
   session.observeTranscript({
     id: "weather",
@@ -566,10 +578,25 @@ test("a real but irrelevant receipt cannot launder an invented factual claim", a
       evidence_ids: ["weather"],
     }),
   );
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(backend.turns.length, 2);
+  assert.match(
+    backend.turns[1].params.input[2].text,
+    /did not pass independent evidence verification/,
+  );
+  backend.turns[1].pending.resolve(
+    result({
+      decision: "speak",
+      text: "The evidence only says the weather was nice.",
+      evidence_ids: ["weather"],
+    }),
+  );
   const completed = await completion;
-  assert.equal(completed.invalid, true);
-  assert.match(completed.error, /Independent evidence verification rejected/);
-  assert.equal(backend.verifications[0].transcriptEvidence[0].id, "weather");
+  assert.equal(completed.published, true);
+  assert.equal(
+    session.trace.filter((item) => item.type === "semantic_verification_retry").length,
+    1,
+  );
 });
 
 test("an incomplete foreground answer gets one policy-guided retry before publication", async () => {

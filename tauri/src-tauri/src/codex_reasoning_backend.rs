@@ -17,8 +17,11 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, SyncSender};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::JoinHandle;
@@ -62,6 +65,7 @@ pub struct CodexReasoningBackend {
     model: String,
     effort: String,
     deliberate_effort: String,
+    connection: Arc<Mutex<Option<Arc<CodexAppServerConnection>>>>,
     _isolated_dir: Option<Arc<tempfile::TempDir>>,
 }
 
@@ -79,6 +83,7 @@ impl CodexReasoningBackend {
             model: codex_realtime_model().into(),
             effort: codex_realtime_effort().into(),
             deliberate_effort: codex_realtime_effort().into(),
+            connection: Arc::new(Mutex::new(None)),
             _isolated_dir: None,
         }
     }
@@ -197,6 +202,7 @@ impl CodexReasoningBackend {
             model: model.into(),
             effort: effort.into(),
             deliberate_effort: deliberate_effort.into(),
+            connection: Arc::new(Mutex::new(None)),
             _isolated_dir: Some(isolated_dir),
         })
     }
@@ -224,7 +230,83 @@ impl CodexReasoningBackend {
                 command.env(key, value);
             }
         }
+        #[cfg(unix)]
+        command.process_group(0);
         command
+    }
+
+    fn app_server(&self) -> Result<Arc<CodexAppServerConnection>, ReasoningError> {
+        let mut slot = lock_unpoisoned(&self.connection);
+        if let Some(connection) = slot.as_ref().filter(|connection| !connection.is_closed()) {
+            return Ok(Arc::clone(connection));
+        }
+
+        let mut command = self.command();
+        let mut child = command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|error| {
+                ReasoningError::new(
+                    ReasoningErrorKind::Unavailable,
+                    format!("Could not start Codex: {error}"),
+                    true,
+                )
+            })?;
+        let stdin = child.stdin.take().ok_or_else(|| {
+            ReasoningError::new(
+                ReasoningErrorKind::Protocol,
+                "Codex app-server did not expose stdin",
+                false,
+            )
+        })?;
+        let stdout = child.stdout.take().ok_or_else(|| {
+            ReasoningError::new(
+                ReasoningErrorKind::Protocol,
+                "Codex app-server did not expose stdout",
+                false,
+            )
+        })?;
+        let stderr = child.stderr.take().ok_or_else(|| {
+            ReasoningError::new(
+                ReasoningErrorKind::Protocol,
+                "Codex app-server did not expose stderr",
+                false,
+            )
+        })?;
+
+        let stdin = Arc::new(Mutex::new(stdin));
+        let child = Arc::new(Mutex::new(Some(child)));
+        let state = Arc::new(Mutex::new(ProtocolState::default()));
+        let stderr_tail = Arc::new(Mutex::new(String::new()));
+        let closed = Arc::new(AtomicBool::new(false));
+        let reader = spawn_protocol_reader(
+            stdout,
+            Arc::clone(&stdin),
+            Arc::clone(&state),
+            Arc::clone(&stderr_tail),
+            Arc::clone(&closed),
+            Arc::clone(&child),
+        );
+        let stderr_reader = spawn_stderr_reader(stderr, Arc::clone(&stderr_tail));
+        let connection = Arc::new(CodexAppServerConnection {
+            stdin,
+            child,
+            state,
+            _stderr_tail: stderr_tail,
+            reader: Mutex::new(Some(reader)),
+            stderr_reader: Mutex::new(Some(stderr_reader)),
+            next_request_id: AtomicU64::new(1),
+            closed,
+            cleanup_started: AtomicBool::new(false),
+        });
+        if let Err(error) = connection.initialize() {
+            connection.close();
+            return Err(error);
+        }
+        *slot = Some(Arc::clone(&connection));
+        Ok(connection)
     }
 }
 
@@ -265,51 +347,7 @@ impl PersistentReasoningBackend for CodexReasoningBackend {
         config: ReasoningSessionConfig,
     ) -> Result<Box<dyn PersistentReasoningSession>, ReasoningError> {
         config.validate()?;
-        let mut command = self.command();
-        let mut child = command
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|error| {
-                ReasoningError::new(
-                    ReasoningErrorKind::Unavailable,
-                    format!("Could not start Codex: {error}"),
-                    true,
-                )
-            })?;
-        let stdin = child.stdin.take().ok_or_else(|| {
-            ReasoningError::new(
-                ReasoningErrorKind::Protocol,
-                "Codex app-server did not expose stdin",
-                false,
-            )
-        })?;
-        let stdout = child.stdout.take().ok_or_else(|| {
-            ReasoningError::new(
-                ReasoningErrorKind::Protocol,
-                "Codex app-server did not expose stdout",
-                false,
-            )
-        })?;
-        let stderr = child.stderr.take().ok_or_else(|| {
-            ReasoningError::new(
-                ReasoningErrorKind::Protocol,
-                "Codex app-server did not expose stderr",
-                false,
-            )
-        })?;
-
-        let stdin = Arc::new(Mutex::new(stdin));
-        let state = Arc::new(Mutex::new(ProtocolState::default()));
-        let stderr_tail = Arc::new(Mutex::new(String::new()));
-        let reader = spawn_protocol_reader(
-            stdout,
-            Arc::clone(&stdin),
-            Arc::clone(&state),
-            Arc::clone(&stderr_tail),
-        );
-        let stderr_reader = spawn_stderr_reader(stderr, Arc::clone(&stderr_tail));
+        let connection = self.app_server()?;
         let mut session = CodexReasoningSession {
             id: ReasoningSessionId::new("pending-codex-thread"),
             config,
@@ -317,13 +355,7 @@ impl PersistentReasoningBackend for CodexReasoningBackend {
             effort: self.effort.clone(),
             deliberate_effort: self.deliberate_effort.clone(),
             cwd: self.cwd.clone(),
-            stdin,
-            child: Some(child),
-            state,
-            _stderr_tail: stderr_tail,
-            reader: Some(reader),
-            stderr_reader: Some(stderr_reader),
-            next_request_id: 1,
+            connection,
             closed: false,
         };
         session.initialize()?;
@@ -365,25 +397,20 @@ struct ProtocolState {
     turns: HashMap<String, ActiveTurn>,
 }
 
-pub struct CodexReasoningSession {
-    id: ReasoningSessionId,
-    config: ReasoningSessionConfig,
-    model: String,
-    effort: String,
-    deliberate_effort: String,
-    cwd: PathBuf,
+struct CodexAppServerConnection {
     stdin: Arc<Mutex<ChildStdin>>,
-    child: Option<Child>,
+    child: Arc<Mutex<Option<Child>>>,
     state: Arc<Mutex<ProtocolState>>,
     _stderr_tail: Arc<Mutex<String>>,
-    reader: Option<JoinHandle<()>>,
-    stderr_reader: Option<JoinHandle<()>>,
-    next_request_id: u64,
-    closed: bool,
+    reader: Mutex<Option<JoinHandle<()>>>,
+    stderr_reader: Mutex<Option<JoinHandle<()>>>,
+    next_request_id: AtomicU64,
+    closed: Arc<AtomicBool>,
+    cleanup_started: AtomicBool,
 }
 
-impl CodexReasoningSession {
-    fn initialize(&mut self) -> Result<(), ReasoningError> {
+impl CodexAppServerConnection {
+    fn initialize(&self) -> Result<(), ReasoningError> {
         self.request(
             "initialize",
             json!({
@@ -396,7 +423,141 @@ impl CodexReasoningSession {
             }),
             PendingKind::Ordinary,
         )?;
-        self.notify("initialized", json!({}))?;
+        self.notify("initialized", json!({}))
+    }
+
+    fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::Acquire)
+    }
+
+    fn request(
+        &self,
+        method: &str,
+        params: Value,
+        kind: PendingKind,
+    ) -> Result<Value, ReasoningError> {
+        if self.is_closed() {
+            return Err(ReasoningError::new(
+                ReasoningErrorKind::Unavailable,
+                "Codex app-server connection is closed",
+                true,
+            ));
+        }
+        let id = self
+            .next_request_id
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                current.checked_add(1)
+            })
+            .map_err(|_| {
+                ReasoningError::new(
+                    ReasoningErrorKind::Protocol,
+                    "Codex request id exhausted",
+                    false,
+                )
+            })?;
+        let (sender, receiver) = mpsc::sync_channel(1);
+        lock_unpoisoned(&self.state).pending.insert(
+            id,
+            PendingRequest {
+                method: method.into(),
+                kind,
+                sender,
+            },
+        );
+        if let Err(error) = self.write_message(&json!({
+            "method": method,
+            "id": id,
+            "params": params,
+        })) {
+            lock_unpoisoned(&self.state).pending.remove(&id);
+            self.close();
+            return Err(error);
+        }
+        match receiver.recv_timeout(REQUEST_TIMEOUT) {
+            Ok(result) => result,
+            Err(_) => {
+                lock_unpoisoned(&self.state).pending.remove(&id);
+                let error = ReasoningError::new(
+                    ReasoningErrorKind::Timeout,
+                    format!("Codex {method} timed out"),
+                    true,
+                );
+                self.close();
+                Err(error)
+            }
+        }
+    }
+
+    fn notify(&self, method: &str, params: Value) -> Result<(), ReasoningError> {
+        self.write_message(&json!({ "method": method, "params": params }))
+    }
+
+    fn write_message(&self, message: &Value) -> Result<(), ReasoningError> {
+        write_protocol_message(&self.stdin, message)
+    }
+
+    fn close(&self) {
+        self.closed.store(true, Ordering::Release);
+        if self.cleanup_started.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        terminate_shared_app_server(&self.child);
+        if let Some(reader) = lock_unpoisoned(&self.reader).take() {
+            let _ = reader.join();
+        }
+        if let Some(reader) = lock_unpoisoned(&self.stderr_reader).take() {
+            let _ = reader.join();
+        }
+    }
+}
+
+fn terminate_shared_app_server(child: &Mutex<Option<Child>>) {
+    if let Some(mut child) = lock_unpoisoned(child).take() {
+        terminate_app_server_process_group(&mut child);
+    }
+}
+
+fn terminate_app_server_process_group(child: &mut Child) {
+    #[cfg(unix)]
+    {
+        if let Ok(process_group) = i32::try_from(child.id()) {
+            // The wrapper and native app-server share this private group. A
+            // direct Child::kill can leave the native descendant holding the
+            // JSONL pipes forever, which makes reader teardown hang.
+            unsafe {
+                libc::kill(-process_group, libc::SIGKILL);
+            }
+        } else {
+            let _ = child.kill();
+        }
+        let _ = child.wait();
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+}
+
+impl Drop for CodexAppServerConnection {
+    fn drop(&mut self) {
+        self.close();
+    }
+}
+
+pub struct CodexReasoningSession {
+    id: ReasoningSessionId,
+    config: ReasoningSessionConfig,
+    model: String,
+    effort: String,
+    deliberate_effort: String,
+    cwd: PathBuf,
+    connection: Arc<CodexAppServerConnection>,
+    closed: bool,
+}
+
+impl CodexReasoningSession {
+    fn initialize(&mut self) -> Result<(), ReasoningError> {
         let service_tier = match self.config.latency_class {
             ReasoningLatencyClass::Realtime => "fast",
             ReasoningLatencyClass::Deliberate => "flex",
@@ -444,52 +605,7 @@ impl CodexReasoningSession {
                 false,
             ));
         }
-        let id = self.next_request_id;
-        self.next_request_id = self.next_request_id.checked_add(1).ok_or_else(|| {
-            ReasoningError::new(
-                ReasoningErrorKind::Protocol,
-                "Codex request id exhausted",
-                false,
-            )
-        })?;
-        let (sender, receiver) = mpsc::sync_channel(1);
-        lock_unpoisoned(&self.state).pending.insert(
-            id,
-            PendingRequest {
-                method: method.into(),
-                kind,
-                sender,
-            },
-        );
-        if let Err(error) = self.write_message(&json!({
-            "method": method,
-            "id": id,
-            "params": params,
-        })) {
-            lock_unpoisoned(&self.state).pending.remove(&id);
-            return Err(error);
-        }
-        match receiver.recv_timeout(REQUEST_TIMEOUT) {
-            Ok(result) => result,
-            Err(_) => {
-                lock_unpoisoned(&self.state).pending.remove(&id);
-                let error = ReasoningError::new(
-                    ReasoningErrorKind::Timeout,
-                    format!("Codex {method} timed out"),
-                    true,
-                );
-                self.close();
-                Err(error)
-            }
-        }
-    }
-
-    fn notify(&self, method: &str, params: Value) -> Result<(), ReasoningError> {
-        self.write_message(&json!({ "method": method, "params": params }))
-    }
-
-    fn write_message(&self, message: &Value) -> Result<(), ReasoningError> {
-        write_protocol_message(&self.stdin, message)
+        self.connection.request(method, params, kind)
     }
 
     fn input_for(request: &ReasoningTurnRequest) -> Vec<Value> {
@@ -705,17 +821,6 @@ impl PersistentReasoningSession for CodexReasoningSession {
             return;
         }
         self.closed = true;
-        if let Some(child) = self.child.as_mut() {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
-        self.child = None;
-        if let Some(reader) = self.reader.take() {
-            let _ = reader.join();
-        }
-        if let Some(reader) = self.stderr_reader.take() {
-            let _ = reader.join();
-        }
     }
 }
 
@@ -730,6 +835,8 @@ fn spawn_protocol_reader(
     stdin: Arc<Mutex<ChildStdin>>,
     state: Arc<Mutex<ProtocolState>>,
     stderr_tail: Arc<Mutex<String>>,
+    closed: Arc<AtomicBool>,
+    child: Arc<Mutex<Option<Child>>>,
 ) -> JoinHandle<()> {
     std::thread::spawn(move || {
         for line in BufReader::new(stdout).lines() {
@@ -738,12 +845,16 @@ fn spawn_protocol_reader(
                     Ok(message) => {
                         if let Some(response) = handle_message(message, &state) {
                             if let Err(error) = write_protocol_message(&stdin, &response) {
+                                closed.store(true, Ordering::Release);
+                                terminate_shared_app_server(&child);
                                 fail_protocol(&state, error);
                                 return;
                             }
                         }
                     }
                     Err(error) => {
+                        closed.store(true, Ordering::Release);
+                        terminate_shared_app_server(&child);
                         fail_protocol(
                             &state,
                             ReasoningError::new(
@@ -756,6 +867,8 @@ fn spawn_protocol_reader(
                     }
                 },
                 Err(error) => {
+                    closed.store(true, Ordering::Release);
+                    terminate_shared_app_server(&child);
                     fail_protocol(
                         &state,
                         ReasoningError::new(
@@ -774,6 +887,7 @@ fn spawn_protocol_reader(
         } else {
             format!(": {detail}")
         };
+        closed.store(true, Ordering::Release);
         fail_protocol(
             &state,
             ReasoningError::new(
@@ -1044,19 +1158,22 @@ mod tests {
 const readline = require('node:readline');
 const rl = readline.createInterface({ input: process.stdin });
 function send(value) { process.stdout.write(JSON.stringify(value) + '\n'); }
+let threadCounter = 0;
+let turnCounter = 0;
 rl.on('line', (line) => {
   const msg = JSON.parse(line);
   if (msg.method === 'initialize') send({ id: msg.id, result: { userAgent: 'fake' } });
   else if (msg.method === 'thread/start') {
     if (msg.params.model !== 'gpt-5.6-terra') send({ id: msg.id, error: { code: -32602, message: 'wrong model' } });
-    else send({ id: msg.id, result: { thread: { id: 'thread-1' } } });
+    else send({ id: msg.id, result: { thread: { id: `thread-${++threadCounter}` } } });
   }
   else if (msg.method === 'turn/start') {
+    const turnId = `turn-${++turnCounter}`;
     if (msg.params.effort !== 'none') send({ id: msg.id, error: { code: -32602, message: 'wrong effort' } });
-    else send({ id: msg.id, result: { turn: { id: 'turn-1' } } });
-    send({ method: 'item/agentMessage/delta', params: { turnId: 'turn-1', delta: '{"decision":' } });
-    send({ method: 'item/agentMessage/delta', params: { turnId: 'turn-1', delta: '"silent"}' } });
-    send({ method: 'turn/completed', params: { turn: { id: 'turn-1', status: 'completed' } } });
+    else send({ id: msg.id, result: { turn: { id: turnId } } });
+    send({ method: 'item/agentMessage/delta', params: { turnId, delta: '{"decision":' } });
+    send({ method: 'item/agentMessage/delta', params: { turnId, delta: '"silent"}' } });
+    send({ method: 'turn/completed', params: { turn: { id: turnId, status: 'completed' } } });
   } else if (msg.method === 'turn/steer') send({ id: msg.id, result: { turnId: msg.params.expectedTurnId } });
   else if (msg.method === 'turn/interrupt') send({ id: msg.id, result: {} });
 });
@@ -1220,6 +1337,120 @@ rl.on('line', (line) => {
             }
             event => panic!("failed turn was misclassified: {event:?}"),
         }
+    }
+
+    #[test]
+    fn fresh_reasoning_threads_reuse_one_initialized_app_server_connection() {
+        let Ok(node) = which::which("node") else {
+            return;
+        };
+        let backend = CodexReasoningBackend::new(
+            node,
+            vec!["-e".into(), FAKE_SERVER.into()],
+            std::env::temp_dir(),
+        );
+        let mut first = backend.start_session(config()).expect("first fresh thread");
+        assert_eq!(first.id().as_str(), "thread-1");
+        first.close();
+
+        let mut second = backend
+            .start_session(config())
+            .expect("second fresh thread");
+        assert_eq!(
+            second.id().as_str(),
+            "thread-2",
+            "a fresh thread must come from the already-initialized app-server instead of a second process"
+        );
+        second.close();
+    }
+
+    #[test]
+    fn dead_protocol_connection_is_killed_and_replaced_before_the_next_session() {
+        let Ok(node) = which::which("node") else {
+            return;
+        };
+        let invalid_after_thread = r#"
+const readline = require('node:readline');
+const rl = readline.createInterface({ input: process.stdin });
+function send(value) { process.stdout.write(JSON.stringify(value) + '\n'); }
+rl.on('line', (line) => {
+  const msg = JSON.parse(line);
+  if (msg.method === 'initialize') send({ id: msg.id, result: { userAgent: 'fake' } });
+  else if (msg.method === 'thread/start') {
+    send({ id: msg.id, result: { thread: { id: 'thread-before-protocol-failure' } } });
+    process.stdout.write('{invalid json}\n');
+    setInterval(() => {}, 1000);
+  }
+});
+"#;
+        let backend = CodexReasoningBackend::new(
+            node,
+            vec!["-e".into(), invalid_after_thread.into()],
+            std::env::temp_dir(),
+        );
+        let mut first = backend
+            .start_session(config())
+            .expect("initial thread response arrives before protocol failure");
+        let first_connection = Arc::clone(
+            lock_unpoisoned(&backend.connection)
+                .as_ref()
+                .expect("connection must be cached"),
+        );
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !first_connection.is_closed() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            first_connection.is_closed(),
+            "reader failure must make the cached connection unavailable"
+        );
+        assert!(
+            lock_unpoisoned(&first_connection.child).is_none(),
+            "reader failure must kill the still-running invalid app-server"
+        );
+        first.close();
+
+        let mut second = backend
+            .start_session(config())
+            .expect("a fresh app-server must replace the dead connection");
+        let second_connection = Arc::clone(
+            lock_unpoisoned(&backend.connection)
+                .as_ref()
+                .expect("replacement connection must be cached"),
+        );
+        assert!(
+            !Arc::ptr_eq(&first_connection, &second_connection),
+            "a dead app-server connection must never be reused"
+        );
+        second.close();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn app_server_teardown_kills_pipe_owning_wrapper_descendants() {
+        let Ok(node) = which::which("node") else {
+            return;
+        };
+        let server_with_descendant = format!(
+            "require('node:child_process').spawn(process.execPath, ['-e', 'setInterval(() => {{}}, 1000)'], {{ stdio: 'inherit' }});\n{FAKE_SERVER}"
+        );
+        let backend = CodexReasoningBackend::new(
+            node,
+            vec!["-e".into(), server_with_descendant],
+            std::env::temp_dir(),
+        );
+        let mut session = backend
+            .start_session(config())
+            .expect("start wrapped fake Codex session");
+        session.close();
+        drop(session);
+
+        let teardown_started = Instant::now();
+        drop(backend);
+        assert!(
+            teardown_started.elapsed() < Duration::from_secs(2),
+            "closing a wrapper process must not wait on a descendant that inherited the protocol pipes"
+        );
     }
 
     #[test]

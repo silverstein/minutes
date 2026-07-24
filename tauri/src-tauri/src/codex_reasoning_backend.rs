@@ -8,7 +8,7 @@
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use minutes_core::live_sidekick::{
     PersistentReasoningBackend, PersistentReasoningSession, ReasoningBackendDescriptor,
-    ReasoningError, ReasoningErrorKind, ReasoningEventSink, ReasoningLatencyClass,
+    ReasoningDepth, ReasoningError, ReasoningErrorKind, ReasoningEventSink, ReasoningLatencyClass,
     ReasoningOutputContract, ReasoningPrivacyClass, ReasoningSessionConfig, ReasoningSessionId,
     ReasoningStreamEvent, ReasoningTurnId, ReasoningTurnKind, ReasoningTurnRequest,
     ReasoningTurnResult,
@@ -44,6 +44,10 @@ fn codex_verifier_effort() -> &'static str {
     include_str!("../../../resources/live_sidekick/codex_verifier_effort.txt").trim()
 }
 
+fn codex_verifier_adjudication_effort() -> &'static str {
+    include_str!("../../../resources/live_sidekick/codex_verifier_adjudication_effort.txt").trim()
+}
+
 fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|error| error.into_inner())
 }
@@ -57,6 +61,7 @@ pub struct CodexReasoningBackend {
     codex_home: PathBuf,
     model: String,
     effort: String,
+    deliberate_effort: String,
     _isolated_dir: Option<Arc<tempfile::TempDir>>,
 }
 
@@ -73,6 +78,7 @@ impl CodexReasoningBackend {
             codex_home,
             model: codex_realtime_model().into(),
             effort: codex_realtime_effort().into(),
+            deliberate_effort: codex_realtime_effort().into(),
             _isolated_dir: None,
         }
     }
@@ -89,6 +95,7 @@ impl CodexReasoningBackend {
             configured_mcp_servers,
             codex_realtime_model(),
             codex_realtime_effort(),
+            codex_realtime_effort(),
         )
     }
 
@@ -101,6 +108,7 @@ impl CodexReasoningBackend {
             configured_mcp_servers,
             codex_verifier_model(),
             codex_verifier_effort(),
+            codex_verifier_adjudication_effort(),
         )
     }
 
@@ -109,6 +117,7 @@ impl CodexReasoningBackend {
         _configured_mcp_servers: impl IntoIterator<Item = String>,
         model: &str,
         effort: &str,
+        deliberate_effort: &str,
     ) -> Result<Self, ReasoningError> {
         let isolated_dir = Arc::new(tempfile::tempdir().map_err(|error| {
             ReasoningError::new(
@@ -187,6 +196,7 @@ impl CodexReasoningBackend {
             codex_home,
             model: model.into(),
             effort: effort.into(),
+            deliberate_effort: deliberate_effort.into(),
             _isolated_dir: Some(isolated_dir),
         })
     }
@@ -305,6 +315,7 @@ impl PersistentReasoningBackend for CodexReasoningBackend {
             config,
             model: self.model.clone(),
             effort: self.effort.clone(),
+            deliberate_effort: self.deliberate_effort.clone(),
             cwd: self.cwd.clone(),
             stdin,
             child: Some(child),
@@ -359,6 +370,7 @@ pub struct CodexReasoningSession {
     config: ReasoningSessionConfig,
     model: String,
     effort: String,
+    deliberate_effort: String,
     cwd: PathBuf,
     stdin: Arc<Mutex<ChildStdin>>,
     child: Option<Child>,
@@ -623,7 +635,10 @@ impl PersistentReasoningSession for CodexReasoningSession {
                 "input": Self::input_for(&request),
                 "outputSchema": Self::output_schema_for(request.output_contract, request.kind),
                 "serviceTier": service_tier,
-                "effort": self.effort.as_str(),
+                "effort": match request.reasoning_depth {
+                    ReasoningDepth::Realtime => self.effort.as_str(),
+                    ReasoningDepth::Deliberate => self.deliberate_effort.as_str(),
+                },
                 "environments": []
             }),
             PendingKind::TurnStart {
@@ -1064,6 +1079,7 @@ rl.on('line', (line) => {
     fn request() -> ReasoningTurnRequest {
         ReasoningTurnRequest {
             kind: ReasoningTurnKind::Background,
+            reasoning_depth: ReasoningDepth::Realtime,
             invocation: InvocationIdentity {
                 sequence: 1,
                 source_policy_generation: 0,
@@ -1563,6 +1579,7 @@ rl.on('line', (line) => {
         assert_eq!(verifier.descriptor().model, "gpt-5.6-terra");
         assert_eq!(backend.effort, "none");
         assert_eq!(verifier.effort, "low");
+        assert_eq!(verifier.deliberate_effort, "medium");
         assert!(verifier
             .args
             .join(" ")

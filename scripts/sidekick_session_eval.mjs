@@ -14,6 +14,7 @@ import {
 import {
   CODEX_REALTIME_EFFORT,
   CODEX_REALTIME_MODEL,
+  CODEX_VERIFIER_ADJUDICATION_EFFORT,
   CODEX_VERIFIER_EFFORT,
   CODEX_VERIFIER_MODEL,
   CodexAppServerBackend,
@@ -136,6 +137,7 @@ async function runVerifierCalibration({ codex, verifierModel, verifierEffort }) 
       return new CodexAppServerBackend(client, {
         model: verifierModel,
         reasoningEffort: verifierEffort,
+        deliberateReasoningEffort: CODEX_VERIFIER_ADJUDICATION_EFFORT,
       });
     },
   });
@@ -231,6 +233,7 @@ async function runOnce({ fixture, codex, model, verifierModel, effort, verifierE
       return new CodexAppServerBackend(verifierClient, {
         model: verifierModel,
         reasoningEffort: verifierEffort,
+        deliberateReasoningEffort: CODEX_VERIFIER_ADJUDICATION_EFFORT,
       });
     },
   });

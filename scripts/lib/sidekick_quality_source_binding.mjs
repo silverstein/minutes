@@ -18,6 +18,7 @@ const QUALITY_SURFACE_PATHS = Object.freeze([
   "resources/live_sidekick/codex_realtime_effort.txt",
   "resources/live_sidekick/codex_verifier_model.txt",
   "resources/live_sidekick/codex_verifier_effort.txt",
+  "resources/live_sidekick/codex_verifier_adjudication_effort.txt",
   "tauri/src/assets/app-icon.png",
   "scripts/lib/sidekick_provider.mjs",
   "scripts/lib/sidekick_provider_attestation.mjs",

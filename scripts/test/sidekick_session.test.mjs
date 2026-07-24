@@ -599,6 +599,72 @@ test("a real but irrelevant receipt triggers one fresh grounded retry", async ()
   );
 });
 
+test("a repaired foreground candidate gets one deliberate adjudication before suppression", async () => {
+  const backend = new FakeBackend();
+  const verifier = new SequenceEvidenceVerifier([
+    {
+      allowed: false,
+      decision: "reject",
+      reason_code: "unsupported_fact",
+      latency: { total_ms: 5 },
+    },
+    {
+      allowed: false,
+      decision: "reject",
+      reason_code: "unsupported_fact",
+      latency: { total_ms: 7 },
+    },
+    {
+      allowed: true,
+      decision: "allow",
+      reason_code: "supported",
+      latency: { total_ms: 11 },
+    },
+  ]);
+  const publications = [];
+  const session = new SidekickSession({
+    backend,
+    evidenceVerifier: verifier,
+    captureSessionId: "capture-a",
+    onPublish: (item) => publications.push(item),
+  });
+  await session.start();
+  session.observeTranscript({
+    id: "decision",
+    captureSessionId: "capture-a",
+    text: "The team approved a staged rollout.",
+  });
+  const completion = session.sendUser("What was approved?");
+  await new Promise((resolve) => setImmediate(resolve));
+  backend.turns[0].pending.resolve(result({
+    decision: "speak",
+    text: "The team approved a blanket rollout.",
+    evidence_ids: ["decision"],
+  }, { first: 3, total: 20 }));
+  await new Promise((resolve) => setImmediate(resolve));
+  backend.turns[1].pending.resolve(result({
+    decision: "speak",
+    text: "The team approved a staged rollout.",
+    evidence_ids: ["decision"],
+  }, { first: 4, total: 30 }));
+
+  const completed = await completion;
+  assert.equal(completed.published, true);
+  assert.equal(backend.turns.length, 2);
+  assert.equal(verifier.calls.length, 3);
+  assert.equal(verifier.calls[0].reasoningDepth, "realtime");
+  assert.equal(verifier.calls[1].reasoningDepth, "realtime");
+  assert.equal(verifier.calls[2].reasoningDepth, "deliberate");
+  assert.equal(publications[0].latency.first_token_ms, 3);
+  assert.equal(publications[0].latency.total_ms, 73);
+  assert.equal(
+    session.trace.filter(
+      (item) => item.type === "evidence_verification_adjudication",
+    ).length,
+    1,
+  );
+});
+
 test("an incomplete foreground answer gets one policy-guided retry before publication", async () => {
   const backend = new FakeBackend();
   const verifier = new SequenceEvidenceVerifier([

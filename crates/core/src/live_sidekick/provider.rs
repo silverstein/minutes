@@ -144,6 +144,18 @@ pub enum ReasoningLatencyClass {
     Deliberate,
 }
 
+/// Provider-neutral reasoning depth for one turn inside a session.
+///
+/// Minutes can request a more deliberate second opinion without naming a
+/// vendor model or embedding provider-specific effort controls in core.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReasoningDepth {
+    #[default]
+    Realtime,
+    Deliberate,
+}
+
 /// Whether one turn is proactive or directly user-authorized.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -292,6 +304,8 @@ impl BoundedReasoningWindow {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ReasoningTurnRequest {
     pub kind: ReasoningTurnKind,
+    #[serde(default)]
+    pub reasoning_depth: ReasoningDepth,
     pub invocation: InvocationIdentity,
     pub window: BoundedReasoningWindow,
     /// Bounded user-authored corrections and interaction memory owned by
@@ -719,6 +733,7 @@ mod tests {
     fn foreground_requires_typed_user_authority() {
         let request = ReasoningTurnRequest {
             kind: ReasoningTurnKind::Foreground,
+            reasoning_depth: ReasoningDepth::Realtime,
             invocation: invocation(),
             window: window("capture-a"),
             authoritative_memory: Vec::new(),
@@ -737,6 +752,7 @@ mod tests {
     fn background_cannot_smuggle_typed_user_authority() {
         let request = ReasoningTurnRequest {
             kind: ReasoningTurnKind::Background,
+            reasoning_depth: ReasoningDepth::Realtime,
             invocation: invocation(),
             window: window("capture-a"),
             authoritative_memory: Vec::new(),
@@ -774,6 +790,7 @@ mod tests {
     fn rendered_prompt_separates_user_authority_and_hides_unverified_speaker_labels() {
         let request = ReasoningTurnRequest {
             kind: ReasoningTurnKind::Foreground,
+            reasoning_depth: ReasoningDepth::Realtime,
             invocation: invocation(),
             window: window("capture-a"),
             authoritative_memory: Vec::new(),
@@ -804,6 +821,7 @@ mod tests {
         });
         let request = ReasoningTurnRequest {
             kind: ReasoningTurnKind::Foreground,
+            reasoning_depth: ReasoningDepth::Realtime,
             invocation: invocation(),
             window,
             authoritative_memory: Vec::new(),
@@ -839,6 +857,7 @@ mod tests {
     fn combined_serialized_lanes_share_one_budget() {
         let request = ReasoningTurnRequest {
             kind: ReasoningTurnKind::Foreground,
+            reasoning_depth: ReasoningDepth::Realtime,
             invocation: invocation(),
             window: BoundedReasoningWindow {
                 capture_session_id: "capture-a".into(),
@@ -869,6 +888,7 @@ mod tests {
     fn unverified_speaker_tracks_are_stable_distinct_and_anonymous() {
         let mut request = ReasoningTurnRequest {
             kind: ReasoningTurnKind::Foreground,
+            reasoning_depth: ReasoningDepth::Realtime,
             invocation: invocation(),
             window: window("capture-a"),
             authoritative_memory: Vec::new(),
@@ -907,6 +927,7 @@ mod tests {
     fn persistent_session_cannot_cross_capture_or_policy_epoch() {
         let mut request = ReasoningTurnRequest {
             kind: ReasoningTurnKind::Foreground,
+            reasoning_depth: ReasoningDepth::Realtime,
             invocation: invocation(),
             window: window("capture-a"),
             authoritative_memory: Vec::new(),
@@ -946,6 +967,7 @@ mod tests {
         };
         let request = ReasoningTurnRequest {
             kind: ReasoningTurnKind::Foreground,
+            reasoning_depth: ReasoningDepth::Realtime,
             invocation: invocation(),
             window: window("capture-a"),
             authoritative_memory: Vec::new(),

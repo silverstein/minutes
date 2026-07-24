@@ -4,6 +4,7 @@ import {
   assertReasoningBackend,
   CODEX_REALTIME_EFFORT,
   CODEX_REALTIME_MODEL,
+  CODEX_VERIFIER_ADJUDICATION_EFFORT,
   CODEX_VERIFIER_EFFORT,
   CODEX_VERIFIER_MODEL,
   CodexAppServerBackend,
@@ -61,6 +62,7 @@ test("the Codex adapter contains protocol-specific names behind the generic back
   const backend = new CodexAppServerBackend(client, {
     model: "gpt-sidekick",
     reasoningEffort: "minimal",
+    deliberateReasoningEffort: "medium",
   });
   assertReasoningBackend(backend);
   const session = await backend.startSession({
@@ -91,6 +93,13 @@ test("the Codex adapter contains protocol-specific names behind the generic back
     firstTokenMs: 12,
     totalMs: 34,
   });
+  const deliberateTurn = await backend.startTurn({
+    input: [{ type: "text", text: "adjudicate" }],
+    outputSchema: { type: "object" },
+    reasoningDepth: "deliberate",
+  });
+  assert.equal(client.turn.effort, "medium");
+  await deliberateTurn.completion;
 
   await backend.steerTurn({ turnId: "turn-a", input: [{ type: "text", text: "steer" }] });
   assert.equal(client.steer.threadId, "thread-a");
@@ -116,6 +125,7 @@ test("the Codex adapter defaults to the shipped realtime model", async () => {
   assert.equal(CODEX_REALTIME_MODEL, "gpt-5.6-terra");
   assert.equal(CODEX_VERIFIER_MODEL, "gpt-5.6-terra");
   assert.equal(CODEX_VERIFIER_EFFORT, "low");
+  assert.equal(CODEX_VERIFIER_ADJUDICATION_EFFORT, "medium");
   assert.equal(CODEX_REALTIME_EFFORT, "none");
   assert.equal(client.started.model, CODEX_REALTIME_MODEL);
   const turn = await backend.startTurn({ input: [], outputSchema: { type: "object" } });

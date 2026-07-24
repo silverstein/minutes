@@ -200,7 +200,13 @@ export class BackendEvidenceVerifier {
     }
   }
 
-  async verify({ candidate, transcriptEvidence, screenEvidence, authoritativeContext = null }) {
+  async verify({
+    candidate,
+    transcriptEvidence,
+    screenEvidence,
+    authoritativeContext = null,
+    reasoningDepth = "realtime",
+  }) {
     if (!this.started) throw new Error("evidence verifier has not started");
     if (this.closed) throw new Error("evidence verifier is closed");
     if (this.activeBackend) throw new Error("evidence verifier already has an active candidate");
@@ -234,6 +240,7 @@ export class BackendEvidenceVerifier {
             transcriptEvidence,
             screenEvidence,
             authoritativeContext,
+            reasoningDepth,
           });
       this.verificationReceipts.push({
         session_id: slot.session.sessionId ?? null,
@@ -252,6 +259,7 @@ export class BackendEvidenceVerifier {
     transcriptEvidence,
     screenEvidence,
     authoritativeContext = null,
+    reasoningDepth = "realtime",
   }) {
     const input = [
       {
@@ -274,6 +282,7 @@ export class BackendEvidenceVerifier {
       input,
       outputSchema: EVIDENCE_VERDICT_SCHEMA,
       latencyClass: "fast",
+      reasoningDepth,
     });
     const result = await started.completion;
     if (result.status !== "completed" || result.error) {

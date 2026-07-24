@@ -14,6 +14,7 @@ import {
   CodexAppServerBackend,
   CODEX_REALTIME_EFFORT,
   CODEX_REALTIME_MODEL,
+  CODEX_VERIFIER_ADJUDICATION_EFFORT,
   CODEX_VERIFIER_EFFORT,
   CODEX_VERIFIER_MODEL,
 } from "./lib/sidekick_provider.mjs";
@@ -239,6 +240,7 @@ async function runScenario({ fixture, providerExecutable, options, mcpDisableArg
         {
           model: options.verifierModel,
           reasoningEffort: options.verifierEffort,
+          deliberateReasoningEffort: CODEX_VERIFIER_ADJUDICATION_EFFORT,
         },
       );
     },

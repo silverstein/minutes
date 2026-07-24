@@ -337,6 +337,7 @@ struct ActiveReasoning {
     /// in verification forever; evidence beyond that refreshed seal remains
     /// eligible for the next background decision window.
     verification_refreshes: u8,
+    verification_adjudications: u8,
     freshness_retries: u8,
     completeness_retries: u8,
     verification_retries: u8,
@@ -826,6 +827,7 @@ impl LiveSidekickEngine {
                             transcript_revision: self.transcript_revision,
                             screen_revision: self.screen_revision,
                             verification_refreshes: 0,
+                            verification_adjudications: 0,
                             freshness_retries: 0,
                             completeness_retries: 0,
                             verification_retries: 0,
@@ -1042,6 +1044,7 @@ impl LiveSidekickEngine {
             transcript_revision: self.transcript_revision,
             screen_revision: self.screen_revision,
             verification_refreshes: 0,
+            verification_adjudications: 0,
             freshness_retries: retry_state.freshness_retries,
             completeness_retries: retry_state.completeness_retries,
             verification_retries: retry_state.verification_retries,
@@ -1092,6 +1095,7 @@ impl LiveSidekickEngine {
                              authoritative_memory: Vec<String>| {
             ReasoningTurnRequest {
                 kind,
+                reasoning_depth: ReasoningDepth::Realtime,
                 invocation,
                 window: BoundedReasoningWindow {
                     capture_session_id: capture_session_id.clone(),
@@ -1286,6 +1290,11 @@ impl LiveSidekickEngine {
             verification_request.window.latest_image = None;
         }
         verification_request.output_contract = ReasoningOutputContract::EvidenceVerificationV1;
+        verification_request.reasoning_depth = if active.verification_adjudications > 0 {
+            ReasoningDepth::Deliberate
+        } else {
+            ReasoningDepth::Realtime
+        };
         verification_request.candidate_to_verify = Some(candidate.clone());
         if let Err(error) = verification_request.validate(self.config.max_window_chars) {
             self.record_failure(active.work, error);
@@ -1401,6 +1410,24 @@ impl LiveSidekickEngine {
         if !verdict.allows_publication() {
             if verified_newer_than_generation {
                 self.restart_for_fresh_evidence(active, result.total_ms);
+                return;
+            }
+            if matches!(active.work, SidekickWork::Foreground { .. })
+                && active.verification_adjudications == 0
+                && ((verdict.reason_code
+                    == EvidenceVerificationReason::IncompleteMaterialConsequence
+                    && active.completeness_retries > 0)
+                    || (verdict.reason_code
+                        != EvidenceVerificationReason::IncompleteMaterialConsequence
+                        && active.verification_retries > 0))
+            {
+                active.verification_adjudications =
+                    active.verification_adjudications.saturating_add(1);
+                let candidate = candidate.clone();
+                let mut generation_result = generation_result.clone();
+                generation_result.total_ms =
+                    generation_result.total_ms.saturating_add(result.total_ms);
+                self.start_candidate_verification(active, candidate, generation_result);
                 return;
             }
             let retry_kind = if !matches!(active.work, SidekickWork::Foreground { .. }) {
@@ -1906,6 +1933,7 @@ impl LiveSidekickEngine {
     ) -> Result<(), ReasoningError> {
         let request = ReasoningTurnRequest {
             kind: ReasoningTurnKind::Background,
+            reasoning_depth: ReasoningDepth::Realtime,
             invocation: InvocationIdentity {
                 sequence: 1,
                 source_policy_generation: self.session.source_policy_generation,
@@ -2186,6 +2214,7 @@ mod tests {
         turns: Vec<FakeTurn>,
         verification_turns: Vec<FakeTurn>,
         verification_turns_started: usize,
+        verification_depths: Vec<ReasoningDepth>,
         closed_sessions: Vec<String>,
         steer_fails: bool,
         defer_verification: bool,
@@ -2300,6 +2329,9 @@ mod tests {
                         decision: EvidenceVerificationDecision::Allow,
                         reason_code: EvidenceVerificationReason::Supported,
                     });
+                if !is_warmup {
+                    state.verification_depths.push(request.reasoning_depth);
+                }
                 let invocation = request.invocation;
                 if !is_warmup && state.defer_verification {
                     state.verification_turns.push(FakeTurn {
@@ -2877,6 +2909,70 @@ mod tests {
     }
 
     #[test]
+    fn repaired_foreground_candidate_gets_one_deliberate_adjudication_before_suppression() {
+        let backend = FakeBackend::default();
+        {
+            let mut state = lock(&backend.state);
+            state.verification_verdicts.extend([
+                EvidenceVerificationVerdict {
+                    decision: EvidenceVerificationDecision::Reject,
+                    reason_code: EvidenceVerificationReason::UnsupportedFact,
+                },
+                EvidenceVerificationVerdict {
+                    decision: EvidenceVerificationDecision::Reject,
+                    reason_code: EvidenceVerificationReason::UnsupportedFact,
+                },
+                EvidenceVerificationVerdict {
+                    decision: EvidenceVerificationDecision::Allow,
+                    reason_code: EvidenceVerificationReason::Supported,
+                },
+            ]);
+        }
+        let mut engine = engine(backend.clone());
+        observe(
+            &mut engine,
+            "decision",
+            "The team approved a staged rollout.",
+        );
+        engine.send_user("What was approved?").unwrap();
+        backend.complete(
+            0,
+            speak(&["decision"], "The team approved a blanket rollout."),
+        );
+        assert!(engine.has_active_turn());
+        {
+            let state = lock(&backend.state);
+            assert_eq!(state.turns.len(), 2);
+            assert_eq!(state.verification_turns_started, 1);
+            assert_eq!(state.verification_verdicts.len(), 2);
+            assert_eq!(state.verification_depths, vec![ReasoningDepth::Realtime]);
+        }
+        backend.complete(
+            1,
+            speak(&["decision"], "The team approved a staged rollout."),
+        );
+
+        let publications = engine.take_publications();
+        assert_eq!(publications.len(), 1);
+        assert_eq!(
+            publications[0].candidate.text.as_deref(),
+            Some("The team approved a staged rollout.")
+        );
+        assert_eq!(publications[0].total_ms, 1_300);
+        let state = lock(&backend.state);
+        assert_eq!(state.turns.len(), 2);
+        assert_eq!(state.verification_turns_started, 3);
+        assert_eq!(
+            state.verification_depths,
+            vec![
+                ReasoningDepth::Realtime,
+                ReasoningDepth::Realtime,
+                ReasoningDepth::Deliberate,
+            ]
+        );
+    }
+
+    #[test]
     fn confidence_gate_without_human_disposition_retries_before_model_verification() {
         let backend = FakeBackend::default();
         let mut engine = engine(backend.clone());
@@ -3166,6 +3262,10 @@ mod tests {
     fn independent_verifier_blocks_real_but_irrelevant_receipt_laundering() {
         let backend = FakeBackend::default();
         lock(&backend.state).verification_verdicts.extend([
+            EvidenceVerificationVerdict {
+                decision: EvidenceVerificationDecision::Reject,
+                reason_code: EvidenceVerificationReason::UnsupportedFact,
+            },
             EvidenceVerificationVerdict {
                 decision: EvidenceVerificationDecision::Reject,
                 reason_code: EvidenceVerificationReason::UnsupportedFact,

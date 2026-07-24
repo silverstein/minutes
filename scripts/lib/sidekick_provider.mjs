@@ -20,6 +20,14 @@ export const CODEX_VERIFIER_EFFORT = readFileSync(
   "utf8",
 ).trim();
 
+export const CODEX_VERIFIER_ADJUDICATION_EFFORT = readFileSync(
+  new URL(
+    "../../resources/live_sidekick/codex_verifier_adjudication_effort.txt",
+    import.meta.url,
+  ),
+  "utf8",
+).trim();
+
 /**
  * Vendor-neutral persistent reasoning backend contract used by Sidekick.
  *
@@ -56,11 +64,16 @@ function codexInput(item) {
 export class CodexAppServerBackend {
   constructor(
     client,
-    { model = CODEX_REALTIME_MODEL, reasoningEffort = CODEX_REALTIME_EFFORT } = {},
+    {
+      model = CODEX_REALTIME_MODEL,
+      reasoningEffort = CODEX_REALTIME_EFFORT,
+      deliberateReasoningEffort = reasoningEffort,
+    } = {},
   ) {
     this.client = client;
     this.model = model;
     this.reasoningEffort = reasoningEffort;
+    this.deliberateReasoningEffort = deliberateReasoningEffort;
     this.threadId = null;
   }
 
@@ -85,14 +98,22 @@ export class CodexAppServerBackend {
     };
   }
 
-  async startTurn({ input, outputSchema, latencyClass = "fast" }) {
+  async startTurn({
+    input,
+    outputSchema,
+    latencyClass = "fast",
+    reasoningDepth = "realtime",
+  }) {
     this.#assertStarted();
     const started = await this.client.startTurn({
       threadId: this.threadId,
       input: input.map(codexInput),
       outputSchema,
       serviceTier: latencyClass,
-      effort: this.reasoningEffort,
+      effort:
+        reasoningDepth === "deliberate"
+          ? this.deliberateReasoningEffort
+          : this.reasoningEffort,
     });
     return {
       turnId: started.turnId,

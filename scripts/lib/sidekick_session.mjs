@@ -443,6 +443,7 @@ export class SidekickSession {
       screenEvidence: null,
       authoritativeContext: null,
       verificationRefreshes: 0,
+      verificationAdjudications: 0,
       completion: null,
     };
     const turn = this.#turnInput({ mode, typedMessage, policyFeedback });
@@ -593,6 +594,10 @@ export class SidekickSession {
               ? verificationWindow.screenEvidence
               : null,
             authoritativeContext: verificationWindow.authoritativeContext,
+            reasoningDepth:
+              invocation.verificationAdjudications > 0
+                ? "deliberate"
+                : "realtime",
           });
           verificationTotalMs += verdict.latency?.total_ms ?? 0;
           if (
@@ -628,6 +633,30 @@ export class SidekickSession {
             });
           }
           invocation.verifiedEvidenceRevision = sealedEvidenceRevision;
+          if (
+            !verdict.allowed &&
+            invocation.mode === "foreground" &&
+            invocation.verificationAdjudications === 0 &&
+            (
+              (verdict.reason_code === "incomplete_material_consequence" &&
+                invocation.completenessRetry > 0) ||
+              (verdict.reason_code !== "incomplete_material_consequence" &&
+                invocation.verificationRetry > 0)
+            )
+          ) {
+            this.#record("evidence_verification_rejected", {
+              invocation: invocation.id,
+              reason_code: verdict.reason_code,
+              candidate: decision,
+              verification_total_ms: verdict.latency?.total_ms ?? null,
+            });
+            invocation.verificationAdjudications += 1;
+            this.#record("evidence_verification_adjudication", {
+              invocation: invocation.id,
+              reason_code: verdict.reason_code,
+            });
+            continue;
+          }
           break;
         }
         if (!verdict.allowed) {

@@ -19870,6 +19870,13 @@ fn run_native_sidekick_ui_acceptance(
             break metrics;
         }
         if Instant::now() >= signal_deadline {
+            if capture_audit_screens {
+                // A visual audit must remain autonomous in a quiet room. Keep
+                // the real microphone receipt and let the evaluator fail its
+                // independent signal gate without aborting the UI journey or
+                // losing the screenshots needed to inspect the product.
+                break metrics;
+            }
             return Err("The real room microphone produced only digital silence.".into());
         }
         std::thread::sleep(Duration::from_millis(250));

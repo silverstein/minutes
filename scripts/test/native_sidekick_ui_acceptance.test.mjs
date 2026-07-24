@@ -1256,6 +1256,15 @@ test('native UI acceptance preserves opt-in app-captured screenshots with exact 
     assert.deepEqual((await stat(screenshots[0].path)).mode & 0o777, 0o600);
     const report = JSON.parse(await readFile(path.join(auditDirectory, 'product-path.json'), 'utf8'));
     assert.equal(report.screenshots[1].turn_id, 'turn-2');
+    assert.deepEqual(
+      await preserveNativeSidekickAuditArtifacts(
+        { turns: [] },
+        temporaryRoot,
+        auditDirectory,
+      ),
+      [],
+      'an app failure before the first turn must not be masked by the audit copier',
+    );
 
     turns[0].audit_screen.sha256 = '0'.repeat(64);
     await assert.rejects(

@@ -629,7 +629,7 @@ export async function preserveNativeSidekickAuditArtifacts(
   const canonicalAuditDirectory = await fs.realpath(auditDirectory);
   const turns = Array.isArray(payload?.turns) ? payload.turns : [];
   if (turns.length === 0) {
-    throw new Error("native Sidekick audit capture produced no turns");
+    return [];
   }
   const screenshots = [];
   for (const [index, turn] of turns.entries()) {

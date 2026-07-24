@@ -164,7 +164,7 @@ export function MemoryCompoundsHero() {
 
           <a
             href="#install"
-            className="hidden rounded-[4px] bg-[var(--accent)] px-5 py-2.5 font-mono text-[11px] font-semibold uppercase tracking-[0.1em] text-[#171411] hover:bg-[var(--accent-hover)] lg:inline-flex"
+            className="hidden rounded-[4px] bg-[var(--accent)] px-5 py-2.5 font-mono text-[11px] font-semibold uppercase tracking-[0.1em] text-[var(--marketing-button-text)] hover:bg-[var(--accent-hover)] lg:inline-flex"
           >
             Download
           </a>
@@ -176,7 +176,7 @@ export function MemoryCompoundsHero() {
               <a
                 href="#install"
                 onClick={closeMobileMenu}
-                className="mt-3 bg-[var(--accent)] px-4 py-3 text-center font-mono text-[12px] font-semibold uppercase tracking-[0.1em] text-[#171411]"
+                className="mt-3 bg-[var(--accent)] px-4 py-3 text-center font-mono text-[12px] font-semibold uppercase tracking-[0.1em] text-[var(--marketing-button-text)]"
               >
                 Download
               </a>

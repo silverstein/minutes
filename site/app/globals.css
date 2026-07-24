@@ -22,6 +22,12 @@
   --purple: #bf5af2;
   --orange: #d4832a;
   --shadow-panel: 0 18px 40px rgba(26, 25, 22, 0.08);
+  --marketing-button-text: #171411;
+  --marketing-proof-bg: #171714;
+  --marketing-proof-bg-elevated: #1e1e1a;
+  --marketing-proof-text: #f1ece3;
+  --marketing-proof-muted: #aaa49a;
+  --marketing-shadow-soft: rgba(26, 25, 22, 0.07);
   color-scheme: light;
 }
 
@@ -208,7 +214,7 @@ summary:focus-visible {
 
 .marketing-primary-action {
   background: var(--accent);
-  color: #171411;
+  color: var(--marketing-button-text);
 }
 
 .marketing-primary-action:hover {
@@ -315,7 +321,7 @@ summary:focus-visible {
   border: 1px solid var(--border-mid);
   border-radius: 5px;
   background: var(--bg-elevated);
-  box-shadow: 0 12px 32px rgba(26, 25, 22, 0.07);
+  box-shadow: 0 12px 32px var(--marketing-shadow-soft);
 }
 
 .memory-artifact-bar {
@@ -423,8 +429,8 @@ summary:focus-visible {
 }
 
 .marketing-proof-band {
-  background: #171714;
-  color: #f1ece3;
+  background: var(--marketing-proof-bg);
+  color: var(--marketing-proof-text);
 }
 
 .marketing-proof-band-inner {
@@ -468,11 +474,11 @@ summary:focus-visible {
   margin-top: 14px;
   font-size: 13px;
   line-height: 1.65;
-  color: #aaa49a;
+  color: var(--marketing-proof-muted);
 }
 
 .marketing-proof-band-inner > a:hover {
-  background: #1e1e1a;
+  background: var(--marketing-proof-bg-elevated);
 }
 
 @media (max-width: 1023px) {

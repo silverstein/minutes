@@ -204,8 +204,8 @@ export function MemoryCompoundsHero() {
             <a href="#install" className="marketing-primary-action">
               Download Minutes
             </a>
-            <a href="#memory-flow" className="marketing-secondary-action">
-              Watch memory compound
+            <a href="#product" className="marketing-secondary-action">
+              See Minutes in motion
             </a>
           </div>
 

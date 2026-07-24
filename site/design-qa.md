@@ -63,7 +63,7 @@ No actionable P0, P1, or P2 findings remain.
 - Desktop Product, For agents, Compare, Resources, Docs, GitHub, and Download links are present as ordinary server-rendered anchors.
 - Mobile exposes the same primary links in a semantic `details` menu.
 - Selecting a mobile menu link closes the menu before scrolling; the earlier overlay obstruction is fixed.
-- Both hero actions work. `#memory-flow` lands below the sticky header, and `#install` lands with Mac and Windows choices visible.
+- Both hero actions work. `#product` lands at the product-in-motion demo below the sticky header, and `#install` lands with Mac and Windows choices visible.
 - The mobile primary CTA is visible within the initial 390 × 844 viewport.
 - Browser console warnings/errors: none.
 - The revised `CLI + 36 MCP tools` proof point fits its cell without horizontal overflow.

@@ -79,6 +79,8 @@ test("deterministic policy allows a confidence gate with an explicit human dispo
     "Automate only the high-confidence queue and send the balance to the support team.",
     "Launch above the confidence threshold; route uncertain work to specialists.",
     "Stage automated resolution by confidence, routing below-threshold tickets to humans.",
+    "Full automation creates $800k/month contractual exposure (4,000 wrong × $200); 90% accuracy stops being decisive. Stage a confidence gate: automate only high-confidence tickets; route all others to humans.",
+    "Full automation creates $800k/month contractual exposure: 4,000 wrong resolutions × $200 Meridian credit. The 90% headline stops deciding; stage only high-confidence tickets and route all other tickets to humans.",
   ]) {
     assert.equal(
       deterministicEvidenceRejection({

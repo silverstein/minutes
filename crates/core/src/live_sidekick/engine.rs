@@ -181,6 +181,13 @@ fn confidence_gate_omits_human_disposition(
             "the rest",
             "the balance",
             "everything else",
+            "all others",
+            "all other work",
+            "all other tickets",
+            "all other cases",
+            "all other items",
+            "all other requests",
+            "all other resolutions",
             "human fallback",
         ],
     );
@@ -3276,6 +3283,30 @@ mod tests {
         let publications = engine.take_publications();
         assert_eq!(publications.len(), 1);
         assert_eq!(lock(&backend.state).verification_turns_started, 1);
+    }
+
+    #[test]
+    fn confidence_gate_routes_all_other_work_to_humans_without_a_false_retry() {
+        for text in [
+            "Full automation creates $800k/month contractual exposure (4,000 wrong × $200); 90% accuracy stops being decisive. Stage a confidence gate: automate only high-confidence tickets; route all others to humans.",
+            "Full automation creates $800k/month contractual exposure: 4,000 wrong resolutions × $200 Meridian credit. The 90% headline stops deciding; stage only high-confidence tickets and route all other tickets to humans.",
+        ] {
+            let backend = FakeBackend::default();
+            let mut engine = engine(backend.clone());
+            observe(
+                &mut engine,
+                "decision",
+                "We must decide between full automation and keeping a human in the loop.",
+            );
+            engine.send_user("What is the real risk?").unwrap();
+            backend.complete(0, speak(&["decision"], text));
+
+            let publications = engine.take_publications();
+            assert_eq!(publications.len(), 1, "{text}");
+            let state = lock(&backend.state);
+            assert_eq!(state.turns.len(), 1, "{text}");
+            assert_eq!(state.verification_turns_started, 1, "{text}");
+        }
     }
 
     #[test]

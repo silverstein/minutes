@@ -15,7 +15,7 @@ const pages = [
     title: "Minutes vs Granola AI",
     href: "/compare/granola-vs-minutes",
     blurb:
-      "Best if you want the honest tradeoff between a polished hosted AI notepad and a local-first memory layer for agents.",
+      "Best if you want a clear tradeoff between a polished hosted AI notepad and a local-first memory layer for agents.",
   },
   {
     title: "Minutes vs Otter AI",
@@ -27,7 +27,7 @@ const pages = [
     title: "Minutes vs Fireflies.ai",
     href: "/compare/fireflies-vs-minutes",
     blurb:
-      "Best if you want the honest tradeoff between a hosted meeting assistant with integrations and a local-first memory layer for agents.",
+      "Best if you want a clear tradeoff between a hosted meeting assistant with integrations and a local-first memory layer for agents.",
   },
   {
     title: "Minutes vs Hyprnote",

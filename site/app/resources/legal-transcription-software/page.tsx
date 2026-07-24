@@ -99,7 +99,7 @@ export default function LegalTranscriptionSoftwarePage() {
         <p className="mt-5 text-[17px] leading-8 text-[var(--text-secondary)]">
           Most &ldquo;legal transcription software&rdquo; roundups compare turnaround times and
           per-minute prices, and skip the only question that can end a career: where does the
-          privileged audio go? Here&rsquo;s the honest map of the category — what needs a human,
+          privileged audio go? Here&rsquo;s a clear map of the category — what needs a human,
           what needs software, and what the software&rsquo;s architecture must look like when
           the recording is privileged.
         </p>

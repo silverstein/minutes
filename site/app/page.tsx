@@ -1,12 +1,7 @@
 import { CopyButton } from "@/components/copy-button";
 import { DemoPlayer } from "@/components/demo-player";
+import { MemoryCompoundsHero } from "@/components/memory-compounds-hero";
 import { APPLE_SILICON_DOWNLOAD_PATH } from "@/lib/downloads";
-import {
-  GITHUB_CONTRIBUTORS,
-  GITHUB_FORKS,
-  GITHUB_STARS,
-  NPM_MONTHLY_DOWNLOADS,
-} from "@/lib/proof";
 import {
   MINUTES_MCP_TOOL_COUNT,
   MINUTES_RELEASE_VERSION,
@@ -352,121 +347,24 @@ function HomeFlowCard({
 
 export default function Home() {
   return (
-    <div className="mx-auto max-w-[840px] px-6 pb-16 sm:px-8">
-      <nav className="sticky top-0 z-40 flex flex-wrap items-center justify-between gap-3 border-b border-[color:var(--border)] bg-[var(--bg)] py-4 backdrop-blur-sm">
-        <a
-          href="/"
-          className="font-mono text-[15px] font-medium text-[var(--text)]"
-        >
-          minutes
-        </a>
-        <div className="flex flex-wrap justify-end gap-x-6 gap-y-2 text-sm text-[var(--text-secondary)] max-sm:gap-x-4 max-sm:text-xs">
-          <a href="https://github.com/silverstein/minutes" className="hover:text-[var(--accent)]">
-            GitHub
-          </a>
-          <a href="#install" className="hover:text-[var(--accent)]">
-            Install
-          </a>
-          <a href="#dictation" className="hover:text-[var(--accent)]">
-            Dictation
-          </a>
-          <a href="#local" className="hover:text-[var(--accent)]">
-            On-device
-          </a>
-          <a href="#pipeline" className="hover:text-[var(--accent)]">
-            Pipeline
-          </a>
-          <a href="/proof" className="hover:text-[var(--accent)]">
-            Proof
-          </a>
-          <a href="/writing" className="hover:text-[var(--accent)]">
-            Writing
-          </a>
-          <a href="/for-agents" className="hover:text-[var(--accent)]">
-            For agents
-          </a>
-          <a href="/llms.txt" className="hover:text-[var(--accent)]">
-            llms.txt
-          </a>
-        </div>
-      </nav>
+    <div className="pb-16">
+      <MemoryCompoundsHero />
+      <main className="mx-auto max-w-[840px] px-6 sm:px-8">
 
-      <section className="pb-16 pt-16 text-center sm:pb-20 sm:pt-24">
+      <section
+        id="product"
+        className="scroll-mt-24 pb-16 pt-16 text-center sm:pb-20 sm:pt-24"
+      >
         <p className="mb-5 font-mono text-[11px] uppercase tracking-[0.18em] text-[var(--accent)]">
-          Open source · Local first · MIT
+          The product, in motion
         </p>
-        <h1 className="mx-auto max-w-[760px] font-serif text-[40px] leading-[0.98] tracking-[-0.045em] text-[var(--text)] sm:text-[58px]">
-          Your AI remembers every conversation —
-          <br />
-          <span className="italic text-[var(--accent)]">and no one can take it from you.</span>
-        </h1>
-        <p className="mx-auto mt-5 max-w-[640px] text-[16px] leading-7 text-[var(--text-secondary)] sm:text-[17px]">
-          Meetings, voice memos, dictation — Minutes transcribes them locally,
-          writes structured markdown to your own disk, and lets every AI you use
-          (Claude, Codex, Gemini, anything MCP) read the same folder of truth.
-          Nothing is uploaded. When a cloud memory app gets acquired or
-          subpoenaed, your recordings aren&apos;t theirs to hand over — they
-          never left your machine.
-        </p>
-        <div className="mx-auto mt-7 flex max-w-[640px] flex-wrap justify-center gap-2">
-          {[
-            "On-device transcription",
-            "Nothing uploaded",
-            "Open source · MIT",
-            "Consent in every file",
-          ].map((claim) => (
-            <span
-              key={claim}
-              className="rounded-full border border-[color:var(--border-mid)] px-3 py-1 font-mono text-[11px] tracking-[0.02em] text-[var(--text-secondary)]"
-            >
-              {claim}
-            </span>
-          ))}
-        </div>
-        <p className="mx-auto mt-6 max-w-[720px] font-mono text-[12px] uppercase tracking-[0.14em] text-[var(--text-secondary)]">
-          {GITHUB_STARS} GitHub stars • {GITHUB_FORKS} forks •{" "}
-          {GITHUB_CONTRIBUTORS} contributors • {NPM_MONTHLY_DOWNLOADS} npm
-          installs/mo
-        </p>
-
-        <div className="mt-8 flex flex-wrap justify-center gap-3">
-          <a
-            href="#install"
-            className="inline-flex items-center gap-2 rounded-[5px] bg-[var(--accent)] px-6 py-2.5 font-mono text-[11px] font-medium uppercase tracking-[0.1em] text-black hover:bg-[var(--accent-hover)]"
-          >
-            Get started
-            <svg
-              width="14"
-              height="14"
-              viewBox="0 0 16 16"
-              fill="none"
-              className="mt-px"
-            >
-              <path
-                d="M6 3l5 5-5 5"
-                stroke="currentColor"
-                strokeWidth="1.5"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              />
-            </svg>
-          </a>
-          <a
-            href="https://github.com/silverstein/minutes"
-            className="inline-flex items-center gap-2 rounded-[5px] border border-[color:var(--border-mid)] px-6 py-2.5 font-mono text-[11px] uppercase tracking-[0.1em] text-[var(--text-secondary)] hover:border-[color:var(--accent)] hover:text-[var(--accent)]"
-          >
-            View on GitHub
-          </a>
-          <a
-            href="/proof"
-            className="inline-flex items-center gap-2 rounded-[5px] border border-[color:var(--border-mid)] px-6 py-2.5 font-mono text-[11px] uppercase tracking-[0.1em] text-[var(--text-secondary)] hover:border-[color:var(--accent)] hover:text-[var(--accent)]"
-          >
-            See proof
-          </a>
-        </div>
-
-        <p className="mt-5 font-mono text-[12px] text-[var(--text-secondary)]">
-          Local, open source, free forever.
+        <h2 className="mx-auto max-w-[680px] font-serif text-[36px] leading-[1.02] tracking-[-0.04em] text-[var(--text)] sm:text-[48px]">
+          The interface is the evidence.
+        </h2>
+        <p className="mx-auto mt-5 max-w-[650px] text-[15px] leading-7 text-[var(--text-secondary)] sm:text-[16px]">
+          Minutes captures locally, writes one inspectable Markdown file, and
+          lets your agents recall the decision with a source. No proprietary
+          workspace stands between you and your own history.
         </p>
 
         <div className="mt-12">
@@ -506,48 +404,28 @@ export default function Home() {
 
         <div
           id="install"
-          className="mt-12 flex flex-wrap justify-center gap-3"
+          className="mt-12 scroll-mt-24 border-t border-[color:var(--border)] pt-10"
         >
+          <p className="font-mono text-[11px] uppercase tracking-[0.18em] text-[var(--accent)]">
+            Download
+          </p>
+          <h2 className="mt-3 font-serif text-[32px] leading-tight tracking-[-0.035em] text-[var(--text)] sm:text-[38px]">
+            Start building your folder of truth.
+          </h2>
+          <div className="mt-6 flex flex-wrap justify-center gap-3">
           <a
             href={APPLE_SILICON_DOWNLOAD_PATH}
             className="inline-flex items-center gap-2 rounded-[5px] border border-[color:var(--border)] bg-[var(--bg-elevated)] px-5 py-2.5 font-mono text-[11px] uppercase tracking-[0.1em] text-[var(--text)] shadow-[var(--shadow-panel)] hover:border-[color:var(--border-mid)] hover:bg-[var(--bg-hover)]"
           >
-            <svg
-              width="14"
-              height="14"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="1.5"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            >
-              <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4" />
-              <polyline points="7 10 12 15 17 10" />
-              <line x1="12" y1="15" x2="12" y2="3" />
-            </svg>
             Mac (Apple Silicon)
           </a>
           <a
             href={WINDOWS_SETUP_EXE}
             className="inline-flex items-center gap-2 rounded-[5px] border border-[color:var(--border)] bg-[var(--bg-elevated)] px-5 py-2.5 font-mono text-[11px] uppercase tracking-[0.1em] text-[var(--text)] shadow-[var(--shadow-panel)] hover:border-[color:var(--border-mid)] hover:bg-[var(--bg-hover)]"
           >
-            <svg
-              width="14"
-              height="14"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="1.5"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            >
-              <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4" />
-              <polyline points="7 10 12 15 17 10" />
-              <line x1="12" y1="15" x2="12" y2="3" />
-            </svg>
             Windows
           </a>
+          </div>
         </div>
 
         <p className="mt-4 text-[13px] text-[var(--text-secondary)]">
@@ -829,6 +707,26 @@ export default function Home() {
             </tbody>
           </table>
         </div>
+        <div className="mt-6 flex flex-wrap items-center gap-x-5 gap-y-3 text-[13px] text-[var(--text-secondary)]">
+          <a
+            href="/compare"
+            className="font-mono text-[11px] font-semibold uppercase tracking-[0.1em] text-[var(--accent)] underline decoration-[color:var(--border-mid)] underline-offset-4"
+          >
+            Explore all Minutes comparisons
+          </a>
+          <a href="/compare/granola-vs-minutes" className="hover:text-[var(--text)]">
+            Granola
+          </a>
+          <a href="/compare/otter-vs-minutes" className="hover:text-[var(--text)]">
+            Otter
+          </a>
+          <a href="/compare/fathom-vs-minutes" className="hover:text-[var(--text)]">
+            Fathom
+          </a>
+          <a href="/compare/hyprnote-vs-minutes" className="hover:text-[var(--text)]">
+            Hyprnote
+          </a>
+        </div>
       </section>
 
       <section className="border-t border-[color:var(--border)] py-16">
@@ -952,6 +850,7 @@ export default function Home() {
           </a>
         </p>
       </footer>
+      </main>
     </div>
   );
 }

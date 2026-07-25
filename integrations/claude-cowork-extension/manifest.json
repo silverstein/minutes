@@ -7,14 +7,14 @@
   "long_description": "Minutes gives Claude a local-first conversation memory layer. Record meetings and quick thoughts, search transcripts, inspect structured intents, run consistency reports, profile people across meetings, register your notes with QMD, and research a topic across past conversations without uploading your artifacts to a separate cloud app.",
   "author": {
     "name": "Mat Silverstein",
-    "url": "https://github.com/matsilverstein/minutes"
+    "url": "https://github.com/silverstein/minutes"
   },
-  "homepage": "https://github.com/matsilverstein/minutes",
-  "documentation": "https://github.com/matsilverstein/minutes/tree/main/integrations/claude-cowork-extension",
-  "support": "https://github.com/matsilverstein/minutes/issues",
+  "homepage": "https://github.com/silverstein/minutes",
+  "documentation": "https://github.com/silverstein/minutes/tree/main/integrations/claude-cowork-extension",
+  "support": "https://github.com/silverstein/minutes/issues",
   "repository": {
     "type": "git",
-    "url": "https://github.com/matsilverstein/minutes.git"
+    "url": "https://github.com/silverstein/minutes.git"
   },
   "license": "MIT",
   "server": {

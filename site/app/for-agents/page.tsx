@@ -807,7 +807,7 @@ export default function ForAgentsPage() {
           {[
             ["/llms.txt", "llms.txt", "Concise agent index with tool names, descriptions, and doc links"],
             ["/llms-full.txt", "llms-full.txt", "Full agent reference with product description and all entry points"],
-            ["/proof", "/proof", "Honest proof page: demo, eval v0.1 caveats, and adapter status"],
+            ["/proof", "/proof", "Proof page: demo, eval v0.1 caveats, and adapter status"],
             ["/docs/mcp/tools", "/docs/mcp/tools", "Generated MCP tool reference with stable anchor links"],
             ["/docs/mcp/tools.md", "/docs/mcp/tools.md", "Same reference as raw markdown for direct context ingestion"],
             ["/docs/errors", "/docs/errors", "Generated error catalog from Rust thiserror definitions"],

@@ -65,7 +65,7 @@ export default function HyprnoteVsMinutesPage() {
       competitorName="Hyprnote"
       competitorLabel="Hyprnote (Anarlog)"
       markdownHref="/compare/hyprnote-vs-minutes.md"
-      heroSummary="Hyprnote and Minutes are friendly neighbors: both are open source, local-first, and serious about privacy. The honest difference is the job. Hyprnote is a notepad you write in during meetings, with AI that enhances what you wrote. Minutes is a memory layer: it turns everything you record into structured markdown that Claude, Codex, and any MCP client can query later, with consent provenance in every file."
+      heroSummary="Hyprnote and Minutes are friendly neighbors: both are open source, local-first, and serious about privacy. The practical difference is the job. Hyprnote is a notepad you write in during meetings, with AI that enhances what you wrote. Minutes is a memory layer: it turns everything you record into structured markdown that Claude, Codex, and any MCP client can query later, with consent provenance in every file."
       quickVerdictCompetitor="you want a polished local notepad for taking and enhancing your own meeting notes, and the app itself is where you want to live."
       quickVerdictMinutes="you want a durable, agent-readable corpus: files on your disk, MCP tools, a CLI, and consent and provenance metadata your tools can rely on."
       comparisonRows={comparisonRows as any}

@@ -155,7 +155,7 @@ export default function Post() {
           </p>
 
           <h2 className="pt-4 font-serif text-[26px] leading-tight tracking-[-0.02em] text-[var(--text)]">
-            The honest recommendation
+            The recommendation
           </h2>
           <p>
             Start with Whisper — it&apos;s the default for a reason: universal language coverage,

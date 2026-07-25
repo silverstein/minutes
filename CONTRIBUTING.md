@@ -112,6 +112,12 @@ cd crates/mcp && npm run build && node test/mcp_tools_test.mjs
 - Explicit > clever
 - `String.includes()` not regex for user-input search (special char safety)
 
+## Code of Conduct
+
+This project follows the [Contributor Covenant](CODE_OF_CONDUCT.md). By taking part, you agree to uphold it.
+
+Conduct concerns can be reported privately to the maintainer through GitHub, as described in [Enforcement](CODE_OF_CONDUCT.md#enforcement). Reports are reviewed promptly and the reporter's privacy is respected.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).

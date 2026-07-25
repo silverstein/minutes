@@ -77,7 +77,7 @@ export default function SuperwhisperVsMinutesPage() {
       competitorLabel="superwhisper"
       markdownHref="/compare/superwhisper-vs-minutes.md"
       lastReviewed="2026-07-11"
-      heroSummary="superwhisper and Minutes agree on the thing this category usually gets wrong: your voice should be transcribed on your device, not in someone's cloud. The difference is the job. superwhisper is a polished dictation tool — speak, and clean text lands in whatever app you're typing in. Minutes treats dictation as one input to a bigger system: an open-source conversation memory that records meetings, diarizes speakers, and writes markdown files your AI agents can query. Different jobs, with honest overlap."
+      heroSummary="superwhisper and Minutes agree on the thing this category usually gets wrong: your voice should be transcribed on your device, not in someone's cloud. The difference is the job. superwhisper is a polished dictation tool — speak, and clean text lands in whatever app you're typing in. Minutes treats dictation as one input to a bigger system: an open-source conversation memory that records meetings, diarizes speakers, and writes markdown files your AI agents can query. Different jobs, with real overlap."
       quickVerdictCompetitor="you want the most refined dedicated dictation experience — custom per-app modes, 100+ languages, iOS and Windows support — and you're happy paying a subscription for a closed-source tool."
       quickVerdictMinutes="dictation is one mode of a bigger need — recording meetings, keeping voice memos, and building a private, searchable memory of your conversations that Claude and other agents can use — and you want it open source and free."
       comparisonRows={comparisonRows as any}

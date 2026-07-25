@@ -104,7 +104,7 @@ export default function MacwhisperVsMinutesPage() {
         "A fair test: open your transcription tool's output folder. If it's a pile of exports you rarely revisit, either tool works and MacWhisper is more polished. If you wish that pile were a queryable memory, that wish is the entire reason Minutes exists.",
       ]}
       chooseSection={[
-        "Pick MacWhisper for file work: interviews, podcast episodes, subtitle jobs, transcribing someone else's videos. It is the best tool on macOS for exactly that, and the one-time price is honest.",
+        "Pick MacWhisper for file work: interviews, podcast episodes, subtitle jobs, transcribing someone else's videos. It is the best tool on macOS for exactly that, with straightforward one-time pricing.",
         "Pick Minutes for conversation memory: your own meetings and ideas, captured continuously into structured local files your agents read straight from disk — no vendor sync, no account.",
         "Plenty of people should own both — they're neighbors, not rivals: one optimizes the transcript, the other optimizes the archive.",
       ]}

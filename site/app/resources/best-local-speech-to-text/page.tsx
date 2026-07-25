@@ -4,7 +4,7 @@ import { PublicFooter } from "@/components/public-footer";
 export const metadata: Metadata = {
   title: "The best local speech-to-text apps (2026)",
   description:
-    "A fit-based guide to on-device transcription: MacWhisper, superwhisper, Buzz, Vibe, whisper.cpp, and Minutes — matched to the job you're actually hiring for, with honest disclosure of which one is ours.",
+    "A fit-based guide to on-device transcription: MacWhisper, superwhisper, Buzz, Vibe, whisper.cpp, and Minutes — matched to the job you're actually hiring for, with a clear disclosure of which one is ours.",
   alternates: {
     canonical: "/resources/best-local-speech-to-text",
   },

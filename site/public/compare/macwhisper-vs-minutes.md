@@ -24,7 +24,7 @@ Both transcribe locally on your Mac, and both can run Whisper or Parakeet models
 ## Where MacWhisper wins
 
 - Unmatched file-transcription ergonomics: batches, YouTube/media-file URLs, podcast transcription with per-speaker files, filler-word removal, real subtitle workflow with auto-translation
-- Honest one-time pricing with lifetime updates; capable free tier (100 languages)
+- Straightforward one-time pricing with lifetime updates; capable free tier (100 languages)
 - iOS companion app
 
 ## Where Minutes wins

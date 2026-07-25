@@ -18,7 +18,7 @@ Cloud notetakers answer the security question with policies: encryption in trans
 - **No account, no vendor database.** Nothing to sign up for; no server-side profile of your conversations to breach or subpoena.
 - **Open source, MIT.** Every claim here is verifiable in the repository — readable Rust, not a trust-center PDF.
 
-## What does touch the network (the honest list)
+## What does touch the network
 
 - Transcription and diarization models are downloaded once, at setup
 - Updates, if you install them

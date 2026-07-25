@@ -161,8 +161,8 @@ export default function SecurityPage() {
         <SectionLabel label="What Does Touch The Network" />
         <div className="space-y-4 text-[15px] leading-8 text-[var(--text-secondary)]">
           <p>
-            A security page you can trust has to be honest about the exceptions, so here is the
-            complete list. Minutes downloads transcription and diarization models once, at setup.
+            A useful security page has to name the exceptions, so here is the complete list.
+            Minutes downloads transcription and diarization models once, at setup.
             If you install updates, those come over the network too. And if you enable automated
             summarization — it is off by default — your transcript text goes wherever you point
             it: a local model via Ollama, an agent CLI you&rsquo;ve signed into (claude, codex,

@@ -884,6 +884,11 @@ Metal is the only backend that is exercised daily by the maintainer. CUDA, ROCm/
 and Vulkan should be considered experimental: they wire through to whisper.cpp via
 whisper-rs and are expected to work, but have not been validated in CI.
 
+> **NVIDIA on Windows:** prefer `vulkan` over `cuda`. The CUDA path on older
+> (Pascal / GTX 10-series) GPUs hits an NVIDIA-toolchain crash that Minutes
+> cannot work around; Vulkan gives GPU acceleration with no CUDA Toolkit. See
+> [docs/development/gpu-acceleration.md](docs/development/gpu-acceleration.md).
+
 ```bash
 # Apple Metal (macOS) — already enabled in the release DMG; use this for source builds
 cargo install --path crates/cli --features metal

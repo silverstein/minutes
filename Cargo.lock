@@ -3440,7 +3440,7 @@ dependencies = [
  "symphonia",
  "tempfile",
  "thiserror 2.0.18",
- "toml 0.8.2",
+ "toml 1.0.7+spec-1.1.0",
  "tracing",
  "ureq 3.2.0",
  "walkdir",

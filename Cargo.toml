@@ -20,7 +20,7 @@ lto = "thin"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
-toml = "0.8"
+toml = "1.0"
 
 # Audio
 cpal = { version = "0.18.1", default-features = false, features = ["pipewire", "realtime"] }

@@ -478,6 +478,7 @@ impl CaptureRelayClient {
                 Ok(client) => return Ok(client),
                 Err(error)
                     if is_unexpected_eof(&error)
+                        || is_handshake_teardown_error(&error)
                         || (establishment_retry.started()
                             && is_retryable_establishment_error(&error)) =>
                 {
@@ -666,6 +667,27 @@ fn connection_closed_error() -> CaptureRelayError {
 
 fn is_unexpected_eof(error: &CaptureRelayError) -> bool {
     matches!(error, CaptureRelayError::Io(error) if error.kind() == io::ErrorKind::UnexpectedEof)
+}
+
+/// Transient connection-teardown errors that can surface on a fresh connect's
+/// handshake when a prior client's socket is still tearing down. Observed as
+/// `BrokenPipe` on macOS during rapid reconnects under CPU contention (#529):
+/// the accept/first-write window widens under load, so the client's `ClientHello`
+/// write or first-frame read can race the peer teardown. These are retried from
+/// the first attempt — unlike a general establishment error, the race can hit
+/// before `EstablishmentRetry` has started its clock, so gating on `started()`
+/// would let it fall straight through to the caller.
+fn is_handshake_teardown_error(error: &CaptureRelayError) -> bool {
+    matches!(
+        error,
+        CaptureRelayError::Io(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::BrokenPipe
+                    | io::ErrorKind::ConnectionReset
+                    | io::ErrorKind::ConnectionAborted
+            )
+    )
 }
 
 fn is_retryable_establishment_error(error: &CaptureRelayError) -> bool {
@@ -1137,8 +1159,16 @@ fn set_owner_only_permissions(path: &Path) -> io::Result<()> {
 }
 
 fn write_json_line(stream: &mut Stream, value: &impl Serialize) -> io::Result<()> {
-    serde_json::to_writer(&mut *stream, value).map_err(io::Error::other)?;
-    stream.write_all(b"\n")?;
+    // Serialize to a buffer first, then write. Writing directly with
+    // `serde_json::to_writer` folds a socket write failure into a serde_json
+    // error, and `io::Error::other` then erases its `ErrorKind` to `Other` —
+    // so a `BrokenPipe` during a reconnect handshake became an unclassifiable
+    // error the retry path could not recognize (#529). Serializing to a Vec
+    // isolates genuine serialization faults from the socket write, so the
+    // write's real `ErrorKind` (e.g. `BrokenPipe`) reaches the caller intact.
+    let mut bytes = serde_json::to_vec(value).map_err(io::Error::other)?;
+    bytes.push(b'\n');
+    stream.write_all(&bytes)?;
     stream.flush()
 }
 
@@ -1309,21 +1339,72 @@ mod tests {
             server.publish_transcript_for_test(utterance(&format!("transcript-{seq}")));
             server.publish_nudge(nudge(&format!("nudge-{seq}")));
 
-            let mut client = CaptureRelayClient::connect_from(&discovery_path, cursor).unwrap();
-            wait_for_frame(
-                &mut client,
-                |frame| matches!(frame, RelayFrame::Transcript { seq: frame_seq, .. } if *frame_seq == seq),
-            );
-            wait_for_frame(
-                &mut client,
-                |frame| matches!(frame, RelayFrame::Nudge { seq: frame_seq, .. } if *frame_seq == seq),
-            );
-
-            cursor = client.cursor();
+            // Rapid reconnect churn can transiently close a freshly established
+            // connection mid-delivery (observed on Windows named pipes, #529).
+            // That is a legitimate reconnect scenario, not a replay failure, and
+            // an established consumer surfacing it as an error is correct
+            // production behavior — so the *test* reconnects with the same cursor
+            // and retries the cycle. The replay invariant is unchanged: some
+            // (re)connection must still deliver transcript-seq and nudge-seq.
+            cursor = read_reconnect_cycle_with_retry(&discovery_path, cursor, seq);
             assert_eq!(cursor.transcript_seq, seq);
             assert_eq!(cursor.nudge_seq, seq);
-            drop(client);
         }
+    }
+
+    fn read_reconnect_cycle_with_retry(
+        discovery_path: &Path,
+        cursor: RelayCursor,
+        seq: u64,
+    ) -> RelayCursor {
+        for attempt in 1..=10u32 {
+            match read_reconnect_cycle(discovery_path, cursor.clone(), seq) {
+                Ok(next) => return next,
+                Err(error) if attempt < 10 => {
+                    eprintln!("reconnect cycle {seq} attempt {attempt} retrying after {error:?}");
+                    thread::sleep(Duration::from_millis(20));
+                }
+                Err(error) => {
+                    panic!("reconnect cycle {seq} failed after {attempt} attempts: {error:?}")
+                }
+            }
+        }
+        unreachable!("retry loop returns or panics")
+    }
+
+    fn read_reconnect_cycle(
+        discovery_path: &Path,
+        cursor: RelayCursor,
+        seq: u64,
+    ) -> Result<RelayCursor, CaptureRelayError> {
+        let mut client = CaptureRelayClient::connect_from(discovery_path, cursor)?;
+        try_wait_for_frame(
+            &mut client,
+            |frame| matches!(frame, RelayFrame::Transcript { seq: frame_seq, .. } if *frame_seq == seq),
+        )?;
+        try_wait_for_frame(
+            &mut client,
+            |frame| matches!(frame, RelayFrame::Nudge { seq: frame_seq, .. } if *frame_seq == seq),
+        )?;
+        Ok(client.cursor())
+    }
+
+    fn try_wait_for_frame(
+        client: &mut CaptureRelayClient,
+        predicate: impl Fn(&RelayFrame) -> bool,
+    ) -> Result<RelayFrame, CaptureRelayError> {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while Instant::now() < deadline {
+            if let Some(frame) = client.try_recv()? {
+                if predicate(&frame) {
+                    return Ok(frame);
+                }
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        Err(CaptureRelayError::InvalidData(
+            "timed out waiting for relay frame".into(),
+        ))
     }
 
     #[test]

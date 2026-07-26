@@ -7,7 +7,6 @@ import {
   mkdtemp,
   readFile,
   rm,
-  stat,
   writeFile,
 } from "node:fs/promises";
 import os from "node:os";
@@ -384,18 +383,29 @@ test(
       child.once("close", (code, signal) => resolve({ code, signal })),
     );
 
-    let ready = false;
+    // Readiness must mean a usable worktree path has been *published*, not
+    // merely that the marker file exists: stat() can win between the marker's
+    // creation and its content write, and SIGKILL'ing then reads "" and runs
+    // `git worktree remove --force ""` (exit 128). Poll for non-empty content
+    // and capture it. See #566.
+    let abandonedWorktree = "";
     for (let attempt = 0; attempt < 250; attempt += 1) {
       try {
-        await stat(marker);
-        ready = true;
-        break;
+        const published = (await readFile(marker, "utf8")).trim();
+        if (published !== "") {
+          abandonedWorktree = published;
+          break;
+        }
       } catch (error) {
         if (error.code !== "ENOENT") throw error;
-        await new Promise((resolve) => setTimeout(resolve, 20));
       }
+      await new Promise((resolve) => setTimeout(resolve, 20));
     }
-    assert.equal(ready, true, "bump subprocess created its temporary worktree");
+    assert.notEqual(
+      abandonedWorktree,
+      "",
+      "bump subprocess published its temporary worktree path",
+    );
     process.kill(-child.pid, "SIGKILL");
     const outcome = await closed;
     assert.equal(outcome.signal, "SIGKILL");
@@ -403,7 +413,6 @@ test(
     assert.equal(status(root), "");
     await assertSnapshot(root, before);
 
-    const abandonedWorktree = await readFile(marker, "utf8");
     const remove = git(root, "worktree", "remove", "--force", abandonedWorktree);
     assert.equal(remove.status, 0, remove.stderr);
     await rm(path.dirname(abandonedWorktree), { recursive: true, force: true });

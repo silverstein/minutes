@@ -16,6 +16,14 @@ updates:
       interval: weekly
       day: monday
     open-pull-requests-limit: 5
+    # ort and ndarray are intentionally pinned for pyannote-rs compat: ort rc.12
+    # switched to ndarray 0.17, which conflicts with pyannote-rs's ndarray 0.16
+    # (see crates/core/Cargo.toml). Bumping either breaks the diarize build, so
+    # the cargo-minor-patch group failed repeatedly (#545, #572, #578) until they
+    # were ignored here. Revisit when pyannote-rs supports ndarray 0.17.
+    ignore:
+      - dependency-name: "ort"
+      - dependency-name: "ndarray"
     groups:
       cargo-minor-patch:
         patterns: ["*"]

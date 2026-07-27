@@ -15,7 +15,7 @@
     "@remotion/player": "^4.0.499",
     "@types/three": "^0.185.1",
     "geist": "^1.7.2",
-    "next": "^16.2.11",
+    "next": "^16.2.12",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
     "remotion": "^4.0.446",

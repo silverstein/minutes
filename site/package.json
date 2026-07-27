@@ -12,7 +12,7 @@
   "dependencies": {
     "@react-three/drei": "^10.7.7",
     "@react-three/fiber": "^9.6.1",
-    "@remotion/player": "^4.0.499",
+    "@remotion/player": "^4.0.500",
     "@types/three": "^0.185.1",
     "geist": "^1.7.2",
     "next": "^16.2.12",

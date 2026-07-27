@@ -912,7 +912,16 @@ fn handle_utterance<G>(
 
     if config.dictation.accumulate {
         accumulated_results.push(result.clone());
-        on_result(result);
+        // Stream the per-utterance result only for stdout. Single-shot
+        // destinations (insert/clipboard/file/command) receive exactly one
+        // combined result from `flush_accumulated_results` at session end;
+        // emitting the per-utterance result here as well delivered twice, which
+        // for `destination = "insert"` pasted the dictation into the focused
+        // field twice. This mirrors the stdout special-case in
+        // `flush_accumulated_results`.
+        if config.dictation.destination == "stdout" {
+            on_result(result);
+        }
         return;
     }
 
@@ -1609,5 +1618,54 @@ mod tests {
         assert!(note.contains("- first sentence. second sentence."));
         assert!(!note.contains("- first sentence.\n"));
         assert!(!note.contains("- second sentence.\n"));
+    }
+
+    #[test]
+    fn accumulate_insert_defers_delivery_to_flush_not_per_utterance() {
+        // Regression: with accumulate on, a single-shot destination must receive
+        // exactly one combined result from the flush, never a per-utterance emit
+        // that (for destination = "insert") pasted into the focused field twice.
+        let dir = TempDir::new().unwrap();
+        let mut config = test_config(dir.path());
+        config.dictation.accumulate = true;
+
+        config.dictation.destination = "insert".into();
+        let mut accumulated = Vec::new();
+        let mut delivered = 0usize;
+        {
+            let mut on_result = |_result: DictationResult| delivered += 1;
+            handle_utterance(
+                "hello world",
+                1.0,
+                &config,
+                &mut accumulated,
+                &mut on_result,
+            );
+        }
+        assert_eq!(
+            delivered, 0,
+            "accumulate + insert must not deliver per-utterance"
+        );
+        assert_eq!(
+            accumulated.len(),
+            1,
+            "the utterance is still accumulated for the flush"
+        );
+
+        // stdout keeps its live per-utterance stream.
+        config.dictation.destination = "stdout".into();
+        let mut accumulated_stdout = Vec::new();
+        let mut streamed = 0usize;
+        {
+            let mut on_result = |_result: DictationResult| streamed += 1;
+            handle_utterance(
+                "hello world",
+                1.0,
+                &config,
+                &mut accumulated_stdout,
+                &mut on_result,
+            );
+        }
+        assert_eq!(streamed, 1, "stdout still streams per-utterance");
     }
 }

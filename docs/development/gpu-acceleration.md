@@ -11,11 +11,17 @@ GPU through one of several backends. GPU backends are opt-in Cargo features.
 | `vulkan` | Vulkan | Linux, Windows | GPU acceleration with **no CUDA Toolkit**. The most portable NVIDIA path on Windows. Needs the Vulkan SDK (LunarG). |
 | `hipblas` | AMD ROCm/HIP | Linux | For AMD GPUs. |
 
-Install with a single feature, for example:
+Install by adding a GPU feature to the defaults, for example:
 
 ```bash
-cargo install minutes-cli --no-default-features --features vulkan
+cargo install minutes-cli --features vulkan
 ```
+
+> **Do not pass `--no-default-features` with only a GPU feature.** `whisper` is a
+> default feature; dropping the defaults builds a binary with no transcription
+> ("Transcription placeholder — whisper feature not enabled"). If you must use
+> `--no-default-features`, name `whisper` explicitly:
+> `cargo install minutes-cli --no-default-features --features whisper,vulkan`.
 
 ## Choosing a backend
 
@@ -47,15 +53,35 @@ This is a dead toolchain combination, not a bug we can patch — `cudafe++` is
 not open source, and the crash precedes whisper.cpp entirely, so neither a
 CMake nor a whisper.cpp change would fix it.
 
-**Do this instead — use Vulkan:**
+**Try Vulkan instead — but see the shader-gen caveat below:**
 
 ```powershell
 # Install the Vulkan SDK (LunarG) first, then:
-cargo install minutes-cli --no-default-features --features vulkan --force
+cargo install minutes-cli --features vulkan --force
 ```
 
-Vulkan gives you GPU acceleration on the same Pascal card with no CUDA Toolkit
-and no nvcc, sidestepping every failure above. If you don't need GPU at all, the
-default CPU build works out of the box.
+Vulkan avoids the CUDA Toolkit and nvcc entirely, sidestepping every failure
+above. Keep the default features (do not pass `--no-default-features` with only
+`vulkan`, or you get a placeholder binary with no transcription — see the note
+in the install section above).
+
+### Vulkan also fails on some Windows configs: `vulkan-shaders-gen` hangs
+
+On at least one Windows machine (a dual-GPU laptop: Pascal GTX 1050 + Intel UHD
+630, Vulkan SDK 1.4.350), the `vulkan` build hangs indefinitely in whisper.cpp's
+`ggml-vulkan` step: `vulkan-shaders-gen.exe` sits at 0% CPU forever (reproducible
+serial and parallel, and by running the extracted command manually outside the
+build). This is an **upstream ggml/whisper.cpp build-tool hang**, not a Minutes
+issue, and it is under investigation upstream (issue #531). A 0%-CPU block
+(rather than a spin) points at the tool waiting on a subprocess/device call, and
+dual-GPU device enumeration is a suspected factor.
+
+**If both CUDA and Vulkan fail on your machine, use the CPU build** — it always
+works, needs no toolkit, and on a low-end GPU like a GTX 1050 the GPU speedup is
+modest anyway:
+
+```powershell
+cargo install minutes-cli --force
+```
 
 Reference: issue [#531](https://github.com/silverstein/minutes/issues/531).

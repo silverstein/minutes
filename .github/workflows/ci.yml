@@ -156,7 +156,12 @@ jobs:
       # unnoticed until #591. Several of these tests mutate process-global state
       # (HOME, USERPROFILE) behind a local mutex, so run single-threaded rather
       # than relying on every test remembering to take that guard.
+      # macOS and Windows only: the Tauri app ships for those two platforms
+      # (release-macos.yml, release-windows-desktop.yml) and has no Linux
+      # desktop release. Building it on Linux would pull the whole GTK/WebKit
+      # stack into CI for a target that never ships.
       - name: Desktop app unit tests
+        if: runner.os != 'Linux'
         run: cargo test -p minutes-app --no-default-features -- --test-threads=1
         timeout-minutes: 10
 

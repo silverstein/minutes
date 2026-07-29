@@ -151,6 +151,15 @@ jobs:
         run: cargo test -p minutes-core --no-default-features --features diarize --lib -- diarize --test-threads=1
         timeout-minutes: 3
 
+      # The desktop suite was compiled by `cargo check -p minutes-app --tests`
+      # but never executed, so a test that failed 100% of the time on macOS went
+      # unnoticed until #591. Several of these tests mutate process-global state
+      # (HOME, USERPROFILE) behind a local mutex, so run single-threaded rather
+      # than relying on every test remembering to take that guard.
+      - name: Desktop app unit tests
+        run: cargo test -p minutes-app --no-default-features -- --test-threads=1
+        timeout-minutes: 10
+
       - name: Integration tests (no whisper, macOS only)
         if: runner.os == 'macOS'
         run: cargo test -p minutes-core --no-default-features --test integration -- --test-threads=1

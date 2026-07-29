@@ -9,6 +9,18 @@ cd "$repo_root"
 
 node scripts/check_version_sync.mjs
 
+# Generated docs embed counts (tests, CLI commands, MCP tools), so any change
+# that adds a test or command leaves them stale and CI's "Site Release Link
+# Consistency" job fails. That has caught several PRs, including contributor
+# ones where the red check was not their fault. Check it here instead, where the
+# fix is one command away rather than a round trip through CI.
+if ! node scripts/sync_site_release_version.mjs --check >/dev/null 2>&1; then
+  echo "pre-push: generated site constants are stale." >&2
+  echo "  fix: node scripts/generate_llms_txt.mjs && node scripts/sync_site_release_version.mjs" >&2
+  echo "  then commit the regenerated files (site/lib/release.ts, site/public/llms*.txt, docs catalogs)." >&2
+  exit 1
+fi
+
 if [[ -d tooling/skills/node_modules && -d tooling/skills/dist ]]; then
   npm --prefix tooling/skills run check
 else

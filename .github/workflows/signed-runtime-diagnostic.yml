@@ -116,7 +116,7 @@ jobs:
             printf '%s\n' '--- scoped unified log ---'
             /usr/bin/log show --last 20s --style compact --info --debug \
               --predicate \
-              'process CONTAINS[c] "minutes" OR eventMessage CONTAINS[c] "com.useminutes.apple-speech-worker"' \
-              | tail -1200 || true
+              'process CONTAINS[c] "minutes" OR process == "launchd" OR eventMessage CONTAINS[c] "com.useminutes.apple-speech-worker"' \
+              | tail -3000 || true
             exit 1
           fi

@@ -113,6 +113,17 @@ jobs:
           test ! -f "$stderr" || tail -200 "$stderr"
           if [ "$launch_status" -ne 0 ] ||
              ! grep -Fq "apple-speech-signed-byte-transport=accepted" "$stdout"; then
+            sleep 3
+            printf '%s\n' '--- worker crash reports ---'
+            shopt -s nullglob
+            reports=(
+              "$HOME"/Library/Logs/DiagnosticReports/*minutes-apple*
+              /Library/Logs/DiagnosticReports/*minutes-apple*
+            )
+            for report in "${reports[@]}"; do
+              printf 'report=%s\n' "$report"
+              sed -n '1,320p' "$report"
+            done
             printf '%s\n' '--- scoped unified log ---'
             /usr/bin/log show --last 20s --style compact --info --debug \
               --predicate \

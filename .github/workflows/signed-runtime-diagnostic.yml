@@ -124,8 +124,8 @@ jobs:
           sudo "$lldb" -b -p "$worker_pid" \
             -o 'process handle -s true -n false -p false SIGBUS' \
             -o 'process continue' \
-            -o 'thread backtrace all' \
-            -o 'process kill' \
+            -k 'thread backtrace all' \
+            -k 'process kill' \
             -o 'quit'
           debugger_status=$?
           wait "$launcher_pid"

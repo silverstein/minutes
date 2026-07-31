@@ -90,6 +90,51 @@ jobs:
           clang -Wall -Wextra -Werror -pthread "$source_file" -o "$executable"
           "$executable"
 
+      - name: Capture the signed worker SIGBUS backtrace
+        run: |
+          set -euo pipefail
+          worker_pid_file="$RUNNER_TEMP/minutes-apple-worker.pid"
+          stdout="$RUNNER_TEMP/minutes-debug.stdout"
+          stderr="$RUNNER_TEMP/minutes-debug.stderr"
+          (
+            for _ in {1..2000}; do
+              worker_pid="$(
+                pgrep -f '/minutes-apple-speech-worker$' | head -1 || true
+              )"
+              if [ -n "$worker_pid" ]; then
+                kill -STOP "$worker_pid"
+                printf '%s\n' "$worker_pid" >"$worker_pid_file"
+                exit 0
+              fi
+              sleep 0.002
+            done
+            exit 1
+          ) &
+          watcher_pid=$!
+          open -n -W \
+            --stdout "$stdout" \
+            --stderr "$stderr" \
+            "runtime/Minutes Dev.app" \
+            --args --apple-speech-transport-acceptance &
+          launcher_pid=$!
+          wait "$watcher_pid"
+          worker_pid="$(cat "$worker_pid_file")"
+          lldb="$(xcrun -f lldb)"
+          set +e
+          sudo "$lldb" -b -p "$worker_pid" \
+            -o 'process handle -s true -n false -p false SIGBUS' \
+            -o 'process continue' \
+            -o 'thread backtrace all' \
+            -o 'process kill' \
+            -o 'quit'
+          debugger_status=$?
+          wait "$launcher_pid"
+          launcher_status=$?
+          set -e
+          printf 'debugger_status=%s launcher_status=%s\n' \
+            "$debugger_status" "$launcher_status"
+          test ! -f "$stderr" || tail -200 "$stderr"
+
       - name: Launch the signed app through LaunchServices
         run: |
           set -euo pipefail

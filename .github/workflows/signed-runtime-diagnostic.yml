@@ -68,9 +68,9 @@ jobs:
           if [ "$launch_status" -ne 0 ] ||
              ! grep -Fq "apple-speech-signed-byte-transport=accepted" "$stdout"; then
             printf '%s\n' '--- scoped unified log ---'
-            /usr/bin/log show --last 3m --style compact \
+            /usr/bin/log show --last 20s --style compact --info --debug \
               --predicate \
-              'process == "minutes-apple-speech-worker" OR process == "Minutes Dev" OR process == "xpcproxy"' \
-              | tail -400 || true
+              'process CONTAINS[c] "minutes" OR eventMessage CONTAINS[c] "com.useminutes.apple-speech-worker"' \
+              | tail -1200 || true
             exit 1
           fi

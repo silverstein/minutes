@@ -56,6 +56,40 @@ jobs:
             --test-requirement='=(identifier "com.useminutes.desktop" or identifier "com.useminutes.desktop.dev") and anchor apple generic and certificate leaf[subject.OU] = "63TMLKT8HN"' \
             "$app"
 
+      - name: Probe RLIMIT_NPROC compatibility with XPC worker threads
+        run: |
+          set -euo pipefail
+          source_file="$RUNNER_TEMP/rlimit-nproc-probe.c"
+          executable="$RUNNER_TEMP/rlimit-nproc-probe"
+          cat >"$source_file" <<'C'
+          #include <errno.h>
+          #include <pthread.h>
+          #include <stdio.h>
+          #include <sys/resource.h>
+
+          static void *worker(void *unused) {
+            (void)unused;
+            return NULL;
+          }
+
+          int main(void) {
+            struct rlimit limit = {1, 1};
+            errno = 0;
+            int limit_status = setrlimit(RLIMIT_NPROC, &limit);
+            int limit_errno = errno;
+            pthread_t thread;
+            int thread_status = pthread_create(&thread, NULL, worker, NULL);
+            if (thread_status == 0) {
+              pthread_join(thread, NULL);
+            }
+            printf("setrlimit_status=%d setrlimit_errno=%d pthread_create_status=%d\n",
+                   limit_status, limit_errno, thread_status);
+            return 0;
+          }
+          C
+          clang -Wall -Wextra -Werror -pthread "$source_file" -o "$executable"
+          "$executable"
+
       - name: Launch the signed app through LaunchServices
         run: |
           set -euo pipefail

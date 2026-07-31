@@ -1,0 +1,76 @@
+name: Temporary signed XPC launch diagnostic
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/signed-runtime-diagnostic.yml
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  launch-services-probe:
+    name: Reuse signed 0501e06a artifact through LaunchServices
+    runs-on: macos-latest
+    timeout-minutes: 10
+    env:
+      CANDIDATE_SHA: 0501e06a6e3bb559d91f6c291f1234964f5a0f36
+      SOURCE_RUN_ID: "30596190795"
+    steps:
+      - name: Download the already signed exact candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="acceptance-$CANDIDATE_SHA"
+          resolved="$(
+            git ls-remote --refs \
+              "https://github.com/${GITHUB_REPOSITORY}.git" \
+              "refs/tags/$tag" |
+              awk '{print $1}'
+          )"
+          test "$resolved" = "$CANDIDATE_SHA"
+          gh run download "$SOURCE_RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name "minutes-dev-signed-$CANDIDATE_SHA" \
+            --dir payload
+          test "$(cut -d= -f2 payload/signed-dev-provenance.txt | head -1)" = "$CANDIDATE_SHA"
+          (
+            cd payload
+            shasum -a 256 -c minutes-dev-signed.zip.sha256
+          )
+          mkdir runtime
+          ditto -x -k payload/minutes-dev-signed.zip runtime
+          codesign --verify --deep --strict --verbose=4 "runtime/Minutes Dev.app"
+
+      - name: Launch the signed app through LaunchServices
+        run: |
+          set -euo pipefail
+          stdout="$RUNNER_TEMP/minutes-acceptance.stdout"
+          stderr="$RUNNER_TEMP/minutes-acceptance.stderr"
+          isolated_tmp="$RUNNER_TEMP/minutes-acceptance-tmp"
+          mkdir -p "$isolated_tmp"
+          set +e
+          open -n -W \
+            --stdout "$stdout" \
+            --stderr "$stderr" \
+            --env "TMPDIR=$isolated_tmp" \
+            "runtime/Minutes Dev.app" \
+            --args --apple-speech-transport-acceptance
+          launch_status=$?
+          set -e
+          printf 'LaunchServices status: %s\n' "$launch_status"
+          printf '%s\n' '--- app stdout ---'
+          test ! -f "$stdout" || tail -200 "$stdout"
+          printf '%s\n' '--- app stderr ---'
+          test ! -f "$stderr" || tail -200 "$stderr"
+          if [ "$launch_status" -ne 0 ] ||
+             ! grep -Fq "apple-speech-signed-byte-transport=accepted" "$stdout"; then
+            printf '%s\n' '--- scoped unified log ---'
+            /usr/bin/log show --last 3m --style compact \
+              --predicate \
+              'process == "minutes-apple-speech-worker" OR process == "Minutes Dev" OR process == "xpcproxy"' \
+              | tail -400 || true
+            exit 1
+          fi

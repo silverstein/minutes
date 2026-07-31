@@ -115,15 +115,14 @@ jobs:
              ! grep -Fq "apple-speech-signed-byte-transport=accepted" "$stdout"; then
             sleep 3
             printf '%s\n' '--- worker crash reports ---'
-            shopt -s nullglob
-            reports=(
-              "$HOME"/Library/Logs/DiagnosticReports/*minutes-apple*
-              /Library/Logs/DiagnosticReports/*minutes-apple*
-            )
-            for report in "${reports[@]}"; do
+            while IFS= read -r report; do
               printf 'report=%s\n' "$report"
               sed -n '1,320p' "$report"
-            done
+            done < <(
+              find "$HOME/Library/Logs/DiagnosticReports" \
+                /Library/Logs/DiagnosticReports \
+                -type f -iname '*minutes-apple*' -mmin -2 -print 2>/dev/null
+            )
             printf '%s\n' '--- scoped unified log ---'
             /usr/bin/log show --last 20s --style compact --info --debug \
               --predicate \

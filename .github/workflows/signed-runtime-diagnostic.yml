@@ -43,6 +43,18 @@ jobs:
           mkdir runtime
           ditto -x -k payload/minutes-dev-signed.zip runtime
           codesign --verify --deep --strict --verbose=4 "runtime/Minutes Dev.app"
+          app="runtime/Minutes Dev.app"
+          worker="$app/Contents/XPCServices/com.useminutes.apple-speech-worker.xpc/Contents/MacOS/minutes-apple-speech-worker"
+          worker_cdhash="$(
+            codesign -dvvv "$worker" 2>&1 |
+              awk -F= '/^CDHash=/{print tolower($2); exit}'
+          )"
+          codesign --verify --verbose=4 \
+            --test-requirement="=identifier \"com.useminutes.apple-speech-worker\" and cdhash H\"$worker_cdhash\" and anchor apple generic and certificate leaf[subject.OU] = \"63TMLKT8HN\"" \
+            "$worker"
+          codesign --verify --verbose=4 \
+            --test-requirement='=(identifier "com.useminutes.desktop" or identifier "com.useminutes.desktop.dev") and anchor apple generic and certificate leaf[subject.OU] = "63TMLKT8HN"' \
+            "$app"
 
       - name: Launch the signed app through LaunchServices
         run: |

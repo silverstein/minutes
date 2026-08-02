@@ -831,14 +831,18 @@ fn apply_tray_activity(
 pub fn rebuild_localized_shell(app: &tauri::AppHandle) {
     use minutes_core::i18n::tr;
 
-    let activity = derive_tray_activity(snapshot_tray_state(app));
-    apply_tray_activity(app, activity, false);
+    let snapshot = snapshot_tray_state(app);
+    let activity = derive_tray_activity(snapshot);
+    apply_tray_activity(app, snapshot, activity, false);
 
     if let Some(h) = app.try_state::<TrayMenuHandles>() {
         h.open.set_text(tr("Open Minutes")).ok();
         h.record.set_text(tr("Start Recording")).ok();
         h.quick_thought.set_text(tr("Quick Thought")).ok();
         h.sensitive.set_text(tr("Sensitive Meeting")).ok();
+        h.coach
+            .set_text(tr(if snapshot.copilot { "Coach ✓" } else { "Coach" }))
+            .ok();
         h.mic_mute
             .set_text(tr(if minutes_core::streaming::is_mic_muted() {
                 "Mute My Mic (Recording Only) ✓"

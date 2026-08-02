@@ -841,7 +841,11 @@ pub fn rebuild_localized_shell(app: &tauri::AppHandle) {
         h.quick_thought.set_text(tr("Quick Thought")).ok();
         h.sensitive.set_text(tr("Sensitive Meeting")).ok();
         h.coach
-            .set_text(tr(if snapshot.copilot { "Coach ✓" } else { "Coach" }))
+            .set_text(tr(if snapshot.copilot {
+                "Coach ✓"
+            } else {
+                "Coach"
+            }))
             .ok();
         h.mic_mute
             .set_text(tr(if minutes_core::streaming::is_mic_muted() {
@@ -854,7 +858,9 @@ pub fn rebuild_localized_shell(app: &tauri::AppHandle) {
         h.assistant.set_text(tr("Recall")).ok();
         h.list.set_text(tr("Open Meetings Folder")).ok();
         h.paste_summary.set_text(tr("Copy Latest Summary")).ok();
-        h.paste_transcript.set_text(tr("Copy Latest Transcript")).ok();
+        h.paste_transcript
+            .set_text(tr("Copy Latest Transcript"))
+            .ok();
         let hidden = minutes_core::config::Config::load()
             .privacy
             .hide_from_screen_share;
@@ -988,12 +994,27 @@ fn build_app_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     use minutes_core::i18n::tr;
     #[cfg(target_os = "macos")]
     let app_menu = {
-        let about_item =
-            MenuItem::with_id(app, "app-show-about", tr("About Minutes"), true, None::<&str>)?;
-        let whats_new_item =
-            MenuItem::with_id(app, "app-show-whats-new", tr("What’s New…"), true, None::<&str>)?;
-        let settings_item =
-            MenuItem::with_id(app, "app-open-settings", tr("Settings…"), true, Some("Cmd+,"))?;
+        let about_item = MenuItem::with_id(
+            app,
+            "app-show-about",
+            tr("About Minutes"),
+            true,
+            None::<&str>,
+        )?;
+        let whats_new_item = MenuItem::with_id(
+            app,
+            "app-show-whats-new",
+            tr("What’s New…"),
+            true,
+            None::<&str>,
+        )?;
+        let settings_item = MenuItem::with_id(
+            app,
+            "app-open-settings",
+            tr("Settings…"),
+            true,
+            Some("Cmd+,"),
+        )?;
         let check_updates_item = MenuItem::with_id(
             app,
             "app-check-for-updates",
@@ -1001,7 +1022,8 @@ fn build_app_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
             true,
             None::<&str>,
         )?;
-        let quit_item = MenuItem::with_id(app, "app-quit", tr("Quit Minutes"), true, Some("Cmd+Q"))?;
+        let quit_item =
+            MenuItem::with_id(app, "app-quit", tr("Quit Minutes"), true, Some("Cmd+Q"))?;
 
         SubmenuBuilder::new(app, &app.package_info().name)
             .item(&about_item)
@@ -1020,10 +1042,20 @@ fn build_app_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     };
 
     let file_menu = {
-        let open_item =
-            MenuItem::with_id(app, "app-open-main", tr("Open Minutes"), true, Some("Cmd+O"))?;
-        let note_item =
-            MenuItem::with_id(app, "app-add-note", tr("Add Note…"), true, Some("Cmd+Shift+N"))?;
+        let open_item = MenuItem::with_id(
+            app,
+            "app-open-main",
+            tr("Open Minutes"),
+            true,
+            Some("Cmd+O"),
+        )?;
+        let note_item = MenuItem::with_id(
+            app,
+            "app-add-note",
+            tr("Add Note…"),
+            true,
+            Some("Cmd+Shift+N"),
+        )?;
         let list_item = MenuItem::with_id(
             app,
             "app-open-meetings-folder",
@@ -1046,7 +1078,8 @@ fn build_app_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
 
         #[cfg(not(target_os = "macos"))]
         {
-            let quit_item = MenuItem::with_id(app, "app-quit", tr("Quit Minutes"), true, None::<&str>)?;
+            let quit_item =
+                MenuItem::with_id(app, "app-quit", tr("Quit Minutes"), true, None::<&str>)?;
 
             SubmenuBuilder::new(app, tr("File"))
                 .item(&open_item)
@@ -2156,8 +2189,13 @@ fn main() {
                 None::<&str>,
             )?;
             let quick_thought_item_ref = quick_thought_item.clone();
-            let sensitive_item =
-                MenuItem::with_id(app, "sensitive", tr("Sensitive Meeting"), true, None::<&str>)?;
+            let sensitive_item = MenuItem::with_id(
+                app,
+                "sensitive",
+                tr("Sensitive Meeting"),
+                true,
+                None::<&str>,
+            )?;
             let sensitive_item_ref = sensitive_item.clone();
             let stop_item = MenuItem::with_id(
                 app,
@@ -2203,7 +2241,8 @@ fn main() {
                 true,
                 None::<&str>,
             )?;
-            let assistant_item = MenuItem::with_id(app, "assistant", tr("Recall"), true, None::<&str>)?;
+            let assistant_item =
+                MenuItem::with_id(app, "assistant", tr("Recall"), true, None::<&str>)?;
             let screen_share_item = MenuItem::with_id(
                 app,
                 "screen-share-toggle",

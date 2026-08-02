@@ -152,7 +152,10 @@ mod tests {
     fn tr_is_identity_in_english() {
         set_locale(Locale::En);
         assert_eq!(tr("Stop Recording"), "Stop Recording");
-        assert_eq!(tr("some string with no translation"), "some string with no translation");
+        assert_eq!(
+            tr("some string with no translation"),
+            "some string with no translation"
+        );
     }
 
     #[test]

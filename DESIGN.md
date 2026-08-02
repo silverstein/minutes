@@ -24,6 +24,21 @@
 - **Loading (landing site):** Google Fonts CDN for Instrument Serif + Geist + Geist Mono
 - **Loading (Tauri app):** Bundled WOFF2 files in `tauri/src/fonts/` — offline-safe, no network dependency
 
+**Approved exception — CJK fallback (localized UI only).** Geist and Instrument
+Serif have no CJK coverage, so a localized UI would render Chinese, Japanese, or
+Korean text in whatever the OS substitutes, inconsistently across machines. A
+system CJK stack (PingFang SC, Hiragino Sans, Microsoft YaHei, Noto Sans CJK) is
+therefore permitted **only** as a fallback appended after the fonts above, and
+**only** when a CJK locale is active.
+
+The constraint that keeps this from eroding the design: English rendering must be
+byte-identical to before. The fallback never precedes the primary faces, is never
+applied globally, and is scoped by active locale rather than by content
+detection. In English the stack is untouched.
+
+Approved for the zh-CN localization (#621, proposed in discussion #420). The same
+exception extends to future locales with the same scoping.
+
 **Scale (landing site):**
 
 | Role | Font | Size | Weight |

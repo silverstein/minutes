@@ -175,11 +175,40 @@
   }
 
   // ── Apply / observe ───────────────────────────────────────────────────────
+  var FONT_CLASS = 'i18n-cjk-font';
+  var fontStyleEl = null;
+
+  // Scoped CJK font fallback. Geist / Instrument Serif / Geist Mono have no CJK
+  // glyphs, so Chinese text would otherwise render in a system default that may
+  // clash with the design. This injects a rule that keeps the app's original
+  // Latin font first and adds a system CJK stack after it — only when the UI is
+  // in Chinese, so the Latin design is untouched in English.
+  function ensureCjkFontRule() {
+    if (fontStyleEl) return;
+    fontStyleEl = document.createElement('style');
+    fontStyleEl.setAttribute('data-i18n-font', '');
+    fontStyleEl.textContent =
+      '.' + FONT_CLASS + ' {\n' +
+      '  --font-sans: \'Geist\', -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;\n' +
+      '  --font-display: \'Instrument Serif\', ui-serif, "Iowan Old Style", Georgia, "Songti SC", "SimSun", serif;\n' +
+      '  --font-mono: \'Geist Mono\', \'SF Mono\', Menlo, Consolas, monospace;\n' +
+      '}\n';
+    (document.head || document.documentElement).appendChild(fontStyleEl);
+  }
+
+  function updateFontClass() {
+    if (document.body) {
+      document.body.classList.toggle(FONT_CLASS, currentLocale === 'zh-CN');
+    }
+  }
+
   function apply(locale) {
     currentLocale = locale;
     if (document.documentElement) {
       document.documentElement.lang = (locale === 'zh-CN') ? 'zh-CN' : 'en';
     }
+    if (locale === 'zh-CN') ensureCjkFontRule();
+    updateFontClass();
     walk(document.documentElement);
   }
 
@@ -249,10 +278,12 @@
   startObserver();               // translate nodes as the body is parsed
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', function () {
+      updateFontClass();         // body exists now
       apply(currentLocale);      // full-tree safety net after parse
       refreshFromBackend();      // reconcile with persisted config
     });
   } else {
+    updateFontClass();
     apply(currentLocale);
     refreshFromBackend();
   }

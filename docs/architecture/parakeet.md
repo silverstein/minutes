@@ -48,9 +48,11 @@ isolation protocol remains the requirement for removing the fallback.
 Parakeet is eligible for standalone-live fallback only when the current build,
 platform, transport, and runtime storage probe all report it ready. No current
 platform satisfies the Parakeet transport requirement. A retained Parakeet
-preference therefore resolves to Whisper. Apple Speech also currently resolves
-to Whisper because its pathname-only helper has the same private-audio
-transport gap. See [`docs/architecture/apple-speech.md`](apple-speech.md).
+preference therefore resolves to Whisper. Apple Speech has a separate
+authenticated in-memory XPC candidate, but its product gate remains closed
+until signed runtime acceptance; it does not weaken or satisfy Parakeet's
+remaining transport gate. See
+[`docs/architecture/apple-speech.md`](apple-speech.md).
 
 All live utterances that request Parakeet use Whisper until parakeet.cpp accepts
 a byte stream or a post-exec helper proves descriptor isolation. Installing

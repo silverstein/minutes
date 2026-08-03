@@ -167,6 +167,8 @@ export type CorpusLeaseHooks = {
     | "after-baseline"
     | "before-finalize"
     | "before-authorized";
+  /** Test-only deterministic parent deadline after the projection has started. */
+  operationDeadlineForTest?: Promise<void>;
 };
 
 type RootIdentity = {
@@ -2031,6 +2033,12 @@ export async function withStableCorpusLease<T>(
           operationTermination = new Promise<void>((resolve) => {
             resolveOperationTermination = resolve;
           });
+          if (hooks.operationDeadlineForTest) {
+            void hooks.operationDeadlineForTest.then(
+              () => fail("meeting corpus authorization deadline elapsed"),
+              () => fail("meeting corpus authorization deadline elapsed")
+            );
+          }
           try {
             operationResult = await operation(
               snapshot,

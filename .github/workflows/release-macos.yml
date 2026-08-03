@@ -53,6 +53,13 @@ jobs:
     name: Build signed + notarized Minutes.app
     needs: release_readiness
     runs-on: macos-latest
+    # Scopes the Apple signing secrets to this workflow instead of leaving
+    # them readable by every workflow in a public repository. The environment
+    # deliberately carries no required reviewer -- it exists to confine the
+    # credentials, not to add an approval step -- and its ref policy allows
+    # `main` and `v*` tags, which is exactly how this workflow is triggered,
+    # so release behaviour is unchanged.
+    environment: production-release
 
     steps:
       - name: Validate exact release tag input
@@ -209,8 +216,10 @@ jobs:
           app="target/release/bundle/macos/Minutes.app"
           sidecar="target/release/bundle/macos/Minutes.app/Contents/MacOS/minutes"
           staged_graph_worker="$app/Contents/MacOS/minutes-graph-worker"
+          staged_apple_speech_worker="$app/Contents/MacOS/minutes-apple-speech-worker"
           test -f "$sidecar" || { echo "ERROR: bundled CLI sidecar missing" >&2; exit 1; }
           test -f "$staged_graph_worker" || { echo "ERROR: bundled graph worker missing" >&2; exit 1; }
+          test -f "$staged_apple_speech_worker" || { echo "ERROR: bundled Apple Speech worker missing" >&2; exit 1; }
           size=$(stat -f%z "$sidecar")
           echo "bundled CLI sidecar size: $size bytes"
           if [ "$size" -lt 10000000 ]; then
@@ -219,6 +228,7 @@ jobs:
           fi
           file "$sidecar" | grep -q "Mach-O" || { echo "ERROR: bundled CLI sidecar is not a Mach-O binary" >&2; exit 1; }
           file "$staged_graph_worker" | grep -q "Mach-O" || { echo "ERROR: bundled graph worker is not a Mach-O binary" >&2; exit 1; }
+          file "$staged_apple_speech_worker" | grep -q "Mach-O" || { echo "ERROR: bundled Apple Speech worker is not a Mach-O binary" >&2; exit 1; }
 
           codesign --force --options runtime --timestamp \
             --entitlements tauri/src-tauri/minutes-cli.entitlements \
@@ -227,16 +237,25 @@ jobs:
             "$app" \
             "$APPLE_SIGNING_IDENTITY" \
             tauri/src-tauri/minutes-graph-worker.entitlements
+          ./scripts/package-apple-speech-xpc.sh \
+            "$app" \
+            "$APPLE_SIGNING_IDENTITY" \
+            tauri/src-tauri/minutes-apple-speech-worker.entitlements
           graph_worker_bundle="$app/Contents/XPCServices/com.useminutes.graph-worker.xpc"
           graph_worker="$graph_worker_bundle/Contents/MacOS/minutes-graph-worker"
+          apple_speech_worker_bundle="$app/Contents/XPCServices/com.useminutes.apple-speech-worker.xpc"
+          apple_speech_worker="$apple_speech_worker_bundle/Contents/MacOS/minutes-apple-speech-worker"
           test ! -e "$staged_graph_worker"
+          test ! -e "$staged_apple_speech_worker"
           test -f "$graph_worker"
+          test -f "$apple_speech_worker"
 
           codesign --force --options runtime --timestamp \
             --entitlements tauri/src-tauri/entitlements.plist \
             --sign "$APPLE_SIGNING_IDENTITY" "$app"
           codesign --verify --deep --strict --verbose=4 "$app"
           codesign --verify --strict --verbose=4 "$graph_worker_bundle"
+          codesign --verify --strict --verbose=4 "$apple_speech_worker_bundle"
 
           codesign -d --entitlements :- "$graph_worker" \
             > "$RUNNER_TEMP/graph-worker-entitlements.plist" 2>/dev/null
@@ -252,12 +271,32 @@ jobs:
                   f"graph worker entitlement allowlist mismatch: {actual!r}"
               )
           PY
+          codesign -d --entitlements :- "$apple_speech_worker" \
+            > "$RUNNER_TEMP/apple-speech-worker-entitlements.plist" 2>/dev/null
+          python3 - "$RUNNER_TEMP/apple-speech-worker-entitlements.plist" <<'PY'
+          import plistlib
+          import sys
+
+          with open(sys.argv[1], "rb") as source:
+              actual = plistlib.load(source)
+          expected = {"com.apple.security.app-sandbox": True}
+          if actual != expected:
+              raise SystemExit(
+                  f"Apple Speech worker entitlement allowlist mismatch: {actual!r}"
+              )
+          PY
           codesign -dv --verbose=4 "$graph_worker" \
             > "$RUNNER_TEMP/graph-worker-identity.txt" 2>&1
           grep -Fq "Identifier=com.useminutes.graph-worker" \
             "$RUNNER_TEMP/graph-worker-identity.txt"
           grep -Fq "TeamIdentifier=63TMLKT8HN" \
             "$RUNNER_TEMP/graph-worker-identity.txt"
+          codesign -dv --verbose=4 "$apple_speech_worker" \
+            > "$RUNNER_TEMP/apple-speech-worker-identity.txt" 2>&1
+          grep -Fq "Identifier=com.useminutes.apple-speech-worker" \
+            "$RUNNER_TEMP/apple-speech-worker-identity.txt"
+          grep -Fq "TeamIdentifier=63TMLKT8HN" \
+            "$RUNNER_TEMP/apple-speech-worker-identity.txt"
 
           notary_zip="$RUNNER_TEMP/Minutes-final.zip"
           ditto -c -k --keepParent "$app" "$notary_zip"
@@ -310,7 +349,9 @@ jobs:
             "$RUNNER_TEMP/minutes-release.p12" \
             "$RUNNER_TEMP/Minutes-final.zip" \
             "$RUNNER_TEMP/graph-worker-entitlements.plist" \
-            "$RUNNER_TEMP/graph-worker-identity.txt"
+            "$RUNNER_TEMP/graph-worker-identity.txt" \
+            "$RUNNER_TEMP/apple-speech-worker-entitlements.plist" \
+            "$RUNNER_TEMP/apple-speech-worker-identity.txt"
 
       - name: Upload signed app bundle
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a

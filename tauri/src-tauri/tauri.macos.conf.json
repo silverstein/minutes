@@ -5,7 +5,8 @@
       "bin/system_audio_record",
       "bin/calendar-events",
       "bin/minutes",
-      "bin/minutes-graph-worker"
+      "bin/minutes-graph-worker",
+      "bin/minutes-apple-speech-worker"
     ],
     "resources": [
       "resources/assistant-skill-bundle/**/*"

@@ -242,7 +242,7 @@ retention, nothing is deleted automatically unless `auto_cleanup` is enabled.
 
 | key | default | meaning |
 |---|---|---|
-| `backend` | `"whisper"` | Final transcription backend. Retained `"apple-speech"` and `"parakeet"` values currently resolve to sealed Whisper because their pathname-only helpers lack a secure private-audio transport. |
+| `backend` | `"whisper"` | Final transcription backend. Retained `"apple-speech"` and `"parakeet"` values resolve to sealed Whisper while their secure private-audio release gates remain closed. |
 | `destination` | `"clipboard"` | `"clipboard"`, `"file"`, or `"command"` |
 | `destination_file` | unset | Target file when `destination = "file"` |
 | `destination_command` | unset | Shell command when `destination = "command"` |

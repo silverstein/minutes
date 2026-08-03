@@ -98,6 +98,8 @@ mkdir -p tauri/src-tauri/bin
 cp -f target/release/minutes "tauri/src-tauri/bin/minutes-${HOST_TARGET}"
 cp -f target/release/minutes-graph-worker \
   "tauri/src-tauri/bin/minutes-graph-worker-${HOST_TARGET}"
+cp -f target/release/minutes-apple-speech-worker \
+  "tauri/src-tauri/bin/minutes-apple-speech-worker-${HOST_TARGET}"
 
 echo "=== Building ${DEV_PRODUCT_NAME}.app ==="
 # The calendar-events Swift helper is compiled and staged into
@@ -128,6 +130,10 @@ if [[ "$SIGN_MODE" == "identity" ]]; then
     "$BUILD_APP" \
     "$SIGNING_IDENTITY" \
     tauri/src-tauri/minutes-graph-worker.entitlements
+  ./scripts/package-apple-speech-xpc.sh \
+    "$BUILD_APP" \
+    "$SIGNING_IDENTITY" \
+    tauri/src-tauri/minutes-apple-speech-worker.entitlements
 
   echo "=== Signing ${DEV_PRODUCT_NAME}.app (outer, no --deep) ==="
   codesign --force --options runtime --timestamp \
@@ -152,6 +158,10 @@ else
     "$BUILD_APP" \
     - \
     tauri/src-tauri/minutes-graph-worker.entitlements
+  ./scripts/package-apple-speech-xpc.sh \
+    "$BUILD_APP" \
+    - \
+    tauri/src-tauri/minutes-apple-speech-worker.entitlements
   codesign --force --sign - "$BUILD_APP"
 fi
 

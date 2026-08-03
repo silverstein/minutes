@@ -249,9 +249,9 @@ pub fn append_native_call_invalid_stem_warning(
 
 /// Check whether the model for the effective batch backend is ready.
 ///
-/// Retained Parakeet and Apple Speech preferences resolve to Whisper while
-/// their private-audio transport gates are closed. Health must describe that
-/// configured/resolved split while checking the model runtime will load.
+/// Retained Parakeet and batch Apple Speech preferences resolve to Whisper.
+/// Apple Speech's authenticated transport is live/dictation-only; health must
+/// describe that configured/resolved split while checking the model runtime.
 pub fn model_status(config: &Config) -> HealthItem {
     let configured_parakeet = config.transcription.engine.eq_ignore_ascii_case("parakeet");
     if configured_parakeet
@@ -280,7 +280,7 @@ pub fn model_status(config: &Config) -> HealthItem {
         .eq_ignore_ascii_case("apple-speech")
         && crate::transcribe::effective_batch_engine(config) == "whisper"
     {
-        Some("Apple Speech (retained preference); its pathname-only helper cannot accept sealed private audio".into())
+        Some("Apple Speech (retained preference); its authenticated byte transport is not selectable until signed runtime acceptance passes".into())
     } else {
         None
     };

@@ -1278,18 +1278,31 @@ pub const fn parakeet_private_audio_transport_supported() -> bool {
     false
 }
 
-/// Whether the pathname-only Apple Speech helper can receive private audio
-/// without publishing a named plaintext WAV.
-///
-/// It cannot today: the helper accepts only `--audio-path`. Keep retained
-/// Apple Speech preferences on the sealed in-process Whisper path until the
-/// helper has an exact byte/fd transport (minutes-hueo).
-pub const fn apple_speech_private_audio_transport_supported() -> bool {
+/// Whether this exact running app can authenticate the bundled one-purpose
+/// Apple Speech XPC service before sending private utterance bytes.
+pub fn apple_speech_private_audio_transport_supported() -> bool {
+    // The service implementation and packaging are present, but product
+    // selection remains fail-closed until the exact reviewed SHA passes the
+    // separately authorized signed-macOS hostile-holder/runtime gate.
     false
 }
 
+/// Resolve an Apple Speech preference through the product transport gate.
+///
+/// This stays in the always-compiled pipeline layer so product callers and the
+/// signed transport acceptance route exercise the same fail-closed decision.
+pub fn resolved_apple_speech_backend(requested: &str) -> &str {
+    if requested.eq_ignore_ascii_case("apple-speech")
+        && !apple_speech_private_audio_transport_supported()
+    {
+        "whisper"
+    } else {
+        requested
+    }
+}
+
 pub const fn apple_speech_unavailable_reason() -> &'static str {
-    "the Apple Speech helper cannot receive secure private audio yet"
+    "the signed Apple Speech secure private audio byte-transport service is unavailable or untrusted"
 }
 
 /// One cross-surface answer to whether Parakeet can actually be selected.
@@ -7929,6 +7942,16 @@ pub fn run_post_record_hook(config: &Config, transcript_path: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn apple_speech_preference_resolves_through_closed_product_gate() {
+        assert_eq!(
+            resolved_apple_speech_backend("apple-speech"),
+            "whisper",
+            "Apple Speech must remain unselectable before signed runtime acceptance"
+        );
+        assert_eq!(resolved_apple_speech_backend("whisper"), "whisper");
+    }
 
     fn sparse_health(voice: f32, system: f32) -> markdown::RecordingHealth {
         markdown::RecordingHealth {

@@ -8,6 +8,8 @@ import { readFileSync } from "node:fs";
 // authority: these goldens make comment/dead-step duplication fail closed.
 const EXPECTED_SIGNING_JOB_SHA256 =
   "903c7c962b5eac067fbe423699943969b0405cec732306299366f172f5037894";
+const EXPECTED_POST_SIGNING_BOUNDARY_SHA256 =
+  "e0a1feef44fa29000affee57a51a55156c232d677307181a68e9cc2341594807";
 const EXPECTED_PRE_SIGNING_BOUNDARY_SHA256 =
   "1ddf57258d26c54dab346639d179a4cce64e6d3e333bb92982b38706ac7fe333";
 const EXPECTED_TRIGGER_BLOCK = `on:
@@ -32,8 +34,9 @@ function requirePattern(pattern, message) {
   if (!pattern.test(source)) errors.push(message);
 }
 
+const preSigningBoundary = source.split(/^  sign-reviewed-artifact:\n/m, 1)[0];
+
 if (!signingJobFixture) {
-  const preSigningBoundary = source.split(/^  sign-reviewed-artifact:\n/m, 1)[0];
   const preSigningBoundaryHash = createHash("sha256")
     .update(preSigningBoundary)
     .digest("hex");
@@ -122,6 +125,13 @@ const afterSigningJob =
   signingJobStart >= 0 && nextJobOffset >= 0
     ? signingJobTail.slice(nextJobOffset)
     : "";
+// The unstripped signing job, kept only so the three regions can be proved to
+// tile the file exactly. `signingJob` above drops one trailing newline for its
+// own golden, which would otherwise make the arithmetic below off by one.
+const signingJobRegion =
+  signingJobStart >= 0 && nextJobOffset >= 0
+    ? signingJobTail.slice(0, nextJobOffset)
+    : signingJobTail;
 if (!signingJob) {
   errors.push("could not isolate the secret-bearing signing job");
 } else {
@@ -175,6 +185,39 @@ if (!signingJobFixture) {
   );
   if (SECRET_CONTEXT_EXPRESSION.test(afterSigningJob)) {
     errors.push("post-signing runtime jobs must not receive signing secrets");
+  }
+
+  // Everything after the signing job was checked for secret references and
+  // nothing else, so `run-signed-runtime` -- 2 KB that checks out the
+  // candidate at its acceptance tag and executes a candidate-controlled script
+  // to produce the provenance receipt acceptance relies on -- could be
+  // rewritten freely and this guard still passed. Steps could be added,
+  // removed, or altered, and the receipt made to say whatever the edit wanted.
+  // It carries no secrets, so the pattern above never fired.
+  const afterSigningJobHash = createHash("sha256").update(afterSigningJob).digest("hex");
+  if (afterSigningJobHash !== EXPECTED_POST_SIGNING_BOUNDARY_SHA256) {
+    errors.push(
+      "the complete post-signing runtime boundary changed; review it and update its golden hash",
+    );
+  }
+
+  // The three hashed regions must tile the file exactly. Without this, the
+  // next job appended to this workflow lands outside all of them and is
+  // unreviewed again -- which is precisely how the region above was
+  // introduced. A coverage failure means a region boundary moved, so the
+  // goldens no longer mean what they claim, whatever they hash to.
+  //
+  // Stated as a concatenation rather than as arithmetic on lengths: the
+  // identity is then self-evident and cannot hold by coincidence. Comparing
+  // sums also invited an off-by-encoding reading, since `.length` counts
+  // UTF-16 code units and the message said "bytes".
+  const covered =
+    preSigningBoundary + signingJobMarker + signingJobRegion + afterSigningJob;
+  if (covered !== source) {
+    errors.push(
+      `hashed regions reconstruct ${covered.length} of ${source.length} characters ` +
+        "and do not reproduce this workflow; some of it is outside every golden",
+    );
   }
   const beforeSigningJob = source.split(/^  sign-reviewed-artifact:\n/m, 1)[0];
   if (SECRET_CONTEXT_EXPRESSION.test(beforeSigningJob)) {

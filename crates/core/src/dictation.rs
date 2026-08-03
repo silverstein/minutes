@@ -743,11 +743,14 @@ fn dictation_final_backend(config: &Config) -> DictationFinalBackend {
 }
 
 fn apple_speech_dictation_ready(_config: &Config) -> bool {
-    tracing::warn!(
-        reason = crate::pipeline::apple_speech_unavailable_reason(),
-        "apple-speech dictation preference retained; using sealed Whisper fallback"
-    );
-    crate::pipeline::apple_speech_private_audio_transport_supported()
+    let ready = crate::pipeline::apple_speech_private_audio_transport_supported();
+    if !ready {
+        tracing::warn!(
+            reason = crate::pipeline::apple_speech_unavailable_reason(),
+            "apple-speech dictation preference retained; using sealed Whisper fallback"
+        );
+    }
+    ready
 }
 
 fn parakeet_dictation_ready(config: &Config) -> bool {
@@ -824,16 +827,9 @@ fn transcribe_utterance_with_apple_speech(
         return Ok(None);
     }
 
-    let tmp_wav = tempfile::Builder::new()
-        .prefix("minutes-dictation-apple-speech-")
-        .suffix(".wav")
-        .tempfile()
-        .map_err(TranscribeError::Io)?;
-    crate::transcribe::write_wav_16k_mono(tmp_wav.path(), samples)?;
-
     let locale = crate::apple_speech::live_locale_hint(config.transcription.language.as_deref());
-    let result = crate::apple_speech::transcribe_with_apple_speech(
-        tmp_wav.path(),
+    let result = crate::apple_speech_worker::transcribe_samples(
+        samples,
         locale.as_deref(),
         crate::apple_speech::AppleSpeechMode::Dictation,
         true,
@@ -1588,6 +1584,7 @@ mod tests {
             result.engine_descriptor_version.as_deref(),
             Some(config.dictation.model.as_str())
         );
+        #[cfg(not(target_os = "macos"))]
         assert!(!crate::pipeline::apple_speech_private_audio_transport_supported());
     }
 
@@ -1693,6 +1690,7 @@ mod tests {
             handle_utterance(
                 "hello world",
                 1.0,
+                DictationFinalBackend::Whisper,
                 &config,
                 &mut accumulated,
                 &mut on_result,
@@ -1717,6 +1715,7 @@ mod tests {
             handle_utterance(
                 "hello world",
                 1.0,
+                DictationFinalBackend::Whisper,
                 &config,
                 &mut accumulated_stdout,
                 &mut on_result,

@@ -1,0 +1,447 @@
+name: Archive Pilot Private Artifact
+
+# Produces a Developer ID signed, notarized Minutes Archive build for the
+# private attorney pilot, encrypted to a single recipient before upload.
+#
+# This repository is public, so workflow artifacts are downloadable by any
+# authenticated user for their whole retention window. A plaintext signed
+# build would therefore be published the moment this job goes green -- before
+# the human QA and independent review that the pilot runbook makes
+# preconditions of distribution. The artifact is encrypted with age so that
+# publication is not distribution.
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_sha:
+        description: Full SHA protected by the matching acceptance-<sha> tag
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: archive-pilot-private
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  TAURI_CLI_VERSION: "2.10.1"
+  ARCHIVE_BUNDLE_ID: com.useminutes.archive
+  ARCHIVE_EXECUTABLE: minutes-archive-app
+  ARCHIVE_TEAM_ID: 63TMLKT8HN
+  EXPECTED_RECIPIENT_FINGERPRINT: "cef5dee2d8e5510f48fec6198cc3bcbaf2af11ef08a80e916f7b9e4575caf20f"
+
+jobs:
+  authorize-candidate:
+    name: Authorize exact protected Archive candidate
+    if: github.ref == 'refs/heads/main' && github.actor == 'silverstein'
+    runs-on: ubuntu-latest
+    outputs:
+      candidate_sha: ${{ steps.authorize.outputs.candidate_sha }}
+    steps:
+      - name: Bind the request to its protected acceptance tag
+        id: authorize
+        env:
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "candidate_sha must be a full lowercase commit SHA" >&2
+            exit 1
+          fi
+          tag="acceptance-$CANDIDATE_SHA"
+          remote="https://github.com/${GITHUB_REPOSITORY}.git"
+          # `git ls-remote` patterns tail-match across ref namespaces, so a
+          # pattern of "refs/tags/<tag>" also matches a branch literally named
+          # "refs/tags/<tag>". Restrict to the tag namespace AND assert the
+          # full ref name exactly. Both patterns are required: the plain name
+          # does not match the peeled "^{}" line annotated tags carry.
+          refs="$(
+            git ls-remote --tags "$remote" \
+              "refs/tags/$tag" "refs/tags/$tag^{}" || true
+          )"
+          exact="$(
+            printf '%s\n' "$refs" | awk -v t="refs/tags/$tag" '$2 == t {print $1}'
+          )"
+          peeled="$(
+            printf '%s\n' "$refs" |
+              awk -v t="refs/tags/$tag^{}" '$2 == t {print $1}'
+          )"
+          if [ "$(printf '%s\n' "$exact" | grep -c .)" -ne 1 ]; then
+            echo "Protected tag $tag must resolve to exactly one refs/tags ref" >&2
+            exit 1
+          fi
+          if [ "$(printf '%s\n' "$peeled" | grep -c .)" -gt 1 ]; then
+            echo "Protected tag $tag has ambiguous peeled refs" >&2
+            exit 1
+          fi
+          resolved="${peeled:-$exact}"
+          if [ "$resolved" != "$CANDIDATE_SHA" ]; then
+            echo "Protected tag $tag does not resolve exactly to $CANDIDATE_SHA" >&2
+            exit 1
+          fi
+          echo "candidate_sha=$CANDIDATE_SHA" >> "$GITHUB_OUTPUT"
+
+  build-unsigned:
+    name: Build and gate Archive without signing secrets
+    needs: authorize-candidate
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - name: Check out exact protected candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: refs/tags/acceptance-${{ needs.authorize-candidate.outputs.candidate_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Verify exact candidate checkout
+        env:
+          CANDIDATE_SHA: ${{ needs.authorize-candidate.outputs.candidate_sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
+          printf '%s\n' "$CANDIDATE_SHA" > candidate-sha.txt
+
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --version "${TAURI_CLI_VERSION}" --locked
+
+      - name: Test bounded Archive implementation
+        run: |
+          set -euo pipefail
+          cargo fmt --all -- --check
+          cargo test \
+            -p minutes-archive-semantic \
+            -p minutes-archive-convert \
+            -p minutes-archive-core \
+            -p minutes-archive-app
+          cargo clippy \
+            -p minutes-archive-semantic \
+            -p minutes-archive-convert \
+            -p minutes-archive-core \
+            -p minutes-archive-app \
+            --all-targets -- -D warnings
+
+      - name: Validate client-free human QA fixtures
+        run: scripts/make-archive-qa-fixtures.test.sh
+
+      - name: Build isolated Archive app without signing
+        run: |
+          set -euo pipefail
+          (
+            cd archive/src-tauri
+            cargo tauri build --bundles app --no-sign
+          )
+
+      - name: Gate whole-bundle integrity
+        run: |
+          set -euo pipefail
+          scripts/archive-bundle-integrity.py \
+            "target/release/bundle/macos/Minutes Archive.app" \
+            "$ARCHIVE_EXECUTABLE" "$ARCHIVE_BUNDLE_ID"
+
+      - name: Exercise exact unsigned app executable
+        run: |
+          set -euo pipefail
+          app="target/release/bundle/macos/Minutes Archive.app"
+          cargo run -p minutes-archive-core --example document_vault_smoke -- \
+            "$app/Contents/MacOS/$ARCHIVE_EXECUTABLE"
+          scripts/archive-native-lifecycle-smoke.sh "$app"
+
+      - name: Re-gate bundle after candidate code executed
+        run: |
+          set -euo pipefail
+          # The smoke tests above run candidate-controlled code against the
+          # bundle path, so the pre-execution gate constrains nothing about
+          # what is actually packaged. Re-gate immediately before zipping and
+          # record the digest so the signing job can prove the tree it
+          # receives is the tree that was gated here.
+          scripts/archive-bundle-integrity.py \
+            "target/release/bundle/macos/Minutes Archive.app" \
+            "$ARCHIVE_EXECUTABLE" "$ARCHIVE_BUNDLE_ID" | tee built-gate.txt
+
+      - name: Package unsigned candidate
+        run: |
+          set -euo pipefail
+          ditto -c -k --sequesterRsrc --keepParent \
+            "target/release/bundle/macos/Minutes Archive.app" \
+            minutes-archive-unsigned.zip
+          shasum -a 256 minutes-archive-unsigned.zip \
+            > minutes-archive-unsigned.zip.sha256
+
+      - name: Upload unsigned Archive candidate
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: minutes-archive-unsigned-${{ needs.authorize-candidate.outputs.candidate_sha }}
+          path: |
+            minutes-archive-unsigned.zip
+            minutes-archive-unsigned.zip.sha256
+            candidate-sha.txt
+            built-gate.txt
+          if-no-files-found: error
+          retention-days: 1
+
+  sign-notarize-deliver:
+    name: Sign, notarize, and encrypt Archive pilot
+    needs:
+      - authorize-candidate
+      - build-unsigned
+    runs-on: macos-latest
+    timeout-minutes: 45
+    environment: signed-dev-acceptance
+    steps:
+      # Deliberately checks out the REVIEWED workflow ref (main), never the
+      # candidate tag. The gate script executes inside the job that later
+      # holds Apple signing secrets, so taking it from candidate-controlled
+      # content would let a malicious candidate poison PATH or shadow
+      # codesign for the steps that follow, even though it runs before the
+      # credentials are imported.
+      - name: Check out reviewed gate script only
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+          sparse-checkout: scripts/archive-bundle-integrity.py
+          sparse-checkout-cone-mode: false
+
+      - name: Download exact unsigned Archive candidate
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: minutes-archive-unsigned-${{ needs.authorize-candidate.outputs.candidate_sha }}
+          path: payload
+
+      - name: Verify provenance and bundle before unlocking credentials
+        env:
+          CANDIDATE_SHA: ${{ needs.authorize-candidate.outputs.candidate_sha }}
+        run: |
+          set -euo pipefail
+          test "$(cat payload/candidate-sha.txt)" = "$CANDIDATE_SHA"
+          (cd payload && shasum -a 256 -c minutes-archive-unsigned.zip.sha256)
+          mkdir signed
+          ditto -x -k payload/minutes-archive-unsigned.zip signed
+          scripts/archive-bundle-integrity.py \
+            "signed/Minutes Archive.app" \
+            "$ARCHIVE_EXECUTABLE" "$ARCHIVE_BUNDLE_ID" > extracted-gate.txt
+          cat extracted-gate.txt
+          # The digest is only a control if something compares it. The tree
+          # gated before packaging must be the tree that survives the round
+          # trip, or the earlier gate certified a bundle that does not ship.
+          built="$(awk -F= '/^tree_sha256=/{print $2}' payload/built-gate.txt)"
+          extracted="$(awk -F= '/^tree_sha256=/{print $2}' extracted-gate.txt)"
+          if [ -z "$built" ] || [ "$built" != "$extracted" ]; then
+            echo "Bundle changed across packaging" >&2
+            echo "  built     $built" >&2
+            echo "  extracted $extracted" >&2
+            exit 1
+          fi
+
+      # Installed BEFORE the signing identity is unlocked. `brew install` runs
+      # unpinned, network-fetched formula code; doing it later would put
+      # arbitrary third-party execution inside the window where the ephemeral
+      # keychain is unlocked with codesign in its partition list -- a Developer
+      # ID signing oracle for whatever that code chose to sign.
+      - name: Install age before any credential is unlocked
+        run: |
+          set -euo pipefail
+          brew install age >/dev/null 2>&1 || brew install age
+          age --version
+
+      - name: Import Developer ID identity into an ephemeral keychain
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          set -euo pipefail
+          for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY; do
+            if [ -z "${!name}" ]; then
+              echo "Missing required signing secret: ${name}" >&2
+              exit 1
+            fi
+          done
+          case "$APPLE_SIGNING_IDENTITY" in
+            "Developer ID Application:"*) ;;
+            *)
+              echo "Archive distribution requires a Developer ID Application identity" >&2
+              exit 1
+              ;;
+          esac
+          keychain="$RUNNER_TEMP/minutes-archive-pilot.keychain-db"
+          certificate="$RUNNER_TEMP/minutes-archive-pilot.p12"
+          keychain_password="$(openssl rand -hex 24)"
+          python3 - "$certificate" <<'PY'
+          import base64
+          import os
+          import pathlib
+          import sys
+
+          pathlib.Path(sys.argv[1]).write_bytes(
+              base64.b64decode(os.environ["APPLE_CERTIFICATE"], validate=True)
+          )
+          PY
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security import "$certificate" -k "$keychain" \
+            -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$keychain_password" "$keychain" >/dev/null
+          security list-keychains -d user -s "$keychain"
+          security find-identity -v -p codesigning "$keychain" \
+            | grep -Fq "$APPLE_SIGNING_IDENTITY"
+          echo "ARCHIVE_KEYCHAIN=$keychain" >> "$GITHUB_ENV"
+
+      - name: Materialize App Store Connect key
+        env:
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          for name in APPLE_API_ISSUER APPLE_API_KEY APPLE_API_PRIVATE_KEY; do
+            if [ -z "${!name}" ]; then
+              echo "Missing required notarization secret: ${name}" >&2
+              exit 1
+            fi
+          done
+          key_path="$RUNNER_TEMP/archive_notary_key.p8"
+          printf '%s' "$APPLE_API_PRIVATE_KEY" > "$key_path"
+          chmod 600 "$key_path"
+          echo "ARCHIVE_API_KEY_PATH=$key_path" >> "$GITHUB_ENV"
+
+      # Candidate code is never executed after the signing identity is
+      # unlocked. Only the reviewed, provenance-bound inert app is signed.
+      - name: Sign Archive
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          set -euo pipefail
+          app="signed/Minutes Archive.app"
+          codesign --force --options runtime --timestamp \
+            --sign "$APPLE_SIGNING_IDENTITY" \
+            "$app/Contents/MacOS/$ARCHIVE_EXECUTABLE"
+          codesign --force --options runtime --timestamp \
+            --sign "$APPLE_SIGNING_IDENTITY" "$app"
+          codesign --verify --deep --strict --verbose=4 "$app"
+
+      - name: Notarize, verify verdict, and staple
+        env:
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+        run: |
+          set -euo pipefail
+          app="signed/Minutes Archive.app"
+          identity="$(codesign -dv --verbose=4 "$app" 2>&1)"
+          test "$(awk -F= '/^TeamIdentifier=/{print $2}' <<<"$identity")" \
+            = "$ARCHIVE_TEAM_ID"
+          test "$(awk -F= '/^Identifier=/{print $2}' <<<"$identity")" \
+            = "$ARCHIVE_BUNDLE_ID"
+
+          notary_zip="$RUNNER_TEMP/Minutes-Archive-notary.zip"
+          ditto -c -k --sequesterRsrc --keepParent "$app" "$notary_zip"
+          # `notarytool --wait` is not documented to exit non-zero on an
+          # Invalid verdict, so assert the status explicitly rather than
+          # relying on stapler failing later.
+          submit_json="$RUNNER_TEMP/notary-submit.json"
+          xcrun notarytool submit "$notary_zip" \
+            --key "$ARCHIVE_API_KEY_PATH" \
+            --key-id "$APPLE_API_KEY" \
+            --issuer "$APPLE_API_ISSUER" \
+            --wait --timeout 30m \
+            --output-format json > "$submit_json"
+          status="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("status",""))' "$submit_json")"
+          echo "notarization status: $status"
+          if [ "$status" != "Accepted" ]; then
+            echo "Notarization did not return Accepted; refusing to deliver" >&2
+            exit 1
+          fi
+
+          xcrun stapler staple "$app"
+          xcrun stapler validate "$app"
+          codesign --verify --deep --strict --verbose=4 "$app"
+          spctl --assess --type execute --verbose=4 "$app"
+
+      - name: Re-gate signed bundle and record provenance
+        env:
+          CANDIDATE_SHA: ${{ needs.authorize-candidate.outputs.candidate_sha }}
+        run: |
+          set -euo pipefail
+          app="signed/Minutes Archive.app"
+          scripts/archive-bundle-integrity.py \
+            "$app" "$ARCHIVE_EXECUTABLE" "$ARCHIVE_BUNDLE_ID" \
+            > archive-bundle-report.txt
+          cat archive-bundle-report.txt
+          {
+            printf 'candidate=%s\n' "$CANDIDATE_SHA"
+            printf 'team_id=%s\n' "$ARCHIVE_TEAM_ID"
+            printf 'identifier=%s\n' "$ARCHIVE_BUNDLE_ID"
+            cat archive-bundle-report.txt
+            printf 'notarized=true\nstapled=true\n'
+          } > signed-archive-provenance.txt
+
+      - name: Encrypt pilot artifact to its single recipient
+        env:
+          AGE_RECIPIENT: ${{ vars.ARCHIVE_PILOT_AGE_RECIPIENT }}
+        run: |
+          set -euo pipefail
+          if [ -z "$AGE_RECIPIENT" ]; then
+            echo "ARCHIVE_PILOT_AGE_RECIPIENT variable is not set; refusing to publish a plaintext signed build" >&2
+            exit 1
+          fi
+          # The recipient lives in a repository variable, which sits outside
+          # the environment's reviewer gate. Swapping it would re-encrypt the
+          # artifact to someone else's key and still go green, so the expected
+          # key is pinned here in the reviewed workflow. Rotating the key is a
+          # reviewed change to this line, not a silent variable edit.
+          recipient_fingerprint="$(
+            printf '%s' "$AGE_RECIPIENT" | awk '{print $1" "$2}' | shasum -a 256 | awk '{print $1}'
+          )"
+          if [ "$recipient_fingerprint" != "$EXPECTED_RECIPIENT_FINGERPRINT" ]; then
+            echo "Delivery recipient does not match the reviewed key; refusing to encrypt" >&2
+            echo "  expected $EXPECTED_RECIPIENT_FINGERPRINT" >&2
+            echo "  actual   $recipient_fingerprint" >&2
+            exit 1
+          fi
+          recipients="$RUNNER_TEMP/pilot-recipients.txt"
+          printf '%s\n' "$AGE_RECIPIENT" > "$recipients"
+          ditto -c -k --sequesterRsrc --keepParent \
+            "signed/Minutes Archive.app" minutes-archive-pilot-notarized.zip
+          shasum -a 256 minutes-archive-pilot-notarized.zip \
+            >> signed-archive-provenance.txt
+          age -R "$recipients" \
+            -o minutes-archive-pilot-notarized.zip.age \
+            minutes-archive-pilot-notarized.zip
+          rm -f minutes-archive-pilot-notarized.zip
+          test -s minutes-archive-pilot-notarized.zip.age
+          # Fail closed if the plaintext build survived into the upload set.
+          if [ -e minutes-archive-pilot-notarized.zip ]; then
+            echo "plaintext signed build still present; refusing to upload" >&2
+            exit 1
+          fi
+
+      - name: Remove ephemeral signing material
+        if: always()
+        run: |
+          if [ -n "${ARCHIVE_KEYCHAIN:-}" ]; then
+            security delete-keychain "$ARCHIVE_KEYCHAIN" || true
+          fi
+          rm -f \
+            "$RUNNER_TEMP/minutes-archive-pilot.p12" \
+            "${ARCHIVE_API_KEY_PATH:-}" \
+            "$RUNNER_TEMP/Minutes-Archive-notary.zip"
+
+      - name: Upload encrypted Archive pilot
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: minutes-archive-pilot-${{ needs.authorize-candidate.outputs.candidate_sha }}
+          path: |
+            minutes-archive-pilot-notarized.zip.age
+            signed-archive-provenance.txt
+            archive-bundle-report.txt
+          if-no-files-found: error
+          retention-days: 7

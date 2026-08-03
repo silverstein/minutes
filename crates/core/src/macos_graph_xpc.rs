@@ -18,8 +18,12 @@ use std::time::{Duration, Instant};
 
 type XpcObject = *mut c_void;
 type PeerRequirementFn = unsafe extern "C" fn(XpcObject, *const c_char) -> c_int;
+type XpcConnectionHandler = unsafe extern "C" fn(XpcObject);
 
+const GRAPH_SUBSYSTEM: &str = "policy graph";
+const APPLE_SPEECH_SUBSYSTEM: &str = "Apple Speech";
 const XPC_SERVICE_NAME: &[u8] = b"com.useminutes.graph-worker\0";
+const APPLE_SPEECH_XPC_SERVICE_NAME: &[u8] = b"com.useminutes.apple-speech-worker\0";
 const COMMAND_KEY: &[u8] = b"command\0";
 const SEQUENCE_KEY: &[u8] = b"sequence\0";
 const OFFSET_KEY: &[u8] = b"offset\0";
@@ -39,11 +43,23 @@ const XPC_ERROR_CONNECTION_INTERRUPTED_SYMBOL: &[u8] = b"_xpc_error_connection_i
 const XPC_ERROR_CONNECTION_INVALID_SYMBOL: &[u8] = b"_xpc_error_connection_invalid\0";
 static XPC_SETTLEMENT_FAILED: AtomicBool = AtomicBool::new(false);
 static XPC_PARENT_REQUEST_LOCK: Mutex<()> = Mutex::new(());
+static APPLE_SPEECH_XPC_SETTLEMENT_FAILED: AtomicBool = AtomicBool::new(false);
+static APPLE_SPEECH_XPC_PARENT_REQUEST_LOCK: Mutex<()> = Mutex::new(());
 static XPC_PARENT_CALLBACK_QUEUE: OnceLock<usize> = OnceLock::new();
+static GRAPH_SERVICE_NONCE: OnceLock<[u8; 16]> = OnceLock::new();
+static GRAPH_SERVICE_CLAIMED: AtomicBool = AtomicBool::new(false);
+static APPLE_SPEECH_SERVICE_NONCE: OnceLock<[u8; 16]> = OnceLock::new();
+static APPLE_SPEECH_SERVICE_CLAIMED: AtomicBool = AtomicBool::new(false);
 
 unsafe extern "C" {
     fn minutes_current_process_is_trusted_distribution() -> c_int;
     fn minutes_validate_graph_authority_bundle(
+        authority_bundle_path: *const c_char,
+        current_executable_path: *const c_char,
+        running_parent_cdhash: *const u8,
+        running_parent_cdhash_len: isize,
+    ) -> c_int;
+    fn minutes_validate_apple_speech_authority_bundle(
         authority_bundle_path: *const c_char,
         current_executable_path: *const c_char,
         running_parent_cdhash: *const u8,
@@ -97,7 +113,7 @@ unsafe extern "C" {
     fn xpc_type_get_name(kind: *const c_void) -> *const c_char;
     fn xpc_retain(object: XpcObject) -> XpcObject;
     fn xpc_release(object: XpcObject);
-    fn xpc_main(handler: &Block<dyn Fn(XpcObject)>) -> !;
+    fn xpc_main(handler: XpcConnectionHandler) -> !;
 }
 
 fn parent_callback_queue() -> Result<*mut c_void, String> {
@@ -112,18 +128,18 @@ fn parent_callback_queue() -> Result<*mut c_void, String> {
     }
 }
 
-fn ensure_transport_available(poisoned: &AtomicBool) -> Result<(), String> {
+fn ensure_transport_available(subsystem: &str, poisoned: &AtomicBool) -> Result<(), String> {
     if poisoned.load(Ordering::Acquire) {
-        Err(
-            "policy graph XPC transport requires an application restart after an unconfirmed service exit"
-                .into(),
-        )
+        Err(format!(
+            "{subsystem} XPC transport requires an application restart after an unconfirmed service exit"
+        ))
     } else {
         Ok(())
     }
 }
 
 fn lock_parent_request<'a>(
+    subsystem: &str,
     lock: &'a Mutex<()>,
     poisoned: &AtomicBool,
     deadline: Instant,
@@ -131,19 +147,18 @@ fn lock_parent_request<'a>(
     loop {
         match lock.try_lock() {
             Ok(guard) => {
-                ensure_transport_available(poisoned)?;
+                ensure_transport_available(subsystem, poisoned)?;
                 return Ok(guard);
             }
             Err(TryLockError::Poisoned(_)) => {
-                return Err("policy graph XPC parent request lock was poisoned".into());
+                return Err(format!("{subsystem} XPC parent request lock was poisoned"));
             }
             Err(TryLockError::WouldBlock) => {
                 let remaining = deadline.saturating_duration_since(Instant::now());
                 if remaining.is_zero() {
-                    return Err(
-                        "policy graph XPC parent request admission exceeded its wall-clock budget"
-                            .into(),
-                    );
+                    return Err(format!(
+                        "{subsystem} XPC parent request admission exceeded its wall-clock budget"
+                    ));
                 }
                 std::thread::sleep(remaining.min(Duration::from_millis(2)));
             }
@@ -154,7 +169,31 @@ fn lock_parent_request<'a>(
 const CS_OPS_CDHASH: libc::c_uint = 5;
 
 pub(crate) fn current_process_is_trusted_distribution() -> bool {
-    unsafe { minutes_current_process_is_trusted_distribution() == 1 }
+    trusted_distribution_verdict() == TrustedDistribution::Yes
+}
+
+/// Whether this process is a trusted distribution build.
+///
+/// `Indeterminate` is not `No`. The Security evaluation can fail to complete,
+/// and treating that as "this is a development build" is what allowed a signed
+/// worker to silently install a weaker peer requirement.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum TrustedDistribution {
+    Yes,
+    No,
+    Indeterminate,
+}
+
+pub(crate) fn trusted_distribution_verdict() -> TrustedDistribution {
+    verdict_from_status(unsafe { minutes_current_process_is_trusted_distribution() })
+}
+
+fn verdict_from_status(status: c_int) -> TrustedDistribution {
+    match status {
+        1 => TrustedDistribution::Yes,
+        0 => TrustedDistribution::No,
+        _ => TrustedDistribution::Indeterminate,
+    }
 }
 
 pub(crate) fn current_process_cdhash() -> std::io::Result<[u8; 20]> {
@@ -250,6 +289,33 @@ pub(crate) fn validate_authority_bundle(authority_bundle: &Path) -> Result<(), S
     }
 }
 
+pub(crate) fn validate_apple_speech_authority_bundle(
+    authority_bundle: &Path,
+) -> Result<(), String> {
+    let authority_bundle = cstring_path(
+        authority_bundle,
+        "Apple Speech worker authority bundle path",
+    )?;
+    let current_executable =
+        std::env::current_exe().map_err(|_| "current executable path was unavailable")?;
+    let current_executable = cstring_path(&current_executable, "current executable path")?;
+    let running_parent_cdhash =
+        current_process_cdhash().map_err(|_| "current executable identity was unavailable")?;
+    let status = unsafe {
+        minutes_validate_apple_speech_authority_bundle(
+            authority_bundle.as_ptr(),
+            current_executable.as_ptr(),
+            running_parent_cdhash.as_ptr(),
+            running_parent_cdhash.len() as isize,
+        )
+    };
+    if status == 0 {
+        Ok(())
+    } else {
+        Err("the application bundle did not seal the Apple Speech worker authority".into())
+    }
+}
+
 struct OwnedXpc(XpcObject);
 
 impl OwnedXpc {
@@ -270,6 +336,7 @@ impl Drop for OwnedXpc {
 }
 
 struct Connection {
+    subsystem: &'static str,
     object: XpcObject,
     invalidated: mpsc::Receiver<()>,
     service_nonce: Mutex<Option<[u8; 16]>>,
@@ -280,25 +347,37 @@ struct Connection {
 impl Connection {
     fn wait_for_service_exit(&self, deadline: Instant) -> Result<(), String> {
         if !self.terminal_acknowledged.load(Ordering::Acquire) {
-            return Err("policy graph XPC terminal settlement was not acknowledged".into());
+            return Err(format!(
+                "{} XPC terminal settlement was not acknowledged",
+                self.subsystem
+            ));
         }
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
-            return Err("policy graph XPC service exit exceeded its wall-clock budget".into());
+            return Err(format!(
+                "{} XPC service exit exceeded its wall-clock budget",
+                self.subsystem
+            ));
         }
-        self.invalidated
-            .recv_timeout(remaining)
-            .map_err(|_| "policy graph XPC service exit exceeded its wall-clock budget".to_string())
+        self.invalidated.recv_timeout(remaining).map_err(|_| {
+            format!(
+                "{} XPC service exit exceeded its wall-clock budget",
+                self.subsystem
+            )
+        })
     }
 
     fn send_with_reply(&self, message: XpcObject, deadline: Instant) -> Result<OwnedXpc, String> {
         if self.transport_failed.load(Ordering::Acquire) {
-            return Err("policy graph XPC transport ended before the next request".into());
+            return Err(format!(
+                "{} XPC transport ended before the next request",
+                self.subsystem
+            ));
         }
         if let Some(nonce) = *self
             .service_nonce
             .lock()
-            .map_err(|_| "policy graph XPC service nonce lock was poisoned")?
+            .map_err(|_| format!("{} XPC service nonce lock was poisoned", self.subsystem))?
         {
             unsafe {
                 xpc_dictionary_set_data(
@@ -309,15 +388,20 @@ impl Connection {
                 );
             }
         }
-        let reply = match send_with_reply(self.object, parent_callback_queue()?, message, deadline)
-        {
+        let reply = match send_with_reply(
+            self.subsystem,
+            self.object,
+            parent_callback_queue()?,
+            message,
+            deadline,
+        ) {
             Ok(reply) => reply,
             Err(error) => {
                 self.transport_failed.store(true, Ordering::Release);
                 return Err(error);
             }
         };
-        let service_nonce = match service_nonce_from_reply(reply.0) {
+        let service_nonce = match service_nonce_from_reply(self.subsystem, reply.0) {
             Ok(nonce) => nonce,
             Err(error) => {
                 self.transport_failed.store(true, Ordering::Release);
@@ -327,8 +411,8 @@ impl Connection {
         let mut expected_nonce = self
             .service_nonce
             .lock()
-            .map_err(|_| "policy graph XPC service nonce lock was poisoned")?;
-        if let Err(error) = bind_service_nonce(&mut expected_nonce, service_nonce) {
+            .map_err(|_| format!("{} XPC service nonce lock was poisoned", self.subsystem))?;
+        if let Err(error) = bind_service_nonce(self.subsystem, &mut expected_nonce, service_nonce) {
             self.transport_failed.store(true, Ordering::Release);
             return Err(error);
         }
@@ -337,7 +421,10 @@ impl Connection {
             self.terminal_acknowledged.store(true, Ordering::Release);
         }
         if self.transport_failed.load(Ordering::Acquire) && !terminal {
-            return Err("policy graph XPC transport ended before a terminal reply".into());
+            return Err(format!(
+                "{} XPC transport ended before a terminal reply",
+                self.subsystem
+            ));
         }
         Ok(reply)
     }
@@ -346,21 +433,31 @@ impl Connection {
         if self.transport_failed.load(Ordering::Acquire)
             && !self.terminal_acknowledged.load(Ordering::Acquire)
         {
-            return Err("policy graph XPC transport failed before terminal acknowledgement".into());
+            return Err(format!(
+                "{} XPC transport failed before terminal acknowledgement",
+                self.subsystem
+            ));
         }
         if abort && !self.terminal_acknowledged.load(Ordering::Acquire) {
-            let message = OwnedXpc::dictionary()
-                .map_err(|_| "policy graph XPC terminal abort could not be created")?;
+            let message = OwnedXpc::dictionary().map_err(|_| {
+                format!("{} XPC terminal abort could not be created", self.subsystem)
+            })?;
             set_command(message.0, COMMAND_ABORT);
-            let reply = self
-                .send_with_reply(message.0, deadline)
-                .map_err(|_| "policy graph XPC terminal abort was not acknowledged")?;
+            let reply = self.send_with_reply(message.0, deadline).map_err(|_| {
+                format!("{} XPC terminal abort was not acknowledged", self.subsystem)
+            })?;
             if !unsafe { xpc_dictionary_get_bool(reply.0, OK_KEY.as_ptr().cast()) } {
-                return Err("policy graph XPC terminal abort was rejected".into());
+                return Err(format!(
+                    "{} XPC terminal abort was rejected",
+                    self.subsystem
+                ));
             }
         }
         if !self.terminal_acknowledged.load(Ordering::Acquire) {
-            return Err("policy graph XPC terminal settlement was not acknowledged".into());
+            return Err(format!(
+                "{} XPC terminal settlement was not acknowledged",
+                self.subsystem
+            ));
         }
         self.wait_for_service_exit(deadline)
     }
@@ -385,28 +482,39 @@ fn set_command(message: XpcObject, command: &[u8]) {
     }
 }
 
-fn service_nonce_from_reply(reply: XpcObject) -> Result<[u8; 16], String> {
+fn service_nonce_from_reply(subsystem: &str, reply: XpcObject) -> Result<[u8; 16], String> {
     let mut length = 0_usize;
     let data =
         unsafe { xpc_dictionary_get_data(reply, SERVICE_NONCE_KEY.as_ptr().cast(), &mut length) };
     if data.is_null() || length != 16 {
-        return Err("policy graph XPC service reply lacked its exact process nonce".into());
+        return Err(format!(
+            "{subsystem} XPC service reply lacked its exact process nonce"
+        ));
     }
     let mut nonce = [0_u8; 16];
     nonce.copy_from_slice(unsafe { std::slice::from_raw_parts(data.cast::<u8>(), length) });
     Ok(nonce)
 }
 
-fn bind_service_nonce(expected: &mut Option<[u8; 16]>, observed: [u8; 16]) -> Result<(), String> {
+fn bind_service_nonce(
+    subsystem: &str,
+    expected: &mut Option<[u8; 16]>,
+    observed: [u8; 16],
+) -> Result<(), String> {
     match *expected {
         None => *expected = Some(observed),
         Some(current) if current == observed => {}
-        Some(_) => return Err("policy graph XPC service generation changed mid-request".into()),
+        Some(_) => {
+            return Err(format!(
+                "{subsystem} XPC service generation changed mid-request"
+            ))
+        }
     }
     Ok(())
 }
 
 fn send_with_reply(
+    subsystem: &str,
     connection: XpcObject,
     reply_queue: *mut c_void,
     message: XpcObject,
@@ -414,7 +522,9 @@ fn send_with_reply(
 ) -> Result<OwnedXpc, String> {
     let remaining = deadline.saturating_duration_since(Instant::now());
     if remaining.is_zero() {
-        return Err("policy graph XPC operation exceeded its wall-clock budget".into());
+        return Err(format!(
+            "{subsystem} XPC operation exceeded its wall-clock budget"
+        ));
     }
     let (sender, receiver) = mpsc::sync_channel(1);
     let handler = RcBlock::new(move |reply: XpcObject| {
@@ -428,11 +538,13 @@ fn send_with_reply(
     }
     let reply = receiver
         .recv_timeout(remaining)
-        .map_err(|_| "policy graph XPC operation exceeded its wall-clock budget".to_string())?;
+        .map_err(|_| format!("{subsystem} XPC operation exceeded its wall-clock budget"))?;
     let reply = reply as XpcObject;
     if !xpc_type_is(reply, "dictionary") {
         unsafe { xpc_release(reply) };
-        return Err("policy graph XPC peer was unavailable or unauthenticated".into());
+        return Err(format!(
+            "{subsystem} XPC peer was unavailable or unauthenticated"
+        ));
     }
     Ok(OwnedXpc(reply))
 }
@@ -451,6 +563,7 @@ fn open_authenticated_connection(
     let (invalidated_sender, invalidated) = mpsc::channel();
     let transport_failed = Arc::new(AtomicBool::new(false));
     let connection = Connection {
+        subsystem: GRAPH_SUBSYSTEM,
         object: connection,
         invalidated,
         service_nonce: Mutex::new(None),
@@ -517,6 +630,91 @@ fn open_authenticated_connection(
     }
 }
 
+fn open_apple_speech_authenticated_connection(
+    exact_cdhash: &[u8; 20],
+    trusted_distribution: bool,
+    deadline: Instant,
+) -> Result<Connection, String> {
+    let callback_queue = parent_callback_queue()?;
+    let connection = unsafe {
+        xpc_connection_create(
+            APPLE_SPEECH_XPC_SERVICE_NAME.as_ptr().cast(),
+            callback_queue,
+        )
+    };
+    if connection.is_null() {
+        return Err("Apple Speech XPC service could not be created".into());
+    }
+    let (invalidated_sender, invalidated) = mpsc::channel();
+    let transport_failed = Arc::new(AtomicBool::new(false));
+    let connection = Connection {
+        subsystem: APPLE_SPEECH_SUBSYSTEM,
+        object: connection,
+        invalidated,
+        service_nonce: Mutex::new(None),
+        transport_failed: Arc::clone(&transport_failed),
+        terminal_acknowledged: AtomicBool::new(false),
+    };
+    let encoded = exact_cdhash
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let mut requirement =
+        format!("identifier \"com.useminutes.apple-speech-worker\" and cdhash H\"{encoded}\"");
+    if trusted_distribution {
+        requirement.push_str(
+            " and anchor apple generic and certificate leaf[subject.OU] = \"63TMLKT8HN\"",
+        );
+    }
+    let requirement = CString::new(requirement)
+        .map_err(|_| "Apple Speech XPC requirement was malformed".to_string())?;
+    set_peer_requirement(connection.object, &requirement)?;
+    let events = RcBlock::new(move |event: XpcObject| {
+        if xpc_is_connection_end(event) {
+            transport_failed.store(true, Ordering::Release);
+            let _ = invalidated_sender.send(());
+        }
+    });
+    unsafe {
+        xpc_connection_set_event_handler(connection.object, &events);
+        xpc_connection_resume(connection.object);
+    }
+
+    // No utterance byte crosses the connection before this exact-service
+    // code-signing requirement succeeds and the service returns its nonce.
+    let begin_result = (|| {
+        let begin = OwnedXpc::dictionary()?;
+        set_command(begin.0, COMMAND_BEGIN);
+        let reply = connection.send_with_reply(begin.0, deadline)?;
+        if unsafe { xpc_dictionary_get_bool(reply.0, BUSY_KEY.as_ptr().cast()) } {
+            return Ok(false);
+        }
+        if !unsafe { xpc_dictionary_get_bool(reply.0, OK_KEY.as_ptr().cast()) } {
+            return Err("Apple Speech XPC service rejected its content-free handshake".into());
+        }
+        Ok(true)
+    })();
+    match begin_result {
+        Ok(true) => Ok(connection),
+        Ok(false) => Err("Apple Speech XPC service is busy with another utterance".into()),
+        Err(error) if connection.terminal_acknowledged.load(Ordering::Acquire) => {
+            match connection.settle(false, deadline) {
+                Ok(()) => Err(error),
+                Err(settlement) => {
+                    APPLE_SPEECH_XPC_SETTLEMENT_FAILED.store(true, Ordering::Release);
+                    Err(format!("{error}; {settlement}"))
+                }
+            }
+        }
+        Err(error) => {
+            APPLE_SPEECH_XPC_SETTLEMENT_FAILED.store(true, Ordering::Release);
+            Err(format!(
+                "{error}; Apple Speech XPC handshake had no terminal acknowledgement"
+            ))
+        }
+    }
+}
+
 pub(crate) fn run(
     authority_bundle: &Path,
     exact_cdhash: &[u8; 20],
@@ -528,10 +726,14 @@ pub(crate) fn run(
     if wall_clock.is_zero() {
         return Err("policy graph XPC wall-clock budget must be positive".into());
     }
-    ensure_transport_available(&XPC_SETTLEMENT_FAILED)?;
+    ensure_transport_available(GRAPH_SUBSYSTEM, &XPC_SETTLEMENT_FAILED)?;
     let deadline = Instant::now() + wall_clock;
-    let _request_guard =
-        lock_parent_request(&XPC_PARENT_REQUEST_LOCK, &XPC_SETTLEMENT_FAILED, deadline)?;
+    let _request_guard = lock_parent_request(
+        GRAPH_SUBSYSTEM,
+        &XPC_PARENT_REQUEST_LOCK,
+        &XPC_SETTLEMENT_FAILED,
+        deadline,
+    )?;
     validate_authority_bundle(authority_bundle)?;
     let connection = open_authenticated_connection(exact_cdhash, trusted_distribution, deadline)?;
 
@@ -628,6 +830,127 @@ pub(crate) fn run(
             let context = outcome
                 .err()
                 .unwrap_or_else(|| "policy graph XPC result was ready".to_string());
+            Err(format!("{context}; {settlement}"))
+        }
+    }
+}
+
+pub(crate) fn run_apple_speech(
+    authority_bundle: &Path,
+    exact_cdhash: &[u8; 20],
+    trusted_distribution: bool,
+    mut input: impl Read,
+    max_response_bytes: u64,
+    wall_clock: Duration,
+) -> Result<Vec<u8>, String> {
+    if wall_clock.is_zero() {
+        return Err("Apple Speech XPC wall-clock budget must be positive".into());
+    }
+    ensure_transport_available(APPLE_SPEECH_SUBSYSTEM, &APPLE_SPEECH_XPC_SETTLEMENT_FAILED)?;
+    let deadline = Instant::now() + wall_clock;
+    let _request_guard = lock_parent_request(
+        APPLE_SPEECH_SUBSYSTEM,
+        &APPLE_SPEECH_XPC_PARENT_REQUEST_LOCK,
+        &APPLE_SPEECH_XPC_SETTLEMENT_FAILED,
+        deadline,
+    )?;
+    validate_apple_speech_authority_bundle(authority_bundle)?;
+    let connection =
+        open_apple_speech_authenticated_connection(exact_cdhash, trusted_distribution, deadline)?;
+
+    let outcome = (|| {
+        let mut sequence = 0_u64;
+        let mut total_input = 0_u64;
+        let mut buffer = [0_u8; XPC_CHUNK_BYTES];
+        loop {
+            let read = input
+                .read(&mut buffer)
+                .map_err(|_| "Apple Speech input stream could not be read".to_string())?;
+            if read == 0 {
+                break;
+            }
+            total_input = total_input
+                .checked_add(read as u64)
+                .filter(|total| *total <= crate::apple_speech_worker::MAX_REQUEST_BYTES as u64)
+                .ok_or_else(|| "Apple Speech input exceeded its byte budget".to_string())?;
+            let chunk = OwnedXpc::dictionary()?;
+            set_command(chunk.0, COMMAND_CHUNK);
+            unsafe {
+                xpc_dictionary_set_uint64(chunk.0, SEQUENCE_KEY.as_ptr().cast(), sequence);
+                xpc_dictionary_set_data(
+                    chunk.0,
+                    DATA_KEY.as_ptr().cast(),
+                    buffer.as_ptr().cast(),
+                    read,
+                );
+            }
+            let reply = connection.send_with_reply(chunk.0, deadline)?;
+            if !unsafe { xpc_dictionary_get_bool(reply.0, OK_KEY.as_ptr().cast()) } {
+                return Err("Apple Speech XPC service rejected an input chunk".into());
+            }
+            sequence = sequence
+                .checked_add(1)
+                .ok_or_else(|| "Apple Speech XPC sequence overflowed".to_string())?;
+        }
+
+        let finish = OwnedXpc::dictionary()?;
+        set_command(finish.0, COMMAND_FINISH);
+        unsafe {
+            xpc_dictionary_set_uint64(finish.0, SEQUENCE_KEY.as_ptr().cast(), sequence);
+        }
+        let reply = connection.send_with_reply(finish.0, deadline)?;
+        if !unsafe { xpc_dictionary_get_bool(reply.0, OK_KEY.as_ptr().cast()) } {
+            return Err("Apple Speech XPC worker failed closed".into());
+        }
+        let response_length =
+            unsafe { xpc_dictionary_get_uint64(reply.0, LENGTH_KEY.as_ptr().cast()) };
+        if response_length == 0 || response_length > max_response_bytes {
+            return Err("Apple Speech XPC response exceeded its byte budget".into());
+        }
+        let capacity = usize::try_from(response_length)
+            .map_err(|_| "Apple Speech XPC response exceeded this platform".to_string())?;
+        let mut response = Vec::with_capacity(capacity);
+        while response.len() < capacity {
+            let pull = OwnedXpc::dictionary()?;
+            set_command(pull.0, COMMAND_PULL);
+            unsafe {
+                xpc_dictionary_set_uint64(
+                    pull.0,
+                    OFFSET_KEY.as_ptr().cast(),
+                    response.len() as u64,
+                );
+            }
+            let reply = connection.send_with_reply(pull.0, deadline)?;
+            if !unsafe { xpc_dictionary_get_bool(reply.0, OK_KEY.as_ptr().cast()) } {
+                return Err("Apple Speech XPC service rejected a response pull".into());
+            }
+            let mut length = 0_usize;
+            let data =
+                unsafe { xpc_dictionary_get_data(reply.0, DATA_KEY.as_ptr().cast(), &mut length) };
+            if data.is_null()
+                || length == 0
+                || length > XPC_CHUNK_BYTES
+                || response
+                    .len()
+                    .checked_add(length)
+                    .is_none_or(|end| end > capacity)
+            {
+                return Err("Apple Speech XPC service returned an invalid response chunk".into());
+            }
+            let bytes = unsafe { std::slice::from_raw_parts(data.cast::<u8>(), length) };
+            response.extend_from_slice(bytes);
+        }
+        Ok(response)
+    })();
+    let settlement = connection.settle(outcome.is_err(), deadline);
+    match (outcome, settlement) {
+        (Ok(response), Ok(())) => Ok(response),
+        (Err(error), Ok(())) => Err(error),
+        (outcome, Err(settlement)) => {
+            APPLE_SPEECH_XPC_SETTLEMENT_FAILED.store(true, Ordering::Release);
+            let context = outcome
+                .err()
+                .unwrap_or_else(|| "Apple Speech XPC result was ready".to_string());
             Err(format!("{context}; {settlement}"))
         }
     }
@@ -747,16 +1070,31 @@ impl ServicePhase {
     }
 }
 
+fn parent_requirement_for(
+    verdict: TrustedDistribution,
+    identifiers: &str,
+) -> Result<String, String> {
+    match verdict {
+        TrustedDistribution::Yes => Ok(format!(
+            "{identifiers} and anchor apple generic and certificate leaf[subject.OU] = \"63TMLKT8HN\""
+        )),
+        TrustedDistribution::No => Ok(identifiers.to_string()),
+        TrustedDistribution::Indeterminate => Err(
+            "XPC parent requirement could not establish this process's signing authority"
+                .to_string(),
+        ),
+    }
+}
+
 fn service_parent_requirement() -> Result<CString, String> {
     let identifiers =
         "(identifier \"com.useminutes.desktop\" or identifier \"com.useminutes.desktop.dev\")";
-    let requirement = if current_process_is_trusted_distribution() {
-        format!(
-            "{identifiers} and anchor apple generic and certificate leaf[subject.OU] = \"63TMLKT8HN\""
-        )
-    } else {
-        identifiers.to_string()
-    };
+    // A signed build must never accept the identifier-only form: any
+    // ad-hoc-signed binary claiming the bundle id would satisfy it at the same
+    // UID, which is exactly the adversary the hostile open-holder test models.
+    // Downgrade only on a definitive "not a distribution build", never because
+    // the evaluation could not complete.
+    let requirement = parent_requirement_for(trusted_distribution_verdict(), identifiers)?;
     CString::new(requirement)
         .map_err(|_| "policy graph parent requirement was malformed".to_string())
 }
@@ -861,6 +1199,219 @@ fn handle_service_message(message: XpcObject, state: &Mutex<ServicePhase>) -> Op
     }
 }
 
+enum AppleSpeechServicePhase {
+    AwaitingBegin,
+    Receiving {
+        next_sequence: u64,
+        input: zeroize::Zeroizing<Vec<u8>>,
+    },
+    Processing,
+    Responding {
+        response: Vec<u8>,
+        next_offset: usize,
+    },
+    Done,
+}
+
+impl AppleSpeechServicePhase {
+    fn begin(&mut self) -> bool {
+        if !matches!(self, Self::AwaitingBegin) {
+            return false;
+        }
+        *self = Self::Receiving {
+            next_sequence: 0,
+            input: zeroize::Zeroizing::new(Vec::new()),
+        };
+        true
+    }
+
+    fn append_chunk(&mut self, sequence: u64, data: &[u8]) -> bool {
+        self.append_chunk_with_limit(
+            sequence,
+            data,
+            crate::apple_speech_worker::MAX_REQUEST_BYTES,
+        )
+    }
+
+    fn append_chunk_with_limit(
+        &mut self,
+        sequence: u64,
+        data: &[u8],
+        max_request_bytes: usize,
+    ) -> bool {
+        let Self::Receiving {
+            next_sequence,
+            input,
+        } = self
+        else {
+            return false;
+        };
+        if sequence != *next_sequence
+            || data.is_empty()
+            || data.len() > XPC_CHUNK_BYTES
+            || input
+                .len()
+                .checked_add(data.len())
+                .is_none_or(|total| total > max_request_bytes)
+        {
+            return false;
+        }
+        input.extend_from_slice(data);
+        let Some(next) = next_sequence.checked_add(1) else {
+            return false;
+        };
+        *next_sequence = next;
+        true
+    }
+
+    fn finish_input(&mut self, sequence: u64) -> Option<zeroize::Zeroizing<Vec<u8>>> {
+        let Self::Receiving {
+            next_sequence,
+            input,
+        } = self
+        else {
+            return None;
+        };
+        if sequence != *next_sequence {
+            return None;
+        }
+        let input = std::mem::replace(input, zeroize::Zeroizing::new(Vec::new()));
+        *self = Self::Processing;
+        Some(input)
+    }
+
+    fn install_response(&mut self, response: Vec<u8>) -> bool {
+        self.install_response_with_limit(
+            response,
+            crate::apple_speech_worker::MAX_RESPONSE_BYTES as usize,
+        )
+    }
+
+    fn install_response_with_limit(
+        &mut self,
+        response: Vec<u8>,
+        max_response_bytes: usize,
+    ) -> bool {
+        if !matches!(self, Self::Processing)
+            || response.is_empty()
+            || response.len() > max_response_bytes
+        {
+            return false;
+        }
+        *self = Self::Responding {
+            response,
+            next_offset: 0,
+        };
+        true
+    }
+
+    fn response_chunk(&mut self, offset: usize) -> Option<&[u8]> {
+        let Self::Responding {
+            response,
+            next_offset,
+        } = self
+        else {
+            return None;
+        };
+        if offset != *next_offset || offset >= response.len() {
+            return None;
+        }
+        let end = offset.saturating_add(XPC_CHUNK_BYTES).min(response.len());
+        *next_offset = end;
+        Some(&response[offset..end])
+    }
+
+    fn response_complete(&self) -> bool {
+        matches!(
+            self,
+            Self::Responding {
+                response,
+                next_offset
+            } if *next_offset == response.len()
+        )
+    }
+
+    fn abort(&mut self) -> bool {
+        if matches!(self, Self::Done) {
+            return false;
+        }
+        *self = Self::Done;
+        true
+    }
+}
+
+fn handle_apple_speech_service_message(
+    message: XpcObject,
+    state: &Mutex<AppleSpeechServicePhase>,
+) -> Option<OwnedXpc> {
+    if !xpc_type_is(message, "dictionary") {
+        return None;
+    }
+    let command = service_command(message)?;
+    let mut phase = state.lock().ok()?;
+    if command == "abort" {
+        return service_reply(message, phase.abort());
+    }
+    match (&mut *phase, command) {
+        (AppleSpeechServicePhase::AwaitingBegin, "begin") => service_reply(message, phase.begin()),
+        (AppleSpeechServicePhase::Receiving { .. }, "chunk") => {
+            let sequence =
+                unsafe { xpc_dictionary_get_uint64(message, SEQUENCE_KEY.as_ptr().cast()) };
+            let mut length = 0_usize;
+            let data =
+                unsafe { xpc_dictionary_get_data(message, DATA_KEY.as_ptr().cast(), &mut length) };
+            if data.is_null() {
+                return service_reply(message, false);
+            }
+            let data = unsafe { std::slice::from_raw_parts(data.cast::<u8>(), length) };
+            service_reply(message, phase.append_chunk(sequence, data))
+        }
+        (AppleSpeechServicePhase::Receiving { .. }, "finish") => {
+            let sequence =
+                unsafe { xpc_dictionary_get_uint64(message, SEQUENCE_KEY.as_ptr().cast()) };
+            let Some(input) = phase.finish_input(sequence) else {
+                return service_reply(message, false);
+            };
+            let response = match crate::apple_speech_worker::process_private_audio_request(&input) {
+                Ok(response) => response,
+                Err(_) => return service_reply(message, false),
+            };
+            let length = response.len() as u64;
+            if !phase.install_response(response) {
+                return service_reply(message, false);
+            }
+            let reply = service_reply(message, true)?;
+            unsafe {
+                xpc_dictionary_set_uint64(reply.0, LENGTH_KEY.as_ptr().cast(), length);
+            }
+            Some(reply)
+        }
+        (AppleSpeechServicePhase::Responding { .. }, "pull") => {
+            let offset = usize::try_from(unsafe {
+                xpc_dictionary_get_uint64(message, OFFSET_KEY.as_ptr().cast())
+            })
+            .ok()?;
+            let reply = service_reply(message, true)?;
+            let Some(chunk) = phase.response_chunk(offset) else {
+                return service_reply(message, false);
+            };
+            unsafe {
+                xpc_dictionary_set_data(
+                    reply.0,
+                    DATA_KEY.as_ptr().cast(),
+                    chunk.as_ptr().cast(),
+                    chunk.len(),
+                );
+            }
+            if phase.response_complete() {
+                *phase = AppleSpeechServicePhase::Done;
+            }
+            Some(reply)
+        }
+        _ => service_reply(message, false),
+    }
+}
+
 fn claim_service_process(claimed: &AtomicBool) -> bool {
     claimed
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -910,6 +1461,136 @@ fn new_service_process_nonce() -> Result<[u8; 16], String> {
     }
 }
 
+unsafe extern "C" fn graph_service_connection_handler(peer: XpcObject) {
+    if !xpc_type_is(peer, "connection") {
+        return;
+    }
+    let Ok(requirement) = service_parent_requirement() else {
+        unsafe { xpc_connection_cancel(peer) };
+        return;
+    };
+    if set_peer_requirement(peer, &requirement).is_err() {
+        unsafe { xpc_connection_cancel(peer) };
+        return;
+    }
+    let Some(message_service_nonce) = GRAPH_SERVICE_NONCE.get().copied() else {
+        unsafe { xpc_connection_cancel(peer) };
+        return;
+    };
+    let state = Arc::new(Mutex::new(ServicePhase::AwaitingBegin));
+    let message_state = Arc::clone(&state);
+    let message_claimed = &GRAPH_SERVICE_CLAIMED;
+    let peer_owns_process_claim = Arc::new(AtomicBool::new(false));
+    let message_peer_owns_process_claim = Arc::clone(&peer_owns_process_claim);
+    let peer_was_rejected = Arc::new(AtomicBool::new(false));
+    let message_peer_was_rejected = Arc::clone(&peer_was_rejected);
+    let peer_address = peer as usize;
+    let messages = RcBlock::new(move |message: XpcObject| {
+        match classify_service_peer_event(
+            xpc_type_is(message, "dictionary"),
+            message_peer_owns_process_claim.load(Ordering::Acquire),
+            message_peer_was_rejected.load(Ordering::Acquire),
+        ) {
+            ServicePeerEvent::HandleMessage => {}
+            ServicePeerEvent::CancelPeer => {
+                unsafe { xpc_connection_cancel(peer_address as XpcObject) };
+                return;
+            }
+            ServicePeerEvent::ExitProcess => unsafe { libc::_exit(72) },
+        }
+        let command = service_command(message);
+        let awaiting_begin = message_state
+            .lock()
+            .is_ok_and(|phase| matches!(*phase, ServicePhase::AwaitingBegin));
+        if awaiting_begin && !awaiting_command_can_claim(command) {
+            let Some(reply) = service_reply(message, false) else {
+                unsafe { xpc_connection_cancel(peer_address as XpcObject) };
+                return;
+            };
+            unsafe {
+                xpc_dictionary_set_bool(reply.0, TERMINAL_KEY.as_ptr().cast(), false);
+                xpc_dictionary_set_data(
+                    reply.0,
+                    SERVICE_NONCE_KEY.as_ptr().cast(),
+                    message_service_nonce.as_ptr().cast(),
+                    message_service_nonce.len(),
+                );
+                xpc_connection_send_message(peer_address as XpcObject, reply.0);
+            }
+            return;
+        }
+        if awaiting_begin && !claim_service_process(message_claimed) {
+            message_peer_was_rejected.store(true, Ordering::Release);
+            let Some(reply) = service_reply(message, false) else {
+                unsafe { xpc_connection_cancel(peer_address as XpcObject) };
+                return;
+            };
+            unsafe {
+                xpc_dictionary_set_bool(reply.0, BUSY_KEY.as_ptr().cast(), true);
+                xpc_dictionary_set_bool(reply.0, TERMINAL_KEY.as_ptr().cast(), false);
+                xpc_dictionary_set_data(
+                    reply.0,
+                    SERVICE_NONCE_KEY.as_ptr().cast(),
+                    message_service_nonce.as_ptr().cast(),
+                    message_service_nonce.len(),
+                );
+                xpc_connection_send_message(peer_address as XpcObject, reply.0);
+            }
+            return;
+        }
+        if awaiting_begin {
+            message_peer_owns_process_claim.store(true, Ordering::Release);
+        } else if !service_request_nonce_matches(message, &message_service_nonce) {
+            let Some(reply) = service_reply(message, false) else {
+                unsafe { libc::_exit(71) };
+            };
+            unsafe {
+                xpc_dictionary_set_bool(reply.0, TERMINAL_KEY.as_ptr().cast(), true);
+                xpc_dictionary_set_data(
+                    reply.0,
+                    SERVICE_NONCE_KEY.as_ptr().cast(),
+                    message_service_nonce.as_ptr().cast(),
+                    message_service_nonce.len(),
+                );
+                xpc_connection_send_message(peer_address as XpcObject, reply.0);
+            }
+            let exit_after_send = RcBlock::new(|| unsafe { libc::_exit(71) });
+            unsafe {
+                xpc_connection_send_barrier(peer_address as XpcObject, &exit_after_send);
+            }
+            return;
+        }
+        let Some(reply) = handle_service_message(message, &message_state) else {
+            unsafe { libc::_exit(71) };
+        };
+        let ok = unsafe { xpc_dictionary_get_bool(reply.0, OK_KEY.as_ptr().cast()) };
+        let terminal = !ok
+            || message_state
+                .lock()
+                .is_ok_and(|phase| matches!(*phase, ServicePhase::Done));
+        unsafe {
+            xpc_dictionary_set_bool(reply.0, TERMINAL_KEY.as_ptr().cast(), terminal);
+            xpc_dictionary_set_data(
+                reply.0,
+                SERVICE_NONCE_KEY.as_ptr().cast(),
+                message_service_nonce.as_ptr().cast(),
+                message_service_nonce.len(),
+            );
+            xpc_connection_send_message(peer_address as XpcObject, reply.0);
+        }
+        if terminal {
+            let exit_after_send = RcBlock::new(|| unsafe { libc::_exit(0) });
+            unsafe {
+                xpc_connection_send_barrier(peer_address as XpcObject, &exit_after_send);
+            }
+        }
+    });
+    unsafe {
+        xpc_connection_set_event_handler(peer, &messages);
+        xpc_connection_resume(peer);
+    }
+}
+
 pub fn run_service_main() -> ! {
     // XPC may otherwise reuse one helper process for sequential connections.
     // This service is intentionally one authenticated request per process:
@@ -920,116 +1601,63 @@ pub fn run_service_main() -> ! {
         unsafe { libc::_exit(70) };
     }
     let service_nonce = match new_service_process_nonce() {
-        Ok(nonce) => Arc::new(nonce),
+        Ok(nonce) => nonce,
         Err(_) => unsafe { libc::_exit(70) },
     };
-    let claimed = Arc::new(AtomicBool::new(false));
-    let connections = RcBlock::new(move |peer: XpcObject| {
-        if !xpc_type_is(peer, "connection") {
-            return;
+    if GRAPH_SERVICE_NONCE.set(service_nonce).is_err() {
+        unsafe { libc::_exit(70) };
+    }
+    unsafe { xpc_main(graph_service_connection_handler) }
+}
+
+unsafe extern "C" fn apple_speech_service_connection_handler(peer: XpcObject) {
+    if !xpc_type_is(peer, "connection") {
+        return;
+    }
+    let Ok(requirement) = service_parent_requirement() else {
+        unsafe { xpc_connection_cancel(peer) };
+        return;
+    };
+    if set_peer_requirement(peer, &requirement).is_err() {
+        unsafe { xpc_connection_cancel(peer) };
+        return;
+    }
+    let Some(message_service_nonce) = APPLE_SPEECH_SERVICE_NONCE.get().copied() else {
+        unsafe { xpc_connection_cancel(peer) };
+        return;
+    };
+    let state = Arc::new(Mutex::new(AppleSpeechServicePhase::AwaitingBegin));
+    let message_state = Arc::clone(&state);
+    let message_claimed = &APPLE_SPEECH_SERVICE_CLAIMED;
+    let peer_owns_process_claim = Arc::new(AtomicBool::new(false));
+    let message_peer_owns_process_claim = Arc::clone(&peer_owns_process_claim);
+    let peer_was_rejected = Arc::new(AtomicBool::new(false));
+    let message_peer_was_rejected = Arc::clone(&peer_was_rejected);
+    let peer_address = peer as usize;
+    let messages = RcBlock::new(move |message: XpcObject| {
+        match classify_service_peer_event(
+            xpc_type_is(message, "dictionary"),
+            message_peer_owns_process_claim.load(Ordering::Acquire),
+            message_peer_was_rejected.load(Ordering::Acquire),
+        ) {
+            ServicePeerEvent::HandleMessage => {}
+            ServicePeerEvent::CancelPeer => {
+                unsafe { xpc_connection_cancel(peer_address as XpcObject) };
+                return;
+            }
+            ServicePeerEvent::ExitProcess => unsafe { libc::_exit(72) },
         }
-        let Ok(requirement) = service_parent_requirement() else {
-            unsafe { xpc_connection_cancel(peer) };
-            return;
-        };
-        if set_peer_requirement(peer, &requirement).is_err() {
-            unsafe { xpc_connection_cancel(peer) };
-            return;
-        }
-        let state = Arc::new(Mutex::new(ServicePhase::AwaitingBegin));
-        let message_state = Arc::clone(&state);
-        let message_claimed = Arc::clone(&claimed);
-        let message_service_nonce = Arc::clone(&service_nonce);
-        let peer_owns_process_claim = Arc::new(AtomicBool::new(false));
-        let message_peer_owns_process_claim = Arc::clone(&peer_owns_process_claim);
-        let peer_was_rejected = Arc::new(AtomicBool::new(false));
-        let message_peer_was_rejected = Arc::clone(&peer_was_rejected);
-        let peer_address = peer as usize;
-        let messages = RcBlock::new(move |message: XpcObject| {
-            match classify_service_peer_event(
-                xpc_type_is(message, "dictionary"),
-                message_peer_owns_process_claim.load(Ordering::Acquire),
-                message_peer_was_rejected.load(Ordering::Acquire),
-            ) {
-                ServicePeerEvent::HandleMessage => {}
-                ServicePeerEvent::CancelPeer => {
-                    unsafe { xpc_connection_cancel(peer_address as XpcObject) };
-                    return;
-                }
-                ServicePeerEvent::ExitProcess => unsafe { libc::_exit(72) },
-            }
-            let command = service_command(message);
-            let awaiting_begin = message_state
-                .lock()
-                .is_ok_and(|phase| matches!(*phase, ServicePhase::AwaitingBegin));
-            if awaiting_begin && !awaiting_command_can_claim(command) {
-                let Some(reply) = service_reply(message, false) else {
-                    unsafe { xpc_connection_cancel(peer_address as XpcObject) };
-                    return;
-                };
-                unsafe {
-                    xpc_dictionary_set_bool(reply.0, TERMINAL_KEY.as_ptr().cast(), false);
-                    xpc_dictionary_set_data(
-                        reply.0,
-                        SERVICE_NONCE_KEY.as_ptr().cast(),
-                        message_service_nonce.as_ptr().cast(),
-                        message_service_nonce.len(),
-                    );
-                    xpc_connection_send_message(peer_address as XpcObject, reply.0);
-                }
+        let command = service_command(message);
+        let awaiting_begin = message_state
+            .lock()
+            .is_ok_and(|phase| matches!(*phase, AppleSpeechServicePhase::AwaitingBegin));
+        if awaiting_begin && !awaiting_command_can_claim(command) {
+            let Some(reply) = service_reply(message, false) else {
+                unsafe { xpc_connection_cancel(peer_address as XpcObject) };
                 return;
-            }
-            if awaiting_begin && !claim_service_process(&message_claimed) {
-                message_peer_was_rejected.store(true, Ordering::Release);
-                let Some(reply) = service_reply(message, false) else {
-                    unsafe { xpc_connection_cancel(peer_address as XpcObject) };
-                    return;
-                };
-                unsafe {
-                    xpc_dictionary_set_bool(reply.0, BUSY_KEY.as_ptr().cast(), true);
-                    xpc_dictionary_set_bool(reply.0, TERMINAL_KEY.as_ptr().cast(), false);
-                    xpc_dictionary_set_data(
-                        reply.0,
-                        SERVICE_NONCE_KEY.as_ptr().cast(),
-                        message_service_nonce.as_ptr().cast(),
-                        message_service_nonce.len(),
-                    );
-                    xpc_connection_send_message(peer_address as XpcObject, reply.0);
-                }
-                return;
-            }
-            if awaiting_begin {
-                message_peer_owns_process_claim.store(true, Ordering::Release);
-            } else if !service_request_nonce_matches(message, &message_service_nonce) {
-                let Some(reply) = service_reply(message, false) else {
-                    unsafe { libc::_exit(71) };
-                };
-                unsafe {
-                    xpc_dictionary_set_bool(reply.0, TERMINAL_KEY.as_ptr().cast(), true);
-                    xpc_dictionary_set_data(
-                        reply.0,
-                        SERVICE_NONCE_KEY.as_ptr().cast(),
-                        message_service_nonce.as_ptr().cast(),
-                        message_service_nonce.len(),
-                    );
-                    xpc_connection_send_message(peer_address as XpcObject, reply.0);
-                }
-                let exit_after_send = RcBlock::new(|| unsafe { libc::_exit(71) });
-                unsafe {
-                    xpc_connection_send_barrier(peer_address as XpcObject, &exit_after_send);
-                }
-                return;
-            }
-            let Some(reply) = handle_service_message(message, &message_state) else {
-                unsafe { libc::_exit(71) };
             };
-            let ok = unsafe { xpc_dictionary_get_bool(reply.0, OK_KEY.as_ptr().cast()) };
-            let terminal = !ok
-                || message_state
-                    .lock()
-                    .is_ok_and(|phase| matches!(*phase, ServicePhase::Done));
             unsafe {
-                xpc_dictionary_set_bool(reply.0, TERMINAL_KEY.as_ptr().cast(), terminal);
+                xpc_dictionary_set_bool(reply.0, TERMINAL_KEY.as_ptr().cast(), false);
                 xpc_dictionary_set_data(
                     reply.0,
                     SERVICE_NONCE_KEY.as_ptr().cast(),
@@ -1038,19 +1666,95 @@ pub fn run_service_main() -> ! {
                 );
                 xpc_connection_send_message(peer_address as XpcObject, reply.0);
             }
-            if terminal {
-                let exit_after_send = RcBlock::new(|| unsafe { libc::_exit(0) });
-                unsafe {
-                    xpc_connection_send_barrier(peer_address as XpcObject, &exit_after_send);
-                }
+            return;
+        }
+        if awaiting_begin && !claim_service_process(message_claimed) {
+            message_peer_was_rejected.store(true, Ordering::Release);
+            let Some(reply) = service_reply(message, false) else {
+                unsafe { xpc_connection_cancel(peer_address as XpcObject) };
+                return;
+            };
+            unsafe {
+                xpc_dictionary_set_bool(reply.0, BUSY_KEY.as_ptr().cast(), true);
+                xpc_dictionary_set_bool(reply.0, TERMINAL_KEY.as_ptr().cast(), false);
+                xpc_dictionary_set_data(
+                    reply.0,
+                    SERVICE_NONCE_KEY.as_ptr().cast(),
+                    message_service_nonce.as_ptr().cast(),
+                    message_service_nonce.len(),
+                );
+                xpc_connection_send_message(peer_address as XpcObject, reply.0);
             }
-        });
+            return;
+        }
+        if awaiting_begin {
+            message_peer_owns_process_claim.store(true, Ordering::Release);
+        } else if !service_request_nonce_matches(message, &message_service_nonce) {
+            let Some(reply) = service_reply(message, false) else {
+                unsafe { libc::_exit(71) };
+            };
+            unsafe {
+                xpc_dictionary_set_bool(reply.0, TERMINAL_KEY.as_ptr().cast(), true);
+                xpc_dictionary_set_data(
+                    reply.0,
+                    SERVICE_NONCE_KEY.as_ptr().cast(),
+                    message_service_nonce.as_ptr().cast(),
+                    message_service_nonce.len(),
+                );
+                xpc_connection_send_message(peer_address as XpcObject, reply.0);
+            }
+            let exit_after_send = RcBlock::new(|| unsafe { libc::_exit(71) });
+            unsafe {
+                xpc_connection_send_barrier(peer_address as XpcObject, &exit_after_send);
+            }
+            return;
+        }
+        let Some(reply) = handle_apple_speech_service_message(message, &message_state) else {
+            unsafe { libc::_exit(71) };
+        };
+        let ok = unsafe { xpc_dictionary_get_bool(reply.0, OK_KEY.as_ptr().cast()) };
+        let terminal = !ok
+            || message_state
+                .lock()
+                .is_ok_and(|phase| matches!(*phase, AppleSpeechServicePhase::Done));
         unsafe {
-            xpc_connection_set_event_handler(peer, &messages);
-            xpc_connection_resume(peer);
+            xpc_dictionary_set_bool(reply.0, TERMINAL_KEY.as_ptr().cast(), terminal);
+            xpc_dictionary_set_data(
+                reply.0,
+                SERVICE_NONCE_KEY.as_ptr().cast(),
+                message_service_nonce.as_ptr().cast(),
+                message_service_nonce.len(),
+            );
+            xpc_connection_send_message(peer_address as XpcObject, reply.0);
+        }
+        if terminal {
+            let exit_after_send = RcBlock::new(|| unsafe { libc::_exit(0) });
+            unsafe {
+                xpc_connection_send_barrier(peer_address as XpcObject, &exit_after_send);
+            }
         }
     });
-    unsafe { xpc_main(&connections) }
+    unsafe {
+        xpc_connection_set_event_handler(peer, &messages);
+        xpc_connection_resume(peer);
+    }
+}
+
+pub fn run_apple_speech_service_main() -> ! {
+    // One authenticated utterance per process. Immutable resource ceilings
+    // are installed before XPC accepts a peer and cannot be raised by a later
+    // request.
+    if crate::apple_speech_worker::prepare_macos_apple_speech_xpc_worker().is_err() {
+        unsafe { libc::_exit(70) };
+    }
+    let service_nonce = match new_service_process_nonce() {
+        Ok(nonce) => nonce,
+        Err(_) => unsafe { libc::_exit(70) },
+    };
+    if APPLE_SPEECH_SERVICE_NONCE.set(service_nonce).is_err() {
+        unsafe { libc::_exit(70) };
+    }
+    unsafe { xpc_main(apple_speech_service_connection_handler) }
 }
 
 #[cfg(test)]
@@ -1098,13 +1802,120 @@ mod tests {
     }
 
     #[test]
+    fn apple_speech_protocol_rejects_replay_reordering_and_premature_transitions() {
+        let mut phase = AppleSpeechServicePhase::AwaitingBegin;
+        assert!(phase.response_chunk(0).is_none());
+        assert!(phase.finish_input(0).is_none());
+        assert!(!phase.install_response(b"early".to_vec()));
+        assert!(phase.begin());
+        assert!(!phase.begin());
+        assert!(!phase.append_chunk(1, b"late"));
+        assert!(!phase.append_chunk(0, b""));
+        assert!(!phase.append_chunk(0, &vec![0; XPC_CHUNK_BYTES + 1]));
+        assert!(phase.append_chunk(0, b"first"));
+        assert!(!phase.append_chunk(0, b"replay"));
+        assert!(!phase.append_chunk(2, b"skip"));
+        assert!(phase.append_chunk(1, b"second"));
+        assert!(phase.finish_input(1).is_none());
+        assert_eq!(phase.finish_input(2).unwrap().as_slice(), b"firstsecond");
+        assert!(phase.install_response(b"response".to_vec()));
+        assert!(!phase.install_response(b"replacement".to_vec()));
+        assert!(phase.response_chunk(1).is_none());
+        assert_eq!(phase.response_chunk(0).unwrap(), b"response");
+        assert!(phase.response_complete());
+        assert!(phase.response_chunk(0).is_none());
+    }
+
+    #[test]
+    fn apple_speech_protocol_enforces_aggregate_request_and_response_budgets() {
+        let mut request = AppleSpeechServicePhase::AwaitingBegin;
+        assert!(request.begin());
+        assert!(request.append_chunk_with_limit(0, b"1234", 4));
+        assert!(!request.append_chunk_with_limit(1, b"5", 4));
+        assert_eq!(request.finish_input(1).unwrap().as_slice(), b"1234");
+
+        assert!(!request.install_response_with_limit(Vec::new(), 4));
+        assert!(!request.install_response_with_limit(b"12345".to_vec(), 4));
+        assert!(request.install_response_with_limit(b"1234".to_vec(), 4));
+        assert!(request.response_chunk(1).is_none());
+        assert_eq!(request.response_chunk(0).unwrap(), b"1234");
+        assert!(request.response_complete());
+    }
+
+    #[test]
+    fn apple_speech_abort_is_terminal_from_every_live_phase() {
+        let mut awaiting = AppleSpeechServicePhase::AwaitingBegin;
+        assert!(awaiting.abort());
+        assert!(!awaiting.abort());
+
+        let mut receiving = AppleSpeechServicePhase::AwaitingBegin;
+        assert!(receiving.begin());
+        assert!(receiving.abort());
+        assert!(!receiving.abort());
+
+        let mut processing = AppleSpeechServicePhase::Processing;
+        assert!(processing.abort());
+        assert!(!processing.abort());
+
+        let mut responding = AppleSpeechServicePhase::Processing;
+        assert!(responding.install_response(b"result".to_vec()));
+        assert!(responding.abort());
+        assert!(!responding.abort());
+    }
+
+    #[test]
+    fn apple_speech_one_process_claim_and_disconnect_are_fail_closed() {
+        let claimed = AtomicBool::new(false);
+        assert!(claim_service_process(&claimed));
+        assert!(!claim_service_process(&claimed));
+        assert_eq!(
+            classify_service_peer_event(false, false, true),
+            ServicePeerEvent::CancelPeer
+        );
+        assert_eq!(
+            classify_service_peer_event(false, true, false),
+            ServicePeerEvent::ExitProcess
+        );
+    }
+
+    #[test]
+    fn signed_builds_never_fall_open_to_an_identifier_only_peer_requirement() {
+        let identifiers = "(identifier \"com.useminutes.desktop\")";
+        // A definitive trusted-distribution verdict anchors to the team.
+        let anchored = parent_requirement_for(TrustedDistribution::Yes, identifiers).unwrap();
+        assert!(anchored.contains("anchor apple generic"));
+        assert!(anchored.contains("63TMLKT8HN"));
+        // A definitive "not a distribution build" keeps local development working.
+        assert_eq!(
+            parent_requirement_for(TrustedDistribution::No, identifiers).unwrap(),
+            identifiers
+        );
+        // An evaluation that could not complete must fail closed rather than
+        // install a requirement any ad-hoc binary at the same UID satisfies.
+        assert!(parent_requirement_for(TrustedDistribution::Indeterminate, identifiers).is_err());
+    }
+
+    #[test]
+    fn only_an_exact_success_or_requirement_failure_is_a_verdict() {
+        assert_eq!(verdict_from_status(1), TrustedDistribution::Yes);
+        assert_eq!(verdict_from_status(0), TrustedDistribution::No);
+        for status in [-1, -67050, 2, i32::MIN, i32::MAX] {
+            assert_eq!(
+                verdict_from_status(status),
+                TrustedDistribution::Indeterminate,
+                "status {status} must not be read as a verdict"
+            );
+        }
+    }
+
+    #[test]
     fn settlement_binds_every_request_to_one_service_process_nonce() {
         let first = [1_u8; 16];
         let second = [2_u8; 16];
         let mut expected = None;
-        bind_service_nonce(&mut expected, first).unwrap();
-        bind_service_nonce(&mut expected, first).unwrap();
-        assert!(bind_service_nonce(&mut expected, second).is_err());
+        bind_service_nonce(GRAPH_SUBSYSTEM, &mut expected, first).unwrap();
+        bind_service_nonce(GRAPH_SUBSYSTEM, &mut expected, first).unwrap();
+        assert!(bind_service_nonce(GRAPH_SUBSYSTEM, &mut expected, second).is_err());
         assert_eq!(expected, Some(first));
     }
 
@@ -1147,6 +1958,7 @@ mod tests {
         let waiter = std::thread::spawn(move || {
             ready_tx.send(()).unwrap();
             lock_parent_request(
+                GRAPH_SUBSYSTEM,
                 &waiter_lock,
                 &waiter_poisoned,
                 Instant::now() + Duration::from_secs(1),

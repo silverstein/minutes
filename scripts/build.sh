@@ -78,6 +78,8 @@ mkdir -p tauri/src-tauri/bin
 cp -f target/release/minutes "tauri/src-tauri/bin/minutes-${HOST_TARGET}"
 cp -f target/release/minutes-graph-worker \
     "tauri/src-tauri/bin/minutes-graph-worker-${HOST_TARGET}"
+cp -f target/release/minutes-apple-speech-worker \
+    "tauri/src-tauri/bin/minutes-apple-speech-worker-${HOST_TARGET}"
 
 echo "=== Building Tauri app ==="
 # The calendar-events Swift helper is compiled and staged into
@@ -121,6 +123,11 @@ fi
     "$SIGN_ID" \
     tauri/src-tauri/minutes-graph-worker.entitlements
 echo "  Signed embedded graph XPC service with identity: $SIGN_ID"
+./scripts/package-apple-speech-xpc.sh \
+    "$APP_BUNDLE" \
+    "$SIGN_ID" \
+    tauri/src-tauri/minutes-apple-speech-worker.entitlements
+echo "  Signed embedded Apple Speech XPC service with identity: $SIGN_ID"
 # Re-signing nested code after the bundle was sealed invalidates the outer
 # seal (#311). Re-seal once, without --deep, preserving nested entitlements.
 if [[ "$SIGN_ID" == "-" ]]; then

@@ -231,9 +231,9 @@ impl Default for VoiceConfig {
 #[serde(default)]
 pub struct TranscriptionConfig {
     /// Transcription engine preference: "whisper" (default), "parakeet", or
-    /// "apple-speech". Retained Parakeet and Apple Speech values currently
-    /// resolve to Whisper on every platform because their pathname-only
-    /// helpers cannot receive Minutes' secure private-audio capability.
+    /// "apple-speech". Apple Speech remains a retained preference and resolves
+    /// to Whisper while its authenticated byte transport awaits signed runtime
+    /// acceptance.
     pub engine: String,
     pub model: String,
     pub model_path: PathBuf,
@@ -1135,8 +1135,8 @@ pub struct LiveTranscriptConfig {
     /// - `"whisper"`: force Whisper for standalone live transcript
     /// - `"parakeet"`: retain Parakeet intent; currently resolves to Whisper
     ///   because no secure private-audio process transport is available
-    /// - `"apple-speech"`: retain Apple Speech intent; currently resolves to
-    ///   Whisper because no secure private-audio process transport is available
+    /// - `"apple-speech"`: retain Apple Speech intent; currently resolve to
+    ///   Whisper while signed runtime acceptance remains incomplete
     pub backend: String,
     /// Whisper model to use for live transcription.
     /// Empty string means "use the dictation model".

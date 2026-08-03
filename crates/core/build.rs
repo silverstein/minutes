@@ -22,6 +22,7 @@ fn compile_macos_graph_xpc_authority_bridge() {
         std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR should be set"),
     );
     let source = manifest_dir.join("src/macos_graph_xpc_authority.swift");
+    let apple_speech_source = manifest_dir.join("src/macos_apple_speech_bridge.swift");
     let archive = out_dir.join("libminutes_macos_graph_xpc_authority.a");
     let target = std::env::var("TARGET").expect("TARGET should be set");
     let architecture = target
@@ -31,11 +32,13 @@ fn compile_macos_graph_xpc_authority_bridge() {
     let swift_target = format!("{architecture}-apple-macos11.0");
 
     println!("cargo:rerun-if-changed={}", source.display());
+    println!("cargo:rerun-if-changed={}", apple_speech_source.display());
     let output = engine_process::command("swiftc")
         .args(["-parse-as-library", "-O"])
         .args(["-target", &swift_target])
         .args(["-emit-library", "-static"])
         .arg(&source)
+        .arg(&apple_speech_source)
         .arg("-o")
         .arg(&archive)
         .output()
@@ -67,6 +70,9 @@ fn compile_macos_graph_xpc_authority_bridge() {
     println!("cargo:rustc-link-lib=dylib=swiftCore");
     println!("cargo:rustc-link-lib=framework=Foundation");
     println!("cargo:rustc-link-lib=framework=Security");
+    println!("cargo:rustc-link-lib=framework=AVFAudio");
+    println!("cargo:rustc-link-lib=framework=CoreMedia");
+    println!("cargo:rustc-link-lib=framework=Speech");
 }
 
 fn stage_calendar_helper() {

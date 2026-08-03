@@ -35,11 +35,39 @@ const MINUTES_DISCUSSIONS_URL: &str = "https://github.com/silverstein/minutes/di
 const MAIN_WINDOW_TRANSPARENT: bool = false;
 #[cfg(target_os = "macos")]
 const MAIN_WINDOW_APPLY_VIBRANCY: bool = false;
+#[cfg(target_os = "macos")]
+const APPLE_SPEECH_TRANSPORT_ACCEPTANCE_ARG: &str = "--apple-speech-transport-acceptance";
 
 static CLEAN_EXIT_STARTED: AtomicBool = AtomicBool::new(false);
 
 #[cfg(target_os = "macos")]
 static MACOS_TERMINATE_APP_HANDLE: OnceLock<tauri::AppHandle> = OnceLock::new();
+
+#[cfg(target_os = "macos")]
+fn maybe_run_apple_speech_transport_acceptance() -> Option<i32> {
+    let mut arguments = std::env::args_os();
+    let _executable = arguments.next();
+    if arguments.next().as_deref()
+        != Some(std::ffi::OsStr::new(APPLE_SPEECH_TRANSPORT_ACCEPTANCE_ARG))
+    {
+        return None;
+    }
+    if arguments.next().is_some() {
+        eprintln!("Apple Speech transport acceptance accepts no caller-supplied input");
+        return Some(64);
+    }
+    match minutes_core::apple_speech_worker::run_signed_transport_acceptance() {
+        Ok(runtime_supported) => {
+            println!("apple-speech-signed-byte-transport=accepted");
+            println!("apple-speech-signed-runtime-supported={runtime_supported}");
+            Some(0)
+        }
+        Err(error) => {
+            eprintln!("Apple Speech signed byte-transport acceptance failed: {error}");
+            Some(1)
+        }
+    }
+}
 
 fn cleanup_before_process_exit(app: &tauri::AppHandle) {
     if let Some(state) = app.try_state::<commands::AppState>() {
@@ -1562,6 +1590,26 @@ fn main() {
         .filter(|candidate| candidate.is_dir())
     {
         let _ = minutes_core::graph_worker::install_policy_projection_worker_executable(sidecar);
+    }
+    #[cfg(target_os = "macos")]
+    if let Some(service) = std::env::current_exe()
+        .ok()
+        .and_then(|executable| {
+            executable.parent().and_then(|macos| {
+                macos.parent().map(|contents| {
+                    contents
+                        .join("XPCServices")
+                        .join("com.useminutes.apple-speech-worker.xpc")
+                })
+            })
+        })
+        .filter(|candidate| candidate.is_dir())
+    {
+        let _ = minutes_core::apple_speech_worker::install_apple_speech_worker_service(service);
+    }
+    #[cfg(target_os = "macos")]
+    if let Some(code) = maybe_run_apple_speech_transport_acceptance() {
+        std::process::exit(code);
     }
     // Route whisper.cpp + ggml C-level logs through Rust `tracing` so they
     // do not leak to raw stderr. The Tauri menu-bar app records audio in

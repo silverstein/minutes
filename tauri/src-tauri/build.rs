@@ -69,7 +69,11 @@ fn stage_rust_sidecars() {
     let require_real = std::env::var("MINUTES_REQUIRE_REAL_CLI_SIDECAR")
         .map(|v| v == "1" || v == "true")
         .unwrap_or(false);
-    for name in ["minutes", "minutes-graph-worker"] {
+    for name in [
+        "minutes",
+        "minutes-graph-worker",
+        "minutes-apple-speech-worker",
+    ] {
         stage_rust_sidecar(&manifest_dir, name, require_real);
     }
 }

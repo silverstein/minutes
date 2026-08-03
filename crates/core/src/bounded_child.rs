@@ -2884,10 +2884,21 @@ mod windows_tests {
             &mut powershell(&aggregate_script),
             None,
             StdoutTarget::Capture { max_bytes: 1024 },
-            budget(20_000),
+            // This script starts PowerShell, which starts a holder process,
+            // waits on a ready file, then starts a probe process, and both
+            // children allocate. That is three PowerShell startups plus two
+            // large allocations, and on a loaded Windows runner 20s was not
+            // enough headroom: the wall clock, not the Job memory ceiling
+            // under test, is what tripped.
+            budget(60_000),
         )
         .expect("the unbounded aggregate allocation control must launch");
-        assert!(!aggregate_control.timed_out);
+        assert!(
+            !aggregate_control.timed_out,
+            "the control tree exceeded its wall clock before the memory behaviour \
+             under test could be observed; this is a harness budget problem, not a \
+             Job memory ceiling result"
+        );
         assert_eq!(
             aggregate_control.output.status.code(),
             Some(91),
@@ -2906,10 +2917,14 @@ mod windows_tests {
             &mut aggregate_limited,
             None,
             StdoutTarget::Capture { max_bytes: 1024 },
-            budget(20_000),
+            budget(60_000),
         )
         .expect("the aggregate-limited process tree must launch");
-        assert!(!aggregate_limited.timed_out);
+        assert!(
+            !aggregate_limited.timed_out,
+            "the limited tree exceeded its wall clock before the Job refusal could \
+             be observed; this is a harness budget problem, not a memory result"
+        );
         assert_eq!(
             aggregate_limited.output.status.code(),
             Some(0),

@@ -8,35 +8,48 @@ If you want the benchmark evidence that informed this experiment, see
 
 ## Current product scope
 
-As of the current `main` branch, Apple Speech is not selectable for live,
-dictation, recording-sidecar, or batch transcription. Its helper accepts an
-audio pathname, which would require Minutes to create a named plaintext WAV
-outside the sealed private-audio capability. Minutes fails closed instead:
+Apple Speech is not yet selectable for live, dictation, recording-sidecar, or
+batch transcription. Existing preferences remain fail-closed to sealed local
+Whisper while the candidate transport completes signed macOS runtime
+acceptance.
 
-- existing `engine = "apple-speech"`, `[live_transcript] backend =
-  "apple-speech"`, and `[dictation] backend = "apple-speech"` preferences are
-  retained so configuration history is not destroyed
-- every such preference resolves to sealed local Whisper
-- capability probes and benchmark tooling remain available for development,
-  but a positive operating-system capability probe does not make the backend
-  selectable
-- the desktop UI reports the retained preference and actual Whisper backend
-  honestly
+The candidate replaces the pathname handoff with a dedicated service embedded
+in the app. Minutes sends bounded 16 kHz mono sample bytes over a nonce-bound,
+one-request XPC connection. The service constructs an `AVAudioPCMBuffer`
+directly; it accepts no audio pathname, executable, environment, or attachment
+and creates no named plaintext utterance file.
 
-Apple Speech can become selectable only after its helper accepts an exact byte
-stream or another transport proves equivalent isolation without a named
-plaintext staging file. This follow-up is tracked locally as `minutes-hueo`.
+- the parent requires the service's exact CodeDirectory hash and Team identity
+  before the content-free handshake
+- the service reciprocally authenticates the signed Minutes parent before
+  accepting any sample frame
+- source, ad-hoc, missing-service, altered-service, and unconfirmed-exit cases
+  stay on Whisper
+- the App-Sandbox-only service has immutable process, address-space, byte, and
+  wall-clock ceilings and exits after one terminal response
+
+The product gate remains off until an explicitly authorized signed development
+app proves the exact reviewed SHA on macOS 26, including the hostile same-UID
+open-holder regression and fallback behavior. A positive source compile,
+unsigned build, or operating-system capability probe is not that proof.
+
+The exact candidate includes a fixed-input, non-product
+`--apple-speech-transport-acceptance` route. It accepts no caller audio or path
+and does not make Apple Speech selectable. After the separately gated signing
+job has destroyed its credentials, a no-secret successor job can invoke that
+route from the signed app while a same-UID process watches and holds newly
+created temporary files. The resulting content-free receipt is acceptance
+evidence only after that protected workflow actually runs for the exact SHA.
 
 ## Fallback behavior
 
-If standalone live transcript or dictation retains an Apple Speech preference,
-Minutes resolves it before capture starts in this order:
+Standalone live transcript and dictation currently resolve Apple Speech to:
 
 1. Whisper
 
-Existing Parakeet preferences behave the same way: retained, but resolved to
-Whisper until secure byte transport lands. No current fallback branch creates a
-named plaintext WAV for either helper.
+No current fallback branch creates a named plaintext Apple Speech WAV. After
+the signed runtime gate passes, the intended live fallback order is Apple
+Speech, separately selectable Parakeet if available, then Whisper.
 
 ## What Apple Speech does not do today
 
@@ -46,7 +59,8 @@ Apple Speech does **not** currently:
 - provide dictation partials before finalization
 - replace post-recording batch transcription or watcher processing
 - become selectable from the desktop settings transcription-engine picker
-- receive any private recording or dictation audio
+- receive private recording or dictation audio while the signed runtime
+  acceptance gate is closed
 
 ## Related docs
 

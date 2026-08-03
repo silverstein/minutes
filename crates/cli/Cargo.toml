@@ -20,6 +20,10 @@ path = "src/main.rs"
 name = "minutes-graph-worker"
 path = "src/bin/minutes-graph-worker.rs"
 
+[[bin]]
+name = "minutes-apple-speech-worker"
+path = "src/bin/minutes-apple-speech-worker.rs"
+
 [features]
 default = ["whisper", "diarize"]
 whisper = ["minutes-core/whisper"]

@@ -99,7 +99,7 @@ pub const PARAKEET_LIVE_FALLBACK_WARNING: &str =
 
 pub const APPLE_SPEECH_SCOPE_DOC_REF: &str = "docs/designs/apple-speech-benchmark-2026-04-22.md";
 pub const APPLE_SPEECH_LIVE_SCOPE_WARNING: &str =
-    "apple-speech cannot receive secure private audio yet; live transcript uses sealed local Whisper for this session";
+    "the authenticated apple-speech byte-transport service is unavailable or untrusted; live transcript uses sealed local Whisper for this session";
 pub const APPLE_SPEECH_LIVE_FALLBACK_WARNING: &str =
     "apple-speech live transcription is unavailable; using sealed local Whisper for this session";
 
@@ -196,12 +196,10 @@ fn live_supports_apple_speech() -> bool {
 /// use runtime truth, not the saved label.
 pub fn resolved_standalone_backend(config: &Config) -> &str {
     let requested = config.effective_live_transcript_backend();
-    if (requested.eq_ignore_ascii_case("parakeet") && !live_supports_parakeet(requested))
-        || (requested.eq_ignore_ascii_case("apple-speech") && !live_supports_apple_speech())
-    {
+    if requested.eq_ignore_ascii_case("parakeet") && !live_supports_parakeet(requested) {
         "whisper"
     } else {
-        requested
+        crate::pipeline::resolved_apple_speech_backend(requested)
     }
 }
 
@@ -1898,7 +1896,7 @@ fn load_sidecar_whisper_ctx(config: &Config) -> Result<whisper_rs::WhisperContex
 /// churn and latency spikes on noisy inputs.
 #[cfg(feature = "parakeet")]
 const PARAKEET_LIVE_MIN_SAMPLES: usize = 16_000; // 1 second at 16kHz
-#[cfg(all(feature = "whisper", target_os = "macos"))]
+#[cfg(any(test, all(feature = "whisper", target_os = "macos")))]
 const APPLE_SPEECH_LIVE_MIN_SAMPLES: usize = 16_000; // 1 second at 16kHz
 
 #[cfg(feature = "parakeet")]
@@ -1940,11 +1938,11 @@ fn transcribe_with_apple_speech_for_live_sidecar(
     transcribe_with_apple_speech_for_live_sidecar_impl(
         samples,
         config,
-        crate::apple_speech::transcribe_with_apple_speech,
+        crate::apple_speech_worker::transcribe_samples,
     )
 }
 
-#[cfg(all(feature = "whisper", target_os = "macos"))]
+#[cfg(any(test, all(feature = "whisper", target_os = "macos")))]
 fn transcribe_with_apple_speech_for_live_sidecar_impl<F>(
     samples: &[f32],
     config: &Config,
@@ -1952,7 +1950,7 @@ fn transcribe_with_apple_speech_for_live_sidecar_impl<F>(
 ) -> Result<Option<(String, f64)>, MinutesError>
 where
     F: FnOnce(
-        &Path,
+        &[f32],
         Option<&str>,
         crate::apple_speech::AppleSpeechMode,
         bool,
@@ -1962,16 +1960,9 @@ where
         return Ok(None);
     }
 
-    let tmp_wav = tempfile::Builder::new()
-        .prefix("minutes-live-apple-speech-")
-        .suffix(".wav")
-        .tempfile()
-        .map_err(TranscribeError::Io)?;
-    crate::transcribe::write_wav_16k_mono(tmp_wav.path(), samples)?;
-
     let locale = crate::apple_speech::live_locale_hint(config.transcription.language.as_deref());
     let result = transcribe_fn(
-        tmp_wav.path(),
+        samples,
         locale.as_deref(),
         crate::apple_speech::AppleSpeechMode::Speech,
         true,
@@ -4307,32 +4298,6 @@ mod tests {
 
         assert_eq!(calls.lock().unwrap().as_slice(), &["parakeet", "whisper"]);
         assert_eq!(result, Some(("whisper transcript".into(), 0.9)));
-    }
-
-    #[cfg(all(feature = "whisper", target_os = "macos"))]
-    #[test]
-    fn apple_speech_live_helper_cleans_up_tempfile_on_error() {
-        let cfg = Config::default();
-        let samples = vec![0.0f32; APPLE_SPEECH_LIVE_MIN_SAMPLES];
-        let seen_path = std::sync::Mutex::new(None::<PathBuf>);
-
-        let result = transcribe_with_apple_speech_for_live_sidecar_impl(
-            &samples,
-            &cfg,
-            |path, _locale, _mode, _ensure_assets| {
-                *seen_path.lock().unwrap() = Some(path.to_path_buf());
-                Err(MinutesError::Io(std::io::Error::other(
-                    "simulated apple speech failure",
-                )))
-            },
-        );
-
-        assert!(result.is_err());
-        let leaked_path = seen_path.lock().unwrap().clone().unwrap();
-        assert!(
-            !leaked_path.exists(),
-            "temporary WAV should be cleaned up after helper failure"
-        );
     }
 
     #[test]

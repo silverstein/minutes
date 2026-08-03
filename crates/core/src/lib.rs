@@ -2,6 +2,7 @@
 
 pub mod apple_fm;
 pub mod apple_speech;
+pub mod apple_speech_worker;
 pub(crate) mod audio_budget;
 pub mod audio_decode_worker;
 pub mod autoresearch;

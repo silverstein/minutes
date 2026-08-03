@@ -590,8 +590,8 @@ export default function Home() {
         </pre>
         <p className="mt-5 max-w-[660px] text-[15px] leading-7 text-[var(--text-secondary)]">
           Transcription runs locally through sealed whisper.cpp. Existing
-          Parakeet and Apple Speech preferences resolve to Whisper until those
-          helpers can accept secure audio bytes without a named plaintext file.
+          Parakeet and Apple Speech preferences resolve to Whisper until their
+          secure byte transports pass their release gates.
           Summarization is optional — Claude can do it conversationally when
           you ask, using your existing subscription. No API keys are required
           to get useful output.

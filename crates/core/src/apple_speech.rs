@@ -80,7 +80,7 @@ pub enum AppleSpeechMode {
 
 impl AppleSpeechMode {
     #[cfg(target_os = "macos")]
-    fn as_helper_arg(self) -> &'static str {
+    pub(crate) fn as_helper_arg(self) -> &'static str {
         match self {
             Self::Speech => "speech",
             Self::Dictation => "dictation",

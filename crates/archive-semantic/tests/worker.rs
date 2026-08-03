@@ -27,37 +27,26 @@ fn bound_worker_denies_network_and_personal_files_before_embedding() {
 #[test]
 fn dropping_the_engine_reclaims_its_worker_snapshot() {
     use minutes_archive_semantic::BoundedSemanticEngine;
-    use std::collections::HashSet;
     use std::path::{Path, PathBuf};
 
-    // Track the specific directory this engine creates. Counting them is
-    // racy: sibling tests in the same binary bind their own engines.
-    fn snapshots() -> HashSet<PathBuf> {
-        let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else {
-            return HashSet::new();
-        };
-        entries
-            .flatten()
-            .filter(|entry| {
-                entry
-                    .file_name()
-                    .to_string_lossy()
-                    .starts_with("minutes-archive-semantic-")
-            })
-            .map(|entry| entry.path())
-            .collect()
-    }
-
+    // Ask the engine which directory is its own rather than inspecting the
+    // shared temp directory. The previous version diffed the set of
+    // `minutes-archive-semantic-*` directories before and after binding, which
+    // only excludes ones that already existed -- a sibling test in this same
+    // binary binds its own engine concurrently, so its snapshot landed inside
+    // the diff and the count was 2. It failed on a hosted runner while passing
+    // locally, purely on scheduling. Nothing about the drop chain was wrong;
+    // the observation was.
     let executable = env!("CARGO_BIN_EXE_minutes-archive-semantic");
-    let before = snapshots();
     let engine = BoundedSemanticEngine::bind(Path::new(executable)).expect("bind");
-    let created = &snapshots() - &before;
-    assert_eq!(
-        created.len(),
-        1,
-        "binding must create exactly one private snapshot"
+    let snapshot = PathBuf::from(engine.snapshot_directory());
+    assert!(
+        snapshot.file_name().is_some_and(|name| name
+            .to_string_lossy()
+            .starts_with("minutes-archive-semantic-")),
+        "unexpected snapshot location {}",
+        snapshot.display()
     );
-    let snapshot = created.into_iter().next().expect("snapshot path");
     assert!(snapshot.exists(), "snapshot must exist while bound");
     drop(engine);
     assert!(

@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Monthly Coach model freshness eval.
+
+  Runs on the maintainer's Mac rather than a GitHub-hosted runner, because a
+  hosted runner cannot serve a 9B or 12B local model and produced a report of
+  nothing but errors (#620). The question the report answers only means something
+  measured on hardware like the one the model would actually run on.
+
+  StartCalendarInterval fires on wake if the machine was asleep at the scheduled
+  time, so a closed laptop delays the run rather than skipping the month.
+
+  The script itself refuses to run during a recording or on battery, so the
+  schedule is a suggestion rather than a promise.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>app.minutes.coacheval</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>REPLACE_WITH_SCRIPT_PATH</string>
+    </array>
+
+    <!-- 1st of the month, 10:17 local. Same day as the old cron; the odd minute
+         keeps it clear of anything scheduled on the hour. -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Day</key>
+        <integer>1</integer>
+        <key>Hour</key>
+        <integer>10</integer>
+        <key>Minute</key>
+        <integer>17</integer>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>REPLACE_WITH_LOG_PATH</string>
+    <key>StandardErrorPath</key>
+    <string>REPLACE_WITH_LOG_PATH</string>
+
+    <!-- Housekeeping: must never compete with a recording, a transcription, or
+         anything the user is actually doing. -->
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>LowPriorityIO</key>
+    <true/>
+    <key>Nice</key>
+    <integer>10</integer>
+</dict>
+</plist>

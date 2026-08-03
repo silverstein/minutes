@@ -1,8 +1,11 @@
 name: Coach model freshness
 
+# Scheduled runs moved to the maintainer's Mac (scripts/coach-model-eval-local.sh
+# plus the app.minutes.coacheval LaunchAgent). A GitHub-hosted runner cannot
+# serve a 9B or 12B local model, so every candidate errored and the report
+# carried no signal (#620). Kept dispatchable for one-off runs where a hosted
+# runner is good enough.
 on:
-  schedule:
-    - cron: "17 9 1 * *"
   workflow_dispatch:
 
 permissions:

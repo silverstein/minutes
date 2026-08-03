@@ -206,13 +206,17 @@ if (!signingJobFixture) {
   // unreviewed again -- which is precisely how the region above was
   // introduced. A coverage failure means a region boundary moved, so the
   // goldens no longer mean what they claim, whatever they hash to.
+  //
+  // Stated as a concatenation rather than as arithmetic on lengths: the
+  // identity is then self-evident and cannot hold by coincidence. Comparing
+  // sums also invited an off-by-encoding reading, since `.length` counts
+  // UTF-16 code units and the message said "bytes".
   const covered =
-    preSigningBoundary.length + signingJobMarker.length + signingJobRegion.length +
-    afterSigningJob.length;
-  if (covered !== source.length) {
+    preSigningBoundary + signingJobMarker + signingJobRegion + afterSigningJob;
+  if (covered !== source) {
     errors.push(
-      `hashed regions cover ${covered} of ${source.length} bytes; ` +
-        "some of this workflow is outside every golden",
+      `hashed regions reconstruct ${covered.length} of ${source.length} characters ` +
+        "and do not reproduce this workflow; some of it is outside every golden",
     );
   }
   const beforeSigningJob = source.split(/^  sign-reviewed-artifact:\n/m, 1)[0];

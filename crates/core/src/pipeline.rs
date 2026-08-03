@@ -196,6 +196,37 @@ fn detect_summarization_warnings(
     warnings
 }
 
+/// Records a [`ProcessingWarning`] when the configured batch transcription
+/// engine is not the one that actually produced the transcript.
+///
+/// `transcribe_dispatch` already emits a `tracing` warning for this, but that
+/// only reaches the CLI: the desktop app deliberately installs no
+/// `tracing_subscriber`, so the event is dropped and the substitution is
+/// invisible there. The engine materially changes the transcript, so the file
+/// itself carries the record and stays greppable after the fact (#633).
+fn detect_engine_fallback_warning(config: &Config) -> Option<ProcessingWarning> {
+    let requested = config.transcription.engine.trim();
+    let effective = crate::transcribe::effective_batch_engine(config);
+    if requested.eq_ignore_ascii_case(effective) {
+        return None;
+    }
+    let detail = if requested.eq_ignore_ascii_case("parakeet") {
+        parakeet_capability(cfg!(feature = "parakeet")).unavailable_reason()
+    } else if requested.eq_ignore_ascii_case("apple-speech") {
+        apple_speech_unavailable_reason()
+    } else {
+        "it is unavailable in this build"
+    };
+    Some(ProcessingWarning {
+        step: "transcribe".to_string(),
+        reason: "engine_fallback".to_string(),
+        timeout_secs: None,
+        message: Some(format!(
+            "Requested transcription engine `{requested}` did not run ({detail}); this transcript was produced by `{effective}`."
+        )),
+    })
+}
+
 const SILENT_REMOTE_WARNING_MESSAGE: &str =
     "Call/remote audio was not captured (system stem silent); transcript reflects only your microphone";
 const SILENT_MICROPHONE_WARNING_MESSAGE: &str =
@@ -5014,6 +5045,9 @@ where
     if let Some(warning) = collapse_warning {
         summarization_warnings.push(warning);
     }
+    if let Some(warning) = detect_engine_fallback_warning(config) {
+        summarization_warnings.push(warning);
+    }
     if !descriptor_authorized {
         if let Some(warning) = detect_silent_remote_stem_warning(
             artifact.frontmatter.r#type,
@@ -5741,6 +5775,9 @@ where
         summarization_attempted,
     );
     if let Some(warning) = collapse_warning {
+        summarization_warnings.push(warning);
+    }
+    if let Some(warning) = detect_engine_fallback_warning(config) {
         summarization_warnings.push(warning);
     }
     if let Some(warning) = detect_silent_remote_stem_warning(
@@ -8175,6 +8212,44 @@ mod tests {
             .as_ref()
             .unwrap()
             .contains("engine `claude`"));
+    }
+
+    #[test]
+    fn engine_fallback_warning_absent_when_requested_engine_runs() {
+        let mut config = Config::default();
+        config.transcription.engine = "whisper".into();
+        assert!(detect_engine_fallback_warning(&config).is_none());
+    }
+
+    #[test]
+    fn engine_fallback_warning_records_retained_parakeet_selection() {
+        // A retained `parakeet` preference resolves to Whisper until the
+        // secure byte transport ships. The desktop app installs no tracing
+        // subscriber, so the transcript is the only place a user can learn
+        // which engine actually ran (#633).
+        let mut config = Config::default();
+        config.transcription.engine = "parakeet".into();
+        let warning = detect_engine_fallback_warning(&config)
+            .expect("retained parakeet selection must be recorded");
+        assert_eq!(warning.step, "transcribe");
+        assert_eq!(warning.reason, "engine_fallback");
+        let message = warning.message.as_ref().unwrap();
+        assert!(
+            message.contains("`parakeet`"),
+            "names the request: {message}"
+        );
+        assert!(message.contains("`whisper`"), "names the actual: {message}");
+    }
+
+    #[test]
+    fn engine_fallback_warning_records_retained_apple_speech_selection() {
+        let mut config = Config::default();
+        config.transcription.engine = "apple-speech".into();
+        let warning = detect_engine_fallback_warning(&config)
+            .expect("retained apple-speech selection must be recorded");
+        assert_eq!(warning.step, "transcribe");
+        assert_eq!(warning.reason, "engine_fallback");
+        assert!(warning.message.as_ref().unwrap().contains("`apple-speech`"));
     }
 
     fn apply_silent_remote_warning_on_batch_path(

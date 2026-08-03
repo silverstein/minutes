@@ -1286,18 +1286,43 @@ describe("stable corpus lease", () => {
   it("poisons admission when an asynchronous projection ignores cancellation", async () => {
     await withCorpus(async (root) => {
       writeFileSync(join(root, "meeting.md"), "uncancellable projection canary");
-      const started = Date.now();
+      let markOperationStarted!: () => void;
+      const operationStarted = new Promise<void>((resolve) => {
+        markOperationStarted = resolve;
+      });
+      let forceOperationDeadline!: () => void;
+      const operationDeadline = new Promise<void>((resolve) => {
+        forceOperationDeadline = resolve;
+      });
+      const lease = withStableCorpusLease(
+        root,
+        () => {
+          markOperationStarted();
+          return new Promise<never>(() => {});
+        },
+        {
+          timeoutMs: 15_000,
+          operationDeadlineForTest: operationDeadline,
+        }
+      );
+
       await expect(
-        withStableCorpusLease(
-          root,
-          () => new Promise<never>(() => {}),
-          { timeoutMs: 300 }
-        )
-      ).rejects.toThrow("stable meeting corpus authorization failed");
+        Promise.race([
+          operationStarted.then(() => true),
+          lease.then(
+            () => false,
+            () => false
+          ),
+        ])
+      ).resolves.toBe(true);
+
+      const started = Date.now();
+      forceOperationDeadline();
+      await expect(lease).rejects.toThrow("stable meeting corpus authorization failed");
       expect(Date.now() - started).toBeLessThan(2_500);
       await expect(
         withStableCorpusLease(root, () => "must not reuse")
       ).rejects.toThrow("requires a process restart");
     });
-  });
+  }, 10_000);
 });

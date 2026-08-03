@@ -486,6 +486,9 @@ jobs:
       - name: Verify version policy
         run: node scripts/check_version_sync.mjs
 
+      - name: Verify corpus lease mirror
+        run: node scripts/check_corpus_lease_mirror.mjs
+
       - name: Test version policy checker
         run: node --test scripts/check_version_sync.test.mjs
 

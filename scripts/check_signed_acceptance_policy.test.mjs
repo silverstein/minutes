@@ -81,6 +81,34 @@ const mutations = [
       "          persist-credentials: true",
     ),
   },
+  // Everything after the signing job was checked for secret references and
+  // nothing else, so the post-signing runtime job -- which checks out the
+  // candidate and runs a candidate-controlled script to produce the receipt
+  // acceptance relies on -- could be rewritten freely. None of these carry a
+  // secret, which is exactly why the old pattern never fired on them.
+  {
+    name: "extra step appended after the runtime job",
+    expected: "complete post-signing runtime boundary changed",
+    source: `${workflow}      - name: Injected tail step\n        run: echo injected\n`,
+  },
+  {
+    name: "whole new job appended after the runtime job",
+    expected: "complete post-signing runtime boundary changed",
+    source: `${workflow}\n  appended:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo injected\n`,
+  },
+  {
+    name: "receipt step rewritten to skip its provenance upload",
+    expected: "complete post-signing runtime boundary changed",
+    // Anchored on the runtime job's own artifact path: `if-no-files-found`
+    // appears three times in this workflow, and replacing the first match
+    // mutates the unsigned-build job instead, which a different golden
+    // already covers -- the test would then pass while proving nothing about
+    // the region under test.
+    source: workflow.replace(
+      "          path: signed-runtime-provenance.json\n          if-no-files-found: error",
+      "          path: signed-runtime-provenance.json\n          if-no-files-found: ignore",
+    ),
+  },
 ];
 
 try {

@@ -18,6 +18,23 @@ cd "$repo_root"
 
 log() { printf '%s coach-eval: %s\n' "$(date -u +%H:%M:%S)" "$*"; }
 
+# --install-agent registers the monthly LaunchAgent and exits. Idempotent: it
+# boots out any previous instance first so an edited plist actually takes.
+if [[ "${1:-}" == "--install-agent" ]]; then
+  label="app.minutes.coacheval"
+  plist="$HOME/Library/LaunchAgents/$label.plist"
+  log_path="$HOME/.minutes/coach-eval.log"
+  mkdir -p "$HOME/Library/LaunchAgents" "$HOME/.minutes"
+  sed -e "s|REPLACE_WITH_SCRIPT_PATH|$script_dir/coach-model-eval-local.sh|" \
+      -e "s|REPLACE_WITH_LOG_PATH|$log_path|" \
+      "$repo_root/tauri/src-tauri/assets/$label.plist" >"$plist"
+  launchctl bootout "gui/$(id -u)/$label" 2>/dev/null || true
+  launchctl bootstrap "gui/$(id -u)" "$plist"
+  log "installed $label (1st of each month, 10:17 local; log: $log_path)"
+  log "run now with: launchctl kickstart gui/$(id -u)/$label"
+  exit 0
+fi
+
 # ── Guards ───────────────────────────────────────────────────────────────────
 # Never compete with a capture. Loading a multi-billion-parameter model pins the
 # GPU and memory, and the standing rule here is that an optional consumer must

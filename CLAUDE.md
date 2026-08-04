@@ -179,7 +179,9 @@ minutes/
 ├── CLAUDE.md                  # This file
 ├── Cargo.toml                 # Workspace root
 ├── crates/
-│   ├── core/src/              # 34 Rust modules — the engine
+│   ├── core/src/              # 82 Rust modules — the engine (the tree below is a
+│   │                          # partial map; run `ls crates/core/src/*.rs` for the
+│   │                          # full list before concluding something is missing)
 │   │   ├── capture.rs         # Audio capture (cpal), device categorization, loopback detection
 │   │   ├── resample.rs        # Shared mono-downmix + 16kHz decimation resampler (used by capture + streaming)
 │   │   ├── transcribe.rs      # Batch transcription: whisper.cpp. Retained Parakeet config resolves to Whisper until secure transport exists
@@ -283,6 +285,33 @@ node test/mcp_tools_test.mjs                        # 8 MCP integration tests
 - **Structured extraction** — action items + decisions in frontmatter as queryable YAML
 - **No API keys needed** — Claude summarizes conversationally via MCP tools
 - **Live transcript** — per-utterance whisper → JSONL append with PidGuard flock for session exclusivity. Delta reads via line cursor or wall-clock duration. Optional WAV preservation for post-meeting reprocessing. Agent-agnostic: JSONL readable by any agent, MCP tools for Claude, CLAUDE.md context injection for Codex/Gemini/OpenCode.
+
+## Already Built — check here before proposing to build it
+
+The module tree above covers 34 of 82 core modules. Several substantial
+capabilities are not in it, and have been independently re-proposed as "new
+work" more than once. Grep before you design.
+
+| Capability | Where | How to check it is live |
+|---|---|---|
+| Custom vocabulary (people, orgs, acronyms) | `vocabulary.rs`, `~/.minutes/vocabulary.toml` | `minutes vocabulary list` |
+| Decode-time lexical biasing | `pipeline.rs::build_decode_hints` → `transcribe.rs::whisper_initial_prompt` → `set_initial_prompt` | vocabulary entries appear in the whisper prompt |
+| Hint evaluation with false-positive scoring | `autoresearch.rs::run_decode_hint_eval_corpus`, `scripts/run_proper_name_eval.sh` | baseline vs candidate WER, `max_wer_regression`, required/forbidden terms |
+| Dictation benchmark corpus | `scripts/run_dictation_benchmark.sh`, `tests/eval/fixtures/` | |
+| In-process SOTA engine (sherpa-onnx / parakeet-v3) | `sherpa_engine.rs`, feature `engine-sherpa` | `minutes setup --sherpa`, `engine = "sherpa"` |
+| Name correction / entity resolution | `name_correction.rs`, `person_identity.rs`, `entity_cluster.rs` | |
+| Bounded child processes, policy filesystem | `bounded_child.rs` (3k lines), `policy_fs.rs` (4.5k lines) | |
+| Search index, context store, desktop context | `search_index.rs`, `context_store.rs`, `desktop_context.rs` | |
+
+**Two traps that produced wrong conclusions in practice:**
+
+- `minutes transcribe` calls `DecodeHints::default()`, so it gets **no**
+  vocabulary biasing. Only the `process`/pipeline path does. Benchmarking name
+  accuracy through `transcribe` measures the unbiased path and tells you
+  nothing about what users of `process` get.
+- Reading one function is not reading the behavior. `effective_batch_engine`
+  looks like a silent engine swap until you read its caller, which warns. Check
+  callers before concluding.
 
 ## Key Patterns
 

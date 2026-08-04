@@ -1249,6 +1249,8 @@ the PNGs and their readable references after summarization.
 
 ```
 minutes/
+├── archive/              Separate least-privilege Archive Census Tauri app
+├── crates/archive-core/  Capability-bound archive inventory primitives
 ├── crates/core/          53 Rust modules — the engine (shared by all interfaces)
 ├── crates/cli/           CLI binary — 58 commands (recording, search, health, storage, templates, workflows)
 ├── crates/whisper-guard/ Anti-hallucination toolkit (VAD gating, dedup, noise trimming)
@@ -1261,7 +1263,9 @@ minutes/
 └── .claude/plugins/minutes/   Claude Code plugin — 19 skills + 1 agent + 2 hooks
 ```
 
-Single `minutes-core` library shared by CLI, MCP server, and Tauri app. Zero code duplication.
+The meeting interfaces share `minutes-core`. The separate Archive target
+depends only on `minutes-archive-core`; it does not inherit Minutes' recording,
+assistant, shell, updater, or broad desktop capability surface.
 
 ### Building your own agent on Minutes
 

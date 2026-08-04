@@ -1,5 +1,15 @@
 [workspace]
-members = ["crates/core", "crates/cli", "crates/reader", "crates/whisper-guard", "tauri/src-tauri"]
+members = [
+    "archive/src-tauri",
+    "crates/archive-convert",
+    "crates/archive-core",
+    "crates/archive-semantic",
+    "crates/core",
+    "crates/cli",
+    "crates/reader",
+    "crates/whisper-guard",
+    "tauri/src-tauri",
+]
 resolver = "2"
 
 [workspace.package]

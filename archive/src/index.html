@@ -1,0 +1,345 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      name="description"
+      content="Private, evidence-first search across explicitly approved local archive locations."
+    />
+    <title>Minutes Archive</title>
+    <link rel="stylesheet" href="./styles.css" />
+    <script defer src="./app.js"></script>
+  </head>
+  <body>
+    <main class="shell">
+      <header class="topbar">
+        <a class="brand" href="#main-content" aria-label="Minutes Archive home">
+          <span class="brand-mark" aria-hidden="true">A</span>
+          <span>Minutes Archive</span>
+        </a>
+        <div class="mode-badges" aria-label="Application protections">
+          <span class="badge badge-local"><span class="dot"></span>Local only</span>
+          <span class="badge">Private pilot</span>
+        </div>
+      </header>
+
+      <section id="main-content" class="hero">
+        <p class="eyebrow">Private legal work product</p>
+        <h1>Map first. Then find the exact language.</h1>
+        <p class="hero-copy">
+          Start with a metadata-only census. If the coverage looks right, build
+          a local, in-memory document index and search exact provisions with
+          source evidence. Nothing is uploaded.
+        </p>
+      </section>
+
+      <div class="workspace">
+        <aside class="rail" aria-label="Census steps">
+          <ol class="steps">
+            <li class="step is-active" data-step="1">
+              <span class="step-number">1</span>
+              <div>
+                <strong>Approve locations</strong>
+                <span>Nothing is scanned implicitly.</span>
+              </div>
+            </li>
+            <li class="step" data-step="2">
+              <span class="step-number">2</span>
+              <div>
+                <strong>Run private census</strong>
+                <span>Metadata only. No filenames exported.</span>
+              </div>
+            </li>
+            <li class="step" data-step="3">
+              <span class="step-number">3</span>
+              <div>
+                <strong>Review coverage</strong>
+                <span>Decide what the pilot should support.</span>
+              </div>
+            </li>
+            <li class="step" data-step="4">
+              <span class="step-number">4</span>
+              <div>
+                <strong>Search exact evidence</strong>
+                <span>Searchable PDF, DOCX, and text.</span>
+              </div>
+            </li>
+          </ol>
+
+          <div class="assurance">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M12 3 5.5 5.8v5.3c0 4.5 2.8 8.5 6.5 9.9 3.7-1.4 6.5-5.4 6.5-9.9V5.8L12 3Z" />
+              <path d="m9.2 12 1.7 1.8 4-4.3" />
+            </svg>
+            <div>
+              <strong>The census cannot open documents</strong>
+              <p>
+                Content access is a later, explicit action. No mode follows
+                links, contacts a model, or uploads anything.
+              </p>
+            </div>
+          </div>
+        </aside>
+
+        <section class="panel" aria-labelledby="locations-title">
+          <div id="setup-view">
+            <div class="panel-heading">
+              <div>
+                <p class="section-label">Step 1</p>
+                <h2 id="locations-title">Approved archive locations</h2>
+                <p>
+                  Use the macOS picker to approve Documents, iCloud Drive,
+                  external drives, or any other folder. Each location remains
+                  a separate authorization boundary.
+                </p>
+              </div>
+              <button id="add-locations" class="button button-secondary" type="button">
+                <span aria-hidden="true">＋</span>
+                Choose locations
+              </button>
+            </div>
+
+            <div id="empty-locations" class="empty-state">
+              <div class="folder-illustration" aria-hidden="true">
+                <span></span>
+              </div>
+              <strong>No locations approved</strong>
+              <p>Your home folder and entire filesystem are intentionally refused.</p>
+            </div>
+
+            <ul id="location-list" class="location-list" aria-live="polite"></ul>
+
+            <div class="privacy-strip">
+              <span class="privacy-icon" aria-hidden="true">◎</span>
+              <div>
+                <strong>Paths stay behind the native boundary</strong>
+                <p>
+                  The interface receives opaque location numbers, not folder
+                  paths. Exported reports contain no paths, filenames, or text.
+                </p>
+              </div>
+            </div>
+
+            <div class="action-row">
+              <p id="setup-status" class="status" role="status">
+                Choose at least one location to continue.
+              </p>
+              <button id="run-census" class="button button-primary" type="button" disabled>
+                Run private census
+                <span aria-hidden="true">→</span>
+              </button>
+            </div>
+          </div>
+
+          <div id="scanning-view" class="scanning-view" hidden aria-live="polite">
+            <div class="scan-orbit" aria-hidden="true">
+              <span></span>
+            </div>
+            <p class="section-label">Metadata-only census</p>
+            <h2>Inspecting approved locations…</h2>
+            <p>
+              Counting formats, sizes, age bands, packages, and cloud-only
+              placeholders. Document contents remain unopened.
+            </p>
+            <div class="progress-track" aria-hidden="true">
+              <span></span>
+            </div>
+            <button id="cancel-census" class="button button-quiet" type="button">
+              Cancel census
+            </button>
+          </div>
+
+          <div id="results-view" hidden>
+            <div class="results-heading">
+              <div>
+                <p class="section-label">Aggregate result</p>
+                <h2>Archive coverage census</h2>
+                <p id="result-summary">The census completed without reading document contents.</p>
+              </div>
+              <div id="result-status" class="result-status">Complete</div>
+            </div>
+
+            <div class="metrics" aria-label="Census totals">
+              <article class="metric">
+                <span>Artifacts</span>
+                <strong id="metric-artifacts">—</strong>
+              </article>
+              <article class="metric">
+                <span>Approved locations</span>
+                <strong id="metric-locations">—</strong>
+              </article>
+              <article class="metric">
+                <span>Document bytes</span>
+                <strong id="metric-bytes">—</strong>
+              </article>
+              <article class="metric">
+                <span>Cloud-only items</span>
+                <strong id="metric-cloud">—</strong>
+              </article>
+            </div>
+
+            <div class="result-grid">
+              <section class="coverage-card" aria-labelledby="coverage-title">
+                <div class="card-title">
+                  <div>
+                    <p class="section-label">Format mix</p>
+                    <h3 id="coverage-title">What the archive contains</h3>
+                  </div>
+                  <span class="metadata-pill">Aggregate only</span>
+                </div>
+                <div id="category-list" class="category-list"></div>
+              </section>
+
+              <section class="signals-card" aria-labelledby="signals-title">
+                <p class="section-label">Coverage signals</p>
+                <h3 id="signals-title">What needs attention</h3>
+                <dl id="signals-list" class="signals-list"></dl>
+              </section>
+            </div>
+
+            <div class="verified-strip">
+              <span aria-hidden="true">✓</span>
+              <div>
+                <strong>No document content was read</strong>
+                <p>
+                  No filenames or paths were emitted, no hashes were computed,
+                  and no symlinks were followed.
+                </p>
+              </div>
+            </div>
+
+            <div class="pilot-strip">
+              <div>
+                <p class="section-label">Optional next gate</p>
+                <strong>Build a temporary document search index</strong>
+                <p>
+                  This explicitly opens searchable <code>.pdf</code>,
+                  <code>.docx</code>, <code>.txt</code>, <code>.text</code>,
+                  and <code>.md</code> files. PDF and DOCX bytes go to a
+                  bounded, network-denied converter. Exact search plus the
+                  revision-pinned macOS semantic model run in separate
+                  network-denied workers; source text, FTS rows, and
+                  suggestion vectors stay in memory.
+                  Scans, legacy Word, and email are counted but not searched.
+                </p>
+              </div>
+              <button id="build-text-vault" class="button button-primary" type="button">
+                Build document pilot
+                <span aria-hidden="true">→</span>
+              </button>
+            </div>
+
+            <div class="action-row results-actions">
+              <button id="start-over" class="button button-secondary" type="button">
+                Change locations
+              </button>
+              <div class="export-group">
+                <span id="export-status" class="status" role="status"></span>
+                <button id="export-report" class="button button-primary" type="button">
+                  Export aggregate report
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <div id="indexing-view" class="scanning-view" hidden aria-live="polite">
+            <div class="scan-orbit" aria-hidden="true">
+              <span></span>
+            </div>
+            <p class="section-label">Explicit content step</p>
+            <h2>Building the private document index…</h2>
+            <p>
+              Reading bounded supported files from the approved locations.
+              PDF and DOCX conversion runs in the network-denied worker. The
+              index stays in memory, links remain excluded, and the built-in
+              macOS sentence model creates suggestion vectors in its own
+              network-denied worker without a model download.
+            </p>
+            <div class="progress-track" aria-hidden="true">
+              <span></span>
+            </div>
+            <button id="cancel-indexing" class="button button-quiet" type="button">
+              Cancel and discard
+            </button>
+          </div>
+
+          <div id="search-view" hidden>
+            <div class="search-heading">
+              <div>
+                <p class="section-label">Evidence-first document pilot</p>
+                <h2>Search the approved archive</h2>
+                <p id="vault-summary">
+                  The private document index is ready in memory.
+                </p>
+              </div>
+              <button id="back-to-census" class="button button-secondary" type="button">
+                Census report
+              </button>
+            </div>
+
+            <form id="search-form" class="search-form">
+              <label for="search-query">What language are you looking for?</label>
+              <div class="search-input-row">
+                <textarea
+                  id="search-query"
+                  rows="3"
+                  maxlength="2000"
+                  placeholder="Find confidentiality provisions no more than three sentences covering affiliates, compelled disclosure, and survival."
+                ></textarea>
+                <button id="search-submit" class="button button-primary" type="submit">
+                  Search
+                </button>
+              </div>
+              <p class="search-help">
+                Try “Find documents containing assignment, governing law, and a
+                BAA reference” for document-level conjunction, or describe a
+                clause in ordinary language for separately labeled semantic
+                suggestions.
+              </p>
+            </form>
+
+            <div id="query-interpretation" class="query-interpretation" hidden>
+              <div>
+                <p class="section-label">Interpreted constraints</p>
+                <div id="query-chips" class="query-chips"></div>
+              </div>
+              <span id="candidate-count" class="metadata-pill"></span>
+            </div>
+
+            <p id="search-status" class="status search-status" role="status">
+              Enter a legal retrieval question. Results are exact source
+              excerpts, not generated answers.
+            </p>
+            <div id="search-results" class="search-results"></div>
+
+            <div class="verified-strip search-verification">
+              <span aria-hidden="true">✓</span>
+              <div>
+                <strong>Every displayed card passed a live source fence</strong>
+                <p>
+                  A moved, replaced, changed, inaccessible, or out-of-scope
+                  source is withdrawn before its indexed excerpt is returned.
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <div id="error-banner" class="error-banner" role="alert" hidden>
+            <strong>Minutes Archive stopped safely.</strong>
+            <span id="error-message"></span>
+            <button id="dismiss-error" type="button" aria-label="Dismiss error">×</button>
+          </div>
+        </section>
+      </div>
+
+      <footer>
+        <span>Private evidence build</span>
+        <span aria-hidden="true">•</span>
+        <span>Networking disabled by design</span>
+        <span aria-hidden="true">•</span>
+        <span>Closing the window ends the session and discards the index</span>
+      </footer>
+    </main>
+  </body>
+</html>

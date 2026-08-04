@@ -1,0 +1,20 @@
+[package]
+name = "minutes-archive-semantic"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+libc = "0.2"
+serde.workspace = true
+serde_json.workspace = true
+sha2 = "0.10"
+tempfile = "3"
+thiserror.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+mach2 = "0.6"
+objc2 = "=0.6.4"
+objc2-foundation = "=0.3.2"
+objc2-natural-language = "=0.3.2"

@@ -1,0 +1,8 @@
+7. CONFIDENTIALITY
+Each party shall protect the other party's Confidential Information.
+
+8. ASSIGNMENT
+Neither party may assign this Agreement. A change of control is deemed an assignment.
+
+9. GOVERNING LAW
+This Agreement is governed by the laws of Delaware.

@@ -1,0 +1,12 @@
+{
+  "identifier": "archive-main",
+  "description": "Minimal permissions for the Minutes Archive private pilot window",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "core:window:allow-close",
+    "core:window:allow-minimize",
+    "core:window:allow-maximize",
+    "core:window:allow-start-dragging"
+  ]
+}

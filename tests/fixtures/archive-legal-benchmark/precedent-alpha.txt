@@ -1,0 +1,17 @@
+7. CONFIDENTIALITY
+Confidential Information includes information of Recipient and its affiliates. Recipient may disclose it when required by law after prompt notice. These duties survive termination or expiration.
+
+8. INDEMNIFICATION
+Provider shall indemnify and hold harmless Client from third-party claims, and Provider shall control the defense subject to Client's right to participate.
+
+9. LIMITATION OF LIABILITY
+The aggregate liability cap does not apply to breach of confidentiality or indemnification obligations.
+
+10. ASSIGNMENT
+Neither party may assign this Agreement without prior written consent.
+
+11. GOVERNING LAW
+This Agreement is governed by the laws of New York.
+
+12. BUSINESS ASSOCIATE
+The parties shall execute a business associate agreement before exchanging protected health information.

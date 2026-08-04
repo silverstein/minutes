@@ -1,0 +1,316 @@
+name: Signed Archive Pilot Acceptance
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_sha:
+        description: Full SHA protected by the matching acceptance-<sha> tag
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: signed-archive-acceptance
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_BUILD_JOBS: "2"
+  TAURI_CLI_VERSION: "2.10.1"
+
+jobs:
+  authorize-candidate:
+    name: Authorize exact protected Archive candidate
+    if: github.ref == 'refs/heads/main' && github.actor == 'silverstein'
+    runs-on: ubuntu-latest
+    outputs:
+      candidate_sha: ${{ steps.authorize.outputs.candidate_sha }}
+    steps:
+      - name: Bind the request to its protected acceptance tag
+        id: authorize
+        env:
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "candidate_sha must be a full lowercase commit SHA" >&2
+            exit 1
+          fi
+          tag="acceptance-$CANDIDATE_SHA"
+          remote="https://github.com/${GITHUB_REPOSITORY}.git"
+          resolved="$(git ls-remote --refs "$remote" "refs/tags/$tag" | awk '{print $1}')"
+          if [ "$resolved" != "$CANDIDATE_SHA" ]; then
+            echo "Protected tag $tag does not resolve exactly to $CANDIDATE_SHA" >&2
+            exit 1
+          fi
+          echo "candidate_sha=$CANDIDATE_SHA" >> "$GITHUB_OUTPUT"
+
+  build-unsigned:
+    name: Build and exercise Archive without signing secrets
+    needs: authorize-candidate
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out exact protected candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: refs/tags/acceptance-${{ needs.authorize-candidate.outputs.candidate_sha }}
+          fetch-depth: 1
+
+      - name: Verify exact candidate checkout
+        env:
+          CANDIDATE_SHA: ${{ needs.authorize-candidate.outputs.candidate_sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
+          printf '%s\n' "$CANDIDATE_SHA" > candidate-sha.txt
+
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --version "${TAURI_CLI_VERSION}" --locked
+
+      - name: Test bounded Archive implementation
+        run: |
+          set -euo pipefail
+          cargo fmt --all -- --check
+          cargo test \
+            -p minutes-archive-semantic \
+            -p minutes-archive-convert \
+            -p minutes-archive-core \
+            -p minutes-archive-app
+          cargo clippy \
+            -p minutes-archive-semantic \
+            -p minutes-archive-convert \
+            -p minutes-archive-core \
+            -p minutes-archive-app \
+            --all-targets -- -D warnings
+
+      - name: Build isolated production Archive app without signing
+        run: |
+          set -euo pipefail
+          (
+            cd archive/src-tauri
+            cargo tauri build --bundles app --no-sign
+          )
+
+      - name: Exercise exact unsigned app executable
+        run: |
+          set -euo pipefail
+          app="target/release/bundle/macos/Minutes Archive.app"
+          executable="$app/Contents/MacOS/minutes-archive-app"
+          test -d "$app"
+          test -x "$executable"
+          test "$(
+            /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' \
+              "$app/Contents/Info.plist"
+          )" = "com.useminutes.archive"
+          if find "$app" -type l -print -quit | grep -q .; then
+            echo "Unsigned Archive app contains a symbolic link; refusing candidate" >&2
+            exit 1
+          fi
+          cargo run -p minutes-archive-core --example document_vault_smoke -- \
+            "$executable"
+          scripts/archive-native-lifecycle-smoke.sh "$app"
+
+      - name: Package unsigned candidate and provenance
+        run: |
+          set -euo pipefail
+          app="target/release/bundle/macos/Minutes Archive.app"
+          ditto -c -k --sequesterRsrc --keepParent \
+            "$app" minutes-archive-unsigned.zip
+          shasum -a 256 minutes-archive-unsigned.zip \
+            > minutes-archive-unsigned.zip.sha256
+
+      - name: Upload unsigned Archive candidate
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: minutes-archive-unsigned-${{ needs.authorize-candidate.outputs.candidate_sha }}
+          path: |
+            minutes-archive-unsigned.zip
+            minutes-archive-unsigned.zip.sha256
+            candidate-sha.txt
+          if-no-files-found: error
+          retention-days: 1
+
+  sign-and-notarize:
+    name: Sign and notarize reviewed inert Archive app
+    needs:
+      - authorize-candidate
+      - build-unsigned
+    runs-on: macos-latest
+    timeout-minutes: 30
+    environment: signed-dev-acceptance
+    steps:
+      - name: Download exact unsigned Archive candidate
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: minutes-archive-unsigned-${{ needs.authorize-candidate.outputs.candidate_sha }}
+          path: payload
+
+      - name: Verify provenance before unlocking credentials
+        env:
+          CANDIDATE_SHA: ${{ needs.authorize-candidate.outputs.candidate_sha }}
+        run: |
+          set -euo pipefail
+          test "$(cat payload/candidate-sha.txt)" = "$CANDIDATE_SHA"
+          (cd payload && shasum -a 256 -c minutes-archive-unsigned.zip.sha256)
+          mkdir signed
+          ditto -x -k payload/minutes-archive-unsigned.zip signed
+          app="signed/Minutes Archive.app"
+          test -d "$app"
+          if find "$app" -type l -print -quit | grep -q .; then
+            echo "Unsigned Archive app contains a symbolic link; refusing to sign" >&2
+            exit 1
+          fi
+          test "$(
+            /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' \
+              "$app/Contents/Info.plist"
+          )" = "com.useminutes.archive"
+
+      - name: Import Developer ID identity into an ephemeral keychain
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          set -euo pipefail
+          for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY; do
+            if [ -z "${!name}" ]; then
+              echo "Missing required signing secret: ${name}" >&2
+              exit 1
+            fi
+          done
+          case "$APPLE_SIGNING_IDENTITY" in
+            "Developer ID Application:"*) ;;
+            *)
+              echo "Archive distribution requires a Developer ID Application identity" >&2
+              exit 1
+              ;;
+          esac
+          keychain="$RUNNER_TEMP/minutes-archive-acceptance.keychain-db"
+          certificate="$RUNNER_TEMP/minutes-archive-acceptance.p12"
+          keychain_password="$(openssl rand -hex 24)"
+          python3 - "$certificate" <<'PY'
+          import base64
+          import os
+          import pathlib
+          import sys
+
+          pathlib.Path(sys.argv[1]).write_bytes(
+              base64.b64decode(os.environ["APPLE_CERTIFICATE"], validate=True)
+          )
+          PY
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security import "$certificate" -k "$keychain" \
+            -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$keychain_password" "$keychain" >/dev/null
+          security list-keychains -d user -s "$keychain"
+          security find-identity -v -p codesigning "$keychain" \
+            | grep -Fq "$APPLE_SIGNING_IDENTITY"
+          {
+            echo "ARCHIVE_ACCEPTANCE_KEYCHAIN=$keychain"
+            echo "ARCHIVE_SIGNING_IDENTITY=$APPLE_SIGNING_IDENTITY"
+          } >> "$GITHUB_ENV"
+
+      - name: Materialize App Store Connect key
+        env:
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          for name in APPLE_API_ISSUER APPLE_API_KEY APPLE_API_PRIVATE_KEY; do
+            if [ -z "${!name}" ]; then
+              echo "Missing required notarization secret: ${name}" >&2
+              exit 1
+            fi
+          done
+          key_path="$RUNNER_TEMP/AuthKey_${APPLE_API_KEY}.p8"
+          printf '%s' "$APPLE_API_PRIVATE_KEY" > "$key_path"
+          chmod 600 "$key_path"
+          {
+            echo "ARCHIVE_API_KEY_PATH=$key_path"
+            echo "ARCHIVE_API_KEY=$APPLE_API_KEY"
+            echo "ARCHIVE_API_ISSUER=$APPLE_API_ISSUER"
+          } >> "$GITHUB_ENV"
+
+      # Candidate code is never executed after the signing identity is
+      # unlocked. This fixed workflow signs and notarizes only the reviewed,
+      # provenance-bound inert app artifact.
+      - name: Sign Archive inside-out
+        run: |
+          set -euo pipefail
+          app="signed/Minutes Archive.app"
+          while IFS= read -r nested_executable; do
+            codesign --force --options runtime --timestamp \
+              --sign "$ARCHIVE_SIGNING_IDENTITY" "$nested_executable"
+          done < <(
+            find "$app/Contents/MacOS" -maxdepth 1 -type f \
+              \( -perm -100 -o -perm -010 -o -perm -001 \)
+          )
+          codesign --force --options runtime --timestamp \
+            --sign "$ARCHIVE_SIGNING_IDENTITY" "$app"
+          codesign --verify --deep --strict --verbose=4 "$app"
+
+      - name: Verify identity, notarize, and staple exact app
+        env:
+          CANDIDATE_SHA: ${{ needs.authorize-candidate.outputs.candidate_sha }}
+        run: |
+          set -euo pipefail
+          app="signed/Minutes Archive.app"
+          identity="$(codesign -dv --verbose=4 "$app" 2>&1)"
+          team_id="$(awk -F= '/^TeamIdentifier=/{print $2}' <<<"$identity")"
+          identifier="$(awk -F= '/^Identifier=/{print $2}' <<<"$identity")"
+          test "$team_id" = "63TMLKT8HN"
+          test "$identifier" = "com.useminutes.archive"
+
+          notary_zip="$RUNNER_TEMP/Minutes-Archive-notary.zip"
+          ditto -c -k --sequesterRsrc --keepParent "$app" "$notary_zip"
+          xcrun notarytool submit "$notary_zip" \
+            --key "$ARCHIVE_API_KEY_PATH" \
+            --key-id "$ARCHIVE_API_KEY" \
+            --issuer "$ARCHIVE_API_ISSUER" \
+            --wait
+          xcrun stapler staple "$app"
+          xcrun stapler validate "$app"
+          codesign --verify --deep --strict --verbose=4 "$app"
+          spctl --assess --type execute --verbose=4 "$app"
+
+          executable="$app/Contents/MacOS/minutes-archive-app"
+          executable_sha="$(shasum -a 256 "$executable" | awk '{print $1}')"
+          printf 'candidate=%s\nteam_id=%s\nidentifier=%s\nexecutable_sha256=%s\nnotarized=true\nstapled=true\n' \
+            "$CANDIDATE_SHA" "$team_id" "$identifier" "$executable_sha" \
+            > signed-archive-provenance.txt
+          ditto -c -k --sequesterRsrc --keepParent \
+            "$app" minutes-archive-pilot-notarized.zip
+          shasum -a 256 minutes-archive-pilot-notarized.zip \
+            > minutes-archive-pilot-notarized.zip.sha256
+
+      - name: Remove ephemeral signing material
+        if: always()
+        run: |
+          if [ -n "${ARCHIVE_ACCEPTANCE_KEYCHAIN:-}" ]; then
+            security delete-keychain "$ARCHIVE_ACCEPTANCE_KEYCHAIN" || true
+          fi
+          rm -f \
+            "$RUNNER_TEMP/minutes-archive-acceptance.p12" \
+            "${ARCHIVE_API_KEY_PATH:-}" \
+            "$RUNNER_TEMP/Minutes-Archive-notary.zip"
+
+      - name: Upload short-lived notarized Archive pilot
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: minutes-archive-pilot-notarized-${{ needs.authorize-candidate.outputs.candidate_sha }}
+          path: |
+            minutes-archive-pilot-notarized.zip
+            minutes-archive-pilot-notarized.zip.sha256
+            signed-archive-provenance.txt
+          if-no-files-found: error
+          retention-days: 7

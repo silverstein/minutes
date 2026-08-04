@@ -1,0 +1,19 @@
+{
+  "productName": "Minutes Archive Dev",
+  "identifier": "com.useminutes.archive.dev",
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Minutes Archive Dev",
+        "width": 1240,
+        "height": 820,
+        "minWidth": 840,
+        "minHeight": 640,
+        "center": true,
+        "resizable": true,
+        "fullscreen": false
+      }
+    ]
+  }
+}

@@ -39,7 +39,10 @@ jobs:
             os: macos-latest
             binary: minutes
             asset: minutes-macos-arm64
-            features: parakeet,metal
+            # engine-sherpa is macOS-only here: sherpa-onnx links statically on
+            # darwin (self-contained binary, #369) but dynamically on Linux and
+            # Windows, where shipping it would need the dylibs bundled alongside.
+            features: parakeet,metal,engine-sherpa
           - target: x86_64-pc-windows-msvc
             os: windows-latest
             binary: minutes.exe

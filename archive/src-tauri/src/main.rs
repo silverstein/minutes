@@ -491,6 +491,7 @@ struct UiSearchResponse {
     semantic_candidates_considered: usize,
     semantic_query_applied: bool,
     stale_evidence_withdrawn: u64,
+    inferred_boundary_evidence_withdrawn: u64,
 }
 
 impl From<LegalSearchResponse> for UiSearchResponse {
@@ -529,6 +530,7 @@ impl From<LegalSearchResponse> for UiSearchResponse {
             semantic_candidates_considered: response.semantic_candidates_considered,
             semantic_query_applied: response.semantic_query_applied,
             stale_evidence_withdrawn: response.stale_evidence_withdrawn,
+            inferred_boundary_evidence_withdrawn: response.inferred_boundary_evidence_withdrawn,
         }
     }
 }

@@ -8,9 +8,9 @@
 
 use crate::retrieval::{
     interpret_legal_query, normalize_converted_document, normalize_text_document,
-    CurrentRevisionSet, DocumentId, LegalIndex, LegalQuery, LegalSearchResponse, RetrievalError,
-    SourceRevision, VaultId, MAX_NORMALIZED_DOCUMENT_BYTES, MAX_QUERY_CHARS,
-    MAX_SEMANTIC_PROVISIONS,
+    CurrentRevisionSet, DocumentId, LegalIndex, LegalQuery, LegalSearchResponse,
+    ProvisionBoundaries, RetrievalError, SourceRevision, VaultId, MAX_NORMALIZED_DOCUMENT_BYTES,
+    MAX_QUERY_CHARS, MAX_SEMANTIC_PROVISIONS,
 };
 use crate::{
     cap_identity_matches, cap_metadata_identity_portable, cap_metadata_is_link_or_reparse,
@@ -133,6 +133,7 @@ pub struct TextVaultBuildReport {
     pub conversion_failures: u64,
     pub ocr_required_files: u64,
     pub searchable_pdf_documents: u64,
+    pub inferred_boundary_documents: u64,
     pub docx_documents: u64,
     pub duplicate_files_skipped: u64,
     pub symlinks_skipped: u64,
@@ -259,6 +260,7 @@ impl AuthorizedTextVault {
                 semantic_query_applied: false,
                 semantic_model: self.index.semantic_model().cloned(),
                 stale_evidence_withdrawn: 0,
+                inferred_boundary_evidence_withdrawn: 0,
                 stale_document_ids: BTreeSet::new(),
             }
         };
@@ -429,6 +431,7 @@ struct BuildCounters {
     conversion_failures: u64,
     ocr_required_files: u64,
     searchable_pdf_documents: u64,
+    inferred_boundary_documents: u64,
     docx_documents: u64,
     duplicate_files_skipped: u64,
     symlinks_skipped: u64,
@@ -783,6 +786,10 @@ fn build_authorized_vault(
                 },
             );
             counters.indexed_documents = document_number;
+            if normalized.provision_boundaries == ProvisionBoundaries::Inferred {
+                counters.inferred_boundary_documents =
+                    counters.inferred_boundary_documents.saturating_add(1);
+            }
             match source_kind {
                 SourceKind::Converted(SourceFormat::Pdf) => {
                     counters.searchable_pdf_documents =
@@ -811,6 +818,7 @@ fn build_authorized_vault(
         conversion_failures: counters.conversion_failures,
         ocr_required_files: counters.ocr_required_files,
         searchable_pdf_documents: counters.searchable_pdf_documents,
+        inferred_boundary_documents: counters.inferred_boundary_documents,
         docx_documents: counters.docx_documents,
         duplicate_files_skipped: counters.duplicate_files_skipped,
         symlinks_skipped: counters.symlinks_skipped,

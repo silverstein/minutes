@@ -5,7 +5,9 @@
 //! filesystem path. Source ingestion and revision revalidation happen outside
 //! the index; every search supplies the currently authorized source revisions.
 
-use minutes_archive_convert::{AnchorFlow, ConvertedDocument, SourceFormat};
+use minutes_archive_convert::{
+    AnchorFlow, ConvertedDocument, SourceFormat, PDF_UNSUPPORTED_STRUCTURE_WARNING,
+};
 use minutes_archive_semantic::{
     cosine_similarity, SemanticModelMetadata, APPLE_ENGLISH_SENTENCE_DIMENSION,
 };
@@ -145,6 +147,12 @@ impl SourceRevision {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum ProvisionBoundaries {
+    Declared,
+    Inferred,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct NormalizedProvision {
     pub ordinal: u32,
@@ -160,6 +168,7 @@ pub struct NormalizedDocument {
     pub title: String,
     pub revision: SourceRevision,
     pub converter: String,
+    pub provision_boundaries: ProvisionBoundaries,
     pub provisions: Vec<NormalizedProvision>,
 }
 
@@ -189,6 +198,7 @@ pub fn normalize_text_document(
         title,
         revision: SourceRevision::from_bytes(bytes),
         converter: "utf8-text-v1".to_string(),
+        provision_boundaries: ProvisionBoundaries::Declared,
         provisions,
     })
 }
@@ -222,6 +232,15 @@ pub fn normalize_converted_document(
             SourceFormat::Docx => "docx-xml-0.41.0-v1",
         }
         .to_string(),
+        provision_boundaries: if converted
+            .warnings
+            .iter()
+            .any(|warning| warning == PDF_UNSUPPORTED_STRUCTURE_WARNING)
+        {
+            ProvisionBoundaries::Inferred
+        } else {
+            ProvisionBoundaries::Declared
+        },
         provisions,
     })
 }
@@ -259,16 +278,20 @@ fn footer_shape(line: &str) -> String {
 /// rather than another guess about what a line looks like.
 fn running_boilerplate(converted: &ConvertedDocument) -> HashSet<String> {
     let mut counts = HashMap::<String, usize>::new();
+    let mut pages = HashMap::<String, Vec<&str>>::new();
     for block in &converted.blocks {
-        if block.flow != AnchorFlow::HardBoundary {
-            continue;
-        }
-        let lines = block
-            .text
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty())
-            .collect::<Vec<_>>();
+        pages
+            .entry(block.source_anchor.clone())
+            .or_default()
+            .extend(
+                block
+                    .text
+                    .lines()
+                    .map(str::trim)
+                    .filter(|line| !line.is_empty()),
+            );
+    }
+    for lines in pages.into_values() {
         // Producers disagree about where furniture lands in the content
         // stream. Chrome draws the running footer last; LibreOffice draws the
         // header and footer FIRST, which is why a rule that only looked at the
@@ -352,6 +375,7 @@ fn segment_anchored_blocks(
     let mut heading_anchor = None::<String>;
     let mut body_anchor = None::<String>;
     let mut body = Vec::<String>::new();
+    let mut page_lines = Vec::<String>::new();
 
     // A page boundary is layout, not structure. It used to flush, which
     // finalized whatever clause was mid-sentence at the bottom of a page: the
@@ -426,6 +450,9 @@ fn segment_anchored_blocks(
     };
 
     for block in &converted.blocks {
+        page_lines.push(block.text.clone());
+        let page_wraps = block.flow == AnchorFlow::HardBoundary
+            && block_wraps_to_next_page(&page_lines.join("\n"), &boilerplate);
         // The document's own structure decides, when it reports any. A DOCX
         // paragraph styled Heading1, or set larger than the document's body
         // text, is a caption regardless of how its words read -- and an
@@ -475,9 +502,7 @@ fn segment_anchored_blocks(
                 }
                 body.push(remainder.join(" "));
             }
-            if block.flow == AnchorFlow::HardBoundary
-                && !block_wraps_to_next_page(&block.text, &boilerplate)
-            {
+            if block.flow == AnchorFlow::HardBoundary && !page_wraps {
                 flush(
                     &mut segments,
                     &mut heading,
@@ -486,6 +511,10 @@ fn segment_anchored_blocks(
                     &mut body,
                     false,
                 );
+                page_lines.clear();
+            }
+            if block.flow == AnchorFlow::HardBoundary {
+                page_lines.clear();
             }
             continue;
         }
@@ -548,9 +577,7 @@ fn segment_anchored_blocks(
             }
         }
 
-        if block.flow == AnchorFlow::HardBoundary
-            && !block_wraps_to_next_page(&block.text, &boilerplate)
-        {
+        if block.flow == AnchorFlow::HardBoundary && !page_wraps {
             flush(
                 &mut segments,
                 &mut heading,
@@ -559,6 +586,9 @@ fn segment_anchored_blocks(
                 &mut body,
                 false,
             );
+            page_lines.clear();
+        } else if block.flow == AnchorFlow::HardBoundary {
+            page_lines.clear();
         }
     }
     flush(
@@ -666,12 +696,10 @@ fn segment_legal_provisions(text: &str) -> Result<Vec<NormalizedProvision>, Retr
         .collect())
 }
 
-/// Heuristic caption detection. Known-inadequate; see the note inside.
-///
-/// This should be replaced by structural signal from the converter --
-/// `w:pStyle` for DOCX, `#` for Markdown, and no promotion at all for PDF,
-/// which carries no reliable heading marker. Until then every change here
-/// trades one class of legal-facing error for another.
+/// Heuristic caption detection for formats whose source structure is lexical.
+/// Ambiguous text-only PDFs are marked as inferred by
+/// `normalize_converted_document`; retrieval withholds them from
+/// same-provision results before this fallback can fabricate a conjunction.
 fn looks_like_legal_heading(line: &str) -> bool {
     if line.len() > 180 || line.ends_with('.') && line.split_whitespace().count() > 12 {
         return false;
@@ -694,8 +722,8 @@ fn looks_like_legal_heading(line: &str) -> bool {
     // silently returns nothing. The word cap is retained as the least-bad
     // interim because its failures are at least symmetric and predictable.
     // The real signal is structural, not lexical: DOCX carries `w:pStyle`,
-    // Markdown carries `#`, and PDF carries none -- which is the honest
-    // answer for PDF. See the note above `looks_like_legal_heading`.
+    // while PDFs are admitted only when the converter found layout structure
+    // or this bounded lexical rule has a safe marker.
     let numbered = line.split_whitespace().count() <= 12
         && line.split_once(['.', ')']).is_some_and(|(prefix, rest)| {
             !rest.trim().is_empty()
@@ -1072,6 +1100,7 @@ pub struct LegalSearchResponse {
     pub semantic_query_applied: bool,
     pub semantic_model: Option<SemanticModelMetadata>,
     pub stale_evidence_withdrawn: u64,
+    pub inferred_boundary_evidence_withdrawn: u64,
     #[serde(skip)]
     pub(crate) stale_document_ids: BTreeSet<DocumentId>,
 }
@@ -1126,6 +1155,7 @@ struct CandidateRow {
     body: String,
     source_revision: SourceRevision,
     source_converter: String,
+    provision_boundaries: ProvisionBoundaries,
     lexical_rank: f64,
 }
 
@@ -1271,7 +1301,8 @@ impl LegalIndex {
                     title TEXT NOT NULL,
                     revision_sha256 TEXT NOT NULL,
                     revision_bytes INTEGER NOT NULL,
-                    converter TEXT NOT NULL
+                    converter TEXT NOT NULL,
+                    provision_boundaries INTEGER NOT NULL
                 ) STRICT;
                 CREATE VIRTUAL TABLE provisions USING fts5(
                     document_id UNINDEXED,
@@ -1524,7 +1555,8 @@ impl LegalIndex {
                     d.title,
                     d.revision_sha256,
                     d.revision_bytes,
-                    d.converter
+                    d.converter,
+                    d.provision_boundaries
                 FROM provisions p
                 JOIN documents d ON d.document_id = p.document_id
                 WHERE p.document_id = ?1 AND p.ordinal = ?2
@@ -1548,6 +1580,7 @@ impl LegalIndex {
                             byte_len: revision_bytes,
                         },
                         source_converter: row.get(8)?,
+                        provision_boundaries: provision_boundaries_from_db(row.get(9)?)?,
                         lexical_rank: 0.0,
                     })
                 },
@@ -1572,7 +1605,8 @@ impl LegalIndex {
                 d.title,
                 d.revision_sha256,
                 d.revision_bytes,
-                d.converter
+                d.converter,
+                d.provision_boundaries
             FROM provisions p
             JOIN documents d ON d.document_id = p.document_id
             WHERE provisions MATCH ?1
@@ -1610,6 +1644,10 @@ impl LegalIndex {
                 body: row.get(4).map_err(|_| RetrievalError::IndexUnavailable)?,
                 source_revision: revision,
                 source_converter: row.get(9).map_err(|_| RetrievalError::IndexUnavailable)?,
+                provision_boundaries: provision_boundaries_from_db(
+                    row.get(10).map_err(|_| RetrievalError::IndexUnavailable)?,
+                )
+                .map_err(|_| RetrievalError::IndexUnavailable)?,
                 lexical_rank: row.get(5).map_err(|_| RetrievalError::IndexUnavailable)?,
             });
         }
@@ -1628,9 +1666,14 @@ impl LegalIndex {
     ) -> Result<LegalSearchResponse, RetrievalError> {
         let mut evidence = Vec::new();
         let mut stale_documents = BTreeSet::new();
+        let mut inferred_boundary_documents = BTreeSet::new();
         for candidate in candidates {
             if !current_revisions.matches(&candidate.document_id, &candidate.source_revision) {
                 stale_documents.insert(candidate.document_id);
+                continue;
+            }
+            if candidate.provision_boundaries == ProvisionBoundaries::Inferred {
+                inferred_boundary_documents.insert(candidate.document_id);
                 continue;
             }
             // Matching spans heading and body so a clause whose operative
@@ -1675,6 +1718,7 @@ impl LegalIndex {
             semantic_query_applied: false,
             semantic_model: self.semantic_model.clone(),
             stale_evidence_withdrawn: stale_documents.len() as u64,
+            inferred_boundary_evidence_withdrawn: inferred_boundary_documents.len() as u64,
             stale_document_ids: stale_documents,
         })
     }
@@ -1794,6 +1838,7 @@ impl LegalIndex {
             semantic_query_applied: false,
             semantic_model: self.semantic_model.clone(),
             stale_evidence_withdrawn: stale_documents.len() as u64,
+            inferred_boundary_evidence_withdrawn: 0,
             stale_document_ids: stale_documents,
         })
     }
@@ -1838,13 +1883,14 @@ fn replace_document_transaction(
     transaction
         .execute(
             "
-            INSERT INTO documents (document_id, title, revision_sha256, revision_bytes, converter)
-            VALUES (?1, ?2, ?3, ?4, ?5)
+            INSERT INTO documents (document_id, title, revision_sha256, revision_bytes, converter, provision_boundaries)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6)
             ON CONFLICT(document_id) DO UPDATE SET
                 title = excluded.title,
                 revision_sha256 = excluded.revision_sha256,
                 revision_bytes = excluded.revision_bytes,
-                converter = excluded.converter
+                converter = excluded.converter,
+                provision_boundaries = excluded.provision_boundaries
             ",
             params![
                 document.document_id.as_str(),
@@ -1853,6 +1899,7 @@ fn replace_document_transaction(
                 i64::try_from(document.revision.byte_len)
                     .map_err(|_| RetrievalError::InvalidDocumentText)?,
                 document.converter,
+                provision_boundaries_to_db(document.provision_boundaries),
             ],
         )
         .map_err(|_| RetrievalError::IndexUnavailable)?;
@@ -1874,6 +1921,21 @@ fn replace_document_transaction(
             .map_err(|_| RetrievalError::IndexUnavailable)?;
     }
     Ok(())
+}
+
+fn provision_boundaries_to_db(boundaries: ProvisionBoundaries) -> i64 {
+    match boundaries {
+        ProvisionBoundaries::Declared => 0,
+        ProvisionBoundaries::Inferred => 1,
+    }
+}
+
+fn provision_boundaries_from_db(value: i64) -> Result<ProvisionBoundaries, rusqlite::Error> {
+    match value {
+        0 => Ok(ProvisionBoundaries::Declared),
+        1 => Ok(ProvisionBoundaries::Inferred),
+        _ => Err(rusqlite::Error::InvalidQuery),
+    }
 }
 
 fn validate_query(query: &LegalQuery) -> Result<(), RetrievalError> {
@@ -2497,6 +2559,7 @@ mod tests {
             body: long.clone(),
             source_revision: SourceRevision::from_bytes(b"bytes"),
             source_converter: "pdf-extract-0.12.0-v1".to_string(),
+            provision_boundaries: ProvisionBoundaries::Declared,
             lexical_rank: 0.0,
         };
         let card = candidate.semantic_evidence_card(&vault, 0.9);

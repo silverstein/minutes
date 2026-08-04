@@ -71,6 +71,7 @@ const vaultReport = {
   vault_id: "local-private-vault",
   approved_locations: 1,
   indexed_documents: 3,
+  inferred_boundary_documents: 0,
   indexed_bytes: 3072,
   unsupported_files_skipped: 1,
   oversized_files_skipped: 0,
@@ -161,6 +162,7 @@ const evidence = {
     model_download_requested: false,
   },
   stale_evidence_withdrawn: 0,
+  inferred_boundary_evidence_withdrawn: 0,
 };
 
 const mockScript = `

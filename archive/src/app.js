@@ -297,6 +297,9 @@ async function exportReport() {
 
 function renderVaultSummary(report) {
   vaultReport = report;
+  // Defaulted, not asserted. A missing count must never blank the search view:
+  // throwing here hides every result behind a number the reader does not need.
+  const inferredBoundaryDocuments = report.inferred_boundary_documents ?? 0;
   elements.vaultSummary.textContent =
     `${report.indexed_documents.toLocaleString()} supported document${
       report.indexed_documents === 1 ? "" : "s"
@@ -308,6 +311,12 @@ function renderVaultSummary(report) {
     } skipped; ${report.ocr_required_files.toLocaleString()} PDF${
       report.ocr_required_files === 1 ? "" : "s"
     } require OCR. ` +
+    // Defaulted, not asserted: a missing count must never blank the search
+    // view. Throwing here would hide every result behind a field the reader
+    // does not care about.
+    `${inferredBoundaryDocuments.toLocaleString()} indexed document${
+      inferredBoundaryDocuments === 1 ? "" : "s"
+    } cannot answer same-clause questions because the file reports no section structure. ` +
     (report.semantic_retrieval_enabled
       ? `${report.semantic_provisions_indexed.toLocaleString()} provision suggestion vector${
           report.semantic_provisions_indexed === 1 ? "" : "s"
@@ -537,12 +546,18 @@ function renderSearchResponse(response) {
           response.stale_evidence_withdrawn === 1 ? " was" : "s were"
         } withdrawn.`
       : "";
+  const boundaryNote =
+    (response.inferred_boundary_evidence_withdrawn ?? 0) > 0
+      ? ` ${(response.inferred_boundary_evidence_withdrawn ?? 0).toLocaleString()} searchable document${
+          response.inferred_boundary_evidence_withdrawn === 1 ? "" : "s"
+        } report no section structure, so they were excluded from same-clause questions.`
+      : "";
   elements.searchStatus.textContent =
     `${verifiedCount.toLocaleString()} current ${resultKind}${
       verifiedCount === 1 ? "" : "s"
     } matched every visible constraint; ${suggestionCount.toLocaleString()} separately labeled meaning suggestion${
       suggestionCount === 1 ? "" : "s"
-    }.${staleNote}`;
+    }.${staleNote}${boundaryNote}`;
 }
 
 async function searchVault(event) {

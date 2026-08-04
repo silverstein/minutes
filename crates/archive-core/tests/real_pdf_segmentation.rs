@@ -13,8 +13,11 @@
 //! .docx carrying genuine `w:hdr`/`w:ftr` parts and a real PAGE field. It
 //! contains no client material.
 
-use minutes_archive_convert::{convert_bytes, SourceFormat};
-use minutes_archive_core::retrieval::{normalize_converted_document, DocumentId};
+use minutes_archive_convert::{convert_bytes, SourceFormat, PDF_UNSUPPORTED_STRUCTURE_WARNING};
+use minutes_archive_core::retrieval::{
+    normalize_converted_document, CurrentRevisionSet, DocumentId, LegalConcept, LegalIndex,
+    LegalQuery, MatchScope, ProvisionBoundaries, VaultId,
+};
 
 const LIABILITY_WRAP: &[u8] =
     include_bytes!("../../../tests/fixtures/archive-real-pdf/liability-wrap.pdf");
@@ -80,12 +83,32 @@ fn a_real_pdf_keeps_a_wrapped_cap_with_its_carve_out_and_furniture_out_of_the_bo
             )
         })
         .collect::<Vec<_>>()
-        .join(" ");
+        .join("\n");
+    let source_text = converted
+        .blocks
+        .iter()
+        .map(|block| block.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let occurrences = |haystack: &str, needle: &str| {
+        let haystack = haystack.split_whitespace().collect::<Vec<_>>();
+        let needle = needle.split_whitespace().collect::<Vec<_>>();
+        haystack
+            .windows(needle.len())
+            .filter(|window| *window == needle)
+            .count()
+    };
     for block in &converted.blocks {
         for line in block.text.lines().map(str::trim).filter(|l| !l.is_empty()) {
             assert!(
                 indexed.contains(line),
                 "a line the converter produced is not in the index: {line:?}"
+            );
+            let input_count = occurrences(&source_text, line);
+            let output_count = occurrences(&indexed, line);
+            assert!(
+                output_count >= input_count,
+                "line occurrence count decreased for {line:?}: {input_count} -> {output_count}"
             );
         }
     }
@@ -93,6 +116,8 @@ fn a_real_pdf_keeps_a_wrapped_cap_with_its_carve_out_and_furniture_out_of_the_bo
 
 const LIST_TAIL_MERGE: &[u8] =
     include_bytes!("../../../tests/fixtures/archive-real-pdf/list-tail-merge.pdf");
+const UNIFORM_SPACING_CAPTIONS: &[u8] =
+    include_bytes!("../../../tests/fixtures/archive-real-pdf/uniform-spacing-captions.pdf");
 
 /// Reproduces the open defect in #26 against real LibreOffice output.
 ///
@@ -102,14 +127,7 @@ const LIST_TAIL_MERGE: &[u8] =
 /// rule can see either caption. The two clauses are indexed as one provision,
 /// and a same-provision query for confidentiality and assignment returns a
 /// card claiming a conjunction the document does not contain.
-///
-/// Ignored because it fails: this is a checked-in reproduction, not a
-/// regression guard. A geometric converter was tried and reverted (see the
-/// revert of 0253b6aa) -- it fixed this and silently deleted section captions
-/// from documents with no running header, which is worse. The fixture and this
-/// test are kept so the next attempt starts from a measured failure.
 #[test]
-#[ignore = "open defect #26: no structure signal exists for uniform-size, title-case captions"]
 fn a_real_pdf_does_not_fabricate_a_same_provision_conjunction() {
     let converted = convert_bytes(SourceFormat::Pdf, LIST_TAIL_MERGE).expect("convert");
     let normalized = normalize_converted_document(
@@ -129,4 +147,72 @@ fn a_real_pdf_does_not_fabricate_a_same_provision_conjunction() {
             provision.text
         );
     }
+}
+
+#[test]
+fn a_real_pdf_with_no_structure_signal_is_searchable_but_withheld_from_same_provision() {
+    let converted = convert_bytes(SourceFormat::Pdf, UNIFORM_SPACING_CAPTIONS).expect("convert");
+    assert!(converted
+        .warnings
+        .iter()
+        .any(|warning| warning == PDF_UNSUPPORTED_STRUCTURE_WARNING));
+
+    let normalized = normalize_converted_document(
+        DocumentId::parse("uniform-spacing-captions").expect("id"),
+        "Uniform Spacing Captions",
+        UNIFORM_SPACING_CAPTIONS,
+        &converted,
+    )
+    .expect("text remains searchable despite inferred boundaries");
+    assert_eq!(
+        normalized.provision_boundaries,
+        ProvisionBoundaries::Inferred
+    );
+    let revisions = CurrentRevisionSet::from_documents([&normalized]);
+    let mut index =
+        LegalIndex::new(VaultId::parse("fixture-vault").expect("vault")).expect("index");
+    index.replace_document(&normalized).expect("ingest");
+
+    let exact = LegalQuery {
+        raw: "remember the exact phrase".to_string(),
+        scope: MatchScope::AnywhereInDocument,
+        required_concepts: Vec::new(),
+        excluded_concepts: Vec::new(),
+        exact_phrase: Some("Confidential Information".to_string()),
+        max_sentences: None,
+        limit: 10,
+    };
+    let exact_response = index
+        .search(index.vault_id(), exact, &revisions)
+        .expect("exact phrase");
+    assert_eq!(exact_response.documents.len(), 1);
+
+    let document_scope = LegalQuery {
+        raw: "find documents containing confidentiality and assignment".to_string(),
+        scope: MatchScope::AnywhereInDocument,
+        required_concepts: vec![LegalConcept::Confidentiality, LegalConcept::Assignment],
+        excluded_concepts: Vec::new(),
+        exact_phrase: None,
+        max_sentences: None,
+        limit: 10,
+    };
+    let document_response = index
+        .search(index.vault_id(), document_scope, &revisions)
+        .expect("document conjunction");
+    assert_eq!(document_response.documents.len(), 1);
+
+    let same_provision = LegalQuery {
+        raw: "find a confidentiality provision containing assignment".to_string(),
+        scope: MatchScope::SameProvision,
+        required_concepts: vec![LegalConcept::Confidentiality, LegalConcept::Assignment],
+        excluded_concepts: Vec::new(),
+        exact_phrase: None,
+        max_sentences: None,
+        limit: 10,
+    };
+    let same_response = index
+        .search(index.vault_id(), same_provision, &revisions)
+        .expect("same provision");
+    assert!(same_response.evidence.is_empty());
+    assert_eq!(same_response.inferred_boundary_evidence_withdrawn, 1);
 }

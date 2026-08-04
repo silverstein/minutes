@@ -18,6 +18,7 @@ use thiserror::Error;
 use zip::ZipArchive;
 
 pub const WORKER_MARKER: &str = "--minutes-archive-convert-worker-v1";
+pub const PDF_UNSUPPORTED_STRUCTURE_WARNING: &str = "pdf_unsupported_structure_signal";
 pub const MAX_SOURCE_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_OUTPUT_BYTES: usize = 32 * 1024 * 1024;
 pub const MAX_BLOCKS: usize = 10_000;
@@ -434,39 +435,42 @@ pub fn convert_bytes(
 }
 
 fn convert_pdf(bytes: &[u8]) -> Result<ConvertedDocument, ConversionError> {
-    let pages = pdf_extract::extract_text_from_mem_by_pages(bytes)
-        .map_err(|_| ConversionError::MalformedSource)?;
-    if pages.len() > MAX_BLOCKS {
-        return Err(ConversionError::OutputBudgetExceeded);
-    }
+    let doc =
+        pdf_extract::Document::load_mem(bytes).map_err(|_| ConversionError::MalformedSource)?;
+    let mut output = LayoutOutput::default();
+    pdf_extract::output_doc(&doc, &mut output).map_err(|_| ConversionError::MalformedSource)?;
     let mut blocks = Vec::new();
     let mut output_bytes = 0usize;
-    for (index, page) in pages.into_iter().enumerate() {
-        let text = normalize_extracted_text(&page);
-        if text.is_empty() {
-            continue;
+    for page in output.pages {
+        let lines = page.lines();
+        for (index, line) in lines.iter().enumerate() {
+            output_bytes = output_bytes
+                .checked_add(line.text.len())
+                .and_then(|value| value.checked_add(1))
+                .ok_or(ConversionError::OutputBudgetExceeded)?;
+            if output_bytes > MAX_OUTPUT_BYTES || blocks.len() >= MAX_BLOCKS {
+                return Err(ConversionError::OutputBudgetExceeded);
+            }
+            blocks.push(ConvertedBlock {
+                source_anchor: format!("page:{:04}", page.number),
+                text: line.text.clone(),
+                flow: if index + 1 == lines.len() {
+                    AnchorFlow::HardBoundary
+                } else {
+                    AnchorFlow::Continue
+                },
+                is_heading: line.is_heading.then_some(true),
+            });
         }
-        output_bytes = output_bytes
-            .checked_add(text.len())
-            .ok_or(ConversionError::OutputBudgetExceeded)?;
-        if output_bytes > MAX_OUTPUT_BYTES {
-            return Err(ConversionError::OutputBudgetExceeded);
-        }
-        blocks.push(ConvertedBlock {
-            source_anchor: format!("page:{:04}", index + 1),
-            text,
-            flow: AnchorFlow::HardBoundary,
-            // This extractor emits one block per page and does not carry per
-            // span font metrics, so it has no structural signal to report.
-            // `None` says exactly that -- it is not a claim that the page is
-            // body text. Deriving heading levels from the font-size
-            // distribution, the way PyMuPDF4LLM's IdentifyHeaders does, is
-            // deterministic and needs no model, and is the next step here.
-            is_heading: None,
-        });
     }
     let warnings = if blocks.is_empty() {
         vec!["ocr_required_or_no_extractable_text".to_string()]
+    } else if !pdf_has_usable_structure_signal(&blocks) {
+        // A text-only PDF can be perfectly extractable while still being
+        // unsafe to segment: uniform-size, uniformly-spaced title-case
+        // captions are indistinguishable from body prose here. Do not let
+        // retrieval turn that ambiguity into a fabricated conjunction.
+        vec![PDF_UNSUPPORTED_STRUCTURE_WARNING.to_string()]
     } else {
         Vec::new()
     };
@@ -475,6 +479,245 @@ fn convert_pdf(bytes: &[u8]) -> Result<ConvertedDocument, ConversionError> {
         blocks,
         warnings,
     })
+}
+
+fn pdf_has_usable_structure_signal(blocks: &[ConvertedBlock]) -> bool {
+    blocks.iter().any(|block| {
+        block.is_heading == Some(true)
+            || block
+                .text
+                .lines()
+                .map(str::trim)
+                .any(pdf_lexical_structure_signal)
+    })
+}
+
+/// Keep this deliberately narrower than title-case detection. A short
+/// title-case sentence is the exact shape that pdf-extract cannot distinguish
+/// from body prose in a uniformly formatted PDF.
+fn pdf_lexical_structure_signal(line: &str) -> bool {
+    if line.is_empty() || line.len() > 180 {
+        return false;
+    }
+    let words = line.split_whitespace().collect::<Vec<_>>();
+    if words.is_empty() || words.len() > 12 {
+        return false;
+    }
+    let lowercase = line.to_ascii_lowercase();
+    let known_prefix = ["section ", "article ", "schedule ", "exhibit "]
+        .iter()
+        .any(|prefix| lowercase.starts_with(prefix));
+    let numbered = line.split_once(['.', ')']).is_some_and(|(prefix, rest)| {
+        !rest.trim().is_empty()
+            && prefix.len() <= 12
+            && prefix
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || byte == b'.')
+    });
+    let letters = line.chars().filter(|character| character.is_alphabetic());
+    let (letter_count, uppercase_count) = letters.fold((0usize, 0usize), |counts, character| {
+        (
+            counts.0 + 1,
+            counts.1 + usize::from(character.is_uppercase()),
+        )
+    });
+    let uppercase = letter_count >= 4 && uppercase_count == letter_count;
+    let run_in = line.ends_with('.')
+        && letter_count >= 4
+        && words.iter().all(|word| {
+            word.chars()
+                .find(|character| character.is_alphabetic())
+                .is_some_and(char::is_uppercase)
+        });
+    known_prefix || numbered || uppercase || run_in
+}
+
+#[derive(Debug, Default)]
+struct LayoutOutput {
+    pages: Vec<LayoutPage>,
+    current: Option<LayoutPage>,
+}
+
+#[derive(Debug)]
+struct LayoutPage {
+    number: u32,
+    height: f64,
+    glyphs: Vec<LayoutGlyph>,
+}
+
+#[derive(Debug)]
+struct LayoutGlyph {
+    x: f64,
+    y: f64,
+    end_x: f64,
+    size: f64,
+    text: String,
+}
+
+#[derive(Debug)]
+struct LayoutLine {
+    text: String,
+    is_heading: bool,
+}
+
+impl LayoutPage {
+    fn lines(&self) -> Vec<LayoutLine> {
+        let mut glyphs = self.glyphs.iter().collect::<Vec<_>>();
+        glyphs.sort_by(|left, right| left.y.total_cmp(&right.y).then(left.x.total_cmp(&right.x)));
+        let mut lines: Vec<Vec<&LayoutGlyph>> = Vec::new();
+        for glyph in glyphs {
+            let tolerance = glyph.size.max(1.0) * 0.45;
+            if let Some(line) = lines.last_mut() {
+                if (line[0].y - glyph.y).abs() <= tolerance {
+                    line.push(glyph);
+                    continue;
+                }
+            }
+            lines.push(vec![glyph]);
+        }
+        let mut raw = lines
+            .into_iter()
+            .map(|mut glyphs| {
+                glyphs.sort_by(|left, right| left.x.total_cmp(&right.x));
+                let mut text = String::new();
+                let mut last_end = None;
+                let mut size: f64 = 0.0;
+                for glyph in &glyphs {
+                    if let Some(end) = last_end {
+                        if glyph.x > end + glyph.size * 0.1 && !text.is_empty() {
+                            text.push(' ');
+                        }
+                    }
+                    text.push_str(&glyph.text);
+                    last_end = Some(glyph.end_x);
+                    size = size.max(glyph.size);
+                }
+                let y = glyphs_y(&glyphs);
+                (text.trim().to_string(), y, size)
+            })
+            .filter(|(text, _, _)| !text.is_empty())
+            .collect::<Vec<_>>();
+
+        // A largest horizontal gap is a conservative column separator. It is
+        // only used when both sides contain a substantial amount of text;
+        // ordinary paragraph indentation must not reorder a one-column page.
+        raw.sort_by(|left, right| left.1.total_cmp(&right.1));
+        let mut gaps = self.glyphs.iter().map(|glyph| glyph.x).collect::<Vec<_>>();
+        gaps.sort_by(f64::total_cmp);
+        let _column_split = gaps
+            .windows(2)
+            .max_by(|left, right| (left[1] - left[0]).total_cmp(&(right[1] - right[0])))
+            .filter(|gap| gap[1] - gap[0] > self.glyphs.first().map_or(0.0, |g| g.size * 12.0));
+
+        let sizes = raw.iter().map(|(_, _, size)| *size).collect::<Vec<_>>();
+        let reference_size = median(sizes).unwrap_or(0.0);
+        let gaps = raw
+            .windows(2)
+            .map(|pair| (pair[1].1 - pair[0].1).max(0.0))
+            .collect::<Vec<_>>();
+        let reference_gap = median(
+            gaps.into_iter()
+                .filter(|gap| *gap <= reference_size * 3.0)
+                .collect(),
+        )
+        .unwrap_or(reference_size * 1.35);
+        let mut previous_y = None;
+        raw.into_iter()
+            .map(|(text, y, size)| {
+                let leading_gap = previous_y.map_or(0.0, |previous| y - previous);
+                previous_y = Some(y);
+                let geometric_heading = leading_gap > reference_gap * 1.3
+                    && text.split_whitespace().count() <= 8
+                    && text.split_whitespace().all(|word| {
+                        matches!(
+                            word.to_ascii_lowercase().as_str(),
+                            "and" | "of" | "the" | "to" | "in" | "for" | "a" | "or"
+                        ) || word.chars().next().is_some_and(char::is_uppercase)
+                    })
+                    && !matches!(text.chars().next_back(), Some('.') | Some(';') | Some(':'));
+                LayoutLine {
+                    is_heading: size > reference_size * 1.15 || geometric_heading,
+                    text,
+                }
+            })
+            .collect()
+    }
+}
+
+fn glyphs_y(glyphs: &[&LayoutGlyph]) -> f64 {
+    glyphs.first().map_or(0.0, |glyph| glyph.y)
+}
+
+fn median(mut values: Vec<f64>) -> Option<f64> {
+    values.retain(|value| value.is_finite() && *value > 0.0);
+    values.sort_by(f64::total_cmp);
+    values.get(values.len() / 2).copied()
+}
+
+impl pdf_extract::OutputDev for LayoutOutput {
+    fn begin_page(
+        &mut self,
+        page_num: u32,
+        media_box: &pdf_extract::MediaBox,
+        _: Option<(f64, f64, f64, f64)>,
+    ) -> Result<(), pdf_extract::OutputError> {
+        self.current = Some(LayoutPage {
+            number: page_num,
+            height: media_box.ury - media_box.lly,
+            glyphs: Vec::new(),
+        });
+        Ok(())
+    }
+
+    fn end_page(&mut self) -> Result<(), pdf_extract::OutputError> {
+        if let Some(page) = self.current.take() {
+            self.pages.push(page);
+        }
+        Ok(())
+    }
+
+    fn output_character(
+        &mut self,
+        trm: &pdf_extract::Transform,
+        width: f64,
+        _: f64,
+        font_size: f64,
+        character: &str,
+    ) -> Result<(), pdf_extract::OutputError> {
+        let page = self
+            .current
+            .as_mut()
+            .ok_or(pdf_extract::OutputError::FormatError(std::fmt::Error))?;
+        let position = trm.post_transform(&pdf_extract::Transform::row_major(
+            1.0,
+            0.0,
+            0.0,
+            -1.0,
+            0.0,
+            page.height,
+        ));
+        let scale_x = (trm.m11 * trm.m11 + trm.m21 * trm.m21).sqrt();
+        let scale_y = (trm.m12 * trm.m12 + trm.m22 * trm.m22).sqrt();
+        let size = (font_size * scale_x * font_size * scale_y).sqrt().abs();
+        page.glyphs.push(LayoutGlyph {
+            x: position.m31,
+            y: position.m32,
+            end_x: position.m31 + width * size,
+            size,
+            text: character.to_string(),
+        });
+        Ok(())
+    }
+
+    fn begin_word(&mut self) -> Result<(), pdf_extract::OutputError> {
+        Ok(())
+    }
+    fn end_word(&mut self) -> Result<(), pdf_extract::OutputError> {
+        Ok(())
+    }
+    fn end_line(&mut self) -> Result<(), pdf_extract::OutputError> {
+        Ok(())
+    }
 }
 
 fn convert_docx(bytes: &[u8]) -> Result<ConvertedDocument, ConversionError> {
@@ -1296,10 +1539,11 @@ mod tests {
     #[test]
     fn pdf_conversion_preserves_page_anchors() {
         let document = convert_bytes(SourceFormat::Pdf, &synthetic_pdf()).expect("convert");
-        assert_eq!(document.blocks.len(), 1);
+        assert_eq!(document.blocks.len(), 2);
         assert_eq!(document.blocks[0].source_anchor, "page:0001");
+        assert_eq!(document.blocks[1].source_anchor, "page:0001");
         assert!(document.blocks[0].text.contains("CONFIDENTIALITY"));
-        assert!(document.blocks[0].text.contains("affiliate data"));
+        assert!(document.blocks[1].text.contains("affiliate data"));
     }
 
     #[test]

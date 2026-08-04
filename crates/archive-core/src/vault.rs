@@ -148,6 +148,7 @@ pub struct TextVaultBuildReport {
     pub semantic_model: Option<SemanticModelMetadata>,
     pub semantic_provisions_indexed: u64,
     pub semantic_provisions_skipped: u64,
+    pub semantic_unavailable: bool,
     pub semantic_derivatives_persisted: bool,
     pub semantic_model_download_requested: bool,
     pub supported_formats: Vec<&'static str>,
@@ -441,6 +442,7 @@ struct BuildCounters {
     directories_scanned: u64,
     semantic_provisions_indexed: u64,
     semantic_provisions_skipped: u64,
+    semantic_unavailable: bool,
 }
 
 pub fn build_authorized_text_vault(
@@ -458,7 +460,10 @@ pub fn build_authorized_document_vault(
     limits: TextVaultLimits,
     cancelled: &AtomicBool,
     converter: &BoundedConverter,
-    semantic_engine: BoundedSemanticEngine,
+    // Optional by design. The inner builder already accepted None; only this
+    // wrapper insisted on an engine, which is what made a Mac without Apple's
+    // linguistic asset unable to build any index at all.
+    semantic_engine: Option<BoundedSemanticEngine>,
 ) -> Result<AuthorizedTextVault, VaultError> {
     build_authorized_vault(
         vault_id,
@@ -466,7 +471,7 @@ pub fn build_authorized_document_vault(
         limits,
         cancelled,
         Some(converter),
-        Some(semantic_engine),
+        semantic_engine,
     )
 }
 
@@ -502,11 +507,24 @@ fn build_authorized_vault(
     let mut sources = BTreeMap::new();
     let mut identities = HashSet::new();
     let mut counters = BuildCounters::default();
-    let mut semantic_session = semantic_engine
+    // Semantic suggestions are an optional aid, explicitly labelled in the UI
+    // as review-not-verified, while exact evidence is the product. Failing the
+    // whole build when Apple's on-device model is unavailable left the
+    // operator with NO index at all -- no lexical search either -- on a Mac
+    // that simply lacks the linguistic asset. The interface already says
+    // "Semantic suggestions are unavailable on this Mac"; this makes the code
+    // agree with it. Withhold the capability, not the product.
+    let mut semantic_session = match semantic_engine
         .as_ref()
         .map(BoundedSemanticEngine::open_session)
         .transpose()
-        .map_err(|_| VaultError::SemanticUnavailable)?;
+    {
+        Ok(session) => session,
+        Err(_) => {
+            counters.semantic_unavailable = true;
+            None
+        }
+    };
     let semantic_model = semantic_session
         .as_ref()
         .map(|_| SemanticModelMetadata::apple_english_sentence_revision_one());
@@ -834,6 +852,7 @@ fn build_authorized_vault(
         semantic_model,
         semantic_provisions_indexed: counters.semantic_provisions_indexed,
         semantic_provisions_skipped: counters.semantic_provisions_skipped,
+        semantic_unavailable: counters.semantic_unavailable,
         semantic_derivatives_persisted: false,
         semantic_model_download_requested: false,
         supported_formats: if converter.is_some() {
@@ -972,6 +991,50 @@ mod tests {
         )
         .expect("build");
         (vault, source)
+    }
+
+    #[test]
+    fn a_mac_without_the_on_device_model_still_gets_a_searchable_index() {
+        // An independent reviewer found that a failure to open the semantic
+        // session aborted the WHOLE build, so a Mac lacking Apple's linguistic
+        // asset got no index at all -- not even lexical. Exact evidence is the
+        // product; semantic suggestions are an optional aid the interface
+        // already labels review-not-verified, and already has copy for being
+        // unavailable. Withhold the capability, not the product.
+        let temp = TempDir::new().expect("temp");
+        let root = temp.path().join("approved");
+        fs::create_dir(&root).expect("root");
+        fs::write(
+            root.join("precedent.txt"),
+            "7. CONFIDENTIALITY\nRecipient shall protect Confidential Information and its affiliates.",
+        )
+        .expect("source");
+        let approved = approve_roots(&[root]).expect("approve");
+
+        // No engine at all: the shape a Mac without the asset now produces.
+        let vault = build_authorized_text_vault(
+            VaultId::parse("no-semantic").expect("vault"),
+            &approved,
+            TextVaultLimits::default(),
+            &AtomicBool::new(false),
+        )
+        .expect("a vault must still build without the on-device model");
+
+        let report = vault.build_report();
+        assert_eq!(report.indexed_documents, 1);
+        assert!(
+            !report.semantic_retrieval_enabled,
+            "semantic must report itself unavailable rather than being claimed"
+        );
+
+        // ...and exact evidence, the primary feature, still works.
+        let response = vault
+            .interpret_and_search("Find confidentiality provisions covering affiliates.")
+            .expect("exact search must work without the model");
+        assert!(
+            !response.evidence.is_empty(),
+            "no exact evidence returned without the on-device model"
+        );
     }
 
     #[test]

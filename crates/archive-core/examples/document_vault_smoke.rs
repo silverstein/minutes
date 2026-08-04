@@ -99,7 +99,7 @@ fn main() {
         DocumentVaultLimits::default(),
         &AtomicBool::new(false),
         &converter,
-        semantic_engine,
+        Some(semantic_engine),
     )
     .expect("build document vault");
     let report = vault.build_report();

@@ -385,14 +385,19 @@ async fn build_archive_text_vault(
             .map_err(|_| "Minutes Archive could not establish the private vault.".to_string())?;
         let converter =
             BoundedConverter::bind(&worker_executable).map_err(|error| error.to_string())?;
-        let semantic_engine =
-            BoundedSemanticEngine::bind(&worker_executable).map_err(|error| error.to_string())?;
+        // Binding the on-device model must not be able to deny the operator an
+        // index. Exact evidence is the product; semantic suggestions are an
+        // optional aid the interface already labels review-not-verified. A Mac
+        // without Apple's linguistic asset previously got NO search at all.
+        let semantic_engine = BoundedSemanticEngine::bind(&worker_executable).ok();
         // Register both snapshots before the long build starts. Until the
         // vault exists these objects live only in this blocking task, so a
         // close during the build would otherwise leave both directories.
         if let Ok(mut registry) = snapshot_registry.lock() {
             registry.push(converter.snapshot_directory().to_path_buf());
-            registry.push(semantic_engine.snapshot_directory().to_path_buf());
+            if let Some(engine) = semantic_engine.as_ref() {
+                registry.push(engine.snapshot_directory().to_path_buf());
+            }
         }
         build_authorized_document_vault(
             vault_id,

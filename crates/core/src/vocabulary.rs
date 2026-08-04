@@ -85,7 +85,18 @@ pub struct VocabularyEntry {
     pub id: String,
     pub kind: VocabularyKind,
     pub canonical: String,
+    /// Spoken variants that may legitimately be *said* and should therefore be
+    /// spelled correctly: "Taura" for "Taura Health", "Mat" for "Mathieu".
+    /// These are offered to the decoder as terms to preserve.
     pub aliases: Vec<String>,
+    /// Known wrong renderings of this term, kept so search and matching can find
+    /// an already-written transcript that contains them.
+    ///
+    /// These are deliberately **never** offered to the decoder. Listing a
+    /// misspelling in a prompt that says "preserve spelling exactly" teaches the
+    /// decoder the error (#647).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub misspellings: Vec<String>,
     pub scope: VocabularyScope,
     pub priority: VocabularyPriority,
     pub source: VocabularySource,
@@ -101,6 +112,7 @@ impl Default for VocabularyEntry {
             kind: VocabularyKind::Term,
             canonical: String::new(),
             aliases: Vec::new(),
+            misspellings: Vec::new(),
             scope: VocabularyScope::Global,
             priority: VocabularyPriority::Normal,
             source: VocabularySource::Manual,
@@ -127,6 +139,7 @@ impl VocabularyEntry {
         }
 
         self.aliases = unique_clean_aliases(self.aliases, &self.canonical);
+        self.misspellings = unique_clean_aliases(self.misspellings, &self.canonical);
         if self.id.trim().is_empty() {
             self.id = entry_id(self.kind, &self.canonical);
         } else {
@@ -144,7 +157,19 @@ impl VocabularyEntry {
         Ok(self)
     }
 
+    /// Every written form that should *match* this entry, including known wrong
+    /// renderings. Use for search, deduplication and lookup.
     pub fn surface_forms(&self) -> Vec<String> {
+        let mut forms = vec![self.canonical.clone()];
+        forms.extend(self.aliases.iter().cloned());
+        forms.extend(self.misspellings.iter().cloned());
+        unique_clean_aliases(forms, "")
+    }
+
+    /// Forms safe to offer a speech decoder as spellings to preserve: the
+    /// canonical form and legitimate spoken variants, never a known
+    /// misspelling. See [`Self::misspellings`] and #647.
+    pub fn hint_forms(&self) -> Vec<String> {
         let mut forms = vec![self.canonical.clone()];
         forms.extend(self.aliases.iter().cloned());
         unique_clean_aliases(forms, "")
@@ -193,6 +218,7 @@ impl VocabularyStore {
             let key = (entry.kind, entry.scope, key_for(&entry.canonical));
             if let Some(existing) = merged.get_mut(&key) {
                 existing.aliases = merge_aliases(&existing.aliases, &entry.aliases);
+                existing.misspellings = merge_aliases(&existing.misspellings, &entry.misspellings);
                 existing.priority = existing.priority.max(entry.priority);
                 if existing.source != VocabularySource::Manual {
                     existing.source = entry.source;
@@ -243,7 +269,7 @@ impl VocabularyStore {
         let mut phrases = Vec::new();
         let mut seen = HashSet::new();
         for entry in entries {
-            for phrase in entry.surface_forms() {
+            for phrase in entry.hint_forms() {
                 let key = key_for(&phrase);
                 if seen.insert(key) {
                     phrases.push(phrase);
@@ -757,6 +783,50 @@ mod tests {
         assert_eq!(
             store.decode_phrases(2),
             vec!["Automattic".to_string(), "Automatic".to_string()]
+        );
+    }
+
+    #[test]
+    fn misspellings_match_but_are_never_offered_to_the_decoder() {
+        // The decoder prompt says "preserve spelling exactly", so a known wrong
+        // rendering listed there teaches the error. Observed in practice: an
+        // entry carrying "patient tricity" produced exactly that in the
+        // transcript (#647). Misspellings must still match, so that already
+        // written transcripts remain findable.
+        let store = VocabularyStore {
+            entries: vec![VocabularyEntry {
+                kind: VocabularyKind::Organization,
+                canonical: "PatientRicity".into(),
+                aliases: vec!["Taura".into()],
+                misspellings: vec!["patient tricity".into()],
+                ..VocabularyEntry::default()
+            }],
+        }
+        .normalized()
+        .expect("normalize");
+
+        let hinted = store.decode_phrases(8);
+        assert!(
+            hinted.contains(&"PatientRicity".to_string()),
+            "canonical must be hinted: {hinted:?}"
+        );
+        assert!(
+            hinted.contains(&"Taura".to_string()),
+            "a spoken variant must still be hinted: {hinted:?}"
+        );
+        assert!(
+            !hinted
+                .iter()
+                .any(|p| p.eq_ignore_ascii_case("patient tricity")),
+            "a known misspelling must never reach the decoder: {hinted:?}"
+        );
+
+        let matchable = store.entries[0].surface_forms();
+        assert!(
+            matchable
+                .iter()
+                .any(|f| f.eq_ignore_ascii_case("patient tricity")),
+            "misspellings must still match for search: {matchable:?}"
         );
     }
 

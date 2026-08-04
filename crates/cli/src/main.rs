@@ -1356,9 +1356,18 @@ enum VocabularyAction {
         /// Canonical spelling to prefer
         canonical: String,
 
-        /// Alias or common misrecognition. Repeat for multiple aliases.
+        /// Spoken variant that should be spelled correctly (e.g. "Taura" for
+        /// "Taura Health"). Offered to the transcriber as a spelling to keep.
+        /// Repeat for multiple. Do NOT put known misrecognitions here: use
+        /// --misspelling, or the transcriber is taught the error (#647).
         #[arg(long = "alias")]
         aliases: Vec<String>,
+
+        /// Known wrong rendering to recognize after the fact (e.g. "patient
+        /// tricity"). Used for search and matching only, never offered to the
+        /// transcriber. Repeat for multiple.
+        #[arg(long = "misspelling")]
+        misspellings: Vec<String>,
 
         /// Output raw JSON instead of formatted text
         #[arg(long)]
@@ -4732,8 +4741,9 @@ fn cmd_vocabulary(action: VocabularyAction, config: &Config) -> Result<()> {
             kind,
             canonical,
             aliases,
+            misspellings,
             json,
-        } => cmd_vocabulary_add(&kind, &canonical, aliases, json),
+        } => cmd_vocabulary_add(&kind, &canonical, aliases, misspellings, json),
         VocabularyAction::Remove { id, json } => cmd_vocabulary_remove(&id, json),
         VocabularyAction::Suggest { meeting, json } => {
             cmd_vocabulary_suggest(&meeting, json, config)
@@ -4778,7 +4788,13 @@ fn cmd_vocabulary_list(json: bool) -> Result<()> {
     Ok(())
 }
 
-fn cmd_vocabulary_add(kind: &str, canonical: &str, aliases: Vec<String>, json: bool) -> Result<()> {
+fn cmd_vocabulary_add(
+    kind: &str,
+    canonical: &str,
+    aliases: Vec<String>,
+    misspellings: Vec<String>,
+    json: bool,
+) -> Result<()> {
     let path = minutes_core::vocabulary::default_path();
     let mut store = minutes_core::vocabulary::load().map_err(|e| anyhow::anyhow!("{}", e))?;
     let now = Local::now().to_rfc3339();
@@ -4788,6 +4804,7 @@ fn cmd_vocabulary_add(kind: &str, canonical: &str, aliases: Vec<String>, json: b
             kind: parse_vocabulary_kind(kind)?,
             canonical: canonical.to_string(),
             aliases,
+            misspellings,
             priority: minutes_core::vocabulary::VocabularyPriority::Normal,
             source: minutes_core::vocabulary::VocabularySource::Manual,
             created_at: Some(now.clone()),

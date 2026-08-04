@@ -193,7 +193,7 @@ jobs:
       # it). build.rs stages it from target/release/minutes, so the CLI must be
       # built first or the bundle ships a placeholder stub (#324).
       - name: Build release CLI for bundling
-        run: cargo build --release -p minutes-cli --features parakeet,metal
+        run: cargo build --release -p minutes-cli --features parakeet,metal,engine-sherpa
 
       - name: Build signed bundle (helper identity is repaired before notarization)
         env:
@@ -202,7 +202,7 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
           MINUTES_REQUIRE_REAL_CLI_SIDECAR: "1"
-        run: cargo tauri build --features parakeet,metal --bundles app
+        run: cargo tauri build --features parakeet,metal,engine-sherpa --bundles app
 
       - name: Sign graph helper inside-out and notarize the final exact app
         env:

@@ -90,7 +90,9 @@ if [[ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" ]]; then
     echo "  No TAURI_SIGNING_PRIVATE_KEY configured; building updater artifacts with --no-sign."
     TAURI_BUILD_ARGS+=(--no-sign)
 fi
-"${TAURI_BUILD_ARGS[@]}"
+# Run from the app crate: with archive/src-tauri also present, the tauri CLI
+# resolves the wrong tauri.conf.json from the repo root.
+( cd "$(git rev-parse --show-toplevel)/tauri/src-tauri" && "${TAURI_BUILD_ARGS[@]}" )
 
 echo "=== Re-signing bundled CLI sidecar with its own entitlements ==="
 # The CLI sidecar needs `com.apple.security.device.audio-input` so `minutes record`

@@ -9,7 +9,7 @@ import { existsSync, readFileSync } from "node:fs";
 const EXPECTED_SOURCE_SHA256 = {
   release: "70ec47bcb544362e3858abdf026010f83668f55c9945b824eaaf9fdf4158bc43",
   acceptance: "8ae35943181c6d0f248f580587b894c53db9c30257f307c5aa5264a83f13969d",
-  build: "6a1933306c99ccbfc6c5cb35a577389fbe79f08333e855661dc1994f0f9718b1",
+  build: "9ca0741767b8e2fc49c4ffd200d5c5c43d13ddf0ebfd88fa2d6116d0cb3656ec",
   dev: "6a1d680b57f6914bbcadda4b83ad4c1bc56c0d0f50bee11a9f9ebb294cbb029b",
   packageXpc: "baebd532d240fc26188c431f571d0a44f2ce1e7240c3277284c9ea9e69c1ef82",
   tauri: "f127e92a1a2a635326d13dd766b3e6cc841655bce30ea2d01d67d9f12c15502c",

@@ -19,7 +19,7 @@ const surfaces = [
   [
     "OpenAI-compatible backend",
     "Minutes should call a model API directly, not an agent loop.",
-    "OpenRouter, Vercel AI Gateway, Cloudflare AI Gateway, llama.cpp",
+    "OpenRouter, OrcaRouter, Vercel AI Gateway, Cloudflare AI Gateway, llama.cpp",
   ],
   ["Routing eval", "The agent has a non-interactive prompt mode worth benchmarking.", "routing:agents -- --agent codex"],
 ] as const;
@@ -29,6 +29,11 @@ const modelBackends = [
   ["llama.cpp", "Local model runtime", "Use an OpenAI-compatible base URL. Do not add it as an agent option."],
   ["vLLM / LM Studio / LocalAI", "Local or self-hosted runtime", "Use the same OpenAI-compatible path when available."],
   ["OpenRouter", "Cloud model router", "Preset candidate for one-key access to many providers."],
+  [
+    "OrcaRouter",
+    "Cloud model gateway",
+    "Preset candidate for one-key access to 150+ models plus gateway-level, zero-trust security for AI agents on the same endpoint.",
+  ],
   ["Vercel AI Gateway", "Cloud model gateway", "Preset candidate for teams already using Vercel routing, billing, or AI SDK workflows."],
   ["Cloudflare AI Gateway", "Cloud model gateway", "Preset candidate for observability, rate limits, caching, retries, and Cloudflare routing."],
 ] as const;
@@ -115,8 +120,8 @@ export default function AgentIntegrationsPage() {
         <div className="rounded-[8px] border border-[color:var(--border)] bg-[var(--bg-elevated)] p-5">
           <p className="font-mono text-[12px] text-[var(--text)]">Model providers</p>
           <p className="mt-3 text-[14px] leading-7 text-[var(--text-secondary)]">
-            Providers expose inference APIs. OpenRouter, Vercel AI Gateway,
-            Cloudflare AI Gateway, and llama.cpp belong behind a generic
+            Providers expose inference APIs. OpenRouter, OrcaRouter, Vercel AI
+            Gateway, Cloudflare AI Gateway, and llama.cpp belong behind a generic
             OpenAI-compatible backend, not in the agent list.
           </p>
         </div>

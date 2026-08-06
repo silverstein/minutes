@@ -684,6 +684,18 @@ engine = "openai-compatible"
 openai_compatible_base_url = "https://openrouter.ai/api/v1"
 openai_compatible_model = "openai/gpt-4o-mini"
 openai_compatible_api_key_env = "OPENROUTER_API_KEY" # leave blank for local servers
+
+# Or route through [OrcaRouter](https://www.orcarouter.ai) — a unified
+# OpenAI-compatible gateway with one key for 150+ models from OpenAI, Anthropic,
+# Google, DeepSeek, and more. It also runs gateway-level, zero-trust security
+# for AI agents on the same endpoint — screening every prompt/response and
+# governing every tool call on a default-deny basis, with no application code
+# changes.
+[summarization]
+engine = "openai-compatible"
+openai_compatible_base_url = "https://api.orcarouter.ai/v1"
+openai_compatible_model = "orcarouter/auto"
+openai_compatible_api_key_env = "ORCAROUTER_API_KEY"
 ```
 
 ### File-backed automation primitives
@@ -1175,7 +1187,7 @@ engine = "none"           # Default: Claude summarizes conversationally via MCP
                           # "auto" = auto-detect an installed agent CLI for pipeline summaries
                           # "agent" = uses your Claude Code, Codex, OpenCode, or Pi subscription (no API key)
                           # "ollama" = local, free
-                          # "openai-compatible" = OpenRouter, Vercel/Cloudflare gateways, llama.cpp, LM Studio, etc.
+                          # "openai-compatible" = OpenRouter, OrcaRouter, Vercel/Cloudflare gateways, llama.cpp, LM Studio, etc.
                           # "claude" / "openai" = direct API key (legacy)
 agent_command = "claude"  # Which CLI to use when engine = "agent" (claude, codex, opencode, pi, etc.)
 ollama_url = "http://localhost:11434"

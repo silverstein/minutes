@@ -62,7 +62,7 @@ Minutes invokes Pi in non-interactive, no-tools mode. This is distinct from
 Inflection's Pi models; do not route transcript data to Inflection unless the
 user explicitly opts into that provider and its data terms.
 
-For OpenRouter, Vercel AI Gateway, Cloudflare AI Gateway, llama.cpp,
+For OpenRouter, OrcaRouter, Vercel AI Gateway, Cloudflare AI Gateway, llama.cpp,
 LM Studio, vLLM, LocalAI, or any other OpenAI-compatible server, use one
 generic backend instead of adding a provider-specific engine:
 
@@ -80,6 +80,20 @@ engine = "openai-compatible"
 openai_compatible_base_url = "https://openrouter.ai/api/v1"
 openai_compatible_model = "openai/gpt-4o-mini"
 openai_compatible_api_key_env = "OPENROUTER_API_KEY"
+```
+
+Or with [OrcaRouter](https://www.orcarouter.ai), a unified OpenAI-compatible
+gateway that exposes 150+ models from OpenAI, Anthropic, Google, DeepSeek, and
+more behind one key. It also runs gateway-level, zero-trust security for AI
+agents on the same endpoint — screening every prompt/response and governing
+every tool call on a default-deny basis, with no application code changes:
+
+```toml
+[summarization]
+engine = "openai-compatible"
+openai_compatible_base_url = "https://api.orcarouter.ai/v1"
+openai_compatible_model = "orcarouter/auto"
+openai_compatible_api_key_env = "ORCAROUTER_API_KEY"
 ```
 
 Local servers can omit the API key env:

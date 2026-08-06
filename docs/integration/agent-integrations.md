@@ -13,7 +13,7 @@ actually supports.
 | Portable skills | The host discovers Agent Skills-style `.agents/skills` folders. | Codex, Gemini CLI, Pi |
 | Host-specific skills | The host needs a different generated shape. | Claude Code plugin, OpenCode commands |
 | `agent_command` backend | Minutes should call the agent CLI for summaries. | `claude`, `codex`, `opencode`, `pi`, `agent` (Cursor Agent CLI) |
-| OpenAI-compatible model backend | Minutes should call a model API directly, not an agent CLI. | OpenRouter, Vercel AI Gateway, Cloudflare AI Gateway, llama.cpp, vLLM |
+| OpenAI-compatible model backend | Minutes should call a model API directly, not an agent CLI. | OpenRouter, OrcaRouter, Vercel AI Gateway, Cloudflare AI Gateway, llama.cpp, vLLM |
 | Routing eval | The agent has a non-interactive prompt mode worth benchmarking. | `npm --prefix tooling/skills run routing:agents -- --agent codex` |
 
 ## Agent hosts vs model providers
@@ -45,6 +45,7 @@ runtime.
 | llama.cpp / llama-cpp-python | Local model runtime | Support through an OpenAI-compatible `base_url`; do not add as an agent option. |
 | vLLM / LM Studio / LocalAI | Local or self-hosted runtime | Support through the same OpenAI-compatible path when available. |
 | OpenRouter | Cloud model router | Good preset for one-key access to many providers; transcripts leave the machine. |
+| [OrcaRouter](https://www.orcarouter.ai) | Cloud model gateway | Good preset for one-key access to 150+ models plus gateway-level, zero-trust security for AI agents on the same endpoint (screening every prompt/response and governing every tool call on a default-deny basis); transcripts leave the machine. |
 | Vercel AI Gateway | Cloud model gateway | Good preset for hosted apps and teams already using Vercel; transcripts leave the machine. |
 | Cloudflare AI Gateway | Cloud model gateway | Good preset for observability, rate limits, caching, retries, and Cloudflare-managed routing; transcripts leave the machine unless the upstream is local/private. |
 

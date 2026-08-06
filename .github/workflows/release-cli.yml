@@ -116,6 +116,54 @@ jobs:
         with:
           files: ${{ matrix.asset }}
 
+      # Windows needs the MSVC runtime beside the executable. Nothing ships it
+      # today, so on a PC that has never had the Visual C++ Redistributable the
+      # binary exits 0xC0000135 (STATUS_DLL_NOT_FOUND) printing nothing at all
+      # (#657). Static linking is not available: ort-sys ships prebuilt ONNX
+      # Runtime against the dynamic CRT and will not link (#659).
+      #
+      # Verified on a clean Windows 11 VM: the same binary fails bare and runs
+      # with these four files beside it. Windows resolves the application
+      # directory ahead of the system path, so no install step is needed.
+      #
+      # The bare .exe is still published so already-installed MCP servers keep
+      # resolving it, but the zip is what a clean machine needs.
+      - name: Package Windows CLI with the MSVC runtime
+        if: matrix.target == 'x86_64-pc-windows-msvc'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $crt = Get-ChildItem 'C:\Program Files*\Microsoft Visual Studio\2022\*\VC\Redist\MSVC\*\x64\Microsoft.VC143.CRT' -Directory -ErrorAction SilentlyContinue |
+                 Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $crt) { throw 'Could not locate the VC143 CRT redistributable on the runner' }
+          Write-Host "CRT source: $($crt.FullName)"
+          $stage = 'minutes-windows-x64'
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          Copy-Item '${{ matrix.asset }}' (Join-Path $stage 'minutes.exe') -Force
+          foreach ($dll in 'vcruntime140.dll','vcruntime140_1.dll','msvcp140.dll','msvcp140_1.dll') {
+            $src = Join-Path $crt.FullName $dll
+            if (-not (Test-Path $src)) { throw "missing $dll in $($crt.FullName)" }
+            Copy-Item $src $stage -Force
+          }
+          # Fail the job rather than publish an archive that repeats the bug.
+          $have = (Get-ChildItem "$stage\*.dll").Count
+          if ($have -ne 4) { throw "expected 4 DLLs beside minutes.exe, found $have" }
+          Compress-Archive -Path "$stage\*" -DestinationPath 'minutes-windows-x64.zip' -Force
+          Write-Host ("archive MB: {0:N2}" -f ((Get-Item 'minutes-windows-x64.zip').Length/1MB))
+
+      - name: Upload Windows zip artifact
+        if: matrix.target == 'x86_64-pc-windows-msvc'
+        uses: actions/upload-artifact@v7
+        with:
+          name: minutes-windows-x64.zip
+          path: minutes-windows-x64.zip
+
+      - name: Upload Windows zip release asset
+        uses: softprops/action-gh-release@v3
+        if: startsWith(github.ref, 'refs/tags/') && matrix.target == 'x86_64-pc-windows-msvc'
+        with:
+          files: minutes-windows-x64.zip
+
       # Additive second artifact for Linux only: the same CLI plus the sherpa
       # engine and its shared libraries, as a tarball. The bare binary above is
       # unchanged, so existing installs and the Homebrew formula are unaffected.

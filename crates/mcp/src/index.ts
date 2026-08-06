@@ -2287,21 +2287,48 @@ async function tryAutoInstallAttempt(capabilityRepair: boolean = false): Promise
       const targetName = isWindows ? "minutes.exe" : "minutes";
       const targetPath = join(installDir, targetName);
 
-      console.error(`[Minutes] Downloading ${binaryName} from latest release...`);
-
       // Ensure install directory exists
       await mkdir(installDir, { recursive: true });
 
-      // Download with curl (available on macOS, Linux, and modern Windows),
-      // verify SHA256SUMS.txt, then move the verified binary into place.
-      await downloadReleaseBinaryWithChecksum({
-        binaryName,
-        targetPath,
-        execFileAsync,
-      });
-
-      // Make executable (not needed on Windows)
-      if (!isWindows) {
+      if (isWindows) {
+        // The Windows binary imports the MSVC runtime (VCRUNTIME140.dll,
+        // MSVCP140.dll and friends), which is not part of Windows. On a PC
+        // that has never had the Visual C++ Redistributable, the bare .exe
+        // exits 0xC0000135 (STATUS_DLL_NOT_FOUND) printing nothing at all, so
+        // the user sees the command silently do nothing (#657).
+        //
+        // The zip carries those four files beside minutes.exe. Windows
+        // resolves the application's own directory ahead of the system path,
+        // so extracting them next to the executable is sufficient and needs no
+        // installer and no admin rights. Verified on a clean Windows 11 VM.
+        const archiveName = "minutes-windows-x64.zip";
+        const archivePath = join(installDir, archiveName);
+        console.error(`[Minutes] Downloading ${archiveName} from latest release...`);
+        await downloadReleaseBinaryWithChecksum({
+          binaryName: archiveName,
+          targetPath: archivePath,
+          execFileAsync,
+        });
+        await execFileAsync(
+          "powershell",
+          [
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            `Expand-Archive -Path '${archivePath}' -DestinationPath '${installDir}' -Force`,
+          ],
+          { timeout: 120000 },
+        );
+        await rm(archivePath, { force: true });
+      } else {
+        console.error(`[Minutes] Downloading ${binaryName} from latest release...`);
+        // Download with curl, verify SHA256SUMS.txt, then move the verified
+        // binary into place.
+        await downloadReleaseBinaryWithChecksum({
+          binaryName,
+          targetPath,
+          execFileAsync,
+        });
         await execFileAsync("chmod", ["+x", targetPath], { timeout: 5000 });
       }
 

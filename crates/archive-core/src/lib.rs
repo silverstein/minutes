@@ -111,8 +111,23 @@ impl std::fmt::Debug for ApprovedRoot {
 }
 
 /// Establishes native directory capabilities from explicit folder-picker
-/// results.
+/// results, refusing the batch if the set-level invariants do not hold.
 pub fn approve_roots(roots: &[PathBuf]) -> Result<Vec<ApprovedRoot>, CensusError> {
+    let approved = authorize_roots(roots)?;
+    validate_approved_roots(&approved)?;
+    Ok(approved)
+}
+
+/// Authorizes each folder-picker result on its own, leaving the set-level
+/// invariants to the caller.
+///
+/// A caller adding to a set that is already approved wants a redundant choice
+/// *folded into* the location that covers it, not the whole selection refused;
+/// it pairs this with `reduce_approved_roots` and then asserts
+/// `validate_approved_roots` on what survives. `approve_roots` remains the
+/// all-or-nothing form, and every per-location refusal above still applies
+/// here -- this relaxes nothing about what may be approved.
+pub fn authorize_roots(roots: &[PathBuf]) -> Result<Vec<ApprovedRoot>, CensusError> {
     if roots.is_empty() {
         return Err(CensusError::NoRoots);
     }
@@ -162,8 +177,34 @@ pub fn approve_roots(roots: &[PathBuf]) -> Result<Vec<ApprovedRoot>, CensusError
         });
     }
 
-    validate_approved_roots(&approved)?;
     Ok(approved)
+}
+
+/// Returns the indices of the roots that no *other* root already covers, in
+/// input order.
+///
+/// Choosing a folder twice, or choosing one inside a folder that is already
+/// approved, is not a mistake worth refusing. The containing root already
+/// carries authority over everything beneath it, so keeping it alone reaches
+/// exactly the same documents and counts each of them once -- which is the
+/// property `validate_approved_roots` exists to protect. Refusing instead threw
+/// away every *other* folder in the same selection and reported only "the
+/// approved locations overlap", naming neither folder.
+///
+/// Exact duplicates and firmlink aliases contain each other, so the tie is
+/// broken by input order: the earlier index wins, which lets a caller put its
+/// existing locations first and keep their identity when the same folder is
+/// chosen again.
+pub fn reduce_approved_roots(roots: &[ApprovedRoot]) -> Vec<usize> {
+    (0..roots.len())
+        .filter(|&index| {
+            !roots.iter().enumerate().any(|(other, candidate)| {
+                other != index
+                    && root_contains(candidate, &roots[index])
+                    && (other < index || !root_contains(&roots[index], candidate))
+            })
+        })
+        .collect()
 }
 
 /// Checks set-level duplicate and overlap invariants without re-authorizing
@@ -1231,6 +1272,76 @@ mod tests {
             validate_roots(&[root, child]),
             Err(CensusError::OverlappingRoots)
         );
+    }
+
+    /// Folding must cost the owner nothing but the redundant entry.
+    ///
+    /// The regression this pins: picking a folder and something inside it used
+    /// to refuse the entire batch, so every *unrelated* folder chosen in the
+    /// same trip through the picker was discarded too and the owner was left
+    /// with an empty list and the word "overlap". Here the unrelated root
+    /// survives, the child folds into its parent, and the census still counts
+    /// the document that lives inside the folded child.
+    #[test]
+    fn a_folder_inside_an_approved_folder_folds_in_and_keeps_the_rest() {
+        let temp = TempDir::new().expect("temp");
+        let parent = synthetic_root(&temp, "parent");
+        let child = parent.join("child");
+        fs::create_dir(&child).expect("child");
+        let unrelated = synthetic_root(&temp, "unrelated");
+        fs::write(child.join("buried.pdf"), b"buried").expect("buried file");
+        fs::write(unrelated.join("separate.docx"), b"separate").expect("separate file");
+
+        let authorized = authorize_roots(&[parent.clone(), child, unrelated.clone()])
+            .expect("each folder is approvable on its own");
+        let kept = reduce_approved_roots(&authorized);
+        assert_eq!(kept, vec![0, 2], "the child folds into its parent");
+
+        let surviving = kept
+            .iter()
+            .map(|&index| authorized[index].clone())
+            .collect::<Vec<_>>();
+        // Reduction is what makes the set valid, so the invariant check is now
+        // an assertion that reduction worked rather than a refusal.
+        validate_approved_roots(&surviving).expect("the reduced set holds the invariant");
+
+        let report = scan_roots(
+            &[parent, unrelated],
+            CensusLimits::default(),
+            &AtomicBool::new(false),
+        )
+        .expect("census over the reduced set");
+        assert_eq!(
+            report.summary.regular_files, 2,
+            "the document inside the folded child is still counted, exactly once"
+        );
+    }
+
+    /// The earlier entry wins, so a caller that lists what it already has first
+    /// keeps those locations -- and their ids -- when the same folder is
+    /// chosen again.
+    #[test]
+    fn the_same_folder_chosen_twice_keeps_the_first_entry() {
+        let temp = TempDir::new().expect("temp");
+        let root = synthetic_root(&temp, "root");
+        let authorized =
+            authorize_roots(&[root.clone(), root.clone(), root]).expect("authorize duplicates");
+        assert_eq!(reduce_approved_roots(&authorized), vec![0]);
+    }
+
+    /// Nesting more than one deep still collapses to the outermost folder.
+    #[test]
+    fn a_chain_of_nested_folders_reduces_to_the_outermost() {
+        let temp = TempDir::new().expect("temp");
+        let outer = synthetic_root(&temp, "outer");
+        let middle = outer.join("middle");
+        fs::create_dir(&middle).expect("middle");
+        let inner = middle.join("inner");
+        fs::create_dir(&inner).expect("inner");
+
+        // Deepest first, to prove the result does not depend on picker order.
+        let authorized = authorize_roots(&[inner, middle, outer]).expect("authorize chain");
+        assert_eq!(reduce_approved_roots(&authorized), vec![2]);
     }
 
     #[test]

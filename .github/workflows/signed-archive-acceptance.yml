@@ -112,11 +112,13 @@ jobs:
             -p minutes-archive-semantic \
             -p minutes-archive-convert \
             -p minutes-archive-core \
+            -p minutes-archive-ocr \
             -p minutes-archive-app
           cargo clippy \
             -p minutes-archive-semantic \
             -p minutes-archive-convert \
             -p minutes-archive-core \
+            -p minutes-archive-ocr \
             -p minutes-archive-app \
             --all-targets -- -D warnings
 
@@ -144,6 +146,8 @@ jobs:
             exit 1
           fi
           cargo run -p minutes-archive-core --example document_vault_smoke -- \
+            "$executable"
+          cargo run -p minutes-archive-core --example archive_pilot_soak -- \
             "$executable"
           scripts/archive-native-lifecycle-smoke.sh "$app"
 

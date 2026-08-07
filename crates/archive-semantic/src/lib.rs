@@ -261,6 +261,24 @@ impl std::fmt::Debug for BoundedSemanticSession {
     }
 }
 
+/// The one thing an index build needs from a semantic worker.
+///
+/// A trait rather than the concrete session so the build's behaviour when the
+/// worker *dies partway through* can be tested without a live Apple linguistic
+/// asset. That failure discarded a complete index in the field -- sixteen
+/// thousand documents, twenty-two minutes -- and no test could reach it,
+/// because every test either had a working worker or no worker at all. The
+/// interesting case is the one in between.
+pub trait SemanticEmbedder {
+    fn embed(&mut self, text: &str) -> Result<Vec<f32>, SemanticError>;
+}
+
+impl SemanticEmbedder for BoundedSemanticSession {
+    fn embed(&mut self, text: &str) -> Result<Vec<f32>, SemanticError> {
+        BoundedSemanticSession::embed(self, text)
+    }
+}
+
 impl BoundedSemanticSession {
     fn spawn(executable: &Path) -> Result<Self, SemanticError> {
         let mut command = worker_command(executable, "embed-stream");

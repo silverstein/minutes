@@ -8,7 +8,149 @@ fn main() {
     compile_calendar_helper();
     stage_rust_sidecars();
     stage_assistant_skill_bundle();
+    stage_msvc_runtime();
     tauri_build::build()
+}
+
+/// Copy the MSVC runtime next to the app so Windows bundles carry it.
+///
+/// The app imports VCRUNTIME140.dll, VCRUNTIME140_1.dll, MSVCP140.dll and
+/// MSVCP140_1.dll. Those ship in the Visual C++ Redistributable, not in
+/// Windows, so on a PC that has never had it the app exits 0xC0000135
+/// (STATUS_DLL_NOT_FOUND) showing nothing at all (#657). Verified on a clean
+/// Windows 11 VM: the same binary fails bare and runs with these four files
+/// beside it.
+///
+/// `bundle.resources` places bare filenames next to the executable, which is
+/// where the loader looks, but the files must exist when Tauri resolves the
+/// glob or the build fails outright. Staging here keeps Microsoft binaries out
+/// of the repo (they are gitignored).
+///
+/// Gated on the **target**, not the host, matching every other staging
+/// function in this file. A build script is compiled for the host, so
+/// `cfg!(windows)` would run this when cross-compiling *from* Windows to a
+/// non-MSVC target such as `x86_64-pc-windows-gnu`, which imports none of
+/// these DLLs.
+fn stage_msvc_runtime() {
+    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    let target_env = std::env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
+    if target_os != "windows" || target_env != "msvc" {
+        return;
+    }
+
+    let manifest_dir = PathBuf::from(
+        std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR should be set"),
+    );
+    const RUNTIME_DLLS: [&str; 4] = [
+        "vcruntime140.dll",
+        "vcruntime140_1.dll",
+        "msvcp140.dll",
+        "msvcp140_1.dll",
+    ];
+
+    // Declare inputs before any early return, so the build script's dependency
+    // set does not shrink between the first run and later ones.
+    for dll in RUNTIME_DLLS {
+        println!(
+            "cargo:rerun-if-changed={}",
+            manifest_dir.join(dll).display()
+        );
+    }
+
+    if RUNTIME_DLLS.iter().all(|d| manifest_dir.join(d).exists()) {
+        return;
+    }
+
+    let arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_else(|_| "x86_64".into());
+    let Some(redist) = find_vc_redist_dir(&arch) else {
+        // Deliberately a warning, not a panic. The compiler toolset and the
+        // redistributable are separate Visual Studio components, so a Build
+        // Tools install without the recommended set has the linker and no
+        // `VC\Redist\MSVC\`. Tauri's unmatched-glob error follows this line
+        // in the log and this explains how to fix it.
+        println!(
+            "cargo:warning=Could not find the VC++ redistributable for {arch}. The Windows app \
+             needs vcruntime140/msvcp140 staged beside it or it will not start on a machine \
+             without the Visual C++ Redistributable (#657). Install the \
+             'MSVC v143 - VS 2022 C++ x64/x86 Redistributable' component (or \
+             Microsoft.VisualStudio.Component.VC.Redist.14.Latest)."
+        );
+        return;
+    };
+    for dll in RUNTIME_DLLS {
+        let src = redist.join(dll);
+        if let Err(error) = std::fs::copy(&src, manifest_dir.join(dll)) {
+            println!(
+                "cargo:warning=failed to stage {} for the Windows bundle: {error}",
+                src.display()
+            );
+        }
+    }
+}
+
+/// Newest `Microsoft.VC*.CRT` directory for `arch` from any installed Visual
+/// Studio.
+///
+/// Sorts by parsed version rather than path text: a plain path sort puts the
+/// edition segment ahead of the version, so a box with Community 14.44 and
+/// Professional 14.29 would pick Professional's older CRT.
+fn find_vc_redist_dir(arch: &str) -> Option<PathBuf> {
+    let redist_arch = match arch {
+        "x86_64" => "x64",
+        "aarch64" => "arm64",
+        "x86" => "x86",
+        _ => return None,
+    };
+    let roots = [
+        r"C:\Program Files\Microsoft Visual Studio",
+        r"C:\Program Files (x86)\Microsoft Visual Studio",
+    ];
+    let mut best: Option<(Vec<u32>, PathBuf)> = None;
+    for root in roots {
+        let Ok(years) = std::fs::read_dir(root) else {
+            continue;
+        };
+        for year in years.flatten() {
+            let Ok(editions) = std::fs::read_dir(year.path()) else {
+                continue;
+            };
+            for edition in editions.flatten() {
+                let msvc = edition.path().join("VC").join("Redist").join("MSVC");
+                let Ok(versions) = std::fs::read_dir(&msvc) else {
+                    continue;
+                };
+                for version in versions.flatten() {
+                    let parsed: Vec<u32> = version
+                        .file_name()
+                        .to_string_lossy()
+                        .split('.')
+                        .filter_map(|p| p.parse().ok())
+                        .collect();
+                    if parsed.is_empty() {
+                        continue;
+                    }
+                    let Ok(crt_dirs) = std::fs::read_dir(version.path().join(redist_arch)) else {
+                        continue;
+                    };
+                    for crt in crt_dirs.flatten() {
+                        let name = crt.file_name().to_string_lossy().to_string();
+                        // Accept any VC<major>.CRT so a future toolset (VC144)
+                        // is picked up instead of silently skipped.
+                        if !name.starts_with("Microsoft.VC") || !name.ends_with(".CRT") {
+                            continue;
+                        }
+                        if !crt.path().join("vcruntime140.dll").exists() {
+                            continue;
+                        }
+                        if best.as_ref().is_none_or(|(v, _)| parsed > *v) {
+                            best = Some((parsed.clone(), crt.path()));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    best.map(|(_, p)| p)
 }
 
 /// Deployment target (`-target <arch>-apple-macos<min>`) for a bundled Swift

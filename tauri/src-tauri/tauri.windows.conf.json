@@ -11,6 +11,10 @@
       "nsis": {
         "installMode": "currentUser"
       }
-    }
+    },
+    "resources": [
+      "vcruntime140*.dll",
+      "msvcp140*.dll"
+    ]
   }
 }

@@ -9682,6 +9682,29 @@ fn reauthorize_recall_ollama_egress(
     reauthorize_recall_sources(sources, config)
 }
 
+/// Re-check an OpenAI-compatible local provider immediately before the request,
+/// mirroring [`reauthorize_recall_ollama_egress`]. Config is reloaded rather
+/// than trusted from turn start, so a provider swapped mid-turn cannot receive
+/// context authorized against the previous one.
+fn reauthorize_recall_openai_compatible_egress(
+    expected_url: &str,
+    expected_model: &str,
+    sources: &[RecallSourceBinding],
+    config: &Config,
+) -> Result<(), String> {
+    let engine = config.summarization.engine.as_str();
+    if !(engine == "openai-compatible" || engine == "openai_compatible") {
+        return Err("Recall context or local provider changed before use.".into());
+    }
+    let current_url =
+        recall_openai_compatible_chat_url(&config.summarization.openai_compatible_base_url)?;
+    if current_url != expected_url || config.summarization.openai_compatible_model != expected_model
+    {
+        return Err("Recall context or local provider changed before use.".into());
+    }
+    reauthorize_recall_sources(sources, config)
+}
+
 fn reauthorize_recall_claude_egress(
     expected_engine: &str,
     sources: &[RecallSourceBinding],
@@ -9743,6 +9766,109 @@ fn recall_ollama_chat_url(raw: &str) -> Result<String, String> {
     }
     url.set_path("/api/chat");
     Ok(url.into())
+}
+
+/// Resolve the chat-completions endpoint for an OpenAI-compatible local
+/// provider (LM Studio, llama.cpp server, vLLM) under the same local-only rule
+/// as Ollama.
+///
+/// Unlike [`recall_ollama_chat_url`] a path prefix is required rather than
+/// refused: these servers are conventionally rooted at `/v1`, so
+/// `http://localhost:1234/v1` must resolve to
+/// `http://localhost:1234/v1/chat/completions`. Credentials, query strings and
+/// fragments stay refused, and the destination must still be loopback: Recall
+/// chat never leaves the machine (#650).
+fn recall_openai_compatible_chat_url(raw: &str) -> Result<String, String> {
+    let mut url = reqwest::Url::parse(raw.trim()).map_err(|_| {
+        "Recall OpenAI-compatible URL must be a valid loopback HTTP URL.".to_string()
+    })?;
+    if url.scheme() != "http"
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(
+            "Recall OpenAI-compatible URL must be a plain loopback HTTP origin with no credentials."
+                .into(),
+        );
+    }
+    let host = url
+        .host_str()
+        .ok_or_else(|| "Recall OpenAI-compatible URL is missing a loopback host.".to_string())?;
+    let is_loopback = host.eq_ignore_ascii_case("localhost")
+        || host
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|address| address.is_loopback());
+    if !is_loopback {
+        return Err(
+            "Recall OpenAI-compatible chat is local-only; remote destinations are refused.".into(),
+        );
+    }
+    // Preserve the configured prefix (usually `/v1`) and append the endpoint,
+    // tolerating a trailing slash or a base that already names the endpoint.
+    let base = url.path().trim_end_matches('/').to_string();
+    let path = if base.ends_with("/chat/completions") {
+        base
+    } else {
+        format!("{base}/chat/completions")
+    };
+    url.set_path(&path);
+    Ok(url.into())
+}
+
+/// Whether one server-sent-events line carries reasoning (chain-of-thought)
+/// rather than answer text.
+///
+/// The two local servers disagree on the key: ollama emits `reasoning`, LM
+/// Studio emits `reasoning_content`. Both are recognized. This is used only to
+/// tell the panel that the model is working, never to render as an answer:
+/// reasoning is the model's scratchpad, not its reply.
+fn openai_compatible_stream_is_reasoning(line: &str) -> bool {
+    let Some(payload) = line.strip_prefix("data:").map(str::trim) else {
+        return false;
+    };
+    if payload.is_empty() || payload == "[DONE]" {
+        return false;
+    }
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(payload) else {
+        return false;
+    };
+    let Some(delta) = value
+        .get("choices")
+        .and_then(|c| c.get(0))
+        .and_then(|c| c.get("delta"))
+    else {
+        return false;
+    };
+    ["reasoning", "reasoning_content"].iter().any(|key| {
+        delta
+            .get(key)
+            .and_then(|v| v.as_str())
+            .is_some_and(|s| !s.is_empty())
+    })
+}
+
+/// Extract the incremental assistant text from one server-sent-events line of
+/// an OpenAI-compatible stream.
+///
+/// Returns `None` for keepalives, the `[DONE]` sentinel, and any frame without
+/// a content delta, so the caller can treat "no text" uniformly.
+fn openai_compatible_stream_delta(line: &str) -> Option<String> {
+    let payload = line.strip_prefix("data:")?.trim();
+    if payload.is_empty() || payload == "[DONE]" {
+        return None;
+    }
+    let value: serde_json::Value = serde_json::from_str(payload).ok()?;
+    let text = value
+        .get("choices")?
+        .get(0)?
+        .get("delta")?
+        .get("content")?
+        .as_str()?;
+    (!text.is_empty()).then(|| text.to_string())
 }
 
 fn recall_ollama_agent() -> ureq::Agent {
@@ -10223,12 +10349,209 @@ pub async fn cmd_recall_chat_send(
         return Ok(());
     }
 
+    // ── OpenAI-compatible local provider path ─────────────────────────────────
+    // LM Studio, llama.cpp server and vLLM speak this shape. It was already a
+    // first-class summarization engine, so a user whose summaries worked still
+    // could not chat (#650). Same local-only rule as Ollama: loopback
+    // destinations only, no credentials, and no API key is sent.
+    let engine_name = config.summarization.engine.clone();
+    if engine_name == "openai-compatible" || engine_name == "openai_compatible" {
+        let prepared_url =
+            recall_openai_compatible_chat_url(&config.summarization.openai_compatible_base_url)?;
+        let (turn_id, cancelled) = begin_recall_chat_turn(&state)?;
+        let model = config.summarization.openai_compatible_model.clone();
+        let expected_model = model.clone();
+        let app_clone = app.clone();
+        let message_clone = message.clone();
+        let history_arc = state.recall_chat_history.clone();
+        let current_turn = state.recall_chat_turn.clone();
+        let source_bindings = egress_sources.clone();
+
+        let task_result = tauri::async_runtime::spawn_blocking(move || {
+            let mut messages: Vec<serde_json::Value> = Vec::new();
+            for turn in &history_snapshot {
+                messages.push(serde_json::json!({"role": "user", "content": turn.user_message}));
+                messages.push(serde_json::json!({"role": "assistant", "content": turn.assistant_response}));
+            }
+            messages.push(serde_json::json!({"role": "user", "content": enriched_message}));
+
+            let body = serde_json::json!({
+                "model": model,
+                "messages": messages,
+                "stream": true,
+            });
+
+            let agent = recall_ollama_agent();
+
+            let fresh_config = match Config::load_strict() {
+                Ok(config) => config,
+                Err(_) => {
+                    history_arc.lock().unwrap().clear();
+                    app_clone
+                        .emit_to(
+                            "main",
+                            "recall-chat-error",
+                            "Recall context could not be reauthorized safely. The conversation was cleared; retry the question.",
+                        )
+                        .ok();
+                    finish_recall_chat_turn(&app_clone, &current_turn, turn_id);
+                    return;
+                }
+            };
+            if reauthorize_recall_openai_compatible_egress(
+                &prepared_url,
+                &expected_model,
+                &source_bindings,
+                &fresh_config,
+            )
+            .is_err()
+            {
+                history_arc.lock().unwrap().clear();
+                app_clone
+                    .emit_to(
+                        "main",
+                        "recall-chat-error",
+                        "Recall context or local provider changed before use. The request was blocked locally.",
+                    )
+                    .ok();
+                finish_recall_chat_turn(&app_clone, &current_turn, turn_id);
+                return;
+            }
+
+            let resp = match agent
+                .post(&prepared_url)
+                .header("Content-Type", "application/json")
+                .send_json(&body)
+            {
+                Ok(r) => r,
+                Err(_) => {
+                    if !cancelled.load(Ordering::Relaxed) {
+                        app_clone
+                            .emit_to(
+                                "main",
+                                "recall-chat-error",
+                                "The local Recall provider could not be reached safely.",
+                            )
+                            .ok();
+                    }
+                    finish_recall_chat_turn(&app_clone, &current_turn, turn_id);
+                    return;
+                }
+            };
+
+            if resp.status().as_u16() >= 300 {
+                let status = resp.status().as_u16();
+                if !cancelled.load(Ordering::Relaxed) {
+                    app_clone
+                        .emit_to(
+                            "main",
+                            "recall-chat-error",
+                            format!("The local Recall provider returned HTTP {status}."),
+                        )
+                        .ok();
+                }
+                finish_recall_chat_turn(&app_clone, &current_turn, turn_id);
+                return;
+            }
+
+            let mut body = resp.into_body();
+            let reader = BufReader::new(body.as_reader());
+            let mut full_response = String::new();
+            // A reasoning model can spend hundreds of frames thinking before a
+            // single word of answer appears (observed: 504 of 508 frames). With
+            // no signal the panel looks hung, so announce once that work is
+            // happening. Announced once rather than per frame: this drives a
+            // status label, not rendered text.
+            let mut announced_thinking = false;
+            for line_result in reader.lines() {
+                if cancelled.load(Ordering::Relaxed) {
+                    break;
+                }
+                match line_result {
+                    Ok(line) => {
+                        if !announced_thinking
+                            && full_response.is_empty()
+                            && openai_compatible_stream_is_reasoning(&line)
+                        {
+                            announced_thinking = true;
+                            app_clone
+                                .emit_to(
+                                    "main",
+                                    "recall-chat-chunk",
+                                    serde_json::json!({"type": "thinking"}),
+                                )
+                                .ok();
+                        }
+                        if let Some(text) = openai_compatible_stream_delta(&line) {
+                            if cancelled.load(Ordering::Relaxed) {
+                                break;
+                            }
+                            full_response.push_str(&text);
+                            app_clone
+                                .emit_to(
+                                    "main",
+                                    "recall-chat-chunk",
+                                    serde_json::json!({"type": "text", "text": text}),
+                                )
+                                .ok();
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("[recall-chat/openai-compatible] read error: {}", e);
+                        break;
+                    }
+                }
+            }
+
+            // A reasoning model can stream its entire budget into a `reasoning`
+            // field and finish with every `content` delta empty. Observed
+            // against a real server: 3861 frames, finish_reason "stop", zero
+            // content. Without this the panel just sits blank with no
+            // explanation, which reads as a hang rather than a model choice.
+            if !cancelled.load(Ordering::Relaxed) && full_response.is_empty() {
+                app_clone
+                    .emit_to(
+                        "main",
+                        "recall-chat-error",
+                        "The local model finished without returning any answer text. Reasoning \
+                         models can spend their whole budget thinking; try a shorter question, a \
+                         larger context or token limit, or a non-reasoning model.",
+                    )
+                    .ok();
+            }
+
+            if !cancelled.load(Ordering::Relaxed) && !full_response.is_empty() {
+                store_recall_history_if_still_authorized(
+                    &history_arc,
+                    RecallChatHistoryTurn {
+                        user_message: message_clone,
+                        assistant_response: full_response,
+                        sources: source_bindings,
+                    },
+                );
+            }
+            finish_recall_chat_turn(&app_clone, &current_turn, turn_id);
+        })
+        .await;
+
+        if let Err(error) = task_result {
+            clear_recall_chat_turn_if_current(&state.recall_chat_turn, turn_id);
+            return Err(format!(
+                "Recall chat OpenAI-compatible task failed: {error}"
+            ));
+        }
+
+        return Ok(());
+    }
+
     // ── CLI agent path ─────────────────────────────────────────────────────────
     let agent_bin = minutes_core::summarize::detect_recall_chat_cli().ok_or_else(|| {
         "No safely isolated AI provider found for Recall chat. Install Claude Code (npm install -g \
-         @anthropic-ai/claude-code) — or configure \
-         Ollama ([summarization] engine = \"ollama\" in config.toml) for a fully local \
-         loopback-only option. Other agent CLIs stay disabled until their no-tools mode is verified."
+         @anthropic-ai/claude-code), or configure a local model in config.toml: \
+         [summarization] engine = \"ollama\", or engine = \"openai-compatible\" with \
+         openai_compatible_base_url pointing at a loopback server such as LM Studio \
+         (http://localhost:1234/v1). Both are fully local and loopback-only. \
+         Other agent CLIs stay disabled until their no-tools mode is verified."
             .to_string()
     })?;
 
@@ -12270,6 +12593,117 @@ mod tests {
             "not a url",
         ] {
             assert!(recall_ollama_chat_url(rejected).is_err(), "{rejected}");
+        }
+    }
+
+    #[test]
+    fn recall_openai_compatible_url_keeps_the_prefix_and_stays_local() {
+        // These servers are rooted at a prefix, so unlike Ollama a path is
+        // required rather than refused. The prefix must survive (#650).
+        for (raw, expected) in [
+            (
+                "http://localhost:1234/v1",
+                "http://localhost:1234/v1/chat/completions",
+            ),
+            (
+                "http://localhost:1234/v1/",
+                "http://localhost:1234/v1/chat/completions",
+            ),
+            (
+                "http://127.0.0.1:8080",
+                "http://127.0.0.1:8080/chat/completions",
+            ),
+            (
+                "http://[::1]:1234/v1",
+                "http://[::1]:1234/v1/chat/completions",
+            ),
+            // Already complete: must not double-append.
+            (
+                "http://localhost:1234/v1/chat/completions",
+                "http://localhost:1234/v1/chat/completions",
+            ),
+        ] {
+            assert_eq!(
+                recall_openai_compatible_chat_url(raw).unwrap(),
+                expected,
+                "{raw}"
+            );
+        }
+
+        // Local-only is the whole point: everything that could leave the
+        // machine, or smuggle credentials, stays refused.
+        for rejected in [
+            "https://localhost:1234/v1",
+            "http://localhost.example.com:1234/v1",
+            "http://192.168.1.10:1234/v1",
+            "http://0.0.0.0:1234/v1",
+            "http://user@localhost:1234/v1",
+            "http://user:pass@localhost:1234/v1",
+            "http://localhost:1234/v1?token=x",
+            "http://localhost:1234/v1#fragment",
+            "not a url",
+        ] {
+            assert!(
+                recall_openai_compatible_chat_url(rejected).is_err(),
+                "{rejected}"
+            );
+        }
+    }
+
+    #[test]
+    fn openai_compatible_stream_delta_reads_only_content_frames() {
+        assert_eq!(
+            openai_compatible_stream_delta(r#"data: {"choices":[{"delta":{"content":"hello"}}]}"#),
+            Some("hello".to_string())
+        );
+        // Keepalives, the terminator, role-only frames and finish frames carry
+        // no text and must not be emitted as chunks.
+        for quiet in [
+            "data: [DONE]",
+            "data:",
+            "",
+            ": keepalive",
+            r#"data: {"choices":[{"delta":{"role":"assistant"}}]}"#,
+            r#"data: {"choices":[{"delta":{},"finish_reason":"stop"}]}"#,
+            r#"data: {"choices":[{"delta":{"content":""}}]}"#,
+            "data: not json",
+            // Seen in the wild from a reasoning model: chain-of-thought arrives
+            // in `reasoning` while `content` stays empty. Must not be emitted
+            // as answer text.
+            r#"data: {"choices":[{"delta":{"role":"assistant","content":"","reasoning":"Thinking"}}]}"#,
+            r#"data: {"choices":[{"delta":{"role":"assistant","content":""},"finish_reason":"stop"}]}"#,
+        ] {
+            assert_eq!(openai_compatible_stream_delta(quiet), None, "{quiet:?}");
+        }
+
+        // Real servers interleave blank separator lines between frames.
+        assert_eq!(openai_compatible_stream_delta(""), None);
+    }
+
+    #[test]
+    fn openai_compatible_reasoning_is_detected_for_both_server_dialects() {
+        // ollama emits `reasoning`; LM Studio emits `reasoning_content`. Both
+        // observed against real servers (#650).
+        assert!(openai_compatible_stream_is_reasoning(
+            r#"data: {"choices":[{"delta":{"role":"assistant","content":"","reasoning":"Thinking"}}]}"#
+        ));
+        assert!(openai_compatible_stream_is_reasoning(
+            r#"data: {"choices":[{"delta":{"role":"assistant","reasoning_content":"*"}}]}"#
+        ));
+
+        for not_reasoning in [
+            "data: [DONE]",
+            "",
+            ": keepalive",
+            r#"data: {"choices":[{"delta":{"content":"hello"}}]}"#,
+            r#"data: {"choices":[{"delta":{"role":"assistant"}}]}"#,
+            // Present but empty carries no signal that work is happening.
+            r#"data: {"choices":[{"delta":{"reasoning":""}}]}"#,
+        ] {
+            assert!(
+                !openai_compatible_stream_is_reasoning(not_reasoning),
+                "{not_reasoning:?}"
+            );
         }
     }
 

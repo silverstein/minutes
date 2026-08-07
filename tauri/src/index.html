@@ -13494,6 +13494,13 @@
     // the narration never overwrites a streaming reply.
     function updateRecallChatStatus(chunk) {
       if (!currentAssistantBubble || currentAssistantBubble.textContent.trim()) return;
+      // Local reasoning models can think for hundreds of stream frames before
+      // the first word of the answer (observed: 504 of 508). Without a status
+      // the panel looks hung. Emitted once per turn by the backend.
+      if (chunk && chunk.type === 'thinking') {
+        currentAssistantBubble.dataset.status = 'thinking';
+        return;
+      }
       if (!chunk || chunk.type !== 'assistant' || !chunk.message || !chunk.message.content) return;
       for (const part of chunk.message.content) {
         if (part && part.type === 'tool_use') {
@@ -13553,6 +13560,12 @@
               if (part.type === 'text') text += part.text;
             }
           }
+        } else if (chunk && chunk.type === 'text' && typeof chunk.text === 'string') {
+          // Local providers (Ollama, OpenAI-compatible servers such as LM Studio)
+          // stream plain text deltas rather than Claude's event envelopes. Without
+          // this branch their chunks fall through every case above and the panel
+          // renders nothing at all, even though the model answered correctly.
+          text = chunk.text;
         } else if (chunk && chunk.type === 'result' && typeof chunk.result === 'string') {
           // Final result event — use as fallback if the assistant bubble is still empty.
           if (currentAssistantBubble && !currentAssistantBubble.textContent.trim()) {
@@ -13582,11 +13595,21 @@
       });
 
       await currentWindow.listen('recall-chat-error', (event) => {
-        // stderr from the claude process — shown only when the bubble is still empty.
+        // Provider stderr or a terminal error, shown only when the bubble is
+        // still empty. `recall-chat-done` nulls currentAssistantBubble, and the
+        // two events are separate channels with no ordering guarantee, so fall
+        // back to the last assistant bubble in the DOM. Without this an error
+        // that loses the race is dropped and the user sees nothing at all.
         const stderr = String(event.payload || '');
-        if (stderr && currentAssistantBubble && !currentAssistantBubble.textContent.trim()) {
-          currentAssistantBubble.classList.remove('streaming');
-          currentAssistantBubble.textContent = stderr;
+        if (!stderr) return;
+        const bubble =
+          currentAssistantBubble ||
+          (recallChatMessages
+            ? recallChatMessages.querySelector('.chat-bubble-assistant:last-of-type')
+            : null);
+        if (bubble && !bubble.textContent.trim()) {
+          bubble.classList.remove('streaming');
+          bubble.textContent = stderr;
         }
       });
 

@@ -533,6 +533,12 @@ jobs:
             node scripts/check_design_tokens.mjs
           fi
 
+      # Nothing links the backend's chunk tags to the panel's dispatch, so a
+      # provider can stream correctly while the UI discards every chunk. That
+      # shipped for months on the Ollama path (#650).
+      - name: Verify Recall chat chunk contract
+        run: node scripts/check_recall_chunk_contract.mjs
+
       - name: Test design-token checker
         run: node --test scripts/check_design_tokens.test.mjs
 

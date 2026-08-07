@@ -17,7 +17,7 @@ pdf-extract = "=0.12.0"
 quick-xml = "=0.41.0"
 serde = { workspace = true }
 serde_json = { workspace = true }
-sha2 = "0.10"
+sha2 = "0.11"
 tempfile = "3"
 thiserror = { workspace = true }
 zip = { version = "=8.6.0", default-features = false, features = ["deflate"] }

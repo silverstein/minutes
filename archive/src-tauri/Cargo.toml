@@ -13,7 +13,7 @@ minutes-archive-core = { path = "../../crates/archive-core" }
 minutes-archive-ocr = { path = "../../crates/archive-ocr" }
 minutes-archive-semantic = { path = "../../crates/archive-semantic" }
 serde = { workspace = true }
-sha2 = "0.10"
+sha2 = "0.11"
 serde_json = { workspace = true }
 tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"

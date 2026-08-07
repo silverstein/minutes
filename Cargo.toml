@@ -84,7 +84,7 @@ schemars = { version = "1", features = ["derive", "chrono04"] }
 # Never linked into a decode that runs in this process: container probing can
 # allocate attacker-declared tables, so it is confined to the bounded
 # audio-decode worker child, which installs RLIMIT_AS before exec.
-symphonia = { version = "0.5", features = ["mp3", "aac", "ogg", "wav", "isomp4"] }
+symphonia = { version = "0.6", features = ["mp3", "aac", "ogg", "wav", "isomp4"] }
 
 # Noise reduction (pure Rust RNNoise port)
 nnnoiseless = "0.5"
